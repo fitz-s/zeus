@@ -1005,15 +1005,24 @@ def _lookup_unknown_side_effect_order(
     and never supplies that absence proof.
     """
 
+    point_read = None
+    point_error_type = None
     if cmd.venue_order_id:
-        return (
-            "found",
-            _venue_order_payload(client.get_order(cmd.venue_order_id)),
-            None,
-            "venue_order_id",
-        )
+        try:
+            point_read = _client_point_order_read(client, cmd.venue_order_id)
+        except Exception as exc:  # noqa: BLE001
+            point_error_type = exc.__class__.__name__
+            logger.warning(
+                "recovery: command %s authenticated point-order read failed (%s); "
+                "falling back to complete authenticated venue reads",
+                cmd.command_id,
+                point_error_type,
+            )
+        else:
+            if point_read.point_order is not None:
+                return "found", point_read.point_order, None, "venue_order_id"
     finder = getattr(client, "find_order_by_idempotency_key", None)
-    if callable(finder):
+    if not cmd.venue_order_id and callable(finder):
         try:
             found = finder(cmd.idempotency_key.value)
         except Exception as exc:  # noqa: BLE001
@@ -1027,7 +1036,8 @@ def _lookup_unknown_side_effect_order(
                 logger.warning(
                     "recovery: command %s idempotency-key lookup returned non-order %s; "
                     "treating lookup as unavailable",
-                    cmd.command_id, type(found).__name__,
+                    cmd.command_id,
+                    type(found).__name__,
                 )
                 return "unavailable", None, None, "idempotency_key"
             logger.info(
@@ -1035,7 +1045,26 @@ def _lookup_unknown_side_effect_order(
                 "corroborating with complete authenticated venue reads",
                 cmd.command_id,
             )
-    venue_status, venue_resp, proof = _lookup_unknown_side_effect_by_venue_reads(cmd, client)
+    venue_status, venue_resp, proof = _lookup_unknown_side_effect_by_venue_reads(
+        cmd, client
+    )
+    if proof is not None and cmd.venue_order_id:
+        proof = {
+            **proof,
+            "point_order_checked": True,
+            "point_order_query_complete": bool(
+                point_read is not None and point_read.query_complete
+            ),
+            "point_order_absent": bool(point_read is not None and point_read.absent),
+            "point_order_source": (
+                point_read.source if point_read is not None else None
+            ),
+            "point_order_absence_reason": (
+                point_read.absence_reason if point_read is not None else None
+            ),
+            "point_order_error_type": point_error_type,
+            "venue_order_id": cmd.venue_order_id,
+        }
     return venue_status, venue_resp, proof, "authenticated_venue_absence"
 
 

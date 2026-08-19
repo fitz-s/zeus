@@ -25956,6 +25956,69 @@ class TestRecoveryResolutionTable:
         events = _get_events(conn, "cmd-001")
         assert "SUBMIT_ACKED" not in [e["event_type"] for e in events]
 
+    def test_unknown_side_effect_known_order_uses_complete_absence_after_point_503(
+        self, conn, mock_client
+    ):
+        _insert(conn)
+        _advance_to_unknown_side_effect(conn, venue_order_id="vord-point-503")
+        mock_client.get_order.side_effect = RuntimeError("point read 503")
+        mock_client.get_open_orders.return_value = []
+        mock_client.get_trades.return_value = []
+
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert summary["advanced"] == 1
+        assert _get_state(conn, "cmd-001") == "SUBMIT_REJECTED"
+        rejected = [
+            event
+            for event in _get_events(conn, "cmd-001")
+            if event["event_type"] == "SUBMIT_REJECTED"
+        ][-1]
+        payload = json.loads(rejected["payload_json"])
+        assert payload["reason"] == "safe_replay_permitted_no_order_found"
+        assert payload["lookup_method"] == "authenticated_venue_absence"
+        proof = payload["venue_absence_proof"]
+        assert proof["open_orders_query_complete"] is True
+        assert proof["trades_query_complete"] is True
+        assert proof["matching_open_order_count"] == 0
+        assert proof["matching_trade_count"] == 0
+        assert proof["point_order_checked"] is True
+        assert proof["point_order_query_complete"] is False
+        assert proof["point_order_error_type"] == "RuntimeError"
+        assert proof["venue_order_id"] == "vord-point-503"
+
+    def test_unknown_side_effect_known_order_point_503_with_trade_stays_unknown(
+        self, conn, mock_client
+    ):
+        _insert(conn)
+        _advance_to_unknown_side_effect(conn, venue_order_id="vord-point-503")
+        mock_client.get_order.side_effect = RuntimeError("point read 503")
+        mock_client.get_open_orders.return_value = []
+        mock_client.get_trades.return_value = [
+            {
+                "id": "trade-after-point-503",
+                "status": "CONFIRMED",
+                "asset_id": "tok-001",
+                "side": "BUY",
+                "price": "0.5",
+                "size": "10",
+                "match_time": "2026-04-26T00:03:00Z",
+            }
+        ]
+
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert summary["advanced"] == 0
+        assert summary["errors"] >= 1
+        assert _get_state(conn, "cmd-001") == "SUBMIT_UNKNOWN_SIDE_EFFECT"
+        assert "SUBMIT_REJECTED" not in [
+            event["event_type"] for event in _get_events(conn, "cmd-001")
+        ]
+
     def test_unknown_side_effect_confirmed_requires_trade_fact_review(
         self,
         conn,

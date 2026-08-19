@@ -2549,3 +2549,34 @@ publication barrier.
   compilation, registries, planning gate, and diff checks must pass before a
   hot-fix deployment. Runtime closeout requires exact loaded SHA plus a new
   fast-event monitor receipt; it does not claim realized profitability.
+
+### Slice B121 — Prove known-order absence before releasing unknown submit debt (2026-08-19)
+
+- Live defect: command `6db607fa346d47ca` remained
+  `SUBMIT_UNKNOWN_SIDE_EFFECT` after a post-sign CLOB 503. During restart
+  preflight the known-order lookup returned no payload, and recovery appended
+  `safe_replay_permitted_no_order_found` with `venue_absence_proof=null`.
+  A missing point-order payload is not proof that the order never rested or
+  filled, so the current shape can release duplicate/capital locks without
+  authenticated exposure evidence.
+- First-principles invariant: a known venue order id may recover immediately
+  from a valid authenticated point-order payload. Any absent, malformed, or
+  failed point read must fall through to complete authenticated open-order and
+  trade enumeration. Safe replay is legal only when both enumerations are
+  complete and show no matching command exposure; any matching exposure or
+  incomplete read remains unknown.
+- SCOPE: recovery of `SUBMIT_UNKNOWN_SIDE_EFFECT` commands carrying a known
+  venue order id. DRAIN: every command-recovery cadence retries the point read
+  and complete account reads. RESET: a point order recovers the command; a
+  matching account order/trade keeps it fail closed for fact recovery; complete
+  zero-exposure proof permits the existing age-gated terminalization.
+- Files authorized: `src/execution/command_recovery.py`,
+  `tests/test_command_recovery.py`, this plan, and the existing test registry.
+  Price, probability, sizing, global ranking, command grammar, and venue submit
+  I/O are unchanged.
+- Acceptance: a point-order 503 plus complete zero-exposure account reads
+  records a non-null absence proof and releases the aged command; the same 503
+  plus any matching trade remains `SUBMIT_UNKNOWN_SIDE_EFFECT`. Focused command
+  recovery tests, compilation, registry/planning checks, and `git diff --check`
+  must pass before hot-fix deployment. Runtime verification separately checks
+  exact loaded SHA and current CLOB order/trade absence.
