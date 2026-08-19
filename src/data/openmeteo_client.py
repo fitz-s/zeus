@@ -46,6 +46,7 @@ DEFAULT_TIMEOUT = 30.0
 DEFAULT_MAX_RETRIES = 3
 DEFAULT_BACKOFF_SEC = 2.0
 DEFAULT_429_FALLBACK_WAIT = 15.0
+SINGLE_RUNS_OUTCOME_CLASSIFIER_REVISION = "provider_reason_v2"
 
 # Top-level ``httpx.get`` creates and tears down a connection pool for every
 # request. Open-Meteo is a recurring multi-lane source, so that shape pays a
@@ -218,10 +219,16 @@ def _preflight_denial_reason(detail: str | None) -> OpenMeteoPreflightDenialReas
 
 
 def request_identity(url: str, params: dict) -> str:
-    """Return a stable identity for the exact executable HTTP request."""
+    """Return a stable identity for the executable request and its terminality law."""
 
+    identity: dict[str, object] = {"url": url, "params": params}
+    if urlsplit(url).netloc == "single-runs-api.open-meteo.com":
+        # SCOPE: exact Single Runs request identities classified under the old law.
+        # DRAIN: the next scheduled poll retries once under this revision-keyed identity.
+        # RESET: success or bounded conditional retry replaces that identity's attempt state.
+        identity["outcome_classifier_revision"] = SINGLE_RUNS_OUTCOME_CLASSIFIER_REVISION
     payload = json.dumps(
-        {"url": url, "params": params},
+        identity,
         default=str,
         sort_keys=True,
         separators=(",", ":"),
@@ -302,9 +309,11 @@ def _provider_reason(response: httpx.Response) -> str | None:
         return None
     if not isinstance(payload, dict):
         return None
-    reason = str(payload.get("reason") or "").strip().lower()
+    reason = " ".join(str(payload.get("reason") or "").strip().lower().split())
     if reason in {"run_not_published", "availability"}:
         return reason
+    if reason.startswith("the requested model run is not available"):
+        return "run_not_published"
     for window in ("daily", "hourly", "minutely"):
         if reason.startswith(f"{window} api request limit exceeded"):
             return f"{window}_api_request_limit_exceeded"

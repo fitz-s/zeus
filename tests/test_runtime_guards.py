@@ -14,6 +14,7 @@ from zoneinfo import ZoneInfo
 from pathlib import Path
 from datetime import date, datetime, timedelta, timezone
 import types
+import hashlib
 import json
 import logging
 import os
@@ -12789,7 +12790,19 @@ def test_openmeteo_generic_400_is_terminal_and_persisted_across_polls(
     assert "https://api.open-meteo.com" not in persisted
 
 
-def test_openmeteo_not_published_400_is_conditional_retry(monkeypatch, tmp_path):
+@pytest.mark.parametrize(
+    "provider_reason",
+    (
+        "run_not_published",
+        (
+            "The requested model run is not available. "
+            "Model: ecmwf_ifs, run: 2026-08-19T00:00Z"
+        ),
+    ),
+)
+def test_openmeteo_not_published_400_is_conditional_retry(
+    monkeypatch, tmp_path, provider_reason
+):
     monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
     monkeypatch.setattr(openmeteo_quota.random, "uniform", lambda _low, _high: 0.0)
     monkeypatch.setattr(openmeteo_client.time, "sleep", lambda _seconds: threading.Event().wait(0.002))
@@ -12802,7 +12815,7 @@ def test_openmeteo_not_published_400_is_conditional_retry(monkeypatch, tmp_path)
             request = httpx.Request("GET", "https://api.open-meteo.com/v1/forecast")
             return httpx.Response(
                 400,
-                json={"reason": "run_not_published"},
+                json={"reason": provider_reason, "error": True},
                 request=request,
             )
 
@@ -12817,6 +12830,52 @@ def test_openmeteo_not_published_400_is_conditional_retry(monkeypatch, tmp_path)
         )
     assert calls["count"] == 2
     assert raised.value.outcome.retry_class is openmeteo_client.OpenMeteoRetryClass.CONDITIONAL
+
+
+def test_openmeteo_single_runs_classifier_revision_drains_old_terminal_state(
+    monkeypatch, tmp_path
+):
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+    tracker = OpenMeteoQuotaTracker(state_path=tmp_path / "openmeteo_quota.json")
+    url = "https://single-runs-api.open-meteo.com/v1/forecast"
+    params = {"latitude": 2, "longitude": 1, "run": "2026-08-19T00:00"}
+    legacy_payload = json.dumps(
+        {"url": url, "params": params},
+        default=str,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    legacy_id = hashlib.sha256(legacy_payload).hexdigest()
+    allowed, reason, lease_id = tracker.acquire_request(legacy_id)
+    assert (allowed, reason) == (True, None)
+    assert tracker.record_request_terminal(
+        legacy_id,
+        lease_id=lease_id,
+        http_outcome={
+            "status_code": 400,
+            "retry_class": "terminal",
+            "retry_after_seconds": None,
+            "reason": "http_400",
+            "body_sha256": "old-classifier",
+        },
+    )
+
+    class _PublishedClient:
+        def get(self, *_args, **_kwargs):
+            request = httpx.Request("GET", url)
+            return httpx.Response(200, json={"hourly": {}}, request=request)
+
+    assert openmeteo_client.fetch(
+        url,
+        params,
+        max_retries=1,
+        quota=tracker,
+        client=_PublishedClient(),
+    ) == {"hourly": {}}
+    assert tracker.request_terminal_outcome(legacy_id) is not None
+    assert tracker.request_terminal_outcome(
+        openmeteo_client.request_identity(url, params)
+    ) is None
 
 
 def test_openmeteo_5xx_retries_with_a_bounded_attempt_count(monkeypatch, tmp_path):
