@@ -220,8 +220,8 @@ Integration gives:
 The coherent probability band places the fifth-percentile payoff probability of `YES 50–51°F` at 0.4018. Its empirical admission bound is 0.4070, so the probability band remains binding. After admission and the family error test, two direct routes remain:
 | Route | Point fair value | Payoff $`q_{\mathrm{LCB}}`$ | All-in cost | Edge $`q_{\mathrm{LCB}}-c`$ | Best lower-tail $`\Delta U`$ | Stake |
 |---|---:|---:|---:|---:|---:|---:|
-| `YES 49°F or below` | 0.1440 | 0.1260 | 0.1200 | 0.0060 | 0.00031 | $8 |
-| `YES 50–51°F` | 0.4304 | 0.4018 | 0.3800 | 0.0218 | 0.00224 | $52 |
+| `YES 49°F or below` | 0.1440 | 0.1260 | 0.1200 | 0.0060 | 0.00031 | \$8 |
+| `YES 50–51°F` | 0.4304 | 0.4018 | 0.3800 | 0.0218 | 0.00224 | \$52 |
 
 Existing family positions make pre-trade wealth outcome-dependent:
 
@@ -246,12 +246,12 @@ R(s)=
 The lower-tail utility sweep is:
 | Stake | Fifth-percentile $`\Delta U`$ |
 |---:|---:|
-| $0 | 0.000000 |
-| $20 | 0.001391 |
-| $35 | 0.001996 |
-| $52 | 0.002235 |
-| $65 | 0.002105 |
-| $80 | 0.001622 |
+| \$0 | 0.000000 |
+| \$20 | 0.001391 |
+| \$35 | 0.001996 |
+| \$52 | 0.002235 |
+| \$65 | 0.002105 |
+| \$80 | 0.001622 |
 
 The route wins at approximately \$52. At the escalation deadline, a fresh book raises its all-in cost to 0.39. The lower-tail edge remains positive at $`0.4018-0.39=0.0118`$, but the repeated utility sweep reduces the stake to approximately \$37. The final command is built from that fresh snapshot and smaller size. At a cost of 0.402 or after a sibling-rank reversal, no command would be produced.
 
