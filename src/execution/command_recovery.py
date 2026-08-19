@@ -14517,6 +14517,12 @@ def _partial_remainder_candidates(
     )
     if terminal_exit_only:
         phase_placeholders = ",".join("?" for _ in _HARD_TERMINAL_REPAIR_PHASES)
+        terminal_states = (
+            CommandState.ACKED.value,
+            CommandState.POST_ACKED.value,
+            CommandState.PARTIAL.value,
+        )
+        terminal_state_placeholders = ",".join("?" for _ in terminal_states)
         rows = conn.execute(
             f"""
             SELECT cmd.*, pc.condition_id AS position_condition_id
@@ -14524,15 +14530,28 @@ def _partial_remainder_candidates(
               JOIN position_current pc
                 ON pc.position_id = cmd.position_id
              WHERE cmd.intent_kind = 'EXIT'
-               AND cmd.state = ?
+               AND cmd.state IN ({terminal_state_placeholders})
                AND COALESCE(cmd.venue_order_id, '') != ''
                AND pc.phase IN ({phase_placeholders})
+               AND (
+                    cmd.state = ?
+                    OR EXISTS (
+                        SELECT 1
+                          FROM venue_trade_facts trade
+                         WHERE trade.command_id = cmd.command_id
+                           AND trade.venue_order_id = cmd.venue_order_id
+                           AND UPPER(COALESCE(trade.state, '')) IN
+                               ('MATCHED', 'MINED', 'CONFIRMED')
+                           AND CAST(COALESCE(trade.filled_size, '0') AS REAL) > 0
+                    )
+               )
                AND (? IS NULL OR cmd.updated_at < ?)
              ORDER BY cmd.updated_at, cmd.command_id
             """,
             (
-                CommandState.PARTIAL.value,
+                *terminal_states,
                 *_HARD_TERMINAL_REPAIR_PHASES,
+                CommandState.PARTIAL.value,
                 updated_before,
                 updated_before,
             ),
@@ -16052,7 +16071,19 @@ def _point_order_terminal_for_partial_remainder(client, venue_order_id: str) -> 
     get_order = getattr(client, "get_order", None)
     if not callable(get_order):
         raise RuntimeError("client lacks get_order; partial remainder terminal proof is unknown")
-    raw = _venue_order_payload(get_order(venue_order_id))
+    try:
+        raw = _venue_order_payload(get_order(venue_order_id))
+    except Exception as exc:
+        from src.venue.response_contracts import VenueOrderNotFound
+
+        order_not_found = (
+            exc
+            if isinstance(exc, VenueOrderNotFound)
+            else exc.__cause__
+        )
+        if not isinstance(order_not_found, VenueOrderNotFound):
+            raise
+        return True, "NOT_FOUND", None
     if raw is None:
         return False, "UNAVAILABLE", None
     status = _order_status(raw)
@@ -17241,7 +17272,11 @@ def reconcile_partial_remainders(
                 command_id=command_id,
             )
             if existing_terminal_remainder is not None and not terminal_exit_only:
-                if command_state == CommandState.PARTIAL.value:
+                if command_state in {
+                    CommandState.ACKED.value,
+                    CommandState.POST_ACKED.value,
+                    CommandState.PARTIAL.value,
+                }:
                     append_event(
                         conn,
                         command_id=command_id,
@@ -17266,6 +17301,15 @@ def reconcile_partial_remainders(
                 client,
                 venue_order_id,
             )
+            if point_status == "NOT_FOUND" and venue_order_id in open_order_ids:
+                logger.warning(
+                    "recovery: command %s point order is absent but open-order enumeration "
+                    "still contains %s; staying fail-closed",
+                    command_id,
+                    venue_order_id,
+                )
+                summary["stayed"] += 1
+                continue
             if not point_terminal and venue_order_id in open_order_ids:
                 summary["stayed"] += 1
                 continue
@@ -17438,7 +17482,11 @@ def reconcile_partial_remainders(
                     resolved_at=now,
                     resolution="command_recovery_expired_partial_remainder",
                 )
-                if command_state == CommandState.PARTIAL.value:
+                if command_state in {
+                    CommandState.ACKED.value,
+                    CommandState.POST_ACKED.value,
+                    CommandState.PARTIAL.value,
+                }:
                     append_event(
                         conn,
                         command_id=command_id,
