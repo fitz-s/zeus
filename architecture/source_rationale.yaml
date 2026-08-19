@@ -1384,7 +1384,7 @@ files:
   src/data/polymarket_client.py:
     zone: K2_runtime
     authority_role: clob_boundary
-    why: CLOB market-data compatibility wrapper; live placement/cancel/order query delegates to the R3 Z2 PolymarketV2Adapter boundary. R3 A2 threads RiskAllocator-selected order_type through this shim so maker/taker policy reaches the venue adapter. Held-monitor public-book network phases run in a DB-free, command-free spawned child that the parent can terminate after the remaining read budget; process startup, IPC, and OS reap are explicit cleanup tails rather than an absolute method-level wall-clock guarantee. Inner HTTP phases are also clamped.
+    why: CLOB market-data compatibility wrapper; live placement/cancel/order query delegates to the R3 Z2 PolymarketV2Adapter boundary. Its get_order None contract is explicitly capability-typed because only an authenticated adapter VenueOrderNotFound is normalized to None; untyped clients cannot inherit that absence authority. R3 A2 threads RiskAllocator-selected order_type through this shim so maker/taker policy reaches the venue adapter. Held-monitor public-book network phases run in a DB-free, command-free spawned child that the parent can terminate after the remaining read budget; process startup, IPC, and OS reap are explicit cleanup tails rather than an absolute method-level wall-clock guarantee. Inner HTTP phases are also clamped.
     downstream:
     - src/engine/cycle_runner.py
     - src/engine/evaluator.py

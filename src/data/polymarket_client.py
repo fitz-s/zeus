@@ -422,6 +422,11 @@ def _resolve_q1_egress_evidence_path(*, default: Path, env_name: str) -> Path:
 class PolymarketClient:
     """CLOB client for order placement and orderbook queries."""
 
+    # get_order() maps only the adapter's typed authenticated 404 to None.
+    # Snapshot consumers may therefore preserve that None as absence proof;
+    # clients without this capability remain ambiguous and fail closed.
+    authenticated_point_absence_returns_none = True
+
     def __init__(
         self,
         *,

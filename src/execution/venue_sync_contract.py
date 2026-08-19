@@ -605,13 +605,18 @@ def capture_venue_read_snapshot(
     orders: dict = {}
     authenticated_absent_order_ids: set[str] = set()
     requested_order_ids = {str(o) for o in order_ids if str(o).strip()}
-    get_order_source = next(
+    get_order_client = next(
         (
-            getattr(source, "get_order", None)
+            source
             for source in venue_sources
             if callable(getattr(source, "get_order", None))
         ),
         None,
+    )
+    get_order_source = (
+        getattr(get_order_client, "get_order", None)
+        if get_order_client is not None
+        else None
     )
     point_read_deadline_skips = 0
     if callable(get_order_source):
@@ -632,6 +637,15 @@ def capture_venue_read_snapshot(
                     )
                 else:
                     orders[oid] = get_order_source(oid)
+                if (
+                    orders[oid] is None
+                    and getattr(
+                        get_order_client,
+                        "authenticated_point_absence_returns_none",
+                        False,
+                    )
+                ):
+                    authenticated_absent_order_ids.add(oid)
             except VenueOrderNotFound:
                 orders[oid] = None
                 authenticated_absent_order_ids.add(oid)
