@@ -138,7 +138,7 @@ Detailed path table at `docs/review/review_scope_map.md`. Compressed map:
 - `src/main.py`, `src/engine/{cycle_runner,evaluator,monitor_refresh}.py`
 - `migrations/**`, `architecture/2026_04_02_architecture_kernel.sql`
 - `maintenance_worker/core/{validator,apply_publisher}.py` — forbidden-path enforcement and real-apply publisher; fail-closed safety contracts
-- `bindings/zeus/safety_overrides.yaml` — loaded by `maintenance_worker/core/validator.py`; defines the forbidden-rule set at runtime
+- `deploy/agent_safety/zeus/safety_overrides.yaml` — loaded by `maintenance_worker/core/validator.py`; defines the forbidden-rule set at runtime
 
 **Tier 1 — Data / probability / persistence correctness**
 - `src/forecast/**` — **live forecast authority (strategy of record)**: `bayes_precision_fusion` T2 Bayesian fusion (`fuse_bayes_precision_posterior`, `eb_bias`), walk-forward de-bias

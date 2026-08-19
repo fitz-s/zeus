@@ -1,5 +1,5 @@
 # Created: 2026-06-08
-# Last reused or audited: 2026-07-20
+# Last reused or audited: 2026-08-08
 # Authority basis: BAYES_PRECISION_FUSION_SPEC.md §3 (causal fixed-lead history; previous-runs
 #   for gridded models; positive-lead named-station single-runs exception with local-day cutoff;
 #   run_time != source_available_at), §5 (walk-forward, no same-day leak), §7 antibodies
@@ -125,6 +125,54 @@ def test_history_excludes_target_on_or_after_decision_date() -> None:
     assert gfs.n_train == 3, "only target_date < decision_date rows may enter (no same-day/future leak)"
     # residual = forecast - settlement = 20.0 - 19.0 = 1.0 on each kept row
     assert all(abs(r - 1.0) < 1e-9 for r in gfs.residuals)
+
+
+def test_history_query_uses_filter_index_and_deterministic_tie_order() -> None:
+    """The live read filters before sorting and gives duplicate dates an exact order."""
+    from src.data.bayes_precision_fusion_history_provider import BayesPrecisionFusionHistoryProvider
+
+    conn = _conn()
+    for cycle, value in (
+        ("2026-03-31T00:00:00+00:00", 20.0),
+        ("2026-03-31T06:00:00+00:00", 21.0),
+    ):
+        _insert_raw(
+            conn,
+            model="gfs_global",
+            city="Paris",
+            target_date="2026-04-01",
+            metric="high",
+            forecast_value_c=value,
+            source_cycle_time=cycle,
+        )
+    _insert_settlement(
+        conn,
+        city="Paris",
+        target_date="2026-04-01",
+        metric="high",
+        settlement_value=19.0,
+    )
+
+    statements: list[str] = []
+    conn.set_trace_callback(statements.append)
+    hist = BayesPrecisionFusionHistoryProvider(conn)(
+        city="Paris",
+        metric="high",
+        lead_days=1,
+        target_date=date(2026, 5, 1),
+        models=["gfs_global"],
+    )["gfs_global"]
+    conn.set_trace_callback(None)
+
+    query = next(
+        statement
+        for statement in statements
+        if "FROM raw_model_forecasts AS r" in statement
+    )
+    plan = tuple(str(row[3]) for row in conn.execute(f"EXPLAIN QUERY PLAN {query}"))
+    assert any("idx_raw_model_forecasts_history_join" in step for step in plan)
+    assert not any("SCAN r" in step for step in plan)
+    assert hist.forecast_values == (20.0, 21.0)
 
 
 # =====================================================================================

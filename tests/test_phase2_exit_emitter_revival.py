@@ -1,10 +1,10 @@
-# Lifecycle: created=2026-06-20; last_reviewed=2026-07-28; last_reused=2026-07-28
+# Lifecycle: created=2026-06-20; last_reviewed=2026-08-06; last_reused=2026-08-06
 # Purpose: RED-on-revert antibodies for the Phase 2 live exit-POST emitter revival
 #   (exit_pending_missing re-stamp loop, day0 static-close deferral, canonical
 #   EXIT_ORDER_POSTED dual-write, monitor-cadence watchdog).
 # Reuse: pytest tests/test_phase2_exit_emitter_revival.py
 # Created: 2026-06-20
-# Last reused or audited: 2026-07-03
+# Last reused or audited: 2026-08-06
 # Authority basis: /tmp/phase2_exit_emitter_diagnosis.md §4-§5 (Phase 2 of the
 #   Zeus lifecycle-alpha fix). RANK 2 of /tmp/lifecycle_alpha_diagnosis_2026-06-20.md.
 """RED-on-revert antibodies for the Phase 2 live exit-POST emitter revival.
@@ -26,10 +26,11 @@ would-have-won.
 """
 from __future__ import annotations
 
+import copy
 import json
 import sqlite3
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -615,6 +616,11 @@ class TestDay0StaticClosedBehavioral:
             ),
         )
         monkeypatch.setattr(
+            cycle_runtime,
+            "_closed_non_accepting_market_info",
+            lambda *_args, **_kwargs: {"source": "clob_market_info"},
+        )
+        monkeypatch.setattr(
             cycle_runtime, "_emit_monitor_refreshed_canonical_if_available",
             lambda conn_, pos_, *, deps, **kwargs: True,
         )
@@ -648,6 +654,44 @@ class TestDay0StaticClosedBehavioral:
         )
         summary = {"monitors": 0, "exits": 0}
 
+        from src.execution import exit_lifecycle
+
+        original_mark = exit_lifecycle.mark_market_closed_hold_to_settlement
+        position_before = copy.deepcopy(vars(pos))
+        monkeypatch.setattr(
+            exit_lifecycle,
+            "mark_market_closed_hold_to_settlement",
+            lambda *_args, **_kwargs: False,
+        )
+        cycle_runtime.execute_monitoring_phase(
+            conn,
+            ClosedClob(),
+            portfolio,
+            Artifact(),
+            type("Tracker", (), {"record_exit": lambda self, position: None})(),
+            summary,
+            deps=deps,
+        )
+        changed_fields = {
+            key
+            for key in set(vars(pos)) | set(position_before)
+            if vars(pos).get(key) != position_before.get(key)
+        }
+        assert changed_fields == {
+            "_canonical_monitor_refreshed_at",
+            "next_exit_retry_at",
+        }
+        assert results == []
+        assert summary["monitors"] == 0
+        assert summary["monitor_canonical_write_failed"] == 1
+
+        monkeypatch.setattr(
+            exit_lifecycle,
+            "mark_market_closed_hold_to_settlement",
+            original_mark,
+        )
+        summary = {"monitors": 0, "exits": 0}
+
         cycle_runtime.execute_monitoring_phase(
             conn,
             ClosedClob(),
@@ -661,10 +705,10 @@ class TestDay0StaticClosedBehavioral:
         assert summary.get("monitor_skipped_closed_market_pending_settlement", 0) == 0
         assert summary.get("day0_hard_fact_closed_market_monitors", 0) == 1
         assert summary.get("day0_hard_fact_closed_market_hold_to_settlement", 0) == 1
-        assert results and results[0].fresh_prob == pytest.approx(0.0)
+        assert results and results[0].fresh_prob is None
         assert "DAY0_HARD_FACT_BIN_DEAD_MARKET_CLOSED" in results[0].exit_reason
-        assert pos.last_monitor_prob == pytest.approx(0.0)
-        assert pos.last_monitor_prob_is_fresh is True
+        assert pos.last_monitor_prob is None
+        assert pos.last_monitor_prob_is_fresh is False
         assert pos.last_monitor_market_price is None
         assert pos.last_monitor_market_price_is_fresh is False
         hold_event = conn.execute(
@@ -680,9 +724,11 @@ class TestDay0StaticClosedBehavioral:
             (pos.trade_id,),
         ).fetchone()
         assert hold_event is not None
-        assert json.loads(hold_event["payload_json"])["semantic_event"] == (
+        hold_payload = json.loads(hold_event["payload_json"])
+        assert hold_payload["semantic_event"] == (
             "MARKET_CLOSED_HOLD_TO_SETTLEMENT"
         )
+        assert hold_payload["exit_decision_available"] is False
 
 
 # ---------------------------------------------------------------------------
@@ -719,6 +765,58 @@ class TestCanonicalExitOrderPostedProvenance:
             conn=_db(),
             now=datetime(2026, 6, 20, 14, 0, tzinfo=timezone.utc),
         )
+
+    def test_hard_fact_verdict_identity_ignores_source_expansion(self, monkeypatch):
+        from src import config
+        from src.execution import day0_hard_fact_exit
+        from src.execution.day0_hard_fact_exit import hard_fact_bin_verdict
+        from src.execution.exit_lifecycle import _hard_fact_sell_authority_valid
+
+        pos = _make_position(
+            state="day0_window",
+            exit_state="",
+            bin_label="30-31°C",
+        )
+        authority = replace(
+            hard_fact_bin_verdict(
+                metric="high",
+                direction="buy_yes",
+                bin_low=30.0,
+                bin_high=31.0,
+                effective_extreme=32.0,
+            ),
+            source="wu_icao_history",
+        )
+        current = replace(authority, source="wu_api+wu_icao_history")
+        monkeypatch.setattr(config, "runtime_cities_by_name", lambda: {"London": object()})
+        monkeypatch.setattr(
+            day0_hard_fact_exit,
+            "evaluate_hard_fact_exit",
+            lambda **_kwargs: current,
+        )
+
+        def valid() -> bool:
+            return _hard_fact_sell_authority_valid(
+                pos,
+                authority,
+                conn=_db(),
+                now=datetime(2026, 6, 20, 14, 0, tzinfo=timezone.utc),
+            )
+
+        assert valid()
+        for current in (
+            replace(authority, action="HOLD_STRUCTURAL_WIN"),
+            replace(authority, reason="different semantic verdict"),
+            replace(authority, metric="low"),
+            replace(authority, rounded_extreme=33.0),
+        ):
+            assert not valid()
+
+        pos.bin_label = "31-32°C"
+        assert not valid()
+        pos.bin_label = "30-31°C"
+        pos.direction = "buy_no"
+        assert not valid()
 
     def test_spine_post_writes_canonical_exit_order_posted(self):
         from src.riskguard.risk_level import RiskLevel
@@ -942,12 +1040,16 @@ class TestMonitorCadenceWatchdog:
         *,
         position_id: str = "p1",
         phase: str = "active",
+        probability_fresh: bool = True,
+        quote_fresh: bool = True,
+        payload: dict | None = None,
     ) -> None:
         conn.execute(
             """
             INSERT INTO position_current (
-                position_id, phase, strategy_key, updated_at, temperature_metric
-            ) VALUES (?, ?, 'opening_inertia', ?, 'high')
+                position_id, phase, strategy_key, updated_at, temperature_metric,
+                shares, chain_shares, chain_state
+            ) VALUES (?, ?, 'opening_inertia', ?, 'high', 10.0, 10.0, 'synced')
             """,
             (position_id, phase, occurred_at),
         )
@@ -957,13 +1059,24 @@ class TestMonitorCadenceWatchdog:
                 event_id, position_id, event_version, sequence_no, event_type,
                 occurred_at, strategy_key, idempotency_key, source_module, env,
                 payload_json
-            ) VALUES (?, ?, 1, 1, 'MONITOR_REFRESHED', ?, 'opening_inertia', ?, 'test', 'live', '{}')
+            ) VALUES (?, ?, 1, 1, 'MONITOR_REFRESHED', ?, 'opening_inertia', ?, 'test', 'live', ?)
             """,
             (
                 f"e:{position_id}:{occurred_at}",
                 position_id,
                 occurred_at,
                 f"i:{position_id}:{occurred_at}",
+                json.dumps(
+                    payload
+                    if payload is not None
+                    else {
+                        "last_monitor_prob": 0.5,
+                        "last_monitor_prob_is_fresh": probability_fresh,
+                        "last_monitor_market_price": 0.5,
+                        "last_monitor_market_price_is_fresh": quote_fresh,
+                    },
+                    sort_keys=True,
+                ),
             ),
         )
         conn.commit()
@@ -1005,6 +1118,162 @@ class TestMonitorCadenceWatchdog:
         assert record is None, "watchdog must NOT flag a healthy cadence"
         assert "monitor_cadence_gap_flagged" not in summary
 
+    def test_watchdog_rejects_fresh_timestamp_with_stale_monitor_inputs(self):
+        from src.execution.exit_lifecycle import _check_monitor_cadence_watchdog
+
+        conn = _db()
+        recent = datetime.now(timezone.utc).isoformat()
+        self._insert_monitor_refreshed(
+            conn,
+            recent,
+            probability_fresh=True,
+            quote_fresh=False,
+        )
+
+        summary: dict = {}
+        record = _check_monitor_cadence_watchdog(conn, summary)
+
+        assert record is None
+        assert summary["monitor_cadence_stale_or_missing_position_count"] == 1
+        assert summary["monitor_cadence_blocking_stale_position_count"] == 0
+        assert summary["monitor_cadence_quote_only_stale_position_count"] == 1
+        assert summary["monitor_cadence_quote_only_stale_positions"][0][
+            "issue"
+        ] == "monitor_clob_stale"
+        assert "monitor_cadence_gap_flagged" not in summary
+
+    def test_quote_only_split_counts_are_exact_when_samples_are_limited(self):
+        from src.ops.monitor_cadence import collect_monitor_cadence_evidence
+
+        conn = _db()
+        now = datetime.now(timezone.utc)
+        for index in range(3):
+            self._insert_monitor_refreshed(
+                conn,
+                now.isoformat(),
+                position_id=f"quote-only-{index}",
+                quote_fresh=False,
+            )
+        self._insert_monitor_refreshed(
+            conn,
+            now.isoformat(),
+            position_id="probability-invalid",
+            payload={
+                "last_monitor_prob_is_fresh": True,
+                "last_monitor_market_price": 0.5,
+                "last_monitor_market_price_is_fresh": True,
+            },
+        )
+
+        evidence = collect_monitor_cadence_evidence(
+            conn,
+            now=now,
+            max_age_seconds=240.0,
+            monitor_refreshed_only=True,
+            require_fresh_inputs=True,
+            sample_limit=1,
+        )
+
+        assert evidence["stale_or_missing_position_count"] == 4
+        assert evidence["quote_only_stale_position_count"] == 3
+        assert evidence["blocking_stale_position_count"] == 1
+        assert len(evidence["quote_only_stale_positions"]) == 1
+        assert len(evidence["blocking_stale_positions"]) == 1
+        assert evidence["blocking_stale_positions"][0]["issue"] == (
+            "monitor_probability_value_invalid"
+        )
+
+    def test_watchdog_rejects_fresh_inputs_when_exit_completion_publish_failed(self):
+        from src.execution.exit_lifecycle import _check_monitor_cadence_watchdog
+
+        conn = _db()
+        recent = datetime.now(timezone.utc).isoformat()
+        self._insert_monitor_refreshed(
+            conn,
+            recent,
+            payload={
+                "last_monitor_prob": 0.5,
+                "last_monitor_prob_is_fresh": True,
+                "last_monitor_market_price": 0.5,
+                "last_monitor_market_price_is_fresh": True,
+                "applied_validations": [
+                    "global_auction_completion_request_failed"
+                ],
+            },
+        )
+
+        record = _check_monitor_cadence_watchdog(conn, {})
+
+        assert record is not None
+        assert record["stale_or_missing_positions"][0]["issue"] == (
+            "monitor_exit_completion_unavailable"
+        )
+
+    def test_watchdog_accepts_typed_absorbing_win_quote_bypass(self):
+        from src.execution.exit_lifecycle import _check_monitor_cadence_watchdog
+
+        conn = _db()
+        recent = datetime.now(timezone.utc).isoformat()
+        self._insert_monitor_refreshed(
+            conn,
+            recent,
+            payload={
+                "last_monitor_prob": 1.0,
+                "last_monitor_prob_is_fresh": True,
+                "last_monitor_market_price_is_fresh": False,
+                "selected_method": "day0_absorbing_hard_fact",
+                "applied_validations": [
+                    "day0_hard_fact_structural_win_quote_bypassed"
+                ],
+            },
+        )
+
+        assert _check_monitor_cadence_watchdog(conn, {}) is None
+
+    def test_watchdog_future_tolerance_does_not_bypass_stale_inputs(self):
+        from src.ops.monitor_cadence import collect_monitor_cadence_evidence
+
+        conn = _db()
+        future = (datetime.now(timezone.utc) + timedelta(seconds=10)).isoformat()
+        self._insert_monitor_refreshed(
+            conn,
+            future,
+            probability_fresh=True,
+            quote_fresh=False,
+        )
+
+        record = collect_monitor_cadence_evidence(
+            conn,
+            now=datetime.now(timezone.utc),
+            max_age_seconds=240.0,
+            monitor_refreshed_only=True,
+            require_fresh_inputs=True,
+        )
+
+        assert record["stale_or_missing_positions"][0]["issue"] == (
+            "monitor_clob_stale"
+        )
+
+    def test_watchdog_rejects_fresh_flags_with_missing_values(self):
+        from src.execution.exit_lifecycle import _check_monitor_cadence_watchdog
+
+        conn = _db()
+        self._insert_monitor_refreshed(
+            conn,
+            datetime.now(timezone.utc).isoformat(),
+            payload={
+                "last_monitor_prob_is_fresh": True,
+                "last_monitor_market_price_is_fresh": True,
+            },
+        )
+
+        record = _check_monitor_cadence_watchdog(conn, {})
+
+        assert record is not None
+        assert record["stale_or_missing_positions"][0]["issue"] == (
+            "monitor_probability_value_invalid"
+        )
+
     def test_watchdog_ignores_recent_monitor_history_for_closed_positions(self):
         from datetime import datetime, timezone
 
@@ -1030,3 +1299,126 @@ class TestMonitorCadenceWatchdog:
 
         assert record is not None
         assert record["last_monitor_refreshed_at"] == active_old
+
+    def test_fresh_position_cannot_hide_stale_sibling(self):
+        from datetime import datetime, timezone
+
+        from src.execution.exit_lifecycle import _check_monitor_cadence_watchdog
+
+        conn = _db()
+        stale_at = "2026-06-19T00:41:00+00:00"
+        self._insert_monitor_refreshed(conn, stale_at, position_id="stale")
+        self._insert_monitor_refreshed(
+            conn,
+            datetime.now(timezone.utc).isoformat(),
+            position_id="fresh",
+        )
+        summary: dict = {}
+
+        record = _check_monitor_cadence_watchdog(conn, summary)
+
+        assert record is not None
+        assert record["open_position_count"] == 2
+        assert record["fresh_position_count"] == 1
+        assert record["stale_or_missing_position_count"] == 1
+        assert [item["position_id"] for item in record["stale_or_missing_positions"]] == [
+            "stale"
+        ]
+
+    def test_missing_and_future_monitor_evidence_are_flagged_without_writes(self):
+        from datetime import datetime, timedelta, timezone
+
+        from src.execution.exit_lifecycle import _check_monitor_cadence_watchdog
+
+        conn = _db()
+        now = datetime.now(timezone.utc)
+        self._insert_monitor_refreshed(
+            conn,
+            (now + timedelta(hours=1)).isoformat(),
+            position_id="future",
+        )
+        conn.execute(
+            """
+            INSERT INTO position_current (
+                position_id, phase, strategy_key, updated_at, temperature_metric,
+                shares, chain_shares, chain_state
+            ) VALUES ('missing', 'active', 'opening_inertia', ?, 'high', 5.0, 5.0, 'synced')
+            """,
+            (now.isoformat(),),
+        )
+        conn.commit()
+        statements: list[str] = []
+        conn.set_trace_callback(statements.append)
+
+        record = _check_monitor_cadence_watchdog(conn, {})
+
+        conn.set_trace_callback(None)
+        assert record is not None
+        assert record["stale_or_missing_position_count"] == 1
+        assert record["stale_or_missing_positions"][0]["position_id"] == "missing"
+        assert record["future_monitor_event_count"] == 1
+        assert record["future_monitor_events"][0]["position_id"] == "future"
+        assert not any(
+            statement.lstrip().upper().startswith(("INSERT", "UPDATE", "DELETE"))
+            for statement in statements
+        )
+
+    def test_unknown_exposure_cannot_remove_active_position_from_watchdog(self):
+        from datetime import datetime, timezone
+
+        from src.execution.exit_lifecycle import _check_monitor_cadence_watchdog
+
+        conn = _db()
+        conn.execute(
+            """
+            INSERT INTO position_current (
+                position_id, phase, strategy_key, updated_at, temperature_metric,
+                shares, chain_shares, chain_state
+            ) VALUES ('unknown-exposure', 'active', 'opening_inertia', ?, 'high',
+                      'malformed', NULL, 'synced')
+            """,
+            (datetime.now(timezone.utc).isoformat(),),
+        )
+        conn.commit()
+
+        record = _check_monitor_cadence_watchdog(conn, {})
+
+        assert record is not None
+        assert record["open_position_count"] == 1
+        assert record["stale_or_missing_position_count"] == 1
+        assert record["stale_or_missing_positions"][0]["position_id"] == (
+            "unknown-exposure"
+        )
+
+    def test_latest_sequence_with_malformed_timestamp_is_not_hidden_by_old_event(self):
+        from src.execution.exit_lifecycle import _check_monitor_cadence_watchdog
+
+        conn = _db()
+        self._insert_monitor_refreshed(
+            conn,
+            "2099-01-01T00:00:00+00:00",
+            position_id="malformed-latest",
+        )
+        conn.execute(
+            """
+            INSERT INTO position_events (
+                event_id, position_id, event_version, sequence_no, event_type,
+                occurred_at, strategy_key, idempotency_key, source_module, env,
+                payload_json
+            ) VALUES ('e:malformed-latest:2', 'malformed-latest', 1, 2,
+                      'MONITOR_REFRESHED', '2026-99-99T99:99:99+00:00', 'opening_inertia',
+                      'i:malformed-latest:2', 'test', 'live', '{}')
+            """
+        )
+        conn.commit()
+
+        record = _check_monitor_cadence_watchdog(conn, {})
+
+        assert record is not None
+        assert record["stale_or_missing_position_count"] == 1
+        assert record["stale_or_missing_positions"][0]["position_id"] == (
+            "malformed-latest"
+        )
+        assert record["stale_or_missing_positions"][0]["issue"] == (
+            "timestamp_unparseable"
+        )

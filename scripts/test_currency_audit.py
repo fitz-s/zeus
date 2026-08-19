@@ -19,7 +19,7 @@ first few lines for the three canonical provenance markers:
 Exits 0 when every panel file carries all three markers; exits 1 with a
 list of missing-marker files otherwise.
 
-Rationale: per `/Users/leofitz/CLAUDE.md` §"File-header provenance rule"
+Rationale: per `~/CLAUDE.md` §"File-header provenance rule"
 and the operator's test-currency directive, any test without a dated
 provenance header AND recent passing-run evidence is UNTRUSTED and
 cannot be cited as protection for any invariant. This script is the

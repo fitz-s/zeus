@@ -21,6 +21,7 @@ from src.decision_kernel.canonicalization import (
 )
 from src.events.day0_authority import (
     Day0AuthorityError,
+    assert_live_day0_entry_provenance,
     assert_live_day0_probability_authority,
     assert_live_day0_payload_authority,
     assert_live_day0_qkernel_guard_authority,
@@ -1219,6 +1220,7 @@ def _validate_pre_submit_probability_authority(
 def _validate_day0_submit_observation_authority(payload: dict[str, Any], *, q_lcb: float) -> None:
     try:
         assert_live_day0_payload_authority(payload)
+        assert_live_day0_entry_provenance(payload)
     except Day0AuthorityError as exc:
         raise LiveOrderAggregateError(
             "PreSubmitRevalidated day0 observation authority required:"

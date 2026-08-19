@@ -256,6 +256,7 @@ def insert_snapshot(
     snapshot: ExecutableMarketSnapshot,
     *,
     capture_trigger: str | None = None,
+    advance_latest: bool = True,
 ) -> None:
     """Persist one immutable executable market snapshot.
 
@@ -263,6 +264,11 @@ def insert_snapshot(
     was captured full, e.g. ``'JIT_SUBMIT'`` or ``'PRIORITY_MARKER'``.
     Optional — omitting it (any caller not yet updated) writes NULL, which is
     a no-op for every existing reader (none of them select this column).
+
+    ``advance_latest=False`` appends immutable evidence without replacing the
+    reusable latest-state projection. Entry-only provenance with a narrower
+    freshness deadline uses this path; monitor and exit writers keep the
+    default projection advancement.
     """
 
     row = _row_from_snapshot(snapshot)
@@ -305,7 +311,8 @@ def insert_snapshot(
         """,
         row,
     )
-    _upsert_latest_snapshot(conn, row)
+    if advance_latest:
+        _upsert_latest_snapshot(conn, row)
 
 
 def insert_compact_snapshot(

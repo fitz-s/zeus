@@ -45,8 +45,8 @@ USAGE
 Run against the PRIMARY checkout's live DB (operator directive: paths follow
 main):
 
-    ZEUS_PRIMARY_ROOT=/Users/leofitz/zeus \
-      /Users/leofitz/zeus/.venv/bin/python3 scripts/audit_rest_then_cross_rerest.py
+    ZEUS_PRIMARY_ROOT=<repo-root> \
+      .venv/bin/python3 scripts/audit_rest_then_cross_rerest.py
 
 Optional: ``--hours N`` (default 24) bounds the ENTRY-command lookback;
 ``--json`` prints machine-readable rows.

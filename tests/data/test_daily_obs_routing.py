@@ -1,5 +1,5 @@
 # Created: 2026-05-14
-# Last reused or audited: 2026-05-14
+# Last reused or audited: 2026-07-29
 # Authority basis: docs/archive/2026-Q2/task_2026-05-14_k1_followups/PLAN.md §2 P0
 """K1 P0 routing tests: daily_tick and catch_up_obs are called with a
 forecasts.db connection, not world.db.
@@ -22,10 +22,9 @@ they assert on which DB family each writer is called with.
 from __future__ import annotations
 
 import sqlite3
+from datetime import datetime, timezone
 from pathlib import Path
-from unittest.mock import MagicMock, call, patch
-
-import pytest
+from unittest.mock import MagicMock, patch
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 
@@ -245,6 +244,193 @@ class TestDailyObsTickRouting:
         finally:
             conn.close()
 
+    def test_hko_ledger_write_failure_rolls_back_accumulator(self, tmp_path):
+        """Ledger failure rolls back only the source savepoint, not its caller."""
+        from src.data.daily_obs_append import _accumulate_hko_reading
+        from src.state.schema.observation_prints_schema import ensure_table
+
+        forecasts_path = tmp_path / "zeus-forecasts.db"
+        world_path = tmp_path / "zeus-world.db"
+        forecasts = sqlite3.connect(forecasts_path)
+        forecasts.execute("CREATE TABLE caller_state (value TEXT NOT NULL)")
+        forecasts.commit()
+        forecasts.close()
+        world = sqlite3.connect(world_path)
+        ensure_table(world)
+        world.execute(
+            """
+            CREATE TABLE hko_hourly_accumulator (
+                target_date TEXT NOT NULL,
+                hour_utc TEXT NOT NULL,
+                temperature REAL NOT NULL,
+                fetched_at TEXT NOT NULL,
+                PRIMARY KEY (target_date, hour_utc)
+            )
+            """
+        )
+        world.commit()
+        world.close()
+
+        conn = sqlite3.connect(forecasts_path)
+        conn.execute("ATTACH DATABASE ? AS world", (str(world_path),))
+        conn.execute("BEGIN")
+        conn.execute("INSERT INTO caller_state VALUES ('caller-owned')")
+        response = MagicMock()
+        response.raise_for_status.return_value = None
+        response.json.return_value = {
+            "updateTime": "2026-07-24T12:02:00+00:00",
+            "temperature": {
+                "data": [{"place": "Hong Kong Observatory", "value": 31.0}]
+            },
+        }
+        try:
+            with (
+                patch("src.data.daily_obs_append.httpx.get", return_value=response),
+                patch(
+                    "src.data.daily_obs_append._append_hko_rhrread_print_to_ledger",
+                    side_effect=sqlite3.OperationalError("simulated ledger write failure"),
+                ),
+            ):
+                assert _accumulate_hko_reading(conn, schema="world") is False
+            assert conn.in_transaction is True
+            assert conn.execute("SELECT value FROM caller_state").fetchone() == (
+                "caller-owned",
+            )
+            assert conn.execute(
+                "SELECT COUNT(*) FROM world.hko_hourly_accumulator"
+            ).fetchone()[0] == 0
+            assert conn.execute(
+                "SELECT COUNT(*) FROM world.observation_prints"
+            ).fetchone()[0] == 0
+            conn.commit()  # Caller retains authority over its outer transaction.
+            assert conn.execute("SELECT value FROM caller_state").fetchone() == (
+                "caller-owned",
+            )
+            assert conn.execute(
+                "SELECT COUNT(*) FROM world.hko_hourly_accumulator"
+            ).fetchone()[0] == 0
+            assert conn.execute(
+                "SELECT COUNT(*) FROM world.observation_prints"
+            ).fetchone()[0] == 0
+        finally:
+            conn.close()
+
+    def test_hko_success_releases_only_source_savepoint(self, tmp_path):
+        """Successful source writes remain inside a pre-existing outer transaction."""
+        from src.data.daily_obs_append import _accumulate_hko_reading
+        from src.state.schema.observation_prints_schema import ensure_table
+
+        forecasts_path = tmp_path / "zeus-forecasts.db"
+        world_path = tmp_path / "zeus-world.db"
+        forecasts = sqlite3.connect(forecasts_path)
+        forecasts.execute("CREATE TABLE caller_state (value TEXT NOT NULL)")
+        forecasts.commit()
+        forecasts.close()
+        world = sqlite3.connect(world_path)
+        ensure_table(world)
+        world.execute(
+            """
+            CREATE TABLE hko_hourly_accumulator (
+                target_date TEXT NOT NULL,
+                hour_utc TEXT NOT NULL,
+                temperature REAL NOT NULL,
+                fetched_at TEXT NOT NULL,
+                PRIMARY KEY (target_date, hour_utc)
+            )
+            """
+        )
+        world.commit()
+        world.close()
+
+        conn = sqlite3.connect(forecasts_path)
+        conn.execute("ATTACH DATABASE ? AS world", (str(world_path),))
+        conn.execute("BEGIN")
+        conn.execute("INSERT INTO caller_state VALUES ('caller-owned')")
+        response = MagicMock()
+        response.raise_for_status.return_value = None
+        response.json.return_value = {
+            "updateTime": "2026-07-24T12:02:00+00:00",
+            "temperature": {
+                "data": [{"place": "Hong Kong Observatory", "value": 31.0}]
+            },
+        }
+        try:
+            with patch(
+                "src.data.daily_obs_append.httpx.get", return_value=response
+            ):
+                assert _accumulate_hko_reading(conn, schema="world") is True
+            assert conn.in_transaction is True
+            assert conn.execute("SELECT value FROM caller_state").fetchone() == (
+                "caller-owned",
+            )
+            assert conn.execute(
+                "SELECT COUNT(*) FROM world.hko_hourly_accumulator"
+            ).fetchone()[0] == 1
+            assert conn.execute(
+                "SELECT COUNT(*) FROM world.observation_prints"
+            ).fetchone()[0] == 1
+
+            conn.rollback()  # Caller rollback must include the released savepoint.
+            assert conn.execute("SELECT COUNT(*) FROM caller_state").fetchone()[0] == 0
+            assert conn.execute(
+                "SELECT COUNT(*) FROM world.hko_hourly_accumulator"
+            ).fetchone()[0] == 0
+            assert conn.execute(
+                "SELECT COUNT(*) FROM world.observation_prints"
+            ).fetchone()[0] == 0
+        finally:
+            conn.close()
+
+    def test_hko_accumulator_and_ledger_use_source_issued_local_day(self, tmp_path):
+        """A delayed fetch keeps the source-issued HKT day in both records."""
+        import src.data.daily_obs_append as daily_obs_append
+
+        from src.data.daily_obs_append import _accumulate_hko_reading
+        from src.state.schema.observation_prints_schema import ensure_table
+
+        class FrozenDateTime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                now_utc = datetime(2026, 7, 15, 16, 5, tzinfo=timezone.utc)
+                return now_utc if tz is not None else now_utc.replace(tzinfo=None)
+
+        forecasts_path = tmp_path / "zeus-forecasts.db"
+        world_path = tmp_path / "zeus-world.db"
+        sqlite3.connect(forecasts_path).close()
+        world = sqlite3.connect(world_path)
+        ensure_table(world)
+        world.commit()
+        world.close()
+
+        conn = sqlite3.connect(forecasts_path)
+        conn.execute("ATTACH DATABASE ? AS world", (str(world_path),))
+        response = MagicMock()
+        response.raise_for_status.return_value = None
+        response.json.return_value = {
+            # 23:55 HKT on July 15; the fetch happens after HKT midnight.
+            "updateTime": "2026-07-15T23:55:00+08:00",
+            "temperature": {
+                "data": [{"place": "Hong Kong Observatory", "value": 31.0}]
+            },
+        }
+        try:
+            with (
+                patch("src.data.daily_obs_append.httpx.get", return_value=response),
+                patch.object(daily_obs_append, "datetime", FrozenDateTime),
+            ):
+                assert _accumulate_hko_reading(conn, schema="world") is True
+            accumulator = conn.execute(
+                "SELECT target_date, hour_utc FROM world.hko_hourly_accumulator"
+            ).fetchone()
+            assert accumulator == ("2026-07-15", "2026-07-15T15:00Z")
+            (publish_ts,) = conn.execute(
+                "SELECT publish_ts_utc FROM world.observation_prints "
+                "WHERE source_channel = 'hko_rhrread_spot'"
+            ).fetchone()
+            assert publish_ts == "2026-07-15T15:55:00+00:00"
+        finally:
+            conn.close()
+
 
 # ---------------------------------------------------------------------------
 # ROT-2: _k2_startup_catch_up calls catch_up_obs with a forecasts connection
@@ -284,8 +470,8 @@ class TestStartupCatchUpRouting:
             patch("src.data.hourly_instants_append.catch_up_missing") as mock_catch_up_hourly,
             patch("src.data.solar_append.catch_up_missing") as mock_catch_up_solar,
             patch("src.data.forecasts_append.catch_up_missing") as mock_catch_up_forecasts,
-            patch("src.data.forecasts_append.daily_tick") as mock_forecasts_dt,
-            patch("src.data.solar_append.daily_tick") as mock_solar_dt,
+            patch("src.data.forecasts_append.daily_tick"),
+            patch("src.data.solar_append.daily_tick"),
         ):
             mock_catch_up_obs.return_value = {"filled": 0}
             mock_catch_up_hourly.return_value = {"filled": 0}

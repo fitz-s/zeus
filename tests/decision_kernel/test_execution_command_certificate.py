@@ -1,4 +1,4 @@
-# Lifecycle: created=2026-05-25; last_reviewed=2026-07-16; last_reused=2026-07-16
+# Lifecycle: created=2026-05-25; last_reviewed=2026-07-31; last_reused=2026-07-31
 # Purpose: Prove live execution certificates preserve authority, sizing, and submit invariants.
 # Reuse: Re-audit final-intent, pre-submit, command, and verifier field closure before relying on it.
 # Authority basis: docs/operations/edli_v1/EDLI_REDEMPTION_FINAL_PACKAGE_SPEC.md §14 full-live increment.
@@ -26,11 +26,13 @@ from src.decision_kernel.certificates.execution import (
     build_executor_expressibility_certificate,
     build_final_intent_certificate_from_actionable,
 )
+from src.decision_kernel.canonicalization import stable_hash
 from src.engine.event_bound_final_intent import (
     _final_execution_intent_from_payload,
     conservative_submit_expected_edge,
     validate_final_intent_cert_for_existing_executor,
 )
+from src.events.day0_authority import assert_live_day0_entry_provenance
 
 
 NOW = datetime(2026, 5, 25, 12, tzinfo=timezone.utc)
@@ -1339,6 +1341,40 @@ def receipt_command():
         pre_submit_revalidation_cert=pre_submit,
         decision_time=NOW,
     )
+
+
+def test_final_intent_preserves_day0_entry_provenance() -> None:
+    provenance = {
+        "city": "Ankara",
+        "target_date": "2026-08-01",
+        "metric": "high",
+        "settlement_source": "wu_icao_history",
+        "station_id": "LTAC",
+        "configured_station_id": "LTAC",
+        "raw_payload_sha256": "d" * 64,
+        "observation_time": "2026-08-01T06:50:00+00:00",
+        "observation_available_at": "2026-08-01T07:15:51+00:00",
+    }
+    actionable_payload = {
+        **provenance,
+        "event_type": "DAY0_EXTREME_UPDATED",
+        "day0_observation_provenance_hash": stable_hash(provenance),
+    }
+
+    _, final_intent, _, _ = builder_chain(
+        actionable_payload=actionable_payload
+    )
+
+    assert_live_day0_entry_provenance(final_intent.payload)
+    for field, value in actionable_payload.items():
+        if field in {
+            "station_id",
+            "configured_station_id",
+            "settlement_source",
+            "raw_payload_sha256",
+            "day0_observation_provenance_hash",
+        }:
+            assert final_intent.payload[field] == value
 
 
 def _actionable_payload() -> dict:

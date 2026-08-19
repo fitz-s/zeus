@@ -13,19 +13,31 @@ import json
 import sqlite3
 import threading
 import time as _time
-from dataclasses import dataclass
+from contextlib import contextmanager
+from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta, timezone
 from decimal import ROUND_CEILING, Decimal, InvalidOperation
+from enum import Enum
 from functools import cached_property
+from pathlib import Path
+from types import MappingProxyType
 from typing import Callable, Mapping, Sequence
 from zoneinfo import ZoneInfo
 
-from src.contracts.executable_cost_curve import BookLevel, ExecutableCostCurve, FeeModel
+from src.contracts.executable_cost_curve import (
+    BidBookLevel,
+    BookLevel,
+    ExecutableCostCurve,
+    FeeModel,
+)
 from src.contracts.executable_market_snapshot import (
     fee_details_from_gamma_fee_schedule,
     fee_rate_fraction_from_details,
 )
 from src.contracts.fee_authority import resolve_taker_fee_fraction
+from src.contracts.strategy_capital_allocation import (
+    StrategyCapitalAllocationWitness,
+)
 from src.events.candidate_binding import weather_family_id
 from src.events.event_writer import EventWriter
 from src.events.opportunity_event import OpportunityEvent
@@ -33,6 +45,7 @@ from src.events.triggers.forecast_snapshot_ready import (
     ForecastSnapshotReadyTrigger,
     executable_forecast_live_eligible_reader,
 )
+from src.state.db import _connect_read_only
 from src.solve.solver import (
     actionable_family_payoff_bindings,
     CurrentExecutionAuthority,
@@ -53,6 +66,238 @@ GLOBAL_BOOK_CONFIRMED_ABSENT_FIELD = "_global_confirmed_absent"
 
 class GlobalAuctionScopeCancelled(RuntimeError):
     """Raised when held-position monitoring preempts a read-only scope scan."""
+
+
+class WorkDeferredCode(str, Enum):
+    """Retryable reasons for yielding a global money-path work cut."""
+
+    PREEMPTED = "DEFERRED_PREEMPTED"
+    DEADLINE = "DEFERRED_DEADLINE"
+
+
+class WorkDeferred(RuntimeError):
+    """Typed control-flow signal; no complete epoch may cross this boundary."""
+
+    def __init__(
+        self,
+        code: WorkDeferredCode,
+        *,
+        stage: str,
+        remaining_s: float,
+    ) -> None:
+        self.code = code
+        self.stage = str(stage)
+        self.remaining_s = max(0.0, float(remaining_s))
+        super().__init__(f"{code.value}:{self.stage}")
+
+
+@dataclass(frozen=True)
+class WorkContext:
+    """One absolute deadline and cancellation authority for a global work cut."""
+
+    deadline_monotonic: float | None
+    cancel_requested: Callable[[], bool] | None = None
+    monotonic: Callable[[], float] = _time.monotonic
+
+    def remaining(self) -> float:
+        if self.deadline_monotonic is None:
+            return float("inf")
+        return max(0.0, float(self.deadline_monotonic) - self.monotonic())
+
+    def checkpoint(self, stage: str) -> float:
+        if self.cancel_requested is not None and self.cancel_requested():
+            raise WorkDeferred(
+                WorkDeferredCode.PREEMPTED,
+                stage=stage,
+                remaining_s=self.remaining(),
+            )
+        remaining = self.remaining()
+        if remaining <= 0.0:
+            raise WorkDeferred(
+                WorkDeferredCode.DEADLINE,
+                stage=stage,
+                remaining_s=remaining,
+            )
+        return remaining
+
+    def clipped_timeout(self, timeout: float, *, stage: str) -> float:
+        requested = float(timeout)
+        if requested <= 0.0:
+            raise ValueError("WORK_CONTEXT_TIMEOUT_INVALID")
+        return min(requested, self.checkpoint(stage))
+
+
+_IN_MEMORY_WORK_SQLITE_FENCE = threading.RLock()
+_SHARED_WORK_SQLITE_FENCE = threading.RLock()
+
+
+def _work_sqlite_main_path(conn: sqlite3.Connection) -> str | None:
+    for _sequence, name, path in conn.execute("PRAGMA database_list"):
+        if str(name) == "main":
+            clean = str(path or "").strip()
+            return clean or None
+    return None
+
+
+@contextmanager
+def _shared_work_sqlite_serialization(
+    work_context: WorkContext,
+    *,
+    stage: str,
+):
+    acquired = False
+    try:
+        while not acquired:
+            remaining = work_context.checkpoint(f"{stage}:fence_wait")
+            wait_seconds = (
+                0.005
+                if remaining == float("inf")
+                else min(0.005, remaining)
+            )
+            acquired = _SHARED_WORK_SQLITE_FENCE.acquire(
+                timeout=max(0.0, wait_seconds)
+            )
+        yield
+    finally:
+        if acquired:
+            _SHARED_WORK_SQLITE_FENCE.release()
+
+
+@contextmanager
+def bounded_work_sqlite(
+    conn: sqlite3.Connection,
+    work_context: WorkContext,
+    *,
+    stage: str,
+    shared_connection: bool = False,
+    keep_independent_connection_open: bool = False,
+):
+    """Run one bounded read without taking ownership of a shared connection.
+
+    File-backed non-shared reads normally close their derived connection on
+    exit.  A staged caller may retain that derived connection after releasing
+    this deadline watcher, but then owns exactly one later ``close()``.
+    """
+
+    if shared_connection:
+        # Some snapshot-scoped readers key frozen state by connection identity.
+        # Serialize those explicit owners, retain any pre-existing progress
+        # handler, and use interrupt plus a clipped busy timeout only.
+        with _shared_work_sqlite_serialization(work_context, stage=stage):
+            work_context.checkpoint(f"{stage}:before_sql")
+            prior_busy_timeout = int(conn.execute("PRAGMA busy_timeout").fetchone()[0])
+            remaining = work_context.remaining()
+            remaining_ms = (
+                prior_busy_timeout
+                if remaining == float("inf")
+                else max(1, min(prior_busy_timeout, int(remaining * 1000.0)))
+            )
+            deferred: list[WorkDeferred] = []
+            stopped = threading.Event()
+
+            def _watch_shared() -> None:
+                while not stopped.wait(0.005):
+                    try:
+                        work_context.checkpoint(f"{stage}:sql_interrupt")
+                    except WorkDeferred as exc:
+                        if not deferred:
+                            deferred.append(exc)
+                        if not stopped.is_set():
+                            conn.interrupt()
+                        return
+
+            watcher = threading.Thread(
+                target=_watch_shared,
+                name="global-work-shared-sqlite-deadline",
+                daemon=True,
+            )
+            conn.execute(f"PRAGMA busy_timeout = {remaining_ms}")
+            watcher.start()
+            try:
+                try:
+                    yield conn
+                except sqlite3.OperationalError:
+                    if deferred:
+                        raise deferred[0]
+                    work_context.checkpoint(f"{stage}:sql_error")
+                    raise
+                if deferred:
+                    raise deferred[0]
+                work_context.checkpoint(f"{stage}:after_sql")
+            finally:
+                stopped.set()
+                watcher.join()
+                conn.execute(f"PRAGMA busy_timeout = {prior_busy_timeout}")
+        return
+    work_context.checkpoint(f"{stage}:before_sql_path")
+    main_path = _work_sqlite_main_path(conn)
+    work_context.checkpoint(f"{stage}:before_sql")
+    if main_path is None:
+        # In-memory fixtures cannot be reopened. Serialize their use and retain
+        # any caller-owned progress handler; production file-backed reads use
+        # the independently interruptible connection below.
+        with _IN_MEMORY_WORK_SQLITE_FENCE:
+            yield conn
+            work_context.checkpoint(f"{stage}:after_sql")
+        return
+
+    remaining = work_context.remaining()
+    remaining_ms = (
+        5_000
+        if remaining == float("inf")
+        else max(1, min(5_000, int(remaining * 1000.0)))
+    )
+    read_conn = _connect_read_only(Path(main_path))
+    read_conn.row_factory = conn.row_factory
+    read_conn.text_factory = conn.text_factory
+    deferred: list[WorkDeferred] = []
+    stopped = threading.Event()
+
+    def _remember_deferred(checkpoint_stage: str) -> bool:
+        try:
+            work_context.checkpoint(checkpoint_stage)
+        except WorkDeferred as exc:
+            if not deferred:
+                deferred.append(exc)
+            return True
+        return False
+
+    def _progress() -> int:
+        return int(_remember_deferred(f"{stage}:sql_progress"))
+
+    def _watch() -> None:
+        while not stopped.wait(0.005):
+            if _remember_deferred(f"{stage}:sql_interrupt"):
+                if not stopped.is_set():
+                    read_conn.interrupt()
+                return
+
+    watcher = threading.Thread(
+        target=_watch,
+        name="global-work-sqlite-deadline",
+        daemon=True,
+    )
+    read_conn.execute("PRAGMA query_only = ON")
+    read_conn.execute(f"PRAGMA busy_timeout = {remaining_ms}")
+    read_conn.set_progress_handler(_progress, 1_000)
+    watcher.start()
+    try:
+        try:
+            yield read_conn
+        except sqlite3.OperationalError:
+            if deferred:
+                raise deferred[0]
+            work_context.checkpoint(f"{stage}:sql_error")
+            raise
+        if deferred:
+            raise deferred[0]
+        work_context.checkpoint(f"{stage}:after_sql")
+    finally:
+        stopped.set()
+        watcher.join()
+        read_conn.set_progress_handler(None, 0)
+        if not keep_independent_connection_open:
+            read_conn.close()
 
 
 @dataclass(frozen=True, init=False)
@@ -113,7 +358,8 @@ class CurrentGlobalBookAsset:
     token_id: str
     curve: ExecutableCostCurve
     captured_at_utc: datetime
-    bid_levels: tuple[BookLevel, ...] = ()
+    neg_risk: bool
+    bid_levels: tuple[BidBookLevel, ...] = ()
 
     def __post_init__(self) -> None:
         if (
@@ -132,6 +378,7 @@ class CurrentGlobalBookAsset:
             or self.curve.side != self.side
             or self.curve.token_id != self.token_id
             or self.captured_at_utc.tzinfo is None
+            or type(self.neg_risk) is not bool
         ):
             raise ValueError("GLOBAL_BOOK_ASSET_INVALID")
 
@@ -149,6 +396,7 @@ class CurrentGlobalSellAsset:
     token_id: str
     curve: ExecutableSellCurve
     captured_at_utc: datetime
+    neg_risk: bool
 
     def __post_init__(self) -> None:
         if (
@@ -167,6 +415,7 @@ class CurrentGlobalSellAsset:
             or self.curve.side != self.side
             or self.curve.token_id != self.token_id
             or self.captured_at_utc.tzinfo is None
+            or type(self.neg_risk) is not bool
         ):
             raise ValueError("GLOBAL_SELL_BOOK_ASSET_INVALID")
 
@@ -196,6 +445,9 @@ class CurrentGlobalBookEpoch:
     max_age: timedelta
     witness_identity: str
     sell_assets: tuple[CurrentGlobalSellAsset, ...] = ()
+    maker_fill_witness_identities: Mapping[
+        tuple[str, str, str, str, str | None], str
+    ] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         states = tuple(sorted(tuple(str(value) for value in row) for row in self.asset_states))
@@ -203,12 +455,23 @@ class CurrentGlobalBookEpoch:
             (asset.family_key, asset.bin_id, asset.side, asset.token_id)
             for asset in self.sell_assets
         )
+        maker_witnesses = {
+            tuple(key): str(identity)
+            for key, identity in self.maker_fill_witness_identities.items()
+        }
         if (
             not states
             or len(set(states)) != len(states)
             or len(set(sell_keys)) != len(sell_keys)
             or self.captured_at_utc.tzinfo is None
             or self.max_age <= timedelta(0)
+            or any(
+                not isinstance(key, tuple)
+                or len(key) != 5
+                or not all(str(value or "").strip() for value in key[:4])
+                or not identity.strip()
+                for key, identity in maker_witnesses.items()
+            )
         ):
             raise ValueError("GLOBAL_BOOK_EPOCH_INVALID")
         expected = current_global_book_epoch_identity(
@@ -218,6 +481,11 @@ class CurrentGlobalBookEpoch:
         if self.witness_identity != expected:
             raise ValueError("GLOBAL_BOOK_EPOCH_IDENTITY_MISMATCH")
         object.__setattr__(self, "asset_states", states)
+        object.__setattr__(
+            self,
+            "maker_fill_witness_identities",
+            MappingProxyType(maker_witnesses),
+        )
 
     @cached_property
     def asset_by_key(self) -> Mapping[tuple[str, str, str, str], CurrentGlobalBookAsset]:
@@ -267,12 +535,24 @@ class CurrentGlobalBookEpoch:
         )
         if asset is None:
             return None
+        maker_witness_identity = None
+        if action == "BUY" and getattr(candidate, "execution_mode", None) == "MAKER_REST":
+            maker_witness_identity = self.maker_fill_witness_identities.get(
+                (*key, None)
+            )
+        elif action == "SELL" and getattr(candidate, "execution_mode", None) == "MAKER_REST":
+            maker_witness_identity = self.maker_fill_witness_identities.get(
+                (*key, getattr(candidate, "position_id", None))
+            )
         return CurrentExecutionAuthority(
             token_id=asset.token_id,
             side=asset.side,  # type: ignore[arg-type]
             book_snapshot_id=asset.curve.snapshot_id,
             execution_curve_identity=executable_curve_identity(asset.curve),
             action=action,  # type: ignore[arg-type]
+            neg_risk=asset.neg_risk,
+            asset_epoch_identity=self.witness_identity,
+            maker_witness_identity=maker_witness_identity,
         )
 
 
@@ -365,6 +645,7 @@ def _global_book_snapshot_rows(
                    s.accepting_orders,
                    s.min_tick_size,
                    s.min_order_size,
+                   s.neg_risk,
                    s.fee_details_json,
                    s.tradeability_status_json,
                    s.captured_at,
@@ -381,6 +662,108 @@ def _global_book_snapshot_rows(
             item = _row_dict(cur, row)
             item["snapshot_invalidated"] = snapshot_invalidated(item)
             rows.append(item)
+    return rows
+
+
+def _global_book_latest_invalidation_rows(
+    trade_conn: sqlite3.Connection,
+    *,
+    condition_ids: Sequence[str],
+    checked_at_utc: datetime,
+) -> list[dict[str, object]]:
+    """Read invalidation identity without loading append-table book payloads."""
+
+    if checked_at_utc.tzinfo is None:
+        raise ValueError("GLOBAL_BOOK_INVALIDATION_CHECK_TIME_NAIVE")
+    clean = tuple(
+        value
+        for value in dict.fromkeys(
+            str(raw or "").strip() for raw in condition_ids
+        )
+        if value
+    )
+    if not clean:
+        return []
+    condition_invalidated_at: dict[str, datetime] = {}
+    token_invalidated_at: dict[str, datetime] = {}
+    if _table_exists(trade_conn, "executable_market_snapshot_invalidations"):
+        for raw_condition, raw_token, raw_invalidated_at in trade_conn.execute(
+            """
+            SELECT condition_id, token_id, MAX(invalidated_at)
+              FROM executable_market_snapshot_invalidations
+             WHERE invalidated_at <= ?
+             GROUP BY condition_id, token_id
+            """,
+            (checked_at_utc.astimezone(timezone.utc).isoformat(),),
+        ):
+            try:
+                invalidated_at = datetime.fromisoformat(
+                    str(raw_invalidated_at).replace("Z", "+00:00")
+                ).astimezone(timezone.utc)
+            except (TypeError, ValueError):
+                continue
+            condition_id = str(raw_condition or "").strip()
+            token_id = str(raw_token or "").strip()
+            if condition_id:
+                condition_invalidated_at[condition_id] = max(
+                    invalidated_at,
+                    condition_invalidated_at.get(
+                        condition_id,
+                        datetime.min.replace(tzinfo=timezone.utc),
+                    ),
+                )
+            if token_id:
+                token_invalidated_at[token_id] = max(
+                    invalidated_at,
+                    token_invalidated_at.get(
+                        token_id,
+                        datetime.min.replace(tzinfo=timezone.utc),
+                    ),
+                )
+
+    rows: list[dict[str, object]] = []
+    for offset in range(0, len(clean), 400):
+        chunk = clean[offset : offset + 400]
+        placeholders = ",".join("?" for _ in chunk)
+        cur = trade_conn.execute(
+            f"""
+            SELECT snapshot_id,
+                   condition_id,
+                   selected_outcome_token_id,
+                   yes_token_id,
+                   no_token_id,
+                   captured_at
+              FROM executable_market_snapshot_latest
+             WHERE condition_id IN ({placeholders})
+             ORDER BY captured_at DESC, snapshot_id DESC
+            """,
+            chunk,
+        )
+        for raw in cur.fetchall():
+            row = _row_dict(cur, raw)
+            try:
+                captured_at = datetime.fromisoformat(
+                    str(row.get("captured_at") or "").replace("Z", "+00:00")
+                ).astimezone(timezone.utc)
+            except (TypeError, ValueError):
+                row["snapshot_invalidated"] = False
+            else:
+                identities = (
+                    condition_invalidated_at.get(
+                        str(row.get("condition_id") or "")
+                    ),
+                    token_invalidated_at.get(
+                        str(row.get("selected_outcome_token_id") or "")
+                    ),
+                    token_invalidated_at.get(str(row.get("yes_token_id") or "")),
+                    token_invalidated_at.get(str(row.get("no_token_id") or "")),
+                )
+                row["snapshot_invalidated"] = any(
+                    invalidated_at is not None
+                    and invalidated_at >= captured_at
+                    for invalidated_at in identities
+                )
+            rows.append(row)
     return rows
 
 
@@ -521,7 +904,7 @@ def _global_sell_curve(
         return None
     try:
         levels = tuple(
-            BookLevel(
+            BidBookLevel(
                 price=Decimal(str(raw.get("price"))),
                 size=Decimal(str(raw.get("size"))),
             )
@@ -585,7 +968,10 @@ def _global_book_metadata_is_current(
     still be inside its own executable-snapshot freshness interval.
     """
 
-    if metadata.get("_global_current_gamma") is True:
+    if (
+        metadata.get("_global_current_gamma") is True
+        or metadata.get("_global_current_clob") is True
+    ):
         return True
     try:
         captured_at = datetime.fromisoformat(
@@ -662,9 +1048,10 @@ def _current_global_book_asset_state(
     CurrentGlobalBookAsset | None,
     CurrentGlobalSellAsset | None,
 ]:
-    if not metadata.get("_global_current_gamma") and bool(
-        metadata.get("snapshot_invalidated")
-    ):
+    if not (
+        metadata.get("_global_current_gamma")
+        or metadata.get("_global_current_clob")
+    ) and bool(metadata.get("snapshot_invalidated")):
         raise ValueError(f"GLOBAL_BOOK_METADATA_INVALIDATED:{condition_id}:{token_id}")
     market_event_id = str(metadata.get("event_id") or "").strip()
     gamma_market_id = str(metadata.get("gamma_market_id") or "").strip()
@@ -672,6 +1059,10 @@ def _current_global_book_asset_state(
         raise ValueError(f"GLOBAL_BOOK_GAMMA_MARKET_ID_MISSING:{condition_id}:{token_id}")
     if not market_event_id:
         raise ValueError(f"GLOBAL_BOOK_MARKET_EVENT_ID_MISSING:{condition_id}:{token_id}")
+    raw_neg_risk = metadata.get("neg_risk")
+    if raw_neg_risk not in {True, False, 0, 1}:
+        raise ValueError(f"GLOBAL_BOOK_NEG_RISK_MISSING:{condition_id}:{token_id}")
+    neg_risk = bool(raw_neg_risk)
 
     metadata_current = _global_book_metadata_is_current(
         metadata,
@@ -739,6 +1130,7 @@ def _current_global_book_asset_state(
         book_hash,
         market_event_id,
         gamma_market_id,
+        str(neg_risk),
     )
     asset = (
         CurrentGlobalBookAsset(
@@ -754,6 +1146,7 @@ def _current_global_book_asset_state(
             bid_levels=(
                 tuple(sell_curve.levels) if sell_curve is not None else ()
             ),
+            neg_risk=neg_risk,
         )
         if curve is not None
         else None
@@ -769,6 +1162,7 @@ def _current_global_book_asset_state(
             token_id=token_id,
             curve=sell_curve,
             captured_at_utc=captured_at_utc,
+            neg_risk=neg_risk,
         )
         if sell_curve is not None
         else None
@@ -780,7 +1174,7 @@ def capture_current_global_book_epoch(
     trade_conn: sqlite3.Connection,
     *,
     probability_witnesses: Mapping[str, FamilyPayoffWitness],
-    get_books: Callable[[list[str]], Mapping[str, Mapping[str, object]]],
+    get_books: Callable[..., Mapping[str, Mapping[str, object]]],
     clock: Callable[[], datetime],
     max_age: timedelta,
     batch_size: int = 500,
@@ -788,13 +1182,27 @@ def capture_current_global_book_epoch(
     metadata_overrides: Mapping[tuple[str, str], Mapping[str, object]] | None = None,
     prefetched_books: Mapping[str, Mapping[str, object]] | None = None,
     prefetched_at_utc: datetime | None = None,
+    required_token_ids: frozenset[str] | None = None,
+    work_context: WorkContext | None = None,
+    request_timeout: float | None = None,
 ) -> CurrentGlobalBookEpoch:
-    """Fetch every candidate-capable native book without shrinking its set."""
+    """Fetch current books for the economically feasible token set."""
 
+    if work_context is not None:
+        work_context.checkpoint("book_capture:start")
+    required_tokens = (
+        frozenset(str(token or "").strip() for token in required_token_ids)
+        if required_token_ids is not None
+        else None
+    )
     if (
         max_age <= timedelta(0)
         or not 1 <= batch_size <= 500
         or not 1 <= book_fetch_workers <= 4
+        or (
+            required_tokens is not None
+            and (not required_tokens or "" in required_tokens)
+        )
     ):
         raise ValueError("GLOBAL_BOOK_FETCH_CONTRACT_INVALID")
     bindings: list[tuple[str, str, str, str, str]] = []
@@ -808,10 +1216,14 @@ def capture_current_global_book_epoch(
             ):
                 token_id = str(raw_token or "").strip()
                 if not token_id:
+                    if required_tokens is not None:
+                        continue
                     raise ValueError(
                         "GLOBAL_TOKEN_IDENTITY_INCOMPLETE:"
                         f"{family_key}:{binding.bin_id}:{side}"
                     )
+                if required_tokens is not None and token_id not in required_tokens:
+                    continue
                 bindings.append(
                     (
                         family_key,
@@ -821,6 +1233,12 @@ def capture_current_global_book_epoch(
                         token_id,
                     )
                 )
+    captured_tokens = frozenset(row[4] for row in bindings)
+    if required_tokens is not None and captured_tokens != required_tokens:
+        raise ValueError(
+            "GLOBAL_REQUIRED_BOOK_TOKEN_MISSING:"
+            + ",".join(sorted(required_tokens.difference(captured_tokens)))
+        )
     if not bindings or len({row[4] for row in bindings}) != len(bindings):
         raise ValueError("GLOBAL_TOKEN_UNIVERSE_AMBIGUOUS")
 
@@ -828,11 +1246,23 @@ def capture_current_global_book_epoch(
     if started_at is None or started_at.tzinfo is None:
         raise ValueError("GLOBAL_BOOK_CLOCK_INVALID")
     started_at = started_at.astimezone(timezone.utc)
-    metadata_rows = _global_book_snapshot_rows(
-        trade_conn,
-        condition_ids=[row[2] for row in bindings],
-        checked_at_utc=started_at,
-    )
+    if work_context is None:
+        metadata_rows = _global_book_snapshot_rows(
+            trade_conn,
+            condition_ids=[row[2] for row in bindings],
+            checked_at_utc=started_at,
+        )
+    else:
+        with bounded_work_sqlite(
+            trade_conn,
+            work_context,
+            stage="book_capture:metadata",
+        ) as read_conn:
+            metadata_rows = _global_book_snapshot_rows(
+                read_conn,
+                condition_ids=[row[2] for row in bindings],
+                checked_at_utc=started_at,
+            )
     metadata_by_key: dict[tuple[str, str], dict[str, object]] = {}
     for row in metadata_rows:
         condition_id = str(row.get("condition_id") or "")
@@ -854,9 +1284,10 @@ def capture_current_global_book_epoch(
             raise ValueError(
                 f"GLOBAL_BOOK_METADATA_MISSING:{condition_id}:{token_id}"
             )
-        if not metadata.get("_global_current_gamma") and bool(
-            metadata.get("snapshot_invalidated")
-        ):
+        if not (
+            metadata.get("_global_current_gamma")
+            or metadata.get("_global_current_clob")
+        ) and bool(metadata.get("snapshot_invalidated")):
             raise ValueError(
                 f"GLOBAL_BOOK_METADATA_INVALIDATED:{condition_id}:{token_id}"
             )
@@ -871,10 +1302,14 @@ def capture_current_global_book_epoch(
             get_books=get_books,
             batch_size=batch_size,
             book_fetch_workers=book_fetch_workers,
+            work_context=work_context,
+            request_timeout=request_timeout,
         )
         if prefetched_books is None
         else _validated_global_book_batch(prefetched_books)
     )
+    if work_context is not None:
+        work_context.checkpoint("book_capture:after_fetch")
     finished_at = clock()
     if finished_at.tzinfo is None:
         raise ValueError("GLOBAL_BOOK_CLOCK_INVALID")
@@ -913,6 +1348,8 @@ def capture_current_global_book_epoch(
         asset_states=states,
         captured_at_utc=started_at,
     )
+    if work_context is not None:
+        work_context.checkpoint("book_capture:before_publish")
     return CurrentGlobalBookEpoch(
         assets=tuple(assets),
         asset_states=tuple(states),
@@ -1099,9 +1536,11 @@ def _validated_global_book_batch(
 def fetch_current_global_books(
     tokens: Sequence[str],
     *,
-    get_books: Callable[[list[str]], Mapping[str, Mapping[str, object]]],
+    get_books: Callable[..., Mapping[str, Mapping[str, object]]],
     batch_size: int = 500,
     book_fetch_workers: int = 1,
+    work_context: WorkContext | None = None,
+    request_timeout: float | None = None,
 ) -> dict[str, Mapping[str, object]]:
     """Fetch one bounded CLOB book universe without interpreting market metadata."""
 
@@ -1124,20 +1563,76 @@ def fetch_current_global_books(
     def merge(batch: Mapping[str, Mapping[str, object]]) -> None:
         books.update(_validated_global_book_batch(batch))
 
+    def fetch(chunk: list[str]) -> Mapping[str, Mapping[str, object]]:
+        if work_context is None:
+            return get_books(chunk)
+        work_context.checkpoint("book_fetch:request_start")
+        if request_timeout is None:
+            return get_books(chunk)
+        timeout = work_context.clipped_timeout(
+            request_timeout,
+            stage="book_fetch:request_timeout",
+        )
+        return get_books(chunk, timeout=timeout)
+
     if len(chunks) == 1 or book_fetch_workers == 1:
         for chunk in chunks:
-            merge(get_books(chunk))
+            if work_context is not None:
+                work_context.checkpoint("book_fetch:before_dispatch")
+            batch = fetch(chunk)
+            if work_context is not None:
+                work_context.checkpoint("book_fetch:before_completion")
+            merge(batch)
         return books
 
-    from concurrent.futures import ThreadPoolExecutor, as_completed
+    from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 
-    with ThreadPoolExecutor(
+    pool = ThreadPoolExecutor(
         max_workers=min(book_fetch_workers, len(chunks)),
         thread_name_prefix="global-clob-books",
-    ) as executor:
-        futures = tuple(executor.submit(get_books, chunk) for chunk in chunks)
-        for future in as_completed(futures):
-            merge(future.result())
+    )
+    pending: set[object] = set()
+    chunk_iter = iter(chunks)
+    try:
+        while len(pending) < min(book_fetch_workers, len(chunks)):
+            if work_context is not None:
+                work_context.checkpoint("book_fetch:before_dispatch")
+            try:
+                chunk = next(chunk_iter)
+            except StopIteration:
+                break
+            pending.add(pool.submit(fetch, chunk))
+        while pending:
+            wait_timeout = None
+            if work_context is not None:
+                wait_timeout = min(
+                    0.025,
+                    work_context.checkpoint("book_fetch:before_wait"),
+                )
+            done, pending = wait(
+                pending,
+                timeout=wait_timeout,
+                return_when=FIRST_COMPLETED,
+            )
+            if not done:
+                continue
+            for future in done:
+                if work_context is not None:
+                    work_context.checkpoint("book_fetch:before_completion")
+                merge(future.result())
+                if work_context is not None:
+                    work_context.checkpoint("book_fetch:before_dispatch")
+                try:
+                    chunk = next(chunk_iter)
+                except StopIteration:
+                    continue
+                pending.add(pool.submit(fetch, chunk))
+    finally:
+        for future in pending:
+            future.cancel()
+        # Running jobs already own a timeout clipped to this work context. Keep
+        # their client alive until they terminate; queued jobs are cancelled.
+        pool.shutdown(wait=True, cancel_futures=True)
     return books
 
 
@@ -1145,7 +1640,13 @@ def _rebind_probability_witness_tokens(
     witness: FamilyPayoffWitness,
     *,
     token_map_by_condition: Mapping[str, tuple[str, str]],
+    required_token_ids: frozenset[str] | None = None,
 ) -> FamilyPayoffWitness:
+    required_tokens = (
+        frozenset(str(token or "").strip() for token in required_token_ids)
+        if required_token_ids is not None
+        else None
+    )
     bindings: list[OutcomeTokenBinding] = []
     for binding in witness.bindings:
         current = token_map_by_condition.get(binding.condition_id)
@@ -1159,7 +1660,7 @@ def _rebind_probability_witness_tokens(
                 )
             yes = current_yes
             no = current_no
-        if not yes or not no:
+        if (not yes or not no) and required_tokens is None:
             raise ValueError(
                 f"GLOBAL_TOKEN_IDENTITY_INCOMPLETE:{binding.condition_id}"
             )
@@ -1167,11 +1668,24 @@ def _rebind_probability_witness_tokens(
             OutcomeTokenBinding(
                 bin_id=binding.bin_id,
                 condition_id=binding.condition_id,
-                yes_token_id=yes,
-                no_token_id=no,
+                yes_token_id=yes or None,
+                no_token_id=no or None,
             )
         )
     rebound = tuple(bindings)
+    if required_tokens is not None:
+        rebound_tokens = {
+            str(token or "").strip()
+            for binding in rebound
+            for token in (binding.yes_token_id, binding.no_token_id)
+            if str(token or "").strip()
+        }
+        missing_required = required_tokens.difference(rebound_tokens)
+        if missing_required:
+            raise ValueError(
+                "GLOBAL_REQUIRED_TOKEN_BINDING_MISSING:"
+                + ",".join(sorted(missing_required))
+            )
     return rebind_family_payoff_witness(witness, bindings=rebound)
 
 
@@ -1265,7 +1779,7 @@ def fetch_current_gamma_markets(
     finally:
         for future in futures:
             future.cancel()
-        pool.shutdown(wait=False, cancel_futures=True)
+        pool.shutdown(wait=True, cancel_futures=True)
     return tuple(markets), len(chunks)
 
 
@@ -1278,12 +1792,51 @@ def bind_current_global_probability_tokens(
         [Sequence[str]], Sequence[Mapping[str, object]]
     ]
     | None = None,
+    get_clob_market: Callable[[str], Mapping[str, object] | None] | None = None,
     trade_conn: sqlite3.Connection | None = None,
     checked_at_utc: datetime | None = None,
     max_workers: int = 8,
     metadata_sink: dict[tuple[str, str], Mapping[str, object]] | None = None,
+    required_token_ids: frozenset[str] | None = None,
 ) -> Mapping[str, FamilyPayoffWitness]:
     """Bind tokens and, when requested, current Gamma tradeability metadata."""
+
+    if required_token_ids is not None and metadata_sink is None:
+        raise ValueError("GLOBAL_REQUIRED_TOKENS_NEED_METADATA_SINK")
+    required_tokens = (
+        frozenset(str(token or "").strip() for token in required_token_ids)
+        if required_token_ids is not None
+        else None
+    )
+    if required_tokens is not None and (
+        not required_tokens or "" in required_tokens
+    ):
+        raise ValueError("GLOBAL_REQUIRED_TOKENS_INVALID")
+
+    def _metadata_keys(
+        witness: FamilyPayoffWitness,
+    ) -> set[tuple[str, str]]:
+        keys = {
+            (binding.condition_id, token_id)
+            for binding in witness.bindings
+            for token_id in (binding.yes_token_id, binding.no_token_id)
+            if token_id
+            and (required_tokens is None or token_id in required_tokens)
+        }
+        return keys
+
+    if required_tokens is not None:
+        witnessed_tokens = {
+            token_id
+            for witness in probability_witnesses.values()
+            for _condition_id, token_id in _metadata_keys(witness)
+        }
+        missing_required = required_tokens.difference(witnessed_tokens)
+        if missing_required:
+            raise ValueError(
+                "GLOBAL_REQUIRED_TOKEN_BINDING_MISSING:"
+                + ",".join(sorted(missing_required))
+            )
 
     missing_by_family = {
         family_key: witness
@@ -1295,13 +1848,23 @@ def bind_current_global_probability_tokens(
     }
     refresh_metadata = metadata_sink is not None
     work_by_family = (
-        dict(probability_witnesses) if refresh_metadata else missing_by_family
+        {
+            family_key: witness
+            for family_key, witness in probability_witnesses.items()
+            if _metadata_keys(witness)
+        }
+        if refresh_metadata
+        else missing_by_family
     )
     if not work_by_family:
         return dict(probability_witnesses)
 
     local_tokens: dict[str, tuple[str, str]] = {}
     local_metadata_by_token: dict[tuple[str, str], Mapping[str, object]] = {}
+    static_tokens: dict[str, tuple[str, str]] = {}
+    static_metadata_by_token: dict[
+        tuple[str, str], Mapping[str, object]
+    ] = {}
     if trade_conn is not None:
         if checked_at_utc is None or checked_at_utc.tzinfo is None:
             raise ValueError("GLOBAL_LOCAL_TOKEN_CHECK_TIME_INVALID")
@@ -1324,50 +1887,211 @@ def bind_current_global_probability_tokens(
             no = str(row.get("no_token_id") or "").strip()
             if not condition_id or not yes or not no:
                 continue
-            if not _global_book_metadata_is_current(
-                row,
-                checked_at_utc=checked_at_utc,
-            ):
-                continue
             pair = (yes, no)
-            previous = local_tokens.get(condition_id)
+            previous = static_tokens.get(condition_id)
             if previous is not None and previous != pair:
                 raise ValueError(
                     f"GLOBAL_LOCAL_TOKEN_IDENTITY_AMBIGUOUS:{condition_id}"
                 )
-            local_tokens[condition_id] = pair
+            static_tokens[condition_id] = pair
             selected = str(row.get("selected_outcome_token_id") or "").strip()
             if selected not in pair:
                 raise ValueError(
                     f"GLOBAL_LOCAL_SELECTED_TOKEN_IDENTITY_INVALID:{condition_id}"
                 )
+            static_metadata_by_token.setdefault((condition_id, selected), row)
+            if bool(row.get("snapshot_invalidated")) or not (
+                _global_book_metadata_is_current(
+                    row,
+                    checked_at_utc=checked_at_utc,
+                )
+            ):
+                continue
+            local_tokens[condition_id] = pair
             local_metadata_by_token.setdefault((condition_id, selected), row)
 
     local_metadata_family_keys: set[str] = set()
+    clob_attempted_family_keys: set[str] = set()
     if metadata_sink is not None:
         for family_key, witness in work_by_family.items():
-            token_keys = {
-                (binding.condition_id, token_id)
-                for binding in witness.bindings
-                for token_id in (binding.yes_token_id, binding.no_token_id)
-            }
+            token_keys = _metadata_keys(witness)
             if not token_keys or not token_keys.issubset(local_metadata_by_token):
                 continue
             local_metadata_family_keys.add(family_key)
-            for binding in witness.bindings:
-                yes, no = local_tokens[binding.condition_id]
-                metadata_sink[(binding.condition_id, yes)] = local_metadata_by_token[
-                    (binding.condition_id, yes)
-                ]
-                metadata_sink[(binding.condition_id, no)] = local_metadata_by_token[
-                    (binding.condition_id, no)
-                ]
+            for token_key in token_keys:
+                metadata_sink[token_key] = local_metadata_by_token[token_key]
+
+    if (
+        metadata_sink is not None
+        and get_clob_market is not None
+        and checked_at_utc is not None
+    ):
+        clob_candidates = {
+            family_key: witness
+            for family_key, witness in work_by_family.items()
+            if family_key not in local_metadata_family_keys
+            and _metadata_keys(witness).issubset(static_metadata_by_token)
+            and all(
+                binding.condition_id in static_tokens
+                for binding in witness.bindings
+                if any(
+                    token_id
+                    and (required_tokens is None or token_id in required_tokens)
+                    for token_id in (
+                        binding.yes_token_id,
+                        binding.no_token_id,
+                    )
+                )
+            )
+        }
+        clob_condition_ids = tuple(
+            dict.fromkeys(
+                condition_id
+                for witness in clob_candidates.values()
+                for condition_id, _token_id in _metadata_keys(witness)
+            )
+        )
+        clob_attempted_family_keys.update(clob_candidates)
+        clob_markets: dict[str, Mapping[str, object]] = {}
+        if clob_condition_ids:
+            from concurrent.futures import ThreadPoolExecutor
+
+            workers = max(1, min(int(max_workers), 16, len(clob_condition_ids)))
+            with ThreadPoolExecutor(
+                max_workers=workers,
+                thread_name_prefix="global-clob-metadata",
+            ) as pool:
+                futures = {
+                    condition_id: pool.submit(get_clob_market, condition_id)
+                    for condition_id in clob_condition_ids
+                }
+                for condition_id, future in futures.items():
+                    raw = future.result()
+                    if isinstance(raw, Mapping):
+                        clob_markets[condition_id] = raw
+
+        def _boolish(raw: Mapping[str, object], *names: str) -> bool | None:
+            for name in names:
+                if name not in raw or raw.get(name) is None:
+                    continue
+                value = raw.get(name)
+                if isinstance(value, bool):
+                    return value
+                if isinstance(value, (int, float)):
+                    return bool(value)
+                if isinstance(value, str):
+                    normalized = value.strip().lower()
+                    if normalized in {"true", "1", "yes"}:
+                        return True
+                    if normalized in {"false", "0", "no"}:
+                        return False
+            return None
+
+        def _clob_token_ids(raw: Mapping[str, object]) -> set[str]:
+            tokens = raw.get("tokens")
+            if not isinstance(tokens, Sequence) or isinstance(
+                tokens, (str, bytes)
+            ):
+                return set()
+            return {
+                str(item.get("token_id") or item.get("tokenId") or "").strip()
+                for item in tokens
+                if isinstance(item, Mapping)
+                and str(
+                    item.get("token_id") or item.get("tokenId") or ""
+                ).strip()
+            }
+
+        for family_key, witness in clob_candidates.items():
+            token_keys = _metadata_keys(witness)
+            refreshed: dict[tuple[str, str], Mapping[str, object]] = {}
+            for condition_id, token_id in token_keys:
+                raw = clob_markets.get(condition_id)
+                if raw is None:
+                    break
+                raw_condition = str(
+                    raw.get("condition_id") or raw.get("conditionId") or ""
+                ).strip()
+                yes, no = static_tokens[condition_id]
+                if (
+                    raw_condition != condition_id
+                    or {yes, no}.difference(_clob_token_ids(raw))
+                ):
+                    break
+                active = _boolish(raw, "active", "isActive")
+                closed = _boolish(raw, "closed", "isClosed")
+                archived = _boolish(raw, "archived", "isArchived")
+                accepting = _boolish(
+                    raw, "accepting_orders", "acceptingOrders"
+                )
+                orderbook = _boolish(
+                    raw,
+                    "enable_order_book",
+                    "enableOrderBook",
+                    "orderbookEnabled",
+                )
+                if None in (active, closed, archived, accepting, orderbook):
+                    break
+                executable_allowed = bool(
+                    active
+                    and not closed
+                    and not archived
+                    and accepting
+                    and orderbook
+                )
+                base = dict(static_metadata_by_token[(condition_id, token_id)])
+                base.update(
+                    {
+                        "active": active,
+                        "closed": closed or archived,
+                        "accepting_orders": accepting,
+                        "enable_orderbook": orderbook,
+                        "min_tick_size": str(
+                            raw.get("minimum_tick_size")
+                            or raw.get("minimumTickSize")
+                            or base.get("min_tick_size")
+                            or ""
+                        ),
+                        "min_order_size": str(
+                            raw.get("minimum_order_size")
+                            or raw.get("minimumOrderSize")
+                            or base.get("min_order_size")
+                            or ""
+                        ),
+                        "tradeability_status_json": json.dumps(
+                            {
+                                "executable_allowed": executable_allowed,
+                                "reason": "global_current_clob_market",
+                            },
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        ),
+                        "captured_at": checked_at_utc.isoformat(),
+                        "freshness_deadline": checked_at_utc.isoformat(),
+                        "snapshot_invalidated": False,
+                        "_global_current_clob": True,
+                    }
+                )
+                refreshed[(condition_id, token_id)] = base
+                local_tokens[condition_id] = (yes, no)
+            if refreshed.keys() == token_keys:
+                metadata_sink.update(refreshed)
+                local_metadata_family_keys.add(family_key)
 
     remote_work_by_family = {
         family_key: witness
         for family_key, witness in work_by_family.items()
         if family_key not in local_metadata_family_keys
+        and family_key not in clob_attempted_family_keys
     }
+    if required_tokens is not None:
+        # A reduce-only cut may use current CLOB tradeability over a persisted
+        # token binding, but it must not make every held SELL depend on Gamma
+        # discovery. Families without enough local identity to query CLOB are
+        # excluded from this cut and retried after their snapshot drain repairs
+        # them; other held families remain executable.
+        clob_attempted_family_keys.update(remote_work_by_family)
+        remote_work_by_family = {}
 
     from concurrent.futures import ThreadPoolExecutor
     from src.data.market_scanner import _boolish_market_field, _extract_outcomes
@@ -1562,6 +2286,8 @@ def bind_current_global_probability_tokens(
             and event is None
             and family_key not in local_metadata_family_keys
         ):
+            if family_key in clob_attempted_family_keys:
+                continue
             raise ValueError(f"GLOBAL_CURRENT_GAMMA_EVENT_MISSING:{family_key}")
         condition_ids = {binding.condition_id for binding in witness.bindings}
         token_map = {
@@ -1607,6 +2333,13 @@ def bind_current_global_probability_tokens(
                             "acceptingOrders",
                             "accepting_orders",
                         )
+                        neg_risk = _boolish_market_field(
+                            raw, "negRisk", "neg_risk", "negative_risk"
+                        )
+                        if neg_risk is None:
+                            raise ValueError(
+                                f"GLOBAL_GAMMA_NEG_RISK_MISSING:{condition_id}"
+                            )
                         executable_allowed = (
                             enable_orderbook is True
                             and active is True
@@ -1634,6 +2367,7 @@ def bind_current_global_probability_tokens(
                             "active": active is True,
                             "closed": closed is True,
                             "accepting_orders": accepting_orders is True,
+                            "neg_risk": bool(neg_risk),
                             "market_end_at": str(
                                 outcome.get("market_end_at")
                                 or raw.get("endDate")
@@ -1673,9 +2407,20 @@ def bind_current_global_probability_tokens(
                 raise ValueError(
                     f"GLOBAL_CURRENT_GAMMA_METADATA_INCOMPLETE:{family_key}:{missing}"
                 )
+        family_required_tokens = (
+            frozenset(
+                token
+                for binding in witness.bindings
+                for token in (binding.yes_token_id, binding.no_token_id)
+                if token in required_tokens
+            )
+            if required_tokens is not None
+            else None
+        )
         rebound[family_key] = _rebind_probability_witness_tokens(
             witness,
             token_map_by_condition=token_map,
+            required_token_ids=family_required_tokens,
         )
     return rebound
 
@@ -2563,8 +3308,24 @@ def _pending_entry_endowments(
     incremental fill is included in an unchanged aggregate balance.
     """
 
+    event_columns = {
+        str(row[1])
+        for row in trade_conn.execute(
+            "PRAGMA table_info(venue_command_events)"
+        ).fetchall()
+    }
+    fixed_cash_fak_sql = (
+        """MAX(
+                   CASE WHEN event.event_type = 'SUBMIT_REQUESTED'
+                              AND json_valid(event.payload_json)
+                              AND UPPER(json_extract(event.payload_json, '$.order_type')) = 'FAK'
+                        THEN 1 ELSE 0 END
+               ) AS fixed_cash_fak"""
+        if "payload_json" in event_columns
+        else "0 AS fixed_cash_fak"
+    )
     rows = trade_conn.execute(
-        """
+        f"""
         SELECT obligation.command_id,
                obligation.status,
                obligation.token_id,
@@ -2582,7 +3343,8 @@ def _pending_entry_endowments(
                MAX(
                    CASE WHEN event.event_type = 'FILL_CONFIRMED'
                         THEN event.occurred_at END
-               ) AS fill_confirmed_at
+               ) AS fill_confirmed_at,
+               {fixed_cash_fak_sql}
           FROM entry_exposure_obligations obligation
           LEFT JOIN venue_commands command
             ON command.command_id = obligation.command_id
@@ -2629,6 +3391,7 @@ def _pending_entry_endowments(
         intent_kind = str(row[12] or "").strip().upper()
         command_state = str(row[13] or "").strip().upper()
         fill_confirmed_at_raw = str(row[14] or "").strip()
+        fixed_cash_fak = bool(row[15])
         try:
             shares = Decimal(str(row[3]))
             cost = Decimal(str(row[4]))
@@ -2654,7 +3417,18 @@ def _pending_entry_endowments(
             or cost < 0
             or command_size <= 0
             or command_price <= 0
-            or shares - command_size > Decimal("0.000001")
+            or (
+                fixed_cash_fak
+                and (
+                    shares < command_size
+                    or abs(cost - command_size * command_price)
+                    > Decimal("0.000001")
+                )
+            )
+            or (
+                not fixed_cash_fak
+                and shares - command_size > Decimal("0.000001")
+            )
         ):
             raise ValueError("CURRENT_WEALTH_ENTRY_OBLIGATION_INVALID")
         obligation_ids.add(command_id)
@@ -2726,6 +3500,7 @@ def current_portfolio_wealth_witness(
     decision_at_utc: datetime,
     max_age: timedelta,
     portfolio_state: object | None = None,
+    capital_allocation: Mapping[str, object] | None = None,
 ) -> PortfolioWealthWitness:
     """Build one current terminal-wealth bound from chain collateral and positions.
 
@@ -2828,7 +3603,11 @@ def current_portfolio_wealth_witness(
             raise ValueError("CURRENT_WEALTH_UNKNOWN_CHAIN_INVENTORY")
         from src.contracts.position_truth import has_current_money_risk_chain_state
         from src.state.chain_reconciliation import _CHAIN_SEEN_AT_MAX_AGE_SECONDS
-        from src.state.portfolio import has_verified_trade_fill
+        from src.state.portfolio import (
+            FILL_AUTHORITY_VENUE_POSITION_OBSERVED,
+            current_tradable_exposure_shares,
+            has_verified_trade_fill,
+        )
 
         position_max_age = timedelta(seconds=_CHAIN_SEEN_AT_MAX_AGE_SECONDS)
         represented_micro: dict[str, int] = {}
@@ -2853,13 +3632,22 @@ def current_portfolio_wealth_witness(
                 shares = Decimal(micro) / Decimal("1000000")
                 evidence = "collateral_snapshot"
             else:
+                causal_shares = Decimal(
+                    str(current_tradable_exposure_shares(position))
+                )
                 shares = Decimal(str(getattr(position, "chain_shares", 0) or 0))
-                if shares <= 0 and has_verified_trade_fill(position):
+                if causal_shares > 0:
+                    shares = causal_shares
+                elif shares <= 0 and has_verified_trade_fill(position):
                     shares = Decimal(str(getattr(position, "shares", 0) or 0))
                 if shares <= 0:
                     raise ValueError("CURRENT_WEALTH_OPEN_POSITION_INVALID")
                 micro = int((shares * Decimal("1000000")).to_integral_value())
-                evidence = "uncertain_local_claim"
+                evidence = (
+                    "causal_venue_exposure"
+                    if causal_shares > 0 and has_verified_trade_fill(position)
+                    else "uncertain_local_claim"
+                )
                 try:
                     chain_verified_at = datetime.fromisoformat(
                         str(getattr(position, "chain_verified_at", "") or "").replace(
@@ -2893,24 +3681,68 @@ def current_portfolio_wealth_witness(
                     (f"position_claim:{position_id}", token, micro)
                 )
             try:
-                cost = max(
-                    Decimal(
-                        str(
-                            getattr(position, name, 0)
-                            or 0
+                fill_authority = str(
+                    getattr(position, "fill_authority", "") or ""
+                ).strip()
+                if fill_authority == FILL_AUTHORITY_VENUE_POSITION_OBSERVED:
+                    # A balance-only rescue has no authenticated trade-fill
+                    # economics.  Its exact chain slice is the sole authority;
+                    # submitted/local intent must not enlarge or shrink it.
+                    cost = Decimal(
+                        str(getattr(position, "chain_cost_basis_usd", 0) or 0)
+                    )
+                    basis_shares = Decimal(
+                        str(getattr(position, "chain_shares", 0) or 0)
+                    )
+                elif has_verified_trade_fill(position):
+                    # A partial SELL makes the current open fill slice smaller
+                    # than the immutable entry fill.  The chain API may retain
+                    # the original lot's initialValue after the exact token
+                    # balance has already shrunk; that historical value is not
+                    # current committed capital.
+                    cost = next(
+                        (
+                            value
+                            for name in (
+                                "effective_cost_basis_usd",
+                                "cost_basis_usd",
+                                "size_usd",
+                                "chain_cost_basis_usd",
+                            )
+                            if (
+                                value := Decimal(
+                                    str(getattr(position, name, 0) or 0)
+                                )
+                            ) > 0
+                        ),
+                        Decimal("0"),
+                    )
+                    basis_shares = next(
+                        (
+                            value
+                            for name in ("effective_shares", "shares", "chain_shares")
+                            if (
+                                value := Decimal(
+                                    str(getattr(position, name, 0) or 0)
+                                )
+                            ) > 0
+                        ),
+                        Decimal("0"),
+                    )
+                else:
+                    cost = max(
+                        Decimal(str(getattr(position, name, 0) or 0))
+                        for name in (
+                            "effective_cost_basis_usd",
+                            "chain_cost_basis_usd",
+                            "cost_basis_usd",
+                            "size_usd",
                         )
                     )
-                    for name in (
-                        "effective_cost_basis_usd",
-                        "chain_cost_basis_usd",
-                        "cost_basis_usd",
-                        "size_usd",
+                    basis_shares = max(
+                        Decimal(str(getattr(position, name, 0) or 0))
+                        for name in ("effective_shares", "chain_shares", "shares")
                     )
-                )
-                basis_shares = max(
-                    Decimal(str(getattr(position, name, 0) or 0))
-                    for name in ("effective_shares", "chain_shares", "shares")
-                )
                 if cost <= 0:
                     price = max(
                         Decimal(str(getattr(position, name, 0) or 0))
@@ -2974,9 +3806,10 @@ def current_portfolio_wealth_witness(
             ):
                 raise ValueError("CURRENT_WEALTH_CHAIN_POSITION_SIZE_MISMATCH")
         held_balances = represented_micro
-        # Only currently represented native inventory may create a SELL action.
-        # Unresolved verified-fill claims still bound wealth and consume capital,
-        # but they are not executable token balances.
+        # Only currently represented venue inventory may create a SELL action.
+        # A typed local-only fill is represented because its CLOB fill fact is
+        # newer than the lagging chain projection. Other unresolved claims still
+        # bound wealth and consume capital without minting a SELL action.
         native_holdings = dict(held_balances)
         bounded_claims = dict(held_balances)
         for token, amount in uncertain_micro.items():
@@ -3043,6 +3876,35 @@ def current_portfolio_wealth_witness(
         )
         spendable = Decimal(spendable_micro) / Decimal("1000000")
         reservations = Decimal(cash_at_risk_micro) / Decimal("1000000")
+        committed_capital = sum(
+            (
+                Decimal(amount) / Decimal("1000000")
+                for amount in native_commitments_micro.values()
+            ),
+            Decimal("0"),
+        )
+        if capital_allocation is None:
+            from src.runtime.bankroll_provider import (
+                current_zeus_capital_allocation_setting,
+            )
+
+            active_capital_allocation = (
+                current_zeus_capital_allocation_setting()
+            )
+        else:
+            active_capital_allocation = capital_allocation
+        # Fail-closed allocation gate (INV-47):
+        # SCOPE — only new BUY capacity for this complete auction epoch.
+        # DRAIN — every selection/preflight/final executor recapture rebuilds
+        # this witness and a changed identity supersedes the full ranking.
+        # RESET — a valid active setting plus current collateral/commitments
+        # rebuilds a coherent witness; SELL/HOLD never depend on positive room.
+        strategy_capital_allocation = StrategyCapitalAllocationWitness.build(
+            capital_basis_usd=floor + committed_capital,
+            committed_capital_usd=committed_capital,
+            venue_spendable_cash_usd=spendable,
+            allocation=active_capital_allocation,
+        )
 
         ledger_snapshot_id = hashlib.sha256(
             repr(
@@ -3079,6 +3941,9 @@ def current_portfolio_wealth_witness(
             spendable_cash_usd=spendable,
             reservations_usd=reservations,
             collateral_authority=authority,
+            strategy_capital_allocation_identity=(
+                strategy_capital_allocation.witness_identity
+            ),
             captured_at_utc=captured_at,
         )
         return PortfolioWealthWitness(
@@ -3089,6 +3954,7 @@ def current_portfolio_wealth_witness(
             spendable_cash_usd=spendable,
             reservations_usd=reservations,
             collateral_authority=authority,
+            strategy_capital_allocation=strategy_capital_allocation,
             captured_at_utc=captured_at,
             max_age=max_age,
             witness_identity=identity,

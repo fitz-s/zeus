@@ -1,8 +1,8 @@
-# Lifecycle: created=2026-05-24; last_reviewed=2026-05-24; last_reused=never
-# Purpose: Tests for inter-registry coherence assertions incl. mx2t3/mx2t6 drift xfail.
+# Lifecycle: created=2026-05-24; last_reviewed=2026-08-04; last_reused=2026-08-04
+# Purpose: Tests for inter-registry coherence, including code/calendar parameter parity.
 # Reuse: Inspect docs/operations/current/plans/data_temporal_kernel/PLAN.md + the target module before relying on it.
 # Created: 2026-05-24
-# Last reused or audited: 2026-05-24
+# Last reused or audited: 2026-08-04
 # Authority basis: docs/operations/current/plans/data_temporal_kernel/PLAN.md
 """Relationship tests for scripts/source_contract_lint.py — RED first, then GREEN.
 
@@ -14,7 +14,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
 import yaml
 
 
@@ -91,34 +90,23 @@ def test_backfill_only_implies_not_live_authorization() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Test 6: code data_version param matches SDK param; calendar drift is reported
-# (Assertion 5 in lint) — XFAIL because calendar still says mx2t6 vs code mx2t3
+# Test 6: code data_version param matches SDK param and calendar (Assertion 5)
 # ---------------------------------------------------------------------------
 
-@pytest.mark.xfail(
-    reason="calendar param mx2t6 vs code mx2t3 drift — fixed in later calendar PR; see PLAN data_temporal_kernel",
-    strict=False,
-)
 def test_code_data_version_param_matches_calendar_or_lint_flags_drift() -> None:
     """Relationship: the SDK fetch param (ecmwf_open_data.py TRACKS.open_data_param)
     and the code data_version param (snapshot_ingest_contract._ECMWF_OPENDATA_HIGH_DATA_VERSION)
     must align with the calendar's declared parameter field.
 
-    KNOWN drift: calendar says parameter=mx2t6, code uses mx2t3.
-    This test is marked xfail — it documents the drift as an antibody and will
-    be activated (xfail removed) once the calendar-fix PR updates parameter to mx2t3.
-
-    The lint must REPORT this mismatch as a drift warning (not silently pass).
+    The former mx2t6/mx2t3 drift is fixed; any recurrence must fail normally.
     """
     from scripts.source_contract_lint import run_assertion_5_code_param_vs_calendar
 
     findings = run_assertion_5_code_param_vs_calendar()
 
-    # If we reach here with no drift findings, the calendar has been fixed
-    # and this test's xfail marker should be removed.
     drift_findings = [f for f in findings if "drift" in f.get("message", "").lower() or "mismatch" in f.get("message", "").lower()]
     assert len(drift_findings) == 0, (
-        f"Calendar param drift still present (expected after calendar-fix PR): {drift_findings}"
+        f"Calendar/code parameter drift: {drift_findings}"
     )
 
 

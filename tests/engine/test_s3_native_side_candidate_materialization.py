@@ -404,7 +404,7 @@ def test_global_jit_curve_allows_evidence_carrier_churn_only(
     ("side", "token_id", "touch"),
     (("YES", "yes-1", "0.40"), ("NO", "no-1", "0.55")),
 )
-def test_global_jit_curve_rejects_unconsumed_tail_drift(
+def test_global_jit_curve_allows_unconsumed_tail_drift(
     side: str,
     token_id: str,
     touch: str,
@@ -431,7 +431,7 @@ def test_global_jit_curve_rejects_unconsumed_tail_drift(
         current_candidate=SimpleNamespace(executable_cost_curve=current),
     )
 
-    assert drift == "fields=levels"
+    assert drift is None
 
 
 @pytest.mark.parametrize(
@@ -501,7 +501,7 @@ def test_global_jit_curve_rejects_selected_order_economic_drift(
     )
 
 
-def test_global_jit_curve_rejects_cheaper_selected_prefix_for_reoptimization():
+def test_global_jit_curve_allows_cheaper_selected_prefix():
     selected = _jit_curve(
         side="YES",
         token_id="yes-1",
@@ -517,7 +517,7 @@ def test_global_jit_curve_rejects_cheaper_selected_prefix_for_reoptimization():
         levels=(("0.39", "5"), ("0.40", "5"), ("0.99", "100")),
     )
 
-    assert not era._global_selected_order_economics_preserved(
+    assert era._global_selected_order_economics_preserved(
         decision=_jit_decision(selected, "10"),
         current_candidate=SimpleNamespace(executable_cost_curve=current),
     )

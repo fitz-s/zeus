@@ -1,5 +1,5 @@
 # Created: 2026-06-11
-# Last reused or audited: 2026-07-20
+# Last reused or audited: 2026-08-10
 # Authority basis: Task #32 follow-up (operator 2026-06-11) — 没有新的就用老的 applied to fusion
 #   membership. The gem_global-only previous_runs exception (edc598b440) is generalized into the
 #   SINGLE serving authority (src/data/replacement_current_value_serving.py): a provider absent
@@ -44,6 +44,7 @@ from src.data.replacement_forecast_cycle_policy import (
 )
 from src.data.replacement_current_value_serving import (
     PREVIOUS_RUNS_SUBSTITUTION_MAX_AGE_HOURS,
+    read_freshest_coherent_instrument_values,
     read_current_instrument_values,
 )
 
@@ -113,6 +114,63 @@ def test_provider_absent_from_both_endpoints_stays_dropped() -> None:
     out = _read(conn)
     assert "jma_seamless" not in out
     assert set(out) == {"gfs_global"}
+
+
+def test_newer_async_run_cannot_erase_latest_coherent_provider_cohort() -> None:
+    conn = _conn()
+    icon_cycle = "2026-06-11T00:00:00+00:00"
+    nbm_coherent_cycle = "2026-06-11T03:00:00+00:00"
+    nbm_latest_cycle = "2026-06-11T04:00:00+00:00"
+    _insert(
+        conn,
+        10,
+        "icon_global",
+        33.0,
+        "single_runs",
+        cycle=icon_cycle,
+        captured="2026-06-11T02:00:00+00:00",
+    )
+    _insert(
+        conn,
+        11,
+        "ncep_nbm_conus",
+        33.2,
+        "single_runs",
+        cycle=nbm_coherent_cycle,
+        captured="2026-06-11T03:30:00+00:00",
+    )
+    _insert(
+        conn,
+        12,
+        "ncep_nbm_conus",
+        33.4,
+        "single_runs",
+        cycle=nbm_latest_cycle,
+        captured="2026-06-11T04:30:00+00:00",
+    )
+
+    newest = read_current_instrument_values(
+        conn,
+        city="Beijing",
+        metric="high",
+        target_date="2026-06-12",
+        source_cycle_time_iso=CYCLE,
+        decision_time_iso="2026-06-11T05:00:00+00:00",
+    )
+    coherent = read_freshest_coherent_instrument_values(
+        conn,
+        city="Beijing",
+        metric="high",
+        target_date="2026-06-12",
+        decision_time_iso="2026-06-11T05:00:00+00:00",
+        models=("icon_global", "ncep_nbm_conus"),
+        cohort_window_hours=3.0,
+    )
+    conn.close()
+
+    assert newest["ncep_nbm_conus"].raw_model_forecast_id == 12
+    assert coherent["icon_global"].raw_model_forecast_id == 10
+    assert coherent["ncep_nbm_conus"].raw_model_forecast_id == 11
 
 
 # -------------------------------------------------------------------------------------
@@ -911,6 +969,132 @@ def test_cycle_priority_never_priced_family_sorts_ahead_of_held_position(tmp_pat
     assert sort_key_tokyo < sort_key_paris
 
 
+def test_cycle_priority_current_exposure_overrides_stale_enqueue_marker(tmp_path) -> None:
+    """Claim-time chain exposure outranks discovery even when its enqueue snapshot said no hold."""
+    import src.data.replacement_forecast_live_materialization_queue as queue_mod
+
+    forecast_db = tmp_path / "forecasts.db"
+    conn = sqlite3.connect(forecast_db)
+    conn.executescript(
+        """
+        CREATE TABLE cycle_advance_enqueues (
+            city TEXT NOT NULL,
+            target_date TEXT NOT NULL,
+            metric TEXT NOT NULL,
+            target_cycle_time TEXT NOT NULL,
+            seed_file TEXT,
+            held_position INTEGER NOT NULL,
+            enqueued_at TEXT NOT NULL
+        );
+        CREATE TABLE forecast_posteriors (
+            source_id TEXT,
+            city TEXT,
+            target_date TEXT,
+            temperature_metric TEXT,
+            source_cycle_time TEXT,
+            computed_at TEXT
+        );
+        """
+    )
+    conn.executemany(
+        "INSERT INTO cycle_advance_enqueues VALUES (?, ?, ?, ?, ?, ?, ?)",
+        [
+            (
+                "Singapore",
+                "2026-08-08",
+                "high",
+                "2026-08-07T18:00:00+00:00",
+                str(tmp_path / "Singapore.current.high.json"),
+                0,
+                "2026-08-08T04:00:59+00:00",
+            ),
+            (
+                "Tokyo",
+                "2026-08-08",
+                "high",
+                "2026-08-07T18:00:00+00:00",
+                str(tmp_path / "Tokyo.current.high.json"),
+                0,
+                "2026-08-08T04:01:00+00:00",
+            ),
+        ],
+    )
+    conn.execute(
+        "INSERT INTO forecast_posteriors VALUES (?, ?, ?, ?, ?, ?)",
+        (
+            queue_mod.SOURCE_ID,
+            "Singapore",
+            "2026-08-08",
+            "high",
+            "2026-08-07T12:00:00+00:00",
+            "2026-08-08T04:00:00+00:00",
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+    trade_db = tmp_path / "trades.db"
+    conn = sqlite3.connect(trade_db)
+    conn.execute(
+        """
+        CREATE TABLE position_current (
+            city TEXT,
+            target_date TEXT,
+            temperature_metric TEXT,
+            phase TEXT,
+            chain_state TEXT,
+            chain_shares REAL,
+            chain_cost_basis_usd REAL
+        )
+        """
+    )
+    conn.execute(
+        "INSERT INTO position_current VALUES (?, ?, ?, ?, ?, ?, ?)",
+        ("Singapore", "2026-08-08", "high", "day0_window", "synced", 5.0, 1.6),
+    )
+    conn.execute(
+        "INSERT INTO position_current VALUES (?, ?, ?, ?, ?, ?, ?)",
+        ("Tokyo", "2026-08-08", "high", "pending_entry", "synced", 5.0, 1.6),
+    )
+    conn.commit()
+    conn.close()
+
+    singapore = tmp_path / "Singapore.current.high.json"
+    tokyo = tmp_path / "Tokyo.current.high.json"
+    for path, city in ((singapore, "Singapore"), (tokyo, "Tokyo")):
+        path.write_text(
+            json.dumps(
+                {
+                    "city": city,
+                    "target_date": "2026-08-08",
+                    "temperature_metric": "high",
+                    "source_cycle_time": "2026-08-07T18:00:00+00:00",
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    priority = queue_mod._cycle_advance_seed_priority_map(
+        forecast_db,
+        (singapore, tokyo),
+        trade_db=trade_db,
+    )
+
+    assert priority[singapore.name][0] == -2
+    assert priority[tokyo.name][0] == -1
+    assert queue_mod._cycle_advance_file_sort_key(
+        singapore, priority
+    ) < queue_mod._cycle_advance_file_sort_key(tokyo, priority)
+
+    without_forecast_db = queue_mod._cycle_advance_seed_priority_map(
+        None,
+        (singapore, tokyo),
+        trade_db=trade_db,
+    )
+    assert without_forecast_db[singapore.name][0] == -2
+    assert without_forecast_db[tokyo.name][0] == 1
+
+
 def test_cycle_priority_held_position_still_beats_plain_refresh_when_both_priced(
     tmp_path,
 ) -> None:
@@ -1076,6 +1260,207 @@ def test_materialization_queue_timeout_moves_request_to_failed(tmp_path) -> None
     ]
 
 
+def test_materialization_queue_requeues_transient_writer_contention(tmp_path) -> None:
+    import src.data.replacement_forecast_live_materialization_queue as queue_mod
+
+    request_dir = tmp_path / "requests"
+    processed_dir = tmp_path / "processed"
+    failed_dir = tmp_path / "failed"
+    request_dir.mkdir()
+    request_path = request_dir / "London.2026-06-25.high.busy.json"
+    request = {
+        "city": "London",
+        "target_date": "2026-06-25",
+        "temperature_metric": "high",
+        "source_cycle_time": "2026-06-24T12:00:00+00:00",
+        "computed_at": "2026-06-24T20:20:45+00:00",
+        "baseline_source_run_id": "b0-run",
+        "openmeteo_source_run_id": "om9-run",
+        "openmeteo_payload_json": "payload.json",
+        "precision_metadata_json": "precision.json",
+        "bins": [{"bin_id": "30C"}],
+    }
+    request_path.write_text(json.dumps(request), encoding="utf-8")
+    concurrent_request = {
+        **request,
+        "computed_at": "2026-06-24T20:20:46+00:00",
+    }
+
+    def _busy_runner(argv):
+        request_path.write_text(json.dumps(concurrent_request), encoding="utf-8")
+        return subprocess.CompletedProcess(
+            list(argv),
+            2,
+            stdout="",
+            stderr=(
+                '{"status":"ERROR","reason_codes":'
+                '["REPLACEMENT_FORECAST_WRITE_DEFERRED"]}\n'
+            ),
+        )
+
+    report = queue_mod.process_replacement_forecast_live_materialization_queue(
+        request_dir=request_dir,
+        processed_dir=processed_dir,
+        failed_dir=failed_dir,
+        forecast_db=tmp_path / "forecasts.db",
+        raw_manifest_dir=None,
+        limit=1,
+        runner=_busy_runner,
+    )
+
+    assert report.status == "PROCESSED"
+    assert report.processed_count == 0
+    assert report.failed_count == 0
+    assert request_path.exists()
+    assert json.loads(request_path.read_text(encoding="utf-8")) == concurrent_request
+    recovered = tuple(request_dir.glob("*.recovered-*.json"))
+    assert len(recovered) == 1
+    assert json.loads(recovered[0].read_text(encoding="utf-8")) == request
+    assert "REPLACEMENT_FORECAST_WRITE_DEFERRED" in report.reason_codes
+    assert not failed_dir.exists() or not tuple(failed_dir.iterdir())
+
+
+def test_materialization_queue_bounds_stale_day0_owner_receipts_per_family(tmp_path) -> None:
+    import src.data.replacement_forecast_live_materialization_queue as queue_mod
+
+    request_dir = tmp_path / "requests"
+    processed_dir = tmp_path / "processed"
+    failed_dir = tmp_path / "failed"
+    request_dir.mkdir()
+    base_request = {
+        "city": "NYC",
+        "target_date": "2026-08-05",
+        "temperature_metric": "low",
+        "source_cycle_time": "2026-08-05T00:00:00+00:00",
+        "baseline_source_run_id": "baseline-run",
+        "openmeteo_source_run_id": "anchor-run",
+        "openmeteo_payload_json": "payload.json",
+        "precision_metadata_json": "precision.json",
+        "bins": [{"bin_id": "57F-or-below"}],
+        "day0_enqueue_owner_witness": {
+            "conditioning_identity": "old-observation-owner",
+        },
+    }
+
+    def _stale_owner_runner(argv):
+        return subprocess.CompletedProcess(
+            list(argv),
+            1,
+            stdout=(
+                '{"status":"BLOCKED","reason_codes":'
+                '["STALE_DAY0_ENQUEUE_OWNER"]}\n'
+            ),
+            stderr="",
+        )
+
+    for minute in (44, 45):
+        request_path = request_dir / f"NYC.2026-08-05.low.{minute}.json"
+        request_path.write_text(
+            json.dumps(
+                {
+                    **base_request,
+                    "computed_at": f"2026-08-05T10:{minute}:00+00:00",
+                }
+            ),
+            encoding="utf-8",
+        )
+        report = queue_mod.process_replacement_forecast_live_materialization_queue(
+            request_dir=request_dir,
+            processed_dir=processed_dir,
+            failed_dir=failed_dir,
+            forecast_db=tmp_path / "forecasts.db",
+            raw_manifest_dir=None,
+            limit=1,
+            runner=_stale_owner_runner,
+        )
+        assert report.status == "PROCESSED"
+        assert report.failed_count == 0
+        assert report.processed_count == 1
+        assert (
+            "REPLACEMENT_LIVE_MATERIALIZATION_REQUEST_SUPERSEDED_BY_DAY0_OWNER"
+            in report.reason_codes
+        )
+
+    receipts = list((tmp_path / "superseded_latest").glob("*.json"))
+    assert len(receipts) == 1
+    receipt = json.loads(receipts[0].read_text(encoding="utf-8"))
+    assert receipt["status"] == "SKIPPED_STALE_DAY0_ENQUEUE_OWNER"
+    assert receipt["computed_at"] == "2026-08-05T10:45:00+00:00"
+    assert not list(failed_dir.glob("*.json"))
+    assert not list(processed_dir.glob("*.json"))
+
+
+def test_materialization_queue_bounds_missing_authority_receipts_per_family(tmp_path) -> None:
+    import src.data.replacement_forecast_live_materialization_queue as queue_mod
+
+    request_dir = tmp_path / "requests"
+    processed_dir = tmp_path / "processed"
+    failed_dir = tmp_path / "failed"
+    request_dir.mkdir()
+    base_request = {
+        "city": "London",
+        "target_date": "2026-08-05",
+        "temperature_metric": "low",
+        "source_cycle_time": "2026-08-05T00:00:00+00:00",
+        "baseline_source_run_id": "baseline-run",
+        "openmeteo_source_run_id": "anchor-run",
+        "openmeteo_payload_json": "payload.json",
+        "precision_metadata_json": "precision.json",
+        "bins": [{"bin_id": "15C"}],
+        "day0_observed_extreme_c": 14.2,
+    }
+
+    def _missing_shape_runner(argv):
+        return subprocess.CompletedProcess(
+            list(argv),
+            1,
+            stdout=(
+                '{"status":"BLOCKED","reason_codes":['
+                '"REPLACEMENT_LIVE_POSTERIOR_REQUIREMENTS_NOT_MET",'
+                '"Q_MODE:BAYES_PRECISION_FUSION_CAPTURE_MISSING"]}\n'
+            ),
+            stderr="current ENS shape missing\n",
+        )
+
+    for minute, extreme in ((44, 14.2), (45, 14.1)):
+        request_path = request_dir / f"London.2026-08-05.low.{minute}.json"
+        request_path.write_text(
+            json.dumps(
+                {
+                    **base_request,
+                    "computed_at": f"2026-08-05T10:{minute}:00+00:00",
+                    "day0_observed_extreme_c": extreme,
+                }
+            ),
+            encoding="utf-8",
+        )
+        report = queue_mod.process_replacement_forecast_live_materialization_queue(
+            request_dir=request_dir,
+            processed_dir=processed_dir,
+            failed_dir=failed_dir,
+            forecast_db=tmp_path / "forecasts.db",
+            raw_manifest_dir=None,
+            limit=1,
+            runner=_missing_shape_runner,
+        )
+        assert report.status == "PROCESSED"
+        assert report.failed_count == 0
+        assert report.processed_count == 1
+        assert (
+            "REPLACEMENT_LIVE_MATERIALIZATION_REQUEST_UNCHANGED_BLOCKED_INPUT"
+            in report.reason_codes
+        )
+
+    receipts = list((tmp_path / "blocked_latest").glob("*.json"))
+    assert len(receipts) == 1
+    receipt = json.loads(receipts[0].read_text(encoding="utf-8"))
+    assert receipt["status"] == "BLOCKED_MISSING_PROBABILITY_AUTHORITY"
+    assert receipt["computed_at"] == "2026-08-05T10:45:00+00:00"
+    assert "Q_MODE:BAYES_PRECISION_FUSION_CAPTURE_MISSING" in receipt["reason_codes"]
+    assert not list(failed_dir.glob("*.json"))
+    assert not list(processed_dir.glob("*.json"))
+
+
 def test_materialization_queue_can_defer_seed_preparation_for_requests(
     tmp_path, monkeypatch
 ) -> None:
@@ -1174,12 +1559,13 @@ def test_materialization_queue_coalesces_duplicate_requests_before_limit(tmp_pat
     assert not newer_path.exists()
     receipts = [
         json.loads(path.read_text(encoding="utf-8"))
-        for path in processed_dir.glob("*.receipt.json")
+        for path in (tmp_path / "superseded_latest").glob("*.json")
     ]
     superseded = [receipt for receipt in receipts if receipt.get("status") == "SKIPPED_SUPERSEDED_REQUEST"]
     assert len(superseded) == 1
-    assert superseded[0]["subprocess_spawned"] is False
-    assert superseded[0]["superseded_by"] == newer_path.name
+    assert superseded[0]["result_evidence"]["subprocess_spawned"] is False
+    assert superseded[0]["result_evidence"]["superseded_by"] == newer_path.name
+    assert not processed_dir.exists() or not tuple(processed_dir.iterdir())
 
 
 def test_materialization_queue_runs_default_requests_in_bounded_parallel(
@@ -1264,6 +1650,86 @@ def test_materialization_queue_runs_default_requests_in_bounded_parallel(
     assert {path.parent.parent.name for path in claimed_inputs} == {
         queue_mod.MATERIALIZATION_INFLIGHT_DIR_NAME
     }
+    receipts = tuple((tmp_path / "succeeded_latest").glob("*.json"))
+    assert len(receipts) == len(paths)
+    assert not tuple(processed_dir.glob("*.json"))
+    assert all(
+        json.loads(path.read_text(encoding="utf-8"))["result_evidence"]
+        == {
+            "committed_posterior": True,
+            "reactor_wake_published": True,
+            "returncode": 0,
+        }
+        for path in receipts
+    )
+
+
+def test_materialization_queue_bounds_success_receipts_per_family(tmp_path) -> None:
+    import src.data.replacement_forecast_live_materialization_queue as queue_mod
+
+    request_dir = tmp_path / "requests"
+    processed_dir = tmp_path / "processed"
+    failed_dir = tmp_path / "failed"
+    request_dir.mkdir()
+    base_request = {
+        "city": "Paris",
+        "target_date": "2026-08-05",
+        "temperature_metric": "low",
+        "source_cycle_time": "2026-08-05T00:00:00+00:00",
+        "baseline_source_run_id": "baseline",
+        "openmeteo_source_run_id": "anchor",
+        "openmeteo_payload_json": "payload.json",
+        "precision_metadata_json": "precision.json",
+        "bins": [{"bin_id": "14C"}],
+    }
+
+    def _successful_runner(argv):
+        return subprocess.CompletedProcess(
+            list(argv),
+            0,
+            stdout=(
+                '{"status":"READY","reason_codes":[],"committed":true,'
+                '"posterior_id":42,"reactor_wake_published":true}\n'
+            ),
+            stderr="large diagnostic output is intentionally not retained",
+        )
+
+    for minute in (30, 31):
+        request_path = request_dir / f"Paris.2026-08-05.low.{minute}.json"
+        request_path.write_text(
+            json.dumps(
+                {
+                    **base_request,
+                    "computed_at": f"2026-08-05T11:{minute}:00+00:00",
+                }
+            ),
+            encoding="utf-8",
+        )
+        report = queue_mod.process_replacement_forecast_live_materialization_queue(
+            request_dir=request_dir,
+            processed_dir=processed_dir,
+            failed_dir=failed_dir,
+            forecast_db=tmp_path / "forecasts.db",
+            raw_manifest_dir=None,
+            limit=1,
+            runner=_successful_runner,
+        )
+        assert report.status == "PROCESSED"
+        assert report.failed_count == 0
+        assert report.processed_count == 1
+
+    receipts = tuple((tmp_path / "succeeded_latest").glob("*.json"))
+    assert len(receipts) == 1
+    receipt = json.loads(receipts[0].read_text(encoding="utf-8"))
+    assert receipt["status"] == "SUCCEEDED"
+    assert receipt["computed_at"] == "2026-08-05T11:31:00+00:00"
+    assert receipt["result_evidence"] == {
+        "committed_posterior": True,
+        "reactor_wake_published": True,
+        "returncode": 0,
+    }
+    assert "large diagnostic output" not in receipts[0].read_text(encoding="utf-8")
+    assert not tuple(processed_dir.glob("*.json"))
 
 
 def test_materialization_queue_releases_lock_before_family_compute(
@@ -1629,7 +2095,8 @@ def test_materialization_queue_retries_blocked_request_only_after_input_change(
         limit=1,
         runner=_blocked_runner,
     )
-    assert first.status == "FAILED"
+    assert first.status == "PROCESSED"
+    assert first.failed_count == 0
     assert len(spawned) == 1
     assert len(tuple((tmp_path / "blocked_attempts").glob("*.json"))) == 1
 
@@ -1651,12 +2118,9 @@ def test_materialization_queue_retries_blocked_request_only_after_input_change(
         "REPLACEMENT_LIVE_MATERIALIZATION_REQUEST_UNCHANGED_BLOCKED_INPUT"
         in second.reason_codes
     )
-    skipped_receipt = max(
-        processed_dir.glob("*.receipt.json"),
-        key=lambda path: path.stat().st_mtime_ns,
-    )
+    skipped_receipt = next((tmp_path / "blocked_latest").glob("*.json"))
     skipped = json.loads(skipped_receipt.read_text(encoding="utf-8"))
-    assert skipped["subprocess_spawned"] is False
+    assert skipped["status"] == "SKIPPED_UNCHANGED_BLOCKED_INPUT"
 
     watermark["value"] = (4, 100, "2026-07-16T12:18:00+00:00", "")
     request_path.write_text(
@@ -1671,7 +2135,8 @@ def test_materialization_queue_retries_blocked_request_only_after_input_change(
         limit=1,
         runner=_blocked_runner,
     )
-    assert third.status == "FAILED"
+    assert third.status == "PROCESSED"
+    assert third.failed_count == 0
     assert len(spawned) == 2
 
 
@@ -1775,7 +2240,8 @@ def test_blocked_source_clock_request_retries_only_on_new_provider_family(
             limit=1,
             runner=_blocked_runner,
         )
-        assert first.status == "FAILED"
+        assert first.status == "PROCESSED"
+        assert first.failed_count == 0
         assert len(spawned) == 1
 
         payload_path.write_text('{"unrelated": true}', encoding="utf-8")
@@ -1824,7 +2290,8 @@ def test_blocked_source_clock_request_retries_only_on_new_provider_family(
             limit=1,
             runner=_blocked_runner,
         )
-        assert third.status == "FAILED"
+        assert third.status == "PROCESSED"
+        assert third.failed_count == 0
         assert len(spawned) == 2
 
         conn.execute(
@@ -1848,7 +2315,8 @@ def test_blocked_source_clock_request_retries_only_on_new_provider_family(
             limit=1,
             runner=_blocked_runner,
         )
-        assert fourth.status == "FAILED"
+        assert fourth.status == "PROCESSED"
+        assert fourth.failed_count == 0
         assert len(spawned) == 3
     finally:
         conn.close()

@@ -2,6 +2,7 @@
 # Last reused/audited: 2026-07-15
 # Authority basis: live redecision repair; non-actuating rotation output must not appear as live action.
 import sqlite3
+import time
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
@@ -239,3 +240,49 @@ def test_portfolio_rotation_evaluation_status_is_noop_without_connection() -> No
     _emit_portfolio_rotation_evaluation_status(None, summary, deps=_deps())
 
     assert summary["portfolio_rotation_evaluation_status"] == "unavailable:no_connection"
+
+
+def test_portfolio_rotation_telemetry_yields_after_held_monitor_deadline() -> None:
+    summary: dict = {}
+
+    _emit_portfolio_rotation_evaluation_status(
+        sqlite3.connect(":memory:"),
+        summary,
+        deps=_deps(),
+        deadline_monotonic=time.monotonic() - 0.001,
+    )
+
+    assert summary["portfolio_rotation_evaluation_status"] == (
+        "deferred:held_monitor_deadline_expired"
+    )
+
+
+def test_portfolio_rotation_sql_scan_cannot_outlive_held_monitor_deadline(
+    monkeypatch,
+) -> None:
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    _create_main_schema(conn)
+    conn.execute(
+        "INSERT INTO position_current VALUES ("
+        "'pos-1', 'trade-1', 'active', 'Seoul', '2026-06-08', 'high', "
+        "'bin', 'buy_yes', 1.0, 0.5, 1, 0.5, 1, 0.5, "
+        "'yes', 'no', 'condition')"
+    )
+    clock = iter((10.0, 10.0, 10.0, 11.0, 11.0))
+    monkeypatch.setattr(
+        "src.engine.cycle_runtime.time.monotonic",
+        lambda: next(clock, 11.0),
+    )
+    summary: dict = {}
+
+    _emit_portfolio_rotation_evaluation_status(
+        conn,
+        summary,
+        deps=_deps(),
+        deadline_monotonic=10.5,
+    )
+
+    assert summary["portfolio_rotation_evaluation_status"] == (
+        "deferred:held_monitor_deadline_expired"
+    )

@@ -42,12 +42,20 @@ SOURCE_CLOCK_MINUTE_RESERVE = 60
 CRITICAL_DAILY_RESERVE = 500
 CRITICAL_HOURLY_RESERVE = 250
 CRITICAL_MINUTE_RESERVE = 60
+# Missing-authority recovery may borrow only the outer half of the critical
+# tranche.  The inner half remains unavailable to anything except held capital.
+HELD_DAILY_RESERVE_FLOOR = CRITICAL_DAILY_RESERVE // 2
+HELD_HOURLY_RESERVE_FLOOR = CRITICAL_HOURLY_RESERVE // 2
+HELD_MINUTE_RESERVE_FLOOR = CRITICAL_MINUTE_RESERVE // 2
 PRIORITY_DAILY_LIMIT = DAILY_HARD_CAP - CRITICAL_DAILY_RESERVE
 PRIORITY_HOURLY_LIMIT = HOURLY_HARD_CAP - CRITICAL_HOURLY_RESERVE
 PRIORITY_MINUTE_LIMIT = MINUTE_HARD_CAP - CRITICAL_MINUTE_RESERVE
 MAINTENANCE_DAILY_LIMIT = PRIORITY_DAILY_LIMIT - SOURCE_CLOCK_DAILY_RESERVE
 MAINTENANCE_HOURLY_LIMIT = PRIORITY_HOURLY_LIMIT - SOURCE_CLOCK_HOURLY_RESERVE
 MAINTENANCE_MINUTE_LIMIT = PRIORITY_MINUTE_LIMIT - SOURCE_CLOCK_MINUTE_RESERVE
+RECOVERY_DAILY_LIMIT = DAILY_HARD_CAP - HELD_DAILY_RESERVE_FLOOR
+RECOVERY_HOURLY_LIMIT = HOURLY_HARD_CAP - HELD_HOURLY_RESERVE_FLOOR
+RECOVERY_MINUTE_LIMIT = MINUTE_HARD_CAP - HELD_MINUTE_RESERVE_FLOOR
 
 _T = TypeVar("_T")
 
@@ -64,10 +72,12 @@ class OpenMeteoQuotaTracker:
         self._minute_key = now.strftime("%Y-%m-%dT%H:%M")
         self._minute_count = 0
         self._blocked_until: datetime | None = None
+        self._blocked_until_by_endpoint: dict[str, datetime] = {}
         self._request_states: dict[str, object] = {}
         self._lock = threading.Lock()
         self._priority = threading.local()
         self._critical = threading.local()
+        self._recovery = threading.local()
         self._state_path = Path(state_path) if state_path is not None else None
 
     @staticmethod
@@ -85,6 +95,9 @@ class OpenMeteoQuotaTracker:
 
     def _is_critical(self) -> bool:
         return bool(getattr(self._critical, "depth", 0))
+
+    def _is_recovery(self) -> bool:
+        return bool(getattr(self._recovery, "depth", 0))
 
     @contextlib.contextmanager
     def priority_lane(self):
@@ -108,6 +121,17 @@ class OpenMeteoQuotaTracker:
         finally:
             self._critical.depth = depth
 
+    @contextlib.contextmanager
+    def recovery_lane(self):
+        """Borrow bounded spare quota without crossing the held-capital floor."""
+
+        depth = int(getattr(self._recovery, "depth", 0))
+        self._recovery.depth = depth + 1
+        try:
+            yield
+        finally:
+            self._recovery.depth = depth
+
     @staticmethod
     def _default_state(now: datetime) -> dict[str, object]:
         return {
@@ -119,6 +143,7 @@ class OpenMeteoQuotaTracker:
             "minute": now.strftime("%Y-%m-%dT%H:%M"),
             "minute_count": 0,
             "blocked_until": None,
+            "blocked_until_by_endpoint": {},
             "requests": {},
         }
 
@@ -163,9 +188,11 @@ class OpenMeteoQuotaTracker:
         return changed
 
     @staticmethod
-    def _request_priority(priority: bool, critical: bool) -> str:
+    def _request_priority(priority: bool, critical: bool, recovery: bool = False) -> str:
         if critical:
             return "critical"
+        if recovery:
+            return "recovery"
         if priority:
             return "priority"
         return "maintenance"
@@ -320,11 +347,18 @@ class OpenMeteoQuotaTracker:
         lease_id: str | None = None,
         in_flight_until: datetime | None = None,
         http_outcome: Mapping[str, object] | None = None,
+        quota_cost: int | None = None,
     ) -> None:
         entries = cls._request_entries(state)
         old = entries.get(request_id)
         prior_attempts = int(old.get("attempts") or 0) if isinstance(old, dict) else 0
         prior_failures = int(old.get("failure_count") or 0) if isinstance(old, dict) else 0
+        prior_quota_cost = 1
+        if isinstance(old, dict):
+            raw_quota_cost = old.get("quota_cost", 1)
+            prior_quota_cost = int(
+                1 if raw_quota_cost is None else raw_quota_cost
+            )
         entry: dict[str, object] = {
             "endpoint": cls._bounded_text(endpoint),
             "job": cls._bounded_text(job),
@@ -341,7 +375,9 @@ class OpenMeteoQuotaTracker:
                 in_flight_until.isoformat() if in_flight_until else None
             ),
             "owner_pid": os.getpid(),
-            "quota_cost": 1,
+            "quota_cost": (
+                prior_quota_cost if quota_cost is None else int(quota_cost)
+            ),
             "updated_at": now.isoformat(),
         }
         if http_outcome is not None:
@@ -417,19 +453,49 @@ class OpenMeteoQuotaTracker:
             self._minute_count = 0
 
     @staticmethod
-    def _blocked_until_from_state(state: dict[str, object]) -> datetime | None:
-        raw = state.get("blocked_until")
-        if raw is None or not str(raw).strip():
-            return None
-        try:
-            return datetime.fromisoformat(str(raw)).astimezone(timezone.utc)
-        except ValueError as exc:
-            raise RuntimeError("Open-Meteo shared cooldown timestamp is invalid") from exc
+    def _endpoint_scope(endpoint: str) -> str:
+        return str(endpoint).strip().partition("/")[0][:160]
+
+    @classmethod
+    def _blocked_until_from_state(
+        cls,
+        state: dict[str, object],
+        endpoint: str = "",
+    ) -> datetime | None:
+        candidates = [state.get("blocked_until")]
+        scope = cls._endpoint_scope(endpoint)
+        scoped = state.get("blocked_until_by_endpoint")
+        if scope and isinstance(scoped, dict):
+            candidates.append(scoped.get(scope))
+        parsed: list[datetime] = []
+        for raw in candidates:
+            if raw is None or not str(raw).strip():
+                continue
+            try:
+                parsed.append(datetime.fromisoformat(str(raw)).astimezone(timezone.utc))
+            except ValueError as exc:
+                raise RuntimeError(
+                    "Open-Meteo shared cooldown timestamp is invalid"
+                ) from exc
+        return max(parsed, default=None)
+
+    def _local_blocked_until(self, endpoint: str = "") -> datetime | None:
+        candidates = [self._blocked_until]
+        scope = self._endpoint_scope(endpoint)
+        if scope:
+            candidates.append(self._blocked_until_by_endpoint.get(scope))
+        return max((value for value in candidates if value is not None), default=None)
 
     @staticmethod
-    def _limits(priority: bool, critical: bool = False) -> tuple[int, int, int]:
+    def _limits(
+        priority: bool,
+        critical: bool = False,
+        recovery: bool = False,
+    ) -> tuple[int, int, int]:
         if critical:
             return DAILY_HARD_CAP, HOURLY_HARD_CAP, MINUTE_HARD_CAP
+        if recovery:
+            return RECOVERY_DAILY_LIMIT, RECOVERY_HOURLY_LIMIT, RECOVERY_MINUTE_LIMIT
         if priority:
             return PRIORITY_DAILY_LIMIT, PRIORITY_HOURLY_LIMIT, PRIORITY_MINUTE_LIMIT
         return (
@@ -446,11 +512,14 @@ class OpenMeteoQuotaTracker:
         *,
         priority: bool,
         critical: bool = False,
+        recovery: bool = False,
+        quota_cost: int = 1,
+        endpoint: str = "",
     ) -> tuple[bool, str | None]:
-        blocked_until = cls._blocked_until_from_state(state)
+        blocked_until = cls._blocked_until_from_state(state, endpoint)
         if blocked_until is not None and now < blocked_until:
             return False, f"cooldown_until={blocked_until.isoformat()}"
-        limits = cls._limits(priority, critical)
+        limits = cls._limits(priority, critical, recovery)
         counts = (
             int(state.get("day_count") or 0),
             int(state.get("hour_count") or 0),
@@ -458,7 +527,7 @@ class OpenMeteoQuotaTracker:
         )
         labels = ("day", "hour", "minute")
         for label, count, limit in zip(labels, counts, limits, strict=True):
-            if count >= limit:
+            if count + quota_cost > limit:
                 return False, f"{label}_limit={count}/{limit}"
         return True, None
 
@@ -468,20 +537,25 @@ class OpenMeteoQuotaTracker:
         *,
         priority: bool,
         critical: bool = False,
+        recovery: bool = False,
+        quota_cost: int = 1,
+        endpoint: str = "",
     ) -> tuple[bool, str | None]:
-        if self._blocked_until is not None and now < self._blocked_until:
-            return False, f"cooldown_until={self._blocked_until.isoformat()}"
-        limits = self._limits(priority, critical)
+        blocked_until = self._local_blocked_until(endpoint)
+        if blocked_until is not None and now < blocked_until:
+            return False, f"cooldown_until={blocked_until.isoformat()}"
+        limits = self._limits(priority, critical, recovery)
         counts = (self._count, self._hour_count, self._minute_count)
         labels = ("day", "hour", "minute")
         for label, count, limit in zip(labels, counts, limits, strict=True):
-            if count >= limit:
+            if count + quota_cost > limit:
                 return False, f"{label}_limit={count}/{limit}"
         return True, None
 
     def can_call(self) -> bool:
         priority = self._is_priority()
         critical = self._is_critical()
+        recovery = self._is_recovery()
         if self._shared_enabled():
             try:
                 allowed, reason = self._shared(
@@ -491,6 +565,7 @@ class OpenMeteoQuotaTracker:
                             now,
                             priority=priority,
                             critical=critical,
+                            recovery=recovery,
                         ),
                         False,
                     )
@@ -505,12 +580,14 @@ class OpenMeteoQuotaTracker:
                     datetime.now(timezone.utc),
                     priority=priority,
                     critical=critical,
+                    recovery=recovery,
                 )
         if not allowed:
             logger.warning(
-                "Open-Meteo quota blocked priority=%s critical=%s reason=%s",
+                "Open-Meteo quota blocked priority=%s critical=%s recovery=%s reason=%s",
                 priority,
                 critical,
+                recovery,
                 reason,
             )
         return allowed
@@ -541,6 +618,7 @@ class OpenMeteoQuotaTracker:
 
         priority = self._is_priority()
         critical = self._is_critical()
+        recovery = self._is_recovery()
 
         def acquire(
             state: dict[str, object], now: datetime
@@ -550,6 +628,7 @@ class OpenMeteoQuotaTracker:
                 now,
                 priority=priority,
                 critical=critical,
+                recovery=recovery,
             )
             if not allowed:
                 return (False, reason, int(state.get("day_count") or 0)), False
@@ -572,6 +651,7 @@ class OpenMeteoQuotaTracker:
                     now,
                     priority=priority,
                     critical=critical,
+                    recovery=recovery,
                 )
                 if allowed:
                     self._count += 1
@@ -597,12 +677,23 @@ class OpenMeteoQuotaTracker:
         endpoint: str = "",
         job: str = "",
         lease_seconds: float = REQUEST_LEASE_SECONDS,
+        count_toward_quota: bool = True,
+        quota_cost: int = 1,
     ) -> tuple[bool, str | None, str | None]:
-        """Atomically reserve one quota unit and one request-scoped attempt lease."""
+        """Atomically reserve one request lease and its provider-equivalent quota cost.
 
+        Unmetered requests retain the same cooldown, retry, terminal-outcome,
+        single-flight, and capacity contracts.  They differ only in that they
+        neither consult nor increment forecast API day/hour/minute counters.
+        """
+
+        if isinstance(quota_cost, bool) or not isinstance(quota_cost, int) or quota_cost < 1:
+            raise ValueError("quota_cost must be a positive integer")
+        metered_cost = quota_cost if count_toward_quota else 0
         priority = self._is_priority()
         critical = self._is_critical()
-        priority_name = self._request_priority(priority, critical)
+        recovery = self._is_recovery()
+        priority_name = self._request_priority(priority, critical, recovery)
         lease_id = secrets.token_hex(16)
         lease_seconds = max(1.0, min(float(lease_seconds), REQUEST_RETRY_MAX_SECONDS))
 
@@ -646,12 +737,24 @@ class OpenMeteoQuotaTracker:
                     None,
                     int(state.get("day_count") or 0),
                 ), False
-            allowed, reason = self._state_allows(
-                state,
-                now,
-                priority=priority,
-                critical=critical,
-            )
+            if count_toward_quota:
+                allowed, reason = self._state_allows(
+                    state,
+                    now,
+                    priority=priority,
+                    critical=critical,
+                    recovery=recovery,
+                    quota_cost=metered_cost,
+                    endpoint=endpoint,
+                )
+            else:
+                blocked_until = self._blocked_until_from_state(state, endpoint)
+                allowed = blocked_until is None or now >= blocked_until
+                reason = (
+                    None
+                    if allowed
+                    else f"cooldown_until={blocked_until.isoformat()}"
+                )
             if not allowed:
                 return (
                     False,
@@ -659,9 +762,10 @@ class OpenMeteoQuotaTracker:
                     None,
                     int(state.get("day_count") or 0),
                 ), False
-            state["day_count"] = int(state.get("day_count") or 0) + 1
-            state["hour_count"] = int(state.get("hour_count") or 0) + 1
-            state["minute_count"] = int(state.get("minute_count") or 0) + 1
+            if count_toward_quota:
+                state["day_count"] = int(state.get("day_count") or 0) + metered_cost
+                state["hour_count"] = int(state.get("hour_count") or 0) + metered_cost
+                state["minute_count"] = int(state.get("minute_count") or 0) + metered_cost
             self._record_request(
                 state,
                 now,
@@ -672,6 +776,7 @@ class OpenMeteoQuotaTracker:
                 outcome="attempt",
                 lease_id=lease_id,
                 in_flight_until=now + timedelta(seconds=lease_seconds),
+                quota_cost=metered_cost,
             )
             return (True, None, lease_id, int(state["day_count"])), True
 
@@ -715,15 +820,28 @@ class OpenMeteoQuotaTracker:
                     allowed = False
                     reason = f"request_state_capacity={MAX_REQUEST_STATES}"
                 else:
-                    allowed, reason = self._local_allows(
-                        now,
-                        priority=priority,
-                        critical=critical,
-                    )
+                    if count_toward_quota:
+                        allowed, reason = self._local_allows(
+                            now,
+                            priority=priority,
+                            critical=critical,
+                            recovery=recovery,
+                            quota_cost=metered_cost,
+                            endpoint=endpoint,
+                        )
+                    else:
+                        blocked_until = self._local_blocked_until(endpoint)
+                        allowed = blocked_until is None or now >= blocked_until
+                        reason = (
+                            None
+                            if allowed
+                            else f"cooldown_until={blocked_until.isoformat()}"
+                        )
                 if allowed:
-                    self._count += 1
-                    self._hour_count += 1
-                    self._minute_count += 1
+                    if count_toward_quota:
+                        self._count += metered_cost
+                        self._hour_count += metered_cost
+                        self._minute_count += metered_cost
                     self._record_request(
                         local_state,
                         now,
@@ -734,13 +852,15 @@ class OpenMeteoQuotaTracker:
                         outcome="attempt",
                         lease_id=lease_id,
                         in_flight_until=now + timedelta(seconds=lease_seconds),
+                        quota_cost=metered_cost,
                     )
                     acquired_lease_id = lease_id
                 else:
                     acquired_lease_id = None
                 count = self._count
         if allowed:
-            self._log_usage(count, endpoint)
+            if count_toward_quota:
+                self._log_usage(count, endpoint)
         else:
             logger.warning(
                 "Open-Meteo request reservation blocked [%s] priority=%s reason=%s",
@@ -781,7 +901,9 @@ class OpenMeteoQuotaTracker:
     ) -> bool:
         """Record a fresh response and clear only this request's retry embargo."""
 
-        priority = self._request_priority(self._is_priority(), self._is_critical())
+        priority = self._request_priority(
+            self._is_priority(), self._is_critical(), self._is_recovery()
+        )
 
         def record(state: dict[str, object], now: datetime) -> tuple[bool, bool]:
             if not self._lease_matches(state, request_id, lease_id, now):
@@ -833,7 +955,9 @@ class OpenMeteoQuotaTracker:
     ) -> int:
         """Persist a bounded full-jitter embargo after a failed request."""
 
-        priority = self._request_priority(self._is_priority(), self._is_critical())
+        priority = self._request_priority(
+            self._is_priority(), self._is_critical(), self._is_recovery()
+        )
 
         def record(state: dict[str, object], now: datetime) -> tuple[int, bool]:
             if not self._lease_matches(state, request_id, lease_id, now):
@@ -885,7 +1009,9 @@ class OpenMeteoQuotaTracker:
         never enter the shared state file.
         """
 
-        priority = self._request_priority(self._is_priority(), self._is_critical())
+        priority = self._request_priority(
+            self._is_priority(), self._is_critical(), self._is_recovery()
+        )
 
         def record(state: dict[str, object], now: datetime) -> tuple[bool, bool]:
             if not self._lease_matches(state, request_id, lease_id, now):
@@ -932,11 +1058,12 @@ class OpenMeteoQuotaTracker:
         counts: tuple[int, int, int],
         priority: bool,
         critical: bool,
+        recovery: bool = False,
     ) -> int:
         waits: list[float] = []
         if blocked_until is not None and blocked_until > now:
             waits.append((blocked_until - now).total_seconds())
-        limits = cls._limits(priority, critical)
+        limits = cls._limits(priority, critical, recovery)
         if counts[0] >= limits[0]:
             next_day = datetime.combine(
                 now.date() + timedelta(days=1),
@@ -959,18 +1086,19 @@ class OpenMeteoQuotaTracker:
             waits.append((next_minute - now).total_seconds())
         return max(0, int(max(waits, default=0.0)) + (1 if waits else 0))
 
-    def retry_after_seconds(self) -> int:
+    def retry_after_seconds(self, endpoint: str = "") -> int:
         """Seconds until the active quota lane can make another reservation."""
 
         priority = self._is_priority()
         critical = self._is_critical()
+        recovery = self._is_recovery()
         if self._shared_enabled():
             try:
                 return self._shared(
                     lambda state, now: (
                         self._retry_after_for_counts(
                             now=now,
-                            blocked_until=self._blocked_until_from_state(state),
+                            blocked_until=self._blocked_until_from_state(state, endpoint),
                             counts=(
                                 int(state.get("day_count") or 0),
                                 int(state.get("hour_count") or 0),
@@ -978,6 +1106,7 @@ class OpenMeteoQuotaTracker:
                             ),
                             priority=priority,
                             critical=critical,
+                            recovery=recovery,
                         ),
                         False,
                     )
@@ -989,13 +1118,19 @@ class OpenMeteoQuotaTracker:
             self._check_reset()
             return self._retry_after_for_counts(
                 now=datetime.now(timezone.utc),
-                blocked_until=self._blocked_until,
+                blocked_until=self._local_blocked_until(endpoint),
                 counts=(self._count, self._hour_count, self._minute_count),
                 priority=priority,
                 critical=critical,
+                recovery=recovery,
             )
 
-    def note_rate_limited(self, retry_after_seconds: int | float | None = None) -> None:
+    def note_rate_limited(
+        self,
+        retry_after_seconds: int | float | None = None,
+        *,
+        endpoint: str = "",
+    ) -> None:
         cooldown = max(RATE_LIMIT_COOLDOWN_SECONDS, int(retry_after_seconds or 0))
         blocked_until = datetime.now(timezone.utc).replace(microsecond=0) + timedelta(
             seconds=cooldown
@@ -1003,9 +1138,17 @@ class OpenMeteoQuotaTracker:
         if self._shared_enabled():
             try:
                 def block(state: dict[str, object], _now: datetime) -> tuple[None, bool]:
-                    current = self._blocked_until_from_state(state)
+                    scope = self._endpoint_scope(endpoint)
+                    current = self._blocked_until_from_state(state, endpoint)
                     if current is None or blocked_until > current:
-                        state["blocked_until"] = blocked_until.isoformat()
+                        if scope:
+                            scoped = state.get("blocked_until_by_endpoint")
+                            if not isinstance(scoped, dict):
+                                scoped = {}
+                                state["blocked_until_by_endpoint"] = scoped
+                            scoped[scope] = blocked_until.isoformat()
+                        else:
+                            state["blocked_until"] = blocked_until.isoformat()
                         return None, True
                     return None, False
 
@@ -1014,10 +1157,16 @@ class OpenMeteoQuotaTracker:
                 logger.exception("Open-Meteo shared cooldown write failed")
         else:
             with self._lock:
-                if self._blocked_until is None or blocked_until > self._blocked_until:
-                    self._blocked_until = blocked_until
+                scope = self._endpoint_scope(endpoint)
+                current = self._local_blocked_until(endpoint)
+                if current is None or blocked_until > current:
+                    if scope:
+                        self._blocked_until_by_endpoint[scope] = blocked_until
+                    else:
+                        self._blocked_until = blocked_until
         logger.warning(
-            "Open-Meteo 429 cooldown engaged for %ds until %s",
+            "Open-Meteo 429 cooldown engaged scope=%s for %ds until %s",
+            self._endpoint_scope(endpoint) or "global",
             cooldown,
             blocked_until.isoformat(),
         )
@@ -1038,11 +1187,11 @@ class OpenMeteoQuotaTracker:
     def calls_remaining(self) -> int:
         return max(0, DAILY_HARD_CAP - self.calls_today())
 
-    def cooldown_remaining_seconds(self) -> int:
+    def cooldown_remaining_seconds(self, endpoint: str = "") -> int:
         if self._shared_enabled():
             try:
                 def remaining(state: dict[str, object], now: datetime) -> tuple[int, bool]:
-                    blocked_until = self._blocked_until_from_state(state)
+                    blocked_until = self._blocked_until_from_state(state, endpoint)
                     if blocked_until is None:
                         return 0, False
                     return max(0, int((blocked_until - now).total_seconds())), False
@@ -1052,10 +1201,11 @@ class OpenMeteoQuotaTracker:
                 logger.exception("Open-Meteo shared cooldown read failed")
                 return RATE_LIMIT_COOLDOWN_SECONDS
         with self._lock:
-            if self._blocked_until is None:
+            blocked_until = self._local_blocked_until(endpoint)
+            if blocked_until is None:
                 return 0
             remaining = int(
-                (self._blocked_until - datetime.now(timezone.utc)).total_seconds()
+                (blocked_until - datetime.now(timezone.utc)).total_seconds()
             )
             return max(0, remaining)
 

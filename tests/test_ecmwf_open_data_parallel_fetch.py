@@ -1,5 +1,5 @@
 # Created: 2026-05-11
-# Last reused/audited: 2026-07-17
+# Last reused/audited: 2026-08-14
 # Authority basis: PLAN docs/operations/task_2026-05-11_ecmwf_download_replacement/PLAN.md §5.4 + §6
 """Unit tests for ECMWF Open Data parallel SDK fetch (Candidate H).
 
@@ -20,6 +20,7 @@ functions (no SQLite writes); all DB writes occur on the main thread.
 from __future__ import annotations
 
 import sqlite3
+import time
 from datetime import date, datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -58,6 +59,23 @@ def _runner_skip_extract_ingest(args, *, label: str, timeout: int) -> dict:
     return {"label": label, "ok": True, "returncode": 0, "stdout_tail": "", "stderr_tail": ""}
 
 
+def _make_paths(mod, tmp_path: Path):
+    root = tmp_path / "51_source_data"
+    extract_script = root / "scripts" / "extract_open_ens_localday.py"
+    manifest_path = root / "docs" / "tigge_city_coordinate_manifest_full_latest.json"
+    extract_script.parent.mkdir(parents=True, exist_ok=True)
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    extract_script.write_text("# test extractor\n")
+    manifest_path.write_text("{}")
+    return mod.OpenDataPaths(
+        raw_root=root,
+        asset_root=root,
+        extract_script=extract_script,
+        manifest_path=manifest_path,
+        origin="test",
+    )
+
+
 def _call_collect(
     *,
     fetch_impl,
@@ -73,7 +91,6 @@ def _call_collect(
     """
     import src.data.ecmwf_open_data as mod
 
-    monkeypatch.setattr(mod, "FIFTY_ONE_ROOT", tmp_path / "51_source_data")
     monkeypatch.setattr(mod, "STEP_HOURS", [3, 6, 9])  # 3 steps only
     if conn is None:
         conn = _make_conn()
@@ -86,6 +103,7 @@ def _call_collect(
         conn=conn,
         _fetch_impl=fetch_impl,
         _runner=_runner_skip_extract_ingest,
+        _paths=_make_paths(mod, tmp_path),
         now_utc=NOW_UTC,
     )
 
@@ -117,7 +135,6 @@ def test_all_ok_returns_SUCCESS_COMPLETE(tmp_path, monkeypatch):
             extract_called.append(label)
         return {"label": label, "ok": True, "returncode": 0, "stdout_tail": "", "stderr_tail": ""}
 
-    monkeypatch.setattr(mod, "FIFTY_ONE_ROOT", tmp_path / "51_source_data")
     monkeypatch.setattr(mod, "STEP_HOURS", [3, 6, 9])
 
     result = mod.collect_open_ens_cycle(
@@ -128,6 +145,7 @@ def test_all_ok_returns_SUCCESS_COMPLETE(tmp_path, monkeypatch):
         conn=_make_conn(),
         _fetch_impl=fetch_impl,
         _runner=runner,
+        _paths=_make_paths(mod, tmp_path),
         now_utc=NOW_UTC,
     )
 
@@ -177,7 +195,6 @@ def test_some_404_returns_PARTIAL_PARTIAL_and_extract_fires(tmp_path, monkeypatc
             extract_called.append(label)
         return {"label": label, "ok": True, "returncode": 0, "stdout_tail": "", "stderr_tail": ""}
 
-    monkeypatch.setattr(mod, "FIFTY_ONE_ROOT", tmp_path / "51_source_data")
     monkeypatch.setattr(mod, "STEP_HOURS", [3, 6, 9])
 
     result = mod.collect_open_ens_cycle(
@@ -188,6 +205,7 @@ def test_some_404_returns_PARTIAL_PARTIAL_and_extract_fires(tmp_path, monkeypatc
         conn=_make_conn(),
         _fetch_impl=fetch_impl,
         _runner=runner,
+        _paths=_make_paths(mod, tmp_path),
         now_utc=NOW_UTC,
     )
 
@@ -223,7 +241,6 @@ def test_all_404_returns_SKIPPED_NOT_RELEASED_and_extract_skipped(tmp_path, monk
             extract_called.append(label)
         return {"label": label, "ok": True, "returncode": 0, "stdout_tail": "", "stderr_tail": ""}
 
-    monkeypatch.setattr(mod, "FIFTY_ONE_ROOT", tmp_path / "51_source_data")
     monkeypatch.setattr(mod, "STEP_HOURS", [3, 6, 9])
 
     result = mod.collect_open_ens_cycle(
@@ -234,6 +251,7 @@ def test_all_404_returns_SKIPPED_NOT_RELEASED_and_extract_skipped(tmp_path, monk
         conn=_make_conn(),
         _fetch_impl=fetch_impl,
         _runner=runner,
+        _paths=_make_paths(mod, tmp_path),
         now_utc=NOW_UTC,
     )
 
@@ -261,7 +279,6 @@ def test_non_404_retry_exhaustion_returns_FAILED_and_extract_skipped(tmp_path, m
             extract_called.append(label)
         return {"label": label, "ok": True, "returncode": 0, "stdout_tail": "", "stderr_tail": ""}
 
-    monkeypatch.setattr(mod, "FIFTY_ONE_ROOT", tmp_path / "51_source_data")
     monkeypatch.setattr(mod, "STEP_HOURS", [3, 6, 9])
 
     result = mod.collect_open_ens_cycle(
@@ -272,6 +289,7 @@ def test_non_404_retry_exhaustion_returns_FAILED_and_extract_skipped(tmp_path, m
         conn=_make_conn(),
         _fetch_impl=fetch_impl,
         _runner=runner,
+        _paths=_make_paths(mod, tmp_path),
         now_utc=NOW_UTC,
     )
 
@@ -639,6 +657,92 @@ def test_thread_safety_max_workers_2(tmp_path, monkeypatch):
     assert result["status"] == "download_failed", (
         f"Expected download_failed when any step fails; got {result['status']!r}"
     )
+
+
+def test_batch_does_not_abandon_worker_at_duplicate_outer_timeout(tmp_path, monkeypatch):
+    """The batch consumes the bounded worker result; it never leaves live HTTP behind."""
+    import src.data.ecmwf_open_data as mod
+
+    def fetch_impl(*, cycle_date, cycle_hour, param, step, output_dir, mirrors):
+        time.sleep(0.02)
+        path = mod._step_cache_path(
+            output_dir,
+            run_date=cycle_date,
+            run_hour=cycle_hour,
+            step=step,
+            param=param,
+        )
+        _make_fake_grib(path)
+        return ("OK", path)
+
+    monkeypatch.setattr(mod, "STEP_HOURS", [3])
+    monkeypatch.setattr(mod, "_PER_STEP_TIMEOUT_SECONDS", 0.001)
+    result = mod.collect_open_ens_cycle(
+        track="mx2t6_high",
+        run_date=RUN_DATE,
+        run_hour=RUN_HOUR,
+        skip_extract=False,
+        conn=_make_conn(),
+        _fetch_impl=fetch_impl,
+        _runner=_runner_skip_extract_ingest,
+        _paths=_make_paths(mod, tmp_path),
+        now_utc=NOW_UTC,
+    )
+
+    download = next(stage for stage in result["stages"] if "download_parallel" in stage["label"])
+    assert download["status"] == "SUCCESS"
+    assert download["ok_steps"] == [3]
+
+
+def test_fetch_one_step_total_deadline_stops_retry_and_mirror_fanout(tmp_path, monkeypatch):
+    """One step deadline bounds the whole operation, not each nested request."""
+    import sys
+    import types
+
+    import src.data.ecmwf_open_data as mod
+
+    class _FakeClient:
+        def __init__(self, source=None):
+            self.source = source
+
+    fake_opendata = types.ModuleType("ecmwf.opendata")
+    fake_opendata.Client = _FakeClient
+    fake_ecmwf = types.ModuleType("ecmwf")
+    fake_ecmwf.opendata = fake_opendata
+    calls: list[float] = []
+
+    def fake_retrieve(_client, *, _deadline=None, **_kwargs):
+        calls.append(float(_deadline))
+        time.sleep(0.02)
+        raise mod.requests.Timeout("slow request")
+
+    orig_ecmwf = sys.modules.get("ecmwf")
+    orig_opendata = sys.modules.get("ecmwf.opendata")
+    sys.modules["ecmwf"] = fake_ecmwf
+    sys.modules["ecmwf.opendata"] = fake_opendata
+    monkeypatch.setattr(mod, "_retrieve_step_with_controlled_ranges", fake_retrieve)
+    monkeypatch.setattr(mod, "_PER_STEP_TIMEOUT_SECONDS", 0.001)
+    try:
+        status, detail = mod._fetch_one_step(
+            cycle_date=RUN_DATE,
+            cycle_hour=RUN_HOUR,
+            param="mx2t3",
+            step=3,
+            output_dir=tmp_path,
+            mirrors=("aws", "google"),
+        )
+    finally:
+        if orig_ecmwf is None:
+            sys.modules.pop("ecmwf", None)
+        else:
+            sys.modules["ecmwf"] = orig_ecmwf
+        if orig_opendata is None:
+            sys.modules.pop("ecmwf.opendata", None)
+        else:
+            sys.modules["ecmwf.opendata"] = orig_opendata
+
+    assert (status, detail) == ("FAILED", "STEP_DEADLINE_EXCEEDED")
+    assert len(calls) == 1
 
 
 # ---------------------------------------------------------------------------

@@ -106,7 +106,7 @@ De-risked ordering (final ordering pending §8 round-2):
 
 ## 8. Reducer semantic contract (consult round-2 — committed)
 
-Full contract: `/tmp/cgc_answer_followup1.txt`. Summary:
+Full contract: `[consult answer artifact]`. Summary:
 
 - **Sole classifier = `src/execution/order_truth_reducer.py`, TYPED + WIDENED** (not replaced). It already emits the proof classes `TERMINAL_NO_FILL/TERMINAL_FILLED/TERMINAL_PARTIAL/PARTIAL_WITH_REMAINDER/LIVE_RESTING/UNKNOWN_SIDE_EFFECT/REVIEW_REQUIRED` (verified). Type its `proof_class`→`OrderProofClass`, `state`→`VenueOrderStatus`; add the ingress normalizer. **`proof_class` typing DONE — Phase 1 step 2a, backward-compatible (StrEnum), all 3 live consumers (`venue_command_repo:2923` set-membership, `exchange_reconcile:2322` JSON store, `:4551` ==) verified; 56 tests green.** `state` typing + ingress wiring deferred (the `"UNKNOWN"` proof value has no `VenueOrderStatus` member → needs `state: VenueOrderStatus | None` + test update).
 - **New `src/contracts/canonical_lifecycle.py`** = typed enums (`VenueOrderStatus` 6, `VenueTradeStatus` 5, `CommandTruthState` 11, `ExposureState` 2, `OrderProofClass`, `PositionPhase`, `ExitProgress`, `VenueStatusIngress`) + the 3 ingress normalizers + **INV-CL-1** (raw status legal only at ingress; CI lint enforces). **DONE — Phase 1 step 1, TDD, 43 tests green.**
@@ -126,7 +126,7 @@ Full contract: `/tmp/cgc_answer_followup1.txt`. Summary:
 
 Confirmed against working tree + live DB + grep + codegraph/CRG: dead (0 rows + no writer) — `HEARTBEAT_CANCEL_SUSPECTED`, `GHOST_DUPLICATE`, `quarantine_fill_failed`, `quarantine_void_failed`, `REDEEM_SUBMITTED` (set only behind the forbidden `submit_redeem` path). NOT dead but cross-axis-conflated — `CANCEL_UNKNOWN` (live `semantic_cancel_status` payload), `CANCEL_FAILED` (live `CommandEventType` + transition). Candidate-dead (no writer) — `SETTLED_NOT_IN_API`, `EXIT_FAILED`, `RetrainStatus.RUNNING`, `SettlementFact.outcome="VOIDED"`. ChainState dup already alias-mitigated in hot paths (residual = bare imports). LifecycleState/LifecyclePhase confirmed runtime-vs-persisted two-layer split via `phase_for_runtime_position()`.
 
-Raw evidence: `scratchpad/states_01..05`, `consult_context_digest.md`, `local_verification_notes.md`, `coupling_impact_map.md`, consult answers `/tmp/cgc_answer_REQ-20260629-134032-8738ab.txt` (round-1) + round-2.
+Raw evidence: `scratchpad/states_01..05`, `consult_context_digest.md`, `local_verification_notes.md`, `coupling_impact_map.md`, consult answers `[consult answer artifact]` (round-1) + round-2.
 
 ## 11. Implementation status (2026-06-29)
 
@@ -156,7 +156,7 @@ REMAINING — DEEP WIRING (each replaces scattered special-cased money-path logi
 - `family_exclusive_dedup` reducer-based blocking rewrite (10-file harness).
 - CHECK-constraint narrowing (single-DB) for the CHECK-coupled dead values.
 
-### Continuation — implementation review + consult 6a42bc3d rulings (2026-06-29, `feature/state-vocab-canonical-redesign`)
+### Continuation — implementation review + external consult thread rulings (2026-06-29, `feature/state-vocab-canonical-redesign`)
 
 A second wave driven by the implementation review + two follow-up consult rulings on the
 "Zeus State Model Redesign" thread. Load-bearing method: **audit the LIVE owner before wiring any
@@ -223,7 +223,7 @@ its own merits (typed axes, no value-coupling); no live behavior depends on it y
 
 ## 12. Round-2 consult ruling (2026-06-30) — Polymarket-grounded redundancy verdict + ideal fact-log model
 
-Consult round-2 (thread `6a42bc3d`, frontier model, web-grounded in Polymarket CLOB / ERC-1155 / UMA
+Consult round-2 ([external consult thread], frontier model, web-grounded in Polymarket CLOB / ERC-1155 / UMA
 docs) **independently converged** with the Claude-side first-principles analysis
 (`scratchpad/first_principles_redundancy_analysis.md`). Both, from different model families, reached:
 the ideal is **not** "A1–A10 stored axes" — it is an **append-only fact/decision log with typed reducers

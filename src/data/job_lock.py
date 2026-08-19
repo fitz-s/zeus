@@ -31,13 +31,27 @@ from __future__ import annotations
 import fcntl
 import logging
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Generator
+from typing import Generator, Literal
 
 logger = logging.getLogger(__name__)
 
 OPENDATA_DAEMON_LOCK_KEY = "opendata_live_forecast"
+MARKET_SUBSTRATE_PRIORITY_TURNSTILE_KEY = "market_substrate_priority_turnstile"
 _OPENDATA_TRACKS = frozenset({"mx2t6_high", "mn2t6_low"})
+
+
+@dataclass(frozen=True)
+class MarketSubstrateTurnstileAdmission:
+    acquired: bool
+    lane: Literal["priority", "broad"]
+    status: Literal[
+        "priority_intent_acquired",
+        "broad_turn_admitted",
+        "priority_intent_active",
+        "broad_turn_active",
+    ]
 
 
 def opendata_track_lock_key(track: str) -> str:
@@ -138,6 +152,38 @@ def acquire_lock(
             lock_file.close()
         except Exception:
             pass
+
+
+@contextmanager
+def acquire_market_substrate_turnstile(
+    *,
+    priority: bool,
+    _locks_dir_override: Path | None = None,
+) -> Generator[MarketSubstrateTurnstileAdmission, None, None]:
+    """Admit priority exclusively and broad writers compatibly via OS-held flock.
+
+    SCOPE: only entry to the ``market_substrate_refresh`` writer lock; this does
+    not block unrelated DB writers or readers. DRAIN: an earlier priority holder
+    exits after scope/no-scope/failure or writer acquisition + revalidation, so a
+    later broad tick retries normally. RESET: ``flock`` is released by context
+    exit or process death; the empty lock inode carries no reservation state.
+    """
+
+    lane: Literal["priority", "broad"] = "priority" if priority else "broad"
+    with acquire_lock(
+        MARKET_SUBSTRATE_PRIORITY_TURNSTILE_KEY,
+        shared=not priority,
+        _locks_dir_override=_locks_dir_override,
+    ) as acquired:
+        if acquired:
+            status = "priority_intent_acquired" if priority else "broad_turn_admitted"
+        else:
+            status = "broad_turn_active" if priority else "priority_intent_active"
+        yield MarketSubstrateTurnstileAdmission(
+            acquired=bool(acquired),
+            lane=lane,
+            status=status,
+        )
 
 
 @contextmanager

@@ -29,8 +29,9 @@ Design invariants (the shape carries the law):
 * **Native NO bounds** — the NO lower bound is ``1 − q⁺_YES`` (widest YES upper
   maps to tightest NO lower), NEVER ``1 − q⁻_YES``. That flip is a spec-mandated
   trap: using ``1 − q⁻_YES`` would silently overstate the NO robust EV.
-* **PR-1 exit (ΔJ≡0)** — the stop compares clean liquidation value to robust
-  hold value with no joint-allocator shadow term; the single audit code is
+* **PR-1 exit (ΔJ≡0)** — the stop compares clean liquidation value to posterior-
+  predictive-mean hold value with no joint-allocator shadow term; the single audit
+  code is
   ``SELL_REVERSAL``. PR-2 injects ΔJ and opens ``SELL_REALLOCATE`` without
   touching this law's PR-1 branch.
 * **Lock is physical authority** — an IMPOSSIBLE/GUARANTEED lock folds the
@@ -87,10 +88,11 @@ class NativeBounds:
 class ExitDecision:
     """Immutable exit verdict with its proof terms.
 
-    ``value_kept`` = robust value of the shares retained ((h−x)·q⁻).
+    ``value_kept`` = posterior-mean value of the shares retained ((h−x)·q).
     ``value_sold`` = net liquidation proceeds L(x) realized on the sold shares.
-    Their sum minus the flat exit margin is the sell-branch value that beat the
-    hold value h·q⁻ when the action is SELL_REVERSAL."""
+    Their sum minus the per-share exit margin on ``shares_to_sell`` is the
+    sell-branch value that beat the hold value h·q when the action is
+    SELL_REVERSAL."""
 
     action: ExitAction
     shares_to_sell: Decimal
@@ -155,10 +157,10 @@ def admissible(
     return entry_value(shares, q_lcb, all_in_cost, entry_margin) > _ZERO
 
 
-def _locked_q_lcb(q_lcb: Decimal, lock: LockState) -> Decimal:
-    """Fold the lock into the scalar robust lower bound, reusing apply_lock so
+def _locked_q_mean(q_mean: Decimal, lock: LockState) -> Decimal:
+    """Fold the lock into the scalar payoff mean, reusing apply_lock so
     the lock semantics have exactly one definition."""
-    return apply_lock(NativeBounds(q_lcb, q_lcb, q_lcb), lock).q_lcb
+    return apply_lock(NativeBounds(q_mean, q_mean, q_mean), lock).q
 
 
 def _deepest_breakpoint(
@@ -175,9 +177,9 @@ def _deepest_breakpoint(
 
 def exit_decision(
     held_shares: Decimal,
-    q_lcb: Decimal,
+    q_mean: Decimal,
     bid_breakpoints: Sequence[tuple[Decimal, Decimal]],
-    exit_margin: Decimal,
+    exit_margin_per_share: Decimal,
     lock: LockState,
     evidence_ok: bool,
     riskguard_red: bool,
@@ -198,11 +200,15 @@ def exit_decision(
        evaluate). A GUARANTEED/IMPOSSIBLE lock is independent physical authority
        and still decides even with stale/absent evidence.
     3. Otherwise compare, over the breakpoints, the sell-branch value
-       ``max_x[(h−x)·q⁻ + L(x)] − M_x`` against the hold value ``h·q⁻`` using the
-       lock-folded q⁻. SELL_REVERSAL at the argmax x iff it strictly wins;
-       else HOLD. Equivalently SELL iff ``L(x) > x·q⁻ + M_x``.
+       ``max_x[(h−x)·q + L(x) − x·m_x]`` against the hold value ``h·q`` using
+       the lock-folded posterior-predictive mean. SELL_REVERSAL at the argmax x
+       iff it strictly wins; else HOLD. Equivalently SELL iff
+       ``L(x) > x·(q + m_x)``.
+
+    ``q_mean`` is intentionally the only payoff-probability parameter: confidence
+    tails cannot silently re-enter the fixed-action expectation through an alias.
     """
-    q = _locked_q_lcb(q_lcb, lock)
+    q = _locked_q_mean(q_mean, lock)
     hold_value = held_shares * q
 
     if riskguard_red:
@@ -227,7 +233,11 @@ def exit_decision(
     best_proceeds = _ZERO
     best_value = hold_value  # the HOLD baseline
     for shares, proceeds in sorted(bid_breakpoints, key=lambda bp: bp[0]):
-        candidate = (held_shares - shares) * q + proceeds - exit_margin
+        candidate = (
+            (held_shares - shares) * q
+            + proceeds
+            - exit_margin_per_share * shares
+        )
         if candidate > best_value:
             best_value = candidate
             best_x = shares

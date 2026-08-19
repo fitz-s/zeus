@@ -140,6 +140,35 @@ _BUSINESS_CYCLE_KEYS = _BUSINESS_CYCLE_KEYS_PRESERVED_ON_AUX_PULSE - {
 }
 
 
+def _is_full_book_exit_monitor_cycle(cycle: dict) -> bool:
+    if bool(cycle.get("targeted_exit_monitor")):
+        return False
+    return str(cycle.get("mode") or "") == "exit_monitor" or (
+        "held_monitor_candidates" in cycle and "monitors" in cycle
+    )
+
+
+def _is_targeted_exit_monitor_cycle(cycle: dict) -> bool:
+    return bool(cycle.get("targeted_exit_monitor"))
+
+
+def _merge_full_book_exit_monitor_cycle(prior_cycle: dict, incoming_cycle: dict) -> dict:
+    """Replace current monitor state while retaining prior business counters.
+
+    A full-book artifact is a replacement boundary: every prior cycle key not
+    explicitly classified as business activity is transient monitor state. This
+    keeps future monitor counters/lists/reasons from becoming sticky without a
+    fragile per-key transient allowlist.
+    """
+    merged_cycle = {
+        key: prior_cycle[key]
+        for key in _BUSINESS_CYCLE_KEYS_PRESERVED_ON_AUX_PULSE
+        if key in prior_cycle
+    }
+    merged_cycle.update(incoming_cycle)
+    return merged_cycle
+
+
 def _cycle_has_business_activity(cycle: dict | None) -> bool:
     if not isinstance(cycle, dict):
         return False
@@ -214,7 +243,19 @@ def _write_cycle_status(
     if cycle_summary is not None:
         incoming_cycle = dict(cycle_summary)
         prior_cycle = prior.get("cycle") if isinstance(prior, dict) else None
-        if (
+        full_book_exit_monitor = _is_full_book_exit_monitor_cycle(incoming_cycle)
+        targeted_exit_monitor = _is_targeted_exit_monitor_cycle(incoming_cycle)
+        if isinstance(prior_cycle, dict) and full_book_exit_monitor:
+            status["cycle"] = _merge_full_book_exit_monitor_cycle(
+                prior_cycle, incoming_cycle
+            )
+        elif isinstance(prior_cycle, dict) and targeted_exit_monitor:
+            # Targeted monitor artifacts are not full-book current state.
+            # Production targeted runs do not write status, but keeping this
+            # boundary here prevents a future caller from clearing or
+            # replacing the current full-book monitor projection.
+            status["cycle"] = dict(prior_cycle)
+        elif (
             isinstance(prior_cycle, dict)
             and "candidates" in prior_cycle
             and "candidates" not in incoming_cycle
@@ -240,6 +281,7 @@ def _write_cycle_status(
             require_explicit=True,
             refreshed_by_pulse=False,
         )
+        _project_recommended_commands(status)
         # Preserve the last verified top-level freshness instant.  This write
         # publishes only the completed cycle; it must not make retained DB-derived
         # portfolio/execution/control fields appear newly refreshed.
@@ -294,6 +336,7 @@ def _write_cycle_status(
         status = annotate_truth_payload(status, STATUS_PATH, generated_at=generated_at, authority="VERIFIED")
     else:
         _preserve_prior_status_freshness_after_pulse_failure(status, prior)
+    _project_recommended_commands(status)
     _atomic_write_status_payload(status)
 
 
@@ -321,6 +364,21 @@ def _refresh_control_status_for_pulse(status: dict) -> None:
         control["status"] = "control_refresh_failed"
         control["refresh_error_type"] = type(exc).__name__
         control["refresh_error"] = str(exc)
+
+
+def _project_recommended_commands(status: dict) -> None:
+    """Keep every daemon-owned status write on the full control contract."""
+
+    control = status.get("control")
+    if not isinstance(control, dict):
+        control = {}
+        status["control"] = control
+    control["recommended_auto_commands"] = recommended_autosafe_commands_from_status(status)
+    control["review_required_commands"] = review_required_commands_from_status(status)
+    control["recommended_commands"] = recommended_commands_from_status(
+        status,
+        include_review_required=True,
+    )
 
 
 def _preserve_prior_status_freshness_after_pulse_failure(status: dict, prior: dict) -> None:
@@ -793,6 +851,39 @@ def _terminal_event_supersedes_nonterminal_fact(row) -> bool:
     event_type = str(row["terminal_event_type"] or "").upper()
     if event_type not in _TERMINAL_COMMAND_EVENT_TYPES:
         return False
+    if event_type == "FILL_CONFIRMED":
+        payload = _payload_mapping(row["terminal_event_payload_json"])
+        predicates = payload.get("required_predicates")
+        required = {
+            "authenticated_confirmed_trade_facts",
+            "bound_venue_order_id_matches_trade",
+            "command_state_review_required",
+            "latest_event_is_review_boundary",
+            "source_fill_time_valid",
+            "trade_facts_cover_command_or_leave_only_dust",
+        }
+        try:
+            fill_matches = abs(
+                float(payload.get("filled_size")) - float(row["matched_size"])
+            ) <= 1e-9
+        except (TypeError, ValueError):
+            fill_matches = False
+        if (
+            payload.get("proof_class") == "authenticated_trade_fact_full_fill"
+            and str(row["command_state"] or "").upper() == "FILLED"
+            and str(payload.get("command_id") or "")
+            == str(row["command_id"] or "")
+            and str(payload.get("venue_order_id") or "")
+            == str(row["venue_order_id"] or "")
+            and fill_matches
+            and isinstance(predicates, dict)
+            and all(predicates.get(name) is True for name in required)
+        ):
+            # This event is selected by highest canonical command sequence.
+            # Its occurred_at intentionally preserves the venue fill time, so
+            # comparing that business timestamp with a fact's observed_at can
+            # invert the actual write/authority order by milliseconds.
+            return True
     if not _status_time_not_before(row["terminal_event_at"], row["venue_observed_at"]):
         return False
     if event_type == "CANCEL_ACKED":
@@ -801,6 +892,68 @@ def _terminal_event_supersedes_nonterminal_fact(row) -> bool:
             venue_order_id=str(row["venue_order_id"] or ""),
         )
     return True
+
+
+def _terminal_partial_order_fact_confirms_closed_remainder(row) -> bool:
+    """Recognize either canonical terminal-partial proof emitted by recovery.
+
+    Command recovery writes the predicate-complete ``terminal_partial_order_fact``
+    shape. Exchange reconciliation reaches the same canonical
+    ``OrderProofClass.TERMINAL_PARTIAL`` conclusion through the order-truth reducer
+    and records the reducer inputs instead. Both prove a closed remainder; treating
+    the latter's ``PARTIALLY_MATCHED`` source state as a live order fabricates debt.
+    """
+
+    payload = _payload_mapping(row["venue_fact_raw_payload_json"])
+    predicates = payload.get("required_predicates")
+    required = {
+        "cancel_acked",
+        "canonical_positive_trade_facts",
+        "canonical_trade_facts_match_terminal_order_fact",
+        "command_state_cancelled",
+        "cumulative_fill_below_requested_size",
+        "terminal_order_remainder_zero",
+    }
+    try:
+        remainder_zero = float(row["remaining_size"]) == 0.0
+        payload_remainder_zero = float(payload.get("remaining_size")) == 0.0
+        matched_size = float(row["matched_size"])
+        submitted_size = float(row["submitted_size"])
+    except (TypeError, ValueError):
+        return False
+    identities_match = (
+        str(payload.get("command_id") or "") == str(row["command_id"] or "")
+        and str(payload.get("venue_order_id") or "")
+        == str(row["venue_order_id"] or "")
+    )
+    predicate_complete_proof = (
+        payload.get("proof_class") == "terminal_partial_order_fact"
+        and str(row["command_state"] or "").upper() in {"CANCELED", "CANCELLED"}
+        and str(row["venue_state"] or "").upper()
+        in {"PARTIAL", "PARTIALLY_MATCHED"}
+        and identities_match
+        and remainder_zero
+        and payload_remainder_zero
+        and 0.0 < matched_size < submitted_size
+        and isinstance(predicates, dict)
+        and all(predicates.get(name) is True for name in required)
+    )
+    reducer_proof = (
+        payload.get("order_truth_proof_class") == "TERMINAL_PARTIAL"
+        and str(payload.get("source_module") or "")
+        == "src.execution.exchange_reconcile"
+        and payload.get("reason") == "m5_exchange_reconcile_entry_fill_order_fact"
+        and str(payload.get("order_truth_source_state") or "").upper()
+        == str(row["venue_state"] or "").upper()
+        and str(row["command_state"] or "").upper() in {"CANCELED", "CANCELLED"}
+        and str(row["venue_state"] or "").upper()
+        in {"PARTIAL", "PARTIALLY_MATCHED"}
+        and identities_match
+        and remainder_zero
+        and payload_remainder_zero
+        and 0.0 < matched_size < submitted_size
+    )
+    return predicate_complete_proof or reducer_proof
 
 
 def _get_risk_level() -> str:
@@ -968,7 +1121,16 @@ def _query_current_open_entry_orders(conn) -> dict:
         venue_state = str(row["venue_state"] or "")
         if phase.lower() in _TERMINAL_ENTRY_PHASES:
             continue
-        if order_status.lower() in _TERMINAL_ENTRY_ORDER_STATUSES:
+        # position_current.order_status describes the position's original
+        # entry, not necessarily this command.  An active/day0 position may
+        # have a later incremental ENTRY resting at the venue while the
+        # position still says ``filled``.  Only use that projection to retire
+        # the command while the position itself is still pending entry;
+        # command state plus the command-specific venue fact govern additions.
+        if (
+            phase.lower() == "pending_entry"
+            and order_status.lower() in _TERMINAL_ENTRY_ORDER_STATUSES
+        ):
             continue
         if venue_state.upper() in _TERMINAL_VENUE_ORDER_STATES:
             continue
@@ -1019,6 +1181,7 @@ def _terminal_entry_command_conflict_empty() -> dict:
         ),
         "count": 0,
         "superseded_by_terminal_event_count": 0,
+        "terminal_partial_order_fact_count": 0,
         "by_command_state": {},
         "by_venue_state": {},
         "by_position_phase": {},
@@ -1039,6 +1202,16 @@ def _query_terminal_entry_command_venue_fact_conflicts(conn) -> dict:
 
     has_position_current = _table_exists(conn, "main", "position_current")
     has_command_events = _table_exists(conn, "main", "venue_command_events")
+    venue_fact_columns = {
+        str(row[1])
+        for row in conn.execute("PRAGMA main.table_info(venue_order_facts)").fetchall()
+        if len(row) > 1
+    }
+    venue_fact_payload_select = (
+        "lof.raw_payload_json AS venue_fact_raw_payload_json"
+        if "raw_payload_json" in venue_fact_columns
+        else "NULL AS venue_fact_raw_payload_json"
+    )
     pc_select = (
         "pc.position_id, pc.phase, pc.order_status, pc.chain_state, pc.city, "
         "pc.target_date, pc.strategy_key"
@@ -1086,6 +1259,7 @@ def _query_terminal_entry_command_venue_fact_conflicts(conn) -> dict:
                vc.updated_at, {pc_select},
                lof.state AS venue_state, lof.remaining_size, lof.matched_size,
                lof.observed_at AS venue_observed_at,
+               {venue_fact_payload_select},
                {event_select}
           FROM venue_commands vc
           JOIN venue_order_facts lof
@@ -1117,8 +1291,12 @@ def _query_terminal_entry_command_venue_fact_conflicts(conn) -> dict:
     by_venue_state: dict[str, int] = {}
     by_position_phase: dict[str, int] = {}
     superseded_by_terminal_event_count = 0
+    terminal_partial_order_fact_count = 0
     orders: list[dict] = []
     for row in rows:
+        if _terminal_partial_order_fact_confirms_closed_remainder(row):
+            terminal_partial_order_fact_count += 1
+            continue
         if _terminal_event_supersedes_nonterminal_fact(row):
             superseded_by_terminal_event_count += 1
             continue
@@ -1159,6 +1337,7 @@ def _query_terminal_entry_command_venue_fact_conflicts(conn) -> dict:
         "status": "ok",
         "count": len(orders),
         "superseded_by_terminal_event_count": superseded_by_terminal_event_count,
+        "terminal_partial_order_fact_count": terminal_partial_order_fact_count,
         "by_command_state": by_command_state,
         "by_venue_state": by_venue_state,
         "by_position_phase": by_position_phase,
@@ -1880,12 +2059,7 @@ def write_status(cycle_summary: dict = None) -> None:
     }
     legacy_positions_artifact = _legacy_positions_artifact_summary(position_view)
     status["portfolio"]["legacy_artifact"] = legacy_positions_artifact
-    status["control"]["recommended_auto_commands"] = recommended_autosafe_commands_from_status(status)
-    status["control"]["review_required_commands"] = review_required_commands_from_status(status)
-    status["control"]["recommended_commands"] = recommended_commands_from_status(
-        status,
-        include_review_required=True,
-    )
+    _project_recommended_commands(status)
     risk_effective_bankroll = _round_money_or_none(risk_details.get("effective_bankroll"))
     risk_initial_bankroll = _round_money_or_none(risk_details.get("initial_bankroll"))
     realized_pnl = risk_details.get("realized_pnl")

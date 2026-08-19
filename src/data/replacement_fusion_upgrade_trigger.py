@@ -28,8 +28,9 @@ finalizes ownership before an atomic hardlink publish into the SAME seed_dir the
 cycle already drains — no new daemon or parallel materialization path. The marker is UNIQUE on
 (city, target_date, metric, source_cycle_time, capturable_family_set): family growth uses the
 canonical family set as its transition key; exact input revisions suffix that key with the
-changed source raw-row ids. A scope is re-enqueued AT MOST ONCE per exact transition while a new
-raw row remains eligible to trigger one new materialization.
+changed source raw-row ids. A transition has at most one active publication. If that publication
+is consumed without converging the posterior and has no terminal no-retry receipt, the same marker
+is atomically reclaimed so a failed consumer cannot turn idempotency into permanent starvation.
 """
 from __future__ import annotations
 
@@ -749,6 +750,31 @@ def _reserve_enqueues(
     stale_before = reserved_at - _RESERVATION_TTL
     reservation = _publication_value(_RESERVATION_PREFIX, publication)
     reserved: list[str] = []
+    observed_before_lock: dict[str, sqlite3.Row | None] = {
+        transition_key: conn.execute(
+            """
+            SELECT enqueued_at, seed_file
+            FROM fusion_upgrade_enqueues
+            WHERE city = ? AND target_date = ? AND metric = ?
+              AND source_cycle_time = ? AND capturable_family_set = ?
+            LIMIT 1
+            """,
+            (city, target_date, metric, source_cycle_iso, transition_key),
+        ).fetchone()
+        for transition_key in transition_keys
+    }
+    reclaimable_markers: dict[str, str] = {}
+    for transition_key, row in observed_before_lock.items():
+        if row is None:
+            continue
+        marker_value = str(row["seed_file"] or "")
+        if marker_value.startswith(
+            (_PUBLISH_PENDING_PREFIX, _RESERVATION_PREFIX)
+        ):
+            continue
+        queue_state = _finalized_seed_has_active_queue_work(marker_value)
+        if queue_state is False:
+            reclaimable_markers[transition_key] = marker_value
     try:
         conn.execute("BEGIN IMMEDIATE")
         existing: dict[str, sqlite3.Row | None] = {
@@ -764,7 +790,7 @@ def _reserve_enqueues(
             ).fetchone()
             for transition_key in transition_keys
         }
-        for row in existing.values():
+        for transition_key, row in existing.items():
             if row is None:
                 continue
             marker_value = str(row["seed_file"] or "")
@@ -785,6 +811,13 @@ def _reserve_enqueues(
                 conn.rollback()
                 return reservation, ()
             if foreign is None:
+                # SCOPE: this exact scope/cycle/transition publication.
+                # DRAIN: the queue consumes public/request/inflight work, or
+                # records a terminal receipt for the exact seed.
+                # RESET: an absent exact queue/terminal witness while the caller's
+                # comparison still proves the posterior stale permits reclaim.
+                # Queue inspection happens before the DB writer lock; the exact
+                # marker match below is the compare-and-swap fence.
                 continue
             try:
                 marker_time = datetime.fromisoformat(
@@ -828,6 +861,29 @@ def _reserve_enqueues(
                 prefix=_RESERVATION_PREFIX,
             )
             if foreign is None:
+                if reclaimable_markers.get(transition_key) == marker_value:
+                    updated = conn.execute(
+                        """
+                        UPDATE fusion_upgrade_enqueues
+                        SET enqueued_at = ?, served_family_set = ?, seed_file = ?
+                        WHERE city = ? AND target_date = ? AND metric = ?
+                          AND source_cycle_time = ? AND capturable_family_set = ?
+                          AND seed_file = ?
+                        """,
+                        (
+                            reserved_at.isoformat(),
+                            served_family_key,
+                            reservation,
+                            city,
+                            target_date,
+                            metric,
+                            source_cycle_iso,
+                            transition_key,
+                            marker_value,
+                        ),
+                    ).rowcount
+                    if updated:
+                        reserved.append(transition_key)
                 continue
             updated = conn.execute(
                 """
@@ -856,6 +912,74 @@ def _reserve_enqueues(
         conn.rollback()
         raise
     return reservation, tuple(reserved)
+
+
+def _finalized_seed_has_active_queue_work(seed_file: str) -> bool | None:
+    """Return True/False for exact queue work; None when fencing is uncertain."""
+    marker = str(seed_file or "").strip()
+    if not marker:
+        return None
+    path = Path(marker)
+    if path.parent.name != "seeds":
+        return None
+    queue_root = path.parent.parent
+    try:
+        from src.data.replacement_forecast_live_materialization_queue import (  # noqa: PLC0415
+            _queue_lock,
+            _seed_terminal_receipt_index_path,
+        )
+
+        with _queue_lock(queue_root / ".materialization_queue.lock") as acquired:
+            if not acquired:
+                return None
+            if path.is_file() or (queue_root / "requests" / path.name).is_file():
+                return True
+            inflight = queue_root / "inflight"
+            try:
+                batches = tuple(inflight.iterdir())
+            except FileNotFoundError:
+                batches = ()
+            for batch in batches:
+                if batch.is_dir() and (batch / path.name).is_file():
+                    return True
+            indexed_receipt = _seed_terminal_receipt_index_path(path)
+            if indexed_receipt is not None and indexed_receipt.is_file():
+                try:
+                    indexed = json.loads(
+                        indexed_receipt.read_text(encoding="utf-8")
+                    )
+                except (OSError, TypeError, ValueError, json.JSONDecodeError):
+                    return None
+                if str(indexed.get("seed_file") or "") != marker:
+                    return None
+                if str(indexed.get("status") or "") in {
+                    "SKIPPED_UNCHANGED_BLOCKED_INPUT",
+                    "SKIPPED_ALREADY_COVERED",
+                    "SKIPPED_SOURCE_CYCLE_REGRESSION",
+                }:
+                    return True
+            processed = queue_root / "seed_processed" / path.name
+            receipt = processed.with_suffix(processed.suffix + ".receipt.json")
+            if processed.exists():
+                if not receipt.is_file():
+                    return None
+                try:
+                    status = str(
+                        json.loads(receipt.read_text(encoding="utf-8")).get(
+                            "status", ""
+                        )
+                    )
+                except (OSError, TypeError, ValueError, json.JSONDecodeError):
+                    return None
+                if status in {
+                    "SKIPPED_UNCHANGED_BLOCKED_INPUT",
+                    "SKIPPED_ALREADY_COVERED",
+                    "SKIPPED_SOURCE_CYCLE_REGRESSION",
+                }:
+                    return True
+            return False
+    except OSError:
+        return None
 
 
 def _release_enqueue_reservations(
@@ -989,6 +1113,7 @@ def enqueue_fusion_upgrade_reseeds(
         write_seed,
     )
     from src.data.replacement_forecast_seed_discovery import (  # noqa: PLC0415
+        _day0_observed_extreme_seed_payload,
         _latest_manifest,
         _load_manifests,
         _manifest_base_dir,
@@ -1013,6 +1138,8 @@ def enqueue_fusion_upgrade_reseeds(
         "scopes_checked": 0,
         "upgrades_detected": 0,
         "input_revisions_detected": 0,
+        "day0_conditioned_upgrades": 0,
+        "day0_skipped": 0,
         "seeds_enqueued": 0,
         "already_enqueued": 0,
         "manifest_missing": 0,
@@ -1083,10 +1210,15 @@ def enqueue_fusion_upgrade_reseeds(
             )
         )
 
-    manifests = (
+    # Periodic discovery owns a global catch-up scan.  An exact source-clock or
+    # held-family repair does not: walking the full raw-manifest tree before a
+    # one-family comparison can retain every belief-reseed worker behind
+    # unrelated historical artifacts.  Keep caller-supplied manifests exact;
+    # otherwise defer scoped lookup until the forecast DB is open below.
+    default_manifests = (
         _load_manifests(raw_dir, computed_at=now)
-        if manifests is None
-        else tuple(manifests)
+        if scopes is None and manifests is None
+        else tuple(manifests) if manifests is not None else None
     )
 
     conn = _connect(forecast_db, write_class="live")
@@ -1103,13 +1235,41 @@ def enqueue_fusion_upgrade_reseeds(
         ):
             if enqueued >= max(1, int(limit)):
                 break
-            # DAY0 GUARD (live-run finding 2026-06-11): a started local day's scope needs the
-            # observed-extreme path, not a plain re-materialization — the seed discovery's
-            # can_seed excludes these and the upgrade re-seed must too (same plan flag, same
-            # reason). Without it the first live enqueue burned 18 budget slots on day0 scopes.
+            scope_manifests = default_manifests
+            if scope_manifests is None:
+                from src.data.replacement_cycle_advance_trigger import (  # noqa: PLC0415
+                    _family_manifests_from_db,
+                )
+
+                scope_manifests = _family_manifests_from_db(
+                    conn,
+                    city=city,
+                    identity=expected_replacement_dependency_identity_by_role(metric)[
+                        "openmeteo_ifs9_anchor"
+                    ],
+                    computed_at=now,
+                )
+            day0_payload: dict[str, object] = {}
+            # A Day0 input revision still changes q, but its re-materialization must
+            # preserve the canonical observed-extreme conditioning.  Skipping Day0
+            # here leaves REPLACEMENT_RAW_INPUT_HWM with no RESET: cycle-advance
+            # correctly sees the same carrier cycle while fusion owns the changed
+            # raw-row identity.  Build the fusion seed with the same canonical Day0
+            # payload used by cycle-advance instead of emitting a plain seed.
             if day0_required:
-                report["day0_skipped"] = int(report.get("day0_skipped", 0)) + 1  # type: ignore[arg-type]
-                continue
+                payload = _day0_observed_extreme_seed_payload(
+                    city=city,
+                    target_date=target_date,
+                    metric=metric,
+                    computed_at=now,
+                )
+                if payload is None:
+                    report["day0_skipped"] = int(report["day0_skipped"]) + 1
+                    continue
+                day0_payload = payload
+                report["day0_conditioned_upgrades"] = (
+                    int(report["day0_conditioned_upgrades"]) + 1
+                )
             report["scopes_checked"] = int(report["scopes_checked"]) + 1
             try:
                 verdict = scope_capture_offers_larger_provider_set(
@@ -1139,11 +1299,11 @@ def enqueue_fusion_upgrade_reseeds(
             # fresh-cycle materialization instead.
             try:
                 from src.data.replacement_forecast_cycle_policy import (  # noqa: PLC0415
-                    cycle_age_exceeds_bound,
+    cycle_age_outside_bound,
                 )
 
                 _cycle_dt = datetime.fromisoformat(source_cycle_iso.replace("Z", "+00:00"))
-                if cycle_age_exceeds_bound(now, _cycle_dt):
+                if cycle_age_outside_bound(now, _cycle_dt):
                     report["cycle_too_old_skipped"] = int(report.get("cycle_too_old_skipped", 0)) + 1  # type: ignore[arg-type]
                     continue
             except Exception:  # noqa: BLE001 — unparseable cycle: let the materializer decide
@@ -1208,7 +1368,7 @@ def enqueue_fusion_upgrade_reseeds(
                     city=city,
                     target_date=target_date,
                     metric=metric,
-                    manifests=manifests,
+                    manifests=scope_manifests,
                     raw_dir=raw_dir,
                     seed_path=seed_path,
                     seed_file=publication.staging_file,
@@ -1222,6 +1382,7 @@ def enqueue_fusion_upgrade_reseeds(
                     manifest_base_dir=_manifest_base_dir,
                     resolve_path=_resolve_path,
                     expected_identity=expected_replacement_dependency_identity_by_role,
+                    day0_payload=day0_payload,
                 )
             except Exception as exc:  # noqa: BLE001 — per-scope fail-soft
                 report["seed_build_failed"] = int(
@@ -1402,6 +1563,7 @@ def _build_and_write_upgrade_seed(
     manifest_base_dir,
     resolve_path,
     expected_identity,
+    day0_payload: Mapping[str, object] | None = None,
 ) -> Path | None:
     """Build one re-materialization seed for a scope using the existing seed-builder pieces and
     atomically write it into private staging. Returns the staging Path, or None when the required
@@ -1426,7 +1588,14 @@ def _build_and_write_upgrade_seed(
     precision_metadata = manifest_path_value(openmeteo, "precision_metadata_json")
     if not openmeteo_payload or not precision_metadata:
         return None
-    coverage = latest_baseline_coverage(conn, city=city, target_date=target_date, temperature_metric=metric)
+    coverage = latest_baseline_coverage(
+        conn,
+        city=city,
+        target_date=target_date,
+        temperature_metric=metric,
+        not_after_source_cycle_time=openmeteo.source_cycle_time,
+        as_of_time=computed_at,
+    )
     bins = market_bins(conn, city=city, target_date=target_date, temperature_metric=metric)
     if coverage is None or not bins:
         return None
@@ -1442,6 +1611,7 @@ def _build_and_write_upgrade_seed(
         precision_metadata_json=resolve_path(precision_metadata, base_dir=openmeteo_base_dir),
         computed_at=computed_at,
         base_dir=seed_path,
+        **dict(day0_payload or {}),
     )
     if not seed_result.ok or seed_result.seed is None:
         return None

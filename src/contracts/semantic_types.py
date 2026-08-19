@@ -162,6 +162,14 @@ class EntryMethod(str, Enum):
     DAY0_OBSERVATION = "day0_observation"
 
     @classmethod
+    def _missing_(cls, value: object) -> "EntryMethod | None":
+        # Compatibility for positions persisted before recovery provenance was
+        # separated from the probability-refresh mechanism.
+        if value in {"exchange_reconcile_fill_recovery", "venue_fact_recovery"}:
+            return cls.QKERNEL_SPINE
+        return None
+
+    @classmethod
     def from_value(cls, value: str | EntryMethod | None) -> "EntryMethod":
         if isinstance(value, cls):
             return value

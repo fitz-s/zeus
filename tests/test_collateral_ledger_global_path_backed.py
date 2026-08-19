@@ -1,8 +1,9 @@
 # Created: 2026-05-13
-# Last reused/audited: 2026-05-15
+# Last reused/audited: 2026-08-12
 # Authority basis: docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/Z4.yaml
 #                  + 2026-05-13 collateral_ledger singleton lifecycle remediation
 #                  + 2026-06-17 path-backed short-connection live repair
+#                  + 2026-08-12 recurring refresh DDL excision
 """Relationship test for CollateralLedger global singleton DB-path lifecycle.
 
 The R3 Z4 contract is that `configure_global_ledger(...)` installs a
@@ -24,6 +25,7 @@ caller conn lifetime without holding the trade DB write lane open.
 from __future__ import annotations
 
 import sqlite3
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -70,6 +72,42 @@ def test_global_ledger_snapshot_survives_caller_conn_close(tmp_path: Path) -> No
             assert snap.authority_tier in {"CHAIN", "VENUE", "DEGRADED"}
     finally:
         configure_global_ledger(None)
+
+
+def test_preinitialized_path_mode_is_read_only_at_construction(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    from src.state import collateral_ledger as ledger_module
+
+    db_path = tmp_path / "trades.db"
+    seed = sqlite3.connect(db_path)
+    try:
+        init_collateral_schema(seed)
+        seed.commit()
+    finally:
+        seed.close()
+
+    monkeypatch.setattr(
+        ledger_module,
+        "init_collateral_schema",
+        lambda _conn: (_ for _ in ()).throw(
+            AssertionError("preinitialized mode must not run schema DDL")
+        ),
+    )
+
+    ledger = CollateralLedger(db_path=db_path, initialize_schema=False)
+    assert ledger.snapshot().authority_tier == "DEGRADED"
+
+
+def test_preinitialized_path_mode_fails_closed_when_schema_is_missing(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "trades.db"
+    sqlite3.connect(db_path).close()
+
+    with pytest.raises(RuntimeError, match="SCHEMA_NOT_INITIALIZED"):
+        CollateralLedger(db_path=db_path, initialize_schema=False)
 
 
 def test_global_ledger_snapshot_survives_after_transient_caller_conn_pattern(
@@ -189,6 +227,78 @@ def test_path_backed_ledger_does_not_hold_write_lock_between_calls(
             writer.close()
     finally:
         ledger.close()
+
+
+def test_path_backed_live_collateral_fetches_before_bounded_coordinated_persist(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from src.state import db as state_db
+    from src.state import write_coordinator as coordinator_module
+    from src.state.write_coordinator import (
+        DBIdentity,
+        WriteCoordinator,
+        WriteLeaseTimeout,
+    )
+
+    db_path = tmp_path / "zeus_trades.db"
+    events: list[str] = []
+    priorities: dict[str, str] = {}
+
+    def telemetry(row) -> None:
+        events.append(row.owner)
+        priorities[row.owner] = row.priority
+
+    coordinator = WriteCoordinator(
+        {DBIdentity.TRADE: db_path},
+        telemetry_sink=telemetry,
+    )
+    monkeypatch.setattr(state_db, "_zeus_trade_db_path", lambda: db_path)
+    monkeypatch.setattr(
+        coordinator_module,
+        "default_runtime_write_coordinator",
+        lambda: coordinator,
+    )
+    ledger = CollateralLedger(db_path=db_path)
+    assert events == ["collateral_schema_init"]
+    events.clear()
+
+    class Adapter:
+        def get_collateral_payload(self):
+            events.append("network_read")
+            return {
+                "pusd_balance_micro": 199_396_602,
+                "pusd_allowance_micro": 9_000_000,
+                "usdc_e_legacy_balance_micro": 0,
+                "ctf_token_balances": {},
+                "ctf_token_allowances": {},
+                "authority_tier": "CHAIN",
+            }
+
+    raw_holder = sqlite3.connect(db_path)
+    raw_holder.execute("BEGIN IMMEDIATE")
+    raw_holder.execute(
+        "INSERT INTO collateral_reservations "
+        "(command_id,reservation_type,token_id,amount,created_at) "
+        "VALUES ('raw-holder','PUSD_BUY',NULL,1,'2026-08-12T00:00:00+00:00')"
+    )
+    started = time.monotonic()
+    try:
+        with pytest.raises(WriteLeaseTimeout):
+            ledger.refresh(Adapter())
+        assert time.monotonic() - started < 0.6
+        assert events[0] == "network_read"
+        assert events[-1] == "collateral_snapshot_persist"
+    finally:
+        raw_holder.rollback()
+        raw_holder.close()
+
+    snapshot = ledger.refresh(Adapter())
+    assert snapshot.authority_tier == "CHAIN"
+    assert events[-1] == "collateral_snapshot_persist"
+    assert priorities["collateral_schema_init"] == "standard"
+    assert priorities["collateral_snapshot_persist"] == "monitor"
+    ledger.close()
 
 
 def test_path_backed_ledger_reads_fresh_chain_snapshot_past_latest_degraded(

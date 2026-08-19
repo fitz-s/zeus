@@ -64,7 +64,7 @@ def _dt(day: int, hour: int, minute: int = 0) -> datetime:
     return datetime(2026, 6, day, hour, minute, tzinfo=UTC)
 
 
-def _provenance() -> dict[str, object]:
+def _provenance(*, source_cycle_time: datetime) -> dict[str, object]:
     return {
         "replacement_q_mode": "FUSED_NORMAL_FULL",
         "q_lcb_basis": TRADEABLE_GRADE_QLCB_BASIS,
@@ -73,6 +73,7 @@ def _provenance() -> dict[str, object]:
             "current_evidence_shape": {
                 "semantics_revision": CURRENT_EVIDENCE_SEMANTICS_REVISION,
                 "shape_lag_hours": 0.0,
+                "source_cycle_time": source_cycle_time.isoformat(),
                 "translation_applied": False,
             }
         },
@@ -130,7 +131,7 @@ def _insert_posterior(
                     "openmeteo_ifs9_anchor": "om9-run",
                 }
             ),
-            json.dumps(_provenance()),
+            json.dumps(_provenance(source_cycle_time=source_cycle_time)),
             0,
             "live",
             _TOPO_HASH,

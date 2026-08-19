@@ -1,5 +1,5 @@
 # Created: prior to 2026-04-26
-# Last reused/audited: 2026-07-23
+# Last reused/audited: 2026-08-02
 # Authority basis: docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/Z2.yaml
 #                  + 2026-05-13 collateral_ledger singleton conn lifecycle remediation
 #                  + docs/archive/2026-Q2/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md
@@ -7,6 +7,7 @@
 #                  + 2026-05-17 riskguard/read-only bankroll lock remediation.
 #                  + 2026-07-09 concurrent public CLOB metadata prefetch.
 #                  + 2026-07-23 pre-POST deterministic signed-order identity journal.
+#                  + 2026-08-02 killable held-position public-book reads.
 """Polymarket CLOB API client. Spec §6.4.
 
 Limit orders ONLY. Auth via macOS Keychain.
@@ -16,22 +17,27 @@ All numeric fields from API are STRINGS — always float() before use.
 import functools as _functools
 import json
 import logging
+import math
+import multiprocessing
 import os
 import sys
 import threading
+import time
 import warnings
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Literal, Optional, TypedDict
 
 import httpx
 
 from src.data.polymarket_request_governor import (
+    EndpointClass,
     RequestPriority,
     polymarket_request_governor,
 )
 from src.contracts.executable_market_snapshot import (
+    FRESHNESS_WINDOW_DEFAULT,
     MarketSnapshotMismatchError,
     canonicalize_fee_details,
     fee_rate_fraction_from_details,
@@ -57,6 +63,131 @@ PRESUBMIT_JIT_CLOB_HTTP_LIMITS = httpx.Limits(max_keepalive_connections=4, max_c
 # value is the already-canonicalized details dict.
 _FEE_RATE_CACHE: dict[str, tuple[dict[str, Any], datetime]] = {}
 _FEE_RATE_TTL_SECONDS = 1800.0
+_HELD_ORDERBOOK_CHUNK_SIZE = 8
+
+
+class HeldOrderbookReadResult(dict[str, dict]):
+    """Partial held-book result that remains mapping-compatible for callers."""
+
+    attempted_token_ids: frozenset[str]
+    unattempted_token_ids: frozenset[str]
+    terminal_reason: str
+    captured_at: datetime | None
+    captured_at_by_token: dict[str, datetime]
+
+    def __init__(
+        self,
+        books: dict[str, dict],
+        *,
+        attempted_token_ids=(),
+        unattempted_token_ids=(),
+        terminal_reason: str,
+        captured_at: datetime | None,
+        captured_at_by_token: dict[str, datetime] | None = None,
+    ) -> None:
+        super().__init__(books)
+        self.attempted_token_ids = frozenset(
+            str(token_id) for token_id in attempted_token_ids
+        )
+        self.unattempted_token_ids = frozenset(
+            str(token_id) for token_id in unattempted_token_ids
+        )
+        self.terminal_reason = str(terminal_reason)
+        self.captured_at = captured_at
+        self.captured_at_by_token = dict(captured_at_by_token or {})
+
+
+class _HeldOrderbookChunkStarted(TypedDict):
+    type: Literal["chunk_started"]
+    token_ids: list[str]
+
+
+class _HeldOrderbookChunkComplete(TypedDict):
+    type: Literal["chunk_complete"]
+    token_ids: list[str]
+    books: dict[str, dict]
+
+
+class _HeldOrderbookTerminal(TypedDict):
+    type: Literal["terminal"]
+    terminal_reason: str
+
+
+def _send_held_orderbook_event(send_conn, event: dict[str, object]) -> None:
+    send_conn.send(json.dumps(event, separators=(",", ":")))
+
+
+def _parse_held_book_timestamp(value: object) -> datetime | None:
+    if value in (None, ""):
+        return None
+    try:
+        if isinstance(value, (int, float)) or str(value).strip().replace(
+            ".", "", 1
+        ).isdigit():
+            numeric = float(value)
+            if numeric > 10_000_000_000:
+                numeric /= 1_000.0
+            return datetime.fromtimestamp(numeric, tz=timezone.utc)
+        parsed = datetime.fromisoformat(str(value).strip().replace("Z", "+00:00"))
+    except (OSError, OverflowError, TypeError, ValueError):
+        return None
+    if parsed.tzinfo is None:
+        return None
+    return parsed.astimezone(timezone.utc)
+
+
+def _held_orderbook_read_worker(
+    send_conn,
+    token_ids: list[str],
+    timeout_seconds: float,
+    chunk_size: int,
+) -> None:
+    """Read bounded public-book chunks and publish each completed chunk."""
+
+    try:
+        deadline = time.monotonic() + float(timeout_seconds)
+        with PolymarketClient(
+            public_http_timeout=timeout_seconds,
+            public_request_priority=RequestPriority.HELD_REDUCE_ONLY,
+        ) as client:
+            for offset in range(0, len(token_ids), max(1, int(chunk_size))):
+                chunk = token_ids[offset : offset + max(1, int(chunk_size))]
+                started: _HeldOrderbookChunkStarted = {
+                    "type": "chunk_started",
+                    "token_ids": chunk,
+                }
+                _send_held_orderbook_event(send_conn, started)
+                remaining = deadline - time.monotonic()
+                if remaining < 0.01:
+                    terminal: _HeldOrderbookTerminal = {
+                        "type": "terminal",
+                        "terminal_reason": "deadline_exceeded",
+                    }
+                    _send_held_orderbook_event(send_conn, terminal)
+                    return
+                books = client.get_orderbook_snapshots(chunk, timeout=remaining)
+                complete: _HeldOrderbookChunkComplete = {
+                    "type": "chunk_complete",
+                    "token_ids": chunk,
+                    "books": books,
+                }
+                _send_held_orderbook_event(send_conn, complete)
+        terminal = {
+            "type": "terminal",
+            "terminal_reason": "complete",
+        }
+        _send_held_orderbook_event(send_conn, terminal)
+    except BaseException as exc:  # noqa: BLE001 - process boundary reports failure.
+        try:
+            terminal = {
+                "type": "terminal",
+                "terminal_reason": f"worker_error:{type(exc).__name__}:{exc}",
+            }
+            _send_held_orderbook_event(send_conn, terminal)
+        except BaseException:
+            pass
+    finally:
+        send_conn.close()
 
 
 # ---------------------------------------------------------------------------
@@ -399,6 +530,8 @@ class PolymarketClient:
         *,
         params: dict[str, Any] | None = None,
         timeout: "float | httpx.Timeout | None" = None,
+        priority: RequestPriority | None = None,
+        endpoint_class_override: EndpointClass | None = None,
     ):
         url = f"{CLOB_BASE}{path}"
         if not hasattr(self, "_public_http_client"):
@@ -414,7 +547,15 @@ class PolymarketClient:
             "GET",
             url,
             params=params,
-            priority=getattr(self, "_public_request_priority", RequestPriority.SCAN),
+            priority=(
+                priority
+                or getattr(
+                    self,
+                    "_public_request_priority",
+                    RequestPriority.SCAN,
+                )
+            ),
+            endpoint_class_override=endpoint_class_override,
         )
 
     def _bounded_public_http_timeout(
@@ -627,13 +768,18 @@ class PolymarketClient:
         from src.state.db import assert_no_world_mutex_held_for_io
         assert_no_world_mutex_held_for_io("get_orderbook_snapshot")
 
-        if timeout is None:
+        request_timeout = (
+            self._bounded_public_http_timeout(timeout)
+            if timeout is not None
+            else None
+        )
+        if request_timeout is None:
             resp = self._public_get("/book", params={"token_id": token_id})
         else:
             resp = self._public_get(
                 "/book",
                 params={"token_id": token_id},
-                timeout=timeout,
+                timeout=request_timeout,
             )
         resp.raise_for_status()
         data = resp.json()
@@ -686,10 +832,19 @@ class PolymarketClient:
             seen.add(tok)
             body.append({"token_id": tok})
 
-        if timeout is None:
+        request_timeout = (
+            self._bounded_public_http_timeout(timeout)
+            if timeout is not None
+            else None
+        )
+        if request_timeout is None:
             resp = self._public_post("/books", json_body=body)
         else:
-            resp = self._public_post("/books", json_body=body, timeout=timeout)
+            resp = self._public_post(
+                "/books",
+                json_body=body,
+                timeout=request_timeout,
+            )
         resp.raise_for_status()
         payload = resp.json()
         if not isinstance(payload, list):
@@ -707,6 +862,180 @@ class PolymarketClient:
             books[str(asset_id)] = entry
         return books
 
+    def get_held_orderbook_snapshots_hard_deadline(
+        self,
+        token_ids: list[str],
+        *,
+        timeout_seconds: float,
+    ) -> HeldOrderbookReadResult:
+        """Isolate public held-book network reads in a terminable child.
+
+        The child receives token IDs only, opens no DB, and has no submitted
+        command or parent venue client. Killing it can lose only a quote read;
+        the caller must treat timeout or malformed output as unavailable truth
+        and retry from a fresh book on a later monitor cycle. ``timeout_seconds``
+        bounds the parent poll after child start; process startup, IPC decoding,
+        and the final OS reap are cleanup tails, not an absolute method-level
+        wall-clock guarantee.
+        """
+
+        from src.state.db import assert_no_world_mutex_held_for_io
+
+        assert_no_world_mutex_held_for_io(
+            "get_held_orderbook_snapshots_hard_deadline"
+        )
+        wanted = list(
+            dict.fromkeys(
+                str(token_id).strip()
+                for token_id in token_ids
+                if str(token_id).strip()
+            )
+        )
+        if not wanted:
+            return HeldOrderbookReadResult(
+                {},
+                terminal_reason="complete",
+                captured_at=None,
+            )
+        timeout = float(timeout_seconds)
+        if not math.isfinite(timeout) or timeout < 0.01:
+            raise TimeoutError(
+                "held orderbook batch has insufficient remaining deadline"
+            )
+        deadline = time.monotonic() + timeout
+        books: dict[str, dict] = {}
+        attempted: set[str] = set()
+        captured_at_by_token: dict[str, datetime] = {}
+        terminal_reason = "deadline_exceeded"
+        invalid_book_progress = False
+        completed_chunks = 0
+
+        def _remaining() -> float:
+            return max(0.0, deadline - time.monotonic())
+
+        def _stop_and_reap(process) -> None:
+            if not process.is_alive():
+                return
+            process.terminate()
+            process.join(timeout=min(0.25, max(0.01, _remaining())))
+            if process.is_alive():
+                process.kill()
+                # Reaping is correctness cleanup, not network-budget work.  A
+                # fixed tail avoids returning immediately with an unreaped
+                # child when the supplied read budget is already exhausted.
+                process.join(timeout=0.25)
+
+        context = multiprocessing.get_context("spawn")
+        receive_conn, send_conn = context.Pipe(duplex=False)
+        process = context.Process(
+            target=_held_orderbook_read_worker,
+            args=(send_conn, wanted, timeout, _HELD_ORDERBOOK_CHUNK_SIZE),
+            name="zeus-held-orderbook-read",
+            daemon=True,
+        )
+        try:
+            process.start()
+            send_conn.close()
+            cleanup_reserve = min(0.5, timeout / 4.0)
+            while True:
+                poll_budget = max(0.0, _remaining() - cleanup_reserve)
+                if poll_budget <= 0.0 or not receive_conn.poll(poll_budget):
+                    terminal_reason = "deadline_exceeded"
+                    break
+                try:
+                    message = json.loads(receive_conn.recv())
+                except (EOFError, TypeError, ValueError, json.JSONDecodeError):
+                    terminal_reason = "invalid_ipc"
+                    break
+                if not isinstance(message, dict):
+                    terminal_reason = "invalid_ipc"
+                    break
+                event_type = message.get("type")
+                event_tokens = [
+                    token_id
+                    for value in message.get("token_ids", ())
+                    if (token_id := str(value).strip()) in wanted
+                ]
+                if event_type == "chunk_started":
+                    if not event_tokens:
+                        terminal_reason = "invalid_ipc"
+                        break
+                    attempted.update(event_tokens)
+                    continue
+                if event_type == "chunk_complete":
+                    progress_at = datetime.now(timezone.utc)
+                    completed_chunks += 1
+                    attempted.update(event_tokens)
+                    raw_books = message.get("books")
+                    if not isinstance(raw_books, dict):
+                        terminal_reason = "invalid_ipc"
+                        break
+                    for raw_token_id, raw_book in raw_books.items():
+                        token_id = str(raw_token_id).strip()
+                        if token_id not in event_tokens or not isinstance(raw_book, dict):
+                            invalid_book_progress = True
+                            continue
+                        asset_id = str(
+                            raw_book.get("asset_id")
+                            or raw_book.get("assetId")
+                            or raw_book.get("token_id")
+                            or ""
+                        ).strip()
+                        raw_source_at = raw_book.get("timestamp")
+                        source_at = _parse_held_book_timestamp(raw_source_at)
+                        if asset_id != token_id:
+                            invalid_book_progress = True
+                            continue
+                        if raw_source_at not in (None, "") and (
+                            source_at is None
+                            or source_at > progress_at
+                            or progress_at - source_at > FRESHNESS_WINDOW_DEFAULT
+                        ):
+                            invalid_book_progress = True
+                            continue
+                        books[token_id] = raw_book
+                        captured_at_by_token[token_id] = progress_at
+                    continue
+                if event_type == "terminal":
+                    terminal_reason = str(
+                        message.get("terminal_reason") or "invalid_terminal"
+                    )
+                    break
+                terminal_reason = "invalid_ipc"
+                break
+            process.join(timeout=min(0.25, _remaining()))
+            _stop_and_reap(process)
+            if terminal_reason == "complete" and invalid_book_progress:
+                terminal_reason = "invalid_book_progress"
+            if not books and completed_chunks == 0:
+                if terminal_reason == "deadline_exceeded":
+                    raise TimeoutError(
+                        "held orderbook batch exceeded "
+                        f"{timeout:.2f}s child-read budget"
+                    )
+                raise RuntimeError(
+                    f"held orderbook worker failed: {terminal_reason}"
+                )
+            return HeldOrderbookReadResult(
+                books,
+                attempted_token_ids=attempted,
+                unattempted_token_ids=set(wanted) - attempted,
+                terminal_reason=terminal_reason,
+                captured_at=(
+                    min(captured_at_by_token.values())
+                    if captured_at_by_token
+                    else None
+                ),
+                captured_at_by_token=captured_at_by_token,
+            )
+        finally:
+            receive_conn.close()
+            try:
+                send_conn.close()
+            except OSError:
+                pass
+            _stop_and_reap(process)
+
     def get_clob_market_info(
         self,
         condition_id: str,
@@ -722,6 +1051,33 @@ class PolymarketClient:
         if isinstance(data, dict):
             return data
         raise RuntimeError(f"CLOB market response for {condition_id} is not an object")
+
+    def get_held_clob_market_info(
+        self,
+        condition_id: str,
+        *,
+        timeout: "float | httpx.Timeout | None" = None,
+    ) -> dict:
+        """Fetch current market facts on the isolated held-risk circuit."""
+
+        request_timeout = (
+            self._bounded_public_http_timeout(timeout)
+            if timeout is not None
+            else None
+        )
+        resp = self._public_get(
+            f"/markets/{condition_id}",
+            timeout=request_timeout,
+            priority=RequestPriority.HELD_REDUCE_ONLY,
+            endpoint_class_override=EndpointClass.HELD_RISK,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        if isinstance(data, dict):
+            return data
+        raise RuntimeError(
+            f"CLOB held market response for {condition_id} is not an object"
+        )
 
     def get_best_bid_ask(self, token_id: str) -> tuple[float, float, float, float]:
         """Get best bid/ask with sizes for VWMP calculation.
@@ -945,34 +1301,47 @@ class PolymarketClient:
         results = adapter.submit_batch(list(envelopes))
         return [_legacy_order_result_from_submit(result) for result in results]
 
-    def get_order(self, order_id: str) -> Optional[dict]:
+    def get_order(
+        self,
+        order_id: str,
+        *,
+        deadline_monotonic: float | None = None,
+    ) -> Optional[dict]:
         """Fetch a single order by venue order ID. Returns None if not found.
 
         Wraps SDK's get_order. Normalizes response to at least
         {"orderID": str, "status": str} so the recovery loop is stable
         against SDK response shape changes.
 
-        Returns None when the venue returns 404 or similar "not found" signal.
-        Other exceptions (network error, auth failure) propagate — the
-        recovery loop catches and logs them so a single bad lookup does not
-        kill the loop.
+        Returns None only when the authenticated adapter raises the typed
+        ``VenueOrderNotFound`` absence signal. Network, auth, transport, and
+        malformed-response failures propagate so recovery cannot mistake an
+        unreadable order for proven absence.
         """
         from src.venue.response_contracts import VenueOrderNotFound
 
         try:
-            state = self._ensure_v2_adapter().get_order(order_id)
+            if deadline_monotonic is None:
+                # Preserve the historical one-argument adapter contract for
+                # non-monitor callers and compatibility fakes.
+                state = self._ensure_v2_adapter().get_order(order_id)
+            else:
+                adapter = getattr(self, "_v2_adapter", None)
+                if adapter is None:
+                    from src.venue.polymarket_v2_adapter import (
+                        IncompleteOrderTruthError,
+                    )
+
+                    raise IncompleteOrderTruthError(
+                        "ORDER_TRUTH_INCOMPLETE: authenticated adapter was not "
+                        "prepared before the monitor deadline"
+                    )
+                state = adapter.get_order(
+                    order_id,
+                    deadline_monotonic=deadline_monotonic,
+                )
         except VenueOrderNotFound:
             return None
-        except httpx.HTTPStatusError as exc:
-            if exc.response.status_code == 404:
-                return None
-            raise
-        except Exception as exc:
-            # Some SDK versions raise a plain exception on 404; treat any
-            # message containing "not found" (case-insensitive) as None.
-            if "not found" in str(exc).lower() or "404" in str(exc):
-                return None
-            raise
 
         result = dict(state.raw)
 
@@ -983,6 +1352,11 @@ class PolymarketClient:
             result.setdefault("status", state.status or result.get("state") or result.get("order_status") or "UNKNOWN")
 
         return result
+
+    def prepare_order_truth_reader(self) -> None:
+        """Prepare the authenticated V2 order reader before monitor deadlines."""
+
+        self._ensure_v2_adapter().prepare_order_truth_reader()
 
     def cancel_order(self, order_id: str) -> Optional[dict]:
         """Cancel a pending order."""
@@ -1031,16 +1405,26 @@ class PolymarketClient:
         logger.info("Batch order cancel result: %d orders → %s", len(order_ids), [r.status for r in results])
         return payloads
 
-    def get_order_status(self, order_id: str) -> Optional[dict]:
+    def get_order_status(
+        self,
+        order_id: str,
+        *,
+        deadline_monotonic: float | None = None,
+    ) -> Optional[dict]:
         """Fetch a live order's latest exchange status."""
         try:
-            result = self.get_order(order_id)
+            result = self.get_order(
+                order_id,
+                deadline_monotonic=deadline_monotonic,
+            )
             if result is None:
                 return {"status": "NOT_FOUND"}
             logger.info("Order status: %s → %s", order_id, result.get("status"))
             return result
         except Exception as exc:
             logger.warning("Order status fetch failed for %s: %s", order_id, exc)
+            if exc.__class__.__name__ == "IncompleteOrderTruthError":
+                raise
             return {"status": "FETCH_ERROR", "reason": str(exc)}
 
     def get_open_orders(self) -> list[dict]:

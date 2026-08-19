@@ -1,5 +1,5 @@
 # Created: 2026-04-27
-# Last reused/audited: 2026-07-28
+# Last reused/audited: 2026-07-29
 # Authority basis (2026-06-12): operator law 2026-06-10 ABSOLUTE — redeem submission
 #   FORBIDDEN. redeem() now raises REDEEM_SUBMISSION_FORBIDDEN unconditionally; the
 #   autonomous web3 broadcast body (eth_sendRawTransaction EOA path) was DELETED.
@@ -25,12 +25,14 @@ import importlib.metadata
 import hashlib
 import json
 import logging
+import multiprocessing
 import os
 import sys
 import threading
 import time
 import urllib.parse
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal, ROUND_FLOOR
@@ -72,6 +74,119 @@ _DERIVED_API_CREDS_CACHE: dict[tuple[str, int, str, int, str], Any] = {}
 _ABSOLUTE_LIVE_PRICE_MIN = Decimal("0.05")
 _ABSOLUTE_LIVE_PRICE_MAX = Decimal("0.95")
 _ACCOUNT_TRUTH_MAX_PAGES = 100
+
+
+def install_dedicated_heartbeat_http_transport(*, timeout_seconds: float) -> bool:
+    """Install the heartbeat keeper's bounded, single-connection SDK transport.
+
+    Heartbeat supervision owns cadence and timeout policy; this adapter owns the
+    SDK's process-global HTTP helper, including request error cause preservation.
+    The operation is intentionally idempotent: every install replaces and closes
+    the previous dedicated client, while the request wrapper is marked once.
+    """
+
+    try:
+        import httpx
+        from py_clob_client_v2.http_helpers import helpers as heartbeat_http_helpers
+    except Exception as exc:  # pragma: no cover - dependency absence is runtime-specific
+        logger.warning("heartbeat HTTP transport install skipped: %s", exc)
+        return False
+
+    try:
+        timeout_value = float(timeout_seconds)
+    except (TypeError, ValueError):
+        logger.warning("heartbeat HTTP transport install skipped: invalid timeout=%r", timeout_seconds)
+        return False
+    if not timeout_value > 0:
+        logger.warning("heartbeat HTTP transport install skipped: invalid timeout=%r", timeout_seconds)
+        return False
+
+    old_client = getattr(heartbeat_http_helpers, "_http_client", None)
+    heartbeat_http_helpers._http_client = httpx.Client(
+        http2=False,
+        timeout=httpx.Timeout(timeout_value),
+        limits=httpx.Limits(
+            max_connections=1,
+            max_keepalive_connections=1,
+            keepalive_expiry=30.0,
+        ),
+    )
+    close = getattr(old_client, "close", None)
+    if callable(close):
+        try:
+            close()
+        except Exception:
+            logger.debug("old heartbeat HTTP client close failed", exc_info=True)
+
+    if getattr(heartbeat_http_helpers, "_zeus_request_cause_preserved", False):
+        return True
+
+    def _request_with_cause(endpoint: str, method: str, headers=None, data=None, params=None):
+        overloaded_headers = heartbeat_http_helpers._overload_headers(method, headers)
+        try:
+            if isinstance(data, str):
+                resp = heartbeat_http_helpers._http_client.request(
+                    method=method,
+                    url=endpoint,
+                    headers=overloaded_headers,
+                    content=data.encode("utf-8"),
+                    params=params,
+                )
+            else:
+                resp = heartbeat_http_helpers._http_client.request(
+                    method=method,
+                    url=endpoint,
+                    headers=overloaded_headers,
+                    json=data,
+                    params=params,
+                )
+
+            if resp.status_code != 200:
+                heartbeat_http_helpers.logger.error(
+                    "[py_clob_client_v2] request error status=%s url=%s body=%s",
+                    resp.status_code,
+                    endpoint,
+                    resp.text,
+                )
+                raise PolyApiException(resp)
+
+            try:
+                return resp.json()
+            except ValueError:
+                return resp.text
+        except PolyApiException:
+            raise
+        except httpx.RequestError as exc:
+            heartbeat_http_helpers.logger.error("[py_clob_client_v2] request error: %s", exc)
+            raise PolyApiException(
+                error_msg=f"Request exception: {type(exc).__name__}"
+            ) from exc
+
+    heartbeat_http_helpers.request = _request_with_cause
+    heartbeat_http_helpers._zeus_request_cause_preserved = True
+    return True
+
+
+def is_heartbeat_transport_error(exc: BaseException) -> bool:
+    """Recognize an HTTP transport failure through its cause/context chain."""
+
+    try:
+        import httpx
+    except Exception:  # pragma: no cover - dependency absence is runtime-specific
+        return False
+
+    current: BaseException | None = exc
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, httpx.RequestError):
+            return True
+        cause = getattr(current, "__cause__", None)
+        context = getattr(current, "__context__", None)
+        current = cause if isinstance(cause, BaseException) else context
+        if not isinstance(current, BaseException):
+            current = None
+    return False
 
 
 def _assert_absolute_live_price_before_sdk(price: Decimal | str | float) -> Decimal:
@@ -307,6 +422,7 @@ class PolymarketV2AdapterProtocol(Protocol):
     funder_address: str
     chain_id: int
     sdk_version: str
+    authenticated_point_reads_are_complete: bool
 
     def preflight(self) -> PreflightResult: ...
 
@@ -317,7 +433,7 @@ class PolymarketV2AdapterProtocol(Protocol):
         intent: ExecutionIntent,
         snapshot: Any,
         order_type: str,
-        post_only: bool = False,
+        post_only: bool = True,
     ) -> VenueSubmissionEnvelope: ...
 
     def submit(
@@ -336,7 +452,14 @@ class PolymarketV2AdapterProtocol(Protocol):
 
     def cancel_batch(self, order_ids: list[str]) -> list[CancelResult]: ...
 
-    def get_order(self, order_id: str) -> OrderState: ...
+    def get_order(
+        self,
+        order_id: str,
+        *,
+        deadline_monotonic: float | None = None,
+    ) -> OrderState: ...
+
+    def prepare_order_truth_reader(self) -> None: ...
 
     def get_account_truth(
         self,
@@ -397,7 +520,15 @@ class IncompleteAccountTruthError(V2ReadUnavailable):
     code = "INCOMPLETE_ACCOUNT_TRUTH"
 
 
+class IncompleteOrderTruthError(V2ReadUnavailable):
+    """Typed fail-closed order-read failure; absence is never inferred."""
+
+    code = "ORDER_TRUTH_INCOMPLETE"
+
+
 class PolymarketV2Adapter:
+    authenticated_point_reads_are_complete = True
+
     def __init__(
         self,
         *,
@@ -427,6 +558,7 @@ class PolymarketV2Adapter:
             if network_timeout_seconds is not None and float(network_timeout_seconds) > 0
             else None
         )
+        self._rpc_call_is_default = rpc_call is None
         if rpc_call is None:
             self._rpc_call = lambda rpc_url, method, params: _json_rpc_call(
                 rpc_url,
@@ -551,6 +683,11 @@ class PolymarketV2Adapter:
             )
         return self._client
 
+    def prepare_order_truth_reader(self) -> None:
+        """Initialize authenticated order truth outside monitor deadlines."""
+
+        self._sdk_client()
+
     def _refresh_signer_bound_l2_api_creds(self, client: Any) -> None:
         set_api_creds = getattr(client, "set_api_creds", None)
         if not callable(set_api_creds):
@@ -614,7 +751,7 @@ class PolymarketV2Adapter:
         intent: ExecutionIntent,
         snapshot: Any,
         order_type: str,
-        post_only: bool = False,
+        post_only: bool = True,
     ) -> VenueSubmissionEnvelope:
         _assert_snapshot_fresh(snapshot)
         outcome_label = _outcome_label(intent.direction)
@@ -701,7 +838,7 @@ class PolymarketV2Adapter:
         try:
             _assert_absolute_live_price_before_sdk(envelope.price)
             envelope = self._bind_runtime_submission_envelope(envelope)
-            envelope.assert_live_submit_bound()
+            envelope.assert_live_fill_price_bound()
         except ValueError as exc:
             _cnt_inc("placeholder_envelope_blocked_total")
             logger.warning(
@@ -709,7 +846,11 @@ class PolymarketV2Adapter:
             )
             return _rejected_submit_result(
                 envelope,
-                error_code="BOUND_ENVELOPE_NOT_LIVE_AUTHORITY",
+                error_code=(
+                    "LIVE_FILL_PRICE_UNBOUNDED"
+                    if "live fill price is unbounded" in str(exc)
+                    else "BOUND_ENVELOPE_NOT_LIVE_AUTHORITY"
+                ),
                 error_message=str(exc),
             )
         if not callable(before_post):
@@ -775,7 +916,7 @@ class PolymarketV2Adapter:
                     chain_id=self.chain_id,
                     neg_risk=envelope.neg_risk,
                 )
-                _assert_final_fok_depth_bound(active_client, envelope)
+                _assert_final_executable_price_bound(active_client, envelope)
                 if not expected_order_id:
                     raise V2AdapterError(
                         "signed order has no deterministic venue order id"
@@ -908,6 +1049,14 @@ class PolymarketV2Adapter:
                     error_code=rejected.error_code,
                     error_message=rejected.error_message,
                 )
+            if post_started and _is_polymarket_deterministic_request_400_error(exc):
+                return _rejected_submit_result(
+                    envelope,
+                    error_code="venue_rejected_400",
+                    error_message=str(exc),
+                    signed_order=signed_order,
+                    signed_order_hash=signed_hash,
+                )
             if not post_started:
                 error_code = (
                     "SUBMIT_ABORTED_PRICE_MOVED"
@@ -1000,7 +1149,7 @@ class PolymarketV2Adapter:
             try:
                 _assert_absolute_live_price_before_sdk(envelope.price)
                 bound_envelope = self._bind_runtime_submission_envelope(envelope)
-                bound_envelope.assert_live_submit_bound()
+                bound_envelope.assert_live_fill_price_bound()
             except ValueError as exc:
                 _cnt_inc("placeholder_envelope_blocked_total")
                 logger.warning(
@@ -1009,7 +1158,11 @@ class PolymarketV2Adapter:
                 return [
                     _rejected_submit_result(
                         e,
-                        error_code="BOUND_ENVELOPE_NOT_LIVE_AUTHORITY",
+                        error_code=(
+                            "LIVE_FILL_PRICE_UNBOUNDED"
+                            if "live fill price is unbounded" in str(exc)
+                            else "BOUND_ENVELOPE_NOT_LIVE_AUTHORITY"
+                        ),
                         error_message=str(exc),
                     )
                     for e in envelopes
@@ -1094,7 +1247,7 @@ class PolymarketV2Adapter:
 
         try:
             for envelope in bound:
-                _assert_final_fok_depth_bound(client, envelope)
+                _assert_final_executable_price_bound(client, envelope)
         except Exception as exc:
             error_code = (
                 "SUBMIT_ABORTED_PRICE_MOVED"
@@ -1207,9 +1360,8 @@ class PolymarketV2Adapter:
                 results.append(_cancel_result_from_response(order_id, item.raw_item))
         return results
 
-    def get_order(self, order_id: str) -> OrderState:
-        _assert_no_world_mutex_held_for_io("venue.get_order")
-        raw = self._sdk_client().get_order(order_id)
+    @staticmethod
+    def _order_state_from_raw(order_id: str, raw: object) -> OrderState:
         if raw is None or raw == {}:
             raise VenueOrderNotFound(order_id)
         raw_dict = _normalize_v2_amount_response(
@@ -1223,6 +1375,112 @@ class PolymarketV2Adapter:
         raw_dict["status"] = outcome.status
         raw_dict["_venue_order_status"] = outcome.status
         return OrderState(order_id=outcome.order_id, status=outcome.status, raw=raw_dict)
+
+    @staticmethod
+    def _order_truth_deadline_remaining(deadline_monotonic: float) -> float:
+        remaining = float(deadline_monotonic) - time.monotonic()
+        if remaining <= 0.0:
+            raise IncompleteOrderTruthError(
+                "ORDER_TRUTH_INCOMPLETE: order read deadline elapsed"
+            )
+        return remaining
+
+    async def _get_order_deadline_async(
+        self,
+        order_id: str,
+        *,
+        deadline_monotonic: float,
+    ) -> object:
+        try:
+            import httpx
+            from py_clob_client_v2.endpoints import GET_ORDER
+        except Exception as exc:  # pragma: no cover - installed SDK surface
+            raise IncompleteOrderTruthError(
+                "ORDER_TRUTH_INCOMPLETE: authenticated order helpers unavailable"
+            ) from exc
+
+        # The monitor deadline may not wrap lazy SDK/client initialization:
+        # custom factories and credential derivation are synchronous and cannot
+        # be cancelled by asyncio.timeout. The held-monitor prewarms this client
+        # before acquiring its single-writer claim.
+        client = self._client
+        if client is None:
+            raise IncompleteOrderTruthError(
+                "ORDER_TRUTH_INCOMPLETE: authenticated client was not prepared "
+                "before the monitor deadline"
+            )
+        request_path = f"{GET_ORDER}{urllib.parse.quote(str(order_id), safe='')}"
+        host = str(getattr(client, "host", self.host)).rstrip("/")
+        remaining = self._order_truth_deadline_remaining(deadline_monotonic)
+        try:
+            async with httpx.AsyncClient(http2=False, timeout=None) as http:
+                async with asyncio.timeout(remaining):
+                    headers, _ = await self._account_truth_headers_async(
+                        http,
+                        client,
+                        request_path=request_path,
+                        deadline_monotonic=deadline_monotonic,
+                    )
+                    remaining = self._order_truth_deadline_remaining(
+                        deadline_monotonic
+                    )
+                    async with asyncio.timeout(remaining):
+                        response = await http.get(
+                            f"{host}{request_path}",
+                            headers=headers,
+                        )
+            if response.status_code == 404:
+                raise VenueOrderNotFound(order_id)
+            if response.status_code != 200:
+                raise IncompleteOrderTruthError(
+                    "ORDER_TRUTH_INCOMPLETE: authenticated order read returned "
+                    f"HTTP {response.status_code}"
+                )
+            decoded = response.json()
+            self._order_truth_deadline_remaining(deadline_monotonic)
+            return decoded
+        except (IncompleteOrderTruthError, VenueOrderNotFound):
+            raise
+        except IncompleteAccountTruthError as exc:
+            raise IncompleteOrderTruthError(
+                "ORDER_TRUTH_INCOMPLETE: order authentication deadline elapsed"
+            ) from exc
+        except TimeoutError as exc:
+            raise IncompleteOrderTruthError(
+                "ORDER_TRUTH_INCOMPLETE: order read deadline elapsed"
+            ) from exc
+        except Exception as exc:
+            raise IncompleteOrderTruthError(
+                "ORDER_TRUTH_INCOMPLETE: authenticated order read failed"
+            ) from exc
+
+    def get_order(
+        self,
+        order_id: str,
+        *,
+        deadline_monotonic: float | None = None,
+    ) -> OrderState:
+        _assert_no_world_mutex_held_for_io("venue.get_order")
+        if deadline_monotonic is None:
+            raw = self._sdk_client().get_order(order_id)
+        else:
+            self._order_truth_deadline_remaining(deadline_monotonic)
+            try:
+                asyncio.get_running_loop()
+            except RuntimeError:
+                pass
+            else:
+                raise IncompleteOrderTruthError(
+                    "ORDER_TRUTH_INCOMPLETE: synchronous order read cannot nest "
+                    "in a running event loop"
+                )
+            raw = asyncio.run(
+                self._get_order_deadline_async(
+                    order_id,
+                    deadline_monotonic=deadline_monotonic,
+                )
+            )
+        return self._order_state_from_raw(order_id, raw)
 
     @staticmethod
     def _account_truth_deadline_remaining(deadline_monotonic: float) -> float:
@@ -1688,6 +1946,151 @@ class PolymarketV2Adapter:
             "pusd_allowance_source": "chain_erc20_batch",
         }
 
+    def _get_chain_targeted_collateral_payload(
+        self,
+        *,
+        token_ids: list[str],
+    ) -> dict[str, Any]:
+        """Read submit-time pUSD and targeted CTF truth in one Polygon batch."""
+
+        if not self.polygon_rpc_url:
+            raise V2ReadUnavailable(
+                "polygon RPC is required for targeted collateral truth"
+            )
+        collateral, spenders = _collateral_allowance_contracts(self.chain_id)
+        unique_tokens = tuple(
+            dict.fromkeys(
+                token_id
+                for raw_token_id in token_ids
+                if (token_id := str(raw_token_id or "").strip())
+            )
+        )
+        calls: list[tuple[str, list[Any]]] = [
+            (
+                "eth_call",
+                [
+                    {
+                        "to": collateral,
+                        "data": "0x70a08231" + _abi_address(self.funder_address),
+                    },
+                    "latest",
+                ],
+            ),
+            *[
+                (
+                    "eth_call",
+                    [
+                        {
+                            "to": collateral,
+                            "data": (
+                                "0xdd62ed3e"
+                                + _abi_address(self.funder_address)
+                                + _abi_address(spender)
+                            ),
+                        },
+                        "latest",
+                    ],
+                )
+                for spender in spenders
+            ],
+        ]
+        for token_id in unique_tokens:
+            try:
+                token_value = int(token_id, 0)
+            except (TypeError, ValueError) as exc:
+                raise V2AdapterError(
+                    f"invalid targeted collateral token_id {token_id!r}"
+                ) from exc
+            if not 0 <= token_value < 2**256:
+                raise V2AdapterError(
+                    f"targeted collateral token_id outside uint256: {token_id!r}"
+                )
+            token_word = format(token_value, "064x")
+            calls.append(
+                (
+                    "eth_call",
+                    [
+                        {
+                            "to": POLYGON_CTF_ADDRESS,
+                            "data": (
+                                ERC1155_BALANCE_OF_SELECTOR
+                                + _abi_address(self.funder_address)
+                                + token_word
+                            ),
+                        },
+                        "latest",
+                    ],
+                )
+            )
+            calls.extend(
+                (
+                    "eth_call",
+                    [
+                        {
+                            "to": POLYGON_CTF_ADDRESS,
+                            "data": (
+                                ERC1155_IS_APPROVED_FOR_ALL_SELECTOR
+                                + _abi_address(self.funder_address)
+                                + _abi_address(exchange)
+                            ),
+                        },
+                        "latest",
+                    ],
+                )
+                for exchange in spenders
+            )
+
+        # The caller's submit-collateral guard is 20 seconds. Every underlying
+        # network operation must finish first; an equal/longer inner timeout
+        # merely leaks the worker after the outer guard fires.
+        timeout_seconds = min(self._network_timeout(8.0), 10.0)
+        values = _json_rpc_batch_call_hard_deadline(
+            self.polygon_rpc_url,
+            calls,
+            timeout_seconds=timeout_seconds,
+        )
+        expected = 3 + 3 * len(unique_tokens)
+        if len(values) != expected:
+            raise V2AdapterError(
+                f"targeted collateral batch returned {len(values)} results; "
+                f"expected {expected}"
+            )
+        quantities = [
+            _uint256_hex_data_int(value, context="targeted collateral batch")
+            for value in values
+        ]
+        pusd_balance, exchange_allowance, neg_risk_allowance = quantities[:3]
+        balances: dict[str, int] = {}
+        allowances: dict[str, int] = {}
+        offset = 3
+        for token_id in unique_tokens:
+            balance, exchange_approved, neg_risk_approved = quantities[
+                offset : offset + 3
+            ]
+            offset += 3
+            if exchange_approved not in {0, 1} or neg_risk_approved not in {0, 1}:
+                raise V2AdapterError(
+                    f"targeted collateral approvals must be canonical bools "
+                    f"for token_id={token_id}"
+                )
+            balances[token_id] = balance
+            allowances[token_id] = (
+                balance if exchange_approved and neg_risk_approved else 0
+            )
+        return {
+            "pusd_balance_micro": pusd_balance,
+            "pusd_allowance_micro": min(exchange_allowance, neg_risk_allowance),
+            "usdc_e_legacy_balance_micro": 0,
+            "ctf_token_balances_units": balances,
+            "ctf_token_allowances_units": allowances,
+            "authority_tier": "CHAIN",
+            "signature_type": self.signature_type,
+            "pusd_balance_source": "CHAIN",
+            "pusd_allowance_source": "chain_erc20_batch",
+            "ctf_balance_source": "chain_erc1155_batch",
+            "ctf_token_scope": "targeted",
+        }
+
     def _pusd_collateral_payload_from_raw(
         self,
         raw: dict[str, Any],
@@ -1828,8 +2231,25 @@ class PolymarketV2Adapter:
         its runtime proportional to the order being submitted.
         """
 
-        raw = self._collateral_balance_allowance_raw(refresh_allowance=True)
-        payload = self._pusd_collateral_payload_from_raw(raw)
+        # Production uses the adapter's bounded JSON-RPC transport. One ordered
+        # batch is both fresher and faster than serial CLOB cache reads followed
+        # by chain fallbacks. Custom rpc_call is retained as the deterministic
+        # unit-test seam for the legacy per-call proof below.
+        if self._rpc_call_is_default:
+            return self._get_chain_targeted_collateral_payload(token_ids=token_ids)
+
+        try:
+            raw = self._collateral_balance_allowance_raw(refresh_allowance=True)
+            payload = self._pusd_collateral_payload_from_raw(raw)
+        except Exception as clob_exc:
+            try:
+                payload = self.get_chain_pusd_collateral_payload()
+            except Exception as chain_exc:
+                raise V2ReadUnavailable(
+                    "targeted collateral base unavailable from both CLOB and chain: "
+                    f"clob={type(clob_exc).__name__}; "
+                    f"chain={type(chain_exc).__name__}"
+                ) from chain_exc
         balances: dict[str, int] = {}
         allowances: dict[str, int] = {}
         for token_id in dict.fromkeys(str(t or "").strip() for t in token_ids):
@@ -1902,10 +2322,20 @@ class PolymarketV2Adapter:
 
         if not token_id:
             return {}
-        client = self._sdk_client()
+        try:
+            client = self._sdk_client()
+        except Exception as clob_error:
+            try:
+                return self._chain_conditional_balance_allowance_raw(token_id)
+            except Exception as chain_exc:
+                raise V2ReadUnavailable(
+                    "conditional token balance unavailable from both CLOB and chain: "
+                    f"clob={type(clob_error).__name__}; "
+                    f"chain={type(chain_exc).__name__}"
+                ) from chain_exc
         get_balance_allowance = getattr(client, "get_balance_allowance", None)
         if not callable(get_balance_allowance):
-            return {}
+            return self._chain_conditional_balance_allowance_raw(token_id)
         try:
             from py_clob_client_v2.clob_types import AssetType, BalanceAllowanceParams
 
@@ -1921,32 +2351,107 @@ class PolymarketV2Adapter:
                 signature_type=self.signature_type,
             )
         try:
-            return dict(get_balance_allowance(params) or {})
-        except Exception as exc:
-            logger.debug(
-                "conditional balance allowance unavailable for token %s...%s: %s",
-                token_id[:8],
-                token_id[-4:],
-                exc,
+            raw = dict(get_balance_allowance(params) or {})
+            balance = _micro_int_or_none(raw.get("balance"))
+            if balance is not None and balance > 0:
+                return raw
+            clob_error: Exception = V2ReadUnavailable(
+                "conditional balance response missing or zero; "
+                "chain confirmation required"
             )
-            return {}
+        except Exception as exc:
+            clob_error = exc
+        try:
+            return self._chain_conditional_balance_allowance_raw(token_id)
+        except Exception as chain_exc:
+            raise V2ReadUnavailable(
+                "conditional token balance unavailable from both CLOB and chain: "
+                f"clob={type(clob_error).__name__}; "
+                f"chain={type(chain_exc).__name__}"
+            ) from chain_exc
+
+    def _chain_conditional_balance_allowance_raw(
+        self,
+        token_id: str,
+    ) -> dict[str, Any]:
+        """Read exact ERC-1155 inventory and exchange approvals from Polygon."""
+
+        if not self.polygon_rpc_url:
+            raise V2ReadUnavailable("polygon_rpc_url required for CTF balance fallback")
+        token_word = format(int(str(token_id), 0), "064x")
+        balance_data = (
+            ERC1155_BALANCE_OF_SELECTOR
+            + _abi_address(self.funder_address)
+            + token_word
+        )
+        _collateral, exchanges = _collateral_allowance_contracts(self.chain_id)
+        approval_data = tuple(
+            ERC1155_IS_APPROVED_FOR_ALL_SELECTOR
+            + _abi_address(self.funder_address)
+            + _abi_address(exchange)
+            for exchange in exchanges
+        )
+
+        def _read(data: str) -> int:
+            return _eth_call_uint(
+                self.polygon_rpc_url,
+                self._rpc_call,
+                to=POLYGON_CTF_ADDRESS,
+                data=data,
+            )
+
+        # Assert on the caller thread before moving the blocking calls to
+        # workers; the world-mutex sentinel is thread-local.
+        _assert_no_world_mutex_held_for_io("onchain.ctf_parallel")
+        # balanceOf and both operator approvals are independent current facts.
+        # Reading them in one capture window avoids three serial RPC round trips
+        # on every SELL without changing the fail-closed proof.
+        with ThreadPoolExecutor(
+            max_workers=1 + len(approval_data),
+            thread_name_prefix="zeus-ctf-proof",
+        ) as pool:
+            values = list(pool.map(_read, (balance_data, *approval_data)))
+        balance, *approval_values = values
+        approvals = tuple(bool(value) for value in approval_values)
+        # This targeted surface does not carry market negRisk identity, so it
+        # can only certify execution allowance when both possible venue
+        # operators are approved. The final submit remains authoritative.
+        allowance = balance if approvals and all(approvals) else 0
+        return {
+            "balance": str(balance),
+            "allowance": str(allowance),
+            "authority_tier": "CHAIN",
+            "balance_source": "polygon_erc1155_balance_of",
+        }
 
     def _chain_collateral_allowance_micro(self) -> int | None:
         if not self.polygon_rpc_url:
             return None
+        # This guard must stay outside the fallback catch below: I/O under the
+        # world mutex is a structural violation, not an unavailable allowance.
+        _assert_no_world_mutex_held_for_io("onchain.pusd_allowance_parallel")
         try:
             collateral, spenders = _collateral_allowance_contracts(self.chain_id)
-            allowances = [
-                _eth_call_uint(
+            allowance_data = tuple(
+                "0xdd62ed3e"
+                + _abi_address(self.funder_address)
+                + _abi_address(spender)
+                for spender in spenders
+            )
+
+            def _read(data: str) -> int:
+                return _eth_call_uint(
                     self.polygon_rpc_url,
                     self._rpc_call,
                     to=collateral,
-                    data="0xdd62ed3e"
-                    + _abi_address(self.funder_address)
-                    + _abi_address(spender),
+                    data=data,
                 )
-                for spender in spenders
-            ]
+
+            with ThreadPoolExecutor(
+                max_workers=len(allowance_data),
+                thread_name_prefix="zeus-pusd-allowance",
+            ) as pool:
+                allowances = list(pool.map(_read, allowance_data))
             return min(allowances)
         except Exception as exc:
             logger.warning(
@@ -2946,6 +3451,12 @@ def _is_polymarket_invalid_safe_signature_error(exc: BaseException) -> bool:
     return "status_code=400" in text and "invalid POLY_GNOSIS_SAFE signature" in text
 
 
+def _is_polymarket_deterministic_request_400_error(exc: BaseException) -> bool:
+    """True only for a synchronous typed venue request rejection."""
+
+    return isinstance(exc, PolyApiException) and exc.status_code == 400
+
+
 def _is_polymarket_geoblock_403_error(exc: BaseException) -> bool:
     """Recognize the venue's synchronous, definitive geographic rejection."""
 
@@ -2990,8 +3501,60 @@ def _is_polymarket_fak_no_match_error(exc: BaseException) -> bool:
     )
 
 
+def _assert_final_executable_price_bound(
+    _client: Any,
+    envelope: VenueSubmissionEnvelope,
+) -> None:
+    """Independently require a venue-legal bounded fill pre-POST."""
+
+    _assert_absolute_live_price_before_sdk(envelope.price)
+    tick_size = Decimal(envelope.tick_size)
+    price = Decimal(envelope.price)
+    if (
+        not tick_size.is_finite()
+        or tick_size <= 0
+        or price % tick_size != 0
+    ):
+        raise ValueError(
+            "LIVE_ORDER_TICK_INVALID:FINAL_SDK_BOUNDARY:"
+            f"price={price}:tick_size={tick_size}"
+        )
+    size = Decimal(envelope.size)
+    min_order_size = Decimal(envelope.min_order_size)
+    if (
+        not size.is_finite()
+        or not min_order_size.is_finite()
+        or size <= 0
+        or min_order_size <= 0
+        or size < min_order_size
+    ):
+        raise ValueError(
+            "LIVE_ORDER_SIZE_INVALID:FINAL_SDK_BOUNDARY:"
+            f"size={size}:min_order_size={min_order_size}"
+        )
+    order_type = str(envelope.order_type or "").strip().upper()
+    maker = envelope.post_only and order_type in {"GTC", "GTD"}
+    marketable_taker = (
+        not envelope.post_only
+        and (
+            (envelope.side == "BUY" and order_type in {"FOK", "FAK"})
+            or (envelope.side == "SELL" and order_type == "FAK")
+        )
+    )
+    if not (maker or marketable_taker):
+        # INV-47 SCOPE: only this token/side submission (or its atomic batch)
+        # is rejected. DRAIN: the next submit may carry a certified maker or
+        # role-scoped marketable envelope. RESET: no latch is stored; a
+        # direction-aware bounded-fill mode passes immediately.
+        raise ValueError(
+            "LIVE_FILL_PRICE_UNBOUNDED:FINAL_SDK_BOUNDARY:"
+            f"side={envelope.side}:order_type={order_type or 'ABSENT'}:"
+            f"post_only={envelope.post_only}"
+        )
+
+
 def _assert_final_fok_depth_bound(client: Any, envelope: VenueSubmissionEnvelope) -> None:
-    """Bind an FOK to executable depth after SDK preparation, immediately pre-POST."""
+    """Legacy FOK depth checker retained for offline diagnostics and tests."""
 
     if str(envelope.order_type).upper() != "FOK":
         return
@@ -3233,6 +3796,84 @@ def _json_rpc_batch_call(
     return [by_id[index] for index in range(1, len(calls) + 1)]
 
 
+def _json_rpc_batch_process_worker(
+    send_conn,
+    rpc_url: str,
+    calls: list[tuple[str, list[Any]]],
+    timeout_seconds: float,
+) -> None:
+    try:
+        result = _json_rpc_batch_call(
+            rpc_url,
+            calls,
+            timeout_seconds=timeout_seconds,
+        )
+        send_conn.send(("ok", result))
+    except BaseException as exc:
+        send_conn.send(("error", f"{type(exc).__name__}: {exc}"))
+    finally:
+        send_conn.close()
+
+
+def _json_rpc_batch_call_hard_deadline(
+    rpc_url: str,
+    calls: list[tuple[str, list[Any]]],
+    *,
+    timeout_seconds: float,
+) -> list[Any]:
+    """Run a public RPC batch behind a killable total wall-clock deadline."""
+
+    _assert_no_world_mutex_held_for_io("onchain.batch_hard_deadline")
+    timeout = max(0.01, float(timeout_seconds))
+    deadline = time.monotonic() + timeout
+
+    def _remaining() -> float:
+        return max(0.0, deadline - time.monotonic())
+
+    def _stop_and_reap(process) -> None:
+        if not process.is_alive():
+            return
+        process.terminate()
+        process.join(timeout=min(0.25, _remaining()))
+        if process.is_alive():
+            process.kill()
+            process.join(timeout=min(0.25, _remaining()))
+
+    context = multiprocessing.get_context("spawn")
+    receive_conn, send_conn = context.Pipe(duplex=False)
+    process = context.Process(
+        target=_json_rpc_batch_process_worker,
+        args=(send_conn, rpc_url, calls, timeout),
+        name="zeus-targeted-collateral-rpc",
+        daemon=True,
+    )
+    try:
+        process.start()
+        send_conn.close()
+        # Reserve cleanup budget inside the same total deadline. The caller's
+        # outer guard is 20 seconds; this bounded subprocess must be reaped
+        # before that guard can abandon its worker.
+        poll_budget = max(0.0, _remaining() - min(0.5, timeout / 4.0))
+        if poll_budget <= 0.0 or not receive_conn.poll(poll_budget):
+            _stop_and_reap(process)
+            raise TimeoutError(
+                f"targeted collateral RPC exceeded {timeout:.1f}s hard deadline"
+            )
+        status, payload = receive_conn.recv()
+        process.join(timeout=min(0.25, _remaining()))
+        _stop_and_reap(process)
+        if status != "ok":
+            raise V2ReadUnavailable(f"targeted collateral RPC failed: {payload}")
+        return list(payload)
+    finally:
+        receive_conn.close()
+        try:
+            send_conn.close()
+        except OSError:
+            pass
+        _stop_and_reap(process)
+
+
 def _hex_data_bytes(value: Any, *, context: str) -> bytes:
     if (
         not isinstance(value, str)
@@ -3360,6 +4001,8 @@ CTF_GET_COLLECTION_ID_SELECTOR = "0x856296f7"
 # balanceOf(address account, uint256 id) ERC1155 selector.
 # keccak256('balanceOf(address,uint256)')[:4] — verified 2026-06-09.
 ERC1155_BALANCE_OF_SELECTOR = "0x00fdd58e"
+# isApprovedForAll(address,address) ERC1155 selector.
+ERC1155_IS_APPROVED_FOR_ALL_SELECTOR = "0xe985e9c5"
 # wcol() — NegRiskAdapter's wrapped-collateral token used as the CTF collateral
 # for ALL negRisk positions. negRisk position ERC1155 ids are derived from WCOL,
 # NOT pUSD. keccak256('wcol()')[:4] — verified 2026-06-09.

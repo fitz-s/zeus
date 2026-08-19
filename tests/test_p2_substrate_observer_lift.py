@@ -1,12 +1,13 @@
 # Created: 2026-06-08
-# Last reused or audited: 2026-06-08
-# Authority basis: docs/architecture/system_decomposition_plan.md
+# Last reused or audited: 2026-08-04
+# Authority basis: docs/reference/design_system_decomposition_plan.md
 #   §4.1 (Executable-Substrate Observer), §6 (P2 row), §7 (I1 no-back-coupling),
 #   §8 Step 1 (lift + delete outer pending gates), §9 (regression-unconstructable proof).
-# Lifecycle: created=2026-06-08; last_reviewed=2026-06-08; last_reused=never
+# Lifecycle: created=2026-06-08; last_reviewed=2026-08-04; last_reused=2026-08-04
 # Purpose: RELATIONSHIP TESTS for process-topology refactor STEP P2 — lift the
 #   executable-substrate observer (the zero-trade regression site) out of the order
 #   daemon into its own process.
+# Reuse: Inspect current scheduler registration, process boundary, and shared writer-lock relationships first.
 #
 # These tests verify CROSS-MODULE INVARIANTS (Module A's output → Module B), not just
 # function behavior:
@@ -27,6 +28,9 @@ from __future__ import annotations
 import ast
 import contextlib
 import inspect
+import threading
+import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -152,13 +156,148 @@ def test_substrate_observer_heartbeat_has_dedicated_executor():
 
 
 def test_substrate_observer_money_path_priority_has_dedicated_executor():
-    """Money-path substrate recapture must not wait behind broad warm/discovery jobs."""
+    """Money-path recapture must not queue behind broad default-executor work."""
     src = _OBSERVER_DAEMON.read_text(encoding="utf-8")
     assert '"priority": _APSchedulerThreadPoolExecutor(max_workers=1)' in src
     assert 'id="money_path_substrate_priority"' in src
     assert 'executor="priority"' in src
     assert "_priority_refresh_interval_seconds()" in src
-    assert "next_run_time=datetime.now(timezone.utc)" in src
+    assert "base_now = datetime.now(timezone.utc)" in src
+    assert "next_run_time=base_now" in src
+
+
+def test_substrate_observer_broad_jobs_share_default_but_priority_is_independent():
+    """Resolve each registered job to its actual single-worker executor object."""
+    from types import SimpleNamespace
+
+    import src.ingest.substrate_observer_daemon as daemon
+
+    class _FakeExecutor:
+        def __init__(self, max_workers):
+            self.max_workers = max_workers
+
+    class _FakeScheduler:
+        def __init__(self):
+            self.executors = {
+                "default": _FakeExecutor(max_workers=1),
+                "discovery": _FakeExecutor(max_workers=1),
+                "priority": _FakeExecutor(max_workers=1),
+                "heartbeat": _FakeExecutor(max_workers=1),
+            }
+            self.jobs = []
+
+        def add_job(self, func, trigger, **kwargs):
+            executor_name = kwargs.get("executor", "default")
+            self.jobs.append(
+                SimpleNamespace(
+                    id=kwargs["id"],
+                    trigger=trigger,
+                    executor_name=executor_name,
+                    executor=self.executors[executor_name],
+                    kwargs=kwargs,
+                    next_run_time=kwargs.get("next_run_time"),
+                    func=func,
+                )
+            )
+
+    scheduler = _FakeScheduler()
+    daemon._register_substrate_observer_jobs(
+        scheduler,
+        money_path_priority_cycle=lambda: None,
+        market_substrate_warm_cycle=lambda: None,
+        market_discovery_cycle=lambda: None,
+        priority_refresh_interval_seconds=20.0,
+        heartbeat=lambda: None,
+    )
+
+    jobs = {job.id: job for job in scheduler.jobs}
+    warm_job = jobs["edli_market_substrate_warm"]
+    discovery_job = jobs["market_discovery"]
+    priority_job = jobs["money_path_substrate_priority"]
+    assert warm_job.executor_name == "default"
+    assert warm_job.executor is scheduler.executors["default"]
+    assert scheduler.executors["default"].max_workers == 1
+    assert discovery_job.executor_name == "discovery"
+    assert discovery_job.executor is scheduler.executors["discovery"]
+    assert discovery_job.executor is not warm_job.executor
+    assert priority_job.executor_name == "priority"
+    assert priority_job.executor is scheduler.executors["priority"]
+    assert priority_job.executor.max_workers == 1
+    assert priority_job.executor is not warm_job.executor
+    assert jobs["substrate_observer_heartbeat"].executor_name == "heartbeat"
+    assert jobs["substrate_observer_heartbeat"].executor is not warm_job.executor
+
+    priority_time = priority_job.next_run_time
+    warm_time = jobs["edli_market_substrate_warm"].next_run_time
+    discovery_time = jobs["market_discovery"].next_run_time
+    assert priority_time is not None
+    assert warm_time is not None
+    assert discovery_time is not None
+    assert priority_time < warm_time < discovery_time
+    assert warm_time - priority_time == timedelta(seconds=10)
+    assert discovery_time - priority_time == timedelta(seconds=15)
+    assert priority_job.kwargs["seconds"] == 20.0
+    assert (
+        jobs["edli_market_substrate_warm"].kwargs["seconds"]
+        == daemon._EDLI_SUBSTRATE_WARM_INTERVAL_SECONDS
+    )
+    assert jobs["market_discovery"].kwargs["minutes"] == 5
+    assert jobs["market_discovery"].kwargs["misfire_grace_time"] == 120
+
+
+def test_actual_warm_and_priority_executors_start_while_discovery_is_blocked():
+    """A long universe read cannot suppress warm or priority triggers."""
+    pytest.importorskip("apscheduler")
+    from apscheduler.executors.pool import ThreadPoolExecutor
+    from apscheduler.schedulers.background import BackgroundScheduler
+
+    import src.ingest.substrate_observer_daemon as daemon
+
+    broad_started = threading.Event()
+    warm_started = threading.Event()
+    priority_started = threading.Event()
+
+    def _long_discovery():
+        broad_started.set()
+        time.sleep(1.4)
+
+    def _priority():
+        priority_started.set()
+
+    scheduler = BackgroundScheduler(
+        executors={
+            "default": ThreadPoolExecutor(max_workers=1),
+            "discovery": ThreadPoolExecutor(max_workers=1),
+            "priority": ThreadPoolExecutor(max_workers=1),
+            "heartbeat": ThreadPoolExecutor(max_workers=1),
+        }
+    )
+    daemon._register_substrate_observer_jobs(
+        scheduler,
+        money_path_priority_cycle=_priority,
+        market_substrate_warm_cycle=warm_started.set,
+        market_discovery_cycle=_long_discovery,
+        priority_refresh_interval_seconds=20.0,
+        heartbeat=lambda: None,
+    )
+    now = datetime.now(timezone.utc)
+    scheduler.modify_job("market_discovery", next_run_time=now)
+    scheduler.modify_job("edli_market_substrate_warm", next_run_time=now + timedelta(seconds=0.05))
+    scheduler.modify_job(
+        "money_path_substrate_priority",
+        next_run_time=now + timedelta(seconds=0.1),
+        misfire_grace_time=1,
+    )
+    scheduler.modify_job("substrate_observer_heartbeat", next_run_time=None)
+    try:
+        scheduler.start()
+        assert broad_started.wait(0.5), "discovery job did not start"
+        assert warm_started.wait(0.6), "warm trigger queued behind discovery"
+        assert priority_started.wait(0.6), (
+            "priority trigger queued behind discovery and missed its 1s grace"
+        )
+    finally:
+        scheduler.shutdown(wait=True)
 
 
 def test_substrate_observer_preflight_converges_forecast_runtime_indexes():
@@ -469,7 +608,7 @@ def test_superiority_substrate_producer_fires_on_staleness_regardless_of_backlog
     import src.data.job_lock as job_lock
 
     orig_lock = job_lock.acquire_lock
-    job_lock.acquire_lock = lambda _name: contextlib.nullcontext(True)
+    job_lock.acquire_lock = lambda _name, **_kwargs: contextlib.nullcontext(True)
     # Make the staleness clock report STALE so the producer is due to fire.
     obs._market_discovery_last_completed_monotonic = None
     try:

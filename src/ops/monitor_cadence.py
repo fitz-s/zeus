@@ -7,11 +7,12 @@ events; it does not use projection timestamps and never writes runtime state.
 from __future__ import annotations
 
 import json
+import math
 import re
 import sqlite3
 from datetime import datetime, timezone
 from decimal import Decimal
-from typing import Any
+from typing import Any, Mapping
 
 from src.contracts.position_truth import (
     CURRENT_MONEY_RISK_CHAIN_STATES,
@@ -51,6 +52,9 @@ def collect_monitor_cadence_evidence(
     now: datetime,
     max_age_seconds: float | None = None,
     min_occurred_at: datetime | None = None,
+    strict_future: bool = False,
+    monitor_refreshed_only: bool = False,
+    require_fresh_inputs: bool = False,
     sample_limit: int = 25,
 ) -> dict[str, Any]:
     """Return per-position monitor cadence evidence for current money risk.
@@ -59,7 +63,20 @@ def collect_monitor_cadence_evidence(
     ``min_occurred_at`` is the post-start restart proof floor.  When both are
     supplied, a position must satisfy both.  Future-dated monitor events are
     reported separately because they are clock/data faults, not stale cadence.
+    ``strict_future`` rejects every event after ``now``; other consumers retain
+    the concurrent-write tolerance.
+    ``monitor_refreshed_only`` excludes non-monitor fallback authority from
+    coverage without changing the default health/preflight behavior.
+    ``require_fresh_inputs`` additionally requires the latest canonical monitor
+    event to attest both current probability and held-side CLOB authority.  It
+    is meaningful only with ``monitor_refreshed_only`` and prevents a fresh
+    timestamp carrying stale inputs from falsely clearing recovery debt.
     """
+
+    if require_fresh_inputs and not monitor_refreshed_only:
+        raise ValueError(
+            "MONITOR_CADENCE_FRESH_INPUTS_REQUIRE_MONITOR_REFRESHED_ONLY"
+        )
 
     position_columns = _table_columns(conn, "position_current")
     event_columns = _table_columns(conn, "position_events")
@@ -88,8 +105,9 @@ def collect_monitor_cadence_evidence(
                     "restart_resolution": "settlement_harvester_or_chain_size_change",
                 }
             )
-            fresh_count += 1
-            continue
+            if not monitor_refreshed_only:
+                fresh_count += 1
+                continue
         monitor_event = _latest_monitor_refreshed_event(
             conn,
             str(position["position_id"]),
@@ -112,6 +130,11 @@ def collect_monitor_cadence_evidence(
             event_columns,
         )
         if not occurred_at:
+            if monitor_refreshed_only:
+                stale_or_missing.append(
+                    {**position_evidence, "last_monitor_refreshed_at": None}
+                )
+                continue
             if _review_required_event_is_fresh(
                 review_event,
                 now_utc=now_utc,
@@ -147,12 +170,30 @@ def collect_monitor_cadence_evidence(
             continue
         age_seconds = (now_utc - occurred_dt).total_seconds()
         position_evidence["age_seconds"] = round(age_seconds, 1)
-        if age_seconds < -MONITOR_CADENCE_FUTURE_TOLERANCE_SECONDS:
+        if age_seconds < (
+            0.0 if strict_future else -MONITOR_CADENCE_FUTURE_TOLERANCE_SECONDS
+        ):
             future_events.append(position_evidence)
-        elif age_seconds < 0.0:
+            continue
+        if require_fresh_inputs:
+            input_issue = _monitor_event_fresh_input_issue(monitor_event)
+            if input_issue is not None:
+                if _monitor_event_closed_market_pending_settlement(
+                    position_evidence,
+                    monitor_event,
+                ):
+                    settlement_recoverable.append(position_evidence.copy())
+                else:
+                    stale_or_missing.append(
+                        {**position_evidence, "issue": input_issue}
+                    )
+                continue
+        if age_seconds < 0.0:
             fresh_count += 1
         elif min_occurred_utc is not None and occurred_dt < min_occurred_utc:
-            if _review_required_event_is_fresh(
+            if monitor_refreshed_only:
+                stale_or_missing.append(position_evidence)
+            elif _review_required_event_is_fresh(
                 review_event,
                 now_utc=now_utc,
                 max_age_seconds=max_age_seconds,
@@ -181,7 +222,9 @@ def collect_monitor_cadence_evidence(
                 else:
                     stale_or_missing.append(position_evidence)
         elif max_age_seconds is not None and age_seconds > float(max_age_seconds):
-            if _review_required_event_is_fresh(
+            if monitor_refreshed_only:
+                stale_or_missing.append(position_evidence)
+            elif _review_required_event_is_fresh(
                 review_event,
                 now_utc=now_utc,
                 max_age_seconds=max_age_seconds,
@@ -212,12 +255,33 @@ def collect_monitor_cadence_evidence(
         else:
             fresh_count += 1
     open_count = len(monitored_rows)
+    quote_only_stale = [
+        item
+        for item in stale_or_missing
+        if item.get("issue") == "monitor_clob_stale"
+    ]
+    blocking_stale = [
+        item
+        for item in stale_or_missing
+        if item.get("issue") != "monitor_clob_stale"
+    ]
     return {
         "open_position_count": open_count,
         "monitored_position_count": open_count,
+        "monitored_position_ids": sorted(
+            str(row["position_id"]) for row in monitored_rows
+        ),
         "fresh_position_count": fresh_count,
         "stale_or_missing_position_count": len(stale_or_missing),
         "stale_or_missing_positions": stale_or_missing[:sample_limit],
+        # Keep strict stale evidence intact, but split the complete list so a
+        # missing held-side quote cannot become global cadence debt. Counts are
+        # deliberately computed before sampling; each sample is independently
+        # bounded by sample_limit.
+        "quote_only_stale_position_count": len(quote_only_stale),
+        "quote_only_stale_positions": quote_only_stale[:sample_limit],
+        "blocking_stale_position_count": len(blocking_stale),
+        "blocking_stale_positions": blocking_stale[:sample_limit],
         "settlement_recoverable_position_count": len(settlement_recoverable),
         "settlement_recoverable_positions": settlement_recoverable[:sample_limit],
         "review_managed_position_count": len(review_managed),
@@ -228,6 +292,294 @@ def collect_monitor_cadence_evidence(
         "non_monitor_chain_risk_positions": non_monitor_chain_risk_rows[:sample_limit],
         "non_monitor_chain_risk_role": "chain_reconciliation_not_monitor_cadence",
     }
+
+
+def monitor_cadence_blocking_evidence(
+    evidence: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Read blocking/quote-only stale groups with legacy evidence fallback.
+
+    Older callers and test doubles expose only the strict stale count/list.
+    Treat that shape as wholly blocking so the new quote-only classification
+    cannot accidentally make an unknown evidence shape fail open.
+    """
+
+    stale_count = int(evidence.get("stale_or_missing_position_count") or 0)
+    stale_positions = list(evidence.get("stale_or_missing_positions") or [])
+    group_fields = {
+        "blocking_stale_position_count",
+        "blocking_stale_positions",
+        "quote_only_stale_position_count",
+        "quote_only_stale_positions",
+    }
+    if not group_fields.issubset(evidence):
+        return {
+            "blocking_stale_position_count": stale_count,
+            "blocking_stale_positions": stale_positions,
+            "quote_only_stale_position_count": 0,
+            "quote_only_stale_positions": [],
+        }
+    return {
+        "blocking_stale_position_count": int(
+            evidence.get("blocking_stale_position_count") or 0
+        ),
+        "blocking_stale_positions": list(evidence["blocking_stale_positions"]),
+        "quote_only_stale_position_count": int(
+            evidence.get("quote_only_stale_position_count") or 0
+        ),
+        "quote_only_stale_positions": list(evidence["quote_only_stale_positions"]),
+    }
+
+
+def latest_complete_global_auction_receipt(
+    conn: sqlite3.Connection,
+    *,
+    completed_not_before: datetime,
+    require_held_coverage_count: int = 0,
+    require_held_position_ids: tuple[str, ...] = (),
+) -> tuple[int, int, int] | None:
+    """Return a complete current-cut auction proving held redecision coverage."""
+
+    try:
+        rows = conn.execute(
+            """
+            SELECT id, mode, started_at, completed_at, artifact_json
+              FROM decision_log
+             WHERE mode IN (
+                'global_single_order_auction',
+                'global_single_order_auction_delta',
+                'global_single_order_auction_duplicate'
+             )
+             ORDER BY id DESC
+             LIMIT 8
+            """
+        ).fetchall()
+    except sqlite3.Error:
+        return None
+    for row in rows:
+        try:
+            from src.contracts.global_auction_receipt import (
+                GLOBAL_AUCTION_RECEIPT_SCHEMA_VERSION,
+                assert_global_auction_summary_integrity,
+            )
+
+            artifact = json.loads(row["artifact_json"] or "{}")
+            summary = artifact.get("summary") or {}
+            required_position_ids = frozenset(require_held_position_ids)
+            if required_position_ids:
+                if summary.get("schema_version") != GLOBAL_AUCTION_RECEIPT_SCHEMA_VERSION:
+                    continue
+                assert_global_auction_summary_integrity(summary)
+                row_completed_at = _parse_iso_utc(row["completed_at"])
+                artifact_completed_at = _parse_iso_utc(artifact.get("completed_at"))
+                decision_at = _parse_iso_utc(summary.get("decision_at_utc"))
+                if (
+                    row_completed_at is None
+                    or artifact_completed_at is None
+                    or decision_at is None
+                    or row_completed_at != artifact_completed_at
+                    or row_completed_at != decision_at
+                ):
+                    continue
+                completed_at = row_completed_at
+            else:
+                completed_at = _parse_iso_utc(
+                    artifact.get("completed_at")
+                    or row["completed_at"]
+                    or row["started_at"]
+                )
+            candidate_count = int(summary.get("candidate_evaluation_count") or 0)
+            scope_count = int(summary.get("full_scope_family_count") or 0)
+            held_expected_count = int(summary.get("held_position_expected_count") or 0)
+            held_accounted_count = int(
+                summary.get("held_position_evaluated_count") or 0
+            ) + int(summary.get("held_position_excluded_count") or 0)
+            if required_position_ids:
+                from src.control.live_health import (
+                    _current_global_auction_holding_payload,
+                )
+
+                holding_payload = _current_global_auction_holding_payload(
+                    conn,
+                    summary,
+                )
+                receipt_position_ids = tuple(
+                    str(item.get("position_id") or "").strip()
+                    for item in holding_payload
+                )
+                if (
+                    any(not position_id for position_id in receipt_position_ids)
+                    or len(set(receipt_position_ids)) != len(receipt_position_ids)
+                    # The receipt may contain an additional position that is
+                    # no longer a current monitor obligation (for example an
+                    # unexecutable dust remainder). Every current obligation
+                    # must still be present; a newly opened or omitted current
+                    # position therefore keeps the restart guard closed.
+                    or not required_position_ids.issubset(receipt_position_ids)
+                    or len(receipt_position_ids) != held_expected_count
+                    or sum(
+                        item.get("status") == "EVALUATED"
+                        for item in holding_payload
+                    )
+                    != int(summary.get("held_position_evaluated_count") or 0)
+                    or sum(
+                        item.get("status") == "EXCLUDED"
+                        for item in holding_payload
+                    )
+                    != int(summary.get("held_position_excluded_count") or 0)
+                ):
+                    continue
+        except Exception:  # noqa: BLE001 - malformed receipts fail closed.
+            continue
+        if (
+            completed_at is not None
+            and completed_at >= completed_not_before
+            and summary.get("candidate_coverage_complete") is True
+            and summary.get("scope_family_coverage_complete") is True
+            and candidate_count > 0
+            and scope_count > 0
+            and (
+                require_held_coverage_count <= 0
+                or (
+                    summary.get("held_position_coverage_complete") is True
+                    and held_expected_count >= require_held_coverage_count
+                    and held_accounted_count >= held_expected_count
+                )
+            )
+        ):
+            return int(row["id"]), candidate_count, scope_count
+    return None
+
+
+def collect_monitor_restart_proof(
+    conn: sqlite3.Connection,
+    *,
+    now: datetime,
+    completed_not_before: datetime,
+    max_age_seconds: float | None = None,
+    sample_limit: int = 5,
+) -> dict[str, Any]:
+    """Prove current held cadence and exact auction coverage in one DB snapshot."""
+
+    owns_transaction = not bool(getattr(conn, "in_transaction", False))
+    if owns_transaction:
+        conn.execute("BEGIN")
+    try:
+        monitor = collect_monitor_cadence_evidence(
+            conn,
+            now=now,
+            min_occurred_at=completed_not_before,
+            max_age_seconds=max_age_seconds,
+            strict_future=True,
+            monitor_refreshed_only=True,
+            require_fresh_inputs=True,
+            sample_limit=sample_limit,
+        )
+        groups = monitor_cadence_blocking_evidence(monitor)
+        open_count = int(monitor.get("open_position_count") or 0)
+        held_ids = tuple(
+            str(value or "").strip()
+            for value in monitor.get("monitored_position_ids", ())
+        )
+        identity_complete = (
+            len(held_ids) == open_count
+            and all(held_ids)
+            and len(set(held_ids)) == len(held_ids)
+        )
+        quote_only_count = int(groups["quote_only_stale_position_count"])
+        receipt = None
+        if quote_only_count > 0 and identity_complete:
+            receipt = latest_complete_global_auction_receipt(
+                conn,
+                completed_not_before=completed_not_before,
+                require_held_coverage_count=open_count,
+                require_held_position_ids=held_ids,
+            )
+        green = (
+            identity_complete
+            and int(monitor.get("future_monitor_event_count") or 0) == 0
+            and int(groups["blocking_stale_position_count"]) == 0
+            and (quote_only_count == 0 or receipt is not None)
+        )
+        return {
+            **monitor,
+            **groups,
+            "complete_held_auction_receipt": receipt,
+            "monitor_scope_identity": held_ids,
+            "green": green,
+        }
+    finally:
+        if owns_transaction and bool(getattr(conn, "in_transaction", False)):
+            conn.rollback()
+
+
+def count_current_monitor_obligations(
+    conn: sqlite3.Connection,
+    *,
+    now: datetime,
+) -> int:
+    """Strictly count positive exposures governed by monitor cadence law.
+
+    Zero is authority only when the canonical schema and every exposure field
+    that could prove a monitored row are present and finite. Unknown data raises
+    so callers retain fail-closed monitor priority.
+    """
+
+    _ensure_utc(now)
+    columns = _table_columns(conn, "position_current")
+    required = {"position_id", "phase", "shares", "chain_shares"}
+    missing = sorted(required - columns)
+    if missing:
+        raise RuntimeError(
+            "MONITOR_OBLIGATION_SCHEMA_INCOMPLETE:" + ",".join(missing)
+        )
+    invalid_phase = conn.execute(
+        """
+        SELECT position_id
+          FROM position_current
+         WHERE phase IS NULL OR TRIM(phase) = ''
+         LIMIT 1
+        """
+    ).fetchone()
+    if invalid_phase is not None:
+        raise RuntimeError("MONITOR_OBLIGATION_PHASE_UNKNOWN")
+
+    phases = tuple(sorted(MONITOR_CADENCE_POSITION_PHASES))
+    placeholders = ",".join("?" for _ in phases)
+    rows = conn.execute(
+        f"""
+        SELECT position_id, shares, chain_shares
+          FROM position_current
+         WHERE phase IN ({placeholders})
+        """,
+        phases,
+    ).fetchall()
+    obligation_count = 0
+    for row in rows:
+        position_id = str(row["position_id"] or "").strip()
+        if not position_id:
+            raise RuntimeError("MONITOR_OBLIGATION_POSITION_ID_UNKNOWN")
+        exposures: list[float | None] = []
+        for field in ("shares", "chain_shares"):
+            raw = row[field]
+            try:
+                value = float(raw) if raw is not None else None
+            except (TypeError, ValueError):
+                value = None
+            if value is not None and (not math.isfinite(value) or value < 0.0):
+                value = None
+            exposures.append(value)
+        if any(
+            value is not None and value > MONITOR_CADENCE_EXPOSURE_EPS
+            for value in exposures
+        ):
+            obligation_count += 1
+            continue
+        if any(value is None for value in exposures):
+            raise RuntimeError(
+                f"MONITOR_OBLIGATION_EXPOSURE_UNKNOWN:{position_id}"
+            )
+    return obligation_count
 
 
 def _table_columns(conn: sqlite3.Connection, table_name: str) -> set[str]:
@@ -267,16 +619,19 @@ def _monitor_cadence_position_rows(
         position_id = str(row["position_id"] or "")
         phase = str(row["phase"] or "").strip().lower()
         chain_state = str(row["chain_state"] or "").strip()
-        shares = _float_or_zero(row["shares"])
-        chain_shares = _float_or_zero(row["chain_shares"])
+        shares = _finite_nonnegative_float_or_none(row["shares"])
+        chain_shares = _finite_nonnegative_float_or_none(row["chain_shares"])
         exposure_positive = (
-            shares > MONITOR_CADENCE_EXPOSURE_EPS
-            or chain_shares > MONITOR_CADENCE_EXPOSURE_EPS
+            shares is not None and shares > MONITOR_CADENCE_EXPOSURE_EPS
+        ) or (
+            chain_shares is not None
+            and chain_shares > MONITOR_CADENCE_EXPOSURE_EPS
         )
+        exposure_unknown = shares is None or chain_shares is None
         if _position_requires_monitor_cadence(
             phase=phase,
             chain_state=chain_state,
-            exposure_positive=exposure_positive,
+            exposure_positive=exposure_positive or exposure_unknown,
             target_date=row["target_date"],
             now_utc=now_utc,
         ):
@@ -289,6 +644,7 @@ def _monitor_cadence_position_rows(
                     "exit_reason": str(row["exit_reason"] or "").strip(),
                     "shares": shares,
                     "chain_shares": chain_shares,
+                    "exposure_unknown": exposure_unknown,
                 }
             )
     return monitored
@@ -396,9 +752,11 @@ def _latest_monitor_refreshed_event(
     position_id: str,
     event_columns: set[str],
 ) -> dict[str, str] | None:
-    order_by = "datetime(occurred_at) DESC"
-    if "sequence_no" in event_columns:
-        order_by += ", sequence_no DESC"
+    order_by = (
+        "sequence_no DESC"
+        if "sequence_no" in event_columns
+        else "datetime(occurred_at) DESC"
+    )
     payload_select = "payload_json" if "payload_json" in event_columns else "NULL AS payload_json"
     row = conn.execute(
         f"""
@@ -456,6 +814,70 @@ def _monitor_event_closed_market_pending_settlement(
         }
     )
     return True
+
+
+def _monitor_event_fresh_input_issue(
+    monitor_event: dict[str, str] | None,
+) -> str | None:
+    """Return why a current monitor event lacks redecision authority."""
+
+    if monitor_event is None:
+        return "monitor_payload_missing"
+    try:
+        payload = json.loads(monitor_event.get("payload_json") or "{}")
+    except (TypeError, ValueError):
+        return "monitor_payload_unparseable"
+    if not isinstance(payload, dict):
+        return "monitor_payload_invalid"
+
+    validations_raw = payload.get("applied_validations")
+    validations = (
+        {str(item) for item in validations_raw}
+        if isinstance(validations_raw, list)
+        else set()
+    )
+    if "global_auction_completion_request_failed" in validations:
+        return "monitor_exit_completion_unavailable"
+
+    def _is_true(value: object) -> bool:
+        return value is True or (type(value) is int and value == 1)
+
+    probability_flag = _is_true(payload.get("last_monitor_prob_is_fresh"))
+    quote_flag = _is_true(payload.get("last_monitor_market_price_is_fresh"))
+
+    def _is_unit_interval(value: object) -> bool:
+        return (
+            not isinstance(value, bool)
+            and isinstance(value, (int, float))
+            and math.isfinite(float(value))
+            and 0.0 <= float(value) <= 1.0
+        )
+
+    probability_fresh = probability_flag and _is_unit_interval(
+        payload.get("last_monitor_prob")
+    )
+    quote_fresh = quote_flag and _is_unit_interval(
+        payload.get("last_monitor_market_price")
+    )
+    if probability_fresh and quote_fresh:
+        return None
+    structural_win = (
+        probability_fresh
+        and payload.get("last_monitor_prob") == 1.0
+        and payload.get("selected_method") == "day0_absorbing_hard_fact"
+        and "day0_hard_fact_structural_win_quote_bypassed" in validations
+    )
+    if structural_win:
+        return None
+    if probability_flag and not probability_fresh:
+        return "monitor_probability_value_invalid"
+    if quote_flag and not quote_fresh:
+        return "monitor_market_price_value_invalid"
+    if not probability_fresh and not quote_fresh:
+        return "monitor_probability_and_clob_stale"
+    if not probability_fresh:
+        return "monitor_probability_stale"
+    return "monitor_clob_stale"
 
 
 def _latest_exit_redecision_event(
@@ -629,3 +1051,13 @@ def _float_or_zero(value: object) -> float:
         return float(value or 0.0)
     except (TypeError, ValueError):
         return 0.0
+
+
+def _finite_nonnegative_float_or_none(value: object) -> float | None:
+    try:
+        parsed = float(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
+    if parsed is None or not math.isfinite(parsed) or parsed < 0.0:
+        return None
+    return parsed

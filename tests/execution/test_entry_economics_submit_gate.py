@@ -1,5 +1,5 @@
 # Created: 2026-07-01
-# Last reused/audited: 2026-07-27
+# Last reused/audited: 2026-08-12
 # Authority basis: current q-kernel final-entry economics and selected-side probability quality law.
 from __future__ import annotations
 
@@ -7,8 +7,11 @@ import math
 
 import pytest
 
+import src.execution.executor as executor_module
 from src.contracts import Direction, ExecutionIntent
+from src.contracts.global_auction_receipt import GlobalAuctionReceiptRef
 from src.contracts.slippage_bps import SlippageBps
+from src.contracts.strategy_capital_allocation import STRATEGY_LOG_UTILITY_BASIS
 from src.decision_kernel.canonicalization import (
     qkernel_current_state_identity_hash,
     qkernel_global_current_state_rejection_reason,
@@ -46,6 +49,27 @@ def _econ(**overrides) -> dict:
     return payload
 
 
+def _global_receipt_payload(
+    *,
+    winner_event_id: str,
+    winner_candidate_id: str,
+    winner_actuation_identity: str,
+    selection_epoch_identity: str,
+) -> dict[str, object]:
+    return GlobalAuctionReceiptRef(
+        decision_log_id=41,
+        decision_log_mode="global_single_order_auction",
+        receipt_hash="a" * 64,
+        execution_binding_hash="b" * 64,
+        artifact_summary_hash="c" * 64,
+        schema_version=21,
+        winner_event_id=winner_event_id,
+        winner_candidate_id=winner_candidate_id,
+        winner_actuation_identity=winner_actuation_identity,
+        selection_epoch_identity=selection_epoch_identity,
+    ).as_payload()
+
+
 def _current_state_econ(**overrides) -> dict:
     current = dict(
         decision_id="decision-current-1",
@@ -60,8 +84,10 @@ def _current_state_econ(**overrides) -> dict:
         selection_guard_cell_key="current-sample-1",
         selection_guard_n=64,
         global_actuation_identity="global-current-1",
+        global_winner_event_id="event-current-1",
         global_economic_identity="global-economic-current-1",
         global_optimum_semantics="CUT_TIME_GLOBAL_OPTIMUM",
+        global_execution_mode="TAKER_LIMIT",
         global_candidate_id="candidate-current-1",
         global_bin_id="bin-1",
         global_universe_witness_identity="universe-current-1",
@@ -96,6 +122,35 @@ def _current_state_econ(**overrides) -> dict:
         global_terminal_payoff_semantics="BINARY_0_1",
     )
     current.update(overrides)
+    current.setdefault("global_ruin_probability_reduction", 0.0)
+    current.setdefault("global_terminal_ruin_probability_reduction", 0.0)
+    current.setdefault(
+        "global_proposal_expected_delta_log_wealth",
+        current["global_robust_delta_log_wealth"],
+    )
+    current.setdefault(
+        "global_proposal_expected_ev_usd",
+        current["global_robust_ev_usd"],
+    )
+    current.setdefault("global_proposal_capital_lock_hours", 1.0)
+    current.setdefault(
+        "global_proposal_expected_log_growth_per_hour",
+        current["global_proposal_expected_delta_log_wealth"]
+        / current["global_proposal_capital_lock_hours"],
+    )
+    current.setdefault(
+        "global_proposal_expected_capital_efficiency",
+        current["global_proposal_expected_delta_log_wealth"]
+        / float(current["global_expected_cost_usd"]),
+    )
+    current.setdefault("global_proposal_fill_semantics", "IMMEDIATE_FILL")
+    current.setdefault("global_utility_basis", STRATEGY_LOG_UTILITY_BASIS)
+    current["global_auction_receipt"] = _global_receipt_payload(
+        winner_event_id=current["global_winner_event_id"],
+        winner_candidate_id=current["global_candidate_id"],
+        winner_actuation_identity=current["global_actuation_identity"],
+        selection_epoch_identity=current["global_selection_epoch_identity"],
+    )
     payload = _econ(**current)
     for legacy_field in (
         "delta_u_at_min",
@@ -155,6 +210,10 @@ def _current_state_mean_buy_econ(**overrides) -> dict:
         global_expected_delta_log_wealth=expected_du,
         global_expected_ev_usd=action * shares - expected_cost,
         global_expected_capital_efficiency=expected_du / expected_cost,
+        global_proposal_expected_delta_log_wealth=expected_du,
+        global_proposal_expected_ev_usd=action * shares - expected_cost,
+        global_proposal_expected_log_growth_per_hour=expected_du,
+        global_proposal_expected_capital_efficiency=expected_du / expected_cost,
         global_cut_time_win_probability_mean=action,
         global_cut_time_loss_probability_mean=1.0 - action,
         global_terminal_win_probability_mean=action,
@@ -213,16 +272,22 @@ def _day0_actionable_payload(
         "observation_time": "2026-05-25T11:30:00+00:00",
         "observation_available_at": "2026-05-25T11:35:00+00:00",
         "day0_probability_authority": {
+            "probability_authority": "day0_remaining_day_global_probability_v1",
             "q_source": "day0_remaining_day",
             "q_mode": "remaining_day",
             "remaining_models": remaining_models,
             "rounded_value": 20,
             "observation_time": "2026-05-25T11:30:00+00:00",
+            "observation_available_at": "2026-05-25T11:35:00+00:00",
             "lcb_transform": {
                 "yes_lcb_by_condition": {"condition-1": q_lcb},
                 "no_lcb_by_condition": {"condition-1": 0.02},
             },
         },
+        "probability_authority": "day0_remaining_day_global_probability_v1",
+        "q_source": "day0_remaining_day",
+        "q_mode": "remaining_day",
+        "remaining_models": remaining_models,
         "_edli_q_source": "day0_remaining_day",
         "_edli_day0_q_mode": "remaining_day",
         "_edli_day0_remaining_models": remaining_models,
@@ -234,6 +299,7 @@ def _day0_actionable_payload(
     if remaining_models is None:
         payload["day0_probability_authority"].pop("remaining_models", None)
         payload.pop("_edli_day0_remaining_models", None)
+        payload.pop("remaining_models", None)
     return payload
 
 
@@ -440,8 +506,8 @@ def test_entry_economics_micro_tail_still_requires_strategy_economics():
     )
 
     assert verdict["allowed"] is False
-    assert verdict["reason"] == "limit_price_below_strategy_entry_floor"
-    assert verdict["details"]["submit_edge"] == pytest.approx(0.05)
+    assert verdict["reason"] == "live_order_unit_price_out_of_bounds"
+    assert verdict["details"]["limit_price"] == pytest.approx(0.024)
 
 
 def test_entry_economics_buenos_aires_shape_still_requires_strategy_economics():
@@ -475,8 +541,8 @@ def test_entry_economics_buenos_aires_shape_still_requires_strategy_economics():
     )
 
     assert verdict["allowed"] is False
-    assert verdict["reason"] == "limit_price_below_strategy_entry_floor"
-    assert verdict["details"]["submit_edge"] > 0.0
+    assert verdict["reason"] == "live_order_unit_price_out_of_bounds"
+    assert verdict["details"]["limit_price"] == pytest.approx(0.041)
 
 
 def test_entry_economics_allows_high_confidence_center_buy_yes():
@@ -577,8 +643,8 @@ def test_entry_economics_legacy_low_price_still_requires_strategy_economics():
     )
 
     assert verdict["allowed"] is False
-    assert verdict["reason"] == "limit_price_below_strategy_entry_floor"
-    assert verdict["details"]["submit_edge"] > 0.0
+    assert verdict["reason"] == "live_order_unit_price_out_of_bounds"
+    assert verdict["details"]["limit_price"] == pytest.approx(0.031)
 
 
 def test_entry_economics_blocks_unarmed_selection_guard_even_with_large_raw_edge():
@@ -1085,6 +1151,51 @@ def test_entry_economics_current_state_winner_ignores_legacy_profit_density_floo
     assert verdict["allowed"] is True
 
 
+def test_entry_economics_passes_canonical_typed_no_direction_to_global_validator(
+    monkeypatch,
+):
+    economics = _current_state_mean_buy_econ(
+        side="NO",
+        payoff_q_point=0.80,
+        payoff_q_lcb=0.60,
+        payoff_q_action=0.80,
+        cost=0.45,
+        edge_lcb=0.15,
+        edge_expected=0.35,
+    )
+    seen_directions: list[str | None] = []
+
+    def _global_reason(_economics, *, direction=None, **_kwargs):
+        seen_directions.append(direction)
+        if direction == "buy_no":
+            return None
+        return "CURRENT_MAKER_FILL_WITNESS_ACTION_INVALID"
+
+    monkeypatch.setattr(
+        executor_module,
+        "qkernel_global_current_state_rejection_reason",
+        _global_reason,
+    )
+    verdict = _entry_economics_component(
+        _intent(
+            direction=Direction("buy_no"),
+            limit_price=0.45,
+            q_live=0.80,
+            q_lcb_5pct=0.60,
+            expected_edge=0.35,
+            min_entry_price=0.05,
+            min_expected_profit_usd=0.0,
+            min_submit_edge_density=0.0,
+            qkernel_execution_economics=economics,
+        ),
+        shares=5.0,
+        actionable_payload={"qkernel_execution_economics": economics},
+    )
+
+    assert seen_directions == ["buy_no"]
+    assert verdict["allowed"] is True
+
+
 @pytest.mark.parametrize(
     ("direction", "side"),
     ((Direction("buy_yes"), "YES"), (Direction("buy_no"), "NO")),
@@ -1093,7 +1204,7 @@ def test_entry_economics_current_state_winner_ignores_legacy_profit_density_floo
     ("price", "q_lcb", "shares"),
     ((0.001, 0.80, 1000.0), (0.999, 1.0, 10.0)),
 )
-def test_entry_economics_current_state_tail_price_requires_economics_not_nominal_band(
+def test_entry_economics_current_state_tail_price_cannot_bypass_absolute_band(
     direction,
     side,
     price,
@@ -1144,15 +1255,14 @@ def test_entry_economics_current_state_tail_price_requires_economics_not_nominal
         actionable_payload={"qkernel_execution_economics": economics},
     )
 
-    assert verdict["allowed"] is True
-    assert verdict["details"]["global_limit_bound_authorized"] is True
-    assert verdict["details"]["submit_edge"] == pytest.approx(edge)
+    assert verdict["allowed"] is False
+    assert verdict["reason"] == "live_order_unit_price_out_of_bounds"
 
 
 def test_entry_economics_current_state_tail_still_requires_positive_robust_utility():
-    price = 0.999
+    price = 0.95
     q_lcb = 1.0
-    edge = 0.001
+    edge = 0.05
     shares = 10.0
     economics = _current_state_econ(
         side="YES",
@@ -1188,6 +1298,7 @@ def test_entry_economics_current_state_tail_still_requires_positive_robust_utili
             q_lcb_5pct=q_lcb,
             expected_edge=edge,
             min_entry_price=0.10,
+            min_expected_profit_usd=1.0,
             executable_snapshot_min_tick_size="0.001",
             qkernel_execution_economics=economics,
         ),
@@ -1260,6 +1371,7 @@ def test_current_state_mean_buy_accepts_positive_expected_edge_with_negative_lcb
             "direction": "buy_yes",
             "selection_authority_applied": "qkernel_spine",
             "qkernel_execution_economics": economics,
+            "global_auction_receipt": economics["global_auction_receipt"],
         },
         q_live=0.70,
         q_lcb=0.35,
@@ -1285,6 +1397,47 @@ def test_current_state_mean_buy_accepts_positive_expected_edge_with_negative_lcb
         qkernel_execution_economics=economics,
     )
     assert taker_quality["allowed"] is True
+
+
+def test_current_state_mean_maker_requires_current_fill_witness():
+    fill_probability = 0.19
+    capital_lock_hours = 2.0
+    economics = _current_state_mean_buy_econ(
+        global_execution_mode="MAKER_REST",
+        global_fill_probability=fill_probability,
+        global_fill_probability_source="rest_then_cross_deadline_prior_v1",
+        global_rest_deadline_minutes=20.0,
+        global_proposal_fill_semantics=(
+            "FILL_WEIGHTED_ZERO_CONTINUATION_LOWER_BOUND"
+        ),
+    )
+    proposal_du = (
+        economics["global_expected_delta_log_wealth"] * fill_probability
+    )
+    economics.update(
+        global_proposal_expected_delta_log_wealth=proposal_du,
+        global_proposal_expected_ev_usd=(
+            economics["global_expected_ev_usd"] * fill_probability
+        ),
+        global_proposal_expected_log_growth_per_hour=(
+            proposal_du / capital_lock_hours
+        ),
+        global_proposal_expected_capital_efficiency=(
+            economics["global_expected_capital_efficiency"]
+        ),
+        global_proposal_capital_lock_hours=capital_lock_hours,
+    )
+    economics["current_state_identity_hash"] = qkernel_current_state_identity_hash(
+        economics
+    )
+
+    assert (
+        qkernel_global_current_state_rejection_reason(
+            economics,
+            direction="buy_yes",
+        )
+        == "CURRENT_MAKER_FILL_WITNESS_UNAVAILABLE"
+    )
 
 
 @pytest.mark.parametrize(

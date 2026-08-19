@@ -112,12 +112,6 @@ coverage_roots:
     zone: architecture
     authority_role: schema_law
     orientation_note: Topology graph must not redefine canonical manifests.
-  - path: "raw"
-    status: active
-    scope: runtime
-    zone: raw_evidence
-    authority_role: derived_telemetry
-    orientation_note: Raw captures are external evidence inputs, not canonical truth until promoted through declared bridge/config paths.
   - path: "state"
     status: conditional
     scope: runtime
@@ -216,24 +210,18 @@ root_governed_files:
     zone: root
     authority_role: orientation
     orientation_note: Private vulnerability-disclosure path and credential discipline; not runtime authority.
-  - path: "CHANGELOG.md"
-    status: active
-    scope: global
-    zone: root
-    authority_role: orientation
-    orientation_note: Operational milestone log; the authoritative history is git, not this file.
   - path: "REVIEW.md"
     status: active
     scope: global
     zone: root
     authority_role: orientation
     orientation_note: Review-task routing for agents; defers to AGENTS.md and executable authority.
-  - path: "SECURITY-FALSE-POSITIVES.md"
+  - path: "docs/reference/security_false_positives.md"
     status: active
-    scope: global
-    zone: root
+    scope: scoped
+    zone: docs_reference
     authority_role: runtime_support
-    orientation_note: Allowlist of known secret-scan false positives; not architecture authority.
+    orientation_note: Allowlist of known secret-scan false positives; not architecture authority. Moved from root SECURITY-FALSE-POSITIVES.md (showcase brief 03).
 
 state_surfaces:
   - path: "state/README.md"
@@ -504,7 +492,6 @@ registry_directories:
   - path: ".github/workflows"
   - path: ".github/instructions"
   - path: ".agents/skills"
-  - path: "raw"
 
 docs_root_allowed_files:
   - docs/AGENTS.md
@@ -589,17 +576,7 @@ docs_subroots:
     requires_agents: true
     allow_non_markdown: true
     allowed_extensions: [".md", ".json", ".txt", ".yaml", ".yml", ".py", ".sql", ".mmd", ".fixed", ".mjs", ".log", ".jsonl", ".csv"]
-  - path: "docs/evidence"
-    role: generated_report
-    requires_agents: false
-    allow_non_markdown: true
-    allowed_extensions: [".md", ".json", ".csv", ".txt", ".yaml", ".yml", ".py", ".sql", ".patch", ".png"]
-  - path: "docs/rebuild"
-    role: generated_report
-    requires_agents: false
-    allow_non_markdown: true
-    allowed_extensions: [".md", ".json", ".csv", ".txt", ".yaml", ".yml", ".py", ".sql"]
-  - path: "docs/lore"
+  - path: "docs/reference/lessons"
     role: generated_report
     requires_agents: false
     allow_non_markdown: true
@@ -607,10 +584,6 @@ docs_subroots:
   - path: "docs/review"
     role: reference
     requires_agents: true
-    allow_non_markdown: false
-  - path: "docs/architecture"
-    role: reference
-    requires_agents: false
     allow_non_markdown: false
   - path: "docs/methodology"
     role: reference
@@ -642,6 +615,12 @@ archive_interface:
   historic_peer_phrases:
     - "Active subdirectories plus archives"
     - "archives/AGENTS.md"
+
+authority_claims:
+  - path: "docs/reference/security_false_positives.md"
+    enforcement:
+      - .gitleaks.toml
+      - .claude/hooks/hook_common.py
 
 reference_fact_specs:
   - path: "docs/reference/zeus_math_spec.md"

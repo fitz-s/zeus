@@ -318,8 +318,8 @@ higher than the original evidence-basis summary and why zero cities appear in an
   change in any `error:` category.
 - Full regression: every test file importing `replacement_forecast_materializer` (42 files, 376
   cases) passes except 10 pre-existing failures verified identical on the unmodified main checkout
-  at the same base commit (5 schema-migration tests expecting a `trade_authority_status` column
-  that is already present in the base schema, plus 5 unrelated AST/source-scan antibodies).
+  at the same base commit (5 schema-migration tests expecting a retired trade-authority status
+  column that is already present in the base schema, plus 5 unrelated AST/source-scan antibodies).
 - `--validate 2026-07-21` against the live DB: see Acceptance section below for numbers.
 - 2026-07-28 (later same day): design-review corrections 1-4 applied (tau clock -> issue time;
   event weighting; interval-censored primary likelihood; data-fence documentation). Full fitter

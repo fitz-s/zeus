@@ -1,8 +1,8 @@
-# Lifecycle: created=2026-04-30; last_reviewed=2026-07-24; last_reused=2026-07-24
+# Lifecycle: created=2026-04-30; last_reviewed=2026-07-31; last_reused=2026-07-31
 # Purpose: Lock healthcheck relationship predicates for live daemon, launchd, entry capability, and settlement truth.
 # Reuse: Run when scripts/healthcheck.py health predicates or live readiness status fields change.
 # Created: 2026-04-30
-# Last reused/audited: 2026-07-24
+# Last reused/audited: 2026-07-31
 # Authority basis: first-principles ZEUS_MODE cleanup 2026-04-30; healthcheck live-only runtime contract; docs/archive/2026-Q2/task_2026-05-16_live_continuous_run_package/LIVE_CONTINUOUS_RUN_PACKAGE_PLAN.md Phase C; 2026-05-17 riskguard live DB-holder health contract.
 from __future__ import annotations
 import pytest
@@ -1488,7 +1488,15 @@ def test_venue_commands_schema_status_rejects_active_entry_missing_q_version(
     assert result["active_missing_q_version_sample"][0]["position_id"] == "pos-no-q"
 
 
-def _init_venue_order_truth_db(db_path: Path, *, command_state: str, venue_state: str) -> None:
+def _init_venue_order_truth_db(
+    db_path: Path,
+    *,
+    command_state: str,
+    venue_state: str,
+    phase: str = "active",
+    remaining_size: str = "9.0",
+    matched_size: str = "0.0",
+) -> None:
     conn = sqlite3.connect(str(db_path))
     conn.executescript(
         """
@@ -1543,10 +1551,11 @@ def _init_venue_order_truth_db(db_path: Path, *, command_state: str, venue_state
         INSERT INTO position_current (
             position_id, phase, order_status, chain_state, city, target_date, strategy_key
         ) VALUES (
-            'pos-1', 'quarantined', 'rejected', 'entry_authority_quarantined',
+            'pos-1', ?, 'rejected', 'synced',
             'Paris', '2026-07-04', 'center_bin_buy'
         )
-        """
+        """,
+        (phase,),
     )
     conn.execute(
         """
@@ -1554,12 +1563,12 @@ def _init_venue_order_truth_db(db_path: Path, *, command_state: str, venue_state
             venue_order_id, command_id, state, remaining_size, matched_size,
             observed_at, ingested_at, local_sequence
         ) VALUES (
-            'ord-1', 'cmd-1', ?, '9.0', '0.0',
+            'ord-1', 'cmd-1', ?, ?, ?,
             '2026-07-04T00:01:30+00:00',
             '2026-07-04T00:01:31+00:00', 2
         )
         """,
-        (venue_state,),
+        (venue_state, remaining_size, matched_size),
     )
     conn.commit()
     conn.close()
@@ -1581,10 +1590,111 @@ def test_terminal_entry_command_venue_fact_conflict_status_rejects_resting_fact(
     assert result["ok"] is False
     assert result["issue"] == "TERMINAL_ENTRY_COMMAND_VENUE_FACT_CONFLICT"
     assert result["count"] == 1
+    assert result["historical_count"] == 1
+    assert result["blocking_count"] == 1
     assert result["by_command_state"] == {"SUBMIT_REJECTED": 1}
     assert result["by_venue_state"] == {"RESTING": 1}
     assert result["sample"][0]["command_id"] == "cmd-1"
     assert result["sample"][0]["remaining_size"] == 9.0
+    assert result["blocking_sample"][0]["command_id"] == "cmd-1"
+
+
+def test_terminal_position_keeps_historical_conflict_visible_without_blocking(
+    monkeypatch, tmp_path
+):
+    db_path = tmp_path / "zeus_trades.db"
+    _init_venue_order_truth_db(
+        db_path,
+        command_state="CANCELLED",
+        venue_state="PARTIALLY_MATCHED",
+        phase="settled",
+        remaining_size="4.0",
+        matched_size="5.0",
+    )
+    monkeypatch.setattr(healthcheck, "_trade_db_path", lambda: db_path)
+
+    result = _ORIGINAL_TERMINAL_ENTRY_COMMAND_VENUE_FACT_CONFLICTS_STATUS()
+
+    assert result["ok"] is True
+    assert result["issue"] is None
+    assert result["historical_count"] == 1
+    assert result["blocking_count"] == 0
+    assert result["terminal_position_count"] == 1
+    assert result["sample"][0]["blocking"] is False
+    assert result["blocking_sample"] == []
+
+
+def test_reducer_terminal_partial_does_not_block_active_position(
+    monkeypatch, tmp_path
+):
+    db_path = tmp_path / "zeus_trades.db"
+    _init_venue_order_truth_db(
+        db_path,
+        command_state="CANCELLED",
+        venue_state="PARTIALLY_MATCHED",
+        phase="active",
+        remaining_size="0",
+        matched_size="5.0",
+    )
+    monkeypatch.setattr(healthcheck, "_trade_db_path", lambda: db_path)
+
+    result = _ORIGINAL_TERMINAL_ENTRY_COMMAND_VENUE_FACT_CONFLICTS_STATUS()
+
+    assert result["ok"] is True
+    assert result["historical_count"] == 1
+    assert result["blocking_count"] == 0
+    assert result["terminal_order_truth_count"] == 1
+    assert result["sample"][0]["canonical_order_proof_class"] == "TERMINAL_PARTIAL"
+
+
+def test_missing_position_row_blocks_even_with_terminal_order_proof(
+    monkeypatch, tmp_path
+):
+    db_path = tmp_path / "zeus_trades.db"
+    _init_venue_order_truth_db(
+        db_path,
+        command_state="CANCELLED",
+        venue_state="PARTIALLY_MATCHED",
+        remaining_size="0",
+        matched_size="5.0",
+    )
+    conn = sqlite3.connect(str(db_path))
+    conn.execute("DELETE FROM position_current WHERE position_id = 'pos-1'")
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(healthcheck, "_trade_db_path", lambda: db_path)
+
+    result = _ORIGINAL_TERMINAL_ENTRY_COMMAND_VENUE_FACT_CONFLICTS_STATUS()
+
+    assert result["ok"] is False
+    assert result["blocking_count"] == 1
+    assert result["terminal_order_truth_count"] == 1
+    assert result["blocking_sample"][0]["position_projection_present"] is False
+
+
+def test_missing_position_table_blocks_even_with_terminal_order_proof(
+    monkeypatch, tmp_path
+):
+    db_path = tmp_path / "zeus_trades.db"
+    _init_venue_order_truth_db(
+        db_path,
+        command_state="CANCELLED",
+        venue_state="PARTIALLY_MATCHED",
+        remaining_size="0",
+        matched_size="5.0",
+    )
+    conn = sqlite3.connect(str(db_path))
+    conn.execute("DROP TABLE position_current")
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(healthcheck, "_trade_db_path", lambda: db_path)
+
+    result = _ORIGINAL_TERMINAL_ENTRY_COMMAND_VENUE_FACT_CONFLICTS_STATUS()
+
+    assert result["ok"] is False
+    assert result["blocking_count"] == 1
+    assert result["terminal_order_truth_count"] == 1
+    assert result["blocking_sample"][0]["position_projection_present"] is False
 
 
 def test_terminal_entry_command_venue_fact_conflict_status_accepts_terminal_fact(
@@ -1603,6 +1713,8 @@ def test_terminal_entry_command_venue_fact_conflict_status_accepts_terminal_fact
     assert result["ok"] is True
     assert result["issue"] is None
     assert result["count"] == 0
+    assert result["historical_count"] == 0
+    assert result["blocking_count"] == 0
     assert result["sample"] == []
 
 
@@ -1626,7 +1738,8 @@ def _init_monitor_cadence_db(db_path, *, monitor_at: datetime | None) -> None:
             position_id TEXT NOT NULL,
             sequence_no INTEGER NOT NULL,
             event_type TEXT NOT NULL,
-            occurred_at TEXT NOT NULL
+            occurred_at TEXT NOT NULL,
+            payload_json TEXT
         )
         """
     )
@@ -1643,16 +1756,28 @@ def _init_monitor_cadence_db(db_path, *, monitor_at: datetime | None) -> None:
         conn.execute(
             """
             INSERT INTO position_events (
-                event_id, position_id, sequence_no, event_type, occurred_at
-            ) VALUES ('evt-monitor', 'pos-1', 1, 'MONITOR_REFRESHED', ?)
+                event_id, position_id, sequence_no, event_type, occurred_at,
+                payload_json
+            ) VALUES ('evt-monitor', 'pos-1', 1, 'MONITOR_REFRESHED', ?, ?)
             """,
-            (monitor_at.isoformat(),),
+            (
+                monitor_at.isoformat(),
+                json.dumps(
+                    {
+                        "last_monitor_prob": 0.5,
+                        "last_monitor_prob_is_fresh": True,
+                        "last_monitor_market_price": 0.5,
+                        "last_monitor_market_price_is_fresh": True,
+                    }
+                ),
+            ),
         )
     conn.execute(
         """
         INSERT INTO position_events (
-            event_id, position_id, sequence_no, event_type, occurred_at
-        ) VALUES ('evt-chain', 'pos-1', 2, 'CHAIN_SIZE_CORRECTED', ?)
+            event_id, position_id, sequence_no, event_type, occurred_at,
+            payload_json
+        ) VALUES ('evt-chain', 'pos-1', 2, 'CHAIN_SIZE_CORRECTED', ?, '{}')
         """,
         (now.isoformat(),),
     )
@@ -1689,7 +1814,154 @@ def test_monitor_cadence_status_accepts_fresh_monitor_refresh(monkeypatch, tmp_p
     assert result["open_position_count"] == 1
 
 
-def test_monitor_cadence_status_accepts_fresh_typed_review_management(
+def test_monitor_cadence_strict_future_rejects_near_future_monitor_event(tmp_path):
+    from src.ops.monitor_cadence import collect_monitor_cadence_evidence
+
+    db_path = tmp_path / "zeus_trades.db"
+    now = datetime.now(timezone.utc)
+    _init_monitor_cadence_db(db_path, monitor_at=now + timedelta(seconds=10))
+    conn = sqlite3.connect(str(db_path))
+    conn.row_factory = sqlite3.Row
+    try:
+        evidence = collect_monitor_cadence_evidence(
+            conn,
+            now=now,
+            strict_future=True,
+        )
+    finally:
+        conn.close()
+
+    assert evidence["fresh_position_count"] == 0
+    assert evidence["future_monitor_event_count"] == 1
+
+
+def test_monitor_cadence_post_boot_floor_rejects_pre_boot_monitor_event(tmp_path):
+    from src.ops.monitor_cadence import collect_monitor_cadence_evidence
+
+    db_path = tmp_path / "zeus_trades.db"
+    boot_at = datetime.now(timezone.utc)
+    _init_monitor_cadence_db(
+        db_path,
+        monitor_at=boot_at - timedelta(microseconds=1),
+    )
+    conn = sqlite3.connect(str(db_path))
+    conn.row_factory = sqlite3.Row
+    try:
+        evidence = collect_monitor_cadence_evidence(
+            conn,
+            now=boot_at,
+            min_occurred_at=boot_at,
+        )
+    finally:
+        conn.close()
+
+    assert evidence["fresh_position_count"] == 0
+    assert evidence["stale_or_missing_position_count"] == 1
+
+
+@pytest.mark.parametrize("event_type", ("REVIEW_REQUIRED", "EXIT_ORDER_REJECTED"))
+def test_monitor_cadence_monitor_refreshed_only_rejects_post_boot_alternative_event(
+    tmp_path,
+    event_type,
+):
+    from src.ops.monitor_cadence import collect_monitor_cadence_evidence
+
+    db_path = tmp_path / "zeus_trades.db"
+    boot_at = datetime.now(timezone.utc)
+    _init_monitor_cadence_db(db_path, monitor_at=None)
+    conn = sqlite3.connect(str(db_path))
+    conn.row_factory = sqlite3.Row
+    try:
+        payload = None
+        if event_type == "REVIEW_REQUIRED":
+            payload = json.dumps(
+                {
+                    "reason": "entry_authority_chain_absence_conflict",
+                    "review_state": "unresolved",
+                    "source": "chain_reconciliation",
+                }
+            )
+        else:
+            conn.execute("ALTER TABLE position_current ADD COLUMN order_status TEXT")
+            conn.execute("ALTER TABLE position_current ADD COLUMN exit_reason TEXT")
+            conn.execute(
+                """
+                UPDATE position_current
+                   SET phase = 'pending_exit', order_status = 'retry_pending'
+                 WHERE position_id = 'pos-1'
+                """
+            )
+        conn.execute(
+            """
+            INSERT INTO position_events (
+                event_id, position_id, sequence_no, event_type, occurred_at,
+                payload_json
+            ) VALUES ('evt-alternative', 'pos-1', 3, ?, ?, ?)
+            """,
+            (event_type, (boot_at + timedelta(seconds=1)).isoformat(), payload),
+        )
+        conn.commit()
+        evidence = collect_monitor_cadence_evidence(
+            conn,
+            now=boot_at + timedelta(seconds=2),
+            min_occurred_at=boot_at,
+            monitor_refreshed_only=True,
+        )
+    finally:
+        conn.close()
+
+    assert evidence["fresh_position_count"] == 0
+    assert evidence["stale_or_missing_position_count"] == 1
+
+
+@pytest.mark.parametrize(
+    ("monitor_refreshed_only", "expected_fresh"),
+    ((False, 1), (True, 0)),
+)
+def test_monitor_cadence_monitor_refreshed_only_rejects_dust_without_monitor_event(
+    tmp_path,
+    monitor_refreshed_only,
+    expected_fresh,
+):
+    from src.ops.monitor_cadence import collect_monitor_cadence_evidence
+
+    db_path = tmp_path / "zeus_trades.db"
+    boot_at = datetime.now(timezone.utc)
+    _init_monitor_cadence_db(db_path, monitor_at=None)
+    conn = sqlite3.connect(str(db_path))
+    conn.row_factory = sqlite3.Row
+    try:
+        conn.execute("ALTER TABLE position_current ADD COLUMN order_status TEXT")
+        conn.execute("ALTER TABLE position_current ADD COLUMN exit_reason TEXT")
+        dust_reason = (
+            "[DUST: executable_snapshot_gate: size 3.1125 is below "
+            "snapshot min_order_size 5]"
+        )
+        conn.execute(
+            """
+            UPDATE position_current
+               SET phase = 'pending_exit', order_status = 'backoff_exhausted',
+                   shares = 3.1125, chain_shares = 3.1125,
+                   exit_reason = ?
+             WHERE position_id = 'pos-1'
+            """,
+            (dust_reason,),
+        )
+        conn.commit()
+        evidence = collect_monitor_cadence_evidence(
+            conn,
+            now=boot_at + timedelta(seconds=1),
+            min_occurred_at=boot_at,
+            monitor_refreshed_only=monitor_refreshed_only,
+        )
+    finally:
+        conn.close()
+
+    assert evidence["fresh_position_count"] == expected_fresh
+    assert evidence["stale_or_missing_position_count"] == 1 - expected_fresh
+
+
+def test_monitor_cadence_status_does_not_accept_review_as_monitor_refresh(
     monkeypatch,
     tmp_path,
 ):
@@ -1697,7 +1969,6 @@ def test_monitor_cadence_status_accepts_fresh_typed_review_management(
     stale_monitor = datetime.now(timezone.utc) - timedelta(minutes=20)
     _init_monitor_cadence_db(db_path, monitor_at=stale_monitor)
     conn = sqlite3.connect(str(db_path))
-    conn.execute("ALTER TABLE position_events ADD COLUMN payload_json TEXT")
     conn.execute(
         """
         INSERT INTO position_events (
@@ -1722,12 +1993,9 @@ def test_monitor_cadence_status_accepts_fresh_typed_review_management(
 
     result = _ORIGINAL_MONITOR_CADENCE_STATUS()
 
-    assert result["ok"] is True
-    assert result["issue"] is None
-    assert result["review_managed_position_count"] == 1
-    assert result["review_managed_positions"][0]["cadence_source"] == (
-        "REVIEW_REQUIRED"
-    )
+    assert result["ok"] is False
+    assert result["issue"] == "MONITOR_CADENCE_STALE"
+    assert result["review_managed_position_count"] == 0
 
 
 def test_monitor_cadence_status_rejects_one_stale_position_when_another_is_fresh(

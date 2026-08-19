@@ -25,6 +25,7 @@ manifests only — it never downloads).
 from __future__ import annotations
 
 import atexit
+import contextlib
 import fcntl
 import functools
 import json
@@ -222,8 +223,9 @@ def _rotate_bpf_extra_targets(
     *,
     cycle: datetime,
     state_path: Path | None,
+    priority_group_keys: set[tuple[str, str]] | None = None,
 ) -> tuple[tuple[object, ...], int, int, str]:
-    """Start each bounded extras pass after the groups attempted last time."""
+    """Rotate urgent and ordinary groups independently, with urgent groups first."""
 
     grouped: dict[tuple[str, str], list[object]] = {}
     for target in targets:
@@ -234,14 +236,43 @@ def _rotate_bpf_extra_targets(
         return (), 0, 0, "NO_TARGETS"
 
     cycle_key = cycle.astimezone(timezone.utc).isoformat()
+    priority = set(priority_group_keys or ())
+    priority_keys = tuple(key for key in keys if key in priority)
+    ordinary_keys = tuple(key for key in keys if key not in priority)
     with _BPF_EXTRA_ROTATION_LOCK:
-        start, cursor_status = _bpf_extra_rotation_start(
-            state_path=state_path,
-            cycle_key=cycle_key,
-            keys=keys,
-        )
-
-    rotated_keys = keys[start:] + keys[:start]
+        if not priority_keys:
+            start, cursor_status = _bpf_extra_rotation_start(
+                state_path=state_path,
+                cycle_key=cycle_key,
+                keys=keys,
+            )
+            rotated_keys = keys[start:] + keys[:start]
+        else:
+            priority_start, priority_status = _bpf_extra_rotation_start(
+                state_path=state_path,
+                cycle_key=cycle_key,
+                keys=priority_keys,
+            )
+            rotated_priority = (
+                priority_keys[priority_start:] + priority_keys[:priority_start]
+            )
+            if ordinary_keys:
+                ordinary_start, ordinary_status = _bpf_extra_rotation_start(
+                    state_path=state_path,
+                    cycle_key=cycle_key,
+                    keys=ordinary_keys,
+                )
+                rotated_ordinary = (
+                    ordinary_keys[ordinary_start:] + ordinary_keys[:ordinary_start]
+                )
+            else:
+                ordinary_status = "NO_TARGETS"
+                rotated_ordinary = ()
+            rotated_keys = rotated_priority + rotated_ordinary
+            start = keys.index(rotated_keys[0])
+            cursor_status = (
+                f"PRIORITY_{priority_status};ORDINARY_{ordinary_status}"
+            )
     return (
         tuple(target for key in rotated_keys for target in grouped[key]),
         start,
@@ -427,29 +458,38 @@ def _source_transport_error_is_nonretryable(
     return True
 
 
-def _source_cycle_can_cover_full_local_day(
+def _source_cycle_can_cover_local_decision_window(
     *,
     cycle: datetime,
     target_date: str,
     timezone_name: str,
+    decision_time: datetime | None = None,
 ) -> bool:
-    """Whether a run can geometrically contain the target's whole local day.
+    """Whether a run can contain the full day or the unresolved Day0 suffix.
 
-    The full-day raw-input parser requires a sample no later than local 03:xx.
-    A run initialized after that boundary cannot ever satisfy the contract, so
-    retrying it on every source-clock poll only consumes provider quota.  Day0
-    remaining-day probability is a separate observed-so-far + future-vector
-    carrier and does not depend on pretending this partial day is complete.
+    Future targets still require a run initialized before their local day. A
+    current local-day run may start after 03:xx because the downstream parser
+    separately requires an elapsed-prefix-only gap plus complete coverage from
+    decision time through the unresolved evening. Past partial days remain
+    inadmissible; malformed geometry stays fail-open only to that stricter
+    downstream payload validator.
     """
 
     try:
         target = date.fromisoformat(str(target_date))
-        local_cycle = cycle.astimezone(ZoneInfo(str(timezone_name)))
+        zone = ZoneInfo(str(timezone_name))
+        decision = decision_time or datetime.now(timezone.utc)
+        if cycle.utcoffset() is None or decision.utcoffset() is None:
+            return True
+        local_cycle = cycle.astimezone(zone)
+        local_decision = decision.astimezone(zone)
     except (TypeError, ValueError, KeyError):
         return True
     if local_cycle.date() != target:
         return local_cycle.date() < target
-    return local_cycle.hour <= 3
+    if local_cycle.hour <= 3:
+        return True
+    return local_decision.date() == target and cycle <= decision
 
 
 def _settings_section(name: str, default=None):
@@ -522,8 +562,14 @@ def _replacement_forecast_live_materialization_queue_config() -> dict[str, objec
         "seed_dir": _rooted_path(cfg.get("seed_dir"), base_dir / "seeds"),
         "seed_processed_dir": _rooted_path(cfg.get("seed_processed_dir"), base_dir / "seed_processed"),
         "seed_failed_dir": _rooted_path(cfg.get("seed_failed_dir"), base_dir / "seed_failed"),
-        "forecast_db": _rooted_path(forecast_db),
-        "raw_manifest_dir": _rooted_path(raw_manifest_dir),
+        "forecast_db": _rooted_path(
+            forecast_db,
+            STATE_DIR / "zeus-forecasts.db",
+        ),
+        "raw_manifest_dir": _rooted_path(
+            raw_manifest_dir,
+            base_dir / "raw_manifests",
+        ),
         "seed_discovery_limit": int(cfg.get("seed_discovery_limit_per_cycle") or cfg.get("seed_limit_per_cycle") or cfg.get("materialization_limit_per_cycle") or 80),
         "request_dir": request_dir,
         "inflight_dir": (
@@ -593,13 +639,11 @@ def _probe_resolved_available_cycle() -> datetime | None:
     """
     from src.data.replacement_cycle_availability import (  # noqa: PLC0415
         newest_complete_cycle,
-        probe_anchor_available_any,
-        resolve_anchor_cycle_availability,
+        resolve_provider_anchor_cycle_availability,
     )
 
-    availability = resolve_anchor_cycle_availability(
+    availability = resolve_provider_anchor_cycle_availability(
         datetime.now(timezone.utc),
-        probe_anchor=probe_anchor_available_any,
     )
     return newest_complete_cycle(availability)
 
@@ -624,12 +668,82 @@ def _probe_resolved_bayes_precision_fusion_extras_cycle() -> datetime | None:
     return newest_complete_cycle(availability)
 
 
+def _critical_scopes_missing_current_anchor(
+    forecast_db: Path,
+    scopes: Sequence[tuple[str, str, str]],
+    cycle: datetime,
+) -> tuple[tuple[str, str, str], ...] | None:
+    """Return exact critical scopes without materializable canonical raw at ``cycle``."""
+
+    from src.data.replacement_forecast_source_run_identity import (  # noqa: PLC0415
+        expected_replacement_dependency_identity_by_role,
+    )
+    from scripts.download_replacement_forecast_current_targets import (  # noqa: PLC0415
+        _current_target_payload_file_materializable,
+    )
+    from src.config import cities_by_name  # noqa: PLC0415
+    from src.state.db import _connect  # noqa: PLC0415
+
+    try:
+        conn = _connect(forecast_db, write_class=None)
+        conn.execute("PRAGMA query_only=ON")
+        try:
+            missing: list[tuple[str, str, str]] = []
+            cycle_iso = cycle.astimezone(timezone.utc).isoformat()
+            for city, target_date, metric in scopes:
+                identity = expected_replacement_dependency_identity_by_role(metric)[
+                    "openmeteo_ifs9_anchor"
+                ]
+                row = conn.execute(
+                    """
+                    SELECT artifact_path, sha256, byte_size
+                    FROM raw_forecast_artifacts
+                    WHERE source_id = ?
+                      AND product_id = ?
+                      AND data_version = ?
+                      AND source_cycle_time = ?
+                      AND json_extract(artifact_metadata_json, '$.city') = ?
+                      AND json_extract(artifact_metadata_json, '$.target_date') = ?
+                      AND json_extract(artifact_metadata_json, '$.metric') = ?
+                    LIMIT 1
+                    """,
+                    (
+                        identity.source_id,
+                        identity.product_id,
+                        identity.data_version,
+                        cycle_iso,
+                        city,
+                        target_date,
+                        metric,
+                    ),
+                ).fetchone()
+                if row is None:
+                    missing.append((city, target_date, metric))
+                    continue
+                city_config = cities_by_name.get(city)
+                if city_config is None or not _current_target_payload_file_materializable(
+                    Path(str(row[0])),
+                    city_timezone=city_config.timezone,
+                    target_date=target_date,
+                    cycle=cycle,
+                    expected_sha256=str(row[1]),
+                    expected_byte_size=int(row[2]),
+                ):
+                    missing.append((city, target_date, metric))
+            return tuple(missing)
+        finally:
+            conn.close()
+    except Exception:
+        return None
+
+
 @_single_current_target_download
 def _download_replacement_forecast_current_targets_if_needed(
     cfg: dict[str, object],
     *,
     max_wall_clock_seconds: float | None = None,
     required_scopes: Sequence[tuple[str, str, str]] | None = None,
+    quota_critical: bool = False,
 ) -> dict[str, object] | None:
     forecast_db = cfg.get("forecast_db")
     output_dir = cfg.get("download_output_dir") or cfg.get("raw_manifest_dir")
@@ -680,6 +794,44 @@ def _download_replacement_forecast_current_targets_if_needed(
                 "status": "CURRENT_TARGET_SCOPED_DOWNLOAD_NO_TARGETS",
                 "available_cycle": available_cycle.isoformat(),
             }
+        if quota_critical:
+            from src.data.replacement_forecast_seed_discovery import (  # noqa: PLC0415
+                held_position_family_priorities,
+            )
+
+            critical_families = held_position_family_priorities()
+            unauthorized = tuple(
+                scope for scope in required_scopes if critical_families.get(scope) != 0
+            )
+            if unauthorized:
+                raise ValueError(
+                    "critical current-target quota requires exact canonical "
+                    "day0_window/pending_exit scopes: "
+                    + ",".join("/".join(scope) for scope in unauthorized)
+                )
+            missing_critical_scopes = _critical_scopes_missing_current_anchor(
+                Path(str(forecast_db)),
+                required_scopes,
+                available_cycle,
+            )
+            if missing_critical_scopes is None:
+                raise RuntimeError("critical current-target anchor coverage unreadable")
+            if not missing_critical_scopes:
+                _close_current_target_bucket_pool()
+                return {
+                    "status": "CURRENT_TARGET_CRITICAL_SCOPES_ALREADY_COVERED",
+                    "available_cycle": available_cycle.isoformat(),
+                    "downloaded_cycle": (
+                        None
+                        if downloaded_cycle is None
+                        else downloaded_cycle.isoformat()
+                    ),
+                    "target_count": len(required_scopes),
+                    "written_manifest_count": 0,
+                }
+            required_scopes = missing_critical_scopes
+    if quota_critical and required_scopes is None:
+        raise ValueError("critical current-target quota requires explicit scopes")
     cycle_targets_have_current_manifests = (
         plan is not None and plan.missing_openmeteo_manifest_count <= 0
     )
@@ -730,36 +882,46 @@ def _download_replacement_forecast_current_targets_if_needed(
         download_kwargs["required_scopes"] = required_scopes
     bucket_pool = _current_target_bucket_pool(cycle)
     try:
-        result = download_current_target_openmeteo_inputs(
-            forecast_db=Path(str(forecast_db)),
-            output_dir=Path(str(output_dir)),
-            cycle=cycle,
-            # ``required_scopes`` is already the bounded, freshly committed source
-            # batch. Applying the generic maintenance limit here silently drops the
-            # tail before the deadline can decide how much work fits, leaving raw
-            # model rows without the anchor required to materialize q.
-            limit=(
-                None
-                if required_scopes is not None
-                else int(cfg.get("download_limit") or 10)
-            ),
-            write_db=True,
-            release_lag_hours=release_lag_hours,
-            anchor_sigma_c=float(cfg.get("download_anchor_sigma_c") or 3.0),
-            # CYCLE-CURRENCY (K-root instance #3): when this call fires because the available
-            # cycle is AHEAD of the downloaded high-water mark, the NEW cycle's raw inputs are
-            # needed for ALL current targets — coverage ("a posterior exists") must not filter
-            # the target list. Once that cycle is already represented, a residual manifest gap
-            # must repair only uncovered rows; replaying every covered target each poll rewrites
-            # the same manifests and repeatedly drives global seed discovery.
-            include_covered=cycle_advanced,
-            missing_manifests_only=not cycle_advanced,
-            precomputed_plan=plan,
-            max_wall_clock_seconds=remaining,
-            fetch_workers=int(cfg.get("source_clock_fanout_workers") or 4),
-            bucket_reader_pool=bucket_pool,
-            **download_kwargs,
-        )
+        quota_context = contextlib.nullcontext()
+        if quota_critical:
+            from src.data.openmeteo_quota import quota_tracker  # noqa: PLC0415
+
+            # SCOPE: only the explicit canonical Day0/pending-exit scopes validated
+            # above. DRAIN: this bounded raw-anchor call and its existing manifest
+            # commit. RESET: context exit; every later call re-proves current phase.
+            quota_context = quota_tracker.critical_lane()
+        with quota_context:
+            result = download_current_target_openmeteo_inputs(
+                forecast_db=Path(str(forecast_db)),
+                output_dir=Path(str(output_dir)),
+                cycle=cycle,
+                # ``required_scopes`` is already the bounded, freshly committed source
+                # batch. Applying the generic maintenance limit here silently drops the
+                # tail before the deadline can decide how much work fits, leaving raw
+                # model rows without the anchor required to materialize q.
+                limit=(
+                    None
+                    if required_scopes is not None
+                    else int(cfg.get("download_limit") or 10)
+                ),
+                write_db=True,
+                release_lag_hours=release_lag_hours,
+                anchor_sigma_c=float(cfg.get("download_anchor_sigma_c") or 3.0),
+                # CYCLE-CURRENCY (K-root instance #3): when this call fires because the available
+                # cycle is AHEAD of the downloaded high-water mark, the NEW cycle's raw inputs are
+                # needed for ALL current targets — coverage ("a posterior exists") must not filter
+                # the target list. Once that cycle is already represented, a residual manifest gap
+                # must repair only uncovered rows; replaying every covered target each poll rewrites
+                # the same manifests and repeatedly drives global seed discovery.
+                include_covered=cycle_advanced,
+                missing_manifests_only=not cycle_advanced,
+                precomputed_plan=plan,
+                max_wall_clock_seconds=remaining,
+                fetch_workers=int(cfg.get("source_clock_fanout_workers") or 4),
+                bucket_reader_pool=bucket_pool,
+                quota_critical=quota_critical,
+                **download_kwargs,
+            )
     except Exception:
         _close_current_target_bucket_pool(cycle)
         raise
@@ -787,6 +949,7 @@ def _download_bayes_precision_fusion_extra_raw_inputs_if_needed(
 
         from src.config import cities_by_name  # noqa: PLC0415
         from src.data.replacement_forecast_current_target_plan import (  # noqa: PLC0415
+            ReplacementForecastTargetKey,
             build_replacement_forecast_current_target_plan,
         )
         from src.data.bayes_precision_fusion_download import (  # noqa: PLC0415
@@ -819,18 +982,106 @@ def _download_bayes_precision_fusion_extra_raw_inputs_if_needed(
         if cycle is None:
             return {"status": "BAYES_PRECISION_FUSION_EXTRA_CYCLE_PROBE_UNRESOLVED_SKIP"}
 
-        # CYCLE-CURRENCY (2026-06-09, K-root instance #5 — same structural decision as the
-        # anchor downloader's include_covered): plan 'covered' has NO cycle-awareness, so
-        # skipping covered rows meant a covered target NEVER received the new cycle's extras
-        # (observed live: Madrid 06-10 fused with icon_global because its icon_eu row only
-        # existed at the stale 06-08T12 cycle — the 00z extras run had skipped Madrid 06-10 as
-        # covered). The coverage filter is REMOVED: the extras job now feeds ALL current
-        # targets, and the downloader itself skips per-ROW (model, city, target, metric,
-        # cycle, endpoint) combos that are already persisted, so the steady-state cost is
-        # only-missing fetches (self-healing per cycle, no covered/freshness conflation).
+        # CYCLE-CURRENCY (2026-06-09, K-root instance #5): plan ``covered`` is not
+        # cycle-aware, so it cannot decide capture admission. Exact-cycle provider-family
+        # coverage below can: it keeps a currently covered market in the fanout when the new
+        # cycle is absent, and removes it once the live q-path's two-family minimum has landed.
+        # Future targets still need full local-day coverage. Active Day0 targets may use
+        # an elapsed-prefix-only vector, but the downstream parser must prove that it spans
+        # decision time through the unresolved evening before any row becomes authority.
         plan = build_replacement_forecast_current_target_plan(Path(str(forecast_db)))
+        decision_time = datetime.now(timezone.utc)
+        coverage = _extras_coverage_missing(
+            cfg,
+            cycle,
+            decision_time=decision_time,
+        )
+        missing_scopes = None if coverage is None else coverage[0]
+        try:
+            from src.data.replacement_forecast_seed_discovery import (  # noqa: PLC0415
+                held_position_family_priorities,
+            )
+
+            held_priority = held_position_family_priorities()
+        except Exception:
+            held_priority = {}
+        capture_rows: list[object] = list(plan.rows)
+        planned_scopes = {
+            (row.city, row.target_date, row.temperature_metric)
+            for row in capture_rows
+        }
+        for city, target_date, metric in held_priority:
+            if (city, target_date, metric) in planned_scopes:
+                continue
+            capture_rows.append(
+                ReplacementForecastTargetKey(
+                    city=city,
+                    target_date=target_date,
+                    temperature_metric=metric,
+                )
+            )
+        admitted_rows = [
+            row
+            for row in capture_rows
+            if (
+                missing_scopes is None
+                or (row.city, row.temperature_metric, row.target_date) in missing_scopes
+            )
+            and (
+                (city_cfg := cities_by_name.get(row.city)) is None
+                or _source_cycle_can_cover_local_decision_window(
+                    cycle=cycle,
+                    target_date=row.target_date,
+                    timezone_name=str(city_cfg.timezone),
+                    decision_time=decision_time,
+                )
+            )
+        ]
+        admitted_rows.sort(
+            key=lambda row: (
+                held_priority.get(
+                    (row.city, row.target_date, row.temperature_metric),
+                    2,
+                ),
+                bool(getattr(row, "day0_observed_extreme_required", False)),
+                int(getattr(row, "posterior_count", 0)) > 0,
+                not bool(getattr(row, "can_seed", False)),
+                -int(getattr(row, "fusion_current_value_count", 0)),
+                row.target_date,
+                row.city,
+                row.temperature_metric,
+            )
+        )
+        held_group_keys = {
+            (row.city, row.target_date)
+            for row in admitted_rows
+            if held_priority.get(
+                (row.city, row.target_date, row.temperature_metric),
+                2,
+            ) < 2
+        }
+        starved_rows = [
+            row
+            for row in admitted_rows
+            if (
+                int(getattr(row, "posterior_count", 0)) <= 0
+                and bool(getattr(row, "can_seed", False))
+                and not bool(
+                    getattr(row, "day0_observed_extreme_required", False)
+                )
+            )
+        ]
+        starvation_frontier = min(
+            (row.target_date for row in starved_rows),
+            default=None,
+        )
+        priority_group_keys = held_group_keys | {
+            (row.city, row.target_date)
+            for row in starved_rows
+            if row.target_date == starvation_frontier
+        }
         targets: list[BayesPrecisionFusionDownloadTarget] = []
-        for row in plan.rows:
+        for row in admitted_rows:
             city_cfg = cities_by_name.get(row.city)
             if city_cfg is None:
                 continue
@@ -873,6 +1124,7 @@ def _download_bayes_precision_fusion_extra_raw_inputs_if_needed(
                 targets,
                 cycle=cycle,
                 state_path=rotation_state_path,
+                priority_group_keys=priority_group_keys,
             )
             download_error: Exception | None = None
             try:
@@ -945,6 +1197,7 @@ def _download_bayes_precision_fusion_source_clock_raw_inputs_if_needed(
     source_clock_report: object,
     max_wall_clock_seconds: float | None = None,
     on_source_commit: Callable[[str, Mapping[str, object]], None] | None = None,
+    decision_time: datetime | None = None,
 ) -> dict[str, object] | None:
     """Fast source-clock current capture for only updated sources and affected cities.
 
@@ -962,11 +1215,14 @@ def _download_bayes_precision_fusion_source_clock_raw_inputs_if_needed(
         from src.data.bayes_precision_fusion_download import (  # noqa: PLC0415
             BayesPrecisionFusionDownloadTarget,
             bayes_precision_fusion_quota_cooldown_seconds,
+            bayes_precision_fusion_held_quota_cooldown_seconds,
+            bayes_precision_fusion_held_quota_priority,
             bayes_precision_fusion_source_clock_quota_priority,
             download_bayes_precision_fusion_extra_raw_inputs,
         )
         from src.data.openmeteo_model_updates import read_model_updates_jsonl  # noqa: PLC0415
         from src.data.replacement_forecast_current_target_plan import (  # noqa: PLC0415
+            ReplacementForecastTargetKey,
             replacement_forecast_current_target_keys,
         )
         from src.data.replacement_forecast_seed_discovery import (  # noqa: PLC0415
@@ -997,16 +1253,28 @@ def _download_bayes_precision_fusion_source_clock_raw_inputs_if_needed(
                 "updated_sources": updated_sources,
             }
 
+        held_priority = held_position_family_priorities()
         cooldown_seconds = bayes_precision_fusion_quota_cooldown_seconds()
         if cooldown_seconds > 0:
-            return {
-                "status": "SOURCE_CLOCK_BPF_SCOPED_QUOTA_COOLDOWN_SKIPPED",
-                "updated_sources": updated_sources,
-                "affected_cities": affected_cities,
-                "cooldown_seconds": cooldown_seconds,
-            }
+            affected_city_set = set(affected_cities)
+            has_held_target = any(
+                priority < 2 and city in affected_city_set
+                for (city, _target_date, _metric), priority in held_priority.items()
+            )
+            held_cooldown_seconds = (
+                bayes_precision_fusion_held_quota_cooldown_seconds()
+                if has_held_target
+                else cooldown_seconds
+            )
+            if held_cooldown_seconds > 0:
+                return {
+                    "status": "SOURCE_CLOCK_BPF_SCOPED_QUOTA_COOLDOWN_SKIPPED",
+                    "updated_sources": updated_sources,
+                    "affected_cities": affected_cities,
+                    "cooldown_seconds": held_cooldown_seconds,
+                }
 
-        now = datetime.now(timezone.utc)
+        now = decision_time or datetime.now(timezone.utc)
         source_cycles: dict[str, datetime] = {}
         source_availabilities: dict[str, datetime] = {}
         frozen_runs = payload.get("source_runs")
@@ -1069,10 +1337,23 @@ def _download_bayes_precision_fusion_source_clock_raw_inputs_if_needed(
                 "unresolved_sources": unresolved_sources,
             }
 
-        held_priority = held_position_family_priorities()
         all_target_keys = tuple(
             replacement_forecast_current_target_keys(Path(str(forecast_db)))
         )
+        planned_scopes = {
+            (row.city, row.target_date, row.temperature_metric)
+            for row in all_target_keys
+        }
+        held_target_keys = tuple(
+            ReplacementForecastTargetKey(
+                city=city,
+                target_date=target_date,
+                temperature_metric=metric,
+            )
+            for city, target_date, metric in held_priority
+            if (city, target_date, metric) not in planned_scopes
+        )
+        all_target_keys = (*all_target_keys, *held_target_keys)
         reported_affected = set(affected_cities)
         target_keys_by_source: dict[str, list[object]] = {}
         for source in resolved_sources:
@@ -1145,10 +1426,11 @@ def _download_bayes_precision_fusion_source_clock_raw_inputs_if_needed(
             unservable = 0
             for row in rows:
                 city_cfg = cities_by_name.get(row.city)
-                if city_cfg is None or _source_cycle_can_cover_full_local_day(
+                if city_cfg is None or _source_cycle_can_cover_local_decision_window(
                     cycle=cycle,
                     target_date=row.target_date,
                     timezone_name=str(city_cfg.timezone),
+                    decision_time=now,
                 ):
                     coverable.append(row)
                 else:
@@ -1221,7 +1503,7 @@ def _download_bayes_precision_fusion_source_clock_raw_inputs_if_needed(
             list[BayesPrecisionFusionDownloadTarget],
         ]
         tasks_by_source: dict[str, list[task_type]] = {}
-        priority_task: task_type | None = None
+        priority_tasks: list[task_type] = []
         source_order = tuple(
             sorted(
                 resolved_sources,
@@ -1258,36 +1540,33 @@ def _download_bayes_precision_fusion_source_clock_raw_inputs_if_needed(
                     grouped_targets.append([target])
                 else:
                     grouped_targets[index].append(target)
-            if priority_task is None:
-                first_priority = min(
-                    held_priority.get(
-                        (target.city, target.target_date, target.metric),
-                        2,
-                    )
-                    for target in grouped_targets[0]
+            held_groups: list[list[BayesPrecisionFusionDownloadTarget]] = []
+            while grouped_targets and min(
+                held_priority.get(
+                    (target.city, target.target_date, target.metric),
+                    2,
                 )
-                priority_groups: list[list[BayesPrecisionFusionDownloadTarget]] = []
-                while (
-                    grouped_targets
-                    and len(priority_groups) < _SOURCE_CLOCK_LOCATION_BATCH_SIZE
-                    and min(
-                        held_priority.get(
-                            (target.city, target.target_date, target.metric),
-                            2,
-                        )
-                        for target in grouped_targets[0]
-                    ) == first_priority
-                ):
-                    priority_groups.append(grouped_targets.pop(0))
-                priority_task = (
+                for target in grouped_targets[0]
+            ) < 2:
+                held_groups.append(grouped_targets.pop(0))
+            priority_tasks.extend(
+                (
                     source,
                     source_cycles[source],
                     [
                         target
-                        for group in priority_groups
+                        for group in held_groups[
+                            offset : offset + _SOURCE_CLOCK_LOCATION_BATCH_SIZE
+                        ]
                         for target in group
                     ],
                 )
+                for offset in range(
+                    0,
+                    len(held_groups),
+                    _SOURCE_CLOCK_LOCATION_BATCH_SIZE,
+                )
+            )
             if not grouped_targets:
                 tasks_by_source[source] = []
                 continue
@@ -1309,6 +1588,14 @@ def _download_bayes_precision_fusion_source_clock_raw_inputs_if_needed(
                     _SOURCE_CLOCK_LOCATION_BATCH_SIZE,
                 )
             ]
+
+        held_priority_barrier = bool(priority_tasks)
+        if not priority_tasks:
+            for source in source_order:
+                source_tasks = tasks_by_source.get(source, [])
+                if source_tasks:
+                    priority_tasks.append(source_tasks.pop(0))
+                    break
 
         tasks: list[
             tuple[
@@ -1338,7 +1625,19 @@ def _download_bayes_precision_fusion_source_clock_raw_inputs_if_needed(
             cycle: datetime,
             chunk: list[BayesPrecisionFusionDownloadTarget],
         ) -> tuple[str, dict[str, object]]:
-            cooldown_seconds = bayes_precision_fusion_quota_cooldown_seconds()
+            held_chunk = any(
+                held_priority.get(
+                    (target.city, target.target_date, target.metric),
+                    2,
+                )
+                < 2
+                for target in chunk
+            )
+            cooldown_seconds = (
+                bayes_precision_fusion_held_quota_cooldown_seconds()
+                if held_chunk
+                else bayes_precision_fusion_quota_cooldown_seconds()
+            )
             if quota_abort.is_set() or cooldown_seconds > 0:
                 quota_abort.set()
                 return source, {
@@ -1360,7 +1659,12 @@ def _download_bayes_precision_fusion_source_clock_raw_inputs_if_needed(
                 if deadline is not None
                 else None
             )
-            with bayes_precision_fusion_source_clock_quota_priority():
+            quota_context = (
+                bayes_precision_fusion_held_quota_priority()
+                if held_chunk
+                else bayes_precision_fusion_source_clock_quota_priority()
+            )
+            with quota_context:
                 report = download_bayes_precision_fusion_extra_raw_inputs(
                     forecast_db=Path(str(forecast_db)),
                     cycle=cycle,
@@ -1388,9 +1692,9 @@ def _download_bayes_precision_fusion_source_clock_raw_inputs_if_needed(
         source_commit_notifications = 0
         source_commit_notification_errors: list[str] = []
 
-        assert priority_task is not None
-        priority_report: dict[str, object] = {}
-        scheduled_tasks = (priority_task, *tasks)
+        assert priority_tasks
+        priority_reports: list[dict[str, object]] = []
+        scheduled_tasks = (*priority_tasks, *tasks)
         executor_worker_count = min(max_workers, len(scheduled_tasks))
         callback_futures = {}
         source_executor = ThreadPoolExecutor(
@@ -1403,7 +1707,16 @@ def _download_bayes_precision_fusion_source_clock_raw_inputs_if_needed(
         )
         try:
             futures = {}
-            for index, task in enumerate(scheduled_tasks):
+
+            def _submit_task(
+                task: task_type,
+                *,
+                is_priority: bool,
+                runner: Callable[
+                    [str, datetime, list[BayesPrecisionFusionDownloadTarget]],
+                    tuple[str, dict[str, object]],
+                ],
+            ) -> object:
                 source, cycle, chunk = task
                 task_key = (
                     source,
@@ -1421,7 +1734,7 @@ def _download_bayes_precision_fusion_source_clock_raw_inputs_if_needed(
                 with _SOURCE_CLOCK_DOWNLOAD_INFLIGHT_LOCK:
                     future = _SOURCE_CLOCK_DOWNLOAD_INFLIGHT.get(task_key)
                     if future is None:
-                        future = source_executor.submit(_download_task, *task)
+                        future = source_executor.submit(runner, *task)
                         _SOURCE_CLOCK_DOWNLOAD_INFLIGHT[task_key] = future
                         created = True
 
@@ -1432,7 +1745,61 @@ def _download_bayes_precision_fusion_source_clock_raw_inputs_if_needed(
                                 _SOURCE_CLOCK_DOWNLOAD_INFLIGHT.pop(key, None)
 
                     future.add_done_callback(_release_source_future)
-                futures[future] = (source, index == 0)
+                futures[future] = (source, is_priority)
+
+                return future
+
+            priority_futures = {
+                _submit_task(task, is_priority=True, runner=_download_task)
+                for task in priority_tasks
+            }
+            priority_barrier = Event()
+            if not held_priority_barrier:
+                priority_barrier.set()
+            else:
+                priority_remaining = [len(priority_futures)]
+                priority_lock = Lock()
+
+                def _release_priority_barrier(_future: object) -> None:
+                    with priority_lock:
+                        priority_remaining[0] -= 1
+                        if priority_remaining[0] == 0:
+                            priority_barrier.set()
+
+                for future in priority_futures:
+                    future.add_done_callback(_release_priority_barrier)
+
+            def _download_after_priority(
+                source: str,
+                cycle: datetime,
+                chunk: list[BayesPrecisionFusionDownloadTarget],
+            ) -> tuple[str, dict[str, object]]:
+                remaining = (
+                    max(0.0, deadline - time.monotonic())
+                    if deadline is not None
+                    else None
+                )
+                if not priority_barrier.wait(remaining):
+                    return source, {
+                        "status": "BAYES_PRECISION_FUSION_EXTRA_TIMEBOXED_INCOMPLETE",
+                        "target_count": len(chunk),
+                        "written_row_count": 0,
+                        "timeboxed_incomplete": True,
+                        "timebox_unattempted_target_groups": len(
+                            {target.city for target in chunk}
+                        ),
+                        "global_models_expected": 1,
+                        "global_models_unavailable": (source,),
+                        "single_runs_request_cycles": {source: cycle.isoformat()},
+                    }
+                return _download_task(source, cycle, chunk)
+
+            for task in tasks:
+                _submit_task(
+                    task,
+                    is_priority=False,
+                    runner=_download_after_priority,
+                )
 
             source_timeout = (
                 None
@@ -1451,7 +1818,7 @@ def _download_bayes_precision_fusion_source_clock_raw_inputs_if_needed(
                         continue
                     reports_by_source[result_source].append(task_report)
                     if is_priority:
-                        priority_report = task_report
+                        priority_reports.append(task_report)
                     if (
                         on_source_commit is not None
                         and int(task_report.get("written_row_count") or 0) > 0
@@ -1657,6 +2024,16 @@ def _download_bayes_precision_fusion_source_clock_raw_inputs_if_needed(
             for source_reports in reports_by_source.values()
             for item in source_reports
         ]
+        committed_families = tuple(
+            sorted(
+                {
+                    tuple(str(part) for part in scope)
+                    for item in reports
+                    for scope in (item.get("committed_families") or ())
+                    if isinstance(scope, (tuple, list)) and len(scope) == 3
+                }
+            )
+        )
         report = {
             "status": status,
             "cycle": max(source_cycles.values()).isoformat(),
@@ -1682,6 +2059,7 @@ def _download_bayes_precision_fusion_source_clock_raw_inputs_if_needed(
             "written_row_count": sum(
                 int(item.get("written_row_count") or 0) for item in reports
             ),
+            "committed_families": committed_families,
             "pruned_row_count": sum(
                 int(item.get("pruned_row_count") or 0) for item in reports
             ),
@@ -1756,15 +2134,20 @@ def _download_bayes_precision_fusion_source_clock_raw_inputs_if_needed(
             "source_commit_notification_errors": tuple(
                 source_commit_notification_errors
             ),
-            "priority_probe_source": priority_task[0],
+            "priority_probe_source": priority_tasks[0][0],
+            "priority_probe_sources": tuple(
+                dict.fromkeys(task[0] for task in priority_tasks)
+            ),
             "priority_probe_families": tuple(
                 dict.fromkeys(
                     (target.city, target.target_date)
-                    for target in priority_task[2]
+                    for task in priority_tasks
+                    for target in task[2]
                 )
             ),
-            "priority_probe_transport_aborted": bool(
-                priority_report.get("transport_aborted_remaining_targets")
+            "priority_probe_transport_aborted": any(
+                bool(report.get("transport_aborted_remaining_targets"))
+                for report in priority_reports
             ),
             "updated_sources": updated_sources,
             "affected_cities": affected_cities,
@@ -1782,23 +2165,27 @@ _EXTRAS_FIXPOINT_HEALTH_JOB = "bayes_precision_fusion_capture"
 
 
 def _extras_coverage_missing(
-    cfg: dict[str, object], cycle: datetime
+    cfg: dict[str, object],
+    cycle: datetime,
+    *,
+    decision_time: datetime | None = None,
 ) -> tuple[set[tuple[str, str, str]], int] | None:
     """Per-(city, metric, target_date) coverage gap for ``cycle``'s BPF single_runs capture.
 
     Returns ``(missing_scopes, planned_count)`` where ``missing_scopes`` is the set of planned
-    scopes with NO ``single_runs`` row at this cycle's exact natural key, and ``planned_count``
-    is the size of the plan. Returns ``None`` on any probe error (caller fails-open = re-run).
+    scopes without two provider families at this cycle's exact natural key, and
+    ``planned_count`` is the size of the plan. Returns ``None`` on any probe error
+    (caller fails-open = re-run).
 
-    THE DENOMINATOR is the SAME plan the fan-out builds its download targets from
-    (``build_replacement_forecast_current_target_plan`` — see
-    _download_bayes_precision_fusion_extra_raw_inputs_if_needed:284,312). A scope is "covered"
-    iff it has >=1 ``single_runs`` row at the exact (city, metric, target_date,
-    source_cycle_time) key the materializer's q-path reads
+    THE DENOMINATOR is the current-market plan plus canonical held-position
+    families, the same union both fan-outs build their download targets from. A scope is "covered"
+    iff it has >=2 distinct provider families in ``single_runs`` rows at the exact
+    (city, metric, target_date, source_cycle_time) key the materializer's q-path reads
     (replacement_current_value_serving.read_current_instrument_values) — so completeness here
-    is byte-aligned with what actually feeds the traded q. A ``previous_runs`` substitute is a
-    q FALLBACK, not cycle completeness, so it is deliberately NOT counted: the cycle's own
-    single_runs must land or the cycle stays incomplete and we keep re-trying for THIS cycle.
+    is byte-aligned with the live shape's minimum provider-family requirement. One
+    provider row is partial capture, not completeness. A ``previous_runs`` substitute
+    is a q FALLBACK, not cycle completeness, so it is deliberately NOT counted: the
+    cycle's own two provider families must land or capture keeps retrying for THIS cycle.
     """
     forecast_db = cfg.get("forecast_db")
     if forecast_db is None:
@@ -1809,25 +2196,61 @@ def _extras_coverage_missing(
         from src.data.replacement_forecast_current_target_plan import (  # noqa: PLC0415
             build_replacement_forecast_current_target_plan,
         )
+        from src.data.replacement_forecast_seed_discovery import (  # noqa: PLC0415
+            held_position_family_priorities,
+        )
         from src.state.db import _connect  # noqa: PLC0415
 
         plan = build_replacement_forecast_current_target_plan(Path(str(forecast_db)))
-        need = {(row.city, row.temperature_metric, row.target_date) for row in plan.rows}
+        from src.config import cities_by_name  # noqa: PLC0415
+
+        capture_scopes = {
+            (row.city, row.temperature_metric, row.target_date)
+            for row in plan.rows
+        }
+        capture_scopes.update(
+            (city, metric, target_date)
+            for city, target_date, metric in held_position_family_priorities()
+        )
+        need = {
+            (city, metric, target_date)
+            for city, metric, target_date in capture_scopes
+            if (
+                (city_cfg := cities_by_name.get(city)) is None
+                or _source_cycle_can_cover_local_decision_window(
+                    cycle=cycle,
+                    target_date=target_date,
+                    timezone_name=str(city_cfg.timezone),
+                    decision_time=decision_time,
+                )
+            )
+        }
         if not need:
             return (set(), 0)  # no planned scopes (e.g. no open markets) => nothing to capture
         conn = _connect(Path(str(forecast_db)))
         try:
             cycle_iso = cycle.astimezone(_tz.utc).isoformat()
-            have = {
-                (str(r[0]), str(r[1]), str(r[2]))
-                for r in conn.execute(
-                    "SELECT DISTINCT city, metric, target_date FROM raw_model_forecasts"
-                    " WHERE source_cycle_time = ? AND endpoint = 'single_runs'",
-                    (cycle_iso,),
-                )
-            }
+            rows = conn.execute(
+                "SELECT DISTINCT city, metric, target_date, model "
+                "FROM raw_model_forecasts "
+                "WHERE source_cycle_time = ? AND endpoint = 'single_runs'",
+                (cycle_iso,),
+            ).fetchall()
         finally:
             conn.close()
+        from src.strategy.live_inference.source_clock_vnext import (  # noqa: PLC0415
+            provider_family_for_source,
+        )
+
+        families_by_scope: dict[tuple[str, str, str], set[str]] = {}
+        for city, metric, target_date, model in rows:
+            scope = (str(city), str(metric), str(target_date))
+            families_by_scope.setdefault(scope, set()).add(
+                provider_family_for_source(str(model))
+            )
+        have = {
+            scope for scope, families in families_by_scope.items() if len(families) >= 2
+        }
         return (need - have, len(need))
     except Exception:
         return None
@@ -2162,15 +2585,11 @@ def _replacement_cycle_availability_poll_if_needed(
     )
     from src.data.replacement_cycle_availability import (  # noqa: PLC0415
         newest_complete_cycle,
-        probe_anchor_available_any,
-        resolve_anchor_cycle_availability,
+        resolve_provider_anchor_cycle_availability,
     )
 
     now = datetime.now(timezone.utc)
-    availability = resolve_anchor_cycle_availability(
-        now,
-        probe_anchor=probe_anchor_available_any,
-    )
+    availability = resolve_provider_anchor_cycle_availability(now)
     anchor_have = _per_leg_downloaded_cycle(Path(str(forecast_db)), "openmeteo_ecmwf_ifs_9km")
     newest_anchor_published = next((a.cycle for a in availability if a.anchor_available), None)
 
@@ -2368,6 +2787,7 @@ def _enqueue_fusion_upgrade_reseeds_if_needed(
     scopes: Sequence[tuple[str, str, str]] | None = None,
     changed_sources: Sequence[str] | None = None,
     manifest_snapshot: dict[str, object] | None = None,
+    limit: int | None = None,
 ) -> dict[str, object] | None:
     """Enqueue scopes whose provider set or consumed raw input revision changed.
 
@@ -2392,7 +2812,11 @@ def _enqueue_fusion_upgrade_reseeds_if_needed(
             forecast_db=Path(str(forecast_db)),
             seed_dir=Path(str(seed_dir)),
             raw_manifest_dir=Path(str(raw_manifest_dir)),
-            limit=int(cfg.get("seed_limit") or cfg.get("limit") or 10),
+            limit=int(
+                limit
+                if limit is not None
+                else cfg.get("seed_limit") or cfg.get("limit") or 10
+            ),
             scopes=scopes,
             changed_sources=changed_sources,
             computed_at=computed_at,
@@ -2408,6 +2832,7 @@ def _enqueue_cycle_advance_reseeds_if_needed(
     *,
     scopes: Sequence[tuple[str, str, str]] | None = None,
     manifest_snapshot: dict[str, object] | None = None,
+    limit: int | None = None,
 ) -> dict[str, object] | None:
     """U5 step 2a — enqueue re-materialization seeds for active-window families whose latest
     posterior consumed a STRICTLY OLDER cycle than the freshest materializable in-universe cycle.
@@ -2435,7 +2860,11 @@ def _enqueue_cycle_advance_reseeds_if_needed(
             seed_dir=Path(str(seed_dir)),
             raw_manifest_dir=Path(str(raw_manifest_dir)),
             trades_db=_zeus_trade_db_path(),
-            limit=int(cfg.get("seed_limit") or cfg.get("limit") or 10),
+            limit=int(
+                limit
+                if limit is not None
+                else cfg.get("seed_limit") or cfg.get("limit") or 10
+            ),
             scopes=scopes,
             computed_at=computed_at,
             manifests=manifests,

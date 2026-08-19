@@ -2,8 +2,8 @@
 
 Date: 2026-06-05
 Status: active plan
-Target new repo: `/Users/leofitz/zeus`
-Current live checkout: `/Users/leofitz/.openclaw/workspace-venus/zeus`
+Target new repo: `<local>/zeus`
+Current live checkout: `<local>/workspace-venus/zeus`
 
 ## Purpose
 
@@ -18,7 +18,7 @@ must split those surfaces deliberately.
 
 ## Required Outcome
 
-`/Users/leofitz/zeus` becomes the normal Zeus checkout for source work and,
+`<local>/zeus` becomes the normal Zeus checkout for source work and,
 after gated cutover, the runtime checkout for retired/no-submit daemons. The old
 checkout remains intact as a hot rollback point until all runtime-ready retired
 gates pass.
@@ -39,7 +39,7 @@ The exact HEAD and dirty state can change during active work. Before execution,
 freeze current facts with:
 
 ```bash
-cd /Users/leofitz/.openclaw/workspace-venus/zeus
+cd <local>/workspace-venus/zeus
 date -u
 git status --short --branch
 git rev-parse HEAD
@@ -71,7 +71,7 @@ Executed on 2026-06-05 with live/runtime cutover intentionally out of scope.
 
 Current target source mirror:
 
-- Destination repo: `/Users/leofitz/zeus`
+- Destination repo: `<local>/zeus`
 - Destination-relative root: `.`
 - Destination state directory: `state/`
 - Destination logs directory: `logs/`
@@ -80,7 +80,7 @@ Current target source mirror:
 
 Completed pre-cutover actions:
 
-- Created `/Users/leofitz/zeus` as a standalone git clone from the current
+- Created `<local>/zeus` as a standalone git clone from the current
   checkout using `git clone --no-hardlinks`.
 - Synced this plan and scope packet into the destination repo.
 - Synced `config/settings.json` into the destination repo as an unstaged local
@@ -110,7 +110,7 @@ python3 scripts/topology_doctor.py --planning-lock --changed-files docs/operatio
 ```
 
 The same py_compile, bash syntax, and `git diff --check` checks also passed in
-`/Users/leofitz/zeus`.
+`<local>/zeus`.
 
 Expected current destination probe behavior before DB/runtime cutover:
 
@@ -118,7 +118,7 @@ Expected current destination probe behavior before DB/runtime cutover:
 ALERT ... flags=LIVE_CODE_PLANE_DRIFT,...,SETTLEMENT_TRUTH_DB_MISSING
 ```
 
-That alert is expected while `/Users/leofitz/zeus/state` has no canonical DBs
+That alert is expected while `<local>/zeus/state` has no canonical DBs
 and active daemons still belong to the old checkout.
 
 Residual old-checkout path blockers found by repo scan:
@@ -139,7 +139,7 @@ Residual old-checkout path blockers found by repo scan:
 | `tests/fixtures/dispatch_payloads/worktree_create_advisor.enter_worktree.json` | fixture path literal | fixture/test-route admission before edit |
 | `scripts/authority_inventory.py` | comment-only reference | no runtime blocker; can be left until docs/comment hygiene route |
 
-These paths mean `/Users/leofitz/zeus` is source-prepared but not yet cutover
+These paths mean `<local>/zeus` is source-prepared but not yet cutover
 clean. Runtime cutover must not proceed until the active-path subset above is
 either patched under a valid route, explicitly retired, or proven non-runtime.
 
@@ -209,9 +209,9 @@ Use staged local clone plus gated runtime retargeting.
 
 Chosen option:
 
-1. Create `/Users/leofitz/zeus` by cloning the current local repo, not by
+1. Create `<local>/zeus` by cloning the current local repo, not by
    moving the current live checkout.
-2. Keep `/Users/leofitz/.openclaw/workspace-venus/zeus` intact as hot standby.
+2. Keep `<local>/workspace-venus/zeus` intact as hot standby.
 3. Rebuild `.venv` in the new repo.
 4. Make code paths root-relative or env-driven.
 5. Copy local-only config and runtime state intentionally.
@@ -221,7 +221,7 @@ Chosen option:
 
 Rejected options:
 
-- `mv /Users/leofitz/.openclaw/workspace-venus/zeus /Users/leofitz/zeus`:
+- `mv <local>/workspace-venus/zeus <local>/zeus`:
   breaks launchd, cron, worktree metadata, logs, venv, loaded SHA assumptions,
   and rollback simplicity.
 - `rsync` as primary migration: can copy active DB/WAL/log/runtime state while
@@ -236,8 +236,8 @@ Rejected options:
 Replacement target:
 
 ```text
-OLD_REPO=/Users/leofitz/.openclaw/workspace-venus/zeus
-NEW_REPO=/Users/leofitz/zeus
+OLD_REPO=<local>/workspace-venus/zeus
+NEW_REPO=<local>/zeus
 ```
 
 ### Source And Runtime Code Paths
@@ -246,14 +246,14 @@ These must be changed before the new checkout can be runtime-ready.
 
 | File | Old value | Required replacement |
 |---|---|---|
-| `src/state/db_paths.py` | default `/Users/leofitz/.openclaw/workspace-venus/zeus` | repo-relative fallback with `ZEUS_PRIMARY_ROOT` override |
-| `scripts/live_health_probe.py` | `ROOT = "/Users/leofitz/.openclaw/workspace-venus/zeus"` | `ZEUS_PRIMARY_ROOT` or script-derived repo root |
-| `scripts/live_health_monitor.sh` | `cd /Users/leofitz/.openclaw/workspace-venus/zeus` | `cd "${ZEUS_DIR:-/Users/leofitz/zeus}"` |
-| `scripts/data_chain_monitor.sh` | `cd /Users/leofitz/.openclaw/workspace-venus/zeus` | `cd "${ZEUS_DIR:-/Users/leofitz/zeus}"` |
-| `scripts/arm_live_mode.sh` | `ZEUS_DIR="${ZEUS_DIR:-/Users/leofitz/.openclaw/workspace-venus/zeus}"` | default `/Users/leofitz/zeus` or require explicit `ZEUS_DIR` |
-| `scripts/expire_auto_pause.sh` | same old `ZEUS_DIR` default | default `/Users/leofitz/zeus` or require explicit `ZEUS_DIR` |
-| `scripts/run_redeem_reconcile_with_onchain_proof.py` | `ZEUS_ROOT = "/Users/leofitz/.openclaw/workspace-venus/zeus"` | env/repo-root derived |
-| `scripts/check_full_transport_ship_readiness.py` | `_STATE = Path("/Users/leofitz/.openclaw/workspace-venus/zeus/state")` | `ROOT / "state"` |
+| `src/state/db_paths.py` | default `<local>/workspace-venus/zeus` | repo-relative fallback with `ZEUS_PRIMARY_ROOT` override |
+| `scripts/live_health_probe.py` | `ROOT = "<local>/workspace-venus/zeus"` | `ZEUS_PRIMARY_ROOT` or script-derived repo root |
+| `scripts/live_health_monitor.sh` | `cd <local>/workspace-venus/zeus` | `cd "${ZEUS_DIR:-<local>/zeus}"` |
+| `scripts/data_chain_monitor.sh` | `cd <local>/workspace-venus/zeus` | `cd "${ZEUS_DIR:-<local>/zeus}"` |
+| `scripts/arm_live_mode.sh` | `ZEUS_DIR="${ZEUS_DIR:-<local>/workspace-venus/zeus}"` | default `<local>/zeus` or require explicit `ZEUS_DIR` |
+| `scripts/expire_auto_pause.sh` | same old `ZEUS_DIR` default | default `<local>/zeus` or require explicit `ZEUS_DIR` |
+| `scripts/run_redeem_reconcile_with_onchain_proof.py` | `ZEUS_ROOT = "<local>/workspace-venus/zeus"` | env/repo-root derived |
+| `scripts/check_full_transport_ship_readiness.py` | `_STATE = Path("<local>/workspace-venus/zeus/state")` | `ROOT / "state"` |
 | `scripts/generate_monthly_bounds.py` | `state/zeus-world.db` under old root | `STATE_DIR / "zeus-world.db"` |
 | `scripts/pipeline_empirical_detail.py` | old `state/zeus-forecasts.db` | `ZEUS_FORECASTS_DB` or `STATE_DIR / "zeus-forecasts.db"` |
 | `scripts/audit_matched_date_proper_scores.py` | default old `state/backups/` | `STATE_DIR / "backups"` |
@@ -275,7 +275,7 @@ STATE_DIR = ROOT / "state"
 Preferred shell pattern:
 
 ```bash
-ZEUS_DIR="${ZEUS_DIR:-/Users/leofitz/zeus}"
+ZEUS_DIR="${ZEUS_DIR:-<local>/zeus}"
 cd "$ZEUS_DIR"
 ```
 
@@ -289,14 +289,14 @@ cd "$ZEUS_DIR"
 ### External Source Data Paths
 
 These paths point to external source-data roots, not the Zeus repo. Do not
-blindly replace with `/Users/leofitz/zeus`.
+blindly replace with `<local>/zeus`.
 
 | File | Existing external path | Policy |
 |---|---|---|
-| `scripts/diagnose_opendata_tigge_equivalence.py` | `/Users/leofitz/.openclaw/workspace-venus/51 source data/raw` | introduce `ZEUS_51_SOURCE_ROOT` |
-| `scripts/etl_solar_times.py` | `/Users/leofitz/.openclaw/workspace-venus/51 source data/raw/solar/` | introduce `ZEUS_51_SOURCE_ROOT` |
-| `scripts/backfill_solar_openmeteo.py` | `/Users/leofitz/.openclaw/workspace-venus/51 source data/raw/solar/` | introduce `ZEUS_51_SOURCE_ROOT` |
-| `raw/README.md` | `/Users/leofitz/.openclaw/workspace-venus/51 source data/raw/` | document external mount |
+| `scripts/diagnose_opendata_tigge_equivalence.py` | `<local>/workspace-venus/51 source data/raw` | introduce `ZEUS_51_SOURCE_ROOT` |
+| `scripts/etl_solar_times.py` | `<local>/workspace-venus/51 source data/raw/solar/` | introduce `ZEUS_51_SOURCE_ROOT` |
+| `scripts/backfill_solar_openmeteo.py` | `<local>/workspace-venus/51 source data/raw/solar/` | introduce `ZEUS_51_SOURCE_ROOT` |
+| `raw/README.md` | `<local>/workspace-venus/51 source data/raw/` | document external mount |
 
 ### Test And Fixture Paths
 
@@ -319,25 +319,25 @@ to the old repo. Update only after code-ready and DB-copy gates pass.
 Current active files:
 
 ```text
-/Users/leofitz/Library/LaunchAgents/com.zeus.live-trading.plist
-/Users/leofitz/Library/LaunchAgents/com.zeus.forecast-live.plist
-/Users/leofitz/Library/LaunchAgents/com.zeus.data-ingest.plist
-/Users/leofitz/Library/LaunchAgents/com.zeus.riskguard-live.plist
-/Users/leofitz/Library/LaunchAgents/com.zeus.venue-heartbeat.plist
-/Users/leofitz/Library/LaunchAgents/com.zeus.heartbeat-sensor.plist
-/Users/leofitz/Library/LaunchAgents/com.zeus.calibration-transfer-eval.plist
+<local>/Library/LaunchAgents/com.zeus.live-trading.plist
+<local>/Library/LaunchAgents/com.zeus.forecast-live.plist
+<local>/Library/LaunchAgents/com.zeus.data-ingest.plist
+<local>/Library/LaunchAgents/com.zeus.riskguard-live.plist
+<local>/Library/LaunchAgents/com.zeus.venue-heartbeat.plist
+<local>/Library/LaunchAgents/com.zeus.heartbeat-sensor.plist
+<local>/Library/LaunchAgents/com.zeus.calibration-transfer-eval.plist
 ```
 
 Replace in each active plist:
 
 | Old | New |
 |---|---|
-| `/Users/leofitz/.openclaw/workspace-venus/zeus` | `/Users/leofitz/zeus` |
-| `/Users/leofitz/.openclaw/workspace-venus/zeus/.venv/bin/python` | `/Users/leofitz/zeus/.venv/bin/python` |
-| `/Users/leofitz/.openclaw/workspace-venus/zeus/logs/...` | `/Users/leofitz/zeus/logs/...` |
-| old `PYTHONPATH` value | `/Users/leofitz/zeus` |
-| old `PATH` prefix | `/Users/leofitz/zeus/.venv/bin` |
-| old `WorkingDirectory` | `/Users/leofitz/zeus` |
+| `<local>/workspace-venus/zeus` | `<local>/zeus` |
+| `<local>/workspace-venus/zeus/.venv/bin/python` | `<local>/zeus/.venv/bin/python` |
+| `<local>/workspace-venus/zeus/logs/...` | `<local>/zeus/logs/...` |
+| old `PYTHONPATH` value | `<local>/zeus` |
+| old `PATH` prefix | `<local>/zeus/.venv/bin` |
+| old `WorkingDirectory` | `<local>/zeus` |
 
 For each plist, verify all of these keys:
 
@@ -358,18 +358,18 @@ Current active Zeus cron entries:
 
 ```text
 line 48:
-*/30 * * * * cd /Users/leofitz/.openclaw/workspace-venus/zeus && .venv/bin/python scripts/heartbeat_dispatcher.py >> /Users/leofitz/.openclaw/logs/zeus-heartbeat-dispatch.log 2>&1
+*/30 * * * * cd <local>/workspace-venus/zeus && .venv/bin/python scripts/heartbeat_dispatcher.py >> <local>/.openclaw/logs/zeus-heartbeat-dispatch.log 2>&1
 
 line 67:
-0 10 * * * cd /Users/leofitz/.openclaw/workspace-venus/zeus && WU_API_KEY=... .venv/bin/python scripts/oracle_snapshot_listener.py >> /Users/leofitz/.openclaw/logs/oracle-snapshot.log 2>&1
+0 10 * * * cd <local>/workspace-venus/zeus && WU_API_KEY=... .venv/bin/python scripts/oracle_snapshot_listener.py >> <local>/.openclaw/logs/oracle-snapshot.log 2>&1
 ```
 
 Required replacements:
 
 ```text
-cd /Users/leofitz/.openclaw/workspace-venus/zeus
+cd <local>/workspace-venus/zeus
 →
-cd /Users/leofitz/zeus
+cd <local>/zeus
 ```
 
 Do not write secrets into any repo file. Preserve secret sourcing behavior in
@@ -473,8 +473,8 @@ Objective: establish exact current truth and prevent split-brain writes.
 Commands:
 
 ```bash
-OLD=/Users/leofitz/.openclaw/workspace-venus/zeus
-NEW=/Users/leofitz/zeus
+OLD=<local>/workspace-venus/zeus
+NEW=<local>/zeus
 
 cd "$OLD"
 date -u | tee /tmp/zeus-migration-freeze.txt
@@ -500,8 +500,8 @@ Objective: create source-only standalone checkout without moving live runtime.
 Commands:
 
 ```bash
-OLD=/Users/leofitz/.openclaw/workspace-venus/zeus
-NEW=/Users/leofitz/zeus
+OLD=<local>/workspace-venus/zeus
+NEW=<local>/zeus
 
 test ! -e "$NEW"
 git clone --no-hardlinks "$OLD" "$NEW"
@@ -519,12 +519,12 @@ Expected:
 
 ### Phase 2: Rebuild Local Environment
 
-Objective: make `/Users/leofitz/zeus` code-ready before any runtime retarget.
+Objective: make `<local>/zeus` code-ready before any runtime retarget.
 
 Commands depend on the current environment manager. Minimum:
 
 ```bash
-cd /Users/leofitz/zeus
+cd <local>/zeus
 python3 -m venv .venv
 .venv/bin/python -m pip install -U pip
 # Install project requirements using the repo's established dependency command.
@@ -533,7 +533,7 @@ python3 -m venv .venv
 Verification:
 
 ```bash
-cd /Users/leofitz/zeus
+cd <local>/zeus
 .venv/bin/python -m compileall src scripts
 python3 scripts/topology_doctor.py --navigation --task "post-clone code-ready smoke" --intent audit --write-intent read_only
 ```
@@ -573,8 +573,8 @@ Each slice requires its own topology/admission check before editing.
 Acceptance for this phase:
 
 ```bash
-cd /Users/leofitz/zeus
-rg -n '/Users/leofitz/.openclaw/workspace-venus/zeus|workspace-venus/zeus' src scripts tests
+cd <local>/zeus
+rg -n '<local>/workspace-venus/zeus|workspace-venus/zeus' src scripts tests
 ```
 
 Only approved historical/test fixtures may remain after the relevant slice.
@@ -586,8 +586,8 @@ Objective: bring operator-local config across intentionally.
 Commands:
 
 ```bash
-OLD=/Users/leofitz/.openclaw/workspace-venus/zeus
-NEW=/Users/leofitz/zeus
+OLD=<local>/workspace-venus/zeus
+NEW=<local>/zeus
 
 diff -u "$OLD/config/settings.example.json" "$NEW/config/settings.example.json" || true
 cp "$OLD/config/settings.json" "$NEW/config/settings.json"
@@ -627,16 +627,16 @@ Confirm no writers:
 
 ```bash
 pgrep -af 'python -m src|forecast_live|riskguard|heartbeat|zeus' || true
-lsof /Users/leofitz/.openclaw/workspace-venus/zeus/state/zeus-world.db 2>/dev/null || true
-lsof /Users/leofitz/.openclaw/workspace-venus/zeus/state/zeus-forecasts.db 2>/dev/null || true
-lsof /Users/leofitz/.openclaw/workspace-venus/zeus/state/zeus_trades.db 2>/dev/null || true
+lsof <local>/workspace-venus/zeus/state/zeus-world.db 2>/dev/null || true
+lsof <local>/workspace-venus/zeus/state/zeus-forecasts.db 2>/dev/null || true
+lsof <local>/workspace-venus/zeus/state/zeus_trades.db 2>/dev/null || true
 ```
 
 Copy:
 
 ```bash
-OLD=/Users/leofitz/.openclaw/workspace-venus/zeus
-NEW=/Users/leofitz/zeus
+OLD=<local>/workspace-venus/zeus
+NEW=<local>/zeus
 mkdir -p "$NEW/state" "$NEW/logs"
 
 rsync -a --progress \
@@ -652,7 +652,7 @@ rsync -a "$OLD/state/"*.json "$OLD/state/"*.jsonl "$NEW/state/" 2>/dev/null || t
 Verify DBs:
 
 ```bash
-NEW=/Users/leofitz/zeus
+NEW=<local>/zeus
 sqlite3 "file:$NEW/state/zeus-world.db?mode=ro" "PRAGMA query_only=ON; PRAGMA quick_check;"
 sqlite3 "file:$NEW/state/zeus-forecasts.db?mode=ro" "PRAGMA query_only=ON; PRAGMA quick_check;"
 sqlite3 "file:$NEW/state/zeus_trades.db?mode=ro" "PRAGMA query_only=ON; PRAGMA quick_check;"
@@ -668,9 +668,9 @@ Objective: move scheduled low-level jobs after new repo is DB-valid.
 Edit crontab entries:
 
 ```text
-cd /Users/leofitz/.openclaw/workspace-venus/zeus
+cd <local>/workspace-venus/zeus
 →
-cd /Users/leofitz/zeus
+cd <local>/zeus
 ```
 
 Affected active Zeus entries:
@@ -713,7 +713,7 @@ plutil -lint ~/Library/LaunchAgents/com.zeus.venue-heartbeat.plist
 plutil -lint ~/Library/LaunchAgents/com.zeus.heartbeat-sensor.plist
 plutil -lint ~/Library/LaunchAgents/com.zeus.calibration-transfer-eval.plist
 
-rg '/Users/leofitz/.openclaw/workspace-venus/zeus' ~/Library/LaunchAgents/com.zeus.*.plist
+rg '<local>/workspace-venus/zeus' ~/Library/LaunchAgents/com.zeus.*.plist
 ```
 
 Expected:
@@ -735,15 +735,15 @@ After each start:
 
 ```bash
 launchctl list | rg 'zeus'
-tail -n 80 /Users/leofitz/zeus/logs/<service>.log
-tail -n 80 /Users/leofitz/zeus/logs/<service>.err
-pgrep -af '/Users/leofitz/zeus|python -m src'
+tail -n 80 <local>/zeus/logs/<service>.log
+tail -n 80 <local>/zeus/logs/<service>.err
+pgrep -af '<local>/zeus|python -m src'
 ```
 
 Hard gate:
 
 ```bash
-pgrep -af '/Users/leofitz/.openclaw/workspace-venus/zeus|/Users/leofitz/zeus'
+pgrep -af '<local>/workspace-venus/zeus|<local>/zeus'
 ```
 
 There must not be simultaneous old and new writer processes.
@@ -753,7 +753,7 @@ There must not be simultaneous old and new writer processes.
 Required checks:
 
 ```bash
-cd /Users/leofitz/zeus
+cd <local>/zeus
 python3 scripts/healthcheck.py --mode live --json
 python3 scripts/check_forecast_live_ready.py --claim-mode post-launch --json
 python3 scripts/topology_doctor.py --navigation --task "post-migration runtime retired verification" --intent audit --write-intent read_only
@@ -761,10 +761,10 @@ python3 scripts/topology_doctor.py --navigation --task "post-migration runtime r
 
 Manual evidence to inspect:
 
-- `state/loaded_sha.json` matches `/Users/leofitz/zeus` HEAD
-- heartbeats advance under `/Users/leofitz/zeus/state`
-- logs write under `/Users/leofitz/zeus/logs`
-- DB writes, if expected, occur in `/Users/leofitz/zeus/state`
+- `state/loaded_sha.json` matches `<local>/zeus` HEAD
+- heartbeats advance under `<local>/zeus/state`
+- logs write under `<local>/zeus/logs`
+- DB writes, if expected, occur in `<local>/zeus/state`
 - `real_order_submit_enabled` remains false until live-arm plan is complete
 - no duplicate writers
 - riskguard healthy
@@ -775,14 +775,14 @@ Manual evidence to inspect:
 Worktrees:
 
 ```bash
-cd /Users/leofitz/zeus
+cd <local>/zeus
 git worktree list --porcelain
 ```
 
 Policy:
 
 - Do not copy old worktrees wholesale.
-- Recreate only active worktrees from `/Users/leofitz/zeus`.
+- Recreate only active worktrees from `<local>/zeus`.
 - Archive stale `.claude/worktrees` rather than treating them as current source.
 
 AI/session records:
@@ -796,7 +796,7 @@ AI/session records:
 
 | Gate | Claim | Required evidence |
 |---|---|---|
-| Source clone | `/Users/leofitz/zeus` has correct source authority | matching frozen HEAD, `git status`, remote check |
+| Source clone | `<local>/zeus` has correct source authority | matching frozen HEAD, `git status`, remote check |
 | Code-ready | code imports and tooling run from new repo | compile smoke, topology orientation, targeted tests |
 | Path-ready | active source/scripts no longer require old root | `rg` over `src scripts tests` |
 | DB-ready | destination DBs are readable and coherent | `PRAGMA quick_check`, checksum/size comparison |
@@ -811,8 +811,8 @@ AI/session records:
 Run after migration:
 
 ```bash
-OLD=/Users/leofitz/.openclaw/workspace-venus/zeus
-NEW=/Users/leofitz/zeus
+OLD=<local>/workspace-venus/zeus
+NEW=<local>/zeus
 
 rg -n "$OLD|workspace-venus/zeus" "$NEW/src" "$NEW/scripts" "$NEW/tests" || true
 rg -n "$OLD|workspace-venus/zeus" ~/Library/LaunchAgents/com.zeus.*.plist || true
@@ -839,12 +839,12 @@ Unacceptable remaining matches:
 
 Rollback before DB copy:
 
-- Delete or ignore `/Users/leofitz/zeus`.
+- Delete or ignore `<local>/zeus`.
 - Keep old checkout and launchd unchanged.
 
 Rollback after DB copy but before launchd retarget:
 
-- Stop using `/Users/leofitz/zeus`.
+- Stop using `<local>/zeus`.
 - Old launchd still points to old checkout.
 - Restart old services from old checkout if they were unloaded.
 
@@ -925,10 +925,10 @@ Stop and do not proceed to runtime retarget if:
 
 Migration is complete only when:
 
-- `/Users/leofitz/zeus` is the source checkout used for daily work.
-- Active launchd and cron Zeus entries point to `/Users/leofitz/zeus`.
-- Canonical DB files in `/Users/leofitz/zeus/state` pass integrity checks.
-- Runtime logs and heartbeats advance from `/Users/leofitz/zeus`.
+- `<local>/zeus` is the source checkout used for daily work.
+- Active launchd and cron Zeus entries point to `<local>/zeus`.
+- Canonical DB files in `<local>/zeus/state` pass integrity checks.
+- Runtime logs and heartbeats advance from `<local>/zeus`.
 - `state/loaded_sha.json` matches the new checkout HEAD.
 - No active process writes from the old checkout.
 - Old checkout remains available for rollback until an explicit retirement step.

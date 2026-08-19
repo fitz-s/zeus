@@ -1,10 +1,10 @@
-# Lifecycle: created=2026-06-12; last_reviewed=2026-07-23; last_reused=2026-07-23
+# Lifecycle: created=2026-06-12; last_reviewed=2026-08-07; last_reused=2026-08-07
 # Purpose: light smoke coverage for the three new ops scripts (zeus_status,
 #   deploy_live, generate_schema_cheatsheet).
 # Reuse: asserts the FAIL-SOFT contract (a locked/empty/missing DB degrades one
 #   section to ERR, the rest still render) and that each script runs read-only
 #   against temp DBs. No live DB is touched.
-# Last reused/audited: 2026-07-23
+# Last reused/audited: 2026-08-07
 # Authority basis: operator big-direction 2026-06-12 ("大方向现在也只是添加几个文件现在做")
 """Smoke tests for scripts/zeus_status.py, deploy_live.py, generate_schema_cheatsheet.py."""
 from __future__ import annotations
@@ -13,6 +13,7 @@ import contextlib
 import importlib.util
 import io
 import json
+import plistlib
 import sqlite3
 import sys
 import types
@@ -23,6 +24,55 @@ import pytest
 
 _REPO = Path(__file__).resolve().parent.parent
 _SCRIPTS = _REPO / "scripts"
+
+
+def test_log_rotation_launchd_plist_contract(tmp_path):
+    """The independent launchd backstop stays portable and non-recursive."""
+    template = _REPO / "deploy" / "launchd" / "com.zeus.log-rotation.plist"
+    raw = template.read_bytes()
+    plist = plistlib.loads(raw)
+    env = plist["EnvironmentVariables"]
+
+    assert plist["Label"] == "com.zeus.log-rotation"
+    assert plist["ProgramArguments"] == [
+        "/bin/bash",
+        "ZEUS_REPO_PLACEHOLDER/scripts/ops/rotate_zeus_logs.sh",
+        "--apply",
+    ]
+    assert plist["StartInterval"] == 900
+    assert plist["RunAtLoad"] is True
+    assert plist["ThrottleInterval"] >= 60
+    assert env["ZEUS_LOG_ROTATE_MB"] == "50"
+    assert env["ZEUS_LOG_ROTATE_KEEP"] == "5"
+    assert env["ZEUS_PRIMARY_ROOT"] == "ZEUS_REPO_PLACEHOLDER"
+    assert env["PATH"] == "/usr/local/bin:/usr/bin:/bin"
+    assert plist["WorkingDirectory"] == "ZEUS_REPO_PLACEHOLDER"
+
+    for key in ("StandardOutPath", "StandardErrorPath"):
+        output_path = plist[key]
+        assert output_path == "/dev/null"
+        assert "ZEUS_REPO_PLACEHOLDER/logs/" not in output_path
+    assert not any(
+        secret_marker in raw
+        for secret_marker in (
+            b"POLYMARKET_API_KEY",
+            b"POLYMARKET_API_SECRET",
+            b"POLYMARKET_API_PASSPHRASE",
+            b"secrets.env",
+        )
+    )
+
+    install = _load("install_launchd_plist_log_rotation", "install_launchd_plist.py")
+    repo_root = tmp_path / "portable repo"
+    home = tmp_path / "portable home"
+    rendered = install.render(template, repo_root, home)
+    assert b"PLACEHOLDER" not in rendered
+    rendered_plist = plistlib.loads(rendered)
+    assert rendered_plist["WorkingDirectory"] == str(repo_root)
+    assert rendered_plist["EnvironmentVariables"]["ZEUS_PRIMARY_ROOT"] == str(repo_root)
+    assert rendered_plist["ProgramArguments"][1] == str(
+        repo_root / "scripts" / "ops" / "rotate_zeus_logs.sh"
+    )
 
 
 def _load(modname: str, filename: str):
@@ -71,6 +121,249 @@ def test_zeus_status_failsoft_on_empty_dbs(tmp_path, capsys):
     assert "error" in data["events"]
     assert "error" in data["blocks"]
     assert "error" in data["orders"]
+
+
+@pytest.mark.parametrize("phase", ("settled", "economically_closed"))
+def test_restart_preflight_catches_terminal_fak_ctf_reservation_debt(
+    monkeypatch,
+    tmp_path,
+    phase,
+):
+    """The blocker reports one exact terminal/no-live-remainder debt sample."""
+    preflight = _load(
+        f"preflight_terminal_fak_debt_{phase}",
+        "check_live_restart_preflight.py",
+    )
+    db = tmp_path / f"terminal-fak-debt-{phase}.db"
+    conn = sqlite3.connect(str(db))
+    conn.row_factory = sqlite3.Row
+    conn.executescript(
+        """
+        CREATE TABLE venue_commands (
+            command_id TEXT PRIMARY KEY, position_id TEXT, token_id TEXT,
+            side TEXT, intent_kind TEXT, state TEXT, venue_order_id TEXT,
+            size TEXT, envelope_id TEXT
+        );
+        CREATE TABLE venue_command_events (
+            command_id TEXT, event_type TEXT, sequence_no INTEGER,
+            payload_json TEXT
+        );
+        CREATE TABLE venue_submission_envelopes (
+            envelope_id TEXT PRIMARY KEY, order_type TEXT
+        );
+        CREATE TABLE venue_order_facts (
+            fact_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            command_id TEXT, venue_order_id TEXT, state TEXT,
+            matched_size TEXT, remaining_size TEXT
+        );
+        CREATE TABLE venue_trade_facts (
+            trade_fact_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            trade_id TEXT, command_id TEXT, venue_order_id TEXT, state TEXT,
+            filled_size TEXT, fill_price TEXT, tx_hash TEXT,
+            observed_at TEXT, venue_timestamp TEXT, local_sequence INTEGER,
+            raw_payload_json TEXT
+        );
+        CREATE TABLE position_current (
+            position_id TEXT PRIMARY KEY, phase TEXT, direction TEXT,
+            token_id TEXT, no_token_id TEXT
+        );
+        CREATE TABLE collateral_reservations (
+            command_id TEXT, reservation_type TEXT, token_id TEXT,
+            amount INTEGER, released_at TEXT
+        );
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO venue_commands(
+            command_id, position_id, token_id, side, intent_kind, state,
+            venue_order_id, size, envelope_id
+        ) VALUES ('cmd-terminal-debt', 'pos-terminal-debt', 'tok-terminal-debt',
+                  'SELL', 'EXIT', 'REVIEW_REQUIRED', 'ord-terminal-debt',
+                  '6', 'env-terminal-debt')
+        """
+    )
+    conn.execute(
+        "INSERT INTO venue_submission_envelopes VALUES ('env-terminal-debt', 'FAK')"
+    )
+    conn.execute(
+        "INSERT INTO position_current VALUES (?, ?, 'buy_yes', ?, ?)" ,
+        ("pos-terminal-debt", phase, "tok-terminal-debt", "tok-terminal-debt-no"),
+    )
+    conn.execute(
+        """INSERT INTO collateral_reservations VALUES (
+            'cmd-terminal-debt', 'CTF_SELL', 'tok-terminal-debt', 6000000, NULL
+        )"""
+    )
+    review_payload = {
+        "reason": "partial_remainder_point_order_filled_without_full_trade_fact",
+        "point_order": {
+            "orderID": "ord-terminal-debt",
+            "status": "MATCHED",
+            "order_type": "FAK",
+            "side": "SELL",
+            "asset_id": "tok-terminal-debt",
+            "original_size": "6",
+            "size_matched": "2",
+            "remaining_size": "0",
+        },
+    }
+    conn.execute(
+        "INSERT INTO venue_command_events VALUES (?, 'REVIEW_REQUIRED', 1, ?)",
+        ("cmd-terminal-debt", json.dumps(review_payload)),
+    )
+    conn.execute(
+        """INSERT INTO venue_order_facts(
+            command_id, venue_order_id, state, matched_size, remaining_size
+        ) VALUES (
+            'cmd-terminal-debt', 'ord-terminal-debt', 'PARTIALLY_MATCHED', '2', '4'
+        )"""
+    )
+    # A later revision of the same trade is one economic fill, not a second
+    # fill.  The preflight must use the canonical reducer shared with recovery.
+    conn.execute(
+        """INSERT INTO venue_trade_facts(
+            trade_id, command_id, venue_order_id, state, filled_size,
+            fill_price, tx_hash, observed_at, local_sequence, raw_payload_json
+        ) VALUES (
+            'trade-terminal-debt', 'cmd-terminal-debt', 'ord-terminal-debt',
+            'CONFIRMED', '2', '0.46', 'tx-terminal-debt',
+            '2026-08-02T00:01:00+00:00', 2, '{}'
+        )"""
+    )
+    conn.execute(
+        """INSERT INTO venue_trade_facts(
+            trade_id, command_id, venue_order_id, state, filled_size,
+            fill_price, tx_hash, observed_at, local_sequence, raw_payload_json
+        ) VALUES (
+            'trade-terminal-debt', 'cmd-terminal-debt', 'ord-terminal-debt',
+            'CONFIRMED', '2', '0.46', 'tx-terminal-debt',
+            '2026-08-02T00:00:00+00:00', 1, '{}'
+        )"""
+    )
+    conn.commit()
+
+    @contextlib.contextmanager
+    def _temp_trade_db():
+        yield conn
+
+    monkeypatch.setattr(preflight, "_connect_live_ro", _temp_trade_db)
+    result = preflight._terminal_fak_collateral_reservation_debt_check()
+
+    assert result.ok is False
+    assert result.restart_blocking is True
+    assert result.name == "terminal_fak_collateral_reservation_debt"
+    assert result.evidence["debt_samples"] == [
+        {
+            "command_id": "cmd-terminal-debt",
+            "position_id": "pos-terminal-debt",
+            "venue_order_id": "ord-terminal-debt",
+            "token_id": "tok-terminal-debt",
+            "position_phase": phase,
+            "requested_size": "6",
+            "matched_size": "2",
+            "active_ctf_reservation_amount": 6000000,
+            "resolution": "command_recovery.terminal_fak_partial_exit_review",
+        }
+    ]
+
+    conn.execute(
+        "UPDATE collateral_reservations SET amount = 1000000 "
+        "WHERE command_id = 'cmd-terminal-debt'"
+    )
+    amount_mismatch = preflight._terminal_fak_collateral_reservation_debt_check()
+    assert amount_mismatch.ok is False
+    assert amount_mismatch.evidence["debt_count"] == 0
+    assert "reservation_exact" in amount_mismatch.evidence["unknown_samples"][0][
+        "reason"
+    ]
+    conn.execute(
+        "UPDATE collateral_reservations SET amount = 6000000 "
+        "WHERE command_id = 'cmd-terminal-debt'"
+    )
+
+    review_payload["point_order"]["remaining_size"] = "4"
+    conn.execute(
+        "UPDATE venue_command_events SET payload_json = ?",
+        (json.dumps(review_payload),),
+    )
+    nonzero = preflight._terminal_fak_collateral_reservation_debt_check()
+    assert nonzero.ok is False
+    assert nonzero.evidence["debt_count"] == 0
+    assert nonzero.evidence["unknown_samples"][0]["reason"] == (
+        "point_order_explicit_remainder_nonzero"
+    )
+
+    review_payload["point_order"]["remaining_size"] = "invalid"
+    conn.execute(
+        "UPDATE venue_command_events SET payload_json = ?",
+        (json.dumps(review_payload),),
+    )
+    invalid_remainder = preflight._terminal_fak_collateral_reservation_debt_check()
+    assert invalid_remainder.ok is False
+    assert invalid_remainder.evidence["unknown_samples"][0]["reason"] == (
+        "point_order_explicit_remainder_invalid"
+    )
+
+    conn.execute("UPDATE venue_command_events SET payload_json = '{bad-json'")
+    malformed = preflight._terminal_fak_collateral_reservation_debt_check()
+    assert malformed.ok is False
+    assert malformed.evidence["unknown_samples"][0]["reason"] == (
+        "review_payload_invalid_json"
+    )
+
+    review_payload["point_order"]["remaining_size"] = "0"
+    conn.execute(
+        "UPDATE venue_command_events SET payload_json = ?",
+        (json.dumps(review_payload),),
+    )
+    conn.execute(
+        "DELETE FROM position_current WHERE position_id = 'pos-terminal-debt'"
+    )
+    missing_position = preflight._terminal_fak_collateral_reservation_debt_check()
+    assert missing_position.ok is False
+    assert missing_position.evidence["unknown_samples"][0]["reason"] == (
+        "position_current_missing"
+    )
+    conn.execute(
+        "INSERT INTO position_current VALUES (?, ?, 'buy_yes', ?, ?)",
+        (
+            "pos-terminal-debt",
+            phase,
+            "tok-terminal-debt",
+            "tok-terminal-debt-no",
+        ),
+    )
+    conn.execute("DELETE FROM venue_command_events")
+    missing_review = preflight._terminal_fak_collateral_reservation_debt_check()
+    assert missing_review.ok is False
+    assert missing_review.evidence["unknown_samples"][0]["reason"] == (
+        "latest_review_reason_or_shape_mismatch"
+    )
+    conn.close()
+
+
+def test_restart_preflight_terminal_fak_debt_missing_surface_fails_closed(
+    monkeypatch,
+):
+    preflight = _load(
+        "preflight_terminal_fak_debt_missing_surface",
+        "check_live_restart_preflight.py",
+    )
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+
+    @contextlib.contextmanager
+    def _missing_surface():
+        yield conn
+
+    monkeypatch.setattr(preflight, "_connect_live_ro", _missing_surface)
+    result = preflight._terminal_fak_collateral_reservation_debt_check()
+
+    assert result.ok is False
+    assert result.restart_blocking is True
+    assert "venue_commands" in result.evidence["missing_tables"]
+    conn.close()
 
 
 def test_zeus_status_failsoft_on_missing_db_file(tmp_path, capsys):
@@ -440,6 +733,80 @@ def test_zeus_status_price_truth_no_evidence_is_missing(tmp_path):
     assert result["full_depth_token_coverage"]["cities"][0]["status"] == "missing"
     assert result["holes"][0]["age"] == "NONE"
     assert result["holes"][0]["reason"] == "stale_or_missing_evidence"
+
+
+def test_zeus_status_price_truth_excludes_proven_ended_local_today_market(tmp_path):
+    """A past venue end boundary cannot make the still-open surface look stale."""
+    zs = _load("zeus_status_smoke_price5", "zeus_status.py")
+    now = datetime.now(timezone.utc)
+    fdb = tmp_path / "forecasts.db"
+    tdb = tmp_path / "trades.db"
+    today = now.strftime("%Y-%m-%d")
+    tomorrow = (now + timedelta(days=1)).strftime("%Y-%m-%d")
+
+    fc = sqlite3.connect(str(fdb))
+    fc.execute(
+        "CREATE TABLE market_events "
+        "(city TEXT, target_date TEXT, condition_id TEXT, token_id TEXT)"
+    )
+    fc.executemany(
+        "INSERT INTO market_events VALUES ('Tokyo', ?, ?, ?)",
+        [
+            (today, "cond-ended", "tok-ended"),
+            (tomorrow, "cond-open", "tok-open"),
+        ],
+    )
+    fc.commit()
+    fc.close()
+
+    tr = sqlite3.connect(str(tdb))
+    tr.execute(
+        "CREATE TABLE execution_feasibility_latest "
+        "(token_id TEXT, quote_seen_at TEXT, best_bid_before REAL, "
+        "best_ask_before REAL, depth_before_json TEXT)"
+    )
+    tr.executemany(
+        "INSERT INTO execution_feasibility_latest VALUES (?, ?, 0.45, 0.55, ?)",
+        [
+            ("tok-ended", (now - timedelta(hours=8)).isoformat(), '{"bids":[[0.45,1]],"asks":[[0.55,1]]}'),
+            ("tok-open", now.isoformat(), '{"bids":[[0.45,1]],"asks":[[0.55,1]]}'),
+        ],
+    )
+    tr.execute(
+        "CREATE TABLE executable_market_snapshot_latest "
+        "(condition_id TEXT, snapshot_id TEXT, outcome_label TEXT, "
+        "orderbook_top_ask REAL, captured_at TEXT)"
+    )
+    tr.execute(
+        "CREATE TABLE executable_market_snapshots "
+        "(snapshot_id TEXT, market_end_at TEXT)"
+    )
+    tr.executemany(
+        "INSERT INTO executable_market_snapshot_latest VALUES (?, ?, 'YES', 0.55, ?)",
+        [
+            ("cond-ended", "snap-ended", (now - timedelta(hours=8)).isoformat()),
+            ("cond-open", "snap-open", now.isoformat()),
+        ],
+    )
+    tr.executemany(
+        "INSERT INTO executable_market_snapshots VALUES (?, ?)",
+        [
+            ("snap-ended", (now - timedelta(hours=1)).isoformat()),
+            ("snap-open", (now + timedelta(hours=12)).isoformat()),
+        ],
+    )
+    tr.commit()
+    tr.close()
+
+    zs.FORECASTS_DB, zs.TRADES_DB = str(fdb), str(tdb)
+    result = zs.section_price_holes()
+
+    assert result.get("error") is None, result.get("error")
+    assert result["proven_ended_tokens_excluded"] == 1
+    assert result["bba_token_coverage"]["tokens_total"] == 1
+    assert result["bba_token_coverage"]["fresh_tokens"] == 1
+    assert result["bba_token_coverage"]["cities"][0]["status"] == "green"
+    assert result["holes"] == []
 
 
 # --------------------------------------------------------------------------
@@ -2108,189 +2475,157 @@ def test_deploy_live_trading_restart_runs_recovery(monkeypatch, tmp_path):
     assert "restart recovery passed" in detail
     assert calls
     assert "_ensure_restart_world_schemas(world_conn)" in calls[0][2]
-    assert "_ensure_restart_trade_schemas(trade_conn)" in calls[0][2]
+    assert "applied['world'] = apply_migrations(" in calls[0][2]
+    assert "world_ghost_cleanup" not in calls[0][2]
+    assert "target='202608_edli_active_redecision_projection'" in calls[0][2]
+    assert "target='202608_edli_active_redecision_projection_receipt_notnull'" in calls[0][2]
+    assert "get_world_connection_read_only" in calls[0][2]
+    assert "PRAGMA table_info(opportunity_event_processing_type_backfill)" in calls[0][2]
+    assert "assert_active_projection_ready" in calls[0][2]
+    assert "world_active_redecision_projection_receipt" in calls[0][2]
+    assert "world_active_redecision_backfill_notnull" in calls[0][2]
+    assert "EDLI_BACKFILL_RECEIPT_CONSUMER_NOTNULL_REQUIRED" in calls[0][2]
+    assert "EDLI_ACTIVE_REDECISION_PROJECTION_UNSEEDED" in calls[0][2]
+    assert "_assert_restart_trade_schema_ready(trade_conn)" in calls[0][2]
+    assert "init_schema_trade_only" not in calls[0][2]
+    assert calls[0][2].count("target='202607_cas_reservation_ledger'") == 1
+    assert calls[0][2].count("_assert_restart_trade_schema_ready(trade_conn)") == 1
     assert "get_trade_connection(write_class='live')" in calls[0][2]
     assert "get_world_connection_with_trades_required(write_class='live')" in calls[0][2]
     assert "get_trade_connection_with_world_required(write_class='live')" not in calls[0][2]
     assert "append_rest_filled_orphan_trade_facts_to_edli" in calls[0][2]
-
-
-def test_deploy_restart_trade_schema_installs_auto_resolution_on_legacy_db(tmp_path):
-    dl = _load("deploy_live_restart_trade_schema", "deploy_live.py")
-    db_path = tmp_path / "zeus_trades.db"
-    conn = sqlite3.connect(db_path)
-    conn.row_factory = sqlite3.Row
-    conn.execute(
-        """
-        CREATE TABLE token_suppression (
-            token_id TEXT PRIMARY KEY,
-            condition_id TEXT,
-            suppression_reason TEXT NOT NULL CHECK (suppression_reason IN (
-                'operator_quarantine_clear',
-                'chain_only_quarantined',
-                'settled_position'
-            )),
-            source_module TEXT NOT NULL,
-            created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL,
-            evidence_json TEXT NOT NULL DEFAULT '{}'
+    assert "_edli_trade_fact_bridge_candidates_read_only" in calls[0][2]
+    assert "candidates=confirmed_candidates" in calls[0][2]
+    assert "candidates=rest_orphan_candidates" in calls[0][2]
+    assert "absorbed_fill_aggregate_ids=absorbed_fill_aggregate_ids" in calls[0][2]
+    assert "recovery_deadline_monotonic = time.monotonic() + 60.0" in calls[0][2]
+    assert "deadline_monotonic=recovery_deadline_monotonic" in calls[0][2]
+    assert "bridge_deadline_monotonic = time.monotonic() + 15.0" in calls[0][2]
+    assert "summary['edli_trade_fact_bridge_deferred'] = True" in calls[0][2]
+    recovery_script = calls[0][2]
+    assert recovery_script.index("target='202608_edli_active_redecision_projection'") < (
+        recovery_script.index(
+            "target='202608_edli_active_redecision_projection_receipt_notnull'"
         )
-        """
+    ) < recovery_script.index("world_conn.commit()") < recovery_script.index(
+        "PRAGMA table_info(opportunity_event_processing_type_backfill)"
     )
+    assert recovery_script.index(
+        "target='202607_cas_reservation_ledger'"
+    ) < recovery_script.index("_assert_restart_trade_schema_ready(trade_conn)") < recovery_script.index(
+        "reconcile_unresolved_commands"
+    )
+    import inspect
+
+    assert "init_schema_trade_only" not in inspect.getsource(
+        dl._assert_restart_trade_schema_ready
+    )
+
+
+def test_deploy_live_restart_recovery_failure_preserves_stderr(monkeypatch, tmp_path):
+    dl = _load("deploy_live_restart_recovery_stderr", "deploy_live.py")
+    dl.LIVE_REPO = str(tmp_path)
+    (tmp_path / ".venv" / "bin").mkdir(parents=True)
+
+    def _fake_run(cmd, **kwargs):
+        import subprocess
+
+        return subprocess.CompletedProcess(
+            cmd,
+            1,
+            '{"advanced": 0, "errors": 1, "scope": "restart_preflight"}\n',
+            "recovery: command exact-id raised RuntimeError: exact failure\n",
+        )
+
+    monkeypatch.setattr(dl.subprocess, "run", _fake_run)
+
+    ok, detail = dl._run_restart_recovery_if_needed(["com.zeus.live-trading"])
+
+    assert ok is False
+    assert "command exact-id" in detail
+    assert "exact failure" in detail
+    assert '"errors": 1' in detail
+
+
+def _restart_trade_schema_fixture(tmp_path, *, include_reason=True, include_ledger=True):
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(tmp_path / "zeus_trades.db")
+    reason = "'chain_only_auto_resolved_match'," if include_reason else ""
     conn.executescript(
-        """
+        f"""
         CREATE TABLE token_suppression_history (
             history_id INTEGER PRIMARY KEY AUTOINCREMENT,
             token_id TEXT NOT NULL,
             condition_id TEXT,
             suppression_reason TEXT NOT NULL CHECK (suppression_reason IN (
-                'operator_quarantine_clear', 'chain_only_quarantined', 'settled_position'
+                'operator_quarantine_clear', 'chain_only_quarantined', {reason} 'settled_position'
             )),
-            source_module TEXT NOT NULL,
-            created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL,
-            evidence_json TEXT NOT NULL DEFAULT '{}',
-            operation TEXT NOT NULL DEFAULT 'record' CHECK (operation IN ('record', 'migrated')),
-            recorded_at TEXT NOT NULL
+            source_module TEXT NOT NULL, created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL, evidence_json TEXT NOT NULL DEFAULT '{{}}',
+            operation TEXT NOT NULL DEFAULT 'record', recorded_at TEXT NOT NULL
         );
-        CREATE VIEW observation_instants_current AS
-        SELECT * FROM observation_instants;
-        """
-    )
-    conn.execute(
-        """
-        INSERT INTO token_suppression (
-            token_id, condition_id, suppression_reason, source_module,
-            created_at, updated_at, evidence_json
-        ) VALUES ('legacy-token', 'legacy-condition', 'chain_only_quarantined',
-                  'test', '2026-07-19T00:00:00Z', '2026-07-19T00:00:00Z', '{}')
-        """
-    )
-    conn.commit()
-
-    dl._ensure_restart_trade_schemas(conn)
-
-    create_sql = conn.execute(
-        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'token_suppression'"
-    ).fetchone()[0]
-    assert "chain_only_auto_resolved_match" in create_sql
-    assert "chain_only_auto_resolved_match" in conn.execute(
-        "SELECT sql FROM sqlite_master WHERE type = 'table' "
-        "AND name = 'token_suppression_history'"
-    ).fetchone()[0]
-    assert conn.execute(
-        "SELECT suppression_reason FROM token_suppression WHERE token_id = 'legacy-token'"
-    ).fetchone()[0] == "chain_only_quarantined"
-    conn.execute(
-        """
-        INSERT INTO token_suppression (
-            token_id, condition_id, suppression_reason, source_module,
-            created_at, updated_at, evidence_json
-        ) VALUES ('auto-token', 'auto-condition', 'chain_only_auto_resolved_match',
-                  'test', '2026-07-19T00:00:00Z', '2026-07-19T00:00:00Z', '{}')
-        """
-    )
-    conn.rollback()
-    conn.close()
-
-
-def test_deploy_restart_trade_schema_upgrades_b071_alias_without_losing_history(tmp_path):
-    dl = _load("deploy_live_restart_trade_schema_b071", "deploy_live.py")
-    db_path = tmp_path / "zeus_trades.db"
-    conn = sqlite3.connect(db_path)
-    conn.row_factory = sqlite3.Row
-    conn.executescript(
-        """
-        CREATE TABLE token_suppression_history (
-            history_id INTEGER PRIMARY KEY AUTOINCREMENT,
-            token_id TEXT NOT NULL,
-            condition_id TEXT,
-            suppression_reason TEXT NOT NULL CHECK (suppression_reason IN (
-                'operator_quarantine_clear', 'chain_only_quarantined', 'settled_position'
-            )),
-            source_module TEXT NOT NULL,
-            created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL,
-            evidence_json TEXT NOT NULL DEFAULT '{}',
-            operation TEXT NOT NULL DEFAULT 'record' CHECK (operation IN ('record', 'migrated')),
-            recorded_at TEXT NOT NULL
-        );
-        CREATE INDEX idx_token_suppression_history_id_time
-            ON token_suppression_history(token_id, history_id DESC);
-        CREATE TRIGGER token_suppression_history_no_update
-        BEFORE UPDATE ON token_suppression_history
-        BEGIN SELECT RAISE(ABORT, 'token_suppression_history is append-only'); END;
-        CREATE TRIGGER token_suppression_history_no_delete
-        BEFORE DELETE ON token_suppression_history
-        BEGIN SELECT RAISE(ABORT, 'token_suppression_history is append-only'); END;
         CREATE VIEW token_suppression_current AS
         SELECT token_id, condition_id, suppression_reason, source_module,
                created_at, updated_at, evidence_json
-        FROM token_suppression_history h1
-        WHERE history_id = (
-            SELECT MAX(history_id) FROM token_suppression_history h2
-            WHERE h2.token_id = h1.token_id
+        FROM token_suppression_history;
+        CREATE VIEW token_suppression AS SELECT * FROM token_suppression_current;
+        CREATE TABLE settlement_commands (
+            command_id TEXT, state TEXT, condition_id TEXT, market_id TEXT,
+            payout_asset TEXT, pusd_amount_micro INTEGER, token_amounts_json TEXT,
+            winning_index_set TEXT, tx_hash TEXT, block_number INTEGER,
+            confirmation_count INTEGER, requested_at TEXT, submitted_at TEXT,
+            terminal_at TEXT, error_payload TEXT, polymarket_end_anchor_source TEXT,
+            autoretry_eligible INTEGER
         );
-        CREATE VIEW token_suppression AS
-        SELECT token_id, condition_id, suppression_reason, source_module,
-               created_at, updated_at, evidence_json
-        FROM token_suppression_current;
-        INSERT INTO token_suppression_history (
-            history_id, token_id, condition_id, suppression_reason, source_module,
-            created_at, updated_at, evidence_json, operation, recorded_at
-        ) VALUES (17, 'b071-token', 'b071-condition', 'chain_only_quarantined',
-                  'legacy', '2026-07-18T00:00:00Z', '2026-07-18T01:00:00Z',
-                  '{"proof": true}', 'migrated', '2026-07-18T02:00:00Z');
+        CREATE TABLE _migrations_applied (name TEXT PRIMARY KEY, applied_at TEXT NOT NULL);
         """
     )
+    if include_ledger:
+        conn.execute(
+            "INSERT INTO _migrations_applied VALUES (?, ?)",
+            ("202607_cas_reservation_ledger", "2026-08-11T00:00:00Z"),
+        )
     conn.commit()
+    return conn
 
-    dl._ensure_restart_trade_schemas(conn)
 
-    history_sql = conn.execute(
-        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'token_suppression_history'"
-    ).fetchone()[0]
-    row = conn.execute(
-        """
-        SELECT history_id, token_id, condition_id, suppression_reason,
-               source_module, created_at, updated_at, evidence_json,
-               operation, recorded_at
-          FROM token_suppression_history
-         WHERE token_id = 'b071-token'
-        """
-    ).fetchone()
-    assert "chain_only_auto_resolved_match" in history_sql
-    assert tuple(row) == (
-        17,
-        "b071-token",
-        "b071-condition",
-        "chain_only_quarantined",
-        "legacy",
-        "2026-07-18T00:00:00Z",
-        "2026-07-18T01:00:00Z",
-        '{"proof": true}',
-        "migrated",
-        "2026-07-18T02:00:00Z",
+def test_deploy_restart_trade_schema_assertion_is_read_only(tmp_path, monkeypatch):
+    dl = _load("deploy_live_restart_trade_schema_ready", "deploy_live.py")
+    conn = _restart_trade_schema_fixture(tmp_path)
+    monkeypatch.setattr(
+        "src.state.table_registry.assert_db_matches_registry",
+        lambda _conn, _identity: None,
     )
-    assert {
-        r[0]
-        for r in conn.execute(
-            "SELECT name FROM sqlite_master WHERE type = 'view' AND name LIKE 'token_suppression%'"
-        )
-    } == {"token_suppression", "token_suppression_current"}
-    assert {
-        r[0]
-        for r in conn.execute(
-            "SELECT name FROM sqlite_master WHERE type = 'trigger' AND name LIKE 'token_suppression_history_%'"
-        )
-    } == {"token_suppression_history_no_update", "token_suppression_history_no_delete"}
-    assert conn.execute(
-        "SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = 'idx_token_suppression_history_id_time'"
-    ).fetchone() is not None
-    assert conn.execute(
-        "SELECT type FROM sqlite_master WHERE name = 'token_suppression'"
-    ).fetchone()[0] == "view"
+    before = (
+        conn.execute("PRAGMA schema_version").fetchone()[0],
+        conn.total_changes,
+        conn.in_transaction,
+    )
+    dl._assert_restart_trade_schema_ready(conn)
+    assert (
+        conn.execute("PRAGMA schema_version").fetchone()[0],
+        conn.total_changes,
+        conn.in_transaction,
+    ) == before
     conn.close()
+
+
+def test_deploy_restart_trade_schema_assertion_fails_without_reason_or_ledger(tmp_path, monkeypatch):
+    dl = _load("deploy_live_restart_trade_schema_fail_closed", "deploy_live.py")
+    monkeypatch.setattr(
+        "src.state.table_registry.assert_db_matches_registry",
+        lambda _conn, _identity: None,
+    )
+    for kwargs, reason in (
+        ({"include_reason": False}, "reason"),
+        ({"include_ledger": False}, "ledger"),
+    ):
+        conn = _restart_trade_schema_fixture(tmp_path / reason, **kwargs)
+        before = (conn.execute("PRAGMA schema_version").fetchone()[0], conn.total_changes)
+        with pytest.raises(RuntimeError):
+            dl._assert_restart_trade_schema_ready(conn)
+        assert (conn.execute("PRAGMA schema_version").fetchone()[0], conn.total_changes) == before
+        conn.close()
 
 
 def test_deploy_live_restart_world_schemas_are_atomic_and_idempotent(tmp_path):
@@ -2358,6 +2693,35 @@ def test_deploy_live_waits_for_fresh_prerequisite_code_identity(monkeypatch, tmp
 
     ok, detail = dl._wait_for_prerequisite_code_identity(
         [dl.DAEMONS["price-channel-ingest"]],
+        expected_sha=expected,
+        launched_after=launched,
+        timeout_seconds=0,
+    )
+
+    assert ok is True
+    assert "verified" in detail
+
+
+def test_deploy_live_requires_data_ingest_code_identity(monkeypatch, tmp_path):
+    """The 5-second Day0 source writer must load the deployed checkout."""
+
+    dl = _load("deploy_live_data_ingest_identity", "deploy_live.py")
+    launched = datetime.now(timezone.utc)
+    state = tmp_path / "state"
+    state.mkdir()
+    expected = "c" * 40
+    (state / "daemon-heartbeat-ingest.json").write_text(
+        json.dumps(
+            {
+                "git_head": expected[:9],
+                "alive_at": launched.isoformat(),
+            }
+        )
+    )
+    monkeypatch.setattr(dl, "LIVE_REPO", str(tmp_path))
+
+    ok, detail = dl._wait_for_prerequisite_code_identity(
+        [dl.DAEMONS["data-ingest"]],
         expected_sha=expected,
         launched_after=launched,
         timeout_seconds=0,
@@ -2719,7 +3083,8 @@ def test_deploy_live_waits_for_post_start_monitor_refresh(monkeypatch, tmp_path)
             sequence_no INTEGER PRIMARY KEY,
             position_id TEXT,
             event_type TEXT,
-            occurred_at TEXT
+            occurred_at TEXT,
+            payload_json TEXT
         )
         """
     )
@@ -2729,10 +3094,20 @@ def test_deploy_live_waits_for_post_start_monitor_refresh(monkeypatch, tmp_path)
     conn.execute(
         """
         INSERT INTO position_events (
-            sequence_no, position_id, event_type, occurred_at
-        ) VALUES (1, 'pos-1', 'MONITOR_REFRESHED', ?)
+            sequence_no, position_id, event_type, occurred_at, payload_json
+        ) VALUES (1, 'pos-1', 'MONITOR_REFRESHED', ?, ?)
         """,
-        (datetime.now(timezone.utc).isoformat(),),
+        (
+            datetime.now(timezone.utc).isoformat(),
+            json.dumps(
+                {
+                    "last_monitor_prob": 0.5,
+                    "last_monitor_prob_is_fresh": True,
+                    "last_monitor_market_price": 0.5,
+                    "last_monitor_market_price_is_fresh": True,
+                }
+            ),
+        ),
     )
     conn.commit()
     conn.close()
@@ -2747,7 +3122,208 @@ def test_deploy_live_waits_for_post_start_monitor_refresh(monkeypatch, tmp_path)
     assert "post-start monitor cadence verified" in detail
 
 
-def test_deploy_live_accepts_post_start_typed_review_management(monkeypatch, tmp_path):
+def test_deploy_live_quote_only_monitor_staleness_requires_complete_held_auction(
+    monkeypatch, tmp_path
+):
+    dl = _load("deploy_live_monitor_quote_only_auction", "deploy_live.py")
+    state = tmp_path / "state"
+    state.mkdir()
+    trade_db = state / "zeus_trades.db"
+    launched = datetime.now(timezone.utc) - timedelta(seconds=1)
+    conn = sqlite3.connect(trade_db)
+    conn.executescript(
+        """
+        CREATE TABLE position_current (
+            position_id TEXT PRIMARY KEY,
+            phase TEXT,
+            shares REAL,
+            chain_shares REAL
+        );
+        CREATE TABLE position_events (
+            sequence_no INTEGER PRIMARY KEY,
+            position_id TEXT,
+            event_type TEXT,
+            occurred_at TEXT,
+            payload_json TEXT
+        );
+        CREATE TABLE decision_log (
+            id INTEGER PRIMARY KEY,
+            mode TEXT,
+            started_at TEXT,
+            completed_at TEXT,
+            artifact_json TEXT
+        );
+        INSERT INTO position_current VALUES ('pos-1', 'active', 1.0, 1.0);
+        """
+    )
+    monitor_at = datetime.now(timezone.utc).isoformat()
+    conn.execute(
+        """
+        INSERT INTO position_events (
+            sequence_no, position_id, event_type, occurred_at, payload_json
+        ) VALUES (1, 'pos-1', 'MONITOR_REFRESHED', ?, ?)
+        """,
+        (
+            monitor_at,
+            json.dumps(
+                {
+                    "last_monitor_prob": 0.99,
+                    "last_monitor_prob_is_fresh": True,
+                    "last_monitor_market_price": 0.999,
+                    "last_monitor_market_price_is_fresh": False,
+                }
+            ),
+        ),
+    )
+    conn.commit()
+    monkeypatch.setattr(dl, "LIVE_REPO", str(tmp_path))
+
+    ok, detail = dl._wait_for_post_start_monitor_cadence(
+        launched_after=launched,
+        timeout_seconds=0,
+    )
+
+    assert ok is False
+    assert "complete_post_start_held_auction_receipt=missing" in detail
+
+    conn.close()
+    monkeypatch.setattr(
+        dl,
+        "_latest_complete_global_auction_receipt",
+        lambda *_args, **kwargs: (
+            (1, 1, 1)
+            if kwargs.get("require_held_position_ids") == ("pos-1",)
+            else None
+        ),
+    )
+
+    ok, detail = dl._wait_for_post_start_monitor_cadence(
+        launched_after=launched,
+        timeout_seconds=0,
+    )
+
+    assert ok is True
+    assert "quote_only_positions=1" in detail
+    assert "held_auction_receipt=1" in detail
+
+
+def test_exact_held_restart_proof_rejects_legacy_global_auction_receipt(tmp_path):
+    from src.ops.monitor_cadence import latest_complete_global_auction_receipt
+
+    trade_db = tmp_path / "zeus_trades.db"
+    conn = sqlite3.connect(trade_db)
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        """
+        CREATE TABLE decision_log (
+            id INTEGER PRIMARY KEY,
+            mode TEXT,
+            started_at TEXT,
+            completed_at TEXT,
+            artifact_json TEXT
+        )
+        """
+    )
+    now = datetime.now(timezone.utc)
+    conn.execute(
+        "INSERT INTO decision_log VALUES (1, 'global_single_order_auction', ?, NULL, ?)",
+        (
+            now.isoformat(),
+            json.dumps(
+                {
+                    "summary": {
+                        "schema_version": 20,
+                        "candidate_coverage_complete": True,
+                        "scope_family_coverage_complete": True,
+                        "candidate_evaluation_count": 1,
+                        "full_scope_family_count": 1,
+                        "held_position_coverage_complete": True,
+                        "held_position_expected_count": 1,
+                        "held_position_evaluated_count": 0,
+                        "held_position_excluded_count": 1,
+                    }
+                }
+            ),
+        ),
+    )
+    assert latest_complete_global_auction_receipt(
+        conn,
+        completed_not_before=now - timedelta(seconds=1),
+        require_held_coverage_count=1,
+        require_held_position_ids=("pos-1",),
+    ) is None
+    conn.close()
+
+
+def test_held_restart_proof_accepts_receipt_superset_but_not_missing_current(monkeypatch):
+    from src.ops import monitor_cadence
+
+    summary = {
+        "schema_version": 22,
+        "candidate_coverage_complete": True,
+        "scope_family_coverage_complete": True,
+        "candidate_evaluation_count": 1,
+        "full_scope_family_count": 1,
+        "held_position_coverage_complete": True,
+        "held_position_expected_count": 2,
+        "held_position_evaluated_count": 0,
+        "held_position_excluded_count": 2,
+        "decision_at_utc": "2026-08-13T00:00:01+00:00",
+    }
+
+    class FakeConn:
+        class Cursor(list):
+            def fetchall(self):
+                return self
+
+        def execute(self, *_args, **_kwargs):
+            return self.Cursor([
+                {
+                    "id": 1,
+                    "mode": "global_single_order_auction",
+                    "started_at": "2026-08-13T00:00:00+00:00",
+                    "completed_at": "2026-08-13T00:00:01+00:00",
+                    "artifact_json": json.dumps(
+                        {
+                            "completed_at": "2026-08-13T00:00:01+00:00",
+                            "summary": summary,
+                        }
+                    ),
+                }
+            ])
+
+    monkeypatch.setattr(
+        "src.contracts.global_auction_receipt.assert_global_auction_summary_integrity",
+        lambda _summary: None,
+    )
+    monkeypatch.setattr(
+        "src.control.live_health._current_global_auction_holding_payload",
+        lambda _conn, _summary: [
+            {"position_id": "current", "status": "EXCLUDED"},
+            {"position_id": "closed-after-receipt", "status": "EXCLUDED"},
+        ],
+    )
+    assert monitor_cadence.latest_complete_global_auction_receipt(
+        FakeConn(),
+        completed_not_before=datetime.fromisoformat(
+            "2026-08-13T00:00:00+00:00"
+        ),
+        require_held_coverage_count=1,
+        require_held_position_ids=("current",),
+    ) == (1, 1, 1)
+    assert monitor_cadence.latest_complete_global_auction_receipt(
+        FakeConn(),
+        completed_not_before=datetime.fromisoformat(
+            "2026-08-13T00:00:00+00:00"
+        ),
+        require_held_coverage_count=2,
+        require_held_position_ids=("current", "new-current"),
+    ) is None
+
+
+def test_deploy_live_review_management_does_not_replace_monitor_refresh(
+    monkeypatch, tmp_path
+):
     dl = _load("deploy_live_monitor_review_wait", "deploy_live.py")
     state = tmp_path / "state"
     state.mkdir()
@@ -2802,8 +3378,8 @@ def test_deploy_live_accepts_post_start_typed_review_management(monkeypatch, tmp
         timeout_seconds=0,
     )
 
-    assert ok is True
-    assert "post-start monitor cadence verified" in detail
+    assert ok is False
+    assert "did not verify" in detail
 
 
 def test_deploy_live_post_start_monitor_wait_rejects_stale_chain_only_projection(
@@ -2832,7 +3408,8 @@ def test_deploy_live_post_start_monitor_wait_rejects_stale_chain_only_projection
             sequence_no INTEGER PRIMARY KEY,
             position_id TEXT,
             event_type TEXT,
-            occurred_at TEXT
+            occurred_at TEXT,
+            payload_json TEXT
         )
         """
     )
@@ -2896,7 +3473,8 @@ def test_deploy_live_post_start_monitor_wait_is_per_position(
             sequence_no INTEGER PRIMARY KEY,
             position_id TEXT,
             event_type TEXT,
-            occurred_at TEXT
+            occurred_at TEXT,
+            payload_json TEXT
         )
         """
     )
@@ -2905,10 +3483,20 @@ def test_deploy_live_post_start_monitor_wait_is_per_position(
     conn.execute(
         """
         INSERT INTO position_events (
-            sequence_no, position_id, event_type, occurred_at
-        ) VALUES (1, 'pos-1', 'MONITOR_REFRESHED', ?)
+            sequence_no, position_id, event_type, occurred_at, payload_json
+        ) VALUES (1, 'pos-1', 'MONITOR_REFRESHED', ?, ?)
         """,
-        (datetime.now(timezone.utc).isoformat(),),
+        (
+            datetime.now(timezone.utc).isoformat(),
+            json.dumps(
+                {
+                    "last_monitor_prob": 0.5,
+                    "last_monitor_prob_is_fresh": True,
+                    "last_monitor_market_price": 0.5,
+                    "last_monitor_market_price_is_fresh": True,
+                }
+            ),
+        ),
     )
     conn.commit()
     conn.close()
@@ -2925,7 +3513,7 @@ def test_deploy_live_post_start_monitor_wait_is_per_position(
     assert "pos-2" in detail
 
 
-def test_deploy_live_post_start_monitor_wait_accepts_one_coverage_tranche(
+def test_deploy_live_post_start_monitor_wait_rejects_partial_coverage_tranche(
     monkeypatch, tmp_path
 ):
     dl = _load("deploy_live_monitor_cadence_wait_tranche", "deploy_live.py")
@@ -2950,7 +3538,8 @@ def test_deploy_live_post_start_monitor_wait_accepts_one_coverage_tranche(
             sequence_no INTEGER PRIMARY KEY,
             position_id TEXT,
             event_type TEXT,
-            occurred_at TEXT
+            occurred_at TEXT,
+            payload_json TEXT
         )
         """
     )
@@ -2963,10 +3552,22 @@ def test_deploy_live_post_start_monitor_wait_accepts_one_coverage_tranche(
         conn.execute(
             """
             INSERT INTO position_events (
-                sequence_no, position_id, event_type, occurred_at
-            ) VALUES (?, ?, 'MONITOR_REFRESHED', ?)
+                sequence_no, position_id, event_type, occurred_at, payload_json
+            ) VALUES (?, ?, 'MONITOR_REFRESHED', ?, ?)
             """,
-            (sequence_no, position_id, datetime.now(timezone.utc).isoformat()),
+            (
+                sequence_no,
+                position_id,
+                datetime.now(timezone.utc).isoformat(),
+                json.dumps(
+                    {
+                        "last_monitor_prob": 0.5,
+                        "last_monitor_prob_is_fresh": True,
+                        "last_monitor_market_price": 0.5,
+                        "last_monitor_market_price_is_fresh": True,
+                    }
+                ),
+            ),
         )
     conn.commit()
     conn.close()
@@ -2977,10 +3578,9 @@ def test_deploy_live_post_start_monitor_wait_accepts_one_coverage_tranche(
         timeout_seconds=0,
     )
 
-    assert ok is True
-    assert "progress_positions=2" in detail
-    assert "required_progress=2" in detail
-    assert "remaining_for_continuous_coverage=4" in detail
+    assert ok is False
+    assert "stale_or_missing_positions=4" in detail
+    assert "pos-2" in detail
 
 
 def test_deploy_live_post_start_monitor_wait_rejects_future_monitor_event(
@@ -3035,6 +3635,44 @@ def test_deploy_live_post_start_monitor_wait_rejects_future_monitor_event(
     assert "future_monitor_events=1" in detail
 
 
+def test_deploy_live_post_start_monitor_wait_rejects_non_monitor_chain_risk(
+    monkeypatch, tmp_path
+):
+    dl = _load("deploy_live_monitor_cadence_wait_non_monitor_chain_risk", "deploy_live.py")
+    state = tmp_path / "state"
+    state.mkdir()
+    trade_db = state / "zeus_trades.db"
+    conn = sqlite3.connect(trade_db)
+    conn.executescript(
+        """
+        CREATE TABLE position_current (
+            position_id TEXT PRIMARY KEY,
+            phase TEXT,
+            chain_shares REAL,
+            chain_state TEXT
+        );
+        CREATE TABLE position_events (
+            sequence_no INTEGER PRIMARY KEY,
+            position_id TEXT,
+            event_type TEXT,
+            occurred_at TEXT
+        );
+        INSERT INTO position_current VALUES ('pos-voided', 'voided', 1.0, 'synced');
+        """
+    )
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(dl, "LIVE_REPO", str(tmp_path))
+
+    ok, detail = dl._wait_for_post_start_monitor_cadence(
+        launched_after=datetime.now(timezone.utc),
+        timeout_seconds=0,
+    )
+
+    assert ok is False
+    assert "non_monitor_chain_risk_position_count=1" in detail
+
+
 def _init_edli_queue_db(path: Path) -> sqlite3.Connection:
     conn = sqlite3.connect(path)
     conn.execute(
@@ -3053,6 +3691,558 @@ def _init_edli_queue_db(path: Path) -> sqlite3.Connection:
         """
     )
     return conn
+
+
+def _init_paused_entry_park_authority(
+    state: Path,
+    *,
+    paused: bool = True,
+) -> tuple[sqlite3.Connection, sqlite3.Connection]:
+    """Create only the canonical pause/exposure/command surfaces this gate reads."""
+
+    world = _init_edli_queue_db(state / "zeus-world.db")
+    world.execute(
+        """
+        CREATE TABLE control_overrides (
+            override_id TEXT PRIMARY KEY,
+            target_type TEXT NOT NULL,
+            target_key TEXT NOT NULL,
+            action_type TEXT NOT NULL,
+            value TEXT NOT NULL,
+            issued_by TEXT NOT NULL,
+            issued_at TEXT NOT NULL,
+            effective_until TEXT,
+            reason TEXT NOT NULL,
+            precedence INTEGER NOT NULL
+        )
+        """
+    )
+    world.execute(
+        """
+        INSERT INTO control_overrides VALUES (
+            'control_plane:global:entries_paused', 'global', 'entries', 'gate',
+            ?, 'control_plane', ?, NULL, 'deploy_test_pause', 100
+        )
+        """,
+        ("true" if paused else "false", datetime.now(timezone.utc).isoformat()),
+    )
+    trade = sqlite3.connect(state / "zeus_trades.db")
+    trade.executescript(
+        """
+        CREATE TABLE position_current (
+            position_id TEXT PRIMARY KEY,
+            phase TEXT,
+            chain_shares REAL,
+            shares REAL,
+            chain_state TEXT NOT NULL
+        );
+        CREATE TABLE venue_commands (
+            command_id TEXT PRIMARY KEY,
+            side TEXT NOT NULL,
+            state TEXT NOT NULL
+        );
+        """
+    )
+    return world, trade
+
+
+def _insert_claimable_edli_entry_backlog(
+    conn: sqlite3.Connection,
+    *,
+    event_id: str = "evt-paused-entry",
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO opportunity_event_processing (
+            consumer_name, event_id, processing_status, attempt_count,
+            claimed_at, processed_at, last_error, updated_at
+        ) VALUES ('edli_reactor_v1', ?, 'pending', 0, NULL, NULL, NULL, ?)
+        """,
+        (event_id, datetime.now(timezone.utc).isoformat()),
+    )
+
+
+def _publish_exact_held_sell_wake(state: Path, *, position_id: str):
+    from src.runtime import reactor_wake
+
+    wake_path = state / reactor_wake.REACTOR_WAKE_FILENAME
+    request = reactor_wake.make_held_sell_reauction_request(
+        position_id=position_id,
+        family=("Paris", "2026-08-02", "low"),
+        probability_content_identity=f"q-{position_id}",
+        held_token_id=f"token-{position_id}",
+        held_best_bid=0.22,
+        bid_observed_at="2026-08-02T19:00:00+00:00",
+    )
+    wake = reactor_wake.publish_reactor_wake(
+        source="test",
+        reason=reactor_wake.GLOBAL_AUCTION_COMPLETION_WAKE_REASON,
+        path=wake_path,
+        held_sell_reauction_requests=(request,),
+    )
+    return wake_path, wake, request
+
+
+def test_deploy_live_paused_entry_backlog_is_explicitly_expected_parked(
+    monkeypatch, tmp_path
+):
+    dl = _load("deploy_live_paused_entry_backlog", "deploy_live.py")
+    state = tmp_path / "state"
+    state.mkdir()
+    world, trade = _init_paused_entry_park_authority(state)
+    _insert_claimable_edli_entry_backlog(world)
+    world.commit()
+    trade.commit()
+    world.close()
+    trade.close()
+    monkeypatch.setattr(dl, "LIVE_REPO", str(tmp_path))
+
+    ok, detail = dl._wait_for_post_start_edli_queue_progress(
+        launched_after=datetime.now(timezone.utc),
+        post_start_freshness_verified=True,
+        timeout_seconds=0,
+    )
+
+    assert ok is True
+    assert "post-start EDLI queue expected parked" in detail
+    assert "durable_entries_paused=true" in detail
+    assert "canonical_unresolved_positions=0" in detail
+    assert "nonterminal_sell_commands=0" in detail
+    assert "held_sell_global_auction_debt=0" in detail
+
+
+def test_deploy_live_unpaused_entry_backlog_does_not_get_parked(
+    monkeypatch, tmp_path
+):
+    dl = _load("deploy_live_unpaused_entry_backlog", "deploy_live.py")
+    state = tmp_path / "state"
+    state.mkdir()
+    world, trade = _init_paused_entry_park_authority(state, paused=False)
+    _insert_claimable_edli_entry_backlog(world)
+    world.commit()
+    trade.commit()
+    world.close()
+    trade.close()
+    monkeypatch.setattr(dl, "LIVE_REPO", str(tmp_path))
+
+    ok, detail = dl._wait_for_post_start_edli_queue_progress(
+        launched_after=datetime.now(timezone.utc),
+        post_start_freshness_verified=True,
+        timeout_seconds=0,
+    )
+
+    assert ok is False
+    assert "expected_parked=durable_entries_paused=false" in detail
+
+
+def test_deploy_live_paused_entry_backlog_requires_post_start_freshness(
+    monkeypatch, tmp_path
+):
+    dl = _load("deploy_live_paused_entry_unfresh", "deploy_live.py")
+    state = tmp_path / "state"
+    state.mkdir()
+    world, trade = _init_paused_entry_park_authority(state)
+    _insert_claimable_edli_entry_backlog(world)
+    world.commit()
+    trade.commit()
+    world.close()
+    trade.close()
+    monkeypatch.setattr(dl, "LIVE_REPO", str(tmp_path))
+
+    ok, detail = dl._wait_for_post_start_edli_queue_progress(
+        launched_after=datetime.now(timezone.utc),
+        post_start_freshness_verified=False,
+        timeout_seconds=0,
+    )
+
+    assert ok is False
+    assert "expected_parked=post_start_freshness=unverified" in detail
+
+
+@pytest.mark.parametrize("phase", ("active", "day0_window", "pending_exit"))
+def test_deploy_live_paused_entry_backlog_allows_fresh_monitored_open_exposure(
+    monkeypatch, tmp_path, phase
+):
+    dl = _load(f"deploy_live_paused_entry_open_exposure_{phase}", "deploy_live.py")
+    state = tmp_path / "state"
+    state.mkdir()
+    world, trade = _init_paused_entry_park_authority(state)
+    _insert_claimable_edli_entry_backlog(world)
+    trade.executescript(
+        """
+        ALTER TABLE position_current ADD COLUMN cost_basis_usd REAL;
+        """
+    )
+    trade.execute(
+        """
+        INSERT INTO position_current (
+            position_id, phase, chain_shares, chain_state, shares, cost_basis_usd
+        ) VALUES ('pos-open', ?, 7, 'synced', 7, 42)
+        """,
+        (phase,),
+    )
+    world.commit()
+    trade.commit()
+    world.close()
+    trade.close()
+    monkeypatch.setattr(dl, "LIVE_REPO", str(tmp_path))
+
+    ok, detail = dl._wait_for_post_start_edli_queue_progress(
+        launched_after=datetime.now(timezone.utc),
+        post_start_freshness_verified=True,
+        timeout_seconds=0,
+    )
+
+    assert ok is True
+    assert "canonical_unresolved_positions=0" in detail
+
+
+def test_deploy_live_paused_entry_backlog_ignores_terminal_historical_exposure(
+    monkeypatch, tmp_path
+):
+    dl = _load("deploy_live_paused_entry_terminal_economics", "deploy_live.py")
+    state = tmp_path / "state"
+    state.mkdir()
+    world, trade = _init_paused_entry_park_authority(state)
+    _insert_claimable_edli_entry_backlog(world)
+    trade.executescript(
+        """
+        ALTER TABLE position_current ADD COLUMN cost_basis_usd REAL;
+        """
+    )
+    trade.executemany(
+        """
+        INSERT INTO position_current (
+            position_id, phase, chain_shares, chain_state, shares, cost_basis_usd
+        ) VALUES (?, ?, 7, 'closed_redeemed', 7, 42)
+        """,
+        (
+            (f"terminal-{index}", phase)
+            for index, phase in enumerate(
+                ("settled",) * 1_587 + ("voided", "admin_closed", "economically_closed")
+            )
+        ),
+    )
+    world.commit()
+    trade.commit()
+    world.close()
+    trade.close()
+    monkeypatch.setattr(dl, "LIVE_REPO", str(tmp_path))
+
+    ok, detail = dl._wait_for_post_start_edli_queue_progress(
+        launched_after=datetime.now(timezone.utc),
+        post_start_freshness_verified=True,
+        timeout_seconds=0,
+    )
+
+    assert ok is True
+    assert "canonical_unresolved_positions=0" in detail
+
+
+@pytest.mark.parametrize(
+    ("case", "phase", "shares", "chain_shares", "chain_state"),
+    (
+        ("voided_chain_risk", "voided", 0.0, 1.0, "synced"),
+        ("active_null_shares", "active", None, 1.0, "synced"),
+        ("active_infinite_shares", "active", float("inf"), 1.0, "synced"),
+        ("active_null_chain_shares", "active", 1.0, None, "synced"),
+        ("active_infinite_chain_shares", "active", 1.0, float("inf"), "synced"),
+    ),
+)
+def test_deploy_live_paused_entry_backlog_rejects_unresolved_position_authority(
+    monkeypatch, tmp_path, case, phase, shares, chain_shares, chain_state
+):
+    dl = _load(f"deploy_live_paused_entry_unresolved_{case}", "deploy_live.py")
+    state = tmp_path / "state"
+    state.mkdir()
+    world, trade = _init_paused_entry_park_authority(state)
+    _insert_claimable_edli_entry_backlog(world)
+    trade.execute(
+        """
+        INSERT INTO position_current (
+            position_id, phase, chain_shares, shares, chain_state
+        ) VALUES ('pos-unresolved', ?, ?, ?, ?)
+        """,
+        (phase, chain_shares, shares, chain_state),
+    )
+    world.commit()
+    trade.commit()
+    world.close()
+    trade.close()
+    monkeypatch.setattr(dl, "LIVE_REPO", str(tmp_path))
+
+    ok, detail = dl._wait_for_post_start_edli_queue_progress(
+        launched_after=datetime.now(timezone.utc),
+        post_start_freshness_verified=True,
+        timeout_seconds=0,
+    )
+
+    assert ok is False
+    assert "expected_parked=canonical_unresolved_positions=1" in detail
+
+
+def test_deploy_live_paused_entry_backlog_rejects_pending_fill_unknown_exposure(
+    monkeypatch, tmp_path
+):
+    dl = _load("deploy_live_paused_entry_pending_unknown", "deploy_live.py")
+    state = tmp_path / "state"
+    state.mkdir()
+    world, trade = _init_paused_entry_park_authority(state)
+    _insert_claimable_edli_entry_backlog(world)
+    trade.execute(
+        """
+        INSERT INTO position_current (
+            position_id, phase, chain_shares, chain_state
+        ) VALUES ('pos-pending', 'pending_entry', 0, 'unknown')
+        """
+    )
+    world.commit()
+    trade.commit()
+    world.close()
+    trade.close()
+    monkeypatch.setattr(dl, "LIVE_REPO", str(tmp_path))
+
+    ok, detail = dl._wait_for_post_start_edli_queue_progress(
+        launched_after=datetime.now(timezone.utc),
+        post_start_freshness_verified=True,
+        timeout_seconds=0,
+    )
+
+    assert ok is False
+    assert "expected_parked=canonical_unresolved_positions=1" in detail
+
+
+@pytest.mark.parametrize("phase", (None, "", "unknown", "unrecognized_phase"))
+def test_deploy_live_paused_entry_backlog_rejects_ungoverned_lifecycle_phase(
+    monkeypatch, tmp_path, phase
+):
+    dl = _load("deploy_live_paused_entry_ungoverned_phase", "deploy_live.py")
+    state = tmp_path / "state"
+    state.mkdir()
+    world, trade = _init_paused_entry_park_authority(state)
+    _insert_claimable_edli_entry_backlog(world)
+    trade.execute(
+        """
+        INSERT INTO position_current (
+            position_id, phase, chain_shares, chain_state
+        ) VALUES ('pos-ungoverned', ?, 0, 'closed_redeemed')
+        """,
+        (phase,),
+    )
+    world.commit()
+    trade.commit()
+    world.close()
+    trade.close()
+    monkeypatch.setattr(dl, "LIVE_REPO", str(tmp_path))
+
+    ok, detail = dl._wait_for_post_start_edli_queue_progress(
+        launched_after=datetime.now(timezone.utc),
+        post_start_freshness_verified=True,
+        timeout_seconds=0,
+    )
+
+    assert ok is False
+    assert "expected_parked=canonical_unresolved_positions=1" in detail
+
+
+def test_deploy_live_paused_entry_backlog_rejects_nonterminal_sell_debt(
+    monkeypatch, tmp_path
+):
+    dl = _load("deploy_live_paused_entry_sell_debt", "deploy_live.py")
+    state = tmp_path / "state"
+    state.mkdir()
+    world, trade = _init_paused_entry_park_authority(state)
+    _insert_claimable_edli_entry_backlog(world)
+    trade.execute("INSERT INTO venue_commands VALUES ('sell-open', 'SELL', 'POSTING')")
+    world.commit()
+    trade.commit()
+    world.close()
+    trade.close()
+    monkeypatch.setattr(dl, "LIVE_REPO", str(tmp_path))
+
+    ok, detail = dl._wait_for_post_start_edli_queue_progress(
+        launched_after=datetime.now(timezone.utc),
+        post_start_freshness_verified=True,
+        timeout_seconds=0,
+    )
+
+    assert ok is False
+    assert "expected_parked=nonterminal_sell_commands=1" in detail
+
+
+def test_deploy_live_paused_entry_backlog_ignores_generic_global_auction_marker(
+    monkeypatch, tmp_path
+):
+    from src.runtime.reactor_wake import (
+        GLOBAL_AUCTION_COMPLETION_WAKE_REASON,
+        REACTOR_WAKE_FILENAME,
+        publish_reactor_wake,
+    )
+
+    dl = _load("deploy_live_paused_entry_auction_debt", "deploy_live.py")
+    state = tmp_path / "state"
+    state.mkdir()
+    world, trade = _init_paused_entry_park_authority(state)
+    _insert_claimable_edli_entry_backlog(world)
+    world.commit()
+    trade.commit()
+    world.close()
+    trade.close()
+    publish_reactor_wake(
+        source="test",
+        reason=GLOBAL_AUCTION_COMPLETION_WAKE_REASON,
+        path=state / REACTOR_WAKE_FILENAME,
+    )
+    monkeypatch.setattr(dl, "LIVE_REPO", str(tmp_path))
+
+    ok, detail = dl._wait_for_post_start_edli_queue_progress(
+        launched_after=datetime.now(timezone.utc),
+        post_start_freshness_verified=True,
+        timeout_seconds=0,
+    )
+
+    assert ok is True
+    assert "held_sell_global_auction_debt=0" in detail
+
+
+def test_deploy_live_paused_entry_backlog_rejects_any_queued_exact_held_sell_debt(
+    monkeypatch, tmp_path
+):
+    from src.runtime import reactor_wake
+
+    dl = _load("deploy_live_paused_entry_exact_held_debt", "deploy_live.py")
+    state = tmp_path / "state"
+    state.mkdir()
+    world, trade = _init_paused_entry_park_authority(state)
+    _insert_claimable_edli_entry_backlog(world)
+    world.commit()
+    trade.commit()
+    world.close()
+    trade.close()
+    wake_path, completed_wake, completed_request = _publish_exact_held_sell_wake(
+        state, position_id="pos-completed"
+    )
+    _wake_path, outstanding_wake, outstanding_request = _publish_exact_held_sell_wake(
+        state, position_id="pos-outstanding"
+    )
+    completed_receipt = reactor_wake.HeldSellReauctionReceipt(
+        request_id=completed_request.request_id,
+        material_identity=completed_request.material_identity,
+        generation=completed_request.generation,
+        status=reactor_wake.POSITION_NO_LONGER_EXPOSED,
+        reason=reactor_wake.SELL_OBLIGATION_ENDED_BY_CANONICAL_CHAIN_ZERO,
+        lifecycle_phase="economically_closed",
+        chain_state="chain_confirmed_zero",
+        chain_shares=0.0,
+        schema_version=completed_request.schema_version,
+    )
+    assert reactor_wake.persist_held_sell_reauction_receipts(
+        (completed_receipt,), path=wake_path
+    )
+    assert reactor_wake.held_sell_reauction_requests_completed(
+        (completed_request,), path=wake_path)
+    assert not reactor_wake.held_sell_reauction_requests_completed(
+        (outstanding_request,), path=wake_path)
+    assert reactor_wake.exact_held_sell_completion_wake_ids(path=wake_path) == {
+        completed_wake.wake_id,
+        outstanding_wake.wake_id,
+    }
+    monkeypatch.setattr(dl, "LIVE_REPO", str(tmp_path))
+
+    ok, detail = dl._wait_for_post_start_edli_queue_progress(
+        launched_after=datetime.now(timezone.utc),
+        post_start_freshness_verified=True,
+        timeout_seconds=0,
+    )
+
+    assert ok is False
+    assert "expected_parked=held_sell_global_auction_debt=2" in detail
+
+
+@pytest.mark.parametrize(
+    ("surface", "expected"),
+    (("malformed_legacy", "EDLI_EXPECTED_PARKED_WAKE_SURFACE_INVALID"),
+     ("malformed_queue", "EDLI_EXPECTED_PARKED_WAKE_SURFACE_INVALID"),
+     ("unreadable", "EDLI_EXPECTED_PARKED_WAKE_SURFACE_UNREADABLE")),
+)
+def test_deploy_live_paused_entry_backlog_rejects_invalid_wake_surface(
+    monkeypatch, tmp_path, surface, expected
+):
+    dl = _load("deploy_live_paused_entry_invalid_wake", "deploy_live.py")
+    state = tmp_path / "state"
+    state.mkdir()
+    world, trade = _init_paused_entry_park_authority(state)
+    _insert_claimable_edli_entry_backlog(world)
+    world.commit()
+    trade.commit()
+    world.close()
+    trade.close()
+    wake_path = state / "edli-reactor-wake.json"
+    if surface == "malformed_legacy":
+        wake_path.write_text("{not-json", encoding="utf-8")
+    elif surface == "malformed_queue":
+        queue_dir = state / "edli-reactor-wake.json.d"
+        queue_dir.mkdir()
+        (queue_dir / "malformed.json").write_text("{not-json", encoding="utf-8")
+    else:
+        from src.runtime import reactor_wake
+
+        reactor_wake.publish_reactor_wake(
+            source="test",
+            reason="forecast_posterior_advanced",
+            path=wake_path,
+        )
+
+        def unreadable_wake(*_args, **_kwargs):
+            raise OSError("test unreadable wake")
+
+        monkeypatch.setattr(
+            reactor_wake, "_read_reactor_wake_path", unreadable_wake
+        )
+    monkeypatch.setattr(dl, "LIVE_REPO", str(tmp_path))
+
+    ok, detail = dl._wait_for_post_start_edli_queue_progress(
+        launched_after=datetime.now(timezone.utc),
+        post_start_freshness_verified=True,
+        timeout_seconds=0,
+    )
+
+    assert ok is False
+    assert expected in detail
+
+
+def test_deploy_live_paused_entry_backlog_rejects_unknown_pause_authority(
+    monkeypatch, tmp_path
+):
+    dl = _load("deploy_live_paused_entry_unknown_pause", "deploy_live.py")
+    state = tmp_path / "state"
+    state.mkdir()
+    world = _init_edli_queue_db(state / "zeus-world.db")
+    _insert_claimable_edli_entry_backlog(world)
+    world.commit()
+    world.close()
+    trade = sqlite3.connect(state / "zeus_trades.db")
+    trade.executescript(
+        """
+        CREATE TABLE position_current (
+            position_id TEXT PRIMARY KEY, phase TEXT,
+            chain_shares REAL, chain_state TEXT
+        );
+        CREATE TABLE venue_commands (command_id TEXT PRIMARY KEY, side TEXT, state TEXT);
+        """
+    )
+    trade.commit()
+    trade.close()
+    monkeypatch.setattr(dl, "LIVE_REPO", str(tmp_path))
+
+    ok, detail = dl._wait_for_post_start_edli_queue_progress(
+        launched_after=datetime.now(timezone.utc),
+        post_start_freshness_verified=True,
+        timeout_seconds=0,
+    )
+
+    assert ok is False
+    assert "EDLI_EXPECTED_PARKED_PAUSE_UNREADABLE:missing_table" in detail
 
 
 def test_deploy_live_monitor_wait_budget_covers_runtime_coverage_contract(
@@ -3101,6 +4291,7 @@ def test_deploy_live_post_start_edli_queue_wait_rejects_stale_processing_claim(
 
     ok, detail = dl._wait_for_post_start_edli_queue_progress(
         launched_after=launched,
+        post_start_freshness_verified=True,
         timeout_seconds=0,
     )
 
@@ -3136,6 +4327,7 @@ def test_deploy_live_post_start_edli_queue_wait_accepts_reclaimed_claim(
 
     ok, detail = dl._wait_for_post_start_edli_queue_progress(
         launched_after=launched,
+        post_start_freshness_verified=True,
         timeout_seconds=0,
     )
 
@@ -3201,6 +4393,7 @@ def test_deploy_live_post_start_edli_queue_wait_accepts_complete_auction_receipt
 
     ok, detail = dl._wait_for_post_start_edli_queue_progress(
         launched_after=launched,
+        post_start_freshness_verified=True,
         timeout_seconds=0,
     )
 
@@ -3237,6 +4430,7 @@ def test_deploy_live_post_start_edli_queue_wait_skips_future_retry_floor(
 
     ok, detail = dl._wait_for_post_start_edli_queue_progress(
         launched_after=launched,
+        post_start_freshness_verified=True,
         timeout_seconds=0,
     )
 
@@ -3247,9 +4441,17 @@ def test_deploy_live_post_start_edli_queue_wait_skips_future_retry_floor(
 def test_deploy_live_live_restart_runs_recovery_before_preflight(monkeypatch, capsys):
     dl = _load("deploy_live_restart_order_live", "deploy_live.py")
     calls = []
+    pause_expected_shas = []
+    live_head = {"sha": "c" * 40}
 
     monkeypatch.setattr(dl, "_gate", lambda allow_dirty, allow_unpushed=False: (True, []))
-    monkeypatch.setattr(dl, "head_sha", lambda short=True: "c" * 40)
+
+    def _head_sha(short=True):
+        captured = live_head["sha"]
+        live_head["sha"] = "f" * 40
+        return captured
+
+    monkeypatch.setattr(dl, "head_sha", _head_sha)
     monkeypatch.setattr(dl, "_launchctl_service_loaded", lambda label: True)
 
     def _stop(label):
@@ -3264,8 +4466,10 @@ def test_deploy_live_live_restart_runs_recovery_before_preflight(monkeypatch, ca
         calls.append(("recovery", tuple(labels)))
         return True, "live restart recovery passed"
 
-    def _pause(labels):
+    def _pause(labels, **kwargs):
         calls.append(("pause_entries", tuple(labels)))
+        pause_expected_shas.append(kwargs["expected_sha"])
+        assert live_head["sha"] == "f" * 40
         return True, "live restart entry pause guard armed"
 
     def _launch(label):
@@ -3285,7 +4489,7 @@ def test_deploy_live_live_restart_runs_recovery_before_preflight(monkeypatch, ca
         return True, "post-start monitor cadence verified"
 
     def _queue(**kwargs):
-        calls.append(("queue", "post-start"))
+        calls.append(("queue", kwargs["post_start_freshness_verified"]))
         return True, "post-start EDLI queue progress verified"
 
     def _resume(labels):
@@ -3324,8 +4528,11 @@ def test_deploy_live_live_restart_runs_recovery_before_preflight(monkeypatch, ca
     )
     assert calls == [
         ("pause_entries", tuple(expanded_labels)),
+        *[("launch", label) for label in preflight_prerequisites],
+        ("prerequisite", preflight_prerequisites),
         ("stop", dl.LIVE_TRADING_LABEL),
-        *[("stop", label) for label in dl.LIVE_TRADING_PREREQUISITE_LABELS],
+        ("stop", heartbeat_supervisor),
+        *[("stop", label) for label in preflight_prerequisites],
         ("recovery", tuple(expanded_labels)),
         *[("launch", label) for label in preflight_prerequisites],
         ("prerequisite", preflight_prerequisites),
@@ -3334,10 +4541,77 @@ def test_deploy_live_live_restart_runs_recovery_before_preflight(monkeypatch, ca
         ("verify", "cccccccc"),
         ("launch", heartbeat_supervisor),
         ("monitor", "post-start"),
-        ("queue", "post-start"),
+        ("queue", True),
         ("resume_entries", tuple(expanded_labels)),
     ]
+    assert pause_expected_shas == ["c" * 40]
     assert "live restart preflight passed" in capsys.readouterr().out
+
+
+def test_deploy_live_projection_recovery_failure_restores_paused_monitoring(
+    monkeypatch,
+):
+    dl = _load("deploy_live_projection_recovery_failure", "deploy_live.py")
+    stops: list[str] = []
+    launches: list[str] = []
+
+    monkeypatch.setattr(dl, "_gate", lambda allow_dirty, allow_unpushed=False: (True, []))
+    monkeypatch.setattr(dl, "head_sha", lambda short=True: "d" * 40)
+    monkeypatch.setattr(dl, "_launchctl_service_loaded", lambda label: True)
+    monkeypatch.setattr(
+        dl,
+        "_pause_entries_for_live_restart_if_needed",
+        lambda labels, **_kwargs: (True, "pause armed"),
+    )
+    monkeypatch.setattr(
+        dl,
+        "_stop_label",
+        lambda label: (stops.append(label) or (True, f"stopped {label}")),
+    )
+    monkeypatch.setattr(
+        dl,
+        "_run_restart_recovery_if_needed",
+        lambda labels: (False, "EDLI_BACKFILL_RECEIPT_COPY_COUNT_MISMATCH"),
+    )
+    monkeypatch.setattr(
+        dl,
+        "_launch_or_restart_label",
+        lambda label: (launches.append(label) or (True, f"launched {label}")),
+    )
+    monkeypatch.setattr(
+        dl,
+        "_wait_for_prerequisite_code_identity",
+        lambda labels, **kwargs: (True, "prerequisites verified"),
+    )
+    monkeypatch.setattr(
+        dl,
+        "_wait_for_live_runtime_fresh",
+        lambda **_kwargs: (True, "runtime verified"),
+    )
+    monkeypatch.setattr(
+        dl,
+        "_wait_for_post_start_monitor_cadence",
+        lambda **_kwargs: (True, "held monitor verified"),
+    )
+    monkeypatch.setattr(dl, "_live_restart_exclusive_lock", contextlib.nullcontext)
+
+    assert dl.main(["restart", "live-trading"]) == 1
+    prerequisites = [
+        label
+        for label in dl.LIVE_TRADING_PREREQUISITE_LABELS
+        if label != dl.DAEMONS["venue-heartbeat"]
+    ]
+    assert stops == [
+        dl.LIVE_TRADING_LABEL,
+        dl.DAEMONS["venue-heartbeat"],
+        *prerequisites,
+    ]
+    assert launches == [
+        *prerequisites,
+        *prerequisites,
+        dl.LIVE_TRADING_LABEL,
+        dl.DAEMONS["venue-heartbeat"],
+    ]
 
 
 def test_deploy_live_starts_heartbeat_before_monitor_and_stops_after_failure(
@@ -3353,7 +4627,7 @@ def test_deploy_live_starts_heartbeat_before_monitor_and_stops_after_failure(
     monkeypatch.setattr(
         dl,
         "_pause_entries_for_live_restart_if_needed",
-        lambda labels: (True, "pause armed"),
+        lambda labels, **_kwargs: (True, "pause armed"),
     )
     monkeypatch.setattr(dl, "_stop_label", lambda label: (True, f"stopped {label}"))
     monkeypatch.setattr(
@@ -3403,6 +4677,7 @@ def test_deploy_live_restart_pause_guard_is_indefinite_control_plane(monkeypatch
 
     monkeypatch.setattr(dl, "_require_live_repo", lambda: str(tmp_path))
     monkeypatch.setattr(dl, "_live_trading_subprocess_env", lambda: {})
+    monkeypatch.setattr(dl, "head_sha", lambda short=False: "a" * 40)
 
     class Result:
         returncode = 0
@@ -3420,11 +4695,10 @@ def test_deploy_live_restart_pause_guard_is_indefinite_control_plane(monkeypatch
     assert ok is True
     assert "entries pause guard armed" in detail
     assert calls
-    code = calls[0][0][2]
+    code = calls[-1][0][2]
     assert "deploy_live_restart_guard" in code
+    assert "arm_deploy_live_restart_guard" in code
     assert "entries pause guard preserved" in code
-    assert "issued_by IN ('control_plane', 'operator')" in code
-    assert "issued_by='control_plane'" in code
     assert "effective_until=None" in code
     assert "system_auto_pause" not in code
 
@@ -3569,34 +4843,18 @@ def test_deploy_live_restart_pause_does_not_retry_before_scoped_unload(
 
 def test_deploy_live_restart_pause_preserves_existing_operator_pause(monkeypatch, tmp_path):
     dl = _load("deploy_live_restart_pause_guard_preserve_operator", "deploy_live.py")
-    pause_calls = []
-    sql_calls = []
 
     monkeypatch.setattr(dl, "_require_live_repo", lambda: str(tmp_path))
     monkeypatch.setattr(dl, "_live_trading_subprocess_env", lambda: {})
+    monkeypatch.setattr(dl, "head_sha", lambda short=False: "a" * 40)
 
     control_mod = types.ModuleType("src.control.control_plane")
-    state_db_mod = types.ModuleType("src.state.db")
-
-    def fake_pause_entries(*args, **kwargs):
-        pause_calls.append((args, kwargs))
-
-    class _Cursor:
-        def fetchone(self):
-            return ("operator_investigation", "control_plane", "2026-07-03T00:00:00+00:00")
-
-    class _Conn:
-        def execute(self, sql, params=()):
-            sql_calls.append((sql, params))
-            return _Cursor()
-
-        def close(self):
-            return None
-
-    control_mod.pause_entries = fake_pause_entries
-    state_db_mod.get_world_connection = lambda: _Conn()
+    control_mod.arm_deploy_live_restart_guard = lambda **_kwargs: {
+        "status": "preserved",
+        "reason": "operator_investigation",
+        "issued_by": "control_plane",
+    }
     monkeypatch.setitem(sys.modules, "src.control.control_plane", control_mod)
-    monkeypatch.setitem(sys.modules, "src.state.db", state_db_mod)
 
     class Result:
         returncode = 0
@@ -3618,9 +4876,6 @@ def test_deploy_live_restart_pause_preserves_existing_operator_pause(monkeypatch
     assert ok is True
     assert "entries pause guard preserved" in detail
     assert "operator_investigation" in detail
-    assert pause_calls == []
-    assert sql_calls
-    assert "effective_until IS NULL" in sql_calls[0][0]
 
 
 def test_deploy_live_verified_restart_clears_only_its_control_plane_guard(
@@ -3628,29 +4883,13 @@ def test_deploy_live_verified_restart_clears_only_its_control_plane_guard(
     tmp_path,
 ):
     dl = _load("deploy_live_restart_resume_exact_guard", "deploy_live.py")
-    resume_calls = []
 
     monkeypatch.setattr(dl, "_require_live_repo", lambda: str(tmp_path))
     monkeypatch.setattr(dl, "_live_trading_subprocess_env", lambda: {})
 
     control_mod = types.ModuleType("src.control.control_plane")
-    state_db_mod = types.ModuleType("src.state.db")
-    control_mod.resume_entries = lambda *args, **kwargs: resume_calls.append((args, kwargs))
-
-    class _Cursor:
-        def fetchone(self):
-            return ("deploy_live_restart_guard", "control_plane")
-
-    class _Conn:
-        def execute(self, _sql, _params=()):
-            return _Cursor()
-
-        def close(self):
-            return None
-
-    state_db_mod.get_world_connection = lambda: _Conn()
+    control_mod.recover_deploy_live_restart_guard = lambda: {"status": "reset"}
     monkeypatch.setitem(sys.modules, "src.control.control_plane", control_mod)
-    monkeypatch.setitem(sys.modules, "src.state.db", state_db_mod)
 
     class Result:
         returncode = 0
@@ -3673,12 +4912,6 @@ def test_deploy_live_verified_restart_clears_only_its_control_plane_guard(
 
     assert ok is True
     assert "restart guard cleared" in detail
-    assert resume_calls == [
-        (
-            ("deploy_live_restart_guard_verified_runtime_queue_monitor",),
-            {"issued_by": "control_plane"},
-        )
-    ]
 
 
 def test_deploy_live_verified_restart_preserves_non_deploy_pause(monkeypatch, tmp_path):
@@ -3715,7 +4948,7 @@ def test_deploy_live_all_restarts_sidecars_before_live_preflight(monkeypatch):
     monkeypatch.setattr(
         dl,
         "_pause_entries_for_live_restart_if_needed",
-        lambda labels: (calls.append(("pause_entries", tuple(labels))) or (True, "pause ok")),
+        lambda labels, **_kwargs: (calls.append(("pause_entries", tuple(labels))) or (True, "pause ok")),
     )
     monkeypatch.setattr(
         dl,
@@ -3752,7 +4985,10 @@ def test_deploy_live_all_restarts_sidecars_before_live_preflight(monkeypatch):
     monkeypatch.setattr(
         dl,
         "_wait_for_post_start_edli_queue_progress",
-        lambda **kwargs: (calls.append(("queue", "post-start")) or (True, "queue verified")),
+        lambda **kwargs: (
+            calls.append(("queue", kwargs["post_start_freshness_verified"]))
+            or (True, "queue verified")
+        ),
     )
     monkeypatch.setattr(
         dl,
@@ -3763,6 +4999,11 @@ def test_deploy_live_all_restarts_sidecars_before_live_preflight(monkeypatch):
         dl,
         "_live_restart_exclusive_lock",
         contextlib.nullcontext,
+    )
+    monkeypatch.setattr(
+        dl,
+        "_resume_entries_after_verified_live_restart_if_needed",
+        lambda labels: (calls.append(("resume_entries", tuple(labels))) or (True, "resumed")),
     )
 
     rc = dl.main(["restart", "all"])
@@ -3782,19 +5023,18 @@ def test_deploy_live_all_restarts_sidecars_before_live_preflight(monkeypatch):
             ),
         )
     )
-    assert stop_index < recovery_index
-    assert recovery_index < prerequisite_index < preflight_index
+    assert prerequisite_index < stop_index < recovery_index < preflight_index
     live_launch_index = calls.index(("launch", dl.LIVE_TRADING_LABEL))
     assert live_launch_index > preflight_index
     heartbeat_launch_index = calls.index(("launch", dl.DAEMONS["venue-heartbeat"]))
     assert calls.index(("verify", "dddddddd")) < heartbeat_launch_index
     assert heartbeat_launch_index < calls.index(("monitor", "post-start"))
     assert calls.index(("verify", "dddddddd")) > live_launch_index
-    assert calls.index(("queue", "post-start")) > calls.index(("verify", "dddddddd"))
+    assert calls.index(("queue", True)) > calls.index(("verify", "dddddddd"))
     assert calls.index(("monitor", "post-start")) > calls.index(("verify", "dddddddd"))
-    assert calls.index(("monitor", "post-start")) < calls.index(("queue", "post-start"))
+    assert calls.index(("monitor", "post-start")) < calls.index(("queue", True))
     preflight_launches = [
-        call for call in calls[recovery_index:preflight_index]
+        call for call in calls[:stop_index]
         if call[0] == "launch"
     ]
     assert {label for _, label in preflight_launches} == {
@@ -3804,16 +5044,20 @@ def test_deploy_live_all_restarts_sidecars_before_live_preflight(monkeypatch):
     }
 
 
-def test_deploy_live_preflight_failure_leaves_live_stopped(monkeypatch, capsys):
+def test_deploy_live_preflight_failure_restores_paused_held_monitoring(
+    monkeypatch,
+    capsys,
+):
     dl = _load("deploy_live_restart_preflight_failure", "deploy_live.py")
     calls = []
 
     monkeypatch.setattr(dl, "_gate", lambda allow_dirty, allow_unpushed=False: (True, []))
+    monkeypatch.setattr(dl, "head_sha", lambda short=True: "d" * 40)
     monkeypatch.setattr(dl, "_launchctl_service_loaded", lambda label: True)
     monkeypatch.setattr(
         dl,
         "_pause_entries_for_live_restart_if_needed",
-        lambda labels: (calls.append(("pause_entries", tuple(labels))) or (True, "pause ok")),
+        lambda labels, **_kwargs: (calls.append(("pause_entries", tuple(labels))) or (True, "pause ok")),
     )
     monkeypatch.setattr(
         dl,
@@ -3847,6 +5091,22 @@ def test_deploy_live_preflight_failure_leaves_live_stopped(monkeypatch, capsys):
         "_live_restart_exclusive_lock",
         contextlib.nullcontext,
     )
+    monkeypatch.setattr(
+        dl,
+        "_wait_for_live_runtime_fresh",
+        lambda **kwargs: (
+            calls.append(("verify", kwargs["expected_sha"][:8]))
+            or (True, "runtime verified")
+        ),
+    )
+    monkeypatch.setattr(
+        dl,
+        "_wait_for_post_start_monitor_cadence",
+        lambda **_kwargs: (
+            calls.append(("monitor", "paused-recovery"))
+            or (True, "held monitor verified")
+        ),
+    )
 
     rc = dl.main(["restart", "live-trading"])
 
@@ -3860,15 +5120,24 @@ def test_deploy_live_preflight_failure_leaves_live_stopped(monkeypatch, capsys):
     )
     assert calls == [
         ("pause_entries", tuple(expanded_labels)),
+        *[("launch", label) for label in preflight_prerequisites],
+        ("prerequisite", preflight_prerequisites),
         ("stop", dl.LIVE_TRADING_LABEL),
-        *[("stop", label) for label in dl.LIVE_TRADING_PREREQUISITE_LABELS],
+        ("stop", heartbeat_supervisor),
+        *[("stop", label) for label in preflight_prerequisites],
         ("recovery", tuple(expanded_labels)),
         *[("launch", label) for label in preflight_prerequisites],
         ("prerequisite", preflight_prerequisites),
         ("preflight", tuple(expanded_labels)),
+        ("launch", dl.LIVE_TRADING_LABEL),
+        ("launch", heartbeat_supervisor),
+        ("verify", "dddddddd"),
+        ("monitor", "paused-recovery"),
     ]
     err = capsys.readouterr().err
-    assert "live-trading left stopped" in err
+    assert "paused live monitoring restored" in err
+    assert "deploy entry guard remains armed" in err
+    assert "live-trading left stopped" not in err
 
 
 def test_deploy_live_restart_lock_excludes_watchdog_shared_lease(

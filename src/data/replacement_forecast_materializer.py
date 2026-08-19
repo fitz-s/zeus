@@ -31,11 +31,12 @@ from zoneinfo import ZoneInfo
 from src.data.forecast_target_contract import compute_target_local_day_window_utc
 from src.data.latency_metrics import emit_materialization_latency
 from src.data.replacement_forecast_cycle_policy import (
+    BETWEEN_COHORT_STATUS_SIMULTANEOUS_PROVEN,
     CURRENT_EVIDENCE_SEMANTICS_REVISION,
     STALE_ENSEMBLE_ABSOLUTE_DISAGREEMENT_SEMANTICS_REVISION,
     TRADEABLE_GRADE_QLCB_BASIS,
     classify_cycle_phase,
-    cycle_age_exceeds_bound,
+    cycle_age_outside_bound,
     replacement_source_cycle_max_age_hours,
 )
 from src.data.openmeteo_ecmwf_ifs9_anchor import (
@@ -196,7 +197,12 @@ class PreparedReplacementForecastMaterialization:
     request: ReplacementForecastMaterializeRequest
     metric: str
     posterior: "_PosteriorComputeResult"
+    day0_ledger_frontier_identity: tuple[int, str, str] | None
     anchor_id: int | None = None
+
+
+class PreparedReplacementForecastSnapshotStale(RuntimeError):
+    """The write snapshot changed; recompute only after releasing writer locks."""
 
 
 def _to_utc(value: datetime | str, *, field_name: str) -> datetime:
@@ -483,6 +489,122 @@ def _ensure_replacement_identity_columns(conn: sqlite3.Connection) -> None:
         )
 
 
+def _ensure_replacement_frontier_indexes(conn: sqlite3.Connection) -> None:
+    """Install target-frontier indexes before entering any final writer lock."""
+
+    if conn.in_transaction:
+        raise RuntimeError(
+            "REPLACEMENT_FRONTIER_INDEX_BOOTSTRAP_REQUIRES_AUTOCOMMIT"
+        )
+    posterior_columns = _table_columns(conn, "forecast_posteriors")
+    if {
+        "source_id",
+        "city",
+        "target_date",
+        "temperature_metric",
+        "posterior_id",
+    }.issubset(posterior_columns):
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_forecast_posteriors_source_family_frontier
+                ON forecast_posteriors(
+                    source_id, city, target_date, temperature_metric, posterior_id DESC
+                )
+            """
+        )
+    provider_columns = _table_columns(conn, "raw_model_forecasts")
+    if {
+        "city",
+        "target_date",
+        "metric",
+        "model",
+        "source_cycle_time",
+        "endpoint",
+        "lead_days",
+        "captured_at",
+        "raw_model_forecast_id",
+    }.issubset(provider_columns):
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_raw_model_forecasts_target_model_frontier
+                ON raw_model_forecasts(
+                    city,
+                    target_date,
+                    metric,
+                    model,
+                    datetime(source_cycle_time) DESC,
+                    CASE endpoint WHEN 'single_runs' THEN 0 ELSE 1 END,
+                    lead_days,
+                    captured_at DESC,
+                    raw_model_forecast_id DESC
+                )
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_raw_model_forecasts_target_frontier
+                ON raw_model_forecasts(
+                    city, target_date, metric, raw_model_forecast_id DESC
+                )
+            """
+        )
+    ensemble_columns = _table_columns(conn, "ensemble_snapshots")
+    if {
+        "snapshot_id",
+        "city",
+        "target_date",
+        "temperature_metric",
+        "source_id",
+        "model_version",
+        "authority",
+        "causality_status",
+        "boundary_ambiguous",
+        "forecast_window_attribution_status",
+        "contributes_to_target_extrema",
+        "source_cycle_time",
+        "issue_time",
+        "source_available_at",
+        "available_at",
+    }.issubset(ensemble_columns):
+        eligibility = """
+            WHERE source_id = 'ecmwf_open_data'
+              AND model_version = 'ecmwf_ens'
+              AND authority = 'VERIFIED'
+              AND causality_status = 'OK'
+              AND boundary_ambiguous = 0
+              AND forecast_window_attribution_status = 'FULLY_INSIDE_TARGET_LOCAL_DAY'
+              AND contributes_to_target_extrema = 1
+        """
+        conn.execute(
+            f"""
+            CREATE INDEX IF NOT EXISTS idx_ensemble_snapshots_replacement_exact_frontier
+                ON ensemble_snapshots(
+                    city,
+                    target_date,
+                    temperature_metric,
+                    COALESCE(source_cycle_time, issue_time) DESC,
+                    COALESCE(source_available_at, available_at) DESC,
+                    snapshot_id DESC
+                )
+                {eligibility}
+            """
+        )
+        conn.execute(
+            f"""
+            CREATE INDEX IF NOT EXISTS idx_ensemble_snapshots_replacement_casefold_frontier
+                ON ensemble_snapshots(
+                    lower(city),
+                    target_date,
+                    temperature_metric,
+                    COALESCE(source_cycle_time, issue_time) DESC,
+                    COALESCE(source_available_at, available_at) DESC,
+                    snapshot_id DESC
+                )
+                {eligibility}
+            """
+        )
+
+
 def _bin_topology_payload(bins: Sequence[object], *, settlement_step_c: float) -> list[dict[str, object]]:
     return [
         {
@@ -571,11 +693,11 @@ def _request_with_day0_physical_frontier(
 
     ``forecast_posteriors`` is the materializer's durable local ledger.  A
     same-cycle re-materialization may improve model evidence, but it must not
-    reopen support that an earlier absorbing observation already removed.  The
-    reducer mirrors the canonical Day0 fact shape: HIGH takes MAX, LOW takes
-    MIN. When the current request proves the same frontier, its independently
-    reproducible source/clock replaces a historical carrier identity; otherwise
-    the source that owns the winning extreme keeps its latest clock. Rows
+    reopen support that independent evidence already removed.  The reducer
+    mirrors the canonical Day0 fact shape across sources: HIGH takes MAX, LOW
+    takes MIN.  Within one source, however, a newer snapshot replaces that
+    source's older snapshot even when the provider retracts an extreme.  The
+    physical quantity is monotone; an upstream snapshot is not.  Rows
     materialized after this request's clock are excluded, so this guard cannot
     introduce look-ahead.
     """
@@ -642,8 +764,14 @@ def _request_with_day0_physical_frontier(
                AND city = ?
                AND target_date = ?
                AND temperature_metric = ?
+             ORDER BY computed_at DESC
             """,
-            (SOURCE_ID, request.city, _date_text(request.target_date), metric),
+            (
+                SOURCE_ID,
+                request.city,
+                _date_text(request.target_date),
+                metric,
+            ),
         ).fetchall()
     except sqlite3.DatabaseError:
         return blocked("REPLACEMENT_MATERIALIZATION_DAY0_FRONTIER_LEDGER_READ_FAILED")
@@ -742,6 +870,17 @@ def _request_with_day0_physical_frontier(
             return blocked(
                 "REPLACEMENT_MATERIALIZATION_DAY0_FRONTIER_LEDGER_INVALID"
             )
+        if (
+            request_extreme is not None
+            and request_observed_at is not None
+            and source.strip().lower()
+            == str(request.day0_observed_extreme_source or "").strip().lower()
+            and observed_at <= request_observed_at
+        ):
+            # The current causal snapshot is the state of this source.  Keeping
+            # an older, more-extreme snapshot would convert provider revision
+            # into false physical certainty and can pin q at 0/1 indefinitely.
+            continue
         sample_count_raw = conditioning.get("sample_count")
         sample_count = (
             int(sample_count_raw)
@@ -852,6 +991,34 @@ def _request_with_day0_physical_frontier(
         ),
         day0_observed_extreme_sample_count=clock_owner[3],
         day0_observed_extreme_unit=clock_owner[4],
+    )
+
+
+def _day0_ledger_frontier_identity(
+    conn: sqlite3.Connection,
+    request: ReplacementForecastMaterializeRequest,
+    *,
+    metric: str,
+) -> tuple[int, str, str] | None:
+    """Read the append-only family high-water row and its mutable fingerprint."""
+
+    row = conn.execute(
+        """
+        SELECT posterior_id, provenance_json, computed_at
+          FROM forecast_posteriors
+         WHERE source_id = ?
+           AND city = ?
+           AND target_date = ?
+           AND temperature_metric = ?
+         ORDER BY posterior_id DESC
+         LIMIT 1
+        """,
+        (SOURCE_ID, request.city, _date_text(request.target_date), metric),
+    ).fetchone()
+    return (
+        None
+        if row is None
+        else (int(row[0]), str(row[1]), str(row[2]))
     )
 
 
@@ -1137,7 +1304,7 @@ def _prewrite_block_reasons(request: ReplacementForecastMaterializeRequest) -> t
     # within the empirical max healthy cycle age of 28.8h). Expired-but-rematerializable: the
     # SAME cycle is allowed only WHILE within this bound. Refusing here means a too-stale cycle
     # never even gets re-stamped, so the live gate is never the sole line of defence.
-    if cycle_age_exceeds_bound(computed_at, request_source_cycle_time):
+    if cycle_age_outside_bound(computed_at, request_source_cycle_time):
         reasons.append("REPLACEMENT_MATERIALIZATION_SOURCE_CYCLE_TOO_STALE")
     return tuple(reasons)
 
@@ -1409,8 +1576,9 @@ def _replacement_sigma_scale_lookup(unit: str) -> tuple[float, float, float]:
         # Resolve the σ-scale fit against the RUNTIME state dir (ZEUS_PRIMARY_ROOT/
         # state — the shared live state the fitter writes), like every other state
         # artifact, NOT relative to __file__ (the deployed code tree). The live
-        # daemon runs CODE from zeus-live-main but STATE from /Users/leofitz/zeus/
-        # state; resolving via __file__ made it read a STALE bundled copy (C k=1.0)
+        # daemon runs CODE from zeus-live-main but STATE from the repo root's
+        # state/ dir (ZEUS_PRIMARY_ROOT); resolving via __file__ made it read a
+        # STALE bundled copy (C k=1.0)
         # and silently drop the fitted k<1 sharpening, so the served forecast stayed
         # too flat (modal under-weighted → YES leaks to tails, NO on the predicted
         # bin). Dev/tests resolve to the same path, so they are unchanged.
@@ -2065,12 +2233,10 @@ class _CurrentEvidenceShape:
     translation_applied: bool
     stale_shape_reused: bool
     ens_center_delta_raw_c: float
+    between_cohort_status: str
     # Between-spread freshest-coherent-cohort provenance (consult v2 (b), 2026-07-17):
-    # populated ONLY when the ±3h cohort filter actually excluded a provider from the
-    # between term (None otherwise). None fields are DROPPED from as_payload so every
-    # pre-existing row's provenance payload stays byte-identical; they are NEVER part of
-    # the shape_hash identity dict (the cohort-filtered between value itself already
-    # distinguishes the shape).
+    # populated only when the ±3h cohort filter excludes a provider from the between term.
+    # The status is always persisted and is part of the shape_hash identity.
     between_cohort_models: tuple[str, ...] | None = None
     between_cohort_excluded: tuple[str, ...] | None = None
     # Shape-age sigma term: the fitted variance gamma_g * shape_lag_hours/6 is
@@ -2124,6 +2290,61 @@ def _current_provider_family_count(
     return len(families)
 
 
+def _current_provider_cohort_family_count(
+    *,
+    configured_weights: Mapping[str, float],
+    values_c_by_source: Mapping[str, float],
+    cycles_by_source: Mapping[str, datetime | str],
+) -> int:
+    """Count provider families in the freshest coherent configured cohort."""
+
+    from src.strategy.live_inference.source_clock_vnext import (  # noqa: PLC0415
+        provider_family_for_source,
+    )
+
+    eligible: list[tuple[str, datetime]] = []
+    for source, raw_weight in configured_weights.items():
+        try:
+            weight = float(raw_weight)
+            value = float(values_c_by_source[source])
+            cycle = _to_utc(
+                cycles_by_source[source],
+                field_name=f"cycles_by_source[{source}]",
+            )
+        except (KeyError, TypeError, ValueError, OverflowError):
+            continue
+        if weight <= 0.0 or not math.isfinite(weight) or not math.isfinite(value):
+            continue
+        eligible.append((str(source), cycle))
+    if not eligible:
+        return 0
+
+    cohort = _freshest_coherent_provider_models(dict(eligible))
+    return len({provider_family_for_source(source) for source in cohort})
+
+
+def _freshest_coherent_provider_models(
+    cycle_by_model: Mapping[str, datetime],
+) -> tuple[str, ...]:
+    """Select the newest <=3h cohort that proves two provider families."""
+
+    from src.strategy.live_inference.source_clock_vnext import (  # noqa: PLC0415
+        provider_family_for_source,
+    )
+
+    for cohort_cycle in sorted(set(cycle_by_model.values()), reverse=True):
+        cohort = tuple(
+            model
+            for model, cycle in cycle_by_model.items()
+            if 0.0
+            <= (cohort_cycle - cycle).total_seconds() / 3600.0
+            <= BETWEEN_COHORT_WINDOW_HOURS
+        )
+        if len({provider_family_for_source(model) for model in cohort}) >= 2:
+            return cohort
+    return ()
+
+
 def _current_evidence_shape_from_values(
     *,
     snapshot_id: int,
@@ -2155,15 +2376,14 @@ def _current_evidence_shape_from_values(
     ``source_cycle_time`` leaves today's same-cycle semantics untouched.
 
     ``provider_cycles`` (freshest-coherent-cohort, consult v2 (b), 2026-07-17):
-    optional model -> served cycle ISO stamp. When supplied, the BETWEEN term is
+    required model -> served cycle ISO stamp. The BETWEEN term is
     computed only over providers whose cycle is within ``BETWEEN_COHORT_WINDOW_HOURS``
     of the freshest provider cycle — cross-cycle displacement is staleness error
     (already priced as v_m(lag) variance in the center weights), not simultaneous
     model disagreement, and folding it into between would double-count it. The
     CENTER and its weights are untouched (stale providers still enter the center,
-    downweighted, never excluded). FAIL-OPEN: ``provider_cycles`` absent, a
-    provider's cycle missing/unparseable, or a coherent cohort of fewer than 2
-    providers -> between over ALL providers, byte-identical to today.
+    downweighted, never excluded). Missing or unparseable cycle provenance, or a
+    coherent cohort with fewer than 2 distinct provider families, fails closed.
 
     ``shape_age_gamma_c2_per_6h`` (consult P2-B full form, 2026-07-17): the fitted
     excess-variance slope from ``src.forecast.shape_age_sigma.gamma_for`` (degC² per 6h
@@ -2220,50 +2440,52 @@ def _current_evidence_shape_from_values(
     within = math.sqrt(
         sum((value - member_mean) ** 2 for value in members) / len(members)
     )
-    # Freshest-coherent-cohort between (consult v2 (b)): simultaneous disagreement is
-    # only measurable among providers speaking from (near-)the-same cycle; a stale
-    # provider's displacement is issuance-lag error, already priced as v_m(lag) in the
-    # center weights. Cohort = providers within BETWEEN_COHORT_WINDOW_HOURS of the
-    # freshest parseable provider cycle; a provider with a missing/unparseable cycle is
-    # INCLUDED (fail-open: absent provenance never shrinks the evidence basis). Weights
-    # renormalized within the cohort so between stays a proper weighted spread. Fail-open
-    # to ALL providers when no cycle parses or the coherent cohort is < 2.
-    cohort = normalized
+    # FAIL-CLOSED GATE CONTRACT
+    # SCOPE: only the affected posterior materialization.
+    # DRAIN: fresh complete simultaneous provider cycles, then rematerialization.
+    # RESET: a newly materialized current-revision certificate.
+    if provider_cycles is None:
+        raise ValueError(
+            "current shape requires complete provider cycle provenance"
+        )
+    cycle_by_model: dict[str, datetime] = {}
+    for model, _value, _weight in normalized:
+        raw_cycle = provider_cycles.get(model)
+        if raw_cycle is None:
+            raise ValueError(f"current shape provider cycle missing: {model}")
+        try:
+            cycle_by_model[model] = _to_utc(
+                str(raw_cycle), field_name=f"provider_cycles[{model}]"
+            )
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ValueError(
+                f"current shape provider cycle unparseable: {model}"
+            ) from exc
+
+    cohort_models = _freshest_coherent_provider_models(cycle_by_model)
+    if not cohort_models:
+        raise ValueError(
+            "current shape requires at least two simultaneous provider families"
+        )
+    cohort = tuple(
+        (model, value, weight)
+        for model, value, weight in normalized
+        if model in cohort_models
+    )
     between_cohort_models: tuple[str, ...] | None = None
     between_cohort_excluded: tuple[str, ...] | None = None
-    if provider_cycles is not None:
-        cycle_by_model: dict[str, datetime] = {}
-        for model, _value, _weight in normalized:
-            raw_cycle = provider_cycles.get(model)
-            if raw_cycle is None:
-                continue
-            try:
-                cycle_by_model[model] = _to_utc(
-                    str(raw_cycle), field_name="provider_cycle"
-                )
-            except Exception:
-                continue
-        if cycle_by_model:
-            freshest = max(cycle_by_model.values())
-            coherent = tuple(
-                (model, value, weight)
-                for model, value, weight in normalized
-                if model not in cycle_by_model
-                or (freshest - cycle_by_model[model]).total_seconds() / 3600.0
-                <= BETWEEN_COHORT_WINDOW_HOURS
-            )
-            if len(coherent) >= 2 and len(coherent) < len(normalized):
-                cohort_total = sum(weight for _, _, weight in coherent)
-                cohort = tuple(
-                    (model, value, weight / cohort_total)
-                    for model, value, weight in coherent
-                )
-                between_cohort_models = tuple(model for model, _, _ in coherent)
-                between_cohort_excluded = tuple(
-                    model
-                    for model, _, _ in normalized
-                    if model not in between_cohort_models
-                )
+    if len(cohort) < len(normalized):
+        cohort_total = sum(weight for _, _, weight in cohort)
+        cohort = tuple(
+            (model, value, weight / cohort_total)
+            for model, value, weight in cohort
+        )
+        between_cohort_models = tuple(model for model, _, _ in cohort)
+        between_cohort_excluded = tuple(
+            model
+            for model, _, _ in normalized
+            if model not in between_cohort_models
+        )
     between = math.sqrt(
         sum(weight * (value - center) ** 2 for _, value, weight in cohort)
     )
@@ -2321,6 +2543,7 @@ def _current_evidence_shape_from_values(
         "shape_lag_hours": shape_lag_hours,
         "translation_applied": translation_applied,
         "ens_center_delta_raw_c": ens_center_delta_raw,
+        "between_cohort_status": BETWEEN_COHORT_STATUS_SIMULTANEOUS_PROVEN,
     }
     if stale_shape_reused:
         identity["stale_shape_reused"] = True
@@ -2346,11 +2569,9 @@ def _current_evidence_shape_from_values(
         translation_applied=translation_applied,
         stale_shape_reused=stale_shape_reused,
         ens_center_delta_raw_c=ens_center_delta_raw,
-        # Cohort provenance intentionally OUTSIDE the `identity` dict above: when the
-        # filter is inactive these are None (payload-dropped, shape_hash byte-identical
-        # for every existing row); when active, the filtered `between` value inside
-        # `identity` already changes the hash — stamping the model lists there too would
-        # be redundant identity churn.
+        between_cohort_status=BETWEEN_COHORT_STATUS_SIMULTANEOUS_PROVEN,
+        # Cohort membership is diagnostic provenance; the status and filtered between
+        # value above are the identity-bearing proof.
         between_cohort_models=between_cohort_models,
         between_cohort_excluded=between_cohort_excluded,
         # Same discipline: outside `identity` — a positive term already widens the
@@ -2358,6 +2579,128 @@ def _current_evidence_shape_from_values(
         # term is None (payload-dropped), keeping every pre-existing row byte-identical.
         shape_age_sigma_term_c2=shape_age_sigma_term,
     )
+
+
+@dataclass(frozen=True)
+class CurrentEvidenceSnapshotIdentity:
+    """The exact ENS row selected by the live current-evidence authority."""
+
+    snapshot_id: int
+    city: str
+    members_json: str
+    source_cycle_time: str
+    source_available_at: str
+    members_unit: str
+
+
+def _current_evidence_snapshot_row(
+    conn: sqlite3.Connection,
+    request: ReplacementForecastMaterializeRequest,
+    *,
+    metric: str,
+    select_sql: str,
+    allow_casefold_fallback: bool = True,
+) -> sqlite3.Row | tuple[object, ...] | None:
+    """Run the one canonical causal target ENS selector."""
+
+    decision_at = _to_utc(
+        request.computed_at, field_name="computed_at"
+    ).isoformat()
+    carrier_cycle_dt = _to_utc(
+        request.source_cycle_time, field_name="source_cycle_time"
+    )
+    carrier_cycle = carrier_cycle_dt.isoformat()
+    min_evidence_cycle = (
+        carrier_cycle_dt
+        - timedelta(hours=replacement_source_cycle_max_age_hours())
+    ).isoformat()
+    params = (
+        request.city,
+        _date_text(request.target_date),
+        metric,
+        carrier_cycle,
+        min_evidence_cycle,
+        decision_at,
+    )
+    query = """
+        SELECT {select_sql}
+          FROM ensemble_snapshots
+         WHERE {city_predicate}
+           AND target_date = ?
+           AND temperature_metric = ?
+           AND source_id = 'ecmwf_open_data'
+           AND model_version = 'ecmwf_ens'
+           AND authority = 'VERIFIED'
+           AND causality_status = 'OK'
+           AND boundary_ambiguous = 0
+           AND forecast_window_attribution_status = 'FULLY_INSIDE_TARGET_LOCAL_DAY'
+           AND contributes_to_target_extrema = 1
+           AND COALESCE(source_cycle_time, issue_time) <= ?
+           AND COALESCE(source_cycle_time, issue_time) >= ?
+           AND COALESCE(source_available_at, available_at) <= ?
+         ORDER BY COALESCE(source_cycle_time, issue_time) DESC,
+                  COALESCE(source_available_at, available_at) DESC,
+                  snapshot_id DESC
+         LIMIT 1
+    """
+    row = conn.execute(
+        query.format(city_predicate="city = ?", select_sql=select_sql), params
+    ).fetchone()
+    if row is None and allow_casefold_fallback:
+        # Exact city preserves the live composite-index seek. The compatibility
+        # fallback is still bounded to one row and runs only after an exact miss.
+        row = conn.execute(
+            query.format(
+                city_predicate="lower(city) = lower(?)", select_sql=select_sql
+            ),
+            params,
+        ).fetchone()
+    return row
+
+
+def read_current_evidence_snapshot_identity(
+    conn: sqlite3.Connection,
+    request: ReplacementForecastMaterializeRequest,
+    *,
+    metric: str,
+) -> CurrentEvidenceSnapshotIdentity | None:
+    """Select the one causal target ENS row used by current-evidence q."""
+
+    row = _current_evidence_snapshot_row(
+        conn,
+        request,
+        metric=metric,
+        select_sql="""snapshot_id, city, members_json,
+                      COALESCE(source_cycle_time, issue_time),
+                      COALESCE(source_available_at, available_at), members_unit""",
+    )
+    if row is None:
+        return None
+    return CurrentEvidenceSnapshotIdentity(
+        snapshot_id=int(row[0]),
+        city=str(row[1]),
+        members_json=str(row[2]),
+        source_cycle_time=str(row[3]),
+        source_available_at=str(row[4]),
+        members_unit=str(row[5]),
+    )
+
+
+def read_current_evidence_snapshot_id(
+    conn: sqlite3.Connection,
+    request: ReplacementForecastMaterializeRequest,
+    *,
+    metric: str,
+) -> int | None:
+    """Return the production-equivalent bounded frontier identity."""
+
+    row = _current_evidence_snapshot_row(
+        conn,
+        request,
+        metric=metric,
+        select_sql="snapshot_id",
+    )
+    return None if row is None else int(row[0])
 
 
 def _read_current_evidence_shape(
@@ -2372,70 +2715,20 @@ def _read_current_evidence_shape(
 ) -> _CurrentEvidenceShape | None:
     """Read the latest causal target-specific ECMWF ENS available at decision time.
 
-    ``provider_cycles`` (optional, fail-open): model -> served cycle ISO stamp,
-    threaded into the between-term freshest-coherent-cohort filter of
-    ``_current_evidence_shape_from_values``. Omitting it is byte-identical to today.
+    ``provider_cycles``: model -> served cycle ISO stamp, threaded into the
+    between-term freshest-coherent-cohort filter of
+    ``_current_evidence_shape_from_values``. Missing or incomplete provenance
+    blocks this current-evidence shape.
     """
 
     try:
-        decision_at = _to_utc(request.computed_at, field_name="computed_at").isoformat()
-        carrier_cycle_dt = _to_utc(
+        carrier_cycle = _to_utc(
             request.source_cycle_time, field_name="source_cycle_time"
-        )
-        carrier_cycle = carrier_cycle_dt.isoformat()
-        # Same one-clock staleness law that governs posterior readiness
-        # (replacement_source_cycle_max_age_hours) also bounds how old the ENS carrier row
-        # may be to still call itself "current evidence" — an unbounded walk-back silently
-        # launders a stale ENS cycle into decision-time current evidence.
-        min_evidence_cycle = (
-            carrier_cycle_dt
-            - timedelta(hours=replacement_source_cycle_max_age_hours())
         ).isoformat()
-        params = (
-            request.city,
-            _date_text(request.target_date),
-            metric,
-            carrier_cycle,
-            min_evidence_cycle,
-            decision_at,
+        snapshot = read_current_evidence_snapshot_identity(
+            conn, request, metric=metric
         )
-        query = """
-            SELECT snapshot_id, members_json,
-                   COALESCE(source_cycle_time, issue_time) AS evidence_cycle,
-                   COALESCE(source_available_at, available_at) AS evidence_available_at,
-                   members_unit
-            FROM ensemble_snapshots
-            WHERE {city_predicate}
-              AND target_date = ?
-              AND temperature_metric = ?
-              AND source_id = 'ecmwf_open_data'
-              AND model_version = 'ecmwf_ens'
-              AND authority = 'VERIFIED'
-              AND causality_status = 'OK'
-              AND boundary_ambiguous = 0
-              AND forecast_window_attribution_status = 'FULLY_INSIDE_TARGET_LOCAL_DAY'
-              AND contributes_to_target_extrema = 1
-              AND COALESCE(source_cycle_time, issue_time) <= ?
-              AND COALESCE(source_cycle_time, issue_time) >= ?
-              AND COALESCE(source_available_at, available_at) <= ?
-            ORDER BY COALESCE(source_cycle_time, issue_time) DESC,
-                     COALESCE(source_available_at, available_at) DESC,
-                     snapshot_id DESC
-            LIMIT 1
-            """
-        row = conn.execute(
-            query.format(city_predicate="city = ?"),
-            params,
-        ).fetchone()
-        if row is None:
-            # ``lower(city)`` disables the live composite city index on the
-            # multi-million-row snapshot table. Canonical identity uses the exact
-            # seek; retain case-insensitive compatibility only after a miss.
-            row = conn.execute(
-                query.format(city_predicate="lower(city) = lower(?)"),
-                params,
-            ).fetchone()
-        if row is None:
+        if snapshot is None:
             return None
         # Boundary-quarantined members are persisted as null (leakage law: their boundary
         # value must never enter extrema) even on snapshots where the majority rule already
@@ -2444,9 +2737,11 @@ def _read_current_evidence_shape(
         # _current_evidence_shape_from_values is the correct fail-closed gate on the
         # resulting (possibly reduced) member count, not a blanket exception swallow.
         values = tuple(
-            float(value) for value in json.loads(row[1]) if value is not None
+            float(value)
+            for value in json.loads(snapshot.members_json)
+            if value is not None
         )
-        members_unit = str(row[4] or "").strip().lower()
+        members_unit = str(snapshot.members_unit or "").strip().lower()
         if members_unit in {"degf", "f", "°f"}:
             values = tuple((value - 32.0) * 5.0 / 9.0 for value in values)
         elif members_unit not in {"degc", "c", "°c"}:
@@ -2461,9 +2756,9 @@ def _read_current_evidence_shape(
         except Exception:
             shape_age_gamma = 0.0
         return _current_evidence_shape_from_values(
-            snapshot_id=int(row[0]),
-            source_cycle_time=str(row[2]),
-            source_available_at=str(row[3]),
+            snapshot_id=snapshot.snapshot_id,
+            source_cycle_time=snapshot.source_cycle_time,
+            source_available_at=snapshot.source_available_at,
             members_c=values,
             provider_values_c=provider_values_c,
             provider_weights=provider_weights,
@@ -2626,6 +2921,40 @@ def _bayes_precision_fusion_lead_bucket(lead_days: int) -> str:
     return "L4P"
 
 
+def _freshest_declared_provider_representatives(
+    served: Mapping[str, object],
+) -> dict[str, object]:
+    """Remove stale same-provider alternatives before the specificity selector runs.
+
+    A regional nest is preferable only within the same provider cycle.  If its latest
+    possessed run is older than a global member from that provider, selecting it first
+    can discard the fresh member and leave the current-evidence cohort impossible.
+    Keep every newest-cycle tie so ``select_models`` still applies the declared
+    highest-resolution-first rule within one issuance.
+    """
+    from src.forecast.model_selection import PROVIDER_FAMILIES  # noqa: PLC0415
+
+    out = dict(served)
+    for family in PROVIDER_FAMILIES:
+        present = [model for model in family if model in out]
+        cycles: dict[str, datetime] = {}
+        for model in present:
+            raw_cycle = getattr(out[model], "served_cycle", None)
+            try:
+                cycles[model] = _to_utc(
+                    str(raw_cycle), field_name=f"served_cycle[{model}]"
+                )
+            except (TypeError, ValueError, OverflowError):
+                continue
+        if len(cycles) < 2:
+            continue
+        newest = max(cycles.values())
+        for model, cycle in cycles.items():
+            if cycle < newest:
+                out.pop(model, None)
+    return out
+
+
 def _replacement_bayes_precision_fusion_override(
     request: "ReplacementForecastMaterializeRequest",
     *,
@@ -2695,6 +3024,7 @@ def _replacement_bayes_precision_fusion_override(
         # previous_runs substitution is recorded, never silent); persisted_current is its
         # (value, rid) view for the fetch seam below.
         from src.data.replacement_current_value_serving import (  # noqa: PLC0415
+            read_freshest_coherent_instrument_values,
             read_current_instrument_values,
         )
 
@@ -2710,6 +3040,9 @@ def _replacement_bayes_precision_fusion_override(
                 # weights them at initial precision (raw_second_moment_weights) and the frozen-scheme
                 # skip (_station_live_omitted below) serves that live fusion center.
                 include_station_sources=True,
+            )
+            served_current = _freshest_declared_provider_representatives(
+                served_current
             )
             persisted_current = {
                 m: (s.value_c, s.raw_model_forecast_id) for m, s in served_current.items()
@@ -2738,10 +3071,11 @@ def _replacement_bayes_precision_fusion_override(
 
         # ARRIVAL GUARD inputs (C1-AVAIL-CLOCK, 2026-06-16): the honest per-model availability is
         # PROOF OF POSSESSION = the served row's captured_at, routed through the canonical producer
-        # (no nominal — captured_at is the real possession wall-clock). Models with no served row are
-        # absent from the map -> the capture's guard fail-OPENs (admits) them. decision_utc is the
-        # materialization decision instant (computed_at). Expected to exclude ~0 in
-        # production (extras' captured_at lands hours after the cycle, before any decision).
+        # (no nominal — captured_at is the real possession wall-clock). Models with no served row
+        # have no candidate value and are dropped before the guard. A finite served candidate with
+        # missing or malformed availability remains fail-closed. decision_utc is the materialization
+        # decision instant (computed_at). Expected to exclude ~0 in production (extras' captured_at
+        # lands hours after the cycle, before any decision).
         model_available_at: dict[str, str] = {}
         for _m, _served in served_current.items():
             _captured = getattr(_served, "captured_at", None)
@@ -2749,7 +3083,7 @@ def _replacement_bayes_precision_fusion_override(
                 try:
                     model_available_at[_m] = proof_of_possession_available_at(_captured)
                 except Exception:
-                    # Unparseable capture stamp -> omit (fail-OPEN: the guard admits the model).
+                    # Unparseable capture stamp -> omit; a finite candidate then fails closed.
                     pass
 
         consumed_ids: list[int] = []
@@ -2777,15 +3111,6 @@ def _replacement_bayes_precision_fusion_override(
             decision_utc=computed_at,
             model_available_at=model_available_at,
         )
-        if not capture.has_history:
-            import logging  # noqa: PLC0415
-
-            logging.getLogger("zeus.replacement_bayes_precision_fusion").warning(
-                "replacement_0_1 BAYES_PRECISION_FUSION history MISSING for %s %s %s -> "
-                "live posterior blocked (no alternate authority)",
-                request.city, metric, target_date,
-            )
-            return None
         if not capture.has_extras:
             # K3 ANTIBODY (2026-06-09): all multi-model extras absent. This is a wiring failure
             # (for example, a lead-calendar mismatch), not permission to revive the old anchor path.
@@ -3057,10 +3382,37 @@ def _replacement_bayes_precision_fusion_override(
                     values_c_by_source=_source_values,
                 )
             )
+            _scheme_coherent_current = (
+                {}
+                if _scheme is None or conn is None
+                else read_freshest_coherent_instrument_values(
+                    conn,
+                    city=request.city,
+                    metric=metric,
+                    target_date=target_date,
+                    decision_time_iso=computed_at.isoformat(),
+                    models=tuple(str(model) for model in _scheme.weights),
+                    cohort_window_hours=BETWEEN_COHORT_WINDOW_HOURS,
+                )
+            )
+            _scheme_current_provider_cohort_count = (
+                0
+                if _scheme is None
+                else _current_provider_family_count(
+                    configured_weights=_scheme.weights,
+                    values_c_by_source={
+                        str(model): float(value.value_c)
+                        for model, value in _scheme_coherent_current.items()
+                    },
+                )
+            )
             _scheme_current_pair_missing = (
                 _scheme is not None
                 and not _station_live_omitted
-                and _scheme_current_provider_count < 2
+                and (
+                    _scheme_current_provider_count < 2
+                    or _scheme_current_provider_cohort_count < 2
+                )
             )
             if (
                 _scheme is not None
@@ -3168,29 +3520,37 @@ def _replacement_bayes_precision_fusion_override(
                         "sample_n": int(_scheme.sample_n),
                         "center_sigma_c": _source_clock_center_sigma_c,
                         "predictive_sigma_c": _source_clock_predictive_sigma_c,
+                        "between_cohort_value_serving": {
+                            str(model): value.as_provenance()
+                            for model, value in _scheme_coherent_current.items()
+                            if model in _source_clock_used_models
+                        },
                     }
+                    for _model, _served in _scheme_coherent_current.items():
+                        if _model in _source_clock_used_models:
+                            _source_clock_dep_ids.add(
+                                int(_served.raw_model_forecast_id)
+                            )
                     _source_clock_current_shape = _read_current_evidence_shape(
                         conn,
                         request,
                         metric=metric,
                         provider_values_c={
-                            model: float(_source_values[model])
+                            model: float(_scheme_coherent_current[model].value_c)
                             for model in _source_clock_used_models
-                            if model in _source_values
+                            if model in _scheme_coherent_current
                         },
                         provider_weights={
                             str(model): float(weight)
                             for model, weight in _weights.items()
                             if model in _source_clock_used_models
+                            and model in _scheme_coherent_current
                         },
                         center_c=float(_mu_diagonal),
-                        # Freshest-coherent-cohort between (consult v2 (b)): served
-                        # cycle stamps for the cohort filter. A model without a served
-                        # row (e.g. the anchor) is simply absent — fail-open included.
                         provider_cycles={
-                            str(_m): str(served_current[_m].served_cycle)  # type: ignore[union-attr]
+                            str(_m): str(_scheme_coherent_current[_m].served_cycle)
                             for _m in _source_clock_used_models
-                            if _m in served_current
+                            if _m in _scheme_coherent_current
                         },
                     )
                     # The live source-clock route has one shape authority: current
@@ -3224,10 +3584,11 @@ def _replacement_bayes_precision_fusion_override(
                     )
             else:
                 # A station-augmented center, a city without a frozen scheme, or a frozen
-                # basket with fewer than two CURRENT provider families uses the existing
-                # current precision-fusion center. The last case is horizon-safe: regional
-                # sources selected on short-lead history (ICON-EU/D2) cannot cover every
-                # later target, while already-captured global sources remain current facts.
+                # basket without two simultaneous CURRENT provider families uses the
+                # existing current precision-fusion center. The last case is horizon- and
+                # cycle-safe: regional sources selected on short-lead history (ICON-EU/D2)
+                # may be absent later, while asynchronously issued configured sources can
+                # coexist with already-captured, coherent global current facts.
                 # This preserves the two-provider shape gate and never substitutes a
                 # historical width or treats missing between-spread as zero.
                 if _scheme_current_pair_missing:
@@ -3246,10 +3607,17 @@ def _replacement_bayes_precision_fusion_override(
                         "one_scheme_status": _scheme.one_scheme_status,
                         "walkforward_pass": bool(_scheme.walkforward_pass),
                         "sample_n": int(_scheme.sample_n),
-                        "fallback_reason": "configured_current_provider_pair_unavailable",
+                        "fallback_reason": (
+                            "configured_current_provider_pair_unavailable"
+                            if _scheme_current_provider_count < 2
+                            else "configured_current_provider_cohort_unavailable"
+                        ),
                         "fallback_to": "current_precision_fusion",
                         "configured_current_provider_family_count": (
                             _scheme_current_provider_count
+                        ),
+                        "configured_current_provider_cohort_family_count": (
+                            _scheme_current_provider_cohort_count
                         ),
                     }
                     try:
@@ -3258,39 +3626,56 @@ def _replacement_bayes_precision_fusion_override(
                         logging.getLogger(
                             "zeus.replacement_bayes_precision_fusion"
                         ).warning(
-                            "source-clock one-scheme current provider pair unavailable for "
-                            "%s %s %s: present_families=%d configured=%s missing=%s; "
+                            "source-clock one-scheme current provider pair/cohort unavailable for "
+                            "%s %s %s: present_families=%d cohort_families=%d "
+                            "configured=%s missing=%s; "
                             "using current precision fusion",
                             request.city,
                             metric,
                             target_date,
                             _scheme_current_provider_count,
+                            _scheme_current_provider_cohort_count,
                             list(_scheme.final_sources),
                             _missing_scheme_sources,
                         )
                     except Exception:
                         pass
                 _source_clock_used_models = tuple(str(model) for model in _weights)
+                _fallback_coherent_current = (
+                    {}
+                    if conn is None
+                    else read_freshest_coherent_instrument_values(
+                        conn,
+                        city=request.city,
+                        metric=metric,
+                        target_date=target_date,
+                        decision_time_iso=computed_at.isoformat(),
+                        models=_source_clock_used_models,
+                        cohort_window_hours=BETWEEN_COHORT_WINDOW_HOURS,
+                        include_station_sources=True,
+                    )
+                )
+                for _served in _fallback_coherent_current.values():
+                    _source_clock_dep_ids.add(int(_served.raw_model_forecast_id))
                 _source_clock_current_shape = _read_current_evidence_shape(
                     conn,
                     request,
                     metric=metric,
                     provider_values_c={
-                        str(model): float(_z_by_model[model])
+                        str(model): float(_fallback_coherent_current[model].value_c)
                         for model in _weights
-                        if model in _z_by_model
+                        if model in _fallback_coherent_current
                     },
                     provider_weights={
                         str(model): float(weight)
                         for model, weight in _weights.items()
+                        if model in _fallback_coherent_current
                     },
                     center_c=float(_mu_diagonal),
-                    # Freshest-coherent-cohort between (consult v2 (b)); same fail-open
-                    # threading as the one-scheme branch above.
                     provider_cycles={
-                        str(_m): str(served_current[_m].served_cycle)  # type: ignore[union-attr]
+                        str(_m): str(_fallback_coherent_current[_m].served_cycle)
                         for _m in _source_clock_used_models
-                        if _m in served_current
+                        if _m in _fallback_coherent_current
                     },
                 )
                 if _source_clock_current_shape is not None:
@@ -3303,6 +3688,10 @@ def _replacement_bayes_precision_fusion_override(
                 if _source_clock_payload is not None:
                     _source_clock_payload.update(
                         {
+                            "between_cohort_value_serving": {
+                                str(model): value.as_provenance()
+                                for model, value in _fallback_coherent_current.items()
+                            },
                             "center_sigma_c": _source_clock_center_sigma_c,
                             "predictive_sigma_c": _source_clock_predictive_sigma_c,
                             "probability_shape_basis": (
@@ -5979,6 +6368,7 @@ def _write_posterior_row(
             """
             SELECT posterior_id FROM forecast_posteriors
             WHERE posterior_identity_hash = ?
+            LIMIT 1
             """,
             (posterior_identity_hash,),
         ).fetchone()
@@ -5989,6 +6379,7 @@ def _write_posterior_row(
         """
         SELECT posterior_id FROM forecast_posteriors
         WHERE posterior_identity_hash = ?
+        LIMIT 1
         """,
         (posterior_identity_hash,),
     ).fetchone()
@@ -6284,11 +6675,26 @@ def prepare_replacement_forecast_live(
     if isinstance(validated, ReplacementForecastMaterializeResult):
         return validated
     request, metric = validated
+    try:
+        day0_ledger_frontier_identity = _day0_ledger_frontier_identity(
+            conn, request, metric=metric
+        )
+    except sqlite3.DatabaseError:
+        return ReplacementForecastMaterializeResult(
+            status="BLOCKED",
+            reason_codes=(
+                "REPLACEMENT_MATERIALIZATION_DAY0_FRONTIER_LEDGER_READ_FAILED",
+            ),
+            posterior_id=None,
+            anchor_id=None,
+            readiness_id=None,
+        )
     posterior = _compute_posterior_payload(conn, request, metric=metric, anchor_id=-1)
     return PreparedReplacementForecastMaterialization(
         request=request,
         metric=metric,
         posterior=posterior,
+        day0_ledger_frontier_identity=day0_ledger_frontier_identity,
     )
 
 
@@ -6336,20 +6742,6 @@ def _day0_enqueue_owner_witness_is_current(
     ):
         return False
     try:
-        columns = {
-            str(row[1])
-            for row in conn.execute("PRAGMA table_info(cycle_advance_enqueues)").fetchall()
-        }
-        required = {
-            "city",
-            "target_date",
-            "metric",
-            "target_cycle_time",
-            "seed_file",
-            "day0_conditioning_identity_json",
-        }
-        if not required.issubset(columns):
-            return False
         row = conn.execute(
             """
             SELECT seed_file, day0_conditioning_identity_json
@@ -6383,21 +6775,32 @@ def write_prepared_replacement_forecast_live(
 ) -> ReplacementForecastMaterializeResult:
     """Persist a prepared family after the caller revalidates its DB snapshot."""
 
-    validated = _validated_replacement_forecast_request(conn, prepared.request)
-    if isinstance(validated, ReplacementForecastMaterializeResult):
-        return validated
-    request, metric = validated
+    # The caller has already run the complete read-only validation and the
+    # script has revalidated the bounded dependency witness under its final
+    # transaction. Re-running validation here would widen the writer lock into
+    # a second materialization computation and could observe a different q.
+    request = prepared.request
+    metric = prepared.metric
+    try:
+        current_day0_frontier_identity = _day0_ledger_frontier_identity(
+            conn, request, metric=metric
+        )
+    except sqlite3.DatabaseError as exc:
+        raise PreparedReplacementForecastSnapshotStale(
+            "replacement forecast Day0 frontier unavailable"
+        ) from exc
+    if (
+        current_day0_frontier_identity
+        != prepared.day0_ledger_frontier_identity
+    ):
+        raise PreparedReplacementForecastSnapshotStale(
+            "replacement forecast Day0 frontier changed"
+        )
     anchor_id = prepared.anchor_id
     posterior = prepared.posterior
     if request != prepared.request:
-        # The writer lock may observe a newly persisted causal Day0 frontier
-        # after the read snapshot was computed. Rebuild the pure payload against
-        # that frontier before it can be committed.
-        posterior = _compute_posterior_payload(
-            conn,
-            request,
-            metric=metric,
-            anchor_id=anchor_id if anchor_id is not None else -1,
+        raise PreparedReplacementForecastSnapshotStale(
+            "replacement forecast write snapshot changed"
         )
     if anchor_id is None:
         anchor_id = _insert_anchor(conn, request, metric=metric)
@@ -6491,6 +6894,9 @@ def materialize_replacement_forecast_live(
     if isinstance(validated, ReplacementForecastMaterializeResult):
         return validated
     request, metric = validated
+    day0_ledger_frontier_identity = _day0_ledger_frontier_identity(
+        conn, request, metric=metric
+    )
     anchor_id = _insert_anchor(conn, request, metric=metric)
     posterior = _compute_posterior_payload(
         conn,
@@ -6504,6 +6910,7 @@ def materialize_replacement_forecast_live(
             request=request,
             metric=metric,
             posterior=posterior,
+            day0_ledger_frontier_identity=day0_ledger_frontier_identity,
             anchor_id=anchor_id,
         ),
     )

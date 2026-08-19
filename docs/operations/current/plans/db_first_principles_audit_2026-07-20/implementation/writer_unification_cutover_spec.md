@@ -5,7 +5,7 @@ schemes + the ~336 no-intent-lock direct-connection writers onto one gate per ph
 the 24/7 live-money fleet. This version reconciles TWO independent adversarial reviews of the
 initial union-bridge design (`writer_unification_context.md`, scratchpad):
 - **opus `cutover-critic`** (local) — found the two deadlocks; judged the bridge GO after fixes.
-- **GPT-5.6 Pro consult** `REQ-20260721-204133` — full verdict in
+- **GPT-5.6 Pro consult** `external consult, 2026-07-21` — full verdict in
   `consult_writer_unification_verdict.md` (492 lines). Confirmed every tactical finding AND
   **dominated the strategy: it rejects the union bridge as unsound and replaces it** with a
   fleetwide dark compatibility deployment + a bounded per-physical-DB quiescent-epoch handoff.

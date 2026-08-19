@@ -1,5 +1,5 @@
 # Created: 2026-07-19
-# Last reused/audited: 2026-07-28
+# Last reused/audited: 2026-07-30
 # Authority basis: operator directive 2026-07-19 (Day0 is a zero-sum race against the market
 #   book) + docs/evidence/upstream_physical_2026_07_17/day0_latency_chain_measurement.md (the
 #   measured bottleneck is the ~40-min SCHEDULED posterior recompute cadence, HOP 2b p50 39.9 min
@@ -27,7 +27,9 @@ from __future__ import annotations
 
 import json
 import importlib
+import multiprocessing
 import sqlite3
+import subprocess
 import threading
 import time
 from datetime import datetime, timezone
@@ -109,6 +111,7 @@ def test_canonical_manifest_read_excludes_future_available_artifact() -> None:
         computed_at=datetime(2026, 7, 19, 6, 59, 59, 900000, tzinfo=UTC),
     )
     assert len(available) == 1
+    assert available[0].product_metadata["artifact_id"] == 1
     conn.close()
 
 
@@ -116,9 +119,13 @@ def _queue_config(tmp_path: Path) -> dict[str, object]:
     return {
         "forecast_db": tmp_path / "forecasts.db",
         "seed_dir": tmp_path / "seeds",
+        "seed_processed_dir": tmp_path / "seed_processed",
+        "seed_failed_dir": tmp_path / "seed_failed",
         "raw_manifest_dir": tmp_path / "raw",
         "request_dir": tmp_path / "requests",
         "inflight_dir": tmp_path / "inflight",
+        "processed_dir": tmp_path / "processed",
+        "failed_dir": tmp_path / "failed",
     }
 
 
@@ -198,6 +205,101 @@ def _prepare_forecast_db(tmp_path: Path) -> Path:
     conn.commit()
     conn.close()
     return db_path
+
+
+def _multiprocess_day0_ingest_owner(
+    cfg: dict[str, object],
+    reports,
+    release,
+    materializer_called,
+) -> None:
+    """Publish one exact Day0 seed from a process with no materialization authority."""
+
+    forecast_production._replacement_forecast_live_materialization_queue_config = (
+        lambda: cfg
+    )
+    seed_discovery._day0_observed_extreme_seed_payload = (
+        lambda **_kwargs: _day0_payload("2026-07-19T05:00:00+00:00")
+    )
+    cycle = datetime(2026, 7, 19, 0, tzinfo=UTC)
+    cycle_advance.family_materializable_cycle = (
+        lambda *args, **kwargs: (cycle, ())
+    )
+
+    def _write_seed(_conn_arg, **kwargs):
+        path = Path(kwargs["output_path"])
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(
+                {
+                    "day0_observed_extreme_observation_time": kwargs.get(
+                        "day0_observed_extreme_observation_time"
+                    ),
+                }
+            ),
+            encoding="utf-8",
+        )
+        return path
+
+    cycle_advance._build_and_write_advance_seed = _write_seed
+    materialization_queue._run_materialization_item = (
+        lambda _item: materializer_called.set()
+        or subprocess.CompletedProcess([], 0, stdout="", stderr="")
+    )
+    reports.put(
+        cycle_advance._materialize_day0_extreme_updated_seed(
+            city="Shanghai",
+            target_date="2026-07-19",
+            metric="high",
+            computed_at=datetime(2026, 7, 19, 5, 1, tzinfo=UTC),
+            held_position=False,
+        )
+    )
+    release.wait(5.0)
+
+
+def _multiprocess_forecast_materialization_owner(
+    seed_file: str,
+    dummy_files: tuple[str, ...],
+    running,
+    peak_running,
+    four_started,
+    exact_retry_started,
+    release,
+) -> None:
+    """Drain only inside the forecast-live owner under its existing four-worker cap."""
+
+    exact_path = Path(seed_file)
+
+    def _run_owned_item(item):
+        with running.get_lock():
+            running.value += 1
+            peak_running.value = max(peak_running.value, running.value)
+            if running.value == materialization_queue.DEFAULT_MATERIALIZATION_MAX_WORKERS:
+                four_started.set()
+        try:
+            if item.input_json == exact_path:
+                exact_retry_started.set()
+                item.input_json.unlink()
+            else:
+                assert release.wait(5.0)
+            return subprocess.CompletedProcess([], 0, stdout="", stderr="")
+        finally:
+            with running.get_lock():
+                running.value -= 1
+
+    materialization_queue._run_materialization_item = _run_owned_item
+    pending = [
+        materialization_queue._PendingMaterialization(
+            input_json=Path(path),
+            command=(),
+            request_payload=None,
+            marker_path=None,
+            attempt_fingerprint=None,
+        )
+        for path in (*dummy_files, seed_file)
+    ]
+    materialization_queue._run_materialization_batch(pending)
 
 
 def _fetch_enqueue_row(db_path: Path) -> sqlite3.Row:
@@ -323,6 +425,7 @@ def _insert_materialized_day0_posterior(
         (
             json.dumps(
                 {
+                    "openmeteo_anchor_artifact_id": 1,
                     "day0_conditioning": {
                         "source": payload["day0_observed_extreme_source"],
                         "observation_time": payload[
@@ -389,6 +492,75 @@ def test_day0_extreme_bridge_enqueues_exactly_one_seed_and_dedups_same_observati
 
     row_after = _fetch_enqueue_row(cfg["forecast_db"])
     assert row_after["seed_file"] == first_seed_file
+
+
+def test_day0_ingest_process_only_publishes_seed_for_bounded_forecast_owner(
+    tmp_path,
+) -> None:
+    """Two live owners still expose only forecast-live's four materialization workers."""
+    _prepare_forecast_db(tmp_path)
+    cfg = _queue_config(tmp_path)
+    ctx = multiprocessing.get_context("spawn")
+    ingest_release = ctx.Event()
+    owner_release = ctx.Event()
+    four_started = ctx.Event()
+    exact_retry_started = ctx.Event()
+    ingest_materializer_called = ctx.Event()
+    reports = ctx.Queue()
+    running = ctx.Value("i", 0)
+    peak_running = ctx.Value("i", 0)
+
+    ingest_owner = ctx.Process(
+        target=_multiprocess_day0_ingest_owner,
+        args=(cfg, reports, ingest_release, ingest_materializer_called),
+        name="day0-ingest-owner",
+    )
+    ingest_owner.start()
+    report = reports.get(timeout=5.0)
+    seed_file = Path(report["seed_file"])
+    assert report["enqueued"] is True
+    assert seed_file.is_file()
+    assert not ingest_materializer_called.is_set()
+    assert not hasattr(
+        materialization_queue,
+        "enqueue_day0_exact_seed_fast_drain",
+    )
+
+    dummy_files = tuple(
+        str(tmp_path / f"normal-{index}.json")
+        for index in range(materialization_queue.DEFAULT_MATERIALIZATION_MAX_WORKERS)
+    )
+    forecast_owner = ctx.Process(
+        target=_multiprocess_forecast_materialization_owner,
+        args=(
+            str(seed_file),
+            dummy_files,
+            running,
+            peak_running,
+            four_started,
+            exact_retry_started,
+            owner_release,
+        ),
+        name="forecast-live-materialization-owner",
+    )
+    forecast_owner.start()
+    assert four_started.wait(5.0)
+    assert ingest_owner.is_alive()
+    assert forecast_owner.is_alive()
+    assert peak_running.value <= materialization_queue.DEFAULT_MATERIALIZATION_MAX_WORKERS
+    assert not exact_retry_started.is_set()
+    assert seed_file.is_file(), "saturated owner must leave the exact seed retryable"
+
+    owner_release.set()
+    assert exact_retry_started.wait(5.0)
+    forecast_owner.join(5.0)
+    assert forecast_owner.exitcode == 0
+    assert not seed_file.exists()
+    assert peak_running.value <= materialization_queue.DEFAULT_MATERIALIZATION_MAX_WORKERS
+
+    ingest_release.set()
+    ingest_owner.join(5.0)
+    assert ingest_owner.exitcode == 0
 
 
 def test_day0_extreme_bridge_advances_on_strictly_newer_observation_time(
@@ -1154,6 +1326,7 @@ def test_queue_quarantines_preexisting_stale_day0_upgrade_seed(tmp_path, monkeyp
                 "precision_metadata_json": "precision.json",
                 "bins": [{"bin_id": "warm"}],
                 "upgrade_trigger": "day0_observation_advanced",
+                "cycle_advance_enqueue_owner": True,
                 "day0_observed_extreme_source": "late_alternate_source",
                 "day0_observed_extreme_observation_time": "2026-07-19T05:00:00.132000+00:00",
                 "day0_observed_extreme_c": 20.5,
@@ -1188,6 +1361,96 @@ def test_queue_quarantines_preexisting_stale_day0_upgrade_seed(tmp_path, monkeyp
     )
 
 
+def test_current_day0_owner_uses_latest_enqueue_not_consumed_source_cycle(
+    tmp_path,
+) -> None:
+    """A newer target-cycle marker may intentionally reuse the consumed source cycle."""
+    db_path = _prepare_forecast_db(tmp_path)
+    old_seed = tmp_path / "old.json"
+    new_seed = tmp_path / "new.json"
+    old_seed.write_text("{}", encoding="utf-8")
+    new_seed.write_text("{}", encoding="utf-8")
+    consumed_cycle = "2026-07-19T00:00:00+00:00"
+    new_identity = {
+        "day0_observed_extreme_source": "wu_icao_history",
+        "day0_observed_extreme_observation_time": "2026-07-19T05:05:00+00:00",
+        "day0_observed_extreme_c": 21.0,
+        "day0_observed_extreme_unit": "C",
+    }
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    assert cycle_advance._record_enqueue(
+        conn,
+        city="Shanghai",
+        target_date="2026-07-19",
+        metric="high",
+        consumed_cycle_iso=consumed_cycle,
+        target_cycle_iso=consumed_cycle,
+        held_position=True,
+        seed_file=str(old_seed),
+        day0_observed_extreme_source="aviationweather_metar",
+        day0_observed_extreme_observation_time="2026-07-19T05:00:00+00:00",
+        day0_observed_extreme_c=20.0,
+        day0_observed_extreme_unit="C",
+    ) is True
+    assert cycle_advance._record_enqueue(
+        conn,
+        city="Shanghai",
+        target_date="2026-07-19",
+        metric="high",
+        consumed_cycle_iso=consumed_cycle,
+        target_cycle_iso="2026-07-19T12:00:00+00:00",
+        held_position=True,
+        seed_file=str(new_seed),
+        reason="DAY0_OBSERVATION_ADVANCED",
+        **new_identity,
+    ) is True
+    conn.commit()
+    conn.close()
+
+    ownership = materialization_queue._upgrade_day0_seed_has_current_enqueue_ownership(
+        forecast_db=db_path,
+        seed_file=new_seed,
+        seed={
+            "city": "Shanghai",
+            "target_date": "2026-07-19",
+            "temperature_metric": "high",
+            "source_cycle_time": consumed_cycle,
+            "upgrade_trigger": "day0_observation_advanced",
+            "cycle_advance_enqueue_owner": True,
+            **new_identity,
+        },
+    )
+
+    assert ownership.ownership is materialization_queue._Day0EnqueueOwnership.CURRENT
+    assert ownership.witness is not None
+    assert ownership.witness["target_cycle_time"] == "2026-07-19T12:00:00+00:00"
+
+
+def test_day0_fusion_revision_uses_its_own_owner_not_cycle_advance_marker(
+    tmp_path,
+) -> None:
+    """Conditioned fusion seeds must not be rejected by another lane's fence."""
+    ownership = materialization_queue._upgrade_day0_seed_has_current_enqueue_ownership(
+        forecast_db=tmp_path / "missing.db",
+        seed_file=tmp_path / "fusion.json",
+        seed={
+            "city": "Los Angeles",
+            "target_date": "2026-08-18",
+            "temperature_metric": "high",
+            "source_cycle_time": "2026-08-18T18:00:00+00:00",
+            "upgrade_trigger": "instrument_set_expansion",
+            "day0_observed_extreme_source": "wu_icao_history",
+            "day0_observed_extreme_observation_time": "2026-08-19T00:53:00+00:00",
+            "day0_observed_extreme_c": 27.22222222222222,
+            "day0_observed_extreme_unit": "F",
+        },
+    )
+
+    assert ownership.ownership is materialization_queue._Day0EnqueueOwnership.CURRENT
+    assert ownership.witness is None
+
+
 def test_queue_defers_current_day0_upgrade_seed_when_marker_read_is_transient(
     tmp_path, monkeypatch
 ) -> None:
@@ -1217,6 +1480,7 @@ def test_queue_defers_current_day0_upgrade_seed_when_marker_read_is_transient(
                 "precision_metadata_json": "precision.json",
                 "bins": [{"bin_id": "warm"}],
                 "upgrade_trigger": "day0_observation_advanced",
+                "cycle_advance_enqueue_owner": True,
                 **identity,
             }
         ),
@@ -1354,6 +1618,7 @@ def test_queue_revalidates_day0_owner_immediately_before_request_publish(
                 "precision_metadata_json": "precision.json",
                 "bins": [{"bin_id": "warm"}],
                 "upgrade_trigger": "day0_observation_advanced",
+                "cycle_advance_enqueue_owner": True,
                 **owner_a,
             }
         ),
@@ -1454,6 +1719,7 @@ def test_queue_defers_legacy_null_day0_identity_without_stale_receipt(tmp_path, 
                 "precision_metadata_json": "precision.json",
                 "bins": [{"bin_id": "warm"}],
                 "upgrade_trigger": "day0_observation_advanced",
+                "cycle_advance_enqueue_owner": True,
                 **identity,
             }
         ),
@@ -1533,6 +1799,7 @@ def test_queue_scans_past_indeterminate_day0_prefix_without_starving_current_see
                     "precision_metadata_json": "precision.json",
                     "bins": [{"bin_id": "warm"}],
                     "upgrade_trigger": "day0_observation_advanced",
+                    "cycle_advance_enqueue_owner": True,
                     **identity,
                 }
             ),
@@ -1664,6 +1931,7 @@ def test_queue_rotates_bounded_indeterminate_inspections_across_reload(
                     "precision_metadata_json": "precision.json",
                     "bins": [{"bin_id": "warm"}],
                     "upgrade_trigger": "day0_observation_advanced",
+                    "cycle_advance_enqueue_owner": True,
                     **identity,
                 }
             ),
@@ -1969,6 +2237,7 @@ def test_day0_drained_marker_with_active_provisional_posterior_does_not_reenqueu
         (
             json.dumps(
                 {
+                    "openmeteo_anchor_artifact_id": 1,
                     "day0_provisional_observation": {
                         "active": True,
                         "source": identity["day0_observed_extreme_source"],
@@ -2229,6 +2498,29 @@ def test_cycle_poll_catches_up_every_new_day0_identity_on_one_model_cycle(
     )
     assert identity is not None
     assert cycle_advance._latest_posterior_matches_day0_conditioning(
+        conn,
+        city="Shanghai",
+        target_date="2026-07-19",
+        metric="high",
+        identity=identity,
+        target_cycle_iso=cycle.isoformat(),
+        as_of=datetime(2026, 7, 19, 5, 3, tzinfo=UTC),
+    )
+    latest = conn.execute(
+        "SELECT MAX(posterior_id) FROM forecast_posteriors"
+    ).fetchone()[0]
+    provenance = json.loads(
+        conn.execute(
+            "SELECT provenance_json FROM forecast_posteriors WHERE posterior_id = ?",
+            (latest,),
+        ).fetchone()[0]
+    )
+    provenance["openmeteo_anchor_artifact_id"] = None
+    conn.execute(
+        "UPDATE forecast_posteriors SET provenance_json = ? WHERE posterior_id = ?",
+        (json.dumps(provenance), latest),
+    )
+    assert not cycle_advance._latest_posterior_matches_day0_conditioning(
         conn,
         city="Shanghai",
         target_date="2026-07-19",

@@ -92,6 +92,16 @@ def _witness(conn: sqlite3.Connection):
     )
 
 
+def test_wealth_witness_reads_legacy_event_schema_without_payload_json():
+    conn = _wealth_conn()
+
+    assert "payload_json" not in {
+        row[1]
+        for row in conn.execute("PRAGMA table_info(venue_command_events)").fetchall()
+    }
+    assert _witness(conn).spendable_cash_usd == Decimal("25")
+
+
 def test_family_joint_never_spends_fixed_fraction_above_kelly_target():
     """Minimum marketability cannot override the shared fractional-Kelly target."""
     family = "family-joint-weak-edge"
@@ -160,6 +170,7 @@ def test_family_joint_never_spends_fixed_fraction_above_kelly_target():
         ledger_snapshot_id="ledger-current",
         executable_cost_curve=curve,
         resolution_identity=witness.resolution_identity,
+        neg_risk=False,
     )
     endowment = solve.FamilyPortfolioEndowment(
         family_key=family,
@@ -189,11 +200,10 @@ def test_family_joint_never_spends_fixed_fraction_above_kelly_target():
         fractional_kelly_multiplier=Decimal("0.03125"),
     )
 
-    assert full.primary_candidate_id == candidate_id
+    assert full.targets[0].candidate_id == candidate_id
     assert full.targets[0].shares > Decimal("55")
     assert full.targets[0].full_kelly_target_shares == full.targets[0].shares
     assert full.targets[0].full_kelly_target_shares * Decimal("0.03125") < Decimal("5")
-    assert fractional.primary_candidate_id is None
     assert fractional.targets == ()
     assert fractional.no_trade_reason == "FAMILY_JOINT_NO_POSITIVE_TARGET"
 

@@ -5,9 +5,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 import math
+import re
 from typing import Mapping
 
 from src.contracts.settlement_semantics import SettlementSemantics
+from src.decision_kernel.canonicalization import stable_hash
 
 
 class Day0AuthorityError(ValueError):
@@ -27,6 +29,14 @@ DAY0_LIVE_AUTHORITY_MATCHES = {
 
 DAY0_REMAINING_DAY_Q_SOURCE = "day0_remaining_day"
 DAY0_REMAINING_DAY_Q_MODE = "remaining_day"
+DAY0_REMAINING_DAY_GLOBAL_AUTHORITY = "day0_remaining_day_global_probability_v1"
+# Settlement learning must grade the probability mechanism that actually
+# authorized a fill.  Increment this when the Day0 probability construction
+# changes; the value is stamped into every live ENTRY q_version.
+DAY0_PROBABILITY_SEMANTICS_REVISION = (
+    "day0_conditional_remaining_path_error_no_marginal_peak_v3"
+)
+_DAY0_SEMANTIC_Q_VERSION_PREFIX = "day0-semrev:"
 DAY0_DETERMINISTIC_BIN_PAYOFF_Q_SOURCE = "day0_deterministic_bin_payoff"
 DAY0_DETERMINISTIC_BIN_PAYOFF_Q_MODE = "deterministic_bin_payoff"
 DAY0_DETERMINISTIC_BIN_PAYOFF_GLOBAL_AUTHORITY = (
@@ -66,6 +76,37 @@ DAY0_WU_FAST_RESIDUAL_SOURCE = "wu_api+same_station_fast_tail"
 DAY0_ABSORBING_FINALITIES = frozenset(
     {DAY0_MONOTONE_SETTLEMENT_BOUND, DAY0_FINAL_DAILY_SETTLEMENT}
 )
+
+
+def bind_day0_probability_semantics(q_version: object) -> str:
+    """Bind one Day0 q identity to the mechanism that produced it."""
+
+    identity = str(q_version or "").strip()
+    if not identity:
+        raise ValueError("DAY0_Q_VERSION_MISSING")
+    if identity.startswith(_DAY0_SEMANTIC_Q_VERSION_PREFIX):
+        if day0_probability_semantics_revision(identity) is None:
+            raise ValueError("DAY0_Q_VERSION_SEMANTICS_INVALID")
+        return identity
+    prefix = (
+        f"{_DAY0_SEMANTIC_Q_VERSION_PREFIX}"
+        f"{DAY0_PROBABILITY_SEMANTICS_REVISION}:"
+    )
+    return f"{prefix}{identity}"
+
+
+def day0_probability_semantics_revision(q_version: object) -> str | None:
+    """Read a stamped Day0 semantics revision; legacy hashes return None."""
+
+    identity = str(q_version or "").strip()
+    if not identity.startswith(_DAY0_SEMANTIC_Q_VERSION_PREFIX):
+        return None
+    revision, separator, base_identity = identity[
+        len(_DAY0_SEMANTIC_Q_VERSION_PREFIX) :
+    ].partition(":")
+    if not separator or not revision or not base_identity:
+        return None
+    return revision
 
 
 def day0_evidence_finality(payload: Mapping[str, object]) -> str:
@@ -156,6 +197,65 @@ def assert_live_day0_payload_authority(payload: Mapping[str, object]) -> None:
         raise Day0AuthorityError(",".join(errors))
 
 
+def day0_entry_provenance_errors(payload: Mapping[str, object]) -> tuple[str, ...]:
+    """Return missing or inconsistent immutable Day0 ENTRY provenance fields."""
+
+    raw_payload_sha256 = str(payload.get("raw_payload_sha256") or "").strip()
+    station_id = str(payload.get("station_id") or "").strip().upper()
+    configured_station_id = str(
+        payload.get("configured_station_id") or ""
+    ).strip().upper()
+    observation_time = str(payload.get("observation_time") or "").strip()
+    observation_available_at = str(
+        payload.get("observation_available_at") or ""
+    ).strip()
+    provenance_hash = str(
+        payload.get("day0_observation_provenance_hash") or ""
+    ).strip()
+    errors: list[str] = []
+    if not re.fullmatch(r"[0-9a-f]{64}", raw_payload_sha256):
+        errors.append("raw_payload_sha256")
+    if not station_id:
+        errors.append("station_id")
+    if not configured_station_id:
+        errors.append("configured_station_id")
+    elif not (station_id == configured_station_id or station_id.startswith(f"{configured_station_id}:")):
+        errors.append("configured_station_id_mismatch")
+    try:
+        observed_at = datetime.fromisoformat(observation_time.replace("Z", "+00:00"))
+        available_at = datetime.fromisoformat(
+            observation_available_at.replace("Z", "+00:00")
+        )
+        if observed_at.tzinfo is None or available_at.tzinfo is None or observed_at > available_at:
+            errors.append("observation_clocks")
+    except ValueError:
+        errors.append("observation_clocks")
+    expected_hash = stable_hash(
+        {
+            "city": payload.get("city"),
+            "target_date": payload.get("target_date"),
+            "metric": payload.get("metric") or payload.get("temperature_metric"),
+            "settlement_source": payload.get("settlement_source"),
+            "station_id": station_id,
+            "configured_station_id": configured_station_id,
+            "raw_payload_sha256": raw_payload_sha256,
+            "observation_time": observation_time,
+            "observation_available_at": observation_available_at,
+        }
+    )
+    if provenance_hash != expected_hash:
+        errors.append("day0_observation_provenance_hash")
+    return tuple(errors)
+
+
+def assert_live_day0_entry_provenance(payload: Mapping[str, object]) -> None:
+    """Fail closed unless an ENTRY carries one exact Day0 observation binding."""
+
+    errors = day0_entry_provenance_errors(payload)
+    if errors:
+        raise Day0AuthorityError("day0_entry_provenance:" + ",".join(errors))
+
+
 def _day0_probability_block(payload: Mapping[str, object]) -> Mapping[str, object]:
     block = payload.get("day0_probability_authority")
     return block if isinstance(block, Mapping) else {}
@@ -196,14 +296,22 @@ def _first_int(payload: Mapping[str, object], block: Mapping[str, object], *keys
 
 
 def _day0_lcb_transform(payload: Mapping[str, object], block: Mapping[str, object]) -> Mapping[str, object]:
-    transform = payload.get("_edli_day0_lcb_transform")
-    if not isinstance(transform, Mapping):
-        transform = payload.get("day0_lcb_transform")
-    if not isinstance(transform, Mapping):
-        transform = block.get("lcb_transform")
-    if not isinstance(transform, Mapping):
+    transforms: list[Mapping[str, object]] = []
+    for value in (
+        payload.get("_edli_day0_lcb_transform"),
+        payload.get("day0_lcb_transform"),
+        block.get("lcb_transform"),
+    ):
+        if value in (None, ""):
+            continue
+        if not isinstance(value, Mapping):
+            raise Day0AuthorityError("remaining_day_lcb_transform invalid")
+        transforms.append(value)
+    if not transforms:
         raise Day0AuthorityError("remaining_day_lcb_transform missing")
-    return transform
+    if len({stable_hash(dict(value)) for value in transforms}) != 1:
+        raise Day0AuthorityError("remaining_day_lcb_transform mismatch")
+    return transforms[0]
 
 
 def _truthy_false(value: object) -> bool:
@@ -426,7 +534,11 @@ def _assert_replacement_global_day0_probability_authority(
 ) -> None:
     """Validate one current replacement posterior conditioned on current Day0 truth."""
 
-    authority = str(block.get("probability_authority") or "").strip()
+    authority = _matching_text(
+        "replacement_day0_probability_authority",
+        payload.get("probability_authority"),
+        block.get("probability_authority"),
+    )
     allowed_authorities = DAY0_REPLACEMENT_GLOBAL_AUTHORITIES_BY_Q_SOURCE.get(
         q_source,
         frozenset(),
@@ -1091,10 +1203,21 @@ def assert_live_day0_probability_authority(
     """
 
     block = _day0_probability_block(payload)
-    authority = _first_text(payload, block, "authority", "calibration_authority")
+    calibration_authority = _first_text(
+        payload,
+        block,
+        "authority",
+        "calibration_authority",
+    )
+    probability_authority = _first_text(payload, block, "probability_authority")
     calibration_method = _first_text(payload, block, "calibration_method")
     input_space = _first_text(payload, block, "input_space")
-    hard_fact_markers = {authority.upper(), calibration_method.lower(), input_space.lower()}
+    hard_fact_markers = {
+        calibration_authority.upper(),
+        probability_authority.upper(),
+        calibration_method.lower(),
+        input_space.lower(),
+    }
     if DAY0_OBSERVATION_HARD_FACT_AUTHORITY in hard_fact_markers or "day0_live_observation_hard_fact" in hard_fact_markers:
         raise Day0AuthorityError("day0 hard-fact calibration cannot authorize entry probability")
 
@@ -1125,24 +1248,57 @@ def assert_live_day0_probability_authority(
             "day0_probability_q_source required:"
             f"{q_source or 'missing'}"
         )
-    q_mode = _first_text(payload, block, "_edli_day0_q_mode", "day0_q_mode", "q_mode")
+    remaining_authority = _matching_text(
+        "remaining_day_probability_authority",
+        payload.get("probability_authority"),
+        block.get("probability_authority"),
+    )
+    if remaining_authority != DAY0_REMAINING_DAY_GLOBAL_AUTHORITY:
+        raise Day0AuthorityError(
+            "remaining_day_probability_authority required:"
+            f"{remaining_authority}"
+        )
+    _matching_text(
+        "remaining_day_q_source",
+        payload.get("_edli_q_source"),
+        payload.get("q_source"),
+        block.get("q_source"),
+    )
+    q_mode = _matching_text(
+        "remaining_day_q_mode",
+        payload.get("_edli_day0_q_mode"),
+        payload.get("day0_q_mode"),
+        payload.get("q_mode"),
+        block.get("q_mode"),
+    )
     if q_mode != DAY0_REMAINING_DAY_Q_MODE:
         raise Day0AuthorityError(f"remaining_day_q_mode required:{q_mode or 'missing'}")
-    remaining_models = _first_int(
-        payload,
-        block,
-        "_edli_day0_remaining_models",
-        "day0_remaining_models",
-        "remaining_models",
+    remaining_models = _matching_float(
+        "remaining_day_models",
+        payload.get("_edli_day0_remaining_models"),
+        payload.get("day0_remaining_models"),
+        payload.get("remaining_models"),
+        block.get("remaining_models"),
     )
-    if remaining_models is None or remaining_models <= 0:
+    if remaining_models <= 0 or not remaining_models.is_integer():
         raise Day0AuthorityError("remaining_day_models missing")
-    rounded_value = _first_float(payload, block, "rounded_value", "rounded_extreme")
-    if rounded_value is None:
-        raise Day0AuthorityError("remaining_day_observed_extreme missing")
-    observation_time = _first_text(payload, block, "observation_time", "observation_available_at")
-    if not observation_time:
-        raise Day0AuthorityError("remaining_day_observation_time missing")
+    _matching_float(
+        "remaining_day_observed_extreme",
+        payload.get("rounded_value"),
+        payload.get("rounded_extreme"),
+        block.get("rounded_value"),
+        block.get("rounded_extreme"),
+    )
+    _matching_text(
+        "remaining_day_observation_time",
+        payload.get("observation_time"),
+        block.get("observation_time"),
+    )
+    _matching_text(
+        "remaining_day_observation_available_at",
+        payload.get("observation_available_at"),
+        block.get("observation_available_at"),
+    )
 
     transform = _day0_lcb_transform(payload, block)
     if q_lcb is None:
@@ -1449,6 +1605,11 @@ class Day0AuthorityEvidence:
     observation_time: str
     raw_value: float
     rounded_value: int
+    station_id: str
+    configured_station_id: str
+    settlement_source: str
+    raw_payload_sha256: str
+    day0_observation_provenance_hash: str
     settlement_semantics: SettlementSemantics
 
 
@@ -1472,6 +1633,22 @@ def assert_live_day0_authority(evidence: Day0AuthorityEvidence) -> None:
     rounded = int(evidence.settlement_semantics.round_single(evidence.raw_value))
     if rounded != evidence.rounded_value:
         raise Day0AuthorityError("rounded_value does not match SettlementSemantics")
+    assert_live_day0_entry_provenance(
+        {
+            "city": evidence.city,
+            "target_date": evidence.target_date,
+            "metric": evidence.metric,
+            "station_id": evidence.station_id,
+            "configured_station_id": evidence.configured_station_id,
+            "settlement_source": evidence.settlement_source,
+            "raw_payload_sha256": evidence.raw_payload_sha256,
+            "observation_time": evidence.observation_time,
+            "observation_available_at": evidence.observation_available_at,
+            "day0_observation_provenance_hash": (
+                evidence.day0_observation_provenance_hash
+            ),
+        }
+    )
 
 
 def observability_row_to_authority(row: Mapping[str, object]) -> Day0AuthorityEvidence:
@@ -1497,5 +1674,12 @@ def observability_row_to_authority(row: Mapping[str, object]) -> Day0AuthorityEv
         observation_time=str(row.get("observation_time") or ""),
         raw_value=float(row.get("raw_value") or 0.0),
         rounded_value=int(row.get("rounded_value") or 0),
+        station_id=str(row.get("station_id") or ""),
+        configured_station_id=str(row.get("configured_station_id") or ""),
+        settlement_source=str(row.get("settlement_source") or ""),
+        raw_payload_sha256=str(row.get("raw_payload_sha256") or ""),
+        day0_observation_provenance_hash=str(
+            row.get("day0_observation_provenance_hash") or ""
+        ),
         settlement_semantics=semantics,
     )

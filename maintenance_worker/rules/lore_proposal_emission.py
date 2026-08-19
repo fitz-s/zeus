@@ -9,12 +9,12 @@ Handler: lore_proposal_emission
 
 Surfaces lore-extraction candidates from closed packets.
 
-enumerate(): scans lore_topic_dirs under docs/lore/ for entries older
+enumerate(): scans lore_topic_dirs under docs/reference/lessons/ for entries older
   than lore_review_ttl_days that lack a companion REVIEWED or PROMOTED
   marker; separately greps docs/operations/task_*/ packets for a
   "## Lessons" section and reports them as pending-lore proposals.
   The implemented triggers are packet Lessons sections and stale entries under
-  docs/lore/<topic>/. Other catalog ideas are not wired here.
+  docs/reference/lessons/<topic>/. Other catalog ideas are not wired here.
 
 apply(): always dry_run_only=True — lore emission requires human review.
   Returns mock diff showing what would be emitted to proposals_dir.
@@ -78,7 +78,7 @@ def enumerate(entry: Any, ctx: TickContext) -> list[Candidate]:  # noqa: A001
 
     Trigger 1 (implemented): scan docs/operations/task_*/ packets for
       "## Lessons" section older than lore_review_ttl_days.
-    Also scans configured lore_topic_dirs under docs/lore/ for stale
+    Also scans configured lore_topic_dirs under docs/reference/lessons/ for stale
     unreviewed entries.
     """
     raw: dict = entry.raw
@@ -95,7 +95,7 @@ def enumerate(entry: Any, ctx: TickContext) -> list[Candidate]:  # noqa: A001
     # --- Trigger 1: closed packets with ## Lessons section ---
     candidates.extend(_scan_packet_lessons(repo_root, now_ts, ttl_seconds, ttl_days))
 
-    # --- Stale lore entries in docs/lore/<topic>/ ---
+    # --- Stale lore entries in docs/reference/lessons/<topic>/ ---
     candidates.extend(_scan_lore_topic_dirs(repo_root, lore_topic_dirs, now_ts, ttl_seconds, ttl_days))
 
     return candidates
@@ -207,9 +207,9 @@ def _scan_lore_topic_dirs(
     ttl_days: int,
 ) -> list[Candidate]:
     """
-    Scan docs/lore/<topic>/ for stale unreviewed lore entry files.
+    Scan docs/reference/lessons/<topic>/ for stale unreviewed lore entry files.
     """
-    lore_base = repo_root / "docs" / "lore"
+    lore_base = repo_root / "docs" / "reference" / "lessons"
     candidates: list[Candidate] = []
 
     if not lore_base.exists():

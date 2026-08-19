@@ -489,6 +489,7 @@ def _tick_wu_city(
     start_date: date,
     end_date: date,
     dry_run: bool,
+    day0_family_admission: Callable[[dict[str, object]], bool] | None = None,
 ) -> TickResult:
     city = cities_by_name[city_name]
     result = TickResult(city=city_name, tier="WU_ICAO")
@@ -530,7 +531,19 @@ def _tick_wu_city(
 
     result.rows_ready = len(rows)
     if not dry_run and rows:
-        result.rows_written = _write_rows(conn, rows, prints)
+        event_ids: list[str] = []
+        event_families: list[tuple[str, str, str]] = []
+        result.rows_written = _write_rows(
+            conn,
+            rows,
+            prints,
+            day0_event_city=city_name,
+            day0_family_admission=day0_family_admission,
+            inserted_event_ids=event_ids,
+            inserted_event_families=event_families,
+        )
+        result.day0_event_ids = tuple(event_ids)
+        result.day0_event_families = tuple(event_families)
     return result
 
 
@@ -698,6 +711,9 @@ def run_live_tick(
                 start_date=start_date,
                 end_date=end_date,
                 dry_run=dry_run,
+                tick_kwargs={
+                    "day0_family_admission": day0_family_admission,
+                },
             )
         except Exception as exc:
             r = TickResult(city=city_name, tier="WU_ICAO", failure_reason=f"unexpected: {exc}")

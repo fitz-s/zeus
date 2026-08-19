@@ -47,6 +47,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import sqlite3
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -418,6 +419,44 @@ def classify_local_position(
         )
     local_shares = row.local_reported_shares()
     delta = abs(chain_fact.size - local_shares)
+    attributed_chain_shares = (
+        chain_fact.size
+        if row.fill_authority == "venue_position_observed"
+        else min(chain_fact.size, local_shares)
+    )
+    projected_chain_shares = float(row.chain_shares or 0.0)
+    chain_projection_delta = abs(
+        projected_chain_shares - attributed_chain_shares
+    )
+    if (
+        chain_fact.size + _SIZE_MISMATCH_TOLERANCE >= local_shares
+        and chain_projection_delta > _SIZE_MISMATCH_TOLERANCE
+    ):
+        details = {
+            "reason": "chain_projection_stale_prefix",
+            "chain_size": chain_fact.size,
+            "local_shares": local_shares,
+            "chain_shares_before": row.chain_shares,
+            "attributed_chain_shares": attributed_chain_shares,
+            "shares_unchanged": True,
+            "delta": chain_projection_delta,
+        }
+        if delta <= _SIZE_MISMATCH_TOLERANCE:
+            details.update(
+                {
+                    "chain_avg_price": chain_fact.avg_price,
+                    "chain_cost_basis_usd": chain_fact.cost_basis_usd,
+                }
+            )
+        else:
+            details["unattributed_residual"] = chain_fact.size - local_shares
+        return MirrorFinding(
+            classification=SIZE_CORRECTED,
+            position_id=row.position_id,
+            asset=held_token,
+            writes=True,
+            details=details,
+        )
     if delta > _SIZE_MISMATCH_TOLERANCE:
         if chain_fact.size > local_shares:
             # The Data API row is the wallet's token aggregate. It can contain
@@ -1295,6 +1334,7 @@ def apply_size_correction_finding(
     )
     projection["chain_shares"] = attributed_chain_shares
     projection["chain_state"] = "synced"
+    chain_economics_basis = "existing_projection"
     if owned_reduction:
         unit_cost = float(current["cost_basis_usd"] or 0.0) / owned_shares_before
         remaining_cost = unit_cost * chain_size
@@ -1302,6 +1342,7 @@ def apply_size_correction_finding(
         projection["cost_basis_usd"] = remaining_cost
         projection["chain_avg_price"] = unit_cost
         projection["chain_cost_basis_usd"] = remaining_cost
+        chain_economics_basis = "authenticated_fill_cost_after_owned_reduction"
         if "shares_remaining" in current.keys():
             prior_remaining = current["shares_remaining"]
             if prior_remaining is not None:
@@ -1318,6 +1359,26 @@ def apply_size_correction_finding(
                 if observed_cost_basis > 0.0
                 else observed_avg_price * attributed_chain_shares
             )
+            chain_economics_basis = "venue_position_observation"
+        elif (
+            fill_authority in FILL_GRADE_FILL_AUTHORITIES
+            and attributed_chain_shares > 0.0
+            and owned_shares_before > 0.0
+        ):
+            owned_cost_basis = float(current["cost_basis_usd"] or 0.0)
+            unit_cost = owned_cost_basis / owned_shares_before
+            if math.isfinite(unit_cost) and unit_cost > 0.0:
+                # The balance snapshot proves current quantity but may carry no
+                # price.  Preserve the stronger authenticated trade-fill cost
+                # for exactly the chain-confirmed owned slice; never invent
+                # economics for balance-only or fill-unproven positions.
+                projection["chain_avg_price"] = unit_cost
+                projection["chain_cost_basis_usd"] = (
+                    unit_cost * attributed_chain_shares
+                )
+                chain_economics_basis = (
+                    "authenticated_fill_cost_for_chain_confirmed_owned_slice"
+                )
     projection["updated_at"] = occurred_at
     projection["chain_seen_at"] = occurred_at
 
@@ -1333,6 +1394,7 @@ def apply_size_correction_finding(
             "chain_state_after": projection["chain_state"],
             "chain_avg_price_after": projection["chain_avg_price"],
             "chain_cost_basis_after": projection["chain_cost_basis_usd"],
+            "chain_economics_basis": chain_economics_basis,
             "unattributed_residual": max(0.0, chain_size - owned_shares_before),
         },
         default=str,

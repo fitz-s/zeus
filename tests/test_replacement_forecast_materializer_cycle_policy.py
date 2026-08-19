@@ -1,5 +1,5 @@
 # Created: 2026-06-10
-# Last reused or audited: 2026-07-15
+# Last reused or audited: 2026-08-12
 # Authority basis: operator staleness/cycle-physics directive 2026-06-10 (bounded re-materialization
 #   staleness gate at materialization, fail-closed; cycle-phase provenance treats all standard
 #   00Z/06Z/12Z/18Z cycles as live-eligible synoptic).
@@ -20,6 +20,7 @@ Two cross-module invariants are pinned here (Fitz: relationship tests, not funct
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
@@ -36,7 +37,10 @@ from src.data.replacement_forecast_cycle_policy import (
     REPLACEMENT_SOURCE_CYCLE_MAX_AGE_HOURS_DEFAULT,
     STALE_ENSEMBLE_ABSOLUTE_DISAGREEMENT_SEMANTICS_REVISION,
     classify_cycle_phase,
+    current_evidence_shape_has_entry_authority,
+    current_evidence_shape_has_held_authority,
     current_evidence_shape_semantics_mismatch,
+    current_evidence_shape_source_cycle_time,
     tradeable_grade_coverage_sql,
 )
 from src.data.replacement_forecast_materializer import (
@@ -52,11 +56,53 @@ UTC = timezone.utc
 _STALE_REASON = "REPLACEMENT_MATERIALIZATION_SOURCE_CYCLE_TOO_STALE"
 
 
+@pytest.mark.parametrize(
+    "cycle_text",
+    (
+        "2026-06-07T12:00:00+00",
+        "2026-06-07T12:00:00+0000",
+        "2026-06-07T12:00:00+00:99",
+        "2026-06-07T12:00:00",
+    ),
+)
+def test_shape_cycle_timestamp_uses_one_strict_aware_grammar(cycle_text: str) -> None:
+    provenance = {
+        "bayes_precision_fusion": {
+            "current_evidence_shape": {"source_cycle_time": cycle_text}
+        }
+    }
+
+    assert current_evidence_shape_source_cycle_time(provenance) is None
+
+
+@pytest.mark.parametrize(
+    "cycle_text",
+    (
+        "2026-06-07T12:00:00Z",
+        "2026-06-07T12:00:00+00:00",
+        "2026-06-07T12:00:00.123456-05:00",
+    ),
+)
+def test_shape_cycle_timestamp_accepts_canonical_aware_iso(cycle_text: str) -> None:
+    provenance = {
+        "bayes_precision_fusion": {
+            "current_evidence_shape": {"source_cycle_time": cycle_text}
+        }
+    }
+
+    assert current_evidence_shape_source_cycle_time(provenance) is not None
+
+
 def test_current_evidence_semantics_is_probability_identity_and_coverage() -> None:
     current = {
+        "q_lcb_basis": "fused_center_bootstrap_p05",
         "bayes_precision_fusion": {
             "current_evidence_shape": {
                 "semantics_revision": CURRENT_EVIDENCE_SEMANTICS_REVISION,
+                "shape_lag_hours": 0.0,
+                "source_cycle_time": "2026-06-07T12:00:00+00:00",
+                "stale_shape_reused": False,
+                "translation_applied": False,
             }
         }
     }
@@ -70,6 +116,7 @@ def test_current_evidence_semantics_is_probability_identity_and_coverage() -> No
             "current_evidence_shape": {
                 "semantics_revision": STALE_ENSEMBLE_ABSOLUTE_DISAGREEMENT_SEMANTICS_REVISION,
                 "shape_lag_hours": 6.0,
+                "source_cycle_time": "2026-06-07T06:00:00+00:00",
                 "stale_shape_reused": True,
                 "translation_applied": False,
             }
@@ -108,18 +155,150 @@ def test_current_evidence_semantics_is_probability_identity_and_coverage() -> No
     assert current_evidence_shape_semantics_mismatch(ambiguous_v2_transport) is True
     assert current_evidence_shape_semantics_mismatch(stale) is True
     assert current_evidence_shape_semantics_mismatch({}) is False
+    assert current_evidence_shape_has_entry_authority(current) is True
+    assert current_evidence_shape_has_entry_authority(stale_reused) is True
 
     clause = tradeable_grade_coverage_sql(
         posterior_columns={"q_lcb_json", "q_ucb_json", "provenance_json"},
+        decision_time=datetime(2026, 6, 7, 12, tzinfo=UTC),
         alias="p.",
     )
     assert "current_evidence_shape.semantics_revision" in clause
     assert "current_evidence_shape.stale_shape_reused" in clause
     assert "current_evidence_shape.translation_applied" in clause
+    assert "current_evidence_shape.shape_lag_hours" in clause
     assert CURRENT_EVIDENCE_SEMANTICS_REVISION in clause
     assert STALE_ENSEMBLE_ABSOLUTE_DISAGREEMENT_SEMANTICS_REVISION in clause
     assert "ensemble_center_scenarios_v2" not in clause
     assert "ensemble_anomaly_transport_v2" not in clause
+
+    conn = sqlite3.connect(":memory:")
+    conn.execute(
+        "CREATE TABLE posterior (q_lcb_json TEXT, q_ucb_json TEXT, provenance_json TEXT)"
+    )
+
+    def is_tradeable(provenance: dict) -> bool:
+        conn.execute("DELETE FROM posterior")
+        conn.execute(
+            "INSERT INTO posterior VALUES (?, ?, ?)",
+            ("{}", "{}", json.dumps(provenance)),
+        )
+        row = conn.execute(
+            f"SELECT COUNT(*) FROM posterior p WHERE 1 = 1 {clause}"
+        ).fetchone()
+        return bool(row[0])
+
+    stale_reused["q_lcb_basis"] = "fused_center_bootstrap_p05"
+    missing_lag = json.loads(json.dumps(current))
+    del missing_lag["bayes_precision_fusion"]["current_evidence_shape"]["shape_lag_hours"]
+    omitted_stale = json.loads(json.dumps(current))
+    del omitted_stale["bayes_precision_fusion"]["current_evidence_shape"]["stale_shape_reused"]
+    stale_missing_flag = json.loads(json.dumps(stale_reused))
+    del stale_missing_flag["bayes_precision_fusion"]["current_evidence_shape"][
+        "stale_shape_reused"
+    ]
+    stale_translated = json.loads(json.dumps(stale_reused))
+    stale_translated["bayes_precision_fusion"]["current_evidence_shape"][
+        "translation_applied"
+    ] = True
+    stale_wrong_revision = json.loads(json.dumps(stale_reused))
+    stale_wrong_revision["bayes_precision_fusion"]["current_evidence_shape"][
+        "semantics_revision"
+    ] = CURRENT_EVIDENCE_SEMANTICS_REVISION
+    stale_at_bound = json.loads(json.dumps(stale_reused))
+    stale_at_bound["bayes_precision_fusion"]["current_evidence_shape"][
+        "shape_lag_hours"
+    ] = REPLACEMENT_SOURCE_CYCLE_MAX_AGE_HOURS_DEFAULT
+    stale_at_bound["bayes_precision_fusion"]["current_evidence_shape"][
+        "source_cycle_time"
+    ] = "2026-06-06T06:00:00+00:00"
+    stale_over_bound = json.loads(json.dumps(stale_reused))
+    stale_over_bound["bayes_precision_fusion"]["current_evidence_shape"][
+        "shape_lag_hours"
+    ] = REPLACEMENT_SOURCE_CYCLE_MAX_AGE_HOURS_DEFAULT + 0.001
+    stale_over_bound["bayes_precision_fusion"]["current_evidence_shape"][
+        "source_cycle_time"
+    ] = "2026-06-06T05:59:56+00:00"
+    negative_lag = json.loads(json.dumps(stale_reused))
+    negative_lag["bayes_precision_fusion"]["current_evidence_shape"][
+        "shape_lag_hours"
+    ] = -0.001
+    missing_cycle = json.loads(json.dumps(current))
+    del missing_cycle["bayes_precision_fusion"]["current_evidence_shape"][
+        "source_cycle_time"
+    ]
+    naive_cycle = json.loads(json.dumps(current))
+    naive_cycle["bayes_precision_fusion"]["current_evidence_shape"][
+        "source_cycle_time"
+    ] = "2026-06-07T12:00:00"
+    future_cycle = json.loads(json.dumps(current))
+    future_cycle["bayes_precision_fusion"]["current_evidence_shape"][
+        "source_cycle_time"
+    ] = "2026-06-07T12:00:01+00:00"
+    old_cycle = json.loads(json.dumps(current))
+    old_cycle["bayes_precision_fusion"]["current_evidence_shape"][
+        "source_cycle_time"
+    ] = "2026-06-06T05:59:59+00:00"
+    malformed_shapes = []
+    for field, value in (
+        ("shape_lag_hours", False),
+        ("shape_lag_hours", "0"),
+        ("stale_shape_reused", 0),
+        ("stale_shape_reused", "false"),
+    ):
+        malformed = json.loads(json.dumps(current))
+        malformed["bayes_precision_fusion"]["current_evidence_shape"][field] = value
+        malformed_shapes.append(malformed)
+    assert is_tradeable(current) is True
+    assert is_tradeable(omitted_stale) is True
+    assert is_tradeable(stale_reused) is True
+    assert is_tradeable(stale_at_bound) is True
+    assert current_evidence_shape_has_entry_authority(stale_at_bound) is True
+    assert is_tradeable(stale_over_bound) is False
+    assert current_evidence_shape_has_entry_authority(stale_over_bound) is False
+    assert is_tradeable(negative_lag) is False
+    assert current_evidence_shape_has_entry_authority(negative_lag) is False
+    assert is_tradeable(missing_lag) is False
+    assert current_evidence_shape_has_entry_authority(missing_lag) is False
+    for invalid_cycle in (missing_cycle, naive_cycle, future_cycle, old_cycle):
+        assert is_tradeable(invalid_cycle) is False
+    assert current_evidence_shape_has_entry_authority(missing_cycle) is False
+    assert current_evidence_shape_has_held_authority(naive_cycle) is False
+    for malformed_stale in (
+        stale_missing_flag,
+        stale_translated,
+        stale_wrong_revision,
+    ):
+        assert is_tradeable(malformed_stale) is False
+        assert current_evidence_shape_has_entry_authority(malformed_stale) is False
+    for malformed in malformed_shapes:
+        assert is_tradeable(malformed) is False
+        assert current_evidence_shape_has_entry_authority(malformed) is False
+
+    for nonfinite_lag in (float("nan"), float("inf"), float("-inf")):
+        malformed = json.loads(json.dumps(stale_reused))
+        malformed["bayes_precision_fusion"]["current_evidence_shape"][
+            "shape_lag_hours"
+        ] = nonfinite_lag
+        assert is_tradeable(malformed) is False
+        assert current_evidence_shape_has_entry_authority(malformed) is False
+        assert current_evidence_shape_has_held_authority(malformed) is False
+
+    conn.execute("DELETE FROM posterior")
+    conn.execute(
+        "INSERT INTO posterior VALUES (?, ?, ?)",
+        ("{}", "{}", "{malformed-json"),
+    )
+    assert conn.execute(
+        f"SELECT COUNT(*) FROM posterior p WHERE 1 = 1 {clause}"
+    ).fetchone()[0] == 0
+
+    missing_provenance_clause = tradeable_grade_coverage_sql(
+        posterior_columns={"q_lcb_json", "q_ucb_json"},
+        decision_time=datetime(2026, 6, 7, 12, tzinfo=UTC),
+        alias="p.",
+    )
+    assert "AND 0 = 1" in missing_provenance_clause
 
 
 @dataclass(frozen=True)
@@ -232,6 +411,15 @@ def test_prewrite_blocks_when_cycle_older_than_bound() -> None:
     cycle = datetime(2026, 6, 5, 0, tzinfo=UTC)  # 00Z (synoptic) so phase never confounds this
     computed_at = cycle + timedelta(hours=REPLACEMENT_SOURCE_CYCLE_MAX_AGE_HOURS_DEFAULT + 2)
     reasons = _prewrite_block_reasons(_request(cycle=cycle, computed_at=computed_at))
+    assert _STALE_REASON in reasons
+
+
+def test_prewrite_blocks_future_cycle() -> None:
+    cycle = datetime(2026, 6, 5, 6, tzinfo=UTC)
+    computed_at = cycle - timedelta(minutes=1)
+
+    reasons = _prewrite_block_reasons(_request(cycle=cycle, computed_at=computed_at))
+
     assert _STALE_REASON in reasons
 
 

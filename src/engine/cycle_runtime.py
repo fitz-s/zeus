@@ -1,5 +1,5 @@
 # Created: 2026-05-04
-# Last reused/audited: 2026-07-19
+# Last reused/audited: 2026-08-16
 # Authority basis: IOC forward-port (Fix C: allowed_discovery_modes_inverse) — 2026-05-23
 """Heavy runtime helpers extracted from cycle_runner.
 
@@ -10,11 +10,13 @@ function here receives a `deps` object, typically the cycle_runner module.
 
 from __future__ import annotations
 
+import copy
 import inspect
 import json
 import logging
 import math
 import os
+import sqlite3
 import threading
 import time
 import uuid
@@ -37,6 +39,10 @@ from src.contracts.execution_intent import (
 )
 from src.contracts.position_truth import (
     has_current_money_risk_chain_state,
+)
+from src.contracts.venue_submission_envelope import (
+    LIVE_ORDER_MAX_UNIT_PRICE,
+    LIVE_ORDER_MIN_UNIT_PRICE,
 )
 from src.engine.time_context import lead_hours_to_date_start, lead_hours_to_settlement_close
 from src.state.lifecycle_manager import (
@@ -130,8 +136,16 @@ _LIVE_DISCOVERY_EVAL_BUDGET_ENV = "ZEUS_LIVE_DISCOVERY_EVAL_BUDGET_SECONDS"
 _LIVE_DISCOVERY_EVAL_BUDGET_DEFAULT_SECONDS = 360.0
 _HELD_POSITION_MONITOR_BUDGET_ENV = "ZEUS_HELD_POSITION_MONITOR_BUDGET_SECONDS"
 _HELD_POSITION_MONITOR_BUDGET_DEFAULT_SECONDS = 75.0
+_HELD_MONITOR_GLOBAL_DEBT_SCAN_MAX_SECONDS = 1.0
 _HELD_POSITION_MONITOR_RESERVATION_MIN = 2
 _HELD_POSITION_MONITOR_DEGRADED_COVERAGE_CYCLES = 3
+_MONITOR_CANONICAL_WRITE_LEASE_DEADLINE_MS = 250
+_MONITOR_CANONICAL_WRITE_LEASE_MAX_HOLD_MS = 250
+# A foreground quote writer may already own the unified TRADE gate when the
+# monitor publishes its priority intent.  New background writers then yield,
+# but the monitor must wait long enough for that one incumbent transaction to
+# commit; a one-second retry repeatedly dropped otherwise-complete decisions.
+_MONITOR_CANONICAL_WRITE_RETRY_DEADLINE_MS = 5_000
 
 
 def _held_position_monitor_reservation_count(position_count: int) -> int:
@@ -144,6 +158,41 @@ def _held_position_monitor_reservation_count(position_count: int) -> int:
             / _HELD_POSITION_MONITOR_DEGRADED_COVERAGE_CYCLES
         ),
     )
+
+
+def _held_position_monitor_primary_reservation(
+    position_count: int,
+    monitor_budget_seconds: float,
+) -> tuple[int, float]:
+    """Reserve one belief-read tranche per admitted degraded-coverage slot.
+
+    The reservation scheduler admits roughly one third of the held book when a
+    full pass is deadline-degraded.  Reserving only one five-second read let a
+    coherent HWM read plus optional order-book batch consume the whole claim
+    before any admitted position reached canonical redecision.  Keep half the
+    claim available for prerequisites/auxiliary work and reserve at least one
+    complete read.  If the configured claim cannot fund one third of a very
+    large book, reduce this pass's admission count instead of pretending that
+    several positions share one read deadline.
+    """
+
+    from src.engine.monitor_refresh import HELD_MONITOR_PRIMARY_BELIEF_READ_MAX_SECONDS
+
+    budget = max(0.0, float(monitor_budget_seconds))
+    single_read = float(HELD_MONITOR_PRIMARY_BELIEF_READ_MAX_SECONDS)
+    if budget < single_read:
+        # A claim shorter than one complete q read has no statistical
+        # admission capacity.  SCOPE: this pass's statistical slice.  DRAIN:
+        # the next recurring pass recomputes capacity from its own claim.
+        # RESET: a claim at least as large as one complete read.
+        return 0, 0.0
+    desired = _held_position_monitor_reservation_count(position_count)
+    capacity = max(
+        1,
+        math.floor(max(single_read, budget / 2.0) / single_read),
+    )
+    admitted = min(desired, capacity)
+    return admitted, single_read * admitted
 
 
 def _held_position_monitor_budget_seconds(override: float | None = None) -> float:
@@ -3203,6 +3252,56 @@ def _monitor_refreshed_phase_for_position(pos) -> str:
     return LifecyclePhase.ACTIVE.value
 
 
+class CanonicalTradeWriteIdentityError(RuntimeError):
+    """The live trade DB identity could not be proven before a canonical write."""
+
+
+def _canonical_trade_write_lease(conn, *, owner: str, deadline_ms: int, max_hold_ms: int):
+    """Serialize canonical live-trade writes without imposing the live lease on test DBs."""
+
+    from contextlib import nullcontext
+    from pathlib import Path
+
+    from src.state.db import _zeus_trade_db_path
+
+    try:
+        main_rows = [
+            row
+            for row in conn.execute("PRAGMA database_list").fetchall()
+            if str(row[1]) == "main"
+        ]
+    except Exception as exc:
+        raise CanonicalTradeWriteIdentityError(
+            "CANONICAL_TRADE_DB_IDENTITY_UNAVAILABLE"
+        ) from exc
+    if len(main_rows) != 1:
+        raise CanonicalTradeWriteIdentityError("CANONICAL_TRADE_DB_IDENTITY_AMBIGUOUS")
+    raw_main_path = str(main_rows[0][2] or "").strip()
+    # sqlite :memory: and explicitly named noncanonical fixtures are test-only
+    # surfaces. A PRAGMA failure or an ambiguous main identity is never one.
+    if not raw_main_path:
+        return nullcontext()
+    main_path = Path(raw_main_path).resolve(strict=False)
+    if main_path != _zeus_trade_db_path().resolve(strict=False):
+        return nullcontext()
+
+    from src.state.db_writer_lock import WriteClass
+    from src.state.write_coordinator import (
+        DBIdentity,
+        WritePriority,
+        default_runtime_write_coordinator,
+    )
+
+    return default_runtime_write_coordinator().lease(
+        (DBIdentity.TRADE,),
+        owner=owner,
+        write_class=WriteClass.LIVE,
+        priority=WritePriority.MONITOR,
+        deadline_ms=deadline_ms,
+        max_hold_ms=max_hold_ms,
+    )
+
+
 def _emit_monitor_refreshed_canonical_if_available(
     conn,
     pos,
@@ -3212,43 +3311,205 @@ def _emit_monitor_refreshed_canonical_if_available(
     final_should_exit: bool | None = None,
     final_exit_reason: str | None = None,
     final_exit_trigger: str | None = None,
+    decision_unavailable_reason: str | None = None,
+    decision_unavailable_trigger: str | None = None,
 ) -> bool:
     if conn is None:
         return True
 
     from src.engine.lifecycle_events import build_monitor_refreshed_canonical_write
     from src.state.db import append_many_and_project
+    from src.state.write_coordinator import WriteLeaseTimeout, bounded_sqlite_write
 
-    try:
+    position_id = str(getattr(pos, "trade_id", "") or "").strip()
+    if not position_id:
+        deps.logger.warning("CANONICAL_MONITOR_REFRESHED_EMIT_FAILED trade_id missing")
+        return False
+    # This is the monitor observation's attempt identity. It is captured before
+    # either lease attempt and is never refreshed after waiting for a writer.
+    monitor_occurred_at = (
+        deps._utcnow().isoformat()
+        if callable(getattr(deps, "_utcnow", None))
+        else datetime.now(timezone.utc).isoformat()
+    )
+
+    # A monitor refresh can persist auxiliary facts on this long-lived
+    # connection before it reaches the canonical append.  Never wait for the
+    # unified writer lease while retaining that SQLite transaction: another
+    # process may already own the lease and be waiting for this connection's
+    # SQLite writer, forming a cross-process lock-order cycle.  The canonical
+    # MONITOR_REFRESHED event+projection remains one later transaction inside
+    # the lease; prior auxiliary work is a separate commit boundary by design.
+    if conn.in_transaction:
+        try:
+            conn.commit()
+        except Exception as exc:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            deps.logger.warning(
+                "CANONICAL_MONITOR_REFRESHED_PRELEASE_COMMIT_FAILED "
+                "trade_id=%s reason=%s",
+                position_id,
+                exc,
+            )
+            return False
+
+    def append_frozen_monitor_refreshed() -> bool:
+        current = conn.execute(
+            "SELECT phase, updated_at FROM position_current WHERE position_id = ?",
+            (position_id,),
+        ).fetchone()
+        if current is None:
+            deps.logger.info(
+                "CANONICAL_MONITOR_REFRESHED_CANCELLED trade_id=%s reason=missing_position",
+                position_id,
+            )
+            return False
+        canonical_phase = str(current[0] or "").strip()
+        canonical_updated_at = str(current[1] or "").strip()
+        if is_terminal_state(canonical_phase):
+            deps.logger.info(
+                "CANONICAL_MONITOR_REFRESHED_CANCELLED trade_id=%s reason=terminal phase=%s",
+                position_id,
+                canonical_phase,
+            )
+            return False
+        if canonical_phase not in {
+            LifecyclePhase.ACTIVE.value,
+            LifecyclePhase.DAY0_WINDOW.value,
+            LifecyclePhase.PENDING_EXIT.value,
+        }:
+            deps.logger.info(
+                "CANONICAL_MONITOR_REFRESHED_CANCELLED trade_id=%s reason=unmonitorable phase=%s",
+                position_id,
+                canonical_phase,
+            )
+            return False
+        if canonical_updated_at:
+            try:
+                canonical_updated = datetime.fromisoformat(
+                    canonical_updated_at.replace("Z", "+00:00")
+                )
+                monitor_attempt_at = datetime.fromisoformat(
+                    monitor_occurred_at.replace("Z", "+00:00")
+                )
+            except (TypeError, ValueError):
+                deps.logger.warning(
+                    "CANONICAL_MONITOR_REFRESHED_CANCELLED trade_id=%s reason=invalid_timestamp",
+                    position_id,
+                )
+                return False
+            if canonical_updated.tzinfo is None or monitor_attempt_at.tzinfo is None:
+                deps.logger.warning(
+                    "CANONICAL_MONITOR_REFRESHED_CANCELLED trade_id=%s reason=invalid_timestamp",
+                    position_id,
+                )
+                return False
+            if canonical_updated > monitor_attempt_at:
+                deps.logger.info(
+                    "CANONICAL_MONITOR_REFRESHED_CANCELLED trade_id=%s reason=stale_attempt",
+                    position_id,
+                )
+                return False
+        existing = conn.execute(
+            """
+            SELECT 1
+              FROM position_events
+             WHERE position_id = ?
+               AND event_type = 'MONITOR_REFRESHED'
+               AND occurred_at = ?
+             LIMIT 1
+            """,
+            (position_id, monitor_occurred_at),
+        ).fetchone()
+        if existing is not None:
+            pos.last_monitor_at = monitor_occurred_at
+            return True
         row = conn.execute(
             "SELECT COALESCE(MAX(sequence_no), 0) FROM position_events WHERE position_id = ?",
-            (getattr(pos, "trade_id", ""),),
+            (position_id,),
         ).fetchone()
         next_seq = int((row[0] if row else 0) or 0) + 1
-        monitor_occurred_at = (
-            deps._utcnow().isoformat()
-            if hasattr(deps, "_utcnow")
-            else (
-                str(getattr(pos, "last_monitor_at", "") or "").strip()
-                or datetime.now(timezone.utc).isoformat()
-            )
-        )
+        previous_monitor_at = getattr(pos, "last_monitor_at", None)
         pos.last_monitor_at = monitor_occurred_at
-        events, projection = build_monitor_refreshed_canonical_write(
-            pos,
-            sequence_no=next_seq,
-            phase_after=_monitor_refreshed_phase_for_position(pos),
-            source_module="src.engine.cycle_runtime",
-            occurred_at=monitor_occurred_at,
-            exit_decision=exit_decision,
-            final_should_exit=final_should_exit,
-            final_exit_reason=final_exit_reason,
-            final_exit_trigger=final_exit_trigger,
-        )
-        append_many_and_project(conn, events, projection)
+        try:
+            events, projection = build_monitor_refreshed_canonical_write(
+                pos,
+                sequence_no=next_seq,
+                phase_after=canonical_phase,
+                source_module="src.engine.cycle_runtime",
+                occurred_at=monitor_occurred_at,
+                exit_decision=exit_decision,
+                final_should_exit=final_should_exit,
+                final_exit_reason=final_exit_reason,
+                final_exit_trigger=final_exit_trigger,
+                decision_unavailable_reason=decision_unavailable_reason,
+                decision_unavailable_trigger=decision_unavailable_trigger,
+            )
+            append_many_and_project(conn, events, projection)
+            conn.commit()
+        except Exception:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            pos.last_monitor_at = previous_monitor_at
+            raise
+        return True
+
+    try:
+        with _canonical_trade_write_lease(
+            conn,
+            owner="monitor_canonical_append",
+            deadline_ms=_MONITOR_CANONICAL_WRITE_LEASE_DEADLINE_MS,
+            max_hold_ms=_MONITOR_CANONICAL_WRITE_LEASE_MAX_HOLD_MS,
+        ) as lease:
+            if lease is None:
+                return append_frozen_monitor_refreshed()
+            with bounded_sqlite_write(
+                conn,
+                lease,
+                max_hold_ms=_MONITOR_CANONICAL_WRITE_LEASE_MAX_HOLD_MS,
+            ):
+                return append_frozen_monitor_refreshed()
+    except WriteLeaseTimeout as exc:
+        try:
+            with _canonical_trade_write_lease(
+                conn,
+                owner="monitor_canonical_append_retry",
+                deadline_ms=_MONITOR_CANONICAL_WRITE_RETRY_DEADLINE_MS,
+                max_hold_ms=_MONITOR_CANONICAL_WRITE_LEASE_MAX_HOLD_MS,
+            ) as lease:
+                if lease is None:
+                    return append_frozen_monitor_refreshed()
+                with bounded_sqlite_write(
+                    conn,
+                    lease,
+                    max_hold_ms=_MONITOR_CANONICAL_WRITE_LEASE_MAX_HOLD_MS,
+                ):
+                    return append_frozen_monitor_refreshed()
+        except WriteLeaseTimeout as retry_exc:
+            deps.logger.info(
+                "CANONICAL_MONITOR_REFRESHED_RETRY_DEFERRED_NEXT_CYCLE "
+                "trade_id=%s reason=%s retry_reason=%s",
+                position_id,
+                exc,
+                retry_exc,
+            )
+            return False
+        except Exception as retry_exc:
+            deps.logger.warning(
+                "CANONICAL_MONITOR_REFRESHED_RETRY_DEFERRED_NEXT_CYCLE "
+                "trade_id=%s reason=%s",
+                position_id,
+                retry_exc,
+            )
+            return False
     except Exception as exc:
         deps.logger.warning(
-            "CANONICAL_MONITOR_REFRESHED_EMIT_FAILED trade_id=%s reason=%s",
+            "CANONICAL_MONITOR_REFRESHED_DEFERRED_NEXT_CYCLE trade_id=%s reason=%s",
             getattr(pos, "trade_id", ""),
             exc,
         )
@@ -3296,6 +3557,7 @@ def _record_monitor_hold_decision(
         summary["monitor_canonical_write_failed"] = (
             summary.get("monitor_canonical_write_failed", 0) + 1
         )
+        return False
     monitor_fresh_prob, monitor_fresh_edge = (
         _current_monitor_result_probability_and_edge(pos)
     )
@@ -3311,7 +3573,121 @@ def _record_monitor_hold_decision(
     )
     summary[counter] = summary.get(counter, 0) + 1
     summary["monitors"] = summary.get("monitors", 0) + 1
+    _append_held_monitor_coverage_position_id(
+        summary,
+        "held_monitor_canonical_position_ids",
+        pos,
+    )
     return canonical_written
+
+
+def _revoke_monitor_action_authority(
+    pos,
+    *,
+    missing_fields: set[str] | None = None,
+) -> None:
+    """Revoke only the evidence axes an incomplete monitor attempt did not prove."""
+
+    missing = None if missing_fields is None else set(missing_fields)
+    revoke_all = missing is None or not missing
+    if revoke_all or missing & {"fresh_prob", "fresh_prob_is_fresh"}:
+        pos.last_monitor_prob_is_fresh = False
+        pos.last_monitor_edge = None
+    if revoke_all or missing & {
+        "current_market_price",
+        "current_market_price_is_fresh",
+        "best_bid",
+    }:
+        pos.last_monitor_market_price_is_fresh = False
+        pos.last_monitor_edge = None
+        pos.last_monitor_market_price = None
+        pos.last_monitor_best_bid = None
+        pos.last_monitor_best_ask = None
+        pos.last_monitor_market_vig = None
+
+
+def _record_monitor_data_degraded_attempt(
+    conn,
+    pos,
+    *,
+    artifact,
+    deps,
+    summary: dict,
+    stage: str,
+) -> bool:
+    """Persist one attempted redecision without inventing action authority.
+
+    A bounded q/book/metadata read that returns unavailable is still a real
+    monitor attempt. Leaving the prior MONITOR_REFRESHED timestamp untouched
+    makes the fair scheduler select the same failed head forever and blinds the
+    rest of the held book. Revoke both freshness witnesses before persisting so
+    the event cannot authorize BUY, SELL, or an economic HOLD; family-scoped
+    DATA_DEGRADED remains responsible for repairing the missing input.
+    """
+
+    _revoke_monitor_action_authority(pos)
+    pos.applied_validations = list(
+        dict.fromkeys(
+            [
+                *(getattr(pos, "applied_validations", []) or []),
+                "monitor_attempt_data_degraded_no_action_authority",
+            ]
+        )
+    )
+    normalized_stage = str(stage or "unknown").strip().upper()[:96]
+    reason = f"MONITOR_INPUTS_UNAVAILABLE:{normalized_stage}"
+    canonical_written = _emit_monitor_refreshed_canonical_if_available(
+        conn,
+        pos,
+        deps=deps,
+        decision_unavailable_reason=reason,
+        decision_unavailable_trigger="MONITOR_INPUTS_UNAVAILABLE",
+    )
+    if not canonical_written:
+        summary["monitor_canonical_write_failed"] = (
+            summary.get("monitor_canonical_write_failed", 0) + 1
+        )
+        return False
+    artifact.add_monitor_result(
+        deps.MonitorResult(
+            position_id=pos.trade_id,
+            fresh_prob=None,
+            fresh_edge=None,
+            should_exit=False,
+            exit_reason=reason,
+            neg_edge_count=pos.neg_edge_count,
+        )
+    )
+    summary["monitor_data_degraded_attempts"] = (
+        summary.get("monitor_data_degraded_attempts", 0) + 1
+    )
+    summary["monitors"] = summary.get("monitors", 0) + 1
+    _append_held_monitor_coverage_position_id(
+        summary,
+        "held_monitor_no_action_authority_position_ids",
+        pos,
+    )
+    _append_held_monitor_coverage_position_id(
+        summary,
+        "held_monitor_canonical_position_ids",
+        pos,
+    )
+    return True
+
+
+def _append_held_monitor_coverage_position_id(
+    summary: dict,
+    field: str,
+    pos,
+) -> None:
+    """Append one stable position identity to a pass-local coverage set."""
+
+    position_id = str(getattr(pos, "trade_id", "") or "").strip()
+    if not position_id:
+        return
+    position_ids = summary.setdefault(field, [])
+    if position_id not in position_ids:
+        position_ids.append(position_id)
 
 
 _FAMILY_OVERLAY_STATISTICAL_EXIT_TRIGGERS = frozenset(
@@ -3328,28 +3704,23 @@ _FAMILY_OVERLAY_STATISTICAL_EXIT_TRIGGERS = frozenset(
     }
 )
 
-# These monitor verdicts are estimates of one leg's terminal value. They do not
-# carry the global auction's current depth curve, fees, portfolio endowment, or
-# robust delta-log-wealth objective, so they may propose a SELL but never actuate
-# one locally. RED and absorbing Day0 hard facts are deliberately absent: their
-# direct reduce-only authority comes from risk/settlement truth, not this
-# statistical comparison.
-_GLOBAL_AUCTION_STATISTICAL_SELL_TRIGGERS = frozenset(
-    {
-        "CI_SEPARATED_REVERSAL",
-        "CI_OVERLAP_SELL_VALUE_DOMINATES",
-        "SETTLEMENT_IMMINENT",
-        "EDGE_REVERSAL",
-        "BUY_NO_EDGE_EXIT",
-        "BUY_NO_NEAR_EXIT",
-        # ultimate_alpha 2026-07-24: the unified stopping-law sell proposes and
-        # the global auction actuates — evaluate_exit's L(x) sees only the
-        # top-of-book bid, while the auction values the sell against the real
-        # depth curve, fees, and portfolio endowment (the closest existing
-        # machinery to the PR-2 allocator ΔJ). RED and absorbing Day0 hard
-        # facts remain deliberately absent (direct reduce-only authority).
-        "SELL_REVERSAL",
-    }
+# A monitor probability verdict estimates one leg's terminal value. It may
+# propose a SELL, but only the global auction carries current depth, fees,
+# correlated endowment, and capital ranking. Statistical authority is therefore
+# the default, not an allowlist: a new trigger must not fall through to a local
+# submit that the execution boundary will reject. RED, recomputed absorbing
+# Day0 facts, and exact zero support remain direct reduce-only authorities. A
+# durable market-relative rejection of the exact HOLD q is also direct: the
+# global auction cannot compare HOLD using the probability witness RiskGuard
+# just invalidated. Zero support is statistical in provenance but deterministic
+# in action: positive cash strictly dominates a zero-payoff token in every
+# represented branch. A strategy entry gate is not SELL authority: historical
+# evidence may stop new exposure, but held exposure remains subject to the
+# current global CASH/HOLD/SELL comparison.
+_DIRECT_REDUCE_ONLY_SELL_TRIGGERS = (
+    "RED_FORCE_EXIT",
+    "DAY0_HARD_FACT_BIN_DEAD",
+    "POSTERIOR_SUPPORT_ZERO_SELL_DOMINATES",
 )
 
 _FAMILY_OVERLAY_MIN_DIRECT_SELL_ADVANTAGE_USD = 0.05
@@ -3667,10 +4038,36 @@ def _day0_immature_exit_authority_reason(*sources) -> str | None:
 
 
 def _global_auction_owns_statistical_sell(exit_decision, exit_reason: str) -> bool:
-    trigger = str(getattr(exit_decision, "trigger", "") or exit_reason or "")
-    return any(
-        trigger.startswith(prefix)
-        for prefix in _GLOBAL_AUCTION_STATISTICAL_SELL_TRIGGERS
+    trigger = str(
+        getattr(exit_decision, "trigger", "") or exit_reason or ""
+    ).strip()
+    return trigger not in _DIRECT_REDUCE_ONLY_SELL_TRIGGERS
+
+
+def _posterior_support_zero_sell_dominates(pos, exit_context) -> bool:
+    """Return whether legal SELL proceeds dominate HOLD in every current draw."""
+
+    if not (
+        bool(getattr(exit_context, "fresh_prob_is_fresh", False))
+        and bool(getattr(exit_context, "current_market_price_is_fresh", False))
+    ):
+        return False
+    fresh_prob = _finite_float_or_none(getattr(exit_context, "fresh_prob", None))
+    best_bid = _finite_float_or_none(getattr(exit_context, "best_bid", None))
+    if fresh_prob is None or fresh_prob > 1e-12:
+        return False
+    if best_bid is None or not 0.05 <= best_bid <= 0.95:
+        return False
+    raw_samples = getattr(pos, "_current_global_held_probability_samples", None)
+    if raw_samples is None:
+        return False
+    try:
+        samples = tuple(float(value) for value in raw_samples)
+    except (TypeError, ValueError):
+        return False
+    return bool(samples) and all(
+        math.isfinite(value) and 0.0 <= value <= 1e-12
+        for value in samples
     )
 
 
@@ -4255,7 +4652,14 @@ def _closed_by_static_market_end_info(conn, pos, *, decision_time: datetime | No
     }
 
 
-def _closed_non_accepting_market_info(clob, pos, conn=None, *, decision_time: datetime | None = None) -> dict | None:
+def _closed_non_accepting_market_info(
+    clob,
+    pos,
+    conn=None,
+    *,
+    decision_time: datetime | None = None,
+    deadline_monotonic: float | None = None,
+) -> dict | None:
     static_closed = _closed_by_static_market_end_info(
         conn,
         pos,
@@ -4281,12 +4685,53 @@ def _closed_non_accepting_market_info(clob, pos, conn=None, *, decision_time: da
     ):
         return static_closed
 
-    get_market_info = getattr(clob, "get_clob_market_info", None)
+    get_market_info = (
+        getattr(clob, "get_held_clob_market_info", None)
+        if deadline_monotonic is not None
+        else getattr(clob, "get_clob_market_info", None)
+    )
     if condition_id and callable(get_market_info):
-        try:
-            info = get_market_info(condition_id)
-        except Exception:
-            info = None
+        if (
+            deadline_monotonic is not None
+            and time.monotonic() >= float(deadline_monotonic)
+        ):
+            return static_closed
+        if deadline_monotonic is None:
+            try:
+                info = get_market_info(condition_id)
+            except Exception:
+                info = None
+        else:
+            remaining = float(deadline_monotonic) - time.monotonic()
+            # The held-risk adapter owns a timeout-capable contract. Transport
+            # failures remain visible to the monitor failure lane; only an
+            # identical request already being served may reuse no new close
+            # evidence and continue through current q/book redecision.
+            try:
+                info = get_market_info(
+                    condition_id,
+                    timeout=max(0.0, remaining),
+                )
+            except Exception as exc:
+                from src.data.polymarket_request_governor import (
+                    RequestAdmissionDenied,
+                )
+
+                # SCOPE: only an identical held-risk metadata request already
+                # in flight. DRAIN: its bounded owner records success/failure;
+                # this monitor continues through current q/book redecision.
+                # RESET: the next monitor retries metadata after lease release.
+                if isinstance(exc, RequestAdmissionDenied) and str(exc).startswith(
+                    "POLYMARKET_REQUEST_IN_FLIGHT:"
+                ):
+                    info = None
+                else:
+                    raise
+        if (
+            deadline_monotonic is not None
+            and time.monotonic() >= float(deadline_monotonic)
+        ):
+            return static_closed
         if info is not None:
             closed = _market_info_value(info, "closed")
             accepting_orders = _market_info_value(info, "accepting_orders", "acceptingOrders")
@@ -4333,6 +4778,7 @@ def _held_monitor_schedule_key(
     pos,
     *,
     deadline_rescue_position_id: int | None,
+    durable_debt_position_id: int | None,
     dead_bin_position_ids: frozenset[int],
     selected_urgent_position_ids: frozenset[int],
     selected_coverage_position_ids: frozenset[int],
@@ -4350,11 +4796,25 @@ def _held_monitor_schedule_key(
     )
     if position_id == deadline_rescue_position_id:
         return -4, urgency
+    if (
+        position_id in dead_bin_position_ids
+        and position_id in selected_urgent_position_ids
+    ):
+        return -3, urgency
+    # The oldest canonical debt is the first non-absorbing service obligation.
+    # Repeated pending-exit/Day0 wakes must not consume its reserved belief read.
+    if position_id == durable_debt_position_id:
+        return -2, -1
     if position_id in selected_urgent_position_ids:
-        return (-3 if position_id in dead_bin_position_ids else -2), urgency
+        return -1, urgency
     if has_selected_urgent:
         if position_id in selected_coverage_position_ids:
-            return -1, urgency if urgency < 2 else 2 + int(network_dependent)
+            return -1, (-2 + urgency) * 2 + int(network_dependent)
+        # Durable fairness is service, not admission.  It gets the first
+        # optional slot only after the guaranteed belief slice, so one stale
+        # debt read cannot precede and then expand that bounded slice.
+        if position_id == durable_debt_position_id:
+            return -1, 1
         if position_id in reserved_local_position_ids:
             return -1, 2
         if position_id == reserved_network_position_id:
@@ -4362,12 +4822,14 @@ def _held_monitor_schedule_key(
         if position_id in dead_bin_position_ids or urgency < 2:
             return 0, urgency
         return 1, int(network_dependent)
+    if position_id in selected_coverage_position_ids:
+        return 0, -1 + int(network_dependent)
     if position_id in reserved_local_position_ids:
         return 0, 0
     if position_id == reserved_network_position_id:
         return 0, 1
-    if position_id in selected_coverage_position_ids:
-        return 0, 1 if network_dependent else 0
+    if position_id == durable_debt_position_id:
+        return 0, 2
     return 1, 1 if network_dependent else 0
 
 
@@ -4396,6 +4858,7 @@ def _reserve_held_monitor_positions(
     limit: int,
     priority_key: Callable[[object], object] | None = None,
     fair_by_attempt: bool = False,
+    durable_only: bool = False,
 ) -> list:
     """Select a thread-safe fair slice, seeded by durable monitor progress."""
 
@@ -4407,6 +4870,16 @@ def _reserve_held_monitor_positions(
         return []
     if limit <= 0:
         return []
+    if durable_only:
+        ordered = sorted(
+            positions,
+            key=lambda pos: (
+                bool(str(getattr(pos, "_canonical_monitor_refreshed_at", "") or "")),
+                str(getattr(pos, "_canonical_monitor_refreshed_at", "") or ""),
+                _held_monitor_stable_position_key(pos),
+            ),
+        )
+        return ordered[: min(limit, len(ordered))]
     if fair_by_attempt or all(
         hasattr(pos, "_canonical_monitor_refreshed_at") for pos in positions
     ):
@@ -4505,6 +4978,8 @@ def _fresh_local_held_monitor_orderbooks(
     now_utc: datetime,
     summary: dict,
     deps,
+    deadline_monotonic: float | None = None,
+    captured_at_out: list[datetime] | None = None,
 ) -> dict[str, dict]:
     if conn is None:
         return {}
@@ -4520,40 +4995,128 @@ def _fresh_local_held_monitor_orderbooks(
         return {}
     values_sql = ",".join("(?, ?)" for _ in scope)
     params = [part for pair in scope for part in pair]
-    params.append(now_utc.astimezone(timezone.utc).isoformat())
+    checked_at = now_utc.astimezone(timezone.utc).isoformat()
+    params.extend((checked_at, checked_at, checked_at))
+    progress_handler_installed = False
+    if deadline_monotonic is not None:
+        if time.monotonic() >= float(deadline_monotonic):
+            summary["held_monitor_orderbook_prefetch_defer_reason"] = (
+                "AUXILIARY_DEADLINE_EXPIRED"
+            )
+            return {}
+        set_progress_handler = getattr(conn, "set_progress_handler", None)
+        if callable(set_progress_handler):
+            set_progress_handler(
+                lambda: int(time.monotonic() >= float(deadline_monotonic)),
+                1_000,
+            )
+            progress_handler_installed = True
     try:
+        invalidation_table = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' "
+            "AND name='executable_market_snapshot_invalidations' LIMIT 1"
+        ).fetchone()
+        if invalidation_table is None:
+            return {}
         rows = conn.execute(
             f"""
             WITH requested(condition_id, token_id) AS (
                 VALUES {values_sql}
             )
             SELECT latest.selected_outcome_token_id,
-                   snapshot.orderbook_depth_json
+                   snapshot.orderbook_depth_json,
+                   latest.captured_at,
+                   latest.active,
+                   latest.closed,
+                   latest.accepting_orders,
+                   latest.tradeability_status_json
               FROM requested
               JOIN executable_market_snapshot_latest AS latest
                 ON latest.condition_id = requested.condition_id
                AND latest.selected_outcome_token_id = requested.token_id
               JOIN executable_market_snapshots AS snapshot
                 ON snapshot.snapshot_id = latest.snapshot_id
-             WHERE latest.active = 1
-               AND latest.closed = 0
-               AND latest.accepting_orders = 1
-               AND latest.freshness_deadline >= ?
+               AND snapshot.condition_id = latest.condition_id
+               AND snapshot.selected_outcome_token_id =
+                   latest.selected_outcome_token_id
+               AND snapshot.yes_token_id = latest.yes_token_id
+               AND snapshot.no_token_id = latest.no_token_id
+               AND snapshot.active = latest.active
+               AND snapshot.closed = latest.closed
+               AND snapshot.accepting_orders IS latest.accepting_orders
+               AND snapshot.captured_at = latest.captured_at
+               AND snapshot.freshness_deadline = latest.freshness_deadline
+               AND snapshot.tradeability_status_json IS
+                   latest.tradeability_status_json
+             WHERE julianday(latest.freshness_deadline) IS NOT NULL
+               AND julianday(latest.captured_at) IS NOT NULL
+               AND julianday(latest.freshness_deadline) >= julianday(?)
+               AND julianday(latest.captured_at) <= julianday(?)
+               AND NOT EXISTS (
+                    SELECT 1
+                      FROM executable_market_snapshot_invalidations AS invalidation
+                     WHERE (
+                            invalidation.condition_id = latest.condition_id
+                            OR invalidation.token_id IN (
+                                latest.selected_outcome_token_id,
+                                latest.yes_token_id,
+                                latest.no_token_id
+                            )
+                       )
+                       AND (
+                            julianday(invalidation.invalidated_at) IS NULL
+                            OR (
+                                julianday(invalidation.invalidated_at) >=
+                                    julianday(latest.captured_at)
+                                AND julianday(invalidation.invalidated_at) <=
+                                    julianday(?)
+                            )
+                       )
+               )
             """,
             params,
         ).fetchall()
     except Exception as exc:  # noqa: BLE001 - network remains the fallback.
+        if (
+            deadline_monotonic is not None
+            and time.monotonic() >= float(deadline_monotonic)
+        ):
+            summary["held_monitor_orderbook_prefetch_defer_reason"] = (
+                "AUXILIARY_DEADLINE_EXPIRED"
+            )
         summary["held_monitor_local_orderbook_error"] = str(exc)[:500]
         deps.logger.warning(
             "held monitor local orderbook prefetch failed; using network fallback: %s",
             exc,
         )
         return {}
+    finally:
+        if progress_handler_installed:
+            conn.set_progress_handler(None, 0)
+
+    if (
+        deadline_monotonic is not None
+        and time.monotonic() >= float(deadline_monotonic)
+    ):
+        summary["held_monitor_orderbook_prefetch_defer_reason"] = (
+            "AUXILIARY_DEADLINE_EXPIRED"
+        )
+        return {}
 
     books: dict[str, dict] = {}
+    captured_times: list[datetime] = []
+    from src.engine.monitor_refresh import _monitor_snapshot_is_executable
+
     for row in rows:
         try:
-            token_id, raw_book = row[0], row[1]
+            token_id, raw_book, raw_captured_at = row[0], row[1], row[2]
+            if not _monitor_snapshot_is_executable(
+                active=row[3],
+                closed=row[4],
+                accepting_orders=row[5],
+                tradeability_status_json=row[6],
+            ):
+                continue
             book = json.loads(str(raw_book))
         except (IndexError, TypeError, ValueError, json.JSONDecodeError):
             continue
@@ -4564,8 +5127,13 @@ def _fresh_local_held_monitor_orderbooks(
             or book.get("token_id")
             or ""
         ).strip()
-        if token_id and (not asset_id or asset_id == token_id):
+        if token_id and asset_id == token_id:
             books[token_id] = book
+            captured_at = _parse_utc_timestamp(raw_captured_at)
+            if captured_at is not None:
+                captured_times.append(captured_at)
+    if captured_at_out is not None and captured_times:
+        captured_at_out.append(min(captured_times))
     return books
 
 
@@ -4578,13 +5146,18 @@ def _prefetch_held_monitor_orderbooks(
     now_utc: datetime,
     deps,
     local_only: bool = False,
+    preserve_existing: bool = False,
+    mark_unfetched_attempted: bool = True,
+    deadline_monotonic: float | None = None,
 ) -> frozenset[str]:
     from src.data.market_scanner import _configured_batch_orderbook_getter
-    from src.engine.monitor_refresh import install_monitor_orderbook_prefetch
+    from src.engine.monitor_refresh import (
+        install_monitor_orderbook_prefetch,
+        monitor_orderbook_prefetch_attempted,
+        publish_current_monitor_orderbook_batch,
+        prefetched_monitor_orderbook,
+    )
 
-    # A client may survive across cycles. Clear the prior cycle before any
-    # return or failed fetch so stale executable truth cannot be reused.
-    install_monitor_orderbook_prefetch(clob, {})
     getter = _configured_batch_orderbook_getter(clob)
     token_ids = list(
         dict.fromkeys(
@@ -4593,46 +5166,249 @@ def _prefetch_held_monitor_orderbooks(
             if (token_id := _position_held_token_id(pos))
         )
     )
+    existing_books: dict[str, dict] = {}
+    existing_attempted: set[str] = set()
+    if preserve_existing:
+        for token_id in token_ids:
+            book = prefetched_monitor_orderbook(clob, token_id)
+            if book is not None:
+                existing_books[token_id] = book
+            if monitor_orderbook_prefetch_attempted(clob, token_id):
+                existing_attempted.add(token_id)
+    else:
+        # A client may survive across cycles. Clear the prior cycle before any
+        # return or failed fetch so stale executable truth cannot be reused.
+        install_monitor_orderbook_prefetch(clob, {})
+        publish_current_monitor_orderbook_batch({}, captured_at_utc=None)
     summary["held_monitor_orderbooks_requested"] = len(token_ids)
-    local_books = _fresh_local_held_monitor_orderbooks(
+    summary["held_monitor_orderbooks_published_for_global_sell"] = 0
+    if (
+        local_only
+        and deadline_monotonic is not None
+        and time.monotonic() >= float(deadline_monotonic)
+    ):
+        summary["held_monitor_orderbook_prefetch_defer_reason"] = (
+            "AUXILIARY_DEADLINE_EXPIRED"
+        )
+        summary["held_monitor_orderbook_prefetch_bypassed"] = True
+        install_monitor_orderbook_prefetch(
+            clob,
+            {},
+            merge=preserve_existing,
+        )
+        return frozenset()
+    local_capture_times: list[datetime] = []
+    fresh_local_books = _fresh_local_held_monitor_orderbooks(
         conn,
         positions,
         now_utc=now_utc,
         summary=summary,
         deps=deps,
+        deadline_monotonic=deadline_monotonic,
+        captured_at_out=local_capture_times,
     )
+    local_books = {**existing_books, **fresh_local_books}
     summary["held_monitor_orderbooks_local"] = len(local_books)
     missing_token_ids = [
-        token_id for token_id in token_ids if token_id not in local_books
+        token_id
+        for token_id in token_ids
+        if token_id not in local_books and token_id not in existing_attempted
     ]
     summary["held_monitor_orderbooks_network_requested"] = len(missing_token_ids)
     if local_only or not missing_token_ids or getter is None:
-        installed = install_monitor_orderbook_prefetch(clob, local_books)
+        published = publish_current_monitor_orderbook_batch(
+            fresh_local_books,
+            captured_at_utc=(
+                min(local_capture_times) if local_capture_times else None
+            ),
+            merge=preserve_existing,
+        )
+        summary["held_monitor_orderbooks_published_for_global_sell"] = published
+        attempted = (
+            existing_attempted
+            | (set(missing_token_ids) if mark_unfetched_attempted else set())
+        )
+        installed = install_monitor_orderbook_prefetch(
+            clob,
+            local_books,
+            attempted_token_ids=attempted,
+            merge=preserve_existing,
+        )
         summary["held_monitor_orderbook_prefetch_installed"] = installed
         summary["held_monitor_orderbooks_prefetched"] = (
             len(local_books) if installed else 0
         )
         return frozenset(missing_token_ids if installed else token_ids)
+    batch_transport_failed = False
+    network_attempted_token_ids = set(missing_token_ids)
+    network_unattempted_token_ids: set[str] = set()
+    network_terminal_reason = "complete"
+    network_captured_at: datetime | None = None
+    typed_network_result = False
+    from src.data.polymarket_client import (
+        HeldOrderbookReadResult,
+        PolymarketClient,
+    )
+
     try:
-        network_books = getter(missing_token_ids)
-        if not isinstance(network_books, dict):
-            raise TypeError("batch orderbook response must be a mapping")
+        if deadline_monotonic is not None:
+            remaining = float(deadline_monotonic) - time.monotonic()
+            if remaining <= 0.0:
+                raise TimeoutError("held monitor orderbook deadline elapsed")
+            network_result = (
+                clob.get_held_orderbook_snapshots_hard_deadline(
+                    missing_token_ids,
+                    timeout_seconds=remaining,
+                )
+                if isinstance(clob, PolymarketClient)
+                else getter(missing_token_ids)
+            )
+            # A prior bounded singular read may have populated this cycle's
+            # cache while the shared batch was being scheduled. Preserve it.
+            if isinstance(network_result, dict):
+                for token_id in missing_token_ids:
+                    if token_id in network_result:
+                        continue
+                    cached = prefetched_monitor_orderbook(clob, token_id)
+                    if cached is not None:
+                        network_result[token_id] = cached
+        else:
+            network_result = getter(missing_token_ids)
+        if isinstance(network_result, HeldOrderbookReadResult):
+            typed_network_result = True
+            network_books = dict(network_result)
+            network_attempted_token_ids = set(network_result.attempted_token_ids)
+            network_unattempted_token_ids = set(
+                network_result.unattempted_token_ids
+            )
+            network_terminal_reason = network_result.terminal_reason
+            network_captured_at = network_result.captured_at
+            if network_terminal_reason != "complete":
+                batch_transport_failed = True
+                summary["held_monitor_orderbook_prefetch_error"] = (
+                    network_terminal_reason
+                )[:500]
+                deps.logger.warning(
+                    "held monitor bounded orderbook prefetch ended with %s; "
+                    "installing completed chunks and deferring only gaps",
+                    network_terminal_reason,
+                )
+        else:
+            network_books = network_result
     except Exception as exc:  # noqa: BLE001 - one failed batch must not fan out.
+        batch_transport_failed = True
+        network_terminal_reason = f"batch_error:{type(exc).__name__}"
         summary["held_monitor_orderbook_prefetch_error"] = str(exc)[:500]
         network_books = {}
         deps.logger.warning(
-            "held monitor batch orderbook prefetch failed; deferring ordinary quote reads: %s",
+            "held monitor batch orderbook prefetch failed; deferring missing "
+            "positions until the next bounded cycle: %s",
             exc,
         )
+    else:
+        if not isinstance(network_books, dict):
+            exc = TypeError("batch orderbook response must be a mapping")
+            batch_transport_failed = True
+            network_terminal_reason = "invalid_batch_response"
+            summary["held_monitor_orderbook_prefetch_error"] = str(exc)[:500]
+            network_books = {}
+            deps.logger.warning(
+                "held monitor batch orderbook prefetch returned an invalid response; "
+                "deferring ordinary quote reads: %s",
+                exc,
+            )
+    summary["held_monitor_orderbook_prefetch_transport_failed"] = (
+        batch_transport_failed
+    )
+    network_deferred_token_ids = (
+        set(missing_token_ids) - set(network_books)
+        if typed_network_result or batch_transport_failed
+        else set()
+    )
+    summary["held_monitor_orderbook_prefetch_partial_progress"] = bool(
+        typed_network_result
+        and network_books
+        and network_terminal_reason != "complete"
+    )
+    summary["held_monitor_orderbook_prefetch_attempted_token_ids"] = [
+        token_id
+        for token_id in missing_token_ids
+        if token_id in network_attempted_token_ids
+    ]
+    summary["held_monitor_orderbook_prefetch_unattempted_token_ids"] = [
+        token_id
+        for token_id in missing_token_ids
+        if token_id in network_unattempted_token_ids
+    ]
+    summary["held_monitor_orderbook_prefetch_deferred_token_ids"] = [
+        token_id
+        for token_id in missing_token_ids
+        if token_id in network_deferred_token_ids
+    ]
+    summary["held_monitor_orderbook_prefetch_terminal_reason"] = (
+        network_terminal_reason
+    )
     books = {**local_books, **network_books}
+    publish_books = {**fresh_local_books, **network_books}
+    if network_books and network_captured_at is None:
+        network_captured_at = datetime.now(timezone.utc)
+    publish_capture_times = [*local_capture_times]
+    if network_captured_at is not None:
+        publish_capture_times.append(network_captured_at)
+    published = publish_current_monitor_orderbook_batch(
+        publish_books,
+        captured_at_utc=(
+            min(publish_capture_times) if publish_capture_times else None
+        ),
+        merge=preserve_existing,
+    )
+    summary["held_monitor_orderbooks_published_for_global_sell"] = published
     installed = install_monitor_orderbook_prefetch(
         clob,
         books,
-        attempted_token_ids=missing_token_ids,
+        attempted_token_ids=existing_attempted | network_attempted_token_ids,
+        merge=preserve_existing,
     )
     summary["held_monitor_orderbook_prefetch_installed"] = installed
     summary["held_monitor_orderbooks_prefetched"] = len(books) if installed else 0
-    return frozenset(missing_token_ids if installed else token_ids)
+    return frozenset(network_deferred_token_ids if installed else token_ids)
+
+
+def _mark_held_monitor_orderbook_attempted(
+    clob,
+    positions,
+    attempted_token_id: str,
+) -> bool:
+    """Preserve cycle-local books while recording one completed singular attempt."""
+
+    from src.engine.monitor_refresh import (
+        install_monitor_orderbook_prefetch,
+        monitor_orderbook_prefetch_attempted,
+        prefetched_monitor_orderbook,
+    )
+
+    token_ids = {
+        token_id
+        for pos in positions
+        if (token_id := _position_held_token_id(pos))
+    }
+    token_ids.add(str(attempted_token_id))
+    books = {
+        token_id: book
+        for token_id in token_ids
+        if (book := prefetched_monitor_orderbook(clob, token_id)) is not None
+    }
+    attempted = {
+        token_id
+        for token_id in token_ids
+        if monitor_orderbook_prefetch_attempted(clob, token_id)
+    }
+    attempted.add(str(attempted_token_id))
+    return install_monitor_orderbook_prefetch(
+        clob,
+        books,
+        attempted_token_ids=attempted,
+    )
 
 
 def _blocking_review_fact_for_position(portfolio, pos):
@@ -4813,26 +5589,38 @@ def _build_exit_context(
         _pos_entry_posterior = float(pos.p_posterior)
     except (TypeError, ValueError):
         _pos_entry_posterior = None
+    _fresh_post_finite = _finite_float_or_none(_fresh_post)
+    _cb_lo_finite = _finite_float_or_none(_cb_lo)
+    _cb_hi_finite = _finite_float_or_none(_cb_hi)
+    _held_price_finite = _finite_float_or_none(_held_price)
+    current_belief_finite = (
+        bool(getattr(pos, "last_monitor_prob_is_fresh", False))
+        and bool(getattr(pos, "last_monitor_market_price_is_fresh", False))
+        and _fresh_post_finite is not None
+        and _cb_lo_finite is not None
+        and _cb_hi_finite is not None
+        and _held_price_finite is not None
+    )
+    if current_belief_finite:
+        # Current hold value is independent of the sunk entry certificate.  A
+        # recovered fill may temporarily lack its historical entry witness, but
+        # that must not suppress a complete fresh q/book comparison and trap
+        # real exposure in EVIDENCE_UNAVAILABLE.
+        _current_ci = (
+            max(0.0, _cb_lo_finite + _held_price_finite),
+            min(1.0, _cb_hi_finite + _held_price_finite),
+        )
     if (
         _pos_entry_posterior is not None
         and math.isfinite(_pos_entry_posterior)
         and 0.0 < _pos_entry_posterior < 1.0
-        and _fresh_post is not None and math.isfinite(float(_fresh_post))
-        and _cb_lo is not None and _cb_hi is not None and _held_price is not None
-        and math.isfinite(float(_cb_lo)) and math.isfinite(float(_cb_hi))
-        and math.isfinite(float(_held_price))
     ):
-        # Both entry and a finite CURRENT belief CI are available → arm the CI-separation gate.
+        # Historical entry belief remains an independent attribution surface.
         _entry_posterior = _pos_entry_posterior
         _ci_half = max(0.0, float(getattr(pos, "entry_ci_width", 0.0) or 0.0)) / 2.0
         _entry_ci = (
             max(0.0, _entry_posterior - _ci_half),
             min(1.0, _entry_posterior + _ci_half),
-        )
-        # Shift edge-space band → belief space by adding the held-side price back.
-        _current_ci = (
-            max(0.0, float(_cb_lo) + float(_held_price)),
-            min(1.0, float(_cb_hi) + float(_held_price)),
         )
 
     # Receipt-only evidence for the later family telemetry. Always overwrite
@@ -4973,6 +5761,7 @@ def _refresh_pending_exit_retry_quote_from_current_clob(
     pos,
     exit_context,
     identity_seed_allowed: bool,
+    deadline_monotonic: float | None = None,
 ):
     """Use stale snapshot identity only to find the held token; price comes from CLOB."""
 
@@ -4981,22 +5770,34 @@ def _refresh_pending_exit_retry_quote_from_current_clob(
         or conn is None
         or clob is None
         or getattr(exit_context, "current_market_price_is_fresh", False)
+        or (
+            deadline_monotonic is not None
+            and time.monotonic() >= float(deadline_monotonic)
+        )
     ):
         return exit_context, False
 
     token_id = _held_exit_token_from_snapshot_identity(conn, pos)
     if not token_id:
         return exit_context, False
-    quote_fn = getattr(clob, "get_best_bid_ask", None)
-    if not callable(quote_fn):
-        return exit_context, False
+
+    from src.engine.monitor_refresh import (
+        _HELD_MONITOR_DEADLINE_ATTR,
+        monitor_quote_refresh,
+    )
+
+    previous_deadline = getattr(pos, _HELD_MONITOR_DEADLINE_ATTR, None)
+    had_previous_deadline = hasattr(pos, _HELD_MONITOR_DEADLINE_ATTR)
+    if deadline_monotonic is not None:
+        setattr(pos, _HELD_MONITOR_DEADLINE_ATTR, float(deadline_monotonic))
 
     try:
-        bid, ask, bid_size, ask_size = quote_fn(token_id)
-        bid_f = float(bid)
-        ask_f = float(ask)
-        bid_size_f = float(bid_size)
-        ask_size_f = float(ask_size)
+        quote = monitor_quote_refresh(
+            conn,
+            clob,
+            pos,
+            retry_after_prefetch=True,
+        )
     except Exception as exc:
         logger.debug(
             "Exit retry current CLOB quote failed for %s token=%s: %s",
@@ -5005,25 +5806,50 @@ def _refresh_pending_exit_retry_quote_from_current_clob(
             exc,
         )
         return exit_context, False
+    finally:
+        if deadline_monotonic is not None:
+            if had_previous_deadline:
+                setattr(pos, _HELD_MONITOR_DEADLINE_ATTR, previous_deadline)
+            else:
+                try:
+                    delattr(pos, _HELD_MONITOR_DEADLINE_ATTR)
+                except AttributeError:
+                    pass
+
     if (
-        not math.isfinite(bid_f)
-        or not math.isfinite(ask_f)
-        or not math.isfinite(bid_size_f)
-        or not math.isfinite(ask_size_f)
-        or bid_f <= 0.0
-        or ask_f <= 0.0
-        or bid_size_f <= 0.0
-        or ask_size_f <= 0.0
-        or bid_f > ask_f
+        quote is None
+        or (
+            deadline_monotonic is not None
+            and time.monotonic() >= float(deadline_monotonic)
+        )
     ):
         return exit_context, False
-
-    from src.strategy.market_fusion import vwmp
-
-    telemetry_market_price = (
-        bid_f if _position_state_value(pos) == "day0_window" else float(vwmp(bid_f, ask_f, bid_size_f, ask_size_f))
-    )
-    source_timestamp = datetime.now(timezone.utc).isoformat()
+    try:
+        bid_f = float(quote.best_bid)
+        ask_f = (
+            float(quote.best_ask)
+            if quote.best_ask is not None
+            else None
+        )
+        bid_size_f = float(quote.bid_size)
+        ask_size_f = float(quote.ask_size)
+        telemetry_market_price = float(quote.mark_price)
+    except (TypeError, ValueError):
+        return exit_context, False
+    if (
+        not math.isfinite(bid_f)
+        or not math.isfinite(bid_size_f)
+        or not math.isfinite(ask_size_f)
+        or not math.isfinite(telemetry_market_price)
+        or bid_f <= 0.0
+        or bid_size_f <= 0.0
+        or (
+            ask_f is not None
+            and (not math.isfinite(ask_f) or ask_f <= 0.0 or bid_f > ask_f)
+        )
+    ):
+        return exit_context, False
+    source_timestamp = str(quote.source_timestamp)
     pos.last_monitor_best_bid = bid_f
     pos.last_monitor_best_ask = ask_f
     pos.last_monitor_market_price = telemetry_market_price
@@ -5036,6 +5862,8 @@ def _refresh_pending_exit_retry_quote_from_current_clob(
             current_market_price_is_fresh=True,
             best_bid=bid_f,
             best_ask=ask_f,
+            bid_size=bid_size_f,
+            bid_ladder=quote.bid_ladder,
         ),
         True,
     )
@@ -5047,6 +5875,93 @@ def _monitor_probability_content_identity(receipt: object) -> str:
     if not isinstance(receipt, dict):
         return ""
     return str(receipt.get("probability_content_identity") or "").strip()
+
+
+def _live_order_quote_is_executable(value: float) -> bool:
+    """Classify a held SELL quote against the durable live-order price band.
+
+    SCOPE: only the current held-token book in one reauction request.
+    DRAIN: every monitor or recovery refresh reclassifies the newest exact bid.
+    RESET: the next finite in-band bid immediately restores EXECUTABLE state.
+    """
+
+    return (
+        math.isfinite(value)
+        and LIVE_ORDER_MIN_UNIT_PRICE
+        <= Decimal(str(value))
+        <= LIVE_ORDER_MAX_UNIT_PRICE
+    )
+
+
+def _monitor_global_sell_request_context(position, exit_context) -> dict[str, object]:
+    """Bind a monitor SELL to exact q/book evidence or request reactor refresh.
+
+    A replacement-posterior monitor receipt may carry only one held-bin scalar;
+    it cannot mint the full-family probability-content identity owned by the
+    global auction.  Preserve that distinction with a V4 ``UNKNOWN`` attempt so
+    the reactor durably rebuilds the MECE family witness before acting.
+    """
+
+    receipt = getattr(position, "_day0_monitor_probability_receipt", None)
+    if not isinstance(receipt, dict):
+        receipt = getattr(position, "_monitor_probability_receipt", None)
+    probability_content_identity = _monitor_probability_content_identity(receipt)
+    if not probability_content_identity:
+        return {
+            "probability_content_identity": "",
+            "probability_observed_at": "",
+            "held_best_bid": None,
+            "bid_observed_at": "",
+            "book_state": "UNKNOWN",
+        }
+    observation = receipt.get("observation") if isinstance(receipt, dict) else None
+    physical_clock = (
+        observation.get("physical_frontier_clock")
+        if isinstance(observation, dict)
+        else None
+    )
+    probability_observed_at = str(
+        receipt.get("probability_observed_at")
+        or receipt.get("computed_at")
+        or (
+            physical_clock.get("observation_available_at")
+            if isinstance(physical_clock, dict)
+            else ""
+        )
+        or (
+            observation.get("observation_available_at")
+            if isinstance(observation, dict)
+            else ""
+        )
+        or ""
+    ).strip()
+    held_best_bid = exit_context.best_bid
+    bid_observed_at = str(getattr(position, "last_monitor_at", "") or "")
+    if held_best_bid is None:
+        book_state = "UNKNOWN"
+    else:
+        try:
+            held_best_bid = float(held_best_bid)
+        except (TypeError, ValueError):
+            held_best_bid = None
+            book_state = "UNKNOWN"
+        else:
+            if not math.isfinite(held_best_bid):
+                held_best_bid = None
+                book_state = "UNKNOWN"
+            elif not _live_order_quote_is_executable(held_best_bid):
+                book_state = "NO_EXECUTABLE_BOOK"
+            elif not bid_observed_at:
+                book_state = "STALE"
+            else:
+                book_state = "EXECUTABLE"
+    return {
+        "probability_content_identity": probability_content_identity,
+        "probability_observed_at": probability_observed_at,
+        "held_best_bid": held_best_bid,
+        "bid_observed_at": bid_observed_at,
+        "book_state": book_state,
+    }
 
 
 def _current_monitor_global_holding_coverage(
@@ -5062,8 +5977,22 @@ def _current_monitor_global_holding_coverage(
 ):
     """Resolve one monitor-epoch ledger and the current held-token book."""
 
+    from src.engine.global_batch_runtime import (
+        CurrentGlobalHoldingCoverage,
+        GlobalHoldingCoverageOutcome,
+    )
+
+    def unavailable(
+        outcome: GlobalHoldingCoverageOutcome,
+        reason: str,
+    ) -> CurrentGlobalHoldingCoverage:
+        return CurrentGlobalHoldingCoverage(outcome=outcome, reason=reason)
+
     if conn is None or checked_at_utc.tzinfo is None:
-        return None
+        return unavailable(
+            GlobalHoldingCoverageOutcome.COVERAGE_PARTITION,
+            "GLOBAL_HOLDING_COVERAGE_MONITOR_INPUT_INCOMPLETE",
+        )
     try:
         from src.contracts.executable_market_snapshot import (
             FRESHNESS_WINDOW_DEFAULT,
@@ -5077,6 +6006,7 @@ def _current_monitor_global_holding_coverage(
         from src.engine.global_batch_runtime import (
             _CurrentHoldingWitness,
             current_global_holding_coverage,
+            held_sell_reauction_coverage,
         )
         from src.engine.global_single_order_auction import (
             global_sell_book_witness_identity,
@@ -5098,6 +6028,44 @@ def _current_monitor_global_holding_coverage(
             return value.astimezone(timezone.utc)
 
         checked = checked_at_utc.astimezone(timezone.utc)
+        position_id = str(
+            getattr(position, "position_id", "")
+            or getattr(position, "trade_id", "")
+            or ""
+        )
+        direction_raw = getattr(position, "direction", "")
+        direction = str(
+            getattr(direction_raw, "value", direction_raw) or ""
+        ).lower()
+        if direction == "buy_yes":
+            side = "YES"
+            token_id = str(getattr(position, "token_id", "") or "").strip()
+        elif direction == "buy_no":
+            side = "NO"
+            token_id = str(getattr(position, "no_token_id", "") or "").strip()
+        else:
+            return unavailable(
+                GlobalHoldingCoverageOutcome.COVERAGE_PARTITION,
+                "GLOBAL_HOLDING_COVERAGE_SIDE_UNSUPPORTED",
+            )
+        family = (
+            str(getattr(position, "city", "") or ""),
+            str(getattr(position, "target_date", "") or ""),
+            str(getattr(position, "temperature_metric", "") or "").lower(),
+        )
+        # Absence of an exact published lease is cheap and authoritative.
+        # Witness I/O cannot create coverage and must not delay reservation of
+        # the V4 SELL obligation while an executable bid is disappearing.
+        if held_sell_reauction_coverage(
+            position_id=position_id,
+            probability_content_identity=probability_content_identity,
+            token_id=token_id,
+            family=family,
+        ) is None:
+            return unavailable(
+                GlobalHoldingCoverageOutcome.COVERAGE_NOT_PUBLISHED,
+                "GLOBAL_HOLDING_COVERAGE_NOT_PUBLISHED",
+            )
         wealth_max_age = timedelta(
             seconds=float(COLLATERAL_SNAPSHOT_MAX_AGE_SECONDS)
         )
@@ -5106,7 +6074,10 @@ def _current_monitor_global_holding_coverage(
         ):
             wealth = wealth_witness_cache.get("witness")
             if wealth is None:
-                return None
+                return unavailable(
+                    GlobalHoldingCoverageOutcome.WEALTH,
+                    "GLOBAL_HOLDING_COVERAGE_WEALTH_UNAVAILABLE",
+                )
         else:
             try:
                 wealth = current_portfolio_wealth_witness(
@@ -5128,35 +6099,27 @@ def _current_monitor_global_holding_coverage(
             checked < wealth_captured_at
             or checked - wealth_captured_at > wealth.max_age
         ):
-            return None
-        direction_raw = getattr(position, "direction", "")
-        direction = str(
-            getattr(direction_raw, "value", direction_raw) or ""
-        ).lower()
-        if direction == "buy_yes":
-            side = "YES"
-            token_id = str(getattr(position, "token_id", "") or "").strip()
-        elif direction == "buy_no":
-            side = "NO"
-            token_id = str(getattr(position, "no_token_id", "") or "").strip()
-        else:
-            return None
+            return unavailable(
+                GlobalHoldingCoverageOutcome.WEALTH,
+                "GLOBAL_HOLDING_COVERAGE_WEALTH_EXPIRED",
+            )
         native_holdings = {
             str(token): Decimal(int(amount)) / Decimal("1000000")
             for token, amount in tuple(wealth.native_holdings_micro or ())
         }
         held_shares = native_holdings.get(token_id)
         if held_shares is None or held_shares <= 0:
-            return None
+            return unavailable(
+                GlobalHoldingCoverageOutcome.WEALTH,
+                "GLOBAL_HOLDING_COVERAGE_HELD_SHARES_UNAVAILABLE",
+            )
         condition_id = str(
             getattr(position, "condition_id", "") or ""
         ).strip()
         family_key = weather_family_id(
-            city=str(getattr(position, "city", "") or ""),
-            target_date=str(getattr(position, "target_date", "") or ""),
-            metric=str(
-                getattr(position, "temperature_metric", "") or ""
-            ).lower(),
+            city=family[0],
+            target_date=family[1],
+            metric=family[2],
         )
 
         def current_sell_book_witness(coverage) -> str | None:
@@ -5245,11 +6208,7 @@ def _current_monitor_global_holding_coverage(
             )
 
         return current_global_holding_coverage(
-            position_id=str(
-                getattr(position, "position_id", "")
-                or getattr(position, "trade_id", "")
-                or ""
-            ),
+            position_id=position_id,
             probability_content_identity=probability_content_identity,
             checked_at_utc=checked,
             family_key=family_key,
@@ -5267,13 +6226,16 @@ def _current_monitor_global_holding_coverage(
             current_holding_witness_resolver=current_holding_witness,
             current_time_provider=current_time,
         )
-    except Exception as exc:  # noqa: BLE001 - incomplete witness preserves local exit
+    except Exception as exc:  # noqa: BLE001 - monitor remains read-only on failed truth.
         logger.debug(
             "global holding coverage current-witness resolution failed for %s: %s",
             getattr(position, "trade_id", "unknown"),
             exc,
         )
-        return None
+        return unavailable(
+            GlobalHoldingCoverageOutcome.COVERAGE_PARTITION,
+            "GLOBAL_HOLDING_COVERAGE_MONITOR_RESOLUTION_FAILED",
+        )
 
 
 def _execution_stub(candidate, decision, result, city, mode, *, deps):
@@ -5299,13 +6261,32 @@ def _execution_stub(candidate, decision, result, city, mode, *, deps):
     )
 
 
-def _release_monitor_write_lock_boundary(conn, summary: dict, deps, *, boundary: str) -> bool:
+def _release_monitor_write_lock_boundary(
+    conn,
+    summary: dict,
+    deps,
+    *,
+    boundary: str,
+    deadline_monotonic: float | None = None,
+) -> bool:
     """Commit monitor writes at bounded points so live price/decision writers can run."""
 
     if conn is None:
         return True
     try:
-        conn.commit()
+        if deadline_monotonic is None:
+            conn.commit()
+        else:
+            from src.execution.exit_lifecycle import (
+                _held_monitor_preparation_deadline,
+            )
+
+            with _held_monitor_preparation_deadline(
+                conn,
+                float(deadline_monotonic),
+            ) as ensure_live:
+                conn.commit()
+                ensure_live()
     except Exception as exc:  # noqa: BLE001
         try:
             conn.rollback()
@@ -5330,6 +6311,127 @@ def _release_monitor_write_lock_boundary(conn, summary: dict, deps, *, boundary:
         return True
 
 
+def _prefetch_held_replacement_artifact_hwm(
+    positions,
+    *,
+    decision_time: datetime,
+    deadline_monotonic: float,
+    sql_timeout_seconds: float,
+    clob,
+    summary: dict,
+    deps,
+) -> None:
+    """Freeze one causal artifact-HWM cut before serial held redecision."""
+
+    from src.data.replacement_input_hwm import (
+        ReplacementInputHwmReadUnavailable,
+        freeze_replacement_artifact_hwm,
+        frozen_replacement_artifact_hwm_unavailable,
+    )
+    from src.engine.monitor_refresh import install_monitor_replacement_hwm_snapshot
+    from src.state.chain_reconciliation import resolve_position_metric
+    from src.state.db import get_forecasts_connection_read_only
+
+    requests: set[tuple[str, str, str]] = set()
+    for position in positions:
+        try:
+            metric = resolve_position_metric(position)[0]
+        except Exception as exc:  # noqa: BLE001 - malformed identity fails later in its own lane.
+            summary["held_monitor_hwm_identity_errors"] = (
+                summary.get("held_monitor_hwm_identity_errors", 0) + 1
+            )
+            deps.logger.warning(
+                "held monitor HWM prefetch skipped malformed family %s: %s",
+                getattr(position, "trade_id", ""),
+                exc,
+            )
+            continue
+        requests.add(
+            (str(position.city), str(position.target_date), str(metric))
+        )
+    summary["held_monitor_hwm_prefetch_family_count"] = len(requests)
+    if not requests:
+        install_monitor_replacement_hwm_snapshot(clob, None)
+        summary["held_monitor_hwm_prefetch_status"] = "not_required"
+        return
+
+    snapshot = None
+    forecasts = None
+    started = time.monotonic()
+    blocker_reason = ""
+    try:
+        if started >= deadline_monotonic:
+            raise ReplacementInputHwmReadUnavailable(
+                "held monitor HWM batch deadline elapsed before read",
+                basis="held_monitor_hwm_prefetch_deadline",
+            )
+        forecasts = get_forecasts_connection_read_only(
+            deadline_monotonic=deadline_monotonic,
+        )
+        if time.monotonic() >= deadline_monotonic:
+            raise ReplacementInputHwmReadUnavailable(
+                "held monitor HWM batch deadline elapsed before BEGIN",
+                basis="held_monitor_hwm_prefetch_connection_deadline",
+            )
+        forecasts.execute("BEGIN")
+        if time.monotonic() >= deadline_monotonic:
+            raise ReplacementInputHwmReadUnavailable(
+                "held monitor HWM batch deadline elapsed during BEGIN",
+                basis="held_monitor_hwm_prefetch_begin_deadline",
+            )
+        snapshot = freeze_replacement_artifact_hwm(
+            forecasts,
+            requests=requests,
+            decision_time=decision_time,
+            deadline_monotonic=deadline_monotonic,
+            sql_timeout_seconds=sql_timeout_seconds,
+        )
+    except ReplacementInputHwmReadUnavailable as exc:
+        blocker_reason = exc.blocker_reason()
+    except sqlite3.OperationalError as exc:
+        blocker_reason = (
+            "REPLACEMENT_RAW_INPUT_HWM:"
+            "basis=held_monitor_hwm_prefetch_sqlite_unavailable:"
+            f"detail={str(exc)[:200]}"
+        )
+    except Exception as exc:  # noqa: BLE001 - one batch bug must fail closed, not fan out.
+        blocker_reason = (
+            "REPLACEMENT_RAW_INPUT_HWM:"
+            "basis=held_monitor_hwm_prefetch_failed:"
+            f"detail={type(exc).__name__}:{str(exc)[:200]}"
+        )
+        deps.logger.exception("held monitor HWM batch prefetch failed")
+    finally:
+        if forecasts is not None:
+            try:
+                forecasts.rollback()
+            except sqlite3.Error:
+                pass
+            forecasts.close()
+
+    if snapshot is None:
+        snapshot = frozen_replacement_artifact_hwm_unavailable(
+            requests=requests,
+            decision_time=decision_time,
+            blocker_reason=blocker_reason or "held monitor HWM batch unavailable",
+        )
+        summary["held_monitor_hwm_prefetch_status"] = "unavailable"
+        summary["held_monitor_hwm_prefetch_blocker"] = blocker_reason
+        deps.logger.warning(
+            "held monitor HWM batch unavailable: families=%d elapsed_s=%.3f reason=%s",
+            len(requests),
+            time.monotonic() - started,
+            blocker_reason,
+        )
+    else:
+        summary["held_monitor_hwm_prefetch_status"] = "ready"
+    summary["held_monitor_hwm_prefetch_elapsed_seconds"] = round(
+        time.monotonic() - started,
+        6,
+    )
+    install_monitor_replacement_hwm_snapshot(clob, snapshot)
+
+
 
 def execute_monitoring_phase(
     conn,
@@ -5346,21 +6448,36 @@ def execute_monitoring_phase(
     defer_partial_orderbook_gaps: bool = False,
 ):
     from src.engine.monitor_refresh import (
+        _DAY0_ZERO_PROBABILITY_EXIT_AUTHORITY_ATTR,
+        _GLOBAL_MONITOR_ALPHA_ATTR,
+        HELD_MONITOR_PRIMARY_BELIEF_READ_MAX_SECONDS,
+        HELD_MONITOR_RAW_HWM_READ_MAX_SECONDS,
         _GLOBAL_MONITOR_SAMPLES_ATTR,
         _HELD_MONITOR_DEADLINE_ATTR,
+        _HELD_MONITOR_MIN_ORDER_SIZE_ATTR,
+        _MONITOR_PROBABILITY_RECEIPT_ATTR,
         install_monitor_day0_family_cache,
+        install_monitor_replacement_hwm_snapshot,
+        monitor_quote_refresh,
         refresh_position,
     )
     from src.execution.exit_lifecycle import (
+        GLOBAL_SELL_REAUCTION_COMPLETION_DEADLINE_SECONDS,
         ExitContext,
         build_exit_intent,
         check_pending_exits,
         check_pending_retries,
+        classify_global_sell_snapshot_reauction_debt,
         execute_exit,
+        GlobalSellSnapshotReauctionDebtStatus,
         has_global_sell_snapshot_reauction_retry,
+        _held_monitor_preparation_deadline,
+        _is_non_executable_dust_hold,
         handle_exit_pending_missing,
         is_exit_cooldown_active,
-        needs_global_sell_snapshot_reauction,
+        latest_held_sell_reauction_obligation,
+        preserve_held_sell_reauction_deadline,
+        _drain_same_turn_global_sell_reauction_after_no_fill,
         recover_global_sell_snapshot_reauction_debt,
         release_backoff_exhausted_pending_exit_for_redecision,
         release_pending_exit_without_order_if_retryable,
@@ -5370,16 +6487,367 @@ def execute_monitoring_phase(
     portfolio_dirty = False
     tracker_dirty = False
 
+    def global_sell_reauction_completion_deadline_at() -> str:
+        armed_at = (
+            deps._utcnow()
+            if callable(getattr(deps, "_utcnow", None))
+            else datetime.now(timezone.utc)
+        )
+        if armed_at.tzinfo is None:
+            armed_at = armed_at.replace(tzinfo=timezone.utc)
+        else:
+            armed_at = armed_at.astimezone(timezone.utc)
+        return (
+            armed_at
+            + timedelta(
+                seconds=GLOBAL_SELL_REAUCTION_COMPLETION_DEADLINE_SECONDS
+            )
+        ).isoformat()
+
+    def arm_global_sell_reauction_obligation(
+        position,
+        request: object,
+    ) -> dict[str, object]:
+        """Build the canonical position-scoped outbox for one exact V4 request."""
+
+        armed_at = (
+            deps._utcnow()
+            if callable(getattr(deps, "_utcnow", None))
+            else datetime.now(timezone.utc)
+        )
+        if armed_at.tzinfo is None:
+            armed_at = armed_at.replace(tzinfo=timezone.utc)
+        else:
+            armed_at = armed_at.astimezone(timezone.utc)
+        deadline_text = str(
+            getattr(request, "completion_deadline_at", "") or ""
+        ).strip()
+        if deadline_text:
+            deadline_at = datetime.fromisoformat(
+                deadline_text.replace("Z", "+00:00")
+            ).astimezone(timezone.utc)
+            armed_at = deadline_at - timedelta(
+                seconds=GLOBAL_SELL_REAUCTION_COMPLETION_DEADLINE_SECONDS
+            )
+        else:
+            deadline_at = armed_at + timedelta(
+                seconds=GLOBAL_SELL_REAUCTION_COMPLETION_DEADLINE_SECONDS
+            )
+        armed_at_text = armed_at.isoformat()
+        deadline_text = deadline_at.isoformat()
+        fields = (
+            "request_id",
+            "material_identity",
+            "attempt_identity",
+            "scope_identity",
+            "generation",
+            "position_id",
+            "family",
+            "held_token_id",
+            "probability_content_identity",
+            "probability_observed_at",
+            "held_best_bid",
+            "bid_observed_at",
+            "book_state",
+            "schema_version",
+        )
+        obligation = {
+            field: getattr(request, field, None)
+            for field in fields
+        }
+        obligation.update(
+            {
+                "state": "ARMED",
+                "armed_at": armed_at_text,
+                "completion_deadline_at": deadline_text,
+            }
+        )
+        if not obligation.get("position_id"):
+            obligation["position_id"] = str(
+                getattr(position, "trade_id", "") or ""
+            )
+        existing = getattr(position, "_held_sell_reauction_obligation", None)
+        if not isinstance(existing, dict):
+            existing = latest_held_sell_reauction_obligation(conn, position)
+        residual_proof = existing.get("residual_proof")
+        if isinstance(residual_proof, dict):
+            # A fresh q/book attempt supersedes only the auction witness.  The
+            # terminal command's authenticated handoff of positive residual
+            # shares remains the ownership proof for this position scope.
+            obligation["residual_proof"] = dict(residual_proof)
+        return preserve_held_sell_reauction_deadline(obligation, existing)
+
     def request_global_sell_snapshot_reauction(
         position,
         force_new_generation: bool = False,
+        *,
+        deadline_monotonic: float | None = None,
     ) -> bool:
         """Reserve a durable global cut for a canonical reauction debt."""
 
+        request_deadline = (
+            global_sell_debt_deadline
+            if deadline_monotonic is None
+            else float(deadline_monotonic)
+        )
         try:
+            if time.monotonic() >= request_deadline:
+                defer_optional_maintenance("GLOBAL_SELL_DEBT_REQUEST_DEADLINE")
+                raise TimeoutError(
+                    "GLOBAL_SELL_REAUCTION_AUXILIARY_DEADLINE_EXPIRED"
+                )
             from src.events.reactor import request_global_auction_completion
 
-            durable_request_accepted = request_global_auction_completion(
+            obligation = getattr(position, "_held_sell_reauction_obligation", {})
+            obligation = obligation if isinstance(obligation, dict) else {}
+            def load_canonical_monitor_cut() -> tuple[str, dict[str, object]]:
+                if not force_new_generation or conn is None:
+                    return "", {}
+                try:
+                    monitor_rows = conn.execute(
+                        """
+                        SELECT sequence_no, occurred_at, payload_json
+                          FROM position_events
+                         WHERE position_id = ?
+                           AND event_type = 'MONITOR_REFRESHED'
+                         ORDER BY julianday(occurred_at) DESC, sequence_no DESC
+                         LIMIT 16
+                        """,
+                        (
+                            str(
+                                getattr(position, "position_id", "")
+                                or getattr(position, "trade_id", "")
+                                or ""
+                            ),
+                        ),
+                    ).fetchall()
+                    monitor_row = max(
+                        (
+                            row
+                            for row in monitor_rows
+                            if _parse_utc_timestamp(row[1]) is not None
+                        ),
+                        key=lambda row: (
+                            _parse_utc_timestamp(row[1]),
+                            int(row[0]),
+                        ),
+                        default=None,
+                    )
+                    if monitor_row is not None:
+                        monitor_at = str(monitor_row[1] or "")
+                        decoded = json.loads(str(monitor_row[2] or "{}"))
+                        if isinstance(decoded, dict):
+                            return monitor_at, decoded
+                except (sqlite3.Error, TypeError, json.JSONDecodeError):
+                    pass
+                return "", {}
+
+            canonical_monitor_at, canonical_monitor_payload = (
+                load_canonical_monitor_cut()
+            )
+            canonical_receipt = canonical_monitor_payload.get(
+                "day0_monitor_probability_receipt"
+            ) or canonical_monitor_payload.get("monitor_probability_receipt")
+            canonical_probability_content_identity = (
+                _monitor_probability_content_identity(canonical_receipt)
+            )
+            canonical_monitor_clock = _parse_utc_timestamp(canonical_monitor_at)
+            obligation_clocks = tuple(
+                clock
+                for clock in (
+                    _parse_utc_timestamp(str(obligation.get(field) or ""))
+                    for field in (
+                        "armed_at",
+                        "probability_observed_at",
+                        "bid_observed_at",
+                    )
+                )
+                if clock is not None
+            )
+            canonical_advances_obligation = bool(
+                canonical_monitor_clock is not None
+                and (
+                    not obligation_clocks
+                    or canonical_monitor_clock > max(obligation_clocks)
+                )
+                and canonical_probability_content_identity
+                and canonical_monitor_payload.get("last_monitor_prob_is_fresh")
+                is True
+                and canonical_monitor_payload.get(
+                    "last_monitor_market_price_is_fresh"
+                )
+                is True
+                and canonical_monitor_payload.get("last_monitor_best_bid")
+                is not None
+            )
+            if force_new_generation and not canonical_advances_obligation:
+                if time.monotonic() >= request_deadline:
+                    raise TimeoutError(
+                        "GLOBAL_SELL_REAUCTION_AUXILIARY_DEADLINE_EXPIRED"
+                    )
+                previous_deadline = getattr(
+                    position,
+                    _HELD_MONITOR_DEADLINE_ATTR,
+                    None,
+                )
+                setattr(
+                    position,
+                    _HELD_MONITOR_DEADLINE_ATTR,
+                    request_deadline,
+                )
+                try:
+                    refresh_position(conn, clob, position)
+                finally:
+                    if previous_deadline is None:
+                        try:
+                            delattr(position, _HELD_MONITOR_DEADLINE_ATTR)
+                        except AttributeError:
+                            pass
+                    else:
+                        setattr(
+                            position,
+                            _HELD_MONITOR_DEADLINE_ATTR,
+                            previous_deadline,
+                        )
+                if time.monotonic() >= request_deadline:
+                    raise TimeoutError(
+                        "GLOBAL_SELL_REAUCTION_AUXILIARY_DEADLINE_EXPIRED"
+                    )
+                if not (
+                    bool(getattr(position, "last_monitor_prob_is_fresh", False))
+                    and bool(
+                        getattr(
+                            position,
+                            "last_monitor_market_price_is_fresh",
+                            False,
+                        )
+                    )
+                    and str(getattr(position, "last_monitor_at", "") or "")
+                ):
+                    raise ValueError(
+                        "GLOBAL_SELL_REAUCTION_CURRENT_MONITOR_WITNESS_UNAVAILABLE"
+                    )
+                canonical_monitor_at, canonical_monitor_payload = (
+                    load_canonical_monitor_cut()
+                )
+                canonical_receipt = canonical_monitor_payload.get(
+                    "day0_monitor_probability_receipt"
+                ) or canonical_monitor_payload.get("monitor_probability_receipt")
+                canonical_probability_content_identity = (
+                    _monitor_probability_content_identity(canonical_receipt)
+                )
+                canonical_monitor_clock = _parse_utc_timestamp(
+                    canonical_monitor_at
+                )
+            held_token_id = str(
+                obligation.get("held_token_id")
+                or _position_held_token_id(position)
+                or ""
+            ).strip()
+            probability_receipt = getattr(
+                position, "_day0_monitor_probability_receipt", None
+            )
+            if not isinstance(probability_receipt, dict):
+                probability_receipt = getattr(
+                    position,
+                    "_monitor_probability_receipt",
+                    None,
+                )
+            runtime_probability_content_identity = str(
+                (
+                    probability_receipt.get("probability_content_identity")
+                    if isinstance(probability_receipt, dict)
+                    else ""
+                )
+                or ""
+            ).strip()
+            runtime_monitor_at = str(
+                getattr(position, "last_monitor_at", "") or ""
+            ).strip()
+            runtime_monitor_clock = _parse_utc_timestamp(runtime_monitor_at)
+            canonical_is_current = bool(
+                canonical_monitor_clock is not None
+                and (
+                    runtime_monitor_clock is None
+                    or canonical_monitor_clock >= runtime_monitor_clock
+                )
+            )
+            # Recovery follows the latest committed MONITOR_REFRESHED cut.  An
+            # in-memory receipt can survive a refresh helper and must never
+            # pin a reauction to an older probability epoch.  Select the whole
+            # causal cut; never splice q from one cut to the book of another.
+            if force_new_generation and canonical_is_current:
+                current_probability_content_identity = str(
+                    canonical_probability_content_identity or ""
+                ).strip()
+                current_bid = canonical_monitor_payload.get(
+                    "last_monitor_best_bid"
+                )
+                current_observed_at = canonical_monitor_at
+            else:
+                current_probability_content_identity = str(
+                    runtime_probability_content_identity or ""
+                ).strip()
+                current_bid = getattr(position, "last_monitor_best_bid", None)
+                current_observed_at = runtime_monitor_at
+            probability_content_identity = str(
+                (
+                    current_probability_content_identity
+                    if force_new_generation
+                    else obligation.get("probability_content_identity")
+                    or current_probability_content_identity
+                )
+                or ""
+            ).strip()
+            if force_new_generation and not probability_content_identity:
+                raise ValueError(
+                    "GLOBAL_SELL_REAUCTION_CURRENT_PROBABILITY_IDENTITY_UNAVAILABLE"
+                )
+            try:
+                current_bid = float(current_bid)
+            except (TypeError, ValueError):
+                current_bid = None
+            if current_bid is not None and not math.isfinite(current_bid):
+                current_bid = None
+            current_observed_at = str(current_observed_at or "")
+            if force_new_generation:
+                held_best_bid = current_bid
+                bid_observed_at = current_observed_at
+                probability_observed_at = current_observed_at
+                book_state = (
+                    "EXECUTABLE"
+                    if current_bid is not None
+                    and _live_order_quote_is_executable(current_bid)
+                    else "NO_EXECUTABLE_BOOK"
+                )
+            else:
+                held_best_bid = obligation.get("held_best_bid")
+                bid_observed_at = str(obligation.get("bid_observed_at") or "")
+                probability_observed_at = str(
+                    obligation.get("probability_observed_at")
+                    or current_observed_at
+                )
+                book_state = str(obligation.get("book_state") or "UNKNOWN")
+            if time.monotonic() >= request_deadline:
+                raise TimeoutError(
+                    "GLOBAL_SELL_REAUCTION_AUXILIARY_DEADLINE_EXPIRED"
+                )
+            request_scope_identity = str(
+                obligation.get("scope_identity") or ""
+            )
+            request_generation = str(obligation.get("generation") or "")
+            if force_new_generation and request_scope_identity:
+                from src.runtime.reactor_wake import (
+                    latest_v4_held_sell_reauction_request,
+                )
+
+                latest_request = latest_v4_held_sell_reauction_request(
+                    request_scope_identity
+                )
+                if latest_request is not None:
+                    request_scope_identity = latest_request.scope_identity
+                    request_generation = latest_request.generation
+            request_result = request_global_auction_completion(
                 reason="GLOBAL_SELL_SNAPSHOT_REAUCTION_REQUIRED",
                 position_id=str(
                     getattr(position, "position_id", "")
@@ -5393,8 +6861,37 @@ def execute_monitoring_phase(
                         getattr(position, "temperature_metric", "") or ""
                     ).strip().lower(),
                 ),
+                probability_content_identity=probability_content_identity,
+                held_token_id=held_token_id,
+                held_best_bid=held_best_bid,
+                bid_observed_at=bid_observed_at,
+                probability_observed_at=probability_observed_at,
+                completion_deadline_at=(
+                    global_sell_reauction_completion_deadline_at()
+                ),
+                book_state=book_state,
+                generation=request_generation or None,
+                scope_identity=request_scope_identity,
+                schema_version=int(obligation.get("schema_version") or 4),
                 force_new_generation=force_new_generation,
+                return_request=True,
             )
+            if not isinstance(request_result, tuple) or len(request_result) != 2:
+                raise ValueError(
+                    "GLOBAL_SELL_REAUCTION_TYPED_REQUEST_WITNESS_UNAVAILABLE"
+                )
+            durable_request_accepted = bool(request_result[0])
+            prepared_request = request_result[1]
+            if durable_request_accepted and prepared_request is None:
+                raise ValueError(
+                    "GLOBAL_SELL_REAUCTION_PREPARED_REQUEST_UNAVAILABLE"
+                )
+            if durable_request_accepted:
+                setattr(
+                    position,
+                    "_held_sell_reauction_obligation",
+                    arm_global_sell_reauction_obligation(position, prepared_request),
+                )
         except Exception as exc:  # noqa: BLE001 - failed reservation keeps retry pending.
             summary["global_sell_snapshot_reauction_request_failed"] = (
                 summary.get(
@@ -5425,11 +6922,32 @@ def execute_monitoring_phase(
         )
         return True
 
-    def drain_committed_global_sell_snapshot_reauction_debts() -> None:
+    def drain_committed_global_sell_snapshot_reauction_debts(
+        debt_positions: tuple[object, ...],
+    ) -> None:
         nonlocal portfolio_dirty
-        for position in tuple(getattr(portfolio, "positions", ()) or ()):
-            if not needs_global_sell_snapshot_reauction(position, conn):
-                continue
+        for index, position in enumerate(debt_positions):
+            if time.monotonic() >= global_sell_debt_deadline:
+                deferred = len(debt_positions) - index
+                defer_optional_maintenance(
+                    "GLOBAL_SELL_DEBT_DRAIN_DEADLINE",
+                    deferred,
+                )
+                summary["global_sell_snapshot_reauction_deadline_deferred"] = (
+                    summary.get(
+                        "global_sell_snapshot_reauction_deadline_deferred",
+                        0,
+                    )
+                    + deferred
+                )
+                summary["global_sell_snapshot_reauction_debts_pending"] = (
+                    summary.get(
+                        "global_sell_snapshot_reauction_debts_pending",
+                        0,
+                    )
+                    + deferred
+                )
+                break
             if recover_global_sell_snapshot_reauction_debt(
                 position,
                 conn=conn,
@@ -5475,10 +6993,6 @@ def execute_monitoring_phase(
                 for field in global_retry_runtime_fields
             }
             for position in tuple(getattr(portfolio, "positions", ()) or ())
-            if (
-                has_global_snapshot_retry_runtime(position)
-                or needs_global_sell_snapshot_reauction(position, conn)
-            )
         }
 
     def restore_global_retry_runtime(
@@ -5493,22 +7007,58 @@ def execute_monitoring_phase(
 
     def check_pending_retry_with_committed_global_reauction(position) -> bool:
         nonlocal portfolio_dirty
-        global_retry = has_global_snapshot_retry_runtime(position)
-        previous_runtime = (
-            {
-                field: getattr(position, field, "")
-                for field in global_retry_runtime_fields
-            }
-            if global_retry
-            else None
-        )
-        released = check_pending_retries(
-            position,
-            conn=conn,
-            global_sell_reauction_requester=(
-                request_global_sell_snapshot_reauction
-            ),
-        )
+
+        def defer_retry_runtime() -> bool:
+            defer_optional_maintenance("GLOBAL_SELL_RETRY_RUNTIME_DEADLINE")
+            summary["global_sell_snapshot_reauction_retry_runtime_deferred"] = (
+                summary.get(
+                    "global_sell_snapshot_reauction_retry_runtime_deferred",
+                    0,
+                )
+                + 1
+            )
+            return False
+
+        previous_runtime = {
+            field: getattr(position, field, "")
+            for field in global_retry_runtime_fields
+        }
+        if time.monotonic() >= auxiliary_deadline:
+            return defer_retry_runtime()
+        try:
+            if conn is None:
+                global_retry = has_global_snapshot_retry_runtime(position)
+                released = check_pending_retries(
+                    position,
+                    conn=conn,
+                    global_sell_reauction_requester=(
+                        request_global_sell_snapshot_reauction
+                    ),
+                )
+            else:
+                # This compatibility retry path re-reads durable SELL lineage
+                # after the bounded debt scan above.  Keep that duplicate read
+                # inside the same auxiliary clock: one dust position can own
+                # thousands of MONITOR_REFRESHED payloads, and an unbounded
+                # payload scan must not retain the full-book monitor claim.
+                # SCOPE: this position's retry classification in this pass.
+                # DRAIN: the next recurring pass retries from canonical truth.
+                # RESET: a complete classification before auxiliary_deadline.
+                with _held_monitor_preparation_deadline(
+                    conn,
+                    auxiliary_deadline,
+                ):
+                    global_retry = has_global_snapshot_retry_runtime(position)
+                    released = check_pending_retries(
+                        position,
+                        conn=conn,
+                        global_sell_reauction_requester=(
+                            request_global_sell_snapshot_reauction
+                        ),
+                    )
+        except (sqlite3.Error, TimeoutError):
+            restore_global_retry_runtime({id(position): previous_runtime})
+            return defer_retry_runtime()
         if not released or not global_retry:
             return released
         if conn is not None and conn.in_transaction and not _release_monitor_write_lock_boundary(
@@ -5516,8 +7066,8 @@ def execute_monitoring_phase(
             summary,
             deps,
             boundary="late_global_sell_snapshot_reauction",
+            deadline_monotonic=auxiliary_deadline,
         ):
-            assert previous_runtime is not None
             for field, value in previous_runtime.items():
                 setattr(position, field, value)
             return False
@@ -5544,6 +7094,15 @@ def execute_monitoring_phase(
             )
         return released
 
+    def defer_optional_maintenance(reason: str, count: int = 1) -> None:
+        summary["held_monitor_optional_maintenance_deferred"] = (
+            summary.get("held_monitor_optional_maintenance_deferred", 0)
+            + max(1, int(count))
+        )
+        summary.setdefault("held_monitor_optional_maintenance_defer_reasons", [])
+        if reason not in summary["held_monitor_optional_maintenance_defer_reasons"]:
+            summary["held_monitor_optional_maintenance_defer_reasons"].append(reason)
+
     def urgent_preemption_requested() -> bool:
         if should_preempt_for_urgent_day0 is None:
             return False
@@ -5561,6 +7120,105 @@ def execute_monitoring_phase(
         summary["held_monitor_defer_reason"] = "urgent_day0_wake"
         return portfolio_dirty, tracker_dirty
 
+    # One wall-clock budget owns the entire admitted held-monitor pass,
+    # including pending-exit preflight. A budget created after preflight is
+    # not a deadline: one stalled authenticated order read could retain the
+    # global monitor claim forever and blind every other held position.
+    monitor_budget_seconds = _held_position_monitor_budget_seconds(
+        held_position_monitor_budget_seconds
+    )
+    monitor_deadline = time.monotonic() + monitor_budget_seconds
+    portfolio_position_count = len(
+        tuple(getattr(portfolio, "positions", ()) or ())
+    )
+    (
+        primary_reserved_position_count,
+        primary_reserve_seconds,
+    ) = _held_position_monitor_primary_reservation(
+        portfolio_position_count,
+        monitor_budget_seconds,
+    )
+    auxiliary_deadline = monitor_deadline - primary_reserve_seconds
+    global_sell_debt_deadline = auxiliary_deadline
+    summary["held_monitor_budget_seconds"] = monitor_budget_seconds
+    summary["held_monitor_primary_belief_reserve_seconds"] = (
+        primary_reserve_seconds
+    )
+    summary["held_monitor_primary_belief_reserved_positions"] = (
+        primary_reserved_position_count
+    )
+    summary["held_monitor_primary_belief_read_started"] = 0
+    summary["held_monitor_primary_belief_read_completed"] = 0
+    summary["held_monitor_primary_belief_read_deferred"] = 0
+    summary["held_monitor_primary_belief_started_position_ids"] = []
+    summary["held_monitor_primary_belief_completed_position_ids"] = []
+    summary["held_monitor_primary_belief_expired_position_ids"] = []
+    summary["held_monitor_primary_belief_failed_position_ids"] = []
+    summary["held_monitor_primary_belief_failed_stages"] = []
+    summary["held_monitor_primary_belief_deferred_position_ids"] = []
+    summary["held_monitor_optional_maintenance_deferred"] = 0
+
+    # Freeze current probability authority before pending-exit recovery can
+    # spend the auxiliary tranche on venue reads.  A recovered order state is
+    # useful, but it cannot outrank the fresh belief cut needed to re-decide
+    # every still-held share.  The preflight below consumes only whatever
+    # remains before ``auxiliary_deadline``; the primary per-position reserve
+    # therefore always starts with either one causal HWM snapshot or one typed
+    # DATA_DEGRADED snapshot, never an unattempted read caused by preflight.
+    portfolio_positions = tuple(getattr(portfolio, "positions", ()) or ())
+    try:
+        monitor_now_utc = (
+            deps._utcnow()
+            if hasattr(deps, "_utcnow")
+            else datetime.now(timezone.utc)
+        )
+    except Exception:
+        monitor_now_utc = datetime.now(timezone.utc)
+    if monitor_now_utc.tzinfo is None:
+        monitor_now_utc = monitor_now_utc.replace(tzinfo=timezone.utc)
+    else:
+        monitor_now_utc = monitor_now_utc.astimezone(timezone.utc)
+    monitor_positions = _monitoring_phase_positions(
+        portfolio,
+        conn=conn,
+        now_utc=monitor_now_utc,
+    )
+    install_monitor_day0_family_cache(clob, decision_time=monitor_now_utc)
+    install_monitor_replacement_hwm_snapshot(clob, None)
+    hwm_prefetch_started = time.monotonic()
+    hwm_prefetch_deadline = min(
+        auxiliary_deadline,
+        hwm_prefetch_started + HELD_MONITOR_RAW_HWM_READ_MAX_SECONDS,
+    )
+    hwm_prefetch_budget_seconds = max(
+        0.0,
+        hwm_prefetch_deadline - hwm_prefetch_started,
+    )
+    summary["held_monitor_hwm_prefetch_budget_seconds"] = (
+        hwm_prefetch_budget_seconds
+    )
+    _prefetch_held_replacement_artifact_hwm(
+        monitor_positions,
+        decision_time=monitor_now_utc,
+        deadline_monotonic=hwm_prefetch_deadline,
+        sql_timeout_seconds=hwm_prefetch_budget_seconds,
+        clob=clob,
+        summary=summary,
+        deps=deps,
+    )
+
+    # Preflight may release a due retry back to its economic holding phase
+    # before the normal monitor pass. Preserve the preflight identity fact so
+    # a stale snapshot may still recover only the held token identity; the
+    # quote itself must always come from the current CLOB below.
+    retry_quote_identity_seed_position_ids = frozenset(
+        id(position)
+        for position in tuple(getattr(portfolio, "positions", ()) or ())
+        if position.state == "pending_exit"
+        and getattr(position, "exit_state", "") == "retry_pending"
+        and not is_exit_cooldown_active(position)
+    )
+
     if run_exit_preflight:
         global_retry_runtime_before_preflight = snapshot_global_retry_runtime()
         try:
@@ -5568,6 +7226,7 @@ def execute_monitoring_phase(
                 portfolio,
                 clob,
                 conn=conn,
+                deadline_monotonic=auxiliary_deadline,
                 global_sell_reauction_requester=(
                     request_global_sell_snapshot_reauction
                 ),
@@ -5622,6 +7281,7 @@ def execute_monitoring_phase(
             summary,
             deps,
             boundary="exit_preflight",
+            deadline_monotonic=auxiliary_deadline,
         ):
             restore_global_retry_runtime(global_retry_runtime_before_preflight)
             summary["held_monitor_orderbook_prefetch_defer_reason"] = (
@@ -5634,57 +7294,117 @@ def execute_monitoring_phase(
     else:
         summary["exit_preflight_skipped_for_monitor_refresh"] = True
 
-    committed_debts = any(
-        needs_global_sell_snapshot_reauction(position, conn)
-        for position in tuple(getattr(portfolio, "positions", ()) or ())
+    # Preflight may close or release positions.  Recompute the execution set,
+    # while retaining the preflight-preceding HWM cut over its family superset.
+    portfolio_positions = tuple(getattr(portfolio, "positions", ()) or ())
+    monitor_positions = _monitoring_phase_positions(
+        portfolio,
+        conn=conn,
+        now_utc=monitor_now_utc,
     )
-    if committed_debts:
-        if conn is not None and conn.in_transaction and not _release_monitor_write_lock_boundary(
+    monitor_reservation_count = min(
+        primary_reserved_position_count,
+        _held_position_monitor_reservation_count(len(monitor_positions)),
+    )
+    summary["held_monitor_candidates"] = len(monitor_positions)
+    summary["held_monitor_candidate_position_ids"] = [
+        str(getattr(position, "trade_id", "") or "").strip()
+        for position in monitor_positions
+        if str(getattr(position, "trade_id", "") or "").strip()
+    ]
+    summary["held_monitor_canonical_position_ids"] = []
+    summary["held_monitor_discharged_position_ids"] = []
+    summary["held_monitor_no_action_authority_position_ids"] = []
+    if urgent_preemption_requested():
+        summary["held_monitor_preempted"] = True
+        summary["held_monitor_positions_deferred"] = len(monitor_positions)
+        summary["held_monitor_defer_reason"] = "urgent_day0_wake"
+        return portfolio_dirty, tracker_dirty
+
+    # Debt reconstruction is auxiliary to current economic redecision. Bound
+    # the whole scan, not each row independently, so a larger held book cannot
+    # spend the 70s auxiliary window on serial lineage reads and leave only the
+    # 5s primary reserve for every q/book refresh.
+    debt_scan_deadline = min(
+        auxiliary_deadline,
+        time.monotonic() + _HELD_MONITOR_GLOBAL_DEBT_SCAN_MAX_SECONDS,
+    )
+    global_sell_debt_deadline = debt_scan_deadline
+    summary["global_sell_snapshot_reauction_scan_budget_seconds"] = (
+        _HELD_MONITOR_GLOBAL_DEBT_SCAN_MAX_SECONDS
+    )
+    committed_debt_candidates: list[object] = []
+    for index, position in enumerate(portfolio_positions):
+        if time.monotonic() >= debt_scan_deadline:
+            defer_optional_maintenance("GLOBAL_SELL_DEBT_SCAN_DEADLINE")
+            summary["global_sell_snapshot_reauction_scan_deadline_deferred"] = (
+                len(portfolio_positions) - index
+            )
+            break
+        debt_status = classify_global_sell_snapshot_reauction_debt(
+            position,
+            conn,
+            auxiliary_deadline=debt_scan_deadline,
+        )
+        if debt_status is GlobalSellSnapshotReauctionDebtStatus.DEFERRED:
+            # SCOPE: unclassified positions in this held-monitor pass. DRAIN:
+            # the next pass reclassifies each against canonical truth. RESET:
+            # a bounded DEBT or NO_DEBT classification.
+            deferred = len(portfolio_positions) - index
+            defer_optional_maintenance(
+                "GLOBAL_SELL_DEBT_CLASSIFICATION_DEFERRED",
+                deferred,
+            )
+            summary["global_sell_snapshot_reauction_scan_deadline_deferred"] = deferred
+            summary["global_sell_snapshot_reauction_classification_deferred"] = (
+                summary.get("global_sell_snapshot_reauction_classification_deferred", 0)
+                + deferred
+            )
+            break
+        if debt_status is GlobalSellSnapshotReauctionDebtStatus.DEBT:
+            committed_debt_candidates.append(position)
+    committed_debt_positions = tuple(committed_debt_candidates)
+    if committed_debt_positions:
+        if time.monotonic() >= global_sell_debt_deadline:
+            defer_optional_maintenance(
+                "GLOBAL_SELL_DEBT_DRAIN_DEADLINE",
+                len(committed_debt_positions),
+            )
+            summary["global_sell_snapshot_reauction_deadline_deferred"] = len(
+                committed_debt_positions
+            )
+            summary["global_sell_snapshot_reauction_debts_pending"] = (
+                summary.get("global_sell_snapshot_reauction_debts_pending", 0)
+                + len(committed_debt_positions)
+            )
+        elif conn is not None and conn.in_transaction and not _release_monitor_write_lock_boundary(
             conn,
             summary,
             deps,
             boundary="before_global_sell_snapshot_reauction",
+            deadline_monotonic=global_sell_debt_deadline,
         ):
             summary["global_sell_snapshot_reauction_debts_pending"] = (
                 summary.get("global_sell_snapshot_reauction_debts_pending", 0)
                 + 1
             )
         else:
-            drain_committed_global_sell_snapshot_reauction_debts()
-
-    try:
-        monitor_now_utc = deps._utcnow() if hasattr(deps, "_utcnow") else datetime.now(timezone.utc)
-    except Exception:
-        monitor_now_utc = datetime.now(timezone.utc)
-    if monitor_now_utc.tzinfo is None:
-        monitor_now_utc = monitor_now_utc.replace(tzinfo=timezone.utc)
-    else:
-        monitor_now_utc = monitor_now_utc.astimezone(timezone.utc)
-    monitor_positions = _monitoring_phase_positions(
-        portfolio,
-        conn=conn,
-        now_utc=monitor_now_utc,
-    )
-    monitor_budget_seconds = _held_position_monitor_budget_seconds(
-        held_position_monitor_budget_seconds
-    )
-    monitor_reservation_count = _held_position_monitor_reservation_count(
-        len(monitor_positions)
-    )
-    monitor_deadline = time.monotonic() + monitor_budget_seconds
-    summary["held_monitor_candidates"] = len(monitor_positions)
-    summary["held_monitor_budget_seconds"] = monitor_budget_seconds
-    if urgent_preemption_requested():
-        summary["held_monitor_preempted"] = True
-        summary["held_monitor_positions_deferred"] = len(monitor_positions)
-        summary["held_monitor_defer_reason"] = "urgent_day0_wake"
-        return portfolio_dirty, tracker_dirty
-    install_monitor_day0_family_cache(clob)
+            drain_committed_global_sell_snapshot_reauction_debts(
+                committed_debt_positions
+            )
 
     durable_hard_facts = {}
     from src.execution.day0_hard_fact_exit import evaluate_hard_fact_exit
 
-    for pos in monitor_positions:
+    for position_index, pos in enumerate(monitor_positions):
+        if time.monotonic() >= auxiliary_deadline:
+            deferred = len(monitor_positions) - position_index
+            defer_optional_maintenance(
+                "HELD_HARD_FACT_PRECLASS_DEADLINE",
+                deferred,
+            )
+            summary["held_monitor_hard_fact_preclass_deferred"] = deferred
+            break
         city = deps.cities_by_name.get(pos.city)
         if not _day0_hard_fact_position_eligible(pos) or city is None:
             continue
@@ -5721,24 +7441,6 @@ def execute_monitoring_phase(
         if getattr(durable_hard_facts.get(id(pos)), "action", None)
         == "EXIT_DEAD_BIN"
     )
-    selected_coverage_positions = (
-        _reserve_held_monitor_positions(
-            "bounded_coverage",
-            monitor_positions,
-            limit=monitor_reservation_count,
-            priority_key=lambda pos: (
-                -1
-                if id(pos) in dead_bin_position_ids
-                else _held_monitor_urgency_rank(pos)
-            ),
-            fair_by_attempt=True,
-        )
-        if monitor_budget_seconds > 0.0
-        else []
-    )
-    selected_coverage_position_ids = frozenset(
-        id(pos) for pos in selected_coverage_positions
-    )
     quote_positions = [
         pos for pos in monitor_positions if id(pos) not in structural_win_position_ids
     ]
@@ -5754,11 +7456,41 @@ def execute_monitoring_phase(
         now_utc=monitor_now_utc,
         deps=deps,
         local_only=True,
+        mark_unfetched_attempted=False,
+        deadline_monotonic=auxiliary_deadline,
     )
     summary.update(local_prefetch)
+    if time.monotonic() >= auxiliary_deadline:
+        defer_optional_maintenance("HELD_ORDERBOOK_PREFETCH_DEADLINE")
+        summary["held_monitor_orderbook_prefetch_bypassed"] = True
+        # No batch miss may consume the primary reserve.  Let the admitted
+        # position use refresh_position's own current, bounded quote path.
+        network_book_tokens = frozenset()
     local_book_tokens = frozenset(
         _position_held_token_id(pos) for pos in quote_positions
     ) - network_book_tokens
+    # Quote production precedes belief admission.  This lets the bounded q
+    # consumer prefer already-current local books within equal urgency instead
+    # of opening network work ahead of immediately actionable held positions.
+    selected_coverage_positions = (
+        _reserve_held_monitor_positions(
+            "bounded_coverage",
+            monitor_positions,
+            limit=monitor_reservation_count,
+            priority_key=lambda pos: (
+                -1
+                if id(pos) in dead_bin_position_ids
+                else _held_monitor_urgency_rank(pos),
+                _position_held_token_id(pos) in network_book_tokens,
+            ),
+            fair_by_attempt=True,
+        )
+        if monitor_budget_seconds > 0.0
+        else []
+    )
+    selected_coverage_position_ids = frozenset(
+        id(pos) for pos in selected_coverage_positions
+    )
     local_first_network_gap = bool(
         defer_partial_orderbook_gaps and local_book_tokens and network_book_tokens
     )
@@ -5766,14 +7498,14 @@ def execute_monitoring_phase(
         summary["held_monitor_partial_orderbook_gaps_scheduled_after_local"] = len(
             network_book_tokens
         )
-    network_positions = [
+    all_network_positions = [
         pos
         for pos in quote_positions
         if _position_held_token_id(pos) in network_book_tokens
     ]
     ordinary_active_network_positions = [
         pos
-        for pos in network_positions
+        for pos in all_network_positions
         if id(pos) not in dead_bin_position_ids
         and _held_monitor_urgency_rank(pos) == 2
     ]
@@ -5802,6 +7534,72 @@ def execute_monitoring_phase(
         id(pos) for pos in selected_urgent_positions
     )
     has_selected_urgent = bool(selected_urgent_positions)
+    # INV-47 held-monitor debt gate: SCOPE is current held-position debt only;
+    # DRAIN is one finite oldest-debt monitor attempt per bounded recovery pass;
+    # RESET is a successful canonical MONITOR_REFRESHED timestamp advance.
+    durable_debt_candidates = [
+        pos
+        for pos in monitor_positions
+        if hasattr(pos, "_canonical_monitor_refreshed_at")
+        and id(pos) not in selected_urgent_position_ids
+    ]
+    durable_debt_position = _reserve_held_monitor_positions(
+        "durable_debt",
+        durable_debt_candidates,
+        limit=1,
+        durable_only=True,
+    )
+    durable_debt_position_id = (
+        id(durable_debt_position[0]) if durable_debt_position else None
+    )
+    if (
+        durable_debt_position
+        and monitor_reservation_count > 0
+        and durable_debt_position_id not in selected_coverage_position_ids
+    ):
+        # The primary reserve is executable capacity, not an accounting label.
+        # Admit the oldest durable debt into that fixed-size tranche so the
+        # low-remaining-budget guard cannot defer it behind rotating coverage.
+        selected_coverage_positions = [
+            durable_debt_position[0],
+            *(
+                pos
+                for pos in selected_coverage_positions
+                if id(pos) != durable_debt_position_id
+            ),
+        ][:monitor_reservation_count]
+        selected_coverage_position_ids = frozenset(
+            id(pos) for pos in selected_coverage_positions
+        )
+    network_prefetch_position_ids = set(selected_coverage_position_ids)
+    network_prefetch_position_ids.update(selected_urgent_position_ids)
+    if reserved_network_position_id is not None:
+        network_prefetch_position_ids.add(reserved_network_position_id)
+    # The oldest durable debt owns a bounded singular quote attempt before
+    # optional batch work.  Keep its token in the network-gap set, but never
+    # duplicate it inside the shared batch.
+    network_positions = [
+        pos
+        for pos in all_network_positions
+        if id(pos) in network_prefetch_position_ids
+        and id(pos) != durable_debt_position_id
+    ]
+    network_book_tokens = frozenset(
+        {
+            _position_held_token_id(pos)
+            for pos in network_positions
+        }
+        | (
+            {_position_held_token_id(durable_debt_position[0])}
+            if durable_debt_position
+            and _position_held_token_id(durable_debt_position[0])
+            in network_book_tokens
+            else set()
+        )
+    )
+    summary["held_monitor_network_prefetch_scope_positions"] = [
+        str(getattr(pos, "trade_id", "") or "") for pos in network_positions
+    ]
     ordinary_active_local_positions = [
         pos
         for pos in monitor_positions
@@ -5849,6 +7647,10 @@ def execute_monitoring_phase(
         str(getattr(pos, "trade_id", "") or "")
         for pos in selected_coverage_positions
     ]
+    summary["held_monitor_primary_belief_admitted_position_ids"] = [
+        str(getattr(pos, "trade_id", "") or "")
+        for pos in selected_coverage_positions
+    ]
 
     deadline_rescue_position_id = next(
         (
@@ -5869,6 +7671,7 @@ def execute_monitoring_phase(
         key=lambda pos: _held_monitor_schedule_key(
             pos,
             deadline_rescue_position_id=deadline_rescue_position_id,
+            durable_debt_position_id=durable_debt_position_id,
             dead_bin_position_ids=dead_bin_position_ids,
             selected_urgent_position_ids=selected_urgent_position_ids,
             selected_coverage_position_ids=selected_coverage_position_ids,
@@ -5905,12 +7708,173 @@ def execute_monitoring_phase(
     )
     network_prefetch_started = False
     network_prefetch_unavailable = False
+    network_prefetch_batch_transport_failed = False
+    network_prefetch_batch_failed = False
+    network_prefetch_partial_progress = False
+    network_prefetch_deferred_token_ids: set[str] = set()
+    network_prefetch_singular_fallback_attempted = False
+    network_prefetch_singular_fallback_position_id = None
+    degraded_attempt_position_ids: set[int] = set()
+    durable_debt_network_attempted = False
     summary["held_monitor_budget_reservation_count"] = monitor_reservation_count
+    summary["held_monitor_durable_debt_position"] = (
+        str(getattr(durable_debt_position[0], "trade_id", "") or "")
+        if durable_debt_position
+        else ""
+    )
     summary["held_monitor_budget_bypass_scanned"] = 0
     monitor_wealth_witness_cache: dict[str, object] = {}
     deadline_rescue_used = False
+    refresh_owned_attrs = (
+        "last_monitor_at",
+        "last_monitor_best_bid",
+        "last_monitor_best_ask",
+        "last_monitor_bid_size",
+        "last_monitor_bid_ladder",
+        "last_monitor_market_vig",
+        "last_monitor_whale_toxicity",
+        "last_monitor_market_price",
+        "last_monitor_market_price_is_fresh",
+        "last_monitor_prob",
+        "last_monitor_prob_is_fresh",
+        "last_monitor_edge",
+        "selected_method",
+        "applied_validations",
+        "_bootstrap_context",
+        "_day0_monitor_probability_receipt",
+        "_day0_exit_authority_status",
+        "_day0_exit_authority_reason",
+        "_replacement_current_evidence_held_bounds",
+        _DAY0_ZERO_PROBABILITY_EXIT_AUTHORITY_ATTR,
+        _GLOBAL_MONITOR_ALPHA_ATTR,
+        _GLOBAL_MONITOR_SAMPLES_ATTR,
+        _HELD_MONITOR_MIN_ORDER_SIZE_ATTR,
+        _MONITOR_PROBABILITY_RECEIPT_ATTR,
+    )
+    missing_refresh_attr = object()
 
+    def snapshot_refresh_state(pos) -> dict[str, object]:
+        snapshot: dict[str, object] = {}
+        for attr in refresh_owned_attrs:
+            value = getattr(pos, attr, missing_refresh_attr)
+            if isinstance(value, list):
+                value = list(value)
+            elif isinstance(value, dict):
+                value = dict(value)
+            snapshot[attr] = value
+        return snapshot
+
+    def restore_refresh_state(pos, snapshot: dict[str, object]) -> None:
+        # Restore only fields owned by refresh_position.  Other threads may
+        # attach unrelated runtime evidence while a bounded read is running;
+        # clearing vars(pos) would erase that evidence.
+        for attr, value in snapshot.items():
+            if value is missing_refresh_attr:
+                try:
+                    delattr(pos, attr)
+                except AttributeError:
+                    pass
+            else:
+                setattr(pos, attr, value)
+
+    def record_primary_belief_deferred_ids(positions) -> None:
+        deferred_ids = summary["held_monitor_primary_belief_deferred_position_ids"]
+        for deferred_position in positions:
+            deferred_id = str(getattr(deferred_position, "trade_id", "") or "")
+            if deferred_id not in deferred_ids:
+                deferred_ids.append(deferred_id)
+
+    def record_admitted_child_failure(position_id: str, stage: str) -> None:
+        """Record one admitted statistical child failure without poisoning peers."""
+
+        failed_ids = summary["held_monitor_primary_belief_failed_position_ids"]
+        if position_id in failed_ids:
+            return
+        failed_ids.append(position_id)
+        summary["held_monitor_primary_belief_failed_stages"].append(
+            {"position_id": position_id, "stage": stage}
+        )
+        summary["held_monitor_primary_belief_read_deferred"] = (
+            summary.get("held_monitor_primary_belief_read_deferred", 0) + 1
+        )
+        summary["held_monitor_positions_deferred"] = (
+            summary.get("held_monitor_positions_deferred", 0) + 1
+        )
+        record_primary_belief_deferred_ids((monitor_positions_by_id[position_id],))
+
+    def record_position_deadline_expiry(
+        *,
+        position_index: int,
+        position_deadline: float,
+        position_id: str,
+        stage: str,
+        blocks_statistical_tail: bool,
+    ) -> str | None:
+        """Classify one exhausted child claim without starving the held book."""
+
+        now_monotonic = time.monotonic()
+        if now_monotonic < position_deadline:
+            return None
+        if blocks_statistical_tail:
+            expired_ids = summary[
+                "held_monitor_primary_belief_expired_position_ids"
+            ]
+            if position_id not in expired_ids:
+                expired_ids.append(position_id)
+        if now_monotonic >= monitor_deadline:
+            # SCOPE: this position and the unvisited tail. DRAIN: the next
+            # monitor pass creates a fresh global claim. RESET: a later pass
+            # completes within its global deadline.
+            deferred_count = len(monitor_positions) - position_index
+            summary["held_monitor_primary_belief_read_deferred"] = (
+                summary.get("held_monitor_primary_belief_read_deferred", 0)
+                + deferred_count
+            )
+            summary["held_monitor_positions_deferred"] = (
+                summary.get("held_monitor_positions_deferred", 0)
+                + deferred_count
+            )
+            summary["held_monitor_defer_reason"] = (
+                "MONITOR_DEADLINE_EXPIRED_AFTER_REFRESH"
+            )
+            summary["held_monitor_deadline_deferred_positions"] = deferred_count
+            summary["held_monitor_deadline_defer_reason"] = (
+                "MONITOR_DEADLINE_EXPIRED_AFTER_REFRESH"
+            )
+            record_primary_belief_deferred_ids(
+                monitor_positions[position_index:]
+            )
+            return "global"
+
+        # SCOPE: this exact position attempt only. DRAIN: the fair scheduler
+        # retries it next cycle while this pass continues through the remaining
+        # book. RESET: any complete child attempt clears the transient deadline.
+        summary["held_monitor_primary_belief_read_deferred"] = (
+            summary.get("held_monitor_primary_belief_read_deferred", 0) + 1
+        )
+        summary["held_monitor_positions_deferred"] = (
+            summary.get("held_monitor_positions_deferred", 0) + 1
+        )
+        summary["held_monitor_defer_reason"] = (
+            "PER_POSITION_DEADLINE_EXPIRED"
+        )
+        summary["held_monitor_per_position_deadline_deferred"] = (
+            summary.get("held_monitor_per_position_deadline_deferred", 0) + 1
+        )
+        summary.setdefault(
+            "held_monitor_per_position_deadline_positions",
+            [],
+        ).append({"position_id": position_id, "stage": stage})
+        record_primary_belief_deferred_ids((monitor_positions[position_index],))
+        return "position"
+
+    monitor_positions_by_id = {
+        str(getattr(position, "trade_id", "") or ""): position
+        for position in monitor_positions
+    }
     for position_index, pos in enumerate(monitor_positions):
+        armed_obligation = None
+        completion_request = None
         if urgent_preemption_requested():
             deferred_count = len(monitor_positions) - position_index
             summary["held_monitor_preempted"] = True
@@ -5926,11 +7890,18 @@ def execute_monitoring_phase(
         if monitor_deadline_expired and not deadline_rescue:
             deferred_count = len(monitor_positions) - position_index
             if deferred_count > 0:
+                summary["held_monitor_primary_belief_read_deferred"] = (
+                    summary.get("held_monitor_primary_belief_read_deferred", 0)
+                    + deferred_count
+                )
                 summary["held_monitor_positions_deferred"] = deferred_count
                 summary["held_monitor_defer_reason"] = "cycle_budget_exhausted"
                 summary["held_monitor_deadline_deferred_positions"] = deferred_count
                 summary["held_monitor_deadline_defer_reason"] = (
                     "MONITOR_DEADLINE_EXPIRED"
+                )
+                record_primary_belief_deferred_ids(
+                    monitor_positions[position_index:]
                 )
             break
         if deadline_rescue:
@@ -5939,6 +7910,59 @@ def execute_monitoring_phase(
             summary["held_monitor_dead_bin_deadline_rescue_position"] = str(
                 getattr(pos, "trade_id", "") or ""
             )
+        position_deadline = (
+            monitor_deadline
+            if deadline_rescue
+            else min(
+                monitor_deadline,
+                time.monotonic()
+                + HELD_MONITOR_PRIMARY_BELIEF_READ_MAX_SECONDS,
+            )
+        )
+        deadline_rescue_hard_fact = durable_hard_facts.get(id(pos))
+        local_dead_bin_deadline_rescue = bool(
+            deadline_rescue
+            and getattr(deadline_rescue_hard_fact, "action", None)
+            == "EXIT_DEAD_BIN"
+        )
+        primary_belief_required = getattr(
+            deadline_rescue_hard_fact,
+            "action",
+            None,
+        ) not in {"EXIT_DEAD_BIN", "HOLD_STRUCTURAL_WIN"}
+        admitted_statistical_position = (
+            primary_belief_required
+            and id(pos) in selected_coverage_position_ids
+        )
+        if (
+            not deadline_rescue
+            and primary_belief_required
+            and id(pos) not in selected_coverage_position_ids
+            and monitor_deadline - time.monotonic()
+            < HELD_MONITOR_PRIMARY_BELIEF_READ_MAX_SECONDS
+        ):
+            # The admitted tranche owns its initially reserved claim even when
+            # bounded auxiliary work returns just past its deadline.  Everyone
+            # else requires a complete remaining allowance.  SCOPE: this
+            # unstarted tail in this pass.  DRAIN: the next fair pass rotates
+            # admission.  RESET: a complete remaining allowance or admission.
+            deferred_count = len(monitor_positions) - position_index
+            summary["held_monitor_primary_belief_read_deferred"] = (
+                summary.get("held_monitor_primary_belief_read_deferred", 0)
+                + deferred_count
+            )
+            summary["held_monitor_positions_deferred"] = deferred_count
+            summary["held_monitor_defer_reason"] = (
+                "primary_belief_budget_reserve"
+            )
+            summary["held_monitor_deadline_deferred_positions"] = deferred_count
+            summary["held_monitor_deadline_defer_reason"] = (
+                "PRIMARY_BELIEF_BUDGET_UNAVAILABLE"
+            )
+            record_primary_belief_deferred_ids(
+                monitor_positions[position_index:]
+            )
+            break
         summary["held_monitor_positions_scanned"] = (
             summary.get("held_monitor_positions_scanned", 0) + 1
         )
@@ -5947,9 +7971,19 @@ def execute_monitoring_phase(
         state_value = _position_state_value(pos)
         if is_terminal_state(state_value):
             summary["monitor_skipped_terminal"] = summary.get("monitor_skipped_terminal", 0) + 1
+            _append_held_monitor_coverage_position_id(
+                summary,
+                "held_monitor_discharged_position_ids",
+                pos,
+            )
             continue
         if pos.state == "economically_closed":
             summary["monitor_skipped_economic_close"] = summary.get("monitor_skipped_economic_close", 0) + 1
+            _append_held_monitor_coverage_position_id(
+                summary,
+                "held_monitor_discharged_position_ids",
+                pos,
+            )
             continue
         if False:
             _ = pos.entry_method
@@ -5963,6 +7997,11 @@ def execute_monitoring_phase(
                     tracker_dirty = True
                     portfolio_dirty = True
                     summary["exit_chain_missing_closed"] = summary.get("exit_chain_missing_closed", 0) + 1
+                    _append_held_monitor_coverage_position_id(
+                        summary,
+                        "held_monitor_discharged_position_ids",
+                        pos,
+                    )
                 continue
             if pending_exit_resolution["action"] == "skip":
                 summary["monitor_skipped_exit_pending_missing"] = summary.get("monitor_skipped_exit_pending_missing", 0) + 1
@@ -5980,12 +8019,21 @@ def execute_monitoring_phase(
                 )
         if pos.state == "admin_closed":
             summary["monitor_skipped_admin_close"] = summary.get("monitor_skipped_admin_close", 0) + 1
+            _append_held_monitor_coverage_position_id(
+                summary,
+                "held_monitor_discharged_position_ids",
+                pos,
+            )
             continue
         pending_exit_monitor_only = False
+        monitoring_non_executable_dust = False
         pending_exit_retry_identity_seed_allowed = (
-            pos.state == "pending_exit"
-            and getattr(pos, "exit_state", "") == "retry_pending"
-            and not is_exit_cooldown_active(pos)
+            id(pos) in retry_quote_identity_seed_position_ids
+            or (
+                pos.state == "pending_exit"
+                and getattr(pos, "exit_state", "") == "retry_pending"
+                and not is_exit_cooldown_active(pos)
+            )
         )
         if pos.state == "pending_exit":
             if pos.exit_state == "backoff_exhausted":
@@ -5993,6 +8041,12 @@ def execute_monitoring_phase(
                     portfolio_dirty = True
                     summary["monitor_repaired_market_closed_pending_exit_hold"] = (
                         summary.get("monitor_repaired_market_closed_pending_exit_hold", 0) + 1
+                    )
+                elif _is_non_executable_dust_hold(pos, conn=conn):
+                    pending_exit_monitor_only = True
+                    monitoring_non_executable_dust = True
+                    summary["monitor_pending_exit_dust_redecisions"] = (
+                        summary.get("monitor_pending_exit_dust_redecisions", 0) + 1
                     )
                 elif release_backoff_exhausted_pending_exit_for_redecision(pos, conn=conn):
                     portfolio_dirty = True
@@ -6003,25 +8057,26 @@ def execute_monitoring_phase(
                     summary["monitor_skipped_pending_exit_phase"] = summary.get("monitor_skipped_pending_exit_phase", 0) + 1
                     continue
             if is_exit_cooldown_active(pos):
-                _record_monitor_hold_decision(
-                    conn,
-                    pos,
-                    artifact=artifact,
-                    deps=deps,
-                    summary=summary,
-                    reason="PENDING_EXIT_RETRY_COOLDOWN_ACTIVE",
-                    trigger="PENDING_EXIT_RETRY_COOLDOWN_ACTIVE",
-                    validation="pending_exit_retry_cooldown_monitor_hold",
-                    counter="monitor_pending_exit_retry_cooldown_holds",
+                # Cooldown throttles SELL resubmission, not observation or
+                # economic redecision.  Keep the position monitor-only so the
+                # fresh q/book path below still runs without placing a
+                # duplicate order.
+                pending_exit_monitor_only = True
+                summary["monitor_pending_exit_retry_cooldown_redecisions"] = (
+                    summary.get(
+                        "monitor_pending_exit_retry_cooldown_redecisions",
+                        0,
+                    )
+                    + 1
                 )
-                continue
-            if run_exit_preflight:
-                check_pending_retry_with_committed_global_reauction(pos)
-            if release_pending_exit_without_order_if_retryable(pos, conn=conn):
-                portfolio_dirty = True
-                summary["monitor_released_pending_exit_without_order"] = (
-                    summary.get("monitor_released_pending_exit_without_order", 0) + 1
-                )
+            else:
+                if run_exit_preflight:
+                    check_pending_retry_with_committed_global_reauction(pos)
+                if release_pending_exit_without_order_if_retryable(pos, conn=conn):
+                    portfolio_dirty = True
+                    summary["monitor_released_pending_exit_without_order"] = (
+                        summary.get("monitor_released_pending_exit_without_order", 0) + 1
+                    )
             if pos.state == "pending_exit":
                 pending_exit_monitor_only = True
                 summary["monitor_pending_exit_phase_evaluated"] = (
@@ -6040,7 +8095,7 @@ def execute_monitoring_phase(
                 counter="monitor_exit_order_in_flight_holds",
             )
             continue
-        if pos.exit_state == "backoff_exhausted":
+        if pos.exit_state == "backoff_exhausted" and not monitoring_non_executable_dust:
             _record_monitor_hold_decision(
                 conn,
                 pos,
@@ -6053,7 +8108,7 @@ def execute_monitoring_phase(
                 counter="monitor_pending_exit_backoff_exhausted_holds",
             )
             continue
-        if is_exit_cooldown_active(pos):
+        if is_exit_cooldown_active(pos) and not pending_exit_monitor_only:
             _record_monitor_hold_decision(
                 conn,
                 pos,
@@ -6116,7 +8171,56 @@ def execute_monitoring_phase(
             continue
 
         held_token_id = _position_held_token_id(pos)
-        if held_token_id in network_book_tokens:
+        is_durable_debt_network_attempt = False
+        if (
+            held_token_id in network_book_tokens
+            and time.monotonic() >= auxiliary_deadline
+        ):
+            defer_optional_maintenance("HELD_ORDERBOOK_BATCH_DEADLINE")
+            summary["held_monitor_orderbook_prefetch_bypassed"] = True
+            # Batch orderbook warming is optional.  Do not let a missing batch
+            # turn into an unbounded gap: refresh_position retains its own
+            # current/fresh single-token deadline path.
+            network_book_tokens = frozenset()
+        if (
+            network_prefetch_batch_failed
+            and not network_prefetch_partial_progress
+            and network_prefetch_singular_fallback_attempted
+            and network_prefetch_singular_fallback_position_id != id(pos)
+        ):
+            summary["held_monitor_positions_deferred_for_orderbook_gap"] = (
+                summary.get("held_monitor_positions_deferred_for_orderbook_gap", 0)
+                + 1
+            )
+            if (
+                id(pos) in budget_reserved_position_ids
+                and id(pos) not in degraded_attempt_position_ids
+                and _record_monitor_data_degraded_attempt(
+                    conn,
+                    pos,
+                    artifact=artifact,
+                    deps=deps,
+                    summary=summary,
+                    stage="orderbook_batch_unavailable",
+                )
+            ):
+                degraded_attempt_position_ids.add(id(pos))
+            continue
+        if held_token_id in network_book_tokens and not local_dead_bin_deadline_rescue:
+            if network_prefetch_started:
+                if network_prefetch_partial_progress or network_prefetch_batch_failed:
+                    network_prefetch_unavailable = (
+                        held_token_id in network_prefetch_deferred_token_ids
+                    )
+                if network_prefetch_singular_fallback_position_id == id(pos):
+                    network_prefetch_unavailable = False
+                if (
+                    network_prefetch_batch_failed
+                    and not network_prefetch_partial_progress
+                ):
+                    network_prefetch_unavailable = (
+                        network_prefetch_singular_fallback_position_id != id(pos)
+                    )
             if network_prefetch_unavailable:
                 summary["held_monitor_positions_deferred_for_orderbook_gap"] = (
                     summary.get(
@@ -6125,8 +8229,33 @@ def execute_monitoring_phase(
                     )
                     + 1
                 )
+                if (
+                    id(pos) in budget_reserved_position_ids
+                    and id(pos) not in degraded_attempt_position_ids
+                    and _record_monitor_data_degraded_attempt(
+                        conn,
+                        pos,
+                        artifact=artifact,
+                        deps=deps,
+                        summary=summary,
+                        stage="orderbook_unavailable",
+                    )
+                ):
+                    degraded_attempt_position_ids.add(id(pos))
                 continue
-            if not network_prefetch_started:
+            is_durable_debt_network_attempt = (
+                durable_debt_position_id == id(pos)
+                and not durable_debt_network_attempted
+            )
+            if is_durable_debt_network_attempt:
+                # The initial local-only pass deliberately does not mark
+                # missing network books as attempted.  Let the oldest durable
+                # debt take one finite singular quote attempt first; a later
+                # bulk prefetch cannot consume the whole 75s tranche before
+                # this position reaches monitor_refresh/canonical append.
+                durable_debt_network_attempted = True
+                summary["held_monitor_durable_debt_network_attempted"] = True
+            elif not network_prefetch_started:
                 # Local lifecycle writes must be durable before optional CLOB
                 # I/O.  A failed commit is a typed deferral, never permission
                 # to call the batch getter against an uncertain write state.
@@ -6135,6 +8264,7 @@ def execute_monitoring_phase(
                     summary,
                     deps,
                     boundary="before_network_orderbook_prefetch",
+                    deadline_monotonic=position_deadline,
                 ):
                     network_prefetch_unavailable = True
                     summary["held_monitor_orderbook_prefetch_defer_reason"] = (
@@ -6157,6 +8287,26 @@ def execute_monitoring_phase(
                     network_prefetch,
                     now_utc=monitor_now_utc,
                     deps=deps,
+                    preserve_existing=True,
+                    deadline_monotonic=auxiliary_deadline,
+                )
+                network_prefetch_deferred_token_ids = set(
+                    network_prefetch.get(
+                        "held_monitor_orderbook_prefetch_deferred_token_ids",
+                        (),
+                    )
+                )
+                network_prefetch_partial_progress = bool(
+                    network_prefetch.get(
+                        "held_monitor_orderbook_prefetch_partial_progress",
+                        False,
+                    )
+                )
+                network_prefetch_unavailable = (
+                    held_token_id in network_prefetch_deferred_token_ids
+                )
+                network_prefetch_deadline_exhausted = (
+                    time.monotonic() >= auxiliary_deadline
                 )
                 summary["held_monitor_orderbooks_prefetched"] = (
                     int(summary.get("held_monitor_orderbooks_prefetched", 0) or 0)
@@ -6170,10 +8320,35 @@ def execute_monitoring_phase(
                 )
                 if error := network_prefetch.get("held_monitor_orderbook_prefetch_error"):
                     summary["held_monitor_orderbook_prefetch_error"] = error
-                    network_prefetch_unavailable = True
+                    network_prefetch_batch_failed = True
+                    network_prefetch_batch_transport_failed = bool(
+                        network_prefetch.get(
+                            "held_monitor_orderbook_prefetch_transport_failed",
+                            False,
+                        )
+                    )
+                    if network_prefetch_batch_transport_failed:
+                        summary[
+                            "held_monitor_orderbook_prefetch_transport_failed"
+                        ] = True
+                    network_prefetch_unavailable = (
+                        held_token_id in network_prefetch_deferred_token_ids
+                        if network_prefetch_partial_progress
+                        else True
+                    )
                     summary["held_monitor_orderbook_prefetch_defer_reason"] = (
                         "ORDERBOOK_BATCH_UNAVAILABLE"
                     )
+                    if time.monotonic() >= monitor_deadline:
+                        deferred_count = len(monitor_positions) - position_index
+                        summary["held_monitor_positions_deferred"] = deferred_count
+                        summary["held_monitor_defer_reason"] = "cycle_budget_exhausted"
+                        summary["held_monitor_deadline_deferred_positions"] = (
+                            deferred_count
+                        )
+                        summary["held_monitor_deadline_defer_reason"] = (
+                            "MONITOR_DEADLINE_EXPIRED_DURING_BATCH_PREFETCH"
+                        )
                 if not network_prefetch.get(
                     "held_monitor_orderbook_prefetch_installed",
                     False,
@@ -6185,15 +8360,138 @@ def execute_monitoring_phase(
                     summary["held_monitor_orderbook_prefetch_unavailable"] = (
                         "ORDERBOOK_PREFETCH_INSTALL_FAILED"
                     )
-                if network_prefetch_unavailable:
-                    summary["held_monitor_positions_deferred_for_orderbook_gap"] = (
-                        summary.get(
-                            "held_monitor_positions_deferred_for_orderbook_gap",
-                            0,
+                if network_prefetch_deadline_exhausted:
+                    defer_optional_maintenance("HELD_ORDERBOOK_BATCH_DEADLINE")
+                    summary["held_monitor_orderbook_prefetch_bypassed"] = True
+                    network_prefetch_unavailable = False
+                    network_book_tokens = frozenset()
+                    if time.monotonic() >= monitor_deadline:
+                        deferred_count = len(monitor_positions) - position_index
+                        summary["held_monitor_positions_deferred"] = deferred_count
+                        summary["held_monitor_defer_reason"] = (
+                            "cycle_budget_exhausted"
                         )
-                        + 1
+                        summary["held_monitor_deadline_deferred_positions"] = (
+                            deferred_count
+                        )
+                        summary["held_monitor_deadline_defer_reason"] = (
+                            "MONITOR_DEADLINE_EXPIRED_DURING_BATCH_PREFETCH"
+                        )
+                        break
+                if (
+                    network_prefetch_batch_failed
+                    and not network_prefetch_singular_fallback_attempted
+                    and network_prefetch_deferred_token_ids
+                    and time.monotonic() < monitor_deadline
+                ):
+                    # Recover only the first actual gap. Completed chunk books
+                    # remain installed and never consume the one singular retry.
+                    fallback_pos = (
+                        next(
+                            position
+                            for position in network_positions
+                            if _position_held_token_id(position)
+                            in network_prefetch_deferred_token_ids
+                        )
+                        if network_prefetch_partial_progress
+                        else pos
                     )
-                    continue
+                    fallback_token_id = _position_held_token_id(fallback_pos)
+                    previous_deadline = getattr(
+                        fallback_pos,
+                        _HELD_MONITOR_DEADLINE_ATTR,
+                        None,
+                    )
+                    network_prefetch_singular_fallback_attempted = True
+                    fallback_deadline = position_deadline
+                    if id(fallback_pos) in selected_coverage_position_ids:
+                        fallback_deadline = min(
+                            monitor_deadline,
+                            time.monotonic()
+                            + HELD_MONITOR_PRIMARY_BELIEF_READ_MAX_SECONDS,
+                        )
+                    setattr(
+                        fallback_pos,
+                        _HELD_MONITOR_DEADLINE_ATTR,
+                        fallback_deadline,
+                    )
+                    try:
+                        fallback_quote = monitor_quote_refresh(
+                            conn,
+                            clob,
+                            fallback_pos,
+                            retry_after_prefetch=True,
+                        )
+                    finally:
+                        if previous_deadline is None:
+                            try:
+                                delattr(
+                                    fallback_pos,
+                                    _HELD_MONITOR_DEADLINE_ATTR,
+                                )
+                            except AttributeError:
+                                pass
+                        else:
+                            setattr(
+                                fallback_pos,
+                                _HELD_MONITOR_DEADLINE_ATTR,
+                                previous_deadline,
+                            )
+                    if fallback_quote is not None:
+                        network_prefetch_deferred_token_ids.discard(
+                            fallback_token_id
+                        )
+                        if network_prefetch_partial_progress:
+                            network_prefetch_unavailable = (
+                                held_token_id
+                                in network_prefetch_deferred_token_ids
+                            )
+                        network_prefetch_singular_fallback_position_id = id(
+                            fallback_pos
+                        )
+                        summary[
+                            "held_monitor_batch_failure_singular_recovered_position"
+                        ] = str(getattr(fallback_pos, "trade_id", "") or "")
+                        summary[
+                            "held_monitor_batch_failure_singular_recovered"
+                        ] = 1
+                    else:
+                        summary[
+                            "held_monitor_batch_failure_singular_unavailable"
+                        ] = 1
+                        if (
+                            id(fallback_pos) in budget_reserved_position_ids
+                            and id(fallback_pos)
+                            not in degraded_attempt_position_ids
+                            and _record_monitor_data_degraded_attempt(
+                                conn,
+                                fallback_pos,
+                                artifact=artifact,
+                                deps=deps,
+                                summary=summary,
+                                stage="orderbook_singular_unavailable",
+                            )
+                        ):
+                            degraded_attempt_position_ids.add(id(fallback_pos))
+                    network_prefetch_unavailable = (
+                        held_token_id in network_prefetch_deferred_token_ids
+                    )
+                if (
+                    network_prefetch_batch_failed
+                    and not network_prefetch_partial_progress
+                    and durable_debt_network_attempted
+                ):
+                    network_prefetch_unavailable = True
+                if network_prefetch_unavailable:
+                    if network_prefetch_singular_fallback_position_id != id(pos):
+                        summary["held_monitor_positions_deferred_for_orderbook_gap"] = (
+                            summary.get(
+                                "held_monitor_positions_deferred_for_orderbook_gap",
+                                0,
+                            )
+                            + 1
+                        )
+                        continue
                 if urgent_preemption_requested():
                     # This position is already counted as scanned above; only
                     # the unvisited tail is deferred.
@@ -6202,9 +8500,63 @@ def execute_monitoring_phase(
                     summary["held_monitor_positions_deferred"] = deferred_count
                     summary["held_monitor_defer_reason"] = "urgent_day0_wake"
                     break
+        elif local_dead_bin_deadline_rescue and held_token_id:
+            # The shared deadline revokes permission to start more I/O, not an
+            # already-proved local settlement fact.  Mark this token attempted
+            # for this cycle so exact-zero refresh records the direct exit
+            # decision without opening a quote read.  The next monitor cycle
+            # clears this transient mark and retries from a fresh book.
+            _mark_held_monitor_orderbook_attempted(
+                clob,
+                quote_positions,
+                held_token_id,
+            )
+            summary["held_monitor_dead_bin_deadline_rescue_without_io"] = (
+                summary.get(
+                    "held_monitor_dead_bin_deadline_rescue_without_io",
+                    0,
+                )
+                + 1
+            )
+
+        if admitted_statistical_position:
+            # The reservation is for one complete position-owned q read, not
+            # for shared quote warming that happened to start while this
+            # position was at the head of the schedule.  Start that bounded
+            # child clock only after shared prerequisites finish.  The outer
+            # monitor deadline remains absolute, so this cannot extend the
+            # cycle or lend capacity to an unadmitted tail.
+            # SCOPE: this admitted statistical position only. DRAIN: its
+            # current metadata/q/book path reaches canonical redecision within
+            # this child tranche. RESET: every position attempt recomputes the
+            # deadline from the unchanged outer claim.
+            position_deadline = min(
+                monitor_deadline,
+                time.monotonic()
+                + HELD_MONITOR_PRIMARY_BELIEF_READ_MAX_SECONDS,
+            )
+            summary["held_monitor_primary_deadline_started_after_shared_work"] = (
+                summary.get(
+                    "held_monitor_primary_deadline_started_after_shared_work",
+                    0,
+                )
+                + 1
+            )
 
         hours_to_settlement = None
         monitor_result_written = False
+        monitor_canonical_failed = False
+        previous_position_deadline = getattr(
+            pos,
+            _HELD_MONITOR_DEADLINE_ATTR,
+            None,
+        )
+        had_previous_position_deadline = hasattr(
+            pos,
+            _HELD_MONITOR_DEADLINE_ATTR,
+        )
+        setattr(pos, _HELD_MONITOR_DEADLINE_ATTR, position_deadline)
+        admitted_child_stage = None
         try:
             city = deps.cities_by_name.get(pos.city)
             if city is not None:
@@ -6302,6 +8654,7 @@ def execute_monitoring_phase(
                         summary,
                         deps,
                         boundary="day0_window_entered",
+                        deadline_monotonic=position_deadline,
                     )
 
             # Day0 hard facts are settlement/observation truth, not venue
@@ -6327,7 +8680,19 @@ def execute_monitoring_phase(
                     deps.logger.warning(
                         "day0 hard-fact lane failed for %s (non-fatal): %s", pos.trade_id, _hf_exc
                     )
-            if _hard_fact is not None and _hard_fact.action == "HOLD_STRUCTURAL_WIN":
+            if (
+                local_dead_bin_deadline_rescue
+                and _hard_fact is not None
+                and _hard_fact.action == "EXIT_DEAD_BIN"
+            ):
+                # No remote market metadata read may start after the cycle
+                # deadline.  Static close evidence is local and remains safe.
+                closed_market_info = _closed_by_static_market_end_info(
+                    conn,
+                    pos,
+                    decision_time=deps._utcnow(),
+                )
+            elif _hard_fact is not None and _hard_fact.action == "HOLD_STRUCTURAL_WIN":
                 # Terminal value is already exactly one. Venue metadata cannot
                 # change the hold decision, so only the local close timestamp is
                 # relevant; remote market/book reads would delay unrelated exits.
@@ -6337,12 +8702,37 @@ def execute_monitoring_phase(
                     decision_time=deps._utcnow(),
                 )
             else:
+                admitted_child_stage = "closed_market_metadata"
                 closed_market_info = _closed_non_accepting_market_info(
                     clob,
                     pos,
                     conn,
                     decision_time=deps._utcnow(),
+                    deadline_monotonic=position_deadline,
                 )
+                admitted_child_stage = None
+            deadline_expiry = record_position_deadline_expiry(
+                position_index=position_index,
+                position_deadline=position_deadline,
+                position_id=str(getattr(pos, "trade_id", "") or ""),
+                stage="closed_market_metadata",
+                blocks_statistical_tail=(
+                    primary_belief_required
+                    and id(pos) in selected_coverage_position_ids
+                ),
+            )
+            if deadline_expiry is not None:
+                _record_monitor_data_degraded_attempt(
+                    conn,
+                    pos,
+                    artifact=artifact,
+                    deps=deps,
+                    summary=summary,
+                    stage="closed_market_metadata_deadline",
+                )
+                if deadline_expiry == "global":
+                    break
+                continue
             # FIX 2b (2026-06-20): split the day0 closed-market pre-emption by
             # evidence source.
             #   * source="clob_market_info" → the VENUE itself reports
@@ -6366,9 +8756,17 @@ def execute_monitoring_phase(
                     "EXIT_DEAD_BIN",
                     "HOLD_STRUCTURAL_WIN",
                 }:
-                    from src.state.portfolio import ExitDecision as _ExitDecision
-
+                    hard_fact_position_before = copy.deepcopy(vars(pos))
                     hard_fact_win = _hard_fact.action == "HOLD_STRUCTURAL_WIN"
+                    hard_fact_trigger = (
+                        "DAY0_HARD_FACT_STRUCTURAL_WIN_MARKET_CLOSED"
+                        if hard_fact_win
+                        else "DAY0_HARD_FACT_BIN_DEAD_MARKET_CLOSED"
+                    )
+                    hard_fact_reason = (
+                        f"{hard_fact_trigger} "
+                        f"({_hard_fact.reason}; source={_hard_fact.source})"
+                    )
                     pos.state = "day0_window"
                     pos.pre_exit_state = ""
                     pos.exit_state = ""
@@ -6380,7 +8778,7 @@ def execute_monitoring_phase(
                         f"{closed_market_info.get('source') or 'market_closed_non_accepting_orders'}"
                     )[:500]
                     pos.last_monitor_prob = 1.0 if hard_fact_win else 0.0
-                    pos.last_monitor_prob_is_fresh = True
+                    pos.last_monitor_prob_is_fresh = False
                     pos.last_monitor_edge = None
                     pos.last_monitor_market_price = None
                     pos.last_monitor_market_price_is_fresh = False
@@ -6396,97 +8794,105 @@ def execute_monitoring_phase(
                                     if hard_fact_win
                                     else "day0_hard_fact_bin_dead_closed_market"
                                 ),
+                                hard_fact_reason,
                             ]
                         )
                     )
-                    exit_decision = _ExitDecision(
-                        False,
-                        (
-                            "DAY0_HARD_FACT_STRUCTURAL_WIN_MARKET_CLOSED "
-                            if hard_fact_win
-                            else "DAY0_HARD_FACT_BIN_DEAD_MARKET_CLOSED "
-                        )
-                        + f"({_hard_fact.reason}; source={_hard_fact.source})",
-                        urgency="normal",
-                        trigger=(
-                            "DAY0_HARD_FACT_STRUCTURAL_WIN_MARKET_CLOSED"
-                            if hard_fact_win
-                            else "DAY0_HARD_FACT_BIN_DEAD_MARKET_CLOSED"
-                        ),
-                        selected_method=pos.selected_method or pos.entry_method,
-                        applied_validations=list(pos.applied_validations),
-                    )
-                    _emit_monitor_refreshed_canonical_if_available(
-                        conn,
-                        pos,
-                        deps=deps,
-                        exit_decision=exit_decision,
-                        final_should_exit=False,
-                        final_exit_reason=exit_decision.reason,
-                        final_exit_trigger=exit_decision.trigger,
-                    )
                     from src.execution.exit_lifecycle import mark_market_closed_hold_to_settlement
 
-                    mark_market_closed_hold_to_settlement(
+                    canonical_written = mark_market_closed_hold_to_settlement(
                         pos,
-                        reason=exit_decision.trigger,
+                        reason=hard_fact_trigger,
                         error=str(
                             closed_market_info.get("source")
                             or "market_closed_non_accepting_orders"
                         ),
                         conn=conn,
                     )
-                    summary["day0_hard_fact_closed_market_hold_to_settlement"] = (
-                        summary.get("day0_hard_fact_closed_market_hold_to_settlement", 0) + 1
-                    )
-                    artifact.add_monitor_result(
-                        deps.MonitorResult(
-                            position_id=pos.trade_id,
-                            fresh_prob=pos.last_monitor_prob,
-                            fresh_edge=None,
-                            should_exit=False,
-                            exit_reason=exit_decision.reason,
-                            neg_edge_count=pos.neg_edge_count,
+                    if canonical_written:
+                        summary["day0_hard_fact_closed_market_hold_to_settlement"] = (
+                            summary.get(
+                                "day0_hard_fact_closed_market_hold_to_settlement",
+                                0,
+                            )
+                            + 1
                         )
-                    )
-                    portfolio_dirty = True
-                    summary["day0_hard_fact_closed_market_monitors"] = (
-                        summary.get("day0_hard_fact_closed_market_monitors", 0) + 1
-                    )
-                    summary["monitors"] += 1
+                        portfolio_dirty = True
+                        artifact.add_monitor_result(
+                            deps.MonitorResult(
+                                position_id=pos.trade_id,
+                                fresh_prob=None,
+                                fresh_edge=None,
+                                should_exit=False,
+                                exit_reason=hard_fact_reason,
+                                neg_edge_count=pos.neg_edge_count,
+                            )
+                        )
+                        summary["day0_hard_fact_closed_market_monitors"] = (
+                            summary.get("day0_hard_fact_closed_market_monitors", 0) + 1
+                        )
+                        summary["monitors"] += 1
+                        _append_held_monitor_coverage_position_id(
+                            summary,
+                            "held_monitor_canonical_position_ids",
+                            pos,
+                        )
+                    else:
+                        vars(pos).clear()
+                        vars(pos).update(hard_fact_position_before)
+                        summary["monitor_canonical_write_failed"] = (
+                            summary.get("monitor_canonical_write_failed", 0) + 1
+                        )
                     continue
                 from src.execution.exit_lifecycle import mark_market_closed_hold_to_settlement
 
-                mark_market_closed_hold_to_settlement(
+                closed_hold_written = mark_market_closed_hold_to_settlement(
                     pos,
                     reason="MARKET_CLOSED_AWAITING_SETTLEMENT",
                     error=str(closed_market_info.get("source") or "market_closed_non_accepting_orders"),
                     conn=conn,
                     preserve_exit_reason=True,
                 )
-                portfolio_dirty = True
-                artifact.add_monitor_result(
-                    deps.MonitorResult(
-                        position_id=pos.trade_id,
-                        fresh_prob=pos.last_monitor_prob,
-                        fresh_edge=None,
-                        should_exit=False,
-                        exit_reason="MARKET_CLOSED_AWAITING_SETTLEMENT",
-                        neg_edge_count=pos.neg_edge_count,
+                if closed_hold_written:
+                    portfolio_dirty = True
+                    artifact.add_monitor_result(
+                        deps.MonitorResult(
+                            position_id=pos.trade_id,
+                            fresh_prob=None,
+                            fresh_edge=None,
+                            should_exit=False,
+                            exit_reason="MARKET_CLOSED_AWAITING_SETTLEMENT",
+                            neg_edge_count=pos.neg_edge_count,
+                        )
                     )
-                )
-                summary["monitor_skipped_closed_market_pending_settlement"] = (
-                    summary.get("monitor_skipped_closed_market_pending_settlement", 0) + 1
-                )
-                summary.setdefault("monitor_closed_market_pending_settlement_positions", []).append(pos.trade_id)
-                summary.setdefault("monitor_closed_market_pending_settlement_reasons", []).append(
-                    {
-                        "position_id": pos.trade_id,
-                        "reason": "market_closed_non_accepting_orders",
-                        **closed_market_info,
-                    }
-                )
-                summary["monitors"] += 1
+                    summary["monitor_closed_market_pending_settlement_attempts"] = (
+                        summary.get(
+                            "monitor_closed_market_pending_settlement_attempts",
+                            0,
+                        )
+                        + 1
+                    )
+                    summary["monitors"] = summary.get("monitors", 0) + 1
+                    _append_held_monitor_coverage_position_id(
+                        summary,
+                        "held_monitor_canonical_position_ids",
+                        pos,
+                    )
+                    summary["monitor_skipped_closed_market_pending_settlement"] = (
+                        summary.get("monitor_skipped_closed_market_pending_settlement", 0) + 1
+                    )
+                    summary.setdefault("monitor_closed_market_pending_settlement_positions", []).append(pos.trade_id)
+                    summary.setdefault("monitor_closed_market_pending_settlement_reasons", []).append(
+                        {
+                            "position_id": pos.trade_id,
+                            "reason": "market_closed_non_accepting_orders",
+                            **closed_market_info,
+                        }
+                    )
+                else:
+                    summary["monitor_canonical_write_failed"] = (
+                        summary.get("monitor_canonical_write_failed", 0) + 1
+                    )
                 continue
 
             # Earlier pending-exit/Day0 lifecycle work may have opened a TRADE
@@ -6499,49 +8905,109 @@ def execute_monitoring_phase(
                 summary,
                 deps,
                 boundary="before_probability_refresh",
+                deadline_monotonic=position_deadline,
             )
-            if _hard_fact is not None and _hard_fact.action == "EXIT_DEAD_BIN":
-                from src.engine.monitor_refresh import refresh_exact_zero_position
+            refresh_position_state = snapshot_refresh_state(pos)
+            try:
+                if _hard_fact is not None and _hard_fact.action == "EXIT_DEAD_BIN":
+                    from src.engine.monitor_refresh import refresh_exact_zero_position
 
-                edge_ctx = refresh_exact_zero_position(conn, clob, pos)
-                summary["day0_hard_fact_probability_refresh_bypassed"] = (
-                    summary.get(
-                        "day0_hard_fact_probability_refresh_bypassed",
-                        0,
+                    edge_ctx = refresh_exact_zero_position(
+                        conn,
+                        clob,
+                        pos,
+                        refresh_quote=not local_dead_bin_deadline_rescue,
                     )
-                    + 1
-                )
-            elif _hard_fact is not None and _hard_fact.action == "HOLD_STRUCTURAL_WIN":
-                from src.engine.monitor_refresh import refresh_exact_one_position
+                    summary["day0_hard_fact_probability_refresh_bypassed"] = (
+                        summary.get(
+                            "day0_hard_fact_probability_refresh_bypassed",
+                            0,
+                        )
+                        + 1
+                    )
+                elif _hard_fact is not None and _hard_fact.action == "HOLD_STRUCTURAL_WIN":
+                    from src.engine.monitor_refresh import refresh_exact_one_position
 
-                edge_ctx = refresh_exact_one_position(pos)
-                summary["day0_hard_fact_probability_refresh_bypassed"] = (
-                    summary.get(
-                        "day0_hard_fact_probability_refresh_bypassed",
-                        0,
+                    edge_ctx = refresh_exact_one_position(pos)
+                    summary["day0_hard_fact_probability_refresh_bypassed"] = (
+                        summary.get(
+                            "day0_hard_fact_probability_refresh_bypassed",
+                            0,
+                        )
+                        + 1
                     )
-                    + 1
-                )
-                summary["day0_hard_fact_structural_win_quote_bypassed"] = (
-                    summary.get(
-                        "day0_hard_fact_structural_win_quote_bypassed",
-                        0,
+                    summary["day0_hard_fact_structural_win_quote_bypassed"] = (
+                        summary.get(
+                            "day0_hard_fact_structural_win_quote_bypassed",
+                            0,
+                        )
+                        + 1
                     )
-                    + 1
-                )
-            else:
-                setattr(
-                    pos,
-                    _HELD_MONITOR_DEADLINE_ATTR,
-                    monitor_deadline,
-                )
-                try:
+                else:
+                    admitted_child_stage = "refresh"
+                    summary["held_monitor_primary_belief_read_started"] = (
+                        summary.get("held_monitor_primary_belief_read_started", 0)
+                        + 1
+                    )
+                    summary[
+                        "held_monitor_primary_belief_started_position_ids"
+                    ].append(str(getattr(pos, "trade_id", "") or ""))
                     edge_ctx = refresh_position(conn, clob, pos)
-                finally:
-                    try:
-                        delattr(pos, _HELD_MONITOR_DEADLINE_ATTR)
-                    except AttributeError:
-                        pass
+                    admitted_child_stage = None
+                    if is_durable_debt_network_attempt and held_token_id:
+                        _mark_held_monitor_orderbook_attempted(
+                            clob,
+                            quote_positions,
+                            held_token_id,
+                        )
+            except Exception:
+                if admitted_statistical_position:
+                    record_admitted_child_failure(
+                        str(getattr(pos, "trade_id", "") or ""),
+                        "refresh",
+                    )
+                restore_refresh_state(pos, refresh_position_state)
+                raise
+            deadline_expiry = record_position_deadline_expiry(
+                position_index=position_index,
+                position_deadline=position_deadline,
+                position_id=str(getattr(pos, "trade_id", "") or ""),
+                stage="refresh",
+                blocks_statistical_tail=(
+                    primary_belief_required
+                    and id(pos) in selected_coverage_position_ids
+                ),
+            )
+            if deadline_expiry is not None:
+                restore_refresh_state(pos, refresh_position_state)
+                _record_monitor_data_degraded_attempt(
+                    conn,
+                    pos,
+                    artifact=artifact,
+                    deps=deps,
+                    summary=summary,
+                    stage="refresh_deadline",
+                )
+                if deadline_expiry == "global":
+                    break
+                continue
+            if monitoring_non_executable_dust:
+                current_min_order_size = getattr(
+                    pos,
+                    _HELD_MONITOR_MIN_ORDER_SIZE_ATTR,
+                    None,
+                )
+                if release_backoff_exhausted_pending_exit_for_redecision(
+                    pos,
+                    conn=conn,
+                    current_min_order_size=current_min_order_size,
+                ):
+                    monitoring_non_executable_dust = False
+                    pending_exit_monitor_only = False
+                    portfolio_dirty = True
+                    summary["monitor_released_dust_after_current_book"] = (
+                        summary.get("monitor_released_dust_after_current_book", 0) + 1
+                    )
             # === DAY0 HARD-FACT verdict — computed before the exit decision and
             # before closed-market pre-emption above. Settlement-authority hard
             # facts must not depend on estimator evidence.
@@ -6553,16 +9019,45 @@ def execute_monitoring_phase(
                 portfolio=portfolio,
             )
             if run_exit_preflight and not (
-                _hard_fact is not None
-                and _hard_fact.action == "HOLD_STRUCTURAL_WIN"
+                local_dead_bin_deadline_rescue
+                or (
+                    _hard_fact is not None
+                    and _hard_fact.action == "HOLD_STRUCTURAL_WIN"
+                )
             ):
+                admitted_child_stage = "pending_exit_retry_quote"
                 exit_context, refreshed_retry_quote = _refresh_pending_exit_retry_quote_from_current_clob(
                     conn=conn,
                     clob=clob,
                     pos=pos,
                     exit_context=exit_context,
                     identity_seed_allowed=pending_exit_retry_identity_seed_allowed,
+                    deadline_monotonic=position_deadline,
                 )
+                admitted_child_stage = None
+                deadline_expiry = record_position_deadline_expiry(
+                    position_index=position_index,
+                    position_deadline=position_deadline,
+                    position_id=str(getattr(pos, "trade_id", "") or ""),
+                    stage="pending_exit_retry_quote",
+                    blocks_statistical_tail=(
+                        primary_belief_required
+                        and id(pos) in selected_coverage_position_ids
+                    ),
+                )
+                if deadline_expiry is not None:
+                    restore_refresh_state(pos, refresh_position_state)
+                    _record_monitor_data_degraded_attempt(
+                        conn,
+                        pos,
+                        artifact=artifact,
+                        deps=deps,
+                        summary=summary,
+                        stage="pending_exit_retry_quote_deadline",
+                    )
+                    if deadline_expiry == "global":
+                        break
+                    continue
                 if refreshed_retry_quote:
                     summary["pending_exit_retry_current_clob_quote_refreshed"] = (
                         summary.get("pending_exit_retry_current_clob_quote_refreshed", 0) + 1
@@ -6641,6 +9136,13 @@ def execute_monitoring_phase(
                 # structurally-won position would defeat the purpose of holding.
             else:
                 exit_decision = pos.evaluate_exit(exit_context)
+                summary["held_monitor_primary_belief_read_completed"] = (
+                    summary.get("held_monitor_primary_belief_read_completed", 0)
+                    + 1
+                )
+                summary[
+                    "held_monitor_primary_belief_completed_position_ids"
+                ].append(str(getattr(pos, "trade_id", "") or ""))
             entry_selection_guard_forced_exit = False
             if not (
                 _hard_fact is not None
@@ -6693,30 +9195,200 @@ def execute_monitoring_phase(
             # with exact terminal value zero, so it must not wait behind the
             # full-universe auction.
             local_exit_trigger = _effective_exit_trigger(exit_decision, exit_reason)
+            posterior_support_zero_direct_sell = (
+                should_exit
+                and local_exit_trigger == "SELL_REVERSAL"
+                and _posterior_support_zero_sell_dominates(pos, exit_context)
+            )
+            branchwise_sell_authority = None
+            if posterior_support_zero_direct_sell:
+                from src.execution.exit_lifecycle import (
+                    BranchwiseDominantSellAuthority,
+                )
+
+                exit_reason = "POSTERIOR_SUPPORT_ZERO_SELL_DOMINATES"
+                local_exit_trigger = exit_reason
+                try:
+                    branchwise_sell_authority = (
+                        BranchwiseDominantSellAuthority.from_current(
+                            pos,
+                            replace(exit_context, exit_reason=exit_reason),
+                        )
+                    )
+                except (TypeError, ValueError) as exc:
+                    should_exit = False
+                    exit_reason = (
+                        "BRANCHWISE_DOMINANT_SELL_AUTHORITY_UNAVAILABLE:"
+                        f"{type(exc).__name__}:{exc}"
+                    )
+                    local_exit_trigger = exit_reason
+                    pos.applied_validations = list(
+                        dict.fromkeys(
+                            [
+                                *(pos.applied_validations or []),
+                                "branchwise_dominant_sell_authority_fail_closed",
+                            ]
+                        )
+                    )
+                    summary["monitor_branchwise_dominant_authority_failed"] = (
+                        summary.get(
+                            "monitor_branchwise_dominant_authority_failed", 0
+                        )
+                        + 1
+                    )
+                else:
+                    pos.applied_validations = list(
+                        dict.fromkeys(
+                            [
+                                *(pos.applied_validations or []),
+                                "posterior_support_zero_sell_dominates",
+                                "global_auction_comparison_inapplicable:branchwise_dominance",
+                                (
+                                    "branchwise_sell_authority:"
+                                    f"{branchwise_sell_authority.authority_identity}"
+                                ),
+                            ]
+                        )
+                    )
+                    summary["monitor_branchwise_dominant_direct_sells"] = (
+                        summary.get("monitor_branchwise_dominant_direct_sells", 0)
+                        + 1
+                    )
             statistical_sell_requires_global = (
                 should_exit
+                and not posterior_support_zero_direct_sell
                 and _global_auction_owns_statistical_sell(
                     exit_decision,
                     exit_reason,
                 )
             )
-            global_holding_coverage = None
-            if (
-                should_exit
-                and local_exit_trigger != "RED_FORCE_EXIT"
-                and local_exit_trigger != "DAY0_HARD_FACT_BIN_DEAD"
-                and getattr(pos, _GLOBAL_MONITOR_SAMPLES_ATTR, None) is not None
-            ):
-                probability_receipt = getattr(
+            if should_exit:
+                # No SELL actuator can make a sub-minimum holding executable.
+                # Apply the same current-book size law before global, direct,
+                # hard-fact, and RED paths so no route can mint impossible debt.
+                from src.execution.exit_lifecycle import (
+                    _latest_fresh_snapshot_min_order,
+                    _mark_exit_dust_hold,
+                )
+
+                try:
+                    held_shares = Decimal(
+                        str(
+                            getattr(pos, "effective_shares", None)
+                            or getattr(pos, "shares", 0)
+                        )
+                    )
+                except (InvalidOperation, TypeError, ValueError):
+                    held_shares = Decimal("0")
+                monitor_min_order = getattr(
                     pos,
-                    "_day0_monitor_probability_receipt",
+                    _HELD_MONITOR_MIN_ORDER_SIZE_ATTR,
                     None,
                 )
-                probability_content_identity = (
-                    _monitor_probability_content_identity(
-                        probability_receipt
+                try:
+                    fresh_min_order = (
+                        Decimal(str(monitor_min_order))
+                        if monitor_min_order is not None
+                        else None
                     )
-                )
+                except (InvalidOperation, TypeError, ValueError):
+                    fresh_min_order = None
+                if fresh_min_order is None or fresh_min_order <= 0:
+                    fresh_min_order = _latest_fresh_snapshot_min_order(
+                        pos,
+                        conn=conn,
+                        now=(
+                            deps._utcnow()
+                            if hasattr(deps, "_utcnow")
+                            else datetime.now(timezone.utc)
+                        ),
+                    )
+                if (
+                    fresh_min_order is not None
+                    and held_shares > 0
+                    and held_shares < fresh_min_order
+                ):
+                    dust_error = (
+                        "executable_snapshot_gate: size "
+                        f"{held_shares} is below snapshot min_order_size "
+                        f"{fresh_min_order}"
+                    )
+                    dust_reason = f"{exit_reason} [DUST: {dust_error}]"
+                    _mark_exit_dust_hold(
+                        pos,
+                        reason=dust_reason,
+                        error=dust_error,
+                        conn=conn,
+                    )
+                    should_exit = False
+                    statistical_sell_requires_global = False
+                    exit_reason = dust_reason
+                    local_exit_trigger = "CANONICAL_DUST_HOLD"
+                    pos.applied_validations = list(
+                        dict.fromkeys(
+                            [
+                                *(pos.applied_validations or []),
+                                "fresh_snapshot_sub_minimum_dust_hold",
+                                "global_auction_inapplicable:venue_minimum",
+                            ]
+                        )
+                    )
+                    summary["monitor_statistical_sell_dust_holds"] = (
+                        summary.get("monitor_statistical_sell_dust_holds", 0) + 1
+                    )
+                elif monitoring_non_executable_dust and fresh_min_order is None:
+                    should_exit = False
+                    statistical_sell_requires_global = False
+                    exit_reason = "CANONICAL_DUST_HOLD_MIN_ORDER_UNAVAILABLE"
+                    local_exit_trigger = exit_reason
+                    pos.applied_validations = list(
+                        dict.fromkeys(
+                            [
+                                *(pos.applied_validations or []),
+                                "current_min_order_size_unavailable",
+                                "canonical_dust_hold_preserved_fail_closed",
+                            ]
+                        )
+                    )
+                    summary["monitor_statistical_sell_dust_min_unavailable_holds"] = (
+                        summary.get(
+                            "monitor_statistical_sell_dust_min_unavailable_holds",
+                            0,
+                        )
+                        + 1
+                    )
+            global_sell_request_context = _monitor_global_sell_request_context(
+                pos,
+                exit_context,
+            )
+            probability_content_identity = str(
+                global_sell_request_context["probability_content_identity"] or ""
+            )
+            held_token_id = _position_held_token_id(pos).strip()
+            # A canonical SELL debt survives monitor refreshes. Only an exact
+            # terminal receipt, command ownership, or position closure may
+            # retire it; a later HOLD caused by a vanished bid is not proof.
+            from src.engine.global_batch_runtime import (
+                CurrentGlobalHoldingCoverage,
+                GlobalHoldingCoverageOutcome,
+            )
+
+            global_holding_coverage = CurrentGlobalHoldingCoverage(
+                outcome=(
+                    GlobalHoldingCoverageOutcome.PROBABILITY_CONTENT
+                    if not probability_content_identity
+                    else GlobalHoldingCoverageOutcome.COVERAGE_NOT_PUBLISHED
+                ),
+                reason=(
+                    "GLOBAL_HOLDING_COVERAGE_PROBABILITY_CONTENT_MISSING"
+                    if not probability_content_identity
+                    else "GLOBAL_HOLDING_COVERAGE_NOT_CHECKED"
+                ),
+            )
+            if (
+                statistical_sell_requires_global
+                and getattr(pos, _GLOBAL_MONITOR_SAMPLES_ATTR, None) is not None
+            ):
                 if probability_content_identity:
                     def coverage_time() -> datetime:
                         try:
@@ -6737,7 +9409,7 @@ def execute_monitoring_phase(
                         coverage_checked_at = coverage_time()
                     except Exception:
                         coverage_checked_at = datetime.now(timezone.utc)
-                    global_holding_coverage = _current_monitor_global_holding_coverage(
+                    coverage_result = _current_monitor_global_holding_coverage(
                         conn=conn,
                         clob=clob,
                         portfolio=portfolio,
@@ -6749,13 +9421,16 @@ def execute_monitoring_phase(
                         current_time_provider=coverage_time,
                         wealth_witness_cache=monitor_wealth_witness_cache,
                     )
-            if (
-                should_exit
-                and local_exit_trigger != "RED_FORCE_EXIT"
-                and local_exit_trigger != "DAY0_HARD_FACT_BIN_DEAD"
-                and global_holding_coverage is not None
-            ):
-                coverage, coverage_receipt_id = global_holding_coverage
+                    # Runtime callers always return a typed result.  Keep this
+                    # narrow normalization for older injected test/runtime
+                    # seams while preventing a generic value from reaching the
+                    # monitor decision or canonical payload.
+                    if coverage_result is not None:
+                        global_holding_coverage = coverage_result
+            if statistical_sell_requires_global and global_holding_coverage.covered:
+                coverage = global_holding_coverage.coverage
+                coverage_receipt_id = global_holding_coverage.decision_log_id
+                assert coverage is not None and coverage_receipt_id is not None
                 should_exit = False
                 exit_reason = "GLOBAL_AUCTION_OWNS_REDUCE_ONLY_SELL"
                 pos.applied_validations = list(
@@ -6786,7 +9461,7 @@ def execute_monitoring_phase(
                     request_global_auction_completion,
                 )
 
-                completion_requested = request_global_auction_completion(
+                completion_result = request_global_auction_completion(
                     reason=(
                         "GLOBAL_AUCTION_STATISTICAL_SELL_AUTHORITY_UNAVAILABLE"
                     ),
@@ -6802,22 +9477,114 @@ def execute_monitoring_phase(
                             getattr(pos, "temperature_metric", "") or ""
                         ).strip().lower(),
                     ),
+                    probability_content_identity=probability_content_identity,
+                    held_token_id=held_token_id,
+                    held_best_bid=global_sell_request_context["held_best_bid"],
+                    bid_observed_at=str(
+                        global_sell_request_context["bid_observed_at"] or ""
+                    ),
+                    book_state=str(global_sell_request_context["book_state"]),
+                    probability_observed_at=str(
+                        global_sell_request_context["probability_observed_at"] or ""
+                    ),
+                    completion_deadline_at=(
+                        global_sell_reauction_completion_deadline_at()
+                    ),
+                    return_request=True,
+                    prepare_only=True,
+                )
+                if isinstance(completion_result, tuple):
+                    completion_requested, completion_request = completion_result
+                else:
+                    completion_requested = bool(completion_result)
+                    completion_request = None
+                monitor_identity = (
+                    f"{getattr(pos, 'trade_id', '')}:monitor_refreshed:"
+                    f"{getattr(pos, 'last_monitor_at', '')}"
+                )
+                request_id = str(
+                    getattr(completion_request, "request_id", "") or ""
+                ).strip()
+                armed_obligation = None
+                if completion_request is not None:
+                    obligation = arm_global_sell_reauction_obligation(
+                        pos,
+                        completion_request,
+                    )
+                    required_obligation_fields = (
+                        "request_id",
+                        "material_identity",
+                        "attempt_identity",
+                        "scope_identity",
+                        "generation",
+                        "position_id",
+                        "held_token_id",
+                    )
+                    try:
+                        is_v4_request = int(
+                            obligation.get("schema_version") or 0
+                        ) == 4
+                    except (TypeError, ValueError):
+                        is_v4_request = False
+                    if is_v4_request and all(
+                        str(obligation.get(field) or "").strip()
+                        for field in required_obligation_fields
+                    ):
+                        setattr(pos, "_held_sell_reauction_obligation", obligation)
+                        armed_obligation = obligation
+                completion_accepted = bool(
+                    completion_requested and armed_obligation is not None
+                )
+                if completion_requested and not completion_accepted:
+                    summary[
+                        "monitor_statistical_sell_auction_malformed_request"
+                    ] = summary.get(
+                        "monitor_statistical_sell_auction_malformed_request", 0
+                    ) + 1
+                completion_requested = completion_accepted
+                authority_outcome = (
+                    GlobalHoldingCoverageOutcome.DRAIN_PENDING
+                    if completion_accepted
+                    else GlobalHoldingCoverageOutcome.REQUEST_REJECTED
                 )
                 should_exit = False
-                exit_reason = (
-                    "GLOBAL_AUCTION_STATISTICAL_SELL_AUTHORITY_UNAVAILABLE"
-                )
+                # SCOPE: this exact position-scoped global reauction debt.
+                # DRAIN: the committed V4 wake and its terminal global receipt.
+                # RESET: ACTUATED/CAPITAL_REJECTED/NO_EXECUTABLE_BOOK or
+                # POSITION_NO_LONGER_EXPOSED receipt for this immutable attempt.
+                exit_reason = "GLOBAL_REAUCTION_PENDING"
+                completion_validations = [
+                    (
+                        "global_auction_completion_requested"
+                        if completion_requested
+                        else "global_auction_completion_request_failed"
+                    ),
+                    (
+                        "global_auction_authority_outcome:"
+                        f"{global_holding_coverage.outcome.value}"
+                    ),
+                    (
+                        "global_auction_completion_debt:"
+                        f"{authority_outcome.value}"
+                    ),
+                    (
+                        "global_auction_completion_monitor_identity:"
+                        f"{monitor_identity}"
+                    ),
+                    "GLOBAL_REAUCTION_PENDING",
+                ]
+                if request_id:
+                    completion_validations.append(
+                        "global_auction_completion_request_id:"
+                        f"{request_id}"
+                    )
                 pos.applied_validations = list(
                     dict.fromkeys(
                         [
                             *(pos.applied_validations or []),
                             "local_statistical_sell_non_authoritative_record",
                             "global_statistical_sell_authority_unavailable",
-                            (
-                                "global_auction_completion_requested"
-                                if completion_requested
-                                else "global_auction_completion_request_failed"
-                            ),
+                            *completion_validations,
                         ]
                     )
                 )
@@ -6869,48 +9636,125 @@ def execute_monitoring_phase(
                     _incomplete_reason,
                 )
 
-            monitor_canonical_written = _emit_monitor_refreshed_canonical_if_available(
-                conn,
-                pos,
-                deps=deps,
-                exit_decision=exit_decision,
-                final_should_exit=should_exit,
-                final_exit_reason=exit_reason,
-                final_exit_trigger=exit_trigger,
-            )
+            if _incomplete_reason is not None and not should_exit:
+                _revoke_monitor_action_authority(
+                    pos,
+                    missing_fields=_missing_fields_from_incomplete_exit_reason(
+                        _incomplete_reason
+                    ),
+                )
+                monitor_canonical_written = (
+                    _emit_monitor_refreshed_canonical_if_available(
+                        conn,
+                        pos,
+                        deps=deps,
+                        decision_unavailable_reason=_incomplete_reason,
+                        decision_unavailable_trigger="INCOMPLETE_EXIT_CONTEXT",
+                    )
+                )
+            else:
+                monitor_canonical_written = (
+                    _emit_monitor_refreshed_canonical_if_available(
+                        conn,
+                        pos,
+                        deps=deps,
+                        exit_decision=exit_decision,
+                        final_should_exit=should_exit,
+                        final_exit_reason=exit_reason,
+                        final_exit_trigger=exit_trigger,
+                    )
+                )
             if not monitor_canonical_written:
+                monitor_canonical_failed = True
                 summary["monitor_canonical_write_failed"] = (
                     summary.get("monitor_canonical_write_failed", 0) + 1
                 )
-                if exit_trigger != "RED_FORCE_EXIT":
-                    monitor_fresh_prob, monitor_fresh_edge = _current_monitor_result_probability_and_edge(pos)
-                    artifact.add_monitor_result(
-                        deps.MonitorResult(
-                            position_id=pos.trade_id,
-                            fresh_prob=monitor_fresh_prob,
-                            fresh_edge=monitor_fresh_edge,
-                            should_exit=False,
-                            exit_reason="MONITOR_CANONICAL_WRITE_FAILED",
-                            neg_edge_count=pos.neg_edge_count,
-                        )
+                if should_exit:
+                    # The bounded writer lease is telemetry/backpressure, not a
+                    # revocation of already-decided economic exit authority.
+                    summary["monitor_canonical_write_failed_exit_authority_preserved"] = (
+                        summary.get(
+                            "monitor_canonical_write_failed_exit_authority_preserved", 0)
+                        + 1
                     )
-                    monitor_result_written = True
-                    summary["monitors"] += 1
+                else:
                     continue
 
-            monitor_fresh_prob, monitor_fresh_edge = _current_monitor_result_probability_and_edge(pos)
-            artifact.add_monitor_result(
-                deps.MonitorResult(
-                    position_id=pos.trade_id,
-                    fresh_prob=monitor_fresh_prob,
-                    fresh_edge=monitor_fresh_edge,
-                    should_exit=should_exit,
-                    exit_reason=exit_reason,
-                    neg_edge_count=pos.neg_edge_count,
+            if (
+                monitor_canonical_written
+                and armed_obligation is not None
+                and completion_request is not None
+                and completion_requested
+            ):
+                from src.events.reactor import (
+                    publish_prepared_global_auction_completion,
                 )
-            )
-            monitor_result_written = True
-            summary["monitors"] += 1
+                from src.execution.exit_lifecycle import (
+                    record_global_sell_reauction_reserved,
+                )
+
+                published = publish_prepared_global_auction_completion(
+                    reason=(
+                        "GLOBAL_AUCTION_STATISTICAL_SELL_AUTHORITY_UNAVAILABLE"
+                    ),
+                    prepared_request=completion_request,
+                )
+                if published:
+                    reserved = record_global_sell_reauction_reserved(conn, pos)
+                    if reserved:
+                        try:
+                            conn.commit()
+                        except Exception:  # noqa: BLE001 - recovery retries the debt.
+                            conn.rollback()
+                            reserved = False
+                    if not reserved:
+                        summary[
+                            "monitor_statistical_sell_auction_reserved_write_failed"
+                        ] = summary.get(
+                            "monitor_statistical_sell_auction_reserved_write_failed",
+                            0,
+                        ) + 1
+                else:
+                    pos.applied_validations = list(
+                        dict.fromkeys(
+                            [
+                                *(pos.applied_validations or []),
+                                "global_auction_completion_publish_failed",
+                            ]
+                        )
+                    )
+                    summary[
+                        "monitor_statistical_sell_auction_completion_publish_failed"
+                    ] = summary.get(
+                        "monitor_statistical_sell_auction_completion_publish_failed",
+                        0,
+                    ) + 1
+
+            if monitor_canonical_written:
+                monitor_fresh_prob, monitor_fresh_edge = _current_monitor_result_probability_and_edge(pos)
+                artifact.add_monitor_result(
+                    deps.MonitorResult(
+                        position_id=pos.trade_id,
+                        fresh_prob=monitor_fresh_prob,
+                        fresh_edge=monitor_fresh_edge,
+                        should_exit=should_exit,
+                        exit_reason=exit_reason,
+                        neg_edge_count=pos.neg_edge_count,
+                    )
+                )
+                monitor_result_written = True
+                summary["monitors"] += 1
+                if _incomplete_reason is not None and not should_exit:
+                    _append_held_monitor_coverage_position_id(
+                        summary,
+                        "held_monitor_no_action_authority_position_ids",
+                        pos,
+                    )
+                _append_held_monitor_coverage_position_id(
+                    summary,
+                    "held_monitor_canonical_position_ids",
+                    pos,
+                )
 
             if should_exit:
                 pos.exit_trigger = exit_trigger
@@ -6940,12 +9784,32 @@ def execute_monitoring_phase(
                     clob=clob,
                     conn=conn,
                     exit_intent=exit_intent,
+                    branchwise_sell_authority=branchwise_sell_authority,
                     hard_fact_authority=(
                         _hard_fact
                         if exit_trigger == "DAY0_HARD_FACT_BIN_DEAD"
                         else None
                     ),
                 )
+                if _drain_same_turn_global_sell_reauction_after_no_fill(
+                    pos,
+                    conn=conn,
+                    requester=lambda position, force_new: (
+                        request_global_sell_snapshot_reauction(
+                            position,
+                            force_new,
+                            deadline_monotonic=monitor_deadline,
+                        )
+                    ),
+                    deadline_monotonic=monitor_deadline,
+                ):
+                    portfolio_dirty = True
+                    summary[
+                        "global_sell_snapshot_reauction_same_turn_recovered"
+                    ] = summary.get(
+                        "global_sell_snapshot_reauction_same_turn_recovered",
+                        0,
+                    ) + 1
                 if outcome.startswith("exit_filled:"):
                     tracker.record_exit(pos)
                     tracker_dirty = True
@@ -6966,7 +9830,7 @@ def execute_monitoring_phase(
             ):
                 from src.execution.exit_lifecycle import mark_market_closed_hold_to_settlement
 
-                mark_market_closed_hold_to_settlement(
+                closed_hold_written = mark_market_closed_hold_to_settlement(
                     pos,
                     reason="MARKET_CLOSED_AWAITING_SETTLEMENT",
                     error=str(
@@ -6976,25 +9840,49 @@ def execute_monitoring_phase(
                     conn=conn,
                     preserve_exit_reason=True,
                 )
-                portfolio_dirty = True
-                summary["monitor_closed_market_pending_settlement_after_eval"] = (
-                    summary.get("monitor_closed_market_pending_settlement_after_eval", 0) + 1
-                )
-                summary.setdefault("monitor_closed_market_pending_settlement_positions", []).append(pos.trade_id)
-                summary.setdefault("monitor_closed_market_pending_settlement_reasons", []).append(
-                    {
-                        "position_id": pos.trade_id,
-                        "reason": "market_closed_no_executable_bid",
-                        **deferred_static_closed_market_info,
-                    }
-                )
+                if closed_hold_written:
+                    portfolio_dirty = True
+                    summary["monitor_closed_market_pending_settlement_after_eval"] = (
+                        summary.get("monitor_closed_market_pending_settlement_after_eval", 0) + 1
+                    )
+                    summary.setdefault("monitor_closed_market_pending_settlement_positions", []).append(pos.trade_id)
+                    summary.setdefault("monitor_closed_market_pending_settlement_reasons", []).append(
+                        {
+                            "position_id": pos.trade_id,
+                            "reason": "market_closed_no_executable_bid",
+                            **deferred_static_closed_market_info,
+                        }
+                    )
+                else:
+                    summary["monitor_canonical_write_failed"] = (
+                        summary.get("monitor_canonical_write_failed", 0) + 1
+                    )
             elif deferred_static_closed_market_info is not None:
                 summary["day0_static_closed_market_tradable_bid_preserved"] = (
                     summary.get("day0_static_closed_market_tradable_bid_preserved", 0) + 1
                 )
         except Exception as e:
+            if admitted_statistical_position and admitted_child_stage is not None:
+                record_admitted_child_failure(
+                    str(getattr(pos, "trade_id", "") or ""),
+                    admitted_child_stage,
+                )
             deps.logger.error("Monitor failed for %s: %s", pos.trade_id, e, exc_info=True)
             summary["monitor_failed"] = summary.get("monitor_failed", 0) + 1
+            if (
+                admitted_child_stage is not None
+                and not monitor_result_written
+                and not monitor_canonical_failed
+            ):
+                monitor_result_written = _record_monitor_data_degraded_attempt(
+                    conn,
+                    pos,
+                    artifact=artifact,
+                    deps=deps,
+                    summary=summary,
+                    stage=admitted_child_stage,
+                )
+                monitor_canonical_failed = not monitor_result_written
             reason_prefix = "time_context_failed" if hours_to_settlement is None else f"refresh_failed:{e.__class__.__name__}"
             if hours_to_settlement is None:
                 try:
@@ -7008,7 +9896,12 @@ def execute_monitoring_phase(
                 or hours_to_settlement <= 6.0
                 or _position_state_value(pos) in {"day0_window", "pending_exit"}
             )
-            if near_settlement and not monitor_result_written and "execution failed" not in str(e).lower():
+            if (
+                near_settlement
+                and not monitor_result_written
+                and not monitor_canonical_failed
+                and "execution failed" not in str(e).lower()
+            ):
                 summary["monitor_chain_missing"] = summary.get("monitor_chain_missing", 0) + 1
                 summary.setdefault("monitor_chain_missing_positions", []).append(pos.trade_id)
                 summary.setdefault("monitor_chain_missing_reasons", []).append(
@@ -7025,19 +9918,45 @@ def execute_monitoring_phase(
                     )
                 )
         finally:
+            if had_previous_position_deadline:
+                setattr(
+                    pos,
+                    _HELD_MONITOR_DEADLINE_ATTR,
+                    previous_position_deadline,
+                )
+            else:
+                try:
+                    delattr(pos, _HELD_MONITOR_DEADLINE_ATTR)
+                except AttributeError:
+                    pass
             _release_monitor_write_lock_boundary(
                 conn,
                 summary,
                 deps,
                 boundary="position_monitor",
+                # The child deadline authorizes starting and completing this
+                # position's q/book/decision work. Once that work has produced
+                # a canonical monitor event, durability belongs to the outer
+                # monitor claim: reusing an already-consumed child deadline
+                # here rolls back the exact current truth the child obtained.
+                # SCOPE: this position's completed local transaction only.
+                # DRAIN: commit before the unchanged outer claim expires.
+                # RESET: the next position receives its own fresh child clock.
+                deadline_monotonic=monitor_deadline,
             )
 
-    _emit_portfolio_rotation_evaluation_status(conn, summary, deps=deps)
+    _emit_portfolio_rotation_evaluation_status(
+        conn,
+        summary,
+        deps=deps,
+        deadline_monotonic=monitor_deadline,
+    )
     _release_monitor_write_lock_boundary(
         conn,
         summary,
         deps,
         boundary="portfolio_rotation_evaluation_status",
+        deadline_monotonic=monitor_deadline,
     )
     return portfolio_dirty, tracker_dirty
 
@@ -7360,7 +10279,13 @@ def _rotation_candidates(conn, *, decision_time: datetime) -> tuple[list, list[s
     return candidates, skipped
 
 
-def _emit_portfolio_rotation_evaluation_status(conn, summary: dict, *, deps) -> None:
+def _emit_portfolio_rotation_evaluation_status(
+    conn,
+    summary: dict,
+    *,
+    deps,
+    deadline_monotonic: float | None = None,
+) -> None:
     """Evaluate portfolio rotation value without implying executable live action.
 
     Actual same-family fill-up/shift actions are driven by EDLI_REDECISION_PENDING
@@ -7371,6 +10296,18 @@ def _emit_portfolio_rotation_evaluation_status(conn, summary: dict, *, deps) -> 
     if conn is None:
         summary["portfolio_rotation_evaluation_status"] = "unavailable:no_connection"
         return
+    if (
+        deadline_monotonic is not None
+        and time.monotonic() >= float(deadline_monotonic)
+    ):
+        # This is read-side telemetry; it has no live rotation authority.  It
+        # must never retain the single held-monitor writer after the economic
+        # redecision budget is gone.  The event reactor owns executable
+        # rotation and a later monitor pass may refresh this summary.
+        summary["portfolio_rotation_evaluation_status"] = (
+            "deferred:held_monitor_deadline_expired"
+        )
+        return
     now_fn = getattr(deps, "_utcnow", None)
     try:
         decision_time = now_fn() if callable(now_fn) else datetime.now(timezone.utc)
@@ -7380,8 +10317,51 @@ def _emit_portfolio_rotation_evaluation_status(conn, summary: dict, *, deps) -> 
         decision_time = decision_time.replace(tzinfo=timezone.utc)
     decision_time = decision_time.astimezone(timezone.utc)
 
-    holds, hold_missing = _rotation_held_positions(conn)
-    candidates, candidate_missing = _rotation_candidates(conn, decision_time=decision_time)
+    previous_busy_ms: int | None = None
+    if deadline_monotonic is not None:
+        remaining_ms = max(
+            0,
+            int((float(deadline_monotonic) - time.monotonic()) * 1_000.0),
+        )
+        if remaining_ms <= 0:
+            summary["portfolio_rotation_evaluation_status"] = (
+                "deferred:held_monitor_deadline_expired"
+            )
+            return
+        previous_busy_row = conn.execute("PRAGMA busy_timeout").fetchone()
+        previous_busy_ms = int(previous_busy_row[0] or 0)
+        conn.execute(f"PRAGMA busy_timeout = {min(previous_busy_ms, remaining_ms)}")
+        conn.set_progress_handler(
+            lambda: int(time.monotonic() >= float(deadline_monotonic)),
+            1_000,
+        )
+    try:
+        holds, hold_missing = _rotation_held_positions(conn)
+        if (
+            deadline_monotonic is not None
+            and time.monotonic() >= float(deadline_monotonic)
+        ):
+            summary["portfolio_rotation_evaluation_status"] = (
+                "deferred:held_monitor_deadline_expired"
+            )
+            return
+        candidates, candidate_missing = _rotation_candidates(
+            conn,
+            decision_time=decision_time,
+        )
+        if (
+            deadline_monotonic is not None
+            and time.monotonic() >= float(deadline_monotonic)
+        ):
+            summary["portfolio_rotation_evaluation_status"] = (
+                "deferred:held_monitor_deadline_expired"
+            )
+            return
+    finally:
+        if deadline_monotonic is not None:
+            conn.set_progress_handler(None, 0)
+            if previous_busy_ms is not None:
+                conn.execute(f"PRAGMA busy_timeout = {previous_busy_ms}")
     summary["portfolio_rotation_held_positions_evaluated"] = len(holds)
     summary["portfolio_rotation_candidates_evaluated"] = len(candidates)
     if hold_missing:

@@ -344,6 +344,219 @@ def test_post_carrier_provider_run_enqueues_same_carrier_refresh(
     assert report["enqueued"][0]["source_cycle_time"] == carrier
 
 
+def test_day0_input_revision_enqueues_observation_conditioned_seed(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Same-cycle late inputs must have a RESET without dropping Day0 truth."""
+    db, kwargs = _revision_upgrade_kwargs(tmp_path)
+    kwargs.update(
+        computed_at=datetime(2026, 7, 25, 12, 0, tzinfo=UTC),
+        scopes=[("Seoul", "2026-07-25", "high")],
+    )
+    day0_payload = {
+        "day0_observed_extreme_c": 31.0,
+        "day0_observed_extreme_source": "wu_icao_history",
+        "day0_observed_extreme_observation_time": "2026-07-25T11:00:00+00:00",
+        "day0_observed_extreme_sample_count": 12,
+        "day0_observed_extreme_unit": "C",
+    }
+    from src.data import replacement_forecast_current_target_plan as target_plan
+    from src.data import replacement_forecast_seed_discovery as discovery
+
+    monkeypatch.setattr(
+        target_plan,
+        "_day0_observed_extreme_required",
+        lambda **_kwargs: True,
+    )
+    monkeypatch.setattr(
+        discovery,
+        "_day0_observed_extreme_seed_payload",
+        lambda **_kwargs: dict(day0_payload),
+    )
+    monkeypatch.setattr(
+        trigger,
+        "scope_capture_offers_larger_provider_set",
+        lambda *_args, **_kwargs: _revision_upgrade_verdict(),
+    )
+    observed: dict[str, object] = {}
+
+    def _build(_conn, **build_kwargs):
+        observed.update(build_kwargs.get("day0_payload") or {})
+        path = Path(build_kwargs["seed_file"])
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("{}\n", encoding="utf-8")
+        return path
+
+    monkeypatch.setattr(trigger, "_build_and_write_upgrade_seed", _build)
+
+    report = trigger.enqueue_fusion_upgrade_reseeds(**kwargs)
+
+    assert report["input_revisions_detected"] == 1
+    assert report["day0_conditioned_upgrades"] == 1
+    assert report["day0_skipped"] == 0
+    assert report["seeds_enqueued"] == 1
+    assert observed == day0_payload
+
+
+def test_scoped_reseed_uses_db_family_manifests_without_global_tree_scan(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A held-family repair must reach enqueue independent of manifest-tree size."""
+    db, kwargs = _revision_upgrade_kwargs(tmp_path)
+    kwargs.pop("manifests")
+    from src.data import replacement_cycle_advance_trigger as cycle_advance
+    from src.data import replacement_forecast_seed_discovery as discovery
+
+    family_manifests = (object(),)
+    monkeypatch.setattr(
+        discovery,
+        "_load_manifests",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("scoped repair must not scan the global manifest tree")
+        ),
+    )
+    monkeypatch.setattr(
+        cycle_advance,
+        "_family_manifests_from_db",
+        lambda *_args, **_kwargs: family_manifests,
+    )
+    monkeypatch.setattr(
+        trigger,
+        "scope_capture_offers_larger_provider_set",
+        lambda *_args, **_kwargs: _revision_upgrade_verdict(),
+    )
+    observed: dict[str, object] = {}
+
+    def _build(_conn, **build_kwargs):
+        observed["manifests"] = build_kwargs["manifests"]
+        path = Path(build_kwargs["seed_file"])
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("{}\n", encoding="utf-8")
+        return path
+
+    monkeypatch.setattr(trigger, "_build_and_write_upgrade_seed", _build)
+
+    report = trigger.enqueue_fusion_upgrade_reseeds(**kwargs)
+
+    assert report["seeds_enqueued"] == 1
+    assert observed["manifests"] is family_manifests
+
+
+def test_upgrade_seed_baseline_lookup_obeys_manifest_and_decision_clocks(
+    tmp_path: Path,
+) -> None:
+    """Fusion upgrades must satisfy the current causal baseline lookup API."""
+    cycle = datetime(2026, 7, 24, 12, 0, tzinfo=UTC)
+    computed_at = datetime(2026, 7, 24, 13, 0, tzinfo=UTC)
+    manifest = SimpleNamespace(
+        source_cycle_time=cycle,
+        artifact_path=tmp_path / "anchor.json",
+    )
+    observed: dict[str, object] = {}
+
+    def _coverage(_conn, **kwargs):
+        observed.update(kwargs)
+        return {"coverage": True}
+
+    output = tmp_path / "staging" / "seed.json"
+    built = trigger._build_and_write_upgrade_seed(
+        _conn(),
+        city="Seoul",
+        target_date="2026-07-25",
+        metric="high",
+        manifests=(manifest,),
+        raw_dir=tmp_path,
+        seed_path=tmp_path / "seeds",
+        seed_file=output,
+        computed_at=computed_at,
+        build_seed=lambda **_kwargs: SimpleNamespace(ok=True, seed={}),
+        latest_baseline_coverage=_coverage,
+        market_bins=lambda *_args, **_kwargs: (object(),),
+        write_seed=lambda path, _payload: (
+            path.parent.mkdir(parents=True, exist_ok=True),
+            path.write_text("{}\n", encoding="utf-8"),
+        ),
+        latest_manifest=lambda *_args, **_kwargs: manifest,
+        manifest_path_value=lambda *_args, **_kwargs: tmp_path / "input.json",
+        manifest_base_dir=lambda *_args, **_kwargs: tmp_path,
+        resolve_path=lambda path, **_kwargs: path,
+        expected_identity=lambda _metric: {
+            "openmeteo_ifs9_anchor": SimpleNamespace(
+                source_id="anchor",
+                data_version="v1",
+            )
+        },
+    )
+
+    assert built == output
+    assert observed["not_after_source_cycle_time"] == cycle
+    assert observed["as_of_time"] == computed_at
+
+
+def test_consumed_failed_publication_reclaims_same_transition_marker(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A vanished seed with an unchanged posterior must have a retry RESET."""
+    _db, kwargs = _revision_upgrade_kwargs(tmp_path)
+    monkeypatch.setattr(
+        trigger,
+        "scope_capture_offers_larger_provider_set",
+        lambda *_args, **_kwargs: _revision_upgrade_verdict(),
+    )
+
+    def _build(_conn, **build_kwargs):
+        path = Path(build_kwargs["seed_file"])
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("{}\n", encoding="utf-8")
+        return path
+
+    monkeypatch.setattr(trigger, "_build_and_write_upgrade_seed", _build)
+    first = trigger.enqueue_fusion_upgrade_reseeds(**kwargs)
+    first_seed = Path(first["enqueued"][0]["seed_file"])
+    first_seed.unlink()
+
+    retried = trigger.enqueue_fusion_upgrade_reseeds(**kwargs)
+
+    assert retried["seeds_enqueued"] == 1
+    assert retried["already_enqueued"] == 0
+    assert Path(retried["enqueued"][0]["seed_file"]).is_file()
+
+
+def test_active_exact_request_keeps_transition_fenced(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A claimed publication is not republished while exact queue work exists."""
+    _db, kwargs = _revision_upgrade_kwargs(tmp_path)
+    monkeypatch.setattr(
+        trigger,
+        "scope_capture_offers_larger_provider_set",
+        lambda *_args, **_kwargs: _revision_upgrade_verdict(),
+    )
+
+    def _build(_conn, **build_kwargs):
+        path = Path(build_kwargs["seed_file"])
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("{}\n", encoding="utf-8")
+        return path
+
+    monkeypatch.setattr(trigger, "_build_and_write_upgrade_seed", _build)
+    first = trigger.enqueue_fusion_upgrade_reseeds(**kwargs)
+    first_seed = Path(first["enqueued"][0]["seed_file"])
+    request = first_seed.parent.parent / "requests" / first_seed.name
+    request.parent.mkdir(parents=True, exist_ok=True)
+    first_seed.replace(request)
+
+    duplicate = trigger.enqueue_fusion_upgrade_reseeds(**kwargs)
+
+    assert duplicate["seeds_enqueued"] == 0
+    assert duplicate["already_enqueued"] == 1
+    assert request.is_file()
+
+
 def test_unchanged_or_unrelated_raw_revision_is_noop() -> None:
     conn = _conn()
     cyc = "2026-06-12T06:00:00+00:00"
@@ -647,6 +860,41 @@ def _revision_upgrade_kwargs(tmp_path: Path) -> tuple[Path, dict[str, object]]:
         "changed_sources": [_DWD],
         "manifests": (),
     }
+
+
+@pytest.mark.parametrize(
+    "cycle_time",
+    (
+        "2026-07-22T06:59:59+00:00",
+        "2026-07-24T13:00:01+00:00",
+    ),
+)
+def test_outside_causal_cycle_never_reaches_fusion_upgrade_publish(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    cycle_time: str,
+) -> None:
+    db, kwargs = _revision_upgrade_kwargs(tmp_path)
+    verdict = _revision_upgrade_verdict()
+    verdict["source_cycle_time"] = cycle_time
+    monkeypatch.setattr(
+        trigger,
+        "scope_capture_offers_larger_provider_set",
+        lambda *_args, **_kwargs: verdict,
+    )
+    monkeypatch.setattr(
+        trigger,
+        "_build_and_write_upgrade_seed",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("outside-bound cycle must not build or publish a seed")
+        ),
+    )
+
+    report = trigger.enqueue_fusion_upgrade_reseeds(**kwargs)
+
+    assert report["upgrades_detected"] == 1
+    assert report["seeds_enqueued"] == 0
+    assert report["cycle_too_old_skipped"] == 1
 
 
 def test_directory_fsync_uses_portable_readonly_open_and_closes(

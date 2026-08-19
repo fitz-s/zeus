@@ -101,6 +101,17 @@ state_machines:
       - ZEUS_REACTOR_GAMMA_EMPTY_BACKOFF_SECONDS
     invariant_tests:
       - tests/test_money_path_semantic_ci.py
+  executable_snapshot_capture_trigger:
+    owner: src/state/snapshot_repo.py
+    description: >
+      Provenance labels for immutable executable-market snapshot capture.
+      JIT_SUBMIT records that the full snapshot was captured at the final
+      submit boundary; it is not a lifecycle, venue-command, order, or fill
+      state.
+    states:
+      - JIT_SUBMIT
+    invariant_tests:
+      - tests/test_capture_policy_track_a.py
   venue_command:
     owner: src/state/venue_command_repo.py
     states:
@@ -124,6 +135,21 @@ state_machines:
       - tests/money_path/test_002_execution_lifecycle_replay.py
       - tests/test_command_recovery.py
       - tests/test_order_truth_reducer.py
+  partial_exit_economic_events:
+    owner: src/execution/exit_lifecycle.py and src/execution/harvester.py
+    description: >
+      Semantic event tags stored inside canonical position-event payloads for
+      an exactly-once capital reduction and its legacy-economics repair. These
+      are economic fact vocabulary, not lifecycle phases or venue-command
+      states. They are registered explicitly because partial-exit realized PnL
+      and residual cost basis must remain machine-routable through MP-ECO and
+      MP-RED checks.
+    states:
+      - CAPITAL_REDUCTION_FILLED
+      - PARTIAL_EXIT_ECONOMICS_REPAIRED
+    invariant_tests:
+      - tests/test_exit_safety.py
+      - tests/test_harvester_settlement_redeem.py
   settlement_command:
     # 2026-07-25: on-chain redemption decoupled entirely (Zeus never submits
     # redeem tx; Polymarket settles win/loss on our behalf). harvester.py no
@@ -1023,6 +1049,96 @@ state_machines:
       - tests/engine/test_mode_flip_and_recapture_semantics.py
       - tests/engine/test_event_reactor_live_qkernel_gate.py
       - tests/strategy/live_inference/test_source_clock_vnext.py
+
+  global_actuation_jit_book_authority_rejection_reason:
+    owner: src/engine/event_reactor_adapter.py
+    description: >
+      PRE_SUBMIT_BOOK_AUTHORITY_JIT_REQUIRED is the fail-closed no-submit
+      reason emitted when a global actuation cannot obtain the typed current
+      JIT book authority required for final ranking and submit. It is not a
+      lifecycle, venue-command, order, or fill state.
+    states:
+      - PRE_SUBMIT_BOOK_AUTHORITY_JIT_REQUIRED
+    invariant_tests:
+      - tests/engine/test_final_submit_mode_authority.py
+      - tests/events/test_reactor.py
+
+  sealed_pre_submit_book_rejection_reason:
+    owner: src/events/reactor.py
+    description: >
+      Fail-closed reasons for rejecting a sealed JIT book override whose
+      identity, causal freshness, depth payload, canonical hash, or executable
+      witness no longer matches the selected final intent. These are
+      final-submit rejection reasons, not lifecycle, venue-command, order, or
+      fill states.
+    states:
+      - PRE_SUBMIT_SEALED_BOOK_IDENTITY_MISMATCH
+      - PRE_SUBMIT_SEALED_BOOK_FRESHNESS_INVALID
+      - PRE_SUBMIT_SEALED_BOOK_DEPTH_INVALID
+      - PRE_SUBMIT_SEALED_BOOK_HASH_MISMATCH
+      - PRE_SUBMIT_SEALED_BOOK_WITNESS_MISMATCH
+    invariant_tests:
+      - tests/events/test_reactor.py
+
+  global_sell_receipt_audit_reason:
+    owner: src/analysis/settlement_skill_attribution.py
+    description: >
+      Read-only settlement-attribution audit reasons for an EXIT/SELL command
+      whose intent kind is wrong or whose canonical INTENT_CREATED event is
+      absent. They make the receipt INVALID without relabeling settlement,
+      supplying q, or becoming lifecycle, command, order, or fill states.
+    states:
+      - GLOBAL_SELL_RECEIPT_INTENT_KIND_MISMATCH
+      - GLOBAL_SELL_RECEIPT_AUDIT_INTENT_EVENT_MISSING
+    invariant_tests:
+      - tests/test_settlement_skill_attribution.py
+
+  global_winner_claim_reason:
+    owner: src/events/event_store.py
+    description: >
+      Event-store claim reasons for a family-global auction winner.
+      GLOBAL_WINNER_TARGETED_CLAIM marks the selected winner's processing
+      claim; GLOBAL_WINNER_SUBMIT_FENCED keeps that claim non-reclaimable while
+      its submit outcome is still being durably finalized. These are processing
+      lease reasons, not lifecycle, order, venue, or fill states.
+    states:
+      - GLOBAL_WINNER_TARGETED_CLAIM
+      - GLOBAL_WINNER_SUBMIT_FENCED
+    invariant_tests:
+      - tests/events/test_reactor.py
+      - tests/events/test_continuous_redecision_emit.py
+
+  held_sell_reauction_receipt_status:
+    owner: src/runtime/reactor_wake.py
+    description: >
+      Terminal receipt statuses for a held-position SELL reauction request.
+      ACTUATED requires an exact current-context sell actuation witness;
+      CAPITAL_REJECTED requires the same current probability/book attempt plus
+      a global capital-objective proof that retaining the holding dominates the
+      executable reduction. Legacy schema-v1 REJECTED remains wire-compatible
+      but is not valid terminal authority for schema-v2/v3 requests. None of
+      these statuses is position lifecycle or venue fill truth.
+    states:
+      - ACTUATED
+      - CAPITAL_REJECTED
+      - REJECTED
+    invariant_tests:
+      - tests/events/test_reactor.py
+      - tests/test_day0_hard_fact_exit.py
+
+  held_sell_reauction_reason:
+    owner: src/events/reactor.py
+    description: >
+      GLOBAL_AUCTION_CAPITAL_REJECTED is the typed terminal reason paired with
+      a CAPITAL_REJECTED held-SELL receipt after the current global
+      expected-log-wealth auction evaluates the exact probability and
+      executable book attempt. It is not a generic stop-loss, lifecycle state,
+      or proof of a venue side effect.
+    states:
+      - GLOBAL_AUCTION_CAPITAL_REJECTED
+    invariant_tests:
+      - tests/events/test_reactor.py
+      - tests/test_day0_hard_fact_exit.py
 
   command_recovery_and_exit_reason_labels:
     owner: src/execution/command_recovery.py

@@ -20,6 +20,49 @@ from src.forecast.model_selection import (
     select_models,
 )
 
+
+def test_fresh_provider_rep_outranks_stale_higher_resolution_member() -> None:
+    from types import SimpleNamespace
+
+    from src.data.replacement_forecast_materializer import (
+        _freshest_declared_provider_representatives,
+    )
+
+    served = {
+        "ecmwf_ifs": SimpleNamespace(served_cycle="2026-08-07T06:00:00+00:00"),
+        "icon_eu": SimpleNamespace(served_cycle="2026-08-06T06:00:00+00:00"),
+        "icon_global": SimpleNamespace(served_cycle="2026-08-07T06:00:00+00:00"),
+    }
+
+    current = _freshest_declared_provider_representatives(served)
+
+    assert set(current) == {"ecmwf_ifs", "icon_global"}
+
+
+def test_same_cycle_provider_reps_preserve_specificity_selection() -> None:
+    from types import SimpleNamespace
+
+    from src.data.replacement_forecast_materializer import (
+        _freshest_declared_provider_representatives,
+    )
+
+    cycle = "2026-08-07T06:00:00+00:00"
+    served = {
+        "icon_eu": SimpleNamespace(served_cycle=cycle),
+        "icon_global": SimpleNamespace(served_cycle=cycle),
+    }
+
+    current = _freshest_declared_provider_representatives(served)
+    selection = select_models(
+        present_models={model: 20.0 for model in current},
+        lat=HELSINKI[0],
+        lon=HELSINKI[1],
+        lead_days=1,
+    )
+
+    assert set(current) == {"icon_eu", "icon_global"}
+    assert selection.likelihood_globals == ("icon_eu",)
+
 # Proof city settlement coordinates (lat, lon) from bayes_precision_fusion_fixed_lead_dataset.json.
 PARIS = (48.967, 2.428)
 LONDON = (51.505, 0.055)

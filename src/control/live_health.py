@@ -1,5 +1,5 @@
 # Created: 2026-05-19
-# Last reused or audited: 2026-07-15
+# Last reused or audited: 2026-08-09
 # Authority basis: codereview-may19-2.md relationship F
 #                  + docs/operations/task_2026-05-21_live_side_effect_risk_boundaries/task.md P1-1
 #
@@ -16,6 +16,7 @@ import base64
 import hashlib
 import json
 import logging
+import math
 import os
 import re
 import subprocess
@@ -23,9 +24,20 @@ import tempfile
 import time
 import zlib
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Mapping, Optional
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+from src.contracts.global_auction_receipt import (
+    assert_global_auction_summary_integrity,
+    global_auction_execution_binding_hash,
+    global_auction_receipt_ref_from_summary,
+)
+from src.contracts.strategy_capital_allocation import (
+    STRATEGY_LOG_UTILITY_BASIS,
+    StrategyCapitalAllocationWitness,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +53,7 @@ VERY_HIGH_YES_EDGE_MIN_Q_LCB = 0.80
 HIGH_YES_EDGE_MIN_LCB_MINUS_ASK = 0.05
 HIGH_YES_EDGE_SAMPLE_LIMIT = 10
 LIVE_BOOT_SIDECAR_HEARTBEATS = (
+    ("data-ingest", "daemon-heartbeat-ingest.json", 180.0),
     ("forecast-live", "forecast-live-heartbeat.json", 120.0),
     ("substrate-observer", "daemon-heartbeat-substrate-observer.json", 180.0),
     ("price-channel-ingest", "daemon-heartbeat-price-channel-ingest.json", 180.0),
@@ -2545,6 +2558,8 @@ def _pending_exit_release_loop_surface(
                            'EXIT_INTENT',
                            'EXIT_ORDER_REJECTED',
                            'EXIT_ORDER_POSTED',
+                           'EXIT_ORDER_FILLED',
+                           'EXIT_ORDER_VOIDED',
                            'EXIT_RETRY_RELEASED'
                        )
                        AND datetime(occurred_at) >= datetime(?)
@@ -2636,7 +2651,17 @@ def _pending_exit_release_loop_surface(
             ON rp.position_id = le.position_id
          WHERE pc.phase IN ('active', 'day0_window')
            AND pc.order_status IN ('filled', 'partial')
-           AND le.latest_exit_event_type <> 'EXIT_RETRY_RELEASED'
+           AND NOT (
+               le.latest_exit_event_type = 'EXIT_RETRY_RELEASED'
+               OR (
+                   le.latest_exit_event_type = 'EXIT_ORDER_VOIDED'
+                   AND COALESCE(le.latest_exit_phase_after, '') IN (
+                       'active',
+                       'day0_window'
+                   )
+                   AND COALESCE(le.latest_exit_venue_status, '') = 'TERMINAL_NO_FILL'
+               )
+           )
            AND rp.position_id IS NULL
            AND (
                COALESCE(CAST(pc.chain_shares AS REAL), 0.0) > 0.0
@@ -3165,6 +3190,10 @@ def _monitor_probability_freshness_surface(
                            IN (0, 'false')
                        AND json_extract(e.payload_json, '$.exit_failure')
                            IN (0, 'false')
+                       AND json_extract(
+                               e.payload_json,
+                               '$.exit_decision_available'
+                           ) IN (0, 'false')
                        AND EXISTS (
                            SELECT 1
                              FROM json_each(
@@ -3185,7 +3214,7 @@ def _monitor_probability_freshness_surface(
                                  )
                              )
                             WHERE json_each.value
-                                = 'closed_market_hold_preserved_monitor_evidence'
+                                = 'closed_market_hold_no_action_authority'
                        )
                      ORDER BY e.sequence_no DESC, datetime(e.occurred_at) DESC
                      LIMIT 1
@@ -3565,7 +3594,8 @@ def _monitor_probability_freshness_surface(
                 and latest_payload.get("exit_failure") is False
                 and isinstance(validations, list)
                 and "MARKET_CLOSED_AWAITING_SETTLEMENT" in validations
-                and "closed_market_hold_preserved_monitor_evidence" in validations
+                and "closed_market_hold_no_action_authority" in validations
+                and latest_payload.get("exit_decision_available") is False
             )
 
         day0_daily_extrema_unconditioned_sample, semantic_err = _sqlite_ro_rows(
@@ -3764,6 +3794,26 @@ def _sub_min_partial_position_surface(state_dir: Path, now: datetime) -> dict:
             "skip_reason": "POSITION_CURRENT_TABLE_MISSING",
         }
 
+    latest_columns, latest_column_err = _sqlite_ro_table_columns(
+        trade_db,
+        "executable_market_snapshot_latest",
+    )
+    if latest_column_err:
+        return {
+            "ok": False,
+            "issue": f"SUB_MIN_PARTIAL_POSITION_READ_UNAVAILABLE:{latest_column_err}",
+            "evaluated": True,
+        }
+    if not latest_columns:
+        return {
+            "ok": False,
+            "issue": (
+                "SUB_MIN_PARTIAL_POSITION_READ_UNAVAILABLE:"
+                "EXECUTABLE_MARKET_SNAPSHOT_LATEST_TABLE_MISSING"
+            ),
+            "evaluated": True,
+        }
+
     snapshot_columns, snapshot_column_err = _sqlite_ro_table_columns(
         trade_db,
         "executable_market_snapshots",
@@ -3776,10 +3826,12 @@ def _sub_min_partial_position_surface(state_dir: Path, now: datetime) -> dict:
         }
     if not snapshot_columns:
         return {
-            "ok": True,
-            "issue": None,
-            "evaluated": False,
-            "skip_reason": "EXECUTABLE_MARKET_SNAPSHOTS_TABLE_MISSING",
+            "ok": False,
+            "issue": (
+                "SUB_MIN_PARTIAL_POSITION_READ_UNAVAILABLE:"
+                "EXECUTABLE_MARKET_SNAPSHOTS_TABLE_MISSING"
+            ),
+            "evaluated": True,
         }
 
     required_position_columns = {
@@ -3789,7 +3841,9 @@ def _sub_min_partial_position_surface(state_dir: Path, now: datetime) -> dict:
         "shares",
         "chain_shares",
         "token_id",
+        "no_token_id",
         "condition_id",
+        "direction",
     }
     required_snapshot_columns = {
         "condition_id",
@@ -3801,23 +3855,31 @@ def _sub_min_partial_position_surface(state_dir: Path, now: datetime) -> dict:
         "captured_at",
         "freshness_deadline",
     }
+    required_latest_columns = {
+        "condition_id",
+        "selected_outcome_token_id",
+        "snapshot_id",
+    }
     missing_position_columns = sorted(required_position_columns - position_columns)
     missing_snapshot_columns = sorted(required_snapshot_columns - snapshot_columns)
-    if missing_position_columns or missing_snapshot_columns:
+    missing_latest_columns = sorted(required_latest_columns - latest_columns)
+    if missing_position_columns or missing_snapshot_columns or missing_latest_columns:
         return {
-            "ok": True,
-            "issue": None,
-            "evaluated": False,
-            "skip_reason": "SUB_MIN_PARTIAL_POSITION_COLUMN_MISSING",
+            "ok": False,
+            "issue": (
+                "SUB_MIN_PARTIAL_POSITION_READ_UNAVAILABLE:"
+                "SUB_MIN_PARTIAL_POSITION_COLUMN_MISSING"
+            ),
+            "evaluated": True,
             "missing_position_columns": missing_position_columns,
             "missing_snapshot_columns": missing_snapshot_columns,
+            "missing_latest_columns": missing_latest_columns,
         }
 
     optional_position_columns = (
         "city",
         "target_date",
         "bin_label",
-        "direction",
         "exit_reason",
         "updated_at",
     )
@@ -3839,17 +3901,22 @@ def _sub_min_partial_position_surface(state_dir: Path, now: datetime) -> dict:
                    pc.shares,
                    pc.chain_shares,
                    pc.token_id,
+                   pc.no_token_id,
                    pc.condition_id,
+                   pc.direction,
+                   CASE
+                       WHEN pc.direction = 'buy_yes' THEN pc.token_id
+                       WHEN pc.direction = 'buy_no' THEN pc.no_token_id
+                       ELSE NULL
+                   END AS exit_token_id,
                    CASE
                        WHEN COALESCE(CAST(pc.chain_shares AS REAL), 0.0) > 0.0
                        THEN COALESCE(CAST(pc.chain_shares AS REAL), 0.0)
                        ELSE COALESCE(CAST(pc.shares AS REAL), 0.0)
                    END AS held_shares,
                    {optional_position_select}
-              FROM position_current pc
+             FROM position_current pc
              WHERE pc.phase IN ('active', 'day0_window', 'pending_exit')
-               AND COALESCE(pc.token_id, '') != ''
-               AND COALESCE(pc.condition_id, '') != ''
                AND (
                    COALESCE(CAST(pc.chain_shares AS REAL), 0.0) > 0.0
                    OR COALESCE(CAST(pc.shares AS REAL), 0.0) > 0.0
@@ -3862,6 +3929,8 @@ def _sub_min_partial_position_surface(state_dir: Path, now: datetime) -> dict:
                ap.chain_shares,
                ap.held_shares,
                ap.token_id,
+               ap.no_token_id,
+               ap.exit_token_id,
                ap.condition_id,
                ap.city,
                ap.target_date,
@@ -3869,6 +3938,7 @@ def _sub_min_partial_position_surface(state_dir: Path, now: datetime) -> dict:
                ap.direction,
                ap.exit_reason,
                ap.updated_at,
+               l.snapshot_id AS latest_snapshot_id,
                s.snapshot_id,
                s.min_order_size,
                s.orderbook_top_bid,
@@ -3876,21 +3946,13 @@ def _sub_min_partial_position_surface(state_dir: Path, now: datetime) -> dict:
                s.captured_at AS snapshot_captured_at,
                s.freshness_deadline AS snapshot_freshness_deadline
           FROM active_positions ap
-          JOIN executable_market_snapshots s
-            ON s.rowid = (
-                SELECT s2.rowid
-                  FROM executable_market_snapshots s2
-                 WHERE s2.condition_id = ap.condition_id
-                   AND s2.selected_outcome_token_id = ap.token_id
-                   AND COALESCE(CAST(s2.min_order_size AS REAL), 0.0) > 0.0
-                 ORDER BY datetime(s2.captured_at) DESC, s2.rowid DESC
-                 LIMIT 1
-            )
-         WHERE ap.held_shares > 0.0
-           AND ap.held_shares < COALESCE(CAST(s.min_order_size AS REAL), 0.0)
-         ORDER BY ap.held_shares / COALESCE(CAST(s.min_order_size AS REAL), 1.0) ASC,
-                  datetime(s.captured_at) DESC,
-                  ap.position_id
+          LEFT JOIN executable_market_snapshot_latest l
+            ON l.condition_id = ap.condition_id
+           AND l.selected_outcome_token_id = ap.exit_token_id
+          LEFT JOIN executable_market_snapshots s
+            ON s.snapshot_id = l.snapshot_id
+           AND s.condition_id = ap.condition_id
+           AND s.selected_outcome_token_id = ap.exit_token_id
         """,
         (),
     )
@@ -3900,16 +3962,123 @@ def _sub_min_partial_position_surface(state_dir: Path, now: datetime) -> dict:
             "issue": f"SUB_MIN_PARTIAL_POSITION_READ_UNAVAILABLE:{sample_err}",
             "evaluated": True,
         }
+    invalid_exit_identity_rows = [
+        row
+        for row in rows
+        if str(row.get("direction") or "") not in {"buy_yes", "buy_no"}
+        or not str(row.get("exit_token_id") or "").strip()
+        or not str(row.get("condition_id") or "").strip()
+    ]
+    if invalid_exit_identity_rows:
+        return {
+            "ok": False,
+            "issue": (
+                "SUB_MIN_PARTIAL_POSITION_READ_UNAVAILABLE:"
+                "EXIT_TOKEN_IDENTITY_MISSING_OR_INVALID"
+            ),
+            "evaluated": True,
+            "invalid_exit_token_position_ids": [
+                str(row.get("position_id") or "")
+                for row in invalid_exit_identity_rows
+            ],
+        }
+    missing_exact_rows = [
+        row
+        for row in rows
+        if not str(row.get("latest_snapshot_id") or "").strip()
+        or not str(row.get("snapshot_id") or "").strip()
+    ]
+    if missing_exact_rows:
+        return {
+            "ok": False,
+            "issue": (
+                "SUB_MIN_PARTIAL_POSITION_READ_UNAVAILABLE:"
+                "EXECUTABLE_MARKET_SNAPSHOT_LATEST_EXACT_ROW_MISSING"
+            ),
+            "evaluated": True,
+            "missing_position_ids": [
+                str(row.get("position_id") or "") for row in missing_exact_rows
+            ],
+        }
+
+    stale_or_missing_snapshot_rows: list[dict] = []
+    partial_rows: list[dict] = []
+    now_utc = (
+        now.replace(tzinfo=timezone.utc)
+        if now.tzinfo is None
+        else now.astimezone(timezone.utc)
+    )
     for row in rows:
+        freshness_raw = row.get("snapshot_freshness_deadline")
+        freshness_deadline = None
+        if isinstance(freshness_raw, str) and freshness_raw.strip():
+            try:
+                freshness_deadline = datetime.fromisoformat(
+                    freshness_raw.strip().replace("Z", "+00:00")
+                )
+            except ValueError:
+                freshness_deadline = None
+        if freshness_deadline is not None and freshness_deadline.tzinfo is not None:
+            freshness_deadline = freshness_deadline.astimezone(timezone.utc)
+        else:
+            freshness_deadline = None
+        if freshness_deadline is None or freshness_deadline <= now_utc:
+            stale_or_missing_snapshot_rows.append(row)
+            continue
+        try:
+            held_shares = float(row.get("held_shares") or 0.0)
+            min_order_size = float(row.get("min_order_size") or 0.0)
+        except (TypeError, ValueError):
+            return {
+                "ok": False,
+                "issue": (
+                    "SUB_MIN_PARTIAL_POSITION_READ_UNAVAILABLE:"
+                    "EXECUTABLE_MARKET_SNAPSHOT_MIN_ORDER_SIZE_INVALID"
+                ),
+                "evaluated": True,
+            }
+        if not math.isfinite(min_order_size) or min_order_size <= 0.0:
+            return {
+                "ok": False,
+                "issue": (
+                    "SUB_MIN_PARTIAL_POSITION_READ_UNAVAILABLE:"
+                    "EXECUTABLE_MARKET_SNAPSHOT_MIN_ORDER_SIZE_INVALID"
+                ),
+                "evaluated": True,
+            }
+        if held_shares <= 0.0 or held_shares >= min_order_size:
+            continue
         age_seconds = _age_seconds(str(row.get("snapshot_captured_at") or ""), now)
         row["snapshot_age_seconds"] = age_seconds
-        row["snapshot_freshness_expired"] = (
-            str(row.get("snapshot_freshness_deadline") or "")
-            < now.astimezone(timezone.utc).isoformat()
-        )
+        row["snapshot_freshness_expired"] = False
+        partial_rows.append(row)
 
-    count = len(rows)
-    sample = rows[:SUB_MIN_PARTIAL_POSITION_SAMPLE_LIMIT]
+    if stale_or_missing_snapshot_rows:
+        return {
+            "ok": False,
+            "issue": (
+                "SUB_MIN_PARTIAL_POSITION_READ_UNAVAILABLE:"
+                "EXIT_TOKEN_SNAPSHOT_STALE_OR_MISSING"
+            ),
+            "evaluated": True,
+            "stale_or_missing_snapshot_position_ids": [
+                str(row.get("position_id") or "")
+                for row in stale_or_missing_snapshot_rows
+            ],
+        }
+
+    partial_rows.sort(key=lambda row: str(row.get("position_id") or ""))
+    partial_rows.sort(
+        key=lambda row: str(row.get("snapshot_captured_at") or ""),
+        reverse=True,
+    )
+    partial_rows.sort(
+        key=lambda row: float(row["held_shares"])
+        / float(row["min_order_size"]),
+    )
+
+    count = len(partial_rows)
+    sample = partial_rows[:SUB_MIN_PARTIAL_POSITION_SAMPLE_LIMIT]
     detail = {
         "evaluated": True,
         "sub_min_partial_position_count": count,
@@ -4644,36 +4813,30 @@ def _recent_buy_yes_entry_command_count(conn: object, *, cutoff: str) -> int | N
 
 
 _LATEST_LIVE_POSTERIORS_SQL = """
-    SELECT posterior_id,
-           source_id,
-           posterior_identity_hash,
-           city,
-           target_date,
-           temperature_metric,
-           computed_at,
-           q_json,
-           q_lcb_json,
-           provenance_json
-      FROM (
-            SELECT posterior_id,
-                   source_id,
-                   posterior_identity_hash,
-                   city,
-                   target_date,
-                   temperature_metric,
-                   computed_at,
-                   q_json,
-                   q_lcb_json,
-                   provenance_json,
-                   ROW_NUMBER() OVER (
-                       PARTITION BY city, target_date, temperature_metric
-                       ORDER BY datetime(computed_at) DESC, posterior_id DESC
-                   ) AS rn
-              FROM forecast_posteriors
-             WHERE runtime_layer = 'live'
-               AND datetime(computed_at) >= datetime(?)
-           )
-     WHERE rn = 1
+    WITH ranked AS (
+        SELECT posterior_id,
+               ROW_NUMBER() OVER (
+                   PARTITION BY city, target_date, temperature_metric
+                   ORDER BY datetime(computed_at) DESC, posterior_id DESC
+               ) AS rn
+          FROM forecast_posteriors
+         WHERE runtime_layer = 'live'
+           AND datetime(computed_at) >= datetime(?)
+    )
+    SELECT fp.posterior_id,
+           fp.source_id,
+           fp.posterior_identity_hash,
+           fp.city,
+           fp.target_date,
+           fp.temperature_metric,
+           fp.computed_at,
+           fp.q_json,
+           fp.q_lcb_json,
+           fp.provenance_json
+      FROM ranked
+      JOIN forecast_posteriors AS fp
+        ON fp.posterior_id = ranked.posterior_id
+     WHERE ranked.rn = 1
 """
 
 
@@ -4745,25 +4908,21 @@ def _load_high_yes_edges_python(
 
     trade_conn = _connect_read_only(trade_db)
     try:
-        quote_rows = trade_conn.execute(
-            """
-            SELECT condition_id,
-                   orderbook_top_ask,
-                   captured_at,
-                   freshness_deadline,
-                   active,
-                   closed,
-                   accepting_orders
-              FROM executable_market_snapshot_latest
-             WHERE UPPER(COALESCE(outcome_label, '')) = 'YES'
-               AND captured_at >= ?
-               AND freshness_deadline >= ?
-               AND COALESCE(active, 1) = 1
-               AND COALESCE(closed, 0) = 0
-               AND COALESCE(accepting_orders, 1) = 1
-            """,
-            (cutoff, now_iso),
-        ).fetchall()
+        quote_rows = _load_high_yes_quotes_for_conditions(
+            trade_conn,
+            condition_ids=tuple(
+                sorted(
+                    {
+                        condition_id
+                        for condition_ids in market_by_family_bin.values()
+                        for condition_id in condition_ids
+                        if condition_id
+                    }
+                )
+            ),
+            cutoff=cutoff,
+            now_iso=now_iso,
+        )
     finally:
         trade_conn.close()
 
@@ -4784,28 +4943,15 @@ def _load_high_yes_edges_python(
     latest_by_condition: dict[str, dict[str, object]] = {}
     for row in posterior_rows:
         try:
-            q_values = json.loads(row["q_json"] or "{}")
             q_lcb_values = json.loads(row["q_lcb_json"] or "{}")
-            provenance = json.loads(row["provenance_json"] or "{}")
         except (TypeError, json.JSONDecodeError):
             continue
-        if (
-            not isinstance(q_values, dict)
-            or not isinstance(q_lcb_values, dict)
-            or not isinstance(provenance, dict)
-        ):
+        if not isinstance(q_lcb_values, dict):
             continue
-        day0_provenance = provenance.get("day0_conditioning")
-        if not isinstance(day0_provenance, dict):
-            day0_provenance = provenance.get("day0_provisional_observation")
-        if (
-            not isinstance(day0_provenance, dict)
-            or day0_provenance.get("active") is not True
-        ):
-            day0_provenance = {}
         city = str(row["city"] or "")
         target_date = str(row["target_date"] or "")
         metric = str(row["temperature_metric"] or "")
+        eligible: list[tuple[object, float, str, dict[str, object], float]] = []
         for bin_label, raw_lcb in q_lcb_values.items():
             try:
                 yes_lcb = float(raw_lcb)
@@ -4822,43 +4968,65 @@ def _load_high_yes_edges_python(
                 lcb_minus_ask = yes_lcb - yes_ask
                 if lcb_minus_ask < HIGH_YES_EDGE_MIN_LCB_MINUS_ASK:
                     continue
-                try:
-                    yes_q = float(q_values.get(bin_label))
-                except (TypeError, ValueError):
-                    yes_q = None
-                edge = {
-                    "posterior_id": row["posterior_id"],
-                    "posterior_identity_hash": str(
-                        row["posterior_identity_hash"] or ""
-                    ),
-                    "posterior_source_id": str(row["source_id"] or ""),
-                    "day0_observation_source": str(
-                        day0_provenance.get("source") or ""
-                    ),
-                    "day0_observation_identity": str(
-                        day0_provenance.get("observation_time") or ""
-                    ),
-                    "city": city,
-                    "target_date": target_date,
-                    "temperature_metric": metric,
-                    "bin_label": str(bin_label),
-                    "condition_id": condition_id,
-                    "computed_at": row["computed_at"],
-                    "yes_q": yes_q,
-                    "yes_lcb": yes_lcb,
-                    "yes_ask": yes_ask,
-                    "lcb_minus_ask": lcb_minus_ask,
-                    **quote,
-                }
-                existing = latest_by_condition.get(condition_id)
-                if existing is None or (
-                    str(edge["computed_at"]),
-                    int(edge["posterior_id"] or 0),
-                ) > (
-                    str(existing["computed_at"]),
-                    int(existing["posterior_id"] or 0),
-                ):
-                    latest_by_condition[condition_id] = edge
+                eligible.append(
+                    (bin_label, yes_lcb, condition_id, quote, lcb_minus_ask)
+                )
+        if not eligible:
+            continue
+        try:
+            q_values = json.loads(row["q_json"] or "{}")
+            provenance = json.loads(row["provenance_json"] or "{}")
+        except (TypeError, json.JSONDecodeError):
+            continue
+        if not isinstance(q_values, dict) or not isinstance(provenance, dict):
+            continue
+        day0_provenance = provenance.get("day0_conditioning")
+        if not isinstance(day0_provenance, dict):
+            day0_provenance = provenance.get("day0_provisional_observation")
+        if (
+            not isinstance(day0_provenance, dict)
+            or day0_provenance.get("active") is not True
+        ):
+            day0_provenance = {}
+        for bin_label, yes_lcb, condition_id, quote, lcb_minus_ask in eligible:
+            yes_ask = float(quote["yes_ask"])
+            try:
+                yes_q = float(q_values.get(bin_label))
+            except (TypeError, ValueError):
+                yes_q = None
+            edge = {
+                "posterior_id": row["posterior_id"],
+                "posterior_identity_hash": str(
+                    row["posterior_identity_hash"] or ""
+                ),
+                "posterior_source_id": str(row["source_id"] or ""),
+                "day0_observation_source": str(
+                    day0_provenance.get("source") or ""
+                ),
+                "day0_observation_identity": str(
+                    day0_provenance.get("observation_time") or ""
+                ),
+                "city": city,
+                "target_date": target_date,
+                "temperature_metric": metric,
+                "bin_label": str(bin_label),
+                "condition_id": condition_id,
+                "computed_at": row["computed_at"],
+                "yes_q": yes_q,
+                "yes_lcb": yes_lcb,
+                "yes_ask": yes_ask,
+                "lcb_minus_ask": lcb_minus_ask,
+                **quote,
+            }
+            existing = latest_by_condition.get(condition_id)
+            if existing is None or (
+                str(edge["computed_at"]),
+                int(edge["posterior_id"] or 0),
+            ) > (
+                str(existing["computed_at"]),
+                int(existing["posterior_id"] or 0),
+            ):
+                latest_by_condition[condition_id] = edge
 
     return sorted(
         latest_by_condition.values(),
@@ -4869,6 +5037,49 @@ def _load_high_yes_edges_python(
         ),
         reverse=True,
     )
+
+
+def _load_high_yes_quotes_for_conditions(
+    conn: object,
+    *,
+    condition_ids: tuple[str, ...],
+    cutoff: str,
+    now_iso: str,
+) -> list[object]:
+    """Read executable YES quotes only for posterior-linked conditions.
+
+    ``executable_market_snapshot_latest`` shares the live trade DB with the
+    order and exit path. A health pass must not scan that table globally when
+    the forecast join has already produced the exact condition scope.
+    """
+
+    rows: list[object] = []
+    for start in range(0, len(condition_ids), 250):
+        chunk = condition_ids[start : start + 250]
+        placeholders = ",".join("?" for _ in chunk)
+        rows.extend(
+            conn.execute(
+                f"""
+                SELECT condition_id,
+                       orderbook_top_ask,
+                       captured_at,
+                       freshness_deadline,
+                       active,
+                       closed,
+                       accepting_orders
+                  FROM executable_market_snapshot_latest
+                 WHERE condition_id IN ({placeholders})
+                   AND UPPER(COALESCE(outcome_label, '')) = 'YES'
+                   AND captured_at >= ?
+                   AND freshness_deadline >= ?
+                   AND COALESCE(active, 1) = 1
+                   AND COALESCE(closed, 0) = 0
+                   AND COALESCE(accepting_orders, 1) = 1
+                """,
+                (*chunk, cutoff, now_iso),
+            ).fetchall()
+        )
+    return rows
 
 
 def _forecast_snapshot_status_counts_for_edges(
@@ -4911,30 +5122,38 @@ def _forecast_snapshot_status_counts_for_edges(
         if "last_error" in processing_columns
         else "NULL AS last_error"
     )
+    rows: list[object] = []
     try:
-        rows = conn.execute(
-            f"""
-            SELECT e.event_id,
-                   e.event_type,
-                   e.available_at,
-                   e.created_at,
-                   e.payload_json,
-                   p.processing_status,
-                   {last_error_select}
-              FROM opportunity_events e
-              LEFT JOIN opportunity_event_processing p
-                ON p.event_id = e.event_id
-               AND p.consumer_name = 'edli_reactor_v1'
-             WHERE e.event_type IN (
-                       'FORECAST_SNAPSHOT_READY',
-                       'EDLI_REDECISION_PENDING',
-                       'DAY0_EXTREME_UPDATED'
-                   )
-               AND e.available_at <= ?
-               AND e.available_at >= ?
-            """,
-            (latest_edge_time, cutoff),
-        ).fetchall()
+        for city, target_date, metric in sorted({key[:3] for key in wanted}):
+            rows.extend(
+                conn.execute(
+                    f"""
+                    SELECT e.event_id,
+                           e.event_type,
+                           e.available_at,
+                           e.created_at,
+                           e.payload_json,
+                           p.processing_status,
+                           {last_error_select}
+                      FROM opportunity_events e
+                           INDEXED BY idx_opportunity_events_day0_family_extreme
+                      LEFT JOIN opportunity_event_processing p
+                        ON p.event_id = e.event_id
+                       AND p.consumer_name = 'edli_reactor_v1'
+                     WHERE e.event_type IN (
+                               'FORECAST_SNAPSHOT_READY',
+                               'EDLI_REDECISION_PENDING',
+                               'DAY0_EXTREME_UPDATED'
+                           )
+                       AND json_extract(e.payload_json, '$.city') = ?
+                       AND json_extract(e.payload_json, '$.target_date') = ?
+                       AND json_extract(e.payload_json, '$.metric') = ?
+                       AND e.available_at <= ?
+                       AND e.available_at >= ?
+                    """,
+                    (city, target_date, metric, latest_edge_time, cutoff),
+                ).fetchall()
+            )
     except Exception:  # noqa: BLE001 - optional trace detail must not mask the edge alarm
         return {}
     counts: dict[tuple[str, str, str, str], dict[str, int]] = {}
@@ -5439,13 +5658,20 @@ _GLOBAL_AUCTION_RECEIPT_MODES = (
     "global_single_order_auction_delta",
     "global_single_order_auction_duplicate",
 )
-_LATEST_GLOBAL_AUCTION_RECEIPT_SQL = """
-    SELECT id, mode, artifact_json, timestamp
-      FROM decision_log NOT INDEXED
+_GLOBAL_AUCTION_COMPONENT_MAX_DELTA_DEPTH = 8
+_GLOBAL_AUCTION_REFERENCE_MAX_HOPS = 9
+_LATEST_GLOBAL_AUCTION_RECEIPT_ID_SQL = """
+    SELECT id
+      FROM decision_log INDEXED BY idx_decision_log_ts
      WHERE mode IN (?, ?, ?)
        AND timestamp >= ?
-     ORDER BY id DESC
+     ORDER BY timestamp DESC, id DESC
      LIMIT 1
+"""
+_GLOBAL_AUCTION_RECEIPT_BY_ID_SQL = """
+    SELECT id, mode, artifact_json, timestamp
+      FROM decision_log
+     WHERE id = ?
 """
 
 
@@ -5478,7 +5704,6 @@ def _global_auction_component_reference_summary(
     mode: str,
     receipt_hash: str,
     component_sha256: str,
-    payload_field: str,
     sha256_field: str,
 ) -> Mapping[str, object]:
     if mode not in _GLOBAL_AUCTION_RECEIPT_MODES:
@@ -5494,10 +5719,22 @@ def _global_auction_component_reference_summary(
     if (
         str(summary.get("receipt_hash") or "") != receipt_hash
         or str(summary.get(sha256_field) or "") != component_sha256
-        or payload_field not in summary
     ):
         raise ValueError("REFERENCE_IDENTITY")
     return summary
+
+
+def _next_global_auction_reference_hop(
+    *,
+    row_id: int,
+    visited: frozenset[int],
+    hops: int,
+) -> tuple[frozenset[int], int]:
+    if row_id in visited:
+        raise ValueError("REFERENCE_CYCLE")
+    if hops >= _GLOBAL_AUCTION_REFERENCE_MAX_HOPS:
+        raise ValueError("REFERENCE_DEPTH")
+    return visited | {row_id}, hops + 1
 
 
 def _global_auction_reference_summary(
@@ -5514,7 +5751,6 @@ def _global_auction_reference_summary(
         mode=mode,
         receipt_hash=receipt_hash,
         component_sha256=component_sha256,
-        payload_field="candidate_evaluations_zlib_b64",
         sha256_field="candidate_evaluations_sha256",
     )
 
@@ -5546,6 +5782,9 @@ def _decode_global_auction_holding_payload(
 def _current_global_auction_holding_payload(
     conn: object,
     summary: Mapping[str, object],
+    *,
+    _visited: frozenset[int] = frozenset(),
+    _hops: int = 0,
 ) -> list[dict[str, object]]:
     prefix = "holding_auction_coverage"
     field = f"{prefix}_zlib_b64"
@@ -5556,22 +5795,52 @@ def _current_global_auction_holding_payload(
 
     delta_field = f"{prefix}_delta_zlib_b64"
     if delta_field in summary:
+        try:
+            delta_depth = int(
+                summary.get(f"{prefix}_delta_chain_depth") or 1
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValueError("REFERENCE_DEPTH") from exc
+        if not 1 <= delta_depth <= _GLOBAL_AUCTION_COMPONENT_MAX_DELTA_DEPTH:
+            raise ValueError("REFERENCE_DEPTH")
         if summary.get(f"{prefix}_delta_encoding") != (
             "zlib+base64+keyed-canonical-json-delta-v1"
         ):
             raise ValueError("HOLDING_DELTA_ENCODING")
+        base_row_id = int(summary[f"{prefix}_base_decision_log_id"])
+        visited, hops = _next_global_auction_reference_hop(
+            row_id=base_row_id,
+            visited=_visited,
+            hops=_hops,
+        )
         base_summary = _global_auction_component_reference_summary(
             conn,
-            row_id=int(summary[f"{prefix}_base_decision_log_id"]),
+            row_id=base_row_id,
             mode=str(summary[f"{prefix}_base_mode"]),
             receipt_hash=str(summary[f"{prefix}_base_receipt_hash"]),
             component_sha256=str(summary[f"{prefix}_base_sha256"]),
-            payload_field=field,
             sha256_field=sha_field,
         )
         if base_summary.get(encoding_field) != summary.get(encoding_field):
             raise ValueError("HOLDING_DELTA_BASE_ENCODING")
-        base = _decode_global_auction_holding_payload(base_summary)
+        base_delta_field = f"{prefix}_delta_zlib_b64"
+        if delta_depth == 1:
+            if base_delta_field in base_summary:
+                raise ValueError("REFERENCE_DEPTH")
+        elif (
+            base_delta_field not in base_summary
+            or int(
+                base_summary.get(f"{prefix}_delta_chain_depth") or 0
+            )
+            != delta_depth - 1
+        ):
+            raise ValueError("REFERENCE_DEPTH")
+        base = _current_global_auction_holding_payload(
+            conn,
+            base_summary,
+            _visited=visited,
+            _hops=hops,
+        )
         compressed = base64.b64decode(str(summary[delta_field]), validate=True)
         if len(compressed) > 2_000_000:
             raise ValueError("HOLDING_DELTA_COMPRESSED_PAYLOAD_TOO_LARGE")
@@ -5603,23 +5872,39 @@ def _current_global_auction_holding_payload(
         raise ValueError("HOLDING_PAYLOAD_REFERENCE_MISSING")
     references = summary.get("payload_reference_components", {})
     component = references.get(field, {}) if isinstance(references, dict) else {}
-    if not isinstance(component, dict) or not component:
-        raise ValueError("HOLDING_PAYLOAD_REFERENCE_COMPONENT_MISSING")
-    component_sha256 = str(component["sha256"])
+    if component:
+        row_id = int(component["decision_log_id"])
+        mode = str(component["mode"])
+        receipt_hash = str(component["receipt_hash"])
+        component_sha256 = str(component["sha256"])
+    else:
+        row_id = int(summary["payload_reference_decision_log_id"])
+        mode = str(summary["payload_reference_mode"])
+        receipt_hash = str(summary["payload_reference_receipt_hash"])
+        component_sha256 = str(summary[sha_field])
     if component_sha256 != str(summary[sha_field]):
         raise ValueError("HOLDING_PAYLOAD_REFERENCE_HASH_MISMATCH")
+    visited, hops = _next_global_auction_reference_hop(
+        row_id=row_id,
+        visited=_visited,
+        hops=_hops,
+    )
     reference_summary = _global_auction_component_reference_summary(
         conn,
-        row_id=int(component["decision_log_id"]),
-        mode=str(component["mode"]),
-        receipt_hash=str(component["receipt_hash"]),
+        row_id=row_id,
+        mode=mode,
+        receipt_hash=receipt_hash,
         component_sha256=component_sha256,
-        payload_field=field,
         sha256_field=sha_field,
     )
     if reference_summary.get(encoding_field) != summary.get(encoding_field):
         raise ValueError("HOLDING_PAYLOAD_REFERENCE_ENCODING")
-    return _decode_global_auction_holding_payload(reference_summary)
+    return _current_global_auction_holding_payload(
+        conn,
+        reference_summary,
+        _visited=visited,
+        _hops=hops,
+    )
 
 
 def _global_auction_holding_authority_matches(
@@ -5660,9 +5945,33 @@ def _global_auction_holding_authority_matches(
         or any(not str(row.get("reason") or "").strip() for row in excluded_rows)
     ):
         return False
-    evaluated_by_candidate = {
-        str(row.get("candidate_id") or ""): row for row in evaluated_rows
-    }
+    evaluated_by_candidate: dict[str, dict[str, object]] = {}
+    for row in evaluated_rows:
+        raw_candidate_ids = row.get("candidate_ids")
+        if raw_candidate_ids is None:
+            candidate_ids = (str(row.get("candidate_id") or ""),)
+        elif isinstance(raw_candidate_ids, list):
+            candidate_ids = tuple(str(value or "") for value in raw_candidate_ids)
+        else:
+            return False
+        primary_candidate_id = str(row.get("candidate_id") or "")
+        if (
+            not candidate_ids
+            or any(not candidate_id for candidate_id in candidate_ids)
+            or len(set(candidate_ids)) != len(candidate_ids)
+            or (
+                primary_candidate_id
+                and primary_candidate_id not in candidate_ids
+            )
+            or any(
+                candidate_id in evaluated_by_candidate
+                for candidate_id in candidate_ids
+            )
+        ):
+            return False
+        evaluated_by_candidate.update(
+            (candidate_id, row) for candidate_id in candidate_ids
+        )
     sell_by_candidate = {
         str(row.get("candidate_id") or ""): row
         for row in detailed
@@ -5671,7 +5980,6 @@ def _global_auction_holding_authority_matches(
     if (
         "" in evaluated_by_candidate
         or "" in sell_by_candidate
-        or len(evaluated_by_candidate) != len(evaluated_rows)
         or len(sell_by_candidate)
         != sum(
             isinstance(row, dict) and row.get("action") == "SELL"
@@ -5712,6 +6020,9 @@ def _apply_global_auction_candidate_semantic_delta(
 def _current_global_auction_candidate_payload(
     conn: object,
     summary: Mapping[str, object],
+    *,
+    _visited: frozenset[int] = frozenset(),
+    _hops: int = 0,
 ) -> dict[str, object]:
     field = "candidate_evaluations_zlib_b64"
     if field in summary:
@@ -5719,6 +6030,14 @@ def _current_global_auction_candidate_payload(
 
     delta_field = "candidate_evaluations_delta_zlib_b64"
     if delta_field in summary:
+        try:
+            delta_depth = int(
+                summary.get("candidate_evaluations_delta_chain_depth") or 1
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValueError("REFERENCE_DEPTH") from exc
+        if not 1 <= delta_depth <= _GLOBAL_AUCTION_COMPONENT_MAX_DELTA_DEPTH:
+            raise ValueError("REFERENCE_DEPTH")
         delta_encoding = str(
             summary.get("candidate_evaluations_delta_encoding") or ""
         )
@@ -5726,6 +6045,7 @@ def _current_global_auction_candidate_payload(
             "zlib+base64+canonical-json-object-delta-v1",
             "zlib+base64+semantic-keyed-canonical-json-delta-v2",
             "zlib+base64+semantic-keyed-canonical-json-delta-v3",
+            "zlib+base64+semantic-keyed-canonical-json-delta-v4",
         }:
             raise ValueError("DELTA_ENCODING")
         base_row_id = int(summary["candidate_evaluations_base_decision_log_id"])
@@ -5742,6 +6062,11 @@ def _current_global_auction_candidate_payload(
             ):
                 raise ValueError("DELTA_BASE_MODE_MISSING")
             base_mode = str(summary.get("payload_reference_mode") or "")
+        visited, hops = _next_global_auction_reference_hop(
+            row_id=base_row_id,
+            visited=_visited,
+            hops=_hops,
+        )
         base_summary = _global_auction_reference_summary(
             conn,
             row_id=base_row_id,
@@ -5753,7 +6078,26 @@ def _current_global_auction_candidate_payload(
             "candidate_evaluation_encoding"
         ):
             raise ValueError("DELTA_BASE_ENCODING")
-        base = _decode_global_auction_candidate_payload(base_summary)[0]
+        if delta_depth == 1:
+            if "candidate_evaluations_delta_zlib_b64" in base_summary:
+                raise ValueError("REFERENCE_DEPTH")
+        elif (
+            "candidate_evaluations_delta_zlib_b64" not in base_summary
+            or int(
+                base_summary.get(
+                    "candidate_evaluations_delta_chain_depth"
+                )
+                or 0
+            )
+            != delta_depth - 1
+        ):
+            raise ValueError("REFERENCE_DEPTH")
+        base = _current_global_auction_candidate_payload(
+            conn,
+            base_summary,
+            _visited=visited,
+            _hops=hops,
+        )
         compressed = base64.b64decode(str(summary[delta_field]), validate=True)
         if len(compressed) > 2_000_000:
             raise ValueError("DELTA_COMPRESSED_PAYLOAD_TOO_LARGE")
@@ -5807,6 +6151,11 @@ def _current_global_auction_candidate_payload(
         component_sha256 = str(summary["candidate_evaluations_sha256"])
     if component_sha256 != str(summary["candidate_evaluations_sha256"]):
         raise ValueError("PAYLOAD_REFERENCE_HASH_MISMATCH")
+    visited, hops = _next_global_auction_reference_hop(
+        row_id=row_id,
+        visited=_visited,
+        hops=_hops,
+    )
     reference_summary = _global_auction_reference_summary(
         conn,
         row_id=row_id,
@@ -5818,7 +6167,80 @@ def _current_global_auction_candidate_payload(
         "candidate_evaluation_encoding"
     ):
         raise ValueError("PAYLOAD_REFERENCE_ENCODING")
-    return _decode_global_auction_candidate_payload(reference_summary)[0]
+    return _current_global_auction_candidate_payload(
+        conn,
+        reference_summary,
+        _visited=visited,
+        _hops=hops,
+    )
+
+
+def _global_auction_strategy_allocation_valid(summary: Mapping[str, object]) -> bool:
+    """Rebuild the schema-21 allocation witness instead of trusting receipt text."""
+
+    raw = summary.get("strategy_capital_allocation")
+    if not isinstance(raw, Mapping):
+        return False
+    try:
+        mode = str(raw["mode"])
+        configured_value = raw["configured_value"]
+        configured_limit = raw["configured_buy_commitment_limit_usd"]
+        allocation: dict[str, object] = {"mode": mode}
+        if configured_value is not None:
+            allocation["value"] = configured_value
+        if configured_limit is not None:
+            allocation["buy_commitment_limit_usd"] = configured_limit
+        witness = StrategyCapitalAllocationWitness.build(
+            capital_basis_usd=raw["capital_basis_usd"],
+            committed_capital_usd=raw["committed_capital_usd"],
+            venue_spendable_cash_usd=raw["venue_spendable_cash_usd"],
+            allocation=allocation,
+        )
+        numeric_fields = (
+            "capital_basis_usd",
+            "allocated_equity_usd",
+            "buy_commitment_limit_usd",
+            "committed_capital_usd",
+            "utility_liquid_cash_usd",
+            "venue_spendable_cash_usd",
+            "remaining_buy_capacity_usd",
+        )
+        if any(
+            Decimal(str(raw[field])) != getattr(witness, field)
+            for field in numeric_fields
+        ):
+            return False
+        if configured_value is None:
+            configured_value_valid = witness.configured_value is None
+        else:
+            configured_value_valid = (
+                Decimal(str(configured_value)) == witness.configured_value
+            )
+        if configured_limit is None:
+            configured_limit_valid = (
+                witness.configured_buy_commitment_limit_usd is None
+            )
+        else:
+            configured_limit_valid = (
+                Decimal(str(configured_limit))
+                == witness.configured_buy_commitment_limit_usd
+            )
+        return bool(
+            configured_value_valid
+            and configured_limit_valid
+            and raw.get("allocation_version") == witness.allocation_version
+            and raw.get("capital_basis_semantics")
+            == witness.capital_basis_semantics
+            and raw.get("source") == witness.source
+            and raw.get("witness_identity") == witness.witness_identity
+        )
+    except (
+        InvalidOperation,
+        KeyError,
+        TypeError,
+        ValueError,
+    ):
+        return False
 
 
 def _latest_global_auction_candidate_counts(
@@ -5836,18 +6258,20 @@ def _latest_global_auction_candidate_counts(
             "issue": None,
             "skip_reason": "GLOBAL_AUCTION_DECISION_LOG_UNAVAILABLE",
         }
-    row = conn.execute(
-        _LATEST_GLOBAL_AUCTION_RECEIPT_SQL,
+    # Keep large artifact_json overflow pages out of the candidate search. The
+    # timestamp index bounds the lookback; only the winning id fetches payload.
+    id_row = conn.execute(
+        _LATEST_GLOBAL_AUCTION_RECEIPT_ID_SQL,
         (*_GLOBAL_AUCTION_RECEIPT_MODES, cutoff),
     ).fetchone()
-    if row is None:
+    if id_row is None:
         return {}, {}, {
             "evaluated": True,
             "issue": None,
             "skip_reason": "GLOBAL_AUCTION_RECEIPT_MISSING",
         }
 
-    receipt_id = row["id"]
+    receipt_id = id_row["id"]
 
     def invalid(reason: str) -> tuple[dict[str, int], dict[str, int], dict[str, object]]:
         return {}, {}, {
@@ -5856,12 +6280,64 @@ def _latest_global_auction_candidate_counts(
             "receipt_id": receipt_id,
         }
 
+    row = conn.execute(
+        _GLOBAL_AUCTION_RECEIPT_BY_ID_SQL,
+        (receipt_id,),
+    ).fetchone()
+    if row is None:
+        return invalid("RECEIPT_ROW_MISSING")
+
     try:
         artifact = json.loads(str(row["artifact_json"] or ""))
         summary = artifact["summary"]
         schema_version = int(summary.get("schema_version") or 0)
         if schema_version < 5:
             return invalid("SCHEMA_VERSION")
+        winner_identity_present = any(
+            str(summary.get(field) or "").strip()
+            for field in (
+                "winner_event_id",
+                "winner_candidate_id",
+                "winner_actuation_identity",
+            )
+        )
+        if winner_identity_present and schema_version not in {21, 22}:
+            # Schema 17-20 receipts remain readable as no-trade telemetry only;
+            # a winner identity on those rows is not an actionable receipt.
+            return invalid("WINNER_SCHEMA_VERSION")
+        if schema_version in {21, 22}:
+            try:
+                expected_execution_binding_hash = (
+                    global_auction_execution_binding_hash(summary)
+                )
+            except ValueError:
+                return invalid("EXECUTION_BINDING_FIELDS")
+            if (
+                summary.get("execution_binding_hash")
+                != expected_execution_binding_hash
+            ):
+                return invalid("EXECUTION_BINDING_HASH")
+            try:
+                assert_global_auction_summary_integrity(summary)
+            except ValueError:
+                return invalid("ARTIFACT_SUMMARY_HASH")
+            winner_candidate_id = str(
+                summary.get("winner_candidate_id") or ""
+            ).strip()
+            winner_event_id = str(summary.get("winner_event_id") or "").strip()
+            winner_actuation_identity = str(
+                summary.get("winner_actuation_identity") or ""
+            ).strip()
+            if bool(winner_candidate_id) != bool(
+                winner_event_id and winner_actuation_identity
+            ):
+                return invalid("WINNER_EXECUTION_BINDING")
+            if winner_candidate_id:
+                global_auction_receipt_ref_from_summary(
+                    decision_log_id=int(receipt_id),
+                    decision_log_mode=str(row["mode"]),
+                    summary=summary,
+                )
         if summary.get("candidate_coverage_complete") is not True:
             return invalid("COVERAGE_INCOMPLETE")
         if summary.get("candidate_condition_index_complete") is not True:
@@ -5877,21 +6353,28 @@ def _latest_global_auction_candidate_counts(
             "zlib+base64+canonical-json-v10",
             "zlib+base64+canonical-json-v11",
             "zlib+base64+canonical-json-v12",
+            "zlib+base64+canonical-json-v13",
         }:
             return invalid("ENCODING")
         holding_payload = None
         current_candidate_encodings = {
             "zlib+base64+canonical-json-v11",
             "zlib+base64+canonical-json-v12",
+            "zlib+base64+canonical-json-v13",
         }
         if candidate_encoding in current_candidate_encodings:
-            expected_schema_versions = (
-                {17, 18}
-                if candidate_encoding == "zlib+base64+canonical-json-v11"
-                else {19}
-            )
+            expected_schema_versions = {
+                "zlib+base64+canonical-json-v11": {17, 18},
+                "zlib+base64+canonical-json-v12": {19, 20},
+                "zlib+base64+canonical-json-v13": {21, 22},
+            }[candidate_encoding]
             if schema_version not in expected_schema_versions:
                 return invalid("SCHEMA_VERSION_CONTRACT")
+            if (
+                candidate_encoding == "zlib+base64+canonical-json-v13"
+                and not _global_auction_strategy_allocation_valid(summary)
+            ):
+                return invalid("STRATEGY_CAPITAL_ALLOCATION")
             if summary.get("holding_auction_coverage_encoding") != (
                 "zlib+base64+canonical-json-v2"
             ):
@@ -5919,10 +6402,19 @@ def _latest_global_auction_candidate_counts(
     try:
         rejected_indexes: set[int] = set()
         buy_candidate_ids: tuple[str, ...] = ()
-        if candidate_encoding == "zlib+base64+canonical-json-v12":
+        if candidate_encoding in {
+            "zlib+base64+canonical-json-v12",
+            "zlib+base64+canonical-json-v13",
+        }:
             buy_index = payload["buy_candidate_index"]
+            expected_buy_index_size = 7 if schema_version >= 20 else 6
             if not isinstance(buy_index, list) or any(
-                not isinstance(row, list) or len(row) != 6
+                not isinstance(row, list)
+                or len(row) != expected_buy_index_size
+                or (
+                    expected_buy_index_size == 7
+                    and row[6] not in {"TAKER_LIMIT", "MAKER_REST"}
+                )
                 for row in buy_index
             ):
                 return invalid("BUY_CANDIDATE_INDEX_INVALID")
@@ -5934,7 +6426,10 @@ def _latest_global_auction_candidate_counts(
                 return invalid("BUY_CANDIDATE_INDEX_INVALID")
         buy_candidate_count = len(buy_candidate_ids)
         for group in payload["rejected_groups"]:
-            if candidate_encoding == "zlib+base64+canonical-json-v12":
+            if candidate_encoding in {
+                "zlib+base64+canonical-json-v12",
+                "zlib+base64+canonical-json-v13",
+            }:
                 candidate_indexes = [
                     int(value) for value in group["candidate_indexes"]
                 ]
@@ -5963,7 +6458,55 @@ def _latest_global_auction_candidate_counts(
         for evaluation in payload["detailed"]:
             covered += 1
             if (
-                candidate_encoding == "zlib+base64+canonical-json-v12"
+                candidate_encoding == "zlib+base64+canonical-json-v13"
+                and evaluation.get("status") in {"SCORED", "SELECTED"}
+            ):
+                expected_growth = evaluation.get("expected_growth")
+                if not isinstance(expected_growth, dict):
+                    return invalid("EXPECTED_GROWTH_MISSING")
+                try:
+                    ruin_reduction = float(
+                        expected_growth["ruin_probability_reduction"]
+                    )
+                    evaluation_ruin_reduction = float(
+                        evaluation["ruin_probability_reduction"]
+                    )
+                except (KeyError, TypeError, ValueError):
+                    return invalid("EXPECTED_GROWTH_RUIN_INVALID")
+                if (
+                    expected_growth.get("utility_basis")
+                    != STRATEGY_LOG_UTILITY_BASIS
+                    or not math.isfinite(ruin_reduction)
+                    or not 0.0 <= ruin_reduction <= 1.0
+                    or ruin_reduction != evaluation_ruin_reduction
+                ):
+                    return invalid("EXPECTED_GROWTH_RUIN_INVALID")
+            if candidate_encoding == "zlib+base64+canonical-json-v13":
+                point_counterfactual = evaluation.get(
+                    "sell_point_counterfactual"
+                )
+                if isinstance(point_counterfactual, dict):
+                    try:
+                        point_ruin = float(
+                            point_counterfactual[
+                                "ruin_probability_reduction"
+                            ]
+                        )
+                    except (KeyError, TypeError, ValueError):
+                        return invalid("SELL_POINT_RUIN_INVALID")
+                    if (
+                        point_counterfactual.get("utility_basis")
+                        != STRATEGY_LOG_UTILITY_BASIS
+                        or not math.isfinite(point_ruin)
+                        or not 0.0 <= point_ruin <= 1.0
+                    ):
+                        return invalid("SELL_POINT_RUIN_INVALID")
+            if (
+                candidate_encoding
+                in {
+                    "zlib+base64+canonical-json-v12",
+                    "zlib+base64+canonical-json-v13",
+                }
                 and evaluation.get("action") == "BUY"
             ):
                 candidate_id = str(evaluation.get("candidate_id") or "")
@@ -6024,7 +6567,10 @@ def _latest_global_auction_candidate_counts(
                     )
                 ):
                     return invalid("SELL_EXPECTED_AUTHORITY")
-        if candidate_encoding == "zlib+base64+canonical-json-v12":
+        if candidate_encoding in {
+            "zlib+base64+canonical-json-v12",
+            "zlib+base64+canonical-json-v13",
+        }:
             rejected_ids = {
                 buy_candidate_ids[index] for index in rejected_indexes
             }
@@ -6359,8 +6905,170 @@ def _target_local_day_complete(
     return target < local_today
 
 
+def _target_local_day_active(city: str, target_date: str, now: datetime) -> bool:
+    """Return whether ``target_date`` is the city's current local day."""
+
+    try:
+        from src.config import runtime_cities_by_name
+
+        city_obj = runtime_cities_by_name().get(str(city))
+        if city_obj is None:
+            return False
+        target = datetime.fromisoformat(str(target_date)).date()
+        local_today = now.astimezone(ZoneInfo(str(city_obj.timezone))).date()
+    except (AttributeError, OSError, TypeError, ValueError, ZoneInfoNotFoundError):
+        return False
+    return target == local_today
+
+
+def _day0_remaining_authority_readiness(
+    state_dir: Path,
+    *,
+    city: str,
+    target_date: str,
+    event_payload: Mapping[str, object],
+    now: datetime,
+    forecast_conn: object | None = None,
+) -> tuple[bool, str, dict[str, object]]:
+    """Prove the same fresh complete hourly bundle consumed by live Day0 q."""
+
+    try:
+        from src.config import runtime_cities_by_name
+        from src.data.day0_hourly_vectors import (
+            DAY0_HOURLY_BUNDLE_MAX_SKEW_MINUTES,
+            day0_hourly_models_for_city,
+            read_freshest_day0_hourly_vectors,
+        )
+        from src.state.db import _connect_read_only
+
+        city_obj = runtime_cities_by_name().get(city)
+        if city_obj is None:
+            return False, "DAY0_CITY_CONFIG_MISSING", {}
+        raw_observation_time = event_payload.get("observation_time")
+        observation_time = datetime.fromisoformat(
+            str(raw_observation_time or "").replace("Z", "+00:00")
+        )
+        if observation_time.tzinfo is None:
+            return False, "DAY0_OBSERVATION_TIME_NAIVE", {}
+        observation_time = observation_time.astimezone(timezone.utc)
+        decision_time = now.astimezone(timezone.utc)
+        if observation_time > decision_time:
+            return False, "DAY0_OBSERVATION_TIME_AFTER_NOW", {}
+        expected_models = day0_hourly_models_for_city(city_obj)
+        if not expected_models:
+            return False, "DAY0_EXPECTED_MODEL_SET_EMPTY", {}
+        owns_connection = forecast_conn is None
+        conn = forecast_conn or _connect_read_only(state_dir / "zeus-forecasts.db")
+        try:
+            vectors = read_freshest_day0_hourly_vectors(
+                city=city,
+                target_date=target_date,
+                now=decision_time,
+                expected_models=expected_models,
+                require_expected=True,
+                max_bundle_skew_minutes=DAY0_HOURLY_BUNDLE_MAX_SKEW_MINUTES,
+                remaining_window_start=observation_time,
+                require_complete_remaining_window=True,
+                conn=conn,
+            )
+        finally:
+            if owns_connection:
+                conn.close()
+        available_models = tuple(sorted(vector.model for vector in vectors))
+        detail = {
+            "expected_models": tuple(expected_models),
+            "available_models": available_models,
+            "observation_time": observation_time.isoformat(),
+        }
+        if len(vectors) != len(expected_models):
+            return False, "DAY0_COMPLETE_HOURLY_BUNDLE_UNAVAILABLE", detail
+        return True, "DAY0_REMAINING_AUTHORITY_READY", detail
+    except Exception as exc:  # noqa: BLE001 - health is fail-closed and observable.
+        return (
+            False,
+            f"DAY0_AUTHORITY_READ_FAILED:{type(exc).__name__}:{exc}",
+            {},
+        )
+
+
+def _authorized_day0_facts_for_health(
+    state_dir: Path,
+    *,
+    scopes: tuple[tuple[str, str, str], ...],
+    now: datetime,
+) -> tuple[
+    dict[tuple[str, str, str], dict[str, object]],
+    dict[tuple[str, str, str], str],
+]:
+    """Resolve bounded Day0 scopes through one canonical read connection."""
+
+    world_db = state_dir / "zeus-world.db"
+    if not world_db.exists():
+        return {}, {}
+    facts: dict[tuple[str, str, str], dict[str, object]] = {}
+    errors: dict[tuple[str, str, str], str] = {}
+    try:
+        from src.data.replacement_forecast_current_target_plan import (
+            _latest_authorized_day0_fact,
+        )
+        from src.state.db import _connect_read_only
+
+        conn = _connect_read_only(world_db)
+        try:
+            for scope in scopes:
+                city, target_date, metric = scope
+                try:
+                    fact = _latest_authorized_day0_fact(
+                        conn,
+                        city=city,
+                        target_date=target_date,
+                        temperature_metric=metric,
+                        decision_time=now.astimezone(timezone.utc),
+                    )
+                except Exception as exc:  # noqa: BLE001 - one family must not hide peers.
+                    errors[scope] = f"DAY0_FACT_READ_FAILED:{type(exc).__name__}:{exc}"
+                    continue
+                if fact is not None:
+                    facts[scope] = dict(fact)
+        finally:
+            conn.close()
+    except Exception as exc:  # noqa: BLE001 - health remains observable on read failure.
+        reason = f"DAY0_FACT_READ_FAILED:{type(exc).__name__}:{exc}"
+        errors.update({scope: reason for scope in scopes})
+    return facts, errors
+
+
+def _day0_readiness_by_scope(
+    state_dir: Path,
+    *,
+    facts: Mapping[tuple[str, str, str], Mapping[str, object]],
+    now: datetime,
+) -> dict[tuple[str, str, str], tuple[bool, str, dict[str, object]]]:
+    """Evaluate all causal Day0 scopes through one forecast DB connection."""
+
+    if not facts:
+        return {}
+    from src.state.db import _connect_read_only
+
+    results: dict[tuple[str, str, str], tuple[bool, str, dict[str, object]]] = {}
+    conn = _connect_read_only(state_dir / "zeus-forecasts.db")
+    try:
+        for (city, target_date, metric), payload in facts.items():
+            results[(city, target_date, metric)] = _day0_remaining_authority_readiness(
+                state_dir,
+                city=city,
+                target_date=target_date,
+                event_payload=payload,
+                now=now,
+                forecast_conn=conn,
+            )
+    finally:
+        conn.close()
+    return results
+
+
 def _posterior_starvation_surface(state_dir: Path, now: datetime) -> dict:
-    """Alert (log-only) on a live-tradeable family with no fresh live posterior.
+    """Alert when a live family lacks its domain's current probability authority.
 
     Incident (2026-07-13/14): all CONUS live posteriors went dark 30-37h with
     NO operator signal. Existing watchdogs (heartbeat_supervisor, riskguard,
@@ -6369,8 +7077,12 @@ def _posterior_starvation_surface(state_dir: Path, now: datetime) -> dict:
     none covers "a family with a live market has no fresh live posterior".
     This surface closes that gap.
 
-    This is an operator alert, not an order gate. Current posterior freshness
-    is proved independently on the money path.
+    Forecast families require a fresh replacement posterior.  Once a causal
+    target-day observation exists, Day0 is a distinct nowcast domain: the
+    replacement posterior is no longer its probability authority, so this
+    surface instead proves the fresh complete hourly bundle consumed by the
+    remaining-day q.  This is an operator alert, not an order gate; the money
+    path independently reproduces the same evidence at decision time.
 
     Emits one structured ``ZEUS_POSTERIOR_STARVATION`` ERROR log line per
     starved (city, target_date, metric) scope per watchdog pass, in addition
@@ -6449,7 +7161,38 @@ def _posterior_starvation_surface(state_dir: Path, now: datetime) -> dict:
         }
 
     now_utc = now.astimezone(timezone.utc)
+    day0_scopes = tuple(
+        (
+            str(row.get("city") or ""),
+            str(row.get("target_date") or ""),
+            str(row.get("metric") or ""),
+        )
+        for row in family_rows
+        if _target_local_day_active(
+            str(row.get("city") or ""),
+            str(row.get("target_date") or ""),
+            now_utc,
+        )
+    )
+    day0_facts, day0_fact_errors = _authorized_day0_facts_for_health(
+        state_dir,
+        scopes=day0_scopes,
+        now=now_utc,
+    )
+    try:
+        day0_readiness = _day0_readiness_by_scope(
+            state_dir,
+            facts=day0_facts,
+            now=now_utc,
+        )
+    except Exception as exc:  # noqa: BLE001 - one typed failure covers every scope.
+        reason = f"DAY0_AUTHORITY_READ_FAILED:{type(exc).__name__}:{exc}"
+        day0_readiness = {
+            scope: (False, reason, {})
+            for scope in day0_facts
+        }
     starved: list[dict] = []
+    day0_authority_ready: list[dict] = []
     for row in family_rows:
         city = str(row.get("city") or "")
         target_date = str(row.get("target_date") or "")
@@ -6466,6 +7209,49 @@ def _posterior_starvation_surface(state_dir: Path, now: datetime) -> dict:
                 continue
             age_h = max(0.0, (now_utc - earliest_seen_at).total_seconds() / 3600.0)
             has_posterior = False
+        scope = (city, target_date, metric)
+        day0_fact = day0_facts.get(scope)
+        day0_fact_err = day0_fact_errors.get(scope)
+        if day0_fact_err:
+            starved.append(
+                {
+                    "city": city,
+                    "target_date": target_date,
+                    "metric": metric,
+                    "authority": "day0_remaining_day_global_probability_v1",
+                    "authority_reason": day0_fact_err,
+                    "age_h": age_h,
+                    "has_posterior": has_posterior,
+                    "newest_blocked_reason": day0_fact_err,
+                }
+            )
+            continue
+        if day0_fact is not None:
+            ready, readiness_reason, readiness_detail = day0_readiness.get(
+                scope,
+                (False, "DAY0_AUTHORITY_READINESS_MISSING", {}),
+            )
+            authority_item = {
+                "city": city,
+                "target_date": target_date,
+                "metric": metric,
+                "authority": "day0_remaining_day_global_probability_v1",
+                "authority_reason": readiness_reason,
+                "day0_projection_missing": True,
+                **readiness_detail,
+            }
+            if ready:
+                day0_authority_ready.append(authority_item)
+                continue
+            starved.append(
+                {
+                    **authority_item,
+                    "age_h": age_h,
+                    "has_posterior": has_posterior,
+                    "newest_blocked_reason": readiness_reason,
+                }
+            )
+            continue
         if age_h <= threshold_hours:
             continue
         starved.append(
@@ -6489,14 +7275,17 @@ def _posterior_starvation_surface(state_dir: Path, now: datetime) -> dict:
         city = item["city"]
         target_date = item["target_date"]
         metric = item["metric"]
-        reason = blocked_reasons.get((city, target_date, metric))
+        reason = str(item.get("newest_blocked_reason") or "") or blocked_reasons.get(
+            (city, target_date, metric)
+        )
         item["newest_blocked_reason"] = reason
         logger.error(
-            "ZEUS_POSTERIOR_STARVATION city=%s target=%s metric=%s age_h=%.2f "
-            "newest_blocked_reason=%s",
+            "ZEUS_POSTERIOR_STARVATION city=%s target=%s metric=%s authority=%s "
+            "age_h=%.2f newest_blocked_reason=%s",
             city,
             target_date,
             metric,
+            item.get("authority") or "replacement_forecast_posterior",
             item["age_h"],
             reason or "unknown",
         )
@@ -6507,6 +7296,8 @@ def _posterior_starvation_surface(state_dir: Path, now: datetime) -> dict:
         "checked_family_count": len(family_rows),
         "starved_count": len(starved),
         "starved_sample": starved,
+        "day0_authority_ready_count": len(day0_authority_ready),
+        "day0_authority_ready_sample": day0_authority_ready[:10],
     }
     if starved:
         return {"ok": False, "issue": f"POSTERIOR_STARVATION:n={len(starved)}", **detail}
@@ -6520,7 +7311,7 @@ def compute_composite_live_health(
 ) -> dict:
     """Compute and persist composite live-health status.
 
-    Consults twenty surfaces:
+    Consults twenty-one surfaces:
       1. heartbeat — daemon-heartbeat.json (alive + fresh timestamp)
       2. venue_heartbeat — external CLOB heartbeat/order-safety keeper
       3. runtime_code — loaded_sha.json vs current git HEAD
@@ -6542,6 +7333,7 @@ def compute_composite_live_health(
       19. execution_capability — entry/exit side-effect gate
       20. posterior_starvation — live-tradeable family with no fresh live posterior
           (log-only alert, not a gate; see _posterior_starvation_surface)
+      21. storage_capacity — free space preserves the configured entry reserve
 
     Writes state/live_health_composite.json atomically.
 
@@ -6884,6 +7676,25 @@ def compute_composite_live_health(
             posterior_starvation_surface["issue"],
         )
 
+    from src.riskguard.riskguard import storage_capacity_snapshot
+
+    storage_capacity = storage_capacity_snapshot(sd)
+    storage_ok = storage_capacity.get("level") == "GREEN"
+    surfaces["storage_capacity"] = {
+        **storage_capacity,
+        "ok": storage_ok,
+        "issue": None
+        if storage_ok
+        else str(storage_capacity.get("status") or "LOW_DISK"),
+    }
+    if not storage_ok:
+        failing.append("storage_capacity")
+        logger.warning(
+            "live_health_composite DEGRADED: failing_surface=%s reason=%s",
+            "storage_capacity",
+            surfaces["storage_capacity"]["issue"],
+        )
+
     # ------------------------------------------------------------------ #
     # Assemble result                                                      #
     # ------------------------------------------------------------------ #
@@ -6914,6 +7725,7 @@ def compute_composite_live_health(
                 pass
             raise
     except Exception:
-        logger.debug("live_health_composite: write failed", exc_info=True)
+        logger.exception("live_health_composite: write failed")
+        raise
 
     return result

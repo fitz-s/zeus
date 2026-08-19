@@ -1,6 +1,6 @@
 # Created: 2026-05-19
 # Last reused or audited: 2026-05-19
-# Authority basis: /Users/leofitz/Downloads/codereview-may19-2.md P0-1 (updated sentinel post-structural-refactor)
+# Authority basis: ~/Downloads/codereview-may19-2.md P0-1 (updated sentinel post-structural-refactor)
 # Lifecycle: created=2026-05-19; last_reviewed=2026-05-19; last_reused=never
 # Purpose: Antibody — entry gate must consult full blocker set via kwargs-only
 #          gate function, not just the risk/heartbeat/ws/quarantine subset.

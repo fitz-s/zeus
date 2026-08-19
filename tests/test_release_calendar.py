@@ -7,11 +7,13 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
 import pytest
 
 from src.data.release_calendar import (
+    DEFAULT_CALENDAR_PATH,
     FetchDecision,
     cycle_profile_for_hour,
     evaluate_safe_fetch,
@@ -33,7 +35,21 @@ def test_calendar_loads_config_with_typed_entries() -> None:
     assert ecmwf_high.default_lag_minutes == 485
     assert ecmwf_high.min_partial_lag_minutes == 400
     assert ecmwf_high.expected_members == 51
-    assert ecmwf_high.partial_policy == "BLOCK_LIVE"
+    assert ecmwf_high.partial_policy == "TARGET_WINDOW_COMPLETE_REQUIRED"
+
+
+def test_calendar_rejects_unknown_partial_policy(tmp_path) -> None:
+    calendar_path = tmp_path / "source_release_calendar.yaml"
+    calendar_path.write_text(
+        DEFAULT_CALENDAR_PATH.read_text().replace(
+            "partial_policy: TARGET_WINDOW_COMPLETE_REQUIRED",
+            "partial_policy: UNKNOWN",
+            1,
+        )
+    )
+
+    with pytest.raises(ValueError, match="partial_policy must be one of"):
+        load_calendar_config(calendar_path)
 
 
 def test_cycle_profiles_exist_for_00_12_full_and_06_18_short() -> None:
@@ -172,6 +188,23 @@ def test_off_cycle_source_cycle_fails_closed() -> None:
 
 
 def test_partial_window_blocks_live_when_policy_blocks_partial() -> None:
+    entry = get_entry("ecmwf_open_data", "mx2t6_high")
+    assert entry is not None
+    blocked_entry = replace(entry, partial_policy="BLOCK_LIVE")
+    decision, metadata = evaluate_safe_fetch(
+        "ecmwf_open_data",
+        "mx2t6_high",
+        _utc(0),
+        _utc(6, 45),
+        allow_partial=True,
+        entries={blocked_entry.key: blocked_entry},
+    )
+
+    assert decision is FetchDecision.PARTIAL_EXPECTED_RETRY
+    assert metadata["next_safe_fetch_at"] == _utc(8, 5)
+
+
+def test_target_complete_policy_allows_collection_in_partial_window() -> None:
     decision, metadata = evaluate_safe_fetch(
         "ecmwf_open_data",
         "mx2t6_high",
@@ -180,8 +213,25 @@ def test_partial_window_blocks_live_when_policy_blocks_partial() -> None:
         allow_partial=True,
     )
 
-    assert decision is FetchDecision.PARTIAL_EXPECTED_RETRY
-    assert metadata["next_safe_fetch_at"] == _utc(8, 5)
+    assert decision is FetchDecision.FETCH_ALLOWED
+    assert metadata["partial_window"] is True
+    assert metadata["live_authorization"] is False
+    assert metadata["target_window_live_authorization"] is True
+    assert metadata["next_safe_fetch_at"] == _utc(6, 40)
+
+
+def test_partial_selection_prefers_current_cycle_over_prior_complete_cycle() -> None:
+    decision, metadata = select_source_run_for_target_horizon(
+        now_utc=_utc(6, 45),
+        source_id="ecmwf_open_data",
+        track="mx2t6_high",
+        required_max_step_hours=144,
+        allow_partial=True,
+    )
+
+    assert decision is FetchDecision.FETCH_ALLOWED
+    assert metadata["selected_cycle_time"] == _utc(0)
+    assert metadata["partial_window"] is True
 
 
 def test_backfill_only_track_never_authorizes_live_fetch() -> None:

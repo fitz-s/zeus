@@ -75,6 +75,20 @@ class VenueOrderNotFound(LookupError):
         super().__init__(f"venue order not found: {order_id}")
 
 
+PRE_SDK_NO_SIDE_EFFECT_REJECTION_CODES = frozenset(
+    {
+        "LIVE_FILL_PRICE_UNBOUNDED",
+        "V2_PRE_SUBMIT_EXCEPTION",
+    }
+)
+
+
+def is_pre_sdk_no_side_effect_rejection(error_code: object) -> bool:
+    """Return whether adapter law proves venue POST was never attempted."""
+
+    return str(error_code or "").strip() in PRE_SDK_NO_SIDE_EFFECT_REJECTION_CODES
+
+
 def _nonempty(value: Any) -> bool:
     if value is None:
         return False

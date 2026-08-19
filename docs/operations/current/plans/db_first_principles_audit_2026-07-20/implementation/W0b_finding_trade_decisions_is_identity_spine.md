@@ -7,7 +7,7 @@ round-3 verdict:"command_recovery.py:6500 的 filled-entry lot 修复门锚在 f
 
 ## 它不知道的事实(实测)
 1. **position_lots.position_id 是 INTEGER,keyed 到 `trade_decisions.trade_id`**(schema:`position_id INTEGER NOT NULL`;`venue_command_repo.py:589-590` docstring 明说 "the current position_lots schema still keys exposure by the integer trade_decisions.trade_id")。
-2. runtime 字符串 position(如 `c19a88f8-bb9`)→ 整数 lot 身份的**唯一桥就是 trade_decisions**:`_trade_decision_id_for_runtime_id`(venue_command_repo.py)= `SELECT trade_id FROM trade_decisions WHERE runtime_trade_id=?`。
+2. runtime 字符串 position(如 `c19a88f…[redacted]`)→ 整数 lot 身份的**唯一桥就是 trade_decisions**:`_trade_decision_id_for_runtime_id`(venue_command_repo.py)= `SELECT trade_id FROM trade_decisions WHERE runtime_trade_id=?`。
 3. apply 路径 `_append_filled_entry_position_lot_repair` → `resolve_position_lot_id_for_command` → 无 trade_decisions 行则**返回 None → 不修复**。
 
 → **trade_decisions 不是 fail-soft 审计投影,是 position_lots 的身份脊柱。** consult 只看候选查询,没看 apply 的 resolve,故误判。

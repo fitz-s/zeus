@@ -126,7 +126,7 @@ but never `zlib`'d, despite the codebase having a working
 
 Measured raw-vs-zlib-6 ratios, last-50-row samples, local Python
 (`zlib.compress(payload.encode("utf-8"), 6)`), scratch files under
-`/private/tmp/claude-501/-Users-leofitz-zeus/0336a436-51ee-413b-9391-74d0393cdc1d/scratchpad/`:
+`<local>/scratchpad/`:
 
 | column | n rows | raw bytes | zlib-6 bytes | ratio |
 |---|---|---|---|---|

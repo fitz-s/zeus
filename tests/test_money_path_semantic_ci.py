@@ -129,6 +129,86 @@ def test_classifier_accepts_registered_pre_submit_inner_timeout_config(tmp_path:
     ]
 
 
+def test_classifier_accepts_registered_held_sell_reauction_protocol(tmp_path: Path) -> None:
+    diff = tmp_path / "diff.patch"
+    diff.write_text(
+        "diff --git a/src/events/reactor.py b/src/events/reactor.py\n"
+        "+++ b/src/events/reactor.py\n"
+        "+claim_reason = 'GLOBAL_WINNER_SUBMIT_FENCED'\n"
+        "+status = 'CAPITAL_REJECTED'\n"
+        "+reason = 'GLOBAL_AUCTION_CAPITAL_REJECTED'\n",
+        encoding="utf-8",
+    )
+
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "scripts/ci/semantic_diff_classifier.py",
+            "--diff-file",
+            str(diff),
+            "--fail-on-unregistered",
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    payload = json.loads(proc.stdout)
+    assert {
+        "GLOBAL_WINNER_SUBMIT_FENCED",
+        "CAPITAL_REJECTED",
+        "GLOBAL_AUCTION_CAPITAL_REJECTED",
+    }.issubset(payload["new_states"])
+    assert payload["unregistered_objects"] == []
+
+
+def test_classifier_accepts_registered_global_submit_receipt_vocabulary(
+    tmp_path: Path,
+) -> None:
+    vocabulary = {
+        "GLOBAL_SELL_RECEIPT_INTENT_KIND_MISMATCH",
+        "GLOBAL_SELL_RECEIPT_AUDIT_INTENT_EVENT_MISSING",
+        "JIT_SUBMIT",
+        "PRE_SUBMIT_BOOK_AUTHORITY_JIT_REQUIRED",
+        "PRE_SUBMIT_SEALED_BOOK_IDENTITY_MISMATCH",
+        "PRE_SUBMIT_SEALED_BOOK_FRESHNESS_INVALID",
+        "PRE_SUBMIT_SEALED_BOOK_DEPTH_INVALID",
+        "PRE_SUBMIT_SEALED_BOOK_HASH_MISMATCH",
+        "PRE_SUBMIT_SEALED_BOOK_WITNESS_MISMATCH",
+    }
+    diff = tmp_path / "diff.patch"
+    added_literals = "".join(
+        f"+reason = {value!r}\n" for value in sorted(vocabulary)
+    )
+    diff.write_text(
+        "diff --git a/src/events/reactor.py b/src/events/reactor.py\n"
+        "+++ b/src/events/reactor.py\n"
+        + added_literals,
+        encoding="utf-8",
+    )
+
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "scripts/ci/semantic_diff_classifier.py",
+            "--diff-file",
+            str(diff),
+            "--fail-on-unregistered",
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    payload = json.loads(proc.stdout)
+    assert vocabulary.issubset(payload["new_states"])
+    assert not {f"state:{value}" for value in vocabulary}.intersection(
+        payload["unregistered_objects"]
+    )
+
+
 def test_semantic_ci_registry_changes_select_self_defense_tests(tmp_path: Path) -> None:
     diff = tmp_path / "diff.patch"
     diff.write_text(

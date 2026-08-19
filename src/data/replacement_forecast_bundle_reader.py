@@ -6,17 +6,21 @@ import json
 import hashlib
 import math
 import sqlite3
+import time
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
+from enum import StrEnum
 from typing import Any, Mapping
 
 from src.config import cities_by_name
 from src.contracts.settlement_semantics import SettlementSemantics
 from src.data.replacement_forecast_cycle_policy import (
     TRADEABLE_GRADE_QLCB_BASIS,
-    current_evidence_shape_semantics_mismatch,
-    cycle_age_exceeds_bound,
+    current_evidence_shape_has_entry_authority,
+    current_evidence_shape_has_held_authority,
+    cycle_age_outside_bound,
+    current_evidence_shape_source_cycle_time,
     replacement_source_cycle_max_age_hours,
 )
 from src.data.staleness_degrade_ladder import (
@@ -61,6 +65,11 @@ _REPLACEMENT_Q_MODE_LIVE_ELIGIBLE = frozenset(
 # (single source of truth shared with the materialization-side fail-closed gate).
 # Re-exported here for backward compatibility with existing imports.
 _replacement_source_cycle_max_age_hours = replacement_source_cycle_max_age_hours
+
+
+class ReplacementForecastAuthorityPurpose(StrEnum):
+    ENTRY = "entry"
+    HELD_REDECISION = "held_redecision"
 
 
 
@@ -235,8 +244,10 @@ def _parse_utc(value: str, *, field_name: str) -> datetime:
 
 def _live_grade_provenance(
     row_map: Mapping[str, Any],
+    *,
+    authority_purpose: ReplacementForecastAuthorityPurpose,
 ) -> Mapping[str, Any] | None:
-    """Return the parsed provenance only when the row is executable."""
+    """Return provenance only when it authorizes the named capital action."""
     if str(row_map.get("runtime_layer") or "") != LIVE_RUNTIME_LAYER:
         return None
     if not row_map.get("q_lcb_json"):
@@ -259,7 +270,12 @@ def _live_grade_provenance(
     )
     if not isinstance(shape, Mapping):
         return None
-    if current_evidence_shape_semantics_mismatch(provenance):
+    shape_authorized = (
+        current_evidence_shape_has_entry_authority(provenance)
+        if authority_purpose is ReplacementForecastAuthorityPurpose.ENTRY
+        else current_evidence_shape_has_held_authority(provenance)
+    )
+    if not shape_authorized:
         return None
     return provenance
 
@@ -496,6 +512,12 @@ def read_replacement_forecast_bundle(
     require_baseline_bundle: bool = True,
     current_bin_topology_hash: str | None = None,
     enforce_raw_input_hwm: bool = False,
+    raw_input_hwm_conn: sqlite3.Connection | None = None,
+    raw_input_hwm_deadline_monotonic: float | None = None,
+    raw_input_hwm_read_max_seconds: float | None = None,
+    authority_purpose: ReplacementForecastAuthorityPurpose = (
+        ReplacementForecastAuthorityPurpose.ENTRY
+    ),
 ) -> ReplacementForecastBundleReadResult:
     """Read a derived replacement posterior only after B0 executable proof exists.
 
@@ -506,6 +528,10 @@ def read_replacement_forecast_bundle(
     closed on a read-time-stale posterior instead of serving it.
     """
 
+    if not isinstance(authority_purpose, ReplacementForecastAuthorityPurpose):
+        raise TypeError(
+            "authority_purpose must be ReplacementForecastAuthorityPurpose"
+        )
     baseline_run_id = _baseline_source_run_id(baseline_bundle)
     if baseline_run_id is None and not require_baseline_bundle:
         baseline_run_id = _baseline_source_run_id_from_readiness(readiness)
@@ -614,7 +640,10 @@ def read_replacement_forecast_bundle(
                 "BLOCKED", "REPLACEMENT_POSTERIOR_READINESS_MISMATCH"
             )
         row_map = dict(certified_row)
-    provenance = _live_grade_provenance(row_map)
+    provenance = _live_grade_provenance(
+        row_map,
+        authority_purpose=authority_purpose,
+    )
     if provenance is None:
         return ReplacementForecastBundleReadResult("BLOCKED", "REPLACEMENT_POSTERIOR_READINESS_NOT_LIVE_GRADE")
     # Fallback case: we are serving an OLDER live row because a NEWER non-live
@@ -625,7 +654,11 @@ def read_replacement_forecast_bundle(
     # served row (staleness, intermediate-cycle, topology-to-current-market, identity hashes).
     _served_via_tradeable_fallback = (
         int(row_map["posterior_id"]) != int(latest_row_map["posterior_id"])
-        and _live_grade_provenance(latest_row_map) is None
+        and _live_grade_provenance(
+            latest_row_map,
+            authority_purpose=authority_purpose,
+        )
+        is None
     )
     _newer_non_executable_posterior_id = (
         int(latest_row_map["posterior_id"]) if _served_via_tradeable_fallback else None
@@ -642,23 +675,35 @@ def read_replacement_forecast_bundle(
     # horizon is the SAME constant the materialization-side fail-closed gate uses
     # (src/data/replacement_forecast_cycle_policy.py) so the two gates can never drift.
     _source_cycle_utc = _parse_utc(str(row_map["source_cycle_time"]), field_name="source_cycle_time")
-    if cycle_age_exceeds_bound(decision_utc, _source_cycle_utc):
+    if cycle_age_outside_bound(decision_utc, _source_cycle_utc):
         return ReplacementForecastBundleReadResult(
             "BLOCKED",
             "REPLACEMENT_LIVE_CYCLE_AGE_EXCEEDS_BOUND",
         )
+    ensemble_cycle_utc = current_evidence_shape_source_cycle_time(provenance)
+    if ensemble_cycle_utc is None:
+        return ReplacementForecastBundleReadResult(
+            "BLOCKED",
+            "REPLACEMENT_ENSEMBLE_CYCLE_TIME_MISSING",
+        )
+    if cycle_age_outside_bound(decision_utc, ensemble_cycle_utc):
+        return ReplacementForecastBundleReadResult(
+            "BLOCKED",
+            "REPLACEMENT_ENSEMBLE_CYCLE_AGE_EXCEEDS_BOUND",
+        )
     # §4a staleness DEGRADE LADDER (authority doc, 2026-07-17): between the fresh band
     # and the EXPIRED wall handled just above, an aged carrier is GRADED. RED (age > 24h,
-    # derived boundary) isolates ENTRY ONLY — this bundle read feeds entry-decision
-    # authority, so withholding it blocks new entries for the family while the
-    # held-position monitor/exit lanes (src/engine/position_belief.py, Position.
-    # evaluate_exit) read their OWN paths and stay fully active. GREEN/AMBER serve the
-    # bundle unchanged here; AMBER's fitted sigma inflation is applied at the admission
-    # sigma seam, never by withholding the belief. UNKNOWN (unparseable cycle) falls
-    # through to the binary law already enforced above — the ladder adds no NEW block on
-    # a classification failure (fail-open to today's behavior).
+    # derived boundary) isolates ENTRY ONLY. HELD_REDECISION is explicitly reduce-only
+    # and therefore remains readable in RED;
+    # the unchanged 30h absolute cycle-age wall above still blocks both purposes.
+    # GREEN/AMBER serve the bundle unchanged here; AMBER's fitted sigma inflation is
+    # applied at the admission sigma seam, never by withholding the belief. UNKNOWN
+    # falls through to the binary law already enforced above.
     _ladder = classify_posterior_staleness(decision_utc, _source_cycle_utc)
-    if _ladder.band is StalenessBand.RED:
+    if (
+        authority_purpose is ReplacementForecastAuthorityPurpose.ENTRY
+        and _ladder.band is StalenessBand.RED
+    ):
         return ReplacementForecastBundleReadResult(
             "BLOCKED",
             "REPLACEMENT_STALENESS_RED_ENTRY_ISOLATED",
@@ -722,16 +767,62 @@ def read_replacement_forecast_bundle(
             },
         }
     if enforce_raw_input_hwm:
-        raw_lag_reason = replacement_live_input_lag_reason(
-            conn,
-            city=city,
-            target_date=target_date_text,
-            metric=metric,
-            decision_time=decision_utc,
-            posterior_source_cycle_time=row_map["source_cycle_time"],
-            posterior_computed_at=row_map["computed_at"],
-            posterior_provenance=provenance,
-        )
+        hwm_conn = raw_input_hwm_conn or conn
+        hwm_deadline = raw_input_hwm_deadline_monotonic
+        raw_lag_reason: str | None
+        if hwm_deadline is not None and time.monotonic() >= hwm_deadline:
+            raw_lag_reason = "basis=HWM_READ_DEADLINE"
+        else:
+            managed_deadline = (
+                hwm_deadline is not None
+                or raw_input_hwm_read_max_seconds is not None
+            )
+            deadline_holder: list[float | None] = [None]
+            handler_installed = False
+            try:
+                if managed_deadline and hasattr(hwm_conn, "set_progress_handler"):
+                    hwm_conn.set_progress_handler(
+                        lambda: int(
+                            deadline_holder[0] is not None
+                            and time.monotonic() >= deadline_holder[0]
+                        ),
+                        1_000,
+                    )
+                    handler_installed = True
+                if raw_input_hwm_read_max_seconds is not None:
+                    stage_deadline = time.monotonic() + max(
+                        0.0, float(raw_input_hwm_read_max_seconds)
+                    )
+                    hwm_deadline = (
+                        stage_deadline
+                        if hwm_deadline is None
+                        else min(hwm_deadline, stage_deadline)
+                    )
+                deadline_holder[0] = hwm_deadline
+                if hwm_deadline is not None and time.monotonic() >= hwm_deadline:
+                    raw_lag_reason = "basis=HWM_READ_DEADLINE"
+                else:
+                    raw_lag_reason = replacement_live_input_lag_reason(
+                        hwm_conn,
+                        city=city,
+                        target_date=target_date_text,
+                        metric=metric,
+                        decision_time=decision_utc,
+                        posterior_source_cycle_time=row_map["source_cycle_time"],
+                        posterior_computed_at=row_map["computed_at"],
+                        posterior_provenance=provenance,
+                    )
+                    if (
+                        hwm_deadline is not None
+                        and time.monotonic() >= hwm_deadline
+                    ):
+                        raw_lag_reason = "basis=HWM_READ_DEADLINE"
+            finally:
+                if handler_installed:
+                    try:
+                        hwm_conn.set_progress_handler(None, 0)
+                    except Exception as exc:
+                        raise RuntimeError("HWM_READ_CLEANUP_FAILED") from exc
         if raw_lag_reason is not None:
             return ReplacementForecastBundleReadResult(
                 "BLOCKED", f"REPLACEMENT_RAW_INPUT_HWM:{raw_lag_reason}"

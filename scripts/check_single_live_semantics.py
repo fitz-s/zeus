@@ -1,5 +1,5 @@
 # Created: 2026-07-22
-# Last reused/audited: 2026-07-24
+# Last reused/audited: 2026-07-31
 # Authority basis: operator-directed single-live-semantics extinction pass.
 """Reject resurrection of dormant alternate-runtime concepts."""
 
@@ -74,9 +74,11 @@ _PARALLEL_INACTIVE = "shadow_" + "veto_only"
 _RETIRED_MEAN_SHIFT = "edli_" + "bias_correction"
 _RETIRED_EXIT_MEAN_SHIFT = "exit_" + "bias_family_unify"
 _RETIRED_AUTHORITY_COLUMN = "trade_" + "authority_status"
+_RETIRED_ROLLOUT_MODE = "rollout_" + "mode"
 _FORBIDDEN = (
     _PARALLEL_INACTIVE,
     _RETIRED_AUTHORITY_COLUMN,
+    _RETIRED_ROLLOUT_MODE,
     "validated_calibration_" + "transfers",
     "ctf_conversion_" + "commands",
     "ctf_conversion_command_" + "events",

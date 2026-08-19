@@ -2,7 +2,7 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!--
   Created: 2026-06-08
-  Authority basis: docs/architecture/system_decomposition_plan.md §4.1 / §6 (P2 row) / §8 Step 1.
+  Authority basis: docs/reference/design_system_decomposition_plan.md §4.1 / §6 (P2 row) / §8 Step 1.
 
   ARTIFACT ONLY. This launchd job description is committed for the operator to install
   when the cutover is performed; the process-topology refactor that produced it does NOT
@@ -15,8 +15,14 @@
   executable_market_snapshots / book_hash_transitions tables the order daemon only READS.
   The order daemon (com.zeus.live-trading) no longer schedules these two jobs.
 
-  INSTALL (operator, NOT performed by the refactor):
-    cp deploy/launchd/com.zeus.substrate-observer.plist ~/Library/LaunchAgents/
+  ZEUS_REPO_PLACEHOLDER is substituted with the repo's absolute path at
+  install time via scripts/install_launchd_plist.py (plistlib-based —
+  parses the plist, substitutes inside string values only, refuses to
+  write if any placeholder survives, plutil -lints, writes atomically) —
+  this file never names an operator's machine.
+
+  INSTALL (operator, NOT performed by the refactor; run from the repo root):
+    python3 scripts/install_launchd_plist.py deploy/launchd/com.zeus.substrate-observer.plist
     launchctl load ~/Library/LaunchAgents/com.zeus.substrate-observer.plist
 -->
 <plist version="1.0">
@@ -24,11 +30,11 @@
 	<key>EnvironmentVariables</key>
 	<dict>
 		<key>PYTHONPATH</key>
-		<string>/Users/leofitz/zeus</string>
+		<string>ZEUS_REPO_PLACEHOLDER</string>
 		<key>PYTHONSAFEPATH</key>
 		<string>1</string>
 		<key>ZEUS_PRIMARY_ROOT</key>
-		<string>/Users/leofitz/zeus</string>
+		<string>ZEUS_REPO_PLACEHOLDER</string>
 	</dict>
 	<key>KeepAlive</key>
 	<true/>
@@ -36,19 +42,19 @@
 	<string>com.zeus.substrate-observer</string>
 	<key>ProgramArguments</key>
 	<array>
-		<string>/Users/leofitz/zeus/.venv/bin/python</string>
+		<string>ZEUS_REPO_PLACEHOLDER/.venv/bin/python</string>
 		<string>-m</string>
 		<string>src.ingest.substrate_observer_daemon</string>
 	</array>
 	<key>RunAtLoad</key>
 	<true/>
 	<key>StandardErrorPath</key>
-	<string>/Users/leofitz/zeus/logs/zeus-substrate-observer.err</string>
+	<string>ZEUS_REPO_PLACEHOLDER/logs/zeus-substrate-observer.err</string>
 	<key>StandardOutPath</key>
-	<string>/Users/leofitz/zeus/logs/zeus-substrate-observer.log</string>
+	<string>ZEUS_REPO_PLACEHOLDER/logs/zeus-substrate-observer.log</string>
 	<key>ThrottleInterval</key>
 	<integer>30</integer>
 	<key>WorkingDirectory</key>
-	<string>/Users/leofitz/zeus</string>
+	<string>ZEUS_REPO_PLACEHOLDER</string>
 </dict>
 </plist>

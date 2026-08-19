@@ -71,15 +71,17 @@ therefore comes from two independent mechanisms, not from windowing alone:
      future SDK/venue surface that adds real windowing is honored for free.
 
 The watermark row is only written AFTER the whole batch's ``append_trade_fact``
-calls have succeeded (advance-after-persist): on any failure mid-cycle the
-connection is rolled back, nothing partial persists, and the next cycle
-retries the full scan from the unchanged watermark.
+calls have succeeded (advance-after-persist). Offline ``sync_fills`` remains one
+atomic transaction. The live writer commits bounded idempotent tranches so a
+MONITOR waiter can acquire between them; a later failure leaves the watermark
+unchanged and the next cycle safely replays the full scan.
 """
 from __future__ import annotations
 
 import json
 import logging
 import sqlite3
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
@@ -104,10 +106,35 @@ from src.state.venue_command_repo import _row_factory_as, append_trade_fact
 logger = logging.getLogger(__name__)
 
 DEFAULT_SOURCE = "polymarket_v2_get_trades"
+FILL_SYNC_DB_WRITE_LEASE_DEADLINE_MS = 1_000
+FILL_SYNC_DB_WRITE_MAX_HOLD_MS = 1_000
+FILL_SYNC_LIVE_TRANCHE_SIZE = 16
 
 _DISPOSITION_ZEUS_ATTRIBUTED = "ZEUS_ATTRIBUTED"
 _DISPOSITION_FOREIGN = "FOREIGN"
 _DISPOSITION_AMBIGUOUS = "AMBIGUOUS"
+
+
+@dataclass(frozen=True)
+class _PreparedFillSync:
+    source: str
+    observed: datetime
+    raw_trade_count: int
+    trades: tuple[tuple[Any, ...], ...]
+    recorded_observations: frozenset[tuple[str, str]]
+    recorded_facts: frozenset[tuple[str, str, str, str, str]]
+
+
+def _fill_sync_schema_ready(conn: sqlite3.Connection) -> bool:
+    rows = conn.execute(
+        "SELECT name FROM sqlite_master "
+        "WHERE type = 'table' AND name IN "
+        "('fill_sync_watermarks', 'wallet_fill_observations')"
+    ).fetchall()
+    return {str(row[0]) for row in rows} == {
+        "fill_sync_watermarks",
+        "wallet_fill_observations",
+    }
 
 
 def _coerce_dt(value: datetime | str | None) -> datetime:
@@ -139,8 +166,8 @@ def _advance_watermark(
     cursor: str | None,
     updated_at: str,
     coverage_note: str,
-) -> None:
-    conn.execute(
+) -> str:
+    cursor_result = conn.execute(
         """
         INSERT INTO fill_sync_watermarks (source, watermark_ts, cursor, updated_at, coverage_note)
         VALUES (?, ?, ?, ?, ?)
@@ -149,9 +176,20 @@ def _advance_watermark(
             cursor = excluded.cursor,
             updated_at = excluded.updated_at,
             coverage_note = excluded.coverage_note
+        WHERE fill_sync_watermarks.watermark_ts IS NULL
+           OR excluded.watermark_ts >= fill_sync_watermarks.watermark_ts
         """,
         (source, watermark_ts, cursor, updated_at, coverage_note),
     )
+    if cursor_result.rowcount > 0:
+        return watermark_ts
+    row = conn.execute(
+        "SELECT watermark_ts FROM fill_sync_watermarks WHERE source = ?",
+        (source,),
+    ).fetchone()
+    if row is None:
+        raise RuntimeError("fill synchronizer watermark disappeared during publication")
+    return str(row[0])
 
 
 def _fact_already_recorded(
@@ -344,22 +382,15 @@ def _venue_timestamp_iso(raw: dict) -> str | None:
         return s or None
 
 
-def sync_fills(
+def _prepare_fill_sync(
     conn: sqlite3.Connection,
     adapter: Any,
     *,
-    source: str = DEFAULT_SOURCE,
-    observed_at: datetime | str | None = None,
-) -> dict[str, Any]:
-    """Run one continuous-sync cycle. Returns a summary dict for logging/health.
+    source: str,
+    observed_at: datetime | str | None,
+) -> _PreparedFillSync:
+    """Freeze the venue/read-side inputs without owning a writer lease."""
 
-    ``adapter`` is read-only here: only ``get_trades`` is called. Attribution,
-    idempotent-append, and the watermark advance all happen inside a single
-    connection-level transaction — see module docstring "advance-after-persist".
-    """
-
-    ensure_watermark_table(conn)
-    ensure_wallet_fill_observations_table(conn)
     observed = _coerce_dt(observed_at)
     watermark = get_watermark(conn, source=source)
     since_cursor = watermark.get("watermark_ts") if watermark else None
@@ -385,6 +416,29 @@ def sync_fills(
             )
         )
 
+    return _PreparedFillSync(
+        source=source,
+        observed=observed,
+        raw_trade_count=len(raw_trades),
+        trades=tuple(prepared_trades),
+        recorded_observations=frozenset(recorded_observations),
+        recorded_facts=frozenset(recorded_facts),
+    )
+
+
+def _persist_prepared_fill_sync(
+    conn: sqlite3.Connection,
+    prepared: _PreparedFillSync,
+    *,
+    publish_watermark: bool = True,
+) -> dict[str, Any]:
+    """Atomically persist one immutable fill-sync cut on a caller-owned tx."""
+
+    if not conn.in_transaction:
+        raise RuntimeError("fill synchronizer persistence requires an active transaction")
+
+    recorded_observations = set(prepared.recorded_observations)
+    recorded_facts = set(prepared.recorded_facts)
     appended = 0
     skipped_idempotent = 0
     foreign_fill_count = 0
@@ -393,152 +447,125 @@ def sync_fills(
     observation_skipped_idempotent = 0
     commands_with_new_facts: set[str] = set()
 
-    try:
-        # Explicit outer transaction: append_trade_fact's internal atomicity
-        # unit is a bare SAVEPOINT/RELEASE (src.state.venue_command_repo.
-        # _savepoint_atomic), which composes with an ALREADY-OPEN transaction
-        # but otherwise commits immediately on its own RELEASE (project memory
-        # L30 / the module's own docstring) — Python's sqlite3 driver does not
-        # auto-BEGIN before a bare "SAVEPOINT" statement the way it does for
-        # INSERT/UPDATE/DELETE. Without this explicit BEGIN, each
-        # append_trade_fact call in the loop below would durably commit on its
-        # own, defeating "advance-after-persist": a later failure in the SAME
-        # cycle would leave earlier appends committed with no watermark advance.
-        #
-        # A deferred transaction that reads 1k+ replayed fills before its final
-        # watermark UPSERT can lose the WAL snapshot-upgrade race to any live
-        # writer. Venue I/O, parsing, command lookup, and idempotency snapshots
-        # therefore happen above; the reserved-writer interval is only the
-        # append delta plus watermark publication.
-        conn.execute("BEGIN IMMEDIATE")
-        for (
-            raw,
-            raw_hash,
-            trade_id,
-            state,
-            order_ids,
-            order_id,
-            command,
-        ) in prepared_trades:
+    for (
+        raw,
+        raw_hash,
+        trade_id,
+        state,
+        order_ids,
+        order_id,
+        command,
+    ) in prepared.trades:
 
-            # Durable observation lane FIRST (packet I / wave-1.5): every swept
-            # trade lands here regardless of attribution outcome, BEFORE the
-            # Zeus-attributed-only lane below runs — see module docstring
-            # "DURABLE OBSERVATION LANE".
-            observation_trade_id = trade_id or _stable_subject("wallet_fill", raw)
-            observation_key = (observation_trade_id, raw_hash)
-            if observation_key in recorded_observations:
-                observation_skipped_idempotent += 1
-            elif _append_wallet_fill_observation(
-                conn,
-                raw=raw,
-                raw_payload_hash=raw_hash,
-                order_id=order_id,
-                order_ids=order_ids,
-                command=command,
-                observed_at=observed,
-            ):
-                observation_appended += 1
-                recorded_observations.add(observation_key)
-            else:
-                observation_skipped_idempotent += 1
-                recorded_observations.add(observation_key)
-
-            if not trade_id or state is None:
-                unattributable_count += 1
-                continue
-            if command is None or not order_id:
-                foreign_fill_count += 1
-                continue
-
-            command_id = str(command["command_id"])
-            filled_size = _trade_filled_size(raw, order_id)
-            fill_price = _trade_fill_price(raw, order_id)
-            missing = _missing_trade_fill_economics(
-                state=state, filled_size=filled_size, fill_price=fill_price
-            )
-            if missing:
-                unattributable_count += 1
-                continue
-
-            filled_size_s = str(filled_size)
-            fill_price_s = str(fill_price)
-            fact_key = (
-                trade_id,
-                command_id,
-                state,
-                filled_size_s,
-                fill_price_s,
-            )
-            if fact_key in recorded_facts or _fact_already_recorded(
-                conn,
-                trade_id=trade_id,
-                command_id=command_id,
-                state=state,
-                filled_size=filled_size_s,
-                fill_price=fill_price_s,
-            ):
-                skipped_idempotent += 1
-                recorded_facts.add(fact_key)
-                continue
-
-            append_trade_fact(
-                conn,
-                trade_id=trade_id,
-                venue_order_id=order_id,
-                command_id=command_id,
-                state=state,
-                filled_size=filled_size_s,
-                fill_price=fill_price_s,
-                source="REST",
-                venue_timestamp=_venue_timestamp_iso(raw),
-                observed_at=observed,
-                raw_payload_hash=raw_hash,
-                raw_payload_json=raw,
-                tx_hash=raw.get("transaction_hash") or raw.get("tx_hash"),
-            )
-            appended += 1
-            recorded_facts.add(fact_key)
-            commands_with_new_facts.add(command_id)
-
-        projected = 0
-        if commands_with_new_facts:
-            from src.execution.command_recovery import (
-                reconcile_authenticated_entry_trade_facts,
-            )
-
-            for command_id in sorted(commands_with_new_facts):
-                projection = reconcile_authenticated_entry_trade_facts(
-                    conn,
-                    command_id=command_id,
-                )
-                if int(projection.get("errors", 0) or 0) > 0:
-                    raise RuntimeError(
-                        "authenticated fill projection failed for "
-                        f"command {command_id}"
-                    )
-                projected += int(projection.get("advanced", 0) or 0)
-
-        _advance_watermark(
+        # Durable observation lane FIRST (packet I / wave-1.5): every swept
+        # trade lands here regardless of attribution outcome, BEFORE the
+        # Zeus-attributed-only lane below runs — see module docstring
+        # "DURABLE OBSERVATION LANE".
+        observation_trade_id = trade_id or _stable_subject("wallet_fill", raw)
+        observation_key = (observation_trade_id, raw_hash)
+        if observation_key in recorded_observations:
+            observation_skipped_idempotent += 1
+        elif _append_wallet_fill_observation(
             conn,
-            source=source,
-            watermark_ts=observed.isoformat(),
-            cursor=None,
-            updated_at=observed.isoformat(),
-            coverage_note=(
-                f"full get_trades() scan; {len(raw_trades)} trades observed, "
-                f"{appended} appended"
-            ),
+            raw=raw,
+            raw_payload_hash=raw_hash,
+            order_id=order_id,
+            order_ids=order_ids,
+            command=command,
+            observed_at=prepared.observed,
+        ):
+            observation_appended += 1
+            recorded_observations.add(observation_key)
+        else:
+            observation_skipped_idempotent += 1
+            recorded_observations.add(observation_key)
+
+        if not trade_id or state is None:
+            unattributable_count += 1
+            continue
+        if command is None or not order_id:
+            foreign_fill_count += 1
+            continue
+
+        command_id = str(command["command_id"])
+        filled_size = _trade_filled_size(raw, order_id)
+        fill_price = _trade_fill_price(raw, order_id)
+        missing = _missing_trade_fill_economics(
+            state=state, filled_size=filled_size, fill_price=fill_price
         )
-    except Exception:
-        conn.rollback()
-        raise
-    else:
-        conn.commit()
+        if missing:
+            unattributable_count += 1
+            continue
+
+        filled_size_s = str(filled_size)
+        fill_price_s = str(fill_price)
+        fact_key = (
+            trade_id,
+            command_id,
+            state,
+            filled_size_s,
+            fill_price_s,
+        )
+        if fact_key in recorded_facts or _fact_already_recorded(
+            conn,
+            trade_id=trade_id,
+            command_id=command_id,
+            state=state,
+            filled_size=filled_size_s,
+            fill_price=fill_price_s,
+        ):
+            skipped_idempotent += 1
+            recorded_facts.add(fact_key)
+            continue
+
+        append_trade_fact(
+            conn,
+            trade_id=trade_id,
+            venue_order_id=order_id,
+            command_id=command_id,
+            state=state,
+            filled_size=filled_size_s,
+            fill_price=fill_price_s,
+            source="REST",
+            venue_timestamp=_venue_timestamp_iso(raw),
+            observed_at=prepared.observed,
+            raw_payload_hash=raw_hash,
+            raw_payload_json=raw,
+            tx_hash=raw.get("transaction_hash") or raw.get("tx_hash"),
+        )
+        appended += 1
+        recorded_facts.add(fact_key)
+        commands_with_new_facts.add(command_id)
+
+    projected = 0
+    if commands_with_new_facts:
+        from src.execution.command_recovery import (
+            reconcile_authenticated_entry_trade_facts,
+        )
+
+        for command_id in sorted(commands_with_new_facts):
+            projection = reconcile_authenticated_entry_trade_facts(
+                conn,
+                command_id=command_id,
+            )
+            if int(projection.get("errors", 0) or 0) > 0:
+                raise RuntimeError(
+                    "authenticated fill projection failed for "
+                    f"command {command_id}"
+                )
+            projected += int(projection.get("advanced", 0) or 0)
+
+    published_watermark = None
+    if publish_watermark:
+        published_watermark = _publish_prepared_fill_sync_watermark(
+            conn,
+            prepared,
+            appended=appended,
+        )
 
     return {
-        "source": source,
-        "trades_seen": len(raw_trades),
+        "source": prepared.source,
+        "trades_seen": prepared.raw_trade_count,
         "appended": appended,
         "skipped_idempotent": skipped_idempotent,
         "foreign_fill_count": foreign_fill_count,
@@ -546,25 +573,191 @@ def sync_fills(
         "observation_appended": observation_appended,
         "observation_skipped_idempotent": observation_skipped_idempotent,
         "projected": projected,
-        "watermark_ts": observed.isoformat(),
+        "watermark_ts": published_watermark,
     }
+
+
+def _publish_prepared_fill_sync_watermark(
+    conn: sqlite3.Connection,
+    prepared: _PreparedFillSync,
+    *,
+    appended: int,
+) -> str:
+    """Publish coverage only after every live tranche has committed."""
+
+    if not conn.in_transaction:
+        raise RuntimeError("fill synchronizer watermark requires an active transaction")
+    return _advance_watermark(
+        conn,
+        source=prepared.source,
+        watermark_ts=prepared.observed.isoformat(),
+        cursor=None,
+        updated_at=prepared.observed.isoformat(),
+        coverage_note=(
+            f"full get_trades() scan; {prepared.raw_trade_count} trades observed, "
+            f"{appended} appended"
+        ),
+    )
+
+
+def _merge_fill_sync_summaries(
+    prepared: _PreparedFillSync,
+    summaries: list[dict[str, Any]],
+    *,
+    watermark_ts: str,
+) -> dict[str, Any]:
+    additive = (
+        "appended",
+        "skipped_idempotent",
+        "foreign_fill_count",
+        "unattributable_count",
+        "observation_appended",
+        "observation_skipped_idempotent",
+        "projected",
+    )
+    return {
+        "source": prepared.source,
+        "trades_seen": prepared.raw_trade_count,
+        **{
+            key: sum(int(summary.get(key, 0) or 0) for summary in summaries)
+            for key in additive
+        },
+        "watermark_ts": watermark_ts,
+    }
+
+
+def sync_fills(
+    conn: sqlite3.Connection,
+    adapter: Any,
+    *,
+    source: str = DEFAULT_SOURCE,
+    observed_at: datetime | str | None = None,
+) -> dict[str, Any]:
+    """Run one atomic sync on a caller-owned connection (tests/offline use)."""
+
+    ensure_watermark_table(conn)
+    ensure_wallet_fill_observations_table(conn)
+    prepared = _prepare_fill_sync(
+        conn,
+        adapter,
+        source=source,
+        observed_at=observed_at,
+    )
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        summary = _persist_prepared_fill_sync(conn, prepared)
+    except Exception:
+        conn.rollback()
+        raise
+    else:
+        conn.commit()
+        return summary
+
+
+def _sync_fills_coordinated(
+    adapter: Any,
+    *,
+    source: str = DEFAULT_SOURCE,
+    observed_at: datetime | str | None = None,
+    tranche_size: int = FILL_SYNC_LIVE_TRANCHE_SIZE,
+) -> dict[str, Any]:
+    """Run live sync with venue I/O outside bounded TRADE write units."""
+
+    if tranche_size < 1:
+        raise ValueError("fill synchronizer tranche_size must be positive")
+
+    from src.state.db import get_trade_connection_read_only
+    from src.state.write_coordinator import (
+        DBIdentity,
+        WritePriority,
+        default_runtime_write_coordinator,
+    )
+
+    coordinator = default_runtime_write_coordinator()
+    transaction_kwargs = {
+        "write_class": "live",
+        "priority": WritePriority.RECOVERY_CRITICAL,
+        "deadline_ms": FILL_SYNC_DB_WRITE_LEASE_DEADLINE_MS,
+        "max_hold_ms": FILL_SYNC_DB_WRITE_MAX_HOLD_MS,
+    }
+    reader = get_trade_connection_read_only()
+    try:
+        if not _fill_sync_schema_ready(reader):
+            reader.close()
+            reader = None
+            with coordinator.transaction(
+                (DBIdentity.TRADE,),
+                owner="fill_synchronizer_schema",
+                **transaction_kwargs,
+            ) as tx:
+                ensure_watermark_table(tx.connection)
+                ensure_wallet_fill_observations_table(tx.connection)
+            reader = get_trade_connection_read_only()
+        assert reader is not None
+        prepared = _prepare_fill_sync(
+            reader,
+            adapter,
+            source=source,
+            observed_at=observed_at,
+        )
+    finally:
+        if reader is not None:
+            reader.close()
+
+    summaries: list[dict[str, Any]] = []
+    for offset in range(0, len(prepared.trades), tranche_size):
+        tranche = _PreparedFillSync(
+            source=prepared.source,
+            observed=prepared.observed,
+            raw_trade_count=prepared.raw_trade_count,
+            trades=prepared.trades[offset : offset + tranche_size],
+            recorded_observations=prepared.recorded_observations,
+            recorded_facts=prepared.recorded_facts,
+        )
+        with coordinator.transaction(
+            (DBIdentity.TRADE,),
+            owner="fill_synchronizer_tranche",
+            **transaction_kwargs,
+        ) as tx:
+            summaries.append(
+                _persist_prepared_fill_sync(
+                    tx.connection,
+                    tranche,
+                    publish_watermark=False,
+                )
+            )
+
+    appended = sum(int(summary.get("appended", 0) or 0) for summary in summaries)
+    with coordinator.transaction(
+        (DBIdentity.TRADE,),
+        owner="fill_synchronizer_watermark",
+        **transaction_kwargs,
+    ) as tx:
+        watermark_ts = _publish_prepared_fill_sync_watermark(
+            tx.connection,
+            prepared,
+            appended=appended,
+        )
+    return _merge_fill_sync_summaries(
+        prepared,
+        summaries,
+        watermark_ts=watermark_ts,
+    )
 
 
 def fill_synchronizer_cycle() -> dict[str, Any]:
     """Scheduler entry point (registered by ``price_channel_daemon``).
 
-    Opens its own trade connection and the live venue adapter; never raises (a
-    poller fault must not crash the scheduler — the next tick retries).
+    Opens the live venue adapter and routes canonical writes through the
+    unified TRADE coordinator; never raises (a poller fault must not crash the
+    scheduler — the next tick retries).
     """
 
     from src.data.polymarket_client import PolymarketClient
-    from src.state.db import get_trade_connection
-
-    conn = get_trade_connection(write_class="live")
     try:
         client = PolymarketClient()
         adapter = client._ensure_v2_adapter()
-        return sync_fills(conn, adapter)
+        return _sync_fills_coordinated(adapter)
     except Exception as exc:  # noqa: BLE001
         logger.error("fill_synchronizer cycle failed (non-fatal; next tick retries): %s", exc, exc_info=True)
         return {
@@ -572,5 +765,3 @@ def fill_synchronizer_cycle() -> dict[str, Any]:
             "scheduler_failed": True,
             "scheduler_failure_reason": "fill_synchronizer_cycle_failed",
         }
-    finally:
-        conn.close()

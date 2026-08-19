@@ -119,6 +119,27 @@ def test_zero_anchor_history_center_still_retained() -> None:
     assert fused.mu == pytest.approx(expected_mu, abs=1e-9)
 
 
+def test_zero_history_cell_keeps_current_instruments_for_current_evidence_gate() -> None:
+    """A new city needs current shape, not a previously settled local trade history."""
+    cap = _capture([], n=0)
+
+    assert not cap.has_history
+    assert cap.has_extras
+    assert cap.anchor_z == pytest.approx(ANCHOR_CENTER_C)
+    assert cap.anchor_tau0 is None
+    assert all(ins.n_train == 0 for ins in cap.likelihood)
+
+    fused = fuse_bayes_precision_posterior(
+        anchor_z=cap.anchor_z,
+        anchor_tau0=cap.anchor_tau0,
+        likelihood=cap.likelihood,
+        disagree_var=cap.disagree_var,
+    )
+    assert fused.method == "EQUAL_WEIGHT"
+    assert ANCHOR_MODEL in fused.used_models
+    assert set(ins.model for ins in cap.likelihood) <= set(fused.used_models)
+
+
 # ---- RELATIONSHIP: trusted anchor (>= MIN_TRAIN) keeps the T2 path (regression) --------
 def test_trusted_anchor_history_still_reaches_t2_bayes() -> None:
     models = ["ecmwf_ifs", "gfs_global", "icon_global", "gem_global", "jma_seamless"]

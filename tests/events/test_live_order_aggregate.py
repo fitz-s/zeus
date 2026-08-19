@@ -1,5 +1,6 @@
 # Created: 2026-05-25
-# Last reused/audited: 2026-07-27
+# Last reused/audited: 2026-08-10
+# Lifecycle: created=2026-05-25; last_reviewed=2026-08-10; last_reused=2026-08-10
 # Authority basis: PR332 full-live split verdict; live-order aggregate substrate PR A.
 from __future__ import annotations
 
@@ -11,7 +12,12 @@ from datetime import datetime, timezone
 
 import pytest
 
-from src.decision_kernel.canonicalization import qkernel_current_state_identity_hash
+from src.contracts.global_auction_receipt import GlobalAuctionReceiptRef
+from src.contracts.strategy_capital_allocation import STRATEGY_LOG_UTILITY_BASIS
+from src.decision_kernel.canonicalization import (
+    qkernel_current_state_identity_hash,
+    stable_hash,
+)
 from src.decision_kernel.verifier import (
     _current_state_solve_payload,
     _verify_pre_submit_revalidation_for_command,
@@ -1211,6 +1217,18 @@ def test_pre_submit_current_state_winner_ignores_legacy_profit_density_floors(
         min_submit_edge_density=1000.0,
     )
     economics = dict(payload["qkernel_execution_economics"])
+    auction_receipt = GlobalAuctionReceiptRef(
+        decision_log_id=41,
+        decision_log_mode="global_single_order_auction",
+        receipt_hash="a" * 64,
+        execution_binding_hash="b" * 64,
+        artifact_summary_hash="c" * 64,
+        schema_version=21,
+        winner_event_id="event-current-1",
+        winner_candidate_id="candidate-current-1",
+        winner_actuation_identity="global-current-1",
+        selection_epoch_identity="epoch-current-1",
+    ).as_payload()
     economics.update(
         {
             "side": side,
@@ -1227,11 +1245,16 @@ def test_pre_submit_current_state_winner_ignores_legacy_profit_density_floors(
             "selection_guard_n": 64,
             "optimal_stake_usd": 0.01,
             "global_actuation_identity": "global-current-1",
+            "global_winner_event_id": "event-current-1",
+            "global_auction_receipt": auction_receipt,
+            "global_economic_identity": "global-economic-current-1",
             "global_optimum_semantics": "CUT_TIME_GLOBAL_OPTIMUM",
+            "global_execution_mode": "TAKER_LIMIT",
             "global_candidate_id": "candidate-current-1",
             "global_bin_id": "bin-1",
             "global_universe_witness_identity": "universe-current-1",
             "global_wealth_witness_identity": "wealth-current-1",
+            "global_wealth_economic_identity": "wealth-economic-current-1",
             "global_selection_epoch_identity": "epoch-current-1",
             "global_selection_cut_at": "2026-07-13T02:00:00+00:00",
             "global_selection_decision_at": "2026-07-13T02:00:01+00:00",
@@ -1246,6 +1269,15 @@ def test_pre_submit_current_state_winner_ignores_legacy_profit_density_floors(
             "global_max_spend_usd": "0.40",
             "global_robust_delta_log_wealth": 0.001,
             "global_robust_ev_usd": 0.20,
+            "global_ruin_probability_reduction": 0.0,
+            "global_terminal_ruin_probability_reduction": 0.0,
+            "global_proposal_expected_delta_log_wealth": 0.001,
+            "global_proposal_expected_ev_usd": 0.20,
+            "global_proposal_expected_log_growth_per_hour": 0.001,
+            "global_proposal_expected_capital_efficiency": 0.0025,
+            "global_proposal_capital_lock_hours": 1.0,
+            "global_proposal_fill_semantics": "IMMEDIATE_FILL",
+            "global_utility_basis": STRATEGY_LOG_UTILITY_BASIS,
             "global_cut_time_win_probability_lcb": 0.60,
             "global_cut_time_loss_probability_ucb": 0.40,
             "global_terminal_win_probability_lcb": 0.60,
@@ -2404,7 +2436,30 @@ def test_pre_submit_mean_winner_binds_action_probability_through_all_verifiers()
         "edge_lcb": lcb - cost,
         "edge_expected": action - cost,
         "global_actuation_identity": "actuation-mean",
+        "global_execution_mode": "TAKER_LIMIT",
         "global_economic_identity": "economic-mean",
+        "global_auction_receipt": GlobalAuctionReceiptRef(
+            decision_log_id=1,
+            decision_log_mode="global_single_order_auction",
+            receipt_hash="a" * 64,
+            execution_binding_hash="b" * 64,
+            artifact_summary_hash="c" * 64,
+            schema_version=21,
+            winner_event_id="event-1",
+            winner_candidate_id="global-candidate-mean",
+            winner_actuation_identity="actuation-mean",
+            selection_epoch_identity="epoch-mean",
+        ).as_payload(),
+        "global_winner_event_id": "event-1",
+        "global_utility_basis": STRATEGY_LOG_UTILITY_BASIS,
+        "global_ruin_probability_reduction": 0.0,
+        "global_terminal_ruin_probability_reduction": 0.0,
+        "global_proposal_expected_delta_log_wealth": expected_du,
+        "global_proposal_expected_ev_usd": expected_ev,
+        "global_proposal_capital_lock_hours": 1.0,
+        "global_proposal_expected_log_growth_per_hour": expected_du,
+        "global_proposal_expected_capital_efficiency": expected_du / expected_cost,
+        "global_proposal_fill_semantics": "IMMEDIATE_FILL",
         "global_optimum_semantics": "CUT_TIME_GLOBAL_OPTIMUM",
         "global_probability_functional": "POSTERIOR_PREDICTIVE_MEAN",
         "global_candidate_id": "global-candidate-mean",
@@ -2540,6 +2595,7 @@ def _day0_probability_authority(
     payload = {
         "q_source": "day0_remaining_day",
         "q_mode": "remaining_day",
+        "probability_authority": "day0_remaining_day_global_probability_v1",
         "remaining_model_names": ["ecmwf", "gfs", "icon"],
         "remaining_source_cycle_time_utc": "2026-05-25T12:00:00+00:00",
         "remaining_capture_times_utc": ["2026-05-25T12:20:00+00:00"],
@@ -2565,6 +2621,17 @@ def _day0_pre_submit_payload(**overrides):
         q_lcb,
         remaining_models=remaining_models,
     )
+    provenance = {
+        "city": "Chicago",
+        "target_date": "2026-05-25",
+        "metric": "high",
+        "settlement_source": "wu_icao_history",
+        "station_id": "KMDW",
+        "configured_station_id": "KMDW",
+        "raw_payload_sha256": "a" * 64,
+        "observation_time": "2026-05-25T17:30:00+00:00",
+        "observation_available_at": "2026-05-25T17:35:00+00:00",
+    }
     payload = _pre_submit_payload(
         q_live=q_live,
         q_lcb_5pct=q_lcb,
@@ -2581,8 +2648,16 @@ def _day0_pre_submit_payload(**overrides):
         raw_value=20.0,
         rounded_value=20,
         high_so_far=20.0,
-        observation_time="2026-05-25T17:30:00+00:00",
-        observation_available_at="2026-05-25T17:35:00+00:00",
+        observation_time=provenance["observation_time"],
+        observation_available_at=provenance["observation_available_at"],
+        city=provenance["city"],
+        target_date=provenance["target_date"],
+        metric=provenance["metric"],
+        station_id=provenance["station_id"],
+        configured_station_id=provenance["configured_station_id"],
+        settlement_source=provenance["settlement_source"],
+        raw_payload_sha256=provenance["raw_payload_sha256"],
+        day0_observation_provenance_hash=stable_hash(provenance),
         day0_probability_authority=day0_probability,
         _edli_q_source="day0_remaining_day",
         _edli_day0_q_mode="remaining_day",
@@ -2616,6 +2691,19 @@ def _day0_qkernel_economics(*, q_live: float = 0.70, q_lcb: float = 0.60) -> dic
         }
     )
     return economics
+
+
+def test_day0_pre_submit_rejects_missing_raw_observation_provenance():
+    payload = _day0_pre_submit_payload(raw_payload_sha256="")
+
+    with pytest.raises(LiveOrderAggregateError, match="raw_payload_sha256"):
+        LiveOrderAggregateLedger(_conn()).append_event(
+            aggregate_id="event-provenance:intent-provenance",
+            event_type="PreSubmitRevalidated",
+            payload=payload,
+            occurred_at=NOW,
+            source_authority="engine_adapter",
+        )
 
 
 def _seed_command_with_submit_attempt(ledger: LiveOrderAggregateLedger) -> None:

@@ -1,7 +1,7 @@
-# Ultimate Alpha 终局规格(consult R2 REQ-20260723-145335,置信 0.92)
+# Ultimate Alpha 终局规格(consult R2 external consult, 2026-07-23,置信 0.92)
 
 Authority basis: operator axiom 2026-07-23(唯一交易逻辑)+ consult 终局形式化
-(全文 /tmp/cgc/answer_REQ-20260723-145335-8c3c06.txt 已核;本文件为可实施浓缩,
+(全文 [consult answer artifact] 已核;本文件为可实施浓缩,
 与 DERIVATION.md、SURFACE_INVENTORY.md 同目录成套)。
 
 ## 唯一决策律:predicted_bin_ev_v1

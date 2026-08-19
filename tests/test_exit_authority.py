@@ -84,6 +84,26 @@ class TestMarkSettled:
         assert closed is not None
         assert closed.state == "settled"
 
+    def test_mark_settled_reuses_caller_transaction_for_exit_audit(self):
+        """Settlement cannot open a second writer behind its own transaction."""
+        pos = _make_position()
+        portfolio = PortfolioState(positions=[pos], audit_logging_enabled=True)
+        audit_conn = object()
+
+        with patch("src.state.db.log_trade_exit") as log_trade_exit, patch(
+            "src.state.db.get_trade_connection_with_world",
+            side_effect=AssertionError("second trade writer must not open"),
+        ):
+            closed = mark_settled(
+                portfolio,
+                "t1",
+                1.0,
+                audit_conn=audit_conn,
+            )
+
+        assert closed is not None
+        log_trade_exit.assert_called_once_with(audit_conn, closed)
+
 
 class TestCanonicalExitFlag:
 

@@ -5,6 +5,91 @@
 
 ## 现状(forward)
 
+### 2026-08-13 B105 — canonical held-monitor debt 由持续 worker 排空
+- **实时反例:** live `6977d34c` 有 26 个 blocking-stale held positions；30 秒 `exit_monitor_recovery` scheduler job 同步运行最长 75 秒的 full-book monitor，`max_instances=1` 因而持续丢 tick。SQLite interruption、reactor handoff 或 preparation deadline 失败后，债务只能再等 scheduler，最老 `MONITOR_REFRESHED` 已超过 25 分钟。entry fail-closed 正确阻止 BUY，但 held redecision 全书失明。
+- **结构性修复:** scheduler job 只读取 canonical cadence evidence 并幂等 dispatch；一个 daemon recovery worker 复用原 process-wide monitor claim，失败后立即从 DB 重建债务并持续重驱。它不增加 writer 并发、不放宽 150 秒、不改变 probability/edge/exit law，也不允许 quote-only 或 stale q/CLOB 清债。
+- **SCOPE / DRAIN / RESET:** scope 仅为当前 positive-exposure 的 blocking stale/future canonical monitor evidence；drain 是单 worker 反复运行现有 full-book lane；reset 只能由每个当前 exposure 的 fresh probability + held-side CLOB `MONITOR_REFRESHED`，或该 exposure 离开 monitored lifecycle set 证明。worker dispatch/exit 的 lost-wakeup 由锁内 request handoff 防止。
+- **验收:** detector 不 inline 运行 monitor；重复 dispatch 只有一个 worker；monitor `False`、异常和 evidence read failure 均保持 debt 并重驱；fresh canonical post-read 才清 debt/fairness。focused + complete runtime-failure suite、compile、planning-lock、diff check 与独立 race review 通过后，按 hot-fix lane 落地。live reload 后必须看到 scheduler 不再 `max_instances` skip recovery、blocking stale 收敛到 0、每个 open position 获得 post-start fresh canonical monitor evidence，并继续以 command/fill/PnL 证明资本结果。
+
+### 2026-08-13 B103 — command-specific no-fill 不再被 aggregate existing position 误作未知新增敞口
+- **实时反例:** 两笔已获准向 reconciled existing position 增仓的 GTC BUY（Miami `98ceeb9699174bef`、Tel Aviv `bb7f96e47fac4cda`）在 cancel-unknown 后，authenticated point order 无活记录、完整 account open-order/trade 扫描无命中、local trade facts 为零，却因 `position_current` 正确保留较早成交的正 shares 而无法满足“整个 projection 零敞口”。两笔 command 永久停在 `REVIEW_REQUIRED`，两个不同 market 又被 governor 提升为 systemic unknown-side-effect，触发全局 reduce-only；candidate 仍被生成但所有新 entry 被拒绝。这是 command exposure 与 aggregate position exposure 的语义混淆，不是 alpha 缺失。
+- **结构性修复:** no-fill clearance 只增加一个严格对称的 second proof shape：从 immutable `SUBMIT_REQUESTED.execution_capability` 重放完整 ENTRY/submit/GTC-or-GTD/command/token/snapshot/capability identity，要求唯一的 `entry_duplicate_same_token=allowed_reconciled_position_increment`、相等的 global wealth binding，以及当前同 position、同 selected token、`active|day0_window`、`chain_state=synced`、正 chain shares、existing order id 不等于本 command order。它与 authenticated point read、完整 account scans、零 matching order/trade、零 local trade/positive order facts、exact unresolved finding CAS 同时成立时，仅 terminalize 本 command；aggregate position 不追加 `ENTRY_ORDER_VOIDED`、不改变 shares/cost/phase/order。任何 capability/identity/scan/finding ambiguity 仍 fail-closed。
+- **生产适配:** scheduled three-phase recovery 的 immutable `VenueReadSnapshot` 现在显式声明已捕获 point-read completeness；captured exception 仍重放为 `SnapshotMissError`，不能冒充 absence。absence 与 explicit terminal-zero-fill 两个分支共用同一 proof reproducer，避免只修一侧。
+- **验证:** command recovery 全文件 `562 passed`；review/no-fill 组合 `128 passed`。新增关系抗体覆盖 certified absence、certified terminal zero-fill、完整 existing position/event invariance、capability action/token/snapshot/order-type/wealth 篡改、execution-fact cost 与 projection cost 偏差、envelope/snapshot condition identity、strict aggregate 故障传播、point/open/trade incomplete、matching venue/local facts、ambiguous finding、savepoint rollback、成功重放 idempotency，以及最终 `append_event` 对 finding identity/omission/count、point completeness/source、increment proof 与 terminal fact 七类 forged clearance 的原子拒绝。以 worktree code 对 live canonical DB 只读重放，两笔当前 row 均生成完整严格 witness。尚未 deploy；live 仍有 unreviewed/unpushed 外部 commits，正式 landing/restart 前必须先恢复可证明的 live deployment chain，再以 loaded SHA、recovery events、unknown/finding count 归零和新的 full auction/entry receipt 验证。
+
+### 2026-08-13 B102 — deterministic FAK no-fill 后同 turn 重拍
+- **实时反例:** Seoul `1772ee9…[redacted]` 在 `06:34:46Z` 已有 current q `0.04658`、bid `0.06` 与负 edge，global auction 正确选择 TAKER SELL；`06:35:02Z` venue 返回 deterministic `FAK no match`。系统只把 `next_retry_at` 设为当前时间，却直到 `06:45:39Z` 才 release/publish 新 reauction；`06:46:04Z` bid 已跌至 `0.01`。FAK 竞态本身不可保证，但这 10m36s 无 delivery guarantee 是 engine-preventable。
+- **结构性修复:** FAK no-fill / post-only cross 的 canonical no-side-effect rejection 与 exact V4 outbox 在同一 monitor turn bounded commit；commit 成功后立即 drain position-scoped debt并发布 fresh global reauction，重新比较 TAKER、MAKER_REST、HOLD/CASH。不得原地把旧 TAKER certificate 改成 maker；commit/publish 失败保留 canonical debt给 recovery。
+- **验收:** antibody 从未提交的 no-fill retry/outbox 开始，不调用下一轮 pending-retry scan，断言同 turn commit + exact V4 wake；原 request identity 不被当作 fresh execution authority。SCOPE 是 position+held token+family+q identity+generation；DRAIN/RESET 仍由 immutable terminal receipt 或新 generation 完成。
+
+### 2026-08-13 B101 — monitor bootstrap 不能吞掉连续概率重估预算
+- **实时反例:** full-book attempt `417337` 持有约 75 秒 claim，但 `CycleArtifact` 创建时只剩 `26.170s`；artifact 前约 48.8 秒没有 q/book 决策。`run_exit_monitor_cycle` 把完整 outer deadline 交给 trade DB connection、ATTACH、watchdog、portfolio load 与 allocator refresh，因此 SQLite 争用可以合法耗尽本应属于 held redecision 的时间。
+- **结构性修复:** normal/YELLOW/ORANGE monitor 的 reactor handoff 必须先为 bootstrap + 一次完整 q read 保留两个 tranche；bootstrap 本身再限制为一个 tranche，并始终把另一个完整 tranche 留给 current probability + executable book。准备超时只终止本次 attempt，由 recurring monitor 在 DB writer 释放后重试。RED 不保留 statistical tranche，继续让 force-exit 使用完整 claim。准备阶段所有 connection/load/retry-release 使用同一 preparation cutoff，receipt 记录 handoff 耗时、准备预算/耗时与留给 primary 的剩余时间。
+- **验收:** deterministic clock 抗体证明 75 秒 claim 的 bootstrap 不能超过一个 q-read tranche、不足以同时容纳 preparation 和完整 q read 时不启动 DB、RED 仍保留完整 sweep claim；既有 absolute claim、SQLite deadline、pending-exit 和 monitor progress 抗体必须继续通过。此项不改变 probability、edge、Kelly 或 exit economics，只修复时间预算的因果所有权。
+
+### 2026-08-12 12:35 CDT tick — current-law 前向资本已为正且 truth complete；robust 仍未证明
+- **live 结果:** loaded SHA `b9f9dd0e8`。以 `2026-08-11T00:00:00Z` 为显式起点、`2026-08-12T17:34:52Z` 为 decision-time cut 的 canonical read-only audit 覆盖 55 个真实 filled commands，chain matched/partially-matched fact coverage complete，0 个 pre-boundary entry fills、0 个未分类 fills。
+- **资本证明:** 23 个 realized positions，gross realized PnL `+$24.183599`，submission-schedule fee bound `$2.347814`，net realized PnL `+$21.835785`，realized-capital return `+41.998%`；8 win / 15 loss。Day0 curve 为 13 realized、net `+$2.975415`；qkernel curve 为 10 realized、net `+$18.860370`。两条 strategy curve 的 `blocked_position_count=0`，总状态为 `positive_observed` / `capital_truth_complete=true`。
+- **修复闭环:** `partial|confirmed|filled` 且有 `filled_at` 的 entry/exit facts 进入资本曲线；partial-exit 仓位仅在存在真实 filled exit 且 `remaining_cost = original_entry_notional × remaining_shares / original_entry_shares` 与 canonical residual projection 相符时通过。Tokyo/Singapore dust residuals 因此不再被误判为资本缺失；不改写 DB/PnL，不接受 pending 或 matched-only intent。
+- **未达部分:** 同目标日内的相关仓位按 cluster 合并后只有 3 个独立 target dates；robust e-value `1.717618 < 10`，reason=`INDEPENDENT_CLUSTER_STRENGTH_NOT_ESTABLISHED`。因此只声明当前前向净资本利得已由真实订单/结算证明，不声明大量胜单、稳定胜率或 robust edge。entries pause 保持；后续证据只能由更多独立未来日期在同一 current-law 下自然形成，不能靠扩大风险制造。
+- **验证:** 两轮官方 deploy 均保持 entry pause 与 fresh held cadence；RiskGuard 全文件 `161 passed`，Ruff、`py_compile`、diff check 通过。
+
+### 2026-08-12 12:18 CDT tick — partial fill 不再从当前资本证明中消失
+- **当前动作:** entries pause 保持；剩余有真实规模且有 bid 的持仓全部 `bid < current q`，强卖会降低 posterior-mean expected capital，因此本 tick 的可执行决策仍为 HOLD，而不是为制造退出记录低卖。
+- **前向审计反例:** 以 `2026-08-11T00:00:00Z` 为显式边界，现有 current-law audit 报告 20 个 realized positions、3 个独立 target-date clusters、fee-bound net `+$15.733464`，但仍 fail-closed 为 `capital_truth_degraded`。根因不是策略亏损，而是资本事实 join 只接受 `execution_fact=filled`：Shanghai `5c16a63…[redacted]` 的第二笔 maker entry 已由两条 venue trade facts 真实成交 5.744678 shares、order fact 为 `PARTIALLY_MATCHED`、execution fact 为 `partial`，且与第一笔合计精确复现 canonical 10.744678 shares / `$4.59468` cost basis，却被审计遗漏；该仓已结算盈利 `+$6.15`。
+- **最小修复:** RiskGuard capital curve 与 forward audit 只扩大到带 `filled_at` 的 `filled|confirmed|partial` execution facts；链上覆盖相应接受 `MATCHED|PARTIALLY_MATCHED`。pending、matched-only、零成交和未确认 intent 仍不计入资本事实；交易准入、订单选择、概率、Kelly、settlement 与 pause 均不改变。
+- **验证:** RiskGuard 全文件 `160 passed`；Ruff、`py_compile` 与 `git diff --check` 通过。尚未 live；部署后必须在 canonical DB 上重跑同边界 audit，清除所有 capital-identity blockers，并重新报告实际 net/e-value，不能把预期修复值或单笔胜出冒充 robust proof。
+
+### 2026-08-12 12:10 CDT tick — 首笔全局最优实际退出兑现；current-law capital curve 转正
+- **真实成交:** complete global auction 在同一 current probability/book/wealth cut 中选择 Shanghai `288de75…[redacted]` 的 20 YES shares；preflight receipt `415446` 为 `STABLE`。executor 提交合法 `0.95` FAK floor，venue order `0xdafefd…[redacted]` 全部以改善价 `0.999` 成交，transaction `0x95b23b…[redacted]`；REST confirmed trade fact、wallet fill、zero chain shares 和 lifecycle `economically_closed` 已收敛。
+- **资本结果:** canonical cost basis `$1.40`，gross proceeds `$19.98`，canonical gross realized PnL `+$18.58`。按 entry/exit 各自冻结的 5% weather fee schedule 计上界，entry fee `$0.065100`、exit fee `$0.000999`，该仓 fee-bound net realized PnL `+$18.513901`，realized-capital return 约 `+1263.0%`。这不是 expected EV，也不是未成交报价。
+- **组合证明:** 当前 probability semantics / `predicted_bin_ev_v1` 的 30 天 canonical curve 现为 14 个 realized positions、gross `+$3.25`；现有 live observer 因遗漏 `CONFIRMED` exit fee 报 net `+$1.561298`。修正后应为 fee bound `$1.689701`、net `+$1.560299`、return on realized capital 约 `+3.3827%`。曲线已转正，但收益高度集中于这一笔，不能声明 robust capital gain 或大样本市场优势。
+- **证明链精度修复:** `execution_fact.terminal_exec_status='CONFIRMED'` 是比 `filled` 更强的成交事实；capital curve 过去只 join `filled`，导致该 exit 的 fee 被静默当成 0。修复让 entry/exit 两端都接受 `filled|confirmed`，不接受 pending/matched-only；新增 confirmed-exit fee antibody，RiskGuard 全文件 `158 passed`，Ruff（忽略文件既有 E402/F401/F841）与 `py_compile` 通过。hotfix 尚未部署；entries pause 保持，后续只用更多独立真实成交/结算检验 robustness。
+
+### 2026-08-12 11:58 CDT tick — bid-only held depth 进入所有阶段的 reauction trigger
+- **最新 live chain:** 并发 money-path commits 已把 above-submit-band current bid 与合法 SELL floor 区分：solver 以当前 0.999 depth 比较经济性，executor 提交不高于 0.95 的 FAK floor，并把实际改善成交单独记账；loaded SHA `f947180e5`。这恢复了 Shanghai 的潜在正 EV 出场，但尚无新 command/fill，所以 forward realized PnL 仍为 `-$8.526401`。
+- **剩余断链:** post-start monitor 已达到 `open=11 / fresh executable=7 / quote-only=4 / blocking stale=0`，却没有新的 held-SELL reauction request。根因是 `monitor_quote_refresh` 只允许 Day0 位置消费 one-sided book；Shanghai 已过本地目标日，虽然 0.999 bid 可立即承接 SELL，monitor 仍把它记为 quote stale，reactor 因 `no exact canonical held-SELL request` 停止在 full auction 之前。
+- **第一性修复:** held SELL 只需要 bid，不需要 ask；任何生命周期中的 current bid-only depth 都是可执行 counterparty evidence。ask-only/no-bid 被解释为零立即清算价值的特殊路径仍限 Day0，防止非 Day0 凭 ask 虚构 bid。global auction、JIT、legal submit floor、actual fill receipt 与 settlement law 不改变。
+- **验证:** post-target active bid-only 新抗体通过，post-target ask-only 继续返回无 quote；连同既有 Day0/target-local bid-only 关系共 `6 passed`。source Ruff（仅忽略文件既有 E402/F401）、`py_compile` 与 diff check 通过。热修复尚未部署；当前 official deploy 仍在等待 post-start full-auction receipt，入场 pause 保持。
+
+### 2026-08-12 11:44 CDT tick — full-auction held proof 接入 deploy cadence；不再把不可执行 quote 冒充未重决策
+- **运行态已生效:** live loaded SHA `e7661feeb`。post-start receipt `415191` 在 boot 后 21 秒完成：11 / 11 families、20 candidates、`candidate_coverage_complete=true`、`scope_family_coverage_complete=true`、`held_position_coverage_complete=true`，winner 为 CASH，reason `NO_CURRENT_EXECUTABLE_POSITIVE_ORDER`。
+- **Shanghai 结果:** position `288de75…[redacted]` 在同一 frozen cut 中为 `EXCLUDED / SELL_BOOK_NO_EXECUTABLE_UNIT_PRICE / NO_EXECUTABLE_BOOK`；0.999 不再进入 taker proposal。boot 后 canonical `venue_commands=0`、`venue_command_events=0`、`settlements=0`，因此没有低价退出，也没有新的 realized PnL。
+- **deploy 假失败根因:** monitor cadence 已把 stale inputs 分成 `blocking_stale` 与 `quote_only_stale`，并明确规定后者不能成为全局 cadence debt；`deploy_live.py` 仍读取旧的总 stale count。高价/无 bid/venue 不可执行仓位已经被 full global auction 重决策，却会让部署等待八分钟后失败。
+- **组合证明修复:** deploy 仅在 blocking stale 为零时考虑 quote-only；若 quote-only 非零，必须再取得本次启动后的 complete global-auction receipt，且 receipt 的 held coverage complete、expected/evaluated/excluded 计数覆盖全部 canonical open positions。没有该 receipt 继续 fail-closed。对当前 live DB 的 worktree read-only probe 为 `fresh_positions=6 + quote_only_positions=5 + held_auction_receipt=415191 => 11 open positions fully covered`。
+- **验证:** deploy/cadence suite `85 passed`；其中新增抗体先证明缺 receipt 必须失败，再加入 complete held receipt 后通过。Ruff（保留脚本既有的 post-`sys.path` E402 例外）、`py_compile` 与 diff check 通过。本 gate hotfix 尚未部署；入场 pause 保持。
+
+### 2026-08-12 11:32 CDT tick — 排除不可提交的高价 SELL 假赢家；高置信仓位回到 HOLD-to-1
+- **forward 结果不变:** containment pause 后去重 settled cohort 仍为 `-$8.526401`（1 win / 2 loss）；本 tick 没有新 command、fill 或 settlement，不能声称资本利得。
+- **部署后证伪:** immediate FAK SELL 的资本释放时钟修复已进入 live loaded tree。Shanghai 20 YES shares 在 `q_mean=0.994666667`、current bid `0.999` 下被统一竞价选为正 expected EV SELL（约 `+$0.075668`），但 executor 按 durable live price law 拒绝 `live_order_executable_price_out_of_bounds: best_bid=0.999`；没有 command 或 fill。
+- **第一性判定:** 0.999 是当前 counterparty quote，却不在允许的新订单价格 `[0.05, 0.95]` 内。把 0.999 经济收益映射成可提交 0.95 floor 会在竞态下允许 0.95 成交；对 `q≈0.9947` 的持仓，该最坏合法成交相对 HOLD 为负，正是用户指出的“高买低卖”机制。正确动作不是绕过 executor，而是让不可执行报价退出 feasible set，继续 HOLD-to-1。
+- **最小修复:** selector 的 live SELL counterparty、precliff capacity 与 JIT mode 都只接受 `[0.05, 0.95]` 当前 bid；高于 0.95 的 book 不再生成/改善 taker proposal，也不再占用全局 winner。合法带内 SELL、maker-rest、BUY、settlement 和既成链上 fill 记录均不改变。
+- **验证边界:** solver 全集加 JIT 抗体 `211 passed`；executor 两条 submit-boundary 抗体 `2 passed`。扩大筛选 `128 passed / 1 failed`，唯一失败为 live baseline 已有的旧 `DummyClient` fixture 在 pre-submit collateral refresh 缺少 `get_collateral_payload`，与本 diff 无关；因此仍不把 declared evaluator 记为 pass。热修复尚未部署，部署后必须以新的 complete-scope receipt 证明 Shanghai 为 HOLD/CASH 或精确的合法替代 winner，且不再出现该 rejected SELL churn。
+
+### 2026-08-12 11:13 CDT tick — held redecision 已恢复；即时正期望 SELL 不再继承过期目标日时钟
+- **forward 结果仍未达标:** 自 containment pause 后已结算的三笔去重 cohort 为 Seoul `-$6.63`、Tokyo `+$6.683599`、Tokyo `-$8.58`，合计 `-$8.526401`（1 win / 2 loss）。开仓保持暂停；本 tick 前最近一次 deploy 后没有新 venue command、fill 或 settlement，不能声称资本利得。
+- **held truth 活性已部署:** `e0a8d09b9` 让最老 canonical held decision debt 进入固定 primary tranche；官方重启后 monitor cadence 从 9 stale / 2 fresh 恢复到 11 / 11 fresh，loaded SHA 随后被并发 monitor hotfix 推进到 `34cb1d04f`，pause reason 仍为 `single_global_auction_cut_monitor_terminated_no_receipt`。
+- **当前反例:** Shanghai 2026-08-12 HIGH `27C YES` 持仓 20 shares，entry `0.07`，current posterior mean `q=0.9951666667`，current bid `0.999`。point counterfactual 相对 HOLD 为 expected EV `+$0.0756677`、expected Δlog wealth `+0.0001519082`，但全局 selector 因目标日本地午夜已过返回 `CAPITAL_HORIZON_NON_POSITIVE`，没有生成 EXIT command。
+- **第一性修复:** 天气目标日结束只约束 settlement-locked BUY 与 maker 未成交分支；marketable FAK SELL 的已成交 claim 在当前 executable window 内释放现金，不应继承过期 family horizon。solver 现在以 certificate-bound quote/FAK window 作为 decision-to-release 的保守上界，同时保留 `resolution_at_utc` 作为 family attribution；horizon=0 的 BUY 继续 fail-closed。
+- **验证与边界:** solver properties `210 passed`；declared capital evaluator 为 `923 passed / 18 failed`，与 clean live `34cb1d04f` 基线逐项相同，因此没有新增失败，但 evaluator 仍是 red，不能记为 pass。planning-lock、`py_compile`、source Ruff 与 diff check 通过。本修复尚未 deploy；只有部署后新的 complete-scope receipt、EXIT command/FAK fill、canonical reconciliation 与后续 forward PnL 才是结果证据。
+
+### 2026-08-11 18:46 CDT tick — exact-winner settlement lock 已部署；forward 盈利仍待真实成交/结算证明
+- **部署事实:** hotfix 已通过官方 `deploy_live.py restart live-trading --allow-unpushed` 入口加载为 `536b41f72`；sidecar identity、restart recovery、monitor cadence 与 EDLI queue progress 均通过。随后 health probe 为 `OK`：daemon/forecast/data/heartbeat 运行，risk `GREEN`，blocking gates `0`，loaded/expected SHA 一致。
+- **当前竞价:** 最新 full-scope receipt 覆盖 116 个 family、2081 个 candidate，9 个 held position 中 8 个 SELL 可评分且全部为负 expected EV，1 个没有合法可执行 SELL book；全局 winner 为 CASH，`NO_CURRENT_EXECUTABLE_POSITIVE_ORDER`。9 个持仓的 monitor probability 与 market price 已重新 fresh。
+- **forward 资本证明:** 自本 SHA 的 deploy guard 时间 `2026-08-11T23:40:47Z` 起，canonical `venue_commands`、`venue_command_events` 与 `settlements` 均无新行，因此该 cohort realized PnL 严格为 `$0.00`。这证明系统没有为制造订单而高买低卖，但尚不证明资本利得；目标保持 active，后续只用新 command/fill/settlement 与资本曲线证明收益。
+
+### 2026-08-11 18:35 CDT tick — 保留 born-unexitable 防线；仅让 absorbing exact winner 持有到 1
+- **当前真相:** `d55ac5b99` 已恢复 full global auction；新 SHA cohort 尚无 venue command / settlement，realized PnL 仍为 `$0.00`，不得声称资本利得已证明。最新完整 receipt 的可评分 BUY frontier 与全部 held SELL counterfactual 均为负，因此 CASH 是当前已评分集合的正确动作。
+- **precliff 核验:** 911 个被 `CURRENT_PRECLIFF_LIQUIDATION_CAPACITY_MISSING` 拦截的 exact token 重新抓取完整 CLOB depth；910 个仍低于最小订单退出容量，908 个容量为零。唯一短暂反例的 `0.06 x 100` bid 随后消失，market-channel 与 REST 再次一致。普通 statistical BUY 的 precliff gate 属实，不能为增加订单而删除。
+- **窄缺口:** 原 gate 同时拒绝 typed `DeterministicBinPayoffWitness` 已证明当前所买 side terminal payoff 恰为 `1` 的立即成交。这不是 statistical longshot：其正确动作是 settlement-locked hold，而不是低价 SELL；要求当前退出盘反而违反 absorbing hard-fact 与“持有到 1”语义。
+- **最小修复:** 仅 `TAKER_LIMIT + DeterministicBinPayoffWitness + exact selected-side payoff=1` 可绕过 precliff sizing/JIT gate。solver 从实际 witness 类型重新证明，JIT 再要求 candidate/current marker 一致、`SETTLEMENT_LOCKED_BUY`、`win_probability_mean=1`、`loss_probability_mean=0`。maker、普通 statistical、unknown deterministic sibling、非 exact decision 全部保留原 gate；伪造 marker 的 statistical candidate 仍 `DEPTH_INFEASIBLE`。
+- **验证:** solver 全集 `209 passed`；新/原 precliff + JIT 抗体 `16 passed`；multiwinner `8 passed`；worktree code + live canonical state 的 read-only boot validation `ALL PASS`。完整 integration 的 5 个失败与 live 基线逐项相同，均为此前 precliff/price-band 后未更新的旧 fixtures，不归因于本 diff；不把部分覆盖称为全绿。尚未落地 live。
+
+### 2026-08-11 18:20 CDT tick — stale held truth 只封 BUY，不再饿死全局 SELL/HOLD/CASH 竞价
+- **实时反例:** main daemon 与 held monitor 仍活，但 global-auction receipt 在 `2026-08-11T22:56:24Z` 后停止；同期 full-book monitor 因 3 个 `monitor_probability_stale` 持仓反复产生 canonical debt。代码把本应仅阻止新 BUY 的 debt 同时用于 reactor admission/preemption，导致 stale probability 无法自愈时整个 global auction 永久停摆，连可减仓 SELL 和 CASH 比较也不能运行。
+- **最小修复:** canonical/bootstrap monitor debt 继续作为 `entry_submit_block_reason` 冻结 BUY；实际 monitor handoff、periodic fairness debt 和 capital-recovery handoff 仍可抢占 reactor。已经 entry-blocked 的 cycle 不再被同一 canonical debt 二次取消，因此 SELL/HOLD/CASH 保持统一比较。若别的 monitor 已占 single-writer claim，选中的 Day0 wake 保持 durable/unacked 并只让出一个 queue turn，使 exact SELL 或独立 material wake 可并发推进；stale 持仓仍不得提供 BUY authority。
+- **验证边界:** managed worktree 中 event-reactor 全集 `342 passed`、run-mode failure surfaces `224 passed`、entry-block/Day0 slice `15 passed`、SELL receipt persistence/executor/settlement slice `19 passed`；以 worktree code + live canonical state 执行 read-only boot validation 为 `ALL PASS`。尚未落地 live；已实现盈亏仍为 `$0.00`，本修复只恢复前向决策能力，不冒充资本利得证明。
+
 ### 2026-07-27 03:45 CDT tick — Ankara fast observation 从默认排除升级为实测 authority
 - **证据窗:** `2026-07-20T07:42:38Z` 至 `2026-07-27T07:42:38Z`，LTAC 同站 WU/METAR 251 个匹配对；rounded delta 的 p99/max 均为 `0°C`，empirical threshold 为 `1°C`，因此可吸收 margin 为 `0°C`。证据只授权同一 settlement station 的 publication-latency advantage，不改变 settlement source。
 - **money-path 作用:** Ankara Day0 held probability 与 hard-fact exit 可消费更早发布的 LTAC METAR，不再等待较慢 WU 更新；dead-bin/structural-win 对称法则、plausibility guard、oracle anomaly pause 和未测量城市 fail-closed 均保持。
@@ -81,7 +166,7 @@
 - **验收:** antibody 先证明旧实现失败；修后 targeted tests + capital evaluator；在 entries paused 下标准 deploy，等新 bundle 被 canonical writer 持久化后，要求新 monitor/auction receipt 的 `finite_evidence_member_count>=4`，再比较 Seoul BUY/SELL/HOLD/CASH。没有新 receipt 就不声称资本最优。
 
 ### 2026-07-15 18:19Z tick — BUY NO 真实结算 +$19.26；修复 A8/A9 语义冲突和 chain-mirror 结算吞吐
-- **实际资本证明:** Wuhan Jul-15 38°C `buy_no` 持仓 `fbeac91f-e9d` 已被 Gamma 确认为市场 NO 结算；canonical `position_current` 为 `settled`，100.00621 shares，cost basis ≈$80.75，realized P&L **+$19.26**。redeem command 已有 100006210 micro-pUSD intent；当前还没有 confirmed redeem transaction，不把 intent 冒充 chain cash realization。
+- **实际资本证明:** Wuhan Jul-15 38°C `buy_no` 持仓 `fbeac91…[redacted]` 已被 Gamma 确认为市场 NO 结算；canonical `position_current` 为 `settled`，100.00621 shares，cost basis ≈$80.75，realized P&L **+$19.26**。redeem command 已有 100006210 micro-pUSD intent；当前还没有 confirmed redeem transaction，不把 intent 冒充 chain cash realization。
 - **新根因:** `position_settled.v1.won` 在 harvester 表示“该 binary market 的 YES bin 是否结算”，在 chain-mirror 却表示“持仓是否赢”。BUY NO 恰好取反，使 raw audit 可以把真实赢单评成输单。P&L 和主学习路径用 `outcome/pnl` 未被翻转，但审计证据被污染。
 - **修复:** 所有新 canonical settlement 显式区分 A8 `market_bin_won` 和 A9 `position_won`；`direction + outcome` 作为可派生持仓语义；显式字段冲突的 row fail-closed，不进 metric/learning。不改写 canonical DB。
 - **throughput 修复:** chain-mirror 把 canonical DB phase `active` 错传给 runtime-state adapter，导致合法结算变成 `unknown` 并被 per-row isolation 静默跳过。现在直接通过 canonical lifecycle fold 验证 `active/day0/pending_exit/economically_closed -> settled`。
@@ -232,7 +317,7 @@
 
 ### 2026-07-07 15:50Z — 操作员用真实账本打脸:我一直报的"健康交易/profit-taking"实为**系统性亏损 churn(以远低于自身 belief 甩仓)**;#1 优先根因+修
 - **操作员直令(真实 Polymarket 账本为证):** "买了就卖出、进场后立即退场造成额外损失、有效高质量订单本就缺少、订单数仍寥寥"。**我此前多 tick 把 exit 报成"profit-taking 正向信号"是挑赢家报喜、失职。** 9 笔已平仓现金流净 **≈ −$3.32**(pre-fee),5 亏碾 4 赢。
-- **根因坐实(系统性,`p_posterior` vs `exit_price`):** 10 笔近期出场 **9 笔卖价远低于模型自身 belief**。铁证:London belief **0.871** 却卖 **0.30**(白送 0.571/股);Paris low20(4a840da7-521)belief 0.829、last_monitor_prob 0.829、监控市价 0.63,却卖 **0.31**;Milan 0.867→0.39。**入场对**(belief 0.83 买 No@0.60 = 强正边),**出场在摧毁价值** —— belief 没变、仍看好,却被甩。
+- **根因坐实(系统性,`p_posterior` vs `exit_price`):** 10 笔近期出场 **9 笔卖价远低于模型自身 belief**。铁证:London belief **0.871** 却卖 **0.30**(白送 0.571/股);Paris low20(4a840da…[redacted])belief 0.829、last_monitor_prob 0.829、监控市价 0.63,却卖 **0.31**;Milan 0.867→0.39。**入场对**(belief 0.83 买 No@0.60 = 强正边),**出场在摧毁价值** —— belief 没变、仍看好,却被甩。
 - **核实后的确切根因(churn-rootfix opus + 我亲读代码坐实,两次纠错后的干净结论):** 两个 exit_reason 标签都是**误标**(不匹配真正下单的 `venue_commands.decision_id`)。`p_posterior`=冻结入场信念、`last_monitor_prob`=当前信念,我和操作员混了。
   - **Mechanism A(FAMILY_DIRECT_SELL)不是 bug:** 卖时当前信念真崩了(London 0.871→**0.0013**),hold EV≈$0.01 < sell≈$2.68,卖是理性 damage-control;Helsinki/HK/Paris07-07 都现金**盈利**。
   - **真罪魁 = `src/strategy/family_rebalance.py:decide_shift_bin`(92-147)无 value gate:** 我读码确认参数里**无任何信念/q_lcb**,逻辑=(redecision + 选中 bin≠持有 bin + 残留>dust)即 `EXIT_OLD_LEG`。姊妹 `decide_fill_up`(:194-197)**有** `q_current_lcb<=q_entry_lcb+floor→BELIEF_NOT_STRENGTHENED` 守卫,shift_bin **缺对称守卫**。故仍强看好的老腿(Paris 当前信念 0.83)只因选了别 bin 就被砸;close-before-open **先卖**、counter-entry VOID→**裸卖**。真实现金亏 **−$2.72**(非 −$42 belief-gap),唯一大损失 Paris low20 −$5.74。**入场全部干净。**
@@ -270,3 +355,99 @@
 - DB 里的仓位/结算/成交是 live 账本,不在未经明确授权下删改。
 
 （历史分析已按操作员指令清除;需要旧内容从 git history 取。）
+
+### 2026-08-02 — partial EXIT realized-PnL canonical continuity (hot-fix slice)
+
+- **Scope / seam:** `src/execution/exit_lifecycle.py` emits canonical
+  `CAPITAL_REDUCTION_FILLED` for a confirmed partial EXIT, but its payload
+  currently omits the already-computed allocated cost and realized-PnL facts.
+  The settlement fold must therefore retain cumulative partial realized PnL and
+  add only residual settlement payout/PnL; it must never overwrite it.
+- **Contract:** every partial fill carries a stable fill identity, allocated
+  cost basis, realized-PnL delta, and cumulative realized PnL. MATCHED /
+  CONFIRMED aliases and replay are idempotent; residual shares/cost remain open;
+  partial fills neither emit `EXIT_ORDER_FILLED` nor economically close a
+  position. Existing event/projection schema is reused unless inspection proves
+  it cannot represent those facts.
+- **Plan:** trace the canonical event writer and settlement reducer, propagate
+  the already computed economics through the existing event payload, and fold
+  partial cumulative plus residual settlement economics exactly once. Add
+  Madrid-like partial, duplicate observation, win/loss settlement, and
+  multi-partial antibodies after auditing lifecycle headers and test registry.
+- **Acceptance / evidence:** targeted event/projection/settlement tests prove
+  the six contract clauses above; `py_compile`, planning-lock, and
+  `git diff --check` pass. No live checkout, process, or production DB is read
+  or mutated. Rollback is one hot-fix commit.
+- **Architecture registration:** harmonize the new payload vocabulary with the
+  existing `architecture/money_path_objects.yaml` fail-closed registry as
+  `partial_exit_economic_events`; it supersedes no lifecycle or command state.
+  `tests/test_exit_safety.py` and `tests/test_harvester_settlement_redeem.py`
+  provide the MP-ECO-001/002 and MP-RED-001/002 behavioral evidence.
+
+### 2026-08-13 — first-lot partial-fill exitability and final SDK boundary (B104)
+
+- **Observed defect:** canonical seven-day full-loss entries are dominated by
+  post-only GTC commands, and several first fills materialized below the venue
+  minimum SELL lot.  The monitor cannot liquidate such a first-lot remainder;
+  later probability redecision is therefore too late by construction.
+- **Structural cause:** the global solver correctly made deterministic
+  settlement payoff a taker-only exception to the pre-cliff depth gate, but the
+  same predicate also bypassed the maker seed requirement.  A new-token maker
+  could consequently rest without an already-sellable holding, and any venue
+  partial fill could create an unexitably small position.
+- **Contract:** deterministic exact payoff may continue to authorize an atomic
+  FOK taker.  Every maker-rest BUY, including its deterministic sibling, needs
+  current selected-token shares at least equal to the venue minimum order size.
+  The SDK boundary independently rejects non-positive/sub-minimum size and
+  off-tick price for both single and batch submission, even if an upstream
+  envelope check is bypassed.
+- **Acceptance:** unseeded exact maker is absent with
+  `MAKER_REST_EXITABILITY_SEED_REQUIRED`; seeded maker and exact FOK taker remain
+  available.  Single/batch adapter antibodies prove no SDK POST occurs for
+  sub-minimum or off-tick orders.  Targeted suites: adapter 204, solver 211,
+  solve integration 470, fill simulator 20; compile and `git diff --check`
+  clean.  Rollback is one B104 hot-fix commit.
+
+### 2026-08-13 — prospective held-position refresh cadence (B106)
+
+- **Observed defect:** the 30-second recovery detector waited until canonical
+  monitor evidence was already 150 seconds old before starting a bounded
+  75-second full-book pass.  Production therefore repeatedly crossed the
+  freshness wall even though recovery eventually drained the debt.
+- **Structural cause:** the normal full-book cadence was 120 seconds while one
+  bounded pass may consume 75 seconds.  Under interval scheduling, the next
+  successful pass could therefore begin roughly 120 seconds after the previous
+  start and finish near 195 seconds; a detector firing only at 150 seconds is
+  necessarily retrospective.
+- **Contract:** the normal full-book job runs every 30 seconds with
+  `max_instances=1` and coalescing.  A 75-second pass skips overlapping ticks,
+  then becomes eligible again at the next 30-second boundary instead of waiting
+  for the old 120-second boundary.  This is a prospective trigger improvement,
+  not by itself a proof of every per-position gap: fair position ordering and
+  incomplete passes still require production time-series validation.  The
+  separate canonical recovery worker remains reserved for actual stale/
+  missing/invalid probability evidence and does not become a permanent
+  pre-wall loop.  This improves monitor latency without changing entry/exit
+  economics.  The observability watchdog fires at 120 seconds: after a complete
+  75-second pass can finish, but before the 150-second hard-debt wall.
+- **Acceptance:** scheduler-registration and cadence constants agree at 30
+  seconds; the existing singleton/retry antibodies continue to prove hard-debt
+  recovery.  Production acceptance requires every current positive exposure to
+  remain below the 150-second probability+book freshness wall over more than
+  one full scheduler/pass horizon.  Rollback is one B106 hot-fix commit.
+
+### 2026-08-15 — held-SELL request price-band parity hot-fix
+
+- **Observed defect:** initial monitor and force-new-generation recovery request
+  seams treated a fresh bid above `0.95` as executable even though the final
+  global auction correctly rejects that quote under the durable live-order law.
+- **Contract:** both seams use `LIVE_ORDER_MIN_UNIT_PRICE` and
+  `LIVE_ORDER_MAX_UNIT_PRICE`; a finite out-of-band bid remains evidence but is
+  `NO_EXECUTABLE_BOOK`, while inclusive boundary quotes remain executable.
+  Continued monitoring reclassifies each fresh quote, so a later in-band bid
+  immediately returns to redecision.  Probability and exit economics do not
+  change.
+- **Acceptance:** relationship antibodies prove `0.97` is never executable and
+  `0.95` remains executable at both seams; targeted pytest, `py_compile`, Ruff,
+  planning-lock, and `git diff --check` pass.  Rollback is one hot-fix commit;
+  this worktree does not deploy it.

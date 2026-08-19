@@ -13,13 +13,13 @@ Goal: full upstream forecast-layer体检 + redesign: per-source publication bias
 - W1: latency/issuance measurement + per-source cycle clock truth (explorer: exp-ingest)
 - W2: issuance-shock propagation + re-decision handling (explorer: exp-redecision)
 - W3: fusion weights / per-city best source / market-definition alignment (explorer: exp-fusion)
-- W4: staleness degrade ladder + per-city isolation (design; consult REQ-20260717-032202-ec62d2 pending)
+- W4: staleness degrade ladder + per-city isolation (design; consult external consult, 2026-07-17 pending)
 - W5: non-blocking queue architecture (head-of-line risk)
 - Execution: worktree implement → git-master merges to live branch promptly (parallel co-workers consume commits).
 
 ## Status
 - [x] Boot; all explorer reports in; exp-starve CONUS root cause DEFINITIVE (degF members_unit bug, fixed 305897168 on 07-14; the 30h darkness = missing alerting + blind receipts + fingerprint churn)
-- [x] Consult v2 answered (/tmp/cgc/answer_REQ-20260717-040148-1c678b.txt) — verdict folded below
+- [x] Consult v2 answered ([consult answer artifact]) — verdict folded below
 - [x] impl-ensage DONE + cherry-picked to live branch 3c532675d (ENS shape 30h age bound; 3 tests green on live)
 - [ ] impl-lowens (quarantine≠missing + floor alignment) — running
 - [ ] impl-receipts (typed block sub-reasons + cycle-scoped fingerprint) — running
@@ -115,7 +115,7 @@ Operator: 防范只是 failsafe;第一性 = 永远拿最新数据做准确融合
 - E5: staleness monotone: +0.096C/cycle-back (daily archive), +0.183C at 3 back. Consistent with my 6h paired slopes (+0.1-0.17C/6h on live cycles).
 - E6: cwa/hko untestable in previous_runs archive (single_runs only).
 - SYNTHESIS: model SELECTION is a bigger lever than freshness (both ~0.1C scale); frozen scheme over-includes hurting models in some regions and under-uses the pool in others → per-region settlement-driven precision pool over 3-4 vetted models indicated. Weekly walk-forward refit artifact (consult (c)) is the delivery vehicle.
-### Consult follow-up verdict (0.94 conf; full text /tmp/cgc/answer_REQ-20260717-121403-d627dd.txt — archive before /tmp cleanup)
+### Consult follow-up verdict (0.94 conf; full text [consult answer artifact] — archive before /tmp cleanup)
 **P2-A CENTER/SHAPE DECOUPLING [BLOCKER-ranked]**: consult REVISES its own earlier same-cycle stance — same-cycle coherence is required WITHIN an ENS shape, never BETWEEN center and shape legs. Design: immutable CenterState (updates event-by-event on any newer capturable instrument) + ShapeState (one coherent ENS cycle, precomputed for ALL tradable-horizon targets on ENS arrival — kills the new-target ENS wait entirely); assembler joins newest center to newest licensed shape; componentwise monotone CAS (c',s')>=(c,s) with one strict. 30h bound stays as catastrophic guard that should never fire on routine 00/12Z schedule. Migration additive (two tables, backfill, pointer switch, atomic rollback).
 **P2-B ANOMALY TRANSPORT MATH [HIGH]**: stale-shape reuse licensed ONLY as location-shape transport: translated members X'_j = mu_t + A_(j,e) (anomalies from ONE coherent cycle recentered on fresh center); recompute preimage hits on translated members; sigma_t^2 = max(sigma_min^2, a_g + b_g*S_e^2 + gamma_g*age/6) fitted walk-forward on "fresh center + then-available shape" (actual availability timestamps, never retrospective newest-pairing). Operational recentered delta_ens = 0 — do NOT retain delta_ens_center^2 (double-counts the new center); raw D_t kept as provenance only. Deterministic staleness slopes do NOT estimate shape staleness — gamma_g needs its own hybrid fit. Verify: availability-replay CRPS/PIT/coverage by shape-age bucket.
 **P2-C AVAILABILITY-AWARE SELECTION [HIGH]**: score R_m = E[L(f at newest run available_at<=tau, Y)] on an exogenous decision schedule — publication timing enters the loss itself, no manual timing bonus. One basket per city×metric; serving-time age penalty + renormalize-on-absence (membership NEVER a readiness requirement — the incident-class antibody). Activate only when full posterior non-inferior on CRPS, not center MAE alone.

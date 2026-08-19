@@ -109,6 +109,7 @@ def connect_with_cutover_lease(
     database: str | Path,
     *,
     canonical_db_path: Path,
+    deadline_monotonic: float | None = None,
     **kwargs: Any,
 ) -> CutoverAwareConnection:
     """Open SQLite only while holding the canonical DB's shared runtime lease."""
@@ -116,13 +117,40 @@ def connect_with_cutover_lease(
     lease_path = cutover_lease_path(canonical_db_path)
     lease_path.parent.mkdir(parents=True, exist_ok=True)
     fd = os.open(str(lease_path), os.O_RDWR | os.O_CREAT, 0o644)
+    lease_acquired = False
     try:
-        fcntl.flock(fd, fcntl.LOCK_SH)
+        if deadline_monotonic is None:
+            fcntl.flock(fd, fcntl.LOCK_SH)
+            lease_acquired = True
+        else:
+            while True:
+                remaining = float(deadline_monotonic) - time.monotonic()
+                if remaining <= 0.0:
+                    raise TimeoutError("CUTOVER_LEASE_DEADLINE_EXPIRED")
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+                    lease_acquired = True
+                    break
+                except BlockingIOError:
+                    remaining = float(deadline_monotonic) - time.monotonic()
+                    if remaining <= 0.0:
+                        raise TimeoutError("CUTOVER_LEASE_DEADLINE_EXPIRED")
+                    time.sleep(min(0.005, remaining))
+            remaining = float(deadline_monotonic) - time.monotonic()
+            if remaining <= 0.0:
+                raise TimeoutError("CUTOVER_LEASE_DEADLINE_EXPIRED")
+            prior_timeout = kwargs.get("timeout")
+            kwargs["timeout"] = (
+                remaining
+                if prior_timeout is None
+                else min(float(prior_timeout), remaining)
+            )
         conn = sqlite3.connect(
             str(database), factory=CutoverAwareConnection, **kwargs
         )
     except BaseException:
-        fcntl.flock(fd, fcntl.LOCK_UN)
+        if lease_acquired:
+            fcntl.flock(fd, fcntl.LOCK_UN)
         os.close(fd)
         raise
     conn._cutover_fd = fd
@@ -983,6 +1011,8 @@ SQLITE_CONNECT_ALLOWLIST: frozenset[str] = frozenset(
         "scripts/allocator_bankroll_sensitivity.py",  # read_only_ro_uri: opens zeus_trades.db via file:...?mode=ro uri; SELECT-only over decision_log/executable_market_snapshot_latest; non-authoritative offline Kelly-formula sensitivity probe; writes stdout only
         # --- book_snapshot_persistence round-5 fix Y1-Y3 (2026-07-29): telemetry spool DB ---
         "src/events/family_book_telemetry_writer.py",  # not in the world-db BULK lock universe: the ONLY raw sqlite3.connect() in this file is inside _default_spool_conn_factory, opening a PRIVATE telemetry spool file (family_book_telemetry_spool.db) that is NEITHER zeus_trades.db NOR any other canonical DB -- asserted at runtime (spool_path.resolve() != trade_db_path.resolve()), not just documented -- so it needs no cutover lease / writer-class arbitration. This module's worker thread NEVER opens a canonical connection at all (round-4 finding); the only canonical write path is run_bounded_ingest(), a pure function the DAEMON calls with its OWN get_trade_connection(write_class="live") connection (src/main.py scheduler job) -- this file opens zero canonical connections. A dedicated AST antibody (tests/events/test_family_book_telemetry_writer.py) asserts exactly one sqlite3.connect() call exists in this module, compensating for this allowlist entry's file-level (not function-level) granularity.
+        # --- settled-position calibration report (2026-07-29): READ-ONLY reliability diagram ---
+        "scripts/generate_calibration_report.py",  # read_only_ro_uri: opens zeus-world.db via file:...?mode=ro uri, ATTACHes zeus_trades.db read-only (INV-37) for the strategy_key/entry-time join; SELECT-only over settlement_attribution (settled-only ground truth) + trades.position_current/position_events; writes docs/reference/calibration_report.md + docs/reference/calibration_reliability.svg only
     }
 )
 

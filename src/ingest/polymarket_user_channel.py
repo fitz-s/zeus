@@ -877,6 +877,33 @@ class PolymarketUserChannelIngestor:
                     observed,
                     {"source": "WS_USER", "venue_order_id": venue_order_id, "order_fact_id": fact_id},
                 )
+            if persisted_state == "CANCEL_CONFIRMED":
+                # The authenticated stream already owns the writer transaction
+                # that made this terminal fact durable.  Consume that exact fact
+                # now so a later contended recovery tick cannot retain collateral.
+                from src.execution.command_recovery import (
+                    reconcile_terminal_entry_exposure_obligations,
+                    reconcile_terminal_order_facts,
+                )
+
+                command_id = str(command["command_id"])
+                terminal = reconcile_terminal_order_facts(
+                    conn,
+                    command_ids=frozenset({command_id}),
+                )
+                obligation = reconcile_terminal_entry_exposure_obligations(
+                    conn,
+                    command_id=command_id,
+                )
+                if terminal.get("errors") or obligation.get("errors"):
+                    logger.error(
+                        "M3 user-channel terminal order projection incomplete: "
+                        "command_id=%s order_id=%s terminal=%s obligation=%s",
+                        command_id,
+                        venue_order_id,
+                        terminal,
+                        obligation,
+                    )
             conn.commit()
             return {"order_fact_id": fact_id}
         finally:

@@ -21,7 +21,7 @@
 
 ### ECMWF OpenData (mx2t3 / 3h product)
 
-**File:** `/Users/leofitz/.openclaw/workspace-venus/51 source data/scripts/extract_open_ens_localday.py`
+**File:** `<local>/workspace-venus/51 source data/scripts/extract_open_ens_localday.py`
 
 - **Line 389–390:** `local_start, local_end = local_day_bounds_utc(target_local_date, timezone_name)` — same ZoneInfo-aware midnight-to-midnight bounds.
 - **Lines 397–414:** For each `(member, step_hours)` bucket: `window_end = issue_dt + timedelta(hours=step_hours)`, `window_start = window_end - timedelta(hours=STEP_HOURS)`. Then `_windows_overlap(...)` returns `(fully_inside, has_overlap)`. HIGH track uses `fully_inside` only (`members_inner`). LOW track distinguishes inner vs boundary for quarantine.

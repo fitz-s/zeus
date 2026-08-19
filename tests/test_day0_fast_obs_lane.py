@@ -1,6 +1,6 @@
 # Created: 2026-06-10
-# Last reused/audited: 2026-07-28
-# Lifecycle: created=2026-06-10; last_reviewed=2026-07-28; last_reused=2026-07-28
+# Last reused/audited: 2026-08-08
+# Lifecycle: created=2026-06-10; last_reviewed=2026-08-08; last_reused=2026-08-08
 # Authority basis: operator green-light 2026-06-10 items A/C/E (free METAR fast
 #   lane, live-obs hook wiring, WU-vs-METAR oracle anomaly guard); day0
 #   first-principles review /tmp/day0_first_principles_review.md §6.2;
@@ -579,6 +579,94 @@ def _london():
     )
 
 
+def _scheduler_hourly_vector(city, model, decision_time, *, omit_local_time=None):
+    from src.data.day0_hourly_vectors import Day0HourlyVector
+
+    local_day = decision_time.astimezone(ZoneInfo(city.timezone)).date()
+    times = [
+        f"{(local_day + timedelta(days=offset)).isoformat()}T{hour:02d}:00"
+        for offset in (0, 1)
+        for hour in range(24)
+    ]
+    if omit_local_time in times:
+        times.remove(omit_local_time)
+    return Day0HourlyVector(
+        model=model,
+        city=city.name,
+        target_date=local_day.isoformat(),
+        timezone_name=city.timezone,
+        captured_at=decision_time.isoformat(),
+        times=tuple(times),
+        temps_c=tuple(18.0 + index * 0.1 for index in range(len(times))),
+    )
+
+
+def _install_scheduler_forecast_db(monkeypatch, tmp_path, city, *, authorized_fact):
+    import src.config as config_module
+    import src.data.day0_hourly_vectors as vectors_module
+    import src.state.db as db_module
+
+    db_path = tmp_path / "scheduler-forecasts.db"
+    now = datetime.now(UTC)
+    observation_time = now - timedelta(minutes=5)
+    target_date = now.astimezone(ZoneInfo(city.timezone)).date().isoformat()
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        """
+        CREATE TABLE observation_instants (
+            city TEXT, target_date TEXT, source TEXT, station_id TEXT,
+            local_timestamp TEXT, utc_timestamp TEXT, imported_at TEXT,
+            temp_unit TEXT, running_max REAL, running_min REAL,
+            authority TEXT, training_allowed INTEGER, causality_status TEXT,
+            source_role TEXT, raw_response TEXT
+        )
+        """
+    )
+    if authorized_fact:
+        conn.execute(
+            """
+            INSERT INTO observation_instants (
+                city, target_date, source, station_id, local_timestamp,
+                utc_timestamp, imported_at, temp_unit, running_max, running_min,
+                authority, training_allowed, causality_status, source_role,
+                raw_response
+            ) VALUES (?, ?, 'wu_icao_history', ?, ?, ?, ?, ?, 25.0, 12.0,
+                      'VERIFIED', 1, 'OK', 'historical_hourly', '{}')
+            """,
+            (
+                city.name,
+                target_date,
+                city.wu_station,
+                observation_time.astimezone(ZoneInfo(city.timezone)).isoformat(),
+                observation_time.isoformat(),
+                observation_time.isoformat(),
+                city.settlement_unit,
+            ),
+        )
+    conn.commit()
+    conn.close()
+
+    def connect(*_args, **_kwargs):
+        opened = sqlite3.connect(db_path)
+        opened.row_factory = sqlite3.Row
+        return opened
+
+    monkeypatch.setattr(config_module, "runtime_cities", lambda: [city])
+    monkeypatch.setattr(
+        config_module,
+        "runtime_cities_by_name",
+        lambda: {city.name: city},
+    )
+    monkeypatch.setattr(db_module, "ZEUS_FORECASTS_DB_PATH", db_path)
+    monkeypatch.setattr(db_module, "get_forecasts_connection", connect)
+    monkeypatch.setattr(db_module, "get_forecasts_connection_read_only", connect)
+    monkeypatch.setattr(db_module, "get_world_connection_read_only", connect)
+    monkeypatch.setattr(vectors_module, "in_domain_models_for_city", lambda _city, **_kw: [])
+    vectors_module._LAST_REFRESH_MONOTONIC.clear()
+    vectors_module._INCOMPLETE_RETRY_NOT_BEFORE_MONOTONIC.clear()
+    return db_path, target_date
+
+
 def _istanbul():
     return SimpleNamespace(
         name="Istanbul", timezone="Europe/Istanbul", settlement_unit="C",
@@ -795,6 +883,42 @@ KORD 180420Z 24006KT 10SM CLR 29/22 A2993 RMK AO2 T02940222
         assert recovered_ok is True
         assert [report.station_id for report in recovered] == ["KORD"]
 
+    def test_awc_reconciles_silent_global_cycle_rewrites(self):
+        from src.data.day0_fast_obs import Day0FastObsEmitter
+
+        report = _report(
+            "RKPK",
+            datetime(2026, 8, 8, 5, 0, tzinfo=UTC),
+            36.0,
+        )
+        recovery_calls = []
+
+        def _recovery(stations, *, hours, client):
+            recovery_calls.append((tuple(stations), hours, client))
+            return [report]
+
+        class _SyntacticallyCurrentCycle:
+            def poll(self, **_kwargs):
+                return [], True
+
+        client = object()
+        emitter = Day0FastObsEmitter(fetcher=_recovery)
+        emitter._cycle_cursor = _SyntacticallyCurrentCycle()
+
+        reports, source_ok, history_loaded = emitter._fetch_global_sources(
+            client=client,
+            stations=("RKPK",),
+            fetch_hours=0.5,
+            awc_due=True,
+            history_missing=False,
+            attempt_monotonic=1.0,
+        )
+
+        assert reports == [report]
+        assert source_ok is True
+        assert history_loaded is True
+        assert recovery_calls == [(("RKPK",), 0.5, client)]
+
     def test_priority_station_fact_bypasses_global_cycle_wait(self):
         import src.data.day0_fast_obs as fast_obs
 
@@ -821,6 +945,7 @@ KORD 180420Z 24006KT 10SM CLR 29/22 A2993 RMK AO2 T02940222
         emitter._station_cursor = _StationCursor()
         emitter._cycle_cursor = _CycleCursor()
         emitter._full_window_loaded = True
+        emitter._last_awc_attempt_monotonic = time.monotonic()
 
         started = time.monotonic()
         try:
@@ -876,6 +1001,7 @@ KORD 180420Z 24006KT 10SM CLR 29/22 A2993 RMK AO2 T02940222
         emitter._cached_reports = [cached]
         emitter._cache_fetched_monotonic = time.monotonic()
         emitter._full_window_loaded = True
+        emitter._last_awc_attempt_monotonic = time.monotonic()
 
         started = time.monotonic()
         try:
@@ -927,6 +1053,7 @@ KORD 180420Z 24006KT 10SM CLR 29/22 A2993 RMK AO2 T02940222
         emitter._station_cursor = _StationCursor()
         emitter._cycle_cursor = _CycleCursor()
         emitter._full_window_loaded = True
+        emitter._last_awc_attempt_monotonic = time.monotonic()
 
         try:
             first_reports, first_status, _age = emitter._reports_with_status(
@@ -985,6 +1112,7 @@ KORD 180420Z 24006KT 10SM CLR 29/22 A2993 RMK AO2 T02940222
         emitter._station_cursor = _StationCursor()
         emitter._cycle_cursor = _CycleCursor()
         emitter._full_window_loaded = True
+        emitter._last_awc_attempt_monotonic = time.monotonic()
         emitter._cached_reports = [lfpb]
         emitter._station_authority_initialized = True
         emitter._station_cache_fetched_monotonic["LFPB"] = time.monotonic() - 3600.0
@@ -1035,6 +1163,7 @@ KORD 180420Z 24006KT 10SM CLR 29/22 A2993 RMK AO2 T02940222
         emitter = fast_obs.Day0FastObsEmitter(min_fetch_interval_s=0.0)
         emitter._cycle_cursor = _CycleCursor()
         emitter._full_window_loaded = True
+        emitter._last_awc_attempt_monotonic = time.monotonic()
         emitter._cached_reports = [lfpb]
         emitter._station_authority_initialized = True
         emitter._station_cache_fetched_monotonic["LFPB"] = time.monotonic() - 3600.0
@@ -1072,6 +1201,7 @@ KORD 180420Z 24006KT 10SM CLR 29/22 A2993 RMK AO2 T02940222
         emitter = fast_obs.Day0FastObsEmitter(min_fetch_interval_s=0.0)
         emitter._cycle_cursor = _CycleCursor()
         emitter._full_window_loaded = True
+        emitter._last_awc_attempt_monotonic = time.monotonic()
         emitter._cached_reports = [lfpb]
         emitter._station_authority_initialized = True
         emitter._station_cache_fetched_monotonic["LFPB"] = time.monotonic() - 3600.0
@@ -1134,8 +1264,8 @@ KORD 180420Z 24006KT 10SM CLR 29/22 A2993 RMK AO2 T02940222
 
         assert first[1] == fast_obs.FETCH_FRESH
         assert second[1] == fast_obs.FETCH_CACHE_HIT
-        assert third[1] == fast_obs.FETCH_CACHE_HIT
-        assert len(awc_calls) == 1
+        assert third[1] == fast_obs.FETCH_FRESH
+        assert len(awc_calls) == 2
 
     def test_cycle_fact_survives_awc_recovery_failure(self, monkeypatch):
         import src.data.day0_fast_obs as fast_obs
@@ -1199,7 +1329,10 @@ KORD 180420Z 24006KT 10SM CLR 29/22 A2993 RMK AO2 T02940222
         assert status == fast_obs.FETCH_FRESH
         assert list(emitter._pending_ledger_reports.values()) == [early]
 
-    def test_incremental_cycle_fact_defers_due_awc_recovery(self, monkeypatch):
+    def test_incremental_cycle_fact_does_not_suppress_due_awc_recovery(
+        self,
+        monkeypatch,
+    ):
         import src.data.day0_fast_obs as fast_obs
 
         report = _report(
@@ -1229,8 +1362,8 @@ KORD 180420Z 24006KT 10SM CLR 29/22 A2993 RMK AO2 T02940222
 
         assert reports == [report]
         assert status == fast_obs.FETCH_FRESH
-        assert awc_calls == []
-        assert emitter._last_awc_attempt_monotonic == 0.0
+        assert awc_calls == [True]
+        assert emitter._last_awc_attempt_monotonic > 0.0
 
 
 # ===========================================================================
@@ -1768,7 +1901,7 @@ class TestEmpiricalThresholds:
         assert threshold == pytest.approx(1.0)  # feeds byte-identical post-rounding
         threshold, provenance = divergence_threshold_for_city("Seoul", "C")
         assert provenance == "empirical"
-        assert threshold == pytest.approx(2.0)  # real +-1C spread measured
+        assert threshold == pytest.approx(1.0)  # current bounded seven-day fit
 
     @pytest.mark.parametrize(
         ("city_name", "station_id"),
@@ -1807,54 +1940,47 @@ class TestEmpiricalThresholds:
     def test_recent_measurements_match_city_contract_and_record_window(self):
         from pathlib import Path
 
+        from src.data.day0_oracle_anomaly import metar_margin_units_for_city
+
         root = Path(__file__).resolve().parents[1]
-        divergence = json.loads(
+        model = json.loads(
             (root / "config" / "wu_metar_divergence.json").read_text()
-        )["cities"]
+        )
+        divergence = model["cities"]
         cities = {
             row["name"]: row
             for row in json.loads((root / "config" / "cities.json").read_text())["cities"]
         }
-
-        expected_windows = {
-            city_name: [
-                "2026-07-20T07:30:13.105666+00:00",
-                "2026-07-27T07:30:13.105666+00:00",
-            ]
-            for city_name in ("Beijing", "Guangzhou", "Wellington")
+        wu_cities = {
+            name
+            for name, city in cities.items()
+            if (city.get("settlement_source_type") or "wu_icao") == "wu_icao"
         }
-        expected_windows["Ankara"] = [
-            "2026-07-20T07:42:38.732852+00:00",
-            "2026-07-27T07:42:38.732852+00:00",
-        ]
-        expected_windows["Karachi"] = [
-            "2026-07-21T09:55:56.854853+00:00",
-            "2026-07-28T09:55:56.854853+00:00",
-        ]
-        for city_name, expected_window in expected_windows.items():
+        assert set(divergence) == wu_cities
+        assert model["window_days"] == 7
+        for city_name in sorted(wu_cities):
             measurement = divergence[city_name]
             city = cities[city_name]
             assert measurement["station_id"] == city["wu_station"]
             assert measurement["unit"] == city["unit"]
-            assert (city.get("settlement_source_type") or "wu_icao") == "wu_icao"
-            assert measurement["matched_pairs"] >= 100
             assert measurement["measurement_window_days"] == 7
-            assert measurement["measurement_window"] == expected_window
-
-        karachi = divergence["Karachi"]
-        assert karachi["matched_pairs"] == 202
-        assert karachi["p95_abs_rounded_delta"] == 0.0
-        assert karachi["p99_abs_rounded_delta"] == 0.0
-        assert karachi["max_abs_rounded_delta"] == 0.0
-        assert karachi["disagree_rate_ge_1unit"] == 0.0
-        assert karachi["empirical_threshold"] == 1.0
-        assert karachi["threshold_provenance"] == "empirical"
-        assert karachi["settlement_faithful"] is True
-        assert karachi["station_id"] == "OPKC"
-        assert karachi["unit"] == "C"
-        assert datetime.fromisoformat(karachi["measurement_generated_at"]) > (
-            datetime.fromisoformat(karachi["measurement_window"][1])
-        )
+            assert measurement["measurement_window"] == model["window"]
+            assert measurement["measurement_generated_at"] == model["generated_at"]
+            assert datetime.fromisoformat(measurement["measurement_generated_at"]) >= (
+                datetime.fromisoformat(measurement["measurement_window"][1])
+            )
+            if measurement["matched_pairs"] >= 100:
+                assert measurement["threshold_provenance"] == "empirical"
+                assert metar_margin_units_for_city(
+                    city_name,
+                    city["unit"],
+                ) is not None
+            else:
+                assert measurement["threshold_provenance"] == "thin_sample"
+                assert metar_margin_units_for_city(
+                    city_name,
+                    city["unit"],
+                ) is None
 
     def test_unmeasured_city_falls_back_to_conservative_default(self):
         from src.data.day0_oracle_anomaly import (
@@ -1885,7 +2011,7 @@ class TestEmpiricalThresholds:
     def test_settlement_faithfulness_verdicts(self):
         from src.data.day0_oracle_anomaly import city_metar_settlement_faithful
 
-        assert city_metar_settlement_faithful("Seoul") is False   # measured divergence
+        assert city_metar_settlement_faithful("Seoul") is True
         assert city_metar_settlement_faithful("Tokyo") is True
         assert city_metar_settlement_faithful("NYC") is True
         # 2026-07-26 (Shenzhen class): a city with NO entry at all is no
@@ -1893,17 +2019,11 @@ class TestEmpiricalThresholds:
         # than a measured-thin sample, not more trust than one.
         assert city_metar_settlement_faithful("UnmeasuredCity") is False
 
-    def test_unfaithful_but_well_measured_city_gets_margin_absorbed_not_excluded(self):
-        """2026-07-16 (day0 defect-5): Seoul's METAR integer is not reliably
-        WU's settlement integer, but the divergence IS well-measured (990
-        matched pairs, empirical_threshold=2.0C) — binary exclusion where
-        margin-absorption machinery already existed one layer over
-        (day0_hard_fact_exit._metar_kill_margin_units) was the same disease
-        as the climatology-band defect. Seoul now gets a fast-lane source
-        WITH the measured margin, not None; faithful cities keep margin 0."""
+    def test_well_measured_city_uses_current_empirical_margin(self):
+        """The live source resolves the current bounded empirical margin."""
         seoul_source = fast_obs_source_for_city(_seoul())
         assert seoul_source is not None
-        assert seoul_source.margin_units == pytest.approx(2.0)
+        assert seoul_source.margin_units == pytest.approx(0.0)
 
         tokyo_source = fast_obs_source_for_city(_tokyo())
         assert tokyo_source is not None
@@ -1990,7 +2110,7 @@ class TestMetarMarginAbsorption:
     def test_seoul_source_resolves_measured_margin_from_real_config(self):
         source = fast_obs_source_for_city(_seoul())
         assert source is not None
-        assert source.margin_units == pytest.approx(2.0)
+        assert source.margin_units == pytest.approx(0.0)
 
     def test_emitted_observation_records_margin_and_shifted_raw_value(self):
         """End-to-end through fast_obs_to_day0_observation: raw_value in the
@@ -1999,6 +2119,13 @@ class TestMetarMarginAbsorption:
         margin so the pre-shift reading stays reconstructable."""
         source = fast_obs_source_for_city(_seoul())
         assert source is not None
+        source = FastObsSource(
+            source_id=source.source_id,
+            station_id=source.station_id,
+            authority=source.authority,
+            notes=source.notes,
+            margin_units=2.0,
+        )
         reports = self._reports([(0, 30.0)])
         extremes = running_extremes_for_local_day(
             reports, city=_seoul(), target_date="2026-06-10",
@@ -2034,6 +2161,23 @@ class TestMetarMarginAbsorption:
         }))
         assert metar_margin_units_for_city("ThinCity", "C", path=path) is None
 
+    def test_thin_sample_apparent_faithfulness_is_not_executable(self, tmp_path):
+        """Zero disagreements in a tiny sample do not prove source fidelity."""
+        from src.data.day0_oracle_anomaly import metar_margin_units_for_city
+
+        path = tmp_path / "divergence.json"
+        path.write_text(json.dumps({
+            "cities": {
+                "ThinLuckyCity": {
+                    "matched_pairs": 4,
+                    "empirical_threshold": 1.0,
+                    "threshold_provenance": "thin_sample",
+                    "settlement_faithful": True,
+                },
+            },
+        }))
+        assert metar_margin_units_for_city("ThinLuckyCity", "C", path=path) is None
+
     def test_never_measured_city_is_now_excluded_not_default_margin(self):
         """2026-07-26 (Shenzhen class, day0 defect-6): a city with NO entry at
         all in wu_metar_divergence.json used to default to
@@ -2065,7 +2209,7 @@ class TestMetarMarginAbsorption:
         assert city_metar_settlement_faithful("Shenzhen", path=path) is False
         assert metar_margin_units_for_city("Shenzhen", "C", path=path) is None
 
-    def test_all_27_measured_cities_have_expected_margin(self):
+    def test_previously_measured_cities_keep_executable_margin(self):
         """Regression: the (b) default-direction fix changes behavior for
         UNMEASURED cities only. Every already-measured city in the real
         config/wu_metar_divergence.json (no path override) must keep its
@@ -2085,7 +2229,7 @@ class TestMetarMarginAbsorption:
                 "Guangzhou", "Wellington", "Ankara", "Karachi",
             }
         )}
-        expected_margin["Seoul"] = 2.0
+        expected_margin["Seoul"] = 0.0
         for city_name, margin in expected_margin.items():
             unit = "F" if city_name in f_cities else "C"
             assert metar_margin_units_for_city(city_name, unit) == pytest.approx(margin), city_name
@@ -3032,129 +3176,169 @@ class TestMutexNoHttpSplit:
             decision_time=decision_time,
         ) == {("London", target_date, "high")}
 
-    def test_hourly_refresh_keeps_held_day0_truth_fresh_while_trading(self, monkeypatch):
-        import src.config as config_module
-        import src.main  # load settings consumers before replacing the config singleton
+    def test_hourly_refresh_keeps_held_day0_truth_fresh_while_trading(
+        self, monkeypatch, tmp_path
+    ):
+        import src.data.day0_hourly_vectors as vectors_module
+        from src.data.openmeteo_quota import OpenMeteoQuotaTracker, PRIORITY_DAILY_LIMIT
         from src.events import reactor as reactor_module
 
         tokyo = _tokyo()
-        target_date = (datetime.now(UTC) + timedelta(hours=9)).date().isoformat()
-        calls = []
-
-        monkeypatch.setattr(
-            config_module,
-            "settings",
-            SimpleNamespace(_data={"edli": {"enabled": True}}),
+        db_path, target_date = _install_scheduler_forecast_db(
+            monkeypatch, tmp_path, tokyo, authorized_fact=False
         )
-        monkeypatch.setattr(config_module, "runtime_cities", lambda: [tokyo, _london()])
+        tracker = OpenMeteoQuotaTracker()
+        tracker._count = PRIORITY_DAILY_LIMIT
+        fetches = []
+        monkeypatch.setattr(vectors_module, "quota_tracker", tracker)
         monkeypatch.setattr(
             reactor_module,
             "_edli_current_held_position_family_keys",
             lambda: {("Tokyo", target_date, "high")},
         )
         monkeypatch.setattr(
-            reactor_module,
-            "_edli_latest_day0_hourly_blocked_families",
-            lambda **_: set(),
-        )
-        monkeypatch.setattr(
-            reactor_module,
-            "_edli_day0_hourly_priority_families",
-            lambda **_: [("Tokyo", target_date, "high")],
-        )
-        monkeypatch.setattr(
-            "src.data.day0_hourly_vectors.maybe_refresh_day0_hourly_vectors",
-            lambda cities, **kwargs: calls.append((cities, kwargs))
-            or SimpleNamespace(
-                vectors_written=3,
-                cities_attempted=1,
-                cities_skipped_throttle=0,
-                cities_skipped_quota=0,
-                incomplete_expected_bundles=0,
-                budget_exhausted=False,
+            vectors_module,
+            "fetch_day0_hourly_vectors",
+            lambda city, *, models, now, **_kw: (
+                fetches.append((city.name, tuple(models)))
+                or [_scheduler_hourly_vector(city, model, now) for model in models],
+                "sha256:held-critical",
             ),
         )
 
-        reactor_module.run_edli_day0_hourly_refresh_cycle(
-            trading_lane_active=True,
-        )
+        reactor_module.run_edli_day0_hourly_refresh_cycle(trading_lane_active=True)
 
-        assert len(calls) == 1
-        cities, kwargs = calls[0]
-        assert [city.name for city in cities] == ["Tokyo"]
-        assert kwargs["max_cities"] == 1
-        assert kwargs["quota_priority_cities"] == 1
-        assert kwargs["persist_lock_blocking"] is False
+        assert [name for name, _models in fetches] == ["Tokyo"]
+        conn = sqlite3.connect(db_path)
+        assert conn.execute("SELECT COUNT(*) FROM day0_hourly_vectors").fetchone()[0] == 6
+        conn.close()
 
-    def test_hourly_refresh_reserves_pending_slot_while_trading(self, monkeypatch):
-        import src.config as config_module
-        import src.main  # load settings consumers before replacing the config singleton
+    def test_hourly_refresh_reserves_strict_bundle_priority_slot_while_trading(
+        self, monkeypatch, tmp_path
+    ):
+        import src.data.day0_hourly_vectors as vectors_module
+        from src.data.openmeteo_quota import MAINTENANCE_DAILY_LIMIT, OpenMeteoQuotaTracker
         from src.events import reactor as reactor_module
 
         tokyo = _tokyo()
-        seoul = _seoul()
-        london = _london()
-        now = datetime.now(UTC)
-        tokyo_date = now.astimezone(ZoneInfo(tokyo.timezone)).date().isoformat()
-        seoul_date = now.astimezone(ZoneInfo(seoul.timezone)).date().isoformat()
-        london_date = now.astimezone(ZoneInfo(london.timezone)).date().isoformat()
-        calls = []
-
-        monkeypatch.setattr(
-            config_module,
-            "settings",
-            SimpleNamespace(_data={"edli": {"enabled": True}}),
+        db_path, target_date = _install_scheduler_forecast_db(
+            monkeypatch, tmp_path, tokyo, authorized_fact=True
         )
-        monkeypatch.setattr(
-            config_module,
-            "runtime_cities",
-            lambda: [tokyo, seoul, london],
-        )
+        conn = sqlite3.connect(db_path)
+        conn.execute(vectors_module._TABLE_DDL)
+        conn.execute(vectors_module._INDEX_DDL)
+        conn.commit()
+        conn.close()
+        tracker = OpenMeteoQuotaTracker()
+        tracker._count = MAINTENANCE_DAILY_LIMIT
+        clock = {"now": 60.0}
+        fetches = {"count": 0, "complete": False}
+        monkeypatch.setattr(vectors_module, "quota_tracker", tracker)
+        monkeypatch.setattr(vectors_module.time, "monotonic", lambda: clock["now"])
         monkeypatch.setattr(
             reactor_module,
             "_edli_current_held_position_family_keys",
-            lambda: {
-                ("Tokyo", tokyo_date, "high"),
-                ("Seoul", seoul_date, "high"),
-            },
+            lambda: set(),
         )
+
+        def fetch(city, *, models, now, **_kw):
+            fetches["count"] += 1
+            omitted = None
+            if not fetches["complete"]:
+                omitted = f"{target_date}T23:00"
+            return (
+                [
+                    _scheduler_hourly_vector(
+                        city,
+                        model,
+                        now,
+                        omit_local_time=omitted if index == 0 else None,
+                    )
+                    for index, model in enumerate(models)
+                ],
+                "sha256:scheduler-priority",
+            )
+
+        monkeypatch.setattr(vectors_module, "fetch_day0_hourly_vectors", fetch)
+
+        reactor_module.run_edli_day0_hourly_refresh_cycle(trading_lane_active=True)
+        conn = sqlite3.connect(db_path)
+        assert conn.execute("SELECT COUNT(*) FROM day0_hourly_vectors").fetchone()[0] == 0
+        conn.close()
+        refresh_key = f"Tokyo|{target_date}"
+        assert vectors_module._INCOMPLETE_RETRY_NOT_BEFORE_MONOTONIC[refresh_key] == (
+            clock["now"] + vectors_module.INCOMPLETE_BUNDLE_RETRY_INTERVAL_S
+        )
+
+        fetches["complete"] = True
+        clock["now"] += vectors_module.INCOMPLETE_BUNDLE_RETRY_INTERVAL_S
+        reactor_module.run_edli_day0_hourly_refresh_cycle(trading_lane_active=True)
+
+        conn = sqlite3.connect(db_path)
+        assert conn.execute("SELECT COUNT(*) FROM day0_hourly_vectors").fetchone()[0] == 6
+        conn.close()
+        probe = reactor_module._edli_day0_hourly_refresh_due_families(
+            cities=[tokyo], decision_time=datetime.now(UTC)
+        )
+        assert probe.proved is True
+        assert probe.refresh_due_families == frozenset()
+        assert refresh_key not in vectors_module._INCOMPLETE_RETRY_NOT_BEFORE_MONOTONIC
+
+        reactor_module.run_edli_day0_hourly_refresh_cycle(trading_lane_active=True)
+        assert fetches["count"] == 2
+
+    @pytest.mark.parametrize("failure", ["runtime_cities_by_name", "priority_families"])
+    def test_hourly_refresh_priority_probe_failure_preserves_maintenance_sweep(
+        self, monkeypatch, tmp_path, failure
+    ):
+        import src.config as config_module
+        import src.data.day0_hourly_vectors as vectors_module
+        from src.data.openmeteo_quota import OpenMeteoQuotaTracker
+        from src.events import reactor as reactor_module
+
+        tokyo = _tokyo()
+        db_path, _target_date = _install_scheduler_forecast_db(
+            monkeypatch, tmp_path, tokyo, authorized_fact=False
+        )
+        if failure == "runtime_cities_by_name":
+            monkeypatch.setattr(
+                config_module,
+                "runtime_cities_by_name",
+                lambda: (_ for _ in ()).throw(
+                    RuntimeError("runtime city map unavailable")
+                ),
+            )
+        else:
+            monkeypatch.setattr(
+                reactor_module,
+                "_edli_day0_hourly_priority_families",
+                lambda **_kw: (_ for _ in ()).throw(
+                    RuntimeError("priority family probe unavailable")
+                ),
+            )
+        monkeypatch.setattr(vectors_module, "quota_tracker", OpenMeteoQuotaTracker())
         monkeypatch.setattr(
             reactor_module,
-            "_edli_latest_day0_hourly_blocked_families",
-            lambda **_: {("London", london_date, "high")},
+            "_edli_current_held_position_family_keys",
+            lambda: set(),
         )
+        fetches = []
         monkeypatch.setattr(
-            reactor_module,
-            "_edli_day0_hourly_priority_families",
-            lambda **_: [
-                ("Tokyo", tokyo_date, "high"),
-                ("Seoul", seoul_date, "high"),
-                ("London", london_date, "high"),
-            ],
-        )
-        monkeypatch.setattr(
-            "src.data.day0_hourly_vectors.maybe_refresh_day0_hourly_vectors",
-            lambda cities, **kwargs: calls.append((cities, kwargs))
-            or SimpleNamespace(
-                vectors_written=9,
-                cities_attempted=3,
-                cities_skipped_throttle=0,
-                cities_skipped_quota=0,
-                incomplete_expected_bundles=0,
-                budget_exhausted=False,
+            vectors_module,
+            "fetch_day0_hourly_vectors",
+            lambda city, *, models, now, **_kw: (
+                fetches.append(city.name)
+                or [_scheduler_hourly_vector(city, model, now) for model in models],
+                "sha256:maintenance-fallback",
             ),
         )
 
-        reactor_module.run_edli_day0_hourly_refresh_cycle(
-            trading_lane_active=True,
-        )
+        reactor_module.run_edli_day0_hourly_refresh_cycle(trading_lane_active=True)
 
-        assert len(calls) == 1
-        cities, kwargs = calls[0]
-        assert [city.name for city in cities] == ["Tokyo", "London", "Seoul"]
-        assert kwargs["max_cities"] == 3
-        assert kwargs["quota_priority_cities"] == 1
-        assert kwargs["persist_lock_blocking"] is False
+        assert fetches == ["Tokyo"]
+        conn = sqlite3.connect(db_path)
+        assert conn.execute("SELECT COUNT(*) FROM day0_hourly_vectors").fetchone()[0] == 6
+        conn.close()
 
     def test_hourly_refresh_cursor_advances_across_full_held_segment_when_throttled(
         self, monkeypatch
@@ -3185,11 +3369,6 @@ class TestMutexNoHttpSplit:
         )
         monkeypatch.setattr(
             reactor_module,
-            "_edli_latest_day0_hourly_blocked_families",
-            lambda **_: set(),
-        )
-        monkeypatch.setattr(
-            reactor_module,
             "_edli_day0_hourly_priority_families",
             lambda **_: sorted(held),
         )
@@ -3217,17 +3396,98 @@ class TestMutexNoHttpSplit:
         assert calls == [["A", "B", "C"], ["D", "E", "A"]]
         assert reactor_module._DAY0_HOURLY_REFRESH_CURSOR == 1
 
-    def test_hourly_refresh_defers_unprioritized_universe_while_trading(self, monkeypatch):
+    def test_hourly_refresh_due_held_bundle_owns_bounded_critical_cut(
+        self, monkeypatch
+    ):
+        """Discovery cannot displace held capital near its strict bundle cliff."""
         import src.config as config_module
         import src.main  # load settings consumers before replacing the config singleton
         from src.events import reactor as reactor_module
+
+        cities = [
+            SimpleNamespace(name=name, timezone="UTC")
+            for name in ("A", "B", "C", "D", "E", "F", "G", "H")
+        ]
+        target_date = datetime.now(UTC).date().isoformat()
+        held = {(name, target_date, "high") for name in ("A", "B", "C", "D", "E")}
+        discovery = {
+            (name, target_date, "high") for name in ("F", "G", "H")
+        }
+        calls = []
 
         monkeypatch.setattr(
             config_module,
             "settings",
             SimpleNamespace(_data={"edli": {"enabled": True}}),
         )
-        monkeypatch.setattr(config_module, "runtime_cities", lambda: [_tokyo()])
+        monkeypatch.setattr(config_module, "runtime_cities", lambda: cities)
+        monkeypatch.setattr(
+            reactor_module,
+            "_edli_current_held_position_family_keys",
+            lambda: held,
+        )
+        monkeypatch.setattr(
+            reactor_module,
+            "_edli_day0_hourly_refresh_due_families",
+            lambda **_kwargs: reactor_module._Day0HourlyPriorityProbe(
+                refresh_due_families=frozenset(held | discovery),
+                proved=True,
+            ),
+        )
+        monkeypatch.setattr(reactor_module, "_DAY0_HOURLY_REFRESH_CURSOR", 0)
+        monkeypatch.setenv("ZEUS_DAY0_HOURLY_REFRESH_MAX_CITIES", "3")
+        monkeypatch.setenv("ZEUS_DAY0_HOURLY_REFRESH_PRIORITY_CITY_CAP", "3")
+        monkeypatch.setattr(
+            "src.data.day0_hourly_vectors.maybe_refresh_day0_hourly_vectors",
+            lambda selected, **kwargs: calls.append(
+                {
+                    "selected": [city.name for city in selected],
+                    "critical": kwargs["quota_critical_cities"],
+                    "priority": kwargs["quota_priority_cities"],
+                }
+            )
+            or SimpleNamespace(
+                vectors_written=0,
+                cities_attempted=1,
+                cities_skipped_throttle=0,
+                cities_skipped_quota=0,
+                incomplete_expected_bundles=1,
+                budget_exhausted=True,
+            ),
+        )
+
+        reactor_module.run_edli_day0_hourly_refresh_cycle(trading_lane_active=True)
+        reactor_module.run_edli_day0_hourly_refresh_cycle(trading_lane_active=True)
+
+        assert calls == [
+            {"selected": ["A", "B", "C"], "critical": 3, "priority": 0},
+            {"selected": ["D", "E", "A"], "critical": 3, "priority": 0},
+        ]
+
+    def test_hourly_refresh_preserves_full_missing_authority_priority_prefix(
+        self, monkeypatch
+    ):
+        """A throttled front page cannot demote later authority gaps."""
+        import src.config as config_module
+        import src.main  # load settings consumers before replacing the config singleton
+        from src.events import reactor as reactor_module
+
+        cities = [
+            SimpleNamespace(name=name, timezone="UTC")
+            for name in ("A", "B", "C", "D", "E")
+        ]
+        target_date = datetime.now(UTC).date().isoformat()
+        missing = frozenset(
+            (city.name, target_date, "high") for city in cities
+        )
+        calls = []
+
+        monkeypatch.setattr(
+            config_module,
+            "settings",
+            SimpleNamespace(_data={"edli": {"enabled": True}}),
+        )
+        monkeypatch.setattr(config_module, "runtime_cities", lambda: cities)
         monkeypatch.setattr(
             reactor_module,
             "_edli_current_held_position_family_keys",
@@ -3235,13 +3495,59 @@ class TestMutexNoHttpSplit:
         )
         monkeypatch.setattr(
             reactor_module,
-            "_edli_latest_day0_hourly_blocked_families",
-            lambda **_: set(),
+            "_edli_day0_hourly_refresh_due_families",
+            lambda **_kwargs: reactor_module._Day0HourlyPriorityProbe(
+                refresh_due_families=missing,
+                proved=True,
+            ),
+        )
+        monkeypatch.setattr(reactor_module, "_DAY0_HOURLY_REFRESH_CURSOR", 0)
+        monkeypatch.setenv("ZEUS_DAY0_HOURLY_REFRESH_MAX_CITIES", "3")
+        monkeypatch.setenv("ZEUS_DAY0_HOURLY_REFRESH_PRIORITY_CITY_CAP", "3")
+        monkeypatch.setattr(
+            "src.data.day0_hourly_vectors.maybe_refresh_day0_hourly_vectors",
+            lambda selected, **kwargs: calls.append(
+                {
+                    "selected": [city.name for city in selected],
+                    "max_cities": kwargs["max_cities"],
+                    "priority_prefix": kwargs["quota_priority_cities"],
+                }
+            )
+            or SimpleNamespace(
+                vectors_written=0,
+                cities_attempted=3,
+                cities_skipped_throttle=2,
+                cities_skipped_quota=0,
+                incomplete_expected_bundles=1,
+                budget_exhausted=False,
+            ),
+        )
+
+        reactor_module.run_edli_day0_hourly_refresh_cycle(
+            trading_lane_active=False
+        )
+
+        assert calls == [
+            {
+                "selected": ["A", "B", "C", "D", "E"],
+                "max_cities": 3,
+                "priority_prefix": 5,
+            }
+        ]
+
+    def test_hourly_refresh_defers_unprioritized_universe_while_trading(
+        self, monkeypatch, tmp_path
+    ):
+        from src.events import reactor as reactor_module
+
+        tokyo = _tokyo()
+        _install_scheduler_forecast_db(
+            monkeypatch, tmp_path, tokyo, authorized_fact=False
         )
         monkeypatch.setattr(
             reactor_module,
-            "_edli_day0_hourly_priority_families",
-            lambda **_: [],
+            "_edli_current_held_position_family_keys",
+            lambda: set(),
         )
         monkeypatch.setattr(
             "src.data.day0_hourly_vectors.maybe_refresh_day0_hourly_vectors",
@@ -3252,21 +3558,23 @@ class TestMutexNoHttpSplit:
             trading_lane_active=True,
         )
 
-    def test_hourly_refresh_admission_excludes_redecision_and_reactor(self):
+    def test_hourly_refresh_observes_trading_lanes_without_owning_them(self):
         source = open("src/main.py", encoding="utf-8").read()
         hook_start = source.index('@_scheduler_job("edli_day0_hourly_refresh")')
         hook_end = source.index("def _edli_is_sqlite_lock_error", hook_start)
         hook = source[hook_start:hook_end]
-        assert "_held_position_monitor_active.is_set()" not in hook
+        assert "_held_position_monitor_active.is_set()" in hook
+        assert "_held_position_monitor_canonical_debt.is_set()" in hook
         assert "_edli_redecision_screen_lock.locked()" in hook
-        assert "_edli_reactor_active_lock.acquire(blocking=False)" in hook
-        assert "_edli_reactor_active_lock.release()" in hook
+        assert "_edli_reactor_active_lock.locked()" in hook
+        assert "_edli_reactor_active_lock.acquire" not in hook
+        assert "_edli_reactor_active_lock.release" not in hook
 
         schedule_at = source.index('id="edli_day0_hourly_refresh"')
         schedule = source[schedule_at - 500 : schedule_at + 500]
         assert "OPENING_HUNT_FIRST_DELAY_SECONDS + 36.0" in schedule
 
-    def test_hourly_refresh_runs_while_held_monitor_is_active(self, monkeypatch):
+    def test_hourly_refresh_reduces_work_while_held_monitor_is_active(self, monkeypatch):
         import threading
 
         import src.main as main
@@ -3286,8 +3594,45 @@ class TestMutexNoHttpSplit:
 
         main._edli_day0_hourly_refresh_cycle()
 
-        assert calls == [{"trading_lane_active": False}]
+        assert calls == [{"trading_lane_active": True}]
         assert main._edli_reactor_active_lock.locked() is False
+
+    def test_blocked_hourly_refresh_never_pins_reactor_lock(self, monkeypatch):
+        import threading
+
+        import src.main as main
+        from src.events import reactor as reactor_module
+
+        started = threading.Event()
+        release = threading.Event()
+
+        def blocked_refresh(**_kwargs):
+            started.set()
+            assert release.wait(timeout=5.0)
+
+        monkeypatch.setattr(main, "_consume_live_control_commands", lambda: None)
+        monkeypatch.setattr(main, "_edli_redecision_screen_lock", threading.Lock())
+        monkeypatch.setattr(main, "_edli_reactor_active_lock", threading.Lock())
+        monkeypatch.setattr(main, "_held_position_monitor_active", threading.Event())
+        monkeypatch.setattr(
+            main, "_held_position_monitor_canonical_debt", threading.Event()
+        )
+        monkeypatch.setattr(
+            reactor_module,
+            "run_edli_day0_hourly_refresh_cycle",
+            blocked_refresh,
+        )
+
+        producer = threading.Thread(target=main._edli_day0_hourly_refresh_cycle)
+        producer.start()
+        assert started.wait(timeout=5.0)
+
+        assert main._edli_reactor_active_lock.acquire(blocking=False)
+        main._edli_reactor_active_lock.release()
+
+        release.set()
+        producer.join(timeout=5.0)
+        assert not producer.is_alive()
 
     def test_live_family_admission_scopes_market_seek_to_runtime_cities(self, monkeypatch):
         from src.events import reactor as reactor_module
@@ -4130,7 +4475,7 @@ def test_fast_conditioning_deduplicates_same_metar_across_writer_prefixes(
             ),
             (
                 "Wellington", "NZWN", FAST_OBS_SOURCE_ID,
-                "2026-07-28T19:34:13.003000+00:00", 7.0, "C",
+                "2026-07-28T19:34:11.503000+00:00", 7.0, "C",
                 "2026-07-28T19:35:41+00:00",
                 "METAR NZWN 281930Z AUTO 02014KT 9999 NCD 07/04 Q1025",
             ),

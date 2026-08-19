@@ -31,7 +31,10 @@ DB = os.environ.get("ZEUS_FORECASTS_DB", str(Path(__file__).resolve().parents[1]
 CITIES = ["Jeddah", "Shanghai", "Busan", "Jakarta", "San Francisco", "NYC",
           "Seoul", "Hong Kong", "Istanbul", "Paris", "Austin", "London"]
 METRIC = "high"
-OUT_CSV = os.environ.get("ZEUS_SD3_SCORE_OUT", "/Users/leofitz/.claude/jobs/866db2ea/score_12city_high.csv")
+OUT_CSV = os.environ.get(
+    "ZEUS_SD3_SCORE_OUT",
+    str(Path(__file__).resolve().parents[1] / "docs" / "operations" / "sd3_validation_evidence" / "score_12city_high.csv"),
+)
 
 
 def load_dists(conn, family):

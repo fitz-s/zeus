@@ -62,7 +62,7 @@ if _REPO not in sys.path:
 import scripts.fit_sigma_scale as _live  # noqa: E402
 import scripts.fit_sigma_shape_kernel as _kern  # noqa: E402
 
-FCST_DEFAULT = os.path.join("/Users/leofitz/zeus", "state", "zeus-forecasts.db")
+FCST_DEFAULT = os.path.join(_REPO, "state", "zeus-forecasts.db")
 
 # Named ring losses the operator called out (the GATE-2 complaint). Matched by city substring; the
 # replay reports each explicitly when its settled cell is in the held-out window.

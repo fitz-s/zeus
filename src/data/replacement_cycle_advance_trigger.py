@@ -120,7 +120,7 @@ def _family_manifests_from_db(
 
     rows = conn.execute(
         """
-        SELECT source_id, product_id, data_version, artifact_path, sha256,
+        SELECT artifact_id, source_id, product_id, data_version, artifact_path, sha256,
                byte_size, source_cycle_time, source_available_at, captured_at,
                request_url, request_params_json, artifact_metadata_json,
                training_allowed
@@ -150,6 +150,8 @@ def _family_manifests_from_db(
             available_at = _parse_cycle(source_available_at)
             if available_at is None or available_at > decision_cut:
                 continue
+            product_metadata = json.loads(row["artifact_metadata_json"] or "{}")
+            product_metadata["artifact_id"] = int(row["artifact_id"])
             manifests.append(
                 RawForecastArtifactManifest(
                     source_id=str(row["source_id"]),
@@ -163,7 +165,7 @@ def _family_manifests_from_db(
                     captured_at=str(row["captured_at"]),
                     request_url=str(row["request_url"] or ""),
                     request_params=json.loads(row["request_params_json"] or "{}"),
-                    product_metadata=json.loads(row["artifact_metadata_json"] or "{}"),
+                    product_metadata=product_metadata,
                     training_allowed=bool(row["training_allowed"]),
                 )
             )
@@ -373,11 +375,15 @@ def _latest_posterior_matches_day0_conditioning(
         conditioning = _active_day0_provisional_or_conditioning(provenance)
         if conditioning is None:
             return False
+        anchor_artifact_id = int(
+            provenance.get("openmeteo_anchor_artifact_id") or 0
+        )
         consumed_cycle = _parse_cycle(
             row["source_cycle_time"] if hasattr(row, "keys") else row[1]
         )
         return (
-            consumed_cycle is not None
+            anchor_artifact_id > 0
+            and consumed_cycle is not None
             and consumed_cycle >= target_cycle
             and _day0_conditioning_identity(
                 source=conditioning.get("source"),
@@ -512,15 +518,46 @@ def _latest_posterior_covers_target_cycle(
     metric: str,
     target_cycle_iso: str,
     as_of: datetime,
+    minimum_computed_at: datetime | None = None,
 ) -> bool:
-    """True only when the latest live posterior consumed this marker cycle or a newer one."""
+    """True when the latest posterior covers the cycle and required computation clock."""
     target_cycle = _parse_cycle(target_cycle_iso)
     if target_cycle is None:
         return False
-    consumed_cycle = _latest_posterior_consumed_cycle(
-        conn, city=city, target_date=target_date, metric=metric, as_of=as_of
+    try:
+        row = conn.execute(
+            """
+            SELECT source_cycle_time, computed_at
+            FROM forecast_posteriors
+            WHERE source_id = ?
+              AND city = ?
+              AND target_date = ?
+              AND temperature_metric = ?
+              AND computed_at <= ?
+            ORDER BY computed_at DESC
+            LIMIT 1
+            """,
+            (
+                SOURCE_ID,
+                city,
+                target_date,
+                metric,
+                as_of.astimezone(UTC).isoformat(),
+            ),
+        ).fetchone()
+    except Exception:
+        return False
+    if row is None:
+        return False
+    consumed_cycle = _parse_cycle(
+        row["source_cycle_time"] if hasattr(row, "keys") else row[0]
     )
-    return consumed_cycle is not None and consumed_cycle >= target_cycle
+    if consumed_cycle is None or consumed_cycle < target_cycle:
+        return False
+    if minimum_computed_at is None:
+        return True
+    computed_at = _parse_cycle(row["computed_at"] if hasattr(row, "keys") else row[1])
+    return computed_at is not None and computed_at >= minimum_computed_at.astimezone(UTC)
 
 
 def _day0_enqueue_owner_request_check(
@@ -816,6 +853,7 @@ def _already_enqueued(
     day0_observed_extreme_c: float | None = None,
     day0_observed_extreme_unit: str | None = None,
     as_of: datetime | None = None,
+    minimum_posterior_computed_at: datetime | None = None,
 ) -> bool:
     """True iff a real re-materialization seed already exists for this exact target cycle.
 
@@ -984,6 +1022,28 @@ def _already_enqueued(
     if visible_seed_file is not None and visible_seed_file.exists():
         return True
     if visible_seed_file is not None and owned_stage_file is not None:
+        if minimum_posterior_computed_at is not None:
+            request_check = _day0_enqueue_owner_request_check(
+                city=city,
+                target_date=target_date,
+                metric=metric,
+                target_cycle_iso=target_cycle_iso,
+                seed_file=seed_file,
+                identity=None,
+            )
+            if request_check.state is _Day0EnqueueOwnerRequestState.ACTIVE:
+                return True
+            if request_check.state is _Day0EnqueueOwnerRequestState.INDETERMINATE:
+                _LOG.warning(
+                    "same-cycle held recompute request INDETERMINATE; retaining marker "
+                    "city=%s target_date=%s metric=%s target_cycle=%s reason=%s",
+                    city,
+                    target_date,
+                    metric,
+                    target_cycle_iso,
+                    request_check.reason,
+                )
+                return True
         if _latest_posterior_covers_target_cycle(
             conn,
             city=city,
@@ -991,6 +1051,7 @@ def _already_enqueued(
             metric=metric,
             target_cycle_iso=target_cycle_iso,
             as_of=decision_as_of,
+            minimum_computed_at=minimum_posterior_computed_at,
         ):
             return True
         _delete_missing_owned_cycle_advance_marker(
@@ -1705,6 +1766,7 @@ def enqueue_single_family_cycle_advance_reseed(
     day0_observed_extreme_unit: str | None = None,
     day0_observation_state: str | None = None,
     held_position: bool = False,
+    minimum_posterior_computed_at: datetime | None = None,
 ) -> dict[str, object]:
     """ALWAYS-DECIDABLE invariant — Build 2 (operator law 2026-06-12). Single-family variant of
     ``enqueue_cycle_advance_reseeds``: when the reactor/monitor finds ONE family blocked on a
@@ -1755,6 +1817,17 @@ def enqueue_single_family_cycle_advance_reseed(
         "held_position": bool(held_position),
         "enqueued": False,
     }
+    if minimum_posterior_computed_at is not None:
+        if (
+            minimum_posterior_computed_at.tzinfo is None
+            or minimum_posterior_computed_at.utcoffset() is None
+        ):
+            report["status"] = "SAME_CYCLE_RECOMPUTE_CUTOFF_INVALID"
+            return report
+        minimum_posterior_computed_at = minimum_posterior_computed_at.astimezone(UTC)
+        if not held_position:
+            report["status"] = "SAME_CYCLE_RECOMPUTE_REQUIRES_HELD_POSITION"
+            return report
     if not forecast_db.exists():
         report["status"] = "CYCLE_ADVANCE_FORECAST_DB_MISSING"
         return report
@@ -1962,10 +2035,132 @@ def enqueue_single_family_cycle_advance_reseed(
                     report["target_cycle"] = target_cycle_iso
                     return report
                 # No newer cycle than the one the posterior already consumed: the staleness is not a
-                # missed-cycle gap this lane can cure. Honest no-op.
-                report["status"] = "CYCLE_ADVANCE_NOT_NEEDED"
-                report["consumed_cycle"] = verdict["consumed_cycle"]
-                return report
+                # missed-cycle gap. A held posterior whose computation clock has expired still has
+                # an independent, bounded RESET: rematerialize the exact latest causal family cycle
+                # while that source cycle remains inside the shared maximum-age law. This does not
+                # relabel stale evidence fresh; only the queue's new canonical posterior can clear
+                # the monitor gate.
+                if minimum_posterior_computed_at is not None:
+                    consumed_cycle = consumed_cycle_dt(consumed_cycle_iso)
+                    if family_cycle is None or family_cycle < consumed_cycle:
+                        report["status"] = "SAME_CYCLE_RECOMPUTE_MANIFEST_MISSING"
+                        report["consumed_cycle"] = consumed_cycle_iso
+                        return report
+                    target_cycle_iso = family_cycle.isoformat()
+                    from src.data.replacement_forecast_cycle_policy import (  # noqa: PLC0415
+                        cycle_age_outside_bound,
+                    )
+
+                    if cycle_age_outside_bound(now, family_cycle):
+                        report["status"] = "SAME_CYCLE_RECOMPUTE_SOURCE_EXPIRED"
+                        report["consumed_cycle"] = consumed_cycle_iso
+                        report["target_cycle"] = target_cycle_iso
+                        return report
+                    if _latest_posterior_covers_target_cycle(
+                        conn,
+                        city=city,
+                        target_date=target_date,
+                        metric=metric,
+                        target_cycle_iso=target_cycle_iso,
+                        as_of=now,
+                        minimum_computed_at=minimum_posterior_computed_at,
+                    ):
+                        report["status"] = "CYCLE_ADVANCE_NOT_NEEDED"
+                        report["consumed_cycle"] = consumed_cycle_iso
+                        report["target_cycle"] = target_cycle_iso
+                        return report
+                    if _already_enqueued(
+                        conn,
+                        city=city,
+                        target_date=target_date,
+                        metric=metric,
+                        target_cycle_iso=target_cycle_iso,
+                        as_of=now,
+                        minimum_posterior_computed_at=minimum_posterior_computed_at,
+                    ):
+                        report["status"] = "SAME_CYCLE_RECOMPUTE_PENDING"
+                        report["consumed_cycle"] = consumed_cycle_iso
+                        report["target_cycle"] = target_cycle_iso
+                        return report
+                    staged_seed_file, visible_seed_file = _staged_cycle_advance_seed_paths(
+                        seed_path=seed_path,
+                        city=city,
+                        target_date=target_date,
+                        metric=metric,
+                        computed_at=now,
+                        seed_name=_seed_name,
+                    )
+                    seed_file = _build_and_write_advance_seed(
+                        conn,
+                        city=city,
+                        target_date=target_date,
+                        metric=metric,
+                        manifests=manifests,
+                        raw_dir=raw_dir,
+                        seed_path=seed_path,
+                        computed_at=now,
+                        build_seed=build_replacement_forecast_materialization_seed,
+                        latest_baseline_coverage=(
+                            latest_baseline_coverage_for_replacement_seed
+                        ),
+                        market_bins=market_bins_for_replacement_seed,
+                        write_seed=write_seed,
+                        latest_manifest=_latest_manifest,
+                        manifest_path_value=_manifest_path_value,
+                        manifest_base_dir=_manifest_base_dir,
+                        resolve_path=_resolve_path,
+                        seed_name=_seed_name,
+                        expected_identity=(
+                            expected_replacement_dependency_identity_by_role
+                        ),
+                        upgrade_trigger="held_belief_computed_age_expired",
+                        output_path=staged_seed_file,
+                        cycle_advance_enqueue_owner=True,
+                    )
+                    if seed_file is None:
+                        report["status"] = "SAME_CYCLE_RECOMPUTE_MANIFEST_MISSING"
+                        return report
+                    inserted = _record_enqueue(
+                        conn,
+                        city=city,
+                        target_date=target_date,
+                        metric=metric,
+                        consumed_cycle_iso=consumed_cycle_iso,
+                        target_cycle_iso=target_cycle_iso,
+                        held_position=True,
+                        seed_file=str(visible_seed_file),
+                        reason="HELD_BELIEF_COMPUTED_AGE_EXPIRED",
+                        replace_existing_seed_file=True,
+                    )
+                    conn.commit()
+                    if inserted:
+                        _publish_staged_cycle_advance_seed_if_owned(
+                            conn,
+                            city=city,
+                            target_date=target_date,
+                            metric=metric,
+                            target_cycle_iso=target_cycle_iso,
+                            staged_seed_file=staged_seed_file,
+                            visible_seed_file=visible_seed_file,
+                            identity=None,
+                        )
+                    else:
+                        _discard_unpublished_cycle_advance_stage(staged_seed_file)
+                    report["enqueued"] = bool(inserted)
+                    report["status"] = (
+                        "SAME_CYCLE_RECOMPUTE_ENQUEUED"
+                        if inserted
+                        else "SAME_CYCLE_RECOMPUTE_PENDING"
+                    )
+                    report["seed_file"] = str(visible_seed_file)
+                    report["consumed_cycle"] = consumed_cycle_iso
+                    report["target_cycle"] = target_cycle_iso
+                    return report
+                else:
+                    # No freshness-expiry repair was requested. Honest no-op.
+                    report["status"] = "CYCLE_ADVANCE_NOT_NEEDED"
+                    report["consumed_cycle"] = verdict["consumed_cycle"]
+                    return report
             if family_cycle is None:
                 report["status"] = "CYCLE_ADVANCE_MANIFEST_MISSING"
                 report["consumed_cycle"] = None
@@ -2628,7 +2823,14 @@ def _build_and_write_advance_seed(
     precision_metadata = manifest_path_value(openmeteo, "precision_metadata_json")
     if not openmeteo_payload or not precision_metadata:
         return None
-    coverage = latest_baseline_coverage(conn, city=city, target_date=target_date, temperature_metric=metric)
+    coverage = latest_baseline_coverage(
+        conn,
+        city=city,
+        target_date=target_date,
+        temperature_metric=metric,
+        not_after_source_cycle_time=openmeteo.source_cycle_time,
+        as_of_time=computed_at,
+    )
     bins = market_bins(conn, city=city, target_date=target_date, temperature_metric=metric)
     if coverage is None or not bins:
         return None

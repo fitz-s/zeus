@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Lifecycle: created=2026-07-21; last_reviewed=2026-07-21; last_reused=2026-07-21
+# Lifecycle: created=2026-07-21; last_reviewed=2026-08-12; last_reused=2026-08-12
 # Purpose: W0-a — rebuild trade_decisions (zeus_trades.db) to drop the dangling
 #   inline FK `forecast_snapshot_id INTEGER REFERENCES ensemble_snapshots(snapshot_id)`.
 #   Local ensemble_snapshots was dropped 2026-05-18 by the K1 split (canonical table
@@ -89,7 +89,7 @@ if str(ROOT) not in sys.path:
 # --- Pinned identity of the table we are migrating (asserted at runtime; a drift
 #     since authoring ABORTS before any write). Captured live 2026-07-21. -------
 EXPECTED_TABLE = "trade_decisions"
-EXPECTED_CREATE_SHA256 = "6a637b7e6ef3f690276c899c96a5deb89d7931aa07bfd3ec5f48a39fd6621c55"
+EXPECTED_CREATE_SHA256 = "260d1f8918f542be4e073b9806695b192ea1ec4879b9af192a7b2ffe3c042b2f"
 EXPECTED_COLUMNS = (
     "trade_id", "market_id", "bin_label", "direction", "size_usd", "price",
     "timestamp", "forecast_snapshot_id", "calibration_model_version", "p_raw",
@@ -102,7 +102,7 @@ EXPECTED_COLUMNS = (
     "exit_market_velocity_1h", "exit_forward_edge", "settlement_semantics_json",
     "epistemic_context_json", "edge_context_json", "entry_alpha_usd",
     "execution_slippage_usd", "exit_timing_usd", "risk_throttling_usd",
-    "settlement_edge_usd", "env",
+    "settlement_edge_usd", "env", "decision_law_id",
 )
 # The exact dangling FK clause to surgically remove (must occur exactly once).
 FK_CLAUSE = "REFERENCES ensemble_snapshots(snapshot_id)"

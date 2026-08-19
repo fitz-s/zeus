@@ -1,18 +1,20 @@
-# Lifecycle: created=2026-04-27; last_reviewed=2026-07-22; last_reused=2026-07-22
+# Lifecycle: created=2026-04-27; last_reviewed=2026-08-17; last_reused=2026-08-17
 # Purpose: Regression coverage for executor and portfolio mechanics under R3 cutover preflight opt-outs.
 # Reuse: Run when executor order submission or portfolio save/load mechanics change.
 # Created: 2026-04-27
-# Last reused/audited: 2026-07-22
+# Last reused/audited: 2026-08-17
 # Authority basis: docs/archive/2026-Q2/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md; R3 Z1 cutover guard audit.
 #                  + docs/operations/task_2026-05-21_live_side_effect_risk_boundaries/task.md P0-1 side-effect boundary fault injection.
 #                  + docs/operations/task_2026-05-21_live_side_effect_risk_boundaries/task.md P2-1 required live ATTACH seam.
 """Tests for executor and portfolio."""
 
+import hashlib
 import sqlite3
 import json
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, ROUND_CEILING
+from types import SimpleNamespace
 
 import pytest
 
@@ -110,6 +112,7 @@ def _ensure_snapshot(
     conn,
     *,
     token_id: str,
+    condition_id: str = "condition-test",
     direction: str = "buy_yes",
     snapshot_id: str | None = None,
     final_limit_price: Decimal = Decimal("0.33"),
@@ -119,6 +122,7 @@ def _ensure_snapshot(
     ask_size: str = "100",
     bid_size: str = "100",
     raw_orderbook_hash: str = "c" * 64,
+    omit_ask: bool = False,
 ) -> str:
     from src.contracts.executable_market_snapshot import ExecutableMarketSnapshot
     from src.state.snapshot_repo import get_snapshot, insert_snapshot
@@ -131,7 +135,9 @@ def _ensure_snapshot(
     yes_token_id = f"{token_id}-yes" if selected_is_no else token_id
     no_token_id = token_id if selected_is_no else f"{token_id}-no"
     outcome_label = "NO" if selected_is_no else "YES"
-    if snapshot_top_ask is not None:
+    if omit_ask:
+        top_ask = None
+    elif snapshot_top_ask is not None:
         top_ask = snapshot_top_ask
     elif str(direction).startswith("sell_"):
         top_ask = min(Decimal("0.99"), final_limit_price + Decimal("0.01"))
@@ -153,7 +159,7 @@ def _ensure_snapshot(
             gamma_market_id="gamma-test",
             event_id="event-test",
             event_slug="event-test",
-            condition_id="condition-test",
+            condition_id=condition_id,
             question_id="question-test",
             yes_token_id=yes_token_id,
             no_token_id=no_token_id,
@@ -185,7 +191,11 @@ def _ensure_snapshot(
             orderbook_depth_jsonb=json.dumps(
                 {
                     "bids": [{"price": str(top_bid), "size": bid_size}],
-                    "asks": [{"price": str(top_ask), "size": ask_size}],
+                    "asks": (
+                        []
+                        if top_ask is None
+                        else [{"price": str(top_ask), "size": ask_size}]
+                    ),
                 }
             ),
             raw_gamma_payload_hash="a" * 64,
@@ -617,6 +627,45 @@ class TestExecutor:
         assert captured["shares"] == pytest.approx(10.0)
         assert captured["decision_id"] == "hyp-final-1"
 
+    def test_submit_recapture_uses_jit_priority(self):
+        """Submit-time book recapture must never contend in the SCAN lane."""
+        import inspect
+
+        from src.execution.executor import _recapture_fresh_entry_snapshot_if_needed
+
+        source = inspect.getsource(_recapture_fresh_entry_snapshot_if_needed)
+
+        assert "public_http_limits=PRESUBMIT_JIT_CLOB_HTTP_LIMITS" in source
+        assert "public_request_priority=RequestPriority.SUBMIT_JIT" in source
+
+    def test_submit_recapture_admission_denial_is_pre_venue(self, monkeypatch):
+        """A governor denial before _live_order has a known zero side effect."""
+        from src.data.polymarket_request_governor import RequestAdmissionDenied
+        from src.engine.event_bound_final_intent import PreVenueSubmitError
+
+        final_intent = _final_execution_intent(
+            token_id="yes-token-recapture-admission",
+            final_limit_price=Decimal("0.33"),
+            size_value=Decimal("3.30"),
+        )
+
+        def deny_before_venue(*_args, **_kwargs):
+            raise RequestAdmissionDenied(
+                "POLYMARKET_SCAN_LEASE_BUSY:clob.polymarket.com:status=scan_in_flight"
+            )
+
+        def fail_live_order(*_args, **_kwargs):  # pragma: no cover - tripwire
+            raise AssertionError("pre-venue denial must not reach _live_order")
+
+        monkeypatch.setattr(
+            "src.execution.executor._recapture_fresh_entry_snapshot_if_needed",
+            deny_before_venue,
+        )
+        monkeypatch.setattr("src.execution.executor._live_order", fail_live_order)
+
+        with pytest.raises(PreVenueSubmitError, match="POLYMARKET_SCAN_LEASE_BUSY"):
+            execute_final_intent(final_intent, conn=_TEST_CONN)
+
     def test_execute_final_intent_submits_expected_fill_shares_below_limit(self, monkeypatch):
         final_intent = _final_execution_intent(
             token_id="yes-token-better-fill-final",
@@ -646,6 +695,20 @@ class TestExecutor:
         assert captured["shares"] == pytest.approx(10.00)
         assert captured["intent"].limit_price == pytest.approx(0.33)
         assert captured["intent"].target_size_usd == pytest.approx(10.00 * 0.33)
+
+    def test_fak_wire_size_uses_jit_cash_without_changing_kelly_target(self):
+        from src.execution.executor import _entry_buy_venue_submit_shares
+
+        intent = SimpleNamespace(
+            submit_order_type="FAK",
+            target_size_usd=33.25,
+            limit_price=0.38,
+        )
+
+        assert _entry_buy_venue_submit_shares(
+            intent,
+            target_shares=97.5,
+        ) == pytest.approx(87.5)
 
     def test_execute_final_intent_rejects_buy_notional_below_venue_minimum(self, monkeypatch):
         final_intent = _final_execution_intent(
@@ -701,6 +764,9 @@ class TestExecutor:
 
             def bind_submission_envelope(self, envelope):
                 self.bound_envelope = envelope
+
+            def bind_signed_submission_identity_persister(self, persister):
+                self.signed_identity_persister = persister
 
             def v2_preflight(self):
                 return None
@@ -890,7 +956,7 @@ class TestExecutor:
         assert result.status == "pending"
         assert captured["order_type"] == "FOK"
 
-    def test_risk_allocator_immediate_mode_preserves_frozen_fak(self):
+    def test_exit_allocator_allows_legal_passive_override_of_immediate_mode(self):
         from src.execution.executor import _risk_allocator_order_type_allows_intent
 
         assert _risk_allocator_order_type_allows_intent(
@@ -901,7 +967,7 @@ class TestExecutor:
             selected_order_type="FAK",
             intent_order_type="FOK",
         )
-        assert not _risk_allocator_order_type_allows_intent(
+        assert _risk_allocator_order_type_allows_intent(
             selected_order_type="FOK",
             intent_order_type="GTC",
         )
@@ -968,7 +1034,10 @@ class TestExecutor:
         ("failure_site", "failure_kind"),
         (
             ("src.state.venue_command_repo.append_event", "locked"),
-            ("src.execution.executor._persist_prebuilt_submit_envelope", "snapshot"),
+            (
+                "src.state.venue_command_repo._assert_entry_certificate_closure",
+                "closure",
+            ),
             ("src.execution.executor._reserve_collateral_for_buy", "collateral"),
             ("src.state.venue_command_repo.insert_command", "integrity"),
             ("src.state.venue_command_repo.append_event", "operational"),
@@ -983,7 +1052,6 @@ class TestExecutor:
         failure_kind,
     ):
         """Every pre-venue failure must release the writer and erase admission."""
-        from src.contracts.executable_market_snapshot import MarketSnapshotError
         from src.engine.event_bound_final_intent import PreVenueSubmitError
         from src.state.collateral_ledger import CollateralInsufficient, CollateralLedger
         from src.state.schema.entry_exposure_obligations_schema import ensure_table
@@ -995,6 +1063,10 @@ class TestExecutor:
             token_id="yes-token-pre-venue-lock",
             final_limit_price=Decimal("0.33"),
             size_value=Decimal("3.30"),
+        )
+        final_intent = replace(
+            final_intent,
+            actionable_certificate_hash="cert-pre-venue-lock",
         )
 
         class ClientShouldNotBeConstructed:
@@ -1065,9 +1137,21 @@ class TestExecutor:
             "src.state.venue_command_repo._validate_entry_submit_payload",
             lambda **_kwargs: None,
         )
+        def begin_test_admission(conn):
+            conn.commit()
+            conn.execute("BEGIN IMMEDIATE")
+
+        monkeypatch.setattr(
+            "src.state.venue_command_repo.begin_fresh_entry_admission",
+            begin_test_admission,
+        )
+        monkeypatch.setattr(
+            "src.state.venue_command_repo._assert_entry_certificate_closure",
+            lambda *args, **kwargs: None,
+        )
         failure = {
             "locked": sqlite3.OperationalError("database is locked"),
-            "snapshot": MarketSnapshotError("snapshot changed"),
+            "closure": ValueError("certificate closure failed"),
             "collateral": CollateralInsufficient("collateral changed"),
             "integrity": sqlite3.IntegrityError("idempotency race"),
             "operational": sqlite3.OperationalError("disk I/O error"),
@@ -1119,6 +1203,7 @@ class TestExecutor:
         _TEST_CONN.commit()
 
         if failure_kind in {
+            "closure",
             "integrity",
             "operational",
             "unexpected",
@@ -1788,7 +1873,7 @@ class TestExecutor:
         assert intent.best_bid == pytest.approx(0.45)
         assert intent.intent_id == "trade-1:exit"
 
-    def test_execute_exit_order_places_sell_and_rounds_down(self, monkeypatch):
+    def test_execute_exit_order_places_passive_sell_and_rounds_down(self, monkeypatch):
         captured = {}
 
         class DummyClient:
@@ -1798,7 +1883,29 @@ class TestExecutor:
             def bind_submission_envelope(self, envelope):
                 self.bound_envelope = envelope
 
+            def bind_signed_submission_identity_persister(self, persister):
+                self.persist_signed_identity = persister
+
             def place_limit_order(self, *, token_id, price, size, side, order_type="GTC"):
+                import hashlib
+
+                from src.contracts.venue_submission_envelope import (
+                    VenueSubmissionEnvelope,
+                )
+
+                signed_order = b"test-passive-exit-signed-order"
+                result = _final_submit_result(
+                    self.bound_envelope,
+                    order_id="sell-1",
+                )
+                self.persist_signed_identity(
+                    VenueSubmissionEnvelope.from_dict(
+                        result["_venue_submission_envelope"]
+                    ).with_updates(
+                        signed_order=signed_order,
+                        signed_order_hash=hashlib.sha256(signed_order).hexdigest(),
+                    )
+                )
                 captured.update(
                     token_id=token_id,
                     price=price,
@@ -1806,12 +1913,15 @@ class TestExecutor:
                     side=side,
                     order_type=order_type,
                 )
-                return _final_submit_result(self.bound_envelope, order_id="sell-1")
+                return result
 
         monkeypatch.setattr("src.data.polymarket_client.PolymarketClient", DummyClient)
         monkeypatch.setattr(
             "src.execution.executor._refresh_exit_collateral_snapshot_for_submit",
-            lambda conn: {"component": "collateral_snapshot_refresh", "allowed": True},
+            lambda conn, **_kwargs: {
+                "component": "collateral_snapshot_refresh",
+                "allowed": True,
+            },
         )
         monkeypatch.setattr(
             "src.execution.executor._assert_collateral_allows_sell",
@@ -1835,7 +1945,7 @@ class TestExecutor:
         assert result.order_id == "sell-1"
         assert captured == {
             "token_id": "yes-token",
-            "price": pytest.approx(0.49),
+            "price": pytest.approx(0.50),
             "size": pytest.approx(12.34),
             "side": "SELL",
             "order_type": "GTC",
@@ -1908,7 +2018,6 @@ class TestExecutor:
                 "allowed": True,
             },
         )
-
         result = execute_exit_order(
             create_exit_order_intent(
                 trade_id="trade-boundary-exit",
@@ -1957,6 +2066,271 @@ class TestExecutor:
             "venue_order_id": "sell-boundary-exit-1",
         }
 
+    @pytest.mark.parametrize(
+        ("best_bid", "min_tick", "expected_limit"),
+        (
+            ("0.94", "0.01", "0.94"),
+        ),
+    )
+    @pytest.mark.parametrize(
+        "include_certificate_projection",
+        (False, True),
+        ids=("typed-authority-only", "typed-authority-with-audit-projection"),
+    )
+    @pytest.mark.parametrize(
+        "replace_nominal_class",
+        (False, True),
+        ids=("stable-module-class", "reloaded-module-class"),
+    )
+    def test_taker_exit_revalidates_real_typed_authority_at_final_sdk_seam(
+        self,
+        monkeypatch,
+        best_bid,
+        min_tick,
+        expected_limit,
+        include_certificate_projection,
+        replace_nominal_class,
+    ):
+        from src.engine import event_reactor_adapter as era
+        from src.execution import exit_lifecycle
+        from src.execution.executor import marketable_sell_certificate_identity
+        from src.contracts.global_auction_receipt import GlobalSellReceiptClosure
+        from tests.integration.test_w3_solve_seam_g3 import (
+            _adapter_sell_actuation,
+            _global_scope_event,
+        )
+
+        projection_slug = (
+            "with-projection"
+            if include_certificate_projection
+            else "authority-only"
+        )
+        slug = f"{best_bid.replace('.', '-')}-{projection_slug}"
+        event = _global_scope_event(
+            city="Executor",
+            source_run_id=f"real-typed-taker-authority-{slug}",
+        )
+        actuation = _adapter_sell_actuation(
+            event,
+            selected_shares="5",
+            bid_levels=((best_bid, "10"),),
+            min_tick=min_tick,
+            required_execution_mode="TAKER_LIMIT",
+        )
+        candidate = actuation.decision.candidate
+        raw_book = {
+            "asset_id": candidate.token_id,
+            "tick_size": min_tick,
+            "min_order_size": "5",
+            "neg_risk": candidate.neg_risk,
+            "bids": [{"price": best_bid, "size": "10"}],
+            "asks": [],
+        }
+        market_authority = era._current_global_market_authority(
+            condition_id=candidate.condition_id,
+            token_id=candidate.token_id,
+            side=candidate.side,
+            gamma_get=lambda *_args, **_kwargs: SimpleNamespace(
+                status_code=200,
+                json=lambda: [{
+                    "conditionId": candidate.condition_id,
+                    "active": True,
+                    "closed": False,
+                    "acceptingOrders": True,
+                    "enableOrderBook": True,
+                    "clobTokenIds": [candidate.token_id, "other-token"],
+                    "orderPriceMinTickSize": min_tick,
+                    "orderMinSize": "5",
+                    "negRisk": candidate.neg_risk,
+                    "feeSchedule": {"exponent": 1, "rate": 0, "takerOnly": True},
+                }],
+            ),
+            clob_market_get=lambda *_args, **_kwargs: {
+                "condition_id": candidate.condition_id,
+                "clobTokenIds": [candidate.token_id, "other-token"],
+                "accepting_orders": True,
+                "enable_order_book": True,
+                "archived": False,
+                "tick_size": min_tick,
+                "min_order_size": "5",
+                "neg_risk": candidate.neg_risk,
+            },
+            raw_book=raw_book,
+            captured_at_utc=datetime.now(timezone.utc),
+            timeout=1.0,
+        )
+        jit = era._global_sell_candidate_from_raw_book(
+            candidate,
+            raw_book,
+            captured_at_utc=datetime.now(timezone.utc),
+            market_authority=market_authority,
+        )
+        authority = exit_lifecycle.GlobalSellExecutionAuthority.from_current(
+            actuation=actuation,
+            jit_candidate=jit,
+        )
+        closure = GlobalSellReceiptClosure(
+            receipt_ref=actuation.auction_receipt_ref,
+            position_id=candidate.position_id,
+            condition_id=candidate.condition_id,
+            token_id=candidate.token_id,
+            action="SELL",
+            execution_mode="TAKER_LIMIT",
+            winner_event_id=actuation.winner_event_id,
+            winner_candidate_id=candidate.candidate_id,
+            winner_actuation_identity=actuation.actuation_identity,
+            selection_epoch_identity=actuation.selection_epoch_identity,
+        )
+        if replace_nominal_class:
+            monkeypatch.setattr(
+                exit_lifecycle,
+                "GlobalSellExecutionAuthority",
+                type("GlobalSellExecutionAuthority", (), {}),
+            )
+        certificate = {
+            "action": "SELL",
+            "position_id": candidate.position_id,
+            "condition_id": candidate.condition_id,
+            "token_id": candidate.token_id,
+            "candidate_id": candidate.candidate_id,
+            "execution_mode": "TAKER_LIMIT",
+            "submit_order_type": "FAK",
+            "execution_authority_identity": authority.authority_identity,
+            "jit_book_hash": jit.executable_sell_curve.book_hash,
+            "book_snapshot_id": jit.book_snapshot_id,
+            "jit_curve_identity": jit.execution_curve_identity,
+            "probability_witness_identity": candidate.probability_witness_identity,
+            "exact_limit_price": str(authority.limit_price()),
+            "selected_shares": str(actuation.decision.shares),
+        }
+        snapshot_id = _ensure_snapshot(
+            _TEST_CONN,
+            token_id=candidate.token_id,
+            condition_id=candidate.condition_id,
+            snapshot_id=f"snap-real-typed-taker-authority-{slug}",
+            direction="sell_yes",
+            min_tick_size=Decimal(min_tick),
+            final_limit_price=Decimal(expected_limit),
+            snapshot_top_ask=Decimal("1.0"),
+            snapshot_top_bid=Decimal(best_bid),
+            raw_orderbook_hash=jit.executable_sell_curve.book_hash,
+            omit_ask=Decimal(best_bid) == Decimal("1"),
+        )
+        captured = {}
+
+        class DummyClient:
+            def __init__(self):
+                self.bound_envelope = None
+
+            def bind_submission_envelope(self, envelope):
+                self.bound_envelope = envelope
+
+            def bind_signed_submission_identity_persister(self, persister):
+                self.signed_identity_persister = persister
+
+            def place_limit_order(
+                self,
+                *,
+                token_id,
+                price,
+                size,
+                side,
+                order_type="GTC",
+            ):
+                captured.update(
+                    token_id=token_id,
+                    price=price,
+                    size=size,
+                    side=side,
+                    order_type=order_type,
+                )
+                result = _final_submit_result(
+                    self.bound_envelope,
+                    order_id=f"sell-real-typed-taker-authority-{slug}",
+                    status="MATCHED",
+                )
+                result.update(
+                    matchedSize="5",
+                    avgPrice=best_bid,
+                    tradeIDs=[f"trade-real-typed-taker-authority-{slug}"],
+                )
+                return result
+
+        monkeypatch.setattr("src.data.polymarket_client.PolymarketClient", DummyClient)
+        monkeypatch.setattr(
+            "src.execution.executor._refresh_exit_collateral_snapshot_for_submit",
+            lambda conn, **kwargs: {
+                "component": "collateral_snapshot_refresh",
+                "allowed": True,
+            },
+        )
+        monkeypatch.setattr(
+            "src.execution.executor._assert_collateral_allows_sell",
+            lambda token_id, shares, conn: {
+                "component": "collateral_sell_preflight",
+                "allowed": True,
+            },
+        )
+        # This SDK seam test isolates final executor/venue binding.  The
+        # command-repository receipt/artifact closure has separate exact tests;
+        # keep this test from depending on a synthetic decision_log row.
+        monkeypatch.setattr(
+            "src.state.venue_command_repo._assert_global_sell_receipt_closure",
+            lambda *_args, **_kwargs: None,
+        )
+
+        projection_kwargs = (
+            {
+                "marketable_sell_certificate": certificate,
+                "marketable_sell_certificate_identity": (
+                    marketable_sell_certificate_identity(certificate)
+                ),
+            }
+            if include_certificate_projection
+            else {}
+        )
+        executor_intent = create_exit_order_intent(
+            trade_id=candidate.position_id,
+            token_id=candidate.token_id,
+            shares=float(actuation.decision.shares),
+            current_price=float(best_bid),
+            best_bid=float(best_bid),
+            exact_limit_price=float(expected_limit),
+            submit_order_type="FAK",
+            executable_snapshot_id=snapshot_id,
+            executable_snapshot_min_tick_size=Decimal(min_tick),
+            executable_snapshot_min_order_size=Decimal("0.01"),
+            executable_snapshot_neg_risk=False,
+            marketable_sell_execution_authority=authority,
+            global_sell_receipt_closure=closure,
+            **projection_kwargs,
+        )
+
+        decision_id = f"decision-real-typed-taker-authority-{slug}"
+        result = execute_exit_order(
+            executor_intent,
+            conn=_TEST_CONN,
+            decision_id=decision_id,
+        )
+
+        assert result.status == "filled", result.reason
+        assert result.command_state == "FILLED"
+        assert captured == {
+            "token_id": candidate.token_id,
+            "price": pytest.approx(float(expected_limit)),
+            "size": pytest.approx(5.0),
+            "side": "SELL",
+            "order_type": "FAK",
+        }
+        command = _TEST_CONN.execute(
+            "SELECT state, price FROM venue_commands WHERE decision_id = ?",
+            (decision_id,),
+        ).fetchone()
+        assert dict(command) == {
+            "state": "FILLED",
+            "price": pytest.approx(float(expected_limit)),
+        }
+
     @pytest.mark.parametrize("price", [0.0, 0.049, 0.951, 0.998, 1.0])
     def test_execute_exit_order_rejects_out_of_band_price_before_persistence(
         self, price
@@ -1980,40 +2354,68 @@ class TestExecutor:
         assert "live_order_unit_price_out_of_bounds" in str(result.reason)
         assert after == before
 
-    def test_execute_exit_order_coerces_fok_exit_to_fak_ioc(self, monkeypatch):
-        captured = {}
+    @pytest.mark.parametrize("best_bid", [0.951, 0.999, 1.0, 1.001])
+    def test_execute_exit_order_rejects_bid_outside_absolute_band_before_persistence(
+        self, best_bid
+    ):
+        before = _TEST_CONN.execute("SELECT COUNT(*) FROM venue_commands").fetchone()[0]
+        token_id = "yes-token-out-of-band-best-bid"
 
-        class DummyClient:
-            def __init__(self):
-                self.bound_envelope = None
-
-            def bind_submission_envelope(self, envelope):
-                self.bound_envelope = envelope
-
-            def place_limit_order(self, *, token_id, price, size, side, order_type="GTC"):
-                captured.update(
-                    token_id=token_id,
-                    price=price,
-                    size=size,
-                    side=side,
-                    order_type=order_type,
-                    envelope_order_type=self.bound_envelope.order_type,
-                )
-                return _final_submit_result(self.bound_envelope, order_id="sell-fak-1")
-
-        monkeypatch.setattr("src.data.polymarket_client.PolymarketClient", DummyClient)
-        monkeypatch.setattr(
-            "src.execution.executor._refresh_exit_collateral_snapshot_for_submit",
-            lambda conn: {"component": "collateral_snapshot_refresh", "allowed": True},
+        result = execute_exit_order(
+            create_exit_order_intent(
+                trade_id="trade-out-of-band-best-bid",
+                token_id=token_id,
+                shares=12.0,
+                current_price=0.95,
+                best_bid=best_bid,
+                exact_limit_price=0.95,
+                **_snapshot_kwargs(
+                    token_id,
+                    direction="sell_yes",
+                    final_limit_price=Decimal("0.95"),
+                    snapshot_top_bid=Decimal("0.999"),
+                    snapshot_top_ask=Decimal("1.0"),
+                ),
+            ),
+            conn=_TEST_CONN,
         )
-        monkeypatch.setattr(
-            "src.execution.executor._assert_collateral_allows_sell",
-            lambda token_id, shares, conn: {"component": "collateral_sell_preflight", "allowed": True},
-        )
+
+        after = _TEST_CONN.execute("SELECT COUNT(*) FROM venue_commands").fetchone()[0]
+        assert result.status == "rejected"
+        assert "live_order_executable_price_out_of_bounds" in str(result.reason)
+        assert after == before
+
+    @pytest.mark.parametrize("price", ["0.049", "0.951", "0.999"])
+    def test_venue_fill_receipt_preserves_realized_out_of_band_price(self, price):
+        from src.execution.executor import _venue_submit_fill_price
+
+        assert _venue_submit_fill_price({"avgPrice": price}, side="SELL") == price
+
+    def test_sell_fill_price_improvement_is_not_a_submission_band_breach(
+        self,
+        caplog,
+    ):
+        from src.execution.executor import _venue_submit_fill_price
+
+        with caplog.at_level("CRITICAL"):
+            assert _venue_submit_fill_price(
+                {"avgPrice": "0.999"},
+                side="SELL",
+            ) == "0.999"
+        assert "LIVE_FILL_PRICE_OUT_OF_BOUNDS_RECEIPT" not in caplog.text
+
+    @pytest.mark.parametrize("price", ["0", "-0.01", "1.001", "NaN"])
+    def test_venue_fill_receipt_rejects_invalid_probability_price(self, price):
+        from src.execution.executor import _venue_submit_fill_price
+
+        assert _venue_submit_fill_price({"avgPrice": price}, side="SELL") is None
+
+    def test_execute_exit_order_rejects_taker_before_persistence(self, monkeypatch):
         monkeypatch.setattr(
             "src.execution.executor._select_risk_allocator_order_type",
             lambda conn, snapshot_id: "FOK",
         )
+        before = _TEST_CONN.execute("SELECT COUNT(*) FROM venue_commands").fetchone()[0]
 
         result = execute_exit_order(
             create_exit_order_intent(
@@ -2022,15 +2424,213 @@ class TestExecutor:
                 shares=12.349,
                 current_price=0.50,
                 best_bid=0.49,
+                submit_order_type="FAK",
                 **_snapshot_kwargs("yes-token"),
             ),
             conn=_TEST_CONN,
         )
 
-        assert result.status == "pending"
-        assert captured["side"] == "SELL"
-        assert captured["order_type"] == "FAK"
-        assert captured["envelope_order_type"] == "FAK"
+        after = _TEST_CONN.execute("SELECT COUNT(*) FROM venue_commands").fetchone()[0]
+        assert result.status == "rejected"
+        assert result.reason.startswith("marketable_sell_authority_required:")
+        assert after == before
+
+    @pytest.mark.parametrize(
+        ("order_type", "best_bid", "limit_price"),
+        (("FAK", 0.49, 0.50), ("GTC", 0.49, 0.50)),
+    )
+    def test_global_sell_marker_requires_receipt_closure_before_any_side_effect(
+        self, monkeypatch, order_type, best_bid, limit_price
+    ):
+        """Both global order modes fail closed before envelope/command/SDK work."""
+
+        monkeypatch.setattr(
+            "src.execution.executor._select_risk_allocator_order_type",
+            lambda *_args, **_kwargs: order_type,
+        )
+        called = []
+
+        class NeverClient:
+            def __init__(self):
+                called.append("init")
+
+        monkeypatch.setattr("src.data.polymarket_client.PolymarketClient", NeverClient)
+        decision_id = f"global-closure-required-{order_type.lower()}"
+        before = {
+            table: _TEST_CONN.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+            for table in (
+                "venue_commands",
+                "venue_submission_envelopes",
+                "venue_command_events",
+                "provenance_envelope_events",
+            )
+        }
+        result = execute_exit_order(
+            create_exit_order_intent(
+                trade_id=f"trade-global-closure-required-{order_type.lower()}",
+                token_id="yes-token",
+                shares=10.0,
+                current_price=limit_price,
+                best_bid=best_bid,
+                exact_limit_price=limit_price,
+                submit_order_type=order_type,
+                global_sell_execution_authority=object(),
+                **_snapshot_kwargs(
+                    "yes-token",
+                    direction="sell_yes",
+                    final_limit_price=Decimal(str(limit_price)),
+                    snapshot_top_bid=Decimal(str(best_bid)),
+                    snapshot_top_ask=Decimal("0.99"),
+                ),
+            ),
+            conn=_TEST_CONN,
+            decision_id=decision_id,
+        )
+        assert result.status == "rejected"
+        assert result.reason == "global_sell_receipt_closure_required"
+        assert called == []
+        after = {
+            table: _TEST_CONN.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+            for table in before
+        }
+        assert after == before
+
+    @pytest.mark.parametrize(
+        ("order_type", "execution_mode", "best_bid"),
+        (("FAK", "TAKER_LIMIT", 0.50), ("GTC", "MAKER_REST", 0.49)),
+    )
+    def test_global_sell_closure_missing_decision_log_fails_before_network_and_rows(
+        self, monkeypatch, order_type, execution_mode, best_bid
+    ):
+        """Every global mode still needs the exact committed receipt artifact."""
+
+        from src.contracts.global_auction_receipt import (
+            GLOBAL_AUCTION_RECEIPT_SCHEMA_VERSION,
+            GlobalAuctionReceiptRef,
+            GlobalSellReceiptClosure,
+        )
+
+        candidate = SimpleNamespace(
+            candidate_id="candidate-missing-receipt",
+            condition_id="condition-test",
+            execution_mode=execution_mode,
+        )
+        actuation = SimpleNamespace(
+            winner_event_id="winner-event-missing-receipt",
+            actuation_identity="a" * 64,
+            selection_epoch_identity="selection-epoch-missing-receipt",
+            decision=SimpleNamespace(candidate=candidate),
+        )
+
+        @dataclass(frozen=True)
+        class FakeAuthority:
+            actuation: object
+            jit_candidate: object
+            authority_identity: str
+
+            def __post_init__(self):
+                return None
+
+            def limit_price(self):
+                return Decimal("0.50")
+
+        receipt_ref = GlobalAuctionReceiptRef(
+            decision_log_id=987654,
+            decision_log_mode="global_single_order_auction",
+            receipt_hash="b" * 64,
+            execution_binding_hash="c" * 64,
+            artifact_summary_hash="d" * 64,
+            schema_version=GLOBAL_AUCTION_RECEIPT_SCHEMA_VERSION,
+            winner_event_id=actuation.winner_event_id,
+            winner_candidate_id=candidate.candidate_id,
+            winner_actuation_identity=actuation.actuation_identity,
+            selection_epoch_identity=actuation.selection_epoch_identity,
+        )
+        token_id = f"yes-token-missing-{order_type.lower()}"
+        trade_id = f"trade-missing-receipt-{order_type.lower()}"
+        authority = FakeAuthority(actuation, object(), "e" * 64)
+        closure = GlobalSellReceiptClosure(
+            receipt_ref=receipt_ref,
+            position_id=trade_id,
+            condition_id=candidate.condition_id,
+            token_id=token_id,
+            action="SELL",
+            execution_mode=execution_mode,
+            winner_event_id=actuation.winner_event_id,
+            winner_candidate_id=candidate.candidate_id,
+            winner_actuation_identity=actuation.actuation_identity,
+            selection_epoch_identity=actuation.selection_epoch_identity,
+        )
+        monkeypatch.setattr(
+            "src.execution.executor._select_risk_allocator_order_type",
+            lambda *_args, **_kwargs: order_type,
+        )
+        monkeypatch.setattr(
+            "src.execution.executor._marketable_sell_certificate_error",
+            lambda *_args, **_kwargs: None,
+        )
+        monkeypatch.setattr(
+            "src.execution.executor._refresh_exit_collateral_snapshot_for_submit",
+            lambda *_args, **_kwargs: {
+                "component": "collateral_snapshot_refresh",
+                "allowed": True,
+            },
+        )
+        monkeypatch.setattr(
+            "src.execution.executor._assert_collateral_allows_sell",
+            lambda *_args, **_kwargs: {
+                "component": "collateral_sell_preflight",
+                "allowed": True,
+            },
+        )
+        called = []
+
+        class NeverClient:
+            def __init__(self):
+                called.append("init")
+
+        monkeypatch.setattr("src.data.polymarket_client.PolymarketClient", NeverClient)
+        decision_id = (
+            "global-closure-missing-decision-log-" + order_type.lower()
+        )
+        before = {
+            table: _TEST_CONN.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+            for table in (
+                "venue_commands",
+                "venue_submission_envelopes",
+                "venue_command_events",
+                "provenance_envelope_events",
+            )
+        }
+        with pytest.raises(ValueError, match="GLOBAL_SELL_RECEIPT_DECISION_LOG_MISSING"):
+            execute_exit_order(
+                create_exit_order_intent(
+                    trade_id=trade_id,
+                    token_id=token_id,
+                    shares=10.0,
+                    current_price=0.50,
+                    best_bid=best_bid,
+                    exact_limit_price=0.50,
+                    submit_order_type=order_type,
+                    global_sell_execution_authority=authority,
+                    global_sell_receipt_closure=closure,
+                    **_snapshot_kwargs(
+                        token_id,
+                        direction="sell_yes",
+                        final_limit_price=Decimal("0.50"),
+                        snapshot_top_bid=Decimal(str(best_bid)),
+                        snapshot_top_ask=Decimal("0.99"),
+                    ),
+                ),
+                conn=_TEST_CONN,
+                decision_id=decision_id,
+            )
+        assert called == []
+        after = {
+            table: _TEST_CONN.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+            for table in before
+        }
+        assert after == before
 
     def test_exit_ack_persistence_failure_returns_unknown_not_pending(self, monkeypatch):
         class DummyClient:

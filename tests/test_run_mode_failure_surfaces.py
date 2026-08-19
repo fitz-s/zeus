@@ -1,8 +1,8 @@
 # Created: 2026-05-19
-# Last reused or audited: 2026-07-28
+# Last reused or audited: 2026-08-18
 # Authority basis: codereview-may19-2.md relationship F
 #                  + docs/operations/task_2026-05-21_live_side_effect_risk_boundaries/task.md P1-1
-# Lifecycle: created=2026-05-19; last_reviewed=2026-07-28; last_reused=2026-07-28
+# Lifecycle: created=2026-05-19; last_reviewed=2026-08-18; last_reused=2026-08-18
 # Purpose: Relationship-F antibody — assert that compute_composite_live_health()
 #   surfaces DEGRADED when run_mode has failed or status_summary is stale, even
 #   when the heartbeat is OK (closing the "scheduler alive but not trading" gap).
@@ -37,6 +37,7 @@ import inspect
 import json
 import logging
 import sqlite3
+import threading
 import zlib
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -45,6 +46,10 @@ import pytest
 
 from src.control import live_health
 from src.control.live_health import compute_composite_live_health, STATUS_FRESH_BUDGET_SECONDS
+from src.contracts.global_auction_receipt import (
+    global_auction_artifact_summary_hash,
+    global_auction_execution_binding_hash,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -78,6 +83,19 @@ def test_day0_edge_trace_matches_causal_observation_before_posterior_clock():
                 processing_status TEXT,
                 last_error TEXT
             );
+            CREATE INDEX idx_opportunity_events_day0_family_extreme
+                ON opportunity_events(
+                    event_type,
+                    json_extract(payload_json, '$.city'),
+                    json_extract(payload_json, '$.target_date'),
+                    json_extract(payload_json, '$.metric'),
+                    CAST(COALESCE(
+                        json_extract(payload_json, '$.rounded_value'),
+                        json_extract(payload_json, '$.high_so_far'),
+                        json_extract(payload_json, '$.low_so_far')
+                    ) AS REAL),
+                    available_at
+                );
             """
         )
         family = {
@@ -216,6 +234,8 @@ def test_day0_edge_trace_matches_causal_observation_before_posterior_clock():
             "day0_observation_source": "wu_icao_history",
             "day0_observation_identity": "2026-07-28T17:00:00+00:00",
         }
+        statements = []
+        conn.set_trace_callback(statements.append)
         counts = live_health._forecast_snapshot_status_counts_for_edges(
             conn,
             edges=[edge],
@@ -230,6 +250,16 @@ def test_day0_edge_trace_matches_causal_observation_before_posterior_clock():
     assert status["day0_pending"] == 1
     assert status["global_entry_suppressed"] == 1
     assert status["global_preflight_batch_blocked"] == 1
+    event_queries = [
+        statement
+        for statement in statements
+        if "FROM opportunity_events e" in statement
+    ]
+    assert len(event_queries) == 1
+    assert "INDEXED BY idx_opportunity_events_day0_family_extreme" in event_queries[0]
+    assert "json_extract(e.payload_json, '$.city') = 'Sao Paulo'" in event_queries[0]
+    assert "json_extract(e.payload_json, '$.target_date') = '2026-07-28'" in event_queries[0]
+    assert "json_extract(e.payload_json, '$.metric') = 'high'" in event_queries[0]
 
 
 def _write_forecast_event_bridge_dbs(
@@ -516,13 +546,20 @@ def _write_high_yes_edge_dbs(
             "CREATE TABLE decision_log ("
             "id INTEGER PRIMARY KEY, mode TEXT, artifact_json TEXT, timestamp TEXT)"
         )
+        trade_conn.execute(
+            "CREATE INDEX idx_decision_log_ts ON decision_log(timestamp)"
+        )
         if with_global_auction_candidate:
             v12 = global_auction_encoding == (
                 "zlib+base64+canonical-json-v12"
             )
+            v13 = global_auction_encoding == (
+                "zlib+base64+canonical-json-v13"
+            )
+            indexed = v12 or v13
             rejection_identity = (
                 {"candidate_indexes": [0]}
-                if v12
+                if indexed
                 else {"candidate_ids": ["candidate-high-yes-1"]}
             )
             evaluation_payload = {
@@ -537,7 +574,7 @@ def _write_high_yes_edge_dbs(
                 "detailed": [],
                 "buy_condition_side_masks": [[condition_id, 1]],
             }
-            if v12:
+            if indexed:
                 evaluation_payload["buy_candidate_index"] = [
                     [
                         "candidate-high-yes-1",
@@ -546,6 +583,7 @@ def _write_high_yes_edge_dbs(
                         condition_id,
                         "YES",
                         "token-high-yes-1",
+                        "TAKER_LIMIT",
                     ]
                 ]
             evaluation_json = json.dumps(
@@ -556,12 +594,14 @@ def _write_high_yes_edge_dbs(
             v11 = global_auction_encoding == (
                 "zlib+base64+canonical-json-v11"
             )
-            current_encoding = v11 or v12
+            current_encoding = v11 or indexed
             holding_json = b"[]"
             decision_at = (now - timedelta(minutes=1)).isoformat()
             artifact = {
                 "summary": {
-                    "schema_version": 19 if v12 else (18 if v11 else 5),
+                    "schema_version": (
+                        21 if v13 else 20 if v12 else 18 if v11 else 5
+                    ),
                     "decision_at_utc": decision_at,
                     "candidate_coverage_complete": True,
                     "candidate_condition_index_complete": True,
@@ -591,6 +631,56 @@ def _write_high_yes_edge_dbs(
                     ).decode(),
                 }
             }
+            if v13:
+                from types import SimpleNamespace
+
+                from src.contracts.strategy_capital_allocation import (
+                    StrategyCapitalAllocationWitness,
+                )
+                from src.engine.global_batch_runtime import (
+                    _strategy_capital_allocation_receipt,
+                )
+
+                allocation = StrategyCapitalAllocationWitness.build(
+                    capital_basis_usd="1",
+                    committed_capital_usd="0",
+                    venue_spendable_cash_usd="1",
+                    allocation={"mode": "wallet_total"},
+                )
+                artifact["summary"]["strategy_capital_allocation"] = (
+                    _strategy_capital_allocation_receipt(
+                        SimpleNamespace(strategy_capital_allocation=allocation)
+                    )
+                )
+                # Canonical schema-21 receipt identity.  This fixture has no
+                # winner (the candidate is a pause/no-trade telemetry row), so
+                # winner fields are intentionally empty; all binding/hash fields
+                # still exist and are verified by the production parser.
+                artifact["summary"].update(
+                    {
+                        "selection_epoch_identity": "epoch-high-yes-1",
+                        "selection_cut_at_utc": decision_at,
+                        "full_scope_identity": "scope-high-yes-1",
+                        "book_epoch_identity": "book-high-yes-1",
+                        "wealth_witness_identity": "wealth-high-yes-1",
+                        "wealth_economic_identity": "wealth-economic-high-yes-1",
+                        "winner_event_id": "",
+                        "winner_candidate_id": "",
+                        "winner_actuation_identity": "",
+                        "payload_identity": "1" * 64,
+                        "decision_payload_identity": "2" * 64,
+                        "audit_context_sha256": "3" * 64,
+                        "book_native_side_states_sha256": "4" * 64,
+                        "buy_minimum_marketable_repairs_sha256": "5" * 64,
+                        "receipt_hash": "6" * 64,
+                    }
+                )
+                artifact["summary"]["execution_binding_hash"] = (
+                    global_auction_execution_binding_hash(artifact["summary"])
+                )
+                artifact["summary"]["artifact_summary_hash"] = (
+                    global_auction_artifact_summary_hash(artifact["summary"])
+                )
             trade_conn.execute(
                 "INSERT INTO decision_log VALUES "
                 "(1, 'global_single_order_auction', ?, ?)",
@@ -636,6 +726,19 @@ def _write_high_yes_edge_dbs(
         world_conn.execute(
             "CREATE TABLE opportunity_event_processing ("
             "event_id TEXT, consumer_name TEXT, processing_status TEXT)"
+        )
+        world_conn.execute(
+            "CREATE INDEX idx_opportunity_events_day0_family_extreme ON "
+            "opportunity_events("
+            "event_type, "
+            "json_extract(payload_json, '$.city'), "
+            "json_extract(payload_json, '$.target_date'), "
+            "json_extract(payload_json, '$.metric'), "
+            "CAST(COALESCE("
+            "json_extract(payload_json, '$.rounded_value'), "
+            "json_extract(payload_json, '$.high_so_far'), "
+            "json_extract(payload_json, '$.low_so_far')"
+            ") AS REAL), available_at)"
         )
         world_conn.execute(
             "CREATE TABLE decision_certificates ("
@@ -1297,6 +1400,10 @@ def _write_pending_exit_projection_regression_db(
     *,
     now: datetime,
     released: bool = False,
+    terminal_voided: bool = False,
+    terminal_voided_phase_after: str = "day0_window",
+    terminal_voided_status: str = "TERMINAL_NO_FILL",
+    later_exit_filled: bool = False,
 ) -> None:
     trade_conn = sqlite3.connect(sd / "zeus_trades.db")
     try:
@@ -1391,10 +1498,11 @@ def _write_pending_exit_projection_regression_db(
                 },
             ),
         ]
+        next_sequence = 12
         if released:
             events.append(
                 (
-                    12,
+                    next_sequence,
                     "EXIT_RETRY_RELEASED",
                     now - timedelta(minutes=5, seconds=52),
                     "pending_exit",
@@ -1406,7 +1514,36 @@ def _write_pending_exit_projection_regression_db(
                     },
                 )
             )
-        next_sequence = 13 if released else 12
+            next_sequence += 1
+        if terminal_voided:
+            events.append(
+                (
+                    next_sequence,
+                    "EXIT_ORDER_VOIDED",
+                    now - timedelta(minutes=5, seconds=52),
+                    "pending_exit",
+                    terminal_voided_phase_after,
+                    terminal_voided_status,
+                    {
+                        "error": "CANCELED",
+                        "status": terminal_voided_status,
+                    },
+                )
+            )
+            next_sequence += 1
+        if later_exit_filled:
+            events.append(
+                (
+                    next_sequence,
+                    "EXIT_ORDER_FILLED",
+                    now - timedelta(minutes=5, seconds=51),
+                    "pending_exit",
+                    "economically_closed",
+                    "filled",
+                    {"status": "filled"},
+                )
+            )
+            next_sequence += 1
         events.extend([
             (
                 next_sequence,
@@ -1842,6 +1979,7 @@ def _write_sub_min_partial_position_db(
                 shares REAL,
                 chain_shares REAL,
                 token_id TEXT,
+                no_token_id TEXT,
                 condition_id TEXT,
                 city TEXT,
                 target_date TEXT,
@@ -1860,6 +1998,7 @@ def _write_sub_min_partial_position_db(
                 'partial',
                 ?,
                 ?,
+                'token-yes-sub-min',
                 'token-no-sub-min',
                 'cond-sub-min',
                 'Taipei',
@@ -1904,6 +2043,20 @@ def _write_sub_min_partial_position_db(
                 (now - timedelta(seconds=10)).isoformat(),
                 (now + timedelta(minutes=1)).isoformat(),
             ),
+        )
+        trade_conn.execute(
+            """
+            CREATE TABLE executable_market_snapshot_latest (
+                condition_id TEXT,
+                selected_outcome_token_id TEXT,
+                snapshot_id TEXT,
+                PRIMARY KEY (condition_id, selected_outcome_token_id)
+            )
+            """
+        )
+        trade_conn.execute(
+            "INSERT INTO executable_market_snapshot_latest VALUES (?, ?, ?)",
+            ("cond-sub-min", "token-no-sub-min", "snap-sub-min"),
         )
         trade_conn.commit()
     finally:
@@ -1992,6 +2145,24 @@ def _setup_healthy_state(sd: Path, offset_seconds: int = -30) -> None:
             "execution_capability": _healthy_execution_capability(),
         },
     )
+
+
+def test_composite_persistence_failure_is_scheduler_visible(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed atomic replace must fail the job, never report scheduler OK."""
+    sd = tmp_path / "state"
+    sd.mkdir()
+    _setup_healthy_state(sd)
+
+    def fail_replace(_src, _dst):
+        raise PermissionError("injected composite replace failure")
+
+    monkeypatch.setattr(live_health.os, "replace", fail_replace)
+
+    with pytest.raises(PermissionError, match="injected composite replace failure"):
+        compute_composite_live_health(state_dir=sd)
 
 
 # ---------------------------------------------------------------------------
@@ -3410,6 +3581,112 @@ def test_pending_exit_projection_release_then_held_is_not_regression(
     ] == "EXIT_ORDER_REJECTED"
 
 
+def test_pending_exit_terminal_no_fill_void_then_held_is_not_regression(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A command-bound terminal zero-fill void authorizes held re-auction."""
+    sd = tmp_path / "state"
+    sd.mkdir()
+    _setup_healthy_state(sd)
+    monkeypatch.setattr(live_health, "_dirty_runtime_worktree_paths", lambda **_kwargs: ())
+    monkeypatch.setattr(
+        live_health,
+        "_main_daemon_surface",
+        lambda status_summary, heartbeat: {
+            "ok": True,
+            "issue": None,
+            "attested": True,
+            "pid": 123,
+            "command": "python -m src.main",
+        },
+    )
+    monkeypatch.setattr(
+        live_health,
+        "_process_code_surface",
+        lambda main_daemon_surface: {"ok": True, "issue": None, "evaluated": True},
+    )
+    now = datetime.now(timezone.utc)
+    _write_forecast_event_bridge_dbs(
+        sd,
+        posterior_computed_at=(now - timedelta(seconds=30)).isoformat(),
+        fsr_created_at=(now - timedelta(seconds=20)).isoformat(),
+    )
+    _write_pending_exit_projection_regression_db(
+        sd,
+        now=now,
+        terminal_voided=True,
+    )
+
+    result = compute_composite_live_health(state_dir=sd, now=now)
+
+    surface = result["surfaces"]["pending_exit_release_loop"]
+    assert surface["pending_exit_projection_regression_count"] == 0
+    assert surface["pending_exit_projection_regression_sample"] == []
+    assert surface["ok"] is True
+    assert "pending_exit_release_loop" not in result["failing_surfaces"]
+
+
+@pytest.mark.parametrize(
+    ("phase_after", "venue_status"),
+    (("day0_window", "CANCELED"), ("pending_exit", "TERMINAL_NO_FILL")),
+)
+def test_pending_exit_void_without_exact_terminal_release_stays_regression(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    phase_after: str,
+    venue_status: str,
+) -> None:
+    sd = tmp_path / "state"
+    sd.mkdir()
+    _setup_healthy_state(sd)
+    monkeypatch.setattr(live_health, "_dirty_runtime_worktree_paths", lambda **_kwargs: ())
+    now = datetime.now(timezone.utc)
+    _write_pending_exit_projection_regression_db(
+        sd,
+        now=now,
+        terminal_voided=True,
+        terminal_voided_phase_after=phase_after,
+        terminal_voided_status=venue_status,
+    )
+
+    surface = live_health._pending_exit_release_loop_surface(
+        sd,
+        now,
+        main_daemon_surface={"attested": True, "issue": None},
+    )
+
+    assert surface["pending_exit_projection_regression_count"] == 1
+    assert surface["pending_exit_projection_regression_sample"][0][
+        "latest_exit_event_type"
+    ] == "EXIT_ORDER_VOIDED"
+
+
+def test_pending_exit_later_fill_supersedes_terminal_void_release(
+    tmp_path: Path,
+) -> None:
+    sd = tmp_path / "state"
+    sd.mkdir()
+    now = datetime.now(timezone.utc)
+    _write_pending_exit_projection_regression_db(
+        sd,
+        now=now,
+        terminal_voided=True,
+        later_exit_filled=True,
+    )
+
+    surface = live_health._pending_exit_release_loop_surface(
+        sd,
+        now,
+        main_daemon_surface={"attested": True, "issue": None},
+    )
+
+    assert surface["pending_exit_projection_regression_count"] == 1
+    assert surface["pending_exit_projection_regression_sample"][0][
+        "latest_exit_event_type"
+    ] == "EXIT_ORDER_FILLED"
+
+
 def test_pending_exit_runtime_gate_block_yields_degraded(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -3597,6 +3874,85 @@ def test_pending_exit_current_churn_yields_degraded(
     assert surface["pending_exit_churn_sample"][0]["position_id"] == "pos-churn"
     assert surface["pending_exit_churn_sample"][0]["exit_intent_count"] == 13
     assert "pending_exit_release_loop" in result["failing_surfaces"]
+
+
+def test_storage_capacity_is_a_composite_health_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import src.riskguard.riskguard as riskguard_module
+
+    sd = tmp_path / "state"
+    sd.mkdir()
+    _setup_healthy_state(sd)
+    monkeypatch.setattr(
+        riskguard_module,
+        "storage_capacity_snapshot",
+        lambda _path: {
+            "level": "DATA_DEGRADED",
+            "status": "LOW_DISK",
+            "reason": "ENTRY_RESERVE_BREACHED",
+            "free_bytes": 1,
+            "required_free_bytes": 2,
+        },
+    )
+
+    result = compute_composite_live_health(state_dir=sd)
+
+    assert result["surfaces"]["storage_capacity"]["ok"] is False
+    assert result["surfaces"]["storage_capacity"]["issue"] == "LOW_DISK"
+    assert "storage_capacity" in result["failing_surfaces"]
+
+
+@pytest.mark.parametrize(
+    ("module_name", "writer_name", "uses_mkstemp"),
+    (
+        ("src.ingest.forecast_live_daemon", "_write_forecast_live_heartbeat", True),
+        ("src.ingest.substrate_observer_daemon", "_write_substrate_observer_heartbeat", False),
+        ("src.ingest.price_channel_daemon", "_write_price_channel_heartbeat", False),
+        ("src.ingest.post_trade_capital_daemon", "_write_post_trade_capital_heartbeat", False),
+    ),
+)
+def test_required_sidecar_exits_after_repeated_unwritable_heartbeat(
+    module_name: str,
+    writer_name: str,
+    uses_mkstemp: bool,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import errno
+    import importlib
+
+    module = importlib.import_module(module_name)
+    monkeypatch.setattr(module, "_heartbeat_fails", 0)
+    monkeypatch.setattr(
+        module.os,
+        "_exit",
+        lambda code: (_ for _ in ()).throw(SystemExit(code)),
+    )
+    if uses_mkstemp:
+        monkeypatch.setattr(
+            module.tempfile,
+            "mkstemp",
+            lambda **_kwargs: (_ for _ in ()).throw(OSError(errno.ENOSPC, "disk full")),
+        )
+        writer = getattr(module, writer_name)
+    else:
+        monkeypatch.setattr("src.config.state_path", lambda _name: tmp_path / "heartbeat.json")
+        monkeypatch.setattr(
+            module.Path,
+            "write_text",
+            lambda _self, _data: (_ for _ in ()).throw(OSError(errno.ENOSPC, "disk full")),
+        )
+        writer = getattr(module, writer_name)
+
+    writer()
+    writer()
+    with pytest.raises(SystemExit) as raised:
+        writer()
+
+    assert raised.value.code == 1
+    assert module._heartbeat_fails == 3
 
 
 def test_pending_exit_health_scopes_event_history_by_open_position(
@@ -4080,9 +4436,10 @@ def test_monitor_probability_freshness_exposes_canonical_closed_market_hold(
                         "hold_reason": "MARKET_CLOSED_AWAITING_SETTLEMENT",
                         "exit_order_submitted": False,
                         "exit_failure": False,
+                        "exit_decision_available": False,
                         "applied_validations": [
                             "MARKET_CLOSED_AWAITING_SETTLEMENT",
-                            "closed_market_hold_preserved_monitor_evidence",
+                            "closed_market_hold_no_action_authority",
                         ],
                     }
                 ),
@@ -4130,9 +4487,10 @@ def test_monitor_probability_freshness_exposes_closed_hold_on_stale_projection(
                         "hold_reason": "MARKET_CLOSED_AWAITING_SETTLEMENT",
                         "exit_order_submitted": False,
                         "exit_failure": False,
+                        "exit_decision_available": False,
                         "applied_validations": [
                             "MARKET_CLOSED_AWAITING_SETTLEMENT",
-                            "closed_market_hold_preserved_monitor_evidence",
+                            "closed_market_hold_no_action_authority",
                         ],
                     }
                 ),
@@ -4182,9 +4540,10 @@ def test_monitor_probability_freshness_fresh_bid_revokes_closed_hold(
                         "hold_reason": "MARKET_CLOSED_AWAITING_SETTLEMENT",
                         "exit_order_submitted": False,
                         "exit_failure": False,
+                        "exit_decision_available": False,
                         "applied_validations": [
                             "MARKET_CLOSED_AWAITING_SETTLEMENT",
-                            "closed_market_hold_preserved_monitor_evidence",
+                            "closed_market_hold_no_action_authority",
                         ],
                     }
                 ),
@@ -4247,9 +4606,10 @@ def test_monitor_probability_freshness_closed_hold_survives_later_stale_event(
                         "hold_reason": "MARKET_CLOSED_AWAITING_SETTLEMENT",
                         "exit_order_submitted": False,
                         "exit_failure": False,
+                        "exit_decision_available": False,
                         "applied_validations": [
                             "MARKET_CLOSED_AWAITING_SETTLEMENT",
-                            "closed_market_hold_preserved_monitor_evidence",
+                            "closed_market_hold_no_action_authority",
                         ],
                     }
                 ),
@@ -4299,9 +4659,10 @@ def test_monitor_probability_freshness_exit_submit_revokes_closed_hold(
                         "hold_reason": "MARKET_CLOSED_AWAITING_SETTLEMENT",
                         "exit_order_submitted": False,
                         "exit_failure": False,
+                        "exit_decision_available": False,
                         "applied_validations": [
                             "MARKET_CLOSED_AWAITING_SETTLEMENT",
-                            "closed_market_hold_preserved_monitor_evidence",
+                            "closed_market_hold_no_action_authority",
                         ],
                     }
                 ),
@@ -4372,9 +4733,10 @@ def test_monitor_probability_freshness_presubmit_exit_rejection_keeps_closed_hol
                         "hold_reason": "MARKET_CLOSED_AWAITING_SETTLEMENT",
                         "exit_order_submitted": False,
                         "exit_failure": False,
+                        "exit_decision_available": False,
                         "applied_validations": [
                             "MARKET_CLOSED_AWAITING_SETTLEMENT",
-                            "closed_market_hold_preserved_monitor_evidence",
+                            "closed_market_hold_no_action_authority",
                         ],
                     }
                 ),
@@ -4464,10 +4826,175 @@ def test_sub_min_partial_position_degrades_when_held_shares_below_snapshot_minim
     assert surface["sub_min_partial_position_count"] == 1
     sample = surface["sub_min_partial_position_sample"][0]
     assert sample["position_id"] == "pos-sub-min"
+    assert sample["exit_token_id"] == "token-no-sub-min"
     assert sample["held_shares"] == pytest.approx(3.8)
     assert sample["min_order_size"] == "5"
     assert sample["orderbook_top_ask"] == "ABSENT"
     assert "sub_min_partial_position" in result["failing_surfaces"]
+
+
+def test_sub_min_partial_position_buy_no_uses_no_token_snapshot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sd = tmp_path / "state"
+    sd.mkdir()
+    _setup_healthy_state(sd)
+    monkeypatch.setattr(live_health, "_dirty_runtime_worktree_paths", lambda **_kwargs: ())
+    now = datetime.now(timezone.utc)
+    _write_sub_min_partial_position_db(sd, now=now, chain_shares=3.8)
+    conn = sqlite3.connect(sd / "zeus_trades.db")
+    try:
+        conn.execute(
+            "INSERT INTO executable_market_snapshots VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                "snap-yes-sub-min",
+                "cond-sub-min",
+                "token-yes-sub-min",
+                "2",
+                "0.80",
+                "0.84",
+                (now - timedelta(seconds=5)).isoformat(),
+                (now + timedelta(minutes=1)).isoformat(),
+            ),
+        )
+        conn.execute(
+            "INSERT INTO executable_market_snapshot_latest VALUES (?, ?, ?)",
+            ("cond-sub-min", "token-yes-sub-min", "snap-yes-sub-min"),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    surface = compute_composite_live_health(state_dir=sd, now=now)["surfaces"][
+        "sub_min_partial_position"
+    ]
+
+    assert surface["issue"] == "SUB_MIN_PARTIAL_POSITION_UNEXITABLE:n=1"
+    sample = surface["sub_min_partial_position_sample"][0]
+    assert sample["exit_token_id"] == "token-no-sub-min"
+    assert sample["min_order_size"] == "5"
+    assert sample["orderbook_top_bid"] == "0.999"
+
+
+def test_sub_min_partial_position_buy_yes_uses_yes_token_snapshot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sd = tmp_path / "state"
+    sd.mkdir()
+    _setup_healthy_state(sd)
+    monkeypatch.setattr(live_health, "_dirty_runtime_worktree_paths", lambda **_kwargs: ())
+    now = datetime.now(timezone.utc)
+    _write_sub_min_partial_position_db(sd, now=now, chain_shares=3.8)
+    conn = sqlite3.connect(sd / "zeus_trades.db")
+    try:
+        conn.execute(
+            "UPDATE position_current SET direction = 'buy_yes' WHERE position_id = 'pos-sub-min'"
+        )
+        conn.execute(
+            "INSERT INTO executable_market_snapshots VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                "snap-yes-sub-min",
+                "cond-sub-min",
+                "token-yes-sub-min",
+                "3",
+                "0.80",
+                "0.84",
+                (now - timedelta(seconds=5)).isoformat(),
+                (now + timedelta(minutes=1)).isoformat(),
+            ),
+        )
+        conn.execute(
+            "INSERT INTO executable_market_snapshot_latest VALUES (?, ?, ?)",
+            ("cond-sub-min", "token-yes-sub-min", "snap-yes-sub-min"),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    surface = compute_composite_live_health(state_dir=sd, now=now)["surfaces"][
+        "sub_min_partial_position"
+    ]
+
+    assert surface["ok"] is True
+    assert surface["sub_min_partial_position_count"] == 0
+
+
+@pytest.mark.parametrize(
+    ("direction", "no_token_id"),
+    (("buy_no", None), ("unknown", "token-no-sub-min")),
+)
+def test_sub_min_partial_position_fails_closed_on_invalid_exit_token_identity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    direction: str,
+    no_token_id: str | None,
+) -> None:
+    sd = tmp_path / "state"
+    sd.mkdir()
+    _setup_healthy_state(sd)
+    monkeypatch.setattr(live_health, "_dirty_runtime_worktree_paths", lambda **_kwargs: ())
+    now = datetime.now(timezone.utc)
+    _write_sub_min_partial_position_db(sd, now=now, chain_shares=3.8)
+    conn = sqlite3.connect(sd / "zeus_trades.db")
+    try:
+        conn.execute(
+            "UPDATE position_current SET direction = ?, no_token_id = ? "
+            "WHERE position_id = 'pos-sub-min'",
+            (direction, no_token_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    surface = compute_composite_live_health(state_dir=sd, now=now)["surfaces"][
+        "sub_min_partial_position"
+    ]
+
+    assert surface["ok"] is False
+    assert surface["issue"].endswith("EXIT_TOKEN_IDENTITY_MISSING_OR_INVALID")
+    assert surface["invalid_exit_token_position_ids"] == ["pos-sub-min"]
+
+
+@pytest.mark.parametrize(
+    "freshness_deadline",
+    (
+        None,
+        "malformed",
+        "2026-08-12T15:00:00",
+        "2026-08-12T15:00:00+00:00",
+    ),
+)
+def test_sub_min_partial_position_fails_closed_on_unusable_snapshot_freshness(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    freshness_deadline: str | None,
+) -> None:
+    sd = tmp_path / "state"
+    sd.mkdir()
+    _setup_healthy_state(sd)
+    monkeypatch.setattr(live_health, "_dirty_runtime_worktree_paths", lambda **_kwargs: ())
+    now = datetime(2026, 8, 12, 16, 0, tzinfo=timezone.utc)
+    _write_sub_min_partial_position_db(sd, now=now, chain_shares=3.8)
+    conn = sqlite3.connect(sd / "zeus_trades.db")
+    try:
+        conn.execute(
+            "UPDATE executable_market_snapshots SET freshness_deadline = ? "
+            "WHERE snapshot_id = 'snap-sub-min'",
+            (freshness_deadline,),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    surface = compute_composite_live_health(state_dir=sd, now=now)["surfaces"][
+        "sub_min_partial_position"
+    ]
+
+    assert surface["ok"] is False
+    assert surface["issue"].endswith("EXIT_TOKEN_SNAPSHOT_STALE_OR_MISSING")
+    assert surface["stale_or_missing_snapshot_position_ids"] == ["pos-sub-min"]
 
 
 def test_sub_min_partial_position_allows_size_at_snapshot_minimum(
@@ -4508,7 +5035,7 @@ def test_sub_min_partial_position_reports_exact_count_when_sample_truncates(
             conn.execute(
                 """
                 INSERT INTO position_current
-                SELECT ?, phase, order_status, shares, chain_shares, ?, ?, city,
+                SELECT ?, phase, order_status, shares, chain_shares, token_id, ?, ?, city,
                        target_date, bin_label, direction, exit_reason, updated_at
                   FROM position_current
                  WHERE position_id = 'pos-sub-min'
@@ -4525,6 +5052,10 @@ def test_sub_min_partial_position_reports_exact_count_when_sample_truncates(
                 """,
                 (f"snap-sub-min-{index}", condition_id, token_id),
             )
+            conn.execute(
+                "INSERT INTO executable_market_snapshot_latest VALUES (?, ?, ?)",
+                (condition_id, token_id, f"snap-sub-min-{index}"),
+            )
         conn.commit()
     finally:
         conn.close()
@@ -4535,6 +5066,182 @@ def test_sub_min_partial_position_reports_exact_count_when_sample_truncates(
     assert surface["sub_min_partial_position_count"] == 11
     assert len(surface["sub_min_partial_position_sample"]) == 10
     assert surface["sub_min_partial_position_truncated"] is True
+
+
+def test_sub_min_partial_position_uses_projected_snapshot_not_newer_history(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sd = tmp_path / "state"
+    sd.mkdir()
+    _setup_healthy_state(sd)
+    monkeypatch.setattr(live_health, "_dirty_runtime_worktree_paths", lambda **_kwargs: ())
+    now = datetime.now(timezone.utc)
+    _write_sub_min_partial_position_db(sd, now=now, chain_shares=3.8)
+    conn = sqlite3.connect(sd / "zeus_trades.db")
+    try:
+        columns = [
+            row[1]
+            for row in conn.execute(
+                "PRAGMA table_info(executable_market_snapshots)"
+            ).fetchall()
+        ]
+        values = list(
+            conn.execute(
+                "SELECT * FROM executable_market_snapshots "
+                "WHERE snapshot_id = 'snap-sub-min'"
+            ).fetchone()
+        )
+        values[columns.index("snapshot_id")] = "snap-sub-min-newer-history"
+        values[columns.index("min_order_size")] = "2"
+        values[columns.index("captured_at")] = (now + timedelta(minutes=1)).isoformat()
+        conn.execute(
+            f"INSERT INTO executable_market_snapshots "
+            f"({', '.join(columns)}) VALUES ({', '.join('?' for _ in columns)})",
+            values,
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    result = compute_composite_live_health(state_dir=sd, now=now)
+
+    surface = result["surfaces"]["sub_min_partial_position"]
+    assert surface["sub_min_partial_position_count"] == 1
+    sample = surface["sub_min_partial_position_sample"][0]
+    assert sample["snapshot_id"] == "snap-sub-min"
+    assert sample["min_order_size"] == "5"
+
+
+def test_sub_min_partial_position_fails_closed_when_latest_projection_missing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sd = tmp_path / "state"
+    sd.mkdir()
+    _setup_healthy_state(sd)
+    monkeypatch.setattr(live_health, "_dirty_runtime_worktree_paths", lambda **_kwargs: ())
+    now = datetime.now(timezone.utc)
+    _write_sub_min_partial_position_db(sd, now=now, chain_shares=3.8)
+    conn = sqlite3.connect(sd / "zeus_trades.db")
+    try:
+        conn.execute("DROP TABLE executable_market_snapshot_latest")
+        conn.commit()
+    finally:
+        conn.close()
+
+    result = compute_composite_live_health(state_dir=sd, now=now)
+
+    surface = result["surfaces"]["sub_min_partial_position"]
+    assert surface["ok"] is False
+    assert surface["evaluated"] is True
+    assert surface["issue"].endswith("EXECUTABLE_MARKET_SNAPSHOT_LATEST_TABLE_MISSING")
+
+
+def test_sub_min_partial_position_fails_closed_when_exact_latest_row_missing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sd = tmp_path / "state"
+    sd.mkdir()
+    _setup_healthy_state(sd)
+    monkeypatch.setattr(live_health, "_dirty_runtime_worktree_paths", lambda **_kwargs: ())
+    now = datetime.now(timezone.utc)
+    _write_sub_min_partial_position_db(sd, now=now, chain_shares=3.8)
+    conn = sqlite3.connect(sd / "zeus_trades.db")
+    try:
+        conn.execute("DELETE FROM executable_market_snapshot_latest")
+        conn.commit()
+    finally:
+        conn.close()
+
+    result = compute_composite_live_health(state_dir=sd, now=now)
+
+    surface = result["surfaces"]["sub_min_partial_position"]
+    assert surface["ok"] is False
+    assert surface["evaluated"] is True
+    assert surface["issue"].endswith(
+        "EXECUTABLE_MARKET_SNAPSHOT_LATEST_EXACT_ROW_MISSING"
+    )
+
+
+def test_sub_min_partial_position_rejects_misdirected_snapshot_identity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sd = tmp_path / "state"
+    sd.mkdir()
+    _setup_healthy_state(sd)
+    monkeypatch.setattr(live_health, "_dirty_runtime_worktree_paths", lambda **_kwargs: ())
+    now = datetime.now(timezone.utc)
+    _write_sub_min_partial_position_db(sd, now=now, chain_shares=3.8)
+    conn = sqlite3.connect(sd / "zeus_trades.db")
+    try:
+        conn.execute(
+            "INSERT INTO executable_market_snapshots VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                "snap-wrong-held-token",
+                "cond-other",
+                "token-other",
+                "2",
+                "0.80",
+                "0.84",
+                (now - timedelta(seconds=5)).isoformat(),
+                (now + timedelta(minutes=1)).isoformat(),
+            ),
+        )
+        conn.execute(
+            "UPDATE executable_market_snapshot_latest SET snapshot_id = ? "
+            "WHERE condition_id = 'cond-sub-min' "
+            "AND selected_outcome_token_id = 'token-no-sub-min'",
+            ("snap-wrong-held-token",),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    surface = compute_composite_live_health(state_dir=sd, now=now)["surfaces"][
+        "sub_min_partial_position"
+    ]
+
+    assert surface["ok"] is False
+    assert surface["issue"].endswith(
+        "EXECUTABLE_MARKET_SNAPSHOT_LATEST_EXACT_ROW_MISSING"
+    )
+    assert surface["missing_position_ids"] == ["pos-sub-min"]
+
+
+def test_sub_min_partial_position_query_has_no_correlated_temp_sort(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sd = tmp_path / "state"
+    sd.mkdir()
+    _setup_healthy_state(sd)
+    now = datetime.now(timezone.utc)
+    _write_sub_min_partial_position_db(sd, now=now, chain_shares=3.8)
+    captured: dict[str, object] = {}
+
+    def capture_query(path, sql, params=()):
+        captured["sql"] = sql
+        captured["params"] = params
+        return [], None
+
+    monkeypatch.setattr(live_health, "_sqlite_ro_rows", capture_query)
+    result = live_health._sub_min_partial_position_surface(sd, now)
+
+    assert result["ok"] is True
+    conn = sqlite3.connect(sd / "zeus_trades.db")
+    try:
+        plan = conn.execute(
+            "EXPLAIN QUERY PLAN " + str(captured["sql"]),
+            tuple(captured["params"]),
+        ).fetchall()
+    finally:
+        conn.close()
+    plan_text = " ".join(str(row[3]) for row in plan).upper()
+    assert "CORRELATED" not in plan_text
+    assert "USE TEMP B-TREE" not in plan_text
 
 
 def test_day0_decision_trace_degrades_when_processed_day0_has_no_artifact(
@@ -4754,6 +5461,40 @@ def test_high_yes_edge_degrades_without_yes_action_or_rejection_trace(
     assert surface["missed_high_yes_edge_sample"][0]["condition_id"] == "cond-high-yes-1"
 
 
+def test_high_yes_loader_skips_large_payloads_before_lcb_candidate(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    sd = tmp_path / "state"
+    sd.mkdir()
+    _write_high_yes_edge_dbs(sd)
+    conn = sqlite3.connect(sd / "zeus-forecasts.db")
+    try:
+        conn.execute(
+            "UPDATE forecast_posteriors "
+            "SET q_lcb_json = '{}', q_json = 'Q_NOT_NEEDED', "
+            "provenance_json = 'PROVENANCE_NOT_NEEDED'"
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    real_loads = live_health.json.loads
+
+    def guarded_loads(payload, *args, **kwargs):
+        assert payload not in {"Q_NOT_NEEDED", "PROVENANCE_NOT_NEEDED"}
+        return real_loads(payload, *args, **kwargs)
+
+    monkeypatch.setattr(live_health.json, "loads", guarded_loads)
+
+    assert live_health._load_high_yes_edges_python(
+        forecast_db=sd / "zeus-forecasts.db",
+        trade_db=sd / "zeus_trades.db",
+        cutoff=_now_iso(-48 * 3600),
+        now_iso=_now_iso(0),
+    ) == []
+
+
 def test_high_yes_edge_recognizes_day0_posterior_redecision_carrier(
     tmp_path: Path,
 ) -> None:
@@ -4845,6 +5586,7 @@ def test_high_yes_edge_accepts_canonical_global_entry_pause(
         "zlib+base64+canonical-json-v10",
         "zlib+base64+canonical-json-v11",
         "zlib+base64+canonical-json-v12",
+        "zlib+base64+canonical-json-v13",
     ),
 )
 def test_high_yes_edge_accepts_current_global_auction_candidate(
@@ -4874,6 +5616,158 @@ def test_high_yes_edge_accepts_current_global_auction_candidate(
     assert evidence["receipt_id"] == 1
     assert evidence["candidate_evaluation_count"] == 1
     assert evidence["yes_condition_count"] == 1
+
+
+def test_schema20_global_winner_identity_is_read_only_telemetry_only(
+    tmp_path: Path,
+) -> None:
+    sd = tmp_path / "state"
+    sd.mkdir()
+    _write_high_yes_edge_dbs(
+        sd,
+        with_global_auction_candidate=True,
+        global_auction_encoding="zlib+base64+canonical-json-v12",
+    )
+    conn = sqlite3.connect(sd / "zeus_trades.db")
+    try:
+        artifact = json.loads(
+            conn.execute(
+                "SELECT artifact_json FROM decision_log WHERE id = 1"
+            ).fetchone()[0]
+        )
+        artifact["summary"].update(
+            {
+                "winner_event_id": "event-schema20",
+                "winner_candidate_id": "candidate-schema20",
+                "winner_actuation_identity": "actuation-schema20",
+            }
+        )
+        conn.execute(
+            "UPDATE decision_log SET artifact_json = ? WHERE id = 1",
+            (json.dumps(artifact),),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    conn = sqlite3.connect(sd / "zeus_trades.db")
+    conn.row_factory = sqlite3.Row
+    try:
+        yes, no, evidence = live_health._latest_global_auction_candidate_counts(
+            conn,
+            cutoff=_now_iso(-48 * 3600),
+        )
+    finally:
+        conn.close()
+
+    assert yes == {}
+    assert no == {}
+    assert evidence["issue"] == (
+        "GLOBAL_AUCTION_CANDIDATE_EVIDENCE_INVALID:WINNER_SCHEMA_VERSION"
+    )
+
+
+def test_v13_global_auction_rejects_tampered_strategy_allocation(
+    tmp_path: Path,
+) -> None:
+    sd = tmp_path / "state"
+    sd.mkdir()
+    _write_high_yes_edge_dbs(
+        sd,
+        with_global_auction_candidate=True,
+        global_auction_encoding="zlib+base64+canonical-json-v13",
+    )
+    conn = sqlite3.connect(sd / "zeus_trades.db")
+    try:
+        artifact = json.loads(
+            conn.execute(
+                "SELECT artifact_json FROM decision_log WHERE id = 1"
+            ).fetchone()[0]
+        )
+        artifact["summary"]["strategy_capital_allocation"][
+            "utility_liquid_cash_usd"
+        ] = "2"
+        artifact["summary"]["artifact_summary_hash"] = (
+            global_auction_artifact_summary_hash(artifact["summary"])
+        )
+        conn.execute(
+            "UPDATE decision_log SET artifact_json = ? WHERE id = 1",
+            (json.dumps(artifact),),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    conn = sqlite3.connect(sd / "zeus_trades.db")
+    conn.row_factory = sqlite3.Row
+    try:
+        yes, no, evidence = live_health._latest_global_auction_candidate_counts(
+            conn,
+            cutoff=_now_iso(-48 * 3600),
+        )
+    finally:
+        conn.close()
+
+    assert yes == {}
+    assert no == {}
+    assert evidence["issue"] == (
+        "GLOBAL_AUCTION_CANDIDATE_EVIDENCE_INVALID:"
+        "STRATEGY_CAPITAL_ALLOCATION"
+    )
+
+
+def test_global_auction_holding_authority_accepts_all_fixed_sell_modes() -> None:
+    authority = {
+        "sell_exit_authority_status": "mature",
+        "sell_exit_authority_reason": "day0_high_extreme_post_peak",
+        "sell_action_authority_identity": "authority-1",
+    }
+    holding_payload = [
+        {
+            "position_id": "position-1",
+            "candidate_id": "sell-taker",
+            "candidate_ids": ["sell-taker", "sell-maker"],
+            "status": "EVALUATED",
+            **authority,
+        }
+    ]
+    candidate_payload = {
+        "detailed": [
+            {
+                "candidate_id": "sell-taker",
+                "position_id": "position-1",
+                "action": "SELL",
+                "execution_mode": "TAKER_LIMIT",
+                **authority,
+            },
+            {
+                "candidate_id": "sell-maker",
+                "position_id": "position-1",
+                "action": "SELL",
+                "execution_mode": "MAKER_REST",
+                **authority,
+            },
+        ]
+    }
+    summary = {
+        "held_position_coverage_complete": True,
+        "held_position_expected_count": 1,
+        "held_position_evaluated_count": 1,
+        "held_position_excluded_count": 0,
+    }
+
+    assert live_health._global_auction_holding_authority_matches(
+        candidate_payload,
+        holding_payload,
+        summary,
+    )
+
+    holding_payload[0]["candidate_ids"] = ["sell-taker"]
+    assert not live_health._global_auction_holding_authority_matches(
+        candidate_payload,
+        holding_payload,
+        summary,
+    )
 
 
 @pytest.mark.parametrize(
@@ -5124,6 +6018,21 @@ def test_live_health_reconstructs_holding_v2_delta_and_reference() -> None:
     assert live_health._current_global_auction_holding_payload(
         conn,
         reference_summary,
+    ) == base_rows
+
+    common_reference_summary = {
+        "holding_auction_coverage_encoding": (
+            "zlib+base64+canonical-json-v2"
+        ),
+        "holding_auction_coverage_sha256": base_sha,
+        "payload_reference_fields": [field],
+        "payload_reference_decision_log_id": 1,
+        "payload_reference_mode": "global_single_order_auction",
+        "payload_reference_receipt_hash": "receipt-base",
+    }
+    assert live_health._current_global_auction_holding_payload(
+        conn,
+        common_reference_summary,
     ) == base_rows
     conn.close()
 
@@ -5395,6 +6304,7 @@ def test_live_health_reconstructs_engine_candidate_keyed_delta_v3() -> None:
         "condition_id",
         "side",
         "token_id",
+        "execution_mode",
     ]
     base = {
         "rejected_groups": [],
@@ -5405,8 +6315,24 @@ def test_live_health_reconstructs_engine_candidate_keyed_delta_v3() -> None:
         ],
         "buy_candidate_index_fields": fields,
         "buy_candidate_index": [
-            ["candidate-a", "family-a", "bin-a", "condition-a", "YES", "token-a"],
-            ["candidate-b", "family-b", "bin-b", "condition-b", "NO", "token-b"],
+            [
+                "candidate-a",
+                "family-a",
+                "bin-a",
+                "condition-a",
+                "YES",
+                "token-a",
+                "TAKER_LIMIT",
+            ],
+            [
+                "candidate-b",
+                "family-b",
+                "bin-b",
+                "condition-b",
+                "NO",
+                "token-b",
+                "TAKER_LIMIT",
+            ],
         ],
     }
     current = {
@@ -5423,8 +6349,17 @@ def test_live_health_reconstructs_engine_candidate_keyed_delta_v3() -> None:
                 "condition-a",
                 "YES",
                 "token-a",
+                "TAKER_LIMIT",
             ],
-            ["candidate-b", "family-b", "bin-b", "condition-b", "NO", "token-b"],
+            [
+                "candidate-b",
+                "family-b",
+                "bin-b",
+                "condition-b",
+                "NO",
+                "token-b",
+                "TAKER_LIMIT",
+            ],
         ],
     }
     receipt = global_batch_runtime._candidate_evaluations_delta_receipt(
@@ -5469,6 +6404,53 @@ def test_high_yes_edge_ignores_stale_executable_quote(
     assert surface["ok"] is True
     assert surface["high_yes_edge_count"] == 0
     assert surface["missed_high_yes_edge_count"] == 0
+
+
+def test_high_yes_quote_read_is_bounded_to_posterior_conditions(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "trades.db"
+    raw_conn = sqlite3.connect(db_path)
+    raw_conn.row_factory = sqlite3.Row
+    raw_conn.execute(
+        "CREATE TABLE executable_market_snapshot_latest ("
+        "condition_id TEXT, outcome_label TEXT, orderbook_top_ask TEXT, "
+        "captured_at TEXT, freshness_deadline TEXT, active INTEGER, "
+        "closed INTEGER, accepting_orders INTEGER)"
+    )
+    raw_conn.execute(
+        "CREATE INDEX idx_snapshot_latest_condition_captured "
+        "ON executable_market_snapshot_latest(condition_id, captured_at DESC)"
+    )
+    raw_conn.executemany(
+        "INSERT INTO executable_market_snapshot_latest VALUES "
+        "(?, ?, '0.20', '2026-08-03T00:00:00+00:00', "
+        "'2026-08-04T00:00:00+00:00', 1, 0, 1)",
+        [
+            ("wanted", "YES"),
+            ("wanted-lower", "yes"),
+            ("irrelevant-a", "YES"),
+            ("irrelevant-b", "YES"),
+        ],
+    )
+
+    class ScopedConnection:
+        def execute(self, sql: str, params: tuple[object, ...]):
+            normalized = " ".join(sql.split()).lower()
+            assert "where condition_id in" in normalized
+            return raw_conn.execute(sql, params)
+
+    try:
+        rows = live_health._load_high_yes_quotes_for_conditions(
+            ScopedConnection(),
+            condition_ids=("wanted", "wanted-lower"),
+            cutoff="2026-08-02T00:00:00+00:00",
+            now_iso="2026-08-03T00:00:00+00:00",
+        )
+    finally:
+        raw_conn.close()
+
+    assert {row["condition_id"] for row in rows} == {"wanted", "wanted-lower"}
 
 
 def test_high_yes_edge_accepts_buy_yes_no_submit_evidence(
@@ -5571,6 +6553,86 @@ def test_high_yes_latest_posterior_uses_live_index_and_real_timestamp_order() ->
             '{"90F": 0.95}',
             "live",
         ),
+        (
+            6,
+            "Austin",
+            "2026-07-28",
+            "high",
+            (now - timedelta(minutes=20)).isoformat(),
+            '{"90F": 0.81}',
+            '{"90F": 0.71}',
+            "live",
+        ),
+        (
+            7,
+            "Austin",
+            "2026-07-28",
+            "high",
+            (now - timedelta(minutes=20)).isoformat(),
+            '{"90F": 0.82}',
+            '{"90F": 0.72}',
+            "live",
+        ),
+        (
+            8,
+            "Austin",
+            "2026-07-28",
+            "high",
+            (now - timedelta(hours=2)).isoformat(),
+            '{"90F": 0.98}',
+            '{"90F": 0.97}',
+            "live",
+        ),
+        (
+            9,
+            "Austin",
+            "2026-07-28",
+            "high",
+            (now - timedelta(minutes=1)).isoformat(),
+            '{"90F": 0.99}',
+            '{"90F": 0.98}',
+            "shadow",
+        ),
+        (
+            10,
+            "Boston",
+            "2026-07-29",
+            "high",
+            (now - timedelta(minutes=15)).isoformat(),
+            '{"90F": 0.61}',
+            '{"90F": 0.51}',
+            "live",
+        ),
+        (
+            11,
+            "Boston",
+            "2026-07-29",
+            "high",
+            (now - timedelta(minutes=15)).isoformat(),
+            '{"90F": 0.62}',
+            '{"90F": 0.52}',
+            "live",
+        ),
+        (
+            12,
+            "Boston",
+            "2026-07-29",
+            "high",
+            (now - timedelta(minutes=1)).isoformat(),
+            '{"90F": 0.99}',
+            '{"90F": 0.98}',
+            "shadow",
+        ),
+        (
+            13,
+            "Boston",
+            "2026-07-29",
+            "high",
+            (now - timedelta(hours=2)).isoformat(),
+            '{"90F": 0.01}',
+            '{"90F": 0.01}',
+            "live",
+        ),
     )
     conn.executemany(
         "INSERT INTO forecast_posteriors ("
@@ -5584,12 +6646,83 @@ def test_high_yes_latest_posterior_uses_live_index_and_real_timestamp_order() ->
         live_health._LATEST_LIVE_POSTERIORS_SQL,
         (cutoff,),
     ).fetchall()
+    legacy_sql = """
+        SELECT posterior_id,
+               source_id,
+               posterior_identity_hash,
+               city,
+               target_date,
+               temperature_metric,
+               computed_at,
+               q_json,
+               q_lcb_json,
+               provenance_json
+          FROM (
+                SELECT posterior_id,
+                       source_id,
+                       posterior_identity_hash,
+                       city,
+                       target_date,
+                       temperature_metric,
+                       computed_at,
+                       q_json,
+                       q_lcb_json,
+                       provenance_json,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY city, target_date, temperature_metric
+                           ORDER BY datetime(computed_at) DESC, posterior_id DESC
+                       ) AS rn
+                  FROM forecast_posteriors
+                 WHERE runtime_layer = 'live'
+                   AND datetime(computed_at) >= datetime(?)
+               )
+         WHERE rn = 1
+    """
+    legacy_selected = conn.execute(legacy_sql, (cutoff,)).fetchall()
     plan = conn.execute(
         "EXPLAIN QUERY PLAN " + live_health._LATEST_LIVE_POSTERIORS_SQL,
         (cutoff,),
     ).fetchall()
 
-    assert [row["posterior_id"] for row in selected] == [2]
+    columns = [
+        "posterior_id",
+        "source_id",
+        "posterior_identity_hash",
+        "city",
+        "target_date",
+        "temperature_metric",
+        "computed_at",
+        "q_json",
+        "q_lcb_json",
+        "provenance_json",
+    ]
+    assert [list(row.keys()) for row in selected] == [columns, columns]
+    assert sorted(row["posterior_id"] for row in selected) == [7, 11]
+    assert sorted(
+        tuple(row[column] for column in columns) for row in selected
+    ) == sorted(
+        tuple(row[column] for column in columns) for row in legacy_selected
+    )
+
+    normalized_sql = " ".join(live_health._LATEST_LIVE_POSTERIORS_SQL.split()).lower()
+    ranked_shape = normalized_sql.split("with ranked as (", 1)[1].split(
+        "from forecast_posteriors", 1
+    )[0]
+    assert "select posterior_id, row_number() over" in ranked_shape
+    assert (
+        "join forecast_posteriors as fp on fp.posterior_id = ranked.posterior_id"
+        in normalized_sql
+    )
+    assert all(
+        column not in ranked_shape
+        for column in (
+            "source_id",
+            "posterior_identity_hash",
+            "q_json",
+            "q_lcb_json",
+            "provenance_json",
+        )
+    )
     assert any(
         "idx_forecast_posteriors_runtime_layer_target" in str(row["detail"])
         and "runtime_layer=?" in str(row["detail"])
@@ -5599,6 +6732,7 @@ def test_high_yes_latest_posterior_uses_live_index_and_real_timestamp_order() ->
         str(row["detail"]).startswith("SCAN forecast_posteriors")
         for row in plan
     )
+    assert any("INTEGER PRIMARY KEY" in str(row["detail"]) for row in plan)
 
 
 def test_high_yes_no_submit_window_uses_indexed_decision_time() -> None:
@@ -5712,7 +6846,7 @@ def test_high_yes_reason_groups_filter_recent_rows_before_grouping() -> None:
         )
 
 
-def test_high_yes_latest_auction_reads_primary_key_tail_without_temp_sort() -> None:
+def test_high_yes_latest_auction_seeks_timestamp_index_before_one_payload() -> None:
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     conn.execute(
@@ -5725,16 +6859,111 @@ def test_high_yes_latest_auction_reads_primary_key_tail_without_temp_sort() -> N
         _now_iso(-48 * 3600),
     )
 
-    plan = conn.execute(
-        "EXPLAIN QUERY PLAN " + live_health._LATEST_GLOBAL_AUCTION_RECEIPT_SQL,
+    id_plan = conn.execute(
+        "EXPLAIN QUERY PLAN "
+        + live_health._LATEST_GLOBAL_AUCTION_RECEIPT_ID_SQL,
         params,
+    ).fetchall()
+    payload_plan = conn.execute(
+        "EXPLAIN QUERY PLAN " + live_health._GLOBAL_AUCTION_RECEIPT_BY_ID_SQL,
+        (1,),
     ).fetchall()
     conn.close()
 
-    details = [str(row["detail"]) for row in plan]
-    assert any("SCAN decision_log" in detail for detail in details)
-    assert all("idx_decision_log_ts" not in detail for detail in details)
-    assert all("USE TEMP B-TREE" not in detail for detail in details)
+    id_details = [str(row["detail"]) for row in id_plan]
+    assert any("idx_decision_log_ts" in detail for detail in id_details)
+    assert all("SCAN decision_log" not in detail for detail in id_details)
+    assert all("USE TEMP B-TREE" not in detail for detail in id_details)
+    payload_details = [str(row["detail"]) for row in payload_plan]
+    assert any("INTEGER PRIMARY KEY" in detail for detail in payload_details)
+
+
+def test_high_yes_latest_auction_search_uses_latest_eligible_timestamp() -> None:
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        "CREATE TABLE decision_log ("
+        "id INTEGER PRIMARY KEY, mode TEXT, artifact_json TEXT, timestamp TEXT)"
+    )
+    conn.execute("CREATE INDEX idx_decision_log_ts ON decision_log(timestamp)")
+    cutoff = _now_iso(-48 * 3600)
+    conn.executemany(
+        "INSERT INTO decision_log(id, mode, artifact_json, timestamp) VALUES (?, ?, ?, ?)",
+        [
+            (10, live_health._GLOBAL_AUCTION_RECEIPT_MODES[0], "{}", _now_iso(-1)),
+            (11, "unrelated_mode", "{}", _now_iso(0)),
+            (12, live_health._GLOBAL_AUCTION_RECEIPT_MODES[1], "{}", _now_iso(-72 * 3600)),
+            (13, live_health._GLOBAL_AUCTION_RECEIPT_MODES[2], "{}", _now_iso(-2)),
+        ],
+    )
+
+    row = conn.execute(
+        live_health._LATEST_GLOBAL_AUCTION_RECEIPT_ID_SQL,
+        (*live_health._GLOBAL_AUCTION_RECEIPT_MODES, cutoff),
+    ).fetchone()
+    conn.close()
+
+    assert row is not None
+    assert row["id"] == 10
+
+
+def test_high_yes_latest_auction_payload_disappearing_fails_closed() -> None:
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        "CREATE TABLE decision_log ("
+        "id INTEGER PRIMARY KEY, mode TEXT, artifact_json TEXT, timestamp TEXT)"
+    )
+    conn.execute("CREATE INDEX idx_decision_log_ts ON decision_log(timestamp)")
+    conn.execute(
+        "INSERT INTO decision_log(id, mode, artifact_json, timestamp) VALUES (?, ?, ?, ?)",
+        (7, live_health._GLOBAL_AUCTION_RECEIPT_MODES[0], "{}", _now_iso(0)),
+    )
+
+    class DisappearingReceiptConnection:
+        def execute(self, sql: str, params: object = ()) -> object:
+            if sql == live_health._GLOBAL_AUCTION_RECEIPT_BY_ID_SQL:
+                conn.execute("DELETE FROM decision_log WHERE id = ?", params)
+            return conn.execute(sql, params)
+
+    yes_counts, no_counts, evidence = live_health._latest_global_auction_candidate_counts(
+        DisappearingReceiptConnection(),
+        cutoff=_now_iso(-48 * 3600),
+    )
+    conn.close()
+
+    assert yes_counts == {}
+    assert no_counts == {}
+    assert evidence == {
+        "evaluated": True,
+        "issue": "GLOBAL_AUCTION_CANDIDATE_EVIDENCE_INVALID:RECEIPT_ROW_MISSING",
+        "receipt_id": 7,
+    }
+
+
+def test_high_yes_latest_auction_missing_timestamp_index_fails_closed(
+    tmp_path: Path,
+) -> None:
+    sd = tmp_path / "state"
+    sd.mkdir()
+    _write_high_yes_edge_dbs(sd, with_global_auction_candidate=True)
+    conn = sqlite3.connect(sd / "zeus_trades.db")
+    try:
+        conn.execute("DROP INDEX idx_decision_log_ts")
+        conn.commit()
+    finally:
+        conn.close()
+
+    surface = live_health._high_yes_edge_missed_surface(
+        sd,
+        datetime.now(timezone.utc),
+        main_daemon_surface={"attested": True},
+    )
+
+    assert surface["ok"] is False
+    assert surface["issue"].startswith(
+        "HIGH_YES_EDGE_READ_UNAVAILABLE:OperationalError:no such index:"
+    )
 
 
 def test_high_yes_edge_degrades_when_quality_yes_no_trade_has_no_order_chain(
@@ -6701,7 +7930,7 @@ def test_process_code_started_before_runtime_source_mtime_yields_degraded(
     monkeypatch.setattr(
         live_health,
         "_process_command_line",
-        lambda _pid: "/Users/leofitz/zeus/.venv/bin/python -m src.main",
+        lambda _pid: "/srv/zeus/.venv/bin/python -m src.main",
     )
     monkeypatch.setattr(live_health, "_process_start_epoch", lambda _pid: 1000.0)
     monkeypatch.setattr(
@@ -6878,9 +8107,13 @@ def test_edli_command_recovery_cycle_refreshes_allocator_after_mutation(monkeypa
     import src.execution.command_recovery as command_recovery
     import src.main as main_module
     import src.state.db as state_db
+    import src.state.portfolio as portfolio
 
     class FakeConn:
         closed = False
+
+        def set_progress_handler(self, *_args) -> None:
+            return None
 
         def close(self) -> None:
             self.closed = True
@@ -6892,6 +8125,13 @@ def test_edli_command_recovery_cycle_refreshes_allocator_after_mutation(monkeypa
     monkeypatch.setattr(main_module, "_settings_section", lambda name, default=None: {"enabled": True})
     monkeypatch.setattr(main_module, "get_mode", lambda: "live")
     monkeypatch.setattr(main_module, "_defer_for_held_position_monitor", lambda job_name: False)
+    monkeypatch.setattr(main_module, "_edli_command_recovery_full_bucket", lambda: 11)
+    monkeypatch.setattr(main_module, "_EDLI_COMMAND_RECOVERY_LAST_FULL_BUCKET", 11)
+    monkeypatch.setattr(
+        command_recovery,
+        "capital_blocking_command_count",
+        lambda _conn: 0,
+    )
     monkeypatch.setattr(
         command_recovery,
         "reconcile_unresolved_commands",
@@ -6901,13 +8141,14 @@ def test_edli_command_recovery_cycle_refreshes_allocator_after_mutation(monkeypa
     )
     monkeypatch.setattr(
         state_db,
-        "get_trade_connection_with_world_required",
-        lambda write_class=None: fake_conn,
+        "get_trade_connection_read_only",
+        lambda: fake_conn,
     )
+    monkeypatch.setattr(portfolio, "load_runtime_open_portfolio", lambda _conn: {})
     monkeypatch.setattr(
         main_module,
         "_edli_refresh_global_allocator",
-        lambda conn: refresh_calls.append(conn) or {"configured": True},
+        lambda conn, **_kwargs: refresh_calls.append(conn) or {"configured": True},
     )
     monkeypatch.setattr(
         main_module,
@@ -6930,13 +8171,26 @@ def test_edli_command_recovery_runs_live_tick_during_active_redecision(monkeypat
     not starve behind continuous redecision activity."""
     import src.execution.command_recovery as command_recovery
     import src.main as main_module
+    import src.state.db as state_db
 
     calls: list[str] = []
+
+    class FakeConn:
+        def close(self) -> None:
+            return None
 
     monkeypatch.setattr(main_module, "_settings_section", lambda name, default=None: {"enabled": True})
     monkeypatch.setattr(main_module, "get_mode", lambda: "live")
     monkeypatch.setattr(main_module, "_defer_for_held_position_monitor", lambda job_name: False)
+    monkeypatch.setattr(main_module, "_edli_command_recovery_full_bucket", lambda: 13)
+    monkeypatch.setattr(main_module, "_EDLI_COMMAND_RECOVERY_LAST_FULL_BUCKET", 13)
     monkeypatch.setattr(main_module, "_edli_reactor_active", lambda: False)
+    monkeypatch.setattr(state_db, "get_trade_connection_read_only", FakeConn)
+    monkeypatch.setattr(
+        command_recovery,
+        "capital_blocking_command_count",
+        lambda _conn: 0,
+    )
     monkeypatch.setattr(
         main_module,
         "_edli_redecision_screen_lock",
@@ -6953,12 +8207,392 @@ def test_edli_command_recovery_runs_live_tick_during_active_redecision(monkeypat
     assert calls == ["live_tick"]
 
 
-def test_redecision_screen_defers_while_entry_reactor_is_active(monkeypatch) -> None:
+def test_command_recovery_yields_trade_db_to_overdue_held_monitor(monkeypatch) -> None:
+    """Historical recovery may not consume the current-capital monitor's I/O."""
+    import threading
+
+    import src.execution.command_recovery as command_recovery
+    import src.main as main_module
+    import src.state.db as state_db
+
+    class FakeConn:
+        def close(self) -> None:
+            return None
+
+    calls: list[str] = []
+    monitor_active = threading.Event()
+    monitor_debt = threading.Event()
+    monitor_debt.set()
+    monkeypatch.setattr(main_module, "get_mode", lambda: "live")
+    monkeypatch.setattr(main_module, "_defer_for_held_position_monitor", lambda _job: False)
+    monkeypatch.setattr(main_module, "_held_position_monitor_active", monitor_active)
+    monkeypatch.setattr(main_module, "_held_position_monitor_canonical_debt", monitor_debt)
+    monkeypatch.setattr(state_db, "get_trade_connection_read_only", FakeConn)
+    monkeypatch.setattr(
+        command_recovery,
+        "capital_blocking_command_count",
+        lambda _conn: 0,
+    )
+    monkeypatch.setattr(
+        command_recovery,
+        "reconcile_unresolved_commands",
+        lambda **kwargs: calls.append(str(kwargs.get("scope"))),
+    )
+
+    main_module._edli_command_recovery_cycle.__wrapped__()
+
+    assert calls == []
+
+
+def test_scoped_capital_recovery_yields_to_held_monitor(monkeypatch) -> None:
+    """An isolated market may not starve global held-capital truth."""
+    import threading
+
+    import src.execution.command_recovery as command_recovery
+    import src.main as main_module
+    import src.state.db as state_db
+    from src.execution.command_recovery import CapitalBlockingCommandScope
+
+    class FakeConn:
+        def close(self) -> None:
+            return None
+
+    calls: list[str] = []
+    monitor_active = threading.Event()
+    monitor_active.set()
+    monkeypatch.setattr(main_module, "get_mode", lambda: "live")
+    monkeypatch.setattr(main_module, "_defer_for_held_position_monitor", lambda _job: False)
+    monkeypatch.setattr(main_module, "_held_position_monitor_active", monitor_active)
+    monkeypatch.setattr(
+        main_module,
+        "_held_position_monitor_canonical_debt",
+        threading.Event(),
+    )
+    monkeypatch.setattr(main_module, "_edli_command_recovery_full_bucket", lambda: 17)
+    monkeypatch.setattr(main_module, "_EDLI_COMMAND_RECOVERY_LAST_FULL_BUCKET", 17)
+    monkeypatch.setattr(state_db, "get_trade_connection_read_only", FakeConn)
+    monkeypatch.setattr(
+        command_recovery,
+        "capital_blocking_command_count",
+        lambda _conn: 1,
+    )
+    monkeypatch.setattr(
+        command_recovery,
+        "capital_blocking_command_scope",
+        lambda _conn: CapitalBlockingCommandScope(
+            total_count=1,
+            scoped_markets=("market-a",),
+            unscopeable_count=0,
+            projection_count=0,
+        ),
+    )
+    monkeypatch.setattr(
+        command_recovery,
+        "reconcile_unresolved_commands",
+        lambda **kwargs: calls.append(str(kwargs.get("scope")))
+        or {"scanned": 1, "advanced": 0},
+    )
+
+    main_module._edli_command_recovery_cycle.__wrapped__()
+
+    assert calls == []
+
+
+def test_systemic_capital_recovery_keeps_priority_during_held_monitor(monkeypatch) -> None:
+    """Systemic unresolved capital still outranks monitor cadence repair."""
+    import threading
+
+    import src.execution.command_recovery as command_recovery
+    import src.main as main_module
+    import src.state.db as state_db
+    from src.execution.command_recovery import CapitalBlockingCommandScope
+
+    class FakeConn:
+        def close(self) -> None:
+            return None
+
+    calls: list[str] = []
+    monitor_active = threading.Event()
+    monitor_active.set()
+    monkeypatch.setattr(main_module, "get_mode", lambda: "live")
+    monkeypatch.setattr(main_module, "_defer_for_held_position_monitor", lambda _job: False)
+    monkeypatch.setattr(main_module, "_held_position_monitor_active", monitor_active)
+    monkeypatch.setattr(
+        main_module,
+        "_held_position_monitor_canonical_debt",
+        threading.Event(),
+    )
+    monkeypatch.setattr(main_module, "_edli_command_recovery_full_bucket", lambda: 17)
+    monkeypatch.setattr(main_module, "_EDLI_COMMAND_RECOVERY_LAST_FULL_BUCKET", 17)
+    monkeypatch.setattr(state_db, "get_trade_connection_read_only", FakeConn)
+    monkeypatch.setattr(
+        command_recovery,
+        "capital_blocking_command_count",
+        lambda _conn: 2,
+    )
+    monkeypatch.setattr(
+        command_recovery,
+        "capital_blocking_command_scope",
+        lambda _conn: CapitalBlockingCommandScope(
+            total_count=2,
+            scoped_markets=("market-a", "market-b"),
+            unscopeable_count=0,
+            projection_count=0,
+        ),
+    )
+    monkeypatch.setattr(
+        command_recovery,
+        "reconcile_unresolved_commands",
+        lambda **kwargs: calls.append(str(kwargs.get("scope")))
+        or {"scanned": 2, "advanced": 0},
+    )
+
+    main_module._edli_command_recovery_cycle.__wrapped__()
+
+    assert calls == ["live_tick"]
+
+
+def test_capital_cancel_recovery_reserves_reactor_then_resets(monkeypatch) -> None:
+    """Only the capital fast pass owns the reactor fairness handoff."""
+    import src.execution.command_recovery as command_recovery
+    import src.main as main_module
+    import src.state.db as state_db
+    from src.execution.command_recovery import CapitalBlockingCommandScope
+
+    class FakeConn:
+        def close(self) -> None:
+            return None
+
+    observed: list[tuple[str, bool, bool]] = []
+    main_module._capital_recovery_handoff_pending.clear()
+    monkeypatch.setattr(main_module, "get_mode", lambda: "live")
+    monkeypatch.setattr(main_module, "_defer_for_held_position_monitor", lambda _job: False)
+    monkeypatch.setattr(main_module, "_consume_live_control_commands", lambda: None)
+    monkeypatch.setattr(main_module, "_edli_command_recovery_full_bucket", lambda: 9)
+    monkeypatch.setattr(main_module, "_EDLI_COMMAND_RECOVERY_LAST_FULL_BUCKET", 9)
+    monkeypatch.setattr(state_db, "get_trade_connection_read_only", FakeConn)
+    monkeypatch.setattr(
+        command_recovery,
+        "capital_blocking_command_scope",
+        lambda _conn: CapitalBlockingCommandScope(
+            total_count=3,
+            scoped_markets=("market-a", "market-b"),
+            unscopeable_count=0,
+            projection_count=0,
+        ),
+    )
+    monkeypatch.setattr(
+        command_recovery,
+        "reconcile_unresolved_commands",
+        lambda **kwargs: observed.append(
+            (
+                str(kwargs.get("scope")),
+                main_module._capital_recovery_handoff_pending.is_set(),
+                main_module._edli_reactor_active_lock.locked(),
+            )
+        )
+        or {"scanned": 3, "advanced": 0},
+    )
+
+    main_module._edli_command_recovery_cycle.__wrapped__()
+
+    assert observed == [("live_tick", True, True)]
+    assert not main_module._capital_recovery_handoff_pending.is_set()
+    assert not main_module._edli_reactor_active_lock.locked()
+
+
+def test_scoped_capital_recovery_does_not_reserve_global_reactor(monkeypatch) -> None:
+    import src.execution.command_recovery as command_recovery
+    import src.main as main_module
+    import src.state.db as state_db
+    from src.execution.command_recovery import CapitalBlockingCommandScope
+
+    class FakeConn:
+        def close(self) -> None:
+            return None
+
+    calls: list[tuple[str, bool]] = []
+    main_module._capital_recovery_handoff_pending.clear()
+    monkeypatch.setattr(main_module, "get_mode", lambda: "live")
+    monkeypatch.setattr(main_module, "_defer_for_held_position_monitor", lambda _job: False)
+    monkeypatch.setattr(main_module, "_consume_live_control_commands", lambda: None)
+    monkeypatch.setattr(main_module, "_edli_command_recovery_full_bucket", lambda: 17)
+    monkeypatch.setattr(main_module, "_EDLI_COMMAND_RECOVERY_LAST_FULL_BUCKET", 17)
+    monkeypatch.setattr(state_db, "get_trade_connection_read_only", FakeConn)
+    monkeypatch.setattr(
+        command_recovery,
+        "capital_blocking_command_scope",
+        lambda _conn: CapitalBlockingCommandScope(
+            total_count=1,
+            scoped_markets=("market-a",),
+            unscopeable_count=0,
+            projection_count=0,
+        ),
+    )
+    monkeypatch.setattr(
+        command_recovery,
+        "reconcile_unresolved_commands",
+        lambda **kwargs: calls.append(
+            (
+                str(kwargs.get("scope")),
+                main_module._capital_recovery_handoff_pending.is_set(),
+            )
+        )
+        or {"scanned": 1, "advanced": 0},
+    )
+
+    main_module._edli_command_recovery_cycle.__wrapped__()
+
+    assert calls == [("live_tick", False)]
+    assert not main_module._capital_recovery_handoff_pending.is_set()
+
+
+def test_capital_cancel_recovery_resets_handoff_after_failure(monkeypatch) -> None:
+    import src.execution.command_recovery as command_recovery
+    import src.main as main_module
+    import src.state.db as state_db
+
+    class FakeConn:
+        def close(self) -> None:
+            return None
+
+    main_module._capital_recovery_handoff_pending.clear()
+    monkeypatch.setattr(main_module, "get_mode", lambda: "live")
+    monkeypatch.setattr(main_module, "_defer_for_held_position_monitor", lambda _job: False)
+    monkeypatch.setattr(main_module, "_consume_live_control_commands", lambda: None)
+    monkeypatch.setattr(state_db, "get_trade_connection_read_only", FakeConn)
+    monkeypatch.setattr(
+        command_recovery,
+        "capital_blocking_command_count",
+        lambda _conn: 1,
+    )
+    monkeypatch.setattr(
+        command_recovery,
+        "reconcile_unresolved_commands",
+        lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("apply failed")),
+    )
+
+    with pytest.raises(RuntimeError, match="apply failed"):
+        main_module._edli_command_recovery_cycle.__wrapped__()
+
+    assert not main_module._capital_recovery_handoff_pending.is_set()
+
+
+def test_capital_cancel_recovery_waits_for_active_reactor(monkeypatch) -> None:
+    import src.execution.command_recovery as command_recovery
+    import src.main as main_module
+    import src.state.db as state_db
+
+    class FakeConn:
+        def close(self) -> None:
+            return None
+
+    class ActiveLock:
+        def __init__(self) -> None:
+            self.held = True
+            self.released = False
+            self.timeout = None
+
+        def locked(self) -> bool:
+            return self.held
+
+        def acquire(self, *, timeout: float) -> bool:
+            self.timeout = timeout
+            self.held = True
+            return True
+
+        def release(self) -> None:
+            self.released = True
+            self.held = False
+
+    active_lock = ActiveLock()
+    calls: list[tuple[str, bool]] = []
+    main_module._capital_recovery_handoff_pending.clear()
+    monkeypatch.setattr(main_module, "get_mode", lambda: "live")
+    monkeypatch.setattr(main_module, "_defer_for_held_position_monitor", lambda _job: False)
+    monkeypatch.setattr(main_module, "_consume_live_control_commands", lambda: None)
+    monkeypatch.setattr(main_module, "_edli_reactor_active_lock", active_lock)
+    monkeypatch.setattr(main_module, "_edli_command_recovery_full_bucket", lambda: 17)
+    monkeypatch.setattr(main_module, "_EDLI_COMMAND_RECOVERY_LAST_FULL_BUCKET", 17)
+    monkeypatch.setattr(state_db, "get_trade_connection_read_only", FakeConn)
+    monkeypatch.setattr(
+        command_recovery,
+        "capital_blocking_command_count",
+        lambda _conn: 2,
+    )
+    monkeypatch.setattr(
+        command_recovery,
+        "reconcile_unresolved_commands",
+        lambda **kwargs: calls.append(
+            (str(kwargs.get("scope")), active_lock.locked())
+        )
+        or {"scanned": 2, "advanced": 0},
+    )
+
+    main_module._edli_command_recovery_cycle.__wrapped__()
+
+    assert calls == [("live_tick", True)]
+    assert active_lock.released is True
+    assert active_lock.locked() is False
+    assert 0 < active_lock.timeout <= main_module._CAPITAL_RECOVERY_REACTOR_DRAIN_SECONDS
+    assert not main_module._capital_recovery_handoff_pending.is_set()
+
+
+def test_capital_cancel_recovery_skips_apply_when_reactor_drain_times_out(
+    monkeypatch,
+) -> None:
+    import src.execution.command_recovery as command_recovery
+    import src.main as main_module
+    import src.state.db as state_db
+
+    class FakeConn:
+        def close(self) -> None:
+            return None
+
+    class BusyLock:
+        def locked(self) -> bool:
+            return True
+
+        def acquire(self, *, timeout: float) -> bool:
+            assert 0 < timeout <= main_module._CAPITAL_RECOVERY_REACTOR_DRAIN_SECONDS
+            return False
+
+    main_module._capital_recovery_handoff_pending.clear()
+    monkeypatch.setattr(main_module, "get_mode", lambda: "live")
+    monkeypatch.setattr(main_module, "_defer_for_held_position_monitor", lambda _job: False)
+    monkeypatch.setattr(main_module, "_consume_live_control_commands", lambda: None)
+    monkeypatch.setattr(main_module, "_edli_reactor_active_lock", BusyLock())
+    monkeypatch.setattr(state_db, "get_trade_connection_read_only", FakeConn)
+    monkeypatch.setattr(
+        command_recovery,
+        "capital_blocking_command_count",
+        lambda _conn: 1,
+    )
+    monkeypatch.setattr(
+        command_recovery,
+        "reconcile_unresolved_commands",
+        lambda **_kwargs: pytest.fail("recovery must not race the active reactor"),
+    )
+
+    main_module._edli_command_recovery_cycle.__wrapped__()
+
+    assert not main_module._capital_recovery_handoff_pending.is_set()
+
+
+def test_redecision_screen_progresses_while_entry_reactor_is_active(monkeypatch) -> None:
+    """Submitted maker rests cannot starve behind new-entry computation."""
+
     import src.events.reactor as reactor_module
     import src.main as main_module
 
     calls: list[str] = []
-    monkeypatch.setattr(main_module, "_edli_reactor_active", lambda: True)
+    monkeypatch.setattr(
+        main_module,
+        "_defer_for_active_entry_reactor",
+        lambda _name: pytest.fail(
+            "resting-order redecision must not yield to the entry reactor"
+        ),
+    )
     monkeypatch.setattr(
         reactor_module,
         "run_edli_continuous_redecision_screen_cycle",
@@ -6967,7 +8601,7 @@ def test_redecision_screen_defers_while_entry_reactor_is_active(monkeypatch) -> 
 
     main_module._edli_continuous_redecision_screen_cycle()
 
-    assert calls == []
+    assert calls == ["screen"]
 
 
 @pytest.mark.parametrize(
@@ -7058,6 +8692,8 @@ def test_exit_monitor_claims_priority_and_waits_for_reactor_handoff(monkeypatch)
             )
         )
         kwargs["mark_held_position_monitor_complete"]()
+        assert main_module._held_position_monitor_claim.acquire(blocking=False)
+        main_module._held_position_monitor_claim.release()
         return True
 
     main_module._held_position_monitor_active.clear()
@@ -7073,6 +8709,56 @@ def test_exit_monitor_claims_priority_and_waits_for_reactor_handoff(monkeypatch)
         ("run", True, None, False),
     ]
     assert not main_module._held_position_monitor_active.is_set()
+
+
+def test_exit_monitor_handoff_preserves_bootstrap_and_primary_q_budget(
+    monkeypatch,
+) -> None:
+    import src.engine.cycle_runtime as cycle_runtime
+    import src.execution.exit_lifecycle as exit_module
+    import src.main as main_module
+    from src.riskguard.risk_level import RiskLevel
+
+    clock = [0.0]
+    observed: dict[str, float] = {}
+
+    class ReactorGate:
+        def acquire(self, *, timeout: float) -> bool:
+            observed["timeout"] = timeout
+            clock[0] += timeout
+            return True
+
+        def release(self) -> None:
+            return None
+
+    def run(**kwargs) -> bool:
+        observed["handoff_elapsed"] = kwargs[
+            "monitor_handoff_elapsed_seconds"
+        ]
+        observed["remaining"] = kwargs["monitor_deadline_monotonic"] - clock[0]
+        kwargs["mark_held_position_monitor_complete"]()
+        return True
+
+    main_module._held_position_monitor_active.clear()
+    monkeypatch.setattr(main_module.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_held_position_monitor_budget_seconds",
+        lambda: 12.0,
+    )
+    monkeypatch.setattr(main_module, "_edli_reactor_active_lock", ReactorGate())
+    monkeypatch.setattr(
+        "src.riskguard.riskguard.get_current_level",
+        lambda: RiskLevel.GREEN,
+    )
+    monkeypatch.setattr(exit_module, "run_exit_monitor_cycle", run)
+
+    assert main_module._exit_monitor_cycle() is True
+    assert observed["timeout"] == pytest.approx(2.0)
+    assert observed["handoff_elapsed"] == pytest.approx(2.0)
+    assert observed["remaining"] == pytest.approx(
+        exit_module.held_monitor_pre_artifact_reserve_seconds()
+    )
 
 
 def test_reactor_bootstrap_releases_after_canonical_monitor_coverage(
@@ -7092,14 +8778,13 @@ def test_reactor_bootstrap_releases_after_canonical_monitor_coverage(
 
     conn = ReadOnlyConnection()
 
-    main_module._held_position_monitor_active.set()
+    boot_at = datetime(2026, 7, 26, 9, 0, tzinfo=timezone.utc)
+    observed_kwargs: dict[str, object] = {}
+
+    main_module._held_position_monitor_active.clear()
     main_module._held_position_monitor_bootstrap_complete.clear()
     main_module._held_position_monitor_bootstrap_last_check = 0.0
-    monkeypatch.setitem(
-        main_module._BOOT_STATE,
-        "ts",
-        datetime(2026, 7, 26, 9, 0, tzinfo=timezone.utc),
-    )
+    monkeypatch.setitem(main_module._BOOT_STATE, "ts", boot_at)
     monkeypatch.setattr(main_module.time, "monotonic", lambda: 10.0)
     monkeypatch.setattr(
         db_module,
@@ -7109,9 +8794,11 @@ def test_reactor_bootstrap_releases_after_canonical_monitor_coverage(
     monkeypatch.setattr(
         cadence_module,
         "collect_monitor_cadence_evidence",
-        lambda *_args, **_kwargs: {
+        lambda *_args, **kwargs: observed_kwargs.update(kwargs) or {
             "open_position_count": 20,
-            "fresh_position_count": 7,
+            "fresh_position_count": 19,
+            "settlement_recoverable_position_count": 1,
+            "stale_or_missing_position_count": 0,
             "future_monitor_event_count": 0,
         },
     )
@@ -7119,12 +8806,288 @@ def test_reactor_bootstrap_releases_after_canonical_monitor_coverage(
         assert main_module._defer_for_held_position_monitor("edli_event_reactor") is False
         assert main_module._held_position_monitor_bootstrap_complete.is_set()
         assert conn.closed is True
+        assert observed_kwargs["min_occurred_at"] == boot_at
+        assert observed_kwargs["strict_future"] is True
+        assert observed_kwargs["monitor_refreshed_only"] is True
+        assert observed_kwargs["require_fresh_inputs"] is False
     finally:
         main_module._held_position_monitor_active.clear()
         main_module._held_position_monitor_bootstrap_complete.clear()
 
 
-def test_reactor_bootstrap_stays_deferred_without_canonical_monitor_coverage(
+def test_reactor_bootstrap_counts_quote_only_monitor_as_covered(
+    monkeypatch,
+) -> None:
+    from datetime import datetime, timezone
+
+    import src.main as main_module
+    import src.ops.monitor_cadence as cadence_module
+    import src.state.db as db_module
+
+    class ReadOnlyConnection:
+        def close(self) -> None:
+            pass
+
+    main_module._held_position_monitor_active.clear()
+    main_module._held_position_monitor_bootstrap_complete.clear()
+    main_module._held_position_monitor_bootstrap_last_check = 0.0
+    monkeypatch.setitem(
+        main_module._BOOT_STATE,
+        "ts",
+        datetime(2026, 7, 26, 9, 0, tzinfo=timezone.utc),
+    )
+    monkeypatch.setattr(main_module.time, "monotonic", lambda: 10.0)
+    monkeypatch.setattr(db_module, "get_trade_connection_read_only", ReadOnlyConnection)
+    monkeypatch.setattr(
+        cadence_module,
+        "collect_monitor_cadence_evidence",
+        lambda *_args, **_kwargs: {
+            "open_position_count": 1,
+            "fresh_position_count": 0,
+            "settlement_recoverable_position_count": 0,
+            "stale_or_missing_position_count": 1,
+            "stale_or_missing_positions": [{"position_id": "quote-only"}],
+            "quote_only_stale_position_count": 1,
+            "quote_only_stale_positions": [{"position_id": "quote-only"}],
+            "blocking_stale_position_count": 0,
+            "blocking_stale_positions": [],
+            "future_monitor_event_count": 0,
+        },
+    )
+    try:
+        assert main_module._defer_for_held_position_monitor("edli_event_reactor") is False
+        assert main_module._held_position_monitor_bootstrap_complete.is_set()
+    finally:
+        main_module._held_position_monitor_active.clear()
+        main_module._held_position_monitor_bootstrap_complete.clear()
+
+
+def test_quote_only_monitor_does_not_block_entry_admission(monkeypatch) -> None:
+    import src.main as main_module
+    import src.ops.monitor_cadence as cadence_module
+    import src.state.db as db_module
+
+    class ReadOnlyConnection:
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(db_module, "get_trade_connection_read_only", ReadOnlyConnection)
+    monkeypatch.setattr(
+        cadence_module,
+        "collect_monitor_cadence_evidence",
+        lambda *_args, **_kwargs: {
+            "stale_or_missing_position_count": 1,
+            "stale_or_missing_positions": [{
+                "position_id": "quote-only",
+                "issue": "monitor_clob_stale",
+            }],
+            "quote_only_stale_position_count": 1,
+            "quote_only_stale_positions": [{
+                "position_id": "quote-only",
+                "issue": "monitor_clob_stale",
+            }],
+            "blocking_stale_position_count": 0,
+            "blocking_stale_positions": [],
+            "future_monitor_event_count": 0,
+        },
+    )
+
+    assert main_module._held_position_monitor_entry_block_reason() is None
+
+
+def test_quote_only_monitor_recovery_does_not_run_full_book_or_set_debt(
+    monkeypatch,
+) -> None:
+    import src.main as main_module
+    import src.ops.monitor_cadence as cadence_module
+    import src.state.db as db_module
+
+    class ReadOnlyConnection:
+        def close(self) -> None:
+            pass
+
+    evidence = {
+        "stale_or_missing_position_count": 1,
+        "stale_or_missing_positions": [{"position_id": "quote-only"}],
+        "quote_only_stale_position_count": 1,
+        "quote_only_stale_positions": [{"position_id": "quote-only"}],
+        "blocking_stale_position_count": 0,
+        "blocking_stale_positions": [],
+        "future_monitor_event_count": 0,
+    }
+    main_module._held_position_monitor_canonical_debt.clear()
+    monkeypatch.setattr(db_module, "get_trade_connection_read_only", ReadOnlyConnection)
+    monkeypatch.setattr(
+        cadence_module,
+        "collect_monitor_cadence_evidence",
+        lambda *_args, **_kwargs: evidence,
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_exit_monitor_cycle",
+        lambda **_kwargs: pytest.fail("quote-only evidence must not run full-book recovery"),
+    )
+
+    try:
+        assert main_module._durable_held_position_monitor_recovery_cycle.__wrapped__() is True
+        assert not main_module._held_position_monitor_canonical_debt.is_set()
+    finally:
+        main_module._held_position_monitor_canonical_debt.clear()
+
+
+@pytest.mark.parametrize(
+    "evidence",
+    (
+        {
+            "open_position_count": 1,
+            "fresh_position_count": 0,
+            "future_monitor_event_count": 0,
+        },
+        {
+            "open_position_count": 20,
+            "fresh_position_count": 19,
+            "future_monitor_event_count": 0,
+        },
+        {
+            "open_position_count": 20,
+            "fresh_position_count": 19,
+            "settlement_recoverable_position_count": 1,
+            "stale_or_missing_position_count": 1,
+            "future_monitor_event_count": 0,
+        },
+    ),
+)
+def test_reactor_bootstrap_keeps_reduce_only_live_without_required_post_boot_coverage(
+    monkeypatch,
+    evidence,
+) -> None:
+    from datetime import datetime, timezone
+
+    import src.main as main_module
+    import src.ops.monitor_cadence as cadence_module
+    import src.state.db as db_module
+
+    class ReadOnlyConnection:
+        def close(self) -> None:
+            pass
+
+    main_module._held_position_monitor_active.clear()
+    main_module._held_position_monitor_bootstrap_complete.clear()
+    main_module._held_position_monitor_bootstrap_last_check = 0.0
+    monkeypatch.setitem(
+        main_module._BOOT_STATE,
+        "ts",
+        datetime(2026, 7, 26, 9, 0, tzinfo=timezone.utc),
+    )
+    monkeypatch.setattr(main_module.time, "monotonic", lambda: 10.0)
+    monkeypatch.setattr(db_module, "get_trade_connection_read_only", ReadOnlyConnection)
+    monkeypatch.setattr(
+        cadence_module,
+        "collect_monitor_cadence_evidence",
+        lambda *_args, **_kwargs: evidence,
+    )
+    try:
+        assert main_module._defer_for_held_position_monitor("edli_event_reactor") is False
+        assert main_module._held_position_monitor_bootstrap_complete.is_set() is False
+    finally:
+        main_module._held_position_monitor_active.clear()
+        main_module._held_position_monitor_bootstrap_complete.clear()
+
+
+@pytest.mark.parametrize(
+    "evidence",
+    (
+        {
+            "open_position_count": 1,
+            "fresh_position_count": 0,
+            "future_monitor_event_count": 0,
+        },
+        {
+            "open_position_count": 1,
+            "fresh_position_count": 0,
+            "future_monitor_event_count": 1,
+        },
+    ),
+)
+def test_reactor_bootstrap_rejects_bad_evidence_without_blocking_reduce_only(
+    monkeypatch,
+    evidence,
+) -> None:
+    from datetime import datetime, timezone
+
+    import src.main as main_module
+    import src.ops.monitor_cadence as cadence_module
+    import src.state.db as db_module
+
+    class ReadOnlyConnection:
+        def close(self) -> None:
+            pass
+
+    boot_at = datetime(2026, 7, 26, 9, 0, tzinfo=timezone.utc)
+    observed_kwargs: dict[str, object] = {}
+    main_module._held_position_monitor_active.clear()
+    main_module._held_position_monitor_bootstrap_complete.clear()
+    main_module._held_position_monitor_bootstrap_last_check = 0.0
+    monkeypatch.setitem(main_module._BOOT_STATE, "ts", boot_at)
+    monkeypatch.setattr(main_module.time, "monotonic", lambda: 10.0)
+    monkeypatch.setattr(db_module, "get_trade_connection_read_only", ReadOnlyConnection)
+    monkeypatch.setattr(
+        cadence_module,
+        "collect_monitor_cadence_evidence",
+        lambda *_args, **kwargs: observed_kwargs.update(kwargs) or evidence,
+    )
+    try:
+        assert main_module._defer_for_held_position_monitor("edli_event_reactor") is False
+        assert main_module._held_position_monitor_bootstrap_complete.is_set() is False
+        assert observed_kwargs["min_occurred_at"] == boot_at
+        assert observed_kwargs["strict_future"] is True
+        assert observed_kwargs["monitor_refreshed_only"] is True
+    finally:
+        main_module._held_position_monitor_active.clear()
+        main_module._held_position_monitor_bootstrap_complete.clear()
+
+
+def test_reactor_bootstrap_completes_vacuously_without_open_held_positions(
+    monkeypatch,
+) -> None:
+    from datetime import datetime, timezone
+
+    import src.main as main_module
+    import src.ops.monitor_cadence as cadence_module
+    import src.state.db as db_module
+
+    class ReadOnlyConnection:
+        def close(self) -> None:
+            pass
+
+    main_module._held_position_monitor_active.clear()
+    main_module._held_position_monitor_bootstrap_complete.clear()
+    main_module._held_position_monitor_bootstrap_last_check = 0.0
+    monkeypatch.setitem(
+        main_module._BOOT_STATE,
+        "ts",
+        datetime(2026, 7, 26, 9, 0, tzinfo=timezone.utc),
+    )
+    monkeypatch.setattr(main_module.time, "monotonic", lambda: 10.0)
+    monkeypatch.setattr(db_module, "get_trade_connection_read_only", ReadOnlyConnection)
+    monkeypatch.setattr(
+        cadence_module,
+        "collect_monitor_cadence_evidence",
+        lambda *_args, **_kwargs: {
+            "open_position_count": 0,
+            "fresh_position_count": 0,
+            "future_monitor_event_count": 0,
+        },
+    )
+    try:
+        assert main_module._defer_for_held_position_monitor("edli_event_reactor") is False
+        assert main_module._held_position_monitor_bootstrap_complete.is_set()
+    finally:
+        main_module._held_position_monitor_active.clear()
+        main_module._held_position_monitor_bootstrap_complete.clear()
+
+
+def test_reactor_bootstrap_allows_reduce_only_without_canonical_monitor_coverage(
     monkeypatch,
 ) -> None:
     import src.main as main_module
@@ -7137,7 +9100,7 @@ def test_reactor_bootstrap_stays_deferred_without_canonical_monitor_coverage(
         lambda: False,
     )
     try:
-        assert main_module._defer_for_held_position_monitor("edli_event_reactor") is True
+        assert main_module._defer_for_held_position_monitor("edli_event_reactor") is False
         assert main_module._held_position_monitor_bootstrap_complete.is_set() is False
     finally:
         main_module._held_position_monitor_active.clear()
@@ -7156,7 +9119,7 @@ def test_periodic_exit_monitor_yields_before_claim_to_urgent_day0_held_monitor(
     main_module._held_position_monitor_active.clear()
     main_module._held_position_monitor_bootstrap_complete.clear()
     main_module._day0_urgent_wake_pending.set()
-    main_module._periodic_exit_monitor_day0_yielded.clear()
+    main_module._periodic_exit_monitor_urgent_yielded.clear()
     main_module._day0_exit_monitor_attempts["wake-held"] = None
     monkeypatch.setattr(main_module, "_held_position_monitor_claim", UnexpectedClaim())
     try:
@@ -7164,7 +9127,7 @@ def test_periodic_exit_monitor_yields_before_claim_to_urgent_day0_held_monitor(
     finally:
         main_module._day0_urgent_wake_pending.clear()
         main_module._day0_exit_monitor_attempts.clear()
-        main_module._periodic_exit_monitor_day0_yielded.clear()
+        main_module._periodic_exit_monitor_urgent_yielded.clear()
 
     assert main_module._held_position_monitor_active.is_set() is False
     assert main_module._held_position_monitor_handoff_pending.is_set() is False
@@ -7195,26 +9158,26 @@ def test_periodic_exit_monitor_forces_full_book_after_one_continuous_day0_yield(
 
     main_module._held_position_monitor_active.clear()
     main_module._held_position_monitor_bootstrap_complete.clear()
-    main_module._periodic_exit_monitor_day0_yielded.clear()
+    main_module._periodic_exit_monitor_urgent_yielded.clear()
     main_module._day0_exit_monitor_attempts["continuous-day0"] = None
     monkeypatch.setattr(main_module, "_edli_reactor_active_lock", ReactorGate())
     monkeypatch.setattr(exit_module, "run_exit_monitor_cycle", _run)
     try:
         assert main_module._exit_monitor_cycle() is True
         assert calls == []
-        assert main_module._periodic_exit_monitor_day0_yielded.is_set()
+        assert main_module._periodic_exit_monitor_urgent_yielded.is_set()
 
         assert main_module._exit_monitor_cycle() is True
         assert calls == ["run"]
         assert main_module._held_position_monitor_bootstrap_complete.is_set() is False
-        assert not main_module._periodic_exit_monitor_day0_yielded.is_set()
+        assert not main_module._periodic_exit_monitor_urgent_yielded.is_set()
 
         assert main_module._exit_monitor_cycle() is True
         assert calls == ["run"]
-        assert main_module._periodic_exit_monitor_day0_yielded.is_set()
+        assert main_module._periodic_exit_monitor_urgent_yielded.is_set()
     finally:
         main_module._day0_exit_monitor_attempts.clear()
-        main_module._periodic_exit_monitor_day0_yielded.clear()
+        main_module._periodic_exit_monitor_urgent_yielded.clear()
 
 
 def test_day0_entry_wake_does_not_pause_unrelated_periodic_monitor(monkeypatch) -> None:
@@ -7289,6 +9252,163 @@ def test_periodic_exit_monitor_sees_urgent_held_claim_failure_preemption(
 
     assert main_module._held_position_monitor_active.is_set() is False
     assert main_module._day0_held_monitor_preempt_requested.is_set() is False
+
+
+def test_claim_busy_urgent_forecast_leaves_stable_preemption_debt() -> None:
+    import src.main as main_module
+
+    main_module._forecast_held_monitor_preempt_requested.clear()
+    assert main_module._held_position_monitor_claim.acquire(blocking=False)
+    try:
+        assert main_module._exit_monitor_cycle(
+            target_families=frozenset({("Paris", "2026-07-17", "high")}),
+            urgent_forecast=True,
+        ) is False
+        assert main_module._forecast_held_monitor_preempt_requested.is_set()
+    finally:
+        main_module._held_position_monitor_claim.release()
+        main_module._forecast_held_monitor_preempt_requested.clear()
+
+
+def test_periodic_exit_monitor_preempts_inflight_for_forecast_debt(
+    monkeypatch,
+) -> None:
+    import src.execution.exit_lifecycle as exit_module
+    import src.main as main_module
+
+    class ReactorGate:
+        def acquire(self, *, timeout: float) -> bool:
+            return True
+
+        def release(self) -> None:
+            pass
+
+    def _run(**kwargs) -> bool:
+        assert main_module._exit_monitor_cycle(
+            target_families=frozenset({("Paris", "2026-07-17", "high")}),
+            urgent_forecast=True,
+        ) is False
+        assert kwargs["should_preempt_for_urgent_day0"]() is True
+        kwargs["mark_held_position_monitor_complete"]()
+        return True
+
+    main_module._held_position_monitor_active.clear()
+    main_module._forecast_held_monitor_preempt_requested.clear()
+    main_module._periodic_exit_monitor_urgent_yielded.clear()
+    monkeypatch.setattr(main_module, "_edli_reactor_active_lock", ReactorGate())
+    monkeypatch.setattr(exit_module, "run_exit_monitor_cycle", _run)
+    try:
+        assert main_module._exit_monitor_cycle() is True
+    finally:
+        main_module._forecast_held_monitor_preempt_requested.clear()
+        main_module._periodic_exit_monitor_urgent_yielded.clear()
+        main_module._held_position_monitor_active.clear()
+
+
+def test_periodic_exit_monitor_immediately_owns_orphaned_forecast_handoff(
+    monkeypatch,
+) -> None:
+    import src.execution.exit_lifecycle as exit_module
+    import src.main as main_module
+
+    calls: list[str] = []
+
+    class ReactorGate:
+        def acquire(self, *, timeout: float) -> bool:
+            return True
+
+        def release(self) -> None:
+            pass
+
+    def _run(**kwargs) -> bool:
+        calls.append("run")
+        assert kwargs["target_families"] is None
+        assert kwargs["should_preempt_for_urgent_day0"]() is False
+        kwargs["mark_held_position_monitor_complete"]()
+        return True
+
+    main_module._held_position_monitor_active.clear()
+    main_module._forecast_held_monitor_preempt_requested.clear()
+    main_module._periodic_exit_monitor_urgent_yielded.clear()
+    monkeypatch.setattr(main_module, "_edli_reactor_active_lock", ReactorGate())
+    monkeypatch.setattr(exit_module, "run_exit_monitor_cycle", _run)
+    try:
+        assert main_module._held_position_monitor_claim.acquire(blocking=False)
+        try:
+            assert main_module._exit_monitor_cycle(
+                target_families=frozenset({("Paris", "2026-07-17", "high")}),
+                urgent_forecast=True,
+            ) is False
+        finally:
+            main_module._held_position_monitor_claim.release()
+        assert main_module._forecast_held_monitor_preempt_requested.is_set()
+
+        assert main_module._exit_monitor_cycle() is True
+        assert calls == ["run"]
+        assert not main_module._periodic_exit_monitor_urgent_yielded.is_set()
+        assert not main_module._forecast_held_monitor_preempt_requested.is_set()
+    finally:
+        main_module._forecast_held_monitor_preempt_requested.clear()
+        main_module._periodic_exit_monitor_urgent_yielded.clear()
+        main_module._held_position_monitor_active.clear()
+
+
+def test_periodic_claim_snapshot_cannot_hide_concurrent_urgent_request(
+    monkeypatch,
+) -> None:
+    """A request that observes the periodic claim is newer than its baseline."""
+    import src.main as main_module
+
+    claim_acquired = threading.Event()
+    allow_claim_return = threading.Event()
+
+    class Claim:
+        def __init__(self) -> None:
+            self.owned = False
+
+        def acquire(self, *, blocking=False):
+            assert blocking is False
+            if self.owned:
+                return False
+            self.owned = True
+            claim_acquired.set()
+            assert allow_claim_return.wait(timeout=2.0)
+            return True
+
+        def release(self) -> None:
+            self.owned = False
+
+    claim = Claim()
+    monkeypatch.setattr(main_module, "_held_position_monitor_claim", claim)
+    monkeypatch.setattr(main_module, "_held_monitor_preempt_generation", 0)
+
+    acquired: list[tuple[bool, int]] = []
+    recorded = threading.Event()
+
+    def periodic() -> None:
+        acquired.append(
+            main_module._acquire_held_monitor_claim(periodic_full_book=True)
+        )
+
+    def urgent() -> None:
+        assert claim.acquire(blocking=False) is False
+        main_module._record_held_monitor_preempt_request()
+        recorded.set()
+
+    periodic_thread = threading.Thread(target=periodic)
+    periodic_thread.start()
+    assert claim_acquired.wait(timeout=2.0)
+    urgent_thread = threading.Thread(target=urgent)
+    urgent_thread.start()
+    assert not recorded.wait(timeout=0.05)
+    allow_claim_return.set()
+    periodic_thread.join(timeout=2.0)
+    urgent_thread.join(timeout=2.0)
+
+    assert acquired == [(True, 0)]
+    assert recorded.is_set()
+    assert main_module._held_monitor_preempt_generation_now() == 1
+    claim.release()
 
 
 def test_targeted_exit_monitor_does_not_complete_full_book_bootstrap(
@@ -7397,6 +9517,16 @@ def test_urgent_exit_monitor_finishes_before_newer_day0_wake(monkeypatch) -> Non
         return True
 
     main_module._held_position_monitor_active.clear()
+    monkeypatch.setattr(
+        main_module,
+        "_canonical_overdue_monitor_families",
+        lambda **_kwargs: frozenset(),
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_held_position_monitor_debt_pending",
+        lambda: False,
+    )
     monkeypatch.setattr(main_module, "_edli_reactor_active_lock", ReactorGate())
     monkeypatch.setattr(exit_module, "run_exit_monitor_cycle", _run)
     monkeypatch.setattr(
@@ -7421,6 +9551,107 @@ def test_urgent_exit_monitor_finishes_before_newer_day0_wake(monkeypatch) -> Non
     assert main_module._held_position_monitor_active.is_set() is False
 
 
+def test_targeted_monitor_absorbs_every_canonically_overdue_family(
+    monkeypatch,
+) -> None:
+    import src.execution.exit_lifecycle as exit_module
+    import src.main as main_module
+
+    captured = {}
+
+    class ReactorGate:
+        def acquire(self, *, timeout: float) -> bool:
+            return True
+
+        def release(self) -> None:
+            pass
+
+    monkeypatch.setattr(
+        main_module,
+        "_canonical_overdue_monitor_families",
+        lambda **_kwargs: frozenset(
+            {
+                ("London", "2026-08-12", "high"),
+                ("Moscow", "2026-08-12", "high"),
+            }
+        ),
+    )
+    monkeypatch.setattr(main_module, "_edli_reactor_active_lock", ReactorGate())
+
+    def run(**kwargs) -> bool:
+        captured.update(kwargs)
+        assert kwargs["should_preempt_for_urgent_day0"]() is False
+        kwargs["mark_held_position_monitor_complete"]()
+        return True
+
+    monkeypatch.setattr(exit_module, "run_exit_monitor_cycle", run)
+    main_module._held_position_monitor_active.clear()
+    main_module._held_position_monitor_canonical_debt.set()
+    try:
+        assert main_module._exit_monitor_cycle(
+            target_families=frozenset({("Paris", "2026-08-12", "high")}),
+            urgent_day0=True,
+        )
+    finally:
+        main_module._held_position_monitor_active.clear()
+        main_module._held_position_monitor_canonical_debt.clear()
+
+    assert captured["target_families"] == frozenset(
+        {
+            ("Paris", "2026-08-12", "high"),
+            ("London", "2026-08-12", "high"),
+            ("Moscow", "2026-08-12", "high"),
+        }
+    )
+
+
+def test_targeted_monitor_preempts_only_for_new_canonical_cadence_debt(
+    monkeypatch,
+) -> None:
+    import src.execution.exit_lifecycle as exit_module
+    import src.main as main_module
+
+    callbacks = []
+
+    class ReactorGate:
+        def acquire(self, *, timeout: float) -> bool:
+            return True
+
+        def release(self) -> None:
+            pass
+
+    debt = iter((False, True))
+    monkeypatch.setattr(
+        main_module,
+        "_canonical_overdue_monitor_families",
+        lambda **_kwargs: frozenset({("London", "2026-08-12", "high")}),
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_held_position_monitor_debt_pending",
+        lambda: next(debt),
+    )
+    monkeypatch.setattr(main_module, "_edli_reactor_active_lock", ReactorGate())
+
+    def run(**kwargs) -> bool:
+        callback = kwargs["should_preempt_for_urgent_day0"]
+        callbacks.extend((callback(), callback()))
+        kwargs["mark_held_position_monitor_complete"]()
+        return True
+
+    monkeypatch.setattr(exit_module, "run_exit_monitor_cycle", run)
+    main_module._held_position_monitor_active.clear()
+    try:
+        assert main_module._exit_monitor_cycle(
+            target_families=frozenset({("Paris", "2026-08-12", "high")}),
+            urgent_day0=True,
+        )
+    finally:
+        main_module._held_position_monitor_active.clear()
+
+    assert callbacks == [False, True]
+
+
 def test_periodic_exit_monitor_yields_when_day0_arrives_during_handoff(
     monkeypatch,
 ) -> None:
@@ -7440,7 +9671,7 @@ def test_periodic_exit_monitor_yields_when_day0_arrives_during_handoff(
 
     main_module._held_position_monitor_active.clear()
     main_module._day0_urgent_wake_pending.clear()
-    main_module._periodic_exit_monitor_day0_yielded.clear()
+    main_module._periodic_exit_monitor_urgent_yielded.clear()
     monkeypatch.setattr(main_module, "_edli_reactor_active_lock", ReactorGate())
     monkeypatch.setattr(
         exit_module,
@@ -7452,7 +9683,7 @@ def test_periodic_exit_monitor_yields_when_day0_arrives_during_handoff(
     finally:
         main_module._day0_urgent_wake_pending.clear()
         main_module._day0_exit_monitor_attempts.clear()
-        main_module._periodic_exit_monitor_day0_yielded.clear()
+        main_module._periodic_exit_monitor_urgent_yielded.clear()
 
     assert calls == ["release"]
     assert main_module._held_position_monitor_active.is_set() is False
@@ -7491,6 +9722,7 @@ def test_held_monitor_reuses_warm_bounded_clob_transport(monkeypatch) -> None:
 
     created = []
     warm_timeouts = []
+    prepared = []
 
     class Client:
         def __init__(self, **kwargs):
@@ -7505,6 +9737,9 @@ def test_held_monitor_reuses_warm_bounded_clob_transport(monkeypatch) -> None:
             warm_timeouts.append(timeout)
             return True
 
+        def prepare_order_truth_reader(self) -> None:
+            prepared.append(self)
+
     exit_module._reset_held_monitor_clob_client()
     monkeypatch.setattr(polymarket_module, "PolymarketClient", Client)
     try:
@@ -7518,6 +9753,7 @@ def test_held_monitor_reuses_warm_bounded_clob_transport(monkeypatch) -> None:
         assert first.kwargs["public_http_limits"].keepalive_expiry == 180.0
         assert exit_module.warm_held_monitor_clob_client() is True
         assert warm_timeouts[-1].connect == 4.5
+        assert prepared == [first]
     finally:
         exit_module._reset_held_monitor_clob_client()
 
@@ -7551,7 +9787,7 @@ def test_day0_wake_does_not_ack_incomplete_exit_monitor(monkeypatch) -> None:
         def is_set(self) -> bool:
             return False
 
-    monkeypatch.setattr(wake_module, "read_reactor_wake", lambda: wake)
+    monkeypatch.setattr(wake_module, "read_reactor_wake", lambda **_kwargs: wake)
     monkeypatch.setattr(
         wake_module,
         "acknowledge_reactor_wake",
@@ -7616,7 +9852,7 @@ def test_held_sell_completion_wake_stays_durable_until_economic_cut(
         "_exit_monitor_excluded_wake_ids",
         lambda: frozenset(),
     )
-    monkeypatch.setattr(wake_module, "read_reactor_wake", lambda: wake)
+    monkeypatch.setattr(wake_module, "read_reactor_wake", lambda **_kwargs: wake)
     monkeypatch.setattr(
         wake_module,
         "coalescible_reactor_wakes",
@@ -7645,8 +9881,214 @@ def test_held_sell_completion_wake_stays_durable_until_economic_cut(
             "producer_wake_published_at": wake.published_at,
             "producer_wake_event_ids": (),
             "producer_wake_families": family_wake.forecast_families,
+            "allow_paused_forecast_snapshot_completion": False,
         }
     ]
+
+
+def test_position_held_sell_reauction_wake_does_not_ack_generic_reactor_run(
+    monkeypatch,
+) -> None:
+    import src.main as main_module
+    import src.runtime.reactor_wake as wake_module
+
+    request = wake_module.make_held_sell_reauction_request(
+        position_id="position-generic-run",
+        family=("Paris", "2026-07-28", "low"),
+        probability_content_identity="q-content-generic-run",
+        held_token_id="token-no-generic-run",
+        held_best_bid=0.10,
+        bid_observed_at="2026-07-28T08:00:00+00:00",
+    )
+    wake = wake_module.ReactorWake(
+        "wake-position-held-sell",
+        "2026-07-28T08:00:00+00:00",
+        "held_position_monitor",
+        wake_module.GLOBAL_AUCTION_COMPLETION_WAKE_REASON,
+        forecast_families=(request.family,),
+        held_sell_reauction_requests=(request,),
+    )
+    acknowledgements: list[str] = []
+    cycle_calls: list[dict] = []
+
+    class IdleLock:
+        def locked(self) -> bool:
+            return False
+
+    monkeypatch.setattr(
+        main_module,
+        "_defer_for_held_position_monitor",
+        lambda _job: False,
+    )
+    monkeypatch.setattr(main_module, "_exit_monitor_excluded_wake_ids", lambda: frozenset())
+    monkeypatch.setattr(wake_module, "read_reactor_wake", lambda **_kwargs: wake)
+    monkeypatch.setattr(wake_module, "coalescible_reactor_wakes", lambda _wake: (wake,))
+    monkeypatch.setattr(
+        wake_module,
+        "acknowledge_reactor_wake",
+        lambda selected: acknowledgements.append(selected.wake_id) or True,
+    )
+    monkeypatch.setattr(
+        wake_module,
+        "held_sell_reauction_requests_completed",
+        lambda _requests: False,
+    )
+    monkeypatch.setattr(main_module, "_edli_reactor_active_lock", IdleLock())
+    monkeypatch.setattr(
+        main_module,
+        "_edli_event_reactor_cycle",
+        lambda **kwargs: cycle_calls.append(kwargs) or True,
+    )
+    monkeypatch.setattr(main_module, "_edli_last_reactor_wake_id", None)
+
+    assert main_module._edli_reactor_wake_poll_once() is False
+    assert acknowledgements == []
+    assert cycle_calls[0]["producer_held_sell_reauction_requests"] == (request,)
+
+
+def test_position_held_sell_reauction_wake_acks_after_typed_receipt(monkeypatch) -> None:
+    import src.main as main_module
+    import src.runtime.reactor_wake as wake_module
+
+    request = wake_module.make_held_sell_reauction_request(
+        position_id="position-typed-receipt",
+        family=("Paris", "2026-07-28", "low"),
+        probability_content_identity="q-content-typed-receipt",
+        held_token_id="token-no-typed-receipt",
+        held_best_bid=0.10,
+        bid_observed_at="2026-07-28T08:00:00+00:00",
+    )
+    wake = wake_module.ReactorWake(
+        "wake-position-typed-receipt",
+        "2026-07-28T08:00:00+00:00",
+        "held_position_monitor",
+        wake_module.GLOBAL_AUCTION_COMPLETION_WAKE_REASON,
+        forecast_families=(request.family,),
+        held_sell_reauction_requests=(request,),
+    )
+    acknowledgements: list[str] = []
+
+    class IdleLock:
+        def locked(self) -> bool:
+            return False
+
+    monkeypatch.setattr(
+        main_module,
+        "_defer_for_held_position_monitor",
+        lambda _job: False,
+    )
+    monkeypatch.setattr(main_module, "_exit_monitor_excluded_wake_ids", lambda: frozenset())
+    monkeypatch.setattr(wake_module, "read_reactor_wake", lambda **_kwargs: wake)
+    monkeypatch.setattr(wake_module, "coalescible_reactor_wakes", lambda _wake: (wake,))
+    monkeypatch.setattr(
+        wake_module,
+        "acknowledge_reactor_wake",
+        lambda selected: acknowledgements.append(selected.wake_id) or True,
+    )
+    monkeypatch.setattr(
+        wake_module,
+        "held_sell_reauction_requests_completed",
+        lambda _requests: True,
+    )
+    monkeypatch.setattr(main_module, "_edli_reactor_active_lock", IdleLock())
+    monkeypatch.setattr(main_module, "_edli_event_reactor_cycle", lambda **_kwargs: True)
+    monkeypatch.setattr(main_module, "_edli_last_reactor_wake_id", None)
+
+    assert main_module._edli_reactor_wake_poll_once() is True
+    assert acknowledgements == [wake.wake_id]
+
+
+def test_forced_held_sell_generation_waits_for_its_exact_receipt(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    import src.main as main_module
+    import src.runtime.reactor_wake as wake_module
+
+    request_kwargs = {
+        "position_id": "position-generation-ack",
+        "family": ("Paris", "2026-07-28", "low"),
+        "probability_content_identity": "q-content-generation-ack",
+        "held_token_id": "token-no-generation-ack",
+        "held_best_bid": 0.10,
+        "bid_observed_at": "2026-07-28T08:00:00+00:00",
+    }
+    old_request = wake_module.make_held_sell_reauction_request(
+        **request_kwargs,
+        generation="old-generation",
+    )
+    new_request = wake_module.make_held_sell_reauction_request(
+        **request_kwargs,
+        generation="forced-generation",
+    )
+    receipt_path = tmp_path / "wake.json"
+    assert wake_module.persist_held_sell_reauction_receipts(
+        (
+            wake_module.HeldSellReauctionReceipt(
+                request_id=old_request.request_id,
+                material_identity=old_request.material_identity,
+                generation=old_request.generation,
+                status="REJECTED",
+                reason="GLOBAL_AUCTION_CURRENT_HOLDING_REJECTED:CASH_DOMINATES",
+            ),
+        ),
+        path=receipt_path,
+    )
+    wake = wake_module.ReactorWake(
+        "wake-forced-generation",
+        "2026-07-28T08:00:00+00:00",
+        "held_position_monitor",
+        wake_module.GLOBAL_AUCTION_COMPLETION_WAKE_REASON,
+        forecast_families=(new_request.family,),
+        held_sell_reauction_requests=(new_request,),
+    )
+    acknowledgements: list[str] = []
+
+    class IdleLock:
+        def locked(self) -> bool:
+            return False
+
+    monkeypatch.setattr(
+        main_module,
+        "_defer_for_held_position_monitor",
+        lambda _job: False,
+    )
+    monkeypatch.setattr(main_module, "_exit_monitor_excluded_wake_ids", lambda: frozenset())
+    monkeypatch.setattr(wake_module, "read_reactor_wake", lambda **_kwargs: wake)
+    monkeypatch.setattr(wake_module, "coalescible_reactor_wakes", lambda _wake: (wake,))
+    monkeypatch.setattr(
+        wake_module,
+        "acknowledge_reactor_wake",
+        lambda selected: acknowledgements.append(selected.wake_id) or True,
+    )
+    completed = wake_module.held_sell_reauction_requests_completed
+    monkeypatch.setattr(
+        wake_module,
+        "held_sell_reauction_requests_completed",
+        lambda requests: completed(requests, path=receipt_path),
+    )
+    monkeypatch.setattr(main_module, "_edli_reactor_active_lock", IdleLock())
+    monkeypatch.setattr(main_module, "_edli_event_reactor_cycle", lambda **_kwargs: True)
+    monkeypatch.setattr(main_module, "_edli_last_reactor_wake_id", None)
+
+    assert main_module._edli_reactor_wake_poll_once() is False
+    assert acknowledgements == []
+
+    assert wake_module.persist_held_sell_reauction_receipts(
+        (
+            wake_module.HeldSellReauctionReceipt(
+                request_id=new_request.request_id,
+                material_identity=new_request.material_identity,
+                generation=new_request.generation,
+                status="REJECTED",
+                reason="GLOBAL_AUCTION_CURRENT_HOLDING_REJECTED:CASH_DOMINATES",
+            ),
+        ),
+        path=receipt_path,
+    )
+    assert main_module._edli_reactor_wake_poll_once() is False
+    assert main_module._edli_reactor_wake_poll_once() is True
+    assert acknowledgements == [wake.wake_id]
 
 
 def test_claimed_monitor_owns_day0_priority_without_starving_reactor(
@@ -7774,6 +10216,229 @@ def test_processed_day0_wake_runs_held_monitor_before_ack(monkeypatch) -> None:
     assert acknowledgements == ["wake-day0-processed"]
 
 
+def test_terminal_day0_cleanup_batches_only_obligation_free_wakes(monkeypatch) -> None:
+    import src.main as main_module
+    import src.runtime.reactor_wake as wake_module
+
+    def day0(wake_id, event_id, city, *, held_requests=()):
+        return wake_module.ReactorWake(
+            wake_id,
+            "2026-08-06T07:00:00+00:00",
+            "day0_extreme_updated_trigger",
+            "day0_extreme_event_committed",
+            (event_id,),
+            ((city, "2026-08-06", "high"),),
+            held_requests,
+        )
+
+    selected = day0("wake-selected", "event-terminal-selected", "Paris")
+    safe = day0("wake-safe", "event-terminal-safe", "London")
+    missing = day0("wake-missing", "event-missing", "Toronto")
+    pending = day0("wake-pending", "event-pending", "Madrid")
+    deferred = day0("wake-deferred", "event-future-retry", "Berlin")
+    exposed = day0("wake-exposed", "event-terminal-exposed", "Milan")
+    held_sell = day0(
+        "wake-held-sell",
+        "event-terminal-held-sell",
+        "Rome",
+        held_requests=(object(),),
+    )
+    monkeypatch.setattr(
+        wake_module,
+        "reactor_wakes_for_reason",
+        lambda *_args, **_kwargs: (
+            selected,
+            safe,
+            missing,
+            pending,
+            deferred,
+            exposed,
+            held_sell,
+        ),
+    )
+    monkeypatch.setattr(main_module, "_pending_held_day0_wake_families", lambda: frozenset())
+    monkeypatch.setattr(
+        main_module,
+        "_reactor_wake_event_state",
+        lambda event_ids: main_module._ReactorWakeEventState(
+            ready=event_ids == ("event-pending",),
+            finished=event_ids != ("event-pending",),
+            terminal=event_ids not in {
+                ("event-pending",),
+                ("event-future-retry",),
+            },
+            all_terminal=event_ids not in {
+                ("event-pending",),
+                ("event-future-retry",),
+            },
+            all_missing=event_ids == ("event-missing",),
+        ),
+    )
+    event_families = {
+        "event-terminal-selected": frozenset({("Paris", "2026-08-06", "high")}),
+        "event-terminal-safe": frozenset({("London", "2026-08-06", "high")}),
+        "event-pending": frozenset({("Madrid", "2026-08-06", "high")}),
+        "event-future-retry": frozenset({("Berlin", "2026-08-06", "high")}),
+        "event-terminal-exposed": frozenset({("Milan", "2026-08-06", "high")}),
+        "event-terminal-held-sell": frozenset({("Rome", "2026-08-06", "high")}),
+    }
+    monkeypatch.setattr(
+        main_module,
+        "_day0_wake_target_families",
+        lambda event_ids: event_families.get(event_ids[0]),
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_day0_wake_requires_exit_monitor",
+        lambda families: any(city == "Milan" for city, _date, _metric in families),
+    )
+
+    cleanup = main_module._terminal_day0_cleanup_wakes(selected)
+
+    assert tuple(wake.wake_id for wake in cleanup) == (
+        "wake-selected",
+        "wake-safe",
+        "wake-missing",
+    )
+
+
+def test_terminal_day0_cleanup_is_bounded_and_probe_failure_retains_selected(
+    monkeypatch,
+) -> None:
+    import src.main as main_module
+    import src.runtime.reactor_wake as wake_module
+
+    wakes = tuple(
+        wake_module.ReactorWake(
+            f"wake-{index}",
+            "2026-08-06T07:00:00+00:00",
+            "day0_extreme_updated_trigger",
+            "day0_extreme_event_committed",
+            (f"event-{index}",),
+            (("Paris", "2026-08-06", "high"),),
+        )
+        for index in range(101)
+    )
+    monkeypatch.setattr(
+        wake_module,
+        "reactor_wakes_for_reason",
+        lambda *_args, **_kwargs: wakes,
+    )
+    monkeypatch.setattr(main_module, "_pending_held_day0_wake_families", lambda: frozenset())
+    monkeypatch.setattr(
+        main_module,
+        "_reactor_wake_event_state",
+        lambda _event_ids: main_module._ReactorWakeEventState(
+            ready=False,
+            finished=True,
+            terminal=True,
+            all_terminal=True,
+        ),
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_day0_wake_target_families",
+        lambda _event_ids: frozenset({("Paris", "2026-08-06", "high")}),
+    )
+    monkeypatch.setattr(main_module, "_day0_wake_requires_exit_monitor", lambda _families: False)
+
+    assert len(main_module._terminal_day0_cleanup_wakes(wakes[0])) == 100
+
+    monkeypatch.setattr(main_module, "_pending_held_day0_wake_families", lambda: None)
+    assert main_module._terminal_day0_cleanup_wakes(wakes[0]) is None
+
+    held_selected = wake_module.ReactorWake(
+        **{
+            **wakes[0].__dict__,
+            "held_sell_reauction_requests": (object(),),
+        }
+    )
+    monkeypatch.setattr(main_module, "_pending_held_day0_wake_families", lambda: frozenset())
+    assert main_module._terminal_day0_cleanup_wakes(held_selected) is None
+
+
+def test_terminal_day0_poll_acknowledges_safe_cleanup_as_one_exact_batch(
+    monkeypatch,
+) -> None:
+    import src.main as main_module
+    import src.runtime.reactor_wake as wake_module
+
+    selected = wake_module.ReactorWake(
+        "wake-selected-batch",
+        "2026-08-06T07:00:01+00:00",
+        "day0_extreme_updated_trigger",
+        "day0_extreme_event_committed",
+        ("event-selected-batch",),
+        (("Paris", "2026-08-06", "high"),),
+    )
+    safe = wake_module.ReactorWake(
+        "wake-safe-batch",
+        "2026-08-06T07:00:00+00:00",
+        "day0_extreme_updated_trigger",
+        "day0_extreme_event_committed",
+        ("event-safe-batch",),
+        (("London", "2026-08-06", "high"),),
+    )
+    acknowledged: list[tuple[str, ...]] = []
+    monkeypatch.setattr(main_module, "_defer_for_held_position_monitor", lambda _name: False)
+    monkeypatch.setattr(
+        main_module,
+        "_paused_forecast_carrier_priority_allowed",
+        lambda **_kwargs: False,
+    )
+    monkeypatch.setattr(wake_module, "read_reactor_wake", lambda **_kwargs: selected)
+    monkeypatch.setattr(wake_module, "coalescible_reactor_wakes", lambda _wake: (selected,))
+    monkeypatch.setattr(
+        wake_module,
+        "reactor_wakes_for_reason",
+        lambda *_args, **_kwargs: (selected, safe),
+    )
+    monkeypatch.setattr(
+        wake_module,
+        "acknowledge_reactor_wakes",
+        lambda wakes: acknowledged.append(tuple(wake.wake_id for wake in wakes)) or True,
+    )
+    monkeypatch.setattr(
+        wake_module,
+        "acknowledge_reactor_wake",
+        lambda _wake: pytest.fail("terminal cleanup must use one exact batch ACK"),
+    )
+    monkeypatch.setattr(wake_module, "reactor_urgent_wake_identity", lambda: None)
+    monkeypatch.setattr(
+        main_module,
+        "_reactor_wake_event_state",
+        lambda _event_ids: main_module._ReactorWakeEventState(
+            ready=False,
+            finished=True,
+            terminal=True,
+            all_terminal=True,
+        ),
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_day0_wake_target_families",
+        lambda event_ids: frozenset(
+            {
+                (
+                    "Paris" if event_ids == ("event-selected-batch",) else "London",
+                    "2026-08-06",
+                    "high",
+                )
+            }
+        ),
+    )
+    monkeypatch.setattr(main_module, "_pending_held_day0_wake_families", lambda: frozenset())
+    monkeypatch.setattr(main_module, "_day0_wake_requires_exit_monitor", lambda _families: False)
+    monkeypatch.setattr(main_module, "_record_day0_no_monitor_completion", lambda _wake_id: True)
+    monkeypatch.setattr(main_module, "_edli_last_reactor_wake_id", None)
+    main_module._held_position_monitor_active.clear()
+
+    assert main_module._edli_reactor_wake_poll_once() is True
+    assert acknowledged == [("wake-selected-batch", "wake-safe-batch")]
+    assert main_module._edli_terminal_day0_cleanup_yield.is_set()
+    main_module._edli_terminal_day0_cleanup_yield.clear()
+
+
 def test_targeted_exit_monitor_filters_positions_without_mutating_full_portfolio() -> None:
     from types import SimpleNamespace
 
@@ -7824,12 +10489,19 @@ def test_exit_monitor_handoff_timeout_releases_priority_claim(monkeypatch) -> No
     import src.main as main_module
 
     calls: list[str] = []
+    observed_timeouts: list[float] = []
 
     class BusyReactorGate:
         def acquire(self, *, timeout: float) -> bool:
+            observed_timeouts.append(timeout)
             return False
 
     main_module._held_position_monitor_active.clear()
+    monkeypatch.setattr(
+        main_module,
+        "_current_periodic_monitor_obligation_count",
+        lambda: None,
+    )
     monkeypatch.setattr(main_module, "_edli_reactor_active_lock", BusyReactorGate())
     monkeypatch.setattr(
         exit_module,
@@ -7840,8 +10512,717 @@ def test_exit_monitor_handoff_timeout_releases_priority_claim(monkeypatch) -> No
     assert main_module._exit_monitor_cycle() is False
 
     assert calls == []
+    assert observed_timeouts == [main_module._EXIT_MONITOR_REACTOR_HANDOFF_SECONDS]
+    assert main_module._periodic_held_position_monitor_fairness_debt.is_set()
     assert not main_module._held_position_monitor_active.is_set()
     assert not main_module._held_position_monitor_handoff_pending.is_set()
+    main_module._periodic_held_position_monitor_fairness_debt.clear()
+
+
+def test_recovery_full_book_handoff_returns_before_next_recovery_tick(
+    monkeypatch,
+) -> None:
+    import src.execution.exit_lifecycle as exit_module
+    import src.main as main_module
+
+    observed_timeouts: list[float] = []
+
+    class BusyReactorGate:
+        def acquire(self, *, timeout: float) -> bool:
+            observed_timeouts.append(timeout)
+            return False
+
+    main_module._held_position_monitor_active.clear()
+    main_module._periodic_held_position_monitor_fairness_debt.clear()
+    monkeypatch.setattr(
+        main_module,
+        "_current_periodic_monitor_obligation_count",
+        lambda: 1,
+    )
+    monkeypatch.setattr(main_module, "_edli_reactor_active_lock", BusyReactorGate())
+    monkeypatch.setattr(
+        exit_module,
+        "run_exit_monitor_cycle",
+        lambda **_kwargs: pytest.fail("busy reactor must not admit recovery writer"),
+    )
+    try:
+        assert main_module._exit_monitor_cycle(recovery_full_book=True) is False
+        assert observed_timeouts == [
+            main_module._URGENT_EXIT_MONITOR_REACTOR_HANDOFF_SECONDS
+        ]
+        assert observed_timeouts[0] < 30.0
+        assert main_module._periodic_held_position_monitor_fairness_debt.is_set()
+        assert not main_module._held_position_monitor_active.is_set()
+        assert not main_module._held_position_monitor_handoff_pending.is_set()
+        assert main_module._held_position_monitor_claim.acquire(blocking=False)
+        main_module._held_position_monitor_claim.release()
+    finally:
+        main_module._periodic_held_position_monitor_fairness_debt.clear()
+
+
+def test_periodic_full_book_timeout_fairness_debt_yields_reactor_until_coverage(
+    monkeypatch,
+) -> None:
+    import src.execution.exit_lifecycle as exit_module
+    import src.main as main_module
+
+    class BusyReactorGate:
+        def acquire(self, *, timeout: float) -> bool:
+            return False
+
+    class IdleReactorGate:
+        def acquire(self, *, timeout: float) -> bool:
+            return True
+
+        def release(self) -> None:
+            pass
+
+    main_module._held_position_monitor_active.clear()
+    main_module._held_position_monitor_handoff_pending.clear()
+    main_module._periodic_held_position_monitor_handoff_pending.clear()
+    main_module._periodic_held_position_monitor_fairness_debt.clear()
+    main_module._held_position_monitor_bootstrap_complete.set()
+    main_module._day0_urgent_wake_pending.clear()
+    main_module._day0_held_monitor_preempt_requested.clear()
+    main_module._periodic_exit_monitor_urgent_yielded.clear()
+    monkeypatch.setattr(
+        main_module,
+        "_current_periodic_monitor_obligation_count",
+        lambda: 1,
+    )
+    monkeypatch.setattr(main_module, "_edli_reactor_active_lock", BusyReactorGate())
+    monkeypatch.setattr(
+        exit_module,
+        "run_exit_monitor_cycle",
+        lambda **_kwargs: pytest.fail("timed-out monitor must not run coverage"),
+    )
+    try:
+        assert main_module._exit_monitor_cycle() is False
+        assert main_module._periodic_held_position_monitor_fairness_debt.is_set()
+        assert main_module._defer_for_held_position_monitor("edli_event_reactor") is True
+
+        monkeypatch.setattr(main_module, "_edli_reactor_active_lock", IdleReactorGate())
+        monkeypatch.setattr(
+            exit_module,
+            "run_exit_monitor_cycle",
+            lambda **kwargs: kwargs["mark_held_position_monitor_complete"]() or True,
+        )
+        assert main_module._exit_monitor_cycle(
+            target_families=frozenset({("Paris", "2026-07-30", "high")}),
+            urgent_day0=True,
+        ) is True
+        assert main_module._periodic_held_position_monitor_fairness_debt.is_set()
+
+        assert main_module._exit_monitor_cycle() is True
+        assert not main_module._periodic_held_position_monitor_fairness_debt.is_set()
+        assert main_module._defer_for_held_position_monitor("edli_event_reactor") is False
+    finally:
+        main_module._held_position_monitor_active.clear()
+        main_module._held_position_monitor_handoff_pending.clear()
+        main_module._periodic_held_position_monitor_handoff_pending.clear()
+        main_module._periodic_held_position_monitor_fairness_debt.clear()
+        main_module._held_position_monitor_canonical_debt.clear()
+        main_module._held_position_monitor_bootstrap_complete.clear()
+        main_module._day0_urgent_wake_pending.clear()
+        main_module._day0_held_monitor_preempt_requested.clear()
+        main_module._periodic_exit_monitor_urgent_yielded.clear()
+
+
+def test_zero_obligation_periodic_monitor_clears_debt_without_reactor_handoff(
+    monkeypatch,
+) -> None:
+    import src.execution.exit_lifecycle as exit_module
+    import src.main as main_module
+
+    class ReactorHandoffMustNotRun:
+        def acquire(self, *, timeout: float) -> bool:
+            pytest.fail(f"zero exposure must not wait {timeout}s for reactor handoff")
+
+    was_bootstrap_complete = (
+        main_module._held_position_monitor_bootstrap_complete.is_set()
+    )
+    main_module._held_position_monitor_active.clear()
+    main_module._periodic_held_position_monitor_fairness_debt.set()
+    main_module._day0_held_monitor_preempt_requested.set()
+    monkeypatch.setattr(
+        main_module,
+        "_current_periodic_monitor_obligation_count",
+        lambda: 0,
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_edli_reactor_active_lock",
+        ReactorHandoffMustNotRun(),
+    )
+    monkeypatch.setattr(
+        exit_module,
+        "run_exit_monitor_cycle",
+        lambda **_kwargs: pytest.fail("zero exposure has no monitor body obligation"),
+    )
+
+    try:
+        assert main_module._exit_monitor_cycle.__wrapped__() is True
+        assert not main_module._periodic_held_position_monitor_fairness_debt.is_set()
+        assert not main_module._held_position_monitor_active.is_set()
+        assert not main_module._held_position_monitor_handoff_pending.is_set()
+        assert not main_module._day0_held_monitor_preempt_requested.is_set()
+        assert main_module._held_position_monitor_claim.acquire(blocking=False)
+        main_module._held_position_monitor_claim.release()
+    finally:
+        main_module._periodic_held_position_monitor_fairness_debt.clear()
+        if not was_bootstrap_complete:
+            main_module._held_position_monitor_bootstrap_complete.clear()
+
+
+def test_periodic_monitor_timeout_rechecks_exposure_before_arming_debt(
+    monkeypatch,
+) -> None:
+    import src.execution.exit_lifecycle as exit_module
+    import src.main as main_module
+
+    class BusyReactorGate:
+        def acquire(self, *, timeout: float) -> bool:
+            return False
+
+    obligation_counts = iter((1, 0))
+    was_bootstrap_complete = (
+        main_module._held_position_monitor_bootstrap_complete.is_set()
+    )
+    main_module._held_position_monitor_active.clear()
+    main_module._periodic_held_position_monitor_fairness_debt.set()
+    monkeypatch.setattr(
+        main_module,
+        "_current_periodic_monitor_obligation_count",
+        lambda: next(obligation_counts),
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_edli_reactor_active_lock",
+        BusyReactorGate(),
+    )
+    monkeypatch.setattr(
+        exit_module,
+        "run_exit_monitor_cycle",
+        lambda **_kwargs: pytest.fail("timed-out monitor must not run coverage"),
+    )
+
+    try:
+        assert main_module._exit_monitor_cycle.__wrapped__() is True
+        assert not main_module._periodic_held_position_monitor_fairness_debt.is_set()
+        with pytest.raises(StopIteration):
+            next(obligation_counts)
+    finally:
+        main_module._periodic_held_position_monitor_fairness_debt.clear()
+        if not was_bootstrap_complete:
+            main_module._held_position_monitor_bootstrap_complete.clear()
+
+
+def test_current_monitor_obligation_count_uses_cadence_exposure_contract() -> None:
+    from src.ops.monitor_cadence import count_current_monitor_obligations
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        """
+        CREATE TABLE position_current (
+            position_id TEXT,
+            phase TEXT,
+            shares REAL,
+            chain_shares REAL,
+            chain_state TEXT,
+            order_status TEXT,
+            exit_reason TEXT,
+            target_date TEXT
+        )
+        """
+    )
+    conn.executemany(
+        "INSERT INTO position_current VALUES (?, ?, ?, ?, '', '', '', '2026-08-03')",
+        (
+            ("active-local", "active", 0.02, 0.0),
+            ("active-dust", "active", 0.005, 0.0),
+            ("active-chain", "active", 0.02, None),
+            ("pending-chain", "pending_exit", 0.0, 0.02),
+            ("closed", "settled", 100.0, 100.0),
+        ),
+    )
+
+    try:
+        assert count_current_monitor_obligations(
+            conn,
+            now=datetime(2026, 8, 3, tzinfo=timezone.utc),
+        ) == 3
+        conn.execute(
+            "INSERT INTO position_current VALUES "
+            "('unknown-exposure', 'active', NULL, 0, '', '', '', '2026-08-03')"
+        )
+        with pytest.raises(
+            RuntimeError,
+            match="MONITOR_OBLIGATION_EXPOSURE_UNKNOWN:unknown-exposure",
+        ):
+            count_current_monitor_obligations(
+                conn,
+                now=datetime(2026, 8, 3, tzinfo=timezone.utc),
+            )
+    finally:
+        conn.close()
+
+    incomplete = sqlite3.connect(":memory:")
+    incomplete.row_factory = sqlite3.Row
+    incomplete.execute(
+        "CREATE TABLE position_current (position_id TEXT, phase TEXT, shares REAL)"
+    )
+    try:
+        with pytest.raises(
+            RuntimeError,
+            match="MONITOR_OBLIGATION_SCHEMA_INCOMPLETE:chain_shares",
+        ):
+            count_current_monitor_obligations(
+                incomplete,
+                now=datetime(2026, 8, 3, tzinfo=timezone.utc),
+            )
+    finally:
+        incomplete.close()
+
+
+def test_durable_monitor_recovery_is_a_noop_with_fresh_canonical_coverage(
+    monkeypatch,
+) -> None:
+    import src.main as main_module
+    import src.ops.monitor_cadence as cadence_module
+    import src.state.db as db_module
+
+    class ReadOnlyConnection:
+        closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    conn = ReadOnlyConnection()
+    observed_kwargs: dict[str, object] = {}
+    monkeypatch.setattr(db_module, "get_trade_connection_read_only", lambda: conn)
+    monkeypatch.setattr(
+        cadence_module,
+        "collect_monitor_cadence_evidence",
+        lambda *_args, **kwargs: observed_kwargs.update(kwargs) or {
+            "stale_or_missing_position_count": 0,
+            "future_monitor_event_count": 0,
+        },
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_exit_monitor_cycle",
+        lambda: pytest.fail("fresh canonical coverage must not run recovery"),
+    )
+
+    assert (
+        main_module._durable_held_position_monitor_recovery_cycle.__wrapped__()
+        is True
+    )
+    assert conn.closed is True
+    assert (
+        observed_kwargs["max_age_seconds"]
+        == main_module.HELD_POSITION_MONITOR_RECOVERY_MAX_AGE_SECONDS
+    )
+    assert observed_kwargs["monitor_refreshed_only"] is True
+    assert observed_kwargs["require_fresh_inputs"] is False
+
+
+def test_durable_monitor_recovery_dispatches_without_running_monitor_inline(
+    monkeypatch,
+) -> None:
+    import src.main as main_module
+    import src.ops.monitor_cadence as cadence_module
+    import src.state.db as db_module
+
+    calls: list[object] = []
+
+    class ReadOnlyConnection:
+        def close(self) -> None:
+            calls.append("close")
+
+    monkeypatch.setattr(
+        db_module,
+        "get_trade_connection_read_only",
+        ReadOnlyConnection,
+    )
+    monkeypatch.setattr(
+        cadence_module,
+        "collect_monitor_cadence_evidence",
+        lambda *_args, **_kwargs: {
+            "stale_or_missing_position_count": 1,
+            "stale_or_missing_positions": [{"position_id": "p-stale"}],
+            "future_monitor_event_count": 0,
+        },
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_exit_monitor_cycle",
+        lambda **_kwargs: pytest.fail("the scheduler detector must not run monitor work"),
+    )
+    worker = object()
+    monkeypatch.setattr(
+        main_module,
+        "_ensure_held_position_monitor_recovery_worker",
+        lambda: calls.append("dispatch") or worker,
+    )
+    main_module._held_position_monitor_canonical_debt.clear()
+
+    try:
+        assert (
+            main_module._durable_held_position_monitor_recovery_cycle.__wrapped__()
+            is True
+        )
+        assert calls == ["close", "dispatch"]
+        assert main_module._held_position_monitor_canonical_debt.is_set()
+    finally:
+        main_module._held_position_monitor_canonical_debt.clear()
+
+
+def test_durable_monitor_recovery_worker_redrives_until_canonical_refresh(
+    monkeypatch,
+) -> None:
+    import src.main as main_module
+    stale = {"stale_or_missing_position_count": 1, "future_monitor_event_count": 0}
+    fresh = {"stale_or_missing_position_count": 0, "future_monitor_event_count": 0}
+    evidence = iter((stale, stale, fresh, fresh))
+    monitor_calls: list[dict] = []
+    monkeypatch.setattr(
+        main_module,
+        "_held_position_monitor_recovery_evidence",
+        lambda: next(evidence),
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_exit_monitor_cycle",
+        lambda **kwargs: monitor_calls.append(kwargs) or False,
+    )
+    monkeypatch.setattr(main_module.time, "sleep", lambda _seconds: None)
+    main_module._held_position_monitor_recovery_requested.clear()
+    main_module._held_position_monitor_canonical_debt.set()
+    main_module._periodic_held_position_monitor_fairness_debt.set()
+    try:
+        main_module._held_position_monitor_recovery_worker_main()
+        assert monitor_calls == [
+            {"recovery_full_book": True},
+            {"recovery_full_book": True},
+        ]
+        assert not main_module._periodic_held_position_monitor_fairness_debt.is_set()
+        assert not main_module._held_position_monitor_canonical_debt.is_set()
+    finally:
+        main_module._held_position_monitor_recovery_requested.clear()
+        main_module._periodic_held_position_monitor_fairness_debt.clear()
+        main_module._held_position_monitor_canonical_debt.clear()
+
+
+def test_durable_monitor_recovery_worker_survives_monitor_exception(
+    monkeypatch,
+) -> None:
+    import src.main as main_module
+
+    stale = {"stale_or_missing_position_count": 1, "future_monitor_event_count": 0}
+    fresh = {"stale_or_missing_position_count": 0, "future_monitor_event_count": 0}
+    evidence = iter((stale, stale, fresh, fresh))
+    attempts = iter((RuntimeError("db locked"), True))
+    calls = 0
+
+    def monitor(**_kwargs):
+        nonlocal calls
+        calls += 1
+        result = next(attempts)
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+    monkeypatch.setattr(
+        main_module,
+        "_held_position_monitor_recovery_evidence",
+        lambda: next(evidence),
+    )
+    monkeypatch.setattr(main_module, "_exit_monitor_cycle", monitor)
+    monkeypatch.setattr(main_module.time, "sleep", lambda _seconds: None)
+    main_module._held_position_monitor_recovery_requested.clear()
+    main_module._held_position_monitor_canonical_debt.set()
+    try:
+        main_module._held_position_monitor_recovery_worker_main()
+        assert calls == 2
+        assert not main_module._held_position_monitor_canonical_debt.is_set()
+    finally:
+        main_module._held_position_monitor_recovery_requested.clear()
+        main_module._held_position_monitor_canonical_debt.clear()
+
+
+def test_durable_monitor_recovery_detector_dispatches_after_evidence_failure(
+    monkeypatch,
+) -> None:
+    import src.main as main_module
+
+    dispatched: list[str] = []
+    monkeypatch.setattr(
+        main_module,
+        "_held_position_monitor_recovery_evidence",
+        lambda: (_ for _ in ()).throw(RuntimeError("database is locked")),
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_ensure_held_position_monitor_recovery_worker",
+        lambda: dispatched.append("worker") or object(),
+    )
+    main_module._held_position_monitor_canonical_debt.clear()
+    try:
+        with pytest.raises(
+            RuntimeError,
+            match="HELD_POSITION_MONITOR_RECOVERY_EVIDENCE_UNAVAILABLE",
+        ):
+            main_module._durable_held_position_monitor_recovery_cycle.__wrapped__()
+        assert dispatched == ["worker"]
+        assert main_module._held_position_monitor_canonical_debt.is_set()
+    finally:
+        main_module._held_position_monitor_canonical_debt.clear()
+
+
+def test_durable_monitor_recovery_worker_redrives_real_busy_handoff(
+    monkeypatch,
+) -> None:
+    import src.execution.exit_lifecycle as exit_module
+    import src.main as main_module
+
+    class BusyReactorGate:
+        def acquire(self, *, timeout: float) -> bool:
+            assert timeout == main_module._URGENT_EXIT_MONITOR_REACTOR_HANDOFF_SECONDS
+            return False
+
+    stale = {"stale_or_missing_position_count": 1, "future_monitor_event_count": 0}
+    fresh = {"stale_or_missing_position_count": 0, "future_monitor_event_count": 0}
+    evidence = iter((stale, fresh, fresh))
+    monkeypatch.setattr(
+        main_module,
+        "_held_position_monitor_recovery_evidence",
+        lambda: next(evidence),
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_current_periodic_monitor_obligation_count",
+        lambda: 1,
+    )
+    monkeypatch.setattr(main_module, "_edli_reactor_active_lock", BusyReactorGate())
+    monkeypatch.setattr(
+        exit_module,
+        "run_exit_monitor_cycle",
+        lambda **_kwargs: pytest.fail("busy handoff must not admit monitor body"),
+    )
+    monkeypatch.setattr(main_module.time, "sleep", lambda _seconds: None)
+    main_module._held_position_monitor_recovery_requested.clear()
+    main_module._periodic_held_position_monitor_fairness_debt.clear()
+    main_module._held_position_monitor_canonical_debt.set()
+    try:
+        main_module._held_position_monitor_recovery_worker_main()
+        assert not main_module._held_position_monitor_active.is_set()
+        assert not main_module._held_position_monitor_handoff_pending.is_set()
+        assert main_module._held_position_monitor_claim.acquire(blocking=False)
+        main_module._held_position_monitor_claim.release()
+        assert not main_module._periodic_held_position_monitor_fairness_debt.is_set()
+        assert not main_module._held_position_monitor_canonical_debt.is_set()
+    finally:
+        main_module._held_position_monitor_active.clear()
+        main_module._held_position_monitor_handoff_pending.clear()
+        main_module._periodic_held_position_monitor_handoff_pending.clear()
+        main_module._held_position_monitor_recovery_requested.clear()
+        main_module._periodic_held_position_monitor_fairness_debt.clear()
+        main_module._held_position_monitor_canonical_debt.clear()
+
+
+def test_durable_monitor_recovery_dispatch_is_single_owner(monkeypatch) -> None:
+    import src.main as main_module
+
+    created: list[object] = []
+
+    class Worker:
+        def __init__(self, **kwargs) -> None:
+            self.kwargs = kwargs
+            self.started = False
+            created.append(self)
+
+        def is_alive(self) -> bool:
+            return self.started
+
+        def start(self) -> None:
+            self.started = True
+
+    monkeypatch.setattr(main_module.threading, "Thread", Worker)
+    main_module._held_position_monitor_recovery_requested.clear()
+    main_module._held_position_monitor_recovery_worker = None
+    try:
+        first = main_module._ensure_held_position_monitor_recovery_worker()
+        second = main_module._ensure_held_position_monitor_recovery_worker()
+        assert first is second
+        assert len(created) == 1
+        assert created[0].kwargs["daemon"] is True
+        assert created[0].kwargs["name"] == "held-position-monitor-recovery"
+        assert main_module._held_position_monitor_recovery_requested.is_set()
+    finally:
+        main_module._held_position_monitor_recovery_requested.clear()
+        main_module._held_position_monitor_recovery_worker = None
+
+
+def test_durable_monitor_recovery_worker_consumes_exit_race_dispatch(
+    monkeypatch,
+) -> None:
+    import src.main as main_module
+
+    fresh = {"stale_or_missing_position_count": 0, "future_monitor_event_count": 0}
+    reads = 0
+
+    def evidence():
+        nonlocal reads
+        reads += 1
+        return fresh
+
+    monkeypatch.setattr(
+        main_module,
+        "_held_position_monitor_recovery_evidence",
+        evidence,
+    )
+    main_module._held_position_monitor_recovery_requested.set()
+    main_module._held_position_monitor_canonical_debt.set()
+    try:
+        main_module._held_position_monitor_recovery_worker_main()
+        assert reads == 2
+        assert not main_module._held_position_monitor_recovery_requested.is_set()
+        assert not main_module._held_position_monitor_canonical_debt.is_set()
+    finally:
+        main_module._held_position_monitor_recovery_requested.clear()
+        main_module._held_position_monitor_canonical_debt.clear()
+
+
+def test_periodic_monitor_handoff_clears_fairness_debt_before_incomplete_scan(
+    monkeypatch,
+) -> None:
+    import src.execution.exit_lifecycle as exit_module
+    import src.main as main_module
+
+    class IdleReactorGate:
+        def acquire(self, *, timeout: float) -> bool:
+            return True
+
+        def release(self) -> None:
+            pass
+
+    was_bootstrap_complete = (
+        main_module._held_position_monitor_bootstrap_complete.is_set()
+    )
+    main_module._held_position_monitor_bootstrap_complete.set()
+    main_module._periodic_held_position_monitor_fairness_debt.set()
+    main_module._day0_urgent_wake_pending.clear()
+    main_module._day0_held_monitor_preempt_requested.clear()
+    main_module._periodic_exit_monitor_urgent_yielded.clear()
+    monkeypatch.setattr(main_module, "_edli_reactor_active_lock", IdleReactorGate())
+    monkeypatch.setattr(exit_module, "run_exit_monitor_cycle", lambda **_kwargs: False)
+
+    try:
+        with pytest.raises(RuntimeError, match="EXIT_MONITOR_CYCLE_INCOMPLETE"):
+            main_module._exit_monitor_cycle.__wrapped__()
+        assert not main_module._periodic_held_position_monitor_fairness_debt.is_set()
+        assert not main_module._defer_for_held_position_monitor("edli_event_reactor")
+    finally:
+        main_module._held_position_monitor_active.clear()
+        main_module._held_position_monitor_handoff_pending.clear()
+        main_module._periodic_held_position_monitor_handoff_pending.clear()
+        main_module._periodic_held_position_monitor_fairness_debt.clear()
+        if not was_bootstrap_complete:
+            main_module._held_position_monitor_bootstrap_complete.clear()
+
+
+def test_durable_monitor_recovery_has_an_independent_scheduler_executor() -> None:
+    import inspect
+
+    import src.main as main_module
+
+    source = inspect.getsource(main_module.main)
+    assert '"monitor_recovery": _APThreadPoolExecutor(1)' in source
+    assert "executor=\"monitor_recovery\"" in source
+    assert "id=\"exit_monitor_recovery\"" in source
+
+
+def test_full_book_monitor_success_requires_complete_canonical_coverage() -> None:
+    from src.execution.exit_lifecycle import (
+        _full_book_monitor_completed_canonical_coverage,
+    )
+
+    assert _full_book_monitor_completed_canonical_coverage(
+        {"monitors": 0},
+        open_position_count=0,
+    )
+    assert not _full_book_monitor_completed_canonical_coverage(
+        {"monitors": 0},
+        open_position_count=4,
+    )
+    assert _full_book_monitor_completed_canonical_coverage(
+        {
+            "monitors": 0,
+            "held_monitor_candidates": 0,
+            "held_monitor_candidate_position_ids": [],
+        },
+        open_position_count=4,
+    )
+    assert not _full_book_monitor_completed_canonical_coverage(
+        {
+            "monitors": 4,
+            "held_monitor_candidates": 4,
+            "held_monitor_candidate_position_ids": ["p1", "p2", "p3", "p4"],
+            "held_monitor_canonical_position_ids": ["p1"],
+        },
+        open_position_count=4,
+    )
+    assert not _full_book_monitor_completed_canonical_coverage(
+        {
+            "monitors": 4,
+            "held_monitor_candidates": 4,
+            "held_monitor_candidate_position_ids": ["p1", "p2", "p3", "p4"],
+            "held_monitor_canonical_position_ids": ["p1", "p2", "p3", "p4"],
+            "held_monitor_no_action_authority_position_ids": ["p4"],
+        },
+        open_position_count=4,
+    )
+    assert _full_book_monitor_completed_canonical_coverage(
+        {
+            "monitors": 4,
+            "held_monitor_candidates": 4,
+            "held_monitor_candidate_position_ids": ["p1", "p2", "p3", "p4"],
+            "held_monitor_canonical_position_ids": ["p1", "p2", "p3", "p4"],
+        },
+        open_position_count=4,
+    )
+    assert _full_book_monitor_completed_canonical_coverage(
+        {
+            "monitors": 3,
+            "held_monitor_candidates": 4,
+            "held_monitor_candidate_position_ids": ["p1", "p2", "p3", "p4"],
+            "held_monitor_canonical_position_ids": ["p1", "p2", "p3"],
+            "held_monitor_discharged_position_ids": ["p4"],
+        },
+        open_position_count=4,
+    )
+    assert not _full_book_monitor_completed_canonical_coverage(
+        {
+            "monitors": 4,
+            "held_monitor_candidates": 4,
+            "held_monitor_candidate_position_ids": ["p1", "p2", "p3", "p4"],
+            "held_monitor_canonical_position_ids": ["p1", "p2", "p3", "p4"],
+            "monitor_canonical_write_failed": 1,
+        },
+        open_position_count=4,
+    )
+    assert not _full_book_monitor_completed_canonical_coverage(
+        {
+            "monitors": 4,
+            "held_monitor_candidates": 4,
+            "held_monitor_candidate_position_ids": ["p1", "p2", "p3", "p4"],
+            "held_monitor_canonical_position_ids": ["p1", "p2", "p3", "p4"],
+            "held_monitor_preempted": True,
+        },
+        open_position_count=4,
+    )
 
 
 def test_reactor_rechecks_monitor_priority_after_active_lock_claim() -> None:
@@ -7851,8 +11232,8 @@ def test_reactor_rechecks_monitor_priority_after_active_lock_claim() -> None:
     source = inspect.getsource(reactor_module.run_edli_event_reactor_cycle)
     defer_call = '_defer_for_held_position_monitor("edli_event_reactor")'
     first_check = source.index(defer_call)
-    lock_claim = source.index("active_lock.acquire(blocking=False)")
-    second_check = source.index(defer_call, first_check + len(defer_call))
+    lock_claim = source.index("if not active_lock.acquire(blocking=False):")
+    second_check = source.index(defer_call, lock_claim)
 
     assert first_check < lock_claim < second_check
 
@@ -7884,6 +11265,41 @@ def test_entry_reactor_monitor_defer_contract_is_effective(monkeypatch) -> None:
     assert main_module._defer_for_held_position_monitor("edli_event_reactor") is True
 
 
+def test_capital_recovery_handoff_defers_only_entry_reactor(monkeypatch) -> None:
+    import threading
+
+    import src.main as main_module
+
+    bootstrap_complete = threading.Event()
+    bootstrap_complete.set()
+    capital_handoff = threading.Event()
+    capital_handoff.set()
+    monkeypatch.setattr(
+        main_module,
+        "_held_position_monitor_handoff_pending",
+        threading.Event(),
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_periodic_held_position_monitor_fairness_debt",
+        threading.Event(),
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_held_position_monitor_bootstrap_complete",
+        bootstrap_complete,
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_capital_recovery_handoff_pending",
+        capital_handoff,
+    )
+
+    assert main_module._defer_for_held_position_monitor("edli_event_reactor") is True
+    assert main_module._defer_for_held_position_monitor("live_health_composite") is False
+    assert main_module._defer_for_held_position_monitor("edli_command_recovery") is False
+
+
 def test_monitor_bootstrap_scopes_defer_to_entry_competitors(monkeypatch) -> None:
     import src.main as main_module
     import src.runtime.reactor_wake as wake_module
@@ -7900,8 +11316,15 @@ def test_monitor_bootstrap_scopes_defer_to_entry_competitors(monkeypatch) -> Non
         "_held_position_monitor_handoff_pending",
         handoff_pending,
     )
+    monkeypatch.setattr(
+        wake_module,
+        "exact_held_sell_completion_wake_ids",
+        lambda **_kwargs: (),
+    )
 
-    for job_name in ("edli_event_reactor", "market_discovery"):
+    assert main_module._defer_for_held_position_monitor("edli_event_reactor") is False
+
+    for job_name in ("live_health_composite", "market_discovery"):
         assert main_module._defer_for_held_position_monitor(job_name) is True
 
     for job_name in (
@@ -7909,7 +11332,6 @@ def test_monitor_bootstrap_scopes_defer_to_entry_competitors(monkeypatch) -> Non
         "edli_continuous_redecision_screen",
         "edli_day0_hourly_refresh",
         "c3_staleness_cancel",
-        "live_health_composite",
         "settlement_guard_report",
         "settlement_skill_attribution",
         "trades_wal_checkpoint",
@@ -7920,13 +11342,469 @@ def test_monitor_bootstrap_scopes_defer_to_entry_competitors(monkeypatch) -> Non
     monkeypatch.setattr(
         wake_module,
         "read_reactor_wake",
-        lambda: pytest.fail("wake queue must not scan before monitor bootstrap"),
+        lambda **_kwargs: None,
     )
     assert main_module._edli_reactor_wake_poll_once() is False
 
     bootstrap_complete.set()
-    for job_name in ("edli_event_reactor", "market_discovery"):
+    for job_name in (
+        "edli_event_reactor",
+        "live_health_composite",
+        "market_discovery",
+    ):
         assert main_module._defer_for_held_position_monitor(job_name) is False
+
+
+def test_monitor_bootstrap_keeps_exact_sell_reauction_live_but_blocks_discovery(
+    monkeypatch,
+) -> None:
+    import src.main as main_module
+    import src.runtime.reactor_wake as wake_module
+
+    bootstrap_complete = type(main_module._held_position_monitor_bootstrap_complete)()
+    handoff_pending = type(main_module._held_position_monitor_handoff_pending)()
+    monkeypatch.setattr(
+        main_module,
+        "_held_position_monitor_bootstrap_complete",
+        bootstrap_complete,
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_held_position_monitor_handoff_pending",
+        handoff_pending,
+    )
+    monkeypatch.setattr(
+        wake_module,
+        "exact_held_sell_completion_wake_ids",
+        lambda **kwargs: (
+            ("held-sell-wake",)
+            if kwargs == {"fail_on_error": True}
+            else pytest.fail("bootstrap bypass must use the fail-closed exact reader")
+        ),
+    )
+    promote_calls = []
+    monkeypatch.setattr(
+        main_module,
+        "_promote_held_position_monitor_bootstrap_from_canonical_progress",
+        lambda: promote_calls.append(True) or False,
+    )
+    assert main_module._defer_for_held_position_monitor("edli_event_reactor") is False
+    assert promote_calls == [True]
+    assert main_module._defer_for_held_position_monitor("market_discovery") is True
+    assert promote_calls == [True, True]
+
+    handoff_pending.set()
+    assert main_module._defer_for_held_position_monitor("edli_event_reactor") is True
+
+
+def test_monitor_bootstrap_allows_reduce_only_reactor_while_coverage_is_missing(
+    monkeypatch,
+) -> None:
+    import src.main as main_module
+    import src.runtime.reactor_wake as wake_module
+
+    bootstrap_complete = type(main_module._held_position_monitor_bootstrap_complete)()
+    monkeypatch.setattr(
+        main_module,
+        "_held_position_monitor_bootstrap_complete",
+        bootstrap_complete,
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_held_position_monitor_handoff_pending",
+        type(main_module._held_position_monitor_handoff_pending)(),
+    )
+    monkeypatch.setattr(
+        wake_module,
+        "exact_held_sell_completion_wake_ids",
+        lambda **_kwargs: ("held-sell-wake",),
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_promote_held_position_monitor_bootstrap_from_canonical_progress",
+        lambda: False,
+    )
+
+    assert main_module._defer_for_held_position_monitor("edli_event_reactor") is False
+    assert bootstrap_complete.is_set() is False
+
+
+def test_canonical_monitor_debt_scopes_reactor_until_current_capital_refresh(
+    monkeypatch,
+) -> None:
+    import src.main as main_module
+
+    canonical_debt = type(main_module._held_position_monitor_canonical_debt)()
+    canonical_debt.set()
+    bootstrap_complete = type(main_module._held_position_monitor_bootstrap_complete)()
+    bootstrap_complete.set()
+    monkeypatch.setattr(
+        main_module,
+        "_held_position_monitor_canonical_debt",
+        canonical_debt,
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_held_position_monitor_bootstrap_complete",
+        bootstrap_complete,
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_held_position_monitor_entry_block_reason",
+        lambda: "held_position_monitor_cadence_overdue",
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_exact_held_sell_completion_pending",
+        lambda: False,
+    )
+
+    assert main_module._defer_for_held_position_monitor("edli_event_reactor") is False
+    assert canonical_debt.is_set() is True
+
+    monkeypatch.setattr(
+        main_module,
+        "_held_position_monitor_entry_block_reason",
+        lambda: None,
+    )
+    assert main_module._defer_for_held_position_monitor("edli_event_reactor") is False
+    assert canonical_debt.is_set() is False
+
+
+def test_canonical_monitor_debt_runs_exact_held_sell_completion(
+    monkeypatch,
+) -> None:
+    import src.main as main_module
+
+    canonical_debt = type(main_module._held_position_monitor_canonical_debt)()
+    canonical_debt.set()
+    fairness_debt = type(
+        main_module._periodic_held_position_monitor_fairness_debt
+    )()
+    fairness_debt.set()
+    bootstrap_complete = type(main_module._held_position_monitor_bootstrap_complete)()
+    bootstrap_complete.set()
+    monkeypatch.setattr(
+        main_module,
+        "_held_position_monitor_canonical_debt",
+        canonical_debt,
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_periodic_held_position_monitor_fairness_debt",
+        fairness_debt,
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_held_position_monitor_bootstrap_complete",
+        bootstrap_complete,
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_held_position_monitor_entry_block_reason",
+        lambda: "held_position_monitor_cadence_overdue",
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_exact_held_sell_completion_pending",
+        lambda: True,
+    )
+
+    assert main_module._defer_for_held_position_monitor("edli_event_reactor") is False
+    assert canonical_debt.is_set() is True
+    assert fairness_debt.is_set() is True
+
+
+def test_reactor_poll_does_not_promote_canonical_family_debt_to_exact_only_queue(
+    monkeypatch,
+) -> None:
+    import src.main as main_module
+    import src.runtime.reactor_wake as wake_module
+
+    reads: list[dict] = []
+    canonical_debt = type(main_module._held_position_monitor_canonical_debt)()
+    canonical_debt.set()
+    monkeypatch.setattr(
+        main_module,
+        "_held_position_monitor_canonical_debt",
+        canonical_debt,
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_held_position_monitor_entry_block_reason",
+        lambda: "held_position_monitor_cadence_overdue",
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_defer_for_held_position_monitor",
+        lambda _job: False,
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_exit_monitor_excluded_wake_ids",
+        lambda: frozenset({"exact-held-sell"}),
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_collateral_authority_wake_backoff_ids",
+        lambda: frozenset(),
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_paused_forecast_carrier_priority_allowed",
+        lambda **_kwargs: False,
+    )
+    monkeypatch.setattr(
+        wake_module,
+        "exact_held_sell_completion_wake_ids",
+        lambda **_kwargs: pytest.fail(
+            "family-scoped canonical debt must not require exact-only selection"
+        ),
+    )
+    monkeypatch.setattr(
+        wake_module,
+        "read_reactor_wake",
+        lambda **kwargs: reads.append(kwargs) or None,
+    )
+
+    assert main_module._edli_reactor_wake_poll_once() is False
+    assert reads == [
+        {
+            "exclude_wake_ids": frozenset({"exact-held-sell"}),
+            "prefer_exact_held_sell": False,
+            "prefer_forecast_carrier_progress": False,
+            "fail_on_error": False,
+        }
+    ]
+
+
+def test_reactor_poll_keeps_fairness_debt_exact_only(
+    monkeypatch,
+) -> None:
+    import src.main as main_module
+    import src.runtime.reactor_wake as wake_module
+
+    fairness_debt = type(
+        main_module._periodic_held_position_monitor_fairness_debt
+    )()
+    fairness_debt.set()
+    reads: list[dict] = []
+    monkeypatch.setattr(
+        main_module,
+        "_defer_for_held_position_monitor",
+        lambda _job: False,
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_periodic_held_position_monitor_fairness_debt",
+        fairness_debt,
+    )
+    monkeypatch.setattr(
+        wake_module,
+        "exact_held_sell_completion_wake_ids",
+        lambda **kwargs: (
+            frozenset({"exact-held-sell"})
+            if kwargs == {"fail_on_error": True}
+            else pytest.fail("fairness selection must use the fail-closed reader")
+        ),
+    )
+    monkeypatch.setattr(
+        wake_module,
+        "read_reactor_wake",
+        lambda **kwargs: reads.append(kwargs) or None,
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_exit_monitor_excluded_wake_ids",
+        lambda: frozenset(),
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_collateral_authority_wake_backoff_ids",
+        lambda: frozenset(),
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_paused_forecast_carrier_priority_allowed",
+        lambda **_kwargs: False,
+    )
+
+    assert main_module._edli_reactor_wake_poll_once() is False
+    assert reads == [
+        {
+            "prefer_exact_held_sell": True,
+            "prefer_forecast_carrier_progress": False,
+            "fail_on_error": True,
+        }
+    ]
+
+
+def test_reactor_wrapper_keeps_existing_canonical_debt_family_scoped(
+    monkeypatch,
+) -> None:
+    import src.events.reactor as reactor_module
+    import src.main as main_module
+
+    canonical_debt = type(main_module._held_position_monitor_canonical_debt)()
+    canonical_debt.set()
+    fairness_debt = type(
+        main_module._periodic_held_position_monitor_fairness_debt
+    )()
+    handoff_pending = type(
+        main_module._periodic_held_position_monitor_handoff_pending
+    )()
+    bootstrap_complete = type(main_module._held_position_monitor_bootstrap_complete)()
+    bootstrap_complete.set()
+    observed: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        main_module,
+        "_held_position_monitor_canonical_debt",
+        canonical_debt,
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_periodic_held_position_monitor_fairness_debt",
+        fairness_debt,
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_periodic_held_position_monitor_handoff_pending",
+        handoff_pending,
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_held_position_monitor_bootstrap_complete",
+        bootstrap_complete,
+    )
+    monkeypatch.setattr(main_module, "_consume_live_control_commands", lambda: None)
+    monkeypatch.setattr(main_module, "_start_edli_reactor_wake_listener", lambda: None)
+    monkeypatch.setattr(
+        main_module,
+        "_edli_live_entry_readiness_block",
+        lambda _cfg: (None, {}),
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_held_position_monitor_entry_block_reason",
+        lambda: "held_position_monitor_cadence_overdue",
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_canonical_monitor_entry_block_scope",
+        lambda _reason: (None, {"family-freshness-debt": _reason}),
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_held_position_monitor_debt_pending",
+        lambda: pytest.fail("debt present at cut start must use family scope"),
+    )
+
+    def run_cycle(**kwargs) -> bool:
+        observed.update(kwargs)
+        assert kwargs["held_position_monitor_pending"]() is False
+        assert kwargs["held_position_monitor_debt_pending"]() is False
+        return True
+
+    monkeypatch.setattr(reactor_module, "run_edli_event_reactor_cycle", run_cycle)
+    monkeypatch.setattr(
+        "src.control.control_plane.recover_deploy_live_restart_guard",
+        lambda: {"status": "noop"},
+    )
+
+    assert main_module._edli_event_reactor_cycle.__wrapped__() is True
+    assert observed["live_entry_block_reason"] is None
+    assert observed["live_entry_family_block_reasons"] == {
+        "family-freshness-debt": "held_position_monitor_cadence_overdue"
+    }
+
+
+def test_canonical_monitor_debt_blocks_only_exact_weather_families(
+    monkeypatch,
+) -> None:
+    import src.main as main_module
+    from src.events.candidate_binding import weather_family_id
+
+    monkeypatch.setattr(
+        main_module,
+        "_canonical_overdue_monitor_families",
+        lambda **_kwargs: frozenset(
+            {
+                ("London", "2026-08-12", "high"),
+                ("Moscow", "2026-08-12", "low"),
+            }
+        ),
+    )
+
+    global_reason, family_reasons = main_module._canonical_monitor_entry_block_scope(
+        "held_position_monitor_cadence_overdue"
+    )
+
+    assert global_reason is None
+    assert family_reasons == {
+        weather_family_id(
+            city="London",
+            target_date="2026-08-12",
+            metric="high",
+        ): "held_position_monitor_cadence_overdue",
+        weather_family_id(
+            city="Moscow",
+            target_date="2026-08-12",
+            metric="low",
+        ): "held_position_monitor_cadence_overdue",
+    }
+
+
+def test_canonical_monitor_debt_scope_failure_blocks_every_family(
+    monkeypatch,
+) -> None:
+    import src.main as main_module
+
+    monkeypatch.setattr(
+        main_module,
+        "_canonical_overdue_monitor_families",
+        lambda **_kwargs: None,
+    )
+
+    assert main_module._canonical_monitor_entry_block_scope(
+        "held_position_monitor_authority_unavailable"
+    ) == ("held_position_monitor_authority_unavailable", {})
+
+
+def test_long_reactor_cut_rechecks_and_yields_when_canonical_monitor_becomes_stale(
+    monkeypatch,
+) -> None:
+    import src.main as main_module
+
+    canonical_debt = type(main_module._held_position_monitor_canonical_debt)()
+    monkeypatch.setattr(
+        main_module,
+        "_held_position_monitor_canonical_debt",
+        canonical_debt,
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_held_position_monitor_canonical_last_check",
+        0.0,
+    )
+    monkeypatch.setattr(main_module.time, "monotonic", lambda: 2.0)
+    checks = []
+    monkeypatch.setattr(
+        main_module,
+        "_held_position_monitor_recovery_evidence",
+        lambda: checks.append(True) or {
+            "stale_or_missing_position_count": 1,
+            "stale_or_missing_positions": [{"position_id": "p-stale"}],
+            "future_monitor_event_count": 0,
+        },
+    )
+
+    assert main_module._held_position_monitor_debt_pending() is True
+    assert canonical_debt.is_set()
+    assert checks == [True]
+
+    assert main_module._held_position_monitor_debt_pending() is True
+    assert checks == [True]
 
 
 def test_full_book_monitor_without_canonical_progress_does_not_complete_bootstrap(
@@ -7950,7 +11828,7 @@ def test_full_book_monitor_without_canonical_progress_does_not_complete_bootstra
     main_module._held_position_monitor_bootstrap_complete.clear()
     main_module._day0_urgent_wake_pending.clear()
     main_module._day0_held_monitor_preempt_requested.clear()
-    main_module._periodic_exit_monitor_day0_yielded.clear()
+    main_module._periodic_exit_monitor_urgent_yielded.clear()
     main_module._day0_exit_monitor_attempts.clear()
     monkeypatch.setattr(main_module, "_edli_reactor_active_lock", ReactorGate())
     monkeypatch.setattr(exit_module, "run_exit_monitor_cycle", _run)
@@ -8082,6 +11960,28 @@ def test_main_orders_boot_command_recovery_before_reactor_registration() -> None
     assert boot_idx < reactor_idx < start_idx
 
 
+def test_main_monitor_cadence_is_prospective_of_hard_freshness_wall() -> None:
+    """Normal monitoring must be scheduled before hard-debt recovery is due."""
+
+    import inspect
+    import src.execution.exit_lifecycle as exit_module
+    import src.main as main_module
+
+    source = inspect.getsource(main_module.main)
+    interval = main_module.HELD_POSITION_MONITOR_RECOVERY_INTERVAL_SECONDS
+    assert interval < main_module.HELD_POSITION_MONITOR_RECOVERY_MAX_AGE_SECONDS
+    assert exit_module._EXIT_MONITOR_INTERVAL_SECONDS == interval == 30.0
+    assert (
+        interval
+        < exit_module._MONITOR_CADENCE_GAP_SECONDS
+        < main_module.HELD_POSITION_MONITOR_RECOVERY_MAX_AGE_SECONDS
+    )
+    assert "seconds=HELD_POSITION_MONITOR_RECOVERY_INTERVAL_SECONDS" in source
+    assert 'id="exit_monitor"' in source
+    assert "max_instances=1" in source
+    assert "coalesce=True" in source
+
+
 def test_command_recovery_runs_once_per_entry_decision_clock() -> None:
     """Persisted fill facts must clear ambiguity before the next auction."""
     import inspect
@@ -8091,6 +11991,18 @@ def test_command_recovery_runs_once_per_entry_decision_clock() -> None:
 
     assert main_module._EDLI_COMMAND_RECOVERY_INTERVAL_SECONDS == 60.0
     assert "seconds=_EDLI_COMMAND_RECOVERY_INTERVAL_SECONDS" in source
+    assert (
+        main_module._EDLI_COMMAND_RECOVERY_FIRST_DELAY_SECONDS
+        - (
+            main_module.HELD_POSITION_MONITOR_FIRST_DELAY_SECONDS
+            + main_module.HELD_POSITION_MONITOR_RECOVERY_INTERVAL_SECONDS
+        )
+    ) == 8.0
+    assert (
+        "_utc_run_time_after(\n"
+        "                _EDLI_COMMAND_RECOVERY_FIRST_DELAY_SECONDS\n"
+        "            )"
+    ) in source
 
 
 def test_boot_fast_command_recovery_includes_filled_entry_projection_repair() -> None:
@@ -8112,14 +12024,17 @@ def test_edli_command_recovery_emits_terminal_no_fill_continuation(monkeypatch) 
     import src.execution.command_recovery as command_recovery
     import src.main as main_module
     import src.state.db as state_db
+    import src.state.portfolio as portfolio
 
     class FakeConn:
         closed = False
 
+        def set_progress_handler(self, *_args) -> None:
+            return None
+
         def close(self) -> None:
             self.closed = True
 
-    trade_refresh_conn = FakeConn()
     trade_ro = FakeConn()
     forecasts_ro = FakeConn()
     summary = {
@@ -8147,11 +12062,6 @@ def test_edli_command_recovery_emits_terminal_no_fill_continuation(monkeypatch) 
     )
     monkeypatch.setattr(
         state_db,
-        "get_trade_connection_with_world_required",
-        lambda write_class=None: trade_refresh_conn,
-    )
-    monkeypatch.setattr(
-        state_db,
         "get_trade_connection_read_only",
         lambda: trade_ro,
     )
@@ -8161,9 +12071,19 @@ def test_edli_command_recovery_emits_terminal_no_fill_continuation(monkeypatch) 
         lambda: forecasts_ro,
     )
     monkeypatch.setattr(
+        command_recovery,
+        "capital_blocking_command_count",
+        lambda _conn: 0,
+    )
+    monkeypatch.setattr(
+        portfolio,
+        "load_runtime_open_portfolio",
+        lambda _conn: {},
+    )
+    monkeypatch.setattr(
         main_module,
         "_edli_refresh_global_allocator",
-        lambda conn: {"configured": True},
+        lambda conn, **_kwargs: {"configured": True},
     )
     monkeypatch.setattr(
         main_module,
@@ -8178,18 +12098,17 @@ def test_edli_command_recovery_emits_terminal_no_fill_continuation(monkeypatch) 
     monkeypatch.setattr(
         main_module,
         "_emit_terminal_no_fill_redecision_continuations",
-        lambda observed_families, decision_time, received_at: (
+        lambda observed_families, decision_time, received_at, **_kwargs: (
             emitted_calls.append((set(observed_families), str(received_at))) or 1
         ),
     )
 
     main_module._edli_command_recovery_cycle()
 
-    assert trade_refresh_conn.closed is True
     assert trade_ro.closed is True
     assert forecasts_ro.closed is True
-    assert clear_calls == [families]
-    assert emitted_calls and emitted_calls[0][0] == families
+    assert clear_calls and all(call == families for call in clear_calls)
+    assert emitted_calls and all(call[0] == families for call in emitted_calls)
 
 
 def test_terminal_no_fill_continuation_accepts_direct_family_identity() -> None:
@@ -8269,7 +12188,7 @@ def test_boot_auto_resolution_continuation_is_emitted_before_first_tick(monkeypa
     monkeypatch.setattr(
         main_module,
         "_emit_terminal_no_fill_redecision_continuations",
-        lambda observed_families, decision_time, received_at: (
+        lambda observed_families, decision_time, received_at, **_kwargs: (
             emitted_calls.append(set(observed_families)) or 1
         ),
     )

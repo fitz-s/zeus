@@ -1,6 +1,6 @@
 # Zeus AGENTS
 
-Root operating contract for `/Users/leofitz/zeus`: durable law, money-path mental models, evidence gates, routing. Never store runtime snapshots here (branches, SHAs, PIDs, bankrolls, receipts, packet diaries). Nested `AGENTS.md` govern their subtrees; direct instructions override all AGENTS files.
+Root operating contract for this repo: durable law, money-path mental models, evidence gates, routing. Never store runtime snapshots here (branches, SHAs, PIDs, bankrolls, receipts, packet diaries). Nested `AGENTS.md` govern their subtrees; direct instructions override all AGENTS files.
 
 ## Boot Digest (SessionStart injection slice — NOT a reading surface)
 
@@ -172,7 +172,7 @@ Risk levels change behavior; advisory-only risk is forbidden by INV-05.
 
 Overall risk is max(individual levels). Genuine computation error -> RED fail-closed. Missing/stale truth input -> DATA_DEGRADED, YELLOW-equivalent: block new entries, preserve held positions, alert. Only RED sweeps active positions. Key file: `src/riskguard/risk_level.py`.
 
-Lifecycle is enum-governed in `src/state/lifecycle_manager.py`: `pending_entry -> active -> day0_window -> pending_exit -> economically_closed -> settled`; terminals are `voided`, `settled`, `admin_closed`; `unknown` is transient/recovery only. `quarantined` is retired from the enum entirely (T5, `docs/rebuild/quarantine_excision_2026-07-11.md`) — a confirmed-fill/chain-absence dispute keeps its TRUE phase (`active`/`pending_exit`) and the dispute lives in a typed `ReviewWorkItem` (`src/contracts/review_work_item.py`), never a lifecycle phase. Chain-only unknown assets never enter the Position lifecycle — they are typed `ChainOnlyFact` records, not a phase. Exit intent is not closure; settlement is not exit; no code may invent lifecycle strings.
+Lifecycle is enum-governed in `src/state/lifecycle_manager.py`: `pending_entry -> active -> day0_window -> pending_exit -> economically_closed -> settled`; terminals are `voided`, `settled`, `admin_closed`; `unknown` is transient/recovery only. `quarantined` is retired from the enum entirely (T5 quarantine excision, 2026-07-11; design notes on the `lab` branch) — a confirmed-fill/chain-absence dispute keeps its TRUE phase (`active`/`pending_exit`) and the dispute lives in a typed `ReviewWorkItem` (`src/contracts/review_work_item.py`), never a lifecycle phase. Chain-only unknown assets never enter the Position lifecycle — they are typed `ChainOnlyFact` records, not a phase. Exit intent is not closure; settlement is not exit; no code may invent lifecycle strings.
 
 Chain reconciliation order: `Chain (Polymarket CLOB) > Chronicler (event log) > Portfolio (local cache)`. Local+chain match -> synced. Local exists, not on chain -> void local hallucination. Chain exists, not local -> materialize a scoped `ChainOnlyFact` (entry block limited to its own condition_id/market family + worst-case exposure counted into risk caps) and evaluate forced exit. Key file: `src/state/chain_reconciliation.py`.
 
@@ -191,9 +191,13 @@ Durable trading rules:
 
 - Canonical DB/event truth outranks derived JSON, CSV, reports, notebooks.
 - Every live venue BUY or SELL, including entry, reduce-only exit, single-order,
-  and batch paths, must have a finite unit price inside inclusive `[0.05, 0.95]`.
-  Anything below `0.05` or above `0.95` is rejected at command persistence,
-  the submission envelope, and an independent final SDK boundary. Current
+  and batch paths, must submit a finite unit price inside inclusive `[0.05, 0.95]`.
+  The current executable quote used to authorize an action must be inside the
+  same band; an in-band submitted floor cannot legalize an out-of-band bid.
+  Already-realized venue facts remain recorded as facts, but cannot authorize a
+  new action. Anything submitted below `0.05` or above `0.95` is rejected at
+  command persistence, the submission envelope, and an independent final SDK
+  boundary. Current
   tick/range, minimum size, identity, tradeability, fees, depth, action-law
   economics, and Kelly remain cumulative requirements; none may waive
   this absolute band. There are no strategy, side, lifecycle, or exit exceptions.
@@ -208,6 +212,10 @@ Durable trading rules:
   `robust_*`. After each action passes its own law, globally ranked
   fixed proposals share one posterior-mean expected-log-growth comparison;
   direction never licenses incomparable objective scores.
+- Whenever both are executable, a held SELL exposes immediate-taker and
+  maker-rest as separate fixed proposals on that same comparison axis. JIT
+  rebinding must preserve the selected execution mode rather than silently
+  switching its capital-release semantics.
 - Holding or buying multiple outcome tokens in the same weather family is not
   categorically forbidden. Every sibling-bin BUY must be evaluated against the
   exact current same-family portfolio and unresolved entry commitments through

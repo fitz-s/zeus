@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  ARTIFACT ONLY. Independent capacity backstop for Zeus log growth: launchd
+  runs the sanctioned log-rotation tool independently of the main Python
+  scheduler, so it still runs when that scheduler is wedged.
+
+  The tool is dry-run by default; this job explicitly passes the apply flag. It uses
+  copytruncate because long-running daemons keep the original log file inode
+  open; renaming it would orphan future writes from the path being watched.
+  Output goes to /dev/null so launchd cannot create recursive unbounded growth
+  under the repo's logs/ directory.
+
+  ZEUS_REPO_PLACEHOLDER is substituted with the repo's absolute path at
+  install time via scripts/install_launchd_plist.py (plistlib-based — parses
+  the plist, substitutes string values, refuses unresolved placeholders, and
+  lints before writing). No secrets are present.
+
+  INSTALL (operator, run from the repo root):
+    python3 scripts/install_launchd_plist.py deploy/launchd/com.zeus.log-rotation.plist
+    launchctl bootout gui/$(id -u)/com.zeus.log-rotation 2>/dev/null || true
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.zeus.log-rotation.plist
+-->
+<plist version="1.0">
+<dict>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>PATH</key>
+		<string>/usr/local/bin:/usr/bin:/bin</string>
+		<key>ZEUS_LOG_ROTATE_KEEP</key>
+		<string>5</string>
+		<key>ZEUS_LOG_ROTATE_MB</key>
+		<string>50</string>
+		<key>ZEUS_PRIMARY_ROOT</key>
+		<string>ZEUS_REPO_PLACEHOLDER</string>
+	</dict>
+	<key>Label</key>
+	<string>com.zeus.log-rotation</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/bin/bash</string>
+		<string>ZEUS_REPO_PLACEHOLDER/scripts/ops/rotate_zeus_logs.sh</string>
+		<string>--apply</string>
+	</array>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>StandardErrorPath</key>
+	<string>/dev/null</string>
+	<key>StandardOutPath</key>
+	<string>/dev/null</string>
+	<key>StartInterval</key>
+	<integer>900</integer>
+	<key>ThrottleInterval</key>
+	<integer>60</integer>
+	<key>WorkingDirectory</key>
+	<string>ZEUS_REPO_PLACEHOLDER</string>
+</dict>
+</plist>

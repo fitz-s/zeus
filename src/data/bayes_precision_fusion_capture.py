@@ -26,6 +26,7 @@ history so the materializer can fail closed without crashing the cycle.
 from __future__ import annotations
 
 import logging
+import math
 from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Callable, Mapping, Protocol, Sequence
@@ -374,14 +375,16 @@ def capture_bayes_precision_instruments(
     pre-fusion honesty gate — an extra whose honest source_available_at is in the FUTURE relative to
     the decision instant could not have been possessed by then, so fusing it would let a
     faster/replacement source bias q before its real availability. Such a model is EXCLUDED here.
-    ARRIVAL-AUTHORITY: this guard CAN change q for a cell where a provider's honest availability is
-    future vs decision — that is the point. A model with NULL/missing/malformed availability is
-    excluded when ``decision_utc`` is supplied, because absent provenance is not live authority.
+    Candidate values are fetched and validated first: absent, non-finite, or otherwise unusable
+    values are dropped before availability is consulted, so an inapplicable or unserved model
+    cannot emit a false missing-availability failure. Once a finite candidate value exists,
+    missing/malformed availability remains fail-closed, and future availability remains excluded.
     Legacy/test callers that omit ``decision_utc`` retain the historical no-arrival-guard behavior.
 
-    NEVER raises. Any failure of an individual model -> that model is dropped. A total failure
-    (all extras dropped), or no history, is returned as absent fusion evidence for the caller to
-    fail closed.
+    NEVER raises. Any failure of an individual model -> that model is dropped. A total current-
+    input failure (all extras dropped) is absent fusion evidence and fails closed. Missing walk-
+    forward history leaves current instruments at the explicit low-N/equal-weight prior; the
+    current-evidence shape remains the live probability gate.
     """
     provider = history_provider or _empty_history_provider
     fetch_fn = live_fetch or _default_live_fetch
@@ -395,9 +398,44 @@ def capture_bayes_precision_instruments(
     dropped: list[str] = []
     _missing_avail_count = 0  # compatibility field; missing availability is dropped, not admitted
     for model in candidate_models:
-        # ARRIVAL GUARD: exclude an extra whose honest availability is after the decision instant
-        # (it was not possessed yet — fusing it would bias q early). Fail-OPEN on NULL/missing
-        # availability or when decision_utc is absent (expected to drop ~0 today).
+        # Fetch and validate the candidate value before touching availability. Domain/lead-ineligible
+        # or unserved models have no candidate value and must not be blamed for missing provenance.
+        try:
+            raw_value = fetch_fn(
+                model=model,
+                latitude=latitude,
+                longitude=longitude,
+                timezone_name=timezone_name,
+                run=run,
+                target_local_date=target_local_date,
+                metric=metric,
+                forecast_hours=forecast_hours,
+            )
+            if raw_value is None:
+                dropped.append(model)
+                continue
+            value = float(raw_value)
+        except Exception as exc:  # belt-and-braces: a buggy provider must not crash the cycle
+            _LOG.warning(
+                "BAYES_PRECISION_FUSION capture dropped %s (provider/value invalid, fail-soft): %s",
+                model,
+                exc,
+            )
+            dropped.append(model)
+            continue
+        if not math.isfinite(value):
+            _LOG.warning(
+                "BAYES_PRECISION_FUSION capture dropped %s (non-finite candidate value: %r)",
+                model,
+                raw_value,
+            )
+            dropped.append(model)
+            continue
+
+        # ARRIVAL GUARD: once a finite candidate exists, exclude an extra whose honest availability
+        # is after the decision instant (it was not possessed yet — fusing it would bias q early).
+        # Missing/malformed availability remains fail-closed; callers without decision_utc retain
+        # the historical no-arrival-guard behavior.
         if decision_utc is not None:
             _raw_avail = availability.get(model)
             _avail_is_missing = (
@@ -415,24 +453,7 @@ def capture_bayes_precision_instruments(
                 continue
             if _avail_is_missing:
                 _missing_avail_count += 1
-        try:
-            value = fetch_fn(
-                model=model,
-                latitude=latitude,
-                longitude=longitude,
-                timezone_name=timezone_name,
-                run=run,
-                target_local_date=target_local_date,
-                metric=metric,
-                forecast_hours=forecast_hours,
-            )
-        except Exception as exc:  # belt-and-braces: a buggy provider must not crash the cycle
-            _LOG.warning("BAYES_PRECISION_FUSION capture dropped %s (provider raised, fail-soft): %s", model, exc)
-            value = None
-        if value is None:
-            dropped.append(model)
-            continue
-        present_values[model] = float(value)
+        present_values[model] = value
 
     # The anchor is always present (the materializer already has it); include it so selection +
     # parent-bias pooling see it.

@@ -28,7 +28,7 @@ Add `must_exist: bool = True` to `_connect` (and thread through the runtime fact
 - The get_*_connection runtime factories pass must_exist=True; init_schema's connect passes False.
 
 ## Why sequenced AFTER the consult
-The writer-unification consult (REQ-20260721-204133) is evaluating a "connection-factory pushdown"
+The writer-unification consult (external consult, 2026-07-21) is evaluating a "connection-factory pushdown"
 that would put write-lease acquisition INTO the `_connect`/BEGIN-IMMEDIATE lifecycle — i.e. it
 restructures the SAME function. W5-8 (open-mode/existence guard) and the pushdown (lock acquisition)
 are different aspects of `_connect` and can coexist, but editing `_connect` twice risks conflict and

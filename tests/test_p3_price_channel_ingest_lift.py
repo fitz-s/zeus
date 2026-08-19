@@ -1,11 +1,11 @@
 # Created: 2026-06-08
-# Last reused or audited: 2026-07-28 (WORLD writer critical-section read cut)
-# Authority basis: docs/architecture/system_decomposition_plan.md
+# Last reused or audited: 2026-08-05 (current-only feasibility writer/readers)
+# Authority basis: docs/reference/design_system_decomposition_plan.md
 #   §4.2 (Price-Channel / CLOB-Fact Ingest), §6 (P3 row + co-location decision),
 #   §7 (I2 no-back-coupling: durable fill bridge + execution_feasibility_evidence),
 #   §8 Step 3 (lift the user-channel WS thread + market-channel + reconcile cycles),
 #   §9 (regression-unconstructable proof — failure-domain isolation).
-# Lifecycle: created=2026-06-08; last_reviewed=2026-07-28; last_reused=2026-07-28
+# Lifecycle: created=2026-06-08; last_reviewed=2026-08-05; last_reused=2026-08-05
 # Purpose: RELATIONSHIP TESTS for process-topology refactor STEP P3 — lift the
 #   price-channel / CLOB-fact ingest (the persistent user/market WebSocket lifecycle)
 #   out of the order daemon into its own process (com.zeus.price-channel-ingest).
@@ -13,7 +13,7 @@
 # These tests verify CROSS-MODULE INVARIANTS (Module A's output → Module B), not just
 # function behaviour:
 #   (NO-REGRESSION) the WS producer + the two channel/reconcile cycles still EXIST and
-#     still write the durable fill bridge + execution_feasibility_evidence the order
+#     still write the durable fill bridge + current feasibility projection the order
 #     runtime READS; the durable fill-bridge SCAN helper stays importable by src.main's
 #     BOOT recovery (the persisted truth is shared, so no fill is dropped across the
 #     cutover); src.main still imports + boots with the jobs removed; the new process
@@ -34,6 +34,7 @@ import fcntl
 import inspect
 import json
 import sqlite3
+import threading
 import time
 import types
 from datetime import datetime, timedelta, timezone
@@ -50,7 +51,11 @@ _EXECUTOR_PY = _REPO_ROOT / "src" / "execution" / "executor.py"
 
 # The two scheduled cycles lifted to P3 (the WS user-channel ingestor is a long-running
 # THREAD, not an add_job — it is started by _start_user_channel_ingestor_if_enabled).
-_LIFTED_JOB_IDS = ("edli_market_channel_ingestor", "edli_user_channel_reconcile")
+_LIFTED_JOB_IDS = (
+    "edli_market_channel_ingestor",
+    "edli_user_channel_reconcile",
+    "edli_fill_bridge_repair",
+)
 
 # The lifted producer surface that must live in the new P3 lane module.
 _LIFTED_PRODUCERS = (
@@ -91,6 +96,25 @@ def test_market_channel_bootstrap_separates_entry_and_held_exit_metadata() -> No
         and keyword.value.value == "exit"
         for keyword in exit_calls[0].keywords
     )
+
+
+def test_price_channel_daemon_writes_boot_identity_before_ws_setup() -> None:
+    tree = ast.parse(_PRICE_CHANNEL_DAEMON.read_text(encoding="utf-8"))
+    main = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "main"
+    )
+    calls = {
+        call.func.id: call.lineno
+        for call in ast.walk(main)
+        if isinstance(call, ast.Call)
+        and isinstance(call.func, ast.Name)
+        and call.func.id
+        in {"_write_price_channel_heartbeat", "_start_user_channel_ingestor"}
+    }
+
+    assert calls["_write_price_channel_heartbeat"] < calls["_start_user_channel_ingestor"]
 
 
 def test_candidate_quote_refresh_budget_matches_live_redecision_surface() -> None:
@@ -237,6 +261,131 @@ def test_price_channel_daemon_records_max_instance_skip(monkeypatch) -> None:
             },
         }
     ]
+
+
+def test_m5_authority_deadline_fails_closed_without_publishing_health(monkeypatch) -> None:
+    import src.ingest.price_channel_daemon as daemon
+    from src.ingest import price_channel_ingest as lane
+    import src.observability.scheduler_health as scheduler_health
+
+    writes: list[dict] = []
+    monkeypatch.setattr(
+        scheduler_health,
+        "_write_scheduler_health",
+        lambda job_name, **kwargs: writes.append({"job_name": job_name, **kwargs}),
+    )
+    monotonic = iter((100.0, 120.0))
+    monkeypatch.setattr(lane.time, "monotonic", lambda: next(monotonic))
+
+    result = daemon._scheduler_job("edli_user_channel_reconcile")(
+        lane._edli_user_channel_reconcile_cycle
+    )()
+
+    assert result is None
+    assert writes == [
+        {
+            "job_name": "edli_user_channel_reconcile",
+            "failed": True,
+            "reason": "m5_authority_proof_deadline_exhausted",
+        }
+    ]
+
+
+def test_m5_authority_job_isolated_from_long_fill_bridge_repair() -> None:
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event
+
+    tree = ast.parse(_PRICE_CHANNEL_DAEMON.read_text(encoding="utf-8"))
+    jobs: dict[str, ast.Call] = {}
+    for node in ast.walk(tree):
+        if not (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "add_job"
+        ):
+            continue
+        job_id = next(
+            (
+                keyword.value.value
+                for keyword in node.keywords
+                if keyword.arg == "id" and isinstance(keyword.value, ast.Constant)
+            ),
+            None,
+        )
+        if isinstance(job_id, str):
+            jobs[job_id] = node
+
+    m5_job = jobs["edli_user_channel_reconcile"]
+    bridge_job = jobs["edli_fill_bridge_repair"]
+    for job, executor in ((m5_job, "m5_authority"), (bridge_job, "fill_bridge")):
+        keywords = {keyword.arg: keyword.value for keyword in job.keywords}
+        assert isinstance(keywords["max_instances"], ast.Constant)
+        assert keywords["max_instances"].value == 1
+        assert isinstance(keywords["coalesce"], ast.Constant)
+        assert keywords["coalesce"].value is True
+        assert isinstance(keywords["executor"], ast.Constant)
+        assert keywords["executor"].value == executor
+
+    interval = {
+        keyword.arg: keyword.value
+        for keyword in m5_job.keywords
+        if keyword.arg in {"seconds", "minutes"}
+    }
+    assert set(interval) == {"seconds"}
+    assert isinstance(interval["seconds"], ast.Name)
+    assert interval["seconds"].id == "M5_AUTHORITY_PROOF_CADENCE_SECONDS"
+
+    lane_tree = ast.parse(_PRICE_CHANNEL_MODULE.read_text(encoding="utf-8"))
+    functions = {
+        node.name: node
+        for node in ast.walk(lane_tree)
+        if isinstance(node, ast.FunctionDef)
+    }
+    m5_calls = {
+        node.func.id
+        for node in ast.walk(functions["_edli_user_channel_reconcile_cycle"])
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+    }
+    repair_calls = {
+        node.func.id
+        for node in ast.walk(functions["_edli_fill_bridge_repair_cycle"])
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+    }
+    assert "_edli_durable_fill_bridge_scan" not in m5_calls
+    assert "_edli_position_fill_redecision_cycle" not in m5_calls
+    assert "_edli_price_channel_world_write_gate" in m5_calls
+    assert "_edli_durable_fill_bridge_scan" in repair_calls
+    assert "_edli_position_fill_redecision_cycle" in repair_calls
+    assert "_edli_price_channel_world_write_gate" in repair_calls
+
+    bridge_started = Event()
+    release_bridge = Event()
+
+    def _long_bridge_repair() -> str:
+        bridge_started.set()
+        assert release_bridge.wait(timeout=1.0)
+        return "repaired"
+
+    def _m5_proof() -> dict[str, str]:
+        return {"status": "m5_authority_proof_complete"}
+
+    with (
+        ThreadPoolExecutor(max_workers=1) as m5_executor,
+        ThreadPoolExecutor(max_workers=1) as bridge_executor,
+    ):
+        bridge_future = bridge_executor.submit(_long_bridge_repair)
+        assert bridge_started.wait(timeout=0.2)
+        proof_future = m5_executor.submit(_m5_proof)
+        assert proof_future.result(timeout=0.2) == {
+            "status": "m5_authority_proof_complete"
+        }
+        repeat_proof_future = m5_executor.submit(_m5_proof)
+        assert repeat_proof_future.result(timeout=0.2) == {
+            "status": "m5_authority_proof_complete"
+        }
+        assert not bridge_future.done()
+        release_bridge.set()
+        assert bridge_future.result(timeout=0.2) == "repaired"
 
 
 def test_price_channel_clob_fetchers_are_budget_bound(monkeypatch) -> None:
@@ -386,10 +535,129 @@ def test_no_regression_order_runtime_keeps_boot_fill_bridge_recovery():
         "the order runtime must keep _edli_boot_fill_bridge_recovery — it reads the durable "
         "fill bridge at boot so no fill is dropped across the P3 cutover."
     )
-    # And it must still be invoked during boot (called inside main()).
-    assert "_edli_boot_fill_bridge_recovery" in _called_func_names(_MAIN_PY), (
-        "_edli_boot_fill_bridge_recovery must still be CALLED at boot in src.main."
+    # And its asynchronous starter must still be invoked during boot. The
+    # canonical recovery itself remains shared and unchanged; only scheduler
+    # startup is decoupled from its historical scan.
+    assert "_start_edli_boot_fill_bridge_recovery" in _called_func_names(_MAIN_PY), (
+        "_start_edli_boot_fill_bridge_recovery must be CALLED at boot in src.main."
     )
+
+
+def test_boot_fill_bridge_skips_cross_db_writer_when_read_only_probe_is_clean(monkeypatch):
+    """Healthy boot must not serialize canonical writers to rediscover no debt."""
+    import src.ingest.price_channel_ingest as pci
+    import src.main as main_mod
+    import src.state.db as db
+
+    monkeypatch.setattr(
+        pci,
+        "_edli_durable_fill_bridge_work_exists_read_only",
+        lambda: False,
+    )
+
+    def _writer_must_not_open(*args, **kwargs):
+        raise AssertionError("clean fill-bridge admission must not open a writer")
+
+    monkeypatch.setattr(db, "get_trade_connection_with_world_required", _writer_must_not_open)
+
+    main_mod._edli_boot_fill_bridge_recovery()
+
+
+def test_boot_fill_bridge_probe_uncertainty_preserves_canonical_recovery(monkeypatch):
+    """Admission uncertainty must fail toward durable recovery, never lost fills."""
+    import src.ingest.price_channel_ingest as pci
+    import src.main as main_mod
+    import src.state.db as db
+
+    class _Conn:
+        committed = False
+        closed = False
+
+        def commit(self):
+            self.committed = True
+
+        def close(self):
+            self.closed = True
+
+    conn = _Conn()
+    monkeypatch.setattr(
+        pci,
+        "_edli_durable_fill_bridge_work_exists_read_only",
+        lambda: (_ for _ in ()).throw(RuntimeError("probe uncertain")),
+    )
+    monkeypatch.setattr(
+        pci,
+        "_edli_durable_fill_bridge_scan",
+        lambda actual_conn, *, now: 0 if actual_conn is conn else -1,
+    )
+    monkeypatch.setattr(
+        db,
+        "get_trade_connection_with_world_required",
+        lambda *, write_class: conn,
+    )
+
+    main_mod._edli_boot_fill_bridge_recovery()
+
+    assert conn.committed is True
+    assert conn.closed is True
+
+
+def test_boot_fill_bridge_recovery_does_not_block_scheduler_startup(monkeypatch):
+    """Historical recovery runs off the boot thread and releases BUY only after success."""
+    import src.main as main_mod
+
+    entered = threading.Event()
+    release = threading.Event()
+    complete = threading.Event()
+    monkeypatch.setattr(main_mod, "_edli_boot_fill_bridge_recovery_complete", complete)
+    monkeypatch.setattr(main_mod, "_edli_boot_fill_bridge_recovery_thread", None)
+
+    def _slow_success():
+        entered.set()
+        assert release.wait(timeout=2.0)
+        return True
+
+    monkeypatch.setattr(main_mod, "_edli_boot_fill_bridge_recovery", _slow_success)
+
+    thread = main_mod._start_edli_boot_fill_bridge_recovery()
+
+    assert thread is not None
+    assert entered.wait(timeout=1.0)
+    assert thread.is_alive()
+    assert complete.is_set() is False
+    assert main_mod._edli_live_entry_readiness_block({}) == (
+        "entry_readiness:EDLI_BOOT_FILL_BRIDGE_RECOVERY_PENDING",
+        {},
+    )
+
+    release.set()
+    thread.join(timeout=2.0)
+    assert thread.is_alive() is False
+    assert complete.is_set() is True
+
+
+def test_boot_fill_bridge_recovery_retries_before_buy_release(monkeypatch):
+    """A failed pass cannot open BUY admission; the same owner retries to success."""
+    import src.main as main_mod
+
+    complete = threading.Event()
+    attempts = []
+    monkeypatch.setattr(main_mod, "_edli_boot_fill_bridge_recovery_complete", complete)
+    monkeypatch.setattr(main_mod, "_edli_boot_fill_bridge_recovery_thread", None)
+    monkeypatch.setattr(main_mod, "_EDLI_BOOT_FILL_BRIDGE_RETRY_SECONDS", 0.001)
+
+    def _fail_then_succeed():
+        attempts.append(len(attempts) + 1)
+        return len(attempts) >= 2
+
+    monkeypatch.setattr(main_mod, "_edli_boot_fill_bridge_recovery", _fail_then_succeed)
+
+    thread = main_mod._start_edli_boot_fill_bridge_recovery()
+    assert thread is not None
+    thread.join(timeout=2.0)
+
+    assert attempts == [1, 2]
+    assert complete.is_set() is True
 
 
 def test_no_regression_order_runtime_reads_current_feasibility_projection():
@@ -410,6 +678,17 @@ def test_no_regression_order_runtime_reads_current_feasibility_projection():
     )
     assert "execution_feasibility_evidence" not in reader_src, (
         "append history cannot restore current book authority."
+    )
+
+
+def test_price_channel_quote_writer_updates_current_without_append_history():
+    """Recurring quote ingestion must not regrow the retired append journal."""
+    from src.events.triggers.market_channel_ingestor import MarketChannelIngestor
+
+    writer_src = inspect.getsource(MarketChannelIngestor.write_prepared_quote_events)
+    assert "append_evidence=False" in writer_src, (
+        "the high-rate quote writer must update execution_feasibility_latest "
+        "without appending execution_feasibility_evidence"
     )
 
 
@@ -509,6 +788,171 @@ def test_open_position_tokens_are_market_channel_seed_priority():
         "yes-voided",
         "no-voided",
     }
+
+
+def test_unsettled_schema22_exit_token_stays_market_channel_priority():
+    from src.ingest.price_channel_ingest import (
+        _edli_current_global_exit_audit_token_ids,
+        _edli_held_position_priority_token_ids,
+    )
+
+    conn = sqlite3.connect(":memory:")
+    conn.executescript(
+        """
+        CREATE TABLE position_current (
+            position_id TEXT PRIMARY KEY,
+            phase TEXT,
+            settled_at TEXT,
+            direction TEXT,
+            token_id TEXT,
+            no_token_id TEXT
+        );
+        CREATE TABLE position_events (
+            position_id TEXT,
+            sequence_no INTEGER,
+            event_type TEXT,
+            command_id TEXT,
+            payload_json TEXT
+        );
+        CREATE TABLE venue_commands (
+            command_id TEXT,
+            position_id TEXT,
+            intent_kind TEXT,
+            state TEXT,
+            token_id TEXT
+        );
+        """
+    )
+    conn.executemany(
+        "INSERT INTO position_current VALUES (?,?,?,?,?,?)",
+        [
+            ("current", "economically_closed", None, "buy_yes", "yes-current", "no-current"),
+            ("legacy", "economically_closed", None, "buy_yes", "yes-legacy", "no-legacy"),
+            ("settled", "economically_closed", "2026-08-13T02:00:00+00:00", "buy_yes", "yes-settled", "no-settled"),
+            ("pending", "pending_exit", None, "buy_no", "yes-pending", "no-pending"),
+        ],
+    )
+    for position_id, schema_version in (("current", 22), ("legacy", 21), ("settled", 22)):
+        conn.execute(
+            "INSERT INTO position_events VALUES (?,?,?,?,?)",
+            (
+                position_id,
+                1,
+                "EXIT_INTENT",
+                None,
+                json.dumps(
+                    {
+                        "exit_intent_capital_certificate": {
+                            "action": "SELL",
+                            "global_auction_receipt": {
+                                "schema_version": schema_version
+                            },
+                        }
+                    }
+                ),
+            ),
+        )
+        conn.execute(
+            "INSERT INTO venue_commands VALUES (?,?,?,?,?)",
+            (
+                f"command-{position_id}",
+                position_id,
+                "EXIT",
+                "FILLED",
+                f"sold-{position_id}",
+            ),
+        )
+        conn.execute(
+            "INSERT INTO position_events VALUES (?,?,?,?,?)",
+            (
+                position_id,
+                2,
+                "EXIT_ORDER_FILLED",
+                f"command-{position_id}",
+                "{}",
+            ),
+        )
+
+    conn.execute(
+        "INSERT INTO position_events VALUES (?,?,?,?,?)",
+        (
+            "pending",
+            1,
+            "EXIT_INTENT",
+            None,
+            json.dumps(
+                {
+                    "exit_intent_capital_certificate": {
+                        "action": "SELL",
+                        "global_auction_receipt": {"schema_version": 22},
+                    }
+                }
+            ),
+        ),
+    )
+
+    assert _edli_held_position_priority_token_ids(conn) == {
+        "sold-current",
+        "no-pending",
+        "yes-pending",
+    }
+    assert _edli_current_global_exit_audit_token_ids() == {
+        "sold-current",
+        "no-pending",
+    }
+
+
+def test_global_exit_audit_appends_only_full_depth_buy_projection():
+    from src.ingest.price_channel_ingest import (
+        _edli_append_global_exit_audit_quote_evidence,
+    )
+    from src.state.schema.execution_feasibility_evidence_schema import ensure_table
+
+    conn = sqlite3.connect(":memory:")
+    ensure_table(conn)
+    base = (
+        "evidence-1",
+        "event-1",
+        "condition-1",
+        "sold-token",
+        "YES",
+        "2026-08-13T08:44:00+00:00",
+        "book-1",
+        0.42,
+        0.45,
+        "2026-08-13T08:44:00+00:00",
+        1,
+    )
+    conn.execute(
+        "INSERT INTO execution_feasibility_latest ("
+        "evidence_id,event_id,condition_id,token_id,outcome_label,direction,"
+        "quote_seen_at,book_hash_before,best_bid_before,best_ask_before,"
+        "depth_before_json,created_at,schema_version) VALUES (?,?,?,?,?,'buy_yes',"
+        "?,?,?,?,?,?,?)",
+        (*base[:5], *base[5:9], '{"bids":[["0.42","5"]],"asks":[]}', *base[9:]),
+    )
+    conn.execute(
+        "INSERT INTO execution_feasibility_latest ("
+        "evidence_id,event_id,condition_id,token_id,outcome_label,direction,"
+        "quote_seen_at,book_hash_before,best_bid_before,best_ask_before,"
+        "depth_before_json,created_at,schema_version) VALUES ("
+        "'evidence-2','event-1','condition-1','sold-token','YES','sell_yes',"
+        "'2026-08-13T08:44:00+00:00','book-1',0.42,0.45,NULL,"
+        "'2026-08-13T08:44:00+00:00',1)"
+    )
+
+    assert _edli_append_global_exit_audit_quote_evidence(
+        conn, {"sold-token"}
+    ) == 1
+    assert conn.execute(
+        "SELECT token_id,direction,depth_before_json "
+        "FROM execution_feasibility_evidence"
+    ).fetchall() == [
+        ("sold-token", "buy_yes", '{"bids":[["0.42","5"]],"asks":[]}')
+    ]
+    assert _edli_append_global_exit_audit_quote_evidence(
+        conn, {"sold-token"}
+    ) == 0
 
 
 def test_open_rest_tokens_are_market_channel_seed_priority():
@@ -2703,10 +3147,16 @@ def test_position_fill_redecision_reads_before_world_write_without_poisoning_cha
     assert read_build < world_write
     assert "(evaluated_fact_ids - event_fact_ids) | acknowledged_fact_ids" in cycle_src
 
-    reconcile_src = inspect.getsource(lane._edli_user_channel_reconcile_cycle)
-    assert '"scheduler_failed": False' in reconcile_src
-    assert '"scheduler_failure_reason": fill_redecision_error' in reconcile_src
-    assert "processed_with_fill_redecision_error" in reconcile_src
+    m5_src = inspect.getsource(lane._edli_user_channel_reconcile_cycle)
+    assert '"scheduler_failed": False' in m5_src
+    assert "m5_authority_proof_complete" in m5_src
+    assert "_edli_durable_fill_bridge_scan" not in m5_src
+
+    repair_src = inspect.getsource(lane._edli_fill_bridge_repair_cycle)
+    assert '"scheduler_failure_reason": scheduler_failure_reason' in repair_src
+    assert "canonical_failure_reasons[0]" in repair_src
+    assert "else fill_redecision_error" in repair_src
+    assert "processed_with_fill_redecision_error" in repair_src
 
 
 def _seed_committed_denver_2026_06_20(forecasts_conn) -> None:
@@ -4550,7 +5000,8 @@ def test_market_channel_snapshot_refresh_uses_shared_substrate_and_trade_write_c
     """The lifted price-channel lane must not race main/substrate snapshot writers."""
 
     lane_src = _PRICE_CHANNEL_MODULE.read_text(encoding="utf-8")
-    assert 'acquire_lock("market_substrate_refresh")' in lane_src
+    assert 'acquire_lock("market_substrate_priority_refresh")' in lane_src
+    assert "public_request_priority=RequestPriority.SUBMIT_JIT" in lane_src
     assert "_edli_price_channel_trade_write_context_factory(" in lane_src
     assert "snapshot_write_context_factory=" in lane_src
     assert "price_channel_snapshot_invalidate" in lane_src

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import json
 import logging
 import math
 from pathlib import Path
@@ -40,6 +41,8 @@ def resolve_strategy_policy(
     conn: sqlite3.Connection,
     strategy_key: str,
     now: datetime,
+    *,
+    probability_semantics_revision: str | None = None,
 ) -> StrategyPolicy:
     if not strategy_key:
         raise ValueError("strategy_key is required")
@@ -74,7 +77,13 @@ def resolve_strategy_policy(
                     logger.info("policy: manual_override gate skipped — field locked by higher-priority source")
                     continue
                 gated = _parse_boolish(row["value"])
-                locked_fields.add("gated")
+                # A permissive operator gate restores ordinary eligibility; it
+                # is not an implicit waiver of a narrower, evidence-scoped
+                # automated safety gate.  Only a restrictive manual gate owns
+                # the deny field.  This keeps policy composition monotone:
+                # permissions cannot erase a still-active loss cohort.
+                if gated:
+                    locked_fields.add("gated")
             elif action_type == "allocation_multiplier":
                 if "allocation_multiplier" in locked_fields:
                     logger.info("policy: manual_override allocation_multiplier skipped — field locked by higher-priority source")
@@ -106,6 +115,15 @@ def resolve_strategy_policy(
         try:
             action_type = str(row["action_type"])
             if action_type == "gate":
+                scoped_revisions = _risk_action_gate_probability_revisions(
+                    row["value"]
+                )
+                if scoped_revisions:
+                    current_revision = str(
+                        probability_semantics_revision or ""
+                    ).strip()
+                    if current_revision and current_revision not in scoped_revisions:
+                        continue
                 if "gated" in locked_fields:
                     logger.info("policy: risk_action gate skipped — field locked by higher-priority source")
                     continue
@@ -289,6 +307,32 @@ def _load_risk_actions(
     return applicable
 
 
+def _risk_action_gate_probability_revisions(raw: Any) -> frozenset[str]:
+    """Return an automated gate's exact probability-evidence scope.
+
+    A plain boolean remains a strategy-wide gate. A structured value may narrow
+    only an automated risk action to named probability-semantics revisions. A
+    caller that cannot name its revision remains gated (fail closed); a caller
+    with a different exact revision is outside that evidence cohort.
+    """
+
+    if not isinstance(raw, str) or not raw.lstrip().startswith("{"):
+        return frozenset()
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        return frozenset()
+    if not isinstance(payload, dict) or payload.get("gate") is not True:
+        return frozenset()
+    revisions = payload.get("probability_semantics_revisions")
+    if not isinstance(revisions, list):
+        return frozenset()
+    cleaned = frozenset(
+        str(value).strip() for value in revisions if str(value).strip()
+    )
+    return cleaned
+
+
 def _query_rows(
     conn: sqlite3.Connection,
     sql: str,
@@ -351,6 +395,13 @@ def _parse_boolish(raw: Any) -> bool:
     if isinstance(raw, (int, float)):
         return bool(raw)
     text = str(raw).strip().lower()
+    if text.startswith("{"):
+        try:
+            payload = json.loads(text)
+        except json.JSONDecodeError:
+            payload = None
+        if isinstance(payload, dict) and isinstance(payload.get("gate"), bool):
+            return bool(payload["gate"])
     # K1/#71: removed "gate"/"ungate" — these are action keywords, not boolean
     # literals. Treating them as booleans loses semantic intent.
     if text in {"1", "true", "yes", "on", "enabled"}:

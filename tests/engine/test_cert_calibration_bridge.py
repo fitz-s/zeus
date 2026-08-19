@@ -32,13 +32,15 @@ The quadrants:
 """
 from __future__ import annotations
 
+import copy
 import sqlite3
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import pytest
 
-from src.config import runtime_cities_by_name, settings
+from src.config import runtime_cities_by_name
+from src.decision_kernel.canonicalization import stable_hash
 from src.decision_kernel.verifier import (
     APPROVED_CALIBRATION_AUTHORITIES,
     DAY0_DETERMINISTIC_BIN_PAYOFF_CALIBRATION_AUTHORITY,
@@ -232,6 +234,265 @@ def test_day0_live_observation_hard_fact_cannot_authorize_entry_probability():
             forecast_payload={"horizon_profile": "full"},
             decision_time=DECISION_TIME,
         )
+
+
+def test_day0_remaining_probability_authority_survives_calibration_certificate():
+    lcb_transform = {
+        "yes_lcb_by_condition": {"condition-72f": 0.60},
+        "no_lcb_by_condition": {"condition-72f": 0.20},
+        "mask": [1.0],
+    }
+    binding = {
+        "city": _CITY,
+        "target_date": _TARGET_DATE,
+        "metric": _METRIC,
+        "station_id": "KORD",
+        "settlement_source": "wu_icao_history",
+        "settlement_unit": "F",
+        "observation_time": "2026-05-24T18:00:00+00:00",
+        "observation_available_at": "2026-05-24T18:01:00+00:00",
+        "observed_extreme_native": 72.0,
+        "rounded_value": 72,
+        "sample_count": 3,
+        "posterior_id": 4242,
+        "probability_base_identity": "day0-base-1",
+    }
+    payload = {
+        **binding,
+        "raw_value": binding["observed_extreme_native"],
+        "configured_station_id": "KORD",
+        "raw_payload_sha256": "a" * 64,
+        "source_match_status": "MATCH",
+        "station_match_status": "MATCH",
+        "local_date_status": "MATCH",
+        "dst_status": "UNAMBIGUOUS",
+        "metric_match_status": "MATCH",
+        "rounding_status": "MATCH",
+        "source_authorized_status": "AUTHORIZED",
+        "live_authority_status": "live",
+        "horizon_profile": "full",
+        "condition_id": "condition-72f",
+        "token_id": "no-token-72f",
+        "candidate_bin_id": "bin-72f",
+        "direction": "buy_no",
+        "q_live": 0.70,
+        "q_lcb_5pct": 0.20,
+        "probability_authority": "day0_remaining_day_global_probability_v1",
+        "q_source": "day0_remaining_day",
+        "_edli_q_source": "day0_remaining_day",
+        "_edli_day0_q_mode": "remaining_day",
+        "_edli_day0_remaining_models": 3,
+        "_edli_day0_remaining_model_names": [
+            "ecmwf_ifs",
+            "icon_global",
+            "ukmo_global_deterministic_10km",
+        ],
+        "_edli_day0_remaining_source_cycle_time_utc": (
+            "2026-05-24T17:30:00+00:00"
+        ),
+        "_edli_day0_remaining_capture_times_utc": [
+            "2026-05-24T17:31:00+00:00"
+        ] * 3,
+        "_edli_day0_lcb_transform": lcb_transform,
+        "day0_probability_authority": {
+            "probability_authority": (
+                "day0_remaining_day_global_probability_v1"
+            ),
+            "q_source": "day0_remaining_day",
+            "q_mode": "remaining_day",
+            "remaining_models": 3,
+            "rounded_value": 72,
+            "observation_time": "2026-05-24T18:00:00+00:00",
+            "observation_available_at": "2026-05-24T18:01:00+00:00",
+            "lcb_transform": lcb_transform,
+        },
+    }
+    payload["day0_observation_provenance_hash"] = stable_hash(
+        {
+            "city": payload["city"],
+            "target_date": payload["target_date"],
+            "metric": payload["metric"],
+            "settlement_source": payload["settlement_source"],
+            "station_id": payload["station_id"],
+            "configured_station_id": payload["configured_station_id"],
+            "raw_payload_sha256": payload["raw_payload_sha256"],
+            "observation_time": payload["observation_time"],
+            "observation_available_at": payload["observation_available_at"],
+        }
+    )
+
+    calibration, _clock = _day0_calibration_authority_payload_and_clock(
+        city=runtime_cities_by_name()[_CITY],
+        family=_family(),
+        payload=payload,
+        forecast_payload={"horizon_profile": "full"},
+        decision_time=DECISION_TIME,
+    )
+
+    expected = "day0_remaining_day_global_probability_v1"
+    assert calibration["probability_authority"] == expected
+    assert (
+        calibration["day0_probability_authority"]["probability_authority"]
+        == expected
+    )
+    assert calibration["city"] == _CITY
+    assert calibration["target_date"] == _TARGET_DATE
+    assert calibration["metric"] == _METRIC
+    assert calibration["temperature_metric"] == _METRIC
+    _assert_event_bound_calibration_live_admitted(
+        SimpleNamespace(payload=calibration)
+    )
+    calibration["day0_probability_authority"] = dict(
+        calibration["day0_probability_authority"]
+    )
+    calibration["day0_probability_authority"]["probability_authority"] = "other"
+    with pytest.raises(
+        ValueError,
+        match="remaining_day_probability_authority mismatch",
+    ):
+        _assert_event_bound_calibration_live_admitted(
+            SimpleNamespace(payload=calibration)
+        )
+
+    conflicts = (
+        ("q_mode", "other", "remaining_day_q_mode mismatch"),
+        ("remaining_models", 2, "remaining_day_models mismatch"),
+        ("rounded_value", 71, "remaining_day_observed_extreme mismatch"),
+        (
+            "observation_time",
+            "2026-05-24T17:59:00+00:00",
+            "remaining_day_observation_time mismatch",
+        ),
+        (
+            "observation_available_at",
+            "2026-05-24T18:02:00+00:00",
+            "remaining_day_observation_available_at mismatch",
+        ),
+        (
+            "lcb_transform",
+            {"yes_lcb_by_condition": {"condition-72f": 0.50}},
+            "remaining_day_lcb_transform mismatch",
+        ),
+    )
+    for field, conflicting_value, reason in conflicts:
+        conflicting = copy.deepcopy(payload)
+        conflicting["day0_probability_authority"][field] = conflicting_value
+        with pytest.raises(ValueError, match=reason):
+            _day0_calibration_authority_payload_and_clock(
+                city=runtime_cities_by_name()[_CITY],
+                family=_family(),
+                payload=conflicting,
+                forecast_payload={"horizon_profile": "full"},
+                decision_time=DECISION_TIME,
+            )
+
+    public_transform = copy.deepcopy(payload)
+    transform = public_transform.pop("_edli_day0_lcb_transform")
+    public_transform["day0_probability_authority"].pop("lcb_transform")
+    public_transform["day0_lcb_transform"] = transform
+    public_calibration, _clock = _day0_calibration_authority_payload_and_clock(
+        city=runtime_cities_by_name()[_CITY],
+        family=_family(),
+        payload=public_transform,
+        forecast_payload={"horizon_profile": "full"},
+        decision_time=DECISION_TIME,
+    )
+    assert (
+        public_calibration["day0_probability_authority"]["lcb_transform"]
+        == transform
+    )
+
+
+def test_day0_conditioned_replacement_keeps_settlement_identity_in_certificate():
+    binding = {
+        "posterior_id": 4242,
+        "probability_base_identity": "day0-base-1",
+        "city": _CITY,
+        "target_date": _TARGET_DATE,
+        "metric": _METRIC,
+        "observation_time": "2026-05-24T18:00:00+00:00",
+        "observation_available_at": "2026-05-24T18:01:00+00:00",
+        "observed_extreme_native": 72.0,
+        "rounded_value": 72,
+        "sample_count": 3,
+        "station_id": "KORD",
+        "configured_station_id": "KORD",
+        "settlement_source": "wu_icao_history",
+        "settlement_unit": "F",
+    }
+    observation = {
+        "city": _CITY,
+        "target_date": _TARGET_DATE,
+        "metric": _METRIC,
+        "raw_value": 72.0,
+        "rounded_value": 72,
+        "sample_count": 3,
+        "station_id": "KORD",
+        "configured_station_id": "KORD",
+        "settlement_source": "wu_icao_history",
+        "settlement_unit": "F",
+        "observation_time": binding["observation_time"],
+        "observation_available_at": binding["observation_available_at"],
+        "source_match_status": "MATCH",
+        "station_match_status": "MATCH",
+        "local_date_status": "MATCH",
+        "dst_status": "UNAMBIGUOUS",
+        "metric_match_status": "MATCH",
+        "rounding_status": "MATCH",
+        "source_authorized_status": "AUTHORIZED",
+        "live_authority_status": "live",
+        "_edli_global_day0_binding": binding,
+    }
+    payload = {
+        **observation,
+        "raw_payload_sha256": "a" * 64,
+        "posterior_id": 4242,
+        "horizon_profile": "full",
+        "probability_authority": (
+            "day0_conditioned_replacement_global_probability_v1"
+        ),
+        "q_source": "day0_conditioned_replacement",
+        "_edli_q_source": "day0_conditioned_replacement",
+        "_edli_day0_q_mode": "fast_residual_conditioned_replacement",
+        "day0_probability_authority": {
+            "probability_authority": (
+                "day0_conditioned_replacement_global_probability_v1"
+            ),
+            "q_source": "day0_conditioned_replacement",
+            "q_mode": "fast_residual_conditioned_replacement",
+            "posterior_id": 4242,
+            "probability_base_identity": "day0-base-1",
+            "global_current_observation_payload": observation,
+        },
+    }
+    payload["day0_observation_provenance_hash"] = stable_hash(
+        {
+            "city": payload["city"],
+            "target_date": payload["target_date"],
+            "metric": payload["metric"],
+            "settlement_source": payload["settlement_source"],
+            "station_id": payload["station_id"],
+            "configured_station_id": payload["configured_station_id"],
+            "raw_payload_sha256": payload["raw_payload_sha256"],
+            "observation_time": payload["observation_time"],
+            "observation_available_at": payload["observation_available_at"],
+        }
+    )
+
+    calibration, _clock = _day0_calibration_authority_payload_and_clock(
+        city=runtime_cities_by_name()[_CITY],
+        family=_family(),
+        payload=payload,
+        forecast_payload={"horizon_profile": "full"},
+        decision_time=DECISION_TIME,
+    )
+
+    assert calibration["city"] == _CITY
+    assert calibration["target_date"] == _TARGET_DATE
+    assert calibration["metric"] == _METRIC
+    _assert_event_bound_calibration_live_admitted(
+        SimpleNamespace(payload=calibration)
+    )
 
 
 def test_day0_deterministic_payoff_round_trips_calibration_authority():

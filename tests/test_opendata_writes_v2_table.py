@@ -1,5 +1,5 @@
 # Created: 2026-05-01
-# Last reused/audited: 2026-05-15
+# Last reused/audited: 2026-08-02
 # Authority basis: Operator directive 2026-05-01 — antibody for Invariant A;
 #   docs/archive/2026-Q2/task_2026-05-08_deep_alignment_audit/DATA_DAEMON_LIVE_EFFICIENCY_REFACTOR_PLAN.md
 #   Phase 5 forecast authority chain ownership.
@@ -115,6 +115,27 @@ def _make_opendata_high_payload(
             }
         )
     return payload
+
+
+def test_member_axis_provenance_requires_canonical_explicit_member_ids():
+    import sys
+    scripts_dir = Path(__file__).resolve().parents[1] / "scripts"
+    if str(scripts_dir) not in sys.path:
+        sys.path.insert(0, str(scripts_dir))
+    from ingest_grib_to_snapshots import _member_axis_provenance
+
+    payload = _make_opendata_high_payload("2026-05-02", "2026-05-01T00:00:00+00:00")
+    verified = _member_axis_provenance(payload)
+    assert verified["status"] == "VERIFIED"
+    assert verified["semantics"] == "ecmwf_ens_member_id_order_v1"
+    assert verified["member_ids"] == list(range(51))
+    assert len(verified["member_axis_hash"]) == 64
+    assert len(verified["member_values_by_id_hash"]) == 64
+
+    payload["members"][1], payload["members"][2] = payload["members"][2], payload["members"][1]
+    unverified = _member_axis_provenance(payload)
+    assert unverified["status"] == "UNVERIFIED"
+    assert unverified["reason"] == "MEMBER_AXIS_NOT_CANONICAL"
 
 
 def test_opendata_high_payload_lands_in_v2(tmp_path: Path, monkeypatch):

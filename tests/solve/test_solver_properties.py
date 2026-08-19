@@ -1,6 +1,6 @@
 # Created: 2026-07-03
-# Last reused/audited: 2026-07-29
-# Lifecycle: created=2026-07-03; last_reviewed=2026-07-29; last_reused=2026-07-29
+# Last reused/audited: 2026-08-17
+# Lifecycle: created=2026-07-03; last_reviewed=2026-08-17; last_reused=2026-08-17
 # Authority basis: current global auction, executable Kelly, and wealth contracts
 """Current global-auction solver properties over executable portfolio wealth."""
 
@@ -15,7 +15,16 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from src.contracts.executable_cost_curve import BookLevel, ExecutableCostCurve, FeeModel
+from src.contracts.executable_cost_curve import (
+    BidBookLevel,
+    BookLevel,
+    ExecutableCostCurve,
+    FeeModel,
+)
+from src.contracts.strategy_capital_allocation import (
+    STRATEGY_LOG_UTILITY_BASIS,
+    StrategyCapitalAllocationWitness,
+)
 from src.contracts.execution_intent import (
     quantize_submit_shares_for_venue,
     quantize_submit_shares_for_venue_at_most,
@@ -134,7 +143,94 @@ def _global_candidate(
         ledger_snapshot_id="ledger-current",
         executable_cost_curve=curve,
         resolution_identity=resolution_identity,
+        neg_risk=False,
+        native_bid_levels=(
+            BookLevel(price=Decimal("0.06"), size=Decimal("1000000")),
+        ),
         eligibility_reason=reason,
+    )
+
+
+def _current_maker_witness(candidate, *, proposal, asset_epoch, outcomes):
+    binding = S.maker_fill_candidate_binding_identity(
+        action=getattr(candidate, "action", "BUY"),
+        family_key=candidate.family_key,
+        bin_id=candidate.bin_id,
+        condition_id=candidate.condition_id,
+        side=candidate.side,
+        token_id=candidate.token_id,
+        ledger_snapshot_id=candidate.ledger_snapshot_id,
+        position_id=getattr(candidate, "position_id", None),
+        held_shares=getattr(candidate, "held_shares", None),
+        asset_epoch_identity=asset_epoch,
+        proposal_identity=S.executable_curve_identity(proposal),
+    )
+    training_cutoff = _DECISION_AT - timedelta(hours=2)
+    issued_at = _DECISION_AT - timedelta(minutes=1)
+    valid_until = _DECISION_AT + timedelta(minutes=1)
+    identity = S.current_maker_fill_witness_identity(
+        candidate_binding_identity=binding,
+        asset_epoch_identity=asset_epoch,
+        book_snapshot_id=proposal.snapshot_id,
+        book_hash=proposal.book_hash,
+        limit_price=proposal.levels[0].price,
+        rest_deadline_minutes=20.0,
+        source_identity="current-source",
+        model_identity="current-model",
+        sample_identity="current-sample",
+        training_cutoff_at_utc=training_cutoff,
+        issued_at_utc=issued_at,
+        valid_until_at_utc=valid_until,
+        outcomes=outcomes,
+    )
+    return S.CurrentMakerFillWitness(
+        witness_identity=identity,
+        candidate_binding_identity=binding,
+        asset_epoch_identity=asset_epoch,
+        book_snapshot_id=proposal.snapshot_id,
+        book_hash=proposal.book_hash,
+        limit_price=proposal.levels[0].price,
+        rest_deadline_minutes=20.0,
+        outcomes=tuple(outcomes),
+        source_identity="current-source",
+        model_identity="current-model",
+        sample_identity="current-sample",
+        training_cutoff_at_utc=training_cutoff,
+        issued_at_utc=issued_at,
+        valid_until_at_utc=valid_until,
+    )
+
+
+def _remint_maker_witness(
+    witness,
+    *,
+    outcomes=None,
+    training_cutoff_at_utc=None,
+    issued_at_utc=None,
+    valid_until_at_utc=None,
+):
+    """Alter a witness only after recomputing its canonical authority hash."""
+
+    fields = {
+        "candidate_binding_identity": witness.candidate_binding_identity,
+        "asset_epoch_identity": witness.asset_epoch_identity,
+        "book_snapshot_id": witness.book_snapshot_id,
+        "book_hash": witness.book_hash,
+        "limit_price": witness.limit_price,
+        "rest_deadline_minutes": witness.rest_deadline_minutes,
+        "source_identity": witness.source_identity,
+        "model_identity": witness.model_identity,
+        "sample_identity": witness.sample_identity,
+        "training_cutoff_at_utc": (
+            training_cutoff_at_utc or witness.training_cutoff_at_utc
+        ),
+        "issued_at_utc": issued_at_utc or witness.issued_at_utc,
+        "valid_until_at_utc": valid_until_at_utc or witness.valid_until_at_utc,
+        "outcomes": tuple(outcomes or witness.outcomes),
+    }
+    return S.CurrentMakerFillWitness(
+        witness_identity=S.current_maker_fill_witness_identity(**fields),
+        **fields,
     )
 
 
@@ -338,9 +434,13 @@ def _global_sell_candidate(
     bids,
     shares="10",
     fee="0",
+    min_tick="0.001",
+    min_order="1",
+    quote_ttl_seconds=1,
     probability_functional="LOWER_CVAR_PARAMETER_DRAWS",
     exit_authority_status="not_applicable",
     exit_authority_reason="non_day0_family",
+    required_mode=None,
 ):
     probability_seed = _global_candidate(
         candidate_id=f"{candidate_id}-q",
@@ -359,9 +459,20 @@ def _global_sell_candidate(
             for price, size in bids
         ),
         fee_model=FeeModel(fee_rate=Decimal(fee)),
-        min_tick=Decimal("0.001"),
-        min_order_size=Decimal("1"),
-        quote_ttl=timedelta(seconds=1),
+        min_tick=Decimal(min_tick),
+        min_order_size=Decimal(min_order),
+        quote_ttl=timedelta(seconds=quote_ttl_seconds),
+    )
+    (
+        proposal,
+        execution_mode,
+        fill_probability,
+        fill_probability_source,
+        rest_deadline_minutes,
+    ) = S.global_sell_execution_terms(
+        curve,
+        capacity=Decimal(shares),
+        required_mode=required_mode,
     )
     return S.GlobalSingleOrderSellCandidate(
         candidate_id=candidate_id,
@@ -379,10 +490,113 @@ def _global_sell_candidate(
         ledger_snapshot_id="ledger-current",
         executable_sell_curve=curve,
         resolution_identity=probability_seed.resolution_identity,
+        proposal_sell_curve=proposal,
+        fill_probability=fill_probability,
+        fill_probability_source=fill_probability_source,
+        rest_deadline_minutes=rest_deadline_minutes,
+        neg_risk=False,
+        execution_mode=execution_mode,
+        eligibility_reason=(
+            "LIVE_UNIT_PRICE_OUT_OF_BOUNDS" if proposal is None else None
+        ),
         probability_functional=probability_functional,
         exit_authority_status=exit_authority_status,
         exit_authority_reason=exit_authority_reason,
     )
+
+
+def test_global_sell_candidate_binds_immediate_taker_authority():
+    sell = _global_sell_candidate(
+        candidate_id="sell-explicit-authority",
+        family="sell-explicit-authority-family",
+        side="YES",
+        held_q=0.30,
+        bids=(("0.60", "10"),),
+    )
+
+    assert sell.execution_mode == "TAKER_LIMIT"
+    assert sell.fill_probability == 1.0
+    assert sell.fill_probability_source == "immediate_taker"
+    assert sell.rest_deadline_minutes is None
+    with pytest.raises(ValueError, match="execution proposal is incoherent"):
+        replace(sell, proposal_sell_curve=None, eligibility_reason=None)
+    with pytest.raises(ValueError, match="execution authority is missing"):
+        replace(sell, fill_probability=None)
+    with pytest.raises(ValueError, match="execution authority is missing"):
+        replace(sell, fill_probability_source=None)
+    with pytest.raises(ValueError, match="execution proposal is incoherent"):
+        replace(sell, rest_deadline_minutes=20.0)
+
+
+@pytest.mark.parametrize("capacity", (Decimal("NaN"), Decimal("Infinity"), Decimal("0")))
+def test_passive_sell_proposal_rejects_invalid_capacity(capacity):
+    sell = _global_sell_candidate(
+        candidate_id=f"sell-invalid-capacity-{capacity}",
+        family=f"sell-invalid-capacity-{capacity}-family",
+        side="YES",
+        held_q=0.30,
+        bids=(("0.60", "10"),),
+    )
+
+    assert S.passive_sell_proposal_curve(
+        sell.executable_sell_curve,
+        capacity=capacity,
+    ) is None
+
+
+def test_global_sell_scores_the_exact_immediate_bid_prefix():
+    sell = _global_sell_candidate(
+        candidate_id="sell-maker-rest-economics",
+        family="sell-maker-rest-economics-family",
+        side="YES",
+        held_q=0.30,
+        bids=(("0.60", "4"), ("0.50", "6")),
+        shares="10",
+        min_tick="0.01",
+    )
+
+    decision = _global_select((sell,))
+
+    assert decision.candidate is sell
+    assert decision.capital_action_mode == "IMMEDIATE_TAKER_SELL"
+    assert decision.limit_price == Decimal("0.50")
+    assert decision.expected_fill_price_before_fee == Decimal("0.54")
+    assert decision.cash_proceeds_usd == Decimal("5.40")
+    assert decision.expected_growth is not None
+    assert decision.expected_growth.expected_delta_log_wealth > 0.0
+    assert decision.expected_growth.expected_ev_usd > 0.0
+    assert decision.capital_lock_hours == pytest.approx(1.0 / 3600.0)
+
+
+def test_taker_sell_capital_horizon_uses_current_execution_window():
+    short = _global_sell_candidate(
+        candidate_id="sell-short-quote",
+        family="sell-short-quote-family",
+        side="YES",
+        held_q=0.30,
+        bids=(("0.60", "10"),),
+        quote_ttl_seconds=1,
+    )
+    long = _global_sell_candidate(
+        candidate_id="sell-long-quote",
+        family="sell-long-quote-family",
+        side="YES",
+        held_q=0.30,
+        bids=(("0.60", "10"),),
+        quote_ttl_seconds=2,
+    )
+
+    short_decision = _global_select(
+        (short,), resolution_hours_by_family={short.family_key: 18.0}
+    )
+    long_decision = _global_select(
+        (long,), resolution_hours_by_family={long.family_key: 18.0}
+    )
+
+    assert short_decision.candidate is short
+    assert long_decision.candidate is long
+    assert short_decision.capital_lock_hours == pytest.approx(1.0 / 3600.0)
+    assert long_decision.capital_lock_hours == pytest.approx(2.0 / 3600.0)
 
 
 @pytest.mark.parametrize("side", ("YES", "NO"))
@@ -823,6 +1037,10 @@ def test_family_joint_fractional_kelly_owns_one_shared_final_vector(monkeypatch)
                 ledger_snapshot_id="ledger-current",
                 executable_cost_curve=curve,
                 resolution_identity="resolution-joint",
+                neg_risk=False,
+                native_bid_levels=(
+                    BookLevel(price=Decimal("0.06"), size=Decimal(depth)),
+                ),
             )
         )
     endowment = S.FamilyPortfolioEndowment(
@@ -873,7 +1091,7 @@ def test_family_joint_fractional_kelly_owns_one_shared_final_vector(monkeypatch)
     )
 
     assert plan.no_trade_reason is None
-    assert plan.primary_candidate_id is not None
+    assert plan.targets
     assert Decimal("0") < plan.fractional_target_cost_usd <= Decimal("1449.166") / 32
     assert plan.full_kelly_cost_usd > plan.fractional_target_cost_usd
     assert plan.expected_delta_log_wealth > 0
@@ -923,7 +1141,6 @@ def test_family_joint_fractional_kelly_owns_one_shared_final_vector(monkeypatch)
         fractional_kelly_multiplier=Decimal("0.03125"),
     )
 
-    assert repeated.primary_candidate_id is None
     assert repeated.no_trade_reason == "FAMILY_JOINT_FRACTIONAL_BUDGET_EXHAUSTED"
     assert repeated.fractional_target_cost_usd == 0
     assert optimize_calls == 1
@@ -934,6 +1151,53 @@ def test_family_joint_fractional_kelly_owns_one_shared_final_vector(monkeypatch)
             probability_witness_identity=witness.witness_identity,
         )
         for candidate in candidates
+    )
+
+    def reuse_joint_targets(selection_candidates, **_kwargs):
+        assert {
+            target.candidate_id for target in plan.targets
+        }.issubset(
+            {candidate.candidate_id for candidate in selection_candidates}
+        )
+        return plan
+
+    monkeypatch.setattr(S, "plan_family_joint_buy_targets", reuse_joint_targets)
+    original_expected_growth = S._expected_growth_comparison
+    forced_delta_by_candidate = {
+        "candidate-35-NO": 0.001,
+        "candidate-36-NO": 0.001 + 5e-16,
+    }
+
+    def sub_femtoscale_joint_growth(
+        score,
+        *,
+        probability_witness,
+        capital_lock_hours,
+    ):
+        comparison = original_expected_growth(
+            score,
+            probability_witness=probability_witness,
+            capital_lock_hours=capital_lock_hours,
+        )
+        candidate_id = score.candidate.candidate_id
+        expected_delta = forced_delta_by_candidate.get(candidate_id)
+        if expected_delta is None:
+            return comparison
+        return replace(
+            comparison,
+            expected_delta_log_wealth=expected_delta,
+            expected_log_growth_per_hour=(
+                expected_delta / comparison.capital_lock_hours
+            ),
+            expected_capital_efficiency=(
+                expected_delta / float(score.cost_usd)
+            ),
+        )
+
+    monkeypatch.setattr(
+        S,
+        "_expected_growth_comparison",
+        sub_femtoscale_joint_growth,
     )
     decision = _global_select(
         bound_candidates,
@@ -950,7 +1214,15 @@ def test_family_joint_fractional_kelly_owns_one_shared_final_vector(monkeypatch)
         (row.candidate_id, row.status, row.rejection_reason)
         for row in decision.candidate_evaluations
     )
-    assert decision.candidate.candidate_id == plan.primary_candidate_id, tuple(
+    assert decision.candidate.candidate_id == "candidate-36-NO"
+    assert (
+        forced_delta_by_candidate["candidate-36-NO"]
+        - forced_delta_by_candidate["candidate-35-NO"]
+        < 1e-15
+    )
+    assert decision.candidate.candidate_id in {
+        target.candidate_id for target in plan.targets
+    }, tuple(
         (
             row.candidate_id,
             row.status,
@@ -961,7 +1233,74 @@ def test_family_joint_fractional_kelly_owns_one_shared_final_vector(monkeypatch)
         for row in decision.candidate_evaluations
     )
     assert decision.buy_sizing_mode == "FAMILY_JOINT_FRACTIONAL_TARGET"
-    assert optimizer_shapes == [5, 4]
+    joint_rows = {
+        row.candidate_id: row
+        for row in decision.candidate_evaluations
+        if row.candidate_id in target_by_id
+    }
+    assert set(joint_rows) == set(target_by_id)
+    assert {
+        row.status for row in joint_rows.values()
+    } == {"SCORED", "SELECTED"}
+    assert all(
+        row.rejection_reason != "FAMILY_JOINT_PLAN_NOT_PRIMARY"
+        for row in joint_rows.values()
+    )
+    cross_family_sell = _global_sell_candidate(
+        candidate_id="cross-family-capital-release-sell",
+        family="cross-family-capital-release-sell",
+        side="YES",
+        held_q=0.10,
+        bids=(("0.90", "10"),),
+        shares="10",
+        required_mode="TAKER_LIMIT",
+    )
+    sell_witness = _global_probability_witness(cross_family_sell)
+    cross_action = _global_select(
+        (*bound_candidates, cross_family_sell),
+        floor="1449.166",
+        ceiling="1449.166",
+        cash="1449.166",
+        cap="1449.166",
+        probability_witnesses={
+            family: witness,
+            cross_family_sell.family_key: sell_witness,
+        },
+        family_portfolio_endowment_resolver=lambda _: endowment,
+        fractional_kelly_multiplier="0.03125",
+    )
+    assert cross_action.candidate is cross_family_sell
+    cross_rows = {
+        row.candidate_id: row for row in cross_action.candidate_evaluations
+    }
+    assert all(
+        cross_rows[candidate_id].status == "SCORED"
+        for candidate_id in target_by_id
+    )
+    original_buy_score = S._score_global_single_order_buy_expected
+
+    def broken_joint_target(candidate, **kwargs):
+        if candidate.candidate_id == "candidate-35-NO":
+            raise RuntimeError("joint-target-invariant-broken")
+        return original_buy_score(candidate, **kwargs)
+
+    monkeypatch.setattr(
+        S,
+        "_score_global_single_order_buy_expected",
+        broken_joint_target,
+    )
+    with pytest.raises(RuntimeError, match="joint-target-invariant-broken"):
+        _global_select(
+            bound_candidates,
+            floor="1449.166",
+            ceiling="1449.166",
+            cash="1449.166",
+            cap="1449.166",
+            probability_witnesses={family: witness},
+            family_portfolio_endowment_resolver=lambda _: endowment,
+            fractional_kelly_multiplier="0.03125",
+        )
+    assert optimizer_shapes == [5]
 
 
 def test_family_joint_does_not_spend_fixed_capital_fraction_above_kelly_target():
@@ -1003,14 +1342,13 @@ def test_family_joint_does_not_spend_fixed_capital_fraction_above_kelly_target()
         fractional_kelly_multiplier=Decimal("0.03125"),
     )
 
-    assert full.primary_candidate_id == candidate.candidate_id
+    assert full.targets[0].candidate_id == candidate.candidate_id
     assert full.targets[0].shares > Decimal("55")
     assert full.targets[0].full_kelly_target_shares == full.targets[0].shares
     assert (
         full.targets[0].full_kelly_target_shares * Decimal("0.03125")
         < Decimal("5")
     )
-    assert fractional.primary_candidate_id is None
     assert fractional.targets == ()
     assert fractional.no_trade_reason == "FAMILY_JOINT_NO_POSITIVE_TARGET"
 
@@ -1063,8 +1401,20 @@ def _global_witness(
     reservations="0",
     collateral="CHAIN",
     position_hash="positions-current",
+    allocation=None,
+    native_commitments_micro=(),
 ):
     captured_at = _DECISION_AT - timedelta(milliseconds=100)
+    committed = sum(
+        (Decimal(amount) / Decimal("1000000") for _, amount in native_commitments_micro),
+        Decimal("0"),
+    )
+    allocation_witness = StrategyCapitalAllocationWitness.build(
+        capital_basis_usd=Decimal(floor) + committed,
+        committed_capital_usd=committed,
+        venue_spendable_cash_usd=Decimal(cash),
+        allocation=allocation or {"mode": "wallet_total"},
+    )
     identity = S.portfolio_wealth_identity(
         ledger_snapshot_id="ledger-current",
         position_set_hash=position_hash,
@@ -1073,6 +1423,7 @@ def _global_witness(
         spendable_cash_usd=Decimal(cash),
         reservations_usd=Decimal(reservations),
         collateral_authority=collateral,
+        strategy_capital_allocation_identity=allocation_witness.witness_identity,
         captured_at_utc=captured_at,
     )
     return S.PortfolioWealthWitness(
@@ -1083,9 +1434,11 @@ def _global_witness(
         spendable_cash_usd=Decimal(cash),
         reservations_usd=Decimal(reservations),
         collateral_authority=collateral,
+        strategy_capital_allocation=allocation_witness,
         captured_at_utc=captured_at,
         max_age=timedelta(seconds=1),
         witness_identity=identity,
+        native_commitments_micro=tuple(native_commitments_micro),
     )
 
 
@@ -1161,7 +1514,14 @@ def _global_select(
                 side=candidate.side,
                 book_snapshot_id=candidate.book_snapshot_id,
                 execution_curve_identity=candidate.execution_curve_identity,
+                neg_risk=candidate.neg_risk,
                 action=getattr(candidate, "action", "BUY"),
+                asset_epoch_identity=getattr(candidate, "asset_epoch_identity", None),
+                maker_witness_identity=(
+                    candidate.maker_fill_witness.witness_identity
+                    if getattr(candidate, "maker_fill_witness", None) is not None
+                    else None
+                ),
             )
             for candidate in candidates
         }
@@ -1300,6 +1660,10 @@ def test_deterministic_day0_payoff_selects_exact_bin_and_rejects_unknown_sibling
         probability_witness=witness,
         ledger_snapshot_id="ledger-current",
         book_captured_at_utc=captured_at,
+        neg_risk=False,
+        native_bid_levels=(
+            BookLevel(price=Decimal("0.06"), size=Decimal("100")),
+        ),
     )
     unknown = S.global_candidate_from_native(
         SimpleNamespace(
@@ -1320,6 +1684,10 @@ def test_deterministic_day0_payoff_selects_exact_bin_and_rejects_unknown_sibling
         probability_witness=witness,
         ledger_snapshot_id="ledger-current",
         book_captured_at_utc=captured_at,
+        neg_risk=False,
+        native_bid_levels=(
+            BookLevel(price=Decimal("0.06"), size=Decimal("100")),
+        ),
     )
 
     decision = _global_select(
@@ -1407,7 +1775,7 @@ def test_global_single_order_sell_can_beat_positive_buy_and_cash():
         candidate_id="positive-buy-runner-up",
         family="buy-family",
         side="NO",
-        q=0.80,
+        q=0.65,
         levels=(("0.60", "20"),),
     )
 
@@ -1417,8 +1785,8 @@ def test_global_single_order_sell_can_beat_positive_buy_and_cash():
 
     assert decision.candidate is sell
     assert decision.shares == Decimal("10")
-    assert decision.cash_proceeds_usd == Decimal("3.4")
-    assert decision.cost_usd == Decimal("6.6")
+    assert decision.cash_proceeds_usd == Decimal("3.4000")
+    assert decision.cost_usd == Decimal("6.6000")
     assert decision.limit_price == Decimal("0.30")
     assert decision.expected_fill_price_before_fee == Decimal("0.34")
     assert decision.max_spend_usd == 0
@@ -1441,9 +1809,10 @@ def test_global_single_order_sell_can_beat_positive_buy_and_cash():
         > evaluations[buy.candidate_id].expected_growth.expected_log_growth_per_hour
         > 0
     )
-    assert decision.capital_lock_hours == pytest.approx(24)
+    expected_lock_hours = 1.0 / 3600.0
+    assert decision.capital_lock_hours == pytest.approx(expected_lock_hours)
     assert decision.robust_log_growth_per_hour == pytest.approx(
-        decision.robust_delta_log_wealth / 24
+        decision.robust_delta_log_wealth / expected_lock_hours
     )
     assert (
         evaluations[sell.candidate_id].robust_log_growth_per_hour
@@ -1508,13 +1877,13 @@ def test_global_single_order_sell_uses_incremental_growth_not_loss_majority():
     assert decision.candidate is sell
     assert decision.terminal_wealth is not None
     assert decision.terminal_wealth.win_probability_lcb == pytest.approx(0.40)
-    assert decision.terminal_wealth.median_payoff_usd == Decimal("-1.0")
-    assert decision.cash_proceeds_usd == Decimal("9.0")
+    assert decision.terminal_wealth.median_payoff_usd == Decimal("-1.0000")
+    assert decision.cash_proceeds_usd == Decimal("9.0000")
     assert decision.robust_delta_log_wealth > 0
     assert decision.robust_ev_usd > 0
 
 
-def test_global_single_order_ranks_buy_and_sell_by_one_capital_growth_rate():
+def test_global_single_order_ranks_immediate_sell_on_execution_horizon():
     sell = _global_sell_candidate(
         candidate_id="sell-runner-up",
         family="sell-runner-family",
@@ -1543,29 +1912,25 @@ def test_global_single_order_ranks_buy_and_sell_by_one_capital_growth_rate():
         },
     )
 
-    assert decision.candidate is buy
-    assert decision.cash_proceeds_usd == 0
-    assert decision.robust_delta_log_wealth == 0
-    assert isinstance(
-        decision.expected_terminal_wealth,
-        S.ExpectedBuyTerminalWealthCertificate,
-    )
-    assert decision.expected_terminal_wealth.expected_delta_log_wealth > 0
-    assert decision.capital_action_mode == "SETTLEMENT_LOCKED_BUY"
-    assert decision.robust_log_growth_per_hour is None
+    assert decision.candidate is sell
+    assert decision.capital_action_mode == "IMMEDIATE_TAKER_SELL"
     evaluations = {
         evaluation.candidate_id: evaluation
         for evaluation in decision.candidate_evaluations
     }
     assert evaluations[buy.candidate_id].expected_growth is not None
     assert evaluations[sell.candidate_id].expected_growth is not None
-    assert evaluations[sell.candidate_id].capital_lock_hours == pytest.approx(24)
+    expected_sell_lock_hours = 1.0 / 3600.0
+    assert evaluations[sell.candidate_id].capital_lock_hours == pytest.approx(
+        expected_sell_lock_hours
+    )
     assert evaluations[sell.candidate_id].robust_log_growth_per_hour == pytest.approx(
-        evaluations[sell.candidate_id].robust_delta_log_wealth / 24
+        evaluations[sell.candidate_id].robust_delta_log_wealth
+        / expected_sell_lock_hours
     )
     assert (
-        evaluations[buy.candidate_id].expected_growth.expected_log_growth_per_hour
-        > evaluations[sell.candidate_id].expected_growth.expected_log_growth_per_hour
+        evaluations[sell.candidate_id].expected_growth.expected_log_growth_per_hour
+        > evaluations[buy.candidate_id].expected_growth.expected_log_growth_per_hour
         > 0
     )
 
@@ -1601,7 +1966,7 @@ def test_global_single_order_entry_pause_blocks_buy_but_preserves_sell_and_cash(
     )
 
     assert decision.candidate is sell
-    assert decision.cash_proceeds_usd == Decimal("3.4")
+    assert decision.cash_proceeds_usd == Decimal("3.4000")
     assert decision.robust_delta_log_wealth > 0
     assert decision.rejection_reasons[buy.candidate_id] == (
         "ENTRY_ACTION_PAUSED:external:operator"
@@ -1629,8 +1994,9 @@ def test_family_entry_block_removes_higher_growth_buy_before_same_family_sell():
         family=family,
         side="YES",
         held_q=0.90,
-        bids=(("0.95", "10"),),
+        bids=(("0.94", "10"),),
         shares="10",
+        quote_ttl_seconds=86400,
     )
     probability_witness = _global_probability_witness(sell)
     buy_curve = _global_curve(
@@ -1652,6 +2018,10 @@ def test_family_entry_block_removes_higher_growth_buy_before_same_family_sell():
         ledger_snapshot_id="ledger-current",
         executable_cost_curve=buy_curve,
         resolution_identity=sell.resolution_identity,
+        neg_risk=False,
+        native_bid_levels=(
+            BookLevel(price=Decimal("0.06"), size=Decimal("20")),
+        ),
     )
     unblocked = _global_select(
         (sell, buy),
@@ -1689,7 +2059,7 @@ def test_family_entry_block_removes_higher_growth_buy_before_same_family_sell():
     assert evaluations[sell.candidate_id].status == "SELECTED"
 
 
-def test_global_buy_is_sized_to_current_fdr_feasible_prefix_before_ranking():
+def test_global_buy_size_uses_mean_not_false_edge_sample_rate():
     buy = _global_candidate(
         candidate_id="buy-fdr-prefix-cap",
         family="buy-fdr-prefix-cap-family",
@@ -1716,16 +2086,20 @@ def test_global_buy_is_sized_to_current_fdr_feasible_prefix_before_ranking():
     )
 
     assert decision.candidate is buy
-    selected_rate = S.finite_sample_false_edge_rate(
+    diagnostic_rate = S.finite_sample_false_edge_rate(
         tuple(q_samples),
         cost=float(decision.cost_usd / decision.shares),
     )
-    assert selected_rate is not None
-    assert selected_rate <= 0.10
-    assert decision.shares < Decimal("25")
+    assert diagnostic_rate is not None
+    assert diagnostic_rate > 0.10
+    assert decision.expected_terminal_wealth is not None
+    assert decision.expected_terminal_wealth.probability_basis == (
+        "POSTERIOR_PREDICTIVE_MEAN"
+    )
+    assert decision.shares == Decimal("25")
 
 
-def test_fdr_infeasible_buy_is_removed_before_positive_sell_ranking():
+def test_false_edge_sample_rate_does_not_remove_buy_before_global_ranking():
     buy = _global_candidate(
         candidate_id="buy-fdr-infeasible",
         family="buy-fdr-infeasible-family",
@@ -1756,14 +2130,16 @@ def test_fdr_infeasible_buy_is_removed_before_positive_sell_ranking():
     )
 
     assert decision.candidate is sell
-    assert decision.rejection_reasons[buy.candidate_id] == (
-        "FDR_ROUTE_FALSE_EDGE_RATE_EXCEEDS_ALPHA"
-    )
+    assert buy.candidate_id not in decision.rejection_reasons
     evaluations = {
         evaluation.candidate_id: evaluation
         for evaluation in decision.candidate_evaluations
     }
-    assert evaluations[buy.candidate_id].status == "REJECTED"
+    assert evaluations[buy.candidate_id].status == "SCORED"
+    assert evaluations[buy.candidate_id].expected_growth is not None
+    assert evaluations[buy.candidate_id].expected_growth.probability_basis == (
+        "POSTERIOR_PREDICTIVE_MEAN"
+    )
     assert evaluations[sell.candidate_id].status == "SELECTED"
 
 
@@ -1793,10 +2169,1050 @@ def test_global_single_order_zero_buy_capacity_preserves_sell_and_cash():
     )
 
     assert decision.candidate is sell
-    assert decision.cash_proceeds_usd == Decimal("3.4")
+    assert decision.cash_proceeds_usd == Decimal("3.4000")
     assert decision.robust_delta_log_wealth > 0
     assert decision.rejection_reasons[buy.candidate_id] == (
         "CAPITAL_CAPACITY_EXHAUSTED"
+    )
+
+
+@pytest.mark.parametrize(
+    ("allocation", "expected_remaining"),
+    [
+        ({"mode": "wallet_total"}, Decimal("20")),
+        ({"mode": "fraction", "value": 0.25}, Decimal("10")),
+        ({"mode": "absolute", "value": 10}, Decimal("10")),
+    ],
+)
+def test_global_witness_allocation_limits_buy_to_remaining_venue_capacity(
+    allocation, expected_remaining
+):
+    witness = _global_witness(
+        floor="40",
+        ceiling="40",
+        cash="20",
+        allocation=allocation,
+    )
+    assert (
+        witness.strategy_capital_allocation.remaining_buy_capacity_usd
+        == expected_remaining
+    )
+
+
+def test_global_buy_uses_remaining_strategy_allocation_not_venue_cash():
+    buy = _global_candidate(
+        candidate_id="allocation-buy-bound",
+        family="allocation-buy-bound",
+        side="YES",
+        q=0.99,
+        levels=(("0.10", "1000"),),
+    )
+    witness = _global_witness(
+        floor="40",
+        ceiling="40",
+        cash="20",
+        allocation={"mode": "fraction", "value": 0.25},
+    )
+    decision = _global_select(
+        (buy,), witness=witness,
+        cap=witness.strategy_capital_allocation.remaining_buy_capacity_usd,
+    )
+    wallet_total = _global_select(
+        (buy,),
+        witness=_global_witness(
+            floor="40",
+            ceiling="40",
+            cash="20",
+            allocation={"mode": "wallet_total"},
+        ),
+        cap="20",
+    )
+    assert decision.candidate is buy
+    assert decision.cost_usd <= Decimal("10")
+    assert wallet_total.cost_usd > decision.cost_usd
+
+
+def test_global_buy_utility_cannot_borrow_co_tenant_wallet_cash():
+    buy = _global_candidate(
+        candidate_id="co-tenant-utility-flip",
+        family="co-tenant-utility-flip",
+        side="YES",
+        q=0.51,
+        levels=(("0.50", "10"),),
+        min_order="1",
+    )
+    zeus_one_dollar = _global_witness(
+        floor="101",
+        ceiling="101",
+        cash="101",
+        allocation={"mode": "absolute", "value": 1},
+    )
+    decision = _global_select(
+        (buy,),
+        witness=zeus_one_dollar,
+        cap=zeus_one_dollar.strategy_capital_allocation.remaining_buy_capacity_usd,
+    )
+    wallet_total = _global_select(
+        (buy,),
+        witness=_global_witness(
+            floor="101",
+            ceiling="101",
+            cash="101",
+            allocation={"mode": "wallet_total"},
+        ),
+        cap="1",
+    )
+
+    one_share_zeus_du = 0.49 * math.log(0.5) + 0.51 * math.log(1.5)
+    one_share_wallet_du = 0.49 * math.log(100.5 / 101) + 0.51 * math.log(
+        101.5 / 101
+    )
+    assert one_share_zeus_du < 0 < one_share_wallet_du
+    assert decision.candidate is None
+    assert decision.rejection_reasons[buy.candidate_id] in {
+        "DEPTH_INFEASIBLE",
+        "FRACTIONAL_KELLY_TARGET_BELOW_MINIMUM_LOT",
+        "NON_POSITIVE_EXPECTED_OBJECTIVE",
+    }
+    assert wallet_total.candidate is buy
+    assert wallet_total.cost_usd <= Decimal("1")
+
+
+def test_global_allocation_drift_supersedes_wealth_identity():
+    buy = _global_candidate(
+        candidate_id="allocation-drift-buy",
+        family="allocation-drift-buy",
+        side="YES",
+        q=0.80,
+    )
+    wallet = _global_witness(
+        floor="40",
+        ceiling="40",
+        cash="20",
+        allocation={"mode": "wallet_total"},
+    )
+    fraction = _global_witness(
+        floor="40",
+        ceiling="40",
+        cash="20",
+        allocation={"mode": "fraction", "value": 0.5},
+    )
+
+    assert wallet.economic_identity != fraction.economic_identity
+    decision = _global_select(
+        (buy,),
+        witness=wallet,
+        current_wealth_identity=fraction.economic_identity,
+        cap=wallet.strategy_capital_allocation.remaining_buy_capacity_usd,
+    )
+    assert decision.candidate is None
+    assert decision.no_trade_reason == "CAPITAL_IDENTITY_SUPERSEDED"
+
+
+def test_global_witness_allocation_zero_keeps_sell_competition_alive():
+    sell = _global_sell_candidate(
+        candidate_id="sell-allocation-zero",
+        family="sell-allocation-zero",
+        side="YES",
+        held_q=0.15,
+        bids=(("0.40", "4"), ("0.30", "6")),
+        shares="10",
+        required_mode="TAKER_LIMIT",
+    )
+    decision = _global_select(
+        (sell,),
+        witness=_global_witness(
+            floor="100",
+            ceiling="110",
+            cash="0",
+            allocation={"mode": "absolute", "value": 0},
+        ),
+        cap="0",
+    )
+    assert decision.candidate is sell
+    assert decision.ruin_probability_reduction == pytest.approx(0.85)
+    assert decision.expected_growth is not None
+    assert decision.expected_growth.ruin_probability_reduction == pytest.approx(
+        0.85
+    )
+
+
+def test_zero_cash_portfolio_witness_keeps_reduce_only_sell_executable():
+    sell = _global_sell_candidate(
+        candidate_id="sell-zero-cash-rescue",
+        family="sell-zero-cash-rescue",
+        side="YES",
+        held_q=0.20,
+        bids=(("0.40", "10"),),
+        shares="10",
+        required_mode="TAKER_LIMIT",
+    )
+    witness = _global_witness(
+        floor="0",
+        ceiling="10",
+        cash="0",
+        allocation={"mode": "absolute", "value": 0},
+    )
+
+    decision = _global_select((sell,), witness=witness, cap="0")
+
+    assert decision.candidate is sell
+    assert decision.ruin_probability_reduction == pytest.approx(0.80)
+    assert decision.expected_growth is not None
+    assert decision.expected_growth.utility_basis == STRATEGY_LOG_UTILITY_BASIS
+
+
+def test_zero_atom_global_ranking_uses_raw_ruin_reduction_before_time_rate():
+    larger_reduction_slower = _global_sell_candidate(
+        candidate_id="larger-ruin-reduction",
+        family="larger-ruin-reduction",
+        side="YES",
+        held_q=0.90,
+        bids=(("0.94", "10"),),
+        shares="10",
+        required_mode="TAKER_LIMIT",
+        quote_ttl_seconds=24 * 3600,
+    )
+    smaller_reduction_faster = _global_sell_candidate(
+        candidate_id="smaller-ruin-reduction",
+        family="smaller-ruin-reduction",
+        side="YES",
+        held_q=0.91,
+        bids=(("0.94", "10"),),
+        shares="10",
+        required_mode="TAKER_LIMIT",
+        quote_ttl_seconds=3600,
+    )
+    witness = _global_witness(
+        floor="100",
+        ceiling="120",
+        cash="0",
+        allocation={"mode": "absolute", "value": 0},
+    )
+    decision = _global_select(
+        (smaller_reduction_faster, larger_reduction_slower),
+        witness=witness,
+        cap="0",
+    )
+
+    assert decision.candidate is larger_reduction_slower
+    assert decision.expected_growth is not None
+    assert decision.expected_growth.ruin_probability_reduction == pytest.approx(
+        0.10
+    )
+
+
+def test_extended_log_preserves_sub_femtoscale_ruin_reduction_exactly():
+    tiny = 1e-16
+
+    ruin_reduction, finite_delta = S._binary_extended_log_delta(
+        loss_probability=tiny,
+        win_probability=1.0 - tiny,
+        loss_baseline=Decimal("0"),
+        win_baseline=Decimal("1"),
+        loss_after=Decimal("1"),
+        win_after=Decimal("1"),
+    )
+
+    assert ruin_reduction == tiny
+    assert finite_delta == 0.0
+
+
+def test_unavailable_maker_witness_rejects_only_maker_sibling():
+    taker = _global_candidate(
+        candidate_id="current-taker-sibling",
+        family="maker-witness-family",
+        side="YES",
+        q=0.80,
+        levels=(("0.40", "100"),),
+    )
+    maker_curve = _global_curve(
+        side="YES",
+        token=taker.token_id,
+        levels=(("0.39", "100"),),
+    )
+    maker = replace(
+        taker,
+        candidate_id="unavailable-maker-sibling",
+        execution_mode="MAKER_REST",
+        proposal_cost_curve=maker_curve,
+        fill_probability=0.19,
+        fill_probability_source="legacy_scalar_not_current_authority",
+        rest_deadline_minutes=20.0,
+    )
+
+    decision = _global_select(
+        (maker, taker),
+        candidate_policy_rejection_resolver=lambda candidate: (
+            "CURRENT_MAKER_FILL_WITNESS_UNAVAILABLE"
+            if candidate.execution_mode == "MAKER_REST"
+            else None
+        ),
+    )
+
+    assert decision.candidate is taker
+    assert decision.rejection_reasons[maker.candidate_id] == (
+        "CURRENT_MAKER_FILL_WITNESS_UNAVAILABLE"
+    )
+
+
+def test_global_buy_generation_omits_untyped_maker_sibling():
+    seed = _global_candidate(
+        candidate_id="maker-generation-wall",
+        family="maker-generation-wall-family",
+        side="YES",
+        q=0.80,
+    )
+    native = SimpleNamespace(
+        no_trade_reason=None,
+        executable_cost_curve=seed.executable_cost_curve,
+        family_key=seed.family_key,
+        bin_id=seed.bin_id,
+        condition_id=seed.condition_id,
+        side=seed.side,
+        token_id=seed.token_id,
+        hypothesis_id="maker-generation-wall-native",
+    )
+
+    proposals = S.global_candidates_from_native(
+        native,
+        probability_witness=_global_probability_witness(seed),
+        ledger_snapshot_id=seed.ledger_snapshot_id,
+        book_captured_at_utc=seed.book_captured_at_utc,
+        neg_risk=False,
+        include_maker=True,
+    )
+
+    assert len(proposals) == 1
+    assert proposals[0].execution_mode == "TAKER_LIMIT"
+    assert proposals[0].eligibility_reason is None
+
+
+@pytest.mark.parametrize("bid_price", ("0.01", "0.04"))
+def test_global_taker_buy_can_commit_to_settlement_without_exit_depth(bid_price):
+    candidate = _global_candidate(
+        candidate_id="taker-born-unexitable",
+        family="taker-born-unexitable-family",
+        side="YES",
+        q=0.80,
+        levels=(("0.05", "100"),),
+        min_order="5",
+    )
+    candidate = replace(
+        candidate,
+        native_bid_levels=(
+            BookLevel(price=Decimal(bid_price), size=Decimal("100")),
+        ),
+    )
+
+    decision = _global_select((candidate,), cap="5")
+
+    assert decision.candidate is candidate
+    assert decision.capital_action_mode == "SETTLEMENT_LOCKED_BUY"
+    assert decision.expected_growth is not None
+    assert decision.expected_growth.expected_ev_usd > 0.0
+    assert decision.capital_lock_hours is not None
+    assert decision.capital_lock_hours > 0.0
+
+
+def test_global_taker_buy_size_uses_buy_depth_not_current_exit_depth():
+    candidate = _global_candidate(
+        candidate_id="taker-repairable-prefix",
+        family="taker-repairable-prefix-family",
+        side="YES",
+        q=0.80,
+        levels=(("0.05", "100"),),
+        min_order="5",
+    )
+    candidate = replace(
+        candidate,
+        native_bid_levels=(
+            BookLevel(price=Decimal("0.05"), size=Decimal("30")),
+            BookLevel(price=Decimal("0.06"), size=Decimal("25")),
+        ),
+    )
+
+    decision = _global_select((candidate,), cap="5")
+
+    assert decision.candidate is candidate
+    assert decision.shares > Decimal("55")
+
+
+def test_statistical_candidate_cannot_forge_exact_payoff_settlement_lock():
+    candidate = _global_candidate(
+        candidate_id="forged-exact-lock",
+        family="forged-exact-lock-family",
+        side="YES",
+        q=0.80,
+        levels=(("0.50", "100"),),
+        min_order="5",
+    )
+    candidate = replace(
+        candidate,
+        native_bid_levels=(
+            BookLevel(price=Decimal("0.04"), size=Decimal("100")),
+        ),
+        settlement_locked_exact_payoff=True,
+    )
+
+    decision = _global_select((candidate,), cap="5")
+
+    assert decision.candidate is None
+    assert decision.rejection_reasons[candidate.candidate_id] == (
+        "DETERMINISTIC_PAYOFF_NOT_PROVED"
+    )
+
+
+@pytest.mark.parametrize(
+    ("exact_yes_payoff", "side"),
+    ((1, "YES"), (0, "NO")),
+)
+def test_exact_payoff_taker_can_lock_to_settlement_without_exit_depth(
+    exact_yes_payoff,
+    side,
+):
+    captured_at = _DECISION_AT - timedelta(milliseconds=100)
+    family = "exact-settlement-lock-family"
+    binding = S.OutcomeTokenBinding(
+        bin_id="winner-bin",
+        condition_id="winner-condition",
+        yes_token_id="winner-yes",
+        no_token_id="winner-no",
+    )
+    other = S.OutcomeTokenBinding(
+        bin_id="unknown-bin",
+        condition_id="unknown-condition",
+        yes_token_id="unknown-yes",
+        no_token_id="unknown-no",
+    )
+    fields = {
+        "family_key": family,
+        "bindings": (binding, other),
+        "exact_yes_payoffs": ((binding.bin_id, exact_yes_payoff),),
+        "q_version": "day0-exact-q-v1",
+        "resolution_identity": "day0-resolution",
+        "topology_identity": "day0-topology",
+        "posterior_identity_hash": "day0-payoff-state",
+        "source_truth_identity": "day0-observation-fact",
+        "authority_certificate_hash": "day0-certificate",
+        "band_alpha": ALPHA,
+        "band_basis": "day0_deterministic_bin_payoff_v1",
+        "captured_at_utc": captured_at,
+    }
+    witness = S.DeterministicBinPayoffWitness(
+        **fields,
+        max_age=timedelta(seconds=30),
+        witness_identity=S.deterministic_bin_payoff_witness_identity(**fields),
+    )
+    native = SimpleNamespace(
+        no_trade_reason=None,
+        executable_cost_curve=_global_curve(
+            side=side,
+            token=(
+                binding.yes_token_id if side == "YES" else binding.no_token_id
+            ),
+            levels=(("0.80", "100"),),
+            min_order="5",
+        ),
+        family_key=family,
+        bin_id=binding.bin_id,
+        condition_id=binding.condition_id,
+        side=side,
+        token_id=(binding.yes_token_id if side == "YES" else binding.no_token_id),
+        hypothesis_id="buy-exact-winner",
+    )
+
+    candidate = S.global_candidate_from_native(
+        native,
+        probability_witness=witness,
+        ledger_snapshot_id="ledger-current",
+        book_captured_at_utc=captured_at,
+        neg_risk=False,
+        native_bid_levels=(
+            BookLevel(price=Decimal("0.05"), size=Decimal("100")),
+        ),
+    )
+    decision = _global_select(
+        (candidate,),
+        probability_witnesses={family: witness},
+        cap="5",
+    )
+
+    assert candidate.settlement_locked_exact_payoff is True
+    assert candidate.eligibility_reason is None
+    assert decision.candidate is candidate
+    assert decision.shares >= Decimal("5")
+    assert decision.expected_terminal_wealth is not None
+    assert decision.expected_terminal_wealth.win_probability_mean == 1.0
+
+
+def test_current_precliff_capacity_counts_actionable_depth_from_inclusive_floor():
+    levels = (
+        BookLevel(price=Decimal("0.05"), size=Decimal("100")),
+        BookLevel(price=Decimal("0.0501"), size=Decimal("2")),
+        BookLevel(price=Decimal("0.95"), size=Decimal("3")),
+        BookLevel(price=Decimal("0.96"), size=Decimal("7")),
+        SimpleNamespace(price=Decimal("0.50"), size=Decimal("-11")),
+        SimpleNamespace(price=Decimal("0.50"), size=Decimal("NaN")),
+        SimpleNamespace(price=Decimal("0.50"), size=Decimal("Infinity")),
+        SimpleNamespace(price=Decimal("NaN"), size=Decimal("100")),
+    )
+
+    assert S.current_precliff_liquidation_capacity(levels) == Decimal("105")
+
+
+def test_current_maker_buy_witness_can_win_on_exact_partial_distribution():
+    taker = _global_candidate(
+        candidate_id="maker-current-taker",
+        family="maker-current-family",
+        side="YES",
+        q=0.80,
+        levels=(("0.50", "100"),),
+    )
+    maker_curve = S.passive_buy_proposal_curve(
+        taker.executable_cost_curve,
+        native_bid_levels=(BookLevel(price=Decimal("0.40"), size=Decimal("100")),),
+    )
+    assert maker_curve is not None
+    asset_epoch = "asset-epoch-current"
+    provisional = replace(
+        taker,
+        candidate_id="maker-current",
+        execution_mode="MAKER_REST",
+        proposal_cost_curve=maker_curve,
+        fill_probability=0.90,
+        fill_probability_source="current-maker-fill-v1",
+        rest_deadline_minutes=20.0,
+        asset_epoch_identity=asset_epoch,
+    )
+    witness = _current_maker_witness(
+        provisional,
+        proposal=maker_curve,
+        asset_epoch=asset_epoch,
+        outcomes=(
+            S.MakerFillOutcome(Decimal("0.70"), Decimal("1"), Decimal("-0.401")),
+            S.MakerFillOutcome(Decimal("0.20"), Decimal("0.50"), Decimal("-0.401")),
+            S.MakerFillOutcome(Decimal("0.10"), Decimal("0"), Decimal("0")),
+        ),
+    )
+    maker = replace(
+        provisional,
+        fill_probability=witness.fill_probability,
+        fill_probability_source=witness.witness_identity,
+        maker_fill_witness=witness,
+    )
+
+    decision = _global_select(
+        (taker, maker), cap="20", resolution_hours_by_family={taker.family_key: 24.0}
+    )
+
+    assert decision.candidate is maker
+    assert decision.candidate.execution_mode == "MAKER_REST"
+    assert decision.capital_action_mode == "CONTINGENT_MAKER_REST_BUY"
+    assert decision.expected_growth is not None
+    terminal = decision.expected_terminal_wealth
+    assert terminal is not None
+    loss_base = terminal.wealth_after_loss_usd - terminal.loss_payoff_usd
+    win_base = terminal.wealth_after_win_usd - terminal.win_payoff_usd
+    expected_du = expected_ev = 0.0
+    for outcome in witness.outcomes:
+        filled = decision.shares * outcome.fill_fraction
+        cost = -(filled * outcome.proceeds_per_share_usd)
+        loss_after = loss_base - cost
+        win_after = win_base - cost + filled
+        outcome_du = terminal.loss_probability_mean * math.log(
+            float(loss_after / loss_base)
+        ) + terminal.win_probability_mean * math.log(float(win_after / win_base))
+        expected_du += float(outcome.probability) * outcome_du
+        expected_ev += float(outcome.probability) * (
+            terminal.win_probability_mean * float(filled) - float(cost)
+        )
+    expected_fill_fraction = 0.80
+    expected_horizon = expected_fill_fraction * 24.0 + (
+        1.0 - expected_fill_fraction
+    ) * (20.0 / 60.0)
+    assert decision.expected_growth.expected_delta_log_wealth == pytest.approx(
+        expected_du
+    )
+    assert decision.expected_growth.expected_ev_usd == pytest.approx(expected_ev)
+    assert decision.expected_growth.capital_lock_hours == pytest.approx(
+        expected_horizon
+    )
+
+
+def test_passive_buy_caps_rest_to_current_precliff_liquidation_depth():
+    taker = _global_candidate(
+        candidate_id="maker-liquidation-cap-taker",
+        family="maker-liquidation-cap-family",
+        side="YES",
+        q=0.80,
+        levels=(("0.50", "100"),),
+    )
+
+    maker_curve = S.passive_buy_proposal_curve(
+        taker.executable_cost_curve,
+        native_bid_levels=(
+            BookLevel(price=Decimal("0.40"), size=Decimal("3")),
+            BookLevel(price=Decimal("0.39"), size=Decimal("4")),
+            BookLevel(price=Decimal("0.04"), size=Decimal("100")),
+        ),
+    )
+
+    assert maker_curve is not None
+    assert maker_curve.levels == (
+        BookLevel(price=Decimal("0.401"), size=Decimal("7")),
+    )
+
+
+def test_passive_buy_uses_bid_capacity_when_taker_best_ask_is_subminimum():
+    taker = _global_candidate(
+        candidate_id="maker-ask-dust-taker",
+        family="maker-ask-dust-family",
+        side="YES",
+        q=0.80,
+        levels=(("0.50", "0.5"),),
+        min_order="5",
+    )
+
+    maker_curve = S.passive_buy_proposal_curve(
+        taker.executable_cost_curve,
+        native_bid_levels=(BookLevel(price=Decimal("0.40"), size=Decimal("10")),),
+    )
+
+    assert maker_curve is not None
+    assert maker_curve.levels == (
+        BookLevel(price=Decimal("0.401"), size=Decimal("10")),
+    )
+
+
+def test_seeded_global_buy_keeps_maker_when_taker_ask_depth_is_subminimum():
+    seed = _global_candidate(
+        candidate_id="maker-ask-dust-generation",
+        family="maker-ask-dust-generation-family",
+        side="YES",
+        q=0.80,
+        levels=(("0.50", "0.5"),),
+        min_order="5",
+    )
+    native = SimpleNamespace(
+        no_trade_reason=None,
+        executable_cost_curve=seed.executable_cost_curve,
+        family_key=seed.family_key,
+        bin_id=seed.bin_id,
+        condition_id=seed.condition_id,
+        side=seed.side,
+        token_id=seed.token_id,
+        hypothesis_id="maker-ask-dust-generation-native",
+    )
+    probability = _global_probability_witness(seed)
+    deterministic_fields = {
+        "family_key": seed.family_key,
+        "bindings": probability.bindings,
+        "exact_yes_payoffs": (("bin", 1), ("other", 0)),
+        "q_version": probability.q_version,
+        "resolution_identity": probability.resolution_identity,
+        "topology_identity": probability.topology_identity,
+        "posterior_identity_hash": probability.posterior_identity_hash,
+        "source_truth_identity": probability.source_truth_identity,
+        "authority_certificate_hash": probability.authority_certificate_hash,
+        "band_alpha": probability.band_alpha,
+        "band_basis": "day0_deterministic_bin_payoff_v1",
+        "captured_at_utc": probability.captured_at_utc,
+    }
+    deterministic_identity = S.deterministic_bin_payoff_witness_identity(
+        **deterministic_fields
+    )
+    deterministic = S.DeterministicBinPayoffWitness(
+        **deterministic_fields,
+        max_age=timedelta(seconds=1),
+        witness_identity=deterministic_identity,
+    )
+    _GLOBAL_PROBABILITY_WITNESSES[deterministic_identity] = deterministic
+    bid_levels = (BookLevel(price=Decimal("0.40"), size=Decimal("10")),)
+    asset_epoch = "maker-ask-dust-generation-epoch"
+    placeholder = SimpleNamespace(
+        fill_probability=1.0,
+        fill_probability_source="placeholder",
+        rest_deadline_minutes=20.0,
+        witness_identity="placeholder",
+    )
+
+    provisional_taker, provisional_maker = S.global_candidates_from_native(
+        native,
+        probability_witness=deterministic,
+        ledger_snapshot_id=seed.ledger_snapshot_id,
+        book_captured_at_utc=seed.book_captured_at_utc,
+        neg_risk=False,
+        native_bid_levels=bid_levels,
+        include_maker=True,
+        maker_fill_witness=placeholder,
+        asset_epoch_identity=asset_epoch,
+        current_token_shares=Decimal("5"),
+    )
+    assert provisional_taker.execution_mode == "TAKER_LIMIT"
+    assert provisional_maker.execution_mode == "MAKER_REST"
+    assert provisional_maker.eligibility_reason is None
+    assert provisional_maker.proposal_cost_curve.levels == (
+        BookLevel(price=Decimal("0.401"), size=Decimal("10")),
+    )
+
+    maker_witness = _current_maker_witness(
+        provisional_maker,
+        proposal=provisional_maker.proposal_cost_curve,
+        asset_epoch=asset_epoch,
+        outcomes=(
+            S.MakerFillOutcome(Decimal("1"), Decimal("1"), Decimal("-0.401")),
+        ),
+    )
+    taker, maker = S.global_candidates_from_native(
+        native,
+        probability_witness=deterministic,
+        ledger_snapshot_id=seed.ledger_snapshot_id,
+        book_captured_at_utc=seed.book_captured_at_utc,
+        neg_risk=False,
+        native_bid_levels=bid_levels,
+        include_maker=True,
+        maker_fill_witness=maker_witness,
+        asset_epoch_identity=asset_epoch,
+        current_token_shares=Decimal("5"),
+    )
+
+    assert taker.execution_mode == "TAKER_LIMIT"
+    assert maker.execution_mode == "MAKER_REST"
+    assert maker.maker_fill_witness is maker_witness
+
+    decision = _global_select(
+        (taker, maker),
+        cap="5",
+        resolution_hours_by_family={seed.family_key: 24.0},
+    )
+
+    assert decision.candidate is maker
+    assert decision.rejection_reasons[taker.candidate_id] == "DEPTH_INFEASIBLE"
+
+
+def test_passive_buy_rejects_sub_minimum_legal_liquidation_depth():
+    taker = _global_candidate(
+        candidate_id="maker-liquidation-dust-taker",
+        family="maker-liquidation-dust-family",
+        side="YES",
+        q=0.80,
+        levels=(("0.50", "100"),),
+    )
+
+    maker_curve = S.passive_buy_proposal_curve(
+        taker.executable_cost_curve,
+        native_bid_levels=(
+            BookLevel(price=Decimal("0.40"), size=Decimal("0.5")),
+            BookLevel(price=Decimal("0.04"), size=Decimal("100")),
+        ),
+    )
+
+    assert maker_curve is None
+
+
+def test_current_maker_witness_asset_epoch_drift_excludes_only_maker_sibling():
+    taker = _global_candidate(
+        candidate_id="maker-epoch-taker", family="maker-epoch-family", side="YES", q=0.80
+    )
+    maker_curve = S.passive_buy_proposal_curve(
+        taker.executable_cost_curve,
+        native_bid_levels=(BookLevel(price=Decimal("0.30"), size=Decimal("100")),),
+    )
+    assert maker_curve is not None
+    provisional = replace(
+        taker,
+        candidate_id="maker-epoch",
+        execution_mode="MAKER_REST",
+        proposal_cost_curve=maker_curve,
+        fill_probability=1.0,
+        fill_probability_source="current-maker-fill-v1",
+        rest_deadline_minutes=20.0,
+        asset_epoch_identity="asset-epoch-a",
+    )
+    witness = _current_maker_witness(
+        provisional,
+        proposal=maker_curve,
+        asset_epoch="asset-epoch-a",
+        outcomes=(S.MakerFillOutcome(Decimal("1"), Decimal("1"), Decimal("-0.301")),),
+    )
+    drifted = replace(
+        provisional,
+        asset_epoch_identity="asset-epoch-b",
+        maker_fill_witness=witness,
+        fill_probability_source=witness.witness_identity,
+    )
+
+    decision = _global_select((taker, drifted))
+
+    assert decision.candidate is taker
+    assert decision.rejection_reasons[drifted.candidate_id] == "CURRENT_MAKER_FILL_WITNESS_MISMATCH"
+
+
+def test_current_maker_witness_rejects_reminted_non_limit_cashflow_only():
+    taker = _global_candidate(
+        candidate_id="maker-cashflow-taker",
+        family="maker-cashflow-family",
+        side="YES",
+        q=0.80,
+        levels=(("0.50", "100"),),
+    )
+    maker_curve = S.passive_buy_proposal_curve(
+        taker.executable_cost_curve,
+        native_bid_levels=(BookLevel(price=Decimal("0.40"), size=Decimal("100")),),
+    )
+    assert maker_curve is not None
+    provisional = replace(
+        taker,
+        candidate_id="maker-cashflow",
+        execution_mode="MAKER_REST",
+        proposal_cost_curve=maker_curve,
+        fill_probability=1.0,
+        fill_probability_source="unbound",
+        rest_deadline_minutes=20.0,
+        asset_epoch_identity="maker-cashflow-epoch",
+    )
+    honest = _current_maker_witness(
+        provisional,
+        proposal=maker_curve,
+        asset_epoch="maker-cashflow-epoch",
+        outcomes=(S.MakerFillOutcome(Decimal("1"), Decimal("1"), Decimal("-0.401")),),
+    )
+    malicious = _remint_maker_witness(
+        honest,
+        outcomes=(S.MakerFillOutcome(Decimal("1"), Decimal("1"), Decimal("-0.01")),),
+    )
+    maker = replace(
+        provisional,
+        maker_fill_witness=malicious,
+        fill_probability_source=malicious.witness_identity,
+    )
+
+    decision = _global_select((taker, maker))
+
+    assert decision.candidate is taker
+    assert decision.rejection_reasons[maker.candidate_id] == (
+        "CURRENT_MAKER_FILL_WITNESS_CASHFLOW_INVALID"
+    )
+    with pytest.raises(ValueError, match="incomplete"):
+        replace(honest, source_identity="tampered-source")
+
+
+def test_current_maker_witness_temporal_order_and_decision_window_fail_closed():
+    taker = _global_candidate(
+        candidate_id="maker-time-taker",
+        family="maker-time-family",
+        side="YES",
+        q=0.80,
+    )
+    proposal = S.passive_buy_proposal_curve(
+        taker.executable_cost_curve,
+        native_bid_levels=(BookLevel(price=Decimal("0.30"), size=Decimal("100")),),
+    )
+    assert proposal is not None
+    provisional = replace(
+        taker,
+        candidate_id="maker-time",
+        execution_mode="MAKER_REST",
+        proposal_cost_curve=proposal,
+        fill_probability=1.0,
+        fill_probability_source="unbound",
+        rest_deadline_minutes=20.0,
+        asset_epoch_identity="maker-time-epoch",
+    )
+    current = _current_maker_witness(
+        provisional,
+        proposal=proposal,
+        asset_epoch="maker-time-epoch",
+        outcomes=(S.MakerFillOutcome(Decimal("1"), Decimal("1"), Decimal("-0.301")),),
+    )
+    expired = _remint_maker_witness(
+        current,
+        valid_until_at_utc=_DECISION_AT - timedelta(seconds=30),
+    )
+    expired_candidate = replace(
+        provisional,
+        maker_fill_witness=expired,
+        fill_probability_source=expired.witness_identity,
+    )
+    expired_decision = _global_select((taker, expired_candidate))
+    assert expired_decision.candidate is taker
+    assert expired_decision.rejection_reasons[expired_candidate.candidate_id] == (
+        "CURRENT_MAKER_FILL_WITNESS_TEMPORAL_INVALID"
+    )
+
+    future = _remint_maker_witness(
+        current,
+        issued_at_utc=_DECISION_AT + timedelta(seconds=30),
+        valid_until_at_utc=_DECISION_AT + timedelta(minutes=1),
+    )
+    future_candidate = replace(
+        provisional,
+        maker_fill_witness=future,
+        fill_probability_source=future.witness_identity,
+    )
+    future_decision = _global_select((taker, future_candidate))
+    assert future_decision.candidate is taker
+    assert future_decision.rejection_reasons[future_candidate.candidate_id] == (
+        "CURRENT_MAKER_FILL_WITNESS_TEMPORAL_INVALID"
+    )
+    with pytest.raises(ValueError, match="incomplete"):
+        _remint_maker_witness(
+            current,
+            training_cutoff_at_utc=current.issued_at_utc + timedelta(seconds=1),
+        )
+
+
+def test_current_maker_sell_witness_binds_actual_holding_and_can_win():
+    taker = _global_sell_candidate(
+        candidate_id="maker-held-taker",
+        family="maker-held-family",
+        side="YES",
+        held_q=0.20,
+        bids=(("0.60", "10"),),
+        shares="10",
+        required_mode="TAKER_LIMIT",
+        probability_functional="POSTERIOR_PREDICTIVE_MEAN",
+        exit_authority_status="mature",
+        exit_authority_reason="current-day0-authority",
+        quote_ttl_seconds=3600,
+    )
+    maker_curve = S.passive_sell_proposal_curve(
+        taker.executable_sell_curve, capacity=Decimal("10")
+    )
+    assert maker_curve is not None
+    asset_epoch = "asset-epoch-held-current"
+    provisional = replace(
+        taker,
+        candidate_id="maker-held",
+        execution_mode="MAKER_REST",
+        proposal_sell_curve=maker_curve,
+        fill_probability=1.0,
+        fill_probability_source="current-maker-fill-v1",
+        rest_deadline_minutes=20.0,
+        asset_epoch_identity=asset_epoch,
+    )
+    witness = _current_maker_witness(
+        provisional,
+        proposal=maker_curve,
+        asset_epoch=asset_epoch,
+        outcomes=(S.MakerFillOutcome(Decimal("1"), Decimal("1"), Decimal("0.601")),),
+    )
+    maker = replace(
+        provisional,
+        fill_probability_source=witness.witness_identity,
+        maker_fill_witness=witness,
+    )
+
+    decision = _global_select((taker, maker))
+
+    assert decision.candidate is maker
+    assert decision.candidate.position_id == taker.position_id
+    assert decision.candidate.held_shares == Decimal("10")
+    assert decision.candidate.execution_mode == "MAKER_REST"
+
+    stale_holding = replace(maker, held_shares=Decimal("9"))
+    stale_decision = _global_select((taker, stale_holding))
+    assert stale_decision.candidate is taker
+    assert stale_decision.rejection_reasons[stale_holding.candidate_id] == (
+        "CURRENT_MAKER_FILL_WITNESS_MISMATCH"
+    )
+
+
+def test_current_maker_sell_aggregates_zero_atom_ruin_lexicographically():
+    taker = _global_sell_candidate(
+        candidate_id="maker-zero-atom-taker",
+        family="maker-zero-atom-family",
+        side="YES",
+        held_q=0.20,
+        bids=(("0.60", "10"),),
+        shares="10",
+        required_mode="TAKER_LIMIT",
+        probability_functional="POSTERIOR_PREDICTIVE_MEAN",
+    )
+    proposal = S.passive_sell_proposal_curve(
+        taker.executable_sell_curve, capacity=Decimal("10")
+    )
+    assert proposal is not None
+    provisional = replace(
+        taker,
+        candidate_id="maker-zero-atom",
+        execution_mode="MAKER_REST",
+        proposal_sell_curve=proposal,
+        fill_probability=0.50,
+        fill_probability_source="unbound",
+        rest_deadline_minutes=20.0,
+        asset_epoch_identity="maker-zero-atom-epoch",
+    )
+    witness = _current_maker_witness(
+        provisional,
+        proposal=proposal,
+        asset_epoch="maker-zero-atom-epoch",
+        outcomes=(
+            S.MakerFillOutcome(Decimal("0.50"), Decimal("1"), Decimal("0.601")),
+            S.MakerFillOutcome(Decimal("0.50"), Decimal("0"), Decimal("0")),
+        ),
+    )
+    maker = replace(
+        provisional,
+        maker_fill_witness=witness,
+        fill_probability_source=witness.witness_identity,
+    )
+    endowment = S.CandidatePortfolioEndowment(
+        loss_wealth_floor_usd=Decimal("0"),
+        win_wealth_floor_usd=Decimal("100"),
+        current_token_shares=Decimal("10"),
+        ledger_snapshot_id="ledger-current",
+    )
+
+    decision = _global_select(
+        (maker,),
+        cap="10",
+        candidate_portfolio_endowment_resolver=lambda _candidate: endowment,
+        resolution_hours_by_family={maker.family_key: 24.0},
+    )
+
+    assert decision.candidate is maker
+    assert decision.expected_growth is not None
+    assert decision.expected_terminal_wealth is not None
+    assert decision.expected_growth.ruin_probability_reduction == pytest.approx(
+        0.50 * (1.0 - decision.expected_terminal_wealth.held_probability_mean)
+    )
+    assert decision.expected_growth.capital_lock_hours == pytest.approx(
+        0.50 * (20.0 / 60.0) + 0.50 * 24.0
+    )
+
+
+def test_global_selector_rejects_untyped_maker_sell_and_keeps_taker_sibling():
+    taker = _global_sell_candidate(
+        candidate_id="sell-taker-sibling",
+        family="sell-maker-wall-family",
+        side="YES",
+        held_q=0.20,
+        bids=(("0.60", "10"),),
+        shares="10",
+        required_mode="TAKER_LIMIT",
+    )
+    maker_curve = S.passive_sell_proposal_curve(
+        taker.executable_sell_curve,
+        capacity=Decimal("10"),
+    )
+    assert maker_curve is not None
+    maker = replace(
+        taker,
+        candidate_id="sell-untyped-maker",
+        execution_mode="MAKER_REST",
+        proposal_sell_curve=maker_curve,
+        fill_probability=0.19,
+        fill_probability_source="legacy_scalar_not_current_authority",
+        rest_deadline_minutes=20.0,
+    )
+
+    decision = _global_select((maker, taker))
+
+    assert decision.candidate is taker
+    assert decision.rejection_reasons[maker.candidate_id] == (
+        "CURRENT_MAKER_FILL_WITNESS_UNAVAILABLE"
     )
 
 
@@ -1877,7 +3293,7 @@ def test_global_single_order_cash_beats_non_positive_buy_and_sell():
         "0.20"
     )
     assert evaluations[sell.candidate_id].robust_delta_log_wealth < 0
-    assert evaluations[sell.candidate_id].robust_ev_usd == pytest.approx(-0.6)
+    assert evaluations[sell.candidate_id].robust_ev_usd == pytest.approx(-0.600)
     assert evaluations[sell.candidate_id].terminal_wealth is not None
     assert evaluations[buy.candidate_id].position_id is None
     assert evaluations[buy.candidate_id].held_shares == 0
@@ -2250,8 +3666,8 @@ def test_global_single_order_capital_authority_failure_preserves_sell_and_stops_
     )
 
     assert decision.candidate is sell
-    assert decision.capital_action_mode == "IMMEDIATE_REDUCE_ONLY_SELL"
-    assert decision.cash_proceeds_usd == Decimal("3.4")
+    assert decision.capital_action_mode == "IMMEDIATE_TAKER_SELL"
+    assert decision.cash_proceeds_usd == Decimal("3.4000")
     assert calls == [buy.candidate_id]
     evaluations = {
         evaluation.candidate_id: evaluation
@@ -2304,77 +3720,203 @@ def test_global_single_order_sell_yes_no_label_mirror_is_exact():
     ("price", "held_q"),
     (("0.004", 0.001),),
 )
-def test_global_single_order_sell_rejects_bids_below_live_price_band(
+def test_global_sell_generation_rejects_bids_below_live_price_band(
     side, price, held_q
 ):
-    sell = _global_sell_candidate(
+    seed = _global_candidate(
         candidate_id=f"sell-out-of-band-{side}-{price}",
         family=f"sell-out-of-band-{side}-{price}-family",
         side=side,
-        held_q=held_q,
-        bids=((price, "10"),),
+        q=held_q,
+    )
+    curve = S.ExecutableSellCurve(
+        token_id=seed.token_id,
+        side=side,
+        snapshot_id="sell-out-of-band-book",
+        book_hash="sell-out-of-band-hash",
+        levels=(BookLevel(price=Decimal(price), size=Decimal("10")),),
+        fee_model=FeeModel(fee_rate=Decimal("0")),
+        min_tick=Decimal("0.001"),
+        min_order_size=Decimal("1"),
+        quote_ttl=timedelta(seconds=1),
+    )
+
+    proposal, mode, *_ = S.global_sell_execution_terms(
+        curve,
+        capacity=Decimal("10"),
+    )
+
+    assert proposal is None
+    assert mode == "TAKER_LIMIT"
+
+
+@pytest.mark.parametrize("side", ("YES", "NO"))
+def test_global_single_order_sell_rejects_above_band_counterparty_bid(side):
+    seed = _global_candidate(
+        candidate_id=f"sell-favorable-above-band-{side}",
+        family=f"sell-favorable-above-band-{side}-family",
+        side=side,
+        q=0.20,
+    )
+    curve = S.ExecutableSellCurve(
+        token_id=seed.token_id,
+        side=side,
+        snapshot_id=f"sell-above-band-{side}-book",
+        book_hash=f"sell-above-band-{side}-hash",
+        levels=(BidBookLevel(price=Decimal("0.999"), size=Decimal("10")),),
+        fee_model=FeeModel(fee_rate=Decimal("0")),
+        min_tick=Decimal("0.001"),
+        min_order_size=Decimal("1"),
+        quote_ttl=timedelta(seconds=1),
+    )
+    holding = SimpleNamespace(
+        family_key=seed.family_key,
+        bin_id=seed.bin_id,
+        side=seed.side,
+        token_id=seed.token_id,
+        position_id=f"position-above-band-{side}",
+        shares=Decimal("10"),
+    )
+
+    candidate = S.global_sell_candidate_from_holding(
+        holding,
+        probability_witness=_global_probability_witness(seed),
+        ledger_snapshot_id=f"ledger-above-band-{side}",
+        executable_sell_curve=curve,
+        book_captured_at_utc=_DECISION_AT,
+        neg_risk=False,
+    )
+
+    assert candidate is None
+
+
+@pytest.mark.parametrize("side", ("YES", "NO"))
+def test_global_single_order_sell_holds_certain_winner_despite_high_bid(side):
+    sell = _global_sell_candidate(
+        candidate_id=f"sell-certain-winner-{side}",
+        family=f"sell-certain-winner-{side}-family",
+        side=side,
+        held_q=1.0,
+        bids=(("0.95", "10"),),
         shares="10",
     )
 
     decision = _global_select((sell,))
 
     assert decision.candidate is None
-    assert (
-        decision.rejection_reasons[sell.candidate_id]
-        == "LIVE_UNIT_PRICE_OUT_OF_BOUNDS"
-    )
+    assert decision.rejection_reasons[sell.candidate_id] in {
+        "NON_POSITIVE_ROBUST_OBJECTIVE",
+        "NON_POSITIVE_ROBUST_FILL_PREFIX",
+    }
 
 
-@pytest.mark.parametrize("side", ("YES", "NO"))
-def test_global_single_order_sell_caps_limit_but_keeps_favorable_fill(side):
-    sell = _global_sell_candidate(
-        candidate_id=f"sell-favorable-above-band-{side}",
-        family=f"sell-favorable-above-band-{side}-family",
-        side=side,
-        held_q=0.20,
-        bids=(("0.999", "10"),),
-        shares="10",
-    )
-
-    decision = _global_select((sell,))
-
-    assert decision.candidate is sell
-    assert decision.limit_price == Decimal("0.95")
-    assert decision.expected_fill_price_before_fee == Decimal("0.999")
-    assert decision.cash_proceeds_usd == Decimal("9.990")
-    assert decision.robust_delta_log_wealth > 0.0
-    assert decision.robust_ev_usd > 0.0
-
-
-def test_global_single_order_sell_cap_is_tick_aligned():
+def test_global_single_order_sell_does_not_legalize_above_band_quote():
     assert S._live_sell_limit_price(
         Decimal("0.98"),
+        Decimal("0.94"),
+        Decimal("0.02"),
+    ) is None
+    assert S._live_sell_limit_price(
+        Decimal("0.98"),
+        Decimal("0.98"),
+        Decimal("0.01"),
+    ) is None
+
+
+def test_global_single_order_sell_high_bid_is_not_execution_authority():
+    curve = S.ExecutableSellCurve(
+        token_id="sell-high-bid-wide-tick-token",
+        side="YES",
+        snapshot_id="sell-high-bid-wide-tick-book",
+        book_hash="sell-high-bid-wide-tick-hash",
+        levels=(
+            BidBookLevel(price=Decimal("0.98"), size=Decimal("5")),
+            BidBookLevel(price=Decimal("0.94"), size=Decimal("5")),
+        ),
+        fee_model=FeeModel(fee_rate=Decimal("0")),
+        min_tick=Decimal("0.02"),
+        min_order_size=Decimal("1"),
+        quote_ttl=timedelta(seconds=1),
+    )
+
+    proposal, mode, *_ = S.global_sell_execution_terms(
+        curve,
+        capacity=Decimal("10"),
+    )
+
+    assert proposal is None
+    assert mode == "TAKER_LIMIT"
+
+
+def test_precliff_liquidation_capacity_excludes_above_band_bids():
+    assert S.current_precliff_liquidation_capacity(
+        (
+            BookLevel(price=Decimal("0.999"), size=Decimal("20")),
+            BookLevel(price=Decimal("0.95"), size=Decimal("7")),
+        )
+    ) == Decimal("7")
+
+
+def test_exact_one_sell_bid_is_not_execution_authority():
+    curve = S.ExecutableSellCurve(
+        token_id="sell-exact-one-token",
+        side="YES",
+        snapshot_id="sell-exact-one-book",
+        book_hash="sell-exact-one-hash",
+        levels=(BidBookLevel(price=Decimal("1"), size=Decimal("10")),),
+        fee_model=FeeModel(fee_rate=Decimal("0")),
+        min_tick=Decimal("0.001"),
+        min_order_size=Decimal("1"),
+        quote_ttl=timedelta(seconds=1),
+    )
+
+    proposal, mode, *_ = S.global_sell_execution_terms(
+        curve,
+        capacity=Decimal("10"),
+    )
+
+    assert proposal is None
+    assert mode == "TAKER_LIMIT"
+    assert curve.levels[0].price == Decimal("1")
+    assert S._live_sell_limit_price(
+        curve.levels[0].price,
+        curve.levels[0].price,
+        curve.min_tick,
+    ) is None
+
+
+def test_global_single_order_sell_legal_depth_is_tick_aligned_without_clamping():
+    assert S._live_sell_limit_price(
+        Decimal("0.95"),
+        Decimal("0.95"),
         Decimal("0.02"),
     ) == Decimal("0.94")
 
 
 @pytest.mark.parametrize("side", ("YES", "NO"))
 @pytest.mark.parametrize(
-    ("price", "held_q"),
-    (("0.05", 0.001), ("0.95", 0.20)),
+    ("best_bid", "expected_price", "held_q"),
+    (("0.05", "0.05", 0.001), ("0.95", "0.95", 0.20)),
 )
-def test_global_single_order_sell_price_band_is_inclusive(side, price, held_q):
+def test_global_single_order_sell_price_band_is_inclusive(
+    side, best_bid, expected_price, held_q
+):
     sell = _global_sell_candidate(
-        candidate_id=f"sell-boundary-{side}-{price}",
-        family=f"sell-boundary-{side}-{price}-family",
+        candidate_id=f"sell-boundary-{side}-{expected_price}",
+        family=f"sell-boundary-{side}-{expected_price}-family",
         side=side,
         held_q=held_q,
-        bids=((price, "10"),),
+        bids=((best_bid, "10"),),
         shares="10",
     )
 
     decision = _global_select((sell,))
 
     assert decision.candidate is sell
-    assert decision.limit_price == Decimal(price)
+    assert decision.limit_price == Decimal(expected_price)
 
 
-def test_global_single_order_sell_uses_best_partial_depth_when_full_depth_is_absent():
+def test_global_single_order_taker_sell_is_capped_by_bid_depth():
     sell = _global_sell_candidate(
         candidate_id="sell-thin-depth",
         family="sell-thin-depth-family",
@@ -2387,13 +3929,14 @@ def test_global_single_order_sell_uses_best_partial_depth_when_full_depth_is_abs
     decision = _global_select((sell,))
 
     assert decision.candidate is sell
-    assert decision.shares == Decimal("9.99")
-    assert decision.cash_proceeds_usd == Decimal("4.995")
+    assert decision.shares == Decimal("9.00")
+    assert sell.held_shares - decision.shares == Decimal("1.00")
+    assert decision.cash_proceeds_usd == Decimal("4.500")
     assert decision.robust_delta_log_wealth > 0.0
     assert decision.robust_ev_usd > 0.0
 
 
-def test_global_single_order_sell_with_subminimum_depth_is_a_complete_no_trade():
+def test_global_single_order_taker_sell_rejects_subminimum_bid_depth():
     sell = _global_sell_candidate(
         candidate_id="sell-subminimum-depth",
         family="sell-subminimum-depth-family",
@@ -2406,9 +3949,6 @@ def test_global_single_order_sell_with_subminimum_depth_is_a_complete_no_trade()
     decision = _global_select((sell,))
 
     assert decision.candidate is None
-    assert decision.no_trade_reason == "NO_CURRENT_EXECUTABLE_POSITIVE_ORDER"
-    assert decision.capital_action_mode == "UNSCORED"
-    assert decision.rejection_reasons == {sell.candidate_id: "DEPTH_INFEASIBLE"}
     assert len(decision.candidate_evaluations) == 1
     assert decision.candidate_evaluations[0].status == "REJECTED"
     assert decision.candidate_evaluations[0].rejection_reason == "DEPTH_INFEASIBLE"
@@ -2445,6 +3985,36 @@ def test_global_single_order_sell_selects_interior_capital_optimal_reduction():
     assert decision.robust_ev_usd > 0.0
 
 
+def test_global_single_order_sell_never_strands_subminimum_remainder():
+    sell = _global_sell_candidate(
+        candidate_id="sell-no-dust-remainder",
+        family="sell-no-dust-remainder-family",
+        side="YES",
+        held_q=0.49,
+        bids=(("0.58", "15"),),
+        shares="15",
+        min_order="5",
+    )
+
+    decision = _global_select(
+        (sell,),
+        floor="100",
+        ceiling="500",
+        candidate_portfolio_endowment_resolver=lambda _candidate: (
+            S.CandidatePortfolioEndowment(
+                loss_wealth_floor_usd=Decimal("114.40"),
+                win_wealth_floor_usd=Decimal("115"),
+                current_token_shares=Decimal("15"),
+                ledger_snapshot_id=sell.ledger_snapshot_id,
+            )
+        ),
+    )
+
+    assert decision.candidate is sell
+    remainder = sell.held_shares - decision.shares
+    assert remainder == 0 or remainder >= Decimal("5")
+
+
 @pytest.mark.parametrize(
     ("held_q", "bids", "shares", "fee", "floor", "ceiling"),
     (
@@ -2478,7 +4048,7 @@ def test_global_single_order_sell_matches_every_cent_grid_oracle(
         ),
     )
 
-    curve = sell.executable_sell_curve
+    curve = sell.economic_sell_curve
     max_shares = min(
         sell.held_shares,
         sum((level.size for level in curve.levels), Decimal("0")),
@@ -2489,6 +4059,10 @@ def test_global_single_order_sell_matches_every_cent_grid_oracle(
     oracle = None
     size = Decimal("1")
     while size <= max_shares:
+        remainder = sell.held_shares - size
+        if remainder != 0 and remainder < curve.min_order_size:
+            size += Decimal("0.01")
+            continue
         proceeds, expected_fill_price, limit_price = curve.proceeds_for_shares(size)
         loss_at_risk = size - proceeds
         loss_after = loss_baseline - size + proceeds
@@ -2591,7 +4165,7 @@ def test_global_sell_materializer_floors_chain_fill_dust_to_venue_grid():
         side=seed.side,
         snapshot_id="sell-chain-dust-book",
         book_hash="sell-chain-dust-hash",
-        levels=(BookLevel(price=Decimal("0.80"), size=Decimal("100")),),
+        levels=(BidBookLevel(price=Decimal("0.80"), size=Decimal("100")),),
         fee_model=FeeModel(fee_rate=Decimal("0")),
         min_tick=Decimal("0.001"),
         min_order_size=Decimal("1"),
@@ -2612,10 +4186,39 @@ def test_global_sell_materializer_floors_chain_fill_dust_to_venue_grid():
         ledger_snapshot_id="ledger-chain-dust",
         executable_sell_curve=sell_curve,
         book_captured_at_utc=_DECISION_AT,
+        neg_risk=False,
     )
 
     assert candidate is not None
     assert candidate.held_shares == Decimal("72.50")
+    assert candidate.execution_mode == "TAKER_LIMIT"
+
+    maker = S.global_sell_candidate_from_holding(
+        holding,
+        probability_witness=probability,
+        ledger_snapshot_id="ledger-chain-dust",
+        executable_sell_curve=sell_curve,
+        book_captured_at_utc=_DECISION_AT,
+        neg_risk=False,
+        execution_mode="MAKER_REST",
+    )
+    assert maker is None
+
+    taker = S.global_sell_candidate_from_holding(
+        holding,
+        probability_witness=probability,
+        ledger_snapshot_id="ledger-chain-dust",
+        executable_sell_curve=sell_curve,
+        book_captured_at_utc=_DECISION_AT,
+        neg_risk=False,
+        execution_mode="TAKER_LIMIT",
+    )
+    assert taker is not None
+    assert taker.held_shares == Decimal("72.50")
+    assert taker.execution_mode == "TAKER_LIMIT"
+    assert taker.proposal_sell_curve.levels == (
+        BidBookLevel(price=Decimal("0.80"), size=Decimal("72.50")),
+    )
 
 
 def test_global_sell_materializer_omits_venue_illegal_dust_only_holding():
@@ -2651,6 +4254,7 @@ def test_global_sell_materializer_omits_venue_illegal_dust_only_holding():
         ledger_snapshot_id="ledger-dust-only",
         executable_sell_curve=sell_curve,
         book_captured_at_utc=_DECISION_AT,
+        neg_risk=False,
     )
 
     assert candidate is None
@@ -3116,11 +4720,11 @@ def test_global_single_order_rejects_cheap_minimum_lot_above_fractional_target()
         side="YES",
         q=0.9187643552930886,
         levels=(
-            ("0.001", "2063.59"),
-            ("0.028", "70"),
-            ("0.029", "129"),
-            ("0.030", "265.8"),
-            ("0.033", "73.36"),
+            ("0.050", "2063.59"),
+            ("0.058", "70"),
+            ("0.059", "129"),
+            ("0.060", "265.8"),
+            ("0.063", "73.36"),
             ("0.300", "500"),
             ("0.600", "1000"),
             ("0.900", "2000"),
@@ -3133,7 +4737,7 @@ def test_global_single_order_rejects_cheap_minimum_lot_above_fractional_target()
         ceiling="1189.71",
         cash="1189.71",
         cap="107.58",
-        multiplier="0.03125",
+        multiplier="0.00001",
     )
 
     assert decision.candidate is None
@@ -3352,7 +4956,7 @@ def test_global_single_order_self_issued_13pct_without_external_current_is_rejec
         family="tail",
         side="YES",
         q=0.13,
-        levels=(("0.008", "1000"),),
+        levels=(("0.05", "1000"),),
     )
     valid_no = _global_candidate(
         candidate_id="valid-no-external",
@@ -3741,6 +5345,9 @@ def test_global_single_order_excludes_superseded_q_book_and_capital_identity():
     q_old = _global_candidate(candidate_id="q-old", family="q", side="YES", q=0.70)
     book_old = _global_candidate(candidate_id="book-old", family="book", side="YES", q=0.70)
     curve_old = _global_candidate(candidate_id="curve-old", family="curve", side="YES", q=0.70)
+    neg_risk_old = _global_candidate(
+        candidate_id="neg-risk-old", family="neg-risk", side="YES", q=0.70
+    )
     ledger_old = replace(
         _global_candidate(candidate_id="ledger-old", family="ledger", side="YES", q=0.70),
         ledger_snapshot_id="ledger-old",
@@ -3749,6 +5356,7 @@ def test_global_single_order_excludes_superseded_q_book_and_capital_identity():
         q_old,
         book_old,
         curve_old,
+        neg_risk_old,
         ledger_old,
     )
     witnesses = {c.family_key: _global_probability_witness(c) for c in candidates}
@@ -3765,6 +5373,7 @@ def test_global_single_order_excludes_superseded_q_book_and_capital_identity():
             side=c.side,
             book_snapshot_id=c.book_snapshot_id,
             execution_curve_identity=c.execution_curve_identity,
+            neg_risk=c.neg_risk,
         )
         for c in candidates
     }
@@ -3773,6 +5382,9 @@ def test_global_single_order_excludes_superseded_q_book_and_capital_identity():
     )
     current_executions["curve-old"] = replace(
         current_executions["curve-old"], execution_curve_identity="curve-new"
+    )
+    current_executions["neg-risk-old"] = replace(
+        current_executions["neg-risk-old"], neg_risk=True
     )
     decision = _global_select(
         candidates,
@@ -3786,9 +5398,30 @@ def test_global_single_order_excludes_superseded_q_book_and_capital_identity():
         "q-old": "PROBABILITY_AUTHORITY_SUPERSEDED",
         "book-old": "BOOK_IDENTITY_SUPERSEDED",
         "curve-old": "EXECUTION_CURVE_SUPERSEDED",
+        "neg-risk-old": "NEG_RISK_SUPERSEDED",
         "ledger-old": "CAPITAL_IDENTITY_SUPERSEDED",
     }
     assert decision.no_trade_reason == "GLOBAL_EPOCH_SUPERSEDED"
+
+
+def test_current_execution_and_candidate_require_exact_boolean_neg_risk():
+    fields = {
+        "token_id": "token",
+        "side": "YES",
+        "book_snapshot_id": "book",
+        "execution_curve_identity": "curve",
+    }
+    with pytest.raises(TypeError, match="neg_risk"):
+        S.CurrentExecutionAuthority(**fields)
+    with pytest.raises(ValueError, match="incomplete"):
+        S.CurrentExecutionAuthority(**fields, neg_risk=1)
+    with pytest.raises(ValueError, match="incomplete"):
+        S.CurrentExecutionAuthority(**{**fields, "token_id": ""}, neg_risk=False)
+    candidate = _global_candidate(
+        candidate_id="neg-risk-type", family="neg-risk-type", side="YES", q=0.70
+    )
+    with pytest.raises(ValueError, match="execution proposal is invalid"):
+        replace(candidate, neg_risk=1)
 
 
 def test_global_single_order_never_promotes_runner_up_after_book_drift():
@@ -3804,6 +5437,7 @@ def test_global_single_order_never_promotes_runner_up_after_book_drift():
             side=candidate.side,
             book_snapshot_id=candidate.book_snapshot_id,
             execution_curve_identity=candidate.execution_curve_identity,
+            neg_risk=candidate.neg_risk,
         )
         for candidate in (moved, runner_up)
     }
@@ -3827,12 +5461,12 @@ def test_global_single_order_rejects_curve_from_another_token_or_snapshot():
         family="a",
         side="YES",
         q=0.02,
-        levels=(("0.005", "1000"),),
+        levels=(("0.05", "1000"),),
     )
     wrong_curve = _global_curve(
         side="YES",
         token="stale-wrong-token",
-        levels=(("0.005", "1000"),),
+        levels=(("0.05", "1000"),),
     )
     forged = replace(cheap_yes, executable_cost_curve=wrong_curve)
     valid_no = _global_candidate(
@@ -3927,6 +5561,40 @@ def test_global_single_order_buy_rejects_legal_limit_with_illegal_fill_vwap(side
 
 
 @pytest.mark.parametrize("side", ("YES", "NO"))
+def test_global_single_order_buy_rejects_legal_limit_and_vwap_with_illegal_first_fill(side):
+    out_of_band = _global_candidate(
+        candidate_id=f"illegal-first-fill-{side}",
+        family=f"illegal-first-fill-{side}-family",
+        side=side,
+        q=0.80,
+        levels=(("0.04", "0.10"), ("0.06", "1000")),
+        min_order="1",
+    )
+    legal = _global_candidate(
+        candidate_id=f"legal-after-illegal-first-fill-{side}",
+        family=f"legal-after-illegal-first-fill-{side}-family",
+        side=side,
+        q=0.75,
+        levels=(("0.06", "1000"),),
+    )
+
+    # The forbidden candidate can have a legal deepest limit and a legal VWAP,
+    # but a taker BUY necessarily consumes the 0.04 ask first.
+    assert out_of_band.executable_cost_curve.avg_cost_for_shares(
+        Decimal("1")
+    ).value > 0.05
+    assert out_of_band.executable_cost_curve.levels[1].price == Decimal("0.06")
+
+    decision = _global_select((out_of_band, legal))
+
+    assert decision.candidate is legal
+    assert (
+        decision.rejection_reasons[out_of_band.candidate_id]
+        == "LIVE_UNIT_PRICE_OUT_OF_BOUNDS"
+    )
+
+
+@pytest.mark.parametrize("side", ("YES", "NO"))
 def test_global_single_order_buy_price_band_applies_to_raw_limit_not_fee_vwap(side):
     candidate = _global_candidate(
         candidate_id=f"fee-boundary-{side}",
@@ -3998,7 +5666,7 @@ def test_global_single_order_unknown_collateral_makes_every_candidate_unrankable
 def test_global_single_order_rejects_stale_wealth_values_not_bound_to_current_ledger():
     cheap_yes = _global_candidate(
         candidate_id="cheap-yes", family="a", side="YES", q=0.02,
-        levels=(("0.005", "1000"),),
+        levels=(("0.05", "1000"),),
     )
     valid_no = _global_candidate(
         candidate_id="valid-no", family="b", side="NO", q=0.65,
@@ -4020,8 +5688,8 @@ def test_global_single_order_does_not_couple_unmodelled_portfolio_upside_to_win(
     candidate = _global_candidate(
         candidate_id="yes", family="a", side="YES", q=0.70
     )
-    cash_only = _global_select((candidate,), floor="50", ceiling="50")
-    unrelated_upside = _global_select((candidate,), floor="50", ceiling="150")
+    cash_only = _global_select((candidate,), floor="50", ceiling="50", cash="50")
+    unrelated_upside = _global_select((candidate,), floor="50", ceiling="150", cash="50")
 
     assert unrelated_upside.candidate is candidate
     assert unrelated_upside.shares == cash_only.shares
@@ -4072,7 +5740,7 @@ def test_global_single_order_duration_is_universe_bound_not_candidate_authored()
     )
 
 
-def test_global_single_order_nonpositive_capital_horizon_invalidates_epoch():
+def test_nonpositive_family_horizon_blocks_buy_but_not_immediate_sell():
     buy = _global_candidate(
         candidate_id="elapsed-horizon",
         family="elapsed",
@@ -4097,12 +5765,17 @@ def test_global_single_order_nonpositive_capital_horizon_invalidates_epoch():
         resolution_hours_by_family={"elapsed-sell": 0.0},
     )
 
-    for candidate, decision in ((buy, buy_decision), (sell, sell_decision)):
-        assert decision.candidate is None
-        assert decision.no_trade_reason == "GLOBAL_EPOCH_SUPERSEDED"
-        assert decision.rejection_reasons[candidate.candidate_id] == (
-            "CAPITAL_HORIZON_NON_POSITIVE"
-        )
+    assert buy_decision.candidate is None
+    assert buy_decision.no_trade_reason == "GLOBAL_EPOCH_SUPERSEDED"
+    assert buy_decision.rejection_reasons[buy.candidate_id] == (
+        "CAPITAL_HORIZON_NON_POSITIVE"
+    )
+    assert sell_decision.candidate is sell
+    assert sell_decision.capital_action_mode == "IMMEDIATE_TAKER_SELL"
+    assert sell_decision.capital_lock_hours == pytest.approx(1.0 / 3600.0)
+    assert sell_decision.expected_growth is not None
+    assert sell_decision.expected_growth.expected_delta_log_wealth > 0.0
+    assert sell_decision.expected_growth.expected_ev_usd > 0.0
 
 
 def test_global_single_order_rejects_probability_from_one_bin_welded_to_another_token():
@@ -4111,14 +5784,14 @@ def test_global_single_order_rejects_probability_from_one_bin_welded_to_another_
         family="a",
         side="YES",
         q=0.002,
-        levels=(("0.005", "1000"),),
+        levels=(("0.05", "1000"),),
     )
     probability = _global_probability_witness(cheap_yes)
     wrong_binding = probability.bindings[1]
     forged_curve = _global_curve(
         side="YES",
         token=wrong_binding.yes_token_id,
-        levels=(("0.005", "1000"),),
+        levels=(("0.05", "1000"),),
     )
     forged = replace(
         cheap_yes,
@@ -4150,7 +5823,7 @@ def test_global_single_order_rejects_external_current_authority_alpha_drift():
         family="a",
         side="YES",
         q=0.03,
-        levels=(("0.005", "1000"),),
+        levels=(("0.05", "1000"),),
     )
     tail_samples = np.concatenate(
         (np.full(20, 0.001, dtype=np.float64), np.full(380, 0.03, dtype=np.float64))
@@ -4311,12 +5984,55 @@ def test_global_single_order_endowment_bound_is_below_every_frechet_coupling():
         assert bound <= true_du + 1e-15
 
 
-def test_global_single_order_rejects_contingent_maker_asset_shape():
-    with pytest.raises(ValueError, match="immediate taker-limit"):
+def test_global_single_order_rejects_unbound_maker_asset_shape():
+    with pytest.raises(ValueError, match="execution proposal is invalid"):
         replace(
             _global_candidate(candidate_id="c", family="f", side="YES", q=0.70),
             execution_mode="MAKER",  # type: ignore[arg-type]
         )
+
+
+def test_global_selector_rejects_untyped_maker_and_keeps_taker_sibling():
+    taker = _global_candidate(
+        candidate_id="taker",
+        family="execution-family",
+        side="YES",
+        q=0.80,
+        levels=(("0.50", "100"),),
+    )
+    proposal_curve = replace(
+        taker.executable_cost_curve,
+        levels=(BookLevel(price=Decimal("0.30"), size=Decimal("100")),),
+        fee_model=FeeModel(fee_rate=Decimal("0")),
+    )
+    maker = replace(
+        taker,
+        candidate_id="maker",
+        execution_mode="MAKER_REST",
+        proposal_cost_curve=proposal_curve,
+        fill_probability=0.19,
+        fill_probability_source="measured_deadline_fill_probability_v1",
+        rest_deadline_minutes=20.0,
+    )
+
+    decision = _global_select(
+        (taker, maker),
+        cap="20",
+        resolution_hours_by_family={"execution-family": 24.0},
+    )
+
+    assert decision.candidate == taker
+    assert decision.capital_action_mode == "SETTLEMENT_LOCKED_BUY"
+    assert decision.limit_price == Decimal("0.50")
+    assert decision.rejection_reasons[maker.candidate_id] == (
+        "CURRENT_MAKER_FILL_WITNESS_UNAVAILABLE"
+    )
+    assert decision.shares <= (
+        decision.fractional_kelly_target_shares
+        - decision.current_token_shares
+    )
+    assert decision.expected_growth is not None
+    assert decision.expected_growth.capital_lock_hours == pytest.approx(24.0)
 
 
 def test_var_nonconcave_where_cvar_stays_concave():

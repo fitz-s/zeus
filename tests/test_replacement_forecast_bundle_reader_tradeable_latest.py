@@ -1,5 +1,5 @@
 # Created: 2026-06-10
-# Last reused/audited: 2026-07-25
+# Last reused/audited: 2026-08-12
 # Authority basis: docs/authority/replacement_final_form_2026_06_09.md
 """Relationship tests for readiness-bound replacement posterior selection.
 
@@ -11,9 +11,10 @@ never substitutes an older row under a different certificate.
 from __future__ import annotations
 
 import json
+import math
 import sqlite3
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 
 from src.data.replacement_forecast_cycle_policy import (
     CURRENT_EVIDENCE_SEMANTICS_REVISION,
@@ -23,6 +24,7 @@ from src.data.replacement_forecast_cycle_policy import (
 from src.data.replacement_forecast_bundle_reader import (
     HIGH_DATA_VERSION,
     PRODUCT_ID,
+    ReplacementForecastAuthorityPurpose,
     SOURCE_ID,
     read_replacement_forecast_bundle,
 )
@@ -67,6 +69,7 @@ def _provenance(
     shape_lag_hours: float = 0.0,
     stale_shape_reused: bool = False,
     translation_applied: bool = False,
+    shape_source_cycle_time: datetime | None = None,
 ) -> dict[str, object]:
     return {
         "bin_topology_hash": _TOPO_HASH,
@@ -77,6 +80,11 @@ def _provenance(
             "current_evidence_shape": {
                 "semantics_revision": semantics_revision,
                 "shape_lag_hours": shape_lag_hours,
+                "source_cycle_time": (
+                    shape_source_cycle_time.isoformat()
+                    if shape_source_cycle_time is not None
+                    else None
+                ),
                 "stale_shape_reused": stale_shape_reused,
                 "translation_applied": translation_applied,
             }
@@ -110,6 +118,7 @@ def _insert_posterior(
     shape_lag_hours: float = 0.0,
     stale_shape_reused: bool = False,
     translation_applied: bool = False,
+    shape_source_cycle_time: datetime | None = None,
 ) -> int:
     # ``with_ucb`` lets a row carry q_lcb_json but NOT q_ucb_json (the freshest-row
     # twin-authority carrier defect: a 13:08Z row HAS q_ucb, its 13:09Z sibling MISSING it).
@@ -158,6 +167,13 @@ def _insert_posterior(
                     shape_lag_hours=shape_lag_hours,
                     stale_shape_reused=stale_shape_reused,
                     translation_applied=translation_applied,
+                    shape_source_cycle_time=(
+                        shape_source_cycle_time
+                        if shape_source_cycle_time is not None
+                        else source_cycle_time - timedelta(hours=shape_lag_hours)
+                        if math.isfinite(shape_lag_hours)
+                        else None
+                    ),
                 )
             ),
             "live",
@@ -329,7 +345,7 @@ def test_missing_current_evidence_shape_is_not_live_readable() -> None:
     assert result.reason_code == "REPLACEMENT_POSTERIOR_READINESS_NOT_LIVE_GRADE"
 
 
-def test_stale_absolute_disagreement_row_is_live_readable() -> None:
+def test_stale_absolute_disagreement_row_retains_entry_authority() -> None:
     conn = _conn()
     posterior_id = _insert_posterior(
         conn,
@@ -353,12 +369,246 @@ def test_stale_absolute_disagreement_row_is_live_readable() -> None:
 
     result = _read(conn, readiness, decision_time=_dt(6, 12))
 
-    assert result.ok is True, result.reason_code
+    assert result.ok is True
     assert result.bundle is not None
     assert result.bundle.posterior_id == posterior_id
 
 
-def _read(conn, readiness, *, decision_time):
+def test_stale_shape_selected_ensemble_beyond_outer_bound_is_blocked() -> None:
+    conn = _conn()
+    posterior_id = _insert_posterior(
+        conn,
+        source_cycle_time=_dt(6, 0),
+        source_available_at=_dt(6, 7),
+        computed_at=_dt(6, 7, 30),
+        q_mode=_FUSED_FULL,
+        with_bounds=True,
+        semantics_revision=(
+            STALE_ENSEMBLE_ABSOLUTE_DISAGREEMENT_SEMANTICS_REVISION
+        ),
+        shape_lag_hours=30.0,
+        stale_shape_reused=True,
+        shape_source_cycle_time=_dt(4, 18),
+    )
+    readiness = _readiness(
+        posterior_id=posterior_id,
+        computed_at=_dt(6, 7, 30),
+        expires_at=_dt(6, 23),
+        decision_time=_dt(6, 7, 30),
+    )
+
+    result = _read(conn, readiness, decision_time=_dt(6, 12))
+
+    assert result.ok is False
+    assert (
+        result.reason_code
+        == "REPLACEMENT_ENSEMBLE_CYCLE_AGE_EXCEEDS_BOUND"
+    )
+
+
+def test_same_cycle_shape_selected_ensemble_future_or_old_is_blocked() -> None:
+    for shape_cycle_time in (_dt(4, 18), _dt(6, 12, 1)):
+        conn = _conn()
+        posterior_id = _insert_posterior(
+            conn,
+            source_cycle_time=_dt(6, 0),
+            source_available_at=_dt(6, 7),
+            computed_at=_dt(6, 7, 30),
+            q_mode=_FUSED_FULL,
+            with_bounds=True,
+            shape_source_cycle_time=shape_cycle_time,
+        )
+        readiness = _readiness(
+            posterior_id=posterior_id,
+            computed_at=_dt(6, 7, 30),
+            expires_at=_dt(6, 23),
+            decision_time=_dt(6, 7, 30),
+        )
+
+        result = _read(conn, readiness, decision_time=_dt(6, 12))
+
+        assert result.ok is False
+        assert (
+            result.reason_code
+            == "REPLACEMENT_ENSEMBLE_CYCLE_AGE_EXCEEDS_BOUND"
+        )
+
+
+def test_same_cycle_shape_without_selected_ensemble_time_is_blocked() -> None:
+    conn = _conn()
+    posterior_id = _insert_posterior(
+        conn,
+        source_cycle_time=_dt(6, 0),
+        source_available_at=_dt(6, 7),
+        computed_at=_dt(6, 7, 30),
+        q_mode=_FUSED_FULL,
+        with_bounds=True,
+    )
+    row = conn.execute(
+        "SELECT provenance_json FROM forecast_posteriors WHERE posterior_id = ?",
+        (posterior_id,),
+    ).fetchone()
+    provenance = json.loads(row[0])
+    del provenance["bayes_precision_fusion"]["current_evidence_shape"][
+        "source_cycle_time"
+    ]
+    conn.execute(
+        "UPDATE forecast_posteriors SET provenance_json = ? WHERE posterior_id = ?",
+        (json.dumps(provenance), posterior_id),
+    )
+    readiness = _readiness(
+        posterior_id=posterior_id,
+        computed_at=_dt(6, 7, 30),
+        expires_at=_dt(6, 23),
+        decision_time=_dt(6, 7, 30),
+    )
+
+    result = _read(conn, readiness, decision_time=_dt(6, 12))
+
+    assert result.ok is False
+    assert result.reason_code == "REPLACEMENT_POSTERIOR_READINESS_NOT_LIVE_GRADE"
+
+
+def test_stale_absolute_disagreement_row_has_held_redecision_authority() -> None:
+    conn = _conn()
+    posterior_id = _insert_posterior(
+        conn,
+        source_cycle_time=_dt(6, 0),
+        source_available_at=_dt(6, 7),
+        computed_at=_dt(6, 7, 30),
+        q_mode=_FUSED_FULL,
+        with_bounds=True,
+        semantics_revision=(
+            STALE_ENSEMBLE_ABSOLUTE_DISAGREEMENT_SEMANTICS_REVISION
+        ),
+        shape_lag_hours=6.0,
+        stale_shape_reused=True,
+    )
+    readiness = _readiness(
+        posterior_id=posterior_id,
+        computed_at=_dt(6, 7, 30),
+        expires_at=_dt(6, 23),
+        decision_time=_dt(6, 7, 30),
+    )
+
+    result = _read(
+        conn,
+        readiness,
+        decision_time=_dt(6, 12),
+        authority_purpose=ReplacementForecastAuthorityPurpose.HELD_REDECISION,
+    )
+
+    assert result.ok is True
+    assert result.bundle is not None
+    assert result.bundle.posterior_id == posterior_id
+
+
+def test_nonfinite_shape_lag_has_no_held_authority() -> None:
+    for shape_lag_hours in (float("nan"), float("inf"), float("-inf")):
+        conn = _conn()
+        posterior_id = _insert_posterior(
+            conn,
+            source_cycle_time=_dt(6, 0),
+            source_available_at=_dt(6, 7),
+            computed_at=_dt(6, 7, 30),
+            q_mode=_FUSED_FULL,
+            with_bounds=True,
+            semantics_revision=(
+                STALE_ENSEMBLE_ABSOLUTE_DISAGREEMENT_SEMANTICS_REVISION
+            ),
+            shape_lag_hours=shape_lag_hours,
+            stale_shape_reused=True,
+        )
+        readiness = _readiness(
+            posterior_id=posterior_id,
+            computed_at=_dt(6, 7, 30),
+            expires_at=_dt(6, 23),
+            decision_time=_dt(6, 7, 30),
+        )
+
+        result = _read(
+            conn,
+            readiness,
+            decision_time=_dt(6, 12),
+            authority_purpose=ReplacementForecastAuthorityPurpose.HELD_REDECISION,
+        )
+
+        assert result.ok is False
+        assert result.reason_code == "REPLACEMENT_POSTERIOR_READINESS_NOT_LIVE_GRADE"
+
+
+def test_translated_stale_shape_has_no_held_redecision_authority() -> None:
+    conn = _conn()
+    posterior_id = _insert_posterior(
+        conn,
+        source_cycle_time=_dt(6, 0),
+        source_available_at=_dt(6, 7),
+        computed_at=_dt(6, 7, 30),
+        q_mode=_FUSED_FULL,
+        with_bounds=True,
+        semantics_revision=(
+            STALE_ENSEMBLE_ABSOLUTE_DISAGREEMENT_SEMANTICS_REVISION
+        ),
+        shape_lag_hours=6.0,
+        stale_shape_reused=True,
+        translation_applied=True,
+    )
+    readiness = _readiness(
+        posterior_id=posterior_id,
+        computed_at=_dt(6, 7, 30),
+        expires_at=_dt(6, 23),
+        decision_time=_dt(6, 7, 30),
+    )
+
+    result = _read(
+        conn,
+        readiness,
+        decision_time=_dt(6, 12),
+        authority_purpose=ReplacementForecastAuthorityPurpose.HELD_REDECISION,
+    )
+
+    assert result.ok is False
+    assert result.reason_code == "REPLACEMENT_POSTERIOR_READINESS_NOT_LIVE_GRADE"
+
+
+def test_red_staleness_isolates_entry_without_blinding_held_redecision() -> None:
+    conn = _conn()
+    posterior_id = _insert_posterior(
+        conn,
+        source_cycle_time=_dt(6, 0),
+        source_available_at=_dt(6, 7),
+        computed_at=_dt(6, 7, 30),
+        q_mode=_FUSED_FULL,
+        with_bounds=True,
+    )
+    readiness = _readiness(
+        posterior_id=posterior_id,
+        computed_at=_dt(6, 7, 30),
+        expires_at=_dt(7, 2),
+        decision_time=_dt(6, 7, 30),
+    )
+
+    entry = _read(conn, readiness, decision_time=_dt(7, 1))
+    held = _read(
+        conn,
+        readiness,
+        decision_time=_dt(7, 1),
+        authority_purpose=ReplacementForecastAuthorityPurpose.HELD_REDECISION,
+    )
+
+    assert entry.ok is False
+    assert entry.reason_code == "REPLACEMENT_STALENESS_RED_ENTRY_ISOLATED"
+    assert held.ok is True
+    assert held.bundle is not None
+
+
+def _read(
+    conn,
+    readiness,
+    *,
+    decision_time,
+    authority_purpose=ReplacementForecastAuthorityPurpose.ENTRY,
+):
     return read_replacement_forecast_bundle(
         conn,
         baseline_bundle=_BaselineBundle(_Evidence("b0-run")),
@@ -368,6 +618,7 @@ def _read(conn, readiness, *, decision_time):
         temperature_metric="high",
         decision_time=decision_time,
         current_bin_topology_hash=_TOPO_HASH,
+        authority_purpose=authority_purpose,
     )
 
 

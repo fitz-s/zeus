@@ -881,6 +881,19 @@ def test_executor_certified_global_increment_reuses_reconciled_position_but_not_
     mem_db.commit()
 
     mem_db.execute(
+        "UPDATE position_current SET shares=23.999986 "
+        "WHERE position_id='active-position'"
+    )
+    rounded_projection = _entry_duplicate_same_token_component(
+        mem_db,
+        token_id=TOKEN_X,
+        candidate_position_id="fresh-candidate",
+        allow_reconciled_position_increment=True,
+    )
+    assert rounded_projection["allowed"] is True
+    assert rounded_projection["reason"] == "allowed_reconciled_position_increment"
+
+    mem_db.execute(
         "UPDATE position_current SET shares=25.0 WHERE position_id='active-position'"
     )
     drifted = _entry_duplicate_same_token_component(

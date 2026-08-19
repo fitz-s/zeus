@@ -61,6 +61,11 @@ _OTHER_CERT_REASON = "EDLI_LIVE_CERTIFICATE_BUILD_FAILED:SOME_OTHER_ASSERTION_FA
 # Classifier unit pins
 # ---------------------------------------------------------------------------
 
+
+def test_global_work_deferrals_are_explicitly_retryable():
+    assert _is_transient_money_path_reason("DEFERRED_PREEMPTED")
+    assert _is_transient_money_path_reason("DEFERRED_DEADLINE")
+
 def test_price_moved_is_transient():
     assert _is_transient_money_path_reason(_PRICE_MOVED_REASON)
 

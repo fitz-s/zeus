@@ -39,10 +39,117 @@ from src.state.db_writer_lock import (
     BulkChunkerNotPolledError,
     WriteClass,
     canonical_lock_order,
+    connect_with_cutover_lease,
     db_writer_lock,
     subprocess_run_with_write_class,
     subprocess_with_write_class,
 )
+
+
+def test_cutover_lease_acquisition_respects_deadline(monkeypatch, tmp_path):
+    from src.state import db_writer_lock
+
+    clock = [10.0]
+    sqlite_called = False
+
+    def flock(_fd, flags):
+        if flags & db_writer_lock.fcntl.LOCK_UN:
+            return None
+        raise BlockingIOError
+
+    def sleep(seconds):
+        clock[0] += seconds
+
+    def sqlite_connect(*_args, **_kwargs):
+        nonlocal sqlite_called
+        sqlite_called = True
+        raise AssertionError("expired lease must not open SQLite")
+
+    monkeypatch.setattr(db_writer_lock.fcntl, "flock", flock)
+    monkeypatch.setattr(db_writer_lock.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(db_writer_lock.time, "sleep", sleep)
+    monkeypatch.setattr(db_writer_lock.sqlite3, "connect", sqlite_connect)
+
+    with pytest.raises(TimeoutError, match="CUTOVER_LEASE_DEADLINE_EXPIRED"):
+        connect_with_cutover_lease(
+            tmp_path / "zeus_trades.db",
+            canonical_db_path=tmp_path / "zeus_trades.db",
+            deadline_monotonic=10.012,
+        )
+
+    assert clock[0] == pytest.approx(10.012)
+    assert sqlite_called is False
+
+
+def test_cutover_lease_handoff_reclamps_sqlite_timeout(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+
+    from src.state import db_writer_lock
+
+    clock = [0.0]
+    connect_calls = []
+
+    def flock(_fd, flags):
+        if flags & db_writer_lock.fcntl.LOCK_UN:
+            return None
+        if clock[0] < 0.9:
+            raise BlockingIOError
+        return None
+
+    def sleep(seconds):
+        clock[0] += seconds
+
+    def sqlite_connect(*_args, **kwargs):
+        connect_calls.append((clock[0], kwargs["timeout"]))
+        return SimpleNamespace()
+
+    monkeypatch.setattr(db_writer_lock.fcntl, "flock", flock)
+    monkeypatch.setattr(db_writer_lock.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(db_writer_lock.time, "sleep", sleep)
+    monkeypatch.setattr(db_writer_lock.sqlite3, "connect", sqlite_connect)
+
+    conn = connect_with_cutover_lease(
+        tmp_path / "zeus_trades.db",
+        canonical_db_path=tmp_path / "zeus_trades.db",
+        deadline_monotonic=1.0,
+        timeout=1.0,
+    )
+
+    assert connect_calls[0][0] == pytest.approx(0.9)
+    assert connect_calls[0][1] == pytest.approx(0.1)
+    db_writer_lock.fcntl.flock(conn._cutover_fd, db_writer_lock.fcntl.LOCK_UN)
+    db_writer_lock.os.close(conn._cutover_fd)
+
+
+def test_cutover_lease_does_not_attempt_at_deadline(monkeypatch, tmp_path):
+    from src.state import db_writer_lock
+
+    clock = [1.0]
+    flock_called = False
+    sqlite_called = False
+
+    def flock(*_args, **_kwargs):
+        nonlocal flock_called
+        flock_called = True
+
+    def sqlite_connect(*_args, **_kwargs):
+        nonlocal sqlite_called
+        sqlite_called = True
+
+    monkeypatch.setattr(db_writer_lock.fcntl, "flock", flock)
+    monkeypatch.setattr(db_writer_lock.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(db_writer_lock.sqlite3, "connect", sqlite_connect)
+
+    with pytest.raises(TimeoutError, match="CUTOVER_LEASE_DEADLINE_EXPIRED"):
+        connect_with_cutover_lease(
+            tmp_path / "zeus_trades.db",
+            canonical_db_path=tmp_path / "zeus_trades.db",
+            deadline_monotonic=1.0,
+            timeout=1.0,
+        )
+
+    assert flock_called is False
+    assert sqlite_called is False
 
 
 def test_trade_world_flocked_forwards_nonblocking_to_both_locks(monkeypatch):

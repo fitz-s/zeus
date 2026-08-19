@@ -1,4 +1,4 @@
-# Lifecycle: created=2026-06-15; last_reviewed=2026-07-27; last_reused=2026-07-27
+# Lifecycle: created=2026-06-15; last_reviewed=2026-08-12; last_reused=2026-08-12
 # Purpose: Prove the live q-kernel bridge preserves probability and execution invariants.
 # Reuse: Re-audit overlay probability authority and live blockers before q-kernel changes.
 # Authority basis: docs/rebuild/consult_review_pr409.md §5/§7 + the round-2
@@ -14,7 +14,7 @@
 #     3. day0 observation lane: _DAY0_LANE_EVENT_TYPES feed live observed-boundary
 #        state into the same qkernel family optimizer.
 #     4. current exposure in SELECTION (per-bin family exposure into argmax ΔU).
-# Last reused/audited: 2026-07-27
+# Last reused/audited: 2026-08-12
 """Integration tests for the four PR #409 live-path blockers (RED-on-revert)."""
 from __future__ import annotations
 
@@ -26,6 +26,8 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
+from src.contracts.strategy_capital_allocation import STRATEGY_LOG_UTILITY_BASIS
+from src.contracts.global_auction_receipt import GlobalAuctionReceiptRef
 from src.engine import event_reactor_adapter as era
 from src.engine import qkernel_spine_bridge as bridge
 from src.decision_kernel.canonicalization import stable_hash
@@ -364,33 +366,6 @@ def _drive(
     extra_exposure=None,
     selection_proofs=None,
 ):
-    from src.solve.solver import PortfolioWealthWitness, portfolio_wealth_identity
-
-    ledger_snapshot_id = "pr409-current-ledger"
-    position_set_hash = "pr409-empty-positions"
-    captured_at = decision_time.astimezone(_dt.timezone.utc)
-    wealth_identity = portfolio_wealth_identity(
-        ledger_snapshot_id=ledger_snapshot_id,
-        position_set_hash=position_set_hash,
-        wealth_floor_usd=Decimal("1000"),
-        wealth_ceiling_usd=Decimal("1000"),
-        spendable_cash_usd=Decimal("1000"),
-        reservations_usd=Decimal("0"),
-        collateral_authority="CHAIN",
-        captured_at_utc=captured_at,
-    )
-    wealth = PortfolioWealthWitness(
-        ledger_snapshot_id=ledger_snapshot_id,
-        position_set_hash=position_set_hash,
-        wealth_floor_usd=Decimal("1000"),
-        wealth_ceiling_usd=Decimal("1000"),
-        spendable_cash_usd=Decimal("1000"),
-        reservations_usd=Decimal("0"),
-        collateral_authority="CHAIN",
-        captured_at_utc=captured_at,
-        max_age=_dt.timedelta(seconds=5),
-        witness_identity=wealth_identity,
-    )
     return bridge.decide_family_via_spine(
         family=family,
         payload=payload,
@@ -404,8 +379,6 @@ def _drive(
         baseline_usd_provider=era._robust_marginal_utility_baseline_usd,
         per_bin_yes_q_lcb=era._per_bin_yes_q_lcb(proofs),
         extra_exposure_by_bin_id=extra_exposure,
-        solve_wealth_witness=wealth,
-        solve_positions=(),
     )
 
 
@@ -1091,9 +1064,10 @@ def test_reactor_seam_routes_day0_through_qkernel_with_observed_boundary():
     assert "_spine_flag_on and _spine_eligible_event and not _is_day0_event" not in src
     assert "NO_TRADE_QKERNEL_DAY0_NOT_WIRED" not in src
     assert "event_bound_legacy_selector" not in src
-    # Forecast/Day0 flag-off must no-trade; neither may use the legacy selector as fallback.
-    assert "if _spine_eligible_event and not _spine_flag_on" in src
-    assert '_spine_no_trade_reason = "QKERNEL_SPINE_REQUIRED"' in src
+    # Forecast and Day0 now route directly through the single live qkernel;
+    # there is no parallel flag-off or legacy-selector runtime.
+    assert "_spine_flag_on" not in src
+    assert "elif _spine_eligible_event:" in src
 
     family, _bins = _three_bin_family(event_type="DAY0_EXTREME_UPDATED")
     proofs = _proofs_for(
@@ -1447,6 +1421,59 @@ def test_selection_exposure_reads_chain_backed_db_without_portfolio_provider():
         assert exposure[bin_id] == pytest.approx(21.27)
 
 
+def test_selection_exposure_uses_open_fill_cost_after_partial_exit():
+    """Fill authority must not reintroduce a sold full-lot chain initialValue."""
+    import sqlite3
+
+    family, _bins = _three_bin_family()
+    proofs = _proofs_for(
+        family,
+        yes_asks=[0.25, 0.30, 0.25, 0.20],
+        no_asks=[0.75, 0.70, 0.75, 0.80],
+        q_by_bin=[0.20, 0.35, 0.30, 0.15],
+        q_lcb_by_bin=[0.12, 0.20, 0.18, 0.08],
+    )
+    bin_by_condition = {
+        proof.candidate.condition_id: era._candidate_bin_id(proof)
+        for proof in proofs
+    }
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        """
+        CREATE TABLE position_current (
+            condition_id TEXT, direction TEXT, phase TEXT, chain_state TEXT,
+            chain_shares REAL, chain_cost_basis_usd REAL,
+            shares REAL, cost_basis_usd REAL, size_usd REAL,
+            fill_authority TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO position_current VALUES (
+            'cond-1', 'buy_no', 'active', 'synced',
+            0.00857, 1.4499, 0.00857, 0.002399599, 0.002399599,
+            'venue_confirmed_full'
+        )
+        """
+    )
+
+    exposure = era._family_existing_exposure_for_selection_by_bin_id(
+        proofs=proofs,
+        portfolio_state_provider=None,
+        held_position_conn=conn,
+        family=family,
+    )
+
+    own_bin = bin_by_condition["cond-1"]
+    assert own_bin not in exposure
+    assert exposure[utility_ranker.OUTSIDE_OUTCOME] == pytest.approx(0.002399599)
+    for cond, bin_id in bin_by_condition.items():
+        if cond != "cond-1":
+            assert exposure[bin_id] == pytest.approx(0.002399599)
+
+
 def test_opportunity_book_receipt_records_selection_exposure():
     """The live receipt must prove which family exposure shaped qkernel selection."""
 
@@ -1584,8 +1611,8 @@ def test_global_current_winner_survives_book_and_sizes_from_its_sealed_curve():
         condition_id="cond-global-current",
         yes_token="yes-global-current",
         no_token="no-global-current",
-        yes_ask=0.04,
-        no_ask=0.96,
+        yes_ask=0.05,
+        no_ask=0.95,
         snapshot_id="snap-global-current",
     )
     proof = _proof(
@@ -1612,14 +1639,18 @@ def test_global_current_winner_survives_book_and_sizes_from_its_sealed_curve():
         "side": "YES",
         "payoff_q_point": 0.70,
         "payoff_q_lcb": 0.60,
-        "cost": 0.04,
-            "edge_lcb": 0.56,
-            "global_actuation_identity": "global-actuation-current",
-            "global_optimum_semantics": "CUT_TIME_GLOBAL_OPTIMUM",
-            "global_candidate_id": "global-candidate-current",
-            "global_bin_id": "bin-1",
+        "cost": 0.05,
+        "edge_lcb": 0.55,
+        "global_actuation_identity": "global-actuation-current",
+        "global_winner_event_id": "event-global-current",
+        "global_economic_identity": "global-economic-current",
+        "global_optimum_semantics": "CUT_TIME_GLOBAL_OPTIMUM",
+        "global_candidate_id": "global-candidate-current",
+        "global_execution_mode": "TAKER_LIMIT",
+        "global_bin_id": "bin-1",
         "global_universe_witness_identity": "global-universe-current",
         "global_wealth_witness_identity": "global-wealth-current",
+        "global_wealth_economic_identity": "global-wealth-economic-current",
         "global_selection_epoch_identity": "global-epoch-current",
         "global_selection_cut_at": "2026-07-11T23:00:00+00:00",
         "global_selection_decision_at": "2026-07-11T23:00:01+00:00",
@@ -1628,27 +1659,48 @@ def test_global_current_winner_survives_book_and_sizes_from_its_sealed_curve():
         "global_jit_book_snapshot_id": "jit-snapshot-current",
         "global_jit_execution_curve_identity": "jit-curve-current",
         "global_target_shares": "25",
-        "global_expected_cost_usd": "1",
-        "global_max_spend_usd": "1",
+        "global_expected_cost_usd": "1.25",
+        "global_max_spend_usd": "1.25",
         "global_robust_delta_log_wealth": 0.01,
-        "global_robust_ev_usd": 14.0,
+        "global_robust_ev_usd": 13.75,
+        "global_ruin_probability_reduction": 0.0,
+        "global_terminal_ruin_probability_reduction": 0.0,
+        "global_utility_basis": STRATEGY_LOG_UTILITY_BASIS,
+        "global_proposal_expected_delta_log_wealth": 0.01,
+        "global_proposal_expected_ev_usd": 13.75,
+        "global_proposal_expected_log_growth_per_hour": 0.01 / 24.0,
+        "global_proposal_expected_capital_efficiency": 0.01,
+        "global_proposal_capital_lock_hours": 24.0,
+        "global_proposal_fill_semantics": "IMMEDIATE_FILL",
         "false_edge_rate": 0.10,
         "global_cut_time_win_probability_lcb": 0.60,
         "global_cut_time_loss_probability_ucb": 0.40,
         "global_terminal_win_probability_lcb": 0.60,
         "global_terminal_loss_probability_ucb": 0.40,
-        "global_terminal_loss_payoff_usd": "-1",
-        "global_terminal_win_payoff_usd": "24",
-        "global_terminal_median_payoff_usd": "24",
-        "global_terminal_wealth_after_loss_usd": "999",
-        "global_terminal_wealth_after_win_usd": "1024",
-        "global_cut_time_expected_value_usd": 14.0,
-        "global_expected_value_usd": 14.0,
+        "global_terminal_loss_payoff_usd": "-1.25",
+        "global_terminal_win_payoff_usd": "23.75",
+        "global_terminal_median_payoff_usd": "23.75",
+        "global_terminal_wealth_after_loss_usd": "998.75",
+        "global_terminal_wealth_after_win_usd": "1023.75",
+        "global_cut_time_expected_value_usd": 13.75,
+        "global_expected_value_usd": 13.75,
         "global_expected_value_semantics": (
             "POINT_EVIDENCE_EXPECTATION_NOT_REALIZED_GAIN"
         ),
         "global_terminal_payoff_semantics": "BINARY_0_1",
     }
+    cert["global_auction_receipt"] = GlobalAuctionReceiptRef(
+        decision_log_id=1,
+        decision_log_mode="global_single_order_auction",
+        receipt_hash="a" * 64,
+        execution_binding_hash="b" * 64,
+        artifact_summary_hash="c" * 64,
+        schema_version=21,
+        winner_event_id=cert["global_winner_event_id"],
+        winner_candidate_id=cert["global_candidate_id"],
+        winner_actuation_identity=cert["global_actuation_identity"],
+        selection_epoch_identity=cert["global_selection_epoch_identity"],
+    ).as_payload()
     cert["current_state_identity_hash"] = era.qkernel_current_state_identity_hash(cert)
     selected = replace(
         proof,
@@ -1668,6 +1720,10 @@ def test_global_current_winner_survives_book_and_sizes_from_its_sealed_curve():
     all_hypothesis_ids = (selected_hypothesis_id,) + tuple(
         f"family-global-current:sibling-{idx}" for idx in range(21)
     )
+    assert era.qkernel_global_current_state_rejection_reason(
+        cert,
+        direction="buy_yes",
+    ) is None
     fdr_cert = era._qkernel_fdr_execution_economics(selected_day0)
     day0_fdr = era._day0_selected_route_fdr_proof(
         event_type="DAY0_EXTREME_UPDATED",
@@ -1712,9 +1768,9 @@ def test_global_current_winner_survives_book_and_sizes_from_its_sealed_curve():
     assert payload["selected_objective"]["authority"] == (
         "qkernel_global_current_state"
     )
-    assert payload["selected_objective"]["optimal_stake_usd"] == pytest.approx(1.0)
+    assert payload["selected_objective"]["optimal_stake_usd"] == pytest.approx(1.25)
     assert payload["selected_objective"]["expected_robust_dollars"] == pytest.approx(
-        14.0
+        13.75
     )
     receipt = era.EventSubmissionReceipt(
         submitted=False,
@@ -1736,8 +1792,8 @@ def test_global_current_winner_survives_book_and_sizes_from_its_sealed_curve():
         )
         is cert
     )
-    assert stake == pytest.approx(1.0)
-    assert price is not None and price.value == pytest.approx(0.04)
+    assert stake == pytest.approx(1.25)
+    assert price is not None and price.value == pytest.approx(0.05)
 
     invalid_receipt_cert = dict(cert, global_robust_ev_usd=0.0)
     invalid_receipt_cert["current_state_identity_hash"] = (
@@ -2125,8 +2181,8 @@ def test_overlay_preserves_replacement_no_bound_and_allows_only_monotone_tighten
     assert current_proof.qkernel_execution_economics[
         "payoff_q_point"
     ] == pytest.approx(0.61)
-    assert current_proof.same_bin_yes_posterior == pytest.approx(0.348)
-    assert era.replacement_no_bound_certificate_matches(
+    assert current_proof.same_bin_yes_posterior == pytest.approx(0.39)
+    assert not era.replacement_no_bound_certificate_matches(
         current_proof.replacement_no_bound_certificate,
         expected=expected,
         q_direction=current_proof.q_posterior,
@@ -2421,7 +2477,9 @@ def test_global_live_command_builder_has_no_unconditional_taker_override():
     )
     assert f"exact_taker_shares=(\n                str(global_decision.shares)\n                if {taker_only}" in source
     assert f"exact_taker_limit_price=(\n                str(global_decision.limit_price)\n                if {taker_only}" in source
-    assert "GLOBAL_TAKER_PREFIX_CERTIFICATE_INVALID" in source
+    assert 'order_type="FOK_LIMIT" if global_fok_authorized else None' in source
+    assert 'time_in_force="FOK" if global_fok_authorized else None' in source
+    assert "GLOBAL_TAKER_PREFIX_CERTIFICATE_INVALID" not in source
 
 
 def test_global_current_state_proof_atomically_replaces_legacy_admission_reject(
@@ -2544,17 +2602,15 @@ def test_retired_near_settled_rejection_is_rescored_by_current_economics(monkeyp
         honor_admission_rejections=False,
         enforce_win_rate_floor=False,
     )
-    point_evidence = {}
     global_rebind = era._selection_scoped_proofs(
         proofs=(proof,),
         honor_admission_rejections=False,
         allow_global_near_settled_rebind=True,
         enforce_win_rate_floor=False,
-        point_evidence_out=point_evidence,
     )
 
     assert ordinary == (proof,)
-    assert global_rebind == (proof,), point_evidence
+    assert global_rebind == (proof,)
 
     monkeypatch.setattr(
         era,
@@ -3032,15 +3088,15 @@ def test_qkernel_receipt_annotation_keeps_live_positive_profit_roi_frontier_cand
     assert annotated.q_lcb_5pct == pytest.approx(0.77877)
 
 
-def test_qkernel_receipt_annotation_accepts_low_price_yes_with_robust_edge():
-    """Receipt overlay admits low absolute q when price-relative economics pass."""
+def test_qkernel_receipt_annotation_accepts_band_floor_yes_with_robust_edge():
+    """Receipt overlay admits a low-q YES at the absolute executable floor."""
 
     row = _row(
         condition_id="cond-qk-kl-tail-yes",
         yes_token="yes-qk-kl-tail-yes",
         no_token="no-qk-kl-tail-yes",
-        yes_ask=0.031,
-        no_ask=0.970,
+        yes_ask=0.05,
+        no_ask=0.95,
         snapshot_id="snap-qk-kl-tail-yes",
     )
     proof = _proof(
@@ -3061,13 +3117,13 @@ def test_qkernel_receipt_annotation_accepts_low_price_yes_with_robust_edge():
         "bin_id": era._candidate_bin_id(proof),
         "payoff_q_point": 0.12180248510788458,
         "payoff_q_lcb": 0.06052567908958011,
-        "edge_lcb": 0.020510409830349664,
-        "point_ev": 0.08178721584865413,
+        "edge_lcb": 0.010525679089580107,
+        "point_ev": 0.07180248510788458,
         "delta_u_at_min": 0.00009152233738979263,
         "optimal_stake_usd": "1.4412832709285736083984375",
         "optimal_delta_u": 0.0006333828915951036,
         "q_dot_payoff": 0.12180248510788458,
-        "cost": 0.04001526925923045,
+        "cost": 0.05,
         "direction_law_ok": True,
         "coherence_allows": True,
         "q_lcb_guard_basis": "OOF_WILSON_95",
@@ -3081,7 +3137,7 @@ def test_qkernel_receipt_annotation_accepts_low_price_yes_with_robust_edge():
     )
 
     assert annotated.passed_prefilter is True
-    assert annotated.trade_score == pytest.approx(0.020510409830349664)
+    assert annotated.trade_score == pytest.approx(0.010525679089580107)
     assert annotated.missing_reason is None
     assert annotated.q_lcb_5pct == pytest.approx(0.06052567908958011)
 

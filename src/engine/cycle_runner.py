@@ -8,8 +8,10 @@ surface stable.
 from __future__ import annotations
 
 import logging
+import math
 import sqlite3
 import sys
+import time
 from datetime import datetime, timezone
 
 from src.config import STATE_DIR, cities_by_name, get_mode, settings
@@ -63,7 +65,7 @@ from src.state.lifecycle_manager import TERMINAL_STATES, is_terminal_state
 # returns None instead of crashing the daemon. Tests monkeypatch this alias to
 # simulate both the happy path (returns Connection) and the lock-degrade path
 # (returns None).  Any other OperationalError still propagates.
-def get_connection():
+def get_connection(*, deadline_monotonic: float | None = None):
     """T2G: Acquire trade+world DB connection via connect_or_degrade.
 
     Returns a live Connection on success, or None if the DB is transiently
@@ -73,20 +75,71 @@ def get_connection():
     flock topology routes this through the LIVE writer flock once Phase 1
     retrofits land.
     """
-    conn = connect_or_degrade(_zeus_trade_db_path(), write_class="live")
+    busy_timeout_ms = None
+    if deadline_monotonic is not None:
+        remaining_seconds = float(deadline_monotonic) - time.monotonic()
+        if not math.isfinite(remaining_seconds) or remaining_seconds <= 0.0:
+            return None
+        busy_timeout_ms = max(1, math.ceil(remaining_seconds * 1000.0))
+    conn = connect_or_degrade(
+        _zeus_trade_db_path(),
+        write_class="live",
+        busy_timeout_ms=busy_timeout_ms,
+        deadline_monotonic=deadline_monotonic,
+    )
     if conn is None:
         return None
+    deadline_exhausted = False
+
+    def _remaining_deadline_ms() -> int | None:
+        if deadline_monotonic is None:
+            return None
+        remaining = float(deadline_monotonic) - time.monotonic()
+        if not math.isfinite(remaining) or remaining <= 0.0:
+            raise TimeoutError("HELD_MONITOR_CONNECTION_DEADLINE_EXPIRED")
+        return max(1, math.ceil(remaining * 1000.0))
+
+    progress_handler_installed = False
     # ATTACH world schema (mirrors get_trade_connection_with_world logic).
     try:
+        remaining_ms = _remaining_deadline_ms()
+        if remaining_ms is not None:
+            conn.execute(f"PRAGMA busy_timeout = {remaining_ms}")
+            conn.set_progress_handler(
+                lambda: int(
+                    time.monotonic() >= float(deadline_monotonic)
+                ),
+                1_000,
+            )
+            progress_handler_installed = True
         attached = {row[1] for row in conn.execute("PRAGMA database_list").fetchall()}
         if "world" not in attached:
+            remaining_ms = _remaining_deadline_ms()
+            conn.execute(f"PRAGMA busy_timeout = {remaining_ms}")
             conn.execute("ATTACH DATABASE ? AS world", (str(ZEUS_WORLD_DB_PATH),))
         # K1 (2026-05-11): ATTACH forecasts DB so evaluator cross-DB joins work.
         if "forecasts" not in attached:
             from src.state.db import ZEUS_FORECASTS_DB_PATH
+            remaining_ms = _remaining_deadline_ms()
+            conn.execute(f"PRAGMA busy_timeout = {remaining_ms}")
             conn.execute("ATTACH DATABASE ? AS forecasts", (str(ZEUS_FORECASTS_DB_PATH),))
+        _remaining_deadline_ms()
+    except TimeoutError:
+        deadline_exhausted = True
     except sqlite3.OperationalError as exc:
-        logger.warning("ATTACH world/forecasts failed (non-fatal): %r", exc)
+        if (
+            deadline_monotonic is not None
+            and time.monotonic() >= float(deadline_monotonic)
+        ):
+            deadline_exhausted = True
+        else:
+            logger.warning("ATTACH world/forecasts failed (non-fatal): %r", exc)
+    finally:
+        if progress_handler_installed:
+            conn.set_progress_handler(None, 0)
+    if deadline_exhausted:
+        conn.close()
+        return None
     return conn
 from src.state.chain_reconciliation import ChainPosition, reconcile as reconcile_with_chain
 from src.state.decision_chain import CycleArtifact, MonitorResult, NoTradeCase, store_artifact
@@ -521,9 +574,19 @@ def _execute_monitoring_phase(
     summary: dict,
     *,
     run_exit_preflight: bool = True,
+    held_position_monitor_budget_seconds: float | None = None,
     should_preempt_for_urgent_day0=None,
     defer_partial_orderbook_gaps: bool = False,
 ):
+    if isinstance(conn, sqlite3.Connection):
+        # SCOPE: only this short-lived held-monitor connection. DRAIN:
+        # src.main's dedicated 90-second PASSIVE canonical-WAL checkpoints copy
+        # reclaimable frames after the monitor releases its transaction.
+        # RESET: the connection closes at cycle teardown; a later cycle opens
+        # and configures a new connection. Keep checkpoint I/O out of a monitor
+        # commit so SQLite cannot overrun the held-position decision deadline.
+        conn.execute("PRAGMA wal_autocheckpoint = 0")
+        summary["held_monitor_wal_autocheckpoint"] = "disabled"
     return _runtime.execute_monitoring_phase(
         conn,
         clob,
@@ -533,6 +596,7 @@ def _execute_monitoring_phase(
         summary,
         deps=sys.modules[__name__],
         run_exit_preflight=run_exit_preflight,
+        held_position_monitor_budget_seconds=held_position_monitor_budget_seconds,
         should_preempt_for_urgent_day0=should_preempt_for_urgent_day0,
         defer_partial_orderbook_gaps=defer_partial_orderbook_gaps,
     )
@@ -596,6 +660,12 @@ def run_cycle(mode: DiscoveryMode, *, edli_event_context: dict | None = None) ->
         freshness_allows_entries = False
         _freshness_verdict = None
     if _freshness_verdict is not None:
+        # Visibility and authority are separate axes.  Every degraded source
+        # remains explicit in the cycle receipt even when its role does not
+        # authorize a capital-path veto for this mode.
+        if _freshness_verdict.degraded_data:
+            summary["degraded_data"] = True
+            summary["stale_sources"] = list(_freshness_verdict.stale_sources)
         # P3 cycle-axis freshness short-circuit (PLAN_v3 §6.P3 — explicitly
         # NOT migrated to phase-axis; this gate fires before any candidate
         # is constructed). Routed through helper for grep-symmetry per
@@ -608,12 +678,9 @@ def run_cycle(mode: DiscoveryMode, *, edli_event_context: dict | None = None) ->
         if _freshness_verdict.day0_capture_disabled and _is_fail_closed_mode:
             summary["skipped"] = True
             summary["skip_reason"] = "cycle_skipped_freshness_degraded"
-            summary["stale_sources"] = list(_freshness_verdict.stale_sources)
             return summary
         if _freshness_verdict.ensemble_disabled and mode == DiscoveryMode.OPENING_HUNT:
-            summary["degraded_data"] = True
             summary["freshness_entry_blocked"] = True
-            summary["stale_sources"] = list(_freshness_verdict.stale_sources)
             freshness_allows_entries = False
 
     artifact = CycleArtifact(mode=mode.value, started_at=summary["started_at"], summary=summary)
@@ -783,7 +850,7 @@ def run_cycle(mode: DiscoveryMode, *, edli_event_context: dict | None = None) ->
     # against venue state. Errors don't fail the cycle.
     try:
         from src.execution.command_recovery import reconcile_unresolved_commands
-        rec_summary = reconcile_unresolved_commands(conn)
+        rec_summary = reconcile_unresolved_commands(scope="live_tick")
         summary["command_recovery"] = rec_summary
     except Exception as exc:
         logger.error("command_recovery raised; continuing cycle: %s", exc, exc_info=True)

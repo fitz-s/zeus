@@ -1,10 +1,12 @@
 # Created: 2026-04-26
-# Lifecycle: created=2026-04-26; last_reviewed=2026-05-15; last_reused=2026-05-15
+# Last reused/audited: 2026-08-10
+# Lifecycle: created=2026-04-26; last_reviewed=2026-08-10; last_reused=2026-08-10
 # Purpose: Lock command-bus type contracts plus U1 executable snapshot gate compatibility.
 # Reuse: Run when venue_commands schema, command bus enums, or snapshot-gated insert semantics change.
 # Authority basis: docs/operations/task_2026-04-26_execution_state_truth_p1_command_bus/implementation_plan.md §P1.S2;
 #                  architecture/invariants.yaml INV-29;
-#                  docs/archive/2026-Q2/task_2026-05-15_live_order_e2e_goal/LIVE_ORDER_E2E_GOAL_PLAN.md.
+#                  docs/archive/2026-Q2/task_2026-05-15_live_order_e2e_goal/LIVE_ORDER_E2E_GOAL_PLAN.md;
+#                  2026-08-10 creation-only recovered-order adoption and operator-close absorption events.
 """P1.S2 command_bus type-contract tests.
 
 Locks the typed surface so P1.S3+ executor work has stable invariants:
@@ -27,6 +29,14 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 _NOW = datetime(2026, 4, 26, tzinfo=timezone.utc)
+
+
+@pytest.fixture(autouse=True)
+def offline_command_grammar_context(monkeypatch):
+    """Pure command-bus grammar tests use the repo's explicit offline mode."""
+    monkeypatch.delenv("ZEUS_ENTRY_Q_VERSION_STRICT", raising=False)
+    monkeypatch.delenv("ZEUS_MODE", raising=False)
+    monkeypatch.delenv("XPC_SERVICE_NAME", raising=False)
 
 
 def _ensure_snapshot(conn, *, token_id: str, snapshot_id: str | None = None) -> str:
@@ -117,21 +127,21 @@ def _ensure_envelope(
     side: str = "BUY",
     price: float | Decimal = 0.5,
     size: float | Decimal = 1.0,
-) -> str:
+    as_object: bool = False,
+    persist: bool = True,
+) -> object:
     from src.contracts.venue_submission_envelope import VenueSubmissionEnvelope
     from src.state.venue_command_repo import insert_submission_envelope
 
     price_dec = Decimal(str(price))
     size_dec = Decimal(str(size))
     envelope_id = envelope_id or f"env-{token_id}-{side}-{price_dec}-{size_dec}"
-    if conn.execute(
+    if persist and conn.execute(
         "SELECT 1 FROM venue_submission_envelopes WHERE envelope_id = ?",
         (envelope_id,),
     ).fetchone():
         return envelope_id
-    insert_submission_envelope(
-        conn,
-        VenueSubmissionEnvelope(
+    envelope = VenueSubmissionEnvelope(
             sdk_package="py-clob-client-v2",
             sdk_version="test",
             host="https://clob-v2.polymarket.com",
@@ -147,7 +157,7 @@ def _ensure_envelope(
             price=price_dec,
             size=size_dec,
             order_type="GTC",
-            post_only=False,
+            post_only=True,
             tick_size=Decimal("0.01"),
             min_order_size=Decimal("0.01"),
             neg_risk=False,
@@ -163,10 +173,10 @@ def _ensure_envelope(
             error_code=None,
             error_message=None,
             captured_at=_NOW.isoformat(),
-        ),
-        envelope_id=envelope_id,
     )
-    return envelope_id
+    if persist:
+        insert_submission_envelope(conn, envelope, envelope_id=envelope_id)
+    return envelope if as_object else envelope_id
 
 
 # ---------------------------------------------------------------------------
@@ -377,9 +387,9 @@ class TestEnumsAreClosed:
         assert len(list(CommandState)) == 17
 
     def test_command_event_type_count(self):
-        """22 events after proof-backed REVIEW_REQUIRED clearance was added."""
+        """24 events, including the two creation-only reconciliation facts."""
         from src.execution.command_bus import CommandEventType
-        assert len(list(CommandEventType)) == 22
+        assert len(list(CommandEventType)) == 24
 
     def test_intent_kind_count(self):
         from src.execution.command_bus import IntentKind
@@ -530,22 +540,36 @@ class TestVenueCommandFromRow:
         conn.row_factory = sqlite3.Row
         init_schema(conn)
         init_schema_trade_only(conn)
+        conn.execute("ATTACH DATABASE ':memory:' AS world")
+        conn.execute(
+            "CREATE TABLE world.decision_certificates (certificate_hash TEXT PRIMARY KEY, certificate_type TEXT NOT NULL, mode TEXT NOT NULL, verifier_status TEXT NOT NULL, payload_json TEXT NOT NULL)"
+        )
 
         idem = IdempotencyKey.from_inputs(
             decision_id="dec-fr", token_id="tok-fr", side="BUY",
             price=0.55, size=20.0, intent_kind=IntentKind.ENTRY,
         )
         snapshot_id = _ensure_snapshot(conn, token_id="tok-fr")
+        live_envelope = _ensure_envelope(
+            conn,
+            token_id="tok-fr",
+            price=0.55,
+            size=20.0,
+            as_object=True,
+            persist=False,
+        )
+        import hashlib
+        live_envelope_id = hashlib.sha256(live_envelope.to_json().encode("utf-8")).hexdigest()
+        conn.execute(
+            "INSERT INTO world.decision_certificates VALUES (?, 'ActionableTradeCertificate', 'LIVE', 'VERIFIED', ?)",
+            ("cert-test-roundtrip", '{"condition_id":"condition-test","token_id":"tok-fr","direction":"buy_yes"}'),
+        )
         insert_command(
             conn,
             command_id="cmd-fr",
             snapshot_id=snapshot_id,
-            envelope_id=_ensure_envelope(
-                conn,
-                token_id="tok-fr",
-                price=0.55,
-                size=20.0,
-            ),
+            envelope_id=live_envelope_id,
+            submission_envelope=live_envelope,
             position_id="pos-fr",
             decision_id="dec-fr",
             idempotency_key=idem.value,
@@ -556,6 +580,8 @@ class TestVenueCommandFromRow:
             size=20.0,
             price=0.55,
             created_at="2026-04-26T00:00:00Z",
+            q_version="q-test-roundtrip",
+            decision_certificate_hash="cert-test-roundtrip",
         )
 
         row = get_command(conn, "cmd-fr")
@@ -611,6 +637,8 @@ class TestRepoSeamEnumGrammar:
         c.row_factory = sqlite3.Row
         init_schema(c)
         init_schema_trade_only(c)
+        c.execute("ATTACH DATABASE ':memory:' AS world")
+        c.execute("CREATE TABLE world.decision_certificates (certificate_hash TEXT PRIMARY KEY, certificate_type TEXT NOT NULL, mode TEXT NOT NULL, verifier_status TEXT NOT NULL, payload_json TEXT NOT NULL)")
         return c
 
     def test_insert_command_rejects_gibberish_intent_kind(self):
@@ -643,6 +671,7 @@ class TestRepoSeamEnumGrammar:
         from src.state.venue_command_repo import insert_command
         conn = self._conn()
         snapshot_id = _ensure_snapshot(conn, token_id="t")
+        conn.execute("INSERT INTO world.decision_certificates VALUES ('cert-cmd-0', 'ActionableTradeCertificate', 'LIVE', 'VERIFIED', '{\"condition_id\":\"condition-test\",\"token_id\":\"t\",\"direction\":\"buy_yes\"}')")
         for i, kind in enumerate(IntentKind):
             insert_command(
                 conn, command_id=f"cmd-{i}", snapshot_id=snapshot_id,
@@ -651,6 +680,7 @@ class TestRepoSeamEnumGrammar:
                 idempotency_key=f"k{i}".ljust(32, "0"), intent_kind=kind.value,
                 market_id="m", token_id="t", side="BUY", size=1.0, price=0.5,
                 created_at="2026-04-26T00:00:00Z",
+                decision_certificate_hash=f"cert-cmd-{i}",
             )
         rows = conn.execute("SELECT intent_kind FROM venue_commands").fetchall()
         assert len(rows) == 4
@@ -676,7 +706,10 @@ class TestVenueCommandFromRowNullPreservation:
         conn.row_factory = sqlite3.Row
         init_schema(conn)
         init_schema_trade_only(conn)
+        conn.execute("ATTACH DATABASE ':memory:' AS world")
+        conn.execute("CREATE TABLE world.decision_certificates (certificate_hash TEXT PRIMARY KEY, certificate_type TEXT NOT NULL, mode TEXT NOT NULL, verifier_status TEXT NOT NULL, payload_json TEXT NOT NULL)")
         snapshot_id = _ensure_snapshot(conn, token_id="t")
+        conn.execute("INSERT INTO world.decision_certificates VALUES ('cert-cmd-null', 'ActionableTradeCertificate', 'LIVE', 'VERIFIED', '{\"condition_id\":\"condition-test\",\"token_id\":\"t\",\"direction\":\"buy_yes\"}')")
         insert_command(
             conn, command_id="cmd-null", snapshot_id=snapshot_id,
             envelope_id=_ensure_envelope(conn, token_id="t"),
@@ -684,6 +717,7 @@ class TestVenueCommandFromRowNullPreservation:
             idempotency_key="k" * 32, intent_kind="ENTRY",
             market_id="m", token_id="t", side="BUY", size=1.0, price=0.5,
             created_at="2026-04-26T00:00:00Z",
+            decision_certificate_hash="cert-cmd-null",
         )
         row = get_command(conn, "cmd-null")
         cmd = VenueCommand.from_row(row)
@@ -773,6 +807,11 @@ class TestReviewRequiredIsQuasiTerminal:
             ),
             (
                 "REVIEW_REQUIRED",
+                "PARTIAL_FILL_OBSERVED",
+                "PARTIAL",
+            ),
+            (
+                "REVIEW_REQUIRED",
                 "FILL_CONFIRMED",
                 "FILLED",
             ),
@@ -804,7 +843,10 @@ class TestCancelPendingInRecoveryFilter:
         conn.row_factory = sqlite3.Row
         init_schema(conn)
         init_schema_trade_only(conn)
+        conn.execute("ATTACH DATABASE ':memory:' AS world")
+        conn.execute("CREATE TABLE world.decision_certificates (certificate_hash TEXT PRIMARY KEY, certificate_type TEXT NOT NULL, mode TEXT NOT NULL, verifier_status TEXT NOT NULL, payload_json TEXT NOT NULL)")
         snapshot_id = _ensure_snapshot(conn, token_id="t")
+        conn.execute("INSERT INTO world.decision_certificates VALUES ('cert-cmd-cp', 'ActionableTradeCertificate', 'LIVE', 'VERIFIED', '{\"condition_id\":\"condition-test\",\"token_id\":\"t\",\"direction\":\"buy_yes\"}')")
 
         insert_command(
             conn, command_id="cmd-cp", snapshot_id=snapshot_id,
@@ -813,6 +855,7 @@ class TestCancelPendingInRecoveryFilter:
             idempotency_key="k" * 32, intent_kind="ENTRY",
             market_id="m", token_id="t", side="BUY", size=1.0, price=0.5,
             created_at="2026-04-26T00:00:00Z",
+            decision_certificate_hash="cert-cmd-cp",
         )
         # INTENT_CREATED → SUBMITTING → CANCEL_PENDING via valid grammar path
         append_event(conn, command_id="cmd-cp", event_type="SUBMIT_REQUESTED",

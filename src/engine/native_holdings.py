@@ -97,9 +97,19 @@ def native_holdings_snapshot_from_positions(
     ledger_snapshot_id: str,
     token_shares_by_id: Mapping[str, Decimal] | None = None,
     pending_entry_endowments: tuple[tuple[str, str, Decimal], ...] = (),
+    required_token_ids: frozenset[str] | None = None,
 ) -> NativeHoldingsSnapshot:
     """Bind canonical open positions to exact current YES/NO token identities."""
 
+    required_tokens = (
+        frozenset(str(token or "").strip() for token in required_token_ids)
+        if required_token_ids is not None
+        else None
+    )
+    if required_tokens is not None and (
+        not required_tokens or "" in required_tokens
+    ):
+        raise ValueError("required native holding token identities are invalid")
     bindings = {str(outcome.condition_id or ""): outcome for outcome in omega.bins}
     token_bindings: dict[str, tuple[object, NativeHoldingSide]] = {}
     for outcome in omega.bins:
@@ -107,9 +117,15 @@ def native_holdings_snapshot_from_positions(
             (str(outcome.yes_token_id or ""), "YES"),
             (str(outcome.no_token_id or ""), "NO"),
         ):
+            if required_tokens is not None and token_id not in required_tokens:
+                continue
             if not token_id or token_id in token_bindings:
                 raise ValueError("current omega has missing or duplicate native token identity")
             token_bindings[token_id] = (outcome, side)
+    if required_tokens is not None and set(token_bindings) != set(required_tokens):
+        raise ValueError(
+            "current omega is missing required native holding token identity"
+        )
     if not family_key.strip() or not ledger_snapshot_id.strip() or not bindings:
         raise ValueError("native holdings snapshot requires family, ledger, and omega identities")
 

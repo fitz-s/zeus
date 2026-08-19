@@ -46,7 +46,10 @@ from src.state.lifecycle_manager import (
     rescue_pending_runtime_state,
 )
 from src.state.portfolio import (
+    ENTRY_ECONOMICS_AVG_FILL_PRICE,
+    FILL_AUTHORITY_CANCELLED_REMAINDER,
     FILL_AUTHORITY_VENUE_CONFIRMED_FULL,
+    FILL_AUTHORITY_VENUE_CONFIRMED_PARTIAL,
     FILL_AUTHORITY_VENUE_POSITION_OBSERVED,
     INACTIVE_RUNTIME_STATES,
     Position,
@@ -59,6 +62,18 @@ logger = logging.getLogger(__name__)
 PENDING_EXIT_STATES = frozenset({"exit_intent", "sell_placed", "sell_pending", "retry_pending"})
 LIVE_TRADE_FACT_SOURCES = frozenset({"REST", "WS_USER", "WS_MARKET", "DATA_API", "CHAIN"})
 FILL_TRADE_FACT_STATES = frozenset({"MATCHED", "MINED", "CONFIRMED"})
+_TERMINAL_ENTRY_COMMAND_STATES = frozenset(
+    {
+        "CANCELLED",
+        "EXPIRED",
+        "FILLED",
+        "REJECTED",
+        "SUBMIT_REJECTED",
+        "SUPERSEDED",
+        "TERMINAL",
+        "VENUE_WIPED",
+    }
+)
 CONFIRMED_CHAIN_ABSENCE_REVIEW_REASON = "chain_absent_confirmed_position_unattributed"
 CONFIRMED_CHAIN_ABSENCE_CHAIN_STATE = "chain_absent_confirmed_position_unattributed"
 ENTRY_AUTHORITY_CHAIN_ABSENCE_REVIEW_REASON = "entry_authority_chain_absence_conflict"
@@ -521,6 +536,140 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
     def _pending_entry_has_linked_fill_fact(position: Position) -> bool:
         return _position_has_linked_fill_fact(position)
 
+    def _pending_entry_fill_economics(position: Position) -> dict[str, object] | None:
+        """Fold exact ENTRY fills without relabeling a partial fill as full.
+
+        A chain balance proves exposure, not completion of the resting entry
+        order.  The economic authority is the deduplicated venue fill journal;
+        the command state determines whether an unfilled remainder is still
+        live or terminal.  This keeps held exposure monitorable while the
+        remaining entry commitment continues through its own redecision lane.
+        """
+
+        if conn is None:
+            return None
+        position_id = str(getattr(position, "trade_id", "") or "").strip()
+        direction_value = getattr(position, "direction", "")
+        direction = str(getattr(direction_value, "value", direction_value) or "")
+        held_token_id = str(
+            (
+                getattr(position, "no_token_id", "")
+                if direction == "buy_no"
+                else getattr(position, "token_id", "")
+            )
+            or ""
+        ).strip()
+        if not position_id or not held_token_id:
+            return None
+        sql = (
+            "WITH "
+            + canonical_trade_fact_cte(
+                source_clause_sql="WHERE fact.source IN ('REST', 'WS_USER')"
+            )
+            + ", "
+            + economic_trade_fact_cte()
+            + """
+            SELECT command.command_id,
+                   command.size AS submitted_size,
+                   command.state AS command_state,
+                   fact.filled_size,
+                   fact.fill_price
+              FROM venue_commands command
+              LEFT JOIN economic_trade_fact fact
+                ON fact.command_id = command.command_id
+               AND UPPER(COALESCE(fact.state, '')) IN ('MATCHED', 'MINED', 'CONFIRMED')
+               AND UPPER(COALESCE(fact.source, '')) IN ('REST', 'WS_USER')
+               AND CAST(COALESCE(fact.filled_size, '0') AS REAL) > 0
+               AND CAST(COALESCE(fact.fill_price, '0') AS REAL) > 0
+             WHERE command.position_id = ?
+               AND UPPER(COALESCE(command.intent_kind, '')) = 'ENTRY'
+               AND UPPER(COALESCE(command.side, '')) = 'BUY'
+               AND command.token_id = ?
+            """
+        )
+        try:
+            rows = conn.execute(sql, (position_id, held_token_id)).fetchall()
+        except Exception as exc:
+            raise RuntimeError(
+                f"pending-entry exact fill fold failed for position_id={position_id}"
+            ) from exc
+        if not rows:
+            return None
+
+        commands: dict[str, dict[str, object]] = {}
+        for row in rows:
+            values = row if hasattr(row, "keys") else None
+            command_id = str(
+                (values["command_id"] if values is not None else row[0]) or ""
+            )
+            submitted = Decimal(
+                str((values["submitted_size"] if values is not None else row[1]) or 0)
+            )
+            state = str(
+                (values["command_state"] if values is not None else row[2]) or ""
+            ).upper()
+            filled = Decimal(str((values["filled_size"] if values is not None else row[3]) or 0))
+            price = Decimal(str((values["fill_price"] if values is not None else row[4]) or 0))
+            if not all(value.is_finite() for value in (submitted, filled, price)):
+                raise RuntimeError(
+                    f"pending-entry exact fill fold is non-finite for position_id={position_id}"
+                )
+            if not command_id:
+                continue
+            command = commands.setdefault(
+                command_id,
+                {
+                    "submitted": max(Decimal("0"), submitted),
+                    "state": state,
+                    "filled": Decimal("0"),
+                    "cost": Decimal("0"),
+                },
+            )
+            if filled > 0 and price > 0:
+                command["filled"] += filled
+                command["cost"] += filled * price
+
+        filled_shares = Decimal("0")
+        filled_cost = Decimal("0")
+        has_live_remainder = False
+        has_terminal_remainder = False
+        live_remaining_shares = Decimal("0")
+        for command in commands.values():
+            submitted = command["submitted"]
+            filled = command["filled"]
+            cost = command["cost"]
+            state = str(command["state"])
+            if filled > 0 and cost > 0:
+                filled_shares += filled
+                filled_cost += cost
+            remainder = max(Decimal("0"), submitted - filled)
+            if remainder > Decimal("0.000001"):
+                if state in _TERMINAL_ENTRY_COMMAND_STATES:
+                    has_terminal_remainder = True
+                else:
+                    has_live_remainder = True
+                    live_remaining_shares += remainder
+        if filled_shares <= 0 or filled_cost <= 0:
+            return None
+
+        if has_live_remainder:
+            fill_authority = FILL_AUTHORITY_VENUE_CONFIRMED_PARTIAL
+            order_status = "partial"
+        elif has_terminal_remainder:
+            fill_authority = FILL_AUTHORITY_CANCELLED_REMAINDER
+            order_status = "cancelled_remainder"
+        else:
+            fill_authority = FILL_AUTHORITY_VENUE_CONFIRMED_FULL
+            order_status = "filled"
+        return {
+            "shares": filled_shares,
+            "cost": filled_cost,
+            "avg_price": filled_cost / filled_shares,
+            "submitted_shares": filled_shares + live_remaining_shares,
+            "fill_authority": fill_authority,
+            "order_status": order_status,
+        }
+
     def _canonical_size_correction_baseline_available(position_id: str, *, expected_phase: str) -> bool:
         if conn is None:
             return False
@@ -641,7 +790,11 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
         )
         from src.state.db import append_many_and_project
 
-        has_trade_fact = _pending_entry_has_linked_fill_fact(position)
+        has_trade_fact = str(getattr(position, "fill_authority", "") or "") in {
+            FILL_AUTHORITY_VENUE_CONFIRMED_PARTIAL,
+            FILL_AUTHORITY_VENUE_CONFIRMED_FULL,
+            FILL_AUTHORITY_CANCELLED_REMAINDER,
+        }
 
         try:
             if has_trade_fact:
@@ -1643,16 +1796,41 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
         return str(getattr(position, "token_id", "") or "")
 
     def _chain_observed_cost(chain: ChainPosition) -> float:
-        try:
-            cost = float(getattr(chain, "cost", 0.0) or 0.0)
-        except (TypeError, ValueError):
-            cost = 0.0
-        if cost > 0.0:
-            return cost
-        try:
-            return float(chain.size) * float(chain.avg_price or 0.0)
-        except (TypeError, ValueError):
-            return 0.0
+        def _finite_decimal(value: object) -> Decimal | None:
+            try:
+                parsed = Decimal(str(value or 0))
+            except (InvalidOperation, ValueError):
+                return None
+            return parsed if parsed.is_finite() else None
+
+        size = _finite_decimal(getattr(chain, "size", 0))
+        avg_price = _finite_decimal(getattr(chain, "avg_price", 0))
+        cost = _finite_decimal(getattr(chain, "cost", 0))
+        derived_cost = (
+            size * avg_price
+            if size is not None
+            and size > 0
+            and avg_price is not None
+            and Decimal("0") < avg_price <= Decimal("1")
+            else None
+        )
+
+        # The Data API's initialValue can lag a just-executed reduction while
+        # the targeted CTF balance already carries the exact residual shares.
+        # A binary outcome token cannot have current acquisition cost above
+        # one collateral unit per currently-held share.  Reject only that
+        # impossible mixed-clock shape and retain the same snapshot's average
+        # price for the residual; coherent positive reported cost keeps its
+        # existing priority (including legitimate rounding/fee differences).
+        if cost is not None and cost > 0:
+            if (
+                derived_cost is not None
+                and size is not None
+                and cost > size + Decimal("0.000001")
+            ):
+                return float(derived_cost)
+            return float(cost)
+        return float(derived_cost) if derived_cost is not None else 0.0
 
     def _confirmed_net_shares_by_position(token_id: str) -> dict[str, Decimal] | None:
         """Fold exactly-once authenticated token fills by their position owner.
@@ -2325,10 +2503,8 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
                 stats["skipped_pending"] += 1
                 stats["skipped_pending_missing_canonical_baseline"] = stats.get("skipped_pending_missing_canonical_baseline", 0) + 1
                 continue
-            if (
-                _pending_entry_has_durable_command(pos)
-                and not _pending_entry_has_linked_fill_fact(pos)
-            ):
+            pending_fill_economics = _pending_entry_fill_economics(pos)
+            if _pending_entry_has_durable_command(pos) and pending_fill_economics is None:
                 stats["skipped_pending"] += 1
                 stats["skipped_pending_missing_fill_fact"] = stats.get("skipped_pending_missing_fill_fact", 0) + 1
                 continue
@@ -2366,34 +2542,42 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
             # PR C3 note: gate at top of this branch already skipped commanded
             # pending entries that lack a fill fact, so a missing fill fact here
             # means the position was pre-command-journal legacy.
-            _has_linked_fill_fact = _pending_entry_has_linked_fill_fact(pos)
-            if _has_linked_fill_fact:
-                # Trade-verified rescue branch: chain economics ARE fill
-                # economics (verified by venue trade fact). Continue to
-                # mutate the legacy fields so downstream P&L and reporting
-                # see the verified fill values.
-                _rescue_eligible = getattr(pos, "corrected_executable_economics_eligible", False)
+            _has_linked_fill_fact = pending_fill_economics is not None
+            if pending_fill_economics is not None:
+                # Fill facts, not the token-level chain aggregate, own entry
+                # economics.  In particular, one partial match must not freeze
+                # zero submitted economics behind a false full-fill authority.
+                rescued.shares = float(pending_fill_economics["shares"])
+                rescued.cost_basis_usd = float(pending_fill_economics["cost"])
+                rescued.size_usd = float(pending_fill_economics["cost"])
+                rescued.entry_price = float(pending_fill_economics["avg_price"])
+                rescued.entry_price_avg_fill = rescued.entry_price
+                rescued.filled_cost_basis_usd = rescued.cost_basis_usd
+                rescued.shares_filled = rescued.shares
+                rescued.shares_submitted = float(
+                    pending_fill_economics["submitted_shares"]
+                )
+                rescued.shares_remaining = max(
+                    0.0, rescued.shares_submitted - rescued.shares_filled
+                )
+                rescued.entry_economics_authority = ENTRY_ECONOMICS_AVG_FILL_PRICE
+                rescued.fill_authority = str(
+                    pending_fill_economics["fill_authority"]
+                )
+                rescued.entry_fill_verified = (
+                    rescued.fill_authority != FILL_AUTHORITY_VENUE_CONFIRMED_PARTIAL
+                )
+                rescued.order_status = str(pending_fill_economics["order_status"])
+            elif _pending_entry_has_linked_fill_fact(pos):
+                # Pre-command-journal legacy rescue has no exact command scope.
+                # Preserve the historical branch for those rows only.
                 if chain.avg_price > 0:
-                    if not _rescue_eligible:
-                        rescued.entry_price = chain.avg_price
-                    else:
-                        _cnt_inc("cost_basis_chain_mutation_blocked_total", labels={"field": "entry_price"})
-                        logger.warning("telemetry_counter event=cost_basis_chain_mutation_blocked_total field=entry_price")
+                    rescued.entry_price = chain.avg_price
                 if chain.cost > 0:
-                    if not _rescue_eligible:
-                        rescued.cost_basis_usd = chain.cost
-                        rescued.size_usd = chain.cost
-                    else:
-                        _cnt_inc("cost_basis_chain_mutation_blocked_total", labels={"field": "cost_basis_usd"})
-                        logger.warning("telemetry_counter event=cost_basis_chain_mutation_blocked_total field=cost_basis_usd")
-                        _cnt_inc("cost_basis_chain_mutation_blocked_total", labels={"field": "size_usd"})
-                        logger.warning("telemetry_counter event=cost_basis_chain_mutation_blocked_total field=size_usd")
+                    rescued.cost_basis_usd = chain.cost
+                    rescued.size_usd = chain.cost
                 if chain.size > 0:
-                    if not _rescue_eligible:
-                        rescued.shares = chain.size
-                    else:
-                        _cnt_inc("cost_basis_chain_mutation_blocked_total", labels={"field": "shares"})
-                        logger.warning("telemetry_counter event=cost_basis_chain_mutation_blocked_total field=shares")
+                    rescued.shares = chain.size
                 rescued.fill_authority = FILL_AUTHORITY_VENUE_CONFIRMED_FULL
                 rescued.entry_fill_verified = True
                 rescued.order_status = "filled"
@@ -2467,11 +2651,23 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
             # entry economics untouched; downstream readers must consult
             # `effective_exposure()` for authority-routed values.
             pos.fill_authority = rescued.fill_authority
-            if rescued.fill_authority == FILL_AUTHORITY_VENUE_CONFIRMED_FULL:
+            if rescued.fill_authority in {
+                FILL_AUTHORITY_VENUE_CONFIRMED_PARTIAL,
+                FILL_AUTHORITY_VENUE_CONFIRMED_FULL,
+                FILL_AUTHORITY_CANCELLED_REMAINDER,
+            }:
                 pos.entry_price = rescued.entry_price
                 pos.cost_basis_usd = rescued.cost_basis_usd
                 pos.size_usd = rescued.size_usd
                 pos.shares = rescued.shares
+                pos.entry_price_avg_fill = rescued.entry_price_avg_fill
+                pos.filled_cost_basis_usd = rescued.filled_cost_basis_usd
+                pos.shares_submitted = rescued.shares_submitted
+                pos.shares_filled = rescued.shares_filled
+                pos.shares_remaining = rescued.shares_remaining
+                pos.entry_economics_authority = (
+                    rescued.entry_economics_authority
+                )
             pos.entry_fill_verified = rescued.entry_fill_verified
             pos.order_status = rescued.order_status
             pos.state = rescued.state

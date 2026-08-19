@@ -6,9 +6,10 @@ import hashlib
 import json
 import logging
 import sqlite3
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
 from src.events.live_cap import LiveCapLedger
 from src.events.live_order_aggregate import LiveOrderAggregateError, LiveOrderAggregateLedger
@@ -22,30 +23,133 @@ from src.events.live_order_reconcile import (
 logger = logging.getLogger(__name__)
 
 
-def append_confirmed_trade_facts_to_edli(
+@dataclass(frozen=True)
+class TradeFactBridgeCandidate:
+    """A bounded read-only discovery result, revalidated before any append."""
+
+    aggregate_id: str
+    execution_command_id: str
+    trade_fact_id: int
+    trade_id: str
+
+
+def discover_confirmed_trade_fact_candidates(
     conn: sqlite3.Connection,
     *,
-    now: datetime | None = None,
+    trade_schema: str,
+    event_schema: str,
+    projection_schema: str,
     limit: int = 100,
     trade_db_path: str | Path | None = None,
-) -> int:
-    """Append missing EDLI UserTradeObserved events from confirmed WS trade facts.
+) -> tuple[TradeFactBridgeCandidate, ...]:
+    """Find WS_USER confirmed fills without taking a canonical writer lease."""
 
-    The source of authority remains the authenticated user channel: this bridge
-    only consumes ``venue_trade_facts`` rows written as ``source='WS_USER'`` and
-    ``state='CONFIRMED'``. The trade fact must bind to the EDLI execution command
-    and either its acknowledged venue order or the same canonical command's
-    persisted venue order. The latter covers a matched submit response that
-    returned an order id but omitted the trade id, so EDLI recorded
-    ``SubmitUnknown`` while the authenticated user channel later proved the fill.
-    """
+    return _discover_trade_fact_candidates(
+        conn,
+        kind="confirmed",
+        trade_schema=trade_schema,
+        event_schema=event_schema,
+        projection_schema=projection_schema,
+        limit=limit,
+        trade_db_path=trade_db_path,
+    )
+
+
+def discover_rest_filled_orphan_trade_fact_candidates(
+    conn: sqlite3.Connection,
+    *,
+    trade_schema: str,
+    event_schema: str,
+    projection_schema: str,
+    limit: int = 50,
+    trade_db_path: str | Path | None = None,
+) -> tuple[TradeFactBridgeCandidate, ...]:
+    """Find REST fill-orphan candidates without taking a canonical writer lease."""
+
+    return _discover_trade_fact_candidates(
+        conn,
+        kind="rest_orphan",
+        trade_schema=trade_schema,
+        event_schema=event_schema,
+        projection_schema=projection_schema,
+        limit=limit,
+        trade_db_path=trade_db_path,
+    )
+
+
+def _discover_trade_fact_candidates(
+    conn: sqlite3.Connection,
+    *,
+    kind: str,
+    trade_schema: str,
+    event_schema: str,
+    projection_schema: str,
+    limit: int,
+    trade_db_path: str | Path | None,
+) -> tuple[TradeFactBridgeCandidate, ...]:
+    """Run the expensive historical/window discovery query in a read-only phase."""
 
     _ensure_trades_attached_if_needed(conn, trade_db_path=trade_db_path)
-    trade_schema = _schema_with_table(conn, "venue_trade_facts", preferred="trades")
-    if trade_schema is None or not _table_exists(conn, "edli_live_order_events"):
-        return 0
+    _require_schema_tables(
+        conn,
+        schema=trade_schema,
+        tables=("venue_commands", "venue_trade_facts"),
+    )
+    _require_schema_tables(
+        conn,
+        schema=event_schema,
+        tables=("edli_live_order_events",),
+    )
+    _require_schema_tables(
+        conn,
+        schema=projection_schema,
+        tables=("edli_live_order_projection",),
+    )
     venue_trade_facts = _q(trade_schema, "venue_trade_facts")
     venue_commands = _q(trade_schema, "venue_commands")
+    events = _q(event_schema, "edli_live_order_events")
+    projection = _q(projection_schema, "edli_live_order_projection")
+
+    if kind == "confirmed":
+        candidate_filter = """
+            UPPER(COALESCE(trade.state, '')) = 'CONFIRMED'
+            AND trade.source = 'WS_USER'
+        """
+        existing_filter = """
+            COALESCE(
+                json_extract(existing.payload_json, '$.trade_id'),
+                json_extract(existing.payload_json, '$.authenticated_presence_proof.trade_id')
+            ) = trade.trade_id
+            AND json_extract(existing.payload_json, '$.fill_authority_state') = 'FILL_CONFIRMED'
+        """
+        command_filter = ""
+        rank_order = "datetime(trade.observed_at) DESC, trade.trade_fact_id DESC"
+    elif kind == "rest_orphan":
+        candidate_filter = """
+            UPPER(COALESCE(trade.state, '')) IN ('MATCHED', 'MINED', 'CONFIRMED')
+            AND NOT EXISTS (
+                SELECT 1
+                  FROM {venue_trade_facts} ws
+                 WHERE ws.trade_id = trade.trade_id
+                   AND ws.source = 'WS_USER'
+                   AND UPPER(COALESCE(ws.state, '')) = 'CONFIRMED'
+            )
+        """.format(venue_trade_facts=venue_trade_facts)
+        existing_filter = "json_extract(existing.payload_json, '$.trade_id') = trade.trade_id"
+        command_filter = """
+            AND UPPER(COALESCE(cmd.state, '')) IN ('FILLED', 'PARTIAL')
+            AND COALESCE(NULLIF(ack.venue_order_id, ''), NULLIF(cmd.venue_order_id, '')) IS NOT NULL
+        """
+        rank_order = """CASE UPPER(COALESCE(trade.state, ''))
+                            WHEN 'CONFIRMED' THEN 3
+                            WHEN 'MINED' THEN 2
+                            WHEN 'MATCHED' THEN 1
+                            ELSE 0
+                        END DESC,
+                        datetime(trade.observed_at) DESC,
+                        trade.trade_fact_id DESC"""
+    else:
+        raise ValueError(f"unsupported trade-fact bridge candidate kind {kind!r}")
 
     rows = conn.execute(
         f"""
@@ -59,10 +163,9 @@ def append_confirmed_trade_facts_to_edli(
                            json_extract(payload_json, '$.execution_command_id') AS execution_command_id,
                            occurred_at AS command_occurred_at,
                            ROW_NUMBER() OVER (
-                               PARTITION BY aggregate_id
-                               ORDER BY event_sequence DESC
+                               PARTITION BY aggregate_id ORDER BY event_sequence DESC
                            ) AS command_rank
-                      FROM edli_live_order_events
+                      FROM {events}
                      WHERE event_type = 'ExecutionCommandCreated'
                    )
              WHERE command_rank = 1
@@ -73,87 +176,378 @@ def append_confirmed_trade_facts_to_edli(
                     SELECT aggregate_id,
                            json_extract(payload_json, '$.venue_order_id') AS venue_order_id,
                            ROW_NUMBER() OVER (
-                               PARTITION BY aggregate_id
-                               ORDER BY event_sequence DESC
+                               PARTITION BY aggregate_id ORDER BY event_sequence DESC
                            ) AS ack_rank
-                      FROM edli_live_order_events
+                      FROM {events}
                      WHERE event_type = 'VenueSubmitAcknowledged'
                    )
              WHERE ack_rank = 1
         ),
-        ranked_confirmed AS (
-        SELECT exec.aggregate_id,
-               exec.event_id,
-               exec.final_intent_id,
-               exec.execution_command_id,
-               exec.command_occurred_at,
-               ack.venue_order_id AS acknowledged_venue_order_id,
-               cmd.command_id,
-               trade.trade_fact_id,
-               trade.trade_id,
-               trade.venue_order_id,
-               trade.state,
-               trade.filled_size,
-               trade.fill_price,
-               trade.tx_hash,
-               trade.observed_at,
-               trade.raw_payload_hash,
-               trade.raw_payload_json,
-               ROW_NUMBER() OVER (
-                   PARTITION BY exec.aggregate_id, trade.trade_id
-                   ORDER BY datetime(trade.observed_at) DESC,
-                            trade.trade_fact_id DESC
-               ) AS logical_fill_rank
-          FROM execution_commands exec
-          JOIN {venue_commands} cmd
-            ON cmd.decision_id = exec.execution_command_id
-          LEFT JOIN submit_acks ack
-            ON ack.aggregate_id = exec.aggregate_id
-          JOIN {venue_trade_facts} trade
-            ON trade.command_id = cmd.command_id
-           AND trade.venue_order_id = COALESCE(
-                   NULLIF(ack.venue_order_id, ''),
-                   NULLIF(cmd.venue_order_id, '')
+        ranked_candidates AS (
+            SELECT exec.aggregate_id, exec.execution_command_id,
+                   trade.trade_fact_id, trade.trade_id,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY exec.aggregate_id, trade.trade_id
+                       ORDER BY {rank_order}
+                   ) AS logical_fill_rank
+              FROM execution_commands exec
+              JOIN {venue_commands} cmd
+                ON cmd.decision_id = exec.execution_command_id
+              LEFT JOIN submit_acks ack
+                ON ack.aggregate_id = exec.aggregate_id
+              JOIN {venue_trade_facts} trade
+                ON trade.command_id = cmd.command_id
+               AND trade.venue_order_id = COALESCE(
+                       NULLIF(ack.venue_order_id, ''), NULLIF(cmd.venue_order_id, '')
+                   )
+             WHERE {candidate_filter}
+               AND CAST(COALESCE(trade.filled_size, '0') AS REAL) > 0
+               AND CAST(COALESCE(trade.fill_price, '0') AS REAL) > 0
+               {command_filter}
+               AND NOT EXISTS (
+                    SELECT 1
+                      FROM {events} existing
+                     WHERE existing.aggregate_id = exec.aggregate_id
+                       AND existing.event_type = 'UserTradeObserved'
+                       AND {existing_filter}
                )
-         WHERE UPPER(COALESCE(trade.state, '')) = 'CONFIRMED'
-           AND trade.source = 'WS_USER'
-           AND CAST(COALESCE(trade.filled_size, '0') AS REAL) > 0
-           AND CAST(COALESCE(trade.fill_price, '0') AS REAL) > 0
-           AND NOT EXISTS (
-                 SELECT 1
-                   FROM edli_live_order_events existing
-                  WHERE existing.aggregate_id = exec.aggregate_id
-                    AND existing.event_type = 'UserTradeObserved'
-                    AND COALESCE(
-                            json_extract(existing.payload_json, '$.trade_id'),
-                            json_extract(
-                                existing.payload_json,
-                                '$.authenticated_presence_proof.trade_id'
-                            )
-                        ) = trade.trade_id
-                    AND json_extract(existing.payload_json, '$.fill_authority_state') = 'FILL_CONFIRMED'
-               )
-           AND NOT EXISTS (
-                 SELECT 1
-                   FROM edli_live_order_projection proj
-                  WHERE proj.aggregate_id = exec.aggregate_id
-                    AND proj.current_state = 'RECONCILED'
-                    AND COALESCE(proj.pending_reconcile, 0) = 0
+               AND NOT EXISTS (
+                    SELECT 1
+                      FROM {projection} proj
+                     WHERE proj.aggregate_id = exec.aggregate_id
+                       AND proj.current_state = 'RECONCILED'
+                       AND COALESCE(proj.pending_reconcile, 0) = 0
                )
         )
-        SELECT *
-          FROM ranked_confirmed
+        SELECT aggregate_id, execution_command_id, trade_fact_id, trade_id
+          FROM ranked_candidates
          WHERE logical_fill_rank = 1
-         ORDER BY observed_at ASC, trade_fact_id ASC
+         ORDER BY trade_fact_id ASC
          LIMIT ?
         """,
         (max(0, limit),),
     ).fetchall()
+    return tuple(
+        TradeFactBridgeCandidate(
+            aggregate_id=str(_row_get(row, "aggregate_id")),
+            execution_command_id=str(_row_get(row, "execution_command_id")),
+            trade_fact_id=int(_row_get(row, "trade_fact_id")),
+            trade_id=str(_row_get(row, "trade_id")),
+        )
+        for row in rows
+    )
+
+
+def _revalidate_confirmed_trade_fact_candidate(
+    conn: sqlite3.Connection,
+    candidate: TradeFactBridgeCandidate,
+    *,
+    trade_schema: str,
+    event_schema: str,
+) -> dict[str, Any] | None:
+    row = _revalidate_trade_fact_candidate(
+        conn,
+        candidate,
+        trade_schema=trade_schema,
+        event_schema=event_schema,
+        states=("CONFIRMED",),
+        source="WS_USER",
+    )
+    if row is None:
+        return None
+    if _has_user_trade_observed(
+        conn,
+        event_schema=event_schema,
+        aggregate_id=candidate.aggregate_id,
+        trade_id=candidate.trade_id,
+        require_confirmed_authority=True,
+    ):
+        return None
+    return row
+
+
+def _revalidate_rest_filled_orphan_trade_fact_candidate(
+    conn: sqlite3.Connection,
+    candidate: TradeFactBridgeCandidate,
+    *,
+    trade_schema: str,
+    event_schema: str,
+) -> dict[str, Any] | None:
+    row = _revalidate_trade_fact_candidate(
+        conn,
+        candidate,
+        trade_schema=trade_schema,
+        event_schema=event_schema,
+        states=("MATCHED", "MINED", "CONFIRMED"),
+        source=None,
+    )
+    if row is None or str(row["command_state"] or "").upper() not in {"FILLED", "PARTIAL"}:
+        return None
+    venue_trade_facts = _q(trade_schema, "venue_trade_facts")
+    ws_confirmed = conn.execute(
+        f"""
+        SELECT 1
+          FROM {venue_trade_facts}
+         WHERE trade_id = ?
+           AND source = 'WS_USER'
+           AND UPPER(COALESCE(state, '')) = 'CONFIRMED'
+         LIMIT 1
+        """,
+        (candidate.trade_id,),
+    ).fetchone()
+    if ws_confirmed is not None:
+        return None
+    if _has_user_trade_observed(
+        conn,
+        event_schema=event_schema,
+        aggregate_id=candidate.aggregate_id,
+        trade_id=candidate.trade_id,
+        require_confirmed_authority=False,
+    ):
+        return None
+    return row
+
+
+def _revalidate_trade_fact_candidate(
+    conn: sqlite3.Connection,
+    candidate: TradeFactBridgeCandidate,
+    *,
+    trade_schema: str,
+    event_schema: str,
+    states: tuple[str, ...],
+    source: str | None,
+) -> dict[str, Any] | None:
+    """Re-read one candidate through aggregate and trade keys under the writer gate."""
+
+    events = _q(event_schema, "edli_live_order_events")
+    projection_schema = _schema_with_table(
+        conn, "edli_live_order_projection", preferred=event_schema
+    )
+    if projection_schema is None:
+        return None
+    projection = _q(projection_schema, "edli_live_order_projection")
+    execution = conn.execute(
+        f"""
+        SELECT json_extract(payload_json, '$.event_id') AS event_id,
+               json_extract(payload_json, '$.final_intent_id') AS final_intent_id,
+               json_extract(payload_json, '$.execution_command_id') AS execution_command_id,
+               occurred_at AS command_occurred_at
+          FROM {events}
+         WHERE aggregate_id = ?
+           AND event_type = 'ExecutionCommandCreated'
+         ORDER BY event_sequence DESC
+         LIMIT 1
+        """,
+        (candidate.aggregate_id,),
+    ).fetchone()
+    if execution is None or str(_row_get(execution, "execution_command_id") or "") != candidate.execution_command_id:
+        return None
+    projection_row = conn.execute(
+        f"""
+        SELECT current_state, pending_reconcile
+          FROM {projection}
+         WHERE aggregate_id = ?
+         LIMIT 1
+        """,
+        (candidate.aggregate_id,),
+    ).fetchone()
+    if (
+        projection_row is not None
+        and str(_row_get(projection_row, "current_state") or "") == "RECONCILED"
+        and not bool(_row_get(projection_row, "pending_reconcile"))
+    ):
+        return None
+    ack = conn.execute(
+        f"""
+        SELECT json_extract(payload_json, '$.venue_order_id') AS venue_order_id
+          FROM {events}
+         WHERE aggregate_id = ?
+           AND event_type = 'VenueSubmitAcknowledged'
+         ORDER BY event_sequence DESC
+         LIMIT 1
+        """,
+        (candidate.aggregate_id,),
+    ).fetchone()
+    venue_commands = _q(trade_schema, "venue_commands")
+    command = conn.execute(
+        f"""
+        SELECT command_id, venue_order_id, state
+          FROM {venue_commands}
+         WHERE decision_id = ?
+         LIMIT 1
+        """,
+        (candidate.execution_command_id,),
+    ).fetchone()
+    if command is None:
+        return None
+    venue_order_id = str(
+        (_row_get(ack, "venue_order_id") if ack is not None else "")
+        or _row_get(command, "venue_order_id")
+        or ""
+    )
+    if not venue_order_id:
+        return None
+    venue_trade_facts = _q(trade_schema, "venue_trade_facts")
+    placeholders = ", ".join("?" for _ in states)
+    source_filter = "AND source = ?" if source is not None else ""
+    latest = conn.execute(
+        f"""
+        SELECT trade_fact_id
+          FROM {venue_trade_facts}
+         WHERE command_id = ?
+           AND venue_order_id = ?
+           AND trade_id = ?
+           AND UPPER(COALESCE(state, '')) IN ({placeholders})
+           {source_filter}
+         ORDER BY { _trade_fact_rank_order(states) }
+         LIMIT 1
+        """,
+        (
+            str(_row_get(command, "command_id")),
+            venue_order_id,
+            candidate.trade_id,
+            *states,
+            *((source,) if source is not None else ()),
+        ),
+    ).fetchone()
+    if latest is None or int(_row_get(latest, "trade_fact_id")) != candidate.trade_fact_id:
+        return None
+    trade = conn.execute(
+        f"""
+        SELECT trade_fact_id, trade_id, venue_order_id, state, source AS trade_source,
+               filled_size, fill_price, tx_hash, observed_at,
+               raw_payload_hash, raw_payload_json
+          FROM {venue_trade_facts}
+         WHERE trade_fact_id = ?
+           AND command_id = ?
+           AND venue_order_id = ?
+           AND trade_id = ?
+           {source_filter}
+         LIMIT 1
+        """,
+        (
+            candidate.trade_fact_id,
+            str(_row_get(command, "command_id")),
+            venue_order_id,
+            candidate.trade_id,
+            *((source,) if source is not None else ()),
+        ),
+    ).fetchone()
+    if trade is None:
+        return None
+    if (
+        str(_row_get(trade, "state") or "").upper() not in states
+        or float(_row_get(trade, "filled_size") or 0) <= 0
+        or float(_row_get(trade, "fill_price") or 0) <= 0
+    ):
+        return None
+    return {
+        "aggregate_id": candidate.aggregate_id,
+        "event_id": _row_get(execution, "event_id"),
+        "final_intent_id": _row_get(execution, "final_intent_id"),
+        "execution_command_id": candidate.execution_command_id,
+        "command_occurred_at": _row_get(execution, "command_occurred_at"),
+        "command_state": _row_get(command, "state"),
+        "trade_fact_id": _row_get(trade, "trade_fact_id"),
+        "trade_id": _row_get(trade, "trade_id"),
+        "venue_order_id": _row_get(trade, "venue_order_id"),
+        "state": _row_get(trade, "state"),
+        "trade_source": _row_get(trade, "trade_source"),
+        "filled_size": _row_get(trade, "filled_size"),
+        "fill_price": _row_get(trade, "fill_price"),
+        "tx_hash": _row_get(trade, "tx_hash"),
+        "observed_at": _row_get(trade, "observed_at"),
+        "raw_payload_hash": _row_get(trade, "raw_payload_hash"),
+        "raw_payload_json": _row_get(trade, "raw_payload_json"),
+    }
+
+
+def _has_user_trade_observed(
+    conn: sqlite3.Connection,
+    *,
+    event_schema: str,
+    aggregate_id: str,
+    trade_id: str,
+    require_confirmed_authority: bool,
+) -> bool:
+    events = _q(event_schema, "edli_live_order_events")
+    rows = conn.execute(
+        f"""
+        SELECT payload_json
+          FROM {events}
+         WHERE aggregate_id = ?
+           AND event_type = 'UserTradeObserved'
+        """,
+        (aggregate_id,),
+    ).fetchall()
+    for row in rows:
+        payload = json.loads(str(_row_get(row, "payload_json") or "{}"))
+        observed_trade_id = payload.get("trade_id") or (
+            payload.get("authenticated_presence_proof") or {}
+        ).get("trade_id")
+        if observed_trade_id != trade_id:
+            continue
+        if not require_confirmed_authority or payload.get("fill_authority_state") == "FILL_CONFIRMED":
+            return True
+    return False
+
+
+def _trade_fact_rank_order(states: tuple[str, ...]) -> str:
+    if states == ("CONFIRMED",):
+        return "datetime(observed_at) DESC, trade_fact_id DESC"
+    return """CASE UPPER(COALESCE(state, ''))
+                  WHEN 'CONFIRMED' THEN 3
+                  WHEN 'MINED' THEN 2
+                  WHEN 'MATCHED' THEN 1
+                  ELSE 0
+              END DESC, datetime(observed_at) DESC, trade_fact_id DESC"""
+
+
+def append_confirmed_trade_facts_to_edli(
+    conn: sqlite3.Connection,
+    *,
+    now: datetime | None = None,
+    limit: int = 100,
+    trade_db_path: str | Path | None = None,
+    candidates: Sequence[TradeFactBridgeCandidate] | None = None,
+    absorbed_fill_aggregate_ids: Sequence[str] | None = None,
+) -> int:
+    """Append missing EDLI UserTradeObserved events from confirmed WS trade facts.
+
+    The source of authority remains the authenticated user channel: this bridge
+    only consumes ``venue_trade_facts`` rows written as ``source='WS_USER'`` and
+    ``state='CONFIRMED'``. The trade fact must bind to the EDLI execution command
+    and either its acknowledged venue order or the same canonical command's
+    persisted venue order. The latter covers a matched submit response that
+    returned an order id but omitted the trade id, so EDLI recorded
+    ``SubmitUnknown`` while the authenticated user channel later proved the fill.
+    """
+
+    trade_schema, event_schema, projection_schema = _append_bridge_schemas(
+        conn, trade_db_path=trade_db_path
+    )
+    if candidates is None:
+        candidates = discover_confirmed_trade_fact_candidates(
+            conn,
+            trade_schema=trade_schema,
+            event_schema=event_schema,
+            projection_schema=projection_schema,
+            limit=limit,
+            trade_db_path=trade_db_path,
+        )
 
     ledger = LiveOrderAggregateLedger(conn)
     appended = 0
     default_now = now or datetime.now(timezone.utc)
-    for row in rows:
+    for candidate in tuple(candidates)[: max(0, limit)]:
+        row = _revalidate_confirmed_trade_fact_candidate(
+            conn,
+            candidate,
+            trade_schema=trade_schema,
+            event_schema=event_schema,
+        )
+        if row is None:
+            continue
         observed_at = _parse_dt(_row_get(row, "observed_at"), default=default_now)
         command_occurred_at = _parse_dt(
             _row_get(row, "command_occurred_at"), default=default_now
@@ -194,8 +588,12 @@ def append_confirmed_trade_facts_to_edli(
     reconciled = _consume_absorbed_confirmed_fills(
         conn,
         trade_schema=trade_schema,
+        event_schema=event_schema,
+        projection_schema=projection_schema,
+        cap_schema=event_schema,
         limit=limit,
         now=default_now,
+        aggregate_ids=absorbed_fill_aggregate_ids,
     )
     if reconciled:
         logger.warning(
@@ -209,9 +607,14 @@ def _consume_absorbed_confirmed_fills(
     conn: sqlite3.Connection,
     *,
     trade_schema: str,
+    event_schema: str,
+    projection_schema: str,
+    cap_schema: str,
     limit: int,
     now: datetime,
-) -> int:
+    aggregate_ids: Sequence[str] | None = None,
+    discover_only: bool = False,
+) -> int | tuple[str, ...]:
     """Close pending EDLI state once the exact fill is already canonical."""
 
     required = (
@@ -221,16 +624,47 @@ def _consume_absorbed_confirmed_fills(
         "position_current",
         "position_events",
     )
-    if any(
-        _schema_with_table(conn, table, preferred=trade_schema) != trade_schema
-        for table in required
-    ):
-        return 0
+    _require_schema_tables(conn, schema=trade_schema, tables=required)
+    _require_schema_tables(
+        conn, schema=event_schema, tables=("edli_live_order_events",)
+    )
+    _require_schema_tables(
+        conn, schema=projection_schema, tables=("edli_live_order_projection",)
+    )
+    _require_schema_tables(conn, schema=cap_schema, tables=("edli_live_cap_usage",))
+    events = _q(event_schema, "edli_live_order_events")
+    projection = _q(projection_schema, "edli_live_order_projection")
+    cap_usage = _q(cap_schema, "edli_live_cap_usage")
+    candidate_aggregate_ids = tuple(dict.fromkeys(aggregate_ids or ()))
+    if aggregate_ids is not None and not candidate_aggregate_ids:
+        return () if discover_only else 0
+    aggregate_placeholders = ", ".join("?" for _ in candidate_aggregate_ids)
+    aggregate_filter = (
+        f"AND aggregate_id IN ({aggregate_placeholders})"
+        if candidate_aggregate_ids
+        else ""
+    )
     commands = _q(trade_schema, "venue_commands")
     trades = _q(trade_schema, "venue_trade_facts")
     orders = _q(trade_schema, "venue_order_facts")
     positions = _q(trade_schema, "position_current")
     position_events = _q(trade_schema, "position_events")
+    order_filter = (
+        f"""
+        WHERE fact.command_id IN (
+            SELECT candidate_command.command_id
+              FROM {projection} candidate_projection
+              JOIN {cap_usage} candidate_usage
+                ON candidate_usage.event_id = candidate_projection.event_id
+               AND candidate_usage.final_intent_id = candidate_projection.final_intent_id
+              JOIN {commands} candidate_command
+                ON candidate_command.decision_id = candidate_usage.execution_command_id
+             WHERE candidate_projection.aggregate_id IN ({aggregate_placeholders})
+        )
+        """
+        if candidate_aggregate_ids
+        else ""
+    )
     rows = conn.execute(
         f"""
         WITH latest_plan AS (
@@ -240,8 +674,9 @@ def _consume_absorbed_confirmed_fills(
                            ROW_NUMBER() OVER (
                                PARTITION BY aggregate_id ORDER BY event_sequence DESC
                            ) AS rank
-                      FROM edli_live_order_events
+                      FROM {events}
                      WHERE event_type = 'SubmitPlanBuilt'
+                       {aggregate_filter}
                    )
              WHERE rank = 1
         ),
@@ -252,8 +687,9 @@ def _consume_absorbed_confirmed_fills(
                            ROW_NUMBER() OVER (
                                PARTITION BY aggregate_id ORDER BY event_sequence DESC
                            ) AS rank
-                      FROM edli_live_order_events
+                      FROM {events}
                      WHERE event_type = 'UserTradeObserved'
+                       {aggregate_filter}
                    )
              WHERE rank = 1
         ),
@@ -265,6 +701,7 @@ def _consume_absorbed_confirmed_fills(
                                PARTITION BY command_id ORDER BY local_sequence DESC
                            ) AS rank
                       FROM {orders} fact
+                      {order_filter}
                    )
              WHERE rank = 1
         )
@@ -279,10 +716,10 @@ def _consume_absorbed_confirmed_fills(
                entry_fill.event_id AS entry_fill_event_id,
                json_extract(entry_fill.payload_json, '$.shares')
                    AS entry_filled_shares
-          FROM edli_live_order_projection projection
+          FROM {projection} projection
           JOIN latest_plan plan USING (aggregate_id)
           JOIN latest_trade observed USING (aggregate_id)
-          JOIN edli_live_cap_usage usage
+          JOIN {cap_usage} usage
             ON usage.event_id = projection.event_id
            AND usage.final_intent_id = projection.final_intent_id
            AND usage.reservation_status = 'RESERVED'
@@ -362,8 +799,15 @@ def _consume_absorbed_confirmed_fills(
          ORDER BY projection.updated_at, projection.aggregate_id
          LIMIT ?
         """,
-        (max(0, limit),),
+        (
+            *candidate_aggregate_ids,
+            *candidate_aggregate_ids,
+            *candidate_aggregate_ids,
+            max(0, limit),
+        ),
     ).fetchall()
+    if discover_only:
+        return tuple(str(_row_get(row, "aggregate_id")) for row in rows)
     ledger = LiveOrderAggregateLedger(conn)
     cap_ledger = LiveCapLedger(conn, schema_initialized=True)
     for row in rows:
@@ -391,9 +835,9 @@ def _consume_absorbed_confirmed_fills(
         ).hexdigest()
         projection_pending = bool(
             conn.execute(
-                """
+                f"""
                 SELECT pending_reconcile
-                  FROM edli_live_order_projection
+                  FROM {projection}
                  WHERE aggregate_id = ?
                 """,
                 (str(_row_get(row, "aggregate_id")),),
@@ -446,6 +890,30 @@ def _consume_absorbed_confirmed_fills(
     return len(rows)
 
 
+def discover_absorbed_confirmed_fill_aggregate_ids(
+    conn: sqlite3.Connection,
+    *,
+    trade_schema: str,
+    event_schema: str,
+    projection_schema: str,
+    cap_schema: str,
+    limit: int = 100,
+) -> tuple[str, ...]:
+    """Discover cap-reconcile candidates before the canonical writer lease."""
+
+    candidates = _consume_absorbed_confirmed_fills(
+        conn,
+        trade_schema=trade_schema,
+        event_schema=event_schema,
+        projection_schema=projection_schema,
+        cap_schema=cap_schema,
+        limit=limit,
+        now=datetime.now(timezone.utc),
+        discover_only=True,
+    )
+    return tuple(candidates)
+
+
 def append_rest_filled_orphan_trade_facts_to_edli(
     conn: sqlite3.Connection,
     *,
@@ -453,6 +921,8 @@ def append_rest_filled_orphan_trade_facts_to_edli(
     grace_minutes: float = 15.0,
     limit: int = 50,
     trade_db_path: str | Path | None = None,
+    candidates: Sequence[TradeFactBridgeCandidate] | None = None,
+    absorbed_fill_aggregate_ids: Sequence[str] | None = None,
 ) -> int:
     """Recover fill orphans whose WS_USER CONFIRMED message never arrived.
 
@@ -476,138 +946,33 @@ def append_rest_filled_orphan_trade_facts_to_edli(
     Every recovered event carries the full provenance chain in its payload.
     """
 
-    _ensure_trades_attached_if_needed(conn, trade_db_path=trade_db_path)
-    trade_schema = _schema_with_table(conn, "venue_trade_facts", preferred="trades")
-    if trade_schema is None or not _table_exists(conn, "edli_live_order_events"):
-        return 0
-    venue_trade_facts = _q(trade_schema, "venue_trade_facts")
-    venue_commands = _q(trade_schema, "venue_commands")
-
     default_now = now or datetime.now(timezone.utc)
     grace_cutoff = default_now.timestamp() - max(0.0, float(grace_minutes)) * 60.0
-
-    rows = conn.execute(
-        f"""
-        WITH execution_commands AS (
-            SELECT aggregate_id, event_id, final_intent_id,
-                   execution_command_id, command_occurred_at
-              FROM (
-                    SELECT aggregate_id,
-                           json_extract(payload_json, '$.event_id') AS event_id,
-                           json_extract(payload_json, '$.final_intent_id') AS final_intent_id,
-                           json_extract(payload_json, '$.execution_command_id') AS execution_command_id,
-                           occurred_at AS command_occurred_at,
-                           ROW_NUMBER() OVER (
-                               PARTITION BY aggregate_id
-                               ORDER BY event_sequence DESC
-                           ) AS command_rank
-                      FROM edli_live_order_events
-                     WHERE event_type = 'ExecutionCommandCreated'
-                   )
-             WHERE command_rank = 1
-        ),
-        submit_acks AS (
-            SELECT aggregate_id, venue_order_id
-              FROM (
-                    SELECT aggregate_id,
-                           json_extract(payload_json, '$.venue_order_id') AS venue_order_id,
-                           ROW_NUMBER() OVER (
-                               PARTITION BY aggregate_id
-                               ORDER BY event_sequence DESC
-                           ) AS ack_rank
-                      FROM edli_live_order_events
-                     WHERE event_type = 'VenueSubmitAcknowledged'
-                   )
-             WHERE ack_rank = 1
-        ),
-        ranked_orphans AS (
-        SELECT exec.aggregate_id,
-               exec.event_id,
-               exec.final_intent_id,
-               exec.execution_command_id,
-               exec.command_occurred_at,
-               cmd.command_id,
-               cmd.state AS command_state,
-               trade.trade_fact_id,
-               trade.trade_id,
-               trade.venue_order_id,
-               trade.state,
-               trade.source AS trade_source,
-               trade.filled_size,
-               trade.fill_price,
-               trade.tx_hash,
-               trade.observed_at,
-               trade.raw_payload_hash,
-               trade.raw_payload_json,
-               ROW_NUMBER() OVER (
-                   PARTITION BY exec.aggregate_id, trade.trade_id
-                   ORDER BY CASE UPPER(COALESCE(trade.state, ''))
-                                WHEN 'CONFIRMED' THEN 3
-                                WHEN 'MINED' THEN 2
-                                WHEN 'MATCHED' THEN 1
-                                ELSE 0
-                            END DESC,
-                            datetime(trade.observed_at) DESC,
-                            trade.trade_fact_id DESC
-               ) AS logical_fill_rank
-          FROM execution_commands exec
-          LEFT JOIN submit_acks ack
-            ON ack.aggregate_id = exec.aggregate_id
-          JOIN {venue_commands} cmd
-            ON cmd.decision_id = exec.execution_command_id
-          JOIN {venue_trade_facts} trade
-            ON trade.command_id = cmd.command_id
-           AND trade.venue_order_id = COALESCE(
-                   NULLIF(ack.venue_order_id, ''),
-                   NULLIF(cmd.venue_order_id, '')
-               )
-         WHERE UPPER(COALESCE(cmd.state, '')) IN ('FILLED', 'PARTIAL')
-           AND COALESCE(
-                   NULLIF(ack.venue_order_id, ''),
-                   NULLIF(cmd.venue_order_id, '')
-               ) IS NOT NULL
-           AND UPPER(COALESCE(trade.state, '')) IN ('MATCHED', 'MINED', 'CONFIRMED')
-           AND CAST(COALESCE(trade.filled_size, '0') AS REAL) > 0
-           AND CAST(COALESCE(trade.fill_price, '0') AS REAL) > 0
-           AND NOT EXISTS (
-                 SELECT 1
-                   FROM {venue_trade_facts} ws
-                  WHERE ws.trade_id = trade.trade_id
-                    AND ws.source = 'WS_USER'
-                    AND UPPER(COALESCE(ws.state, '')) = 'CONFIRMED'
-               )
-           AND NOT EXISTS (
-                 SELECT 1
-                   FROM edli_live_order_events existing
-                  WHERE existing.aggregate_id = exec.aggregate_id
-                    AND existing.event_type = 'UserTradeObserved'
-                    AND json_extract(existing.payload_json, '$.trade_id') = trade.trade_id
-               )
-           AND NOT EXISTS (
-                 -- Mirror of the ledger guard in _require_user_channel_submit_binding:
-                 -- a terminal RECONCILED projection rejects every user-channel append,
-                 -- so selecting such aggregates only manufactures a per-minute retry
-                 -- loop (observed live 2026-06-12). The class must be unselectable.
-                 SELECT 1
-                   FROM edli_live_order_projection proj
-                  WHERE proj.aggregate_id = exec.aggregate_id
-                    AND proj.current_state = 'RECONCILED'
-                    AND COALESCE(proj.pending_reconcile, 0) = 0
-               )
+    trade_schema, event_schema, projection_schema = _append_bridge_schemas(
+        conn, trade_db_path=trade_db_path
+    )
+    if candidates is None:
+        candidates = discover_rest_filled_orphan_trade_fact_candidates(
+            conn,
+            trade_schema=trade_schema,
+            event_schema=event_schema,
+            projection_schema=projection_schema,
+            limit=limit,
+            trade_db_path=trade_db_path,
         )
-        SELECT *
-          FROM ranked_orphans
-         WHERE logical_fill_rank = 1
-         ORDER BY observed_at ASC, trade_fact_id ASC
-         LIMIT ?
-        """,
-        (max(0, limit),),
-    ).fetchall()
 
     ledger = LiveOrderAggregateLedger(conn)
     appended = 0
     skipped_invalid = 0
-    for row in rows:
+    for candidate in tuple(candidates)[: max(0, limit)]:
+        row = _revalidate_rest_filled_orphan_trade_fact_candidate(
+            conn,
+            candidate,
+            trade_schema=trade_schema,
+            event_schema=event_schema,
+        )
+        if row is None:
+            continue
         observed_at = _parse_dt(_row_get(row, "observed_at"), default=default_now)
         rest_confirmed = (
             str(_row_get(row, "trade_source") or "").upper() == "REST"
@@ -647,8 +1012,12 @@ def append_rest_filled_orphan_trade_facts_to_edli(
     reconciled = _consume_absorbed_confirmed_fills(
         conn,
         trade_schema=trade_schema,
+        event_schema=event_schema,
+        projection_schema=projection_schema,
+        cap_schema=event_schema,
         limit=limit,
         now=default_now,
+        aggregate_ids=absorbed_fill_aggregate_ids,
     )
     if reconciled:
         logger.warning(
@@ -760,6 +1129,54 @@ def _append_one_recovered_fill(ledger, row, observed_at, message_hash, grace_min
             "recovery_basis": recovery_basis,
         },
     )
+
+
+def _append_bridge_schemas(
+    conn: sqlite3.Connection,
+    *,
+    trade_db_path: str | Path | None,
+) -> tuple[str, str, str]:
+    """Return the explicit writer-side schema roles for one bridge connection."""
+
+    _ensure_trades_attached_if_needed(conn, trade_db_path=trade_db_path)
+    attached = {str(row[1]) for row in conn.execute("PRAGMA database_list").fetchall()}
+    trade_schema = "trades" if "trades" in attached else "main"
+    event_schema = "main"
+    projection_schema = "main"
+    _require_schema_tables(
+        conn,
+        schema=trade_schema,
+        tables=("venue_commands", "venue_trade_facts"),
+    )
+    _require_schema_tables(
+        conn,
+        schema=event_schema,
+        tables=("edli_live_order_events",),
+    )
+    _require_schema_tables(
+        conn,
+        schema=projection_schema,
+        tables=("edli_live_order_projection",),
+    )
+    return trade_schema, event_schema, projection_schema
+
+
+def _require_schema_tables(
+    conn: sqlite3.Connection,
+    *,
+    schema: str,
+    tables: tuple[str, ...],
+) -> None:
+    attached = {str(row[1]) for row in conn.execute("PRAGMA database_list").fetchall()}
+    if schema not in attached:
+        raise RuntimeError(f"EDLI_BRIDGE_SCHEMA_MISSING:{schema}")
+    missing = tuple(
+        table for table in tables if not _table_exists(conn, table, schema=schema)
+    )
+    if missing:
+        raise RuntimeError(
+            f"EDLI_BRIDGE_TABLE_MISSING:{schema}:{','.join(missing)}"
+        )
 
 
 def _ensure_trades_attached_if_needed(

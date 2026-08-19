@@ -2,7 +2,7 @@
 # Last reused or audited: 2026-06-08 (CLEANUP fix: add the coupling-unconstructable proof —
 #   the resolved WU duplicate is not merely removed, the fail-closed registry E gate makes
 #   re-introducing a SECOND order-daemon WU collector un-constructable; system_decomposition_plan §9)
-# Authority basis: docs/architecture/system_decomposition_plan.md
+# Authority basis: docs/reference/design_system_decomposition_plan.md
 #   §6 (data-ingest row: "REMOVE residual _wu_daily_dispatch duplicate from src.main
 #     ... VERIFIED set-equivalent to daily_tick's wu_icao slice"),
 #   §8 Step 4 (remove residual duplicate; CONTAINMENT VERIFIED set-equivalence),

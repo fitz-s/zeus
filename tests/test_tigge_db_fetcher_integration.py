@@ -204,14 +204,13 @@ def test_db_payload_returns_none_when_no_rows(fake_city, tmp_path, monkeypatch):
     assert _fetch_db_payload(fake_city, DECISION_TIME) is None
 
 
-def test_fetch_ensemble_tigge_satisfies_entry_evidence_contract(
+def test_fetch_ensemble_tigge_preserves_historical_evidence_provenance(
     fake_city, staged_world_db, monkeypatch
 ):
-    """Cross-module invariant: DB-backed TIGGE output must pass entry evidence."""
+    """DB-backed TIGGE remains usable without acquiring a live money role."""
     import src.data.ensemble_client as ec
     import src.data.tigge_client as tc
     from src.data.tigge_client import TIGGEIngest
-    from src.engine.evaluator import _entry_forecast_evidence_errors
 
     ec._clear_cache()
     monkeypatch.setattr(
@@ -222,9 +221,9 @@ def test_fetch_ensemble_tigge_satisfies_entry_evidence_contract(
             authority_tier="FORECAST",
             degradation_level="OK",
             ingest_class=TIGGEIngest,
+            allowed_roles=("historical_evidence",),
         ),
     )
-    monkeypatch.setattr(ec, "gate_source_role", lambda _spec, _role: None)
     monkeypatch.setattr(tc, "_operator_gate_open", lambda **_kwargs: True)
     # Freeze datetime.now() in ensemble_client to _ANCHOR so the 24h freshness check
     # against DB_FETCH_DATETIME (_ANCHOR - 1h) is deterministic regardless of test runtime.
@@ -239,18 +238,17 @@ def test_fetch_ensemble_tigge_satisfies_entry_evidence_contract(
         fake_city,
         forecast_days=4,
         model="tigge",
-        role="entry_primary",
+        role="historical_evidence",
     )
 
     assert result is not None
     assert result["source_id"] == "tigge"
     assert result["model"] == "tigge"
-    assert result["forecast_source_role"] == "entry_primary"
+    assert result["forecast_source_role"] == "historical_evidence"
     assert result["authority_tier"] == "FORECAST"
     assert result["degradation_level"] == "OK"
     assert result["available_at"] == AVAILABLE_AT
     assert result["fetch_time"].isoformat() == DB_FETCH_TIME
-    assert _entry_forecast_evidence_errors(result, "2026-05-03", DECISION_TIME) == []
 
 
 def test_fetch_ensemble_tigge_cache_uses_retrieval_time_not_source_capture(
@@ -269,9 +267,9 @@ def test_fetch_ensemble_tigge_cache_uses_retrieval_time_not_source_capture(
             authority_tier="FORECAST",
             degradation_level="OK",
             ingest_class=TIGGEIngest,
+            allowed_roles=("historical_evidence",),
         ),
     )
-    monkeypatch.setattr(ec, "gate_source_role", lambda _spec, _role: None)
     monkeypatch.setattr(tc, "_operator_gate_open", lambda **_kwargs: True)
     # Freeze datetime.now() in ensemble_client to _ANCHOR for deterministic freshness checks.
     import src.data.ensemble_client as _ec_module
@@ -289,8 +287,18 @@ def test_fetch_ensemble_tigge_cache_uses_retrieval_time_not_source_capture(
 
     monkeypatch.setattr(TIGGEIngest, "fetch", counted_fetch)
 
-    first = ec.fetch_ensemble(fake_city, forecast_days=4, model="tigge", role="entry_primary")
-    second = ec.fetch_ensemble(fake_city, forecast_days=4, model="tigge", role="entry_primary")
+    first = ec.fetch_ensemble(
+        fake_city,
+        forecast_days=4,
+        model="tigge",
+        role="historical_evidence",
+    )
+    second = ec.fetch_ensemble(
+        fake_city,
+        forecast_days=4,
+        model="tigge",
+        role="historical_evidence",
+    )
 
     assert calls["count"] == 1
     assert first is not None

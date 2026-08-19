@@ -1,8 +1,8 @@
-# Lifecycle: created=2026-06-08; last_reviewed=2026-07-28; last_reused=2026-07-28
+# Lifecycle: created=2026-06-08; last_reviewed=2026-08-19; last_reused=2026-08-19
 # Purpose: Relationship regression test for BAYES_PRECISION_FUSION extra-model capture wiring in src/main.py; guards against bare `date` NameError (BLOCKER 9) and verifies capture is gated by the edli flag.
 # Reuse: Run with pytest; update if the BAYES_PRECISION_FUSION extra-capture wiring or flag gate in src/main.py changes.
 # Created: 2026-06-08
-# Last reused or audited: 2026-07-28
+# Last reused or audited: 2026-08-19
 # Authority basis: PR#400 review (src/main.py:4909 bare `date` NameError swallowed by
 #   fail-soft); CONTINUITY_AND_WIRING.md §4 step 2 + BAYES_PRECISION_FUSION_SPEC.md §6 F1 (BAYES_PRECISION_FUSION multi-model
 #   SHADOW capture gated by edli.replacement_0_1_bayes_precision_fusion_capture_enabled).
@@ -42,6 +42,7 @@ import subprocess
 import sys
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -139,6 +140,11 @@ def _wire(monkeypatch, *, rows, state_root: Path, forecast_db="zeus-forecasts.db
     monkeypatch.setattr(
         production, "_probe_resolved_available_cycle", lambda: probed_cycle
     )
+    monkeypatch.setattr(
+        production,
+        "_probe_resolved_bayes_precision_fusion_extras_cycle",
+        lambda: probed_cycle,
+    )
 
     cfg_dict = {
         "forecast_db": forecast_db,
@@ -187,11 +193,10 @@ def test_does_not_raise_nameerror_and_attempts_capture(monkeypatch, tmp_path) ->
 
 
 # ---------------------------------------------------------------------------------------
-# (3) covered rows are INCLUDED (CYCLE-CURRENCY, K-root instance #5): plan 'covered' has
-# no cycle-awareness, so excluding covered rows froze covered targets on stale-cycle
-# extras (Madrid 06-10 fused with icon_global off the 06-08T12 row). The extras job
-# feeds ALL current targets; the downloader itself dedups per persisted
-# (model, city, target, metric, cycle, endpoint) row.
+# (3) covered rows are INCLUDED when exact-cycle coverage cannot be proven
+# (CYCLE-CURRENCY, K-root instance #5): plan 'covered' has no cycle-awareness, so
+# excluding covered rows froze covered targets on stale-cycle extras. Exact-cycle
+# coverage, rather than the plan projection, is the only valid optimization boundary.
 # ---------------------------------------------------------------------------------------
 def test_covered_rows_still_reach_the_downloader(monkeypatch, tmp_path) -> None:
     today = datetime.now(timezone.utc).date()
@@ -208,9 +213,69 @@ def test_covered_rows_still_reach_the_downloader(monkeypatch, tmp_path) -> None:
     assert len(calls) == 1
     cities = sorted(t.city for t in calls[0]["targets"])
     assert cities == ["Amsterdam", "Ankara"], (
-        "covered rows must NOT be filtered from the extras capture — coverage is not "
-        "currency (K-root instance #5); per-row dedup lives in the downloader"
+        "plan coverage must NOT be treated as current-cycle capture — coverage is not "
+        "currency (K-root instance #5)"
     )
+
+
+def test_full_fanout_admits_current_day0_and_prioritizes_held_gap(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    import src.data.replacement_forecast_seed_discovery as seed_discovery
+
+    decision_time = datetime.now(timezone.utc)
+    cycle = decision_time - timedelta(minutes=1)
+    tokyo_day0 = decision_time.astimezone(ZoneInfo("Asia/Tokyo")).date()
+    tokyo_day1 = tokyo_day0 + timedelta(days=1)
+    amsterdam_day1 = (
+        decision_time.astimezone(ZoneInfo("Europe/Amsterdam")).date()
+        + timedelta(days=1)
+    )
+    rows = [
+        _row(city="Amsterdam", target_date=amsterdam_day1.isoformat(), covered=True),
+        _row(city="Tokyo", target_date=tokyo_day1.isoformat(), covered=False),
+    ]
+    cfg_dict, calls = _wire(monkeypatch, rows=rows, state_root=tmp_path)
+    monkeypatch.setattr(
+        production,
+        "_probe_resolved_bayes_precision_fusion_extras_cycle",
+        lambda: cycle,
+    )
+    monkeypatch.setattr(
+        production,
+        "_extras_coverage_missing",
+        lambda _cfg, _cycle, *, decision_time=None: (
+            {
+                ("Tokyo", "high", tokyo_day0.isoformat()),
+                ("Amsterdam", "high", amsterdam_day1.isoformat()),
+                ("Tokyo", "high", tokyo_day1.isoformat()),
+            },
+            3,
+        ),
+    )
+    monkeypatch.setattr(
+        seed_discovery,
+        "held_position_family_priorities",
+        lambda: {
+            ("Tokyo", tokyo_day0.isoformat(), "high"): 0,
+            ("Tokyo", tokyo_day1.isoformat(), "high"): 1,
+        },
+    )
+
+    report = production._download_bayes_precision_fusion_extra_raw_inputs_if_needed(
+        cfg_dict
+    )
+
+    assert report is not None
+    assert len(calls) == 1
+    assert [
+        (target.city, target.target_date) for target in calls[0]["targets"]
+    ] == [
+        ("Tokyo", tokyo_day0.isoformat()),
+        ("Tokyo", tokyo_day1.isoformat()),
+        ("Amsterdam", amsterdam_day1.isoformat()),
+    ]
 
 
 # ---------------------------------------------------------------------------------------
@@ -470,6 +535,53 @@ def test_durable_rotation_does_not_starve_tail_groups_across_restarts(
         "Shanghai",
     ]
     assert attempted[4:] == attempted[:4]
+
+
+def test_priority_rotation_preempts_regular_cursor_and_remains_fair(
+    tmp_path,
+) -> None:
+    cycle = datetime(2026, 8, 5, 0, tzinfo=timezone.utc)
+    state_path = tmp_path / "replacement_forecast_live" / ".rotation.json"
+    targets = _rotation_targets(
+        (
+            ("Tokyo", "2026-08-06", "high"),
+            ("Wuhan", "2026-08-06", "high"),
+            ("Sao Paulo", "2026-08-06", "high"),
+        )
+    )
+    production._advance_bpf_extra_rotation(
+        cycle=cycle,
+        rotated_targets=(targets[2],),
+        attempted_group_count=1,
+        state_path=state_path,
+    )
+    priority = {
+        ("Tokyo", "2026-08-06"),
+        ("Wuhan", "2026-08-06"),
+    }
+
+    first, _, _, first_status = production._rotate_bpf_extra_targets(
+        targets,
+        cycle=cycle,
+        state_path=state_path,
+        priority_group_keys=priority,
+    )
+    assert first[0].city == "Tokyo"
+    assert first_status.startswith("PRIORITY_")
+
+    production._advance_bpf_extra_rotation(
+        cycle=cycle,
+        rotated_targets=first,
+        attempted_group_count=1,
+        state_path=state_path,
+    )
+    second, _, _, _ = production._rotate_bpf_extra_targets(
+        targets,
+        cycle=cycle,
+        state_path=state_path,
+        priority_group_keys=priority,
+    )
+    assert second[0].city == "Wuhan"
 
 
 @pytest.mark.parametrize(

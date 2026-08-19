@@ -1,5 +1,5 @@
 # Created: 2026-06-01
-# Last reused/audited: 2026-07-20
+# Last reused/audited: 2026-08-10
 # Authority basis (2026-06-13 add): docs/archive/2026-Q2/operations_historical/live_inventory_warm_skip_2026-06-13.md —
 #   venue-close warm-skip relationship tests (live-inventory focus; market_phase.family_venue_closed).
 # Authority basis: src/main.py:_edli_event_reactor_cycle (historical inline substrate refresh
@@ -54,6 +54,8 @@ import inspect
 import json
 import re
 import sqlite3
+import threading
+import time as time_module
 from datetime import date, datetime, time, timezone
 from types import SimpleNamespace
 
@@ -573,6 +575,82 @@ def test_pending_family_refresh_includes_processing_day0_hourly_blocks():
         ]
 
 
+def test_substrate_pending_query_does_not_scan_processed_history():
+    """Composite status index must exclude the cold processed population."""
+
+    conn = sqlite3.connect(":memory:")
+    conn.executescript(
+        """
+        CREATE TABLE opportunity_events (
+            event_id TEXT PRIMARY KEY,
+            event_type TEXT NOT NULL,
+            priority INTEGER NOT NULL,
+            available_at TEXT NOT NULL,
+            payload_json TEXT NOT NULL
+        );
+        CREATE TABLE opportunity_event_processing (
+            consumer_name TEXT NOT NULL,
+            event_id TEXT NOT NULL,
+            processing_status TEXT NOT NULL,
+            claimed_at TEXT,
+            last_error TEXT,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (consumer_name, event_id)
+        );
+        CREATE INDEX idx_opportunity_event_processing_status
+            ON opportunity_event_processing(consumer_name, processing_status, updated_at);
+        """
+    )
+    conn.executemany(
+        """
+        INSERT INTO opportunity_event_processing (
+            consumer_name, event_id, processing_status, updated_at
+        ) VALUES ('edli_reactor_v1', ?, 'processed', '2026-08-05T00:00:00+00:00')
+        """,
+        ((f"cold-{index}",) for index in range(5000)),
+    )
+    payload = json.dumps(
+        {"city": "Tokyo", "target_date": "2026-08-06", "metric": "high"}
+    )
+    conn.execute(
+        """
+        INSERT INTO opportunity_events (
+            event_id, event_type, priority, available_at, payload_json
+        ) VALUES ('current', 'FORECAST_SNAPSHOT_READY', 100,
+                  '2026-08-05T00:01:00+00:00', ?)
+        """,
+        (payload,),
+    )
+    conn.execute(
+        """
+        INSERT INTO opportunity_event_processing (
+            consumer_name, event_id, processing_status, updated_at
+        ) VALUES ('edli_reactor_v1', 'current', 'pending',
+                  '2026-08-05T00:01:00+00:00')
+        """
+    )
+
+    progress_calls = 0
+
+    def reject_cold_scan() -> int:
+        nonlocal progress_calls
+        progress_calls += 1
+        return int(progress_calls > 1000)
+
+    conn.set_progress_handler(reject_cold_scan, 10)
+    rows = substrate_observer._pending_family_rows_for_refresh(
+        conn,
+        consumer_name="edli_reactor_v1",
+        now_utc=datetime(2026, 8, 5, 1, 0, tzinfo=timezone.utc),
+    )
+    conn.set_progress_handler(None, 0)
+
+    assert [(row[0], row[1], row[2]) for row in rows] == [
+        ("Tokyo", "2026-08-06", "high")
+    ]
+    assert progress_calls < 1000
+
+
 def test_full_family_capture_cap_is_decoupled_from_direct_clob_threshold():
     """Candidate selection cap and direct /book prefetch threshold serve different purposes."""
 
@@ -600,18 +678,18 @@ def test_priority_direct_clob_uses_selected_priority_subset():
 def test_active_risk_conditions_join_ordinary_but_not_forced_marker_tick():
     """Risk scope joins ordinary work; an FC-03 winner gets one exclusive short tick."""
 
-    src = inspect.getsource(substrate_observer._edli_money_path_substrate_priority_cycle)
+    src = inspect.getsource(
+        substrate_observer._edli_money_path_substrate_priority_cycle_under_intent
+    )
     marker_copy = src.index("marker_exact_condition_ids = list(priority_marker_condition_ids)")
     forced_copy = src.index("marker_force_refresh_condition_ids = list(")
-    extend_marker = src.index("exact_priority_condition_ids = list(marker_exact_condition_ids)")
-    ordinary_branch = src.index("if not marker_force_refresh_condition_ids:")
-    open_read = src.index("open_rest_priority_condition_ids = _open_rest_condition_ids_for_refresh")
-    held_read = src.index("held_position_priority_condition_ids = _edli_current_held_position_condition_ids()")
-    extend_open = src.index("exact_priority_condition_ids.extend(open_rest_priority_condition_ids)")
-    extend_held = src.index("exact_priority_condition_ids.extend(held_position_priority_condition_ids)")
+    strict_read = src.index("strict_scope = _read_strict_priority_scope(")
+    exact_scope = src.index("exact_priority_condition_ids = list(")
 
-    assert marker_copy < forced_copy < extend_marker < ordinary_branch < open_read
-    assert open_read < held_read < extend_open < extend_held
+    assert marker_copy < forced_copy < strict_read < exact_scope
+    assert "include_money_risk=not marker_force_refresh_condition_ids" in src
+    assert "strict_scope.open_rest_condition_ids" in src
+    assert "strict_scope.held_position_condition_ids" in src
 
 
 def test_warm_lane_money_risk_priority_stays_ahead_of_pending_rotation():
@@ -720,7 +798,8 @@ def test_continuous_redecision_confirms_money_path_before_emit():
     assert "confirmed_entry_scope = set(family_keys)" in screen_src
     assert "family_keys &= confirmed_entry_scope" in screen_src
     assert "rest_pull_families &= confirmed_rest_scope" in screen_src
-    assert "open_rest_condition_scope = _edli_open_rest_condition_scope(open_rests, all_beliefs)" in screen_src
+    assert "open_rest_condition_scope = _edli_open_rest_condition_scope(" in screen_src
+    assert "                management_beliefs,\n            )" in screen_src
     assert "_missing_scope(open_rest_condition_scope)" in screen_src
     assert "_edli_redecision_confirm_refresh_lock" in confirm_src
     assert "acquire(blocking=False)" in confirm_src
@@ -773,37 +852,138 @@ def test_live_snapshot_refresh_paths_use_shared_trade_write_coordinator():
     )
 
 
-def test_substrate_snapshot_write_lease_covers_sqlite_busy_floor(monkeypatch):
-    """The outer writer lease must not expire before row-level SQLite lock waiting."""
+def test_substrate_priority_snapshot_writer_yields_to_canonical_monitor(monkeypatch):
+    """Exact held snapshots may queue briefly but MONITOR still outranks them."""
+    from src.state import write_coordinator
+    from src.state.write_coordinator import WritePriority
 
-    monkeypatch.delenv("ZEUS_SUBSTRATE_SNAPSHOT_DB_WRITE_LEASE_DEADLINE_MS", raising=False)
-    monkeypatch.delenv("ZEUS_SUBSTRATE_SNAPSHOT_DB_WRITE_MAX_HOLD_MS", raising=False)
-    monkeypatch.setenv("ZEUS_SNAPSHOT_CAPTURE_BUSY_TIMEOUT_FLOOR_MS", "4000")
+    observed: list[dict] = []
 
-    busy_floor = substrate_observer._substrate_snapshot_sqlite_busy_floor_ms()
-    assert busy_floor == 4000
-    assert substrate_observer._substrate_snapshot_write_lease_deadline_default_ms() == 8000
+    class _Coordinator:
+        @contextlib.contextmanager
+        def lease(self, _dbs, **kwargs):
+            observed.append(kwargs)
+            yield
 
-    monkeypatch.setenv("ZEUS_SUBSTRATE_SNAPSHOT_DB_WRITE_LEASE_DEADLINE_MS", "1000")
-    lease_deadline = substrate_observer._substrate_snapshot_write_lease_ms(
-        "substrate_snapshot_db_write_lease_deadline_ms",
-        substrate_observer._substrate_snapshot_write_lease_deadline_default_ms(),
-        minimum=busy_floor,
-        maximum=30000,
+    monkeypatch.setattr(
+        write_coordinator,
+        "default_runtime_write_coordinator",
+        lambda: _Coordinator(),
     )
-    assert lease_deadline >= busy_floor
 
-    monkeypatch.setenv("ZEUS_SUBSTRATE_SNAPSHOT_DB_WRITE_MAX_HOLD_MS", "1000")
-    max_hold = substrate_observer._substrate_snapshot_write_lease_ms(
-        "substrate_snapshot_db_write_max_hold_ms",
-        substrate_observer.SUBSTRATE_SNAPSHOT_DB_WRITE_MAX_HOLD_MS,
-        minimum=busy_floor,
-        maximum=10000,
+    with substrate_observer._substrate_snapshot_trade_write_context_factory(
+        "substrate_pending_family_snapshot_refresh"
+    )():
+        pass
+
+    assert observed == [
+        {
+            "owner": "substrate_pending_family_snapshot_refresh",
+            "write_class": "live",
+            "priority": WritePriority.RECOVERY_CRITICAL,
+            "deadline_ms": 1_000,
+            "max_hold_ms": 100,
+        }
+    ]
+
+    source = inspect.getsource(substrate_observer._refresh_pending_family_snapshots)
+    assert "cooperative_write_busy_timeout_ms=(" in source
+    assert "SUBSTRATE_BACKGROUND_SNAPSHOT_DB_WRITE_LEASE_DEADLINE_MS" in source
+    assert market_scanner._cooperative_snapshot_busy_timeout_ms(8000, 100) == 100
+    assert market_scanner._cooperative_snapshot_busy_timeout_ms(8000, None) == 8000
+
+
+def test_substrate_priority_snapshot_writer_waits_past_background_probe(
+    monkeypatch, tmp_path
+):
+    """A transient canonical writer cannot make every held snapshot fast-yield."""
+    from src.state import write_coordinator
+    from src.state.write_coordinator import DBIdentity, WriteCoordinator
+
+    coordinator = WriteCoordinator({DBIdentity.TRADE: tmp_path / "trade.db"})
+    acquired = threading.Event()
+    errors: list[BaseException] = []
+
+    def priority_writer() -> None:
+        try:
+            with substrate_observer._substrate_snapshot_trade_write_context_factory(
+                "substrate_pending_family_snapshot_refresh"
+            )():
+                acquired.set()
+        except BaseException as exc:  # noqa: BLE001 - asserted below.
+            errors.append(exc)
+
+    monkeypatch.setattr(
+        write_coordinator,
+        "default_runtime_write_coordinator",
+        lambda: coordinator,
     )
-    assert max_hold >= busy_floor
 
-    monkeypatch.setenv("ZEUS_SNAPSHOT_CAPTURE_BUSY_TIMEOUT_FLOOR_MS", "7000")
-    assert substrate_observer._substrate_snapshot_write_lease_deadline_default_ms() == 8000
+    with coordinator.lease((DBIdentity.TRADE,), owner="canonical-writer"):
+        waiter = threading.Thread(target=priority_writer)
+        waiter.start()
+        time_module.sleep(0.15)
+        assert waiter.is_alive()
+        assert not acquired.is_set()
+
+    waiter.join(timeout=2.0)
+    assert not waiter.is_alive()
+    assert errors == []
+    assert acquired.is_set()
+
+
+def test_pending_priority_capture_keeps_background_writer_admission(
+    monkeypatch,
+):
+    """Selection priority alone cannot promote replayable persistence."""
+    from src.data import market_scanner
+
+    condition_id = "pending-urgent-condition"
+    foreground_context = object()
+    background_context = object()
+    observed_contexts = []
+
+    def capture(_conn, **kwargs):
+        observed_contexts.append(kwargs["persist_context_factory"])
+        return {"persisted": True, "snapshot_persistence_tier": "full"}
+
+    monkeypatch.setattr(
+        market_scanner,
+        "capture_executable_market_snapshot",
+        capture,
+    )
+    market = {
+        "city": "Test City",
+        "slug": "test-city-high",
+        "target_date": "2026-08-13",
+        "temperature_metric": "high",
+        "outcomes": [
+            {
+                "condition_id": condition_id,
+                "token_id": "pending-yes",
+                "no_token_id": "pending-no",
+                "label": "30C",
+                "active": True,
+                "closed": False,
+            }
+        ],
+    }
+
+    summary = market_scanner.refresh_executable_market_substrate_snapshots(
+        sqlite3.connect(":memory:"),
+        markets=[market],
+        clob=SimpleNamespace(),
+        max_outcomes=2,
+        budget_seconds=2.0,
+        priority_condition_ids={condition_id},
+        priority_write_condition_ids=(),
+        snapshot_write_context_factory=foreground_context,
+        background_snapshot_write_context_factory=background_context,
+        background_fast_yield=True,
+    )
+
+    assert summary["inserted"] > 0
+    assert observed_contexts == [background_context, background_context]
 
 
 def test_reactor_uses_targeted_decision_refresher_for_blocked_families():
@@ -1110,11 +1290,14 @@ def test_forced_producer_recaptures_both_native_sides_from_network(
     monkeypatch.setattr(
         market_scanner,
         "capture_executable_market_snapshot",
-        lambda _conn, *, decision, **_kwargs: captured_tokens.append(
-            market_scanner._selected_token_for_direction(
-                market["outcomes"][0], decision.edge.direction
-            )
-        ),
+        lambda _conn, *, decision, **_kwargs: (
+            captured_tokens.append(
+                market_scanner._selected_token_for_direction(
+                    market["outcomes"][0], decision.edge.direction
+                )
+            ),
+            {"snapshot_persistence_tier": "full"},
+        )[1],
     )
 
     forced = market_scanner.refresh_executable_market_substrate_snapshots(
@@ -1184,6 +1367,7 @@ def test_substrate_warm_refreshed_zero_coverage_exhaustion_is_scheduler_failure(
             "inserted": 0,
             "failed": 0,
             "budget_exhausted": 1,
+            "stale_condition_submitted": 8,
             "executable_substrate_coverage_status": "NONE",
         },
         priority_request=None,
@@ -1192,6 +1376,25 @@ def test_substrate_warm_refreshed_zero_coverage_exhaustion_is_scheduler_failure(
 
     assert summary["scheduler_failed"] is True
     assert summary["scheduler_failure_reason"] == "snapshot_refresh_exhausted_no_coverage"
+
+
+def test_substrate_warm_stale_debt_without_attempt_is_not_success():
+    summary = substrate_observer._substrate_warm_business_summary(
+        {
+            "status": "refreshed",
+            "attempted": 0,
+            "inserted": 0,
+            "compact_inserted": 0,
+            "failed": 0,
+            "stale_condition_submitted": 770,
+            "executable_substrate_coverage_status": "NONE",
+        },
+        priority_request=None,
+        priority_marker_active=False,
+    )
+
+    assert summary["scheduler_failed"] is True
+    assert summary["scheduler_failure_reason"] == "snapshot_refresh_no_durable_progress"
 
 
 def test_targeted_decision_refresh_has_no_inline_quota_knobs():
@@ -1226,12 +1429,12 @@ def test_money_path_priority_default_budget_can_finish_hot_snapshot_backlog(monk
     assert substrate_observer._priority_refresh_budget_seconds() == pytest.approx(18.0)
     assert substrate_observer._priority_refresh_lock_wait_seconds() == pytest.approx(6.0)
     assert "timeout=lock_wait_s" in inspect.getsource(
-        substrate_observer._edli_money_path_substrate_priority_cycle
+        substrate_observer._edli_money_path_substrate_priority_cycle_under_intent
     )
 
 
 def test_inline_winner_refresh_waits_through_sidecar_lock_collision(monkeypatch):
-    """A transient sidecar lock must not discard the exact FC-03 winner recapture."""
+    """A transient priority-peer lock must not discard exact FC-03 recapture."""
 
     import src.data.job_lock as job_lock
     import src.state.db as state_db
@@ -1257,11 +1460,12 @@ def test_inline_winner_refresh_waits_through_sidecar_lock_collision(monkeypatch)
             lock_exits.append(self.acquired)
 
     lock_results = iter((False, True))
-    monkeypatch.setattr(
-        job_lock,
-        "acquire_lock",
-        lambda _name: _LockContext(next(lock_results)),
-    )
+    def _acquire_lock(name, **_kwargs):
+        if name == job_lock.MARKET_SUBSTRATE_PRIORITY_TURNSTILE_KEY:
+            return contextlib.nullcontext(True)
+        return _LockContext(next(lock_results))
+
+    monkeypatch.setattr(job_lock, "acquire_lock", _acquire_lock)
     monkeypatch.setattr(substrate_observer.time, "sleep", sleep_calls.append)
 
     class _Conn:
@@ -1278,10 +1482,12 @@ def test_inline_winner_refresh_waits_through_sidecar_lock_collision(monkeypatch)
 
     monkeypatch.setattr(state_db, "get_world_connection", _Conn)
     monkeypatch.setattr(state_db, "get_forecasts_connection_read_only", _Conn)
+    refresh_calls: list[dict] = []
     monkeypatch.setattr(
         substrate_observer,
         "_refresh_pending_family_snapshots",
-        lambda *_args, **_kwargs: {"status": "refreshed", "inserted": 2},
+        lambda *_args, **kwargs: refresh_calls.append(kwargs)
+        or {"status": "refreshed", "inserted": 2},
     )
 
     summary = substrate_observer.refresh_money_path_substrate_now(
@@ -1296,6 +1502,61 @@ def test_inline_winner_refresh_waits_through_sidecar_lock_collision(monkeypatch)
     assert lock_attempts == [False, True]
     assert lock_exits == [False, True]
     assert sleep_calls and sleep_calls[0] <= 0.05
+    assert refresh_calls[0]["request_priority"] is substrate_observer.RequestPriority.SUBMIT_JIT
+
+
+def test_inline_exact_refresh_is_not_starved_by_broad_refresh_lock(monkeypatch):
+    """A slow broad HTTP scan cannot block held-risk exact executable truth."""
+
+    import src.data.job_lock as job_lock
+    import src.state.db as state_db
+
+    broad_lock = threading.Lock()
+    assert broad_lock.acquire(blocking=False)
+    monkeypatch.setattr(substrate_observer, "_market_substrate_refresh_lock", broad_lock)
+    monkeypatch.setattr(
+        substrate_observer,
+        "_market_substrate_priority_refresh_lock",
+        threading.Lock(),
+    )
+    monkeypatch.setattr(
+        job_lock,
+        "acquire_lock",
+        lambda _name, **_kwargs: contextlib.nullcontext(True),
+    )
+
+    class _Conn:
+        def execute(self, sql, _params=()):
+            assert sql == "PRAGMA database_list"
+            return self
+
+        def fetchall(self):
+            return [(0, "main", "")]
+
+        def close(self):
+            pass
+
+    calls: list[dict] = []
+    monkeypatch.setattr(state_db, "get_world_connection", _Conn)
+    monkeypatch.setattr(state_db, "get_forecasts_connection_read_only", _Conn)
+    monkeypatch.setattr(
+        substrate_observer,
+        "_refresh_pending_family_snapshots",
+        lambda *_args, **kwargs: calls.append(kwargs)
+        or {"status": "refreshed", "inserted": 1},
+    )
+
+    try:
+        summary = substrate_observer.refresh_money_path_substrate_now(
+            families=[("Milan", "2026-08-04", "high")],
+            condition_ids=["held-condition"],
+            force_refresh=False,
+        )
+    finally:
+        broad_lock.release()
+
+    assert summary["status"] == "refreshed"
+    assert calls[0]["request_priority"] is substrate_observer.RequestPriority.HELD_REDUCE_ONLY
 
 
 def test_open_rest_condition_scope_maps_unpulled_rests_to_priority_conditions():
@@ -1497,7 +1758,7 @@ def test_substrate_refresh_wake_runs_screen_without_reactor(monkeypatch):
             return False
 
     calls: list[str] = []
-    monkeypatch.setattr(reactor_wake, "read_reactor_wake", lambda: wake)
+    monkeypatch.setattr(reactor_wake, "read_reactor_wake", lambda **_kwargs: wake)
     monkeypatch.setattr(
         reactor_wake,
         "acknowledge_reactor_wake",
@@ -1506,6 +1767,7 @@ def test_substrate_refresh_wake_runs_screen_without_reactor(monkeypatch):
     monkeypatch.setattr(main_module, "_edli_reactor_active_lock", _Lock())
     monkeypatch.setattr(main_module, "_edli_redecision_screen_lock", _Lock())
     monkeypatch.setattr(main_module, "_held_position_monitor_active", _Held())
+    monkeypatch.setattr(main_module, "_defer_for_held_position_monitor", lambda _job: False)
     monkeypatch.setattr(
         main_module,
         "_dispatch_edli_redecision_screen_from_wake",
@@ -1570,7 +1832,7 @@ def test_forecast_wake_is_not_blocked_by_held_position_monitor(monkeypatch):
             return True
 
     calls: list[str] = []
-    monkeypatch.setattr(reactor_wake, "read_reactor_wake", lambda: wake)
+    monkeypatch.setattr(reactor_wake, "read_reactor_wake", lambda **_kwargs: wake)
     monkeypatch.setattr(
         reactor_wake,
         "acknowledge_reactor_wake",
@@ -1578,6 +1840,7 @@ def test_forecast_wake_is_not_blocked_by_held_position_monitor(monkeypatch):
     )
     monkeypatch.setattr(main_module, "_edli_reactor_active_lock", _Lock())
     monkeypatch.setattr(main_module, "_held_position_monitor_active", _Held())
+    monkeypatch.setattr(main_module, "_defer_for_held_position_monitor", lambda _job: False)
     monkeypatch.setattr(
         main_module,
         "_edli_event_reactor_cycle",
@@ -1609,7 +1872,7 @@ def test_event_backed_wake_stays_queued_while_event_is_retryable(monkeypatch):
             return False
 
     calls: list[str] = []
-    monkeypatch.setattr(reactor_wake, "read_reactor_wake", lambda: wake)
+    monkeypatch.setattr(reactor_wake, "read_reactor_wake", lambda **_kwargs: wake)
     monkeypatch.setattr(
         reactor_wake,
         "acknowledge_reactor_wake",
@@ -1617,6 +1880,7 @@ def test_event_backed_wake_stays_queued_while_event_is_retryable(monkeypatch):
     )
     monkeypatch.setattr(main_module, "_edli_reactor_active_lock", _Lock())
     monkeypatch.setattr(main_module, "_held_position_monitor_active", _Held())
+    monkeypatch.setattr(main_module, "_defer_for_held_position_monitor", lambda _job: False)
     monkeypatch.setattr(
         main_module,
         "_edli_event_reactor_cycle",
@@ -1978,7 +2242,7 @@ def test_held_position_monitor_only_pauses_lock_competing_decision_work():
         monitor_competing_jobs = {
             "edli_event_reactor",
             "market_discovery",
-            "EDLI mainstream warm",
+            "live_health_composite",
         }
         for job_name in monitor_competing_jobs:
             assert main_module._defer_for_held_position_monitor(job_name) is True
@@ -2039,7 +2303,7 @@ def test_market_substrate_warm_cycle_exists_and_refreshes_once(monkeypatch):
     monkeypatch.setattr(substrate_observer, "money_path_substrate_priority_active", lambda: False)
     monkeypatch.setattr(
         "src.data.job_lock.acquire_lock",
-        lambda _name: contextlib.nullcontext(True),
+        lambda _name, **_kwargs: contextlib.nullcontext(True),
     )
     _enable_edli_cfg(monkeypatch, enabled=True)
 
@@ -2071,7 +2335,7 @@ def test_money_path_priority_cycle_prioritizes_claim_order_families(monkeypatch)
     monkeypatch.setattr(substrate_observer, "money_path_substrate_priority_active", lambda: False)
     monkeypatch.setattr(
         "src.data.job_lock.acquire_lock",
-        lambda _name: contextlib.nullcontext(True),
+        lambda _name, **_kwargs: contextlib.nullcontext(True),
     )
     _enable_edli_cfg(monkeypatch, enabled=False)
 
@@ -2079,6 +2343,607 @@ def test_money_path_priority_cycle_prioritizes_claim_order_families(monkeypatch)
 
     assert calls and calls[0]["extra_priority_families"] == claim_families
     assert calls[0]["include_pending_families"] is False
+
+
+def _patch_priority_cycle_runtime(monkeypatch, control_query):
+    import src.state.db as state_db
+
+    monkeypatch.setattr(state_db, "get_world_connection", lambda: _FakeConn())
+    monkeypatch.setattr(
+        state_db, "get_forecasts_connection_read_only", lambda: _FakeConn(), raising=False
+    )
+    monkeypatch.setattr(
+        state_db,
+        "get_trade_connection_read_only",
+        lambda: _PriorityScopeFakeConn(),
+        raising=False,
+    )
+    monkeypatch.setattr(state_db, "query_control_override_state", control_query)
+    monkeypatch.setattr(
+        "src.data.job_lock.acquire_lock",
+        lambda _name, **_kwargs: contextlib.nullcontext(True),
+    )
+    _enable_edli_cfg(monkeypatch, enabled=True)
+
+
+def _patch_warm_cycle_runtime(monkeypatch, control_query):
+    import src.state.db as state_db
+
+    monkeypatch.setattr(state_db, "get_world_connection", lambda: _FakeConn())
+    monkeypatch.setattr(
+        state_db, "get_forecasts_connection_read_only", lambda: _FakeConn(), raising=False
+    )
+    monkeypatch.setattr(state_db, "query_control_override_state", control_query)
+    monkeypatch.setattr(substrate_observer, "money_path_substrate_priority_active", lambda: False)
+    monkeypatch.setattr(
+        "src.data.job_lock.acquire_lock",
+        lambda _name, **_kwargs: contextlib.nullcontext(True),
+    )
+    _enable_edli_cfg(monkeypatch, enabled=True)
+
+
+def test_market_substrate_warm_cycle_pause_suppression_resets_next_tick(monkeypatch):
+    """Trusted pause suppresses pending urgency promotion for only the current tick."""
+
+    calls: list[dict] = []
+    control_reads: list[str] = []
+    control_states = iter(
+        (
+            {"status": "ok", "entries_paused": True},
+            {"status": "ok", "entries_paused": False},
+        )
+    )
+
+    def control_query(_conn, *, now):
+        control_reads.append(now)
+        return next(control_states)
+
+    monkeypatch.setattr(
+        substrate_observer,
+        "_refresh_pending_family_snapshots",
+        lambda *a, **k: calls.append(k)
+        or {"status": "refreshed", "attempted": 1, "inserted": 1},
+    )
+    _patch_warm_cycle_runtime(monkeypatch, control_query)
+
+    paused_result = substrate_observer._edli_market_substrate_warm_cycle()
+    resumed_result = substrate_observer._edli_market_substrate_warm_cycle()
+
+    assert len(control_reads) == 2
+    assert all(now.endswith("+00:00") for now in control_reads)
+    assert [call["promote_pending_urgency"] for call in calls] == [False, True]
+    assert all(call["include_pending_families"] is True for call in calls)
+    assert all(call["include_money_risk_families"] is False for call in calls)
+    assert paused_result["pending_urgency_promotion_suppressed"] is True
+    assert paused_result["pending_urgency_promotion_suppression_reason"] == "entries_paused"
+    assert paused_result["control_authority_status"] == "ok"
+    assert paused_result["control_authority_degraded"] is False
+    assert resumed_result["pending_urgency_promotion_suppressed"] is False
+    assert resumed_result["pending_urgency_promotion_suppression_reason"] is None
+    assert resumed_result["control_authority_status"] == "ok"
+    assert resumed_result["control_authority_degraded"] is False
+
+
+@pytest.mark.parametrize("control_mode", ["exception", "non_ok"])
+def test_market_substrate_warm_cycle_control_degraded_promotes_pending_urgency(
+    monkeypatch, control_mode
+):
+    """Unavailable control authority fails open for pending evidence priority."""
+
+    calls: list[dict] = []
+
+    def control_query(_conn, *, now):
+        if control_mode == "exception":
+            raise RuntimeError("control read failed")
+        return {"status": "degraded", "entries_paused": True}
+
+    monkeypatch.setattr(
+        substrate_observer,
+        "_refresh_pending_family_snapshots",
+        lambda *a, **k: calls.append(k)
+        or {"status": "refreshed", "attempted": 1, "inserted": 1},
+    )
+    _patch_warm_cycle_runtime(monkeypatch, control_query)
+
+    result = substrate_observer._edli_market_substrate_warm_cycle()
+
+    assert calls and calls[0]["promote_pending_urgency"] is True
+    assert result["pending_urgency_promotion_suppressed"] is False
+    assert result["control_authority_degraded"] is True
+    if control_mode == "exception":
+        assert result["control_authority_status"] == "unavailable"
+        assert result["control_authority_reason"] == "control_authority_unavailable"
+    else:
+        assert result["control_authority_status"] == "degraded"
+        assert result["control_authority_reason"] == "control_authority_non_ok:degraded"
+
+
+@pytest.mark.parametrize(
+    ("control_state", "expected_status", "expected_reason"),
+    [
+        (None, "unavailable", "control_authority_unavailable"),
+        ({"status": "ok"}, "ok", "control_authority_malformed:entries_paused"),
+        (
+            {"status": "ok", "entries_paused": "true"},
+            "ok",
+            "control_authority_malformed:entries_paused",
+        ),
+        (
+            {"status": "missing_table", "entries_paused": False},
+            "missing_table",
+            "control_authority_non_ok:missing_table",
+        ),
+    ],
+    ids=("non-dict", "missing-entries-paused", "string-true", "missing-table"),
+)
+def test_market_substrate_warm_cycle_malformed_control_fails_open_exactly(
+    monkeypatch, control_state, expected_status, expected_reason
+):
+    """Malformed or missing control authority cannot suppress evidence refresh."""
+
+    calls: list[dict] = []
+    monkeypatch.setattr(
+        substrate_observer,
+        "_refresh_pending_family_snapshots",
+        lambda *a, **k: calls.append(k)
+        or {"status": "refreshed", "attempted": 1, "inserted": 1},
+    )
+    _patch_warm_cycle_runtime(
+        monkeypatch,
+        lambda _conn, *, now: control_state,
+    )
+
+    result = substrate_observer._edli_market_substrate_warm_cycle()
+
+    assert calls and calls[0]["promote_pending_urgency"] is True
+    assert result["promote_pending_urgency"] is True
+    assert result["pending_urgency_promotion_suppressed"] is False
+    assert result["pending_urgency_promotion_suppression_reason"] is None
+    assert result["control_authority_degraded"] is True
+    assert result["control_authority_status"] == expected_status
+    assert result["control_authority_reason"] == expected_reason
+
+
+def test_money_path_priority_cycle_suppresses_claim_families_when_entries_paused(monkeypatch):
+    """Trusted global entry pause suppresses only claim-derived family promotion."""
+
+    calls: list[dict] = []
+    claim_reads: list[int] = []
+    claim_families = [("Tokyo", "2026-06-28", "high")]
+    control_reads: list[str] = []
+
+    def control_query(_conn, *, now):
+        control_reads.append(now)
+        return {"status": "ok", "entries_paused": True}
+
+    monkeypatch.setattr(substrate_observer, "money_path_substrate_priority_active", lambda: False)
+    monkeypatch.setattr(
+        substrate_observer,
+        "_claim_order_priority_families_for_refresh",
+        lambda *a, **k: claim_reads.append(1) or claim_families,
+    )
+    monkeypatch.setattr(
+        substrate_observer,
+        "_refresh_pending_family_snapshots",
+        lambda *a, **k: calls.append(k) or {"status": "refreshed", "attempted": 1, "inserted": 1},
+    )
+    _patch_priority_cycle_runtime(monkeypatch, control_query)
+
+    result = substrate_observer._edli_money_path_substrate_priority_cycle()
+
+    assert control_reads and control_reads[0].endswith("+00:00")
+    assert claim_reads == []
+    assert calls == []
+    assert result["status"] == "no_money_path_priority_scope"
+    assert result["claim_order_priority_families"] == 0
+    assert result["claim_order_priority_suppressed"] is True
+    assert result["claim_order_priority_suppression_reason"] == "entries_paused"
+    assert result["control_authority_status"] == "ok"
+    assert result["control_authority_degraded"] is False
+
+
+def test_money_path_priority_cycle_paused_preserves_exact_open_rest_and_held_scope(monkeypatch):
+    """Entry pause must not suppress exact open-rest or held-position conditions."""
+
+    calls: list[dict] = []
+    claim_reads: list[int] = []
+    condition_families = [("Paris", "2026-06-30", "high")]
+
+    monkeypatch.setattr(substrate_observer, "money_path_substrate_priority_active", lambda: False)
+    monkeypatch.setattr(
+        substrate_observer,
+        "_strict_open_rest_condition_ids_for_refresh",
+        lambda *a, **k: ["cond-rest"],
+    )
+    monkeypatch.setattr(
+        substrate_observer,
+        "_strict_held_position_condition_ids",
+        lambda: ["cond-held"],
+    )
+    monkeypatch.setattr(
+        substrate_observer,
+        "_strict_condition_priority_scope_for_refresh",
+        lambda _conn, condition_ids: condition_families,
+    )
+    monkeypatch.setattr(
+        substrate_observer,
+        "_claim_order_priority_families_for_refresh",
+        lambda *a, **k: claim_reads.append(1) or [("Tokyo", "2026-06-30", "low")],
+    )
+    monkeypatch.setattr(
+        substrate_observer,
+        "_refresh_pending_family_snapshots",
+        lambda *a, **k: calls.append(k) or {"status": "refreshed", "attempted": 2, "inserted": 2},
+    )
+    _patch_priority_cycle_runtime(
+        monkeypatch,
+        lambda _conn, *, now: {"status": "ok", "entries_paused": True},
+    )
+
+    result = substrate_observer._edli_money_path_substrate_priority_cycle()
+
+    assert claim_reads == []
+    assert calls and calls[0]["priority_condition_ids"] == ["cond-rest", "cond-held"]
+    assert calls[0]["priority_write_condition_ids"] == ("cond-held",)
+    assert calls[0]["extra_priority_families"] == condition_families
+    assert result["open_rest_priority_condition_ids"] == 1
+    assert result["held_position_priority_condition_ids"] == 1
+    assert result["claim_order_priority_suppressed"] is True
+
+
+def test_money_path_priority_cycle_paused_fc03_preserves_exact_force_scope(monkeypatch):
+    """Entry pause must not broaden or alter an exact FC-03 recapture."""
+
+    calls: list[dict] = []
+    claim_reads: list[int] = []
+    marker_condition_ids = ["winner-condition"]
+    marker_families = [("Shanghai", "2026-06-28", "high")]
+    monkeypatch.setattr(substrate_observer, "money_path_substrate_priority_active", lambda: True)
+    monkeypatch.setattr(
+        substrate_observer,
+        "money_path_substrate_priority_request",
+        lambda: {
+            "request_id": "req-paused-fc03",
+            "families": marker_families,
+            "condition_ids": marker_condition_ids,
+            "force_refresh_condition_ids": marker_condition_ids,
+        },
+    )
+    monkeypatch.setattr(
+        substrate_observer,
+        "money_path_substrate_priority_families",
+        lambda: marker_families,
+    )
+    monkeypatch.setattr(
+        substrate_observer,
+        "money_path_substrate_priority_condition_ids",
+        lambda: marker_condition_ids,
+    )
+    monkeypatch.setattr(
+        substrate_observer,
+        "_strict_condition_priority_scope_for_refresh",
+        lambda _conn, _condition_ids: marker_families,
+    )
+    monkeypatch.setattr(
+        substrate_observer,
+        "_claim_order_priority_families_for_refresh",
+        lambda *a, **k: claim_reads.append(1) or [("Tokyo", "2026-06-28", "low")],
+    )
+    monkeypatch.setattr(
+        substrate_observer,
+        "_refresh_pending_family_snapshots",
+        lambda *a, **k: calls.append(k) or {"status": "refreshed", "attempted": 1, "inserted": 1},
+    )
+    _patch_priority_cycle_runtime(
+        monkeypatch,
+        lambda _conn, *, now: {"status": "ok", "entries_paused": True},
+    )
+
+    result = substrate_observer._edli_money_path_substrate_priority_cycle()
+
+    assert claim_reads == []
+    assert calls and calls[0]["extra_priority_families"] == marker_families
+    assert calls[0]["priority_condition_ids"] == marker_condition_ids
+    assert calls[0]["force_refresh_condition_ids"] == marker_condition_ids
+    assert calls[0]["priority_write_condition_ids"] == tuple(marker_condition_ids)
+    assert calls[0]["include_money_risk_families"] is False
+    assert calls[0]["request_priority"] is substrate_observer.RequestPriority.SUBMIT_JIT
+    assert result["claim_order_priority_suppressed"] is True
+
+
+def test_money_path_priority_cycle_paused_marker_without_force_preserves_marker_scope(
+    monkeypatch,
+):
+    """Paused entries suppress claim-only lookahead, not an explicit non-forced marker."""
+
+    calls: list[dict] = []
+    claim_reads: list[int] = []
+    marker_condition_ids = ["marker-condition"]
+    marker_families = [("Paris", "2026-06-30", "low")]
+    monkeypatch.setattr(substrate_observer, "money_path_substrate_priority_active", lambda: True)
+    monkeypatch.setattr(
+        substrate_observer,
+        "money_path_substrate_priority_request",
+        lambda: {
+            "request_id": "req-paused-marker",
+            "families": marker_families,
+            "condition_ids": marker_condition_ids,
+            "force_refresh_condition_ids": [],
+        },
+    )
+    monkeypatch.setattr(
+        substrate_observer,
+        "money_path_substrate_priority_families",
+        lambda: marker_families,
+    )
+    monkeypatch.setattr(
+        substrate_observer,
+        "money_path_substrate_priority_condition_ids",
+        lambda: marker_condition_ids,
+    )
+    monkeypatch.setattr(
+        substrate_observer,
+        "_strict_condition_priority_scope_for_refresh",
+        lambda _conn, _condition_ids: marker_families,
+    )
+    monkeypatch.setattr(
+        substrate_observer,
+        "_claim_order_priority_families_for_refresh",
+        lambda *a, **k: claim_reads.append(1) or [("Tokyo", "2026-06-30", "high")],
+    )
+    monkeypatch.setattr(
+        substrate_observer,
+        "_refresh_pending_family_snapshots",
+        lambda *a, **k: calls.append(k) or {"status": "refreshed", "attempted": 1, "inserted": 1},
+    )
+    _patch_priority_cycle_runtime(
+        monkeypatch,
+        lambda _conn, *, now: {"status": "ok", "entries_paused": True},
+    )
+
+    result = substrate_observer._edli_money_path_substrate_priority_cycle()
+
+    assert claim_reads == []
+    assert calls and calls[0]["extra_priority_families"] == marker_families
+    assert calls[0]["priority_condition_ids"] == marker_condition_ids
+    assert calls[0]["force_refresh_condition_ids"] == []
+    assert calls[0]["priority_write_condition_ids"] == ()
+    assert calls[0]["include_money_risk_families"] is False
+    assert result["claim_order_priority_suppressed"] is True
+    assert result["claim_order_priority_suppression_reason"] == "entries_paused"
+
+
+def test_paused_priority_preserves_discovery_capture_policy_and_event_rows(monkeypatch):
+    """Pause changes neither ordinary discovery capture policy nor durable event state."""
+
+    import src.state.db as state_db
+
+    marker_condition_ids = ["marker-condition"]
+    marker_families = [("Paris", "2026-06-30", "low")]
+    event_conn = _pending_family_conn("event-1", "Tokyo", "2026-06-30", "high")
+    before_events = event_conn.execute(
+        """
+        SELECT event_id, processing_status, attempt_count, claimed_at, last_error
+          FROM opportunity_event_processing
+         ORDER BY event_id
+        """
+    ).fetchall()
+    before_event_rows = event_conn.execute(
+        """
+        SELECT event_id, event_type, entity_key, payload_json, created_at
+          FROM opportunity_events
+         ORDER BY event_id
+        """
+    ).fetchall()
+
+    class _WorldConn:
+        def execute(self, sql, params=()):
+            if str(sql).lstrip().upper().startswith("ATTACH DATABASE"):
+                class _Cur:
+                    def fetchall(self_inner):
+                        return []
+
+                return _Cur()
+            return event_conn.execute(sql, params)
+
+        def close(self):
+            pass
+
+    calls: list[dict] = []
+    monkeypatch.setattr(substrate_observer, "money_path_substrate_priority_active", lambda: True)
+    monkeypatch.setattr(
+        substrate_observer,
+        "money_path_substrate_priority_request",
+        lambda: {
+            "request_id": "req-paused-preservation",
+            "families": marker_families,
+            "condition_ids": marker_condition_ids,
+            "force_refresh_condition_ids": [],
+        },
+    )
+    monkeypatch.setattr(
+        substrate_observer,
+        "money_path_substrate_priority_families",
+        lambda: marker_families,
+    )
+    monkeypatch.setattr(
+        substrate_observer,
+        "money_path_substrate_priority_condition_ids",
+        lambda: marker_condition_ids,
+    )
+    monkeypatch.setattr(
+        substrate_observer,
+        "_strict_condition_priority_scope_for_refresh",
+        lambda _conn, _condition_ids: marker_families,
+    )
+    monkeypatch.setattr(
+        substrate_observer,
+        "_claim_order_priority_families_for_refresh",
+        lambda *a, **k: (_ for _ in ()).throw(
+            AssertionError("paused marker cycle must not read claim-only families")
+        ),
+    )
+    monkeypatch.setattr(
+        substrate_observer,
+        "_refresh_pending_family_snapshots",
+        lambda *a, **k: calls.append(k) or {"status": "refreshed", "attempted": 1, "inserted": 1},
+    )
+    _patch_priority_cycle_runtime(
+        monkeypatch,
+        lambda _conn, *, now: {"status": "ok", "entries_paused": True},
+    )
+    monkeypatch.setattr(state_db, "get_world_connection", lambda: _WorldConn())
+
+    result = substrate_observer._edli_money_path_substrate_priority_cycle()
+
+    after_events = event_conn.execute(
+        """
+        SELECT event_id, processing_status, attempt_count, claimed_at, last_error
+          FROM opportunity_event_processing
+         ORDER BY event_id
+        """
+    ).fetchall()
+    after_event_rows = event_conn.execute(
+        """
+        SELECT event_id, event_type, entity_key, payload_json, created_at
+          FROM opportunity_events
+         ORDER BY event_id
+        """
+    ).fetchall()
+    assert result["claim_order_priority_suppressed"] is True
+    assert calls and calls[0]["extra_priority_families"] == marker_families
+    assert before_events == after_events
+    assert before_event_rows == after_event_rows
+
+    class _PolicyConn:
+        def __init__(self, has_full):
+            self.has_full = has_full
+
+        def execute(self, _sql, _params=()):
+            class _Cur:
+                def __init__(self, has_full):
+                    self.has_full = has_full
+
+                def fetchone(self_inner):
+                    return (1,) if self_inner.has_full else None
+
+            return _Cur(self.has_full)
+
+    policy_key = "policy-condition|policy-token"
+    policy_counts = {policy_key: 0}
+    monkeypatch.setattr(
+        market_scanner,
+        "_discovery_captures_since_keyframe",
+        policy_counts,
+    )
+    monkeypatch.setenv("ZEUS_SUBSTRATE_CAPTURE_KEYFRAME_INTERVAL_CYCLES", "2")
+    assert market_scanner._capture_policy_trigger(
+        _PolicyConn(False),
+        requested_trigger="DISCOVERY_SWEEP",
+        condition_id="policy-condition",
+        selected_token="policy-token",
+    ) == "KEYFRAME"
+    assert market_scanner._capture_policy_trigger(
+        _PolicyConn(True),
+        requested_trigger="DISCOVERY_SWEEP",
+        condition_id="policy-condition",
+        selected_token="policy-token",
+    ) == "DISCOVERY_SWEEP"
+    policy_counts[policy_key] = 1
+    assert market_scanner._capture_policy_trigger(
+        _PolicyConn(True),
+        requested_trigger="DISCOVERY_SWEEP",
+        condition_id="policy-condition",
+        selected_token="policy-token",
+    ) == "KEYFRAME"
+
+
+@pytest.mark.parametrize("control_mode", ["exception", "non_ok", "malformed"])
+def test_money_path_priority_cycle_control_authority_degraded_fails_open(
+    monkeypatch, control_mode
+):
+    """Unavailable control authority retains evidence refresh and never suppresses claims."""
+
+    calls: list[dict] = []
+    claim_reads: list[int] = []
+    claim_families = [("Tokyo", "2026-06-28", "low")]
+
+    def control_query(_conn, *, now):
+        if control_mode == "exception":
+            raise RuntimeError("control read failed")
+        if control_mode == "non_ok":
+            return {"status": "degraded", "entries_paused": True}
+        return {"status": "ok", "entries_paused": "true"}
+
+    monkeypatch.setattr(substrate_observer, "money_path_substrate_priority_active", lambda: False)
+    monkeypatch.setattr(
+        substrate_observer,
+        "_claim_order_priority_families_for_refresh",
+        lambda *a, **k: claim_reads.append(1) or claim_families,
+    )
+    monkeypatch.setattr(
+        substrate_observer,
+        "_refresh_pending_family_snapshots",
+        lambda *a, **k: calls.append(k) or {"status": "refreshed", "attempted": 1, "inserted": 1},
+    )
+    _patch_priority_cycle_runtime(monkeypatch, control_query)
+
+    result = substrate_observer._edli_money_path_substrate_priority_cycle()
+
+    assert claim_reads == [1]
+    assert calls and calls[0]["extra_priority_families"] == claim_families
+    assert result["claim_order_priority_suppressed"] is False
+    assert result["control_authority_degraded"] is True
+    if control_mode == "exception":
+        assert result["control_authority_status"] == "unavailable"
+        assert result["control_authority_reason"] == "control_authority_unavailable"
+    elif control_mode == "non_ok":
+        assert result["control_authority_status"] == "degraded"
+        assert result["control_authority_reason"] == "control_authority_non_ok:degraded"
+    else:
+        assert result["control_authority_status"] == "ok"
+        assert result["control_authority_reason"] == "control_authority_malformed:entries_paused"
+
+
+def test_money_path_priority_cycle_claim_suppression_resets_next_tick(monkeypatch):
+    """Paused claim suppression is per-cycle and resets when the pause expires."""
+
+    calls: list[dict] = []
+    claim_reads: list[int] = []
+    control_states = iter(
+        (
+            {"status": "ok", "entries_paused": True},
+            {"status": "ok", "entries_paused": False},
+        )
+    )
+    claim_families = [("Tokyo", "2026-06-28", "high")]
+
+    monkeypatch.setattr(substrate_observer, "money_path_substrate_priority_active", lambda: False)
+    monkeypatch.setattr(
+        substrate_observer,
+        "_claim_order_priority_families_for_refresh",
+        lambda *a, **k: claim_reads.append(1) or claim_families,
+    )
+    monkeypatch.setattr(
+        substrate_observer,
+        "_refresh_pending_family_snapshots",
+        lambda *a, **k: calls.append(k) or {"status": "refreshed", "attempted": 1, "inserted": 1},
+    )
+    _patch_priority_cycle_runtime(
+        monkeypatch,
+        lambda _conn, *, now: next(control_states),
+    )
+
+    paused_result = substrate_observer._edli_money_path_substrate_priority_cycle()
+    resumed_result = substrate_observer._edli_money_path_substrate_priority_cycle()
+
+    assert paused_result["status"] == "no_money_path_priority_scope"
+    assert len(calls) == 1
+    assert calls[0]["extra_priority_families"] == claim_families
+    assert claim_reads == [1]
+    assert paused_result["claim_order_priority_suppressed"] is True
+    assert resumed_result["claim_order_priority_suppressed"] is False
+    assert resumed_result["claim_order_priority_suppression_reason"] is None
 
 
 def test_money_path_priority_cycle_resolves_condition_marker_without_pending_backlog(
@@ -2145,7 +3010,7 @@ def test_money_path_priority_cycle_resolves_condition_marker_without_pending_bac
     )
     monkeypatch.setattr(
         "src.data.job_lock.acquire_lock",
-        lambda _name: contextlib.nullcontext(True),
+        lambda _name, **_kwargs: contextlib.nullcontext(True),
     )
     _enable_edli_cfg(monkeypatch, enabled=True)
 
@@ -2183,7 +3048,7 @@ def test_money_path_priority_cycle_claim_read_failure_does_not_sweep_backlog(
     )
     monkeypatch.setattr(
         "src.data.job_lock.acquire_lock",
-        lambda _name: contextlib.nullcontext(True),
+        lambda _name, **_kwargs: contextlib.nullcontext(True),
     )
     _enable_edli_cfg(monkeypatch, enabled=True)
 
@@ -2206,17 +3071,17 @@ def test_money_path_priority_cycle_exact_conditions_do_not_displace_claim_family
     monkeypatch.setattr(substrate_observer, "money_path_substrate_priority_active", lambda: False)
     monkeypatch.setattr(
         substrate_observer,
-        "_open_rest_condition_ids_for_refresh",
+        "_strict_open_rest_condition_ids_for_refresh",
         lambda *a, **k: ["cond-rest"],
     )
     monkeypatch.setattr(
         substrate_observer,
-        "_edli_current_held_position_condition_ids",
+        "_strict_held_position_condition_ids",
         lambda: ["cond-held"],
     )
     monkeypatch.setattr(
         substrate_observer,
-        "_condition_priority_families_for_refresh",
+        "_strict_condition_priority_scope_for_refresh",
         lambda _conn, _condition_ids: condition_families,
     )
     monkeypatch.setattr(
@@ -2240,7 +3105,7 @@ def test_money_path_priority_cycle_exact_conditions_do_not_displace_claim_family
     )
     monkeypatch.setattr(
         "src.data.job_lock.acquire_lock",
-        lambda _name: contextlib.nullcontext(True),
+        lambda _name, **_kwargs: contextlib.nullcontext(True),
     )
     _enable_edli_cfg(monkeypatch, enabled=True)
 
@@ -2270,7 +3135,7 @@ def test_market_substrate_warm_cycle_runs_while_reactor_active(monkeypatch):
     monkeypatch.setattr(substrate_observer, "money_path_substrate_priority_active", lambda: False)
     monkeypatch.setattr(
         "src.data.job_lock.acquire_lock",
-        lambda _name: contextlib.nullcontext(True),
+        lambda _name, **_kwargs: contextlib.nullcontext(True),
     )
     _enable_edli_cfg(monkeypatch, enabled=True)
 
@@ -2345,7 +3210,7 @@ def test_market_substrate_warm_cycle_ignores_empty_priority_marker(monkeypatch):
     )
     monkeypatch.setattr(
         "src.data.job_lock.acquire_lock",
-        lambda _name: contextlib.nullcontext(True),
+        lambda _name, **_kwargs: contextlib.nullcontext(True),
     )
     _enable_edli_cfg(monkeypatch, enabled=True)
 
@@ -2358,8 +3223,8 @@ def test_market_substrate_warm_cycle_ignores_empty_priority_marker(monkeypatch):
     assert receipts == []
 
 
-def test_money_path_priority_cycle_records_empty_scope_as_noop(monkeypatch):
-    """An empty priority marker is observable, but it is not a scheduler failure."""
+def test_money_path_priority_cycle_records_fully_empty_scope_as_noop(monkeypatch):
+    """Only marker plus independent authority scope being empty is a zero-lock no-op."""
 
     calls: list[int] = []
     receipts: list[dict] = []
@@ -2377,20 +3242,571 @@ def test_money_path_priority_cycle_records_empty_scope_as_noop(monkeypatch):
     monkeypatch.setattr(substrate_observer, "money_path_substrate_priority_families", lambda: [])
     monkeypatch.setattr(substrate_observer, "money_path_substrate_priority_condition_ids", lambda: [])
     monkeypatch.setattr(
+        substrate_observer, "_strict_open_rest_condition_ids_for_refresh", lambda *a, **k: []
+    )
+    monkeypatch.setattr(substrate_observer, "_strict_held_position_condition_ids", lambda: [])
+    monkeypatch.setattr(
+        substrate_observer,
+        "_strict_condition_priority_scope_for_refresh",
+        lambda *a, **k: [],
+    )
+    monkeypatch.setattr(
+        substrate_observer, "_claim_order_priority_families_for_refresh", lambda *a, **k: []
+    )
+    monkeypatch.setattr(
         substrate_observer,
         "record_money_path_substrate_priority_receipt",
         lambda **kwargs: receipts.append(kwargs),
     )
-    _enable_edli_cfg(monkeypatch, enabled=True)
+    _patch_priority_cycle_runtime(
+        monkeypatch,
+        lambda _conn, *, now: {"status": "ok", "entries_paused": False},
+    )
 
     result = substrate_observer._edli_money_path_substrate_priority_cycle()
 
     assert calls == []
-    assert result["status"] == "priority_request_empty_scope"
+    assert result["status"] == "no_money_path_priority_scope"
     assert result["scheduler_failed"] is False
     assert receipts
-    assert receipts[0]["summary"]["status"] == "priority_request_empty_scope"
+    assert receipts[0]["summary"]["status"] == "no_money_path_priority_scope"
     assert receipts[0]["summary"]["scheduler_failed"] is False
+
+
+def test_empty_marker_still_discovers_and_services_held_scope(monkeypatch):
+    """An empty request cannot hide independently authoritative held exposure."""
+
+    refresh_calls: list[dict] = []
+    monkeypatch.setattr(
+        substrate_observer,
+        "money_path_substrate_priority_request",
+        lambda: {"request_id": "empty-with-held", "families": [], "condition_ids": []},
+    )
+    monkeypatch.setattr(substrate_observer, "_strict_open_rest_condition_ids_for_refresh", lambda *a, **k: [])
+    monkeypatch.setattr(
+        substrate_observer,
+        "_strict_held_position_condition_ids",
+        lambda: ["held-condition"],
+    )
+    monkeypatch.setattr(
+        substrate_observer,
+        "_strict_condition_priority_scope_for_refresh",
+        lambda *_a, **_k: [("Paris", "2026-08-04", "high")],
+    )
+    monkeypatch.setattr(
+        substrate_observer, "_claim_order_priority_families_for_refresh", lambda *a, **k: []
+    )
+    monkeypatch.setattr(
+        substrate_observer,
+        "_refresh_pending_family_snapshots",
+        lambda *a, **k: refresh_calls.append(k)
+        or {"status": "refreshed", "attempted": 1, "inserted": 1},
+    )
+    _patch_priority_cycle_runtime(
+        monkeypatch,
+        lambda _conn, *, now: {"status": "ok", "entries_paused": False},
+    )
+
+    result = substrate_observer._edli_money_path_substrate_priority_cycle()
+
+    assert refresh_calls
+    assert refresh_calls[0]["priority_condition_ids"] == ["held-condition"]
+    assert refresh_calls[0]["priority_write_condition_ids"] == (
+        "held-condition",
+    )
+    assert result["held_position_priority_condition_ids"] == 1
+
+
+@pytest.mark.parametrize("failed_reader", ["open_rest", "held_position"])
+def test_priority_real_fail_soft_scope_helpers_become_typed_failures(
+    monkeypatch, failed_reader
+):
+    """The real helpers' swallowed DB errors must not become a healthy empty scope."""
+
+    class _BrokenReadConn(_FakeConn):
+        def execute(self, *a, **k):
+            raise sqlite3.OperationalError(f"{failed_reader} authority unavailable")
+
+    receipts: list[dict] = []
+    refresh_calls: list[dict] = []
+    monkeypatch.setattr(substrate_observer, "money_path_substrate_priority_request", lambda: None)
+    monkeypatch.setattr(
+        substrate_observer, "_claim_order_priority_families_for_refresh", lambda *a, **k: []
+    )
+    monkeypatch.setattr(
+        substrate_observer,
+        "_strict_condition_priority_scope_for_refresh",
+        lambda *_a, **_k: [],
+    )
+    if failed_reader == "open_rest":
+        monkeypatch.setattr(
+            substrate_observer,
+            "_strict_held_position_condition_ids",
+            lambda: [],
+        )
+    else:
+        monkeypatch.setattr(
+            substrate_observer,
+            "_strict_open_rest_condition_ids_for_refresh",
+            lambda *a, **k: [],
+        )
+    monkeypatch.setattr(
+        substrate_observer,
+        "_refresh_pending_family_snapshots",
+        lambda *a, **k: refresh_calls.append(k)
+        or {"status": "no_work", "attempted": 0, "inserted": 0},
+    )
+    monkeypatch.setattr(
+        substrate_observer,
+        "record_money_path_substrate_priority_receipt",
+        lambda **kwargs: receipts.append(kwargs),
+    )
+    _patch_priority_cycle_runtime(
+        monkeypatch,
+        lambda _conn, *, now: {"status": "ok", "entries_paused": False},
+    )
+    import src.state.db as state_db
+
+    monkeypatch.setattr(state_db, "get_trade_connection_read_only", lambda: _BrokenReadConn())
+
+    result = substrate_observer._edli_money_path_substrate_priority_cycle()
+
+    assert result["scheduler_failed"] is True
+    assert failed_reader in result["priority_scope_read_failures"]
+    assert refresh_calls
+    assert receipts and receipts[-1]["summary"]["scheduler_failed"] is True
+
+
+def test_priority_real_topology_read_failure_is_durable(monkeypatch):
+    """The real topology helper cannot swallow SQL failure into a healthy receipt."""
+
+    marker = {
+        "request_id": "topology-read-failure",
+        "families": [],
+        "condition_ids": ["condition-known"],
+        "force_refresh_condition_ids": ["condition-known"],
+    }
+
+    class _BrokenForecastConn(_FakeConn):
+        def execute(self, *a, **k):
+            raise sqlite3.OperationalError("market_events unavailable")
+
+    receipts: list[dict] = []
+    monkeypatch.setattr(substrate_observer, "money_path_substrate_priority_request", lambda: marker)
+    monkeypatch.setattr(
+        substrate_observer,
+        "_refresh_pending_family_snapshots",
+        lambda *a, **k: {"status": "no_work", "attempted": 0, "inserted": 0},
+    )
+    monkeypatch.setattr(
+        substrate_observer,
+        "record_money_path_substrate_priority_receipt",
+        lambda **kwargs: receipts.append(kwargs),
+    )
+    _patch_priority_cycle_runtime(
+        monkeypatch,
+        lambda _conn, *, now: {"status": "ok", "entries_paused": False},
+    )
+    import src.state.db as state_db
+
+    monkeypatch.setattr(
+        state_db, "get_forecasts_connection_read_only", lambda: _BrokenForecastConn()
+    )
+
+    result = substrate_observer._edli_money_path_substrate_priority_cycle()
+
+    assert result["scheduler_failed"] is True
+    assert "condition_topology" in result["priority_scope_read_failures"]
+    assert receipts and receipts[-1]["summary"]["scheduler_failed"] is True
+
+
+def test_priority_unresolved_exact_condition_is_failed_and_receipted(monkeypatch):
+    """A known condition identity without a family mapping is unserviceable, not empty."""
+
+    marker = {
+        "request_id": "unresolved-condition",
+        "families": [],
+        "condition_ids": ["condition-missing-topology"],
+        "force_refresh_condition_ids": ["condition-missing-topology"],
+    }
+    receipts: list[dict] = []
+    monkeypatch.setattr(substrate_observer, "money_path_substrate_priority_request", lambda: marker)
+    monkeypatch.setattr(
+        substrate_observer,
+        "_refresh_pending_family_snapshots",
+        lambda *a, **k: {"status": "no_work", "attempted": 0, "inserted": 0},
+    )
+    monkeypatch.setattr(
+        substrate_observer,
+        "record_money_path_substrate_priority_receipt",
+        lambda **kwargs: receipts.append(kwargs),
+    )
+    _patch_priority_cycle_runtime(
+        monkeypatch,
+        lambda _conn, *, now: {"status": "ok", "entries_paused": False},
+    )
+
+    result = substrate_observer._edli_money_path_substrate_priority_cycle()
+
+    assert result["scheduler_failed"] is True
+    assert result["unresolved_priority_condition_ids"] == ["condition-missing-topology"]
+    assert receipts and receipts[-1]["summary"]["scheduler_failed"] is True
+
+
+def test_no_scope_priority_never_touches_writer_lock_and_warm_executes(monkeypatch):
+    """Concurrent empty priority discovery cannot consume the warm writer tick."""
+
+    class _TrackingLock:
+        def __init__(self):
+            self._lock = threading.Lock()
+            self.attempts: list[str] = []
+
+        def acquire(self, *args, **kwargs):
+            self.attempts.append(threading.current_thread().name)
+            return self._lock.acquire(*args, **kwargs)
+
+        def release(self):
+            self._lock.release()
+
+    writer_lock = _TrackingLock()
+    warm_calls: list[str] = []
+    errors: list[BaseException] = []
+    results: dict[str, dict | None] = {}
+    start = threading.Barrier(3)
+
+    monkeypatch.setattr(substrate_observer, "_market_substrate_refresh_lock", writer_lock)
+    monkeypatch.setattr(substrate_observer, "money_path_substrate_priority_active", lambda: False)
+    monkeypatch.setattr(substrate_observer, "money_path_substrate_priority_request", lambda: None)
+    monkeypatch.setattr(substrate_observer, "_strict_open_rest_condition_ids_for_refresh", lambda *a, **k: [])
+    monkeypatch.setattr(substrate_observer, "_strict_held_position_condition_ids", lambda: [])
+    monkeypatch.setattr(
+        substrate_observer, "_strict_condition_priority_scope_for_refresh", lambda *a, **k: []
+    )
+    monkeypatch.setattr(
+        substrate_observer, "_claim_order_priority_families_for_refresh", lambda *a, **k: []
+    )
+    monkeypatch.setattr(
+        substrate_observer,
+        "_refresh_pending_family_snapshots",
+        lambda *a, **k: warm_calls.append(threading.current_thread().name)
+        or {"status": "no_work", "attempted": 0, "inserted": 0},
+    )
+    _patch_priority_cycle_runtime(
+        monkeypatch,
+        lambda _conn, *, now: {"status": "ok", "entries_paused": False},
+    )
+
+    def _run(name, fn):
+        start.wait()
+        try:
+            results[name] = fn()
+        except BaseException as exc:  # noqa: BLE001 - thread assertion transport
+            errors.append(exc)
+
+    priority = threading.Thread(
+        target=_run,
+        args=("priority", substrate_observer._edli_money_path_substrate_priority_cycle),
+        name="priority",
+    )
+    warm = threading.Thread(
+        target=_run,
+        args=("warm", substrate_observer._edli_market_substrate_warm_cycle),
+        name="warm",
+    )
+    priority.start()
+    warm.start()
+    start.wait()
+    priority.join(timeout=2.0)
+    warm.join(timeout=2.0)
+
+    assert not priority.is_alive() and not warm.is_alive()
+    assert errors == []
+    assert "priority" not in writer_lock.attempts
+    assert "warm" in warm_calls
+    assert results["priority"]["status"] == "no_money_path_priority_scope"
+
+
+def test_priority_started_scope_read_makes_later_warm_yield_before_writer_lock(
+    monkeypatch, tmp_path
+):
+    """Priority intent covers scope reads and prevents a later broad warm overtake."""
+
+    import src.data.job_lock as job_lock
+    import src.state.db as state_db
+
+    class _TrackingLock:
+        def __init__(self):
+            self._lock = threading.Lock()
+            self.attempts: list[str] = []
+
+        def acquire(self, *args, **kwargs):
+            self.attempts.append(threading.current_thread().name)
+            return self._lock.acquire(*args, **kwargs)
+
+        def release(self):
+            self._lock.release()
+
+    writer_lock = _TrackingLock()
+    scope_read_started = threading.Event()
+    release_scope_read = threading.Event()
+    results: dict[str, dict | None] = {}
+    errors: list[BaseException] = []
+
+    def _strict_open_rest(*_args, **_kwargs):
+        scope_read_started.set()
+        release_scope_read.wait(timeout=2.0)
+        return ()
+
+    monkeypatch.setattr(job_lock, "_LOCKS_DIR", tmp_path)
+    monkeypatch.setattr(substrate_observer, "_market_substrate_refresh_lock", writer_lock)
+    monkeypatch.setattr(substrate_observer, "money_path_substrate_priority_active", lambda: False)
+    monkeypatch.setattr(substrate_observer, "money_path_substrate_priority_request", lambda: None)
+    monkeypatch.setattr(
+        substrate_observer, "_strict_open_rest_condition_ids_for_refresh", _strict_open_rest
+    )
+    monkeypatch.setattr(substrate_observer, "_strict_held_position_condition_ids", lambda: ())
+    monkeypatch.setattr(
+        substrate_observer, "_strict_condition_priority_scope_for_refresh", lambda *a, **k: []
+    )
+    monkeypatch.setattr(
+        substrate_observer, "_claim_order_priority_families_for_refresh", lambda *a, **k: []
+    )
+    monkeypatch.setattr(
+        substrate_observer,
+        "_refresh_pending_family_snapshots",
+        lambda *a, **k: (_ for _ in ()).throw(
+            AssertionError("neither no-scope priority nor yielded warm may refresh")
+        ),
+    )
+    monkeypatch.setattr(state_db, "get_world_connection", lambda: _FakeConn())
+    monkeypatch.setattr(state_db, "get_forecasts_connection_read_only", lambda: _FakeConn())
+    monkeypatch.setattr(state_db, "get_trade_connection_read_only", lambda: _PriorityScopeFakeConn())
+    monkeypatch.setattr(
+        state_db,
+        "query_control_override_state",
+        lambda _conn, *, now: {"status": "ok", "entries_paused": False},
+    )
+
+    def _run_priority():
+        try:
+            results["priority"] = substrate_observer._edli_money_path_substrate_priority_cycle()
+        except BaseException as exc:  # noqa: BLE001 - thread assertion transport
+            errors.append(exc)
+
+    priority = threading.Thread(target=_run_priority, name="priority")
+    priority.start()
+    assert scope_read_started.wait(1.0)
+    results["warm"] = substrate_observer._edli_market_substrate_warm_cycle()
+    release_scope_read.set()
+    priority.join(timeout=2.0)
+
+    assert not priority.is_alive()
+    assert errors == []
+    assert results["warm"]["status"] == "priority_intent_yield"
+    assert results["priority"]["status"] == "no_money_path_priority_scope"
+    assert writer_lock.attempts == []
+
+
+def test_discovery_yields_to_existing_priority_intent_before_writer_lock(monkeypatch, tmp_path):
+    """Discovery must pass the cross-process turnstile before touching writer authority."""
+
+    import src.data.job_lock as job_lock
+    from src.data.job_lock import acquire_market_substrate_turnstile
+
+    class _RejectWriterLock:
+        def acquire(self, *args, **kwargs):
+            raise AssertionError("discovery attempted writer lock before yielding")
+
+        def release(self):
+            raise AssertionError("unacquired writer lock was released")
+
+    monkeypatch.setattr(job_lock, "_LOCKS_DIR", tmp_path)
+    monkeypatch.setattr(substrate_observer, "_market_discovery_lock", threading.Lock())
+    monkeypatch.setattr(substrate_observer, "_market_substrate_refresh_lock", _RejectWriterLock())
+    monkeypatch.setattr(substrate_observer, "_market_discovery_last_completed_monotonic", None)
+    monkeypatch.setattr(substrate_observer, "money_path_substrate_priority_active", lambda: False)
+    import src.data.market_scanner as market_scanner
+    monkeypatch.setattr(market_scanner, "find_weather_markets_or_raise", lambda **_kwargs: [])
+
+    with acquire_market_substrate_turnstile(priority=True) as priority:
+        assert priority.acquired
+        result = substrate_observer._market_discovery_cycle()
+
+    assert result["status"] == "priority_intent_yield"
+    assert result["writer"] == "market_discovery"
+
+
+def test_priority_writer_and_warm_never_overlap_when_marker_is_active(monkeypatch):
+    """The active marker makes warm defer while priority owns the writer lock."""
+
+    marker = {
+        "request_id": "req-concurrent-writer",
+        "families": [("Shanghai", "2026-08-04", "high")],
+        "condition_ids": [],
+        "force_refresh_condition_ids": [],
+    }
+    entered = threading.Event()
+    release = threading.Event()
+    calls: list[str] = []
+    active_writers = 0
+    max_active_writers = 0
+
+    monkeypatch.setattr(substrate_observer, "_market_substrate_refresh_lock", threading.Lock())
+    monkeypatch.setattr(substrate_observer, "money_path_substrate_priority_active", lambda: True)
+    monkeypatch.setattr(substrate_observer, "money_path_substrate_priority_request", lambda: marker)
+    monkeypatch.setattr(
+        substrate_observer,
+        "money_path_substrate_priority_families",
+        lambda: marker["families"],
+    )
+    monkeypatch.setattr(substrate_observer, "money_path_substrate_priority_condition_ids", lambda: [])
+    monkeypatch.setattr(substrate_observer, "_strict_open_rest_condition_ids_for_refresh", lambda *a, **k: [])
+    monkeypatch.setattr(substrate_observer, "_strict_held_position_condition_ids", lambda: [])
+    monkeypatch.setattr(
+        substrate_observer, "_strict_condition_priority_scope_for_refresh", lambda *a, **k: []
+    )
+    monkeypatch.setattr(
+        substrate_observer, "_claim_order_priority_families_for_refresh", lambda *a, **k: []
+    )
+
+    def _refresh(*_args, **_kwargs):
+        nonlocal active_writers, max_active_writers
+        calls.append(threading.current_thread().name)
+        active_writers += 1
+        max_active_writers = max(max_active_writers, active_writers)
+        entered.set()
+        release.wait(timeout=2.0)
+        active_writers -= 1
+        return {"status": "refreshed", "attempted": 1, "inserted": 1}
+
+    monkeypatch.setattr(substrate_observer, "_refresh_pending_family_snapshots", _refresh)
+    _patch_priority_cycle_runtime(
+        monkeypatch,
+        lambda _conn, *, now: {"status": "ok", "entries_paused": False},
+    )
+
+    priority = threading.Thread(
+        target=substrate_observer._edli_money_path_substrate_priority_cycle,
+        name="priority",
+    )
+    priority.start()
+    assert entered.wait(1.0), "priority writer did not enter refresh"
+    warm_result = substrate_observer._edli_market_substrate_warm_cycle()
+    release.set()
+    priority.join(timeout=2.0)
+
+    assert not priority.is_alive()
+    assert calls == ["priority"]
+    assert max_active_writers == 1
+    assert warm_result["status"] == "priority_deferred_to_priority_lane"
+
+
+def test_priority_scope_read_failure_is_fail_closed_and_receipted(monkeypatch):
+    """A failed claim read without known scope cannot masquerade as no scope."""
+
+    refresh_calls: list[dict] = []
+    receipts: list[dict] = []
+    monkeypatch.setattr(substrate_observer, "money_path_substrate_priority_active", lambda: False)
+    monkeypatch.setattr(substrate_observer, "money_path_substrate_priority_request", lambda: None)
+    monkeypatch.setattr(substrate_observer, "money_path_substrate_priority_families", lambda: [])
+    monkeypatch.setattr(substrate_observer, "money_path_substrate_priority_condition_ids", lambda: [])
+    monkeypatch.setattr(substrate_observer, "_strict_open_rest_condition_ids_for_refresh", lambda *a, **k: [])
+    monkeypatch.setattr(substrate_observer, "_strict_held_position_condition_ids", lambda: [])
+    monkeypatch.setattr(
+        substrate_observer, "_strict_condition_priority_scope_for_refresh", lambda *a, **k: []
+    )
+    monkeypatch.setattr(
+        substrate_observer, "_claim_order_priority_families_for_refresh", lambda *a, **k: None
+    )
+    monkeypatch.setattr(
+        substrate_observer,
+        "_refresh_pending_family_snapshots",
+        lambda *a, **k: refresh_calls.append(k)
+        or {"status": "no_work", "attempted": 0, "inserted": 0},
+    )
+    monkeypatch.setattr(
+        substrate_observer,
+        "record_money_path_substrate_priority_receipt",
+        lambda **kwargs: receipts.append(kwargs),
+    )
+    _patch_priority_cycle_runtime(
+        monkeypatch,
+        lambda _conn, *, now: {"status": "ok", "entries_paused": False},
+    )
+
+    result = substrate_observer._edli_money_path_substrate_priority_cycle()
+
+    assert refresh_calls
+    assert result["status"] != "no_money_path_priority_scope"
+    assert result["priority_scope_read_failed"] is True
+    assert result["scheduler_failed"] is True
+    assert result["scheduler_failure_reason"] == "priority_scope_read_failed"
+    assert receipts
+    assert receipts[-1]["request"]["request_id"].startswith("implicit-priority-")
+    assert receipts[-1]["request"]["reason"] == "priority_scope_read_failure"
+
+
+def test_priority_marker_identity_change_after_lock_is_typed_retry(monkeypatch):
+    """A replaced marker cannot be serviced with the stale pre-lock scope."""
+
+    request_a = {
+        "request_id": "req-a",
+        "families": [("Paris", "2026-08-04", "high")],
+        "condition_ids": [],
+        "force_refresh_condition_ids": [],
+    }
+    request_b = {
+        "request_id": "req-b",
+        "families": [("Munich", "2026-08-04", "low")],
+        "condition_ids": [],
+        "force_refresh_condition_ids": [],
+    }
+    requests = iter((request_a, request_b))
+    refresh_calls: list[dict] = []
+    receipts: list[dict] = []
+
+    monkeypatch.setattr(substrate_observer, "money_path_substrate_priority_active", lambda: True)
+    monkeypatch.setattr(
+        substrate_observer, "money_path_substrate_priority_request", lambda: next(requests)
+    )
+    monkeypatch.setattr(
+        substrate_observer,
+        "money_path_substrate_priority_families",
+        lambda: request_a["families"],
+    )
+    monkeypatch.setattr(substrate_observer, "money_path_substrate_priority_condition_ids", lambda: [])
+    monkeypatch.setattr(substrate_observer, "_strict_open_rest_condition_ids_for_refresh", lambda *a, **k: [])
+    monkeypatch.setattr(substrate_observer, "_strict_held_position_condition_ids", lambda: [])
+    monkeypatch.setattr(
+        substrate_observer, "_strict_condition_priority_scope_for_refresh", lambda *a, **k: []
+    )
+    monkeypatch.setattr(
+        substrate_observer, "_claim_order_priority_families_for_refresh", lambda *a, **k: []
+    )
+    monkeypatch.setattr(
+        substrate_observer,
+        "_refresh_pending_family_snapshots",
+        lambda *a, **k: refresh_calls.append(k)
+        or {"status": "refreshed", "attempted": 1, "inserted": 1},
+    )
+    monkeypatch.setattr(
+        substrate_observer,
+        "record_money_path_substrate_priority_receipt",
+        lambda **kwargs: receipts.append(kwargs),
+    )
+    _patch_priority_cycle_runtime(
+        monkeypatch,
+        lambda _conn, *, now: {"status": "ok", "entries_paused": False},
+    )
+
+    result = substrate_observer._edli_money_path_substrate_priority_cycle()
+
+    assert refresh_calls == []
+    assert result["status"] == "priority_scope_changed_retry"
+    assert result["scheduler_failed"] is True
+    assert result["priority_request_id_before"] == "req-a"
+    assert result["priority_request_id_after"] == "req-b"
+    assert receipts and receipts[-1]["request"]["request_id"] == "req-b"
 
 
 def test_priority_conditions_deferred_when_refresh_inserted_substrate():
@@ -2456,7 +3872,7 @@ def test_money_path_priority_cycle_forced_condition_excludes_broad_claim_work(mo
     )
     monkeypatch.setattr(
         substrate_observer,
-        "_condition_priority_families_for_refresh",
+        "_strict_condition_priority_scope_for_refresh",
         lambda *a, **k: marker_families,
     )
     monkeypatch.setattr(
@@ -2478,7 +3894,7 @@ def test_money_path_priority_cycle_forced_condition_excludes_broad_claim_work(mo
     )
     monkeypatch.setattr(
         "src.data.job_lock.acquire_lock",
-        lambda _name: contextlib.nullcontext(True),
+        lambda _name, **_kwargs: contextlib.nullcontext(True),
     )
     _enable_edli_cfg(monkeypatch, enabled=True)
 
@@ -2541,7 +3957,7 @@ def test_money_path_priority_cycle_marker_family_does_not_starve_claim_order(mon
     )
     monkeypatch.setattr(
         "src.data.job_lock.acquire_lock",
-        lambda _name: contextlib.nullcontext(True),
+        lambda _name, **_kwargs: contextlib.nullcontext(True),
     )
     _enable_edli_cfg(monkeypatch, enabled=True)
 
@@ -2642,6 +4058,395 @@ def test_priority_family_expands_to_condition_priority_for_captured_books(monkey
     assert result["status"] == "refreshed"
     assert result["priority_condition_ids_requested"] == 2
     assert set(captured_kwargs[0]["priority_condition_ids"]) == {"cond-30", "cond-31"}
+
+
+def test_paused_pending_urgency_stays_discoverable_without_priority_marker(monkeypatch):
+    """Urgent pending work falls back to ordinary capture and resumes priority next tick."""
+
+    family = ("Tokyo", "2026-08-04", "high")
+    world_conn = _pending_family_conn("event-urgent", *family)
+    world_conn.execute(
+        "UPDATE opportunity_events SET event_type = 'EDLI_REDECISION_PENDING'"
+    )
+    before_event_rows = world_conn.execute(
+        """
+        SELECT event_id, event_type, payload_json, created_at
+          FROM opportunity_events
+         ORDER BY event_id
+        """
+    ).fetchall()
+    before_attempt_rows = world_conn.execute(
+        """
+        SELECT event_id, processing_status, attempt_count, claimed_at, last_error
+          FROM opportunity_event_processing
+         ORDER BY event_id
+        """
+    ).fetchall()
+    forecasts_conn = _FakeConn()
+    write_conn = _FakeConn()
+    topology_rows = [
+        {
+            "market_slug": "highest-temperature-in-tokyo-on-august-4-2026",
+            "city": "Tokyo",
+            "target_date": "2026-08-04",
+            "temperature_metric": "high",
+            "condition_id": "cond-tokyo-34",
+            "token_id": "yes-tokyo-34",
+            "range_label": "34C",
+        }
+    ]
+    cached_market = {
+        "slug": "highest-temperature-in-tokyo-on-august-4-2026",
+        "city": SimpleNamespace(name="Tokyo"),
+        "target_date": "2026-08-04",
+        "temperature_metric": "high",
+        "outcomes": [
+            {
+                "condition_id": "cond-tokyo-34",
+                "market_id": "cond-tokyo-34",
+                "token_id": "yes-tokyo-34",
+                "no_token_id": "no-tokyo-34",
+                "question_id": "q-tokyo-34",
+            }
+        ],
+    }
+
+    import src.data.market_topology_rows as topology_rows_module
+    import src.data.polymarket_client as polymarket_client
+    import src.state.db as state_db
+
+    monkeypatch.setattr(
+        topology_rows_module,
+        "_event_family_market_topology_rows",
+        lambda *a, **k: topology_rows,
+    )
+    monkeypatch.setattr(
+        market_scanner,
+        "reconstruct_weather_market_from_static_topology",
+        lambda *a, **k: cached_market,
+    )
+    monkeypatch.setattr(state_db, "get_trade_connection", lambda **k: write_conn)
+    monkeypatch.setattr(state_db, "get_trade_connection_read_only", lambda **k: _FakeConn())
+    monkeypatch.setattr(polymarket_client, "PolymarketClient", _FakePolymarketClient)
+    monkeypatch.setattr(substrate_observer, "_NEW_FAMILY_CONDITION_IDS", set())
+
+    captures: list[dict] = []
+
+    def _refresh(_conn, *, markets, **kwargs):
+        priority_conditions = set(kwargs.get("priority_condition_ids") or ())
+        capture_triggers = [
+            "PRIORITY_MARKER"
+            if str(outcome.get("condition_id") or "") in priority_conditions
+            else "DISCOVERY_SWEEP"
+            for market in markets
+            for outcome in market.get("outcomes", [])
+        ]
+        captures.append(
+            {
+                "markets": markets,
+                "priority_condition_ids": priority_conditions,
+                "capture_triggers": capture_triggers,
+            }
+        )
+        return {
+            "attempted": len(capture_triggers),
+            "inserted": len(capture_triggers),
+            "capture_triggers": capture_triggers,
+            "direct_clob_prefetch_selected_priority_condition_count": len(
+                priority_conditions
+            ),
+        }
+
+    monkeypatch.setattr(
+        market_scanner,
+        "refresh_executable_market_substrate_snapshots",
+        _refresh,
+    )
+
+    paused_result = substrate_observer._refresh_pending_family_snapshots(
+        world_conn,
+        forecasts_conn,
+        now_utc=datetime(2026, 8, 3, 12, 0, tzinfo=timezone.utc),
+        include_money_risk_families=False,
+        promote_pending_urgency=False,
+    )
+    resumed_result = substrate_observer._refresh_pending_family_snapshots(
+        world_conn,
+        forecasts_conn,
+        now_utc=datetime(2026, 8, 3, 12, 0, 20, tzinfo=timezone.utc),
+        include_money_risk_families=False,
+    )
+
+    assert paused_result["status"] == "refreshed"
+    assert paused_result["families_checked"] == 1
+    assert paused_result["pending_urgent_families"] == 1
+    assert paused_result["pending_urgent_priority_families"] == 0
+    assert paused_result["priority_family_count"] == 0
+    assert paused_result["priority_condition_ids_requested"] == 0
+    assert len(captures[0]["markets"]) == 1
+    assert captures[0]["markets"][0]["slug"] == cached_market["slug"]
+    assert captures[0]["priority_condition_ids"] == set()
+    assert captures[0]["capture_triggers"] == ["DISCOVERY_SWEEP"]
+
+    assert resumed_result["status"] == "refreshed"
+    assert resumed_result["promote_pending_urgency"] is True
+    assert resumed_result["pending_urgent_priority_families"] == 1
+    assert resumed_result["priority_family_count"] == 1
+    assert resumed_result["priority_condition_ids_requested"] == 1
+    assert captures[1]["priority_condition_ids"] == {"cond-tokyo-34"}
+    assert captures[1]["capture_triggers"] == ["PRIORITY_MARKER"]
+
+    after_event_rows = world_conn.execute(
+        """
+        SELECT event_id, event_type, payload_json, created_at
+          FROM opportunity_events
+         ORDER BY event_id
+        """
+    ).fetchall()
+    after_attempt_rows = world_conn.execute(
+        """
+        SELECT event_id, processing_status, attempt_count, claimed_at, last_error
+          FROM opportunity_event_processing
+         ORDER BY event_id
+        """
+    ).fetchall()
+    assert after_event_rows == before_event_rows
+    assert after_attempt_rows == before_attempt_rows
+
+
+def test_paused_pending_urgency_preserves_mixed_exact_priority_scopes(monkeypatch):
+    """Pause removes only urgent-pending promotion from a mixed refresh scope."""
+
+    urgent_family = ("Tokyo", "2026-08-05", "high")
+    explicit_family = ("Paris", "2026-08-05", "high")
+    fc03_family = ("Shanghai", "2026-08-05", "low")
+    open_rest_family = ("London", "2026-08-05", "high")
+    held_family = ("Munich", "2026-08-05", "low")
+    new_family = ("Seoul", "2026-08-05", "high")
+    family_conditions = {
+        explicit_family: "cond-explicit",
+        fc03_family: "cond-fc03",
+        open_rest_family: "cond-open-rest",
+        held_family: "cond-held",
+        new_family: "cond-new-family",
+        urgent_family: "cond-urgent-pending",
+    }
+    exact_priority_conditions = [
+        family_conditions[explicit_family],
+        family_conditions[fc03_family],
+        family_conditions[open_rest_family],
+        family_conditions[held_family],
+    ]
+
+    world_conn = _pending_family_conn("event-mixed-urgent", *urgent_family)
+    world_conn.execute(
+        "UPDATE opportunity_events SET event_type = 'EDLI_REDECISION_PENDING'"
+    )
+    world_conn.execute(
+        """
+        CREATE TABLE market_events (
+            condition_id TEXT PRIMARY KEY,
+            city TEXT,
+            target_date TEXT,
+            temperature_metric TEXT
+        )
+        """
+    )
+    world_conn.execute(
+        "INSERT INTO market_events VALUES (?, ?, ?, ?)",
+        (family_conditions[new_family], *new_family),
+    )
+
+    import src.data.market_topology_rows as topology_rows_module
+    import src.data.polymarket_client as polymarket_client
+    import src.state.db as state_db
+
+    topology_visits: list[tuple[str, str, str]] = []
+
+    def _topology_rows(_conn, payload):
+        family = (payload["city"], payload["target_date"], payload["metric"])
+        topology_visits.append(family)
+        condition_id = family_conditions[family]
+        return [
+            {
+                "market_slug": "-".join((*family, condition_id)).lower(),
+                "city": family[0],
+                "target_date": family[1],
+                "temperature_metric": family[2],
+                "condition_id": condition_id,
+                "token_id": f"yes-{condition_id}",
+                "range_label": "test-bin",
+            }
+        ]
+
+    def _reconstruct(_conn, *, topology_rows, now_utc):
+        del now_utc
+        row = topology_rows[0]
+        condition_id = row["condition_id"]
+        return {
+            "slug": row["market_slug"],
+            "city": SimpleNamespace(name=row["city"]),
+            "target_date": row["target_date"],
+            "temperature_metric": row["temperature_metric"],
+            "condition_ids": [condition_id],
+            "outcomes": [
+                {
+                    "condition_id": condition_id,
+                    "market_id": condition_id,
+                    "token_id": f"yes-{condition_id}",
+                    "no_token_id": f"no-{condition_id}",
+                    "question_id": f"q-{condition_id}",
+                }
+            ],
+        }
+
+    monkeypatch.setattr(
+        topology_rows_module,
+        "_event_family_market_topology_rows",
+        _topology_rows,
+    )
+    monkeypatch.setattr(
+        market_scanner,
+        "reconstruct_weather_market_from_static_topology",
+        _reconstruct,
+    )
+    monkeypatch.setattr(
+        substrate_observer,
+        "_open_rest_family_rows_for_refresh",
+        lambda *a, **k: [open_rest_family],
+    )
+    monkeypatch.setattr(
+        substrate_observer,
+        "_edli_current_held_position_family_keys",
+        lambda: {held_family},
+    )
+    monkeypatch.setattr(
+        substrate_observer,
+        "_condition_buy_sides_fresh",
+        lambda _conn, condition_id, _now: condition_id == family_conditions[fc03_family],
+    )
+    monkeypatch.setattr(
+        substrate_observer,
+        "_NEW_FAMILY_CONDITION_IDS",
+        {family_conditions[new_family]},
+    )
+    monkeypatch.setattr(substrate_observer, "_SUBSTRATE_PRIORITY_REFRESH_CURSOR", 0)
+    monkeypatch.setattr(substrate_observer, "_SUBSTRATE_REFRESH_CURSOR", 0)
+    monkeypatch.setattr(market_scanner, "_discovery_captures_since_keyframe", {})
+    monkeypatch.setenv("ZEUS_SUBSTRATE_CAPTURE_KEYFRAME_INTERVAL_CYCLES", "20")
+    monkeypatch.setattr(
+        state_db,
+        "get_trade_connection_read_only",
+        lambda **k: sqlite3.connect(":memory:"),
+    )
+    monkeypatch.setattr(
+        state_db,
+        "get_trade_connection",
+        lambda **k: sqlite3.connect(":memory:"),
+    )
+    monkeypatch.setattr(polymarket_client, "PolymarketClient", _FakePolymarketClient)
+
+    captures: list[tuple[str, str, str, str]] = []
+
+    class _ExistingFullSnapshot:
+        def execute(self, _sql, _params=()):
+            return SimpleNamespace(fetchone=lambda: (1,))
+
+    def _capture_boundary(_conn, *, decision, capture_trigger, **kwargs):
+        del kwargs
+        selected_token = (
+            decision.tokens["no_token_id"]
+            if decision.edge.direction == "buy_no"
+            else decision.tokens["token_id"]
+        )
+        resolved_trigger = market_scanner._capture_policy_trigger(
+            _ExistingFullSnapshot(),
+            requested_trigger=capture_trigger,
+            condition_id=decision.tokens["market_id"],
+            selected_token=selected_token,
+        )
+        captures.append(
+            (
+                decision.tokens["market_id"],
+                decision.edge.direction,
+                capture_trigger,
+                resolved_trigger,
+            )
+        )
+        return {"persisted": True, "snapshot_persistence_tier": "full"}
+
+    monkeypatch.setattr(
+        market_scanner,
+        "capture_executable_market_snapshot",
+        _capture_boundary,
+    )
+
+    result = substrate_observer._refresh_pending_family_snapshots(
+        world_conn,
+        _FakeConn(),
+        now_utc=datetime(2026, 8, 3, 12, 0, tzinfo=timezone.utc),
+        extra_priority_families=[explicit_family, fc03_family],
+        priority_condition_ids=exact_priority_conditions,
+        force_refresh_condition_ids=[family_conditions[fc03_family]],
+        promote_pending_urgency=False,
+    )
+
+    assert result["status"] == "refreshed"
+    assert result["families_checked"] == 6
+    assert result["explicit_priority_families"] == 2
+    assert result["open_rest_priority_families"] == 1
+    assert result["held_position_priority_families"] == 1
+    assert result["pending_urgent_families"] == 1
+    assert result["pending_urgent_priority_families"] == 0
+    assert result["priority_family_count"] == 4
+    expected_priority_conditions = {
+        *exact_priority_conditions,
+        family_conditions[new_family],
+    }
+    assert result["priority_condition_ids_requested"] == len(expected_priority_conditions)
+    assert topology_visits == [
+        explicit_family,
+        fc03_family,
+        open_rest_family,
+        held_family,
+        new_family,
+        urgent_family,
+    ]
+
+    captured_conditions = {
+        condition_id
+        for condition_id, _direction, _requested_trigger, _resolved_trigger in captures
+    }
+    assert captured_conditions == {
+        *expected_priority_conditions,
+        family_conditions[urgent_family],
+    }
+    requested_capture_triggers = {
+        condition_id: trigger
+        for condition_id, _direction, trigger, _resolved_trigger in captures
+    }
+    assert requested_capture_triggers[family_conditions[urgent_family]] == "DISCOVERY_SWEEP"
+    assert {
+        condition_id
+        for condition_id, trigger in requested_capture_triggers.items()
+        if trigger == "PRIORITY_MARKER"
+    } == expected_priority_conditions
+    resolved_capture_triggers = {
+        condition_id: trigger
+        for condition_id, _direction, _requested_trigger, trigger in captures
+    }
+    assert resolved_capture_triggers[family_conditions[urgent_family]] == "DISCOVERY_SWEEP"
+    assert {
+        condition_id
+        for condition_id, trigger in resolved_capture_triggers.items()
+        if trigger == "PRIORITY_MARKER"
+    } == expected_priority_conditions
+    assert {
+        direction
+        for condition_id, direction, _requested_trigger, _resolved_trigger in captures
+        if condition_id == family_conditions[fc03_family]
+    } == {"buy_yes", "buy_no"}
+    assert substrate_observer._NEW_FAMILY_CONDITION_IDS == set()
 
 
 def test_priority_condition_scope_does_not_expand_to_family_siblings(monkeypatch):
@@ -2892,7 +4697,7 @@ def test_market_discovery_cycle_defers_to_nonempty_priority_marker(monkeypatch):
     monkeypatch.setattr(state_db, "get_trade_connection", lambda **_k: _FakeDiscoveryConn())
     monkeypatch.setattr(
         "src.data.job_lock.acquire_lock",
-        lambda _name: contextlib.nullcontext(True),
+        lambda _name, **_kwargs: contextlib.nullcontext(True),
     )
 
     substrate_observer._market_discovery_cycle()
@@ -2916,7 +4721,7 @@ def test_money_path_targeted_refresh_marks_substrate_priority():
     assert "condition_ids=condition_ids" in refresh_src
     assert "force_refresh_condition_ids=(condition_ids if force_refresh else ())" in refresh_src
     assert "merge_existing=not force_refresh" in refresh_src
-    assert 'acquire_lock("market_substrate_refresh")' in producer_src
+    assert 'acquire_lock("market_substrate_priority_refresh")' in producer_src
     assert "_refresh_pending_family_snapshots(" in producer_src
     assert "mark_money_path_substrate_priority(" in confirm_src
     assert 'reason="continuous_redecision_confirm_refresh"' in confirm_src
@@ -3029,7 +4834,7 @@ def test_market_substrate_warm_cycle_ignores_retired_edli_enabled_flag(monkeypat
     monkeypatch.setattr(substrate_observer, "money_path_substrate_priority_active", lambda: False)
     monkeypatch.setattr(
         "src.data.job_lock.acquire_lock",
-        lambda _name: contextlib.nullcontext(True),
+        lambda _name, **_kwargs: contextlib.nullcontext(True),
     )
     _enable_edli_cfg(monkeypatch, enabled=False)
 
@@ -3168,12 +4973,24 @@ def test_pending_family_refresh_filters_globally_stale_target_dates():
         plan = _explain_plan(conn, capture.sql, capture.params)
         assert "USING INDEX idx_opportunity_event_processing_status" in plan
         assert "LIMIT ?" in capture.sql
-        assert capture.params == (
-            "edli_reactor_v1",
-            "2026-06-05T12:00:00+00:00",
-            "2026-06-05",
-            2000,
+        expected_params = (
+            (
+                "edli_reactor_v1",
+                "2026-06-05T12:00:00+00:00",
+                "edli_reactor_v1",
+                "2026-06-05T12:00:00+00:00",
+                "2026-06-05",
+                2000,
+            )
+            if module is substrate_observer
+            else (
+                "edli_reactor_v1",
+                "2026-06-05T12:00:00+00:00",
+                "2026-06-05",
+                2000,
+            )
         )
+        assert capture.params == expected_params
 
 
 def test_pending_family_refresh_filters_city_local_past_frontier_band_dates():
@@ -4707,6 +6524,127 @@ def test_pending_family_refresh_matches_gamma_with_canonical_city_alias(monkeypa
     assert submitted[0][0]["slug"] == gamma_event["slug"]
 
 
+def test_pending_family_refresh_starts_budget_before_query_and_cleans_deadline(monkeypatch):
+    world_conn = _pending_family_conn("event-1", "Hong Kong", "2026-06-07", "high")
+    events: list[str] = []
+    timers: list[threading.Timer] = []
+
+    original_install = substrate_observer._install_sqlite_deadline
+    original_start = substrate_observer._start_sqlite_deadline_interrupt
+    original_cancel = substrate_observer._cancel_sqlite_deadline_interrupt
+    original_clear = substrate_observer._clear_sqlite_deadline
+
+    def _install(conn, *, deadline_monotonic):
+        events.append("install")
+        return original_install(conn, deadline_monotonic=deadline_monotonic)
+
+    def _start(conn, *, deadline_monotonic):
+        events.append("start")
+        timer = original_start(conn, deadline_monotonic=deadline_monotonic)
+        if conn is world_conn and timer is not None:
+            timers.append(timer)
+        return timer
+
+    def _cancel(timer):
+        if timer in timers:
+            events.append("cancel")
+        original_cancel(timer)
+
+    def _clear(conn):
+        if conn is world_conn:
+            events.append("clear")
+        original_clear(conn)
+
+    monkeypatch.setattr(substrate_observer, "_install_sqlite_deadline", _install)
+    monkeypatch.setattr(substrate_observer, "_start_sqlite_deadline_interrupt", _start)
+    monkeypatch.setattr(substrate_observer, "_cancel_sqlite_deadline_interrupt", _cancel)
+    monkeypatch.setattr(substrate_observer, "_clear_sqlite_deadline", _clear)
+
+    def _pending(*_args, **_kwargs):
+        assert events[:2] == ["install", "start"]
+        events.append("pending")
+        return []
+
+    monkeypatch.setattr(substrate_observer, "_pending_family_rows_for_refresh", _pending)
+
+    result = substrate_observer._refresh_pending_family_snapshots(
+        world_conn,
+        _FakeConn(),
+        now_utc=datetime(2026, 6, 6, 12, 0, tzinfo=timezone.utc),
+        include_money_risk_families=False,
+    )
+
+    for timer in timers:
+        timer.join(timeout=1.0)
+    assert result["status"] == "no_pending_open_rest_or_held_families"
+    assert events == ["install", "start", "pending", "cancel", "clear"]
+    assert timers and all(not timer.is_alive() for timer in timers)
+
+
+def test_pending_family_refresh_query_deadline_is_fail_closed(monkeypatch):
+    world_conn = sqlite3.connect(":memory:")
+    deadline = time_module.monotonic() + 0.05
+    monkeypatch.setattr(
+        substrate_observer,
+        "_topology_lookup_deadline_for_snapshot_refresh",
+        lambda **_kwargs: deadline,
+    )
+
+    def _slow_pending(conn, **_kwargs):
+        return conn.execute(
+            """
+            WITH RECURSIVE numbers(value) AS (
+                SELECT 1
+                UNION ALL
+                SELECT value + 1 FROM numbers WHERE value < 1000000000
+            )
+            SELECT sum(value) FROM numbers
+            """
+        ).fetchall()
+
+    monkeypatch.setattr(substrate_observer, "_pending_family_rows_for_refresh", _slow_pending)
+
+    result = substrate_observer._refresh_pending_family_snapshots(
+        world_conn,
+        _FakeConn(),
+        now_utc=datetime(2026, 6, 6, 12, 0, tzinfo=timezone.utc),
+        refresh_budget_seconds=5.0,
+        snapshot_reserve_seconds=1.0,
+        include_money_risk_families=False,
+    )
+
+    assert result["status"] == "error"
+    assert result["scheduler_failed"] is True
+    assert "interrupted" in result["scheduler_failure_reason"].lower()
+    assert result["scheduler_failure_reason"] != "no_pending_open_rest_or_held_families"
+    world_conn.close()
+
+
+def test_pending_family_refresh_expired_empty_query_is_not_success(monkeypatch):
+    world_conn = _pending_family_conn("event-1", "Hong Kong", "2026-06-07", "high")
+    monkeypatch.setattr(
+        substrate_observer,
+        "_topology_lookup_deadline_for_snapshot_refresh",
+        lambda **_kwargs: time_module.monotonic() - 1.0,
+    )
+    monkeypatch.setattr(
+        substrate_observer,
+        "_pending_family_rows_for_refresh",
+        lambda *_args, **_kwargs: [],
+    )
+
+    result = substrate_observer._refresh_pending_family_snapshots(
+        world_conn,
+        _FakeConn(),
+        now_utc=datetime(2026, 6, 6, 12, 0, tzinfo=timezone.utc),
+        include_money_risk_families=False,
+    )
+
+    assert result["status"] == "error"
+    assert result["scheduler_failed"] is True
+    assert "deadline" in result["scheduler_failure_reason"]
+
+
 class _FakeConn:
     """Minimal connection stub: supports the ATTACH/PRAGMA/close calls the warm job
     may make, and is a no-op for everything else."""
@@ -4728,6 +6666,42 @@ class _FakeConn:
         pass
 
 
+class _PriorityScopeFakeConn(_FakeConn):
+    """Schema-complete empty authority surface for strict priority-scope tests."""
+
+    _COLUMNS = {
+        "venue_commands": ("command_id", "position_id", "venue_order_id", "intent_kind", "state", "token_id", "snapshot_id"),
+        "venue_order_facts": ("venue_order_id", "state", "remaining_size", "local_sequence"),
+        "position_current": (
+            "position_id",
+            "city",
+            "target_date",
+            "temperature_metric",
+            "phase",
+            "condition_id",
+            "chain_shares",
+            "shares",
+            "chain_state",
+        ),
+    }
+
+    def execute(self, sql, params=()):
+        normalized = " ".join(str(sql).split()).lower()
+        for table, columns in self._COLUMNS.items():
+            if normalized == f"pragma table_info({table})":
+                rows = [(index, column) for index, column in enumerate(columns)]
+
+                class _SchemaCursor:
+                    def fetchall(self_inner):
+                        return rows
+
+                    def fetchone(self_inner):
+                        return rows[0] if rows else None
+
+                return _SchemaCursor()
+        return super().execute(sql, params)
+
+
 class _FakePolymarketClient:
     def __init__(self, *a, **k):
         pass
@@ -4737,6 +6711,38 @@ class _FakePolymarketClient:
 
     def __exit__(self, *exc):
         return False
+
+
+def test_substrate_clob_client_reuses_one_pool_per_priority(monkeypatch):
+    import src.data.polymarket_client as polymarket_client
+
+    created = []
+
+    class _ProductionClient:
+        __module__ = "src.data.polymarket_client"
+
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+            created.append(self)
+
+    monkeypatch.setattr(polymarket_client, "PolymarketClient", _ProductionClient)
+    substrate_observer._SUBSTRATE_CLOB_CLIENTS.clear()
+    try:
+        scan_one = substrate_observer._substrate_clob_client(
+            substrate_observer.RequestPriority.SCAN
+        )
+        scan_two = substrate_observer._substrate_clob_client(
+            substrate_observer.RequestPriority.SCAN
+        )
+        held = substrate_observer._substrate_clob_client(
+            substrate_observer.RequestPriority.HELD_REDUCE_ONLY
+        )
+    finally:
+        substrate_observer._SUBSTRATE_CLOB_CLIENTS.clear()
+
+    assert scan_one is scan_two
+    assert held is not scan_one
+    assert len(created) == 2
 
 
 class _CaptureConn:

@@ -1,5 +1,5 @@
 # Created: 2026-04-17
-# Last reused/audited: 2026-07-24
+# Last reused/audited: 2026-08-14
 # Authority basis: docs/operations/current/finite_evidence_probability_symmetry/PLAN.md
 """B070 tests: control_overrides event-sourced refactor.
 
@@ -227,6 +227,66 @@ class TestExpire:
         assert result["status"] == "noop"
         assert result["expired_count"] == 0
 
+    def test_entries_pause_expire_requires_exact_generation_witness(self):
+        conn = _memory_conn()
+        upsert_control_override(
+            conn,
+            override_id="control_plane:global:entries_paused",
+            target_type="global",
+            target_key="entries",
+            action_type="gate",
+            value="true",
+            issued_by="control_plane",
+            issued_at="2026-08-12T13:35:50.636990+00:00",
+            reason="forward_capital_proof_required",
+        )
+
+        missing = expire_control_override(
+            conn,
+            override_id="control_plane:global:entries_paused",
+            expired_at="2026-08-12T14:00:00+00:00",
+        )
+        assert missing["status"] == "cas_required"
+        assert missing["expired_count"] == 0
+
+        mismatches = (
+            {
+                "expected_issued_at": "2026-08-12T13:00:00+00:00",
+                "expected_reason": "forward_capital_proof_required",
+                "expected_issued_by": "control_plane",
+            },
+            {
+                "expected_issued_at": "2026-08-12T13:35:50.636990+00:00",
+                "expected_reason": "stale_restart_guard",
+                "expected_issued_by": "control_plane",
+            },
+            {
+                "expected_issued_at": "2026-08-12T13:35:50.636990+00:00",
+                "expected_reason": "forward_capital_proof_required",
+                "expected_issued_by": "stale_deployer",
+            },
+        )
+        for witness in mismatches:
+            mismatch = expire_control_override(
+                conn,
+                override_id="control_plane:global:entries_paused",
+                expired_at="2026-08-12T14:00:00+00:00",
+                **witness,
+            )
+            assert mismatch["status"] == "noop"
+            assert mismatch["expired_count"] == 0
+
+        matched = expire_control_override(
+            conn,
+            override_id="control_plane:global:entries_paused",
+            expired_at="2026-08-12T14:00:00+00:00",
+            expected_issued_at="2026-08-12T13:35:50.636990+00:00",
+            expected_reason="forward_capital_proof_required",
+            expected_issued_by="control_plane",
+        )
+        assert matched["status"] == "expired"
+        assert matched["expired_count"] == 1
+
     def test_view_hides_expired_row_via_existing_filter(self):
         """query_control_override_state filters WHERE effective_until IS NULL OR > now.
         After expire, the latest VIEW row has effective_until in the past."""
@@ -301,6 +361,73 @@ class TestExpire:
         assert gate["reason_code"] == "riskguard_action"
         assert gate["gated_by"] == "auto:riskguard"
         assert gate["reason_snapshot"]["action_id"] == "riskguard:gate:opening_inertia"
+
+    def test_probability_scoped_risk_gate_is_not_widened_to_strategy_gate(self):
+        conn = _memory_conn()
+        conn.execute(
+            """
+            INSERT INTO risk_actions (
+                action_id, strategy_key, action_type, value, issued_at,
+                effective_until, reason, source, precedence, status
+            ) VALUES (
+                'riskguard:gate:forecast_qkernel_entry',
+                'forecast_qkernel_entry', 'gate',
+                '{"gate":true,"probability_semantics_revisions":["old_revision"]}',
+                '2026-04-17T12:00:00+00:00', NULL,
+                'revision-scoped brier degradation', 'riskguard', 50, 'active'
+            )
+            """
+        )
+
+        state = query_control_override_state(
+            conn, now="2026-04-17T14:00:00+00:00"
+        )
+
+        assert state["status"] == "ok"
+        assert "forecast_qkernel_entry" not in state["strategy_gates"]
+
+    def test_structured_strategy_wide_risk_gate_remains_blocking(self):
+        conn = _memory_conn()
+        conn.execute(
+            """
+            INSERT INTO risk_actions (
+                action_id, strategy_key, action_type, value, issued_at,
+                effective_until, reason, source, precedence, status
+            ) VALUES (
+                'riskguard:gate:opening_inertia', 'opening_inertia', 'gate',
+                '{"gate":true}', '2026-04-17T12:00:00+00:00', NULL,
+                'strategy-wide degradation', 'riskguard', 50, 'active'
+            )
+            """
+        )
+
+        state = query_control_override_state(
+            conn, now="2026-04-17T14:00:00+00:00"
+        )
+
+        assert state["strategy_gates"]["opening_inertia"]["enabled"] is False
+
+    def test_malformed_probability_scoped_risk_gate_fails_closed(self):
+        conn = _memory_conn()
+        conn.execute(
+            """
+            INSERT INTO risk_actions (
+                action_id, strategy_key, action_type, value, issued_at,
+                effective_until, reason, source, precedence, status
+            ) VALUES (
+                'riskguard:gate:forecast_qkernel_entry',
+                'forecast_qkernel_entry', 'gate',
+                '{"gate":true,"probability_semantics_revisions":[]}',
+                '2026-04-17T12:00:00+00:00', NULL,
+                'malformed revision scope', 'riskguard', 50, 'active'
+            )
+            """
+        )
+
+        with pytest.raises(ValueError, match="empty risk gate revision scope"):
+            query_control_override_state(
+                conn, now="2026-04-17T14:00:00+00:00"
+            )
 
 
 class TestAppendOnlyEnforcement:

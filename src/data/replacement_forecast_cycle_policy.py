@@ -28,7 +28,9 @@ encode the invariant in shared structure, not in N parallel checks):
 from __future__ import annotations
 
 import json
+import math
 import os
+import re
 from collections.abc import Mapping
 from datetime import datetime, timezone
 
@@ -70,6 +72,11 @@ CYCLE_PHASE_INTERMEDIATE = "experiment"
 _SYNOPTIC_CYCLE_HOURS = frozenset({0, 6, 12, 18})
 _INTERMEDIATE_CYCLE_HOURS = frozenset()
 
+_STRICT_AWARE_ISO_RE = re.compile(
+    r"\A\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}"
+    r"(?:\.\d{1,6})?(?:Z|[+-]\d{2}:\d{2})\Z"
+)
+
 
 # ---------------------------------------------------------------------------
 # TRADEABLE-GRADE COVERAGE PREDICATE — SINGLE AUTHORITY (2026-06-12).
@@ -90,20 +97,23 @@ _INTERMEDIATE_CYCLE_HOURS = frozenset()
 #   (event_reactor_adapter._FUSED_BOOTSTRAP_QLCB_BASIS). Defining it ONCE here (the module both the
 #   materializer and the readers already import, no cycle) makes all four sites share one definition.
 TRADEABLE_GRADE_QLCB_BASIS = "fused_center_bootstrap_p05"
-# v3 re-keys probability identity after station single-runs residual weighting was
-# removed from the live center. Some v2 rows were built with that transient center
-# law, so v2 can no longer prove current semantics even though the implementation is
-# again previous-runs-only. Advancing both identities makes the existing coverage and
-# reseed paths rematerialize every ambiguous certificate instead of serving a mixed law.
-CURRENT_EVIDENCE_SEMANTICS_REVISION = "ensemble_center_scenarios_v3"
+# v4 re-keys probability identity after simultaneous provider-cycle provenance became
+# mandatory for the live between-provider spread. Older rows can no longer prove current
+# semantics, so the existing coverage and reseed paths rematerialize every certificate
+# instead of serving a mixed law.
+CURRENT_EVIDENCE_SEMANTICS_REVISION = "ensemble_center_scenarios_v4"
 
 # A bounded older ENS shape retains its raw absolute members and the full
 # ENS/provider-center disagreement. This identity supersedes every anomaly-
 # transport revision, which synthesized translated members from the fresh
 # center and then reused those members as finite evidence.
 STALE_ENSEMBLE_ABSOLUTE_DISAGREEMENT_SEMANTICS_REVISION = (
-    "stale_ensemble_absolute_disagreement_v1"
+    "stale_ensemble_absolute_disagreement_v2"
 )
+
+# Between-provider spread is live-authoritative only when its source clocks prove
+# one simultaneous cohort. This marker is persisted and included in shape identity.
+BETWEEN_COHORT_STATUS_SIMULTANEOUS_PROVEN = "SIMULTANEOUS_PROVEN"
 
 
 def _current_evidence_shape(provenance: object) -> Mapping[str, object] | None:
@@ -122,6 +132,35 @@ def _current_evidence_shape(provenance: object) -> Mapping[str, object] | None:
         return None
     shape = fusion.get("current_evidence_shape")
     return shape if isinstance(shape, Mapping) else None
+
+
+def current_evidence_shape_source_cycle_time(
+    provenance: object,
+) -> datetime | None:
+    """Return the selected ENS cycle only for the canonical aware ISO grammar.
+
+    ``datetime.fromisoformat`` also accepts compact offsets such as ``+00`` and
+    ``+0000`` while the SQLite coverage predicate intentionally does not.  The
+    persisted probability certificate must have one language-independent
+    grammar, otherwise Python serving can grant authority to a row that SQL
+    correctly considers uncovered.
+    """
+
+    shape = _current_evidence_shape(provenance)
+    if shape is None:
+        return None
+    raw = shape.get("source_cycle_time")
+    if not isinstance(raw, str) or _STRICT_AWARE_ISO_RE.fullmatch(raw) is None:
+        return None
+    if raw[-1] != "Z" and (int(raw[-5:-3]) > 23 or int(raw[-2:]) > 59):
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        return None
+    return parsed.astimezone(UTC)
 
 
 def current_evidence_shape_semantics_mismatch(provenance: object) -> bool:
@@ -148,16 +187,89 @@ def current_evidence_shape_semantics_mismatch(provenance: object) -> bool:
     return str(shape.get("semantics_revision") or "") != expected
 
 
-def tradeable_grade_coverage_sql(*, posterior_columns, alias: str = "") -> str:
+def _current_evidence_shape_has_probability_authority(
+    provenance: object,
+) -> bool:
+    """Validate same-cycle or bounded latest-causal ENS shape authority."""
+
+    shape = _current_evidence_shape(provenance)
+    if shape is None:
+        return False
+    if current_evidence_shape_source_cycle_time(provenance) is None:
+        return False
+    shape_lag_hours = shape.get("shape_lag_hours")
+    if (
+        isinstance(shape_lag_hours, bool)
+        or not isinstance(shape_lag_hours, (int, float))
+        or not math.isfinite(float(shape_lag_hours))
+    ):
+        return False
+    lag = float(shape_lag_hours)
+    if lag < 0.0 or lag > replacement_source_cycle_max_age_hours():
+        return False
+    stale_shape_reused = shape.get("stale_shape_reused")
+    if stale_shape_reused is not None and not isinstance(
+        stale_shape_reused, bool
+    ):
+        return False
+    stale = lag > 0.0
+    if stale and stale_shape_reused is not True:
+        return False
+    if not stale and stale_shape_reused not in (None, False):
+        return False
+    expected_revision = (
+        STALE_ENSEMBLE_ABSOLUTE_DISAGREEMENT_SEMANTICS_REVISION
+        if stale
+        else CURRENT_EVIDENCE_SEMANTICS_REVISION
+    )
+    return (
+        str(shape.get("semantics_revision") or "")
+        == expected_revision
+        and shape.get("translation_applied") is False
+        and not current_evidence_shape_semantics_mismatch(provenance)
+    )
+
+
+def current_evidence_shape_has_entry_authority(provenance: object) -> bool:
+    """Whether current evidence authorizes a new entry."""
+
+    # FAIL-CLOSED GATE CONTRACT
+    # SCOPE: new-entry authority for this one city/date/metric family.
+    # DRAIN: the normal target-specific materializer replaces malformed,
+    # translated, expired, or semantically mismatched shape provenance.
+    # RESET: a coherent same-cycle or bounded latest-causal raw-member shape
+    # restores the authority ratified in replacement_final_form section 1d.
+    return _current_evidence_shape_has_probability_authority(provenance)
+
+
+def current_evidence_shape_has_held_authority(provenance: object) -> bool:
+    """Whether a shape can support reduce-only held-position redecision.
+
+    A bounded latest-causal ENS shape remains probability authority because
+    its untranslated absolute members and explicit disagreement with the
+    current provider center are statistical evidence. The persisted revision
+    and stale flag must agree with the numeric lag exactly.
+    """
+
+    return _current_evidence_shape_has_probability_authority(provenance)
+
+
+def tradeable_grade_coverage_sql(
+    *,
+    posterior_columns,
+    decision_time: datetime,
+    alias: str = "",
+) -> str:
     """SQL fragment selecting ONLY tradeable-grade (certified-bootstrap-bounded) posteriors.
 
     Replaces the broken ``AND <alias>q_lcb_json IS NOT NULL`` proxy at the mask-and-starve
     antibody sites. A soft-anchor Wilson-bounded row (non-NULL q_lcb but basis != bootstrap) is
     NOT tradeable-grade, so it does NOT count as coverage and correctly re-seeds for fusion repair.
 
-    Schema-conditional (same convention as the existing clauses): when forecast_posteriors lacks
-    ``provenance_json`` the fragment is empty (no narrowing) rather than erroring. ``alias`` is the
-    table alias with a trailing dot already applied by the caller's existing convention (e.g. "p.").
+    Schema-conditional and fail-closed: when ``forecast_posteriors`` lacks
+    ``provenance_json``, no row can prove current shape authority. ``alias`` is
+    the table alias with a trailing dot already applied by the caller's existing
+    convention (for example, ``"p."``).
     """
     cols = set(posterior_columns)
     fragments: list[str] = []
@@ -166,23 +278,73 @@ def tradeable_grade_coverage_sql(*, posterior_columns, alias: str = "") -> str:
     if "q_ucb_json" in cols:
         fragments.append(f"AND {alias}q_ucb_json IS NOT NULL")
     if "provenance_json" not in cols:
+        # FAIL-CLOSED GATE CONTRACT
+        # SCOPE: coverage for the queried city/date/metric family only.
+        # DRAIN: the canonical forecast schema migration adds provenance_json;
+        # normal seed/materialization then writes a current shape certificate.
+        # RESET: the next coverage query with that column present evaluates the
+        # ordinary shape predicate; held-position belief reads are independent.
+        fragments.append("AND 0 = 1")
         return "\n              ".join(fragments)
+    provenance_expr = (
+        f"(CASE WHEN json_valid({alias}provenance_json) "
+        f"THEN {alias}provenance_json ELSE '{{}}' END)"
+    )
     fragments.append(
-        f"AND json_extract({alias}provenance_json, '$.q_lcb_basis') = "
+        f"AND json_extract({provenance_expr}, '$.q_lcb_basis') = "
         f"'{TRADEABLE_GRADE_QLCB_BASIS}'"
     )
     shape_path = "$.bayes_precision_fusion.current_evidence_shape"
+    if decision_time.tzinfo is None or decision_time.utcoffset() is None:
+        raise ValueError("coverage decision_time must be timezone-aware")
+    decision_iso = decision_time.astimezone(UTC).isoformat().replace("'", "''")
+    lag_type = f"json_type({provenance_expr}, '{shape_path}.shape_lag_hours')"
+    lag_value = (
+        f"CAST(json_extract({provenance_expr}, "
+        f"'{shape_path}.shape_lag_hours') AS REAL)"
+    )
+    stale_type = (
+        f"json_type({provenance_expr}, '{shape_path}.stale_shape_reused')"
+    )
+    translation_type = (
+        f"json_type({provenance_expr}, '{shape_path}.translation_applied')"
+    )
+    revision_value = (
+        f"json_extract({provenance_expr}, '{shape_path}.semantics_revision')"
+    )
+    ens_cycle_value = (
+        f"json_extract({provenance_expr}, '{shape_path}.source_cycle_time')"
+    )
+    ens_cycle_type = (
+        f"json_type({provenance_expr}, '{shape_path}.source_cycle_time')"
+    )
+    ens_cycle_has_timezone = (
+        f"(substr({ens_cycle_value}, -1, 1) = 'Z' OR ("
+        f"length({ens_cycle_value}) >= 6 AND "
+        f"substr({ens_cycle_value}, -6, 1) IN ('+', '-') AND "
+        f"substr({ens_cycle_value}, -3, 1) = ':'))"
+    )
+    max_lag = replacement_source_cycle_max_age_hours()
+    # Same-cycle and bounded latest-causal raw ENS members are both current
+    # evidence under replacement_final_form section 1d. Translated shapes and
+    # lag/flag/revision mismatches remain fail-closed.
     fragments.append(
-        "AND (("
-        f"COALESCE(json_extract({alias}provenance_json, '{shape_path}.stale_shape_reused'), 0) = 0 "
-        "AND "
-        f"COALESCE(json_extract({alias}provenance_json, '{shape_path}.translation_applied'), 0) = 0 "
-        f"AND json_extract({alias}provenance_json, '{shape_path}.semantics_revision') = "
+        "AND ("
+        f"{translation_type} = 'false' AND "
+        f"{lag_type} IN ('integer', 'real') AND "
+        f"{lag_value} >= 0.0 AND {lag_value} <= {max_lag!r} AND "
+        f"{ens_cycle_type} = 'text' AND {ens_cycle_has_timezone} AND "
+        f"julianday({ens_cycle_value}) IS NOT NULL AND "
+        f"(julianday('{decision_iso}') - julianday({ens_cycle_value})) * 24.0 "
+        f"BETWEEN 0.0 AND {max_lag!r} AND (("
+        f"{lag_value} = 0.0 AND "
+        f"({stale_type} IS NULL OR {stale_type} = 'false') AND "
+        f"{revision_value} = "
         f"'{CURRENT_EVIDENCE_SEMANTICS_REVISION}') OR ("
-        f"json_extract({alias}provenance_json, '{shape_path}.stale_shape_reused') = 1 "
-        f"AND COALESCE(json_extract({alias}provenance_json, '{shape_path}.translation_applied'), 0) = 0 "
-        f"AND json_extract({alias}provenance_json, '{shape_path}.semantics_revision') = "
-        f"'{STALE_ENSEMBLE_ABSOLUTE_DISAGREEMENT_SEMANTICS_REVISION}'))"
+        f"{lag_value} > 0.0 AND "
+        f"{stale_type} = 'true' AND "
+        f"{revision_value} = "
+        f"'{STALE_ENSEMBLE_ABSOLUTE_DISAGREEMENT_SEMANTICS_REVISION}')))"
     )
     return "\n              ".join(fragments)
 
@@ -243,6 +405,23 @@ def cycle_age_exceeds_bound(
     """True iff the source cycle is older than the staleness bound relative to ``reference_time``."""
     bound = replacement_source_cycle_max_age_hours() if max_age_hours is None else float(max_age_hours)
     return cycle_age_hours(reference_time, source_cycle_time) > bound
+
+
+def cycle_age_outside_bound(
+    reference_time: datetime,
+    source_cycle_time: datetime,
+    *,
+    max_age_hours: float | None = None,
+) -> bool:
+    """True when a source cycle is future-dated or older than the causal bound."""
+
+    bound = (
+        replacement_source_cycle_max_age_hours()
+        if max_age_hours is None
+        else float(max_age_hours)
+    )
+    age = cycle_age_hours(reference_time, source_cycle_time)
+    return age < 0.0 or age > bound
 
 
 def classify_cycle_phase(source_cycle_time: datetime) -> str:

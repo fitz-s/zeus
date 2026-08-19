@@ -13,14 +13,17 @@ from __future__ import annotations
 import json
 import os
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import asdict, dataclass
+from contextlib import nullcontext
+from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Mapping, Sequence
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlsplit
 
 import requests
 
+from src.data.openmeteo_client import fetch as _fetch_openmeteo
+from src.data.openmeteo_quota import quota_tracker
 from src.strategy.live_inference.source_clock_vnext import (
     SourceRunClock,
     provider_family_for_source,
@@ -191,6 +194,21 @@ def _metadata_url(template_url: str, model: str) -> str:
     return template_url.format(model=metadata_model_id(model))
 
 
+def _official_metadata_api_url(url: str) -> bool:
+    """Return whether Open-Meteo documents this URL as unmetered metadata."""
+
+    parsed = urlsplit(url)
+    parts = tuple(part for part in parsed.path.split("/") if part)
+    return (
+        parsed.scheme == "https"
+        and parsed.hostname == "api.open-meteo.com"
+        and len(parts) == 4
+        and parts[0] == "data"
+        and bool(parts[1])
+        and parts[2:] == ("static", "meta.json")
+    )
+
+
 def _model_update_worker_count(
     models: Sequence[str],
     *,
@@ -220,16 +238,26 @@ def fetch_model_updates(
     timeout_seconds: float = 30.0,
     session: requests.Session | None = None,
     max_workers: int | None = None,
+    priority: bool = False,
 ) -> tuple[OpenMeteoModelUpdate, ...]:
     base = endpoint_url or os.environ.get(ENV_MODEL_UPDATES_ENDPOINT) or DEFAULT_MODEL_UPDATES_ENDPOINT
-    client = session or requests
     if "{model}" in base:
         clean_models = tuple(str(model).strip() for model in models if str(model).strip())
 
         def _fetch_one(clean_model: str) -> OpenMeteoModelUpdate:
-            response = client.get(_metadata_url(base, clean_model), timeout=timeout_seconds)
-            response.raise_for_status()
-            return parse_model_update(clean_model, response.json())
+            url = _metadata_url(base, clean_model)
+            quota_lane = quota_tracker.priority_lane() if priority else nullcontext()
+            with quota_lane:
+                payload = _fetch_openmeteo(
+                    url,
+                    {},
+                    timeout=timeout_seconds,
+                    max_retries=1,
+                    endpoint_label=f"source_clock_model_meta_{clean_model}",
+                    client=session,
+                    count_toward_quota=not _official_metadata_api_url(url),
+                )
+            return parse_model_update(clean_model, payload)
 
         workers = _model_update_worker_count(
             clean_models,
@@ -242,9 +270,17 @@ def fetch_model_updates(
             return tuple(executor.map(_fetch_one, clean_models))
 
     url = _endpoint_url(base, models)
-    response = client.get(url, timeout=timeout_seconds)
-    response.raise_for_status()
-    return parse_model_updates_payload(response.json())
+    quota_lane = quota_tracker.priority_lane() if priority else nullcontext()
+    with quota_lane:
+        payload = _fetch_openmeteo(
+            url,
+            {},
+            timeout=timeout_seconds,
+            max_retries=1,
+            endpoint_label="source_clock_model_meta_batch",
+            client=session,
+        )
+    return parse_model_updates_payload(payload)
 
 
 def write_model_updates_jsonl(path: str | Path, updates: Sequence[OpenMeteoModelUpdate]) -> None:
@@ -266,5 +302,11 @@ def read_model_updates_jsonl(path: str | Path) -> tuple[OpenMeteoModelUpdate, ..
                 continue
             payload = json.loads(line)
             if isinstance(payload, Mapping):
-                rows.append(parse_model_update(str(payload.get("model") or ""), payload))
+                raw = payload.get("raw")
+                while isinstance(raw, Mapping) and isinstance(raw.get("raw"), Mapping):
+                    raw = raw["raw"]
+                update = parse_model_update(str(payload.get("model") or ""), payload)
+                if isinstance(raw, Mapping):
+                    update = replace(update, raw=dict(raw))
+                rows.append(update)
     return tuple(rows)

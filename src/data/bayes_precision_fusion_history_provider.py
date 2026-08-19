@@ -1,5 +1,5 @@
 # Created: 2026-06-08
-# Last reused or audited: 2026-07-20
+# Last reused or audited: 2026-08-08
 # Authority basis: BAYES_PRECISION_FUSION_SPEC.md §3 (causality: fixed-lead walk-forward history;
 #   run_time != source_available_at), §1 observation model (residual z_s - Y), §5 walk-forward
 #   (no same-day leak); §7 antibodies ("top-K-uses-target-truth (walk-forward only)",
@@ -184,6 +184,7 @@ class BayesPrecisionFusionHistoryProvider:
                        s.settlement_value AS settlement_value,
                        s.settlement_unit AS settlement_unit
                 FROM raw_model_forecasts AS r
+                     INDEXED BY idx_raw_model_forecasts_history_join
                 JOIN settlement_outcomes AS s
                   ON s.city = r.city
                  AND s.target_date = r.target_date
@@ -196,7 +197,7 @@ class BayesPrecisionFusionHistoryProvider:
                   AND s.authority = 'VERIFIED'
                   AND s.settlement_value IS NOT NULL
                   AND r.target_date < ?
-                ORDER BY r.model, r.target_date
+                ORDER BY r.model, r.target_date, r.raw_model_forecast_id
             """
             params: list[object] = [city, metric, int(lead_days), *models, decision_date]
             # ROW-FACTORY SELF-SUFFICIENCY (2026-06-09 hardening): the loop below accesses rows
@@ -218,7 +219,9 @@ class BayesPrecisionFusionHistoryProvider:
         # Group aligned (target_date, forecast, settlement-in-C) triples per model, ordered by
         # target_date. BLOCKER 2: the target_date is carried into ModelHistory.target_dates so
         # the fusion can align the covariance by date (NOT by positional index). The SQL ORDER BY
-        # r.model, r.target_date keeps each model's series date-sorted.
+        # r.model, r.target_date keeps each model's series date-sorted; the row id makes
+        # duplicate-date ordering deterministic. INDEXED BY keeps SQLite from trading a
+        # small result sort for a much larger model/date range scan under live concurrency.
         # Per-model source, never an endpoint mix. Previous-runs wins whenever present. Only the two
         # named station products may fall back to single-runs, and only at positive lead. "No rows in
         # this query" is not proof that an arbitrary gridded model lacks a previous-runs product.

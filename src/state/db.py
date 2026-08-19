@@ -1,5 +1,5 @@
 # Created: prior to 2026-04-26
-# Last reused or audited: 2026-07-15
+# Last reused or audited: 2026-08-14
 # Authority basis: Zeus DB schema + world_write_mutex CATEGORY ANTIBODY.
 #   2026-06-08 thepath/audit-realign Fitz #5 lock-CATEGORY kill: _apply_busy_timeout
 #   helper + SQL-level PRAGMA busy_timeout in _connect()/get_connection() so a
@@ -11,6 +11,8 @@
 #   (283× advisory/2min in prod → WAL re-bloat). Phase 2: guard armed fatal (always
 #   raises, ZEUS_WORLD_MUTEX_IO_ADVISORY=1 to downgrade in emergency).
 #   Plan: architecture/world_mutex_io_offmutex_refactor_2026_06_04.md
+#   2026-07-31 finite_evidence_probability_symmetry: owner-qualified
+#   settlement outcome projection on forecasts-MAIN + attached-trades.
 """Zeus database schema and connection management.
 
 All tables enforce the 4-timestamp constraint where applicable.
@@ -26,9 +28,11 @@ import json
 import logging
 import math
 import os
+import queue
 import sqlite3
 import threading
 import time
+from collections.abc import Mapping
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -251,6 +255,7 @@ def _connect(
     *,
     write_class: WriteClass | str | None = None,
     busy_timeout_ms: int | None = None,
+    deadline_monotonic: float | None = None,
 ) -> sqlite3.Connection:
     """Low-level connection with standard pragmas.
 
@@ -270,23 +275,38 @@ def _connect(
         timeout_ms = busy_timeout_ms
         if timeout_ms < 0:
             raise ValueError(f"busy_timeout_ms must be >= 0; got {timeout_ms}")
-    timeout_s = timeout_ms / 1000.0
+    def remaining_timeout_ms() -> int:
+        if deadline_monotonic is None:
+            return timeout_ms
+        remaining = float(deadline_monotonic) - time.monotonic()
+        if not math.isfinite(remaining) or remaining <= 0.0:
+            raise TimeoutError("DB_CONNECTION_DEADLINE_EXPIRED")
+        return min(timeout_ms, max(1, math.ceil(remaining * 1000.0)))
+
+    timeout_s = remaining_timeout_ms() / 1000.0
     from src.state.db_writer_lock import connect_with_cutover_lease
 
     conn = connect_with_cutover_lease(
-        str(db_path), canonical_db_path=db_path, timeout=timeout_s
+        str(db_path),
+        canonical_db_path=db_path,
+        deadline_monotonic=deadline_monotonic,
+        timeout=timeout_s,
     )
     try:
         conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA foreign_keys=ON")
+        def execute_with_deadline(sql: str) -> sqlite3.Cursor:
+            _apply_busy_timeout(conn, busy_timeout_ms=remaining_timeout_ms())
+            return conn.execute(sql)
+
+        execute_with_deadline("PRAGMA journal_mode=WAL")
+        execute_with_deadline("PRAGMA foreign_keys=ON")
         # 2026-05-12 antibody (cold-cache K3 partial fix): bump page cache to 1 GB
         # so the hot working set of large forecast tables stays resident across
         # cycles. Default is ~2 MB which is fatal for 35 GB forecasts.db cold-cache
         # B-tree descent. ZEUS_DB_CACHE_KB env var overrides; -1048576 = 1 GiB.
         # Per-connection, so independent for trade/world/forecasts/backtest.
         cache_kb = int(os.environ.get("ZEUS_DB_CACHE_KB", "1048576"))
-        conn.execute(f"PRAGMA cache_size = -{cache_kb}")
+        execute_with_deadline(f"PRAGMA cache_size = -{cache_kb}")
         # 2026-05-13 antibody (cold-cache K3 follow-up): mmap_size lets SQLite use
         # OS-managed page cache instead of bounded per-connection cache. On the
         # post-promote 51 GB forecasts.db, 1 GB cache_size still thrashes when
@@ -297,14 +317,14 @@ def _connect(
         mmap_bytes = int(
             os.environ.get("ZEUS_DB_MMAP_BYTES", str(32 * 1024 * 1024 * 1024))
         )
-        conn.execute(f"PRAGMA mmap_size = {mmap_bytes}")
+        execute_with_deadline(f"PRAGMA mmap_size = {mmap_bytes}")
         _install_connection_functions(conn)
         # CATEGORY ANTIBODY (Fitz #5): set the SQL-level wait budget so a writer that
         # loses the WAL write lock WAITS up to busy_timeout instead of raising
         # "database is locked" instantly. sqlite3.connect(timeout=) alone only sets a
         # C-level handler that executescript() can null; this PRAGMA is the durable
         # budget. Connection PRAGMA only — INV-37 / txn semantics unchanged.
-        _apply_busy_timeout(conn, busy_timeout_ms=timeout_ms)
+        _apply_busy_timeout(conn, busy_timeout_ms=remaining_timeout_ms())
         resolved = _resolve_write_class(write_class)
         if resolved is not None:
             _cnt_inc(f"db_connect_write_class_{resolved.value}_total")
@@ -349,7 +369,11 @@ def connect_existing_trade_db_without_journal_bootstrap(
         raise
 
 
-def _connect_read_only(db_path: Path) -> sqlite3.Connection:
+def _connect_read_only(
+    db_path: Path,
+    *,
+    deadline_monotonic: float | None = None,
+) -> sqlite3.Connection:
     """Low-level read-only SQLite connection with bounded lock wait.
 
     Read-only helpers must not create the DB, run write-oriented pragmas, inherit
@@ -358,23 +382,99 @@ def _connect_read_only(db_path: Path) -> sqlite3.Connection:
     """
 
     timeout_ms = int(os.environ.get("ZEUS_DB_READ_BUSY_TIMEOUT_MS", "1000"))
-    conn = sqlite3.connect(
-        f"file:{db_path.resolve()}?mode=ro",
-        uri=True,
-        timeout=max(0.001, timeout_ms / 1000.0),
-    )
+
+    def remaining_timeout_ms() -> int:
+        if deadline_monotonic is None:
+            return timeout_ms
+        remaining = float(deadline_monotonic) - time.monotonic()
+        if not math.isfinite(remaining) or remaining <= 0.0:
+            raise sqlite3.OperationalError("DB_CONNECTION_DEADLINE_EXPIRED")
+        return min(timeout_ms, max(1, math.ceil(remaining * 1000.0)))
+
+    uri = f"file:{db_path.resolve()}?mode=ro"
+    if deadline_monotonic is None:
+        conn = sqlite3.connect(
+            uri,
+            uri=True,
+            timeout=max(0.001, timeout_ms / 1000.0),
+        )
+    else:
+        # sqlite3.connect(timeout=...) bounds SQLite's busy handler, not the
+        # complete file-open call. Held HWM reads own an absolute wall claim,
+        # so acquire on a daemon worker and abandon the handoff at that claim.
+        # The deadline-bound connection is dedicated to the receiving thread;
+        # check_same_thread=False permits that single ownership transfer only.
+        result: queue.Queue[tuple[str, object]] = queue.Queue(maxsize=1)
+        accepted = threading.Event()
+        abandoned = threading.Event()
+
+        def open_until_deadline() -> None:
+            try:
+                opened = sqlite3.connect(
+                    uri,
+                    uri=True,
+                    timeout=remaining_timeout_ms() / 1000.0,
+                    check_same_thread=False,
+                )
+            except BaseException as exc:
+                if not abandoned.is_set():
+                    result.put(("error", exc))
+                return
+            result.put(("connection", opened))
+            while not accepted.wait(0.01):
+                if abandoned.is_set():
+                    opened.close()
+                    return
+
+        opener = threading.Thread(
+            target=open_until_deadline,
+            name="zeus-read-only-deadline-open",
+            daemon=True,
+        )
+        opener.start()
+        remaining = float(deadline_monotonic) - time.monotonic()
+        if not math.isfinite(remaining) or remaining <= 0.0:
+            abandoned.set()
+            raise sqlite3.OperationalError("DB_CONNECTION_DEADLINE_EXPIRED")
+        try:
+            result_kind, value = result.get(timeout=remaining)
+        except queue.Empty as exc:
+            abandoned.set()
+            raise sqlite3.OperationalError(
+                "DB_CONNECTION_DEADLINE_EXPIRED"
+            ) from exc
+        if result_kind == "error":
+            accepted.set()
+            if isinstance(value, BaseException):
+                raise value
+            raise sqlite3.OperationalError("DB_CONNECTION_ERROR_INVALID")
+        conn = value
+        if not isinstance(conn, sqlite3.Connection):
+            accepted.set()
+            raise sqlite3.OperationalError("DB_CONNECTION_RESULT_INVALID")
+        accepted.set()
+        if time.monotonic() >= float(deadline_monotonic):
+            conn.close()
+            raise sqlite3.OperationalError("DB_CONNECTION_DEADLINE_EXPIRED")
     try:
         conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA query_only = ON")
-        conn.execute("PRAGMA foreign_keys=ON")
+
+        def execute_with_deadline(sql: str) -> sqlite3.Cursor:
+            _apply_busy_timeout(conn, busy_timeout_ms=remaining_timeout_ms())
+            cursor = conn.execute(sql)
+            remaining_timeout_ms()
+            return cursor
+
+        execute_with_deadline("PRAGMA query_only = ON")
+        execute_with_deadline("PRAGMA foreign_keys=ON")
         cache_kb = int(os.environ.get("ZEUS_DB_CACHE_KB", "1048576"))
-        conn.execute(f"PRAGMA cache_size = -{cache_kb}")
+        execute_with_deadline(f"PRAGMA cache_size = -{cache_kb}")
         mmap_bytes = int(
             os.environ.get("ZEUS_DB_MMAP_BYTES", str(32 * 1024 * 1024 * 1024))
         )
-        conn.execute(f"PRAGMA mmap_size = {mmap_bytes}")
+        execute_with_deadline(f"PRAGMA mmap_size = {mmap_bytes}")
         _install_connection_functions(conn)
-        conn.execute(f"PRAGMA busy_timeout = {timeout_ms}")
+        _apply_busy_timeout(conn, busy_timeout_ms=remaining_timeout_ms())
         return conn
     except BaseException:
         conn.close()
@@ -385,6 +485,7 @@ def get_trade_connection(
     *,
     write_class: WriteClass | str | None = None,
     busy_timeout_ms: int | None = None,
+    deadline_monotonic: float | None = None,
 ) -> sqlite3.Connection:
     """Trade DB connection (zeus_trades.db).
 
@@ -393,9 +494,16 @@ def get_trade_connection(
     thread, src/events/family_book_telemetry_writer.py) may choose a shorter
     budget so it yields to live writers instead of holding the default
     30-second wait. Connection PRAGMA only -- INV-37 / txn semantics unchanged.
+
+    ``deadline_monotonic`` bounds the total wait (connection open + busy
+    retries) against an absolute ``time.monotonic()`` deadline, independent
+    of ``busy_timeout_ms``'s per-connection budget; see ``_connect``.
     """
     return _connect(
-        _zeus_trade_db_path(), write_class=write_class, busy_timeout_ms=busy_timeout_ms
+        _zeus_trade_db_path(),
+        write_class=write_class,
+        busy_timeout_ms=busy_timeout_ms,
+        deadline_monotonic=deadline_monotonic,
     )
 
 
@@ -442,12 +550,18 @@ def get_world_connection_read_only() -> sqlite3.Connection:
     return _connect_read_only(ZEUS_WORLD_DB_PATH)
 
 
-def get_forecasts_connection_read_only() -> sqlite3.Connection:
+def get_forecasts_connection_read_only(
+    *,
+    deadline_monotonic: float | None = None,
+) -> sqlite3.Connection:
     """Read-only forecasts DB connection (write_class=None).
     T1 thin wrapper — encodes read-only intent in the call site name.
     INV-37: single-DB read; no ATTACH path.
     """
-    return _connect_read_only(ZEUS_FORECASTS_DB_PATH)
+    return _connect_read_only(
+        ZEUS_FORECASTS_DB_PATH,
+        deadline_monotonic=deadline_monotonic,
+    )
 
 
 # --------------------------------------------------------------------------
@@ -1209,7 +1323,10 @@ def get_trade_connection_with_world_optional(
 
 
 def get_trade_connection_with_world_required(
-    *, write_class: WriteClass | str | None = None,
+    *,
+    write_class: WriteClass | str | None = None,
+    busy_timeout_ms: int | None = None,
+    deadline_monotonic: float | None = None,
 ) -> sqlite3.Connection:
     """Trade connection with world/forecasts ATTACHed or fail closed.
 
@@ -1221,17 +1338,37 @@ def get_trade_connection_with_world_required(
     from src.state.db_writer_lock import canonical_lock_order
 
     resolved = _resolve_write_class(write_class)
-    conn = get_trade_connection(write_class=resolved)
+    conn = get_trade_connection(
+        write_class=resolved,
+        busy_timeout_ms=busy_timeout_ms,
+        deadline_monotonic=deadline_monotonic,
+    )
     try:
-        attached = {row[1] for row in conn.execute("PRAGMA database_list").fetchall()}
+        def _remaining_timeout_ms() -> int:
+            timeout_ms = _db_busy_timeout_ms() if busy_timeout_ms is None else busy_timeout_ms
+            if deadline_monotonic is None:
+                return timeout_ms
+            remaining = float(deadline_monotonic) - time.monotonic()
+            if not math.isfinite(remaining) or remaining <= 0.0:
+                raise TimeoutError("DB_CONNECTION_DEADLINE_EXPIRED")
+            return min(timeout_ms, max(1, math.ceil(remaining * 1000.0)))
+
+        def _execute(sql: str, parameters: tuple[object, ...] = ()) -> sqlite3.Cursor:
+            _apply_busy_timeout(conn, busy_timeout_ms=_remaining_timeout_ms())
+            return conn.execute(sql, parameters)
+
+        attached = {row[1] for row in _execute("PRAGMA database_list").fetchall()}
         if "world" not in attached:
             if resolved is not None:
                 _ = canonical_lock_order([_zeus_trade_db_path(), ZEUS_WORLD_DB_PATH])
                 _cnt_inc("db_trade_with_world_canonical_order_total")
-            conn.execute("ATTACH DATABASE ? AS world", (str(ZEUS_WORLD_DB_PATH),))
+            _execute("ATTACH DATABASE ? AS world", (str(ZEUS_WORLD_DB_PATH),))
             attached.add("world")
         if "forecasts" not in attached:
-            conn.execute("ATTACH DATABASE ? AS forecasts", (str(ZEUS_FORECASTS_DB_PATH),))
+            _execute(
+                "ATTACH DATABASE ? AS forecasts",
+                (str(ZEUS_FORECASTS_DB_PATH),),
+            )
             attached.add("forecasts")
         return conn
     except Exception:
@@ -1336,6 +1473,8 @@ def connect_or_degrade(
     db_path: Path,
     *,
     write_class: WriteClass | str | None = None,
+    busy_timeout_ms: int | None = None,
+    deadline_monotonic: float | None = None,
 ) -> Optional[sqlite3.Connection]:
     """T1E: Connect to DB; on 'database is locked' degrade to None (read-only cycle).
 
@@ -1344,7 +1483,14 @@ def connect_or_degrade(
     Any other OperationalError is re-raised (not a lock timeout).
     """
     try:
-        return _connect(db_path, write_class=write_class)
+        return _connect(
+            db_path,
+            write_class=write_class,
+            busy_timeout_ms=busy_timeout_ms,
+            deadline_monotonic=deadline_monotonic,
+        )
+    except TimeoutError:
+        return None
     except sqlite3.OperationalError as exc:
         if str(exc).startswith("database is locked"):
             _handle_db_write_lock(exc)
@@ -1384,6 +1530,7 @@ SETTLEMENT_PROBABILITY_OUTCOME_TRUTH_SOURCES = (
     | frozenset({
         "gamma_exact_held_event",
         "gamma_exact_held_condition",
+        "trades.payout_observations",
     })
 )
 AUTHORITATIVE_SETTLEMENT_ROW_REQUIRED_FIELDS = (
@@ -10415,18 +10562,35 @@ def log_outcome_fact(
     if conn is None:
         logger.info("Outcome fact write skipped: no connection")
         return {"status": "skipped_no_connection", "table": "outcome_fact"}
-    if not _table_exists(conn, "outcome_fact"):
+
+    from src.state.owner_routed_write import owner_write_target
+
+    outcome_fact_target = owner_write_target(conn, "outcome_fact")
+    if outcome_fact_target is None:
+        logger.info("Outcome fact owner unavailable; skipping durable write")
+        return {"status": "skipped_missing_owner", "table": "outcome_fact"}
+    if "." in outcome_fact_target:
+        outcome_fact_schema, outcome_fact_table = outcome_fact_target.split(".", 1)
+        outcome_fact_exists = conn.execute(
+            f"""
+            SELECT 1
+              FROM {outcome_fact_schema}.sqlite_master
+             WHERE type = 'table'
+               AND name = ?
+            """,
+            (outcome_fact_table,),
+        ).fetchone() is not None
+    else:
+        outcome_fact_exists = _table_exists(conn, outcome_fact_target)
+    if not outcome_fact_exists:
         logger.info("Outcome fact table unavailable; skipping durable write")
         return {"status": "skipped_missing_table", "table": "outcome_fact"}
 
-    from src.state.owner_routed_write import require_owner_main
-    require_owner_main(conn, "outcome_fact")  # bare-write helper: fail-closed unless conn is trade-rooted
-
     current = conn.execute(
-        """
+        f"""
         SELECT entered_at, exited_at, settled_at, exit_reason, admin_exit_reason, decision_snapshot_id,
                pnl, outcome, hold_duration_hours, monitor_count, chain_corrections_count, strategy_key
-        FROM outcome_fact
+        FROM {outcome_fact_target}
         WHERE position_id = ?
         """,
         (position_id,),
@@ -10452,8 +10616,8 @@ def log_outcome_fact(
     stored_hold_hours = hold_duration_hours if hold_duration_hours is not None else (current["hold_duration_hours"] if current else None)
 
     conn.execute(
-        """
-        INSERT INTO outcome_fact (
+        f"""
+        INSERT INTO {outcome_fact_target} (
             position_id,
             strategy_key,
             entered_at,
@@ -10993,10 +11157,32 @@ def _settlement_probability_outcome_ready(normalized: dict) -> bool:
 
     authority = str(normalized.get("settlement_authority") or "").strip().upper()
     source = str(normalized.get("settlement_truth_source") or "").strip()
+    settlement_source = str(normalized.get("settlement_source") or "").strip()
+    if (
+        source == "trades.payout_observations"
+        and settlement_source != "polymarket_chain_rpc_finalized_v1"
+    ):
+        return False
     return (
         authority in {"VERIFIED", "VENUE_RESOLVED"}
         and source in SETTLEMENT_PROBABILITY_OUTCOME_TRUTH_SOURCES
         and normalized.get("outcome") in {0, 1}
+    )
+
+
+def settlement_economic_ready(normalized: Mapping[str, object]) -> bool:
+    """Whether a canonical settlement proves final position economics.
+
+    Venue payout truth can prove outcome and P&L before the physical
+    temperature source publishes its final value.  Keep that economic truth
+    distinct from ``metric_ready``, which remains the stricter physical-
+    settlement/calibration contract.
+    """
+
+    return (
+        str(normalized.get("authority_level") or "")
+        != "durable_event_malformed"
+        and not tuple(normalized.get("required_missing_fields") or ())
     )
 
 
@@ -11033,6 +11219,20 @@ def _normalize_position_settlement_event(event: dict) -> Optional[dict]:
         for field in CANONICAL_POSITION_SETTLED_DETAIL_FIELDS
         if _is_missing_settlement_value(details.get(field))
     ]
+    realized_pnl_usd = _coerce_settlement_float(details.get("pnl"))
+    held_side_result = (
+        "win" if position_won is True
+        else "loss" if position_won is False
+        else "unknown"
+    )
+    if realized_pnl_usd is None:
+        economic_result = "unknown"
+    elif realized_pnl_usd > 0.0:
+        economic_result = "profit"
+    elif realized_pnl_usd < 0.0:
+        economic_result = "loss"
+    else:
+        economic_result = "flat"
     normalized = {
         "trade_id": str(event.get("runtime_trade_id") or ""),
         "city": str(event.get("city") or ""),
@@ -11041,7 +11241,17 @@ def _normalize_position_settlement_event(event: dict) -> Optional[dict]:
         "direction": direction,
         "p_posterior": _coerce_settlement_float(details.get("p_posterior")),
         "outcome": outcome,
-        "pnl": _coerce_settlement_float(details.get("pnl")),
+        "pnl": realized_pnl_usd,
+        "realized_pnl_usd": realized_pnl_usd,
+        "historical_shares": _coerce_settlement_float(event.get("historical_shares")),
+        "historical_cost_basis_usd": _coerce_settlement_float(
+            event.get("historical_cost_basis_usd")
+        ),
+        "entry_economics_source": str(
+            event.get("entry_economics_source") or "position_current_projection"
+        ),
+        "held_side_result": held_side_result,
+        "economic_result": economic_result,
         "decision_snapshot_id": str(event.get("decision_snapshot_id") or ""),
         "edge_source": str(event.get("edge_source") or ""),
         "strategy": str(event.get("strategy") or ""),
@@ -11198,6 +11408,8 @@ def query_settlement_events(
                pc.market_id,
                pc.bin_label,
                pc.direction,
+               pc.shares AS historical_shares,
+               pc.cost_basis_usd AS historical_cost_basis_usd,
                e.strategy_key AS strategy,
                pc.edge_source,
                e.source_module AS source,
@@ -11219,7 +11431,24 @@ def query_settlement_events(
         query += "\n        LIMIT ?"
         params.append(limit)
     rows = conn.execute(query, params).fetchall()
-    return _decode_position_event_rows(rows)
+    events = _decode_position_event_rows(rows)
+    fill_hints = _query_entry_execution_fill_hints(
+        conn,
+        [str(event.get("runtime_trade_id") or "") for event in events],
+    )
+    for event in events:
+        event["entry_economics_source"] = "position_current_projection"
+        fill_hint = fill_hints.get(str(event.get("runtime_trade_id") or ""))
+        if fill_hint is None or not fill_hint.get(
+            "entry_fill_command_identity_complete"
+        ):
+            continue
+        event["historical_shares"] = fill_hint["shares_filled"]
+        event["historical_cost_basis_usd"] = fill_hint["filled_cost_basis_usd"]
+        event["entry_economics_source"] = str(
+            fill_hint.get("entry_economics_source") or "execution_fact"
+        )
+    return events
 
 
 def query_authoritative_settlement_rows(
@@ -11354,7 +11583,7 @@ def refresh_strategy_health(
     for settlement_row in settlement_rows:
         if settlement_row.get("is_degraded", False):
             settlement_degraded_rows += 1
-        if not settlement_row.get("metric_ready", False):
+        if not settlement_economic_ready(settlement_row):
             continue
         settled_at = str(settlement_row.get("settled_at") or "")
         settled_at_dt = _parse_iso_timestamp(settled_at)
@@ -12753,14 +12982,30 @@ def expire_control_override(
     *,
     override_id: str,
     expired_at: str,
+    expected_issued_at: str | None = None,
+    expected_reason: str | None = None,
+    expected_issued_by: str | None = None,
 ) -> dict:
     """Append an 'expire' event to `control_overrides_history` that sets
     `effective_until = expired_at` on the latest row for this override_id.
-    No-op if no currently-active row exists. See B070."""
+    No-op if no currently-active matching row exists. The global entries pause
+    is a fixed identity shared by several writers, so expiring it requires an
+    exact generation witness rather than override_id alone. See B070."""
     if conn is None:
         return {"status": "skipped_no_connection", "table": "control_overrides", "expired_count": 0}
     if not _table_exists(conn, "control_overrides_history"):
         return {"status": "skipped_missing_table", "table": "control_overrides", "expired_count": 0}
+    protected_entries_pause = override_id == "control_plane:global:entries_paused"
+    if protected_entries_pause and not all(
+        str(value or "").strip()
+        for value in (expected_issued_at, expected_reason, expected_issued_by)
+    ):
+        return {
+            "status": "cas_required",
+            "table": "control_overrides",
+            "expired_count": 0,
+            "override_id": override_id,
+        }
     recorded_at = datetime.now(timezone.utc).isoformat()
     # Use history_id (AUTOINCREMENT) not recorded_at for the latest-row
     # lookup: strictly monotone, no clock/tie dependency.
@@ -12782,8 +13027,23 @@ def expire_control_override(
               WHERE h2.override_id = ?
           )
           AND (h.effective_until IS NULL OR h.effective_until > ?)
+          AND (? IS NULL OR h.issued_at = ?)
+          AND (? IS NULL OR h.reason = ?)
+          AND (? IS NULL OR h.issued_by = ?)
         """,
-        (expired_at, recorded_at, override_id, override_id, expired_at),
+        (
+            expired_at,
+            recorded_at,
+            override_id,
+            override_id,
+            expired_at,
+            expected_issued_at,
+            expected_issued_at,
+            expected_reason,
+            expected_reason,
+            expected_issued_by,
+            expected_issued_by,
+        ),
     )
     return {
         "status": "expired" if cur.rowcount else "noop",
@@ -12926,10 +13186,18 @@ def query_control_override_state(
             target_key = str(row["strategy_key"] or "")
             if not target_key:
                 continue
+            strategy_wide_gate = _parse_strategy_wide_risk_gate(
+                str(row["value"] or "")
+            )
+            if strategy_wide_gate is None:
+                # A probability-revision-scoped risk action is enforced by the
+                # revision-aware strategy policy at selection and submit.  This
+                # strategy-only projection cannot widen it to every revision.
+                continue
             issued_at = str(row["issued_at"] or "")
             parsed_issued_at = _parse_iso_timestamp(issued_at)
             decision = {
-                "enabled": not _parse_boolish_text(str(row["value"] or "")),
+                "enabled": not strategy_wide_gate,
                 "reason_code": "riskguard_action",
                 "reason_snapshot": {
                     "action_id": str(row["action_id"] or ""),
@@ -13041,7 +13309,44 @@ def _parse_boolish_text(raw: str) -> bool:
         return True
     if text in {"0", "false", "no", "off", "disabled"}:
         return False
+    try:
+        payload = json.loads(text)
+    except (TypeError, ValueError):
+        payload = None
+    if isinstance(payload, dict) and payload.get("paused") is True:
+        return True
     raise ValueError(f"unsupported boolish value in DB: {raw!r}")
+
+
+def _parse_strategy_wide_risk_gate(raw: str) -> bool | None:
+    """Return a strategy-wide gate, or ``None`` for an exact revision scope.
+
+    ``risk_actions`` may carry a structured probability-semantics scope.  The
+    control-plane projection has no probability revision identity, so only the
+    revision-aware strategy policy may consume that shape.  Malformed scopes
+    remain errors so authority loss still fails closed.
+    """
+
+    text = str(raw).strip()
+    if not text.startswith("{"):
+        return _parse_boolish_text(text)
+    try:
+        payload = json.loads(text)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"unsupported risk gate value in DB: {raw!r}") from exc
+    if not isinstance(payload, dict) or not isinstance(payload.get("gate"), bool):
+        raise ValueError(f"unsupported risk gate value in DB: {raw!r}")
+    revisions = payload.get("probability_semantics_revisions")
+    if revisions is None:
+        return bool(payload["gate"])
+    if not isinstance(revisions, list):
+        raise ValueError(f"unsupported risk gate revision scope in DB: {raw!r}")
+    cleaned = tuple(
+        str(value).strip() for value in revisions if str(value).strip()
+    )
+    if not cleaned:
+        raise ValueError(f"empty risk gate revision scope in DB: {raw!r}")
+    return None
 
 
 def _finite_float_or_zero(value) -> float:
@@ -13191,16 +13496,24 @@ def _query_entry_execution_fill_hints(
             {
                 "_shares": Decimal("0"),
                 "_cost": Decimal("0"),
+                "_has_partial": False,
                 "_latest_at": "",
                 "_latest_intent_id": "",
                 "_latest_venue_status": "",
                 "_command_ids": [],
+                "_command_identity_complete": True,
             },
         )
         hint["_shares"] += shares
         hint["_cost"] += filled_cost_basis_usd
+        hint["_has_partial"] = bool(
+            hint["_has_partial"]
+            or str(row["terminal_exec_status"] or "").lower() == "partial"
+        )
         if command_id:
             hint["_command_ids"].append(command_id)
+        else:
+            hint["_command_identity_complete"] = False
         filled_at = str(row["filled_at"] or "")
         if filled_at >= hint["_latest_at"]:
             hint["_latest_at"] = filled_at
@@ -13210,22 +13523,29 @@ def _query_entry_execution_fill_hints(
     for trade_id, hint in hints.items():
         total_shares = hint.pop("_shares")
         total_cost = hint.pop("_cost")
+        has_partial = bool(hint.pop("_has_partial"))
         latest_at = hint.pop("_latest_at")
         latest_intent_id = hint.pop("_latest_intent_id")
         latest_venue_status = hint.pop("_latest_venue_status")
         command_ids = tuple(sorted(set(hint.pop("_command_ids"))))
+        command_identity_complete = bool(hint.pop("_command_identity_complete"))
         hints[trade_id] = {
             "entry_price_avg_fill": float(total_cost / total_shares),
             "shares_filled": float(total_shares),
             "filled_cost_basis_usd": float(total_cost),
             "entry_economics_authority": ENTRY_ECONOMICS_AVG_FILL_PRICE,
-            "fill_authority": FILL_AUTHORITY_VENUE_CONFIRMED_FULL,
-            "entry_fill_verified": True,
+            "fill_authority": (
+                FILL_AUTHORITY_VENUE_CONFIRMED_PARTIAL
+                if has_partial
+                else FILL_AUTHORITY_VENUE_CONFIRMED_FULL
+            ),
+            "entry_fill_verified": not has_partial,
             "entry_economics_source": "execution_fact",
             "execution_fact_intent_id": latest_intent_id,
             "execution_fact_filled_at": latest_at,
             "execution_fact_venue_status": latest_venue_status,
             "execution_fact_command_ids": command_ids,
+            "entry_fill_command_identity_complete": command_identity_complete,
         }
     return hints
 
@@ -13255,6 +13575,7 @@ def _position_current_effective_entry_economics(
     allow_pending_fill_projection: bool = False,
 ) -> dict:
     from src.state.portfolio import (
+        FILL_AUTHORITY_CANCELLED_REMAINDER,
         FILL_AUTHORITY_VENUE_CONFIRMED_PARTIAL,
         FILL_GRADE_FILL_AUTHORITIES,
         fill_authority_effective_open_cost_basis,
@@ -13324,6 +13645,15 @@ def _position_current_effective_entry_economics(
         effective_entry_price = avg_fill_price
         if effective_entry_price <= 0.0 and effective_cost_basis_usd > 0.0 and effective_shares > 0.0:
             effective_entry_price = effective_cost_basis_usd / effective_shares
+        fill_hint_authority = str(
+            fill_hint.get("fill_authority")
+            or FILL_AUTHORITY_VENUE_CONFIRMED_FULL
+        )
+        if (
+            row_fill_authority == FILL_AUTHORITY_CANCELLED_REMAINDER
+            and fill_hint_authority == FILL_AUTHORITY_VENUE_CONFIRMED_PARTIAL
+        ):
+            fill_hint_authority = FILL_AUTHORITY_CANCELLED_REMAINDER
         return {
             "submitted_size_usd": submitted_size_usd,
             "projection_cost_basis_usd": projection_cost_basis_usd,
@@ -13335,9 +13665,15 @@ def _position_current_effective_entry_economics(
             "shares_filled": filled_shares,
             "filled_cost_basis_usd": filled_cost_basis_usd,
             "entry_economics_authority": ENTRY_ECONOMICS_AVG_FILL_PRICE,
-            "fill_authority": FILL_AUTHORITY_VENUE_CONFIRMED_FULL,
+            "fill_authority": fill_hint_authority,
             "entry_economics_source": str(fill_hint.get("entry_economics_source") or "execution_fact"),
-            "entry_fill_verified": True,
+            "entry_fill_verified": bool(
+                fill_hint_authority == FILL_AUTHORITY_CANCELLED_REMAINDER
+                or fill_hint.get(
+                    "entry_fill_verified",
+                    fill_hint_authority != FILL_AUTHORITY_VENUE_CONFIRMED_PARTIAL,
+                )
+            ),
             "execution_fact_intent_id": str(fill_hint.get("execution_fact_intent_id") or ""),
             "execution_fact_filled_at": str(fill_hint.get("execution_fact_filled_at") or ""),
             "execution_fact_venue_status": str(fill_hint.get("execution_fact_venue_status") or ""),
@@ -13491,6 +13827,15 @@ def _query_transitional_position_hints(
         return {}
     columns = _table_columns(conn, "position_events")
     if {"position_id", "payload_json", "occurred_at"}.issubset(columns):
+        transition_index = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?",
+            ("idx_position_events_position_type_sequence",),
+        ).fetchone()
+        index_clause = (
+            " INDEXED BY idx_position_events_position_type_sequence"
+            if transition_index is not None
+            else ""
+        )
         event_placeholders = ", ".join("?" for _ in _TRANSITIONAL_HINT_EVENT_TYPES)
         shared_params = (
             *_TRANSITIONAL_HINT_EVENT_TYPES,
@@ -13507,7 +13852,7 @@ def _query_transitional_position_hints(
                            event_type,
                            payload_json AS payload,
                            occurred_at
-                      FROM position_events
+                      FROM position_events{index_clause}
                      WHERE position_id = ?
                        AND event_type IN ({event_placeholders})
                      ORDER BY sequence_no DESC

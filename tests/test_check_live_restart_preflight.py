@@ -1,4 +1,4 @@
-# Lifecycle: created=2026-06-18; last_reviewed=2026-07-19; last_reused=2026-07-19
+# Lifecycle: created=2026-06-18; last_reviewed=2026-08-03; last_reused=2026-08-12
 # Purpose: Regression tests for read-only live restart preflight risk classification.
 # Reuse: pytest tests/test_check_live_restart_preflight.py
 # Authority basis: AGENTS.md live-money restart proof gates.
@@ -138,7 +138,16 @@ def _insert_monitor_events(
     payload: dict[str, object] | None = None,
 ) -> None:
     now = datetime.now(timezone.utc)
-    payload_json = json.dumps(payload or {})
+    payload_json = json.dumps(
+        payload
+        if payload is not None
+        else {
+            "last_monitor_prob": 0.5,
+            "last_monitor_prob_is_fresh": True,
+            "last_monitor_market_price": 0.5,
+            "last_monitor_market_price_is_fresh": True,
+        }
+    )
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS position_events (
@@ -1089,14 +1098,63 @@ def test_live_input_posterior_cycle_alignment_ignores_closed_old_targets(
         """,
         (old_target_date,),
     )
+    forecasts.executemany(
+        """
+        INSERT INTO raw_model_forecasts (
+            model, city, target_date, metric, source_cycle_time, endpoint,
+            coverage_status, captured_at, source_available_at, source_id, product_id
+        ) VALUES ('icon_global', ?, ?, 'high', ?,
+                  'single_runs', 'COVERED', ?, ?,
+                  'icon_global_single_runs', 'icon_global::single_runs')
+        """,
+        (
+            (
+                f"Closed City {index}",
+                old_target_date,
+                raw_cycle.isoformat(),
+                (raw_cycle + timedelta(minutes=10)).isoformat(),
+                (raw_cycle + timedelta(minutes=5)).isoformat(),
+            )
+            for index in range(20_000)
+        ),
+    )
+    forecasts.execute(
+        """
+        CREATE INDEX idx_raw_alignment_family
+            ON raw_model_forecasts(city, target_date, metric, source_cycle_time)
+        """
+    )
+    forecasts.execute(
+        """
+        CREATE INDEX idx_market_alignment_target
+            ON market_events(target_date, city, temperature_metric)
+        """
+    )
     forecasts.commit()
     forecasts.close()
+
+    real_connect = sqlite3.connect
+    vm_callbacks = 0
+
+    def guarded_connect(*args, **kwargs):
+        conn = real_connect(*args, **kwargs)
+
+        def stop_unbounded_history_scan():
+            nonlocal vm_callbacks
+            vm_callbacks += 1
+            return int(vm_callbacks > 100)
+
+        conn.set_progress_handler(stop_unbounded_history_scan, 100)
+        return conn
+
+    monkeypatch.setattr(preflight.sqlite3, "connect", guarded_connect)
 
     result = preflight._live_input_posterior_cycle_alignment_check()
 
     assert result.ok is True
     assert result.evidence["lagged_or_missing_count"] == 0
     assert result.evidence["active_target_floor_date"] == now.date().isoformat()
+    assert vm_callbacks <= 100
 
 
 def test_live_actionable_certificate_semantics_audits_unreferenced_qkernel_mismatch(
@@ -6304,7 +6362,10 @@ def test_confirmed_fill_bridge_coverage_accepts_already_bridged_trade(
     assert check.evidence["missing_rest_filled_orphan_count"] == 0
 
 
-def test_preflight_tolerates_retry_pending_without_resting_exit_order(monkeypatch, tmp_path):
+@pytest.mark.parametrize("retry_count", (0, 4))
+def test_preflight_tolerates_retry_pending_without_resting_exit_order(
+    monkeypatch, tmp_path, retry_count
+):
     trade_db, forecast_db, _state_dir = _patch_paths(monkeypatch, tmp_path)
     trade = _init_trade_db(trade_db)
     _init_forecast_db(forecast_db).close()
@@ -6327,10 +6388,11 @@ def test_preflight_tolerates_retry_pending_without_resting_exit_order(monkeypatc
             'retry-pos', 'pending_exit', 'Houston', '2026-06-24', 'high',
             'Will the highest temperature in Houston be between 92-93°F on June 24?',
             'buy_no', 36.0, 36.0, 'filled', 'CI_SEPARATED_REVERSAL',
-            4, '2026-06-24T18:22:42+00:00', 0.055, 1, 0.53, 1,
+            ?, '2026-06-24T18:22:42+00:00', 0.055, 1, 0.53, 1,
             '2026-06-24T17:42:42+00:00'
         )
-        """
+        """,
+        (retry_count,),
     )
     trade.execute(
         """
@@ -6417,6 +6479,80 @@ def test_preflight_tolerates_pre_submit_exit_retry_without_exit_command(monkeypa
     assert tolerated["restart_resolution"] == "exit_lifecycle_pre_submit_retry_resume"
     assert tolerated["repair_evidence"]["command_state"] == "NO_EXIT_COMMAND_RETRY_PENDING"
     assert tolerated["repair_evidence"]["event_type"] == "EXIT_ORDER_REJECTED"
+
+
+def test_preflight_tolerates_pre_submit_backoff_for_global_redecision(
+    monkeypatch,
+    tmp_path,
+):
+    trade_db, forecast_db, _state_dir = _patch_paths(monkeypatch, tmp_path)
+    trade = _init_trade_db(trade_db)
+    _init_forecast_db(forecast_db).close()
+    trade.execute(
+        """
+        CREATE TABLE venue_commands (
+            command_id TEXT PRIMARY KEY,
+            position_id TEXT,
+            intent_kind TEXT,
+            state TEXT,
+            venue_order_id TEXT,
+            size REAL,
+            updated_at TEXT
+        )
+        """
+    )
+    trade.execute(
+        """
+        CREATE TABLE position_events (
+            event_id TEXT PRIMARY KEY,
+            position_id TEXT,
+            sequence_no INTEGER,
+            event_type TEXT,
+            occurred_at TEXT,
+            venue_status TEXT,
+            payload_json TEXT
+        )
+        """
+    )
+    trade.execute(
+        """
+        INSERT INTO position_current VALUES (
+            'backoff-no-command-pos', 'pending_exit', 'Busan', '2026-08-09', 'high',
+            'Will the highest temperature in Busan be 31°C on August 9?',
+            'buy_no', 16.0, 16.0, 'backoff_exhausted', '',
+            25, '', 0.385, 1, 0.60, 1,
+            '2026-08-09T02:18:25+00:00'
+        )
+        """
+    )
+    trade.execute(
+        """
+        INSERT INTO position_events VALUES (
+            'backoff-no-command-pos:phase_transition:519',
+            'backoff-no-command-pos',
+            519,
+            'EXIT_ORDER_REJECTED',
+            '2026-08-09T02:18:25+00:00',
+            'backoff_exhausted',
+            '{"error":"marketable_sell_authority_required","venue_call_started":false}'
+        )
+        """
+    )
+    trade.commit()
+    trade.close()
+
+    result = preflight.evaluate()
+
+    pending = next(
+        check
+        for check in result["checks"]
+        if check["name"] == "pending_exit_restart_risk"
+    )
+    assert pending["ok"] is True
+    tolerated = pending["evidence"]["tolerated"][0]
+    assert tolerated["restart_resolution"] == "global_redecision_pre_submit_resume"
+    assert tolerated["repair_evidence"]["command_id"] is None
+    assert tolerated["repair_evidence"]["venue_status"] == "backoff_exhausted"
 
 
 def test_preflight_tolerates_pending_exit_phantom_sell_projection(monkeypatch, tmp_path):
@@ -8589,7 +8725,7 @@ def test_monitor_cadence_restart_evidence_classifies_expired_voided_chain_risk_a
     assert result.evidence["non_monitor_chain_risk_positions"][0]["position_id"] == "expired-voided"
 
 
-def test_monitor_cadence_restart_evidence_accepts_pending_exit_redecision_event(
+def test_monitor_cadence_restart_evidence_rejects_redecision_without_monitor_refresh(
     monkeypatch, tmp_path
 ):
     trade_db = tmp_path / "zeus_trades.db"
@@ -8642,9 +8778,9 @@ def test_monitor_cadence_restart_evidence_accepts_pending_exit_redecision_event(
 
     result = preflight._monitor_cadence_restart_evidence_check(preflight._open_positions())
 
-    assert result.ok is True
-    assert result.evidence["fresh_position_count"] == 1
-    assert result.evidence["stale_or_missing_position_count"] == 0
+    assert result.ok is False
+    assert result.evidence["fresh_position_count"] == 0
+    assert result.evidence["stale_or_missing_position_count"] == 1
 
 
 def test_monitor_cadence_restart_evidence_is_per_position_not_global_latest(

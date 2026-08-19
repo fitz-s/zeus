@@ -356,6 +356,7 @@ def test_obs_v2_live_tick_does_not_hold_writer_lock_across_city_fetch(monkeypatc
 
     lock_held = False
     lock_entries = 0
+    family_admission = lambda _observation: True
 
     @contextlib.contextmanager
     def fake_db_writer_lock(_path, _write_class):
@@ -385,8 +386,17 @@ def test_obs_v2_live_tick_does_not_hold_writer_lock_across_city_fetch(monkeypatc
         def close(self):
             self.closed = True
 
-    def fake_tick(city_name, conn, *, start_date, end_date, dry_run):
+    def fake_tick(
+        city_name,
+        conn,
+        *,
+        start_date,
+        end_date,
+        dry_run,
+        day0_family_admission=None,
+    ):
         assert not lock_held, f"{city_name} fetch/build ran while writer lock was held"
+        assert day0_family_admission is family_admission
         written = obs_tick._write_rows(conn, [object()])
         return obs_tick.TickResult(city=city_name, tier="WU_ICAO", rows_ready=1, rows_written=written)
 
@@ -405,6 +415,7 @@ def test_obs_v2_live_tick_does_not_hold_writer_lock_across_city_fetch(monkeypatc
         city_filter=["Auckland", "Tokyo"],
         db_path=tmp_path / "world.db",
         log_path=tmp_path / "obs_log.jsonl",
+        day0_family_admission=family_admission,
     )
 
     assert [r.rows_written for r in results] == [1, 1]

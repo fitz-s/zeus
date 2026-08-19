@@ -31,10 +31,14 @@ from __future__ import annotations
 
 import logging
 import urllib.error
-import urllib.request
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Callable
+from pathlib import Path
+from typing import Any, Callable, Mapping
+
+from src.config import STATE_DIR
+from src.data.openmeteo_client import fetch as _fetch_openmeteo
+from src.data.openmeteo_quota import quota_tracker
 
 logger = logging.getLogger("zeus.replacement_cycle_availability")
 
@@ -58,6 +62,7 @@ OPENMETEO_PROBE_TIMEOUT_SECONDS = 20.0
 # = one day of lookback, strictly more than any observed publication lag; beyond that the
 # cycle is superseded anyway. This is a SEARCH BOUND, not an availability assumption.
 DEFAULT_MAX_LOOKBACK_CYCLES = 4
+DEFAULT_MODEL_UPDATES_JSONL = STATE_DIR / "source_updates" / "open_meteo_model_updates.jsonl"
 
 
 def floor_to_cycle(now: datetime) -> datetime:
@@ -78,7 +83,7 @@ def candidate_cycles(
 def probe_openmeteo_single_run_available(
     cycle: datetime,
     *,
-    urlopen: Callable[..., object] = urllib.request.urlopen,
+    urlopen: Callable[..., object] | None = None,
 ) -> bool:
     """True iff the open-meteo single-runs API serves this ecmwf_ifs run.
 
@@ -90,6 +95,22 @@ def probe_openmeteo_single_run_available(
     url = OPENMETEO_SINGLE_RUNS_URL.format(
         lat=OPENMETEO_PROBE_LAT, lon=OPENMETEO_PROBE_LON, run=run
     )
+    if urlopen is None:
+        try:
+            with quota_tracker.priority_lane():
+                _fetch_openmeteo(
+                    url,
+                    {},
+                    timeout=OPENMETEO_PROBE_TIMEOUT_SECONDS,
+                    max_retries=1,
+                    endpoint_label="source_clock_anchor_availability",
+                    fast_fail_429=True,
+                    conditional_status_codes=frozenset({400}),
+                )
+            return True
+        except Exception as exc:  # noqa: BLE001 — next poll retries fresh provider truth.
+            logger.debug("openmeteo single-run probe unavailable: %s", exc)
+            return False
     try:
         with urlopen(url, timeout=OPENMETEO_PROBE_TIMEOUT_SECONDS) as resp:  # type: ignore[call-arg]
             return int(getattr(resp, "status", 0) or 0) == 200
@@ -124,10 +145,97 @@ def probe_bucket_run_declared(cycle: datetime) -> bool:
         return False
 
 
+class AnchorAvailabilityProbe:
+    """One provider snapshot reused across one candidate-cycle decision.
+
+    Single-runs and bucket availability remain cycle-specific.  Model metadata
+    describes one provider-current run, so fetching it once per candidate was
+    redundant and made the 15-second poll deterministically exhaust daily quota.
+    """
+
+    def __init__(
+        self,
+        *,
+        urlopen: Callable[..., object] | None = None,
+        meta_fetch: Callable[..., Mapping[str, Any]] | None = None,
+        cached_updates_path: str | Path | None = DEFAULT_MODEL_UPDATES_JSONL,
+    ) -> None:
+        self._urlopen = urlopen
+        self._meta_fetch = meta_fetch
+        self._cached_updates_path = (
+            None if cached_updates_path is None else Path(cached_updates_path)
+        )
+        self._meta_loaded = False
+        self._meta: Mapping[str, Any] | None = None
+
+    def _model_meta(self) -> Mapping[str, Any] | None:
+        if self._meta_loaded:
+            return self._meta
+        self._meta_loaded = True
+        try:
+            if self._meta_fetch is None:
+                from src.data.openmeteo_model_updates import (  # noqa: PLC0415
+                    read_model_updates_jsonl,
+                )
+
+                if self._cached_updates_path is not None:
+                    try:
+                        cached = next(
+                            (
+                                update
+                                for update in read_model_updates_jsonl(
+                                    self._cached_updates_path
+                                )
+                                if update.model == "ecmwf_ifs"
+                            ),
+                            None,
+                        )
+                    except Exception as exc:  # noqa: BLE001 -- network fallback below.
+                        logger.debug(
+                            "source-clock metadata cache unreadable; probing provider: %s",
+                            exc,
+                        )
+                        cached = None
+                    if cached is not None:
+                        self._meta = {
+                            "run_initialisation_utc": cached.last_run_initialisation_time,
+                            "run_availability_utc": cached.last_run_availability_time,
+                            "run_modification_utc": cached.last_run_modification_time,
+                        }
+                        return self._meta
+                from src.data.openmeteo_ecmwf_ifs9_anchor import (
+                    fetch_openmeteo_ifs9_model_meta,
+                )
+
+                self._meta = fetch_openmeteo_ifs9_model_meta()
+            else:
+                self._meta = self._meta_fetch()
+        except Exception as exc:  # noqa: BLE001 -- next transport rung remains valid.
+            logger.debug("anchor meta probe error (treated unavailable): %s", exc)
+            self._meta = None
+        return self._meta
+
+    def __call__(self, cycle: datetime) -> bool:
+        if probe_openmeteo_single_run_available(cycle, urlopen=self._urlopen):
+            return True
+        meta = self._model_meta()
+        if meta is not None:
+            try:
+                if (
+                    meta["run_initialisation_utc"] == cycle.astimezone(UTC)
+                    and meta["run_availability_utc"]
+                    >= meta["run_initialisation_utc"]
+                ):
+                    return True
+            except (KeyError, TypeError, ValueError) as exc:
+                logger.debug("anchor meta probe malformed (treated unavailable): %s", exc)
+        return probe_bucket_run_declared(cycle)
+
+
 def probe_anchor_available_any(
     cycle: datetime,
     *,
-    urlopen: Callable[..., object] = urllib.request.urlopen,
+    urlopen: Callable[..., object] | None = None,
 ) -> bool:
     """True iff the anchor leg can be fetched for this cycle by ANY ladder transport.
 
@@ -140,20 +248,31 @@ def probe_anchor_available_any(
     leg as published when any probe passes. The probe set MUST stay a superset-mirror of
     the downloader's ladder: a rung the probe cannot see is a rung the run-selection
     authority will starve (the downloader only ever fetches probe-confirmed cycles)."""
-    if probe_openmeteo_single_run_available(cycle, urlopen=urlopen):
-        return True
-    try:
-        from src.data.openmeteo_ecmwf_ifs9_anchor import fetch_openmeteo_ifs9_model_meta
+    return AnchorAvailabilityProbe(urlopen=urlopen)(cycle)
 
-        meta = fetch_openmeteo_ifs9_model_meta()
-        if (
-            meta["run_initialisation_utc"] == cycle.astimezone(UTC)
-            and meta["run_availability_utc"] >= meta["run_initialisation_utc"]
-        ):
-            return True
-    except Exception as exc:  # noqa: BLE001 — probe noise = not available yet
-        logger.debug("anchor meta probe error (treated unavailable): %s", exc)
-    return probe_bucket_run_declared(cycle)
+
+_DEFAULT_ANCHOR_PROBE = probe_anchor_available_any
+
+
+def resolve_provider_anchor_cycle_availability(
+    now: datetime,
+    *,
+    max_lookback_cycles: int = DEFAULT_MAX_LOOKBACK_CYCLES,
+) -> tuple["AnchorCycleAvailability", ...]:
+    """Resolve provider availability from one coherent per-poll meta snapshot."""
+
+    current_probe = probe_anchor_available_any
+    # Preserve dependency injection used by replay/tests without adding network I/O.
+    probe: Callable[[datetime], bool] = (
+        current_probe
+        if current_probe is not _DEFAULT_ANCHOR_PROBE
+        else AnchorAvailabilityProbe()
+    )
+    return resolve_anchor_cycle_availability(
+        now,
+        probe_anchor=probe,
+        max_lookback_cycles=max_lookback_cycles,
+    )
 
 
 @dataclass(frozen=True)

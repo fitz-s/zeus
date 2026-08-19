@@ -66,7 +66,7 @@ TIER_RULES: list[tuple[int, str]] = [
     (0, "architecture/2026_04_02_architecture_kernel.sql"),
     (0, "maintenance_worker/core/validator.py"),
     (0, "maintenance_worker/core/apply_publisher.py"),
-    (0, "bindings/zeus/safety_overrides.yaml"),
+    (0, "deploy/agent_safety/zeus/safety_overrides.yaml"),
 
     # Tier 1 — Data / probability / persistence correctness
     (1, "src/calibration/*"),

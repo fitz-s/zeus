@@ -12,7 +12,7 @@ import json
 import logging
 import math
 import os
-import sys
+import tempfile
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
@@ -24,7 +24,78 @@ logger = logging.getLogger(__name__)
 PROJECT_ROOT = Path(__file__).parent.parent
 CONFIG_DIR = PROJECT_ROOT / "config"
 RUNTIME_ROOT = Path(os.environ.get("ZEUS_PRIMARY_ROOT") or PROJECT_ROOT).expanduser().resolve()
-STATE_DIR = RUNTIME_ROOT / "state"
+TEST_STATE_ROOT_ENV = "ZEUS_TEST_STATE_ROOT"
+
+
+def _path_is_within(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+    except ValueError:
+        return False
+    return True
+
+
+def _test_state_forbidden_roots() -> tuple[Path, ...]:
+    return (
+        PROJECT_ROOT.resolve(strict=False),
+        (PROJECT_ROOT / "state").resolve(strict=False),
+    )
+
+
+def validate_test_state_root(value: str | os.PathLike[str] | Path) -> Path:
+    """Validate a pytest state root before any test state path is resolved.
+
+    The marker is intentionally independent of ``ZEUS_PRIMARY_ROOT``. It is a
+    test-only capability boundary, not a production runtime-root override.
+    """
+
+    raw = os.fspath(value) if value is not None else ""
+    if not isinstance(raw, str) or not raw.strip():
+        raise ValueError("test state root must be non-empty")
+    candidate = Path(raw).expanduser()
+    if not candidate.is_absolute():
+        raise ValueError("test state root must be absolute")
+    if candidate.is_symlink():
+        raise ValueError("test state root must not be a symlink")
+
+    resolved = candidate.resolve(strict=False)
+    temp_root = Path(tempfile.gettempdir()).resolve(strict=False)
+    if resolved == temp_root or not _path_is_within(resolved, temp_root):
+        raise ValueError("test state root must be a private temporary child")
+    for forbidden in _test_state_forbidden_roots():
+        if _path_is_within(resolved, forbidden):
+            raise ValueError("test state root may not overlap repo/live state")
+    return resolved
+
+
+def validate_test_state_path(value: str | os.PathLike[str] | Path) -> Path:
+    """Validate a test-only state target by resolved filesystem boundaries."""
+
+    marker = os.environ.get(TEST_STATE_ROOT_ENV)
+    if marker is None:
+        raise RuntimeError("test state path validation requires the test marker")
+    validate_test_state_root(marker)
+    candidate = Path(value).expanduser()
+    if not candidate.is_absolute():
+        raise ValueError("test state path must be absolute")
+    resolved = candidate.resolve(strict=False)
+    temp_root = Path(tempfile.gettempdir()).resolve(strict=False)
+    if resolved == temp_root or not _path_is_within(resolved, temp_root):
+        raise ValueError("test state path must stay under a temporary directory")
+    for forbidden in _test_state_forbidden_roots():
+        if _path_is_within(resolved, forbidden):
+            raise ValueError("test state path may not overlap repo/live state")
+    return candidate
+
+
+_TEST_STATE_ROOT: Path | None = None
+if TEST_STATE_ROOT_ENV in os.environ:
+    # SCOPE: only the pytest marker's root; production has no marker and is untouched.
+    # DRAIN: pytest owns this temporary namespace until session teardown.
+    # RESET: removing the marker restores the existing ZEUS_PRIMARY_ROOT/state path.
+    _TEST_STATE_ROOT = validate_test_state_root(os.environ[TEST_STATE_ROOT_ENV])
+
+STATE_DIR = _TEST_STATE_ROOT or (RUNTIME_ROOT / "state")
 
 
 def runtime_state_path(filename: str) -> Path:
@@ -33,7 +104,12 @@ def runtime_state_path(filename: str) -> Path:
     Backtest/replay lanes use their own DB paths and must not route through
     runtime state files.
     """
-    return STATE_DIR / filename
+    target = STATE_DIR / filename
+    if _TEST_STATE_ROOT is not None:
+        validated = validate_test_state_path(target)
+        if not _path_is_within(validated.resolve(strict=False), _TEST_STATE_ROOT):
+            raise ValueError("default state path escaped the test state root")
+    return target
 
 
 ACTIVE_MODES = ("live",)
@@ -146,12 +222,6 @@ class Settings:
         return dict(self._data["feature_flags"])
 
 
-class EntryForecastRolloutMode(StrEnum):
-    BLOCKED = "blocked"
-    CANARY = "canary"
-    LIVE = "live"
-
-
 class EntryForecastSourceTransport(StrEnum):
     ENSEMBLE_SNAPSHOTS_V2_DB_READER = "ensemble_snapshots_db_reader"
 
@@ -170,7 +240,6 @@ class EntryForecastConfig:
     target_horizon_days: int
     warm_horizon_days: int
     source_cycle_policy: str
-    rollout_mode: EntryForecastRolloutMode
     calibration_policy_id: EntryForecastCalibrationPolicyId
 
     def __post_init__(self) -> None:
@@ -212,8 +281,6 @@ def entry_forecast_config(config: Settings | None = None) -> EntryForecastConfig
 
     cfg = config or settings
     data = cfg["entry_forecast"]
-    settings_mode_raw = data["rollout_mode"]
-    rollout_mode = _resolve_rollout_mode(settings_mode_raw)
     return EntryForecastConfig(
         source_id=str(data["source_id"]).strip(),
         source_transport=EntryForecastSourceTransport(data["source_transport"]),
@@ -223,54 +290,8 @@ def entry_forecast_config(config: Settings | None = None) -> EntryForecastConfig
         target_horizon_days=int(data["target_horizon_days"]),
         warm_horizon_days=int(data["warm_horizon_days"]),
         source_cycle_policy=str(data["source_cycle_policy"]).strip(),
-        rollout_mode=rollout_mode,
         calibration_policy_id=EntryForecastCalibrationPolicyId(data["calibration_policy_id"]),
     )
-
-
-# Operator escape hatch: ZEUS_ENTRY_FORECAST_ROLLOUT_MODE overrides the
-# settings.json value for the lifetime of the process. Used by flip-mode
-# rehearsals and emergency demotion when editing settings.json + restarting
-# the daemon would be too slow. The override is logged to stderr once per
-# resolution so it never silently changes behavior. Invalid env values fail
-# closed (raise ValueError) — they do NOT silently fall back to settings.
-ROLLOUT_MODE_ENV_VAR = "ZEUS_ENTRY_FORECAST_ROLLOUT_MODE"
-_ROLLOUT_MODE_OVERRIDE_LOGGED: set[tuple[str, str]] = set()
-
-
-def _resolve_rollout_mode(settings_mode_raw: str) -> EntryForecastRolloutMode:
-    """Resolve effective rollout_mode from settings + env override.
-
-    Order:
-      1. ``ZEUS_ENTRY_FORECAST_ROLLOUT_MODE`` env var (if set and non-empty).
-      2. settings.json ``entry_forecast.rollout_mode``.
-
-    Invalid env values raise ``ValueError`` (fail-closed). Env value equal to
-    the settings value is a no-op (no log line).
-    """
-    settings_mode = EntryForecastRolloutMode(settings_mode_raw)
-    env_raw = os.environ.get(ROLLOUT_MODE_ENV_VAR, "").strip()
-    if not env_raw:
-        return settings_mode
-    try:
-        env_mode = EntryForecastRolloutMode(env_raw)
-    except ValueError as exc:
-        valid = sorted(m.value for m in EntryForecastRolloutMode)
-        raise ValueError(
-            f"{ROLLOUT_MODE_ENV_VAR}={env_raw!r} is not a valid rollout mode "
-            f"(valid: {valid}). Unset the env var or set a valid value."
-        ) from exc
-    if env_mode is settings_mode:
-        return settings_mode
-    key = (settings_mode.value, env_mode.value)
-    if key not in _ROLLOUT_MODE_OVERRIDE_LOGGED:
-        _ROLLOUT_MODE_OVERRIDE_LOGGED.add(key)
-        print(
-            f"ROLLOUT_MODE_ENV_OVERRIDE: settings={settings_mode.value} "
-            f"env={env_mode.value} (env wins)",
-            file=sys.stderr,
-        )
-    return env_mode
 
 
 def _unit_diurnal_amplitude(city_row: dict, unit: str) -> float:

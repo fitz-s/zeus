@@ -40,6 +40,64 @@ def assert_live_order_unit_price(price: Decimal | str | float) -> Decimal:
     return value
 
 
+def assert_live_order_size(
+    size: Decimal | str | float,
+    min_order_size: Decimal | str | float,
+) -> Decimal:
+    """Return a finite positive size at or above the bound venue minimum."""
+
+    try:
+        value = size if isinstance(size, Decimal) else Decimal(str(size))
+        minimum = (
+            min_order_size
+            if isinstance(min_order_size, Decimal)
+            else Decimal(str(min_order_size))
+        )
+    except Exception as exc:
+        raise ValueError(
+            f"live order size/minimum must be decimal: size={size!r} "
+            f"min_order_size={min_order_size!r}"
+        ) from exc
+    if (
+        not value.is_finite()
+        or not minimum.is_finite()
+        or value <= 0
+        or minimum <= 0
+        or value < minimum
+    ):
+        raise ValueError(
+            "live order size is below venue minimum or invalid: "
+            f"size={value} min_order_size={minimum}"
+        )
+    return value
+
+
+def assert_live_order_tick(
+    price: Decimal | str | float,
+    tick_size: Decimal | str | float,
+) -> Decimal:
+    """Return a finite positive tick when the limit is exactly representable."""
+
+    try:
+        value = price if isinstance(price, Decimal) else Decimal(str(price))
+        tick = tick_size if isinstance(tick_size, Decimal) else Decimal(str(tick_size))
+    except Exception as exc:
+        raise ValueError(
+            f"live order price/tick must be decimal: price={price!r} tick_size={tick_size!r}"
+        ) from exc
+    if (
+        not value.is_finite()
+        or not tick.is_finite()
+        or tick <= 0
+        or value % tick != 0
+    ):
+        raise ValueError(
+            "live order price is off tick or tick is invalid: "
+            f"price={value} tick_size={tick}"
+        )
+    return tick
+
+
 def _json_default(value: Any) -> Any:
     if isinstance(value, Decimal):
         return str(value)
@@ -142,10 +200,40 @@ class VenueSubmissionEnvelope:
             )
 
     def assert_live_submit_bound(self) -> None:
-        """Fail closed unless a trade envelope is price-safe and market-bound."""
+        """Fail closed unless a trade envelope's limit is safe and market-bound."""
 
         assert_live_order_unit_price(self.price)
+        assert_live_order_size(self.size, self.min_order_size)
+        assert_live_order_tick(self.price, self.tick_size)
         self.assert_live_market_bound()
+
+    def assert_live_fill_price_bound(self) -> None:
+        """Validate submitted price and a venue-representable execution mode.
+
+        ``price`` is our order limit.  A SELL fill may improve above that floor;
+        direction-aware receipt validation owns the separate requirement that
+        the realized fill never falls below the submitted limit.
+        """
+
+        self.assert_live_submit_bound()
+        order_type = str(self.order_type or "").strip().upper()
+        maker = self.post_only and order_type in {"GTC", "GTD"}
+        marketable_taker = (
+            not self.post_only
+            and (
+                (self.side == "BUY" and order_type in {"FOK", "FAK"})
+                or (self.side == "SELL" and order_type == "FAK")
+            )
+        )
+        if not (maker or marketable_taker):
+            # INV-47 SCOPE: only this token/side order is rejected.
+            # DRAIN: the next decision may emit a certified legal execution mode.
+            # RESET: no latch is stored; a legal maker or role-scoped taker passes.
+            raise ValueError(
+                "live fill price is unbounded: execution mode is not authorized "
+                "by the envelope: "
+                f"order_type={order_type or 'ABSENT'}:post_only={self.post_only}"
+            )
 
     def to_dict(self) -> dict[str, Any]:
         return {

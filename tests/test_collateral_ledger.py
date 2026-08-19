@@ -1,11 +1,12 @@
 # Created: 2026-04-27
 # Purpose: Lock R3 Z4 CollateralLedger pUSD/CTF reservation and fail-closed executor preflight behavior.
 # Reuse: Run when collateral snapshots, pUSD/CTF accounting, wrap/unwrap command state, or executor collateral gates change.
-# Last reused/audited: 2026-07-17
-# Lifecycle: created=2026-04-27; last_reviewed=2026-07-17; last_reused=2026-07-17
+# Last reused/audited: 2026-08-10
+# Lifecycle: created=2026-04-27; last_reviewed=2026-08-10; last_reused=2026-08-10
 # Authority basis: docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/Z4.yaml
 #                  2026-05-20 live readiness repair: wrap confirmation refresh stays behind V2 adapter boundary.
 #                  current/finite_evidence_probability_symmetry authenticated-fill reservation repair.
+#                  2026-08-10 DDL-free in-transaction BUY preflight and current WORLD/FORECAST certificate fixtures.
 """R3 Z4 collateral-ledger antibodies."""
 
 from __future__ import annotations
@@ -46,6 +47,7 @@ from src.state.collateral_ledger import (
     DEFAULT_COLLATERAL_BUSY_TIMEOUT_MS,
     SQLITE_SIGNED_INTEGER_MAX,
     init_collateral_schema,
+    load_latest_collateral_snapshot_read_only,
     require_pusd_redemption_allowed,
 )
 
@@ -122,11 +124,85 @@ class FakeCollateralAdapter:
 
 
 @pytest.fixture
-def conn():
+def conn(tmp_path, monkeypatch):
     db = sqlite3.connect(":memory:")
     db.row_factory = sqlite3.Row
     init_collateral_schema(db)
     init_wrap_unwrap_schema(db)
+
+    # Current ENTRY admission is a sanctioned trade+WORLD transaction and
+    # resolves its canonical weather family through the FORECASTS owner.  Keep
+    # those two authorities hermetic here, matching the live executor seam.
+    from src.state.db import (
+        apply_architecture_kernel_schema,
+        init_schema as init_world_schema,
+        init_schema_forecasts,
+    )
+
+    world_path = tmp_path / "zeus-world.db"
+    world_conn = sqlite3.connect(world_path)
+    world_conn.row_factory = sqlite3.Row
+    init_world_schema(world_conn)
+    apply_architecture_kernel_schema(world_conn)
+    world_conn.execute(
+        """
+        INSERT OR REPLACE INTO decision_certificates (
+            certificate_id, certificate_type, schema_version,
+            canonicalization_version, semantic_key, claim_type, mode,
+            decision_time, authority_id, authority_version, algorithm_id,
+            algorithm_version, payload_json, payload_hash, certificate_hash,
+            verifier_status, created_at
+        ) VALUES (?, 'ActionableTradeCertificate', 1, 'test-v1', ?,
+                  'actionable_trade', 'LIVE', ?, 'test-authority', 'v1',
+                  'test-algorithm', 'v1', ?, ?, ?, 'VERIFIED', ?)
+        """,
+        (
+            "ActionableTradeCertificate:" + "a" * 24,
+            "actionable:event-test:" + YES_TOKEN,
+            datetime.now(timezone.utc).isoformat(),
+            json.dumps(
+                {
+                    "condition_id": "condition-test",
+                    "token_id": YES_TOKEN,
+                    "direction": "buy_yes",
+                    "qkernel_execution_economics": {},
+                },
+                sort_keys=True,
+            ),
+            "a" * 64,
+            "a" * 64,
+            datetime.now(timezone.utc).isoformat(),
+        ),
+    )
+    world_conn.commit()
+    world_conn.close()
+    db.execute("ATTACH DATABASE ? AS world", (str(world_path),))
+
+    forecasts_path = tmp_path / "zeus-forecasts.db"
+    forecasts_conn = sqlite3.connect(forecasts_path)
+    forecasts_conn.row_factory = sqlite3.Row
+    init_schema_forecasts(forecasts_conn)
+    forecasts_conn.execute(
+        """
+        INSERT INTO market_events (
+            market_slug, city, target_date, temperature_metric, condition_id,
+            token_id, range_label, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "event-test", "Test City", "2026-04-27", "high", "condition-test",
+            YES_TOKEN, "50-51F", datetime.now(timezone.utc).isoformat(),
+        ),
+    )
+    forecasts_conn.commit()
+    forecasts_conn.close()
+
+    def _forecast_read_only():
+        opened = sqlite3.connect(forecasts_path)
+        opened.row_factory = sqlite3.Row
+        return opened
+
+    monkeypatch.setattr("src.state.db.get_forecasts_connection_read_only", _forecast_read_only)
     yield db
     db.close()
 
@@ -192,6 +268,87 @@ def test_path_backed_collateral_ledger_bad_timeout_env_falls_back(tmp_path, monk
             assert conn.execute("PRAGMA busy_timeout").fetchone()[0] == DEFAULT_COLLATERAL_BUSY_TIMEOUT_MS
     finally:
         ledger.close()
+
+
+def test_latest_snapshot_read_is_bounded_and_preserves_causal_tail_order():
+    db = sqlite3.connect(":memory:")
+    db.row_factory = sqlite3.Row
+    init_collateral_schema(db)
+    base = datetime(2026, 8, 11, tzinfo=timezone.utc)
+    rows = [
+        (
+            index,
+            index,
+            0,
+            "{}",
+            "{}",
+            (base + timedelta(seconds=index)).isoformat(),
+            "CHAIN",
+        )
+        for index in range(5_000)
+    ]
+    db.executemany(
+        """
+        INSERT INTO collateral_ledger_snapshots (
+            pusd_balance_micro,
+            pusd_allowance_micro,
+            usdc_e_legacy_balance_micro,
+            ctf_token_balances_json,
+            ctf_token_allowances_json,
+            captured_at,
+            authority_tier
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        rows,
+    )
+    newer_fact_time = base + timedelta(days=1)
+    db.execute(
+        """
+        INSERT INTO collateral_ledger_snapshots (
+            pusd_balance_micro,
+            pusd_allowance_micro,
+            usdc_e_legacy_balance_micro,
+            ctf_token_balances_json,
+            ctf_token_allowances_json,
+            captured_at,
+            authority_tier
+        ) VALUES (20000000, 20000000, 0, '{}', '{}', ?, 'CHAIN')
+        """,
+        (newer_fact_time.isoformat(),),
+    )
+    db.execute(
+        """
+        INSERT INTO collateral_ledger_snapshots (
+            pusd_balance_micro,
+            pusd_allowance_micro,
+            usdc_e_legacy_balance_micro,
+            ctf_token_balances_json,
+            ctf_token_allowances_json,
+            captured_at,
+            authority_tier
+        ) VALUES (10000000, 10000000, 0, '{}', '{}', ?, 'CHAIN')
+        """,
+        ((newer_fact_time - timedelta(seconds=1)).isoformat(),),
+    )
+
+    progress_calls = 0
+
+    def _abort_unbounded_history_scan() -> int:
+        nonlocal progress_calls
+        progress_calls += 1
+        return int(progress_calls > 50)
+
+    db.set_progress_handler(_abort_unbounded_history_scan, 100)
+    try:
+        snapshot = load_latest_collateral_snapshot_read_only(db, witness="pusd")
+    finally:
+        db.set_progress_handler(None, 0)
+        db.close()
+
+    assert snapshot is not None
+    assert snapshot.pusd_balance_micro == 20_000_000
+    assert snapshot.captured_at == newer_fact_time
+    assert progress_calls <= 50
 
 
 def test_live_collateral_refresh_skips_when_refresh_lane_is_busy(monkeypatch):
@@ -263,6 +420,9 @@ def _buy_intent(
         executable_snapshot_min_order_size=executable_snapshot_min_order_size,
         executable_snapshot_neg_risk=executable_snapshot_neg_risk,
         decision_source_context=_decision_source_context(),
+        submit_order_type="GTC",
+        post_only=True,
+        actionable_certificate_hash="a" * 64,
     )
 
 
@@ -472,6 +632,7 @@ def _final_buy_intent(
             "selection_guard_abstained": False,
             "selection_guard_q_safe": 0.95,
         },
+        actionable_certificate_hash="a" * 64,
     )
 
 
@@ -511,6 +672,40 @@ def test_buy_preflight_blocks_when_pusd_insufficient(conn):
 
     with pytest.raises(CollateralInsufficient, match="pusd_insufficient"):
         ledger.buy_preflight(_buy_intent(size_usd=10.0))
+
+
+def test_buy_preflight_in_transaction_is_read_only_and_preserves_caller_transaction(conn):
+    """ENTRY admission preflight must not initialize schema or commit its caller."""
+
+    ledger = CollateralLedger(conn)
+    ledger.set_snapshot(_snapshot(pusd=100_000_000))
+    conn.commit()
+    conn.execute("BEGIN IMMEDIATE")
+    statements: list[str] = []
+    conn.set_trace_callback(statements.append)
+    try:
+        assert CollateralLedger.buy_preflight_in_transaction(
+            conn,
+            _buy_intent(size_usd=1.0),
+            spend_micro=1_000_000,
+        ) is True
+        assert conn.in_transaction is True
+        # Statement-shape check, not substring: 09cd39d72 (2026-08-11) added a
+        # SQL comment mentioning "commit interleaving" to the snapshot-scan
+        # query, which a naive `"COMMIT" in statement.upper()` substring test
+        # false-positives on. Match COMMIT the same way CREATE/DROP/ALTER are
+        # matched below -- by statement start, not by word anywhere in the text.
+        assert not any(
+            statement.lstrip().upper().startswith("COMMIT")
+            for statement in statements
+        )
+        assert not any(
+            statement.lstrip().upper().startswith(("CREATE ", "DROP ", "ALTER "))
+            for statement in statements
+        )
+    finally:
+        conn.set_trace_callback(None)
+        conn.rollback()
 
 
 def test_buy_preflight_blocks_when_pusd_allowance_insufficient(conn):
@@ -987,6 +1182,10 @@ def test_executor_buy_preflight_blocks_before_command_persistence(conn, monkeypa
     configure_global_ledger(ledger)
     monkeypatch.setattr("src.control.cutover_guard.assert_submit_allowed", lambda *args, **kwargs: None)
     monkeypatch.setattr("src.control.heartbeat_supervisor.assert_heartbeat_allows_order_type", lambda *args, **kwargs: None)
+    # cd3dc2f62 (2026-08-11) added a submit-time strategy-policy recheck;
+    # collateral preflight is the subject under test here, not that gate.
+    monkeypatch.setattr("src.riskguard.policy.is_entries_paused", lambda: False)
+    monkeypatch.setattr("src.riskguard.policy.get_edge_threshold_multiplier", lambda: 1.0)
     monkeypatch.setattr(
         "src.execution.executor._entry_taker_quality_component",
         # Not the subject under test (collateral preflight is); same idiom as
@@ -995,7 +1194,7 @@ def test_executor_buy_preflight_blocks_before_command_persistence(conn, monkeypa
     )
     monkeypatch.setattr(
         "src.execution.executor._entry_actionable_certificate_payload_and_component",
-        lambda *args, **kwargs: ({"component": "entry_actionable_certificate", "allowed": True, "reason": "allowed"}, None),
+        lambda *args, **kwargs: ({"component": "entry_actionable_certificate", "allowed": True, "reason": "allowed"}, {"strategy_key": "center_buy"}),
     )
     monkeypatch.setattr(
         "src.execution.executor._entry_economics_component",
@@ -1033,7 +1232,13 @@ def test_executor_buy_preflight_blocks_before_command_persistence(conn, monkeypa
         # converted to a rejected OrderResult (executor.py's pre-command
         # branch: no venue command exists yet, so no SUBMIT_REJECTED
         # journaling either, just a rollback + warning log).
-        result = _live_order("z4-buy-block", _buy_intent(size_usd=10.0), 20.0, conn=conn, decision_id="z4-buy")
+        result = _live_order(
+            "z4-buy-block",
+            _buy_intent(size_usd=10.0, **_exec_snapshot_kwargs(conn)),
+            20.0,
+            conn=conn,
+            decision_id="z4-buy",
+        )
         assert result.status == "rejected"
         assert result.command_state == "REJECTED"
         assert "pusd_insufficient" in (result.reason or "")
@@ -1062,6 +1267,10 @@ def test_executor_buy_preflight_uses_quantized_submitted_notional(conn, monkeypa
     configure_global_ledger(ledger)
     monkeypatch.setattr("src.control.cutover_guard.assert_submit_allowed", lambda *args, **kwargs: None)
     monkeypatch.setattr("src.control.heartbeat_supervisor.assert_heartbeat_allows_order_type", lambda *args, **kwargs: None)
+    # cd3dc2f62 (2026-08-11) added a submit-time strategy-policy recheck;
+    # collateral preflight is the subject under test here, not that gate.
+    monkeypatch.setattr("src.riskguard.policy.is_entries_paused", lambda: False)
+    monkeypatch.setattr("src.riskguard.policy.get_edge_threshold_multiplier", lambda: 1.0)
     monkeypatch.setattr(
         "src.execution.executor._entry_taker_quality_component",
         # Not the subject under test (collateral preflight is); same idiom as
@@ -1070,7 +1279,7 @@ def test_executor_buy_preflight_uses_quantized_submitted_notional(conn, monkeypa
     )
     monkeypatch.setattr(
         "src.execution.executor._entry_actionable_certificate_payload_and_component",
-        lambda *args, **kwargs: ({"component": "entry_actionable_certificate", "allowed": True, "reason": "allowed"}, None),
+        lambda *args, **kwargs: ({"component": "entry_actionable_certificate", "allowed": True, "reason": "allowed"}, {"strategy_key": "center_buy"}),
     )
     monkeypatch.setattr(
         "src.execution.executor._entry_economics_component",
@@ -1160,8 +1369,9 @@ def test_executor_sell_preflight_blocks_before_command_persistence(conn, monkeyp
         best_bid=0.49,
     )
     try:
-        with pytest.raises(CollateralInsufficient, match="ctf_tokens_insufficient"):
-            execute_exit_order(intent, conn=conn, decision_id="z4-sell")
+        result = execute_exit_order(intent, conn=conn, decision_id="z4-sell")
+        assert result.status == "rejected"
+        assert "ctf_tokens_insufficient" in (result.reason or "")
         assert conn.execute("SELECT COUNT(*) FROM venue_commands").fetchone()[0] == 0
     finally:
         configure_global_ledger(None)
@@ -1195,6 +1405,9 @@ def test_executor_exit_refreshes_ctf_snapshot_before_sell_preflight(conn, monkey
     class FakeClient:
         def bind_submission_envelope(self, envelope):
             self.bound_envelope = envelope
+
+        def bind_signed_submission_identity_persister(self, persister):
+            self.identity_persister = persister
 
         def place_limit_order(self, **kwargs):
             return _fake_submit_result(self.bound_envelope, order_id="exit-refresh-order-1", success=True)
@@ -1235,6 +1448,10 @@ def test_executor_ack_reserves_pusd_until_terminal_release(conn, monkeypatch):
     configure_global_ledger(ledger)
     monkeypatch.setattr("src.control.cutover_guard.assert_submit_allowed", lambda *args, **kwargs: None)
     monkeypatch.setattr("src.control.heartbeat_supervisor.assert_heartbeat_allows_order_type", lambda *args, **kwargs: None)
+    # cd3dc2f62 (2026-08-11) added a submit-time strategy-policy recheck;
+    # collateral preflight is the subject under test here, not that gate.
+    monkeypatch.setattr("src.riskguard.policy.is_entries_paused", lambda: False)
+    monkeypatch.setattr("src.riskguard.policy.get_edge_threshold_multiplier", lambda: 1.0)
     monkeypatch.setattr(
         "src.execution.executor._entry_taker_quality_component",
         # Not the subject under test (collateral preflight is); same idiom as
@@ -1243,7 +1460,7 @@ def test_executor_ack_reserves_pusd_until_terminal_release(conn, monkeypatch):
     )
     monkeypatch.setattr(
         "src.execution.executor._entry_actionable_certificate_payload_and_component",
-        lambda *args, **kwargs: ({"component": "entry_actionable_certificate", "allowed": True, "reason": "allowed"}, None),
+        lambda *args, **kwargs: ({"component": "entry_actionable_certificate", "allowed": True, "reason": "allowed"}, {"strategy_key": "center_buy"}),
     )
     monkeypatch.setattr(
         "src.execution.executor._entry_economics_component",
@@ -1275,6 +1492,9 @@ def test_executor_ack_reserves_pusd_until_terminal_release(conn, monkeypatch):
 
         def bind_submission_envelope(self, envelope):
             self.bound_envelope = envelope
+
+        def bind_signed_submission_identity_persister(self, persister):
+            self.identity_persister = persister
 
         def place_limit_order(self, **kwargs):
             return _fake_submit_result(self.bound_envelope, order_id="entry-order-1", success=True)
@@ -1312,6 +1532,10 @@ def test_executor_buy_reserves_quantized_submitted_notional(conn, monkeypatch):
     configure_global_ledger(ledger)
     monkeypatch.setattr("src.control.cutover_guard.assert_submit_allowed", lambda *args, **kwargs: None)
     monkeypatch.setattr("src.control.heartbeat_supervisor.assert_heartbeat_allows_order_type", lambda *args, **kwargs: None)
+    # cd3dc2f62 (2026-08-11) added a submit-time strategy-policy recheck;
+    # collateral preflight is the subject under test here, not that gate.
+    monkeypatch.setattr("src.riskguard.policy.is_entries_paused", lambda: False)
+    monkeypatch.setattr("src.riskguard.policy.get_edge_threshold_multiplier", lambda: 1.0)
     monkeypatch.setattr(
         "src.execution.executor._entry_taker_quality_component",
         # Not the subject under test (collateral preflight is); same idiom as
@@ -1320,7 +1544,7 @@ def test_executor_buy_reserves_quantized_submitted_notional(conn, monkeypatch):
     )
     monkeypatch.setattr(
         "src.execution.executor._entry_actionable_certificate_payload_and_component",
-        lambda *args, **kwargs: ({"component": "entry_actionable_certificate", "allowed": True, "reason": "allowed"}, None),
+        lambda *args, **kwargs: ({"component": "entry_actionable_certificate", "allowed": True, "reason": "allowed"}, {"strategy_key": "center_buy"}),
     )
     monkeypatch.setattr(
         "src.execution.executor._entry_economics_component",
@@ -1352,6 +1576,9 @@ def test_executor_buy_reserves_quantized_submitted_notional(conn, monkeypatch):
 
         def bind_submission_envelope(self, envelope):
             self.bound_envelope = envelope
+
+        def bind_signed_submission_identity_persister(self, persister):
+            self.identity_persister = persister
 
         def place_limit_order(self, **kwargs):
             assert kwargs["size"] == 20.02
@@ -1390,6 +1617,10 @@ def test_executor_buy_rejection_release_requires_successful_terminal_append(conn
     configure_global_ledger(ledger)
     monkeypatch.setattr("src.control.cutover_guard.assert_submit_allowed", lambda *args, **kwargs: None)
     monkeypatch.setattr("src.control.heartbeat_supervisor.assert_heartbeat_allows_order_type", lambda *args, **kwargs: None)
+    # cd3dc2f62 (2026-08-11) added a submit-time strategy-policy recheck;
+    # collateral preflight is the subject under test here, not that gate.
+    monkeypatch.setattr("src.riskguard.policy.is_entries_paused", lambda: False)
+    monkeypatch.setattr("src.riskguard.policy.get_edge_threshold_multiplier", lambda: 1.0)
     monkeypatch.setattr(
         "src.execution.executor._entry_taker_quality_component",
         # Not the subject under test (collateral preflight is); same idiom as
@@ -1398,7 +1629,7 @@ def test_executor_buy_rejection_release_requires_successful_terminal_append(conn
     )
     monkeypatch.setattr(
         "src.execution.executor._entry_actionable_certificate_payload_and_component",
-        lambda *args, **kwargs: ({"component": "entry_actionable_certificate", "allowed": True, "reason": "allowed"}, None),
+        lambda *args, **kwargs: ({"component": "entry_actionable_certificate", "allowed": True, "reason": "allowed"}, {"strategy_key": "center_buy"}),
     )
     monkeypatch.setattr(
         "src.execution.executor._entry_economics_component",
@@ -1442,6 +1673,9 @@ def test_executor_buy_rejection_release_requires_successful_terminal_append(conn
 
         def bind_submission_envelope(self, envelope):
             self.bound_envelope = envelope
+
+        def bind_signed_submission_identity_persister(self, persister):
+            self.identity_persister = persister
 
         def place_limit_order(self, **kwargs):
             return _fake_submit_result(
@@ -1504,6 +1738,18 @@ def test_executor_ack_reserves_ctf_tokens_until_terminal_release(conn, monkeypat
     class FakeClient:
         def bind_submission_envelope(self, envelope):
             self.bound_envelope = envelope
+
+        def bind_signed_submission_identity_persister(self, persister):
+            self.identity_persister = persister
+
+        def get_collateral_payload(self):
+            return {
+                "pusd_balance_micro": 100_000_000,
+                "pusd_allowance_micro": 100_000_000,
+                "ctf_token_balances_units": {YES_TOKEN: _ctf_units(5)},
+                "ctf_token_allowances_units": {YES_TOKEN: _ctf_units(5)},
+                "authority_tier": "CHAIN",
+            }
 
         def place_limit_order(self, **kwargs):
             return _fake_submit_result(self.bound_envelope, order_id="exit-order-1", success=True)
@@ -1593,6 +1839,18 @@ def test_executor_sell_rejection_release_requires_successful_terminal_append(con
     class FakeClient:
         def bind_submission_envelope(self, envelope):
             self.bound_envelope = envelope
+
+        def bind_signed_submission_identity_persister(self, persister):
+            self.identity_persister = persister
+
+        def get_collateral_payload(self):
+            return {
+                "pusd_balance_micro": 100_000_000,
+                "pusd_allowance_micro": 100_000_000,
+                "ctf_token_balances_units": {YES_TOKEN: _ctf_units(5)},
+                "ctf_token_allowances_units": {YES_TOKEN: _ctf_units(5)},
+                "authority_tier": "CHAIN",
+            }
 
         def place_limit_order(self, **kwargs):
             return _fake_submit_result(

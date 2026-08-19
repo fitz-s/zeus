@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Lifecycle: created=2026-06-06; last_reviewed=2026-07-19; last_reused=2026-07-19
+# Lifecycle: created=2026-06-06; last_reviewed=2026-08-03; last_reused=2026-08-03
 # Purpose: Materialize replacement live forecast posteriors and publish commit wakes.
 # Reuse: Inspect forecast materialization and reactor-wake contracts before changing.
 """Materialize Open-Meteo ECMWF IFS 9km + Bayes fusion posterior."""
@@ -7,14 +7,17 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import logging
+import sqlite3
 import sys
+import time
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timezone
 from io import StringIO
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Callable, ContextManager, Mapping
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -29,12 +32,25 @@ from src.data.openmeteo_ecmwf_ifs9_precision_guard import (  # noqa: E402
     OpenMeteoIfs9PrecisionMetadata,
     evaluate_openmeteo_ecmwf_ifs9_precision_guard,
 )
+from src.data.replacement_current_value_serving import (  # noqa: E402
+    CurrentValueServingSchema,
+    current_value_serving_schema,
+    read_current_instrument_family_latest_id,
+    read_current_instrument_frontier_identity,
+    read_current_instrument_frontier_sentinel_ids,
+)
 from src.data.replacement_forecast_materializer import (  # noqa: E402
+    CurrentEvidenceSnapshotIdentity,
+    PreparedReplacementForecastMaterialization,
+    PreparedReplacementForecastSnapshotStale,
     ReplacementForecastMaterializeRequest,
     ReplacementForecastMaterializeResult,
+    _ensure_replacement_frontier_indexes,
     _ensure_replacement_identity_columns,
     day0_enqueue_ownership_witness_from_payload,
     prepare_replacement_forecast_live,
+    read_current_evidence_snapshot_id,
+    read_current_evidence_snapshot_identity,
     write_prepared_replacement_forecast_live,
 )
 from src.data.raw_forecast_artifact_manifest import read_manifest, write_manifest_to_db  # noqa: E402
@@ -42,6 +58,117 @@ from src.data.raw_forecast_artifact_manifest import read_manifest, write_manifes
 
 UTC = timezone.utc
 _SNAPSHOT_RETRY_LIMIT = 3
+_IMMEDIATE_BUSY_TIMEOUT_MS = 10
+_IMMEDIATE_RETRY_LIMIT = 100
+_IMMEDIATE_RETRY_DELAY_SECONDS = 0.05
+_WriterLockFactory = Callable[[], ContextManager[None]]
+_WRITE_DEFERRED_REASON = "REPLACEMENT_FORECAST_WRITE_DEFERRED"
+
+
+class ReplacementForecastWriteDeferred(RuntimeError):
+    """The canonical writer was busy; the queue must retry this request."""
+
+
+@contextlib.contextmanager
+def _forecast_writer_lock():
+    """Own the forecasts LIVE flock only for a canonical write transaction."""
+
+    from src.state.db import ZEUS_FORECASTS_DB_PATH
+    from src.state.db_writer_lock import WriteClass, db_writer_lock
+
+    with db_writer_lock(ZEUS_FORECASTS_DB_PATH, WriteClass.LIVE):
+        yield
+
+
+def _is_sqlite_writer_contention(exc: sqlite3.OperationalError) -> bool:
+    error_code = getattr(exc, "sqlite_errorcode", None)
+    if isinstance(error_code, int) and error_code & 0xFF in {
+        sqlite3.SQLITE_BUSY,
+        sqlite3.SQLITE_LOCKED,
+    }:
+        return True
+    message = str(exc).casefold()
+    return "locked" in message or "busy" in message
+
+
+@contextlib.contextmanager
+def _bounded_sqlite_writer_wait(conn):
+    """Temporarily bound this connection's SQLite writer wait."""
+
+    prior_timeout_ms = int(conn.execute("PRAGMA busy_timeout").fetchone()[0])
+    conn.execute(f"PRAGMA busy_timeout = {_IMMEDIATE_BUSY_TIMEOUT_MS}")
+    try:
+        yield
+    finally:
+        conn.execute(f"PRAGMA busy_timeout = {prior_timeout_ms}")
+
+
+@contextlib.contextmanager
+def _immediate_writer_transaction(conn, writer_lock: _WriterLockFactory):
+    """Retry SQLite ownership outside the priority LIVE flock."""
+
+    last_contention: BaseException | None = None
+    with _bounded_sqlite_writer_wait(conn):
+        for attempt in range(_IMMEDIATE_RETRY_LIMIT):
+            contention: BaseException | None = None
+            lock_stack = contextlib.ExitStack()
+            try:
+                lock_stack.enter_context(writer_lock())
+            except BlockingIOError as exc:
+                lock_stack.close()
+                contention = exc
+            else:
+                with lock_stack:
+                    try:
+                        conn.execute("BEGIN IMMEDIATE")
+                    except sqlite3.OperationalError as exc:
+                        if not _is_sqlite_writer_contention(exc):
+                            raise
+                        contention = exc
+                    else:
+                        try:
+                            yield
+                        except sqlite3.OperationalError as exc:
+                            if conn.in_transaction:
+                                conn.rollback()
+                            if _is_sqlite_writer_contention(exc):
+                                raise ReplacementForecastWriteDeferred(
+                                    _WRITE_DEFERRED_REASON
+                                ) from exc
+                            raise
+                        except BaseException:
+                            if conn.in_transaction:
+                                conn.rollback()
+                            raise
+                        finally:
+                            if conn.in_transaction:
+                                conn.rollback()
+                        return
+            last_contention = contention
+            if attempt + 1 < _IMMEDIATE_RETRY_LIMIT:
+                time.sleep(_IMMEDIATE_RETRY_DELAY_SECONDS)
+
+    # SCOPE: this materializer's one pending write transaction only.
+    # DRAIN: every failed acquisition releases the LIVE flock before a bounded
+    # retry; the queue retries the item on its normal cadence after exhaustion.
+    # RESET: any later attempt that obtains both locks enters the transaction.
+    raise ReplacementForecastWriteDeferred(
+        _WRITE_DEFERRED_REASON
+    ) from last_contention
+
+
+def _attach_world_read_only(conn) -> None:
+    """Expose current observation truth without widening the forecast write lock."""
+
+    from src.state.db import ZEUS_WORLD_DB_PATH
+
+    attached = {
+        str(row[1]) for row in conn.execute("PRAGMA database_list").fetchall()
+    }
+    if "world" in attached:
+        return
+    world_uri = f"{ZEUS_WORLD_DB_PATH.resolve().as_uri()}?mode=ro"
+    conn.execute("ATTACH DATABASE ? AS world", (world_uri,))
 
 
 @dataclass(frozen=True)
@@ -62,6 +189,391 @@ class _DurablePreparationReceipt:
     schema_ready: bool
     anchor_artifact_id: int | None
     manifest_committed: bool
+
+
+@dataclass(frozen=True)
+class _SourceRunWitness:
+    source_run_id: str | None
+    state: str
+    fetch_finished_at: str | None
+    requested_available_at: str
+
+
+@dataclass(frozen=True)
+class _ExactRowsWitness:
+    columns: tuple[str, ...]
+    rows: tuple[tuple[object, ...], ...]
+
+
+@dataclass(frozen=True)
+class _TargetDependencyWitness:
+    """Exact rows plus bounded canonical frontier IDs for one prepared q."""
+
+    source_runs: _ExactRowsWitness
+    source_run_states: tuple[_SourceRunWitness, ...]
+    anchor_artifact: _ExactRowsWitness
+    provider_rows: _ExactRowsWitness
+    ensemble_snapshot: _ExactRowsWitness
+    provider_models: tuple[str, ...]
+    provider_frontier: tuple[tuple[str, int | None], ...]
+    provider_sentinels: tuple[tuple[str, int], ...]
+    provider_family_latest_id: int | None
+    ensemble_frontier_id: int | None
+    ensemble_identity: CurrentEvidenceSnapshotIdentity | None
+    provider_schema: CurrentValueServingSchema
+    prepared_provider_row_ids: tuple[int, ...]
+    prepared_snapshot_id: int | None
+    prepared_shape_id: str | None
+
+
+class _TargetDependencyWitnessUnavailable(RuntimeError):
+    """A bounded target witness could not be read completely."""
+
+
+def _utc_iso(value: datetime | str, *, field_name: str) -> str:
+    if isinstance(value, datetime):
+        parsed = value
+    else:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ValueError(f"{field_name} must be timezone-aware")
+    return parsed.astimezone(UTC).isoformat()
+
+
+def _table_columns(conn, table: str) -> tuple[str, ...]:
+    try:
+        columns = tuple(
+            str(row[1]) for row in conn.execute(f"PRAGMA table_info({table})")
+        )
+    except Exception as exc:
+        raise _TargetDependencyWitnessUnavailable(
+            f"{table} schema witness unavailable"
+        ) from exc
+    if not columns:
+        raise _TargetDependencyWitnessUnavailable(f"{table} is unavailable")
+    return columns
+
+
+def _exact_rows_witness(
+    conn,
+    *,
+    table: str,
+    pk: str,
+    ids: tuple[object, ...],
+    columns: tuple[str, ...],
+) -> _ExactRowsWitness:
+    if not ids:
+        return _ExactRowsWitness(columns, ())
+    if pk not in columns:
+        raise _TargetDependencyWitnessUnavailable(f"{table}.{pk} unavailable")
+    quoted_columns = ", ".join(f'"{column}"' for column in columns)
+    placeholders = ", ".join("?" for _value in ids)
+    try:
+        rows = conn.execute(
+            f"SELECT {quoted_columns} FROM {table} "
+            f"WHERE {pk} IN ({placeholders}) ORDER BY {pk}",
+            ids,
+        ).fetchall()
+    except Exception as exc:
+        raise _TargetDependencyWitnessUnavailable(
+            f"{table} exact-row witness unavailable"
+        ) from exc
+    return _ExactRowsWitness(
+        columns,
+        tuple(tuple(row[index] for index in range(len(columns))) for row in rows),
+    )
+
+
+def _source_run_states(
+    witness: _ExactRowsWitness,
+    *,
+    requested: tuple[tuple[str | None, object], ...],
+) -> tuple[_SourceRunWitness, ...]:
+    id_index = witness.columns.index("source_run_id")
+    fetch_index = witness.columns.index("fetch_finished_at")
+    by_id = {str(row[id_index]): row for row in witness.rows}
+    states: list[_SourceRunWitness] = []
+    for source_run_id, source_available_at in requested:
+        if not source_run_id:
+            states.append(
+                _SourceRunWitness(
+                    source_run_id, "not_requested", None, str(source_available_at)
+                )
+            )
+            continue
+        row = by_id.get(source_run_id)
+        if row is None:
+            state = "missing"
+            fetch_finished_at = None
+        elif row[fetch_index] is None or not str(row[fetch_index]).strip():
+            state = "present_empty"
+            fetch_finished_at = None
+        else:
+            state = "present"
+            fetch_finished_at = str(row[fetch_index])
+        states.append(
+            _SourceRunWitness(
+                source_run_id,
+                state,
+                fetch_finished_at,
+                str(source_available_at),
+            )
+        )
+    return tuple(states)
+
+
+def _build_target_dependency_witness(
+    conn,
+    prepared: PreparedReplacementForecastMaterialization,
+    *,
+    columns: Mapping[str, tuple[str, ...]] | None = None,
+    provider_schema: CurrentValueServingSchema | None = None,
+    baseline: _TargetDependencyWitness | None = None,
+) -> _TargetDependencyWitness:
+    request = prepared.request
+    fusion = (prepared.posterior.provenance_payload or {}).get(
+        "bayes_precision_fusion"
+    ) or {}
+    if not isinstance(fusion, Mapping):
+        raise _TargetDependencyWitnessUnavailable("fusion witness unavailable")
+    prepared_provider_ids = tuple(
+        sorted(int(value) for value in fusion.get("raw_model_forecast_ids", ()))
+    )
+    current_shape = fusion.get("current_evidence_shape") or {}
+    if not isinstance(current_shape, Mapping):
+        raise _TargetDependencyWitnessUnavailable("shape witness unavailable")
+    prepared_snapshot_id = (
+        None
+        if current_shape.get("snapshot_id") is None
+        else int(current_shape["snapshot_id"])
+    )
+    provider_schema = provider_schema or current_value_serving_schema(conn)
+    table_columns = dict(columns or {})
+    for table in (
+        "source_run",
+        "raw_forecast_artifacts",
+        "raw_model_forecasts",
+        "ensemble_snapshots",
+    ):
+        if table not in table_columns:
+            table_columns[table] = _table_columns(conn, table)
+
+    source_requests = (
+        (
+            request.baseline_source_run_id,
+            request.baseline_source_available_at,
+        ),
+        (
+            request.openmeteo_source_run_id,
+            request.openmeteo_source_available_at,
+        ),
+    )
+    source_ids = tuple(
+        sorted({str(run_id) for run_id, _available in source_requests if run_id})
+    )
+    source_runs = _exact_rows_witness(
+        conn,
+        table="source_run",
+        pk="source_run_id",
+        ids=source_ids,
+        columns=table_columns["source_run"],
+    )
+    target_date = (
+        request.target_date.isoformat()
+        if isinstance(request.target_date, date)
+        else str(request.target_date)
+    )
+    provider_family_latest_id = read_current_instrument_family_latest_id(
+        conn,
+        city=request.city,
+        metric=prepared.metric,
+        target_date=target_date,
+    )
+    if baseline is None:
+        provider_frontier = read_current_instrument_frontier_identity(
+            conn,
+            city=request.city,
+            metric=prepared.metric,
+            target_date=target_date,
+            decision_time_iso=_utc_iso(request.computed_at, field_name="computed_at"),
+            models=None,
+            schema=provider_schema,
+        )
+        provider_sentinels = read_current_instrument_frontier_sentinel_ids(
+            conn,
+            city=request.city,
+            metric=prepared.metric,
+            target_date=target_date,
+            decision_time_iso=_utc_iso(request.computed_at, field_name="computed_at"),
+            schema=provider_schema,
+        )
+        provider_models = tuple(
+            sorted(
+                {
+                    *(model for model, _row_id in provider_frontier),
+                    *(model for model, _row_id in provider_sentinels),
+                }
+            )
+        )
+        ensemble_identity = read_current_evidence_snapshot_identity(
+            conn, request, metric=prepared.metric
+        )
+        ensemble_frontier_id = (
+            None if ensemble_identity is None else ensemble_identity.snapshot_id
+        )
+    else:
+        provider_frontier = baseline.provider_frontier
+        provider_models = baseline.provider_models
+        provider_sentinels = baseline.provider_sentinels
+        ensemble_identity = baseline.ensemble_identity
+        ensemble_frontier_id = read_current_evidence_snapshot_id(
+            conn,
+            request,
+            metric=prepared.metric,
+        )
+    provider_identity_ids = tuple(
+        sorted(
+            {
+                *prepared_provider_ids,
+                *(row_id for _model, row_id in provider_sentinels),
+                *(
+                    row_id
+                    for _model, row_id in provider_frontier
+                    if row_id is not None
+                ),
+            }
+        )
+    )
+    provider_rows = _exact_rows_witness(
+        conn,
+        table="raw_model_forecasts",
+        pk="raw_model_forecast_id",
+        ids=provider_identity_ids,
+        columns=table_columns["raw_model_forecasts"],
+    )
+    ensemble_snapshot = _exact_rows_witness(
+        conn,
+        table="ensemble_snapshots",
+        pk="snapshot_id",
+        ids=(() if prepared_snapshot_id is None else (prepared_snapshot_id,)),
+        columns=table_columns["ensemble_snapshots"],
+    )
+    serving = fusion.get("current_value_serving")
+    serving_valid = isinstance(serving, Mapping) and bool(serving)
+    if serving_valid:
+        serving_valid = all(
+            isinstance(payload, Mapping)
+            and isinstance(payload.get("raw_model_forecast_id"), int)
+            and not isinstance(payload.get("raw_model_forecast_id"), bool)
+            and payload["raw_model_forecast_id"] > 0
+            for payload in serving.values()
+        )
+    if not serving_valid:
+        # A live-ineligible computation can legitimately have no fusion serving
+        # witness (for example, the current ENS shape is absent).  It still
+        # needs a stable dependency snapshot so the writer can return its typed
+        # BLOCKED reasons.  A live-eligible computation without this witness is
+        # malformed authority and must remain fail-closed.
+        if bool(getattr(prepared.posterior, "live_eligible", True)):
+            raise _TargetDependencyWitnessUnavailable(
+                "current value serving witness unavailable"
+            )
+        serving = {}
+    prepared_provider_frontier = tuple(
+        sorted(
+            (
+                str(model),
+                int(payload["raw_model_forecast_id"]),
+            )
+            for model, payload in serving.items()
+            if isinstance(payload, Mapping)
+            and int(payload.get("raw_model_forecast_id", -1))
+            in set(prepared_provider_ids)
+        )
+    )
+    current_provider_frontier = dict(provider_frontier)
+    prepared_provider_frontier_by_model = dict(prepared_provider_frontier)
+    if len(provider_rows.rows) != len(provider_identity_ids) or any(
+        current_provider_frontier.get(model) != raw_id
+        for model, raw_id in prepared_provider_frontier_by_model.items()
+    ):
+        raise _TargetDependencyWitnessUnavailable(
+            "prepared provider frontier unavailable"
+        )
+    if prepared_snapshot_id is not None and (
+        len(ensemble_snapshot.rows) != 1
+        or ensemble_frontier_id != prepared_snapshot_id
+    ):
+        raise _TargetDependencyWitnessUnavailable(
+            "prepared ensemble frontier unavailable"
+        )
+    anchor_artifact = _exact_rows_witness(
+        conn,
+        table="raw_forecast_artifacts",
+        pk="artifact_id",
+        ids=(() if request.anchor_artifact_id is None else (request.anchor_artifact_id,)),
+        columns=table_columns["raw_forecast_artifacts"],
+    )
+    if request.anchor_artifact_id is not None and len(anchor_artifact.rows) != 1:
+        raise _TargetDependencyWitnessUnavailable(
+            "prepared anchor artifact unavailable"
+        )
+    return _TargetDependencyWitness(
+        source_runs=source_runs,
+        source_run_states=_source_run_states(
+            source_runs, requested=source_requests
+        ),
+        anchor_artifact=anchor_artifact,
+        provider_rows=provider_rows,
+        ensemble_snapshot=ensemble_snapshot,
+        provider_models=provider_models,
+        provider_frontier=provider_frontier,
+        provider_sentinels=provider_sentinels,
+        provider_family_latest_id=provider_family_latest_id,
+        ensemble_frontier_id=ensemble_frontier_id,
+        ensemble_identity=ensemble_identity,
+        provider_schema=provider_schema,
+        prepared_provider_row_ids=prepared_provider_ids,
+        prepared_snapshot_id=prepared_snapshot_id,
+        prepared_shape_id=str(current_shape.get("shape_hash") or ""),
+    )
+
+
+def _target_dependency_witness(
+    conn,
+    prepared: object,
+) -> _TargetDependencyWitness | object:
+    """Read only target-keyed dependency identities; never recompute q."""
+
+    if not isinstance(prepared, PreparedReplacementForecastMaterialization):
+        return prepared
+    return _build_target_dependency_witness(conn, prepared)
+
+
+def _revalidate_target_dependency_witness(
+    conn,
+    prepared: object,
+    baseline: _TargetDependencyWitness | object,
+) -> _TargetDependencyWitness | object:
+    """Re-read exact prepared rows and bounded frontier IDs under final lock."""
+
+    if not isinstance(prepared, PreparedReplacementForecastMaterialization):
+        return prepared
+    if not isinstance(baseline, _TargetDependencyWitness):
+        return baseline
+    columns = {
+        "source_run": baseline.source_runs.columns,
+        "raw_forecast_artifacts": baseline.anchor_artifact.columns,
+        "raw_model_forecasts": baseline.provider_rows.columns,
+        "ensemble_snapshots": baseline.ensemble_snapshot.columns,
+    }
+    return _build_target_dependency_witness(
+        conn,
+        prepared,
+        columns=columns,
+        provider_schema=baseline.provider_schema,
+        baseline=baseline,
+    )
 
 
 def _dt(value: str, *, field_name: str) -> datetime:
@@ -184,45 +696,48 @@ def _prepare_live_schema_and_manifest(
     *,
     init_schema: bool,
     schema_ready: bool,
-    payload: Mapping[str, Any],
-    base_dir: Path,
+    openmeteo_manifest: object | None,
     anchor_artifact_id: int | None,
+    writer_lock: _WriterLockFactory | None = None,
 ) -> _DurablePreparationReceipt:
-    if schema_ready and "openmeteo_manifest_json" not in payload:
+    if schema_ready and openmeteo_manifest is None:
         return _DurablePreparationReceipt(
             schema_ready=True,
             anchor_artifact_id=anchor_artifact_id,
             manifest_committed=False,
         )
-    conn.execute("BEGIN IMMEDIATE")
+    transaction = (
+        _immediate_writer_transaction(conn, writer_lock)
+        if writer_lock is not None
+        else contextlib.nullcontext()
+    )
+    if writer_lock is None:
+        conn.execute("BEGIN IMMEDIATE")
     try:
-        if init_schema:
-            from src.state.db import _create_readiness_state
-            from src.state.schema.v2_schema import (
-                ensure_replacement_forecast_live_schema,
-            )
+        with transaction:
+            if init_schema:
+                from src.state.db import _create_readiness_state
+                from src.state.schema.v2_schema import (
+                    ensure_replacement_forecast_live_schema,
+                )
 
-            ensure_replacement_forecast_live_schema(conn)
-            _create_readiness_state(conn)
-        if not schema_ready:
-            _ensure_replacement_identity_columns(conn)
-        if "openmeteo_manifest_json" in payload:
-            anchor_artifact_id = write_manifest_to_db(
-                conn,
-                read_manifest(
-                    _resolve_input_path(
-                        payload["openmeteo_manifest_json"],
-                        base_dir=base_dir,
-                    )
-                ),
-                root=ROOT,
+                ensure_replacement_forecast_live_schema(conn)
+                _create_readiness_state(conn)
+            if not schema_ready:
+                _ensure_replacement_identity_columns(conn)
+            if openmeteo_manifest is not None:
+                anchor_artifact_id = write_manifest_to_db(
+                    conn,
+                    openmeteo_manifest,
+                    root=ROOT,
+                    verify_artifact=False,
+                )
+            conn.commit()
+            return _DurablePreparationReceipt(
+                schema_ready=True,
+                anchor_artifact_id=anchor_artifact_id,
+                manifest_committed=openmeteo_manifest is not None,
             )
-        conn.commit()
-        return _DurablePreparationReceipt(
-            schema_ready=True,
-            anchor_artifact_id=anchor_artifact_id,
-            manifest_committed="openmeteo_manifest_json" in payload,
-        )
     except Exception:
         if conn.in_transaction:
             conn.rollback()
@@ -232,30 +747,59 @@ def _prepare_live_schema_and_manifest(
 def _commit_from_read_snapshot(
     conn,
     request: ReplacementForecastMaterializeRequest,
+    *,
+    writer_lock: _WriterLockFactory | None = None,
 ) -> ReplacementForecastMaterializeResult:
+    if writer_lock is None:
+        raise RuntimeError("REPLACEMENT_FORECAST_WRITER_LOCK_REQUIRED")
     for _attempt in range(_SNAPSHOT_RETRY_LIMIT):
-        version = _data_version(conn)
         conn.execute("BEGIN")
         try:
             prepared = prepare_replacement_forecast_live(conn, request)
+            if isinstance(prepared, ReplacementForecastMaterializeResult):
+                return prepared
+            witness = _target_dependency_witness(conn, prepared)
+        except _TargetDependencyWitnessUnavailable:
+            continue
         finally:
             if conn.in_transaction:
                 conn.rollback()
-        if isinstance(prepared, ReplacementForecastMaterializeResult):
-            return prepared
 
-        conn.execute("BEGIN IMMEDIATE")
-        try:
-            if _data_version(conn) != version:
-                conn.rollback()
-                continue
-            result = write_prepared_replacement_forecast_live(conn, prepared)
-            conn.commit()
-            return result
-        except Exception:
-            if conn.in_transaction:
-                conn.rollback()
-            raise
+        # The posterior build above is intentionally lock-free.  Only the
+        # snapshot revalidation and durable write own the process-global writer
+        # flock; otherwise four concurrent materializers can blind Day0 exits by
+        # starving observation/vector writers for the whole fusion compute.
+        with _immediate_writer_transaction(conn, writer_lock):
+            try:
+                try:
+                    current_witness = _revalidate_target_dependency_witness(
+                        conn, prepared, witness
+                    )
+                except _TargetDependencyWitnessUnavailable:
+                    conn.rollback()
+                    continue
+                # SCOPE: this city + target_date + metric and only its prepared
+                # source-run/artifact/provider/ENS identities.
+                # DRAIN: release the final lock, rebuild outside it, retry at most
+                # _SNAPSHOT_RETRY_LIMIT times.
+                # RESET: an attempt whose exact rows and canonical frontier IDs
+                # remain unchanged may commit; unrelated DB writes are invisible.
+                if current_witness != witness:
+                    conn.rollback()
+                    continue
+                try:
+                    result = write_prepared_replacement_forecast_live(
+                        conn, prepared
+                    )
+                except PreparedReplacementForecastSnapshotStale:
+                    conn.rollback()
+                    continue
+                conn.commit()
+                return result
+            except Exception:
+                if conn.in_transaction:
+                    conn.rollback()
+                raise
 
     logging.getLogger(__name__).warning(
         "forecast DB changed during %s snapshot retries; deferring materialization for %s %s %s",
@@ -304,6 +848,8 @@ def _error_response(
         "error_type": exc.__class__.__name__,
         "error": str(exc),
     }
+    if isinstance(exc, ReplacementForecastWriteDeferred):
+        response["reason_codes"] = [_WRITE_DEFERRED_REASON]
     if receipt is not None:
         response.update(
             {
@@ -327,11 +873,14 @@ def _materialize(
     conn=None,
     publish_wake: bool = True,
     schema_ready: bool = False,
+    writer_lock: _WriterLockFactory | None = None,
 ) -> tuple[int, dict[str, object]]:
     if conn is None:
-        from src.state.db import get_forecasts_connection_with_world
+        from src.state.db import get_forecasts_connection
 
-        with get_forecasts_connection_with_world(write_class="live") as owned_conn:
+        owned_conn = get_forecasts_connection(write_class=None)
+        try:
+            _attach_world_read_only(owned_conn)
             return _materialize(
                 input_json,
                 commit=commit,
@@ -339,11 +888,25 @@ def _materialize(
                 conn=owned_conn,
                 publish_wake=publish_wake,
                 schema_ready=schema_ready,
+                writer_lock=writer_lock or _forecast_writer_lock,
             )
+        finally:
+            owned_conn.close()
+    if commit and writer_lock is None:
+        raise RuntimeError("REPLACEMENT_FORECAST_WRITER_LOCK_REQUIRED")
+    effective_writer_lock = writer_lock or contextlib.nullcontext
     payload = _load_json(input_json)
     if not isinstance(payload, Mapping):
         raise ValueError("input JSON must decode to an object")
     base_dir = input_json.parent
+    openmeteo_manifest = None
+    if "openmeteo_manifest_json" in payload:
+        openmeteo_manifest = read_manifest(
+            _resolve_input_path(
+                payload["openmeteo_manifest_json"], base_dir=base_dir
+            )
+        )
+        openmeteo_manifest.verify_artifact(root=ROOT)
     metric = str(payload["temperature_metric"])
     target_date = date.fromisoformat(str(payload["target_date"]))
     source_cycle_time = _dt(str(payload["source_cycle_time"]), field_name="source_cycle_time")
@@ -462,26 +1025,23 @@ def _materialize(
                 conn,
                 init_schema=init_schema,
                 schema_ready=schema_ready,
-                payload=payload,
-                base_dir=base_dir,
+                openmeteo_manifest=openmeteo_manifest,
                 anchor_artifact_id=anchor_artifact_id,
+                writer_lock=effective_writer_lock,
             )
+            _ensure_replacement_frontier_indexes(conn)
+            conn.commit()
             anchor_artifact_id = receipt.anchor_artifact_id
             if anchor_artifact_id is not None:
                 request = replace(request, anchor_artifact_id=anchor_artifact_id)
-            result = _commit_from_read_snapshot(conn, request)
+            result = _commit_from_read_snapshot(
+                conn,
+                request,
+                writer_lock=effective_writer_lock,
+            )
             if result.ok and publish_wake:
                 wake_published = _publish_materialization_wake(request)
         else:
-            if "openmeteo_manifest_json" in payload:
-                read_manifest(
-                    _resolve_input_path(
-                        payload["openmeteo_manifest_json"],
-                        base_dir=base_dir,
-                    )
-                ).verify_artifact(
-                    root=ROOT,
-                )
             if anchor_artifact_id is not None:
                 request = replace(request, anchor_artifact_id=anchor_artifact_id)
             result = _dry_run_from_read_snapshot(conn, request)
@@ -535,6 +1095,7 @@ def _run_one(
     capture_logs: bool = False,
     publish_wake: bool = True,
     schema_ready: bool = False,
+    writer_lock: _WriterLockFactory | None = None,
 ) -> tuple[int, str, str]:
     log_output = StringIO()
     handler: logging.Handler | None = None
@@ -550,6 +1111,7 @@ def _run_one(
             conn=conn,
             publish_wake=publish_wake,
             schema_ready=schema_ready,
+            writer_lock=writer_lock,
         )
         encoded = json.dumps(response, sort_keys=True) + "\n"
         if returncode == 2:
@@ -616,9 +1178,11 @@ def main(argv: list[str] | None = None) -> int:
             "--input-json or --batch-input-json is required unless --print-template is set"
         )
     if args.batch_input_json:
-        from src.state.db import get_forecasts_connection_with_world
+        from src.state.db import get_forecasts_connection
 
-        with get_forecasts_connection_with_world(write_class="live") as conn:
+        conn = get_forecasts_connection(write_class=None)
+        try:
+            _attach_world_read_only(conn)
             schema_ready = False
             if args.commit:
                 try:
@@ -626,9 +1190,9 @@ def main(argv: list[str] | None = None) -> int:
                         conn,
                         init_schema=args.init_schema,
                         schema_ready=False,
-                        payload={},
-                        base_dir=ROOT,
+                        openmeteo_manifest=None,
                         anchor_artifact_id=None,
+                        writer_lock=_forecast_writer_lock,
                     )
                     schema_ready = receipt.schema_ready
                 except Exception as exc:
@@ -645,8 +1209,11 @@ def main(argv: list[str] | None = None) -> int:
                     capture_logs=True,
                     publish_wake=True,
                     schema_ready=schema_ready,
+                    writer_lock=_forecast_writer_lock,
                 )
                 _print_batch_envelope(input_json, returncode, stdout, stderr)
+        finally:
+            conn.close()
         return 0
     returncode, stdout, stderr = _run_one(
         args.input_json,

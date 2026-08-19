@@ -189,7 +189,12 @@ def test_tigge_gate_open_routes_through_ingest_not_openmeteo(monkeypatch, tmp_pa
     monkeypatch.setattr(ensemble_client.httpx, "get", fake_get)
     ensemble_client._clear_cache()
 
-    result = ensemble_client.fetch_ensemble(_city(), forecast_days=1, model="tigge")
+    result = ensemble_client.fetch_ensemble(
+        _city(),
+        forecast_days=1,
+        model="tigge",
+        role="historical_evidence",
+    )
 
     assert calls == []
     assert result is not None
@@ -217,7 +222,12 @@ def test_tigge_gate_open_missing_payload_raises_typed_configuration_error(monkey
     ensemble_client._clear_cache()
 
     with pytest.raises(TIGGEIngestFetchNotConfigured, match="payload"):
-        ensemble_client.fetch_ensemble(_city(), forecast_days=1, model="tigge")
+        ensemble_client.fetch_ensemble(
+            _city(),
+            forecast_days=1,
+            model="tigge",
+            role="historical_evidence",
+        )
 
 
 def test_ingest_protocol_requires_source_id_and_authority_tier() -> None:

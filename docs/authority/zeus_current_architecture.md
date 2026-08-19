@@ -309,16 +309,20 @@ inclusive absolute range `[0.05, 0.95]`. This applies symmetrically to every
 entry, reduce-only exit, single-order, and batch order. Anything below `0.05`
 or above `0.95` is rejected at command persistence, by the canonical envelope,
 and again by an independent final SDK-boundary guard. Current tick alignment,
-minimum size, identity, tradeability, fees, depth, robust delta-log-wealth/EV,
+minimum size, identity, tradeability, fees, depth, expected-log-growth/EV,
 Kelly, strategy, risk, lifecycle, and current-state proof cannot waive the band.
 The official restart preflight must reject a live-trading boot if the active
 config is not exactly `0.05/0.95` or any independent guard accepts a forbidden
 sample (INV-43).
 
-Price alone does not authorize an entry: the global auction separately requires a strict
-current-evidence robust win majority, positive robust EV and delta log wealth,
-and only the remaining shares below the cumulative Fractional Kelly final-
-holding target. These economic conditions apply symmetrically to YES and NO.
+Price alone does not authorize an entry. Each action first passes its own
+probability-witness, positive-EV, executable-book, fee/depth, wealth, and
+cumulative Fractional Kelly law. Every admitted fixed BUY/SELL proposal then
+competes with CASH/HOLD on one posterior-predictive-mean net expected
+delta-log-capital-growth and EV basis carrying its capital-lock horizon and
+current portfolio endowment. Fixed-action `robust_*` values are confidence
+evidence, not the cross-action comparator. These conditions apply symmetrically
+to YES and NO.
 
 ### 10.3 Same-Family Portfolio Capital Objective
 
@@ -327,13 +331,38 @@ Zeus may hold or buy multiple outcome tokens inside one
 `(city, target_date, temperature_metric)` family when the marginal order
 improves the full current portfolio objective. The auction must project all
 same-family YES/NO holdings and unresolved entry commitments onto the
-exhaustive outcome set, then require positive robust delta log wealth and EV
-after fees, depth, affordability, and the cumulative Fractional Kelly target.
+exhaustive outcome set, then require positive posterior-predictive-mean expected
+delta log wealth and EV after fees, depth, affordability, and the cumulative
+Fractional Kelly target. Each fixed proposal carries its capital-lock horizon
+and exact endowment into the common global comparator.
+That joint solve sizes the target vector; it does not choose a primary order.
+Every positive venue-legal target remains a separate fixed BUY proposal until
+the common raw global BUY/SELL/CASH/HOLD comparator chooses the one order.
 The command journal enforces executable-truth and risk contracts; it must not
 categorically reject a sibling token merely because another family token is
 open (INV-45).
 
-### 10.4 Live / Backtest Boundary — NO PARALLEL_OBSERVE_ONLY LANE
+### 10.4 Global Selection Receipt Attribution
+
+An executable global winner must bind the exact committed trade
+`decision_log` schema-21 row, its logical receipt hash, a recomputable
+compact-row execution binding, and a hash of the exact persisted summary into the immutable
+`ActionableTradeCertificate`. The binding names the winning event, candidate,
+actuation, selection epoch, full-scope/book/wealth identities, and the
+content-addressed candidate, holding, repair, book, and audit components.
+Claim-carrier rebinding appends a new sealed row referencing the unchanged base
+cut; an earlier row is never mutated or reused for a changed actuation identity.
+
+Entry command persistence re-reads that exact row before any command or
+position-attribution write. Settlement skill attribution reaches the same
+reference only through the exact position-to-certificate link and revalidates
+the row before consuming frozen decision q. A global marker with a missing,
+deleted, mutated, or mismatched receipt is unattributable and may not fall back
+to a `(condition_id, direction)` guess. Historical and non-global certificates
+retain their existing certificate path; no receipt relation is inferred for
+them.
+
+### 10.5 Live / Backtest Boundary — NO PARALLEL_OBSERVE_ONLY LANE
 
 - Live may act.
 - Backtest may evaluate (walk-forward, settlement-truth graded, no
@@ -352,7 +381,7 @@ standing observation window.
 Replay is evidence check until it has full market-price linkage, active sizing
 parity, and selection-family parity with live control units.
 
-### 10.5 Authority-Loss Degradation
+### 10.6 Authority-Loss Degradation
 
 When DB truth is unavailable or degraded, new-entry paths must fail closed, but
 monitor/exit/reconciliation lanes should keep operating in read-only or

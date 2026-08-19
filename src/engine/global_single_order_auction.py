@@ -11,10 +11,11 @@ from __future__ import annotations
 import hashlib
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from decimal import Decimal
+from decimal import ROUND_FLOOR, Decimal
 from types import SimpleNamespace
 from typing import Any, Callable, Mapping
 
+from src.contracts.global_auction_receipt import GlobalAuctionReceiptRef
 from src.engine.global_auction_universe import (
     CurrentGlobalBookEpoch,
     CurrentGlobalAuctionScope,
@@ -24,14 +25,16 @@ from src.solve.solver import (
     CandidatePortfolioEndowment,
     CurrentExecutionAuthority,
     CurrentFamilyProbabilityAuthority,
+    CurrentMakerFillWitness,
     DeterministicBinPayoffWitness,
     FamilyPortfolioEndowment,
     GlobalSingleOrderAnyCandidate,
     GlobalSingleOrderDecision,
     GlobalSingleOrderSellCandidate,
     PortfolioWealthWitness,
-    global_candidate_from_native,
+    global_candidates_from_native,
     global_sell_candidate_from_holding,
+    executable_curve_identity,
     select_global_single_order,
 )
 
@@ -58,10 +61,12 @@ class GlobalHoldingAuctionCoverage:
     book_deadline_at_utc: datetime
     status: str
     candidate_id: str | None = None
+    candidate_ids: tuple[str, ...] = ()
     reason: str | None = None
     bin_label: str | None = None
     canonical_bin_identity: str | None = None
     sell_book_witness_identity: str | None = None
+    book_state: str = "UNKNOWN"
     sell_exit_authority_status: str = "not_applicable"
     sell_exit_authority_reason: str = "non_day0_family"
     sell_action_authority_identity: str = "non_day0_default_authority"
@@ -69,6 +74,7 @@ class GlobalHoldingAuctionCoverage:
     def __post_init__(self) -> None:
         evaluated = self.status == "EVALUATED"
         excluded = self.status == "EXCLUDED"
+        book_state = str(self.book_state or "").strip().upper()
         canonical_bin_identity = str(
             self.canonical_bin_identity or f"condition:{self.condition_id}"
         ).strip()
@@ -77,6 +83,20 @@ class GlobalHoldingAuctionCoverage:
             "canonical_bin_identity",
             canonical_bin_identity,
         )
+        object.__setattr__(self, "book_state", book_state)
+        candidate_ids = tuple(
+            dict.fromkeys(
+                str(value).strip()
+                for value in (
+                    self.candidate_ids
+                    or ((self.candidate_id,) if self.candidate_id else ())
+                )
+                if str(value or "").strip()
+            )
+        )
+        object.__setattr__(self, "candidate_ids", candidate_ids)
+        if candidate_ids and self.candidate_id is None:
+            object.__setattr__(self, "candidate_id", candidate_ids[0])
         if (
             not (evaluated or excluded)
             or not all(
@@ -101,6 +121,13 @@ class GlobalHoldingAuctionCoverage:
                 or str(self.bin_label or "").strip()
             )
             or self.side not in {"YES", "NO"}
+            or book_state not in {
+                "UNKNOWN",
+                "NO_EXECUTABLE_BOOK",
+                "STALE",
+                "EXECUTABLE",
+            }
+            or (evaluated and book_state != "EXECUTABLE")
             or not Decimal(self.held_shares).is_finite()
             or Decimal(self.held_shares) <= 0
             or any(
@@ -115,7 +142,7 @@ class GlobalHoldingAuctionCoverage:
             or self.decision_at_utc > self.book_deadline_at_utc
             or evaluated
             != bool(
-                str(self.candidate_id or "").strip()
+                candidate_ids
                 and str(self.probability_witness_identity or "").strip()
                 and str(self.probability_content_identity or "").strip()
                 and str(self.sell_book_witness_identity or "").strip()
@@ -123,7 +150,7 @@ class GlobalHoldingAuctionCoverage:
             )
             or excluded
             != bool(
-                not str(self.candidate_id or "").strip()
+                not candidate_ids
                 and str(self.reason or "").strip()
             )
         ):
@@ -153,6 +180,53 @@ def global_sell_book_witness_identity(curve: object) -> str:
         digest.update(str(getattr(level, "price", "")).encode("utf-8"))
         digest.update(b"\x1e")
         digest.update(str(getattr(level, "size", "")).encode("utf-8"))
+        digest.update(b"\x1f")
+    return digest.hexdigest()
+
+
+def _non_executable_sell_coverage(
+    held_shares: object,
+    curve: object,
+) -> tuple[str, str, str]:
+    """Classify a positive holding after both SELL modes fail materialization."""
+
+    sellable_shares = Decimal(held_shares).quantize(
+        Decimal("0.01"),
+        rounding=ROUND_FLOOR,
+    )
+    reason = (
+        "SELL_BOOK_NO_EXECUTABLE_UNIT_PRICE"
+        if sellable_shares > 0
+        else "SELLABLE_SHARES_BELOW_PRECISION"
+    )
+    return reason, "NO_EXECUTABLE_BOOK", global_sell_book_witness_identity(curve)
+
+
+def global_sell_book_unavailability_witness_identity(
+    *,
+    asset_state: tuple[str, ...],
+    book_epoch_identity: str,
+    native_bid_level_count: int,
+) -> str:
+    """Bind one fresh token-level no-SELL-book fact to its complete epoch."""
+
+    state = tuple(str(value) for value in asset_state)
+    epoch_identity = str(book_epoch_identity or "").strip()
+    if (
+        len(state) < 7
+        or not epoch_identity
+        or state[5] not in {"EXECUTABLE", "NO_ASK", "VENUE_NOT_EXECUTABLE"}
+        or native_bid_level_count != 0
+        or not all(state[index].strip() for index in (0, 1, 2, 3, 4, 6))
+    ):
+        raise ValueError("GLOBAL_SELL_BOOK_UNAVAILABILITY_WITNESS_INCOMPLETE")
+    digest = hashlib.sha256()
+    digest.update(epoch_identity.encode("utf-8"))
+    digest.update(b"\x1f")
+    digest.update(str(native_bid_level_count).encode("utf-8"))
+    digest.update(b"\x1f")
+    for value in state:
+        digest.update(value.encode("utf-8"))
         digest.update(b"\x1f")
     return digest.hexdigest()
 
@@ -201,6 +275,7 @@ def _global_decision_economics_identity(
                 terminal.wealth_after_win_usd,
                 repr(terminal.expected_delta_log_wealth),
                 repr(terminal.expected_ev_usd),
+                repr(terminal.ruin_probability_reduction),
             )
         else:
             action_economics = (
@@ -214,6 +289,7 @@ def _global_decision_economics_identity(
                 terminal.wealth_after_win_usd,
                 repr(terminal.expected_delta_log_wealth),
                 repr(terminal.expected_ev_usd),
+                repr(terminal.ruin_probability_reduction),
             )
     elif decision.terminal_wealth is not None:
         terminal = decision.terminal_wealth
@@ -238,6 +314,8 @@ def _global_decision_economics_identity(
         "COMMON_EXPECTED_GROWTH",
         growth.probability_basis,
         growth.probability_witness_identity,
+        growth.utility_basis,
+        repr(growth.ruin_probability_reduction),
         repr(growth.expected_delta_log_wealth),
         repr(growth.expected_ev_usd),
         repr(growth.capital_lock_hours),
@@ -262,15 +340,39 @@ def global_single_order_actuation_identity(
     economics_identity = _global_decision_economics_identity(decision)
     action = str(getattr(candidate, "action", "BUY") or "BUY")
     curve = (
-        candidate.executable_sell_curve
+        candidate.economic_sell_curve
         if action == "SELL"
         else candidate.executable_cost_curve
+    )
+    economic_curve = (
+        candidate.economic_sell_curve
+        if action == "SELL"
+        else candidate.economic_cost_curve
+    )
+    maker_witness = getattr(candidate, "maker_fill_witness", None)
+    execution_identity = (
+        candidate.execution_mode,
+        candidate.fill_probability,
+        candidate.fill_probability_source,
+        candidate.rest_deadline_minutes,
+        candidate.neg_risk,
+        executable_curve_identity(economic_curve),
+        candidate.asset_epoch_identity,
+        maker_witness.witness_identity if maker_witness is not None else None,
+        maker_witness.candidate_binding_identity if maker_witness is not None else None,
+        maker_witness.asset_epoch_identity if maker_witness is not None else None,
     )
     sell_identity = (
         (
             action,
             candidate.position_id,
             candidate.held_shares,
+            candidate.execution_mode,
+            candidate.fill_probability,
+            candidate.fill_probability_source,
+            candidate.rest_deadline_minutes,
+            candidate.economic_sell_curve.levels[0].price,
+            candidate.economic_sell_curve.levels[0].size,
             candidate.probability_functional,
             candidate.exit_authority_status,
             candidate.exit_authority_reason,
@@ -306,6 +408,7 @@ def global_single_order_actuation_identity(
         candidate.condition_id,
         candidate.side,
         candidate.token_id,
+        *execution_identity,
         *sell_identity,
         candidate.probability_witness_identity,
         candidate.book_snapshot_id,
@@ -346,15 +449,37 @@ def global_single_order_economic_identity(
         raise ValueError("global economic identity probability family mismatch")
     action = str(getattr(candidate, "action", "BUY") or "BUY")
     curve = (
-        candidate.executable_sell_curve
+        candidate.economic_sell_curve
         if action == "SELL"
         else candidate.executable_cost_curve
+    )
+    economic_curve = (
+        candidate.economic_sell_curve
+        if action == "SELL"
+        else candidate.economic_cost_curve
+    )
+    maker_witness = getattr(candidate, "maker_fill_witness", None)
+    execution_identity = (
+        candidate.execution_mode,
+        candidate.fill_probability,
+        candidate.fill_probability_source,
+        candidate.rest_deadline_minutes,
+        candidate.neg_risk,
+        executable_curve_identity(economic_curve),
+        candidate.asset_epoch_identity,
+        maker_witness.witness_identity if maker_witness is not None else None,
+        maker_witness.candidate_binding_identity if maker_witness is not None else None,
+        maker_witness.asset_epoch_identity if maker_witness is not None else None,
     )
     sell_identity = (
         (
             action,
             candidate.position_id,
             candidate.held_shares,
+            candidate.execution_mode,
+            candidate.fill_probability,
+            candidate.fill_probability_source,
+            candidate.rest_deadline_minutes,
             candidate.probability_functional,
             candidate.exit_authority_status,
             candidate.exit_authority_reason,
@@ -384,6 +509,7 @@ def global_single_order_economic_identity(
         candidate.condition_id,
         candidate.side,
         candidate.token_id,
+        *execution_identity,
         *sell_identity,
         candidate.resolution_identity,
         probability_witness.family_binding_identity,
@@ -433,6 +559,7 @@ class GlobalSingleOrderActuation:
     actuation_identity: str
     wealth_economic_identity: str
     economic_identity: str
+    auction_receipt_ref: GlobalAuctionReceiptRef | None = None
 
     def __post_init__(self) -> None:
         if (
@@ -466,6 +593,13 @@ class GlobalSingleOrderActuation:
         )
         if self.economic_identity != economic:
             raise ValueError("global actuation economic identity mismatch")
+        if self.auction_receipt_ref is not None:
+            self.auction_receipt_ref.assert_matches_actuation(
+                winner_event_id=self.winner_event_id,
+                winner_candidate_id=self.decision.candidate.candidate_id,
+                winner_actuation_identity=self.actuation_identity,
+                selection_epoch_identity=self.selection_epoch_identity,
+            )
 
 
 def _no_trade(reason: str) -> PreparedGlobalAuctionResult:
@@ -548,12 +682,15 @@ def _candidate_portfolio_endowment(
     )
     if not loss_payouts or not win_payouts:
         raise ValueError("candidate payoff branches are incomplete")
+    utility_liquid = (
+        wealth_witness.strategy_capital_allocation.utility_liquid_cash_usd
+    )
     return CandidatePortfolioEndowment(
         loss_wealth_floor_usd=(
-            wealth_witness.wealth_floor_usd + min(loss_payouts)
+            utility_liquid + min(loss_payouts)
         ),
         win_wealth_floor_usd=(
-            wealth_witness.wealth_floor_usd + min(win_payouts)
+            utility_liquid + min(win_payouts)
         ),
         current_token_shares=current_token_shares,
         ledger_snapshot_id=wealth_witness.ledger_snapshot_id,
@@ -617,17 +754,14 @@ def _family_portfolio_endowment(
         (commitments.get(token, Decimal("0")) for token in family_tokens),
         Decimal("0"),
     )
-    portfolio_capital = wealth_witness.spendable_cash_usd + sum(
-        commitments.values(),
-        Decimal("0"),
-    )
+    capital_allocation = wealth_witness.strategy_capital_allocation
     return FamilyPortfolioEndowment(
         family_key=family_key,
         payout_by_bin_usd=tuple((outcome, payout[outcome]) for outcome in outcomes),
         current_token_shares=tuple(sorted(shares_by_token.items())),
-        wealth_floor_usd=wealth_witness.wealth_floor_usd,
-        spendable_cash_usd=wealth_witness.spendable_cash_usd,
-        portfolio_capital_usd=portfolio_capital,
+        wealth_floor_usd=capital_allocation.utility_liquid_cash_usd,
+        spendable_cash_usd=capital_allocation.remaining_buy_capacity_usd,
+        portfolio_capital_usd=capital_allocation.allocated_equity_usd,
         committed_capital_usd=family_committed,
         ledger_snapshot_id=wealth_witness.ledger_snapshot_id,
     )
@@ -685,6 +819,11 @@ def select_prepared_global_auction(
         or selection_cut_at_utc > decision_at_utc
     ):
         return _no_trade("GLOBAL_SELECTION_EPOCH_IDENTITY_MISSING")
+    if book_epoch is None:
+        # SCOPE: this selection epoch; candidate negRisk is venue-asset authority.
+        # DRAIN: the upstream current-book capture supplies a typed book epoch.
+        # RESET: the next invocation includes that epoch and rematerializes candidates.
+        return _no_trade("GLOBAL_BOOK_NEG_RISK_AUTHORITY_MISSING")
     excluded_by_family = {
         str(family_key or "").strip(): str(reason or "").strip()
         for family_key, reason in (preflight_excluded_by_family or {}).items()
@@ -725,23 +864,6 @@ def select_prepared_global_auction(
             holdings_by_family[family_key] = holdings
         if family_key in excluded:
             continue
-        if book_epoch is None:
-            for seed in getattr(prepared, "candidate_seeds", ()):
-                try:
-                    candidates.append(
-                        global_candidate_from_native(
-                            seed.native_candidate,
-                            probability_witness=probability,
-                            ledger_snapshot_id=wealth_witness.ledger_snapshot_id,
-                            book_captured_at_utc=seed.book_captured_at_utc,
-                        )
-                    )
-                except Exception as exc:  # noqa: BLE001 - one missing asset invalidates globality
-                    return _no_trade(
-                        "GLOBAL_CANDIDATE_MATERIALIZATION_FAILED:"
-                        f"{type(exc).__name__}:{exc}"
-                    )
-
     if not excluded.issubset(probability_witnesses):
         return _no_trade("GLOBAL_EXCLUDED_FAMILY_UNKNOWN")
     if not buy_disabled.issubset(probability_witnesses):
@@ -783,8 +905,10 @@ def select_prepared_global_auction(
             *,
             status: str,
             candidate_id: str | None = None,
+            candidate_ids: tuple[str, ...] = (),
             reason: str | None = None,
             sell_book_witness_identity: str | None = None,
+            book_state: str = "UNKNOWN",
         ) -> GlobalHoldingAuctionCoverage:
             binding = holding_binding(holding, probability)
             prepared = prepared_by_family[holding.family_key]
@@ -809,8 +933,10 @@ def select_prepared_global_auction(
                 book_deadline_at_utc=book_deadline_at_utc,
                 status=status,
                 candidate_id=candidate_id,
+                candidate_ids=candidate_ids,
                 reason=reason,
                 sell_book_witness_identity=sell_book_witness_identity,
+                book_state=book_state,
                 sell_exit_authority_status=str(
                     prepared.day0_exit_authority_status
                 ),
@@ -823,9 +949,27 @@ def select_prepared_global_auction(
             )
 
         candidates = []
-        book_status_by_key = {
-            tuple(state[:5]): str(state[5])
-            for state in book_epoch.asset_states
+
+        def maker_witness_for(
+            *,
+            family_key: str,
+            bin_id: str,
+            condition_id: str,
+            side: str,
+            token_id: str,
+            position_id: str | None,
+        ) -> CurrentMakerFillWitness | None:
+            """Read only an upstream typed current witness; never reinterpret priors."""
+
+            witnesses = prepared_by_family[family_key].maker_fill_witnesses
+            if not isinstance(witnesses, Mapping):
+                return None
+            key = (bin_id, condition_id, side, token_id, position_id)
+            witness = witnesses.get(key)
+            return witness if isinstance(witness, CurrentMakerFillWitness) else None
+
+        book_state_row_by_key = {
+            tuple(state[:5]): tuple(state) for state in book_epoch.asset_states
         }
         for asset in book_epoch.assets:
             probability = probability_witnesses.get(asset.family_key)
@@ -841,18 +985,38 @@ def select_prepared_global_auction(
                 condition_id=asset.condition_id,
                 side=asset.side,
                 token_id=asset.token_id,
+                neg_risk=asset.neg_risk,
                 hypothesis_id=(
                     f"GLOBAL_BOOK:{asset.family_key}:{asset.bin_id}:{asset.side}"
                 ),
             )
             try:
-                candidates.append(
-                    global_candidate_from_native(
+                maker_witness = maker_witness_for(
+                    family_key=asset.family_key,
+                    bin_id=asset.bin_id,
+                    condition_id=asset.condition_id,
+                    side=asset.side,
+                    token_id=asset.token_id,
+                    position_id=None,
+                )
+                current_token_shares = _candidate_portfolio_endowment(
+                    native,
+                    probability_witness=probability,
+                    holdings_snapshot=holdings_by_family[asset.family_key],
+                    wealth_witness=wealth_witness,
+                ).current_token_shares
+                candidates.extend(
+                    global_candidates_from_native(
                         native,
                         probability_witness=probability,
                         ledger_snapshot_id=wealth_witness.ledger_snapshot_id,
                         book_captured_at_utc=asset.captured_at_utc,
                         native_bid_levels=asset.bid_levels,
+                        include_maker=maker_witness is not None,
+                        maker_fill_witness=maker_witness,
+                        asset_epoch_identity=book_epoch.witness_identity,
+                        current_token_shares=current_token_shares,
+                        neg_risk=asset.neg_risk,
                     )
                 )
             except Exception as exc:  # noqa: BLE001 - one malformed asset invalidates globality
@@ -929,7 +1093,7 @@ def select_prepared_global_auction(
                 )
                 if asset is None:
                     binding = holding_binding(holding, probability)
-                    book_status = book_status_by_key.get(
+                    book_state_row = book_state_row_by_key.get(
                         (
                             family_key,
                             str(binding.bin_id),
@@ -937,6 +1101,20 @@ def select_prepared_global_auction(
                             str(holding.side),
                             str(holding.token_id),
                         )
+                    )
+                    book_status = (
+                        str(book_state_row[5]) if book_state_row is not None else None
+                    )
+                    native_asset = book_epoch.asset_by_key.get(
+                        (
+                            family_key,
+                            str(binding.bin_id),
+                            str(holding.side),
+                            str(holding.token_id),
+                        )
+                    )
+                    native_bid_level_count = len(
+                        tuple(getattr(native_asset, "bid_levels", ()) or ())
                     )
                     reason = (
                         f"SELL_{book_status}"
@@ -952,45 +1130,106 @@ def select_prepared_global_auction(
                             probability,
                             status="EXCLUDED",
                             reason=reason,
+                            book_state=(
+                                "STALE"
+                                if book_status == "VENUE_METADATA_STALE"
+                                else "NO_EXECUTABLE_BOOK"
+                            ),
+                            sell_book_witness_identity=(
+                                global_sell_book_unavailability_witness_identity(
+                                    asset_state=book_state_row,
+                                    book_epoch_identity=book_epoch.witness_identity,
+                                    native_bid_level_count=native_bid_level_count,
+                                )
+                                if book_state_row is not None
+                                and book_status
+                                in {
+                                    "EXECUTABLE",
+                                    "NO_ASK",
+                                    "VENUE_NOT_EXECUTABLE",
+                                }
+                                and native_bid_level_count == 0
+                                else None
+                            ),
                         )
                     )
                     continue
                 try:
-                    candidate = global_sell_candidate_from_holding(
-                        holding,
-                        probability_witness=probability,
-                        ledger_snapshot_id=holdings.ledger_snapshot_id,
-                        executable_sell_curve=asset.curve,
-                        book_captured_at_utc=asset.captured_at_utc,
-                        probability_functional=sell_functional,
-                        exit_authority_status=exit_status,
-                        exit_authority_reason=exit_reason,
-                        sell_action_authority_identity=(
-                            prepared.sell_action_authority_identity
-                        ),
+                    sell_candidates = tuple(
+                        candidate
+                        for mode in ("TAKER_LIMIT", "MAKER_REST")
+                        if (
+                            candidate := global_sell_candidate_from_holding(
+                                holding,
+                                probability_witness=probability,
+                                ledger_snapshot_id=holdings.ledger_snapshot_id,
+                                executable_sell_curve=asset.curve,
+                                book_captured_at_utc=asset.captured_at_utc,
+                                probability_functional=sell_functional,
+                                exit_authority_status=exit_status,
+                                exit_authority_reason=exit_reason,
+                                sell_action_authority_identity=(
+                                    prepared.sell_action_authority_identity
+                                ),
+                                execution_mode=mode,
+                                maker_fill_witness=maker_witness_for(
+                                    family_key=family_key,
+                                    bin_id=str(holding.bin_id),
+                                    condition_id=str(
+                                        holding_binding(holding, probability).condition_id
+                                    ),
+                                    side=str(holding.side),
+                                    token_id=str(holding.token_id),
+                                    position_id=str(holding.position_id),
+                                ),
+                                asset_epoch_identity=book_epoch.witness_identity,
+                                neg_risk=asset.neg_risk,
+                            )
+                        )
+                        is not None
                     )
-                    if candidate is not None:
-                        candidates.append(candidate)
+                    if sell_candidates:
+                        candidates.extend(sell_candidates)
                         holding_coverage.append(
                             coverage_row(
                                 holding,
                                 probability,
                                 status="EVALUATED",
-                                candidate_id=candidate.candidate_id,
+                                candidate_id=sell_candidates[0].candidate_id,
+                                candidate_ids=tuple(
+                                    row.candidate_id for row in sell_candidates
+                                ),
                                 sell_book_witness_identity=(
                                     global_sell_book_witness_identity(
-                                        candidate.executable_sell_curve
+                                        sell_candidates[0].executable_sell_curve
                                     )
                                 ),
+                                book_state="EXECUTABLE",
                             )
                         )
                     else:
+                        (
+                            exclusion_reason,
+                            exclusion_book_state,
+                            exclusion_book_witness,
+                        ) = _non_executable_sell_coverage(
+                            holding.shares,
+                            asset.curve,
+                        )
                         holding_coverage.append(
                             coverage_row(
                                 holding,
                                 probability,
                                 status="EXCLUDED",
-                                reason="SELLABLE_SHARES_BELOW_PRECISION",
+                                reason=exclusion_reason,
+                                # A positive holding that cannot materialize
+                                # any venue-legal SELL is current exact
+                                # non-executability, including a residual below
+                                # the venue amount precision.  UNKNOWN would
+                                # leave its durable completion debt immortal
+                                # despite a complete q/book/holding cut.
+                                book_state=exclusion_book_state,
+                                sell_book_witness_identity=exclusion_book_witness,
                             )
                         )
                 except Exception as exc:  # noqa: BLE001 - malformed holding invalidates globality
@@ -1020,27 +1259,65 @@ def select_prepared_global_auction(
         return universe_witness.witness_identity
 
     def _candidate_capital_limit(candidate: GlobalSingleOrderAnyCandidate) -> Decimal:
-        if current_capital_limit_resolver is None:
-            return capital_limit_usd
-        if book_epoch is None:
-            raise ValueError("GLOBAL_CAPITAL_LIMIT_BOOK_EPOCH_MISSING")
-        asset = book_epoch.asset_by_key.get(
-            (
-                candidate.family_key,
-                candidate.bin_id,
-                candidate.side,
-                candidate.token_id,
+        allocator_limit = Decimal(capital_limit_usd)
+        if current_capital_limit_resolver is not None:
+            if book_epoch is None:
+                raise ValueError("GLOBAL_CAPITAL_LIMIT_BOOK_EPOCH_MISSING")
+            asset = book_epoch.asset_by_key.get(
+                (
+                    candidate.family_key,
+                    candidate.bin_id,
+                    candidate.side,
+                    candidate.token_id,
+                )
             )
+            owner_event_id = event_by_family.get(candidate.family_key)
+            if asset is None or owner_event_id is None:
+                raise ValueError("GLOBAL_CAPITAL_LIMIT_SCOPE_MISSING")
+            allocator_limit = Decimal(
+                current_capital_limit_resolver(
+                    candidate,
+                    asset.gamma_market_id,
+                    asset.market_event_id,
+                    owner_event_id,
+                )
+            )
+
+        # The W3 selector owns the final executable BUY size, so the configured
+        # single-position fraction must constrain this same capital envelope.
+        # Leaving it only in the retired local sizing path let the global solver
+        # spend well above max_single_position_pct while every upstream receipt
+        # still advertised that setting. Use Zeus-owned utility equity, never
+        # shared-wallet cash, as the fraction basis. Zero retains the documented
+        # disabled posture.
+        from src.config import sizing_defaults
+
+        single_position_pct = Decimal(
+            str(sizing_defaults()["max_single_position_pct"])
         )
-        owner_event_id = event_by_family.get(candidate.family_key)
-        if asset is None or owner_event_id is None:
-            raise ValueError("GLOBAL_CAPITAL_LIMIT_SCOPE_MISSING")
-        return current_capital_limit_resolver(
-            candidate,
-            asset.gamma_market_id,
-            asset.market_event_id,
-            owner_event_id,
-        )
+        if (
+            not single_position_pct.is_finite()
+            or single_position_pct < 0
+            or single_position_pct > 1
+        ):
+            raise ValueError("GLOBAL_SINGLE_POSITION_FRACTION_INVALID")
+        if single_position_pct > 0:
+            capital_allocation = wealth_witness.strategy_capital_allocation
+            committed_micro = dict(
+                wealth_witness.native_commitments_micro
+            ).get(candidate.token_id, 0)
+            committed_usd = Decimal(committed_micro) / Decimal("1000000")
+            remaining_position_budget = max(
+                Decimal("0"),
+                single_position_pct
+                * capital_allocation.allocated_equity_usd
+                - committed_usd,
+            )
+            allocator_limit = min(
+                allocator_limit,
+                remaining_position_budget,
+            )
+        return allocator_limit
 
     def _candidate_payoff_q_lcb(
         candidate: GlobalSingleOrderAnyCandidate,
@@ -1061,6 +1338,9 @@ def select_prepared_global_auction(
     def _candidate_policy_rejection(
         candidate: GlobalSingleOrderAnyCandidate,
     ) -> str | None:
+        # Solver-owned typed witness validation is deliberately before this
+        # policy hook.  This hook must not turn a current witnessed maker
+        # sibling back into a blanket historical-prior wall.
         if (
             str(getattr(candidate, "action", "BUY") or "BUY").upper() == "BUY"
             and candidate.family_key in buy_disabled
@@ -1127,9 +1407,10 @@ def select_prepared_global_auction(
             winner_event_id=None,
         )
     evaluated = {
-        row.candidate_id: row.position_id
+        candidate_id: row.position_id
         for row in holding_coverage
         if row.status == "EVALUATED"
+        for candidate_id in row.candidate_ids
     }
     sell_evaluations = {
         str(evaluation.candidate_id): str(evaluation.position_id or "")

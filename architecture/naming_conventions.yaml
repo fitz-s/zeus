@@ -67,6 +67,7 @@ file_naming:
         reconcile_realized_fees.py: established reconciliation verb-form (mirrors exchange_reconcile/reconcile_pending_redeems runtime surfaces); fee-evidence artifact writer (2026-06-12)
         deploy_live.py: operator-facing deploy gate command; verb-first name retained because 'deploy' is the operator action (restart-safety gate, PR #407)
         digest_profiles_export.py: derived digest profile mirror exporter; name retained because it mirrors the generated artifact module name
+        download_replacement_forecast_current_targets.py: established source-clock ETL entrypoint imported by production maintenance; retain the exact module name to preserve scheduler and test imports
         _build_pm_truth.py: packet-generated PM settlement export builder retained as evidence utility
         bridge_oracle_to_calibration.py: oracle penalty bridge writer retained under data artifact contract
         code_review_graph_mcp_readonly.py: Zeus-safe Code Review Graph MCP facade; intentionally omits source-writing apply_refactor

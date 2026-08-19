@@ -46,6 +46,7 @@ there is no warm thread at all.
 from datetime import datetime, timezone
 from pathlib import Path
 import sys
+import threading
 import types
 
 import pytest
@@ -58,6 +59,11 @@ from src.state import collateral_ledger
 @pytest.fixture(autouse=True)
 def _reset_ledger_global():
     collateral_ledger.configure_global_ledger(None)
+    from src.state import db as state_db
+
+    collateral_ledger.CollateralLedger(
+        db_path=state_db._zeus_trade_db_path()
+    ).close()
     yield
     collateral_ledger.configure_global_ledger(None)
 
@@ -183,6 +189,41 @@ def test_main_does_not_start_wallet_warm_before_scheduler():
     assert "_start_boot_wallet_warm()" not in body[:scheduler_start], (
         "main() must not start wallet/CLOB warm before scheduler startup"
     )
+
+
+def test_boot_process_heartbeat_pulses_until_scheduler_handoff(monkeypatch):
+    calls: list[str] = []
+    pulsed = threading.Event()
+
+    def write() -> None:
+        calls.append("heartbeat")
+        if len(calls) >= 2:
+            pulsed.set()
+
+    monkeypatch.setattr(main_mod, "_write_heartbeat", write)
+    stop, thread = main_mod._start_boot_process_heartbeat(
+        interval_seconds=0.01,
+    )
+    assert pulsed.wait(timeout=0.5)
+
+    main_mod._stop_boot_process_heartbeat(stop, thread)
+
+    assert not thread.is_alive()
+    assert len(calls) >= 3
+
+
+def test_main_boot_heartbeat_bridges_db_boot_before_scheduler():
+    body = Path(main_mod.__file__).read_text()
+    body = body[body.index("def main():"):]
+
+    identity = body.index("_write_loaded_sha_state(")
+    boot_pulse = body.index("_start_boot_process_heartbeat()")
+    schema_gate = body.index("_startup_world_schema_ready_check()")
+    handoff = body.index("_stop_boot_process_heartbeat(")
+    scheduler_start = body.rindex("        scheduler.start()")
+
+    assert identity < boot_pulse < schema_gate
+    assert schema_gate < handoff < scheduler_start
 
 
 def test_startup_data_health_check_uses_existence_probes_for_large_tables(monkeypatch):

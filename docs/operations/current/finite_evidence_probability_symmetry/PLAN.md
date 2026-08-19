@@ -4,6 +4,1876 @@ Date: 2026-07-11
 Branch: `live` (was `p2-pending-exit-restart-redecision`; renamed at main→live cutover)
 Status: active
 
+## 2026-08-18 Early exit plus residual settlement is a hybrid capital route
+
+The forward capital audit treated the last lifecycle event as the entire
+economic route.  A Tel Aviv Aug-17 NO position sold 16.23 of 16.231665 shares
+at 0.93, then settled only the 0.001665-share residual at 1.00; selecting the
+later `SETTLED` event mislabeled this as a full hold-to-resolution win.
+
+Capital attribution now preserves the terminal cumulative P&L while separately
+reporting entry-filled shares, exit-filled shares, exit-fill fraction, residual
+shares, and first/last exit-fill times.  A settled position with any confirmed
+exit fill is classified as `EXIT_ORDER_FILLED_WITH_RESIDUAL_SETTLEMENT`, never
+as a pure `SETTLED` route.  Acceptance requires a material early exit followed
+by dust settlement to remain an early-exit count and expose its exact residual.
+
+## 2026-08-17 Incremental live entries remain visible after the first fill
+
+The canonical command and venue-fact rows showed five current open entry
+orders, while `status_summary.execution.current_open_entry_orders` reported
+zero.  The derived query incorrectly treated `position_current.order_status`
+as if it described every later command: an active position legitimately keeps
+the original entry's `filled` status while a separately identified incremental
+ENTRY command rests at the venue.
+
+Current-order visibility now uses the position-level terminal order status only
+while the position is still `pending_entry`.  For active and Day0 positions,
+the exact command state and its latest command-specific venue fact decide
+whether an incremental order is open; terminal lifecycle phases still exclude
+closed positions.  This changes only the derived operator read model, not
+selection, sizing, reservations, submission, cancellation, or venue state.
+Acceptance requires an active position with `order_status=filled` and a later
+LIVE ENTRY fact to appear in the projection, while terminal venue facts and
+terminal lifecycle phases remain excluded.
+
+## 2026-08-17 Persisted fast observations retain the 15-minute ENTRY lifetime
+
+Shanghai Aug-18 HIGH NO filled at 03:33:54 UTC from a Day0 probability whose
+persisted fast-station conditioning clock was 03:06:41.  The next ZSPD report
+was not decision-time truth at submit: it became provider-available only at
+03:35:17, moved the running HIGH from 30C to 31C, materialized at 03:35:20,
+and correctly reversed NO probability before the reduce-only SELL.  The loss
+was therefore not look-ahead or a same-certificate buy/sell contradiction.
+
+The defect was a lifetime split.  `FAST_LANE_ENTRY_MAX_CACHE_AGE_S` already
+limits fast-lane ENTRY authority to 15 minutes while evidence remains in the
+in-process memo, but the same observation could survive for hours after being
+persisted into `forecast_posteriors`.  A persisted `aviationweather_metar`,
+`same_station_fast_tail`, or `wu_api+same_station_fast_tail` conditioning now
+uses that same inclusive 15-minute age at every global ENTRY build and submit
+rebind.  SCOPE is only new risk in the affected Day0 family.  DRAIN is the next
+causal station print and normal materialization.  RESET is the next complete
+global cut carrying conditioning inside 15 minutes.  Held-position redecision
+and reduce-only SELL remain executable, and unrelated families continue to
+compete for the single global order.
+
+Live verification exposed one remaining type boundary: expiry initially surfaced
+as a generic `ValueError`, so the reactor retried the stale family at the head of
+the queue instead of completing the global cut without it.  It is now a typed
+`FamilyAuthorityUnavailable` reason.  SCOPE is that one family; DRAIN is the
+same next causal station print; RESET is the next current conditioning witness.
+The cut continues across every other eligible family, held SELL, HOLD, and CASH.
+
+## 2026-08-17 Side-effect-free rejected commands need a fresh carrier
+
+A Warsaw maker continuation remained the global positive-growth winner after
+its first pre-submit pass was correctly revoked by a newer hard-authority fact.
+That pass had already appended `ExecutionCommandCreated` and a terminal
+`SubmitRejected`, with `pre_submit_rejection=true`, `venue_call_started=false`,
+and no `VenueSubmitAttempted`.  The reactor requeued the same immutable carrier;
+the command fence then rejected every retry because that carrier already owned a
+command certificate.  The result was a permanent `GLOBAL_WINNER_CLAIM_FENCE_LOST`
+loop despite unchanged positive economics.
+
+A targeted claim with that exact side-effect-free terminal shape now expires
+only its spent carrier.  The next complete global cut must materialize a fresh
+`claim_retry` carrier and pass the unchanged generation, pointer, current-q,
+JIT-book, wealth, and final hard-authority fences before any venue call.  Any
+`VenueSubmitAttempted` event keeps recovery authority and disables this path.
+SCOPE is one pre-submit-rejected global carrier.  DRAIN is the next global cut
+and fresh carrier claim.  RESET is a new immutable carrier, while any venue
+attempt remains recovery-owned.  Acceptance requires an antibody proving the
+old carrier expires, the replacement identity differs, and the replacement can
+acquire the command fence without weakening supersession or venue-attempt law.
+
+## 2026-08-17 Current-state mean actions must not be deleted by FDR confidence
+
+Post-restart live receipts selected two positive posterior-mean actions but the
+winner preflight deleted both through the legacy `FDR_REJECTED` route.  Their
+global certificates already proved a fixed executable action using posterior-
+predictive-mean EV and expected log wealth; the sampled false-edge rate is
+confidence evidence and cannot replace that action's expected payoff.  The
+solver-side deletion had already been removed, but the selected-route FDR
+adapter still reapplied the same confidence threshold immediately before
+submission.
+
+For an exact sealed global current-state certificate, the selected-route FDR
+shape now records the hypothesis and diagnostic false-edge rate without using
+that rate as action admission.  The prefilter, certificate grammar, current q,
+JIT book, wealth, positive mean EV/log-growth, price band, fees, depth, Kelly,
+and all submit-boundary verification remain cumulative.  Legacy non-current-
+state qkernel and family-BH routes retain their existing FDR law.  SCOPE is one
+globally selected current-state BUY preflight.  DRAIN is the next complete
+auction and JIT revalidation.  RESET is each new sealed global decision; stale
+q/book/wealth still supersedes and reauctions rather than inheriting this pass.
+
+## 2026-08-17 Target-complete ENS windows must not wait for an unused 144h tail
+
+Current live auction evidence contains 150 probability families and target dates
+only through 2026-08-19.  Recomputing each family against the 2026-08-17 00Z
+cycle and its configured city timezone gives a largest honest required period-end
+step of 72h; no current family requires step 144.  The OpenData producer still
+uses the full-horizon 08:05 UTC safe-fetch gate and therefore withholds every
+target even after that target's complete step window is available.  Recent
+primary-object metadata places step 72 around 07:42 UTC and step 144 around
+07:45 UTC, while the current gate delays collection until 08:05 UTC.
+
+The partial window becomes collection-eligible without making an incomplete
+target executable.  A source run may remain PARTIAL, but only a target whose
+exact `source_run_coverage.expected_steps_json` is a subset of observed steps,
+has all expected members, and passes the existing executable reader may become
+COMPLETE/LIVE_ELIGIBLE.  `BLOCK_LIVE` retains its old meaning; the ECMWF tracks
+move to an explicit target-window-complete policy rather than silently changing
+that token's semantics.  Every partial refresh remains retryable until the full
+run succeeds, and each newly committed partial frontier may wake newly complete
+replacement scopes instead of being suppressed by a source-run-id-only wake
+ack.
+
+SCOPE is the two live ECMWF OpenData HIGH/LOW tracks and only target windows
+whose complete required steps and 51 members have been persisted.  DRAIN is the
+five-minute safe-cycle poll: it retries the same cycle, atomically replaces its
+source/coverage/readiness rows, and re-enqueues the scopes made complete by the
+new observed-step frontier.  RESET is a SUCCESS journal for the complete cycle;
+until then PARTIAL never satisfies current-cycle dedup, and missing required
+steps continue to block only their dependent target windows.  Acceptance
+requires calendar antibodies for old BLOCK_LIVE and new target-complete policy,
+producer/daemon selection at the partial gate, repeated partial-frontier wake
+proof, full focused suites, and live rows proving source availability, target
+coverage, replacement revision, auction result, and any venue actuation.
+
+## 2026-08-13 Shared quote warming cannot consume the reserved q tranche
+
+Live restart recovery repeatedly admitted a full-book held monitor with roughly
+74 seconds remaining and explicitly reserved 35 seconds for seven current
+probability reads.  The first position's five-second child deadline was created
+before the shared network order-book batch, however.  When that auxiliary batch
+returned after the child deadline, the position was rejected before its first q
+read; the entire pass then produced zero canonical `MONITOR_REFRESHED` rows,
+retaining both monitor debt and the restart entry guard.
+
+An admitted statistical position now receives its bounded child deadline after
+shared quote warming and immediately before its position-owned metadata/q path.
+The outer monitor deadline remains absolute and unchanged; non-admitted
+positions receive no extra capacity, and missing HWM, probability, or quote
+truth still fails closed.  SCOPE is only an admitted held-position statistical
+redecision whose earlier child clock was consumed by shared prerequisite work.
+DRAIN is a complete fresh q/book evaluation followed by the existing canonical
+monitor append.  RESET is every position attempt and every new outer monitor
+claim.  Acceptance requires an antibody where shared prefetch crosses the old
+child deadline but the admitted position still completes inside the unchanged
+outer deadline, plus live canonical coverage, restart-guard CAS recovery, and a
+new global BUY/SELL/HOLD/CASH cut.
+
+## 2026-08-13 Partial exits retire sold capital from every auction authority
+
+An authenticated Miami SELL reduced the current open position to 0.00857 shares
+and $0.002399599 cost, while the chain API retained the original $1.4499 lot
+`initialValue`.  Position-level exit and PnL authority already used the reduced
+open-fill economics, but global wealth took the maximum of fill, chain, and
+projection costs, while the DB-backed family selector preferred chain cost.
+Both therefore re-committed sold capital and could suppress or distort the next
+positive-growth order.
+
+Fill authority now governs cost selection at both consumers: a verified trade
+fill uses current open-fill cost/shares; a balance-only rescue uses chain
+economics; legacy unknown authority retains the conservative fallback.  SCOPE
+is global wealth and same-family selection after a partial SELL.  DRAIN is the
+next complete global cut reading the reduced canonical open lot.  RESET is each
+new authenticated entry/exit fill or chain observation.  Acceptance requires
+stale full-lot chain cost to be ignored for a verified residual while the
+existing pre-fill chain-lag antibody still charges the complete newer fill.
+
+The same widened SELL integration suite exposed a final-boundary scope defect
+in the preceding deadline hotfix: `_submit_current_global_sell` referenced the
+adapter closure's held deadline even though it is also a module-level direct
+boundary.  Every direct global SELL therefore failed before venue actuation
+with `NameError`.  The caller now passes the exact terminal reason explicitly;
+ordinary epochs retain `GLOBAL_REAUCTION_EPOCH_EXPIRED`, while a request-bound
+deadline retains `HELD_SELL_DEADLINE_EXPIRED` without hidden closure state.
+
+## 2026-08-13 Terminal incremental fills remain canonical recovery debt
+
+The first live 1/8-Kelly cut produced four venue-confirmed entries.  The Miami
+refill command bought 17 additional NO shares at 0.30, but its immediate
+position projection lost a SQLite writer race after the command had already
+become `FILLED`.  The canonical position therefore remained at the prior five
+shares and $1.60 cost even though the confirmed fill made the true aggregate 22
+shares and $6.70 cost.  Periodic authenticated-fill recovery excluded every
+`FILLED` command, while the terminal-order repair compared the 17-share refill
+against the whole five-share position instead of treating it as a delta.
+
+A terminal `FILLED` ENTRY with exact confirmed trade facts, a pre-existing
+same-token command-level fill aggregate, a different current order id, and no
+command-bound fill projection/execution fact is now explicit recovery debt.
+Recovery rebuilds the aggregate from command-level execution facts, writes one
+idempotent `ENTRY_ORDER_FILLED` delta, and preserves the terminal command event.
+A lagging pre-fill chain balance downgrades `chain_state` to `unknown`; it may
+not remain falsely `synced` while command-derived exposure is larger.  A SQLite
+writer-lock failure propagates to the bounded recovery policy instead of being
+logged and counted as success.
+
+SCOPE is one exact terminal refill command and its same-token aggregate
+position.  DRAIN is the next authenticated-entry recovery pass under the
+canonical TRADE writer lease.  RESET is the presence of both the exact
+command-bound fill event and positive execution fact; a `FILLED` command or log
+message alone is not reset.  Acceptance requires the 5 + 17 = 22 shares,
+$1.60 + $5.10 = $6.70 cost antibody, one-event replay idempotence, explicit
+writer-lock propagation, focused recovery/reconciliation suites, and live proof
+that command `6a5be1b238f3472d` is represented by the canonical Miami position.
+
+Allowed files for this repair are `src/execution/command_recovery.py`,
+`src/execution/exchange_reconcile.py`, `tests/test_command_recovery.py`,
+`architecture/test_topology.yaml`, and this plan.
+
+## 2026-08-13 Governed 1/8 Kelly removes artificial capital starvation
+
+Current complete global cuts found a positive posterior-mean London 32C YES
+maker proposal at 0.12, but rejected its minimum executable addition solely as
+`FRACTIONAL_KELLY_TARGET_REACHED`: the existing $3.03 holding already exceeded
+the governed 1/32 target even though the proposal's current q mean was about
+0.242 and its expected EV was positive.  With roughly $545 capital basis and a
+full binary-Kelly fraction near 0.139, 1/32 constrained the family to roughly
+$2.37 while leaving nearly all spendable capital idle.  That is an artificial
+no-order outcome, not a global capital optimum.
+
+The governed live fraction is retuned to 1/8.  At the same decision-time truth,
+the target is roughly $9.46, permitting about $6.43 of additional exposure
+before ordinary depth, correlated-payoff, portfolio, city, and single-position
+limits.  This is a fourfold increase over 1/32 but still one half of the 1/4
+correlated ceiling and far below full Kelly; posterior confidence bounds remain
+diagnostic while posterior mean continues to own expected-log-growth ranking.
+
+SCOPE is live Fractional Kelly sizing for every otherwise admissible proposal.
+DRAIN is the next complete global cut under a freshly loaded 1/8 config, followed
+by candidate-specific submit-time q/book/wealth reproduction.  RESET is every
+new global cut and JIT preflight; moved price, probability, depth, risk, or
+capital can reduce the target or select CASH.  Acceptance requires the exact
+governed-value and correlated-ceiling antibodies, exact live reload, a current
+auction receipt carrying `fractional_kelly_multiplier=0.125`, and either an
+actual positive-growth venue order/fill or a precise non-artificial current
+economic rejection.
+
+## 2026-08-13 Fresh canonical coverage discharges stale auction fairness debt
+
+A recovery full-book monitor can time out waiting for the reactor while an
+already-running urgent held monitor independently refreshes every current
+position.  The timeout arms periodic fairness debt, but recovery previously
+cleared only canonical cadence debt after its final DB read proved the entire
+held book fresh.  The leftover concurrency debt then cancelled every reserved
+global auction before selection, creating a no-order ratchet after the monitor
+obligation had already been satisfied.
+
+Recovery now clears periodic fairness debt together with canonical debt only
+after the exact post-attempt canonical read proves zero blocking-stale and zero
+future monitor evidence.  SCOPE is the completed recovery obligation for the
+current held book.  DRAIN is that exact canonical clean read.  RESET is a later
+periodic handoff timeout or newly overdue held position, either of which arms a
+new debt from current truth.  Acceptance requires an antibody where recovery
+starts stale with fairness debt armed, ends canonically fresh, releases the
+auction, and a live global cut reaches a terminal current winner/CASH result.
+
+## 2026-08-13 Canonical monitor never waits for a lease while holding SQLite
+
+Current runtime evidence showed a three-process lock-order cycle on the live
+trade DB.  The held-position monitor retained an open SQLite write transaction
+while requesting its canonical MONITOR lease; the substrate observer held the
+MONITOR waiter/turnstile while waiting for the unified writer; post-trade
+capital held that unified writer while waiting for SQLite.  Nine held
+positions then exceeded canonical monitor cadence, BUY admission correctly
+failed closed, and command recovery could not re-decide the live Miami maker
+order.  This is a capital-path liveness defect, not evidence that CASH is the
+global economic optimum.
+
+Before requesting the canonical writer lease, the monitor now commits any
+already-open auxiliary transaction on its long-lived connection.  The later
+MONITOR_REFRESHED event and projection still append atomically in their own
+bounded leased transaction.  No network call, probability value, exit verdict,
+or order authority is changed.
+
+SCOPE is one held-monitor canonical append on the live trade DB.  DRAIN is the
+pre-lease commit releasing SQLite, followed by the existing bounded MONITOR
+lease and event+projection transaction.  RESET is every append attempt; an
+auxiliary commit failure rolls back and defers the canonical event to the next
+monitor cycle.  Acceptance requires an antibody proving the connection is not
+in a SQLite transaction when lease acquisition starts, focused monitor/write
+coordinator tests, exact live reload, disappearance of the lock-order cycle,
+fresh canonical coverage for all current positions, and command recovery of
+the current resting order.
+
+## 2026-08-13 Current witnessed maker competes on capital growth
+
+The global auction already constructs a candidate-bound
+`CurrentMakerFillWitness` from causally closed actual maker outcomes, binds it
+to the current book epoch, passive limit, rest deadline, and selection-time
+cut, and scores every zero/partial/full-fill outcome on the same
+posterior-mean expected-log-growth axis as taker, SELL, HOLD, and CASH. The
+entry policy nevertheless rejected every statistical `MAKER_REST` BUY before
+that economics ran. This duplicated the typed witness contract and made a
+currently executable capital-efficient order infeasible solely because its
+fill is contingent.
+
+The blanket statistical-maker veto is removed. A maker BUY is still admitted
+only when the solver has validated its complete current witness and when the
+exact token already owns at least one venue-minimum SELL lot. The latter
+constraint remains mandatory: a first maker partial fill can otherwise create
+exposure below the legal exit size and defeat probability-reversal exit. An
+unwitnessed, stale, mismatched, unseeded, non-positive, or JIT-superseded maker
+still cannot win or submit.
+
+SCOPE is statistical `MAKER_REST` BUYs that already satisfy both typed current
+fill authority and exitability seed law. DRAIN is the next complete global
+BUY/SELL/HOLD/CASH comparison and, for a winner, exact-mode JIT revalidation.
+RESET is every new q/book/wealth/fill-witness cut; no earlier maker winner or
+fill distribution carries forward. Acceptance requires the adapter to contain
+no statistical-maker blanket veto, the existing witness tamper/expiry,
+partial-fill economics, and unseeded-maker antibodies to remain green, exact
+live reload, and a current auction receipt showing either a positive witnessed
+maker submission or the next exact current economic rejection.
+
+## 2026-08-13 Positive winner retains time for submit-time revalidation
+
+After actual admission matched the proof comparator, a Shenzhen BUY winner was
+selected with positive posterior-mean growth but spent about 26 seconds in its
+mandatory selected-family JIT revalidation.  The whole global cut had only 30
+seconds including scope, book, and solve, so the exact duplicate-order read was
+interrupted at the deadline and no venue command could be formed.
+
+The cut is now 45 seconds.  Existing cancellation still yields to pending held
+monitor or new hard Day0 authority; the book remains bounded by its separate
+180-second expiry.  SCOPE is one global auction invocation.  DRAIN is a selected
+winner completing JIT preflight and final actuation inside the enlarged cut.
+RESET is the next invocation or any cancellation/book expiry, which still ends
+the current cut without a venue side effect.  Acceptance requires the focused
+work-cut antibody, the global auction integration suite, exact-head restart,
+and a post-load command/venue receipt or an explicit current rejection reason.
+
+## 2026-08-13 Current positive growth, not prior settlement, admits risk
+
+The statistical-entry gate required profitable settlement evidence from the
+exact current selection revision before that revision could place its first
+order.  The proof-only comparator then repeatedly found positive executable
+posterior-mean BUY winners while the actual comparator was forced to CASH.
+This is circular admission: it prevents both current capital gain and the very
+realized evidence demanded to clear it.
+
+Statistical immediate-taker BUYs now enter the same live feasible set as their
+proof comparison.  They still require current licensed probability semantics,
+source freshness, exact executable book and fees, pre-cliff liquidation depth,
+strategy policy, Fractional Kelly sizing, capital/risk limits, and submit-time
+JIT reproduction.  Unresolved Day0 probability, unwitnessed maker fills, and
+maker entries without a venue-legal exit seed remain blocked.  A negative or
+absent expected-growth winner still selects CASH; this
+change does not create a minimum-order quota.
+
+SCOPE is the removed bankroll-wide settlement-history veto only.  DRAIN is the
+next complete global cut, whose positive winner proceeds to ordinary preflight
+and actuation.  RESET is every new q/book/wealth cut and submit-time preflight;
+stale or negative economics cannot inherit an earlier winner.  Acceptance
+requires the actual candidate policy to contain no settlement-history veto,
+focused adapter and global-auction tests, exact-head restart, and a current
+receipt showing either a genuinely submitted positive winner or current CASH
+with no positive proof winner.
+
+## 2026-08-13 Capital proof winner identity is isolated from frontier telemetry
+
+The proof receipt scans rejected BUY frontiers before serializing its winner.
+That scan reused the winner's local `family_key` and `context` variables, so a
+frontier from another family could relabel the winner and make its exact q
+diagnostic unavailable.  Selection itself was unchanged, but the receipt could
+not prove which current probability witness owned the apparent positive order.
+
+Winner identity and context are now frozen before the frontier scan; every
+frontier uses its own scoped identity.  SCOPE is proof-only receipt telemetry.
+DRAIN is the next complete global cut under the loaded fix.  RESET is every new
+cut, which recomputes both identities from the selected candidate and current
+evaluation set.  Acceptance requires a winner plus a later rejected frontier
+from a different family, with the winner retaining its own family, city, q,
+and confidence-cost diagnostic.
+
+## 2026-08-13 Capital proof exposes confidence-cost amplification readiness
+
+Posterior-mean expected growth is the common comparison axis for fixed BUY,
+SELL, HOLD, and CASH proposals.  A positive mean winner does not by itself show
+that increasing risk is robust to the current probability uncertainty.  The
+proof-only winner therefore also freezes the selected-side lower-tail
+probability confidence bound, exact fee-inclusive cost per share, and their
+margin.  A non-positive margin is explicitly `BLOCKED`; a positive margin says
+only that this diagnostic passed and still requires every ordinary admission,
+risk, depth, Kelly, and submit-time truth check.
+
+The confidence bound remains evidence, never a relabeled fixed-action expected
+payoff and never a second selection objective.  SELL winners are capital-
+release actions, so the entry-cost amplification diagnostic is explicitly not
+applicable.  SCOPE is side-effect-free capital-proof telemetry only.  DRAIN is
+the next complete global cut, which recomputes the diagnostic from the exact
+probability witness and selected all-in cost.  RESET is any fresh q/book/wealth
+cut or a different winner; no prior positive margin carries forward.  Acceptance
+requires an antibody where a positive posterior-mean BUY has a negative
+confidence-cost margin, remains the proof winner, and is stamped blocked without
+changing selection or venue-submit counts.
+
+When no positive order exists, a bare CASH/HOLD result does not identify what
+must move before capital can be deployed.  The same proof receipt therefore
+freezes the nearest rejected executable BUY probe under the solver's exact
+posterior-mean comparator order: expected log-growth rate, expected delta-log
+wealth, capital efficiency, cost, then stable candidate identity.  Its current
+mean-cost and confidence-cost gaps expose the q/price frontier without turning a
+negative probe into an order.  The frontier is absent when no BUY reached exact
+fee/depth/economic scoring, and it resets on every complete global cut.
+
+## 2026-08-13 Capital evidence is independent by target date
+
+The capital evaluator called `(city, target_date, metric)` an independent
+family-day.  That can count several globally selected orders from the same
+target date as separate observations even though they share the same forecast
+issuance environment, model error, and broad weather regime.  The plan's
+minimum evidence unit is one target date, not one city-market cell.
+
+Settlement grading now keeps only the first valid complete-global-cut proof per
+target date.  The sample still records the selected city, metric, condition,
+side, cost, payoff, and exact probability semantics, but another selection on
+the same target date cannot increase the independent sample count.  This is a
+strict evidence correction only; it cannot admit an order, alter selection, or
+change held-position redecision.
+
+SCOPE is the observational current-regime admission evaluator.  DRAIN is one
+causally settled proof from a previously unseen target date.  RESET is the next
+distinct target date; another city or metric on an already-counted date does
+not reset the independence gate.  Acceptance requires an antibody with two
+different families on the same target date counting once, renamed target-date
+contract fields/reasons, and a current evaluator run that remains fail-closed
+until 30 distinct target dates and a positive after-cost delta-log-wealth lower
+bound exist.
+
+## 2026-08-13 Capital proof retains every licensed current-evidence revision
+
+The live replacement authority admits two exact, non-interchangeable current-
+evidence shapes: same-cycle `ensemble_center_scenarios_v4`, and bounded latest-
+causal `stale_ensemble_absolute_disagreement_v2`.  The latter retains raw
+absolute ENS members, charges their full center disagreement against the
+current provider center, forbids translation, and remains bounded by the
+existing source-cycle age law.  The capital-proof writer nevertheless stamped
+only the same-cycle revision.  A latest-causal statistical BUY could therefore
+win the exact current q/book/wealth comparison with an empty semantics field,
+making every later settlement sample ungradeable even though the probability
+reader had already proven entry authority.
+
+The proof writer now reuses the canonical entry-authority predicate and freezes
+the exact persisted revision for both licensed shapes.  The evaluator accepts
+those two revisions explicitly and verifies the solver's real immediate-taker
+certificate: `TAKER_LIMIT`, full immediate fill probability, and the existing
+`SETTLEMENT_LOCKED_BUY` capital mode.  It no longer asks for the nonexistent
+`IMMEDIATE_TAKER_BUY` label.  Maker-rest or partial-fill counterfactuals remain
+inadmissible, and neither revision bypasses executable book, fee, wealth,
+pre-cliff liquidation, settlement, or positive lower-bound requirements.
+
+SCOPE is proof-only probability semantics and later settlement grading; live
+order selection and actuation are unchanged.  DRAIN is the next complete
+global cut, which stamps the exact licensed revision on its proof winner, then
+the ordinary causal settlement join.  RESET is a fresh posterior whose shape
+passes the canonical entry-authority predicate; malformed, translated,
+revision-mismatched, or over-age shapes emit no proof semantics.  Acceptance
+requires antibodies for same-cycle and bounded latest-causal stamping, stale-
+revision settlement grading, immediate full-fill taker proof, and continued
+maker rejection.
+
+## 2026-08-12 Restart recovery is current-risk bounded
+
+The live-trading restart lane stopped the order daemon safely, then spent its
+entire outer timeout inside command recovery even though the restart scope is
+defined as current dangerous side effects only.  Unlike `live_tick` and the
+bounded full sweep, `restart_preflight` did not thread its supplied scheduler
+deadline into writer-lease acquisition, SQLite progress interruption, or the
+per-pass apply factory.  A historical scan could therefore keep held-position
+redecision offline while doing work that the recurring recovery lane already
+owns.
+
+Restart recovery now receives an absolute deadline shorter than the deploy
+subprocess timeout and treats `restart_preflight` as a bounded scope throughout
+its read/apply topology.  The trailing EDLI trade-fact bridge has its own shorter
+SQLite deadline and typed contention deferral, so neither lane can consume the
+other's budget. Deadline exhaustion records a typed deferral; the
+subsequent read-only preflight remains responsible for refusing startup if any
+current submit/cancel/exit ambiguity is still dangerous.  No historical row is
+deleted, relabeled, or used to authorize a trade.
+
+SCOPE is deploy-time command recovery before `live-trading` bootstrap.  DRAIN
+is the existing recurring `live_tick`/full recovery after the daemon starts,
+while current restart-dangerous commands remain covered by the read-only
+preflight.  RESET is a fresh restart invocation with a new finite deadline.
+Acceptance requires factory tests proving deadline interruption and finite
+writer-lease acquisition for `restart_preflight`, deploy wiring of the absolute
+deadline, and successful exact-head restart with entries still paused.
+
+## 2026-08-12 Current truth is not current-regime capital advantage
+
+### Side-effect-free global capital counterfactual
+
+An entry pause cannot itself shrink the evidence universe to held families:
+that makes the capital-proof gate self-referential because statistical BUYs
+are rejected before their economics exist.  Each complete current q/book/
+wealth cut therefore runs one additional proof-only selection over the same
+prepared universe.  It ignores only non-actuation global admission state
+(including the settlement-graded capital-proof pause that the receipt is
+intended to drain); freshness, probability semantics, source quality,
+family-local readiness, strategy policy, price band, fees, depth, Kelly, risk
+and capital limits remain unchanged.
+
+The proof result is embedded in the actual schema-22 global-auction receipt,
+has `venue_actuation_available=false`, and asserts the venue submit counter is
+unchanged.  The ordinary selected object remains the sole preflight/actuator
+input.  SCOPE is statistical evidence for current selection-law evaluation.
+DRAIN is settlement joining of one first complete receipt per independent
+family-day.  RESET is a new selection/probability revision, which makes prior
+receipts ineligible rather than mutating them.
+
+The full global solver used current q, book, and wealth but let its
+`current_state_solve` path bypass settlement-graded OOF reliability.  Freshness
+prevents time travel; it does not prove that the model is more accurate than
+the executable market after costs.  The current artifact predates both the
+active probability semantics and the current global selection/execution rule,
+while recent live fills include selected beliefs near 0.90 that later collapsed
+to approximately zero.  It cannot license fresh risk.
+
+All risk-increasing statistical BUYs are now excluded before strategy, Kelly,
+or capital ranking.  Current Day0 LOCKED/REFUTED hard facts remain eligible
+because their payoff is fixed by monotone source truth rather than estimated
+model advantage.  SELL/HOLD/CASH remain continuously comparable, and this gate
+does not force liquidation.  The no-order outcome is a valid global optimum in
+a zero-sum market when no positive executable advantage is proven.
+
+SCOPE is every statistical BUY under forecast or unresolved/unknown Day0
+authority.  DRAIN is a strict causal walk-forward artifact that grades the exact
+current probability semantics, current selection rule, executable cost/fill
+regime, and settlement outcome.  RESET is successful validation consumed by
+the same candidate-policy seam; process health, fresh q, config, or restart
+cannot clear it.  Acceptance requires direct helper tests for statistical and
+hard-fact cases, source-order proof before strategy/Kelly/capital, focused
+global-entry tests, zero post-load ENTRY commands, and a complete held-capital
+auction receipt.
+
+## 2026-08-12 Marginal peak time is not today's conditional peak state
+
+The Day0 HIGH generator mixed a historical `diurnal_peak_prob` atom into the
+current remaining-path distribution.  That table estimates only
+`P(peak already set | city, month, local hour)`.  It does not condition on
+today's temperature slope, time since the running high, fast observation
+innovation, provider trajectories, or remaining-path spread.  Live Dallas and
+NYC fills exposed the category error: roughly 0.90 selected-side entry beliefs
+collapsed to 0.0041 and 0 after the current temperature kept rising.
+
+The empirical clock probability remains attached as telemetry, but it no
+longer enters point q, bootstrap rows, held value, or order ranking.  Until a
+strictly causal walk-forward conditional model is proven, the current
+observation boundary plus current remaining provider path is the sole
+statistical Day0 distribution.  Existing unresolved-Day0 BUY containment stays
+in force, so this change cannot reopen entries; locked/refuted hard facts remain
+unchanged, and SELL must still beat HOLD/CASH on the unified capital objective.
+
+SCOPE is the statistical Day0 HIGH distribution for unresolved payoffs.  DRAIN
+is immediate recomputation under probability basis v6 on the next monitor or
+auction cycle.  RESET is a new q witness that excludes the marginal atom; a
+future peak-state atom may return only with a named conditional basis and
+strict walk-forward proof.  Acceptance requires a relationship antibody that
+the same remaining path produces the same q with or without marginal telemetry,
+the focused Day0 probability suite, zero new ENTRY commands while paused, and
+a post-load held-capital auction receipt on the new basis.
+
+## 2026-08-12 Paused probability carriers still redecide held capital
+
+The post-hot-fix restart correctly kept new ENTRY commands at zero, but its
+post-start proof could not form a complete held-coverage global-auction receipt.
+Runtime logs showed the contradiction: the paused forecast wake materialized
+its current carrier and then returned "without auction", while the next generic
+reactor cycle was rejected before runtime setup because entries were globally
+blocked. The carrier path therefore refreshed probability evidence but could
+never compare current SELL/HOLD/CASH for capital already at risk.
+
+A materialized paused forecast carrier now reads current held-family exposure.
+An exact empty read retains the cheap no-auction completion. Non-empty or
+unreadable exposure continues into the existing global completion cut, which
+sets `selection_completion_reserved`, disables every BUY proposal, restricts
+known scope to held families, and compares SELL/HOLD/CASH on the existing
+posterior-mean expected-log-growth axis. It creates no authority to sell at a
+loss: SELL must still beat HOLD and CASH under current executable truth.
+
+SCOPE is one materialized forecast carrier while entries are paused and current
+held exposure exists or cannot be read exactly. DRAIN is the existing bounded
+reduce-only global auction and its canonical receipt. RESET is an exact empty
+held-family read, or clearing the pause so the ordinary full feasible set runs;
+a failed exposure read never resets money-at-risk redecision. Acceptance
+requires helper failure/empty/non-empty antibodies, source-order wiring through
+the reduce-only completion mode, the adapter's existing BUY-disabled held-scope
+antibody, hot-fix landing, exact loaded SHA, zero new ENTRY commands while
+paused, and one post-load complete held-coverage global-auction receipt.
+
+## 2026-08-12 Current hold value cannot depend on sunk entry provenance
+
+A venue-confirmed fill can outrun its original position projection.  The
+recovery path preserved the real exposure but historically used zero as the
+missing entry posterior.  The held exit-context builder then coupled the fresh
+current confidence interval to that historical field: even with a fresh Day0
+q and fresh executable book, it omitted `current_ci` and forced
+`EVIDENCE_UNAVAILABLE`.  This is a category error.  The unified exit law
+compares current liquidation proceeds with current hold value; entry belief and
+entry price are sunk attribution facts, not inputs to that comparison.
+
+Current belief bounds are now built whenever the current q/edge band and book
+price are finite, independently of the optional entry witness.  Entry posterior
+and entry CI remain available when valid and remain absent when not proven; no
+historical probability is fabricated.  SCOPE is one held-position exit context.
+DRAIN is the next normal monitor refresh with fresh q and book.  RESET is a
+finite current held-side CI; stale/missing current evidence still fails closed.
+Acceptance requires an antibody with `p_posterior=0` plus fresh current q/book
+that reaches the same predicted-bin SELL law as every other position.
+
+## 2026-08-12 Recovered fills cannot depend on a dead cross-DB FK
+
+The confirmed-fill projection can recover a real venue acquisition before its
+legacy `trade_decisions` bridge exists.  Lifecycle compatibility then invokes
+the existing bridge synthesizer, but the physical trades DB still declares
+`forecast_snapshot_id -> main.ensemble_snapshots`.  The K1 split moved that
+parent to the forecasts DB, and SQLite foreign keys cannot cross attached
+schemas.  With foreign-key enforcement enabled, every bridge INSERT or UPDATE
+therefore fails at statement preparation even when the soft reference is NULL.
+
+The already-reviewed crash-atomic W0-a rebuild removes only that unreachable
+FK.  Its schema pin is advanced to the current physical shape so the later
+`decision_law_id` column is copied and typed-digest checked rather than rejected
+as drift or lost.  No canonical event, position, fill, probability, or execution
+fact is rewritten.
+
+SCOPE is the single `trade_decisions` table in the canonical trades DB.  DRAIN
+is a short all-writer fence, one WAL transaction, and reopening every writer.
+RESET is a fresh-connection schema proof with no dangling FK followed by a
+genuine recovered-fill bridge write.  Acceptance requires the existing crash,
+schema-drift, sequence, and row-digest matrix plus an antibody that preserves a
+non-NULL `decision_law_id`, a fenced dry run, apply receipt, and forward Dallas
+held-monitor evidence.
+
+## 2026-08-12 Held freshness uses the provider vector clock
+
+The replacement posterior has two different clocks: one causal ENS/anchor
+carrier in `source_cycle_time`, and one exact per-provider value vector in
+`bayes_precision_fusion.current_value_serving`.  The held reader already
+verified the latter against current raw-row identities, but then independently
+compared the newest scalar provider cycle with the older carrier and vetoed the
+same posterior again.  A fully current mixed-clock posterior therefore became
+permanently stale even after its repair seed had consumed the new provider
+rows.
+
+The scalar cycle difference is now telemetry only.  Freshness is invalidated
+by the existing exact vector-HWM reason when a provider row is superseded,
+late, missing, mismatched, or unverifiable.  A posterior is fresh across mixed
+clocks only when its causal shape remains legal and every used provider's exact
+served row is still current.
+
+SCOPE is one held `(city, target_date, metric)` posterior read.  DRAIN is the
+existing input-revision/cycle materializer.  RESET is exact equality between
+persisted `current_value_serving` identities and the current coherent provider
+frontier; an unconsumed or unverifiable row remains fail-closed even when only
+one used provider has advanced and a replacement cohort is not materializable
+yet.  Acceptance requires paired antibodies for a consumed newer provider
+vector, an isolated unconsumed revision, and a superseding coherent provider
+vector, plus forward live Madrid monitor proof.
+
+## 2026-08-12 Expired held belief can rematerialize its same causal cycle
+
+The held monitor expires a replacement posterior on its computation clock even
+while the consumed source cycle remains inside the shared causal age bound.  Its
+repair worker previously treated that old posterior as permanent proof that the
+cycle was already covered.  With no newer provider revision or carrier cycle,
+the worker returned `CYCLE_ADVANCE_NOT_NEEDED`; the stale certificate therefore
+had no reset path and both statistical exit authority and complete global
+auction coverage remained unavailable.
+
+The single-family producer now receives the monitor's minimum acceptable
+`computed_at`.  A posterior older than that cutoff can enqueue one same-cycle
+canonical materialization while the source cycle remains legal.  A fresh
+posterior, a visible seed, or the exact active queue request suppresses duplicate
+work; an expired source cycle still fails closed.  Only the newly committed
+posterior clears freshness—no stale row or marker is relabeled current.
+
+SCOPE is one held `(city, target_date, metric)` family.  DRAIN is the existing
+replacement materialization queue using the exact latest causal family cycle.
+RESET is a canonical posterior on that cycle whose `computed_at` meets the
+monitor cutoff; an active exact request only defers duplication, and an expired
+source cycle requires normal cycle advance.  Acceptance requires same-cycle
+expired/fresh antibodies, held reseed cutoff wiring, focused materialization and
+monitor suites, live landing, and a subsequent complete current held-coverage
+auction receipt.
+
+## 2026-08-12 Monitor-shaped fill repair advances realized PnL
+
+The partial-EXIT recovery path appended correct cumulative PnL atoms and folded
+them into a non-NULL projection, but reused the `MONITOR_REFRESHED` projection
+shape to preserve the still-open lifecycle.  The monitor authority merge then
+unconditionally copied the older `position_current.realized_pnl_usd` value over
+the new fold.  When that old value was NULL, canonical current-state PnL stayed
+NULL even though the event ledger already proved the loss or gain.
+
+The merge now distinguishes missing monitor economics from present fill-owned
+economics: NULL input preserves the existing value, while a non-NULL cumulative
+PnL from the append-first fold advances the projection.  No lifecycle, shares,
+cost, or settlement semantics change.
+
+SCOPE is `realized_pnl_usd` on one monitor-shaped canonical projection.  DRAIN
+is the same append-and-project transaction.  RESET is equality between the
+event fold and `position_current`; replaying the same fill remains idempotent.
+Acceptance requires both projection directions (NULL preserves, non-NULL
+advances) and the three partial-EXIT recovery antibodies covering production
+shape, repeated recovery, and multiple trade identities.
+
+## 2026-08-12 Held belief repairs keep independent RESET lanes
+
+Madrid and Tel Aviv remained under active monitoring but could not form a fresh
+exit belief after newer raw forecast inputs arrived.  The monitor correctly
+requested both same-carrier input-revision repair and newer-carrier cycle
+advance, but treated a durable `fusion_upgrade_enqueues` marker as proof that
+all repair work was pending and returned before invoking cycle advance.  Those
+markers survive seed consumption, so the independent cycle lane had no RESET
+and repeated monitor cycles could remain in `BELIEF_AUTHORITY_FAULT` while a
+newer materializable carrier existed.
+
+Only a newly published input-revision seed short-circuits the current worker.
+An already-enqueued revision now remains visible as pending while the same
+family also evaluates cycle advance.  The later monitor still accepts only a
+materialized causal posterior; no stale probability is relabeled fresh.
+
+SCOPE is one held `(city, target_date, metric)` belief repair.  DRAIN is the
+existing fusion queue and cycle-advance queue, independently.  RESET is a
+posterior consuming the relevant input revision/carrier followed by a fresh
+`MONITOR_REFRESHED`; a durable marker alone never resets freshness.  Acceptance
+requires an antibody where `already_enqueued=1` still invokes cycle advance,
+the existing new-revision/no-revision routing tests, and forward Madrid/Tel Aviv
+fresh-belief evidence after live deployment.
+
+## 2026-08-12 Pre-SDK terminal rejection closes its entry exposure obligation
+
+An entry command can cross the durable reservation boundary and then fail before
+the venue SDK is called.  Recovery already requires a typed adapter witness and
+records `REVIEW_CLEARED_NO_VENUE_SIDE_EFFECT`, terminalizing the command as
+`REJECTED`.  The entry-obligation reconciler did not recognize that exact event,
+so the command remained an open exposure obligation indefinitely despite the
+same canonical journal proving that no venue side effect was possible.
+
+The terminal no-fill proof set now includes the validated pre-SDK clearance
+event.  Positive trade/execution facts or a nonterminal order fact still veto
+release, and a generic rejection or unvalidated payload cannot mint this event.
+
+SCOPE is one entry command carrying a typed pre-SDK no-side-effect terminal
+event.  DRAIN is the recurring terminal entry-obligation recovery pass.  RESET
+is the obligation's `RESOLVED` transition; commands without the typed event, or
+with contradictory venue exposure, remain open.  Acceptance requires an
+end-to-end antibody that creates the typed clearance through its validated
+writer, releases the obligation exactly once, then proves idempotence, followed
+by live recovery of the historical obligation without a DB edit.
+
+## 2026-08-12 Held monitor reads the latest causal Day0 event
+
+The held monitor freezes one cycle decision cut before its bounded probability
+reads.  The Day0 event reader nevertheless selected the database's absolute
+latest family event.  When the source materializer committed a new event after
+that cut but before the reader ran, the probability builder correctly rejected
+the event as future evidence.  The reader did not fall back to the immediately
+preceding causal event, so a healthy source update produced
+`INCOMPLETE_EXIT_CONTEXT`, an incomplete monitor cycle, and overdue monitor
+debt that also retained the entry lane in reduce-only mode.
+
+The reader now selects the latest family event whose available, received, and
+created clocks are all at or before the frozen decision time.  This preserves
+the coherent cycle cut and the no-look-ahead rule; it does not accept stale
+evidence as current, and later execution still rebinds to submit-time truth.
+
+SCOPE is one held city/date/metric probability read.  DRAIN is the same bounded
+monitor pass using the newest event causally visible at its decision cut.  RESET
+is a later monitor cut that makes a newly committed event eligible; an event
+still newer than the cut remains excluded.  Acceptance requires an antibody
+with both a causal event and a later committed event, the focused held-belief
+suite, the monitor/exit suites, live hot-fix landing, and forward full-book
+`MONITOR_REFRESHED` evidence without a future-event rejection loop.
+
+## 2026-08-12 FAK no-fill retains an exact deadline-bound SELL handoff
+
+The Seoul 32C NO timeline exposed a stronger acceptance requirement than wake
+priority alone.  Its first current negative-edge SELL was submitted at 0.06 and
+received a deterministic FAK no-fill, but the historical runtime produced no
+second SELL command before the bid fell below the live order floor.  A selector
+test proves only that an already-queued expired request wins scheduling; it does
+not prove the rejected command leaves a new actionable request behind.
+
+The composed antibody now begins with the authenticated FAK no-fill command,
+requires canonical retry release, recovers a new exact V4 request bound to a
+new current probability/book witness, proves the request remains incomplete,
+and proves its expired actuation deadline preempts a competing Day0 wake.  This
+closes the producer-to-selector proof gap without replaying the rejected
+command's historical quote.  Existing global-cut tests continue to own JIT
+candidate/receipt actuation and typed no-book completion.
+
+SCOPE is one rejected exact held SELL attempt.  DRAIN is one current global
+auction cut producing a new command or typed terminal current-book receipt.
+RESET is that request's immutable matching receipt; absent receipt retains the
+debt, while bid below the absolute floor is current no-book evidence rather
+than a promised fill.  Acceptance is both holding/day0 runtime states passing
+the composed antibody plus the deadline-selector and current-cut receipt tests.
+
+## 2026-08-12 Deploy monitor gate and restart reset share one proof
+
+Production loaded the intended SHA and began held-position monitoring, but the
+deploy command accepted one coverage tranche and immediately asked the restart
+guard to prove full-book coverage.  Production accepted four of twelve fresh
+decisions as sufficient; four positions were still stale when the reset proof
+ran, so the global entry pause remained selected even though the monitor
+continued to drain normally.  This is a control-flow contradiction, not
+evidence that the fresh-entry universe lacks alpha.
+
+The post-start monitor gate now waits for the same full-book condition consumed
+by the restart-guard reset: every canonical open position has a fresh
+`MONITOR_REFRESHED` decision after this boot, with no future-dated event.  It
+does not weaken input freshness, chain-risk, queue, or loaded-SHA checks.  The
+existing eight-minute bound covers the documented three two-minute coverage
+cycles plus launch jitter.
+
+SCOPE is only this deploy invocation's global entry pause.  DRAIN is the
+recurring held monitor covering every canonical open position.  RESET is zero
+stale/missing and zero future monitor events against the launch floor; a newly
+opened or stale position restores the wait.  Acceptance requires an antibody
+that rejects partial tranche coverage, the existing complete/no-position/
+future-event/chain-risk cases, and one live restart whose full-book proof and
+canonical CAS reset both pass before entries resume.
+
+## 2026-08-12 Held-capital liveness and RED action closure
+
+Current live evidence disproves the assumption that fresh process heartbeats imply
+fresh held-position decisions.  The daemon remained alive while every actionable
+open position crossed the 240-second canonical `MONITOR_REFRESHED` deadline.  A
+75-second full-book claim reserved only one five-second primary-belief tranche,
+even though its existing degraded-coverage scheduler admits roughly one third of
+the held book.  A 32-second replacement-HWM read followed by a failed 30-second
+order-book batch therefore consumed the claim before any admitted belief tranche
+could make canonical progress.  Recovery observed the durable debt every 30
+seconds but could only contend for the same non-reentrant lane.
+
+The monitor budget must reserve one bounded belief-read tranche for every
+position already selected by the existing degraded-coverage law, capped at half
+the claim so the coherent HWM prerequisite retains a finite half.  Auxiliary
+debt and batch-book work may consume only the remainder.  This does not accept a
+stale forecast or quote, weaken the canonical write, or convert an unavailable
+book into HOLD authority; it guarantees that optional batch work cannot consume
+the time explicitly reserved for causal q/book redecision.  The behavioral
+antibody uses a 13-position pass and proves that five admitted primary tranches
+retain 25 seconds after HWM/auxiliary work rather than sharing one five-second
+reserve.
+
+The live EDLI mesh also omitted the durable RED action law.  `RiskGuard=RED`
+reached the allocator as reduce-only, but the only code that marked positions
+`red_force_exit` remained in the unscheduled legacy `run_cycle`.  The scheduled
+exit owner must therefore invoke the existing idempotent force-exit sweep before
+normal monitoring, widen a targeted wake to the full held book under RED, and
+persist its marker through the same artifact/portfolio commit.  It must not add
+a second order runtime or bypass the existing submit-time RED and executable-book
+checks.
+
+Finally, a prior Seoul SELL proves that a durable global-reauction deadline can
+expire for more than ten minutes without gaining reactor priority.  Expired,
+unreceipted exact held-SELL debt must promote the existing durable wake ahead of
+entry/forecast work while continuing to rebuild from current q/book; an old FAK
+quote is never replay authority.
+
+SCOPE is current positive held exposure, its single-writer monitor claim, current
+RED state, and an exact expired held-SELL obligation.  DRAIN is bounded canonical
+progress for every admitted monitor tranche, the existing RED marker-to-submit
+path, and a terminal exact reauction receipt.  RESET is fresh per-position
+`MONITOR_REFRESHED` evidence, risk below RED, or a matching terminal receipt;
+none is reset by heartbeat, scheduler invocation, stale q, or a timestamp-only
+wake.  Acceptance requires focused budget/RED/deadline-priority antibodies,
+existing monitor/exit/risk suites, live hot-fix landing, exact loaded SHA, fresh
+canonical monitor ages, RED action evidence, and no post-load negative-edge
+executable position lacking bounded intent/command/receipt progression.
+
+The Seoul probability reversal is a separate probability-law defect, not a
+monitor-liveness patch.  The current peak-set atom is
+`P(peak set | city, month, hour)` and can place about 99.3% mass on the observed
+boundary while current slope/provider innovations affect only the remaining
+0.7% branch.  Its replacement must be a causal two-stage posterior conditioned
+on decision-time trajectory evidence and validated walk-forward over at most
+seven days.  No market-price cap, post-outcome label, or uncalibrated constant is
+authorized by this hot-fix slice.
+
+## 2026-08-12 Uncalibrated unresolved Day0 q cannot authorize new capital
+
+Forward live evidence reproduced the same probability-law defect in two new
+families. NYC 84--85F YES was bought while the remaining-day q was about 0.93,
+then the monotone running high reached 86F and made the bin structurally dead.
+Dallas 100--101F NO was bought with held-side q about 0.89 while the current
+fast observation was already near the boundary and the market subsequently
+removed every executable NO bid. These outcomes do not by themselves estimate
+model accuracy, but together with the already-identified marginal peak-set atom
+they disprove authority for spending new capital on that unvalidated q.
+
+The immediate containment removes only BUY proposals whose prepared current
+Day0 payoff truth is `UNRESOLVED` before global capital ranking. The rule binds
+the prepared truth rather than its carrier event label, so a forecast/redecision
+carrier cannot reauthorize the same Day0 q. Deterministic `LOCKED`/`REFUTED`
+Day0 facts, every held SELL/HOLD/CASH proposal, and BUY proposals without Day0
+truth keep their existing current-truth and common-axis comparison paths. This
+is not a replacement probability model and does not claim calibration success.
+
+SCOPE is one risk-increasing BUY side whose current Day0 payoff truth is
+`UNRESOLVED`. DRAIN is the separately planned causal two-stage peak posterior,
+conditioned on decision-time trajectory evidence and validated strictly
+walk-forward over at most seven days. RESET is either a current monotone fact
+that makes the exact side `LOCKED`/`REFUTED`, or a promoted probability-semantics
+revision with validation evidence that removes this containment. No market
+price, stale posterior, or eventual outcome resets it.
+
+Acceptance requires focused antibodies proving unresolved Day0 is rejected
+before strategy/capital checks while hard facts and non-Day0 candidates remain
+eligible; compilation and planning-lock checks; hot-fix landing and exact loaded
+SHA; then current global-auction receipts showing the typed rejection and no
+post-load unresolved Day0 ENTRY command. The broader goal remains active until
+forward chain fills, settlements, and capital-curve evidence establish robust
+capital gain rather than a single favorable trade.
+
+## 2026-08-12 Exact held-SELL completion owns an exact quote scope
+
+The durable completion request already names the only `(position_id, token_id)`
+whose SELL may be selected, but the book epoch still projected every open held
+token before applying that policy.  A one-position recovery therefore paid the
+Gamma binding and CLOB I/O latency of unrelated positions even though none could
+win that auction.  This is a scope mismatch, not an argument to compare capital
+locally: the global posterior/wealth comparison remains intact while quote I/O
+is limited to actions that the exact completion policy can authorize.
+
+SCOPE is quote, binding, and executable-book capture for an exact reserved
+held-SELL completion request.  DRAIN is one current quote epoch for the exact
+open `(position_id, held_token_id)` pair followed by its existing terminal
+receipt path.  RESET is that terminal receipt or disappearance of the exact
+positive chain exposure.  A missing/mismatched pair produces an empty quote
+scope and fails closed; it never widens to all held positions.  Non-exact
+reduce-only auctions retain full held-token coverage.  Acceptance requires an
+antibody with two open families proving the exact request fetches only its named
+held token, plus the existing global-auction and deadline suites.
+
+## 2026-08-12 Held Day0 bundles own the cut before the freshness cliff
+
+The strict Day0 consumer correctly rejects bundles older than three hours, but
+the producer mixed one discovery city into a three-city trading-lane cut even
+when held families were already inside the one-hour refresh headroom.  Under a
+six-second budget, one slow request could therefore leave only one held city on
+critical quota while the fairness cursor advanced over two offered held slots.
+Transport and quota failures exposed this contract gap; they did not create it.
+
+SCOPE is only a bounded Day0 producer cut while at least one current held family
+is refresh-due under the existing strict-bundle headroom proof.  DRAIN gives all
+offered held cities critical quota and rotates the existing held cursor across
+successive cuts; discovery resumes under the existing mixed-slot policy once no
+held family is refresh-due.  RESET is a complete fresh held bundle read back by
+the current probe, not a request attempt or cursor timestamp.  Acceptance uses
+more held cities than the microbatch plus discovery debt, forces a one-city
+budget exhaustion, and proves consecutive cuts contain only held cities with
+full critical quota while cursor fairness still advances.
+
+## 2026-08-12 Shared held-book I/O follows monitor admission
+
+Recent forward evidence showed that only 45 of 159 monitor refreshes had both a
+fresh q and fresh book while a shared order-book batch exceeded its child-read
+budget.  The batch was derived from every locally missing held token before the
+cycle selected its bounded coverage, urgency, and oldest-debt lanes.  One bulk
+transport failure could therefore consume the auxiliary deadline and defer the
+unrelated tail that the batch had no authority to prioritize.
+
+SCOPE is optional shared network prefetch for the positions already admitted by
+this cycle's coverage and urgent lanes plus its one active-network progress
+reservation.  The oldest durable debt keeps its earlier bounded singular read;
+unselected positions keep their normal per-position bounded refresh and are not
+members of the shared failure domain.  DRAIN is a successful scoped batch or
+each position's own finite quote attempt followed by canonical
+`MONITOR_REFRESHED`.  RESET is a fresh canonical q/book event, never batch start
+or scheduler success.  Acceptance proves a large held book produces a strict
+batch subset equal to the admitted position IDs, excludes the singular oldest
+debt, and retains the existing local-first, deadline, and fail-closed tests.
+
+## 2026-08-12 Fresh target-specific ENS shape is required for entry
+
+The current forecast database contained 190 latest family certificates: 176
+used a same-cycle `ensemble_center_scenarios_v4` shape, while 14 reused an ENS
+shape lagged by 6--30 hours.  The stale rows truthfully retained absolute
+ENS/provider-center disagreement and remained readable, but the shared
+tradeable-coverage predicate incorrectly granted them the same new-entry
+authority as a target-specific same-cycle shape.  Six recently settled
+qkernel entries were all admitted under that stale-shape probability identity;
+their common structural defect was the missing current shape, not their city,
+bin, side, or eventual outcome.
+
+The repair separates evidence availability from action authority.  A stale
+shape remains materialized and readable through the independent held-position
+belief path for monitoring, uncertainty, and repair scheduling.  It no longer
+satisfies live entry/FSR coverage or the new-entry bundle reader.  Entry-grade
+authority now requires numeric `shape_lag_hours == 0`,
+no stale reuse, no translation, the current semantic revision, and the existing
+certified bootstrap bounds.  Missing lag provenance fails closed.
+
+SCOPE is only new-entry coverage for the affected family certificate; the 176
+fresh families remain eligible and held-position reads are unchanged.  DRAIN
+is the existing replacement fetch/materialization cycle, which replaces a
+stale certificate when the current target-specific ENS shape arrives.  RESET
+is exact same-cycle lag-zero shape provenance under the current semantics;
+another stale/missing/translated shape remains non-entry-grade.  Acceptance
+requires executable SQL antibodies for fresh, stale, and missing-lag rows,
+the full cycle-policy suite, live landing and loaded-SHA proof, current coverage
+counts, and forward auction receipts showing fresh families still compete.
+
+## 2026-08-11 Confirmed taker SELL retains exact quote proceeds
+
+A forward Tokyo 28C NO exit sold 12.99 shares after current belief reversed.
+The synchronous authenticated submit receipt proved 12.0094 USDC of proceeds
+(weighted fill 0.9245111624), while the later CONFIRMED account trade exposed a
+tick-rounded top-line price of 0.92 plus the complete maker-leg decomposition.
+The fill synchronizer correctly preferred CONFIRMED finality but the capital
+projection then used the rounded top line, understating realized PnL by 0.0586
+USDC.  The position had already reduced to 0.000168 non-executable dust, so an
+append-only correction must revise notional without selling shares twice.
+
+The repair reconstructs taker-SELL proceeds only when every maker leg has a
+valid selected-token BUY or complementary-token SELL shape, all legs sum to the
+root filled size, and the command/envelope/token identities agree.  It appends
+a corrected CONFIRMED trade fact and, when the same stable partial-fill identity
+was already booked, a zero-share signed-notional correction atom.  The fold
+accepts that atom only after a prior identity and requires exact cumulative
+quantity/notional deltas; exposure and allocated basis remain unchanged.
+
+The targeted CTF read can advance residual shares ahead of the Data API's
+position economics.  Reconciliation therefore rejects a mixed-clock reported
+cost only when it is impossible for a binary token (more than one collateral
+unit per current share), deriving residual cost from the same observation's
+current shares and valid average price.  This repairs the chain-cost side of
+the partial-exit convergence gate without changing fill-owned acquisition cost.
+
+An existing full reconcile path also replayed cumulative ENTRY facts after the
+capital-reduction event and could resurrect the sold quantity.  ENTRY facts
+remain immutable acquisition provenance, but once a later canonical
+`CAPITAL_REDUCTION_FILLED` or `EXIT_ORDER_FILLED` exists they no longer have
+current-exposure authority; reobservation must preserve the reduced projection.
+The restart recovery projection pass applies the same rule and classifies that
+reobservation as a stable no-op rather than a repair error.
+
+SCOPE is one authenticated EXIT/SELL command and one stable economic fill
+identity.  DRAIN is the normal recorded-fill economics recovery pass after a
+complete CONFIRMED trade arrives; an already-booked partial fill drains through
+one append-only correction event after local and chain residuals agree.  RESET
+is exact equality between the canonical maker-leg notional and the persisted
+cursor; replay then appends nothing.  Missing token pairs, incomplete or mixed
+maker legs, quantity disagreement, absent prior identity, or divergent residual
+basis remain fail-closed.  Acceptance requires positive and already-booked
+partial correction antibodies, exchange/exit/fill-sync/recovery suites, live
+deployment, authenticated order/trade proof, exact CTF dust balance, corrected
+canonical PnL, one-time stale-full-lot chain-cost repair, and preservation of
+the reduced exposure under later ENTRY reobservation, and preservation of the
+global entry pause.
+
+## 2026-08-11 Zero-price balance snapshots retain authenticated fill cost
+
+A forward partial fill exposed a transient canonical tear: the chain mirror
+observed a positive wallet balance before command recovery had projected the
+complete trade fill, and that balance surface carried zero average price and
+zero cost.  The mirror correctly limited attribution to the then-known owned
+shares, but marked the row `synced` without any chain cost.  The strict runtime
+exposure reader then rejected the whole global auction as torn economics,
+excluding held SELL/HOLD/CASH comparison as well as BUY.
+
+The writer now preserves the authenticated venue-trade unit cost for exactly
+the chain-confirmed owned slice when, and only when, the balance snapshot has
+no positive economics and `fill_authority` is trade-verified.  Chain truth
+continues to own quantity; the chronicled venue fill owns cost.  Balance-only
+and fill-unproven positions receive no synthesized economics, wallet excess is
+not adopted, and a positive venue-position price retains priority.  The event
+records the selected economics basis.
+
+SCOPE is one `CHAIN_SIZE_CORRECTED` projection for a trade-verified open
+position with positive attributed chain shares and a zero-price balance
+snapshot.  DRAIN is the same append-first mirror write and the next normal
+global-auction read.  RESET is a later positive venue-position observation or
+new authenticated fill projection; missing authenticated cost remains
+fail-closed.  Acceptance requires the zero-price partial-fill antibody, the
+complete chain-mirror suite, related chain/exchange invariant suites, hot-fix
+landing, loaded-SHA proof, and a forward auction receipt no longer rejected for
+torn chain economics.  This restores decision liveness; realized capital gain
+still requires later fill, exit/settlement, and capital-curve evidence.
+
+## 2026-08-11 Entry JIT CLOB identity uses the submit lane
+
+After typed maker direction reached executor authority, forward live attempts
+were still reauctioned under `GLOBAL_JIT_CLOB_MARKET_UNAVAILABLE`.  An exact
+current probe showed the endpoint and market were healthy: the default client
+was denied locally as `POLYMARKET_SCAN_LEASE_BUSY:...scan_in_flight`, while the
+same `/markets/{condition_id}` request with `RequestPriority.SUBMIT_JIT`
+returned the current two-token market immediately.  The JIT path already used
+that priority for Gamma and for the full book cut, but omitted it on the final
+CLOB market-identity client and therefore self-contended with its own scan.
+
+The repair explicitly gives that one current CLOB identity request the existing
+FC-03 submit priority.  It does not bypass the governor, reuse a cached market,
+change request budgets, or admit a missing/invalid response.
+
+SCOPE is one selected entry candidate's submit-time CLOB market identity read.
+DRAIN is the existing bounded request and full-market reauction.  RESET is a
+fresh response whose condition, token ownership, lifecycle, tick, minimum size,
+neg-risk, fee schedule, and raw book all agree; any transport or semantic
+failure remains fail-closed.  Acceptance requires a call-site priority
+antibody, focused JIT/global-auction tests, diff/compile checks, hot-fix landing,
+loaded-SHA proof, and a forward live submit outcome.  Venue fill and later
+realized PnL remain separate proof lines.
+
+## 2026-08-11 Typed direction must retain global maker authority
+
+Forward live submission reached a verified global `MAKER_REST` winner with
+positive posterior-mean expected log growth and positive conservative submit
+edge, but the executor rejected it as
+`min_expected_profit_below_live_floor`.  The durable actionable certificate
+and its qkernel economics both pass the global current-state verifier when the
+direction is the canonical `buy_no`.  The executor instead passed
+`str(Direction.NO)` (`Direction.NO`) into the maker-witness validator, which
+cannot bind that text to the sealed `NO` action and therefore incorrectly
+downgrades the proposal into the legacy fixed-floor lane.
+
+The repair normalizes the typed `ExecutionIntent.direction` once through its
+enum value and uses that canonical value for the global verifier, entry-price
+policy, and side binding.  It does not change q, q_lcb, fill probability,
+expected-log/EV ranking, sizing, price, book, risk, or submit-time freshness.
+
+SCOPE is executor validation of one already-verified global entry intent.
+DRAIN is the next submit attempt compiled from a fresh global cut.  RESET is a
+canonical `buy_yes` or `buy_no` value whose side and current maker witness both
+verify; malformed or mismatched directions remain fail-closed.  Acceptance
+requires a typed-direction regression antibody, the focused execution suite,
+diff/compile checks, standard hot-fix landing, loaded-SHA proof, and a forward
+live receipt that either reaches command/venue submission or names the next
+independent current blocker.  A fill alone is not capital-gain proof; later
+exit/settlement and forward PnL must still be observed.
+
+## 2026-08-11 Maker JIT price drift must reauction current market truth
+
+Forward live receipts now reach globally selected, positive posterior-mean
+`MAKER_REST` BUY candidates, but a changed passive limit between selection and
+JIT is emitted as
+`GLOBAL_BUY_JIT_MAKER_WITNESS_SUPERSEDED:...current_limit_or_cashflow_changed`
+and falls through the generic classifier to `BATCH_BLOCKED`.  That stops the
+complete cut even though the failure names current market-authority drift and
+the existing global runtime already has a bounded full-market reauction lane.
+
+The repair classifies only this exact typed drift as
+`MARKET_AUTHORITY_SUPERSEDED`.  It never reuses the selected price or maker
+witness and never constructs a local replacement candidate: the batch discards
+the old cut, refreshes current Gamma/CLOB/raw books, rebuilds the point-in-time
+maker witness, and compares BUY/SELL/HOLD/CASH again.  All other maker-witness
+failures remain fail-closed because they may be proof corruption rather than a
+new executable market fact.
+
+SCOPE is one selected maker BUY whose JIT passive limit or cashflow differs
+from its sealed selection witness.  DRAIN is the existing single bounded
+full-market-authority reauction.  RESET is a complete new q/book/wealth cut with
+an exact current maker witness; a second drift remains fail-closed under the
+existing retry limit.  Acceptance requires an exact classifier antibody, the
+existing changed-limit rejection antibody, market-supersession batch tests,
+focused money-path regression, loaded-SHA proof, and a forward live receipt
+that either persists/submits the reselected command or names the next exact
+current blocker.  It is not capital-gain proof until venue fill plus later
+exit/settlement and forward PnL evidence exist.
+
+## 2026-08-11 Point-in-time maker-fill producer
+
+The global auction currently materializes zero `MAKER_REST` candidates because
+production never populates the typed maker-witness map.  Reusing the legacy
+all-band `0.19` scalar would fabricate current executable truth and remains
+forbidden.  The canonical trade DB now contains enough action-specific facts to
+construct a stricter producer for ENTRY BUY, but not yet for EXIT SELL.
+
+At the current decision cut, the trailing 30-day canonical cohort contains 488
+terminal, venue-acknowledged ENTRY BUY orders using the exact current grammar:
+post-only GTC at `snapshot best_bid + one tick`, strictly below the captured ask.
+Their append-only order facts provide the actual matched fraction observed no
+later than the 20-minute rest deadline.  Early cancellation is retained as its
+real zero/partial outcome rather than censored away: 114/488 had any fill, 61
+were partial, 53 were full, and mean filled fraction was 0.173587.  A two-sided
+99% Dvoretzky-Kiefer-Wolfowitz radius moves finite-sample uncertainty into the
+no-fill atom before scoring, so the raw 23.36% any-fill frequency is not used as
+authority.  This is a causal lower-bound zero/partial/full distribution, not a
+visible-depth proxy or a fixed fill scalar.  The corresponding EXIT SELL cohort
+has only 20 terminal same-grammar observations, so it does not clear the
+30-sample action-specific minimum and cannot borrow BUY evidence.
+
+The implementation reads only rows whose command update and order facts are at
+or before the immutable selection cut, hashes the exact sample rows, and binds
+the resulting distribution to each current candidate, proposal limit, book
+snapshot/hash, global book epoch, ledger generation, rest deadline, issue time,
+and book expiry.  Each action requires at least 30 eligible rows and a strictly
+positive 99% DKW fill-probability lower bound.  Missing tables, malformed facts,
+thin action-specific samples, a non-positive lower bound, a one-tick grammar
+mismatch, or an expired current book produce no witness and exclude only that
+maker sibling.  Taker, HOLD/CASH, and the other action remain available.
+
+SCOPE is one maker sibling in one current q/book/wealth cut.  DRAIN is the next
+normal complete auction, which re-reads only facts available by its frozen cut
+and rebinds every witness to the new current book.  RESET is an action-specific
+sample cohort meeting the declared minimum plus a fresh coherent book; no
+operator flag or historical constant can reset it.  Acceptance requires
+point-in-time/no-look-ahead and exact-grammar antibodies, a thin-SELL rejection
+antibody, both TAKER_LIMIT and witnessed MAKER_REST BUY candidates in one full
+comparison, selected-mode preservation through JIT, focused money-path tests,
+and a live receipt proving the dual-mode candidate set.  This slice improves
+entry price/capital efficiency; it is not realized capital-gain proof.
+
+Pre-deploy verification: the current canonical read produces BUY `n=488`, raw
+any-fill `0.233607`, DKW99 lower bound `0.159927`, raw expected filled fraction
+`0.173587`, and witnessed expected filled fraction `0.118838`; SELL remains
+unavailable.  The new point-in-time/action-specific/dual-mode antibodies pass
+`3/3`, solver properties pass `209/209`, and reactor plus multiwinner tests pass
+`350/350` under the live Python environment.  The complete global integration
+file is `452 passed / 5 failed`; all five failing node IDs reproduce unchanged
+on the current live checkout and are the existing precliff/price-band fixture
+drift, so they are not represented as green.  Worktree code against live DBs
+passes the read-only boot validation `ALL PASS`.
+
+## 2026-08-11 Final maker command compiler closure
+
+Post-deploy receipts proved that the complete auction and JIT preflight now
+preserved the typed maker witness, but the final command compiler still applied
+the retired unconditional maker wall.  A `STABLE` witnessed winner therefore
+ended as `EDLI_LIVE_CERTIFICATE_BUILD_FAILED:CURRENT_MAKER_FILL_WITNESS_UNAVAILABLE`
+before command persistence even though its rebound qkernel certificate carried
+the exact zero/partial/full distribution.
+
+The final wall now admits only the same exact `MAKER_REST` candidate carried by
+the JIT handoff when its typed witness is current at final compilation and its
+serialized witness, candidate/condition/token, passive limit, execution-curve
+identity, fill probability/source, rest deadline, and recomputed certificate
+identity all match the rebound qkernel economics.  Missing JIT handoff, any
+maker/taker mode disagreement, an expired witness, or even a resealed outcome
+mutation retains the existing fail-closed rejection.  Local/unwitnessed makers
+remain unavailable.
+
+SCOPE is one globally selected witnessed maker BUY after stable preflight.
+DRAIN is the same one-shot final compiler and durable command outbox.  RESET is
+an exact current JIT witness matching the already-validated qkernel certificate;
+no flag, scalar prior, or stale selection can reset it.  Acceptance requires
+the exact-witness pass plus resealed-outcome and expiry rejection antibodies,
+the final mode-authority/qkernel/JIT suites, hot-fix landing, loaded-SHA proof,
+and a post-deploy command/venue fact or an exact new current rejection.  It is
+not capital-gain proof until fill, exit/settlement, and forward PnL evidence
+exist.
+
+## 2026-08-10 Current maker witness survives global-to-JIT handoff
+
+Production repeatedly selected one positive posterior-mean global BUY while the
+winner preflight rejected all 21 reconstructed family proofs as
+`CURRENT_MAKER_FILL_WITNESS_UNAVAILABLE`.  The global auction can select
+`MAKER_REST` only with a typed, current `CurrentMakerFillWitness`, but the JIT
+family proof builder intentionally has no local maker authority and the existing
+selected-proof rebind covers only `TAKER_LIMIT`.  The same valid global maker
+authority is therefore lost between selection and preflight.
+
+The repair binds only the exact selected BUY proof when the sealed candidate is
+`MAKER_REST` and the solver's complete maker-witness validator succeeds at the
+JIT decision time.  It copies the witnessed limit, fill probability, source,
+and deadline into that proof; absent, mismatched, or expired witnesses remain
+blocked.  Taker, SELL, siblings, and unwitnessed maker behavior are unchanged.
+The immutable qkernel certificate and final JIT receipt must carry that complete
+candidate-bound zero/partial/full distribution, not only its scalar fill
+probability.  The final validator recomputes the witness identity, book and
+candidate bindings, temporal window, cashflows, posterior-mean expected
+log-growth, EV, capital efficiency, and lock-time rate.  A refreshed JIT book
+may rebind the witness only when the passive limit is unchanged; any price or
+cashflow drift forces a complete reauction rather than silently changing the
+selected action.
+Acceptance requires an antibody proving both the valid handoff and fail-closed
+invalid-witness twin, resealed book/outcome-tamper rejection, same-limit JIT
+rebind, changed-limit reauction, the focused integration slice, planning lock,
+and a live receipt showing the old all-candidate maker-witness rejection has
+disappeared without any maker submit lacking typed authority.
+
+## 2026-08-10 Deploy restart guard reset without entry-queue circularity
+
+The invocation-scoped deploy guard pauses new entries while the replacement
+runtime proves its loaded SHA and refreshes every canonical open position.  A
+claimable entry queue is therefore expected during the guard: requiring one of
+those rows to make post-issue processing progress before reset makes DRAIN
+depend on the action the guard itself forbids.  Production reproduced that
+ratchet with loaded-SHA and 7/7 monitor evidence green, no stale processing,
+and 196 claimable entry rows, while the reactor correctly parked the paused
+entry wake.
+
+SCOPE remains this deploy invocation's global entry pause. DRAIN is loaded-SHA
+identity, complete fresh monitor evidence, and absence of stale in-flight
+reactor ownership; claimable unowned entry work is telemetry, not debt that may
+hold the guard. RESET is the existing witness-bound CAS expiry. Operator and
+newer pause overrides retain precedence.  No command vocabulary, durable
+storage shape, risk semantics, monitor/exit behavior, or manual resume path is
+changed.
+
+## 2026-08-10 Held-monitor deadline begins at ownership claim
+
+Post-deploy verification reopened this slice: the first deadline propagation
+still left DB acquisition, canonical portfolio materialization, and allocator
+preparation outside the absolute claim clock, while non-production CLOB
+adapters could bypass the hard-deadline book API.  The same absolute deadline
+now bounds connection busy wait, preparation SQL progress, portfolio row
+materialization, and every adapter's held-book read.  A separate canonical
+audit also proved that an unarmed V4 residual placeholder copied into an exact
+market-closed hold was being misclassified as immediately due reauction debt;
+that state now drains only through settlement/reconciliation unless a later
+executable monitor event or armed request resets it.
+
+The claim clock is one end-to-end budget across cutover-lease acquisition,
+connection PRAGMAs, ATTACH, preparation scans, and per-position retry-release
+iteration. No blocking layer may reinterpret it as a fresh local timeout.
+
+Production evidence showed a held-monitor pass retaining its single-owner claim
+well past the nominal 75-second budget while command recovery performed
+unbounded decision-artifact reads.  Recovery/review now admits decision-log
+evidence only through the timestamp index in the command's causal window.  The
+held-monitor budget begins when ownership is claimed, not after portfolio and
+allocator preparation; its remaining budget reaches pending-exit preflight and
+the monitor phase.  Global SELL reauction debt never starts a fresh probability
+or book refresh after that deadline, and a deadline-bound book miss cannot fall
+back to an unbounded quote request.  Expiry preserves the durable debt and the
+original invocation's ownership until safe return; it never releases the claim
+while old work can still submit.
+
+SCOPE is one admitted held-monitor invocation and each position-scoped global
+SELL debt. DRAIN is the next normal bounded monitor/recovery pass. RESET is a
+fresh indexed causal decision witness or a completed current q/book reauction
+within the same absolute deadline. Missing proof remains position-scoped and
+fail-closed; unrelated monitoring and entries do not inherit the debt.
+
+## 2026-08-10 Executable limit modes, fill convergence, and command ownership
+
+The current global auction ranks each independently executable maker or taker
+proposal, but the last persistence and venue boundaries still carried the
+retired blanket assumption that every ENTRY must be post-only.  That split made
+a globally selected, certificate-bound FOK/FAK BUY impossible to execute even
+when its finite limit, current book, fees, depth, Kelly target, wealth, and fill
+prefix were all proved.  The executable law remains limit-order only: every
+submitted unit price is finite and inside inclusive `[0.05, 0.95]`; Zeus never
+submits an unpriced market order.  The admitted shapes are now explicit and
+side-aware: ENTRY/BUY may be GTC/GTD post-only maker or FOK/FAK non-post-only
+certified taker; EXIT/SELL may be GTC/GTD post-only maker or FAK non-post-only
+taker.  Non-post-only GTC/GTD, post-only immediate-or-cancel shapes, and SELL
+FOK remain rejected.  Selection mode survives JIT rebinding and the executor
+still re-proves exact actionable probability, book, fee, depth, position,
+wealth, and envelope identity immediately before SDK contact.
+
+The same exact-head audit exposed two convergence gaps.  First, an authenticated
+late trade leg was appended but could be skipped by projection when a previous
+partial-fill transition already existed.  Reconciliation now projects the
+canonical command-level aggregate, replaces only that command's prior ENTRY
+economics, and applies the symmetric EXIT aggregate only against an exact exit
+intent.  Independent legs therefore converge once to one valid aggregate
+without double counting or inventing economic closure.  Second, heartbeat
+control imported SDK transport internals directly.  The venue adapter now owns
+the dedicated HTTP client swap and request-error cause preservation; control
+owns only timeout policy, delegation, and telemetry.
+
+The pre-SDK admission audit also found that constructing a connection-backed
+`CollateralLedger` after `BEGIN IMMEDIATE` ran schema `executescript()` and
+implicitly committed the command/envelope/events before the reservation CAS.
+A later collateral rejection could therefore leave a durable `SUBMITTING`
+command despite the claimed rollback.  ENTRY now uses the DDL-free
+`buy_preflight_in_transaction()` read path under the existing writer lock; a
+pre-side-effect failure rolls back command, event, envelope, and reservation as
+one unit.  The antibody traces SQL inside the open transaction and rejects any
+DDL or COMMIT.
+
+NC-18 additionally found three direct command-journal mutations outside the
+declared `venue_command_repo` writer: recovery of an already-existing EXIT
+order, absorption of an operator-confirmed external close, and mixed-token
+ENTRY command rehoming.  These are observation/repair facts, not new Zeus
+submits.  They move behind three narrow typed repo helpers.  Recovered order
+adoption and external-close absorption use explicit creation-only command
+events rather than fabricated `SUBMIT_*` history; mixed-token rehome performs
+command and execution-fact compare-and-swap in one nested savepoint.  No schema
+or migration is introduced, normal command transitions remain closed, and the
+AST ownership gate is not weakened.
+
+Recovered partial EXIT adoption also exposed a liveness/accounting defect.
+Recovery reduced the local holding to the first observed exchange residual but
+did not append per-leg partial-exit economics.  Later authenticated fills lacked
+an exact full-close intent, so reconcile and pending-exit monitoring correctly
+refused to invent closure but left the position, realized PnL, and capital
+release stranded.  The repair keeps one immutable pre-recovery holding/cost
+baseline, folds each authenticated `(command_id, trade_id)` exactly once through
+the existing partial-exit economic cursor, and projects only delta
+shares/cost/PnL.  It never emits `EXIT_ORDER_FILLED` without exact full intent.
+A sub-minimum residual remains its true size/cost and opens an idempotent typed
+`ReviewWorkItem`. Dust is decided only against the exact held token's latest
+current-time fresh, non-invalidated executable snapshot; missing authority keeps
+the position pending under `MISSING_FILL_AUTHORITY`. A later lower minimum
+resolves the debt only after canonical chain observation and an exact
+`EXIT_RETRY_RELEASED` event actually return the residual to redecision. That
+chain observation must be at least as new as both the terminal order fact and
+the command update; an older local residual cannot release capital.
+
+SCOPE is respectively one selected command envelope, one command's authenticated
+trade aggregate, the heartbeat transport instance, one recovered venue order,
+one deterministic external-close command, or one mixed-token source/target
+command pair.  Recovered partial-exit economics are scoped to one
+`command_id + position_id`; they never create a family/global entry latch.
+DRAIN is the next normal JIT auction, authenticated trade-leg reconciliation/recovery
+sweep, heartbeat installation attempt, or exact repair retry.  RESET is a fresh
+coherent submit witness, a newly observed canonical aggregate, a successfully
+delegated adapter transport, an atomic adoption/absorption commit, or a complete
+two-row rehome CAS.  A per-leg cursor makes replay a no-op; a tradable residual
+returns to ordinary redecision, while dust resolves on later executable truth
+or settlement.  A failed proof leaves only that command/order/repair
+unresolved; it does not block unrelated families, held monitoring, or CASH/HOLD.
+
+Acceptance requires mirrored maker/taker envelope and adapter antibodies,
+zero-command/zero-network rejection on any missing submit proof, full
+entry/exit late-leg convergence without double projection, SDK-import
+confinement, creation-event grammar and idempotency tests, transaction rollback
+for every partial repair failure, the NC-18 direct-mutation scan, the complete
+affected test files, semantic money-path classification, and exact-head CI.
+Allowed implementation/evidence surfaces are
+`src/contracts/venue_submission_envelope.py`, `src/execution/executor.py`,
+`src/venue/polymarket_v2_adapter.py`, `src/control/heartbeat_supervisor.py`,
+`src/execution/exchange_reconcile.py`, `src/execution/command_recovery.py`,
+`src/execution/command_bus.py`, `src/state/venue_command_repo.py`, their scoped
+router/reference/registry entries, `tests/test_unknown_side_effect.py`,
+`tests/test_v2_adapter.py`, `tests/test_heartbeat_supervisor.py`,
+`tests/test_executor_command_split.py`, `tests/test_exchange_reconcile.py`,
+`tests/test_command_recovery.py`, `tests/test_venue_command_repo.py`,
+`tests/test_command_bus_types.py`, `tests/test_command_grammar_amendment.py`,
+`src/state/collateral_ledger.py`, `tests/test_collateral_ledger.py`,
+`architecture/negative_constraints.yaml`, `architecture/invariants.yaml`, and
+their Semgrep/forbidden-pattern companions.  Recovered partial-exit convergence
+also requires `src/contracts/review_work_item.py`,
+`src/state/review_work_items.py`, the existing partial-economics/cursor seams,
+and focused exchange-reconcile/command-recovery antibodies proving per-leg PnL,
+replay idempotency, dust review, and no fabricated full close.
+
+## 2026-08-10 Exact-head temporal truth and required-CI closure
+
+The global-capital-auction exact head exposed two live-base defects while its
+required relationship jobs exercised the surrounding contracts.  First, the
+Day0 observation-print reducer replaced a source-issued report clock with an
+older event's local availability clock.  A corrected value for the same raw
+report therefore appeared to be a later physical observation instead of a
+later possession of the same observation.  The reducer now keeps
+`observation_time` on the source clock and `observation_available_at` on the
+current ledger fetch clock; correction identity remains
+`(channel, source_clock, conditioned value)`, so one correction emits once
+without inventing a new
+weather fact.  Second, terminal EventStore recovery counted SQLite trigger
+side effects through `total_changes`; it now reports only the direct archive
+UPDATE row count while retaining the append-only event and active-projection
+trigger law.
+
+The remaining required-job failures were stale or platform-bound test
+fixtures, not alternate runtime behavior.  EventStore fixtures create legal
+append-only parents (or explicitly enter the legacy migration shape), the
+reactor preemption test owns its monitor-debt authority instead of consulting a
+host DB, the market-snapshot fake returns the current capture result shape,
+Day0 live-order fixtures carry the current typed remaining-window probability
+authority, and EDLI subprocess/bridge/source-shape tests use the running
+interpreter and current converged identities.  No runtime guard, source route,
+provider, settlement rule, execution gate, or workflow is weakened.
+
+The exact-head audit also found a read-side certificate vocabulary split left
+behind by the single-live-semantics cutover: the compiler persists
+`PreSubmitDecisionCertificate` under `pre_submit:` semantic keys, while the
+no-submit projection and opportunity report still queried the retired
+`NoSubmitDecisionCertificate` / `no_submit:` pair.  Those derived readers now
+join the current certificate type and key, so a verified decision is visible
+to readiness/reporting instead of being falsely reported absent.
+
+SCOPE is one Day0 source report/correction, one terminal-recovery batch, and
+one receipt-to-pre-submit-certificate derived join.  DRAIN is the next normal
+observation-print scan, recovery sweep, or report/projection read.  RESET is a
+fresh ledger possession clock, the next independently counted direct UPDATE,
+or a verified current `pre_submit:` certificate; there is no latch and
+unrelated families/events continue.  Acceptance requires
+the same-clock correction to retain the original source time and current fetch
+time, emit exactly once, EventStore to return one archive for one processing
+row despite projection triggers, append-only orphan guards to remain active,
+all initially visible and semantic-classifier-selected required-job cases plus
+the full Reactor relationship suite to pass, and the exact PR head's required
+jobs to become green.
+
+Allowed files are
+`src/data/replacement_forecast_current_target_plan.py`,
+`src/events/event_store.py`,
+`src/events/no_submit_projection.py`,
+`src/analysis/event_opportunity_report.py`,
+`tests/events/test_day0_extreme_updated_trigger.py`,
+`tests/test_replacement_forecast_current_target_plan.py`,
+`tests/events/test_event_store_idempotency.py`, `tests/events/test_reactor.py`,
+`tests/events/test_live_order_aggregate.py`,
+`tests/test_market_scanner_provenance.py`,
+`tests/money_path/test_edli_bankroll_warm_cycle.py`,
+`tests/money_path/test_edli_durable_fill_bridge_scan.py`,
+`tests/money_path/test_edli_market_substrate_warm_cycle.py`,
+`architecture/test_topology.yaml`, this plan, and its `scope.yaml` companion.
+
+## 2026-08-09 Current-value serving authority matches executable law
+
+The active replacement authority still describes `previous_runs` as a
+GEM-only, exact-cycle exception.  The executable single-builder has since
+generalized that rule: carrier-bound reads prefer the selected-cycle
+`single_runs` row, then the selected-cycle `previous_runs` row, then the newest
+eligible prior-cycle row; source-clock live reads instead use each provider's
+newest same-product row possessed by decision time while ENS retains only the
+shape carrier clock.  Future rows, over-age captures, and the product-mismatched
+ECMWF `ifs025` history remain inadmissible, and every substitution is branded by
+`served_via` and `served_cycle`.
+
+This slice changes no selector behavior.  It aligns the active authority doc
+and the serving module's stale exact-cycle commentary with the already-tested
+single-builder, and registers that existing high-risk choke point in the source
+rationale/module manifest.  Acceptance is the existing generalized
+substitution, future-row, product-mismatch, provenance, and source-clock test
+suite passing without a runtime diff.
+
+## 2026-08-09 Current-cut global capital auction and strategy ownership
+
+The global selector previously collapsed venue affordability and Zeus utility
+ownership into one pUSD balance. That let co-tenant wallet cash change Zeus
+Kelly sizing and BUY/SELL ordering even when the operator's Zeus allocation was
+unchanged. It also left the new zero-wealth SELL case outside ordinary log
+utility and treated a fixed maker-fill prior as if it were current executable
+truth.
+
+One frozen allocation witness now names the distinct quantities used by every
+decision cut:
+
+- `C`: current venue-spendable cash;
+- `E`: Zeus-owned utility equity from `zeus_capital_allocation`;
+- `L`: effective BUY commitment ceiling, defaulting and capped to `E`;
+- `K`: active-position cost basis plus unresolved entry commitments;
+- `U=max(E-K,0)`: Zeus-owned liquid utility cash.
+
+Executable BUY capacity is `min(C,max(L-K,0))`. BUY and reduce-only SELL use the
+same portfolio endowment `U + H[a]`, with `H[a]` the exact current/pending
+same-family payoff in settlement atom `a`; venue cash is an affordability fact,
+never hidden utility wealth. `wallet_total` preserves historical parity when
+the complete owned basis is `C+K`. Allocation policy, all five values, remaining
+capacity, and their versioned identity are bound into the immutable wealth
+witness, its economic identity, the selection receipt, JIT certificate, and
+executor rebuild.
+
+CASH/HOLD remain the zero-action baseline. Every independently admitted BUY or
+SELL fixed proposal competes on one posterior-predictive-mean expected-log
+capital-growth basis after its own fees, depth, tick, price-band, Kelly, and
+direction law. Capital lock time determines the finite growth rate. A
+reduce-only SELL that improves an exact positive-probability zero-wealth atom
+uses the epsilon-free extended-log limit: raw ruin-probability reduction is the
+first lexicographic key, without rounding, tolerance collapse, or division by
+time; finite expected log growth per hour is considered only when ruin reduction
+is exactly equal. Negative or non-finite terminal wealth remains invalid, BUY
+may not introduce a zero atom, and positive EV remains an explicit independent
+policy gate.
+
+The same-family Kelly solve owns only the endowment-aware cumulative target
+vector. It does not preselect a "primary" token: every venue-legal positive
+target is rematerialized as its own fixed BUY proposal, kept in the receipt,
+and compared with every other BUY, SELL, HOLD, and CASH proposal by the same
+raw global comparator. No rounded efficiency shortcut may delete a sibling
+before that comparison.
+
+A scalar maker-fill prior is not current decision-time truth and partial fills
+change both terminal atoms and capital-release time. `CurrentMakerFillWitness`
+therefore binds one candidate, current book epoch, token/side, limit, rest
+deadline, training cutoff, issue/decision/expiry clocks, and a complete
+zero/partial/full fill-fraction distribution. Only a witness whose causal clock
+orders `training_cutoff <= issued <= decision <= expiry` and whose identity is
+present in the current book epoch may make its `MAKER_REST` BUY/SELL proposal
+rankable; a missing or mismatched witness excludes only that maker proposal with
+`CURRENT_MAKER_FILL_WITNESS_UNAVAILABLE`, while its taker sibling remains
+eligible. The present live observation plane does not record enough causal
+queue/deadline/partial-fill facts to produce that distribution, so no production
+maker witness is fabricated: live remains taker-only until a reviewed current
+producer exists. A historical fill scalar is offline evidence, never a silent
+live fallback. This is an executable-set decision, not a preference for taker
+orders.
+
+At submit, the selected mode is preserved and probability, executable book,
+Gamma market state, CLOB market-info, fees, tradeability, `negRisk`, tick/min,
+wealth/allocation, position, terminal ruin reduction, utility basis, proposal
+growth, and capital horizon are canonically sealed and revalidated from one
+current Gamma+CLOB+raw-book snapshot. A metadata or selected SELL drift causes a
+complete global re-auction; a pure BUY depth overlay is allowed only when that
+same metadata authority is unchanged. The persisted executable snapshot commits
+all three raw payload hashes rather than retaining selection-time market
+metadata.
+The current receipt shape is schema 21 / canonical candidate encoding v13. A
+winning receipt now persists the winner event/candidate/actuation and a
+recomputable compact-row execution binding plus a hash of the exact persisted
+summary, then freezes the exact `decision_log` row ID, mode, logical receipt
+hash, execution-binding hash, persisted-summary hash, and selection epoch into
+the selected actuation and `ActionableTradeCertificate`. If claim-carrier
+rebinding changes the winner event or actuation identity, the runtime appends
+and commits a newly sealed receipt row that references the unchanged base cut;
+it never mutates or reuses the old binding. Entry command persistence re-reads
+that exact row before writing the command or position attribution. A selected
+SELL carries a typed receipt closure through `ExitIntent` and `ExitOrderIntent`;
+inside the command SAVEPOINT, persistence re-reads the exact receipt and checks
+its position, condition, token, action, execution mode, winner, and submission
+envelope before any command, event, provenance, or envelope row can exist. The
+canonical closure is then copied into the append-only `INTENT_CREATED` command
+event and provenance payload. Settlement skill attribution follows the existing
+exact `position_id -> certificate_hash` relation, revalidates the same entry
+receipt row, then consumes the frozen `q_live`, `q_lcb_5pct`, and
+`posterior_id`; missing, deleted, mutated, or mismatched global receipts produce
+`UNATTRIBUTABLE_Q_MISSING` with no inferred fallback. An orthogonal settlement
+audit follows `position_id -> EXIT/SELL command -> INTENT_CREATED closure` and
+then the exact `decision_log` row, reporting each global SELL receipt as valid
+or invalid without
+rewriting the entry-q grade. No bridge table or settlement schema migration is
+introduced.
+
+SCOPE is one candidate or one complete q/book/wealth auction cut: malformed or
+stale allocation blocks new BUY authority; unavailable maker-fill evidence
+blocks only maker-dependent proposals; a drifted selected identity blocks only
+that actuation. Taker siblings, CASH/HOLD, held monitoring, and unrelated
+families continue. DRAIN is the next normal complete auction and submit-time
+rebuild from current config, canonical commitments, probability and book.
+RESET is a fresh coherent witness or, for maker, a reviewed typed current
+partial-fill authority. Probability formulas, settlement, absolute order-price
+bands, RiskAllocator exposure caps, and lifecycle law are unchanged.
+
+Acceptance requires E/L/K/U math and co-tenant isolation, allocation-zero
+SELL/HOLD/CASH preservation, exact sub-femtoscale ruin ordering, negative-wealth
+rejection, malformed-config rejection, maker rejection with taker-sibling
+survival, retention of every family-joint target through the raw global
+comparator, allocation and comparison-field identity drift rejection at JIT
+and submit, schema-21/v13 health validation, exact receipt-to-actuation/certificate/
+command/settlement closure with mutation/deletion/mismatch antibodies, and
+focused global-auction/runtime regressions.
+
+The 2026-08-10 CI closeout harmonizes the already-executable global SELL
+receipt-audit reasons, `JIT_SUBMIT` snapshot-capture provenance, and JIT/sealed
+book final-submit rejection reasons with
+`architecture/money_path_objects.yaml`. They remain audit, provenance, and
+rejection vocabulary rather than lifecycle, command, order, or fill states.
+`MP-CI-001` is the governing invariant: a synthetic classifier antibody covers
+all nine registered values while unknown money-path objects remain fail-closed.
+The standard-market family-joint Kelly fixture also declares its required
+`neg_risk=False` authority instead of relying on an obsolete constructor shape.
+Allowed CI-closeout files are `architecture/money_path_objects.yaml`,
+`tests/test_money_path_semantic_ci.py`,
+`tests/engine/test_multiwinner_wealth_composition.py`, this plan, and its
+`scope.yaml` companion.
+## 2026-08-10 Day0 HIGH peak state belongs inside the probability simplex
+
+A causal replay of San Francisco Aug-9 HIGH found that the latest same-station
+METAR temperature and current provider trajectories were refreshed before the
+last executable 5-cent bid. The remaining-path q still assigned 0.23585 to a
+future settlement above 75F. At the same decision instant Zeus separately
+computed empirical `P(daily high already set | city, month, local hour)` near
+0.91 from 70 observations, but used it only to label SELL authority mature. A
+state probability that cannot change the settlement distribution leaves the
+engine knowingly pricing the wrong random variable.
+
+The correction represents two mutually exclusive causal states in one MECE
+simplex: when the HIGH is already set, final settlement is the observed
+settlement-channel running maximum; otherwise future extrema are drawn from the
+current conditioned remaining-path model conditional on moving beyond that
+running maximum. Conditioning the second branch is required: the old
+`max(observed, future)` distribution already included peak-set outcomes, so
+mixing it directly would double-count the same state. The empirical weight is accepted only
+from the monthly empirical source with at least 30 observations and receives a
+Jeffreys finite-evidence update so a historical 0/1 cell cannot create certainty
+about unresolved weather. The point operator and every bootstrap row use the
+same latent-state generator, preserve the simplex, and enter the probability
+and witness identities. Heuristic/solar-only confidence cannot modify q. This is a
+continuous-time weather-state correction, not a market-price stop or a patch
+conditioned on the eventual result.
+
+SCOPE is a current target-day HIGH family with fresh authorized observation,
+current remaining-hour paths, and qualified empirical peak-set evidence. DRAIN
+is every normal held-position/global-auction redecision, which rebuilds the
+mixture from the newest observation, wall clock, paths, and book. RESET is the
+next redecision or loss of qualified evidence; LOW, non-Day0, final settlement,
+and deterministic absorbing facts retain their own laws. No price band, Kelly,
+capital objective, venue mode, or settlement semantics changes.
+
+Acceptance requires a San Francisco last-legal-bid causal snapshot to move the
+held `NO >75F` probability below 0.05 before book collapse, every transformed
+sample and point q to remain a valid simplex, non-MECE topology to fail closed,
+LOW to remain unchanged pending its own trough-state law, the probability basis
+to invalidate prior witness semantics, and focused Day0/global-solve tests to
+pass. Live effectiveness still requires loaded-SHA, heartbeat, canonical
+monitor receipt, fresh q/book, and SELL intent-command-fill evidence.
+## 2026-08-08 Day0 probability authority survives certificate compilation
+
+The live global auction produced a current Shanghai Day0 remaining-day witness,
+ranked a positive expected-log-growth NO order, and passed exact JIT preflight.
+The calibration-certificate compiler then reconstructed a reduced Day0 block
+that omitted the already-validated `probability_authority`. Its own downstream
+live validator consequently rejected the certificate as missing authority before
+any venue command could be persisted. This was a producer/consumer transport
+split, not missing probability evidence or failed economics.
+
+The correction carries the producer's canonical Day0 authority block through
+the calibration certificate and adds the same exact authority to the certificate
+root. Authority, q source/mode, model count, observation clocks/value, and LCB
+transform are one closed binding: multiple representations must agree exactly.
+The model identity also commits to that authority. It does not infer or upgrade
+authority: the source payload must first pass the existing Day0 content validator,
+and the compiled certificate is validated again before command build.
+
+SCOPE is one current Day0 remaining-day probability certificate. DRAIN is the
+next normal global-auction redecision, which rebuilds the certificate from fresh
+observation, probability, book, and wealth evidence. RESET is every redecision;
+missing or conflicting source authority remains fail-closed. Forecast q,
+probability math, economic ranking, sizing, price bands, JIT checks, venue
+execution, held SELL, and settlement are unchanged.
+
+Allowed files are `src/engine/event_reactor_adapter.py`,
+`src/events/day0_authority.py`,
+`tests/engine/test_cert_calibration_bridge.py`, and this plan. Acceptance
+requires the compiled remaining-day certificate to preserve matching root and
+nested authority, pass its downstream live validator, retain mismatch rejection,
+pass focused Day0/calibration/global-auction tests, and produce a live command or
+an exact later-stage rejection on the next eligible positive-EV winner.
+
+## 2026-08-08 Current probability authority must have an executable action path
+
+The live global auction repeatedly produced current, identity-bound replacement
+and Day0 witnesses with positive posterior-mean expected log growth, then rejected
+them at preflight because a static probability-promotion allowlist contained only
+deterministic Day0 payoff. That gate required forward real-fill evidence while
+simultaneously preventing every probabilistic fill that could produce the
+evidence. It also exposed a separate forecast handoff gap: the selected global
+posterior parent rebound `posterior_id` and `probability_authority` but omitted its
+same-witness `q_source`.
+
+The correction removes the duplicate static promotion allowlist and dispatches
+each event directly to the owning replacement or Day0 authority validator. The
+closed grammar therefore lives with the producers' executable content contract,
+not in a second manually promoted registry. Grammar admission is not economic admission:
+every recognized payload still passes its existing causal posterior or Day0
+content validator, qkernel current-state economics, canonical q-source equality,
+JIT book/price, fees, depth, Kelly, wealth, and final submit recapture. The global
+forecast parent binder now carries `replacement_0_1` source and authority as one
+indivisible type and rejects a conflicting pre-existing source.
+
+SCOPE is the exact selected BUY probability witness. DRAIN is the next normal
+global auction/preflight using a current typed producer payload. RESET is every
+fresh re-decision, which reconstructs q, book, wealth, and the binding before any
+venue side effect. Held SELL, settlement, probability formulas, price bands,
+sizing, and the CASH alternative are unchanged.
+
+Acceptance requires current forecast and all declared Day0 producer bindings to
+reach their authority-specific content validators, unknown aliases and mixed
+canonical sources to remain fail-closed, missing forecast q-source to be rebound
+from the exact prepared replacement parent, focused and full auction tests to
+pass, and live verification to show the static promotion rejection disappears
+without bypassing downstream JIT/economic gates.
+
+## 2026-08-02 FSR pause scope preserves posterior-carrier progression
+
+The global `entries_paused` containment correctly forbids new BUY actuation,
+but its reactor wake park also returned before a
+`forecast_posterior_advanced` wake could emit, supersede, and drain the latest
+FSR carrier. Active FSR rows therefore retained obsolete posterior identities
+while fresh replacement posteriors continued to materialize.
+
+The hot-fix permits only a targeted `forecast_posterior_advanced` carrier wake
+through both reactor pause checks. Its bounded targeted carrier reaches the
+existing adapter pause fence, which creates no BUY venue command and leaves the
+carrier retryable; ordinary paused queue rows remain unclaimed. Exact held-SELL
+requests retain their existing reduce-only path. SCOPE is new-entry BUY
+actuation only. DRAIN is the targeted FSR enqueue/supersession plus bounded
+no-submit redecision, followed by existing retry-floor scheduling. RESET is
+clearing `entries_paused`, which re-decides the same latest carrier identity.
+
+Acceptance requires a paused fresh-posterior carrier to progress without a
+BUY command, an ordinary paused queue row to remain unclaimed, and the same
+carrier identity to re-decide after the retry floor and pause reset; focused
+and full reactor tests, compile, planning/map, and diff checks must pass.
+
+## 2026-07-31 Source-clock location-batch failure isolation
+
+Current canonical raw-capture evidence showed provider issue-to-capture delays
+of 51--118 minutes while raw commit-to-posterior materialization normally took
+1--20 seconds.  Data-ingest logs tied the lost capture cycles to transient TLS
+handshake and read failures on 25-location Open-Meteo requests: one transport
+failure flattened every independent location in the batch into the same drop.
+
+The hot-fix bisects only a multi-location, non-NBM request that failed without
+a typed HTTP outcome, quota/rate-limit signal, or expired absolute deadline.
+Successful halves retain their original provider, model, source run, requested
+dates, order, provenance, and normal partial commit.  Typed provider outcomes,
+quota denial, NBM's atomic metadata-stamped fallback, and single-location
+failures keep their existing behavior.  SCOPE is the failed request's exact
+location subset.  DRAIN is bounded recursive bisection under the request's
+existing monotonic source-clock deadline.  RESET is the next successful subset
+capture or next normal source-clock poll.  No probability, calibration, Kelly,
+price-band, risk, venue, or order-throughput rule changes.
+
+Acceptance requires a four-location transport failure to recover as two
+ordered two-location requests, quota failure to make no split request, the
+focused BPF download suite and source-clock integration tests to pass, and live
+deployment to prove current loaded SHA, fresh ingest/forecast heartbeats, a new
+raw capture, posterior materialization, and complete global auction receipt.
+
+## 2026-07-31 Exit cooldown preserves continuous redecision
+
+The seven-day full-loss replay found canonical `MONITOR_REFRESHED` events
+created during `pending_exit` retry cooldown by copying the position's previous
+probability and quote.  The new event timestamp made old evidence appear
+current while the monitor skipped `refresh_position -> evaluate_exit`
+entirely.  A retry cooldown is an actuation throttle; it is not authority to
+stop observing the probability curve or executable book.
+
+The hot-fix keeps a cooldown position in monitor-only mode.  Every normal held
+monitor turn still refreshes probability and quote and records the current
+economic exit decision, while the existing pending-exit guard prevents a
+second SELL from being submitted before the retry deadline.  SCOPE is the
+exact pending-exit position.  DRAIN is every held-monitor cycle.  RESET is
+cooldown expiry or terminal order reconciliation.  No probability formula,
+exit threshold, price band, order retry cadence, or global capital objective
+changes.
+
+Acceptance requires a pending-exit position with an active retry cooldown to
+consume a newly refreshed q/book, persist those facts as fresh, preserve the
+current exit signal, and make zero duplicate venue calls.
+
+## 2026-07-30 Canonical LOW ENS boundary evidence
+
+Paris Jul-31 LOW and Shanghai Aug-1 LOW had current 12Z ECMWF ENS snapshots,
+but source-clock posterior materialization rejected both and walked back to
+stale shape evidence.  The snapshots carried only 18/51 and 2/51
+boundary-ambiguous members, respectively.  The out-of-repo Open Data extractor
+still stamped the retired any-member snapshot veto, while the canonical ingest
+contract already used a 26/51 majority rule.  Ingest validated the canonical
+decision but then persisted the producer's stale flag and derived forecast
+window evidence from it, so one obsolete producer boolean overruled the
+contract and broke continuous probability refresh.
+
+The hot-fix makes the ingest contract the single interpreter of LOW boundary
+evidence.  When per-member inner/boundary minima exist, it re-derives ambiguity
+with the strict physical rule `boundary_min < inner_min`; otherwise it uses the
+declared count, with the legacy flag only as the evidence-poor fallback.  The
+ingester consumes that normalized payload for training, DB flags, contract
+window attribution, and posterior selection.  Minority ambiguous members stay
+null and excluded from the ENS sample; genuine missing members and majority
+ambiguity remain fail-closed.  SCOPE is one city/date/metric ENS snapshot.
+DRAIN is the next normal re-ingest/materialization of that source cycle. RESET
+is a newer canonical snapshot identity.  No market-price belief, historical
+width fallback, stale-cycle extension, action threshold, or lifecycle rule is
+added.
+
+Acceptance requires an external-legacy-shaped 2/51 payload to persist as
+`boundary_ambiguous=0`, retain exactly two null members, contribute to the
+target extrema, and be selected as a six-hour stale current-evidence shape by
+an 18Z carrier. The raw evidence hash, artifact identity, canonical revision,
+and per-member decision reasons must remain auditable in provenance. A 26/51
+payload plus missing, NaN, and infinite extrema must remain blocked, followed
+by the focused ingest, materializer, source-contract, and live posterior
+receipts.
+
 ## 2026-07-29 WU fast evidence keeps provisional probability semantics
 
 The Seoul Jul-29 HIGH posterior labeled a qualified same-station
@@ -2039,6 +3909,59 @@ Acceptance requires:
   evidence that Tel Aviv current-state remaining-window probabilities become
   fresh before evaluating exits.
 
+## 2026-07-31 Day0 raw-provenance family isolation
+
+The live global auction currently fails before selection when one Day0 family
+has a current settlement-channel extreme but no verifiable raw-payload digest.
+Rejecting that probability is correct; promoting the family-local evidence gap
+to `GLOBAL_PREPARED_FAMILY_INCOMPLETE` across every otherwise independent
+weather family is not.
+
+The correction types `GLOBAL_DAY0_RAW_PROVENANCE_MISSING` as unavailable for
+that weather family. The family remains excluded from BUY, SELL, HOLD, and
+submit-time probability authority until a fresh canonical fact carries a real
+raw digest. Other complete families remain eligible for the same global
+capital auction.
+
+SCOPE is exactly one city x target-date x metric family lacking raw Day0
+provenance. DRAIN is the existing current-q family exclusion followed by the
+same-epoch global auction over complete families. RESET is the next fresh
+canonical Day0 fact for that family whose raw payload has a valid SHA-256,
+which makes normal probability preparation succeed. No digest is synthesized,
+no probability or Kelly law changes, and no venue order is forced.
+
+Acceptance requires a two-family adapter antibody proving the incomplete
+family is typed ineligible while the complete sibling family can win and
+actuate; the focused W3 seam, compile, lint, diff, hot-fix landing, loaded SHA,
+and a new complete live auction receipt must all be verified.
+
+## 2026-08-01 Current-truth-only capital selection
+
+The first complete post-recovery auction proved that every in-band candidate
+was removed before economics and Fractional Kelly by settled-Brier
+`risk_action:gate` rows. That historical score is valid learning telemetry but
+is not part of the replacement probability authority: current provider center,
+current target-specific ENS shape and disagreement, current portfolio wealth,
+and the executable book are the decision-time truth.
+
+The correction keeps settled Brier, lineage binding, and strategy breakdown in
+the canonical RiskGuard receipt, but removes settled Brier and historical edge
+compression from RiskLevel and durable strategy-gate emission. Current missing
+probability semantics, source identity, collateral/exposure truth, operator
+controls, executable-price law, fees, depth, and Kelly remain behavioral.
+
+SCOPE is entry selection and submit for the current global auction; held
+monitoring and reduce-only exits are unchanged. DRAIN is the next RiskGuard tick,
+which expires obsolete automatic gates, followed by the next same-cut global
+auction. RESET is unnecessary because a settled-history veto is no longer a
+live state; a current truth loss still fails closed through its existing
+authority-specific gate. No order is forced and CASH remains an equal candidate.
+
+Acceptance requires a red-before-green RiskGuard antibody, full RiskGuard and
+W3 regressions, standard hot-fix deployment, expired Brier risk actions, and a
+new complete receipt proving all in-band YES/NO candidates reached economics
+and Fractional Kelly before CASH or one unique order won.
+
 ## 2026-07-27 Boot event-claim recovery under world-writer contention
 
 The post-auction-fix restart proved a runtime continuity defect: prerequisite
@@ -2398,3 +4321,1131 @@ replacement-probability antibody, and this plan. Acceptance requires:
 - a balanced material violation beyond `1e-9` still fails closed;
 - focused replacement/Day0/global-witness tests, planning-lock, compile, diff,
   standard hot-fix landing, and post-restart fresh Ankara monitor evidence pass.
+
+## 2026-07-31 Pending-exit per-position failure isolation
+
+The seven-day full-loss reconstruction found repeated pending-exit scans ending
+at one malformed intentional-reduction proof. The held monitor continued, but
+the remaining positions in that bounded pending-exit batch did not reach fill
+polling or retry release. One bad position could therefore delay unrelated
+exits across repeated cycles.
+
+The repair isolates only the four reduction precondition failures that occur
+before runtime exposure or canonical projection changes. It records the
+position/error in scan stats and advances to the next position. Unknown errors
+and all projection/release failures after mutation still raise fail-closed.
+
+SCOPE is one malformed pending-exit position. DRAIN is the same bounded scan,
+which immediately advances to the next position and rotates on the following
+cycle. RESET is corrected canonical reduction intent/fill/holding evidence for
+the rejected position. No probability, sizing, entry, price-band, settlement,
+or lifecycle grammar changes.
+
+Allowed files are `src/execution/exit_lifecycle.py`,
+`tests/test_exit_safety.py`, and this plan. Acceptance requires:
+
+- a malformed full-close-shaped reduction cannot abort a later retry release;
+- all three reduction completion paths share the same narrow isolation rule;
+- unknown or post-mutation errors remain fail-closed;
+- focused exit-safety tests, compile, diff, hot-fix landing, loaded-SHA, and
+  post-restart health evidence pass.
+
+## 2026-07-31 Global-auction common holding reference
+
+Live health rejected a valid schema-19 global-auction delta receipt after the
+receipt writer compacted all heavy payload references onto one common base.
+The candidate reader already understood that compact form; the holding reader
+required a per-component map that the writer intentionally omits when one base
+serves every referenced component. This false corruption verdict degraded the
+runtime despite intact hashes and candidate evidence.
+
+The repair resolves holding coverage from either its explicit component record
+or the writer's common base identity, then applies the same receipt hash,
+component hash, encoding, payload-presence, and decode checks.
+
+SCOPE is read-only live-health reconstruction of one holding-coverage
+component. DRAIN is the next health evaluation of the latest complete auction
+receipt. RESET is a valid inline, delta, component-reference, or common-reference
+payload whose hashes reproduce exactly. Execution evidence, probability,
+selection, sizing, lifecycle, and venue action are unchanged.
+
+Allowed files are `src/control/live_health.py`,
+`tests/test_run_mode_failure_surfaces.py`, and this plan. Acceptance requires:
+
+- the producer's one-base common-reference compact form reconstructs holding
+  coverage;
+- component-specific references retain their existing validation;
+- the current canonical receipt no longer reports
+  `GLOBAL_AUCTION_CANDIDATE_EVIDENCE_INVALID`;
+- focused tests, planning lock, compile, diff, hot-fix landing, loaded-SHA, and
+  post-restart health evidence pass.
+
+## 2026-08-11 Identity-bound submit recovery owns capital priority
+
+A real maker submit crossed the venue boundary and persisted its exact
+`venue_order_id`, but ACK persistence lost a DB race. The command remained
+`SUBMITTING` while the venue order was LIVE, and a later point read proved a
+separate newly ACKED order had already partially filled. The scheduled recovery
+counted only unresolved cancels as capital blockers, so persistent held-monitor
+I/O debt could indefinitely defer exact-order recovery and leave current fill
+exposure outside canonical position monitoring.
+
+The repair treats a `SUBMITTING` ENTRY or EXIT with a non-empty persisted venue
+order ID as the same class of exact capital blocker as an unresolved cancel.
+That blocker reserves the existing bounded reactor handoff; the existing
+identity-bound point reader remains the sole authority for advancement. No
+venue absence, replay, cancel, fill, price, probability, or sizing rule changes.
+
+SCOPE is one known-order in-flight command. DRAIN is the next scheduled
+identity-bound exact-order read and canonical apply. RESET is advancement out of
+`SUBMITTING` or removal of the exact capital blocker. Acceptance requires:
+
+- the blocker count includes known-order ENTRY/EXIT submits but excludes an
+  unbound submit whose venue side effect remains unknown;
+- an overdue held monitor cannot defer this exact capital recovery;
+- recovery still fences the active reactor before point truth is applied;
+- focused recovery/scheduler tests, compile, diff, hot-fix landing, loaded-SHA,
+  and live command/fill projection evidence pass.
+
+## 2026-08-12 Capital recovery owns its deadline at the writer boundary
+
+Forward evidence exposed a deadline-composition defect in the same lane. The
+live-tick coordinator first wrapped its writer factory with the cumulative
+100ms maintenance deadline. `terminal_order_facts_fast` and its sibling capital
+passes later created independent 1.5s deadlines, but wrapped that already-bound
+factory again. Once the outer maintenance deadline elapsed, every capital APPLY
+attempt failed before opening the DB, and the next tick deterministically
+reconstructed the same expired nesting. Durable terminal orders therefore kept
+collateral reservations and entry-exposure obligations open indefinitely even
+though no venue ambiguity remained.
+
+The structural law is single deadline ownership at the writer boundary. Every
+capital pass constructs its priority lease directly from the canonical
+trade-only connection factory using that pass's fresh absolute deadline; it
+never extends or nests an earlier deadline-bound factory. Read/network work,
+venue truth, probability, sizing, and lifecycle semantics are unchanged.
+
+SCOPE is one exact capital-recovery APPLY transaction. DRAIN is the next
+scheduled live-tick pass with its independently bounded capital deadline. RESET
+is successful canonical terminalization/reservation release or a fresh retry on
+the following tick; monitor intent still preempts the writer. Acceptance
+requires a zero maintenance-budget antibody that proves terminal capital truth
+still receives a positive writer lease deadline and advances while an unrelated
+identity-bound submit remains unresolved, plus the full command-recovery suite.
+
+Allowed files are `src/execution/command_recovery.py`,
+`tests/test_command_recovery.py`, and this plan.
+
+## 2026-08-11 Immutable weather snapshot accepts market-bin slug identity
+
+After the identity-bound submit advanced to ACKED, authenticated fill sync
+proved 7.462684 matched shares but rolled its entire transaction back because
+the missing-position recovery parser rejected the real immutable event slug
+`highest-temperature-in-singapore-on-august-12-2026-32c`. The parser accepted
+only a family slug ending at the year, while executable market snapshots bind
+the outcome-bin suffix as part of their event slug.
+
+The repair extends only the weather-slug grammar after a complete
+metric/city/date prefix. It accepts the executable point/range/shoulder forms
+(`32c`, `50-51f`, `31c-or-below`, `90f-or-higher`) and still rejects arbitrary
+suffixes. Complete snapshot and submission-envelope condition, YES/NO token,
+selected-token, runtime city, and canonical market-metadata checks remain
+mandatory before any position is materialized.
+
+SCOPE is missing-position recovery for an authenticated exact-order ENTRY fill.
+DRAIN is the next continuous fill-sync retry. RESET is a parseable immutable
+weather market slug plus all existing identity predicates. Acceptance requires
+the bin-suffixed Singapore fill test to materialize the exact canonical market
+identity, malformed slugs to remain fail-closed, focused recovery/fill tests to
+pass, then exact-SHA deployment and live projection of both current fills.
+
+## 2026-08-12 Fill repair cannot monopolize canonical redecision
+
+Live evidence showed the price-channel fill-repair job continuously holding the
+trade writer while it rediscovered every confirmed aggregate, loaded every
+position, and reconstructed every command link. During that interval canonical
+`MONITOR_REFRESHED`, quote projection, and exit redecision writes timed out. The
+configured writer `max_hold_ms` was telemetry, not a transaction deadline, so a
+bounded materialization count did not bound lock ownership.
+
+The repair moves aggregate discovery entirely onto a read-only connection and
+passes one exact aggregate at a time through a fresh attached writer
+transaction. The writer-side scan revalidates only that aggregate and commits
+before the next aggregate may acquire the lease. Discovery uncertainty records
+repair debt and retries next cycle; it never falls back to an unbounded writer
+scan. Boot recovery retains its exhaustive one-shot semantics.
+
+SCOPE is one persisted confirmed fill lacking canonical materialization. DRAIN
+is the bounded read-only discovery plus one-fill writer tranches on the existing
+repair cadence. RESET is an exact canonical position or terminal disposition
+for that aggregate. Probability, sizing, order admission, exit economics,
+settlement semantics, and lifecycle grammar are unchanged.
+
+Allowed files are `src/ingest/price_channel_ingest.py`,
+`tests/test_b5_price_channel_inv37_single_writer.py`, and this plan. Acceptance
+requires that scheduled repair performs no full discovery under a writer lease,
+releases the lease between candidates, preserves durable retry on uncertainty,
+passes focused and fill-bridge regression tests, then proves after exact-SHA
+deployment that monitor ages stay inside their watchdog and the repair job no
+longer holds the canonical writer continuously.
+
+## 2026-08-12 Terminal no-fill is defeasible by later authenticated fill truth
+
+Seoul exposed a causal contradiction rather than an observability false
+positive: command recovery terminalized an ENTRY as `EXPIRED` from a no-fill
+snapshot; a later authenticated trade fact and a newer point-order fact proved
+11.627905 matched shares with venue remainder, while reconcile repaired only
+the position projection. Command truth stayed terminal and the late position
+event incorrectly claimed `pending_entry -> active` after the position was
+already `day0_window`.
+
+The repair permits the existing fill event grammar to defeat a terminal
+no-fill conclusion only with exact, newer, authenticated positive-fill proof.
+A late partial correction atomically restores collateral for the still-live
+venue remainder before command state can become `PARTIAL`; a full confirmed
+fill becomes `FILLED`. Missing identity, stale/equal evidence, mismatched
+matched/remainder arithmetic, or failed collateral CAS leaves the command
+unchanged and retryable. Entry-fill projection emits from the actual current
+phase, so append-only lifecycle history cannot move backward.
+
+SCOPE is one terminal command contradicted by later facts bound to its exact
+venue order. DRAIN is continuous M5 reconciliation followed by the existing
+cancel/recovery cadence for any live remainder. RESET is a proof-backed
+`PARTIAL`/`FILLED` command consistent with its position and collateral truth.
+No probability, sizing, price band, settlement, or entry-selection law changes.
+
+Allowed files are `src/execution/exchange_reconcile.py`,
+`src/execution/command_recovery.py`,
+`src/state/venue_command_repo.py`, `src/state/collateral_ledger.py`,
+`src/engine/lifecycle_events.py`, `tests/test_exchange_reconcile.py`, and this
+plan. Acceptance requires a terminal-no-fill plus later partial-fill replay to
+produce a typed command correction, exact remainder reservation, no lifecycle
+phase regression, unchanged exposure economics, rejection of stale/forged
+corrections, focused regressions, exact-SHA deployment, and zero active
+terminal-command/venue-fact conflicts.
+
+Live verification exposed a missing DRAIN edge after the first deployment:
+the account-wide M5 sweep runs only for a WS-gap latch or unresolved finding,
+so an authenticated fill already persisted after a terminal no-fill event can
+remain contradictory forever without another external trigger. The recurring
+entry-exposure-obligation pass now invokes the same strict correction against
+persisted canonical facts before deciding whether the obligation can close.
+This makes convergence depend on durable debt plus the ordinary command-
+recovery cadence, not on a future WS gap; rejected evidence remains open and
+reports its exact rejection reason.
+
+The same live proof found that the derived status cut could stay stale while
+the held monitor remained continuously active: the observability job yielded
+before checking its own freshness budget, so the old PID and pre-correction
+command conflict survived every successful scheduler tick. Held-capital I/O
+keeps priority only while both status cuts remain inside half their freshness
+budget; after that backstop, the read-only pulse and composite refresh run so
+operator health cannot ratchet stale. This changes no trading authority.
+
+## 2026-08-12 Replayable substrate writes cannot outrank capital monitoring
+
+Forward runtime evidence showed canonical `MONITOR_REFRESHED` persistence
+missing both its initial and five-second retry while the substrate observer was
+capturing priority snapshots. The snapshot writer was allowed to hold the
+unified trade writer while SQLite waited four to eight seconds on a legacy/raw
+writer. That inverts the money path: a replayable market-data projection can
+consume the complete deadline of the lifecycle fact that authorizes a held
+position's next exit decision.
+
+Ordinary universe snapshots therefore remain cooperative
+`BACKGROUND_RECOVERY` writers and fast-yield. Exact held/FC-03 rows are also
+replayable, but they are required inputs to the next capital decision: treating
+them as one-shot background probes allowed 24 fetched outcome books to produce
+zero durable snapshots under transient writer occupancy. They now use the
+existing monitor-aware `RECOVERY_CRITICAL` admission with a bounded one-second
+queue and a 100ms per-row hold/SQLite quantum. A published MONITOR intent still
+overtakes this writer, while a transient non-monitor owner no longer makes every
+held row fail immediately. Capture selection priority and writer admission are
+separate typed scopes: pending urgency, open-rest, and non-forced markers may
+move forward in capture order but remain background writers; only canonical
+held condition IDs and forced FC-03 condition IDs enter recovery admission.
+Network reads and probability authority are
+unchanged; only persistence admission changes. Submit-time JIT recapture is
+outside this producer path and retains its own execution authority.
+
+SCOPE is executable-substrate persistence in the recurring observer producer.
+DRAIN is a successful short per-row transaction; exact held scope remains
+level-triggered from canonical positions and retries on the existing 20-second
+cadence until durable, while broad scope fast-yields. RESET is a fresh persisted
+snapshot or expiry of its current priority request; a timeout never promotes
+stale data. Acceptance requires behavioral antibodies proving exact held/forced
+priority snapshots wait through a transient background probe yet yield to
+MONITOR, while broad and pending-urgency snapshots remain background; focused
+substrate/market-scanner tests, exact-SHA
+deployment, and forward evidence that all open positions regain bounded
+canonical monitor age while entry candidates continue to be reconsidered.
+
+## 2026-08-12 Producer wakes must drain durable forecast decision debt
+
+Live evidence showed 152 `FORECAST_SNAPSHOT_READY` and 14
+`EDLI_REDECISION_PENDING` rows still pending while producer wakes repeatedly
+processed only their newly committed target IDs. `targeted_only` disabled the
+ordinary debt scan, and the bounded claim page reserved no place for prior
+causal facts, so continuous fresh production structurally starved the very
+redecision history needed to form new capital-growth proposals.
+
+Each producer bridge claim page now reserves its final slot for the oldest
+eligible non-target FSR/redecision debt. Target IDs and the durable global
+winner retain precedence in the other slots; ordinary targeted-only callers
+retain their old behavior. Claiming debt never accepts its old probability:
+the existing current-posterior identity and submit-time authority gates still
+recompute or reject it before any venue side effect.
+
+SCOPE is one `edli_reactor_v1` producer bridge invocation and at most one
+non-target FSR/redecision row. DRAIN is the existing producer wake cadence,
+which claims the oldest eligible debt in the reserved slot. RESET is
+invocation-local: terminalization, expiry, successful processing, or loss of
+timeliness removes the row and the next wake recalculates the oldest debt.
+Acceptance requires selector and real-reactor tests proving a K-sized page
+contains no more than K-1 targets when debt exists, no debt is claimed without
+the explicit reserve, and current posterior/pause/submit fences remain intact.
+
+## 2026-08-12 Held-monitor probability work is admission bounded
+
+Forward receipts proved that the held monitor could have fresh local books for
+14 of 15 positions and still exhaust its full wall-clock claim after starting
+slow probability refreshes serially.  The existing one-third reservation chose
+the positions that should receive the bounded belief tranche, but it affected
+only ordering: every ordinary position could still start a five-second belief
+read until the global deadline was gone.  One slow family therefore blinded the
+unvisited tail even when quote acquisition used no network.
+
+The repair makes the existing fair bounded-coverage selection the guaranteed
+admission contract.  Durable hard-fact exits and structural wins retain their
+exact-probability lane.  If any admitted statistical read consumes its bounded
+deadline or fails, no non-admitted tail read may start in that pass; those
+positions retain the already-prefetched current quote but emit no probability
+freshness or action authority, and rotate into the next pass.  When the entire
+admitted slice completes quickly, the monitor may use genuine remaining time
+for the tail, preserving normal full-book throughput.  Quote acquisition,
+probability law, exit economics, lifecycle, and venue submission are unchanged.
+
+SCOPE is one non-hard-fact held position in one monitor pass.  DRAIN is the
+next recurring pass's fair bounded-coverage selection.  RESET is admission to
+that pass followed by a complete fresh probability witness; a timeout advances
+only attempt fairness and never manufactures freshness.  Acceptance requires:
+
+- a 15-position local-book pass whose admitted belief reads consume their full
+  allowance starts no more than the admitted one-third slice and starts no tail
+  reads after the first expiry;
+- the next pass admits a disjoint fair slice rather than retrying the same
+  positions;
+- a fully successful fast admitted slice may continue through the tail while
+  the global deadline still has a complete per-position allowance;
+- hard-fact exact-zero/exact-one actions remain outside the statistical belief
+admission gate;
+- equal-urgency admitted positions consume an already-current local book before
+  a network-dependent peer;
+- expiry in any admitted child stage (venue-close metadata, q refresh, or
+  pending-exit retry quote) closes non-admitted statistical tail admission, and
+  receipt ID lists enumerate every position counted as deferred;
+- focused held-monitor tests, compile, planning lock, exact-SHA deployment, and
+  forward receipt evidence show bounded q starts without full-book deadline
+  exhaustion.
+
+Allowed files are `src/engine/cycle_runtime.py`,
+`tests/test_live_safety_invariants.py`, and this plan.
+
+## 2026-08-12 Sub-min health binds the held outcome token and current book
+
+Production health classified two `buy_no` holdings with the YES outcome token's
+book because its read model joined every position through `token_id`.  It then
+reported those positions as currently unexitable even when the selected
+snapshot's freshness deadline had expired.  Shares below the venue minimum
+were real, but the quoted bid, ask, and current executable classification were
+not evidence for the asset Zeus actually held.
+
+The health read model now derives the exit identity symmetrically:
+`buy_yes -> token_id`, `buy_no -> no_token_id`.  Missing direction, held token,
+or condition identity fails closed.  Only an exact latest snapshot for that
+exit token whose aware UTC freshness deadline is still in force may compare
+held shares with `min_order_size`; missing, malformed, naive, or expired
+freshness is typed read-unavailable rather than promoted to `UNEXITABLE`.
+
+SCOPE is the read-only sub-min live-health surface for one open position.
+DRAIN is the existing market-snapshot producer publishing a fresh exact held-
+token row. RESET is a valid direction/condition/held-token identity plus a
+fresh exact snapshot. This surface remains observability evidence: it neither
+authorizes a top-up/sell sequence nor creates a blanket entry veto for
+unrelated families.
+
+Acceptance requires opposite YES/NO books to select the held token, both
+directions to retain symmetry, invalid identity and stale/malformed freshness
+to fail closed, fresh sub-min and at-min arithmetic to remain exact, focused
+health tests and compilation to pass, then exact-SHA deployment and a live
+sample showing the correct held token identity.
+
+## 2026-08-12 Held raw-HWM reads cannot spend the primary decision reserve
+
+Production monitor pass `414811` froze an 11-family replacement-input HWM as
+ready but spent 26.110 seconds doing so; pass `414813` spent 29.970 seconds.
+The caller handed the batch the complete auxiliary deadline and a 20-second
+CPU-time SQL allowance, despite the monitor contract already defining a
+2.5-second raw-HWM stage maximum.  An occasional scheduler, busy-wait, or
+validation delay could therefore consume the wall-clock tranche and leave zero
+positions at `refresh_position -> evaluate_exit`.
+
+The HWM batch now receives its own absolute wall deadline:
+`min(auxiliary_deadline, started + raw_hwm_max)`.  The SQL allowance is the
+same remaining wall budget, not the primary belief reserve. The read-only
+connection open, initialization PRAGMAs, and snapshot `BEGIN` all consume that
+same absolute deadline; no bootstrap step owns a fresh timeout. Because
+`sqlite3.connect(timeout=...)` limits only SQLite busy handling, deadline-bound
+opens use a daemon handoff: the caller returns unavailable at the wall deadline
+and any late connection is closed by its opener. The batch HWM and the Day0
+held-family HWM both use this same connection contract. Completion still
+freezes one causal HWM cut. Expiry uses the existing typed unavailable snapshot
+and fails probability authority closed; it never reuses an older cut, falls
+back to a scalar belief, or writes a synthetic HOLD decision.
+
+SCOPE is one held-monitor HWM batch. DRAIN is the next bounded monitor pass
+against current raw artifacts. RESET is a complete causal batch within its
+independent wall deadline. The remaining primary tranche continues to own
+fresh q/book reads and economic decisions; this change does not lower quote,
+probability, submit, price-band, or global-auction gates.
+
+Acceptance requires an oversized HWM wait to receive the 2.5-second absolute
+deadline through connection bootstrap, `BEGIN`, and the matching SQL allowance;
+both HWM caller shapes must pass it and a deliberately delayed connect must be
+abandoned and closed;
+existing HWM-before-auxiliary ordering must remain intact, typed unavailable
+behavior must retain fail-closed authority, and post-deploy decision artifacts
+must show HWM wall time bounded while primary position attempts continue.
+
+## 2026-08-12 Held belief has one raw-input HWM authority
+
+The bounded batch alone did not guarantee progress. After freezing its
+cycle-scoped HWM cut, `position_belief` independently reopened the large
+forecast DB for every held position and recomputed the artifact HWM through an
+older JSON-field scan. That private path neither consumed the frozen cut nor
+used the shared indexed product/cycle reader. Under live writer and scheduler
+load, each duplicate read reached the five-second belief deadline; the monitor
+had fresh books but completed no fresh probability decisions, and later passes
+could only report `previous monitor cycle is still running`.
+
+Held redecision now delegates both model and artifact frontier reads to
+`replacement_input_hwm`, exactly like entry authority. The artifact reader
+therefore consumes the immutable batch snapshot (including its typed
+unavailable verdict) and uses the indexed product/cycle route when no snapshot
+exists. There is no second raw-input interpretation or fallback scan. The
+posterior remains fail-closed when the frozen cut is unavailable; recurring
+monitor passes, not stale probability reuse, provide recovery.
+
+SCOPE is one held family's raw-input freshness proof inside one monitor cut.
+DRAIN is the next recurring batch snapshot plus bounded belief read. RESET is a
+complete current shared HWM cut; no old private query can create another
+authority. Acceptance requires a relationship antibody proving the held reader
+delegates to both shared HWM functions, deadline interruption remains bounded,
+all primary-reserve/deadline monitor antibodies pass, and a current 10-position
+read sample completes every fresh belief inside one tranche before deployment.
+
+## 2026-08-12 Favorable SELL quotes are not submitted prices
+
+Forward global-auction receipt `415033` selected an immediate Shanghai held
+SELL after current probability and book evidence made it capital-positive. The
+solver correctly mapped the current `0.999` counterparty bid to a legal `0.95`
+submitted SELL floor, but the final executor independently required the
+counterparty bid itself to lie inside the submitted-action band and rejected
+the exit before command persistence. This collapsed two different facts:
+the price Zeus submits and the better price the venue may execute.
+
+The final side-effect boundary now accepts a finite SELL counterparty bid in
+the probability domain `[0.05, 1]` while continuing to require every submitted
+limit, envelope, command, and SDK request to remain inside inclusive
+`[0.05, 0.95]`. A bid above `0.95` therefore improves execution through the
+legal floor; it never authorizes an above-band submission. Values above `1`,
+below `0.05`, or non-finite remain invalid.
+
+SCOPE is one reduce-only SELL intent at the final executor boundary. DRAIN is
+the next current global auction/JIT pass rebuilding the intent from current q
+and book. RESET is a current probability-domain bid plus an independently
+in-band submitted floor; no stale quote or old winner is replay authority.
+Acceptance requires an executor antibody proving `best_bid=0.999` persists and
+submits exactly `0.95`, an invalid `1.001` bid still rejects before persistence,
+focused executor tests, planning lock, compile/diff checks, hot-fix landing,
+exact loaded-SHA proof, and forward winner -> venue command -> fill/progression
+evidence.
+
+Allowed files are `src/execution/executor.py`, `tests/test_executor.py`,
+`architecture/test_topology.yaml`, `architecture/source_rationale.yaml`, and
+this plan. A concurrent inverse change at `e7661feeb` reintroduced the same
+type collapse in `src/solve/solver.py`; this hot-fix therefore also owns
+`tests/solve/test_solver_properties.py` and
+`tests/integration/test_w3_solve_seam_g3.py` so solver, JIT, certificate, and
+final executor boundaries enforce one coherent relationship.
+
+Independent review found two remaining consumers of the old collapsed domain:
+exact bid `1.0` could not be represented by the shared ask-only `BookLevel`, and
+both retry and no-order liquidity recovery treated a favorable `0.999` bid as
+still blocked. The structural closeout introduces a distinct `BidBookLevel`
+whose domain is `(0,1]`; BUY asks retain strict `(0,1)`. Global epoch capture,
+BUY/SELL JIT bid capture, SELL proposal slicing, liquidity admission, retry
+release, no-order release, typed execution authority, and the final executor
+now preserve this distinction end to end. Submitted limits, envelopes,
+commands, and SDK requests remain independently constrained to `[0.05,0.95]`.
+
+The extended allowed set is `src/contracts/executable_cost_curve.py`,
+`src/engine/event_reactor_adapter.py`, `src/engine/global_auction_universe.py`,
+`src/execution/exit_lifecycle.py`, `tests/contracts/test_executable_cost_curve.py`,
+and `tests/test_exit_safety.py`, plus the prior files. Acceptance adds exact
+`1.0` JIT-to-executor proof, `>1` fail-closed proof, and old liquidity-debt
+release on `0.999` without weakening the submit band.
+
+The exact-one antibody then exposed the same collapsed check one layer earlier
+in `src/data/market_scanner.py`: snapshot top-book parsing rejected every price
+`>=1` regardless of side. This plan therefore also owns that file and
+`tests/test_executable_market_snapshot.py`; current market authority must admit
+an exact-one bid but continue rejecting an exact-one ask and any bid above one.
+For finite common-axis scoring only, an exact-one raw bid receives a one-current-
+tick economic haircut; the immutable raw JIT curve and execution authority keep
+the actual `1.0` quote, so Zeus can submit `0.95` and retain favorable fill
+improvement without creating an infinite/undefined efficiency value.
+
+Live reconstruction then found a pre-fix Shanghai SELL stranded in
+`backoff_exhausted`: its last rejection was the retired executor error
+`live_order_executable_price_out_of_bounds: best_bid=0.999`. Correcting the
+forward boundary alone cannot clear durable debt created by the old domain
+collapse. Retry recovery now recognizes only that exact legacy shape with a
+finite bid in `(0.95,1]`, first proves that no EXIT command owns the shares,
+then either requests a fresh global q/book/wealth auction for a canonical
+global SELL or releases a non-global exit to normal current redecision. It does
+not replay the old quote or certificate, and malformed or `>1` values remain
+`backoff_exhausted`. Acceptance requires an exact historical-error antibody,
+global command-ownership proof, fresh-auction debt creation, and a `>1`
+counterexample that remains fail-closed.
+
+The 2026-08-13 live no-order reconstruction exposed a scheduler scope
+contradiction after the allocator scope lattice had already recovered.  One
+`REVIEW_REQUIRED` cancel-unknown command was exactly bound to market `3535393`;
+the allocator correctly isolated that market and left every unrelated family
+entry-eligible, but the scheduled command-recovery wrapper still raised a
+process-global reactor handoff for every nonzero capital-blocker count.  Its
+account-wide venue snapshot repeatedly exhausted the recovery deadline, so the
+handoff suppressed the global auction without resolving the scoped debt.
+Recovery admission must use the same scope lattice: a scoped unknown keeps its
+own market isolated, never reserves the global reactor handoff, and yields its
+account/DB work while canonical held-position monitor debt exists. Only a
+systemic/unscopeable unknown, or capital debt not represented by the
+unknown-side-effect classifier (for example an incomplete confirmed-fill
+projection), may reserve the global reactor handoff and retain recovery I/O
+priority. SCOPE is the affected market for classified scoped unknowns and
+global only for systemic/unclassified capital ambiguity. DRAIN is first the
+current held-capital monitor, then the next scheduled venue recovery plus
+current wealth revalidation. RESET is the exact command/projection recovery
+fact; classifier failure remains global fail-closed. Acceptance requires the
+historical single-market cancel debt to leave the reactor runnable and yield to
+monitor debt, systemic and unclassified debt to retain the global fence, and
+the handoff to clear after success or exception.
+
+Post-deploy evidence showed that recovery yielding was necessary but not
+sufficient. The replayable EDLI reactor still ran a reduce-only auction on
+every wake while all 26 held obligations lacked current monitor authority. It
+repeatedly occupied orchestration, trade-DB, and forecast-DB work long enough
+for the monitor's 5-second preparation and 2.5-second artifact-HWM cuts to be
+interrupted. The same 25-family HWM read completed 25/25 in under one second on
+the canonical read-only DB when isolated, so this is scheduler priority debt,
+not evidence that current probability is intrinsically unavailable.
+
+Canonical held-monitor debt now defers the replayable EDLI auction completely,
+not merely its BUY side. A reduce-only comparison cannot be executable when
+the current q/book authorities required to rank SELL/HOLD/CASH are precisely
+the missing monitor facts. SCOPE is only an EDLI auction while exact canonical
+monitor debt exists; settlement, command recovery classification, collateral,
+and the dedicated monitor lane remain live. DRAIN is the bounded 30-second
+monitor-recovery cadence and full-book current redecision. RESET requires a
+canonical clean coverage read; elapsed time, a process heartbeat, or a
+reduce-only receipt cannot reset it. Acceptance requires reactor deferral under
+canonical debt, normal admission after exact reset, a ready 25-family HWM cut,
+new MONITOR_REFRESHED coverage for the held book, and only then restart-guard
+release and a fresh global auction.
+
+With reactor/recovery contention removed, the next complete monitor cut proved
+the artifact HWM ready in 0.284 seconds and completed seven current probability
+reads. Four completed results were nevertheless rolled back at the final
+position transaction boundary because that commit reused the already-consumed
+five-second q child deadline. The child clock governs whether a remote
+q/book/decision unit may start and finish; after a canonical monitor event is
+constructed, its commit is existing local work and is governed by the unchanged
+outer monitor claim. SCOPE is the completed position transaction only. DRAIN is
+its commit before the outer monitor deadline. RESET is the next position's new
+child deadline; an expired child still cannot authorize new remote work or a
+late canonical decision. Acceptance adds an antibody proving that a completed
+child commits against the outer claim while a refresh that crosses its child
+deadline remains deferred before canonical emit.
+
+The Seoul reconstruction also exposed a separate authority contradiction in
+ENTRY recovery. An authenticated canonical order fact already recorded
+`matched_size=11.627905`, while a later incomplete account read found no local
+trade fact and wrote a new zero-fill fact plus `ENTRY_ORDER_VOIDED`. Order facts
+and trade facts are independent evidence planes; absence from the latter cannot
+negate positive fill truth in the former. Terminal no-fill construction now has
+a shared command+venue-order invariant that refuses every zero-fill append when
+any finite positive canonical matched size exists. The incident branch checks
+the same invariant before mutation and remains `REVIEW_REQUIRED`, allowing the
+existing matched/partial reconciliation lane to establish the economic fill.
+SCOPE is one exact command/order identity; DRAIN is the next matched-order
+reconciliation pass; RESET is authenticated fill projection or an independently
+proved zero-fill identity with no contradictory positive fact. Acceptance
+requires the historical positive-order-fact + absent account-read shape to
+retain the positive fact, emit no clearance/void, and keep review authority.
+
+Adversarial review found two alternate seams that must obey the same law.
+Generic monitor repair may not release a legacy favorable-bid
+`backoff_exhausted` position before command ownership classifies it; the shared
+release helper therefore refuses that debt unless the typed retry classifier
+explicitly authorizes a non-global release. Terminal zero-fill construction
+also revalidates positive matched order truth inside the final repository
+`INSERT ... SELECT WHERE NOT EXISTS` statement, eliminating a cross-connection
+check/append race. A typed contradiction remains `REVIEW_REQUIRED` and lets the
+same-cycle matched-order reconciliation lane drain the positive fill; it is not
+counted as a generic recovery error. Acceptance adds generic-release bypass
+rejection and repository-boundary atomic contradiction antibodies.
+
+## Aggregate position authority over incremental entry-order lifecycle
+
+Live reconstruction on 2026-08-12 exposed a TOCTOU seam between an ACKED
+maker-add order and the already-filled position it targets. A recovery pass may
+select the maker-add while the aggregate projection is absent, then observe the
+earlier fill before mutation. Replaying the stale candidate as a new
+`pending_entry` projection silently replaces the active aggregate; when the
+maker-add later proves terminal zero-fill, `ENTRY_ORDER_VOIDED` can then void
+the real exposure and erase its monitor projection until chain reconciliation
+repairs it.
+
+The structural law is order/aggregate separation: an ENTRY command owns only
+its own order intent and fill delta. A LIVE zero-fill command cannot rebuild a
+same-identity positive aggregate as `pending_entry`, and a terminal zero-fill
+command cannot void that aggregate even when the aggregate's current
+`order_id` was rebound to the incremental order. Mutation-time authority must
+be rechecked by exact position id, held direction, selected token, condition,
+positive local-or-chain exposure, and monitorable lifecycle; candidate-time
+absence is not authority. Filled increments continue through the dedicated
+positive-fill projection path and are not suppressed by this guard.
+
+SCOPE is one exact ENTRY command and aggregate position identity. DRAIN is the
+ordinary order recovery pass, which terminalizes only the zero-fill command
+while leaving the aggregate under held-position monitoring. RESET is a real
+positive fill for that command, which routes through cumulative fill repair,
+or disappearance of the pre-existing positive aggregate. Acceptance requires
+a deterministic stale-candidate race antibody that preserves phase, economics,
+order identity, and monitor fields, plus a same-order-id terminal-zero-fill
+antibody that emits no aggregate `ENTRY_ORDER_VOIDED`.
+
+Allowed files for this hot-fix are `src/execution/command_recovery.py`,
+`tests/test_command_recovery.py`, and this plan.
+
+## 2026-08-17 Restore the evidenced 1/8 sizing law after an unproved rollback
+
+The latest complete live global cut compared 1,694 fixed BUY/SELL proposals
+across 114 families with current q, book, wealth, held-position, and reserved
+capital evidence.  It completed normally and selected CASH/HOLD because no
+remaining order had positive current economics; this was not scheduler or
+coverage starvation.  The same receipt exposed
+`fractional_kelly_multiplier=0.03125`, contradicting this plan's still-active
+1/8 acceptance criterion and the prior live proof that 1/32 alone rejected
+positive-growth minimum lots while most capital remained idle.
+
+The 2026-08-14 code/config rollback to 1/32 carries no loss, drawdown,
+calibration, or correlated-exposure evidence and did not supersede the active
+plan.  Restore the governed fraction to 1/8 while retaining the independent
+1/4 correlated ceiling, single-position, city, portfolio-heat, current-q/book,
+free-cash, and JIT reproduction gates.  This widens only the feasible size of a
+proposal that already wins the unified posterior-mean expected-log-growth
+comparison; it does not turn a non-positive proposal into an order.
+
+SCOPE is live fractional-Kelly sizing for otherwise admissible global
+proposals.  DRAIN is a clean daemon reload followed by the next complete global
+cut.  RESET is every fresh cut and submit-time recapture; changed probability,
+book, wealth, depth, or exposure can reduce the size or select CASH.  Acceptance
+requires exact 1/8 boot/config antibodies, the independent correlated-ceiling
+antibody, a live receipt carrying `fractional_kelly_multiplier=0.125`, and an
+actual venue order/fill or a complete current-economic rejection.  Expected EV
+is not reported as realized capital gain.
+
+Allowed files for this governed retune are `src/main.py`,
+`config/settings.example.json`, `tests/test_boot_guard_kelly_ceiling.py`,
+`tests/test_kelly.py`, `docs/reference/zeus_risk_strategy_reference.md`,
+`architecture/test_topology.yaml`, and this plan.  The ignored operator-owned
+`config/settings.json` is updated atomically only at live deployment so the
+boot guard and runtime value change together.
+
+## 2026-08-17 Empty provider payload cannot cover a held probability scope
+
+Live NYC LOW reconstruction found a current-cycle raw artifact whose complete
+target horizon contained only `null` temperatures. The critical held-family
+download gate treated the row's identity as proof of coverage even though the
+canonical extractor could not produce a deterministic anchor. The same
+syntactically valid file was then reused without another fetch, leaving the held
+position read-only after its probability certificate exceeded the absolute age
+bound.
+
+Current-target raw reuse and critical coverage now require the existing
+canonical local-day extractor to produce at least one finite target-day sample.
+Fetched empty payloads are not published as new canonical artifacts; they remain
+an explicit skipped result and the next held-priority cycle retries. No
+probability freshness, quota, or price boundary is weakened.
+
+SCOPE is the exact held `day0_window`/`pending_exit` city, target date, metric,
+and provider cycle. DRAIN is the next critical provider retry, followed by the
+existing seed/materialization cycle. RESET requires a materializable raw payload
+for that exact scope and cycle; valid JSON, a matching DB row, or an all-null
+hourly series cannot reset the gate. Acceptance requires valid-reuse and
+all-null-retry antibodies, focused downloader/scheduler suites, exact-SHA live
+deployment, and a fresh held-position probability certificate or the current
+provider rejection as the remaining fail-closed reason.
+
+The additional allowed files are
+`scripts/download_replacement_forecast_current_targets.py`,
+`src/data/replacement_forecast_production.py`,
+`tests/test_replacement_download_cycle_currency_gate.py`, and this plan.
+
+The first post-deploy exact-scope retry exposed a second identity collision:
+scoped held recovery and ordinary universe rotation shared one cursor file, and
+the live file still used the prior two-field schema. Exact-scope rotation is now
+keyed by its concrete family set, while the single known legacy cursor shape is
+read once and upgraded on its next compare-and-swap advance. Unknown fields,
+invalid clocks, and corrupt values still fail closed. This keeps critical held
+retries independent from ordinary discovery without deleting runtime evidence
+or silently resetting a malformed cursor.
+
+The next exact live cut exposed a separate Day0 ownership collision for
+Shanghai: a newer observation seed intentionally reused the last materializable
+00Z source while its enqueue marker targeted the missing 12Z cycle. Ownership
+looked up `target_cycle_time` using the seed's consumed `source_cycle_time`, hit
+an older marker, and discarded the newest 28C conditioning seed as stale.
+Ownership now reads the latest `enqueue_id` for the exact family and compares
+its seed path plus conditioning identity; the witness carries the marker's true
+target cycle. SCOPE is that exact family enqueue. DRAIN is the next seed queue
+poll. RESET requires a committed posterior consuming the same conditioning
+identity; a newer enqueue deterministically supersedes the older owner.
+
+The additional allowed files are
+`src/data/replacement_forecast_live_materialization_queue.py` and
+`tests/test_day0_extreme_updated_materialization_bridge.py`.
+
+NYC then proved that semantic validity also belongs inside transport selection:
+the run-pinned and meta-stamped HTTP rungs could return a syntactically valid
+all-null target day and stop the ladder before the independently verified S3
+bucket rung. Each HTTP wave/rung now admits a payload only when the canonical
+extractor can materialize the exact local target day. An empty rung falls
+through with an explicit reason; the bucket keeps all existing run, timestep,
+and city cross-check gates, and the final publisher repeats materializability
+validation. SCOPE is the exact city/date/cycle transport attempt. DRAIN is the
+next admitted rung. RESET requires a finite canonical target-day payload; HTTP
+status alone never resets it.
+
+## 2026-08-17 Held Day0 current-q owns the final Open-Meteo reserve
+
+Live Dallas evidence exposed a quota-lane inversion. The new 12Z ensemble was
+complete, but the matching provider-center anchor stayed at 06Z. At 9,078
+metered requests the ordinary source-clock lane correctly stopped at its 9,000
+daily limit, while the exact held Day0 anchor refresh also stopped there even
+though the quota contract reserves the final tranche through the 9,500 hard
+cap for held Day0 probability. The resulting stale q blocked the current
+SELL/BUY/CASH comparison and therefore blocked evidence-based capital release.
+
+Only a canonical `day0_window` or `pending_exit` family may use that final
+reserve. Source-commit scopes are partitioned from the current canonical trade
+DB before download: exact held-Day0 scopes run first inside `critical_lane`;
+all other scopes remain on the ordinary lane. A broad request, an unreadable
+position projection, an `active` non-Day0 position, or an unlisted family can
+never inherit critical authority.
+
+The same exact held set runs first when the provider-proved `ecmwf_ifs` source
+clock advances. That recovery does not depend on a BPF source-commit callback:
+the extras may already have committed before quota pressure or process reload,
+while the matching anchor is still missing. Its scoped manifest receipt feeds
+the existing reseed triggers before the ordinary broad anchor pass; BPF
+cooldown cannot postpone held-capital probability to the next quota day.
+Critical recovery is idempotent at the canonical artifact identity: a scope
+already holding the current-cycle anchor is not downloaded or rewritten.
+Coverage instead triggers the scoped reseed with a fresh causal computation
+cut. This prevents a recurring poll from advancing immutable
+`captured_at/source_available_at` on the same evidence and turning the current
+anchor into a perpetual future fact.
+
+That immutability binds the ordinary fanout too. A valid on-disk payload whose
+exact source/product/data-version/cycle/scope, path, size, and SHA already match
+the canonical artifact is complete work: the downloader reuses it without
+rewriting either the payload, companion metadata, manifest, or DB row. A
+missing row, mismatched path, corrupt JSON, size drift, or SHA drift remains on
+the existing fetch/repin path. Thus quota class changes who may fetch a missing
+fact, never whether an already-persisted fact may acquire a later timestamp.
+
+SCOPE is the exact `(city, target_date, temperature_metric)` intersection of a
+fresh source commit and canonical held Day0/pending-exit positions. DRAIN is the
+bounded scoped anchor download followed by the existing manifest-bound reseed
+callback. RESET is per-call: critical authority ends when that exact scoped
+download returns, and later calls must re-prove the canonical phase; manifest
+currency then causes the existing current-target gate to skip further fetches.
+The ordinary lane remains fail-closed at the priority cap and the independent
+9,500 hard cap is unchanged.
+
+Allowed files for this hot-fix are
+`src/data/replacement_forecast_production.py`, `src/ingest_main.py`,
+`scripts/download_replacement_forecast_current_targets.py`,
+`tests/test_replacement_download_cycle_currency_gate.py`,
+`tests/test_scheduler_adapter.py`, and this plan. Acceptance requires
+antibodies proving (1) exact canonical held-Day0 scopes enter critical quota,
+(2) mixed batches partition without granting critical authority to ordinary
+scopes, (3) broad/nonheld downloads remain ordinary, (4) both ordinary and
+critical reuse preserve the first canonical capture timestamps, focused tests, live
+deployment, and a new same-cycle Dallas posterior/held-monitor receipt or the
+next exact fail-closed reason.
+
+## 2026-08-17 Entry provenance cannot replace held-exit snapshot projection
+
+Live health intermittently reported exact held outcome tokens as
+`EXIT_TOKEN_SNAPSHOT_STALE_OR_MISSING` even though the regular market scanner
+had recently published a reusable three-minute snapshot.  The append-only
+evidence was intact: an entry-only `JIT_PRESUBMIT` row with a newer
+`captured_at` and a one-second deadline had unconditionally replaced the
+token's `executable_market_snapshot_latest` projection.  Once that one-second
+row expired, held-monitor fallback and health saw stale projection state until
+the next ordinary scanner refresh.
+
+The snapshot repository now separates immutable evidence append from latest
+projection advancement.  Advancement remains the default and is retained by
+ordinary scanner and exit `JIT_SUBMIT` writes.  Entry provenance explicitly
+appends without advancing latest, so its exact row remains addressable by
+snapshot id without narrowing the held-exit reuse window.
+
+SCOPE is only entry `JIT_PRESUBMIT` persistence for one exact condition/token.
+DRAIN is the existing ordinary scanner or exit JIT writer advancing the latest
+projection with its normal freshness contract.  RESET is the next valid
+held-token snapshot; an entry receipt, process heartbeat, or expired one-second
+row cannot reset held-exit freshness.  No schema, append-log, lifecycle,
+probability, or action-law semantics change.
+
+Acceptance requires antibodies proving that the entry JIT row remains
+retrievable by id while the prior reusable latest row remains selected, and
+that the default insert path still advances latest.  Focused tests, compile,
+diff checks, hot-fix landing, exact loaded SHA, heartbeat, canonical open
+exposure, and forward health evidence complete the slice.
+
+Additional allowed files are `src/state/snapshot_repo.py`,
+`src/engine/event_reactor_adapter.py`,
+`tests/test_k1_stage1_presubmit_snapshot_persist.py`,
+`architecture/test_topology.yaml`, and this plan.
+
+## 2026-08-13 Partial fill control state cannot impersonate owned wealth
+
+Live venue truth then exposed the non-terminal twin: Wellington had a confirmed
+10-share ENTRY fill and a `PARTIAL` command/order fact, while its canonical
+position still contained only the prior lot and the new command had neither an
+`ENTRY_ORDER_FILLED` event nor an `execution_fact`. WS ingestion had advanced
+the control fold before scheduled recovery; recovery treated that control fold
+as if it also proved the position projection and skipped the command forever.
+
+An authenticated cumulative partial fill is absorbed only when the exact
+command-bound position event and execution fact reproduce its cumulative shares
+and weighted fill price. When `PARTIAL` state and the matched-size order fact are
+already durable but those capital authorities are absent or stale, recovery
+reuses the control fold and runs only the canonical projection. This prevents a
+duplicate command transition while making the actual acquired exposure visible
+to monitoring, exit selection, risk, and PnL attribution.
+
+SCOPE is the exact PARTIAL ENTRY command/order and its authenticated confirmed
+cumulative fill. DRAIN is the next scheduled authenticated-entry recovery pass.
+RESET requires the command-bound `ENTRY_ORDER_FILLED` event and positive
+`execution_fact` to reproduce cumulative fill size and price; command state and
+matched-size order facts alone never reset the debt. Acceptance requires an
+incremental-position race antibody, idempotent second recovery, focused command
+recovery tests, live deployment, and convergence of the observed Wellington
+fill into canonical position and execution truth.
+
+Allowed files remain `src/execution/command_recovery.py`,
+`tests/test_command_recovery.py`, and this plan.
+
+## 2026-08-13 Terminal exit fill is current-capital priority until PnL books
+
+The first executable post-guard auction selected and filled a Shenzhen
+immediate-taker SELL. Venue and chain truth showed 6.52 shares sold at 0.40 and
+zero remaining chain inventory, but canonical position truth remained
+`pending_exit` with the original shares/cost basis and no `EXIT_ORDER_FILLED`,
+exit `execution_fact`, or realized PnL. The scheduled recovery classifier gave
+priority only to unresolved cancels, in-flight submits, and terminal ENTRY
+projection debt; held-monitor debt therefore deferred this completed capital
+release indefinitely.
+
+A recent terminal EXIT fill is now the symmetric current-capital blocker until
+all three authorities agree: `position_current` is `economically_closed` with
+exit price and realized PnL, the exact command/order has `EXIT_ORDER_FILLED`,
+and a positive command-bound exit `execution_fact` exists. This changes only
+scheduler priority; the existing exact fill, full-exit-intent, lifecycle, and
+PnL projection laws remain the sole authority for closing the position.
+
+SCOPE is the exact recent FILLED EXIT/SELL command with bound positive REST or
+WS_USER fill truth and incomplete close projection. DRAIN is the next scheduled
+command-recovery turn running the existing `exit_pending_projections` pass.
+RESET is the three-authority close above; command state, chain zero, or cash
+proceeds alone cannot reset it. The one-hour priority window prevents old repair
+debt from monopolizing live capital I/O. Acceptance requires a blocker/reset
+antibody, focused recovery tests, live deployment, and canonical convergence of
+the observed Shenzhen exit including realized PnL.
+
+Allowed files remain `src/execution/command_recovery.py`,
+`tests/test_command_recovery.py`, and this plan.
+
+## 2026-08-13 Corrected Day0 facts retain authorized raw provenance
+
+Post-deploy verification found one held Shenzhen position receiving fresh
+monitor cycles but no current probability. The exact reason was
+`GLOBAL_DAY0_RAW_PROVENANCE_MISSING`: the append-only WU print ledger correctly
+canonicalized a same-clock 30C -> 29C correction, while the authorized
+`observation_instants` query retained only the SQL maximum 30C projection. A
+later authorized 29C projection owned a writer-validated provider digest, but
+was discarded before the ledger could transfer that exact digest to its
+canonical 29C fact.
+
+The reader retains all authorized, decision-causal local-day instant
+projections until the existing ledger correction reduction runs. Same-channel
+projections are still replaced by the canonical ledger fact; they contribute
+only an exact persisted digest when source and extreme match. No digest is
+invented, no alternate source is substituted, and a retracted extreme cannot
+win through the projection set. A direct digest lookup that did not reproduce
+the existing authority predicates is removed.
+
+SCOPE is the exact city, target date, metric, authorized source channel, and
+decision time read. DRAIN is the next held-monitor or global-decision refresh,
+which rereads the canonical DB and rebuilds the current fact. RESET requires a
+canonical ledger extreme plus a matching authorized persisted digest; process
+liveness, a different source, or an old extreme cannot reset the provenance
+gate. Acceptance requires the exact Shenzhen correction antibody, the focused
+Day0 suite, live deployment, Shenzhen current probability freshness, automatic
+restart-guard clearance, and resumed global order decisions.
+
+Allowed files for this hot-fix are
+`src/data/replacement_forecast_current_target_plan.py` and this plan. The
+already-landed Shenzhen correction antibody is reused unchanged.
+
+## 2026-08-13 Restart proof covers current obligations without dust equality
+
+After Shenzhen probability freshness recovered on the exact loaded SHA, the
+restart guard remained closed despite complete current global-auction receipts.
+The current monitor set contained 27 executable obligations, while every
+receipt contained those 27 plus Miami position `ada8812…[redacted]`, an exact
+0.00857-share residual classified by the auction as
+`EXCLUDED:SELLABLE_SHARES_BELOW_PRECISION`. The execution lifecycle correctly
+keeps that dust as real exposure, but it is not a current monitor execution
+obligation. Requiring equality between those two differently typed sets made
+the guard a permanent global entry veto.
+
+A complete post-loaded-SHA receipt now proves restart coverage when its held
+identity set is a superset of the current monitor-obligation set. All current
+obligations must still appear; duplicate or blank receipt identities, a newly
+opened current position absent from the receipt, incomplete held coverage,
+stale decision time, or any blocking monitor input still fails closed. Extra
+receipt identities cannot hide missing current capital.
+
+SCOPE is only restart-guard recovery after an exact loaded SHA, fresh monitor
+inputs, and a complete global-auction receipt. DRAIN is the next complete
+auction over the current held set. RESET requires every current monitor
+obligation to be present in that receipt; process liveness, a legacy receipt,
+or a receipt missing a newly current position cannot reset the guard.
+Acceptance requires the superset/missing-current antibody pair, the focused
+restart proof suites, live deployment, proof-driven guard reset, and resumed
+new-order submissions or their exact current winner rejection.
+
+Allowed files for this hot-fix are `src/ops/monitor_cadence.py`,
+`tests/test_ops_scripts_smoke.py`, and this plan.
+
+## 2026-08-13 Day0 digest identity uses the extreme source clock
+
+The exact-clock provenance hardening repaired Shenzhen but exposed a distinct
+OGIMET hourly-bucket identity in the held Tel Aviv 33C NO position. Its
+canonical ledger high is 34C at 10:20Z, its latest source frontier is 17:50Z,
+and the authorized hourly projection explicitly records
+`hour_max_raw_ts=10:20Z`, `latest_raw_ts=10:50Z`, plus the validated bucket
+payload digest. Matching the digest to the frontier clock 17:50Z incorrectly
+made valid current probability unavailable.
+
+Projected facts now retain the writer's metric-specific extreme source clock
+(`hour_max_raw_ts` or `hour_min_raw_ts`, otherwise the existing fact clock).
+Ledger facts retain the canonical best print's source clock separately from
+their latest frontier observation clock. Digest inheritance requires exact
+source, station, unit, value, and extreme source clock equality. Frontier time
+still advances freshness across a plateau; it no longer impersonates the
+physical extreme's provenance identity.
+
+SCOPE is the exact authorized city/date/metric/source extreme used by a current
+Day0 probability. DRAIN is the next monitor/global-decision refresh. RESET
+requires a writer-validated digest on the projection whose extreme source clock
+matches the canonical ledger print; same value at a different clock, a
+different source, or a future/unavailable row cannot reset provenance debt.
+Acceptance requires the OGIMET peak/frontier antibody, the full focused Day0
+suite, live DB replay for Tel Aviv, deployment, fresh probability for
+`b065ae3…[redacted]`, proof-driven restart-guard reset, and resumed global auction.
+
+Allowed files for this hot-fix are
+`src/data/replacement_forecast_current_target_plan.py`,
+`tests/test_replacement_forecast_current_target_plan.py`, and this plan.
+
+## 2026-08-13 Selected global BUY uses its mandatory JIT book
+
+After entry resumed, the complete auction selected a Paris LOW NO
+`TAKER_LIMIT` at `0.56` with positive posterior-mean expected log growth. The
+selected native token's current raw CLOB book remained executable and in-band,
+but the event-local proof still carried an older `0.98` ask and classified the
+exact winner as `LIVE_UNIT_PRICE_OUT_OF_BOUNDS`. Global preflight consequently
+requeued the same positive winner without reaching its already-mandatory native
+JIT book fetch.
+
+For the exact globally selected BUY only, that stale local-quote rejection may
+now reach the existing current-state rebind. No price band changes: winner
+preflight must still fetch the selected native token's current raw CLOB book,
+reconstruct the full curve, preserve the selected in-band limit and cost, and
+pass the independent executor/SDK boundaries before any venue side effect.
+Ordinary family selection and a global BUY without the current-state rebind
+continue to reject the same stale out-of-band proof.
+
+SCOPE is the exact global BUY winner carrying the typed stale local-quote
+reason. DRAIN is its synchronous native-token JIT raw-book fetch and full-curve
+rebind. RESET requires current in-band economics that preserve the sealed
+winner; a worse, out-of-band, unavailable, or identity-mismatched JIT book
+supersedes the candidate. Acceptance requires both sides of the antibody
+(global current rebind admits; ordinary admission rejects), focused integration
+tests, live deployment, and a new command or a different exact current
+preflight reason for the observed Paris winner.
+
+## 2026-08-12 Current-regime capital advantage is the statistical entry license
+
+The last month of chain outcomes is net negative, and forward reconstruction
+found statistical entries whose decision probability collapsed after fill.
+Current probability and an executable quote are inputs to a trade, not proof
+that the selected trade has positive after-cost capital value. Historical
+calibrators, mixed probability revisions, and the existing per-target-date
+market-relative shadow rule cannot license the current global single-order
+auction.
+
+Statistical BUY admission therefore remains fail-closed until one durable,
+read-only evaluator proves the exact current probability-semantics revision and
+exact current global-selection revision on strictly later VERIFIED settlements.
+The independent unit is one target date; the evaluator must use frozen
+decision-time executable cost/fill and portfolio wealth, require complete
+scope/book/held coverage, and require both a positive one-sided 95% lower bound
+of after-cost delta-log-wealth versus CASH over at least 30 independent dates
+and positive real on-chain net P&L for the identical revision window. Missing,
+mixed, stale, or incomplete evidence is a FAIL artifact, never an identity
+fallback or permission to trade.
+
+SCOPE is every statistical BUY proposal; monotone LOCKED/REFUTED Day0 payoff
+facts remain hard-fact actions. DRAIN is new immutable global-auction/shadow
+receipts plus later canonical settlement and execution facts. RESET is an exact
+revision-bound PASS artifact consumed at the existing pre-ranking policy seam;
+tests, model score, restart, or an older profitable cohort cannot reset it.
+An admission-paused BUY wake may enter the global cut only to freeze that
+venue-inert schema-22 counterfactual. The independent actual-BUY rejection
+remains active, so proof collection cannot call the venue actuator.
+
+Acceptance first requires the evaluator to reject worktree placeholder DBs,
+bind WORLD/TRADES/FORECASTS explicitly read-only, report the exact missing proof
+dimensions, and emit a deterministic non-authority artifact. The forward
+receipt writer must then freeze selection-law revision, complete-auction
+identity, decision-time total wealth/endowment, chosen action, executable cost,
+fees, and family/date identity before settlement. Only after at least 30 causal
+settlements and positive real net capital may the policy seam admit statistical
+BUYs. Until then post-deploy evidence must show zero new ENTRY commands and no
+held SELL chosen with non-positive expected objective.
+
+Allowed files for this capital-proof lane are
+`scripts/evaluate_current_regime_capital_advantage.py`,
+`tests/test_evaluate_current_regime_capital_advantage.py`,
+`architecture/script_manifest.yaml`, `architecture/test_topology.yaml`,
+`src/engine/global_batch_runtime.py`,
+`src/events/reactor.py`,
+`tests/integration/test_w3_solve_seam_g3.py`,
+`src/contracts/global_auction_receipt.py`, `src/contracts/AGENTS.md`,
+`src/events/day0_authority.py`, `tests/test_riskguard.py`,
+`src/engine/event_reactor_adapter.py`,
+`src/control/live_health.py`, `tests/test_live_safety_invariants.py`,
+`tests/engine/test_event_reactor_adapter_family_scoped_entry_block.py`, and
+this plan.
+
+### Current collateral refresh must not consume its own writer budget
+
+After the proof-only global cut was allowed to run under the statistical-entry
+pause, live reconstruction reached the next genuine current-truth gate:
+`CURRENT_WEALTH_COLLATERAL_EXPIRED`. The dedicated 30-second capital sidecar
+was alive, but every refresh constructed a path-backed `CollateralLedger` that
+re-ran schema DDL before the chain read. Under canonical trade-DB contention,
+that incidental `collateral_schema_init` writer lease timed out, so no fresh
+snapshot could be published and the global comparison never received current
+wealth.
+
+Recurring refresh construction now validates the already-migrated collateral
+schema through a read-only SQLite connection and performs no DDL. Process
+bootstrap and migrations retain the existing schema-initialization path. A
+missing required table or `collateral_reservations.converted_amount` remains a
+hard failure before external reads; no stale snapshot or fallback wealth is
+substituted.
+
+SCOPE is the current collateral-snapshot refresh cycle. DRAIN is the next
+sidecar cycle reading current chain/venue collateral and persisting its bounded
+snapshot/head DML under the ordinary writer lease. RESET is a new successfully
+committed snapshot with its own capture time; process liveness, an old balance,
+or schema validation alone cannot reset freshness debt. The independent
+statistical-BUY proof gate remains closed.
+
+Forward live evidence then showed the DDL-free cycle could still miss every
+refresh for minutes because its 250ms `STANDARD` snapshot append continually
+yielded to registered monitor writers. Current collateral is itself monitor
+authority for every held/BUY/SELL global comparison, so only the one-row
+snapshot DML now registers as `MONITOR`; schema bootstrap stays `STANDARD`.
+The original 250ms acquisition deadline and 250ms maximum hold remain intact.
+
+The additional allowed files are `src/state/collateral_ledger.py`,
+`src/execution/post_trade_capital.py`,
+`src/main.py`, `src/riskguard/riskguard.py`,
+`tests/test_collateral_ledger_global_path_backed.py`,
+`tests/test_post_trade_capital_collateral.py`,
+`tests/test_p4_post_trade_capital_lift.py`,
+`tests/test_startup_wallet_dedup.py`,
+`tests/test_startup_wallet_warm_overlap.py`,
+`tests/test_riskguard_onchain_bankroll.py`,
+`architecture/source_rationale.yaml`, `architecture/test_topology.yaml`, and
+this plan. Acceptance requires construction-without-DDL and missing-schema
+antibodies, the focused collateral suites, live sidecar restart on the exact
+landed SHA, a newly committed current collateral snapshot, and a subsequent
+global proof receipt or the next exact fail-closed reason.
+
+## 2026-08-13 Terminal fill projection owns current-capital recovery priority
+
+Live reconstruction after a 100-second FOK submit found an authenticated
+Mexico City ENTRY fill in terminal `FILLED` command and confirmed venue-trade
+truth while `position_current`, the command-bound `ENTRY_ORDER_FILLED` event,
+and `execution_fact` were still absent. The existing filled-entry repair could
+reconstruct all three, but `capital_blocking_command_count()` counted only
+in-flight submits and unresolved cancels. With held-monitor cadence debt active,
+the scheduler therefore classified the missing live exposure as zero capital
+blockers and repeatedly deferred command recovery behind a monitor that could
+not yet see the unprojected position.
+
+Terminal authenticated positive fill truth is current capital even after the
+venue command reaches `FILLED`. The capital-blocker classifier now includes
+only an exact FILLED ENTRY command with a bound venue order, a positive
+confirmed REST/WS_USER trade fact, and a missing positive same-token canonical
+position, command-bound fill event, or positive command execution fact. It does
+not treat a fully projected terminal command as unresolved. Current-capital
+priority is bounded to the first hour after the confirmed fill (sixty ordinary
+recovery cadences); older repair debt remains in the background lane and cannot
+turn prior garbage into a permanent live-entry monopoly.
+
+SCOPE is the exact terminal ENTRY command whose authenticated positive fill is
+not completely projected. DRAIN is the next scheduled command-recovery turn,
+which receives the existing current-capital handoff and runs the existing
+filled-entry projection repair. RESET requires all three command-bound
+authorities: positive open `position_current`, `ENTRY_ORDER_FILLED`, and
+positive `execution_fact`; command status or elapsed time alone cannot reset
+the projection, while elapsed time only demotes stale debt from capital-priority
+to background recovery. Acceptance requires a missing-projection blocker antibody, its
+full-projection reset twin, the focused command-recovery suite, live deployment,
+and canonical convergence of the observed Mexico fill.
+
+Allowed files for this hot-fix are `src/execution/command_recovery.py`,
+`tests/test_command_recovery.py`, and this plan.

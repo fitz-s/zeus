@@ -1374,6 +1374,7 @@ def _trades_preflight(
     blockers: list[dict[str, Any]] = []
     details: dict[str, Any] = {
         "active_position_attribution_count": 0,
+        "attribution_retired_closure_refs": 0,
         "nonterminal_command_total": 0,
         "nonterminal_command_attributed": 0,
         "nonterminal_command_unresolved": 0,
@@ -1421,6 +1422,28 @@ def _trades_preflight(
                 "kind": "retired_closure_referenced_by_current_position",
                 "count": len(active_refs),
                 "sample": active_refs[:25],
+            }
+        )
+    attribution_rows = conn.execute(
+        """
+        SELECT pda.attribution_id, pda.position_id, pda.command_id,
+               pda.decision_certificate_hash, pda.resolution
+          FROM trades.position_decision_attribution pda
+          JOIN temp.single_live_retired_closure retired
+            ON lower(retired.certificate_hash) = lower(pda.decision_certificate_hash)
+         WHERE pda.decision_certificate_hash IS NOT NULL
+           AND trim(pda.decision_certificate_hash) != ''
+        """
+    ).fetchall()
+    attribution_refs = [dict(row) for row in attribution_rows]
+    details["attribution_retired_closure_refs"] = len(attribution_refs)
+    details["attribution_retired_closure_sample"] = attribution_refs[:25]
+    if attribution_refs:
+        blockers.append(
+            {
+                "kind": "retired_closure_referenced_by_attribution",
+                "count": len(attribution_refs),
+                "sample": attribution_refs[:25],
             }
         )
     duplicate_command_rows = [
@@ -1855,6 +1878,34 @@ def _saved_decision_indexes(conn: sqlite3.Connection) -> list[str]:
 
 
 def _rebuild_world_decision_graph(conn: sqlite3.Connection) -> None:
+    try:
+        has_trade_attribution_authority = _schema_table_exists(
+            conn, "trades", "position_decision_attribution"
+        )
+    except sqlite3.Error:
+        has_trade_attribution_authority = False
+    if not has_trade_attribution_authority:
+        raise RuntimeError(
+            "certificate retention requires attached trades.position_decision_attribution authority"
+        )
+    referenced = conn.execute(
+        """
+        SELECT pda.attribution_id, pda.position_id, pda.command_id,
+               pda.decision_certificate_hash
+          FROM trades.position_decision_attribution pda
+          JOIN temp.single_live_retired_closure retired
+            ON lower(retired.certificate_hash) = lower(pda.decision_certificate_hash)
+         WHERE pda.decision_certificate_hash IS NOT NULL
+           AND trim(pda.decision_certificate_hash) != ''
+         LIMIT 25
+        """
+    ).fetchall()
+    if referenced:
+        raise RuntimeError(
+            "certificate retention refused: retired closure remains referenced by "
+            "trades.position_decision_attribution: "
+            + json.dumps([dict(row) for row in referenced], sort_keys=True)
+        )
     index_sql = _saved_decision_indexes(conn)
     cols = ", ".join(quote_identifier(column) for column in DECISION_COLUMNS)
     conn.execute(DECISION_LIVE_DDL)
@@ -2105,6 +2156,7 @@ def migrate_world_decision_graph(
     try:
         if int(conn.execute("PRAGMA foreign_keys").fetchone()[0]) != 1:
             raise RuntimeError("foreign_keys must remain ON")
+        conn.execute("ATTACH DATABASE ? AS trades", (f"file:{trades_path}?mode=ro",))
         conn.execute("BEGIN IMMEDIATE")
         try:
             restore_query_only = _materialize_retired_closure(conn)

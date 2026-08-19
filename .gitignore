@@ -88,6 +88,7 @@ nohup.out
 *.db.aborted-*
 *.db.pre-rebuild-*
 *.db.pre-migration-*
+*.db.cutover-lease
 
 # Orphan SQLite sidecars at repo root (should never exist).
 /zeus-world.db-shm
@@ -129,14 +130,7 @@ state/zeus-world.db.pre-p*-*
 /raw/*
 !/raw/AGENTS.md
 !/raw/README.md
-/51 source data/raw/
-/51 source data/tmp/
-/51 source data/.DS_Store
-/51 source data/docs/.DS_Store
-/51 source data/scripts/.DS_Store
-/51 source data/scripts/__pycache__/
-/51 source data/scripts/.omc/
-/51 source data/scripts/*.bak*
+/51 source data/
 raw/**/*.jsonl
 raw/**/*.csv
 raw/**/*.tsv
@@ -276,3 +270,13 @@ evidence/topology_v_next_shadow/archive/*.jsonl.gz
 .local/
 .ai-bridge/
 .agents/skills.disabled/
+# Codex CLI local config — leaks operator-local absolute paths (untracked 2026-07-28)
+.codex/
+
+# Root-local generated agent/runtime scratch.
+/.codegraph/
+/-
+/=
+/:memory:.cutover-lease
+/docs/evidence/
+/docs/rebuild/

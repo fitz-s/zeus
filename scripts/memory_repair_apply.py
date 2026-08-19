@@ -12,7 +12,8 @@ slug + manual-review recommendation. Empty audit (baseline=0) exits 0.
 Paths are derived to be portable:
 - ZEUS_ROOT: derived from __file__ (script lives at <zeus>/scripts/memory_repair_apply.py).
 - MEMORY_DIR: --memory-dir CLI arg → ZEUS_MEMORY_DIR env var → default
-  (~/.claude/projects/-Users-leofitz--openclaw-workspace-venus-zeus/memory).
+  (~/.claude/projects/-Users-<username>--openclaw-workspace-venus-zeus/memory,
+  where <username> is derived from Path.home() rather than baked in).
 """
 # Created: 2026-05-16
 # Last reused or audited: 2026-05-16
@@ -24,7 +25,9 @@ from pathlib import Path
 
 ZEUS_ROOT = Path(__file__).resolve().parents[1]
 
-_DEFAULT_MEMORY_BASE = Path.home() / ".claude/projects/-Users-leofitz--openclaw-workspace-venus-zeus"
+_DEFAULT_MEMORY_BASE = Path.home() / (
+    f".claude/projects/-Users-{Path.home().name}--openclaw-workspace-venus-zeus"
+)
 
 
 def _resolve_memory_dir(cli_arg: str | None) -> Path:
@@ -142,7 +145,7 @@ def main() -> None:
                     help="Specific memory_audit_*.md (default: latest by mtime)")
     ap.add_argument("--memory-dir", metavar="PATH",
                     help="MEMORY directory containing feedback_*.md (default: $ZEUS_MEMORY_DIR or "
-                         "~/.claude/projects/-Users-leofitz--openclaw-workspace-venus-zeus/memory)")
+                         "~/.claude/projects/-Users-<username>--openclaw-workspace-venus-zeus/memory)")
     args = ap.parse_args()
 
     global MEMORY_DIR, _BASE

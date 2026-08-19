@@ -11,6 +11,9 @@ from decimal import Decimal
 from enum import Enum
 from typing import Any, Mapping
 
+from src.contracts.global_auction_receipt import GlobalAuctionReceiptRef
+from src.contracts.strategy_capital_allocation import STRATEGY_LOG_UTILITY_BASIS
+
 CANONICALIZATION_VERSION = "decision-kernel-json-v1"
 _EXPECTED_IDENTITY_UNSET = object()
 
@@ -87,6 +90,8 @@ _QKERNEL_CURRENT_STATE_IDENTITY_FIELDS: tuple[str, ...] = (
     "robust_trade_score",
     "false_edge_rate",
     "global_actuation_identity",
+    "global_winner_event_id",
+    "global_auction_receipt",
     "global_optimum_semantics",
     "global_candidate_id",
     "global_execution_mode",
@@ -110,6 +115,10 @@ _QKERNEL_CURRENT_STATE_IDENTITY_FIELDS: tuple[str, ...] = (
     "global_jit_book_snapshot_id",
     "global_jit_execution_curve_identity",
     "global_target_shares",
+    "global_current_token_shares",
+    "global_full_kelly_target_shares",
+    "global_fractional_kelly_target_shares",
+    "global_buy_sizing_mode",
     "global_expected_cost_usd",
     "global_limit_price",
     "global_expected_fill_price_before_fee",
@@ -120,6 +129,15 @@ _QKERNEL_CURRENT_STATE_IDENTITY_FIELDS: tuple[str, ...] = (
     "global_expected_delta_log_wealth",
     "global_expected_ev_usd",
     "global_expected_capital_efficiency",
+    "global_ruin_probability_reduction",
+    "global_terminal_ruin_probability_reduction",
+    "global_utility_basis",
+    "global_proposal_expected_delta_log_wealth",
+    "global_proposal_expected_ev_usd",
+    "global_proposal_expected_log_growth_per_hour",
+    "global_proposal_expected_capital_efficiency",
+    "global_proposal_capital_lock_hours",
+    "global_proposal_fill_semantics",
     "global_robust_delta_log_wealth",
     "global_robust_ev_usd",
     "global_capital_efficiency",
@@ -159,15 +177,41 @@ _QKERNEL_BUY_FAK_PREFIX_IDENTITY_FIELDS: tuple[str, ...] = (
     "global_buy_fak_full_robust_ev_usd",
 )
 
+_QKERNEL_MAKER_REST_IDENTITY_FIELDS: tuple[str, ...] = (
+    "global_fill_probability",
+    "global_fill_probability_source",
+    "global_rest_deadline_minutes",
+    "global_maker_fill_witness",
+)
+
+_QKERNEL_GLOBAL_CURRENT_STATE_MARKERS: tuple[str, ...] = (
+    "global_actuation_identity",
+    "global_candidate_id",
+    "global_target_shares",
+    "global_expected_cost_usd",
+    "global_max_spend_usd",
+    "global_robust_delta_log_wealth",
+    "global_robust_ev_usd",
+)
+
+
+def _declares_global_current_state(economics: Mapping[str, Any]) -> bool:
+    return any(field in economics for field in _QKERNEL_GLOBAL_CURRENT_STATE_MARKERS)
+
 
 def qkernel_current_state_identity_hash(economics: Mapping[str, Any]) -> str:
     """Recomputable identity for the current-posterior execution certificate."""
 
     fields = _QKERNEL_CURRENT_STATE_IDENTITY_FIELDS
-    if "global_execution_mode" not in economics:
+    if (
+        "global_execution_mode" not in economics
+        and not _declares_global_current_state(economics)
+    ):
         fields = tuple(
             field for field in fields if field != "global_execution_mode"
         )
+    elif economics.get("global_execution_mode") == "MAKER_REST":
+        fields += _QKERNEL_MAKER_REST_IDENTITY_FIELDS
     if "global_buy_fak_prefix_semantics" in economics:
         fields += _QKERNEL_BUY_FAK_PREFIX_IDENTITY_FIELDS
     return stable_hash(
@@ -196,6 +240,10 @@ def qkernel_current_state_rejection_reason(economics: Any) -> str | None:
 
     if not isinstance(economics, Mapping):
         return "payload_not_mapping"
+    if _declares_global_current_state(economics) and economics.get(
+        "global_execution_mode"
+    ) not in {"TAKER_LIMIT", "MAKER_REST"}:
+        return "global_execution_mode"
     band_basis = "CURRENT_POSTERIOR_BAND"
     selection_bases = {
         band_basis,
@@ -275,6 +323,20 @@ def qkernel_global_current_state_rejection_reason(
     assert isinstance(economics, Mapping)
     if not str(economics.get("global_actuation_identity") or "").strip():
         return "global_actuation_identity"
+    try:
+        receipt_ref = GlobalAuctionReceiptRef.from_payload(
+            economics.get("global_auction_receipt")
+        )
+        receipt_ref.assert_matches_actuation(
+            winner_event_id=economics.get("global_winner_event_id"),
+            winner_candidate_id=economics.get("global_candidate_id"),
+            winner_actuation_identity=economics.get("global_actuation_identity"),
+            selection_epoch_identity=economics.get(
+                "global_selection_epoch_identity"
+            ),
+        )
+    except ValueError:
+        return "global_auction_receipt"
     side = str(economics.get("side") or "").strip().upper()
     direction_text = str(direction or "").strip().lower()
     native_side = (
@@ -351,6 +413,7 @@ def qkernel_global_current_state_rejection_reason(
             return "global_posterior_id_mismatch"
     for field in (
         "global_candidate_id",
+        "global_winner_event_id",
         "global_bin_id",
         "global_economic_identity",
         "global_universe_witness_identity",
@@ -370,20 +433,95 @@ def qkernel_global_current_state_rejection_reason(
             return field
     if economics.get("global_optimum_semantics") != "CUT_TIME_GLOBAL_OPTIMUM":
         return "global_optimum_semantics"
-    if (
-        "global_execution_mode" in economics
-        and economics.get("global_execution_mode") != "TAKER_LIMIT"
-    ):
+    execution_mode = economics.get("global_execution_mode")
+    if execution_mode is not None and execution_mode not in {
+        "TAKER_LIMIT",
+        "MAKER_REST",
+    }:
         return "global_execution_mode"
+    if economics.get("global_utility_basis") != STRATEGY_LOG_UTILITY_BASIS:
+        return "global_utility_basis"
+    try:
+        ruin_reduction = float(
+            economics.get("global_ruin_probability_reduction")
+        )
+        terminal_ruin_reduction = float(
+            economics.get("global_terminal_ruin_probability_reduction")
+        )
+        proposal_du = float(
+            economics.get("global_proposal_expected_delta_log_wealth")
+        )
+        proposal_ev = float(economics.get("global_proposal_expected_ev_usd"))
+        proposal_lock = float(
+            economics.get("global_proposal_capital_lock_hours")
+        )
+        proposal_rate = float(
+            economics.get("global_proposal_expected_log_growth_per_hour")
+        )
+        proposal_efficiency = float(
+            economics.get("global_proposal_expected_capital_efficiency")
+        )
+    except (TypeError, ValueError):
+        return "global_expected_growth_invalid"
+    if not all(
+        math.isfinite(value)
+        for value in (
+            ruin_reduction,
+            terminal_ruin_reduction,
+            proposal_du,
+            proposal_ev,
+            proposal_lock,
+            proposal_rate,
+            proposal_efficiency,
+        )
+    ):
+        return "global_expected_growth_non_finite"
+    if (
+        not 0.0 <= ruin_reduction <= 1.0
+        or not 0.0 <= terminal_ruin_reduction <= 1.0
+        or ruin_reduction != terminal_ruin_reduction
+        or proposal_lock <= 0.0
+        or proposal_rate != proposal_du / proposal_lock
+    ):
+        return "global_expected_growth_identity"
+    if direction_text.startswith("buy_") and ruin_reduction != 0.0:
+        return "global_buy_ruin_probability_reduction"
+    if (
+        execution_mode == "TAKER_LIMIT"
+        and economics.get("global_proposal_fill_semantics") != "IMMEDIATE_FILL"
+    ):
+        return "global_proposal_fill_semantics"
+    if execution_mode == "MAKER_REST":
+        return _qkernel_global_maker_rest_rejection_reason(
+            economics,
+            direction=direction,
+        )
     functional = str(
         economics.get("global_probability_functional")
         or "LOWER_CVAR_PARAMETER_DRAWS"
     ).strip()
     if functional == "POSTERIOR_PREDICTIVE_MEAN":
-        return _qkernel_global_mean_buy_rejection_reason(
+        mean_reason = _qkernel_global_mean_buy_rejection_reason(
             economics,
             direction=direction,
         )
+        if mean_reason is not None:
+            return mean_reason
+        try:
+            mean_du = float(economics.get("global_expected_delta_log_wealth"))
+            mean_ev = float(economics.get("global_expected_ev_usd"))
+            mean_efficiency = float(
+                economics.get("global_expected_capital_efficiency")
+            )
+        except (TypeError, ValueError):
+            return "global_mean_proposal_identity"
+        if not (
+            proposal_du == mean_du
+            and proposal_ev == mean_ev
+            and proposal_efficiency == mean_efficiency
+        ):
+            return "global_mean_proposal_identity"
+        return None
     if functional != "LOWER_CVAR_PARAMETER_DRAWS":
         return "global_probability_functional"
     numeric: dict[str, float] = {}
@@ -524,6 +662,308 @@ def qkernel_global_current_state_rejection_reason(
         )
         if prefix_reason is not None:
             return f"global_buy_fak:{prefix_reason}"
+    return None
+
+
+def _maker_fill_parts_hash(*parts: str) -> str:
+    digest = hashlib.sha256()
+    for part in parts:
+        digest.update(part.encode())
+        digest.update(b"\x1f")
+    return digest.hexdigest()
+
+
+def _maker_fill_timestamp(value: object) -> datetime | None:
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        return None
+    return parsed.astimezone(timezone.utc)
+
+
+def _qkernel_global_maker_rest_rejection_reason(
+    economics: Mapping[str, Any],
+    *,
+    direction: str | None,
+) -> str | None:
+    """Recompute the candidate-bound partial-fill witness and maker objective."""
+
+    payload = economics.get("global_maker_fill_witness")
+    if not isinstance(payload, Mapping):
+        return "CURRENT_MAKER_FILL_WITNESS_UNAVAILABLE"
+    required_fields = {
+        "schema_version",
+        "witness_identity",
+        "candidate_binding_identity",
+        "action",
+        "ledger_snapshot_id",
+        "position_id",
+        "held_shares",
+        "asset_epoch_identity",
+        "proposal_identity",
+        "book_snapshot_id",
+        "book_hash",
+        "limit_price",
+        "rest_deadline_minutes",
+        "source_identity",
+        "model_identity",
+        "sample_identity",
+        "training_cutoff_at_utc",
+        "issued_at_utc",
+        "valid_until_at_utc",
+        "validated_at_utc",
+        "outcomes",
+    }
+    if set(payload) != required_fields or payload.get("schema_version") != 1:
+        return "CURRENT_MAKER_FILL_WITNESS_SHAPE_INVALID"
+    text_fields = (
+        "witness_identity",
+        "candidate_binding_identity",
+        "action",
+        "ledger_snapshot_id",
+        "asset_epoch_identity",
+        "proposal_identity",
+        "book_snapshot_id",
+        "book_hash",
+        "source_identity",
+        "model_identity",
+        "sample_identity",
+    )
+    if any(not str(payload.get(field) or "").strip() for field in text_fields):
+        return "CURRENT_MAKER_FILL_WITNESS_SHAPE_INVALID"
+    action = str(payload["action"]).strip().upper()
+    direction_text = str(direction or "").strip().lower()
+    if action != "BUY" or (direction_text and not direction_text.startswith("buy_")):
+        return "CURRENT_MAKER_FILL_WITNESS_ACTION_INVALID"
+    try:
+        limit_price = Decimal(str(payload["limit_price"]))
+        rest_deadline = float(payload["rest_deadline_minutes"])
+        outer_limit = Decimal(str(economics.get("global_limit_price")))
+        outer_cost = Decimal(str(economics.get("cost")))
+        outer_fill_probability = float(economics.get("global_fill_probability"))
+        outer_rest_deadline = float(
+            economics.get("global_rest_deadline_minutes")
+        )
+    except (ArithmeticError, TypeError, ValueError):
+        return "CURRENT_MAKER_FILL_WITNESS_NUMERIC_INVALID"
+    if (
+        not all(value.is_finite() for value in (limit_price, outer_limit, outer_cost))
+        or not Decimal("0.05") <= limit_price <= Decimal("0.95")
+        or limit_price != outer_limit
+        or limit_price != outer_cost
+        or not math.isfinite(rest_deadline)
+        or rest_deadline <= 0.0
+        or not math.isclose(
+            rest_deadline,
+            outer_rest_deadline,
+            rel_tol=0.0,
+            abs_tol=1e-12,
+        )
+        or not math.isfinite(outer_fill_probability)
+    ):
+        return "CURRENT_MAKER_FILL_WITNESS_NUMERIC_INVALID"
+    timestamps = {
+        field: _maker_fill_timestamp(payload.get(field))
+        for field in (
+            "training_cutoff_at_utc",
+            "issued_at_utc",
+            "valid_until_at_utc",
+            "validated_at_utc",
+        )
+    }
+    selection_decision_at = _maker_fill_timestamp(
+        economics.get("global_selection_decision_at")
+    )
+    if any(value is None for value in timestamps.values()) or selection_decision_at is None:
+        return "CURRENT_MAKER_FILL_WITNESS_TEMPORAL_INVALID"
+    training_at = timestamps["training_cutoff_at_utc"]
+    issued_at = timestamps["issued_at_utc"]
+    valid_until = timestamps["valid_until_at_utc"]
+    validated_at = timestamps["validated_at_utc"]
+    assert training_at is not None
+    assert issued_at is not None
+    assert valid_until is not None
+    assert validated_at is not None
+    if not (
+        training_at <= issued_at <= selection_decision_at <= validated_at <= valid_until
+    ):
+        return "CURRENT_MAKER_FILL_WITNESS_TEMPORAL_INVALID"
+    for witness_field, economics_field in (
+        ("book_snapshot_id", "global_jit_book_snapshot_id"),
+        ("book_hash", "global_jit_venue_book_hash"),
+    ):
+        if str(payload[witness_field]) != str(economics.get(economics_field) or ""):
+            return "CURRENT_MAKER_FILL_WITNESS_BOOK_MISMATCH"
+    witness_identity = str(payload["witness_identity"])
+    if witness_identity != str(
+        economics.get("global_fill_probability_source") or ""
+    ):
+        return "CURRENT_MAKER_FILL_WITNESS_SOURCE_MISMATCH"
+    candidate_fields = (
+        "global_family_key",
+        "global_bin_id",
+        "global_condition_id",
+        "side",
+        "global_token_id",
+    )
+    if any(not str(economics.get(field) or "").strip() for field in candidate_fields):
+        return "CURRENT_MAKER_FILL_WITNESS_BINDING_INVALID"
+    expected_binding = _maker_fill_parts_hash(
+        "CURRENT_MAKER_FILL_V1",
+        action,
+        str(economics["global_family_key"]),
+        str(economics["global_bin_id"]),
+        str(economics["global_condition_id"]),
+        str(economics["side"]),
+        str(economics["global_token_id"]),
+        str(payload["ledger_snapshot_id"]),
+        str(payload.get("position_id") or ""),
+        str(payload.get("held_shares") or ""),
+        str(payload["asset_epoch_identity"]),
+        str(payload["proposal_identity"]),
+    )
+    if str(payload["candidate_binding_identity"]) != expected_binding:
+        return "CURRENT_MAKER_FILL_WITNESS_BINDING_INVALID"
+    raw_outcomes = payload.get("outcomes")
+    if not isinstance(raw_outcomes, list) or not raw_outcomes:
+        return "CURRENT_MAKER_FILL_WITNESS_OUTCOMES_INVALID"
+    outcomes: list[tuple[Decimal, Decimal, Decimal]] = []
+    for raw in raw_outcomes:
+        if not isinstance(raw, Mapping) or set(raw) != {
+            "probability",
+            "fill_fraction",
+            "proceeds_per_share_usd",
+        }:
+            return "CURRENT_MAKER_FILL_WITNESS_OUTCOMES_INVALID"
+        try:
+            probability = Decimal(str(raw["probability"]))
+            fraction = Decimal(str(raw["fill_fraction"]))
+            proceeds = Decimal(str(raw["proceeds_per_share_usd"]))
+        except (ArithmeticError, TypeError, ValueError):
+            return "CURRENT_MAKER_FILL_WITNESS_OUTCOMES_INVALID"
+        if (
+            not all(value.is_finite() for value in (probability, fraction, proceeds))
+            or probability <= 0
+            or not Decimal("0") <= fraction <= Decimal("1")
+            or (fraction == 0 and proceeds != 0)
+            or (fraction > 0 and proceeds != -limit_price)
+        ):
+            return "CURRENT_MAKER_FILL_WITNESS_OUTCOMES_INVALID"
+        outcomes.append((probability, fraction, proceeds))
+    probability_total = sum((row[0] for row in outcomes), Decimal("0"))
+    fill_probability = sum(
+        (row[0] for row in outcomes if row[1] > 0),
+        Decimal("0"),
+    )
+    expected_fill_fraction = sum(
+        (row[0] * row[1] for row in outcomes),
+        Decimal("0"),
+    )
+    if (
+        probability_total != Decimal("1")
+        or expected_fill_fraction <= 0
+        or not math.isclose(
+            float(fill_probability),
+            outer_fill_probability,
+            rel_tol=0.0,
+            abs_tol=1e-12,
+        )
+    ):
+        return "CURRENT_MAKER_FILL_WITNESS_OUTCOMES_INVALID"
+    identity_rows = tuple(
+        sorted("\x1e".join(str(value) for value in row) for row in outcomes)
+    )
+    expected_witness_identity = _maker_fill_parts_hash(
+        "CURRENT_MAKER_FILL_V2",
+        str(payload["candidate_binding_identity"]),
+        str(payload["asset_epoch_identity"]),
+        str(payload["book_snapshot_id"]),
+        str(payload["book_hash"]),
+        str(limit_price),
+        repr(rest_deadline),
+        str(payload["source_identity"]),
+        str(payload["model_identity"]),
+        str(payload["sample_identity"]),
+        training_at.isoformat(),
+        issued_at.isoformat(),
+        valid_until.isoformat(),
+        *identity_rows,
+    )
+    if witness_identity != expected_witness_identity:
+        return "CURRENT_MAKER_FILL_WITNESS_IDENTITY_MISMATCH"
+    if economics.get("global_probability_functional") != (
+        "POSTERIOR_PREDICTIVE_MEAN"
+    ):
+        return "CURRENT_MAKER_FILL_WITNESS_PROBABILITY_FUNCTIONAL_INVALID"
+    mean_reason = _qkernel_global_mean_buy_rejection_reason(
+        economics,
+        direction=direction,
+    )
+    if mean_reason is not None:
+        return f"CURRENT_MAKER_FILL_WITNESS_MEAN_ECONOMICS:{mean_reason}"
+    if economics.get("global_proposal_fill_semantics") != (
+        "FILL_WEIGHTED_ZERO_CONTINUATION_LOWER_BOUND"
+    ):
+        return "CURRENT_MAKER_FILL_WITNESS_FILL_SEMANTICS_INVALID"
+    try:
+        shares = float(economics["global_target_shares"])
+        win_probability = float(economics["global_terminal_win_probability_mean"])
+        loss_probability = float(economics["global_terminal_loss_probability_mean"])
+        full_loss_payoff = float(economics["global_terminal_loss_payoff_usd"])
+        full_win_payoff = float(economics["global_terminal_win_payoff_usd"])
+        wealth_after_loss = float(economics["global_terminal_wealth_after_loss_usd"])
+        wealth_after_win = float(economics["global_terminal_wealth_after_win_usd"])
+        proposal_du = float(economics["global_proposal_expected_delta_log_wealth"])
+        proposal_ev = float(economics["global_proposal_expected_ev_usd"])
+        proposal_efficiency = float(
+            economics["global_proposal_expected_capital_efficiency"]
+        )
+        proposal_lock = float(economics["global_proposal_capital_lock_hours"])
+        proposal_rate = float(
+            economics["global_proposal_expected_log_growth_per_hour"]
+        )
+    except (KeyError, TypeError, ValueError):
+        return "CURRENT_MAKER_FILL_WITNESS_EXPECTED_GROWTH_INVALID"
+    loss_base = wealth_after_loss - full_loss_payoff
+    win_base = wealth_after_win - full_win_payoff
+    expected_du = 0.0
+    expected_ev = 0.0
+    expected_spend = 0.0
+    for probability, fraction, proceeds_per_share in outcomes:
+        filled = shares * float(fraction)
+        proceeds = filled * float(proceeds_per_share)
+        loss_after = loss_base + proceeds
+        win_after = win_base + filled + proceeds
+        if min(loss_after, win_after, loss_base, win_base) <= 0.0:
+            return "CURRENT_MAKER_FILL_WITNESS_EXPECTED_GROWTH_INVALID"
+        weight = float(probability)
+        expected_du += weight * (
+            loss_probability * math.log(loss_after / loss_base)
+            + win_probability * math.log(win_after / win_base)
+        )
+        expected_ev += weight * (win_probability * filled + proceeds)
+        expected_spend += weight * (-proceeds)
+    if not (
+        expected_spend > 0.0
+        and proposal_lock > 0.0
+        and math.isclose(proposal_du, expected_du, rel_tol=0.0, abs_tol=1e-12)
+        and math.isclose(proposal_ev, expected_ev, rel_tol=0.0, abs_tol=1e-12)
+        and math.isclose(
+            proposal_efficiency,
+            expected_du / expected_spend,
+            rel_tol=0.0,
+            abs_tol=1e-12,
+        )
+        and math.isclose(
+            proposal_rate,
+            proposal_du / proposal_lock,
+            rel_tol=0.0,
+            abs_tol=1e-12,
+        )
+    ):
+        return "CURRENT_MAKER_FILL_WITNESS_EXPECTED_GROWTH_INVALID"
     return None
 
 

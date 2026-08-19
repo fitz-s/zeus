@@ -33,8 +33,7 @@
 # live DBs. Coverage is reported honestly; gaps are dropped with a reason, never filled.
 """Settlement-graded after-cost EV of the rebuilt q-kernel spine's SELECTED trades.
 
-Run:  /Users/leofitz/zeus/.venv/bin/python \
-        .claude/worktrees/qkernel-rebuild/scripts/qkernel_settlement_graded_ev.py
+Run:  .venv/bin/python scripts/qkernel_settlement_graded_ev.py
 
 Writes docs/rebuild/settlement_graded_ev_2026-06-15.md and prints the headline numbers.
 """
@@ -60,7 +59,13 @@ if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
 # --- live DBs: ALWAYS the main tree (worktree ships only stubs) -------------
-_LIVE_STATE = "/Users/leofitz/zeus/state"
+# ZEUS_MAIN_TREE overrides; default is ~/zeus, the operator's standard layout.
+# expanduser() so ZEUS_MAIN_TREE=~/zeus (the shell does NOT expand '~' inside
+# os.environ.get) resolves correctly instead of leaving a literal '~' segment.
+_LIVE_STATE = os.path.join(
+    os.path.expanduser(os.environ.get("ZEUS_MAIN_TREE") or "~/zeus"),
+    "state",
+)
 FORECASTS_DB = os.path.join(_LIVE_STATE, "zeus-forecasts.db")
 TRADES_DB = os.path.join(_LIVE_STATE, "zeus_trades.db")
 WORLD_DB = os.path.join(_LIVE_STATE, "zeus-world.db")

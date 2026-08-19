@@ -29,6 +29,12 @@ _AUTHORITATIVE_ISSUE_TIERS: frozenset[str] = frozenset(
     {"DERIVED_FROM_DISSEMINATION", "FETCH_TIME", "RECORDED"}
 )
 
+BLOCK_LIVE_PARTIAL_POLICY = "BLOCK_LIVE"
+TARGET_WINDOW_COMPLETE_PARTIAL_POLICY = "TARGET_WINDOW_COMPLETE_REQUIRED"
+_PARTIAL_POLICIES = frozenset(
+    {BLOCK_LIVE_PARTIAL_POLICY, TARGET_WINDOW_COMPLETE_PARTIAL_POLICY}
+)
+
 
 class FetchDecision(str, Enum):
     FETCH_ALLOWED = "FETCH_ALLOWED"
@@ -175,6 +181,13 @@ def _parse_entry(raw_entry: object) -> ReleaseCalendarEntry:
             ),
         )
 
+    partial_policy = _require_str(entry, "partial_policy")
+    if partial_policy not in _PARTIAL_POLICIES:
+        raise ValueError(
+            "release calendar entry partial_policy must be one of "
+            f"{sorted(_PARTIAL_POLICIES)!r}"
+        )
+
     return ReleaseCalendarEntry(
         calendar_id=_require_str(entry, "calendar_id"),
         source_id=_require_str(entry, "source_id"),
@@ -190,7 +203,7 @@ def _parse_entry(raw_entry: object) -> ReleaseCalendarEntry:
         period_semantics=entry.get("period_semantics") if isinstance(entry.get("period_semantics"), str) else None,
         expected_members=entry.get("expected_members") if isinstance(entry.get("expected_members"), int) else None,
         expected_step_rule=entry.get("expected_step_rule") if isinstance(entry.get("expected_step_rule"), str) else None,
-        partial_policy=_require_str(entry, "partial_policy"),
+        partial_policy=partial_policy,
         live_authorization=bool(entry.get("live_authorization", False)),
         authority_tier=_require_str(entry, "authority_tier"),
         backfill_only=bool(entry.get("backfill_only", False)),
@@ -324,7 +337,8 @@ def evaluate_safe_fetch(
         }
 
     full_safe_fetch_at = cycle_utc + timedelta(minutes=profile.default_lag_minutes)
-    if allow_partial and now < full_safe_fetch_at and entry.partial_policy == "BLOCK_LIVE":
+    partial_window = allow_partial and now < full_safe_fetch_at
+    if partial_window and entry.partial_policy == BLOCK_LIVE_PARTIAL_POLICY:
         return FetchDecision.PARTIAL_EXPECTED_RETRY, {
             "reason": "partial fetch window reached but live policy blocks partial data",
             "next_safe_fetch_at": full_safe_fetch_at,
@@ -333,6 +347,12 @@ def evaluate_safe_fetch(
             "authority_tier": entry.authority_tier,
         }
 
+    target_window_live_authorization = (
+        partial_window
+        and entry.partial_policy == TARGET_WINDOW_COMPLETE_PARTIAL_POLICY
+        and entry.live_authorization
+        and profile.live_authorization
+    )
     return FetchDecision.FETCH_ALLOWED, {
         "reason": "source cycle is past safe-fetch lag",
         "next_safe_fetch_at": next_safe_fetch_at,
@@ -341,7 +361,14 @@ def evaluate_safe_fetch(
         "authority_tier": entry.authority_tier,
         "entry_live_authorization": entry.live_authorization,
         "profile_live_authorization": profile.live_authorization,
-        "live_authorization": entry.live_authorization and profile.live_authorization,
+        "live_authorization": (
+            entry.live_authorization
+            and profile.live_authorization
+            and not partial_window
+        ),
+        "target_window_live_authorization": target_window_live_authorization,
+        "partial_window": partial_window,
+        "partial_policy": entry.partial_policy,
         "horizon_profile": profile.horizon_profile,
         "live_max_step_hours": profile.live_max_step_hours,
     }
@@ -354,6 +381,7 @@ def select_source_run_for_target_horizon(
     track: str,
     required_max_step_hours: int,
     cycle_policy: str = "latest_complete_full_horizon",
+    allow_partial: bool = False,
     path: Path = DEFAULT_CALENDAR_PATH,
 ) -> tuple[FetchDecision, dict[str, object]]:
     if cycle_policy != "latest_complete_full_horizon":
@@ -397,6 +425,7 @@ def select_source_run_for_target_horizon(
             cycle_time,
             now,
             required_max_step_hours=required_max_step_hours,
+            allow_partial=allow_partial,
             path=path,
         )
         metadata["selected_cycle_time"] = cycle_time
@@ -410,6 +439,7 @@ def select_source_run_for_target_horizon(
             cycle_time,
             now,
             required_max_step_hours=required_max_step_hours,
+            allow_partial=allow_partial,
             path=path,
         )
         metadata["selected_cycle_time"] = cycle_time

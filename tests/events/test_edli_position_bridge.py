@@ -1,6 +1,6 @@
 # Created: 2026-06-01
-# Lifecycle: created=2026-06-01; last_reviewed=2026-07-23; last_reused=2026-07-23
-# Last reused or audited: 2026-07-23
+# Lifecycle: created=2026-06-01; last_reviewed=2026-07-30; last_reused=2026-07-30
+# Last reused or audited: 2026-07-30
 # Authority basis: DEFECT-1 capital-recoverability bridge. An EDLI FILL_CONFIRMED
 #   must materialise a canonical position_current row (the seam audited as
 #   missing), idempotently, chain-reconcilable by token, summing partial fills.
@@ -1884,18 +1884,24 @@ def test_durable_fill_bridge_repairs_command_linked_short_position_projection(co
     assert repaired["entry_ci_width"] == pytest.approx(2.0 * (0.1507234 - 0.1374248))
 
 
-def test_bridge_resolves_locked_day0_buy_no_to_settlement_capture(conn):
-    aggregate_id = "agg-edli-day0-buyno-1"
+@pytest.mark.parametrize(
+    ("direction", "token_id", "outcome_label"),
+    (("buy_no", ELECTED_NO_TOKEN, "NO"), ("buy_yes", ELECTED_YES_TOKEN, "YES")),
+)
+def test_bridge_preserves_locked_day0_capture_through_runtime_projection(
+    conn, direction, token_id, outcome_label
+):
+    aggregate_id = f"agg-edli-day0-{direction}-locked"
     pre_submit = {
         "event_id": EVENT_ID,
         "event_type": "DAY0_EXTREME_UPDATED",
         "final_intent_id": FINAL_INTENT_ID,
         "condition_id": CONDITION_ID,
-        "token_id": ELECTED_NO_TOKEN,
+        "token_id": token_id,
         "side": "BUY",
-        "direction": "buy_no",
-        "native_token_side": "NO",
-        "outcome_label": "NO",
+        "direction": direction,
+        "native_token_side": outcome_label,
+        "outcome_label": outcome_label,
         "city": "Shanghai",
         "target_date": "2026-06-02",
         "bin_label": "30-32",
@@ -1935,7 +1941,17 @@ def test_bridge_resolves_locked_day0_buy_no_to_settlement_capture(conn):
     assert result is not None
     row = _position_current_rows(conn)[0]
     assert row["strategy_key"] == "settlement_capture"
-    assert row["direction"] == "buy_no"
+    assert row["entry_method"] == EntryMethod.DAY0_OBSERVATION.value
+    assert row["direction"] == direction
+
+    from src.state.db import query_portfolio_loader_view
+    from src.state.portfolio import _position_from_projection_row
+
+    snapshot = query_portfolio_loader_view(conn)
+    assert snapshot["status"] in ("ok", "partial_stale")
+    position = _position_from_projection_row(dict(snapshot["positions"][0]), current_mode="live")
+    assert position.strategy_key == "settlement_capture"
+    assert position.entry_method == EntryMethod.DAY0_OBSERVATION.value
 
 
 def test_bridge_defaults_legacy_day0_buy_no_without_payoff_truth_to_nowcast():
@@ -1951,7 +1967,36 @@ def test_bridge_defaults_legacy_day0_buy_no_without_payoff_truth_to_nowcast():
     )
 
 
-def test_bridge_resolves_day0_buy_yes_to_day0_nowcast_entry(conn):
+def test_bridge_repairs_explicit_capture_without_locked_payoff_truth():
+    from src.events.edli_position_bridge import _resolve_strategy_key_from_pre_submit
+
+    assert (
+        _resolve_strategy_key_from_pre_submit(
+            {
+                "event_type": "DAY0_EXTREME_UPDATED",
+                "strategy_key": "settlement_capture",
+                "day0_payoff_truth": "unresolved",
+            },
+            direction="buy_no",
+            metric="high",
+        )
+        == "day0_nowcast_entry"
+    )
+    assert (
+        _resolve_strategy_key_from_pre_submit(
+            {
+                "event_type": "DAY0_EXTREME_UPDATED",
+                "strategy_key": "settlement_capture",
+                "day0_payoff_truth": "locked",
+            },
+            direction="buy_no",
+            metric="high",
+        )
+        == "settlement_capture"
+    )
+
+
+def test_bridge_preserves_unresolved_day0_nowcast_through_runtime_projection(conn):
     aggregate_id = "agg-edli-day0-buyyes-1"
     pre_submit = {
         "event_id": EVENT_ID,
@@ -1969,6 +2014,7 @@ def test_bridge_resolves_day0_buy_yes_to_day0_nowcast_entry(conn):
         "metric": "high",
         "unit": "C",
         "q_live": 0.9592408185,
+        "day0_payoff_truth": "unresolved",
         "executable_snapshot_id": "exec-snap-day0-yes",
         "qkernel_execution_economics": None,
         "source_match_status": "MATCH",
@@ -2014,6 +2060,13 @@ def test_bridge_resolves_day0_buy_yes_to_day0_nowcast_entry(conn):
     assert row["token_id"] == ELECTED_YES_TOKEN
     assert row["no_token_id"] in (None, "")
     assert row["p_posterior"] == pytest.approx(0.0)
+
+    from src.state.db import query_portfolio_loader_view
+    from src.state.portfolio import _position_from_projection_row
+
+    snapshot = query_portfolio_loader_view(conn)
+    position = _position_from_projection_row(dict(snapshot["positions"][0]), current_mode="live")
+    assert position.strategy_key == "day0_nowcast_entry"
 
 
 # --------------------------------------------------------------------------- #

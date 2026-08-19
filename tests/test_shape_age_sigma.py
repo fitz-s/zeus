@@ -303,6 +303,7 @@ def _shape(*, carrier=None, gamma=0.0):
         provider_values_c={"a": 10.0, "b": 10.6, "c": 12.0},
         provider_weights={"a": 0.4, "b": 0.4, "c": 0.2},
         center_c=10.5,
+        provider_cycles={"a": _CYCLE, "b": _CYCLE, "c": _CYCLE},
         carrier_cycle_time=carrier,
         shape_age_gamma_c2_per_6h=gamma,
     )

@@ -70,7 +70,10 @@ from src.contracts.ensemble_snapshot_provenance import (
     validate_members_unit,
 )
 from src.contracts.settlement_semantics import SettlementSemantics
-from src.contracts.snapshot_ingest_contract import validate_snapshot_contract
+from src.contracts.snapshot_ingest_contract import (
+    normalize_low_boundary_evidence,
+    validate_snapshot_contract,
+)
 from src.contracts.tigge_snapshot_payload import ProvenanceViolation, TiggeSnapshotPayload
 from src.runtime.timeout_guard import run_with_timeout
 from src.state.canonical_write import commit_then_export
@@ -97,6 +100,9 @@ _TRACK_CONFIGS: dict[str, dict[str, Any]] = {
 }
 
 _UNIT_MAP = {"C": "degC", "F": "degF"}
+LOW_LOCAL_DAY_MIN_INTERVAL_EVIDENCE_REVISION = (
+    "low_local_day_min_interval_evidence_v1"
+)
 
 
 @dataclass(frozen=True)
@@ -135,6 +141,201 @@ def _manifest_hash_from_payload(payload: dict) -> str:
     return hashlib.sha256(canon.encode()).hexdigest()
 
 
+def _canonical_step_ranges(payload: dict, key: str) -> list[Any]:
+    raw_ranges = payload.get(key)
+    if not isinstance(raw_ranges, list):
+        return []
+    parsed = {
+        value
+        for raw_value in raw_ranges
+        if (value := _parse_step_range(raw_value)) is not None
+    }
+    return [f"{start}-{end}" for start, end in sorted(parsed)]
+
+
+def _canonical_low_inner_step_ranges(payload: dict) -> list[Any]:
+    """Mirror the ingest contract's LOW inner-range fallback exactly."""
+    ranges = _canonical_step_ranges(payload, "selected_step_ranges_inner")
+    if not ranges:
+        ranges = _canonical_step_ranges(payload, "selected_step_ranges")
+    return ranges
+
+
+def _raw_endpoint_for_provenance(value: object) -> object:
+    """Keep raw extrema visible while making non-finite JSON deterministic."""
+    if value is None:
+        return None
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return value if isinstance(value, (bool, int, float, str)) else repr(value)
+    if math.isfinite(numeric):
+        return numeric
+    if math.isnan(numeric):
+        return "NaN"
+    return "Infinity" if numeric > 0 else "-Infinity"
+
+
+def _low_local_day_min_interval_evidence(
+    payload: dict,
+    *,
+    temperature_metric: str | None = None,
+) -> dict[str, Any] | None:
+    """Build LOW-only, reader-inert interval evidence from normalized members."""
+    metric_name = temperature_metric or payload.get("temperature_metric")
+    if str(metric_name or "").strip().lower() != "low":
+        return None
+
+    boundary_ranges = _canonical_step_ranges(payload, "selected_step_ranges_boundary")
+    boundary_window = bool(boundary_ranges)
+    decisions = payload.get("boundary_normalization", {}).get("member_decisions", [])
+    records: list[dict[str, Any]] = []
+    for index, member in enumerate(payload.get("members", [])):
+        if not isinstance(member, dict):
+            records.append(
+                {
+                    "member": index,
+                    "raw_endpoints": {"inner_min_native_unit": None, "boundary_min_native_unit": None},
+                    "lower_native_unit": None,
+                    "upper_native_unit": None,
+                    "exact": None,
+                    "status": "INVALID",
+                    "reason": "invalid_member_record",
+                }
+            )
+            continue
+
+        try:
+            member_id = int(member.get("member", index))
+        except (TypeError, ValueError):
+            member_id = index
+        inner_raw = member.get("inner_min_native_unit")
+        boundary_raw = member.get("boundary_min_native_unit")
+        raw_endpoints = {
+            "inner_min_native_unit": _raw_endpoint_for_provenance(inner_raw),
+            "boundary_min_native_unit": _raw_endpoint_for_provenance(boundary_raw),
+        }
+        decision_reason = None
+        if isinstance(decisions, list) and index < len(decisions):
+            candidate = decisions[index]
+            if isinstance(candidate, dict):
+                decision_reason = candidate.get("reason")
+
+        try:
+            inner = float(inner_raw)
+        except (TypeError, ValueError):
+            inner = math.nan
+        if not math.isfinite(inner):
+            reason = decision_reason or (
+                "invalid_missing_inner_min"
+                if "inner_min_native_unit" not in member
+                else "invalid_nonfinite_inner_min"
+            )
+            records.append(
+                {
+                    "member": member_id,
+                    "raw_endpoints": raw_endpoints,
+                    "lower_native_unit": None,
+                    "upper_native_unit": None,
+                    "exact": None,
+                    "status": "INVALID",
+                    "reason": reason,
+                }
+            )
+            continue
+
+        if boundary_raw is None:
+            if not boundary_window and decision_reason == "accepted_no_boundary_window":
+                lower = upper = inner
+                exact = True
+                status = "EXACT"
+                reason = decision_reason
+            else:
+                records.append(
+                    {
+                        "member": member_id,
+                        "raw_endpoints": raw_endpoints,
+                        "lower_native_unit": None,
+                        "upper_native_unit": None,
+                        "exact": None,
+                        "status": "INVALID",
+                        "reason": decision_reason or (
+                            "invalid_missing_boundary_min"
+                            if "boundary_min_native_unit" not in member
+                            else "invalid_missing_boundary_extrema"
+                        ),
+                    }
+                )
+                continue
+        else:
+            try:
+                boundary = float(boundary_raw)
+            except (TypeError, ValueError):
+                boundary = math.nan
+            if not math.isfinite(boundary):
+                records.append(
+                    {
+                        "member": member_id,
+                        "raw_endpoints": raw_endpoints,
+                        "lower_native_unit": None,
+                        "upper_native_unit": None,
+                        "exact": None,
+                        "status": "INVALID",
+                        "reason": decision_reason or "invalid_nonfinite_boundary_min",
+                    }
+                )
+                continue
+            if boundary < inner:
+                lower, upper, exact, status = boundary, inner, False, "INTERVAL"
+            else:
+                lower = upper = inner
+                exact, status = True, "EXACT"
+            reason = decision_reason or (
+                "quarantined_boundary_strictly_lower"
+                if boundary < inner
+                else "accepted_boundary_tie"
+                if boundary == inner
+                else "accepted_boundary_not_lower"
+            )
+
+        records.append(
+            {
+                "member": member_id,
+                "raw_endpoints": raw_endpoints,
+                "lower_native_unit": lower,
+                "upper_native_unit": upper,
+                "exact": exact,
+                "status": status,
+                "reason": reason,
+            }
+        )
+
+    records.sort(key=lambda record: record["member"])
+    identity_material = {
+        "semantics_revision": LOW_LOCAL_DAY_MIN_INTERVAL_EVIDENCE_REVISION,
+        "members_unit": payload.get("members_unit"),
+        "native_unit": payload.get("unit"),
+        "selected_step_ranges_inner": _canonical_low_inner_step_ranges(payload),
+        "selected_step_ranges_boundary": boundary_ranges,
+        "member_records": records,
+    }
+    identity_sha256 = hashlib.sha256(
+        json.dumps(
+            identity_material,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+    ).hexdigest()
+    return {
+        **identity_material,
+        "unit_semantics": "raw extrema and interval endpoints remain in native unit",
+        "member_count": len(records),
+        "identity_sha256": identity_sha256,
+    }
+
+
 def _provenance_json(
     payload: dict,
     metric: MetricIdentity,
@@ -159,6 +360,7 @@ def _provenance_json(
         "nearest_grid_distance_km": payload.get("nearest_grid_distance_km"),
         "nearest_grid_provenance_source": payload.get("nearest_grid_provenance_source"),
         "nearest_grid_resolution_deg": payload.get("nearest_grid_resolution_deg"),
+        "member_axis": _member_axis_provenance(payload),
     }
     # Reuse precomputed evidence when available to avoid duplicate timezone/range parsing.
     evidence = contract_evidence if contract_evidence is not None else _contract_evidence_fields(
@@ -187,7 +389,67 @@ def _provenance_json(
             "forecast_window_block_reasons_json",
         }
     }
+    if isinstance(payload.get("boundary_normalization"), dict):
+        prov["boundary_normalization"] = payload["boundary_normalization"]
+    interval_evidence = _low_local_day_min_interval_evidence(
+        payload,
+        temperature_metric=metric.temperature_metric,
+    )
+    if interval_evidence is not None:
+        prov["low_local_day_min_interval_evidence"] = interval_evidence
     return json.dumps(prov, ensure_ascii=False)
+
+
+def _member_axis_provenance(payload: dict) -> dict[str, Any]:
+    """Bind ``members_json`` positions to explicit cross-scope member identities.
+
+    Legacy or malformed member axes remain ingestible but are UNVERIFIED, so a
+    multi-family joint provider cannot mistake equal array offsets for evidence
+    of covariance.
+    """
+
+    raw_members = payload.get("members")
+    if not isinstance(raw_members, list) or not raw_members:
+        return {"status": "UNVERIFIED", "reason": "MEMBERS_MISSING"}
+    member_ids: list[int] = []
+    pairs: list[list[object]] = []
+    for index, member in enumerate(raw_members):
+        if not isinstance(member, dict) or "member" not in member:
+            return {
+                "status": "UNVERIFIED",
+                "reason": "MEMBER_ID_MISSING",
+                "first_bad_index": index,
+            }
+        try:
+            member_id = int(member["member"])
+        except (TypeError, ValueError):
+            return {
+                "status": "UNVERIFIED",
+                "reason": "MEMBER_ID_INVALID",
+                "first_bad_index": index,
+            }
+        member_ids.append(member_id)
+        pairs.append([member_id, member.get("value_native_unit")])
+    if len(set(member_ids)) != len(member_ids):
+        return {"status": "UNVERIFIED", "reason": "MEMBER_ID_DUPLICATE"}
+    if member_ids != list(range(len(member_ids))):
+        return {
+            "status": "UNVERIFIED",
+            "reason": "MEMBER_AXIS_NOT_CANONICAL",
+            "member_ids": member_ids,
+        }
+    canonical_ids = json.dumps(member_ids, separators=(",", ":"))
+    try:
+        canonical_pairs = json.dumps(pairs, separators=(",", ":"), allow_nan=False)
+    except (TypeError, ValueError):
+        return {"status": "UNVERIFIED", "reason": "MEMBER_VALUE_NOT_CANONICAL"}
+    return {
+        "status": "VERIFIED",
+        "semantics": "ecmwf_ens_member_id_order_v1",
+        "member_ids": member_ids,
+        "member_axis_hash": hashlib.sha256(canonical_ids.encode()).hexdigest(),
+        "member_values_by_id_hash": hashlib.sha256(canonical_pairs.encode()).hexdigest(),
+    }
 
 
 def _is_finite_number(value: object) -> bool:
@@ -623,6 +885,9 @@ def ingest_json_file(
 
     # Use the validated dataclass's dict for downstream processing.
     payload = snapshot.to_json_dict()
+    if not str(payload.get("temperature_metric") or "").strip():
+        payload["temperature_metric"] = metric.temperature_metric
+    payload = normalize_low_boundary_evidence(payload)
 
     data_version = str(payload.get("data_version", ""))
     # #38 / #362 version-eradication: OpenData extracted JSON artifacts carry the

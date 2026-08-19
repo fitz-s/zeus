@@ -24,6 +24,10 @@ from src.contracts.replacement_pipeline_files import (
     validate_materialization_seed,
 )
 from src.data.replacement_forecast_cycle_policy import tradeable_grade_coverage_sql
+from src.data.replacement_current_value_serving import (
+    current_value_serving_schema,
+    read_current_instrument_frontier_identity,
+)
 from src.data.replacement_input_hwm import replacement_live_input_lag_reason
 from src.data.replacement_forecast_materialization_request_builder import (
     build_replacement_forecast_materialization_request,
@@ -342,7 +346,52 @@ def _ensure_directory_entry_durable(
         parent = child
 
 
-def _move_request(path: Path, destination_dir: Path) -> Path:
+def _seed_terminal_receipt_index_path(seed_path: Path) -> Path | None:
+    if seed_path.parent.name != "seeds":
+        return None
+    digest = hashlib.sha256(seed_path.name.encode("utf-8")).hexdigest()
+    return seed_path.parent.parent / "seed_receipts" / digest[:2] / f"{digest}.json"
+
+
+def _write_seed_terminal_receipts(
+    seed_path: Path,
+    moved_path: Path,
+    payload: Mapping[str, object],
+) -> None:
+    receipt_payload = dict(payload)
+    index_payload = {
+        **receipt_payload,
+        "seed_file": str(seed_path),
+        "moved_file": str(moved_path),
+    }
+    moved_receipt = moved_path.with_suffix(moved_path.suffix + ".receipt.json")
+    index_path = _seed_terminal_receipt_index_path(seed_path)
+    if index_path is None:
+        raise ValueError(f"terminal seed receipt requires a seeds path: {seed_path}")
+    _ensure_directory_entry_durable(
+        index_path.parent,
+        durable_ancestor=seed_path.parent.parent,
+    )
+    for target, body in (
+        (moved_receipt, receipt_payload),
+        (index_path, index_payload),
+    ):
+        temporary = target.with_name(f".{target.name}.{os.getpid()}.tmp")
+        with temporary.open("w", encoding="utf-8") as handle:
+            json.dump(body, handle, sort_keys=True, indent=2)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, target)
+        _fsync_directory(target.parent)
+
+
+def _move_request(
+    path: Path,
+    destination_dir: Path,
+    *,
+    terminal_receipt: Mapping[str, object] | None = None,
+) -> Path:
     source_dir = path.parent.absolute()
     destination_dir = destination_dir.absolute()
     common_ancestor = Path(
@@ -359,6 +408,13 @@ def _move_request(path: Path, destination_dir: Path) -> Path:
         except FileExistsError:
             continue
         break
+    if terminal_receipt is not None:
+        try:
+            _write_seed_terminal_receipts(path, target, terminal_receipt)
+        except Exception:
+            target.unlink(missing_ok=True)
+            _fsync_directory(destination_dir)
+            raise
     # The destination receipt must be durable before the queue name disappears.
     # A PUBLISH_PENDING owner may observe that disappearance and complete its
     # SQLite marker immediately; hardlink-first makes every such observation
@@ -562,7 +618,15 @@ def _upgrade_day0_seed_has_current_enqueue_ownership(
     seed: Mapping[str, object],
 ) -> _Day0EnqueueOwnershipCheck:
     """Classify Day0 marker ownership without consuming a seed on read uncertainty."""
-    if not seed.get("upgrade_trigger") or seed.get("day0_observed_extreme_observation_time") is None:
+    # Day0 conditioning is probability truth, not an enqueue-owner type.  Only
+    # cycle-advance publishers opt into the cycle_advance_enqueues fence.  A
+    # fusion/input-revision seed carries the same canonical Day0 observation
+    # but is owned by fusion_upgrade_enqueues; forcing it through the cycle
+    # fence consumes a valid seed as STALE before it can repair the posterior.
+    if (
+        seed.get("cycle_advance_enqueue_owner") is not True
+        or seed.get("day0_observed_extreme_observation_time") is None
+    ):
         return _Day0EnqueueOwnershipCheck(_Day0EnqueueOwnership.CURRENT)
     from src.data.replacement_cycle_advance_trigger import (  # noqa: PLC0415
         _day0_conditioning_identity,
@@ -590,6 +654,7 @@ def _upgrade_day0_seed_has_current_enqueue_ownership(
                 for row in conn.execute("PRAGMA table_info(cycle_advance_enqueues)").fetchall()
             }
             required = {
+                "enqueue_id",
                 "city",
                 "target_date",
                 "metric",
@@ -601,19 +666,19 @@ def _upgrade_day0_seed_has_current_enqueue_ownership(
                 return _Day0EnqueueOwnershipCheck(_Day0EnqueueOwnership.INDETERMINATE)
             row = conn.execute(
                 """
-                SELECT seed_file, day0_conditioning_identity_json
+                SELECT seed_file, day0_conditioning_identity_json,
+                       target_cycle_time
                 FROM cycle_advance_enqueues
                 WHERE city = ?
                   AND target_date = ?
                   AND metric = ?
-                  AND target_cycle_time = ?
+                ORDER BY enqueue_id DESC
                 LIMIT 1
                 """,
                 (
                     str(seed.get("city") or ""),
                     str(seed.get("target_date") or ""),
                     str(seed.get("temperature_metric") or ""),
-                    str(seed.get("source_cycle_time") or ""),
                 ),
             ).fetchone()
             if row is None:
@@ -631,7 +696,7 @@ def _upgrade_day0_seed_has_current_enqueue_ownership(
                     "city": str(seed.get("city") or ""),
                     "target_date": str(seed.get("target_date") or ""),
                     "metric": str(seed.get("temperature_metric") or ""),
-                    "target_cycle_time": str(seed.get("source_cycle_time") or ""),
+                    "target_cycle_time": str(row["target_cycle_time"] or ""),
                     "seed_file": str(seed_file),
                     "conditioning_identity": identity,
                 },
@@ -671,7 +736,11 @@ def _seed_already_covered(*, forecast_db: Path | str | None, seed: dict[str, obj
         # A covering posterior must be certified-bootstrap tradeable-grade. A non-live or
         # degraded posterior must not count as "done forever" and block its own repair.
         # Single authority: cycle_policy.tradeable_grade_coverage_sql.
-        tradeable_grade_clause = tradeable_grade_coverage_sql(posterior_columns=posterior_columns)
+        decision_time = _parse_utc_iso(seed.get("computed_at")) or datetime.now(timezone.utc)
+        tradeable_grade_clause = tradeable_grade_coverage_sql(
+            posterior_columns=posterior_columns,
+            decision_time=decision_time,
+        )
         runtime_layer_clause = "AND runtime_layer = 'live'" if "runtime_layer" in posterior_columns else ""
         posterior = conn.execute(
             f"""
@@ -692,7 +761,6 @@ def _seed_already_covered(*, forecast_db: Path | str | None, seed: dict[str, obj
         ).fetchone()
         if posterior is None:
             return False
-        decision_time = _parse_utc_iso(seed.get("computed_at")) or datetime.now(timezone.utc)
         if replacement_live_input_lag_reason(
             conn,
             city=city,
@@ -921,30 +989,54 @@ def _cycle_advance_never_priced_scopes(
     return frozenset(fam_scopes - priced_scopes)
 
 
+def _current_money_risk_scopes(
+    fam_scopes: frozenset[tuple[str, str, str]],
+    *,
+    trade_db: Path | str | None = None,
+) -> frozenset[tuple[str, str, str]]:
+    """Return queued families with chain-confirmed capital currently at risk."""
+
+    if not fam_scopes:
+        return frozenset()
+    try:
+        from src.data.replacement_cycle_advance_trigger import (  # noqa: PLC0415
+            _held_position_families,
+        )
+        from src.state.db import _connect_read_only, _zeus_trade_db_path  # noqa: PLC0415
+
+        db_path = Path(trade_db) if trade_db is not None else _zeus_trade_db_path()
+        if not db_path.exists():
+            return frozenset()
+        conn = _connect_read_only(db_path)
+        try:
+            return frozenset(_held_position_families(conn) & fam_scopes)
+        finally:
+            conn.close()
+    except Exception as exc:  # noqa: BLE001 - priority loss is loud, queue still drains
+        _LOG.error(
+            "replacement materialization current-exposure priority read failed; "
+            "falling back to persisted enqueue priority: %s",
+            exc,
+        )
+        return frozenset()
+
+
 def _cycle_advance_seed_priority_map(
     forecast_db: Path | str | None,
     queue_files: Sequence[Path],
+    *,
+    trade_db: Path | str | None = None,
 ) -> dict[str, tuple[int, str]]:
-    """Return filename -> priority for queued cycle-advance seeds/requests.
+    """Return filename -> priority for queued materialization work.
 
-    The producer records whether a seed repairs a held-position family in
-    ``cycle_advance_enqueues``. The consumer must preserve that priority after a
-    seed becomes either a seed file or a request file; plain filename ordering
-    can otherwise spend live cycles on non-held cities while a held position has
-    stale belief.
-
-    A family that has never had a single ``forecast_posteriors`` row (never
-    priced at all) sorts strictly ahead of a held-position refresh: getting a
-    first price at all dominates the entry-lag budget (see
-    ``docs/evidence/capital_efficiency_2026_07_19/entry_leadtime.md``), and a
-    held-position refresh delayed by a burst of never-priced families is
-    bounded to low single-digit seconds at the default poll cadence (1s tick,
-    8 files/tick) against a refresh cadence measured in hours — negligible.
+    Current chain-confirmed exposure is read at claim time and dominates every
+    discovery tier.  ``cycle_advance_enqueues.held_position`` is only a producer-time
+    fallback: a position may fill after that immutable enqueue row was written, so
+    using the marker as current truth can leave the exit organ behind minutes of
+    first-price discovery.  Never-priced families lead only when no current capital is
+    at risk in the family.
     """
-    if forecast_db is None or not queue_files:
-        return {}
-    db_path = Path(forecast_db)
-    if not db_path.exists():
+    if not queue_files:
         return {}
     names_by_scope: dict[tuple[str, str, str, str], set[str]] = {}
     for path in queue_files:
@@ -962,64 +1054,79 @@ def _cycle_advance_seed_priority_map(
             names_by_scope.setdefault(scope, set()).add(path.name)
     if not names_by_scope:
         return {}
-    try:
-        from src.state.db import _connect_read_only  # noqa: PLC0415
-
-        conn = _connect_read_only(db_path)
+    fam_scopes = frozenset(scope[:3] for scope in names_by_scope)
+    current_money_risk = _current_money_risk_scopes(
+        fam_scopes,
+        trade_db=trade_db,
+    )
+    rows: list[object] = []
+    never_priced_scopes: frozenset[tuple[str, str, str]] = frozenset()
+    if forecast_db is not None and Path(forecast_db).exists():
         try:
-            rows = []
-            scopes = tuple(names_by_scope)
-            for offset in range(0, len(scopes), 200):
-                chunk = scopes[offset : offset + 200]
-                values = ", ".join("(?, ?, ?, ?)" for _ in chunk)
-                rows.extend(
-                    conn.execute(
-                        f"""
-                        WITH queued(city, target_date, metric, target_cycle_time) AS (
-                            VALUES {values}
-                        )
-                        SELECT e.city,
-                               e.target_date,
-                               e.metric,
-                               e.target_cycle_time,
-                               e.held_position,
-                               e.enqueued_at
-                        FROM queued AS q
-                        JOIN cycle_advance_enqueues AS e
-                          ON e.city = q.city
-                         AND e.target_date = q.target_date
-                         AND e.metric = q.metric
-                         AND e.target_cycle_time = q.target_cycle_time
-                        """,
-                        tuple(value for scope in chunk for value in scope),
-                    ).fetchall()
-                )
-            fam_scopes = frozenset(
-                (str(row[0] or ""), str(row[1] or ""), str(row[2] or "")) for row in rows
-            )
-            never_priced_scopes = _cycle_advance_never_priced_scopes(conn, fam_scopes)
-        finally:
-            conn.close()
-    except Exception:  # noqa: BLE001 - priority is best-effort; queue must still drain
-        return {}
+            from src.state.db import _connect_read_only  # noqa: PLC0415
 
-    priority: dict[str, tuple[int, str]] = {}
+            conn = _connect_read_only(Path(forecast_db))
+            try:
+                scopes = tuple(names_by_scope)
+                for offset in range(0, len(scopes), 200):
+                    chunk = scopes[offset : offset + 200]
+                    values = ", ".join("(?, ?, ?, ?)" for _ in chunk)
+                    rows.extend(
+                        conn.execute(
+                            f"""
+                            WITH queued(city, target_date, metric, target_cycle_time) AS (
+                                VALUES {values}
+                            )
+                            SELECT e.city,
+                                   e.target_date,
+                                   e.metric,
+                                   e.target_cycle_time,
+                                   e.held_position,
+                                   e.enqueued_at
+                            FROM queued AS q
+                            JOIN cycle_advance_enqueues AS e
+                              ON e.city = q.city
+                             AND e.target_date = q.target_date
+                             AND e.metric = q.metric
+                             AND e.target_cycle_time = q.target_cycle_time
+                            """,
+                            tuple(value for scope in chunk for value in scope),
+                        ).fetchall()
+                    )
+                never_priced_scopes = _cycle_advance_never_priced_scopes(
+                    conn, fam_scopes
+                )
+            finally:
+                conn.close()
+        except Exception:  # noqa: BLE001 - priority is best-effort; queue must still drain
+            pass
+
+    enqueue_priority: dict[tuple[str, str, str, str], tuple[bool, str]] = {}
     for row in rows:
         scope = tuple(str(value or "") for value in row[:4])
-        names = names_by_scope.get(scope, ())
         held_position, enqueued_at = row[4:]
+        candidate = (bool(int(held_position or 0)), str(enqueued_at or ""))
+        current = enqueue_priority.get(scope)
+        if current is None or (candidate[0] and not current[0]) or (
+            candidate[0] == current[0] and candidate[1] < current[1]
+        ):
+            enqueue_priority[scope] = candidate
+
+    priority: dict[str, tuple[int, str]] = {}
+    for scope, names in names_by_scope.items():
         fam_scope = scope[:3]
-        if fam_scope in never_priced_scopes:
+        held_marker, enqueued_at = enqueue_priority.get(scope, (False, ""))
+        if fam_scope in current_money_risk:
+            tier = -2
+        elif fam_scope in never_priced_scopes:
             tier = -1
-        elif int(held_position or 0) == 1:
+        elif held_marker:
             tier = 0
         else:
             tier = 1
-        value = (tier, str(enqueued_at or ""))
+        value = (tier, enqueued_at)
         for name in names:
-            current = priority.get(name)
-            if current is None or value < current:
-                priority[name] = value
+            priority[name] = value
     return priority
 
 
@@ -1058,9 +1165,17 @@ _UNCHANGED_BLOCKED_REASON = "REPLACEMENT_LIVE_POSTERIOR_REQUIREMENTS_NOT_MET"
 _UNCHANGED_BLOCKED_SKIP_REASON = (
     "REPLACEMENT_LIVE_MATERIALIZATION_REQUEST_UNCHANGED_BLOCKED_INPUT"
 )
+_BLOCKED_INPUT_RECEIPT_REASON = (
+    "REPLACEMENT_LIVE_MATERIALIZATION_REQUEST_BLOCKED_INPUT"
+)
 _UNCHANGED_BLOCKED_SEED_SKIP_REASON = (
     "REPLACEMENT_LIVE_MATERIALIZATION_SEED_UNCHANGED_BLOCKED_INPUT"
 )
+_STALE_DAY0_ENQUEUE_OWNER_REASON = "STALE_DAY0_ENQUEUE_OWNER"
+_STALE_DAY0_OWNER_SUPERSEDED_REASON = (
+    "REPLACEMENT_LIVE_MATERIALIZATION_REQUEST_SUPERSEDED_BY_DAY0_OWNER"
+)
+_WRITE_DEFERRED_REASON = "REPLACEMENT_FORECAST_WRITE_DEFERRED"
 _ATTEMPT_CLOCK_FIELDS = frozenset({"computed_at", "expires_at"})
 _ATTEMPT_INPUT_PATH_FIELDS = (
     "openmeteo_payload_json",
@@ -1256,16 +1371,14 @@ def _blocked_attempt_fingerprint(
     db_path = Path(forecast_db)
     if not all(scope) or not db_path.exists():
         return None
-    # Scope the raw watermark to THIS request's own carrier cycle (2026-07-13/14 incident
-    # gap B): during active ingest a new raw row lands every few minutes for the target's
-    # OTHER cycles/leads, so a target-wide watermark churns every tick and NEVER settles
-    # (verified: 0/277 blocked attempts suppressed). Only inputs at the request's own
-    # source_cycle_time can heal THIS exact request; a fresher cycle produces a NEW request
-    # file with a new semantic key anyway (cycle-advance path), so narrowing here is safe.
-    request_cycle = _parse_utc_iso(payload.get("source_cycle_time"))
-    if request_cycle is None:
+    # A source-clock materialization keeps the ENS carrier cycle fixed while each
+    # deterministic provider may advance independently.  Fingerprint the exact
+    # production selector frontier at this request's immutable decision instant;
+    # carrier-cycle aggregation misses those healing inputs, while target-wide MAX
+    # watermarks churn on rows the request could not yet have consumed.
+    computed_at = _parse_utc_iso(payload.get("computed_at"))
+    if computed_at is None:
         return None
-    request_cycle_iso = request_cycle.isoformat()
     try:
         from src.state.db import _connect  # noqa: PLC0415
 
@@ -1273,25 +1386,24 @@ def _blocked_attempt_fingerprint(
         try:
             conn.execute("PRAGMA query_only=ON")
             missing_sources = _source_clock_missing_configured_sources(conn, payload)
-            row = conn.execute(
-                """
-                SELECT COUNT(*),
-                       COALESCE(MAX(raw_model_forecast_id), 0),
-                       COALESCE(MAX(captured_at), ''),
-                       COALESCE(MAX(source_available_at), '')
-                FROM raw_model_forecasts
-                WHERE city = ?
-                  AND target_date = ?
-                  AND metric = ?
-                  AND source_cycle_time = ?
-                """,
-                scope + (request_cycle_iso,),
-            ).fetchone()
+            from src.strategy.live_inference.source_clock_city_weights import (  # noqa: PLC0415
+                scheme_for_city,
+            )
+
+            scheme = scheme_for_city(scope[0], metric=scope[2])
+            configured_models = None if scheme is None else tuple(scheme.final_sources)
+            source_clock_frontier = read_current_instrument_frontier_identity(
+                conn,
+                city=scope[0],
+                metric=scope[2],
+                target_date=scope[1],
+                decision_time_iso=computed_at.isoformat(),
+                models=configured_models,
+                schema=current_value_serving_schema(conn),
+            )
         finally:
             conn.close()
     except Exception:  # noqa: BLE001 - unknown watermark must retry, never suppress work
-        return None
-    if row is None:
         return None
     file_revisions: dict[str, tuple[int, int] | None] = {}
     if not missing_sources:
@@ -1327,11 +1439,10 @@ def _blocked_attempt_fingerprint(
                 if key not in _ATTEMPT_CLOCK_FIELDS
             },
             "files": file_revisions,
-            "raw": (
-                {"missing_configured_sources": missing_sources}
-                if missing_sources
-                else tuple(row)
-            ),
+            "raw": {
+                "missing_configured_sources": missing_sources,
+                "source_clock_frontier": source_clock_frontier,
+            },
             "logic": logic_revisions,
         },
         sort_keys=True,
@@ -1409,18 +1520,76 @@ def _write_blocked_attempt_marker(
 
 
 def _subprocess_result_reason_codes(completed: subprocess.CompletedProcess[str]) -> tuple[str, ...]:
-    for line in reversed((completed.stdout or "").splitlines()):
-        try:
-            payload = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if not isinstance(payload, Mapping):
-            continue
-        reasons = payload.get("reason_codes")
-        if not isinstance(reasons, list):
-            return ()
-        return tuple(str(reason) for reason in reasons)
+    for stream in (completed.stdout or "", completed.stderr or ""):
+        for line in reversed(stream.splitlines()):
+            try:
+                payload = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(payload, Mapping):
+                continue
+            reasons = payload.get("reason_codes")
+            if not isinstance(reasons, list):
+                continue
+            return tuple(str(reason) for reason in reasons)
     return ()
+
+
+def _record_latest_terminal_request(
+    input_json: Path,
+    *,
+    processed_path: Path,
+    request_payload: Mapping[str, object],
+    receipt_dir_name: str,
+    status: str,
+    reason_codes: Sequence[str],
+    result_evidence: Mapping[str, object] | None = None,
+) -> Path:
+    """Replace valueless terminal work with one compact receipt per family.
+
+    Canonical source/owner/posterior rows carry decision truth. Retaining every
+    full queue request after it becomes blocked or causally obsolete adds no
+    replay value. This receipt keeps the latest disposition while bounding disk
+    use by forecast-family cardinality.
+    """
+
+    receipt_dir = processed_path.parent / receipt_dir_name
+    _ensure_directory_entry_durable(
+        receipt_dir,
+        durable_ancestor=processed_path.parent,
+    )
+    city = str(request_payload.get("city") or "unknown").replace(" ", "_")
+    target_date = str(request_payload.get("target_date") or "unknown")
+    metric = str(request_payload.get("temperature_metric") or "unknown").lower()
+    target = receipt_dir / f"{city}.{target_date}.{metric}.json"
+    temporary = receipt_dir / f".{target.name}.{os.getpid()}.tmp"
+    witness = request_payload.get("day0_enqueue_owner_witness")
+    receipt = {
+        "status": status,
+        "reason_codes": list(reason_codes),
+        "city": request_payload.get("city"),
+        "target_date": request_payload.get("target_date"),
+        "temperature_metric": request_payload.get("temperature_metric"),
+        "source_cycle_time": request_payload.get("source_cycle_time"),
+        "computed_at": request_payload.get("computed_at"),
+        "recorded_at": datetime.now(timezone.utc).isoformat(),
+        "conditioning_identity": (
+            witness.get("conditioning_identity")
+            if isinstance(witness, Mapping)
+            else None
+        ),
+    }
+    if result_evidence:
+        receipt["result_evidence"] = dict(result_evidence)
+    with temporary.open("w", encoding="utf-8") as handle:
+        json.dump(receipt, handle, sort_keys=True, separators=(",", ":"))
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(temporary, target)
+    _fsync_directory(receipt_dir)
+    input_json.unlink()
+    _fsync_directory(input_json.parent)
+    return target
 
 
 def _coalesce_superseded_materialization_requests(
@@ -1439,6 +1608,7 @@ def _coalesce_superseded_materialization_requests(
     """
 
     keys: dict[Path, tuple[str, ...]] = {}
+    payloads: dict[Path, Mapping[str, object]] = {}
     newest_by_key: dict[tuple[str, ...], tuple[tuple[datetime, int, str], Path]] = {}
     for path in requests:
         payload = _load_request_payload_for_coalescing(path)
@@ -1448,6 +1618,7 @@ def _coalesce_superseded_materialization_requests(
         if key is None:
             continue
         keys[path] = key
+        payloads[path] = payload
         freshness = _request_freshness_key(path, payload)
         current = newest_by_key.get(key)
         if current is None or freshness > current[0]:
@@ -1462,24 +1633,22 @@ def _coalesce_superseded_materialization_requests(
             remaining.append(path)
             continue
         newest_path = newest_by_key[key][1]
-        moved = _move_request(path, processed_path)
-        _write_sidecar(
-            moved,
-            {
-                "status": "SKIPPED_SUPERSEDED_REQUEST",
-                "reason_codes": [
-                    "REPLACEMENT_LIVE_MATERIALIZATION_REQUEST_SUPERSEDED_BY_NEWER_DUPLICATE"
-                ],
-                "request_written": False,
+        receipt = _record_latest_terminal_request(
+            path,
+            processed_path=processed_path,
+            request_payload=payloads[path],
+            receipt_dir_name="superseded_latest",
+            status="SKIPPED_SUPERSEDED_REQUEST",
+            reason_codes=(
+                "REPLACEMENT_LIVE_MATERIALIZATION_REQUEST_SUPERSEDED_BY_NEWER_DUPLICATE",
+            ),
+            result_evidence={
                 "request_validated": False,
                 "subprocess_spawned": False,
                 "superseded_by": newest_path.name,
-                "semantic_key": {
-                    field: key[idx] for idx, field in enumerate(_REQUEST_DEDUP_KEY_FIELDS)
-                },
             },
         )
-        superseded.append(str(moved))
+        superseded.append(str(receipt))
     return tuple(remaining), tuple(superseded)
 
 
@@ -1513,11 +1682,19 @@ def _claim_age_seconds(batch_path: Path) -> float:
 
 def _restore_claimed_request(path: Path, request_path: Path, batch_name: str) -> Path:
     request_path.mkdir(parents=True, exist_ok=True)
-    target = request_path / path.name
-    if target.exists():
-        target = request_path / f"{path.stem}.recovered-{batch_name}{path.suffix}"
-    os.replace(path, target)
-    return target
+    attempt = 0
+    while True:
+        suffix = "" if attempt == 0 else f".recovered-{batch_name}-{attempt}"
+        target = request_path / f"{path.stem}{suffix}{path.suffix}"
+        try:
+            os.link(path, target)
+        except FileExistsError:
+            attempt += 1
+            continue
+        _fsync_directory(request_path)
+        path.unlink()
+        _fsync_directory(path.parent)
+        return target
 
 
 def _remove_empty_claim_batch(batch_path: Path) -> None:
@@ -1762,7 +1939,9 @@ def _prepare_seed_requests(
             # it would make every upgrade seed die as SKIPPED_ALREADY_COVERED and the PARTIAL
             # fusion could never heal. The upgrade seed's idempotency authority is the
             # fusion_upgrade_enqueues marker (at most one enqueue per (scope, cycle,
-            # capturable-family-superset) transition), NOT coverage — so this bypass cannot loop.
+            # capturable-family-superset) transition). A consumed failure can
+            # atomically reclaim that marker, while this terminal unchanged-input
+            # receipt remains a no-retry witness — so this bypass cannot loop.
             if _seed_source_cycle_regresses_current_posterior(
                 forecast_db=forecast_db, seed=seed
             ):
@@ -1820,16 +1999,17 @@ def _prepare_seed_requests(
                 # a durable hardlink witness even when latest/ already points
                 # at a newer cycle; unlinking the public queue path could leave
                 # staging at nlink=1 and make crash recovery republish it.
-                moved = _move_request(seed_json, processed_path)
-                _write_sidecar(
-                    moved,
-                    {
-                        "status": "SKIPPED_UNCHANGED_BLOCKED_INPUT",
-                        "reason_codes": [_UNCHANGED_BLOCKED_SEED_SKIP_REASON],
-                        "request_written": False,
-                        "attempt_fingerprint": _fingerprint,
-                        "blocked_attempt_marker": str(marker_path),
-                    },
+                terminal_receipt = {
+                    "status": "SKIPPED_UNCHANGED_BLOCKED_INPUT",
+                    "reason_codes": [_UNCHANGED_BLOCKED_SEED_SKIP_REASON],
+                    "request_written": False,
+                    "attempt_fingerprint": _fingerprint,
+                    "blocked_attempt_marker": str(marker_path),
+                }
+                moved = _move_request(
+                    seed_json,
+                    processed_path,
+                    terminal_receipt=terminal_receipt,
                 )
                 _publish_latest_seed(moved, seed)
                 processed.append(str(moved))
@@ -2131,6 +2311,7 @@ def process_replacement_forecast_live_materialization_queue(
             limit=claim.claimed_count,
             runner=runner,
             marker_dir=request_path.parent / "blocked_attempts",
+            retry_path=request_path,
         )
     finally:
         _remove_empty_claim_batch(claim.batch_path)
@@ -2174,6 +2355,7 @@ def _process_claimed_materialization_batch(
     limit: int = 10,
     runner: Runner | None = None,
     marker_dir: Path | None = None,
+    retry_path: Path | None = None,
 ) -> ReplacementForecastLiveMaterializationQueueReport:
     if not request_path.exists():
         return ReplacementForecastLiveMaterializationQueueReport(
@@ -2214,6 +2396,8 @@ def _process_claimed_materialization_batch(
     processed: list[str] = list(superseded)
     failed: list[str] = []
     unchanged_blocked: list[str] = []
+    stale_day0_superseded: list[str] = []
+    write_deferred: list[str] = []
     pending: list[_PendingMaterialization] = []
     marker_dir = marker_dir or request_path.parent / "blocked_attempts"
     for input_json in requests[:limit]:
@@ -2255,19 +2439,16 @@ def _process_claimed_materialization_batch(
             else (None, None, False)
         )
         if unchanged:
-            moved = _move_request(input_json, processed_path)
-            _write_sidecar(
-                moved,
-                {
-                    "status": "SKIPPED_UNCHANGED_BLOCKED_INPUT",
-                    "reason_codes": [_UNCHANGED_BLOCKED_SKIP_REASON],
-                    "request_validated": True,
-                    "subprocess_spawned": False,
-                    "attempt_fingerprint": attempt_fingerprint,
-                },
+            receipt = _record_latest_terminal_request(
+                input_json,
+                processed_path=processed_path,
+                request_payload=request_payload,
+                receipt_dir_name="blocked_latest",
+                status="SKIPPED_UNCHANGED_BLOCKED_INPUT",
+                reason_codes=(_UNCHANGED_BLOCKED_SKIP_REASON,),
             )
-            processed.append(str(moved))
-            unchanged_blocked.append(str(moved))
+            processed.append(str(receipt))
+            unchanged_blocked.append(str(receipt))
             continue
         pending.append(
             _PendingMaterialization(
@@ -2314,29 +2495,84 @@ def _process_claimed_materialization_batch(
             payload["reason_codes"] = [
                 "REPLACEMENT_LIVE_MATERIALIZATION_REQUEST_TIMEOUT"
             ]
+        result_reason_codes = _subprocess_result_reason_codes(completed)
         if completed.returncode == 0:
             if item.marker_path is not None:
                 try:
                     item.marker_path.unlink()
                 except FileNotFoundError:
                     pass
-            moved = _move_request(input_json, processed_path)
-            _write_sidecar(moved, payload)
-            processed.append(str(moved))
-        else:
-            if (
-                item.request_payload is not None
-                and _UNCHANGED_BLOCKED_REASON
-                in _subprocess_result_reason_codes(completed)
-            ):
+            if item.request_payload is None:
+                moved = _move_request(input_json, processed_path)
+                _write_sidecar(moved, payload)
+                processed.append(str(moved))
+            else:
+                receipt = _record_latest_terminal_request(
+                    input_json,
+                    processed_path=processed_path,
+                    request_payload=item.request_payload,
+                    receipt_dir_name="succeeded_latest",
+                    status="SUCCEEDED",
+                    reason_codes=result_reason_codes,
+                    result_evidence={
+                        "returncode": int(completed.returncode),
+                        "committed_posterior": committed,
+                        "reactor_wake_published": wake_published,
+                    },
+                )
+                processed.append(str(receipt))
+        elif (
+            item.request_payload is not None
+            and _STALE_DAY0_ENQUEUE_OWNER_REASON in result_reason_codes
+        ):
+            if item.marker_path is not None:
                 try:
-                    _write_blocked_attempt_marker(
-                        marker_path=item.marker_path,
-                        payload=item.request_payload,
-                        fingerprint=item.attempt_fingerprint,
-                    )
-                except OSError:
+                    item.marker_path.unlink()
+                except FileNotFoundError:
                     pass
+            receipt = _record_latest_terminal_request(
+                input_json,
+                processed_path=processed_path,
+                request_payload=item.request_payload,
+                receipt_dir_name="superseded_latest",
+                status="SKIPPED_STALE_DAY0_ENQUEUE_OWNER",
+                reason_codes=(_STALE_DAY0_OWNER_SUPERSEDED_REASON,),
+            )
+            processed.append(str(receipt))
+            stale_day0_superseded.append(str(receipt))
+        elif (
+            item.request_payload is not None
+            and _UNCHANGED_BLOCKED_REASON in result_reason_codes
+        ):
+            try:
+                _write_blocked_attempt_marker(
+                    marker_path=item.marker_path,
+                    payload=item.request_payload,
+                    fingerprint=item.attempt_fingerprint,
+                )
+            except OSError:
+                pass
+            receipt = _record_latest_terminal_request(
+                input_json,
+                processed_path=processed_path,
+                request_payload=item.request_payload,
+                receipt_dir_name="blocked_latest",
+                status="BLOCKED_MISSING_PROBABILITY_AUTHORITY",
+                reason_codes=(_BLOCKED_INPUT_RECEIPT_REASON, *result_reason_codes),
+            )
+            processed.append(str(receipt))
+            unchanged_blocked.append(str(receipt))
+        elif _WRITE_DEFERRED_REASON in result_reason_codes:
+            if retry_path is None or input_json.parent == retry_path:
+                restored = input_json
+            else:
+                restored = _restore_claimed_request(
+                    input_json,
+                    retry_path,
+                    request_path.name,
+                )
+            write_deferred.append(str(restored))
+        else:
             moved = _move_request(input_json, failed_path)
             _write_sidecar(moved, payload)
             failed.append(str(moved))
@@ -2347,6 +2583,14 @@ def _process_claimed_materialization_batch(
         reasons.append("REPLACEMENT_LIVE_MATERIALIZATION_REQUEST_SUPERSEDED_BY_NEWER_DUPLICATE")
     if unchanged_blocked:
         reasons.append(_UNCHANGED_BLOCKED_SKIP_REASON)
+    if stale_day0_superseded:
+        reasons.append(_STALE_DAY0_OWNER_SUPERSEDED_REASON)
+    if write_deferred:
+        reasons.append(_WRITE_DEFERRED_REASON)
+        _LOG.warning(
+            "replacement forecast writes deferred by transient contention: count=%d",
+            len(write_deferred),
+        )
     if failed:
         reasons.append("REPLACEMENT_LIVE_MATERIALIZATION_REQUEST_FAILED")
     if committed_posterior_count > reactor_wake_published_count:

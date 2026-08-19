@@ -1,7 +1,7 @@
 # Created: 2026-05-29
 # Last reused or audited: 2026-05-29
 # Lifecycle: created=2026-05-29; last_reviewed=2026-05-29; last_reused=never
-# Authority basis: /Users/leofitz/.claude/jobs/9ea6f95c/OBS_V2_CONSOLIDATION_PLAN.md
+# Authority basis: ~/.claude/jobs/9ea6f95c/OBS_V2_CONSOLIDATION_PLAN.md
 #   (Option B, operator-locked) — merge observation_instants_v2 (superset) + legacy
 #   observation_instants (subset) into ONE canonical observation_instants.
 #   Sequenced AFTER PR3 B3/B5 (pr3_b3_live_table_rename.py:167 explicitly STOPPED

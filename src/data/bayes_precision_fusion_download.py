@@ -1,5 +1,5 @@
 # Created: 2026-06-08
-# Last reused or audited: 2026-07-28
+# Last reused or audited: 2026-08-18
 # Authority basis: BAYES_PRECISION_FUSION_SPEC.md §6 F1 (raw capture: previous_runs + single_runs ->
 #   raw_model_forecasts), §3 (causality: previous-runs fixed-lead; single-runs live capture;
 #   run_time != source_available_at), §5 (~6mo retention); §7 antibodies (C/F unit mix ->
@@ -47,6 +47,9 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Callable, Iterable, Mapping, Sequence
+from zoneinfo import ZoneInfo
+
+import httpx
 
 from src.data.bayes_precision_fusion_capture import (
     OPENMETEO_MODEL_IDS,
@@ -542,17 +545,80 @@ def _is_quota_transport_error(message: object) -> bool:
     )
 
 
+def _can_split_location_batch(
+    error: object,
+    *,
+    location_count: int,
+    deadline_monotonic: float | None,
+) -> bool:
+    """Whether a response failure may be isolated by location.
+
+    DNS, connection, TLS, and read failures apply to the whole request. Splitting those
+    failures recursively turns one unavailable 25-location request into as many as 49
+    attempts without adding information, consuming the quota needed for the next healthy
+    source-clock tick. Only failures above the transport layer may be location-specific.
+    """
+
+    if location_count <= 1 or _typed_transport_outcome(error) is not None:
+        return False
+    if isinstance(error, (httpx.TransportError, OSError, TimeoutError)):
+        return False
+    text = str(error or "").lower()
+    if _is_quota_transport_error(text) or any(
+        marker in text
+        for marker in (
+            "request embargoed",
+            "terminally cached",
+            "request deadline expired",
+        )
+    ):
+        return False
+    return (
+        deadline_monotonic is None
+        or deadline_monotonic - time.monotonic() > 0.05
+    )
+
+
 def bayes_precision_fusion_quota_cooldown_seconds() -> int:
-    """Return time until the source-clock quota lane can make another call."""
+    """Return time until either exact-current Open-Meteo transport is available."""
 
     with _BPF_OPENMETEO_QUOTA_TRACKER.priority_lane():
-        return int(_BPF_OPENMETEO_QUOTA_TRACKER.retry_after_seconds())
+        waits = (
+            _BPF_OPENMETEO_QUOTA_TRACKER.retry_after_seconds(
+                "single-runs-api.open-meteo.com/v1/forecast"
+            ),
+            _BPF_OPENMETEO_QUOTA_TRACKER.retry_after_seconds(
+                "api.open-meteo.com/v1/forecast"
+            ),
+        )
+    return 0 if 0 in waits else int(min(waits))
+
+
+def bayes_precision_fusion_held_quota_cooldown_seconds() -> int:
+    """Return the cooldown after applying the held-capital quota reserve."""
+
+    with _BPF_OPENMETEO_QUOTA_TRACKER.critical_lane():
+        waits = (
+            _BPF_OPENMETEO_QUOTA_TRACKER.retry_after_seconds(
+                "single-runs-api.open-meteo.com/v1/forecast"
+            ),
+            _BPF_OPENMETEO_QUOTA_TRACKER.retry_after_seconds(
+                "api.open-meteo.com/v1/forecast"
+            ),
+        )
+    return 0 if 0 in waits else int(min(waits))
 
 
 def bayes_precision_fusion_source_clock_quota_priority():
     """Reserve Open-Meteo capacity for newly published source runs."""
 
     return _BPF_OPENMETEO_QUOTA_TRACKER.priority_lane()
+
+
+def bayes_precision_fusion_held_quota_priority():
+    """Reserve the final Open-Meteo tranche for held-position refresh."""
+
+    return _BPF_OPENMETEO_QUOTA_TRACKER.critical_lane()
 
 
 @dataclass(frozen=True)
@@ -659,18 +725,19 @@ def _utc_datetime(value: datetime | str) -> datetime:
     return parsed.astimezone(UTC)
 
 
-def _fetch_nbm_standard_meta_stamped_payloads(
+def _fetch_standard_meta_stamped_payloads(
     *,
+    model: str,
     locations: Sequence[tuple[float, float, str, Sequence[date]]],
     run: datetime,
     source_available_at: datetime | str | None,
     forecast_hours: int,
     deadline_monotonic: float | None,
 ) -> tuple[tuple[Mapping[str, object], ...], _StandardMetaStampedTransport]:
-    """Fetch current hourly NBM from the standard API under an atomic metadata window."""
+    """Fetch one current model from the standard API under an atomic metadata window."""
 
     if source_available_at is None:
-        raise ValueError("NBM standard fallback requires frozen source availability")
+        raise ValueError(f"{model} standard fallback requires frozen source availability")
     from src.data.openmeteo_client import fetch  # noqa: PLC0415
     from src.data.openmeteo_ecmwf_ifs9_anchor import STANDARD_FORECAST_URL  # noqa: PLC0415
     from src.data.openmeteo_model_updates import fetch_model_updates  # noqa: PLC0415
@@ -682,14 +749,14 @@ def _fetch_nbm_standard_meta_stamped_payloads(
         deadline_kwargs = _deadline_fetch_kwargs(deadline_monotonic)
         timeout_seconds = float(deadline_kwargs.get("timeout", 30.0))
         updates = fetch_model_updates(
-            ("ncep_nbm_conus",),
+            (model,),
             timeout_seconds=timeout_seconds,
             max_workers=1,
         )
         if len(updates) != 1:
-            raise ValueError(f"NBM metadata response count must be 1, got {len(updates)}")
-        if str(updates[0].model) != "ncep_nbm_conus":
-            raise ValueError(f"NBM metadata identity mismatch: {updates[0].model!r}")
+            raise ValueError(f"{model} metadata response count must be 1, got {len(updates)}")
+        if str(updates[0].model) != model:
+            raise ValueError(f"{model} metadata identity mismatch: {updates[0].model!r}")
         return updates[0]
 
     meta_before = _meta()
@@ -698,17 +765,17 @@ def _fetch_nbm_standard_meta_stamped_payloads(
     before_modified = meta_before.last_run_modification_time
     if before_run != expected_run or before_available != expected_available:
         raise ValueError(
-            "NBM standard fallback refused: provider metadata no longer matches frozen run"
+            f"{model} standard fallback refused: provider metadata no longer matches frozen run"
         )
     if before_modified is None:
-        raise ValueError("NBM standard fallback refused: modification timestamp missing")
+        raise ValueError(f"{model} standard fallback refused: modification timestamp missing")
     before_modified = before_modified.astimezone(UTC)
 
     params = {
         "latitude": ",".join(str(latitude) for latitude, _, _, _ in locations),
         "longitude": ",".join(str(longitude) for _, longitude, _, _ in locations),
         "hourly": "temperature_2m",
-        "models": OPENMETEO_MODEL_IDS.get("ncep_nbm_conus", "ncep_nbm_conus"),
+        "models": OPENMETEO_MODEL_IDS.get(model, model),
         "forecast_hours": forecast_hours,
         "temperature_unit": "celsius",
         "timezone": ",".join(timezone_name for _, _, timezone_name, _ in locations),
@@ -717,7 +784,7 @@ def _fetch_nbm_standard_meta_stamped_payloads(
     payload = fetch(
         STANDARD_FORECAST_URL,
         params,
-        endpoint_label="bayes_precision_fusion_nbm_standard_meta_stamped",
+        endpoint_label=f"bayes_precision_fusion_{model}_standard_meta_stamped",
         quota=_BPF_OPENMETEO_QUOTA_TRACKER,
         fast_fail_429=True,
         **_deadline_fetch_kwargs(deadline_monotonic),
@@ -729,7 +796,7 @@ def _fetch_nbm_standard_meta_stamped_payloads(
         or len(payloads) != len(locations)
         or any(not isinstance(item, Mapping) for item in payloads)
     ):
-        raise ValueError("NBM standard fallback multi-location response shape mismatch")
+        raise ValueError(f"{model} standard fallback multi-location response shape mismatch")
 
     meta_after = _meta()
     after_modified = meta_after.last_run_modification_time
@@ -739,7 +806,7 @@ def _fetch_nbm_standard_meta_stamped_payloads(
         or after_modified is None
         or after_modified.astimezone(UTC) != before_modified
     ):
-        raise ValueError("NBM standard fallback discarded: provider metadata changed mid-fetch")
+        raise ValueError(f"{model} standard fallback discarded: provider metadata changed mid-fetch")
     return tuple(payloads), _StandardMetaStampedTransport(
         run=before_run,
         source_available_at=before_available,
@@ -811,16 +878,12 @@ def _default_live_fetch_batched(
     except Exception as exc:
         batched_error_text = str(exc)
         batched_outcome = _typed_transport_outcome(exc)
-        if _is_quota_transport_error(batched_error_text):
-            _LOG.warning(
-                "BAYES_PRECISION_FUSION batched single_runs fetch hit quota/rate-limit "
-                "(no per-model retry): %s",
-                exc,
-            )
-            return {_BATCH_TRANSPORT_ERROR_KEY: _batch_transport_error(exc)}
-        if models == ["ncep_nbm_conus"]:
+        single_runs_quota = _is_quota_transport_error(batched_error_text)
+        if len(models) == 1 and (models == ["ncep_nbm_conus"] or single_runs_quota):
+            model = models[0]
             try:
-                payloads, meta_stamp = _fetch_nbm_standard_meta_stamped_payloads(
+                payloads, meta_stamp = _fetch_standard_meta_stamped_payloads(
+                    model=model,
                     locations=(
                         (
                             latitude,
@@ -841,7 +904,7 @@ def _default_live_fetch_batched(
                     timezone_name,
                 )
                 parsed[_BATCH_TRANSPORT_PROVENANCE_KEY] = {
-                    "ncep_nbm_conus": meta_stamp,
+                    model: meta_stamp,
                 }
                 return parsed
             except Exception as fallback_exc:
@@ -850,8 +913,15 @@ def _default_live_fetch_batched(
                         _BATCH_TRANSPORT_ERROR_KEY: _batch_transport_error(fallback_exc)
                     }
                 batched_error_text = (
-                    f"{batched_error_text}; nbm_standard_meta_stamped_failed={fallback_exc}"
+                    f"{batched_error_text}; standard_meta_stamped_failed={fallback_exc}"
                 )
+        if single_runs_quota:
+            _LOG.warning(
+                "BAYES_PRECISION_FUSION batched single_runs fetch hit quota/rate-limit "
+                "(no same-host per-model retry): %s",
+                exc,
+            )
+            return {_BATCH_TRANSPORT_ERROR_KEY: (batched_error_text, batched_outcome)}
         if not allow_per_model_fallback:
             _LOG.warning(
                 "BAYES_PRECISION_FUSION batched single_runs fetch failed; "
@@ -1002,9 +1072,12 @@ def _default_live_fetch_locations_batched(
             )
         ]
     except Exception as exc:
-        if models == ["ncep_nbm_conus"] and not _is_quota_transport_error(exc):
+        single_runs_quota = _is_quota_transport_error(exc)
+        if len(models) == 1 and (models == ["ncep_nbm_conus"] or single_runs_quota):
+            model = models[0]
             try:
-                payloads, meta_stamp = _fetch_nbm_standard_meta_stamped_payloads(
+                payloads, meta_stamp = _fetch_standard_meta_stamped_payloads(
+                    model=model,
                     locations=locations,
                     run=run,
                     source_available_at=source_available_at,
@@ -1021,7 +1094,7 @@ def _default_live_fetch_locations_batched(
                                 timezone_name,
                             ),
                             _BATCH_TRANSPORT_PROVENANCE_KEY: {
-                                "ncep_nbm_conus": meta_stamp,
+                                model: meta_stamp,
                             },
                         }
                         for target_local_date in target_local_dates
@@ -1037,8 +1110,37 @@ def _default_live_fetch_locations_batched(
                     exc = fallback_exc
                 else:
                     exc = RuntimeError(
-                        f"{exc}; nbm_standard_meta_stamped_failed={fallback_exc}"
+                        f"{exc}; standard_meta_stamped_failed={fallback_exc}"
                     )
+        if models != ["ncep_nbm_conus"] and _can_split_location_batch(
+            exc,
+            location_count=len(locations),
+            deadline_monotonic=deadline_monotonic,
+        ):
+            midpoint = len(locations) // 2
+            _LOG.warning(
+                "BAYES_PRECISION_FUSION multi-location transport failed; "
+                "isolating ordered subsets size=%d->%d+%d: %s",
+                len(locations),
+                midpoint,
+                len(locations) - midpoint,
+                exc,
+            )
+            return _default_live_fetch_locations_batched(
+                models=models,
+                locations=locations[:midpoint],
+                run=run,
+                forecast_hours=forecast_hours,
+                source_available_at=source_available_at,
+                deadline_monotonic=deadline_monotonic,
+            ) + _default_live_fetch_locations_batched(
+                models=models,
+                locations=locations[midpoint:],
+                run=run,
+                forecast_hours=forecast_hours,
+                source_available_at=source_available_at,
+                deadline_monotonic=deadline_monotonic,
+            )
         error = {_BATCH_TRANSPORT_ERROR_KEY: _batch_transport_error(exc)}
         return [
             {target_local_date: dict(error) for target_local_date in target_local_dates}
@@ -1051,6 +1153,8 @@ def _parse_batched_single_runs_payload(
     models: list[str],
     target_local_date: "date",
     timezone_name: str,
+    *,
+    decision_at: datetime | str | None = None,
 ) -> dict[str, tuple[float | None, float | None]]:
     """Parse a batched single-runs response into {model: (high_c, low_c)}.
 
@@ -1059,6 +1163,8 @@ def _parse_batched_single_runs_payload(
     Uses extract_openmeteo_ecmwf_ifs9_localday_anchor for consistent local-day windowing.
     """
     from src.data.openmeteo_ecmwf_ifs9_anchor import (  # noqa: PLC0415
+        LOCALDAY_SPAN_EARLY_HOUR,
+        LOCALDAY_SPAN_LATE_HOUR,
         extract_openmeteo_ecmwf_ifs9_localday_anchor,
     )
 
@@ -1086,8 +1192,42 @@ def _parse_batched_single_runs_payload(
                 sub_payload,
                 city_timezone=timezone_name,
                 target_local_date=target_local_date,
-                require_full_localday=True,  # 2026-06-17: reject horizon-clipped partial days
+                require_full_localday=False,
             )
+            local_times = anchor.contributing_local_times
+            earliest = min(local_times)
+            latest = max(local_times)
+            covers_full_day = (
+                earliest.hour <= LOCALDAY_SPAN_EARLY_HOUR
+                and latest.hour >= LOCALDAY_SPAN_LATE_HOUR
+            )
+            if not covers_full_day:
+                decision_utc = (
+                    datetime.now(UTC)
+                    if decision_at is None
+                    else _utc_datetime(decision_at)
+                )
+                decision_local = decision_utc.astimezone(ZoneInfo(timezone_name))
+                ordered_times = sorted(local_times)
+                positive_steps = tuple(
+                    right - left
+                    for left, right in zip(ordered_times, ordered_times[1:], strict=False)
+                    if right > left
+                )
+                final_slot_end = latest + (
+                    min(positive_steps) if positive_steps else timedelta(hours=1)
+                )
+                covers_remaining_day0 = (
+                    decision_local.date() == target_local_date
+                    and earliest <= decision_local
+                    and final_slot_end > decision_local
+                    and latest.hour >= LOCALDAY_SPAN_LATE_HOUR
+                )
+                if not covers_remaining_day0:
+                    raise ValueError(
+                        "partial local-day coverage is not an elapsed-prefix-only "
+                        "Day0 slice with remaining-day coverage"
+                    )
             result[model] = (float(anchor.high_c), float(anchor.low_c))
         except Exception as exc:
             _LOG.warning(

@@ -23,6 +23,8 @@ from __future__ import annotations
 
 import sqlite3
 
+import pytest
+
 from src.data.replacement_current_value_serving import (
     SERVED_VIA_PREVIOUS_RUNS,
     SERVED_VIA_SINGLE_RUNS,
@@ -181,3 +183,71 @@ def test_solo_null_captured_at_row_still_serves_when_no_stamped_sibling_exists()
     assert out["ecmwf_ifs025"].age_hours == 0.0, (
         "solo NULL captured_at correctly brands age_hours=0.0 (unknowable, no alternative)"
     )
+
+
+def test_source_clock_selector_propagates_sqlite_interrupt() -> None:
+    """A bounded read interruption is unavailable truth, never an empty family."""
+
+    conn = _conn()
+    _insert(conn, 1, "ecmwf_ifs", 20.0, "single_runs", CAPTURE_EARLY)
+
+    class _InterruptedSourceClockRead:
+        def execute(self, sql, params=()):
+            if "datetime(source_cycle_time)" in sql:
+                raise sqlite3.OperationalError("interrupted")
+            return conn.execute(sql, params)
+
+    with pytest.raises(sqlite3.OperationalError, match="interrupted"):
+        read_current_instrument_values(
+            _InterruptedSourceClockRead(),
+            city="Tokyo",
+            metric="high",
+            target_date="2026-06-12",
+            source_cycle_time_iso=CYCLE,
+            decision_time_iso=CAPTURE_LATE,
+        )
+
+
+def test_source_clock_selector_propagates_schema_interrupt() -> None:
+    """Schema interruption cannot relabel current authority as an empty family."""
+
+    conn = _conn()
+
+    class _InterruptedSchemaRead:
+        def execute(self, sql, params=()):
+            if "PRAGMA table_info(raw_model_forecasts)" in sql:
+                raise sqlite3.OperationalError("interrupted")
+            return conn.execute(sql, params)
+
+    with pytest.raises(sqlite3.OperationalError, match="interrupted"):
+        read_current_instrument_values(
+            _InterruptedSchemaRead(),
+            city="Tokyo",
+            metric="high",
+            target_date="2026-06-12",
+            source_cycle_time_iso=CYCLE,
+            decision_time_iso=CAPTURE_LATE,
+        )
+
+
+def test_station_authority_selector_propagates_sqlite_interrupt() -> None:
+    """An interrupted station override is unknown authority, never partial truth."""
+
+    conn = _conn()
+    _insert(conn, 1, "ecmwf_ifs", 20.0, "single_runs", CAPTURE_EARLY)
+
+    class _InterruptedStationRead:
+        def execute(self, sql, params=()):
+            if "model LIKE 'cwa%'" in sql:
+                raise sqlite3.OperationalError("interrupted")
+            return conn.execute(sql, params)
+
+    with pytest.raises(sqlite3.OperationalError, match="interrupted"):
+        read_current_instrument_values(
+            _InterruptedStationRead(),
+            city="Tokyo",
+            metric="high",
+            target_date="2026-06-12",
+            source_cycle_time_iso=CYCLE,
+            include_station_sources=True,
+        )

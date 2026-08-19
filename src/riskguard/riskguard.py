@@ -6,7 +6,7 @@ and emits durable risk actions into zeus.db when the canonical table exists.
 Graduated response: GREEN → YELLOW → ORANGE → RED.
 
 # Created: (pre-audit)
-# Last reused or audited: 2026-07-08
+# Last reused or audited: 2026-08-18
 # Authority basis: connection-leak audit 2026-05-10 — 51 open zeus-world.db-wal
 #   handles observed on PID 18538. Root cause: tick() and tick_with_portfolio()
 #   opened zeus_conn / risk_conn without try/finally, so any exception in the
@@ -20,15 +20,21 @@ Graduated response: GREEN → YELLOW → ORANGE → RED.
 #   fail-open GREEN, never weakens RED; (3) get_current_level() floors a degraded
 #   row (riskguard_degraded_reason) to DATA_DEGRADED so the SINGLE authority never
 #   surfaces a degraded GREEN as clean — kills the status-vs-gate split-brain.
+#   2026-08-17 Brier strategy gates require independent target dates; correlated
+#   city/metric cells from one forecast day remain visible but cannot fabricate
+#   the minimum evidence count that blocks current positive-growth actions.
 """
 
 import hashlib
 import json
 import logging
+import math
 import os
+import shutil
 import sqlite3
 import sys
 import time
+from collections.abc import Mapping
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
@@ -60,6 +66,7 @@ from src.state.db import (
     query_portfolio_loader_view,
     query_strategy_health_snapshot,
     refresh_strategy_health,
+    settlement_economic_ready,
 )
 from src.state.fill_dedup import canonical_trade_fact_cte
 from src.state.portfolio import (
@@ -74,6 +81,7 @@ from src.state.portfolio import (
 
 RISKGUARD_SETTLEMENT_LIMIT = 50
 RISKGUARD_BRIER_SCAN_LIMIT = 200
+RISKGUARD_REALIZED_TELEMETRY_WINDOW = timedelta(days=7)
 from src.state.portfolio_loader_policy import choose_portfolio_truth_source
 from src.state.strategy_tracker import load_tracker
 from src.contracts.freshness_registry import FreshnessLevel, registry as _freshness_registry
@@ -101,6 +109,79 @@ _RISKGUARD_OPEN_RUNTIME_STATES = frozenset({
     "pending_exit",
     "unknown",
 })
+
+_STORAGE_ENTRY_MIN_FREE_BYTES_DEFAULT = 64 * 1024**3
+_STORAGE_ENTRY_MIN_FREE_RATIO_DEFAULT = 0.10
+_disk_usage = shutil.disk_usage
+
+
+def storage_capacity_snapshot(path=None) -> dict[str, object]:
+    """Return the live volume's entry-preserving capacity verdict.
+
+    SCOPE: DATA_DEGRADED blocks new entries only; held monitoring, cancel,
+    reduce-only SELL, reconciliation, and settlement keep running. DRAIN: an
+    operator or retention job frees the volume while the 60-second RiskGuard
+    tick keeps re-reading the same filesystem. RESET: the next successful read
+    at or above both configured watermarks returns GREEN.
+    """
+
+    capacity_config = settings["riskguard"]
+    try:
+        min_free_bytes = int(
+            capacity_config.get(
+                "storage_entry_min_free_bytes",
+                _STORAGE_ENTRY_MIN_FREE_BYTES_DEFAULT,
+            )
+        )
+        min_free_ratio = float(
+            capacity_config.get(
+                "storage_entry_min_free_ratio",
+                _STORAGE_ENTRY_MIN_FREE_RATIO_DEFAULT,
+            )
+        )
+        if min_free_bytes < 0 or not 0.0 < min_free_ratio < 1.0:
+            raise ValueError("storage entry watermarks are outside valid bounds")
+    except (TypeError, ValueError) as exc:
+        return {
+            "level": RiskLevel.DATA_DEGRADED.value,
+            "status": "CONFIG_INVALID",
+            "reason": f"{type(exc).__name__}:{exc}",
+            "path": str(path or RISK_DB_PATH.parent),
+        }
+
+    target = path or RISK_DB_PATH.parent
+    try:
+        usage = _disk_usage(target)
+    except OSError as exc:
+        return {
+            "level": RiskLevel.DATA_DEGRADED.value,
+            "status": "CAPACITY_UNAVAILABLE",
+            "reason": f"{type(exc).__name__}:{exc}",
+            "path": str(target),
+            "min_free_bytes": min_free_bytes,
+            "min_free_ratio": min_free_ratio,
+        }
+
+    ratio_required_bytes = int(usage.total * min_free_ratio)
+    required_free_bytes = max(min_free_bytes, ratio_required_bytes)
+    level = (
+        RiskLevel.GREEN
+        if usage.free >= required_free_bytes
+        else RiskLevel.DATA_DEGRADED
+    )
+    return {
+        "level": level.value,
+        "status": "READY" if level == RiskLevel.GREEN else "LOW_DISK",
+        "reason": None if level == RiskLevel.GREEN else "ENTRY_RESERVE_BREACHED",
+        "path": str(target),
+        "total_bytes": int(usage.total),
+        "used_bytes": int(usage.used),
+        "free_bytes": int(usage.free),
+        "free_ratio": float(usage.free / usage.total) if usage.total else 0.0,
+        "required_free_bytes": required_free_bytes,
+        "min_free_bytes": min_free_bytes,
+        "min_free_ratio": min_free_ratio,
+    }
 
 
 def _collateral_identity_level(zeus_conn: sqlite3.Connection) -> RiskLevel:
@@ -201,7 +282,12 @@ def _install_riskguard_collateral_ledger() -> bool:
     if get_global_ledger() is not None:
         return True
     try:
-        configure_global_ledger(CollateralLedger(db_path=_zeus_trade_db_path()))
+        configure_global_ledger(
+            CollateralLedger(
+                db_path=_zeus_trade_db_path(),
+                initialize_schema=False,
+            )
+        )
         logger.info(
             "RiskGuard CollateralLedger reader installed (db=%s)",
             _zeus_trade_db_path(),
@@ -1095,7 +1181,7 @@ def _component_breakdown(
 def _canonical_recent_exits_from_settlement_rows(rows: list[dict]) -> list[dict]:
     exits: list[dict] = []
     for row in rows:
-        if not row.get("metric_ready", False):
+        if not settlement_economic_ready(row):
             continue
         pnl = row.get("pnl")
         if pnl is None:
@@ -1730,6 +1816,10 @@ def _bind_qkernel_probability_semantics(
     """
 
     output = [dict(row) for row in rows]
+    accepted_revisions = {
+        CURRENT_EVIDENCE_SEMANTICS_REVISION,
+        STALE_ENSEMBLE_ABSOLUTE_DISAGREEMENT_SEMANTICS_REVISION,
+    }
     qkernel_rows = [
         row
         for row in output
@@ -1742,6 +1832,7 @@ def _bind_qkernel_probability_semantics(
     ]
     status: dict[str, object] = {
         "status": "not_applicable",
+        "licensed_revisions": sorted(accepted_revisions),
         "strategy_candidate_count": len(qkernel_rows),
         "current_count": sum(
             row.get("probability_semantics_ready") is True for row in qkernel_rows
@@ -1818,10 +1909,6 @@ def _bind_qkernel_probability_semantics(
             conn.close()
 
     version_lineage: dict[str, tuple[str, str]] = {}
-    accepted_revisions = {
-        CURRENT_EVIDENCE_SEMANTICS_REVISION,
-        STALE_ENSEMBLE_ABSOLUTE_DISAGREEMENT_SEMANTICS_REVISION,
-    }
     for q_version in versions:
         provenance = provenance_by_version.get(q_version)
         shape = _current_evidence_shape(provenance)
@@ -1881,6 +1968,78 @@ def _bind_qkernel_probability_semantics(
         status[count_key] = int(status[count_key]) + 1
     status["status"] = "ok"
     return output, status
+
+
+def _bind_day0_probability_semantics(
+    rows: list[dict],
+) -> tuple[list[dict], dict[str, object]]:
+    """Classify Day0 settlements by the mechanism stamped at ENTRY fill.
+
+    Old hashes remain valid historical evidence, but they cannot convict the
+    current mechanism.  Mixed-version fills are non-actuating because no one
+    probability mechanism owns their share-weighted q.
+
+    SCOPE: current-law ``day0_nowcast_entry`` settlement learning only.
+    DRAIN: each RiskGuard tick rebinds immutable filled ENTRY q_versions.
+    RESET: a settled fill stamped with the current revision enters the cohort;
+    superseded rows remain telemetry and age naturally with the bounded scan.
+    """
+
+    from src.events.day0_authority import (
+        DAY0_PROBABILITY_SEMANTICS_REVISION,
+        day0_probability_semantics_revision,
+    )
+
+    output = [dict(row) for row in rows]
+    candidates = [
+        row
+        for row in output
+        if str(row.get("strategy") or "").strip() == "day0_nowcast_entry"
+    ]
+    counts = {"current": 0, "superseded": 0, "missing": 0, "mixed": 0}
+    for row in candidates:
+        versions = tuple(
+            str(version).strip()
+            for version in (row.get("entry_q_versions") or ())
+            if str(version).strip()
+        )
+        parsed_revisions = tuple(
+            day0_probability_semantics_revision(version) for version in versions
+        )
+        revisions = tuple(
+            sorted({revision for revision in parsed_revisions if revision})
+        )
+        row["probability_semantics_revisions"] = revisions
+        if not versions:
+            classification = "missing"
+            reason = "entry_q_version_lineage_missing"
+        elif not revisions:
+            classification = "superseded"
+            reason = "superseded_probability_semantics"
+        elif all(
+            revision == DAY0_PROBABILITY_SEMANTICS_REVISION
+            for revision in parsed_revisions
+        ):
+            classification = "current"
+            reason = ""
+        elif DAY0_PROBABILITY_SEMANTICS_REVISION in parsed_revisions:
+            classification = "mixed"
+            reason = "mixed_probability_semantics"
+        else:
+            classification = "superseded"
+            reason = "superseded_probability_semantics"
+        counts[classification] += 1
+        row["probability_semantics_ready"] = classification == "current"
+        row["probability_semantics_blocked_reason"] = reason
+    return output, {
+        "status": "ok" if candidates else "not_applicable",
+        "strategy_candidate_count": len(candidates),
+        "current_count": counts["current"],
+        "superseded_count": counts["superseded"],
+        "missing_count": counts["missing"],
+        "mixed_count": counts["mixed"],
+        "current_revision": DAY0_PROBABILITY_SEMANTICS_REVISION,
+    }
 
 
 def _filled_entry_probability_composites(
@@ -1963,7 +2122,8 @@ def _filled_entry_probability_composites(
                            MAX(
                                CASE
                                    WHEN filled_at IS NOT NULL
-                                    AND lower(COALESCE(terminal_exec_status,''))='filled'
+                                    AND lower(COALESCE(terminal_exec_status,''))
+                                        IN ('filled','confirmed','partial')
                                    THEN filled_at
                                END
                            ) AS filled_at,
@@ -1971,7 +2131,8 @@ def _filled_entry_probability_composites(
                                WHEN SUM(
                                    CASE
                                        WHEN filled_at IS NOT NULL
-                                        AND lower(COALESCE(terminal_exec_status,''))='filled'
+                                        AND lower(COALESCE(terminal_exec_status,''))
+                                            IN ('filled','confirmed','partial')
                                        THEN 1 ELSE 0
                                    END
                                ) > 0
@@ -1980,21 +2141,24 @@ def _filled_entry_probability_composites(
                            MAX(
                                CASE
                                    WHEN filled_at IS NOT NULL
-                                    AND lower(COALESCE(terminal_exec_status,''))='filled'
+                                    AND lower(COALESCE(terminal_exec_status,''))
+                                        IN ('filled','confirmed','partial')
                                    THEN shares
                                END
                            ) AS shares,
                            MIN(
                                CASE
                                    WHEN filled_at IS NOT NULL
-                                    AND lower(COALESCE(terminal_exec_status,''))='filled'
+                                    AND lower(COALESCE(terminal_exec_status,''))
+                                        IN ('filled','confirmed','partial')
                                    THEN shares
                                END
                            ) AS min_shares,
                            MAX(
                                CASE
                                    WHEN filled_at IS NOT NULL
-                                    AND lower(COALESCE(terminal_exec_status,''))='filled'
+                                    AND lower(COALESCE(terminal_exec_status,''))
+                                        IN ('filled','confirmed','partial')
                                    THEN shares
                                END
                            ) AS max_shares
@@ -2112,10 +2276,10 @@ def _riskguard_brier_actuating_rows(
             continue
         if str(row.get("decision_law_id") or "").strip() not in DECISION_LAW_IDS:
             continue
-        if (
-            str(row.get("strategy") or "").strip() == "forecast_qkernel_entry"
-            and row.get("probability_semantics_ready") is not True
-        ):
+        if str(row.get("strategy") or "").strip() in {
+            "forecast_qkernel_entry",
+            "day0_nowcast_entry",
+        } and row.get("probability_semantics_ready") is not True:
             continue
         actuating.append(row)
         if len(actuating) >= limit:
@@ -2123,9 +2287,1959 @@ def _riskguard_brier_actuating_rows(
     return actuating
 
 
+def _bind_entry_market_benchmarks(
+    conn: sqlite3.Connection,
+    rows: list[dict],
+) -> list[dict]:
+    """Bind each settled probability claim to its canonical entry fills."""
+
+    output = [dict(row) for row in rows]
+    trade_ids = sorted(
+        {
+            str(row.get("trade_id") or "").strip()
+            for row in output
+            if str(row.get("trade_id") or "").strip()
+        }
+    )
+    bindings: dict[str, tuple[float, str, str, str]] = {}
+    required_columns = {
+        "position_current": {
+            "position_id",
+            "city",
+            "target_date",
+            "temperature_metric",
+        },
+        "execution_fact": {
+            "position_id",
+            "order_role",
+            "filled_at",
+            "terminal_exec_status",
+            "fill_price",
+            "shares",
+        },
+    }
+    schema_ready = bool(trade_ids) and all(
+        _table_exists(conn, table)
+        and required.issubset(
+            {
+                str(column[1])
+                for column in conn.execute(f"PRAGMA table_info({table})").fetchall()
+            }
+        )
+        for table, required in required_columns.items()
+    )
+    if schema_ready:
+        fill_parts: dict[str, list[tuple[float, float]]] = {
+            trade_id: [] for trade_id in trade_ids
+        }
+        identities: dict[str, tuple[str, str, str]] = {}
+        invalid: set[str] = set()
+        for start in range(0, len(trade_ids), 500):
+            chunk = trade_ids[start : start + 500]
+            placeholders = ",".join("?" for _ in chunk)
+            for bound in conn.execute(
+                "SELECT pc.position_id,ef.fill_price,ef.shares,"
+                "pc.city,pc.target_date,pc.temperature_metric "
+                "FROM position_current AS pc "
+                "LEFT JOIN execution_fact AS ef ON ef.position_id=pc.position_id "
+                "AND ef.order_role='entry' AND ef.filled_at IS NOT NULL "
+                "AND lower(COALESCE(ef.terminal_exec_status,'')) "
+                "IN ('filled','confirmed','partial') "
+                f"WHERE pc.position_id IN ({placeholders})",
+                tuple(chunk),
+            ).fetchall():
+                trade_id = str(bound[0] or "").strip()
+                identities[trade_id] = (
+                    str(bound[3] or "").strip(),
+                    str(bound[4] or "").strip(),
+                    str(bound[5] or "").strip(),
+                )
+                try:
+                    price = float(bound[1])
+                    shares = float(bound[2])
+                except (TypeError, ValueError):
+                    invalid.add(trade_id)
+                    continue
+                if (
+                    not math.isfinite(price)
+                    or not math.isfinite(shares)
+                    or not 0.0 < price < 1.0
+                    or shares <= 0.0
+                ):
+                    invalid.add(trade_id)
+                    continue
+                fill_parts[trade_id].append((price, shares))
+
+        for trade_id, parts in fill_parts.items():
+            identity = identities.get(trade_id)
+            if trade_id in invalid or not parts or identity is None or not all(identity):
+                continue
+            total_shares = sum(shares for _price, shares in parts)
+            price = sum(price * shares for price, shares in parts) / total_shares
+            city, target_date, metric = identity
+            bindings[trade_id] = (price, city, target_date, metric)
+
+    for row in output:
+        binding = bindings.get(str(row.get("trade_id") or "").strip())
+        row["entry_market_benchmark_ready"] = binding is not None
+        if binding is None:
+            row["entry_market_benchmark"] = None
+            row["entry_market_benchmark_family"] = ()
+            continue
+        price, city, target_date, metric = binding
+        row["entry_market_benchmark"] = price
+        row["entry_market_benchmark_family"] = (city, target_date, metric)
+    return output
+
+
+def _settled_market_relative_alpha_shadow_rows(
+    conn: sqlite3.Connection,
+    *,
+    strategy_key: str,
+    window_days: float,
+    as_of: datetime | None = None,
+    forecasts_connection_factory=get_forecasts_connection_read_only,
+) -> tuple[list[dict[str, object]], dict[str, object]]:
+    """Bind frozen no-money decisions to later verified venue outcomes."""
+
+    from src.events.day0_authority import (
+        DAY0_PROBABILITY_SEMANTICS_REVISION,
+        day0_probability_semantics_revision,
+    )
+
+    if strategy_key == "day0_nowcast_entry":
+        expected_revisions = {DAY0_PROBABILITY_SEMANTICS_REVISION}
+        expected_source_status = "current_day0_probability_authority"
+    elif strategy_key == "forecast_qkernel_entry":
+        expected_revisions = {
+            CURRENT_EVIDENCE_SEMANTICS_REVISION,
+            STALE_ENSEMBLE_ABSOLUTE_DISAGREEMENT_SEMANTICS_REVISION,
+        }
+        expected_source_status = "current_qkernel_probability_authority"
+    else:
+        raise ValueError("market-relative alpha shadow strategy is not canonical")
+    expected_reason = f"MARKET_RELATIVE_ALPHA_SHADOW:{strategy_key}"
+
+    evaluated_at = as_of or datetime.now(timezone.utc)
+    if evaluated_at.tzinfo is None:
+        evaluated_at = evaluated_at.replace(tzinfo=timezone.utc)
+    database_names = {
+        str(row[1]) for row in conn.execute("PRAGMA database_list").fetchall()
+    }
+    schema = "world" if "world" in database_names else "main"
+    table_ready = conn.execute(
+        f"SELECT 1 FROM {schema}.sqlite_master "
+        "WHERE type='table' AND name='no_trade_regret_events' LIMIT 1"
+    ).fetchone()
+    status: dict[str, object] = {
+        "status": "no_shadow_evidence",
+        "strategy_key": strategy_key,
+        "source_schema": schema,
+        "shadow_candidate_count": 0,
+        "certificate_ready_count": 0,
+        "settlement_ready_count": 0,
+        "blocked_reasons": {},
+    }
+    if table_ready is None:
+        status["status"] = "shadow_table_unavailable"
+        return [], status
+
+    cutoff = evaluated_at - timedelta(days=window_days + 2.0)
+    column_names = (
+        "regret_event_id",
+        "event_id",
+        "rejection_stage",
+        "rejection_reason",
+        "condition_id",
+        "token_id",
+        "decision_time",
+        "city",
+        "target_date",
+        "metric",
+        "family_id",
+        "bin_label",
+        "direction",
+        "q_live",
+        "c_fee_adjusted",
+        "native_quote_available",
+        "source_status",
+        "family_complete",
+        "hypothetical_order_type",
+        "hypothetical_fill_status",
+        "hypothetical_fill_price",
+        "causal_snapshot_id",
+        "executable_snapshot_id",
+        "envelope_json",
+        "created_at",
+    )
+    raw_rows = conn.execute(
+        f"SELECT {','.join(column_names)} "
+        f"FROM {schema}.no_trade_regret_events "
+        "INDEXED BY idx_no_trade_regret_stage "
+        "WHERE rejection_stage='RISK_GUARD' "
+        "AND rejection_reason=? AND created_at>=? "
+        "ORDER BY created_at,regret_event_id",
+        (
+            expected_reason,
+            cutoff.isoformat(),
+        ),
+    ).fetchall()
+    status["shadow_candidate_count"] = len(raw_rows)
+    blocked: dict[str, int] = {}
+
+    def block(reason: str) -> None:
+        blocked[reason] = blocked.get(reason, 0) + 1
+
+    certificates: list[dict[str, object]] = []
+    for raw in raw_rows:
+        row = dict(zip(column_names, raw))
+        try:
+            envelope = json.loads(str(row["envelope_json"] or ""))
+        except (TypeError, ValueError):
+            block("envelope_invalid")
+            continue
+        if not isinstance(envelope, Mapping):
+            block("envelope_invalid")
+            continue
+        revision = str(
+            envelope.get("probability_semantics_revision") or ""
+        )
+        q_version = str(envelope.get("q_version") or "")
+        posterior_identity_hash = str(
+            envelope.get("posterior_identity_hash") or ""
+        )
+        side = str(envelope.get("side") or "").upper()
+        expected_fields = {
+            "family_key": row["family_id"],
+            "city": row["city"],
+            "target_date": row["target_date"],
+            "metric": row["metric"],
+            "bin_id": row["bin_label"],
+            "condition_id": row["condition_id"],
+            "token_id": row["token_id"],
+        }
+        if envelope.get("decision_law_id") != "executable_min_order_capital_gain_v2":
+            block("superseded_decision_law")
+            continue
+        revision_identity_ready = (
+            day0_probability_semantics_revision(q_version) == revision
+            if strategy_key == "day0_nowcast_entry"
+            else bool(q_version and posterior_identity_hash)
+        )
+        if (
+            envelope.get("schema_version") != 2
+            or envelope.get("strategy_key") != strategy_key
+            or envelope.get("selection_rule")
+            != (
+                "earliest_complete_global_cut_exact_global_posterior_mean_"
+                "expected_growth_winner_v3"
+            )
+            or revision not in expected_revisions
+            or not revision_identity_ready
+            or side not in {"YES", "NO"}
+            or any(
+                str(envelope.get(key) or "") != str(value or "")
+                for key, value in expected_fields.items()
+            )
+            or str(row["direction"] or "") != f"buy_{side.lower()}"
+            or str(row["causal_snapshot_id"] or "")
+            != str(envelope.get("probability_witness_identity") or "")
+            or str(row["executable_snapshot_id"] or "")
+            != str(envelope.get("book_snapshot_id") or "")
+            or int(row["native_quote_available"] or 0) != 1
+            or int(row["family_complete"] or 0) != 1
+            or row["source_status"] != expected_source_status
+            or row["hypothetical_order_type"] != "MARKETABLE_LIMIT"
+            or row["hypothetical_fill_status"] != "EXECUTABLE_AT_DECISION"
+        ):
+            block("certificate_identity_mismatch")
+            continue
+        try:
+            q = float(row["q_live"])
+            market = float(row["hypothetical_fill_price"])
+            envelope_q = float(envelope["q"])
+            envelope_market = float(envelope["raw_min_order_vwap"])
+            fee_adjusted_cost = float(envelope["fee_adjusted_min_order_cost"])
+            row_fee_adjusted_cost = float(row["c_fee_adjusted"])
+            min_order_size = float(envelope["min_order_size"])
+            expected_net_edge = float(envelope["expected_net_edge_per_share"])
+            proof_candidate_id = str(envelope["global_proof_candidate_id"])
+            proof_execution_mode = str(
+                envelope["global_proof_execution_mode"]
+            )
+            proof_shares = float(envelope["global_proof_shares"])
+            proof_cost = float(envelope["global_proof_cost_usd"])
+            proof_delta_log_wealth = float(
+                envelope["global_proof_expected_delta_log_wealth"]
+            )
+            proof_ev_usd = float(envelope["global_proof_expected_ev_usd"])
+            decision_time = datetime.fromisoformat(
+                str(row["decision_time"] or "").replace("Z", "+00:00")
+            )
+            created_at = datetime.fromisoformat(
+                str(row["created_at"] or "").replace("Z", "+00:00")
+            )
+        except (KeyError, TypeError, ValueError):
+            block("certificate_value_invalid")
+            continue
+        if decision_time.tzinfo is None:
+            decision_time = decision_time.replace(tzinfo=timezone.utc)
+        if created_at.tzinfo is None:
+            created_at = created_at.replace(tzinfo=timezone.utc)
+        if (
+            not all(
+                math.isfinite(value)
+                for value in (
+                    q,
+                    market,
+                    fee_adjusted_cost,
+                    min_order_size,
+                    expected_net_edge,
+                    proof_shares,
+                    proof_cost,
+                    proof_delta_log_wealth,
+                    proof_ev_usd,
+                )
+            )
+            or not 0.0 <= q <= 1.0
+            or not 0.0 < market < 1.0
+            or not 0.0 < fee_adjusted_cost < 1.0
+            or min_order_size <= 0.0
+            or expected_net_edge <= 0.0
+            or envelope.get("global_proof_winner") is not True
+            or not proof_candidate_id
+            or proof_execution_mode != "TAKER_LIMIT"
+            or proof_shares <= 0.0
+            or proof_cost <= 0.0
+            or not 0.0 < proof_cost / proof_shares < 1.0
+            or proof_delta_log_wealth <= 0.0
+            or proof_ev_usd <= 0.0
+            or not math.isclose(
+                q - fee_adjusted_cost,
+                expected_net_edge,
+                rel_tol=0.0,
+                abs_tol=1e-12,
+            )
+            or not math.isclose(
+                row_fee_adjusted_cost,
+                fee_adjusted_cost,
+                rel_tol=0.0,
+                abs_tol=1e-12,
+            )
+            or not math.isclose(q, envelope_q, rel_tol=0.0, abs_tol=1e-12)
+            or not math.isclose(
+                market, envelope_market, rel_tol=0.0, abs_tol=1e-12
+            )
+            or str(envelope.get("decision_at_utc") or "")
+            != str(row["decision_time"] or "")
+            or decision_time > evaluated_at
+            or created_at > evaluated_at
+        ):
+            block("certificate_value_mismatch")
+            continue
+        certificates.append(
+            {
+                **row,
+                "envelope": envelope,
+                "q": q,
+                "market": market,
+                "fee_adjusted_cost": fee_adjusted_cost,
+                "min_order_size": min_order_size,
+                "expected_net_edge": expected_net_edge,
+                "side": side,
+                "decision_time_parsed": decision_time,
+                "created_at_parsed": created_at,
+            }
+        )
+    if not certificates:
+        status["certificate_ready_count"] = 0
+        status["blocked_reasons"] = blocked
+        return [], status
+    if strategy_key == "forecast_qkernel_entry":
+        probes = [
+            {
+                "trade_id": str(row["regret_event_id"]),
+                "strategy": strategy_key,
+                "entry_q_versions": (
+                    str(row["envelope"]["posterior_identity_hash"]),
+                ),
+            }
+            for row in certificates
+        ]
+        classified, semantics_binding = _bind_qkernel_probability_semantics(
+            probes,
+            forecasts_connection_factory=forecasts_connection_factory,
+        )
+        status["probability_semantics_binding"] = semantics_binding
+        current_revisions = {
+            str(row["trade_id"]): tuple(
+                str(revision)
+                for revision in (row.get("probability_semantics_revisions") or ())
+            )
+            for row in classified
+            if row.get("probability_semantics_ready") is True
+        }
+        current_certificates = []
+        for row in certificates:
+            revisions = current_revisions.get(str(row["regret_event_id"]))
+            certificate_revision = str(
+                row["envelope"].get("probability_semantics_revision") or ""
+            )
+            if revisions != (certificate_revision,):
+                block("probability_semantics_not_current")
+                continue
+            row["probability_semantics_revisions"] = revisions
+            current_certificates.append(row)
+        certificates = current_certificates
+    else:
+        for row in certificates:
+            row["probability_semantics_revisions"] = (
+                str(row["envelope"]["probability_semantics_revision"]),
+            )
+    status["certificate_ready_count"] = len(certificates)
+    if not certificates:
+        status["blocked_reasons"] = blocked
+        return [], status
+
+    condition_ids = sorted(
+        {str(row["condition_id"]) for row in certificates}
+    )
+    settlement_by_condition: dict[str, list[tuple[object, ...]]] = {}
+    forecasts_conn: sqlite3.Connection | None = None
+    try:
+        forecasts_conn = forecasts_connection_factory()
+        forecasts_conn.execute("PRAGMA query_only=ON")
+        forecasts_conn.execute("PRAGMA busy_timeout=250")
+        for start in range(0, len(condition_ids), 500):
+            chunk = condition_ids[start : start + 500]
+            placeholders = ",".join("?" for _ in chunk)
+            rows = forecasts_conn.execute(
+                "SELECT me.condition_id,me.city,me.target_date,"
+                "me.temperature_metric,me.outcome,so.settled_at "
+                "FROM market_events me JOIN settlement_outcomes so "
+                "ON so.city=me.city AND so.target_date=me.target_date "
+                "AND so.temperature_metric=me.temperature_metric "
+                f"WHERE me.condition_id IN ({placeholders}) "
+                "AND me.outcome IN ('YES','NO') "
+                "AND so.authority='VERIFIED'",
+                tuple(chunk),
+            ).fetchall()
+            for outcome_row in rows:
+                settlement_by_condition.setdefault(
+                    str(outcome_row[0]), []
+                ).append(tuple(outcome_row))
+    except (OSError, sqlite3.Error) as exc:
+        status.update(
+            status="settlement_authority_unavailable",
+            blocked_reasons={
+                **blocked,
+                f"settlement_authority_{type(exc).__name__}": len(certificates),
+            },
+        )
+        return [], status
+    finally:
+        if forecasts_conn is not None:
+            forecasts_conn.close()
+
+    output: list[dict[str, object]] = []
+    for row in certificates:
+        matches = settlement_by_condition.get(str(row["condition_id"]), [])
+        exact = [
+            match
+            for match in matches
+            if (
+                str(match[1]) == str(row["city"])
+                and str(match[2]) == str(row["target_date"])
+                and str(match[3]).lower() == str(row["metric"]).lower()
+            )
+        ]
+        if len(exact) != 1:
+            block("settlement_missing_or_ambiguous")
+            continue
+        _condition_id, _city, _date, _metric, venue_outcome, settled_at_raw = exact[0]
+        try:
+            settled_at = datetime.fromisoformat(
+                str(settled_at_raw or "").replace("Z", "+00:00")
+            )
+        except ValueError:
+            block("settlement_time_invalid")
+            continue
+        if settled_at.tzinfo is None:
+            settled_at = settled_at.replace(tzinfo=timezone.utc)
+        if (
+            settled_at <= row["decision_time_parsed"]
+            or settled_at <= row["created_at_parsed"]
+            or settled_at > evaluated_at
+        ):
+            block("settlement_not_strictly_later")
+            continue
+        output.append(
+            {
+                "trade_id": str(row["regret_event_id"]),
+                "strategy": strategy_key,
+                "probability_semantics_ready": True,
+                "probability_semantics_revisions": row[
+                    "probability_semantics_revisions"
+                ],
+                "decision_law_id": "executable_min_order_capital_gain_v2",
+                "settled_at": settled_at.isoformat(),
+                "entry_market_benchmark_ready": True,
+                "entry_market_benchmark": row["market"],
+                "entry_market_benchmark_family": (
+                    str(row["city"]),
+                    str(row["target_date"]),
+                    str(row["metric"]),
+                ),
+                "p_posterior": row["q"],
+                "outcome": int(str(venue_outcome).upper() == row["side"]),
+                "capital_gain_proof_ready": True,
+                "hypothetical_min_order_size": row["min_order_size"],
+                "hypothetical_capital_committed_usd": (
+                    row["fee_adjusted_cost"] * row["min_order_size"]
+                ),
+                "hypothetical_settlement_payout_usd": (
+                    int(str(venue_outcome).upper() == row["side"])
+                    * row["min_order_size"]
+                ),
+                "hypothetical_realized_pnl_usd": (
+                    (
+                        int(str(venue_outcome).upper() == row["side"])
+                        - row["fee_adjusted_cost"]
+                    )
+                    * row["min_order_size"]
+                ),
+                "evidence_source": (
+                    "no_trade_regret_events_day0_shadow_v2"
+                    if strategy_key == "day0_nowcast_entry"
+                    else "no_trade_regret_events_qkernel_shadow_v2"
+                ),
+            }
+        )
+    status.update(
+        status="ok" if output else "awaiting_verified_settlement",
+        settlement_ready_count=len(output),
+        blocked_reasons=blocked,
+    )
+    return output, status
+
+
+def _settled_day0_market_relative_alpha_shadow_rows(
+    conn: sqlite3.Connection,
+    *,
+    window_days: float,
+    as_of: datetime | None = None,
+    forecasts_connection_factory=get_forecasts_connection_read_only,
+) -> tuple[list[dict[str, object]], dict[str, object]]:
+    return _settled_market_relative_alpha_shadow_rows(
+        conn,
+        strategy_key="day0_nowcast_entry",
+        window_days=window_days,
+        as_of=as_of,
+        forecasts_connection_factory=forecasts_connection_factory,
+    )
+
+
+def _settled_qkernel_market_relative_alpha_shadow_rows(
+    conn: sqlite3.Connection,
+    *,
+    window_days: float,
+    as_of: datetime | None = None,
+    forecasts_connection_factory=get_forecasts_connection_read_only,
+) -> tuple[list[dict[str, object]], dict[str, object]]:
+    return _settled_market_relative_alpha_shadow_rows(
+        conn,
+        strategy_key="forecast_qkernel_entry",
+        window_days=window_days,
+        as_of=as_of,
+        forecasts_connection_factory=forecasts_connection_factory,
+    )
+
+
+def _submission_schedule_fee_usd(
+    *,
+    post_only: object,
+    fee_details_json: object,
+    fill_price: object,
+    shares: object,
+) -> float | None:
+    """Apply an immutable submit-time fee schedule to an actual fill.
+
+    Venue trade facts do not consistently carry ``fee_paid_micro``. A missing
+    observation is not permission to call the fee zero, so the forward capital
+    curve uses the schedule frozen in the submission envelope and the actual
+    fill price/size. Maker fills conservatively receive no rebate.
+    """
+
+    try:
+        price = float(fill_price)
+        quantity = float(shares)
+        maker = int(post_only) == 1
+    except (TypeError, ValueError):
+        return None
+    if (
+        not math.isfinite(price)
+        or not math.isfinite(quantity)
+        or not 0.0 < price < 1.0
+        or quantity <= 0.0
+    ):
+        return None
+    if maker:
+        return 0.0
+    try:
+        details = json.loads(str(fee_details_json or ""))
+        rate = float(details["fee_rate_fraction"])
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+        return None
+    if not math.isfinite(rate) or not 0.0 <= rate <= 1.0:
+        return None
+    return rate * price * (1.0 - price) * quantity
+
+
+def _live_realized_capital_curve(
+    conn: sqlite3.Connection,
+    *,
+    strategy_key: str,
+    window_days: float,
+    as_of: datetime | None = None,
+) -> dict[str, object]:
+    """Build walk-forward realized-capital attribution for observability only.
+
+    A profitable early exit is capital truth but not a binary-outcome grade;
+    probability accuracy is not capital gain. Only exact entry fills plus an
+    EXIT_ORDER_FILLED/SETTLED event enter this curve. A position that exits
+    before resolution and later settles only a residual is reported as a
+    hybrid close, never as if the full entry were held to settlement. Gross
+    canonical P&L is reduced by the frozen fee schedule because venue facts
+    may omit fees.
+    This retrospective curve never supplies entry admission for either strategy;
+    current causal alpha and the normal executable economics/risk stack do.
+    """
+
+    if strategy_key not in {"day0_nowcast_entry", "forecast_qkernel_entry"}:
+        raise ValueError("live capital strategy is not canonical")
+
+    from src.events.day0_authority import DAY0_PROBABILITY_SEMANTICS_REVISION
+
+    evaluated_at = as_of or datetime.now(timezone.utc)
+    if evaluated_at.tzinfo is None:
+        evaluated_at = evaluated_at.replace(tzinfo=timezone.utc)
+    cutoff = evaluated_at - timedelta(days=window_days)
+    status: dict[str, object] = {
+        "status": "awaiting_current_law_fills",
+        "strategy_key": strategy_key,
+        "decision_law_id": "predicted_bin_ev_v1",
+        "probability_semantics_revision": (
+            DAY0_PROBABILITY_SEMANTICS_REVISION
+            if strategy_key == "day0_nowcast_entry"
+            else CURRENT_EVIDENCE_SEMANTICS_REVISION
+        ),
+        "window_days": window_days,
+        "evaluated_at": evaluated_at.isoformat(),
+        "filled_position_count": 0,
+        "open_position_count": 0,
+        "realized_position_count": 0,
+        "excluded_superseded_position_count": 0,
+        "blocked_position_count": 0,
+        "capital_committed_usd": 0.0,
+        "realized_capital_committed_usd": 0.0,
+        "gross_realized_pnl_usd": 0.0,
+        "fee_bound_usd": 0.0,
+        "net_realized_pnl_usd": 0.0,
+        "return_on_realized_capital": None,
+        "curve": [],
+        "blocked_reasons": {},
+        "source": (
+            "venue_commands+venue_submission_envelopes+execution_fact+"
+            "position_events+position_current"
+        ),
+        "fee_basis": "submission_schedule_at_actual_fill_no_maker_rebate",
+    }
+    required_columns = {
+        "position_current": {
+            "position_id", "phase", "city", "target_date",
+            "temperature_metric", "strategy_key", "decision_law_id",
+            "shares", "cost_basis_usd", "realized_pnl_usd",
+        },
+        "venue_commands": {
+            "command_id", "position_id", "intent_kind", "q_version",
+            "envelope_id",
+        },
+        "venue_submission_envelopes": {
+            "envelope_id", "post_only", "fee_details_json",
+        },
+        "execution_fact": {
+            "command_id", "position_id", "order_role", "filled_at",
+            "terminal_exec_status", "fill_price", "shares",
+        },
+        "position_events": {
+            "position_id", "sequence_no", "event_type", "occurred_at",
+            "payload_json",
+        },
+    }
+    try:
+        for table, required in required_columns.items():
+            if not _table_exists(conn, table):
+                status.update(status="capital_truth_unavailable", missing_table=table)
+                return status
+            columns = {
+                str(row[1])
+                for row in conn.execute(f"PRAGMA table_info({table})").fetchall()
+            }
+            missing = sorted(required.difference(columns))
+            if missing:
+                status.update(
+                    status="capital_truth_unavailable",
+                    missing_columns={table: missing},
+                )
+                return status
+    except sqlite3.Error as exc:
+        status.update(status="capital_truth_unavailable", error=type(exc).__name__)
+        return status
+
+    entry_rows = conn.execute(
+        "SELECT pc.position_id,pc.phase,pc.city,pc.target_date,"
+        "pc.temperature_metric,pc.cost_basis_usd,pc.realized_pnl_usd,"
+        "vc.command_id,vc.q_version,ef.fill_price,ef.shares,ef.filled_at,"
+        "vse.post_only,vse.fee_details_json,pc.shares,"
+        "EXISTS(SELECT 1 FROM venue_commands AS exit_vc "
+        "JOIN execution_fact AS exit_ef ON exit_ef.command_id=exit_vc.command_id "
+        "WHERE exit_vc.position_id=pc.position_id "
+        "AND exit_vc.intent_kind='EXIT' AND exit_ef.order_role='exit' "
+        "AND exit_ef.filled_at IS NOT NULL AND exit_ef.shares>0 "
+        "AND lower(COALESCE(exit_ef.terminal_exec_status,'')) "
+        "IN ('filled','confirmed','partial')) "
+        "FROM position_current AS pc "
+        "JOIN venue_commands AS vc ON vc.position_id=pc.position_id "
+        "JOIN execution_fact AS ef ON ef.command_id=vc.command_id "
+        "JOIN venue_submission_envelopes AS vse ON vse.envelope_id=vc.envelope_id "
+        "WHERE pc.strategy_key=? "
+        "AND pc.decision_law_id='predicted_bin_ev_v1' "
+        "AND vc.intent_kind='ENTRY' AND ef.order_role='entry' "
+        "AND ef.filled_at IS NOT NULL "
+        "AND lower(COALESCE(ef.terminal_exec_status,'')) "
+        "IN ('filled','confirmed','partial') "
+        "AND pc.position_id IN ("
+        "SELECT position_id FROM execution_fact "
+        "WHERE order_role='entry' AND filled_at>=? "
+        "AND lower(COALESCE(terminal_exec_status,'')) "
+        "IN ('filled','confirmed','partial')) "
+        "ORDER BY pc.position_id,ef.filled_at,vc.command_id",
+        (strategy_key, cutoff.isoformat()),
+    ).fetchall()
+    if not entry_rows:
+        return status
+
+    positions: dict[str, dict[str, object]] = {}
+    for raw in entry_rows:
+        position_id = str(raw[0] or "").strip()
+        position = positions.setdefault(
+            position_id,
+            {
+                "position_id": position_id,
+                "phase": str(raw[1] or ""),
+                "city": str(raw[2] or ""),
+                "target_date": str(raw[3] or ""),
+                "metric": str(raw[4] or ""),
+                "projection_cost_basis_usd": raw[5],
+                "projection_realized_pnl_usd": raw[6],
+                "projection_shares": raw[14],
+                "has_filled_exit": bool(raw[15]),
+                "entries": [],
+            },
+        )
+        position["entries"].append(
+            {
+                "command_id": str(raw[7] or ""),
+                "q_version": str(raw[8] or ""),
+                "fill_price": raw[9],
+                "shares": raw[10],
+                "filled_at": str(raw[11] or ""),
+                "post_only": raw[12],
+                "fee_details_json": raw[13],
+            }
+        )
+
+    for position in positions.values():
+        deduped: dict[str, dict[str, object]] = {}
+        conflict = False
+        for entry in position["entries"]:
+            command_id = str(entry["command_id"] or "")
+            incumbent = deduped.get(command_id)
+            if not command_id:
+                conflict = True
+                continue
+            if incumbent is None:
+                deduped[command_id] = entry
+                continue
+            try:
+                same_economics = (
+                    str(incumbent["q_version"]) == str(entry["q_version"])
+                    and math.isclose(
+                        float(incumbent["fill_price"]),
+                        float(entry["fill_price"]),
+                        rel_tol=0.0,
+                        abs_tol=1e-12,
+                    )
+                    and math.isclose(
+                        float(incumbent["shares"]),
+                        float(entry["shares"]),
+                        rel_tol=0.0,
+                        abs_tol=1e-12,
+                    )
+                )
+            except (TypeError, ValueError):
+                same_economics = False
+            if not same_economics:
+                conflict = True
+                continue
+            if str(entry["filled_at"]) > str(incumbent["filled_at"]):
+                deduped[command_id] = entry
+        position["entries"] = list(deduped.values())
+        position["entry_identity_conflict"] = conflict
+
+    blocked_reasons: dict[str, int] = status["blocked_reasons"]  # type: ignore[assignment]
+
+    def block(reason: str) -> None:
+        blocked_reasons[reason] = blocked_reasons.get(reason, 0) + 1
+
+    if strategy_key == "day0_nowcast_entry":
+        from src.events.day0_authority import day0_probability_semantics_revision
+
+        current_position_ids = {
+            position_id
+            for position_id, position in positions.items()
+            if {
+                day0_probability_semantics_revision(str(entry["q_version"]))
+                for entry in position["entries"]
+            }
+            == {DAY0_PROBABILITY_SEMANTICS_REVISION}
+        }
+        semantics_binding: dict[str, object] = {
+            "status": "ok",
+            "current_revision": DAY0_PROBABILITY_SEMANTICS_REVISION,
+        }
+    else:
+        probes = [
+            {
+                "trade_id": position_id,
+                "strategy": strategy_key,
+                "entry_q_versions": tuple(
+                    str(entry["q_version"])
+                    for entry in position["entries"]
+                ),
+            }
+            for position_id, position in positions.items()
+        ]
+        classified, semantics_binding = _bind_qkernel_probability_semantics(probes)
+        current_position_ids = {
+            str(row["trade_id"])
+            for row in classified
+            if row.get("probability_semantics_ready") is True
+        }
+    status["probability_semantics_binding"] = semantics_binding
+
+    current_positions: dict[str, dict[str, object]] = {}
+    for position_id, position in positions.items():
+        entries: list[dict[str, object]] = position["entries"]  # type: ignore[assignment]
+        if position_id not in current_position_ids:
+            status["excluded_superseded_position_count"] = (
+                int(status["excluded_superseded_position_count"]) + 1
+            )
+            continue
+        if position["entry_identity_conflict"]:
+            block("entry_command_economics_conflict")
+            continue
+        entry_notional = 0.0
+        entry_shares = 0.0
+        entry_fee = 0.0
+        entry_times: list[datetime] = []
+        valid = True
+        for entry in entries:
+            try:
+                fill_price = float(entry["fill_price"])
+                shares = float(entry["shares"])
+                filled_at = datetime.fromisoformat(
+                    str(entry["filled_at"]).replace("Z", "+00:00")
+                )
+            except (TypeError, ValueError):
+                valid = False
+                break
+            if filled_at.tzinfo is None:
+                filled_at = filled_at.replace(tzinfo=timezone.utc)
+            fee = _submission_schedule_fee_usd(
+                post_only=entry["post_only"],
+                fee_details_json=entry["fee_details_json"],
+                fill_price=fill_price,
+                shares=shares,
+            )
+            if fee is None:
+                valid = False
+                break
+            entry_notional += fill_price * shares
+            entry_shares += shares
+            entry_fee += fee
+            entry_times.append(filled_at)
+        try:
+            projected_cost = float(position["projection_cost_basis_usd"])
+            projected_shares = float(position["projection_shares"])
+        except (TypeError, ValueError):
+            projected_cost = math.nan
+            projected_shares = math.nan
+        original_cost_matches = math.isclose(
+            projected_cost, entry_notional, rel_tol=0.0, abs_tol=0.011
+        )
+        residual_cost_matches = (
+            bool(position["has_filled_exit"])
+            and math.isfinite(projected_shares)
+            and entry_shares > 0.0
+            and 0.0 <= projected_shares < entry_shares
+            and math.isclose(
+                projected_cost,
+                entry_notional * projected_shares / entry_shares,
+                rel_tol=0.0,
+                abs_tol=0.011,
+            )
+        )
+        if (
+            not valid
+            or not entry_times
+            or not math.isfinite(projected_cost)
+            or projected_cost <= 0.0
+            or not (original_cost_matches or residual_cost_matches)
+        ):
+            block("entry_capital_identity_incomplete")
+            continue
+        position.update(
+            entry_notional_usd=entry_notional,
+            entry_filled_shares=entry_shares,
+            entry_fee_bound_usd=entry_fee,
+            capital_committed_usd=entry_notional + entry_fee,
+            entered_at=min(entry_times),
+        )
+        current_positions[position_id] = position
+
+    status["filled_position_count"] = len(current_positions)
+    status["blocked_position_count"] = sum(blocked_reasons.values())
+    status["capital_committed_usd"] = round(
+        sum(
+            float(position["capital_committed_usd"])
+            for position in current_positions.values()
+        ),
+        6,
+    )
+    if not current_positions:
+        if blocked_reasons:
+            status["status"] = "capital_truth_degraded"
+        return status
+
+    position_ids = sorted(current_positions)
+    placeholders = ",".join("?" for _ in position_ids)
+    exit_rows = conn.execute(
+        "SELECT vc.position_id,ef.fill_price,ef.shares,ef.filled_at,"
+        "vse.post_only,vse.fee_details_json "
+        "FROM venue_commands AS vc "
+        "JOIN execution_fact AS ef ON ef.command_id=vc.command_id "
+        "JOIN venue_submission_envelopes AS vse ON vse.envelope_id=vc.envelope_id "
+        "WHERE vc.intent_kind='EXIT' AND ef.order_role='exit' "
+        "AND ef.filled_at IS NOT NULL "
+        "AND lower(COALESCE(ef.terminal_exec_status,'')) "
+        "IN ('filled','confirmed','partial') "
+        f"AND vc.position_id IN ({placeholders})",
+        tuple(position_ids),
+    ).fetchall()
+    exit_fees: dict[str, float | None] = {
+        position_id: 0.0 for position_id in position_ids
+    }
+    exit_summaries: dict[str, dict[str, object]] = {
+        position_id: {
+            "filled_shares": 0.0,
+            "first_filled_at": None,
+            "last_filled_at": None,
+        }
+        for position_id in position_ids
+    }
+    for raw in exit_rows:
+        position_id = str(raw[0] or "")
+        fee = _submission_schedule_fee_usd(
+            post_only=raw[4],
+            fee_details_json=raw[5],
+            fill_price=raw[1],
+            shares=raw[2],
+        )
+        if fee is None:
+            exit_fees[position_id] = None
+        elif exit_fees[position_id] is not None:
+            exit_fees[position_id] = float(exit_fees[position_id]) + fee
+        try:
+            filled_shares = float(raw[2])
+            filled_at = datetime.fromisoformat(
+                str(raw[3] or "").replace("Z", "+00:00")
+            )
+        except (TypeError, ValueError):
+            exit_fees[position_id] = None
+            continue
+        if filled_at.tzinfo is None:
+            filled_at = filled_at.replace(tzinfo=timezone.utc)
+        summary = exit_summaries[position_id]
+        summary["filled_shares"] = float(summary["filled_shares"]) + filled_shares
+        first_filled_at = summary["first_filled_at"]
+        last_filled_at = summary["last_filled_at"]
+        if first_filled_at is None or filled_at < first_filled_at:
+            summary["first_filled_at"] = filled_at
+        if last_filled_at is None or filled_at > last_filled_at:
+            summary["last_filled_at"] = filled_at
+
+    event_rows = conn.execute(
+        "SELECT position_id,event_type,occurred_at,payload_json "
+        "FROM position_events "
+        "WHERE event_type IN ('EXIT_ORDER_FILLED','SETTLED') "
+        f"AND position_id IN ({placeholders}) "
+        "ORDER BY position_id,sequence_no DESC",
+        tuple(position_ids),
+    ).fetchall()
+    latest_event: dict[str, tuple[object, ...]] = {}
+    for raw in event_rows:
+        latest_event.setdefault(str(raw[0] or ""), tuple(raw))
+
+    realized: list[dict[str, object]] = []
+    open_count = 0
+    for position_id, position in current_positions.items():
+        phase = str(position["phase"])
+        if phase not in {"economically_closed", "settled"}:
+            open_count += 1
+            continue
+        event = latest_event.get(position_id)
+        expected_event = "SETTLED" if phase == "settled" else "EXIT_ORDER_FILLED"
+        if event is None or str(event[1]) != expected_event:
+            block("terminal_event_missing_or_mismatched")
+            continue
+        try:
+            payload = json.loads(str(event[3] or ""))
+            event_pnl = float(payload["pnl"])
+            projected_pnl = float(position["projection_realized_pnl_usd"])
+            realized_at = datetime.fromisoformat(
+                str(event[2] or "").replace("Z", "+00:00")
+            )
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+            block("terminal_economics_invalid")
+            continue
+        if realized_at.tzinfo is None:
+            realized_at = realized_at.replace(tzinfo=timezone.utc)
+        if (
+            not math.isfinite(event_pnl)
+            or not math.isfinite(projected_pnl)
+            or not math.isclose(event_pnl, projected_pnl, rel_tol=0.0, abs_tol=0.011)
+            or realized_at < position["entered_at"]
+            or realized_at > evaluated_at
+        ):
+            block("terminal_economics_identity_mismatch")
+            continue
+        exit_fee = exit_fees.get(position_id)
+        if exit_fee is None:
+            block("exit_fee_identity_incomplete")
+            continue
+        fee_bound = float(position["entry_fee_bound_usd"]) + float(exit_fee)
+        exit_summary = exit_summaries[position_id]
+        entry_filled_shares = float(position["entry_filled_shares"])
+        exit_filled_shares = float(exit_summary["filled_shares"])
+        remaining_after_exit_shares = max(
+            0.0,
+            entry_filled_shares - exit_filled_shares,
+        )
+        close_type = expected_event
+        if phase == "settled" and exit_filled_shares > 0.0:
+            close_type = "EXIT_ORDER_FILLED_WITH_RESIDUAL_SETTLEMENT"
+        realized.append(
+            {
+                "position_id": position_id,
+                "city": position["city"],
+                "target_date": position["target_date"],
+                "metric": position["metric"],
+                "close_type": close_type,
+                "terminal_event_type": expected_event,
+                "entry_filled_shares": entry_filled_shares,
+                "exit_filled_shares": exit_filled_shares,
+                "exit_fill_fraction": (
+                    min(1.0, exit_filled_shares / entry_filled_shares)
+                    if entry_filled_shares > 0.0
+                    else 0.0
+                ),
+                "remaining_after_exit_shares": remaining_after_exit_shares,
+                "first_exit_filled_at": exit_summary["first_filled_at"],
+                "last_exit_filled_at": exit_summary["last_filled_at"],
+                "realized_at": realized_at,
+                "capital_committed_usd": float(position["capital_committed_usd"]),
+                "gross_realized_pnl_usd": event_pnl,
+                "fee_bound_usd": fee_bound,
+                "net_realized_pnl_usd": event_pnl - fee_bound,
+            }
+        )
+
+    realized.sort(key=lambda row: (row["realized_at"], row["position_id"]))
+    cumulative = 0.0
+    curve: list[dict[str, object]] = []
+    for row in realized:
+        cumulative += float(row["net_realized_pnl_usd"])
+        curve.append(
+            {
+                **row,
+                "realized_at": row["realized_at"].isoformat(),
+                "first_exit_filled_at": (
+                    row["first_exit_filled_at"].isoformat()
+                    if row["first_exit_filled_at"] is not None
+                    else None
+                ),
+                "last_exit_filled_at": (
+                    row["last_exit_filled_at"].isoformat()
+                    if row["last_exit_filled_at"] is not None
+                    else None
+                ),
+                "entry_filled_shares": round(float(row["entry_filled_shares"]), 6),
+                "exit_filled_shares": round(float(row["exit_filled_shares"]), 6),
+                "exit_fill_fraction": round(float(row["exit_fill_fraction"]), 6),
+                "remaining_after_exit_shares": round(
+                    float(row["remaining_after_exit_shares"]),
+                    6,
+                ),
+                "capital_committed_usd": round(float(row["capital_committed_usd"]), 6),
+                "gross_realized_pnl_usd": round(float(row["gross_realized_pnl_usd"]), 6),
+                "fee_bound_usd": round(float(row["fee_bound_usd"]), 6),
+                "net_realized_pnl_usd": round(float(row["net_realized_pnl_usd"]), 6),
+                "cumulative_net_realized_pnl_usd": round(cumulative, 6),
+            }
+        )
+    realized_capital = sum(float(row["capital_committed_usd"]) for row in realized)
+    gross_pnl = sum(float(row["gross_realized_pnl_usd"]) for row in realized)
+    fee_bound = sum(float(row["fee_bound_usd"]) for row in realized)
+    net_pnl = gross_pnl - fee_bound
+    status.update(
+        open_position_count=open_count,
+        realized_position_count=len(realized),
+        blocked_position_count=sum(blocked_reasons.values()),
+        realized_capital_committed_usd=round(realized_capital, 6),
+        gross_realized_pnl_usd=round(gross_pnl, 6),
+        fee_bound_usd=round(fee_bound, 6),
+        net_realized_pnl_usd=round(net_pnl, 6),
+        return_on_realized_capital=(
+            round(net_pnl / realized_capital, 6)
+            if realized_capital > 0.0
+            else None
+        ),
+        curve=curve,
+    )
+    if status["blocked_position_count"]:
+        status["status"] = "capital_truth_degraded"
+    elif not realized:
+        status["status"] = "probation_in_flight"
+    elif net_pnl > 0.0:
+        status["status"] = "positive"
+    else:
+        status["status"] = "nonpositive"
+    return status
+
+
+def _day0_live_realized_capital_curve(
+    conn: sqlite3.Connection,
+    *,
+    window_days: float,
+    as_of: datetime | None = None,
+) -> dict[str, object]:
+    return _live_realized_capital_curve(
+        conn,
+        strategy_key="day0_nowcast_entry",
+        window_days=window_days,
+        as_of=as_of,
+    )
+
+
+def _qkernel_live_realized_capital_curve(
+    conn: sqlite3.Connection,
+    *,
+    window_days: float,
+    as_of: datetime | None = None,
+) -> dict[str, object]:
+    return _live_realized_capital_curve(
+        conn,
+        strategy_key="forecast_qkernel_entry",
+        window_days=window_days,
+        as_of=as_of,
+    )
+
+
+_GLOBAL_CAPITAL_EVIDENCE_LAW = "executable_min_order_capital_gain_v2"
+
+
+def _global_winner_certificate_q(
+    payload_json: object,
+    *,
+    strategy_key: str,
+) -> tuple[float, float, float] | None:
+    """Return frozen q, target shares, and max spend for one winner."""
+
+    try:
+        payload = json.loads(str(payload_json or ""))
+        economics = payload["qkernel_execution_economics"]
+        receipt = economics["global_auction_receipt"]
+        q = float(economics["global_cut_time_win_probability_mean"])
+        target_shares = float(economics["global_target_shares"])
+        max_spend = float(economics["global_max_spend_usd"])
+        expected_growth = float(economics["global_expected_delta_log_wealth"])
+        expected_ev = float(economics["global_expected_ev_usd"])
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, Mapping) or not isinstance(economics, Mapping):
+        return None
+    if not isinstance(receipt, Mapping):
+        return None
+    candidate_id = str(economics.get("global_candidate_id") or "").strip()
+    actuation_id = str(economics.get("global_actuation_identity") or "").strip()
+    epoch_id = str(economics.get("global_selection_epoch_identity") or "").strip()
+    winner_event_id = str(economics.get("global_winner_event_id") or "").strip()
+    if (
+        str(payload.get("strategy_key") or "").strip() != strategy_key
+        or str(economics.get("global_optimum_semantics") or "")
+        != "CUT_TIME_GLOBAL_OPTIMUM"
+        or str(economics.get("global_probability_functional") or "")
+        != "POSTERIOR_PREDICTIVE_MEAN"
+        or str(economics.get("global_execution_mode") or "")
+        not in {"TAKER_LIMIT", "MAKER_REST"}
+        or not candidate_id
+        or not actuation_id
+        or not epoch_id
+        or not winner_event_id
+        or str(receipt.get("winner_candidate_id") or "") != candidate_id
+        or str(receipt.get("winner_actuation_identity") or "") != actuation_id
+        or str(receipt.get("selection_epoch_identity") or "") != epoch_id
+        or str(receipt.get("winner_event_id") or "") != winner_event_id
+        or not all(
+            math.isfinite(value)
+            for value in (q, target_shares, max_spend, expected_growth, expected_ev)
+        )
+        or not 0.0 <= q <= 1.0
+        or target_shares <= 0.0
+        or max_spend <= 0.0
+        or expected_growth <= 0.0
+        or expected_ev <= 0.0
+    ):
+        return None
+    return q, target_shares, max_spend
+
+
+def _bind_actual_global_capital_evidence(
+    conn: sqlite3.Connection,
+    rows: list[dict],
+    *,
+    strategy_key: str,
+    capital_curve: Mapping[str, object],
+) -> tuple[list[dict], dict[str, object]]:
+    """Bind settled actual fills to their exact global-winner capital law.
+
+    ``position_current.decision_law_id`` names the unified probability/EV law,
+    not the global-auction admission certificate.  The latter lives on each
+    filled ENTRY's immutable ``ActionableTradeCertificate``.  Only when every
+    economically filled command carries a matching LIVE VERIFIED winner and
+    its share-weighted q reproduces the frozen settlement row may actual fills
+    enter the revision-scoped capital-alpha cohort.
+    """
+
+    if strategy_key not in {"day0_nowcast_entry", "forecast_qkernel_entry"}:
+        raise ValueError("actual global capital strategy is not canonical")
+    output = [dict(row) for row in rows]
+    candidates = {
+        str(row.get("trade_id") or "").strip()
+        for row in output
+        if str(row.get("strategy") or "").strip() == strategy_key
+        and str(row.get("trade_id") or "").strip()
+        and row.get("probability_identity_ready") is True
+        and row.get("probability_semantics_ready") is True
+        and str(row.get("decision_law_id") or "").strip() in DECISION_LAW_IDS
+    }
+    status: dict[str, object] = {
+        "status": "no_actual_candidates",
+        "strategy_key": strategy_key,
+        "candidate_count": len(candidates),
+        "capital_law_ready_count": 0,
+        "capital_gain_proof_ready_count": 0,
+        "blocked_reasons": {},
+        "source": (
+            "execution_fact+position_decision_attribution+"
+            "world.decision_certificates+live_realized_capital_curve"
+        ),
+    }
+    if not candidates:
+        return output, status
+
+    blocked: dict[str, int] = status["blocked_reasons"]  # type: ignore[assignment]
+
+    def block(reason: str) -> None:
+        blocked[reason] = blocked.get(reason, 0) + 1
+
+    database_names = {
+        str(row[1]) for row in conn.execute("PRAGMA database_list").fetchall()
+    }
+    required_columns = {
+        "execution_fact": {
+            "position_id", "command_id", "order_role", "filled_at",
+            "terminal_exec_status", "fill_price", "shares",
+        },
+        "position_decision_attribution": {
+            "position_id", "command_id", "decision_certificate_hash",
+            "resolution", "intent_kind",
+        },
+    }
+    try:
+        schema_ready = "world" in database_names and all(
+            _table_exists(conn, table)
+            and required.issubset(
+                {
+                    str(column[1])
+                    for column in conn.execute(
+                        f"PRAGMA table_info({table})"
+                    ).fetchall()
+                }
+            )
+            for table, required in required_columns.items()
+        )
+        world_columns = {
+            str(column[1])
+            for column in conn.execute(
+                "PRAGMA world.table_info(decision_certificates)"
+            ).fetchall()
+        }
+        schema_ready = schema_ready and {
+            "certificate_hash", "certificate_type", "mode",
+            "verifier_status", "payload_json",
+        }.issubset(world_columns)
+    except sqlite3.Error:
+        schema_ready = False
+    if not schema_ready:
+        status["status"] = "certificate_authority_unavailable"
+        block("certificate_schema_unavailable")
+        return output, status
+
+    command_parts: dict[str, list[tuple[float, float]]] = {
+        position_id: [] for position_id in candidates
+    }
+    invalid: set[str] = set()
+    ids = sorted(candidates)
+    for start in range(0, len(ids), 500):
+        chunk = ids[start : start + 500]
+        placeholders = ",".join("?" for _ in chunk)
+        facts = conn.execute(
+            "SELECT ef.position_id,ef.command_id,MIN(ef.shares),MAX(ef.shares),"
+            "MIN(ef.fill_price),MAX(ef.fill_price),"
+            "pda.decision_certificate_hash,dc.payload_json "
+            "FROM execution_fact AS ef "
+            "LEFT JOIN position_decision_attribution AS pda "
+            "ON pda.position_id=ef.position_id AND pda.command_id=ef.command_id "
+            "AND pda.intent_kind='ENTRY' AND pda.resolution='ATTRIBUTED' "
+            "LEFT JOIN world.decision_certificates AS dc "
+            "ON dc.certificate_hash=pda.decision_certificate_hash "
+            "AND dc.certificate_type='ActionableTradeCertificate' "
+            "AND dc.mode='LIVE' AND dc.verifier_status='VERIFIED' "
+            "WHERE ef.order_role='entry' AND ef.filled_at IS NOT NULL "
+            "AND lower(COALESCE(ef.terminal_exec_status,'')) "
+            "IN ('filled','confirmed','partial') "
+            f"AND ef.position_id IN ({placeholders}) "
+            "GROUP BY ef.position_id,ef.command_id,pda.decision_certificate_hash,"
+            "dc.payload_json",
+            tuple(chunk),
+        ).fetchall()
+        for raw in facts:
+            position_id = str(raw[0] or "").strip()
+            command_id = str(raw[1] or "").strip()
+            try:
+                min_shares = float(raw[2])
+                max_shares = float(raw[3])
+                min_price = float(raw[4])
+                max_price = float(raw[5])
+            except (TypeError, ValueError):
+                invalid.add(position_id)
+                continue
+            certificate = _global_winner_certificate_q(
+                raw[7],
+                strategy_key=strategy_key,
+            )
+            if (
+                not command_id
+                or not str(raw[6] or "").strip()
+                or certificate is None
+                or not math.isfinite(min_shares)
+                or min_shares <= 0.0
+                or not math.isfinite(min_price)
+                or not 0.0 < min_price < 1.0
+                or not math.isclose(
+                    min_shares,
+                    max_shares,
+                    rel_tol=0.0,
+                    abs_tol=max(1e-9, abs(max_shares) * 1e-9),
+                )
+                or not math.isclose(
+                    min_price,
+                    max_price,
+                    rel_tol=0.0,
+                    abs_tol=1e-12,
+                )
+            ):
+                invalid.add(position_id)
+                continue
+            q, _certified_target_shares, certified_max_spend = certificate
+            if min_price * min_shares > certified_max_spend + 0.011:
+                invalid.add(position_id)
+                continue
+            command_parts[position_id].append((q, min_shares))
+
+    capital_by_position = {
+        str(point.get("position_id") or "").strip(): point
+        for point in (capital_curve.get("curve") or [])
+        if isinstance(point, Mapping)
+        and str(point.get("position_id") or "").strip()
+    }
+    bindings: dict[str, dict[str, object]] = {}
+    for position_id in sorted(candidates):
+        parts = command_parts.get(position_id, [])
+        if position_id in invalid or not parts:
+            block("global_certificate_identity_incomplete")
+            continue
+        total_shares = sum(shares for _q, shares in parts)
+        composite_q = sum(q * shares for q, shares in parts) / total_shares
+        capital = capital_by_position.get(position_id)
+        binding: dict[str, object] = {
+            "p_posterior": composite_q,
+            "capital_gain_proof_ready": False,
+            "capital_evidence_source": "actual_global_winner_fill",
+        }
+        if capital is not None:
+            try:
+                committed = float(capital["capital_committed_usd"])
+                realized_pnl = float(capital["net_realized_pnl_usd"])
+            except (KeyError, TypeError, ValueError):
+                committed = math.nan
+                realized_pnl = math.nan
+            if (
+                math.isfinite(committed)
+                and committed > 0.0
+                and math.isfinite(realized_pnl)
+            ):
+                binding.update(
+                    capital_gain_proof_ready=True,
+                    hypothetical_capital_committed_usd=committed,
+                    hypothetical_realized_pnl_usd=realized_pnl,
+                )
+        bindings[position_id] = binding
+
+    for row in output:
+        position_id = str(row.get("trade_id") or "").strip()
+        binding = bindings.get(position_id)
+        if binding is None:
+            continue
+        try:
+            frozen_q = float(row["p_posterior"])
+            certificate_q = float(binding["p_posterior"])
+        except (KeyError, TypeError, ValueError):
+            block("global_certificate_probability_mismatch")
+            continue
+        if not math.isclose(
+            frozen_q,
+            certificate_q,
+            rel_tol=0.0,
+            abs_tol=1e-9,
+        ):
+            block("global_certificate_probability_mismatch")
+            continue
+        row["persisted_decision_law_id"] = row.get("decision_law_id")
+        row["decision_law_id"] = _GLOBAL_CAPITAL_EVIDENCE_LAW
+        row["decision_law_evidence_source"] = (
+            "filled_entry_actionable_global_winner_certificate"
+        )
+        row.update(binding)
+        status["capital_law_ready_count"] = (
+            int(status["capital_law_ready_count"]) + 1
+        )
+        if binding["capital_gain_proof_ready"] is True:
+            status["capital_gain_proof_ready_count"] = (
+                int(status["capital_gain_proof_ready_count"]) + 1
+            )
+    status["status"] = (
+        "ok" if status["capital_law_ready_count"] else "no_verified_winners"
+    )
+    return output, status
+
+
+def _market_relative_alpha_evidence(
+    rows: list[dict],
+    *,
+    strategy_key: str,
+    rejection_evalue: float,
+    window_days: float = 7.0,
+    as_of: datetime | None = None,
+) -> dict[str, object]:
+    """Test one current probability law against its executable entry market.
+
+    For one binary claim, ``market/model`` likelihood is a valid sequential
+    e-value because both probabilities were fixed before the outcome. Sibling
+    bins and HIGH/LOW observations within one city-date family are correlated,
+    so each city-date cluster contributes only its largest ex-ante claimed edge.
+    This is a
+    capital-alpha test, not a stop-loss: model/market evidence proves admission;
+    market/model evidence rejects it. Both probabilities are immutable decision-
+    time witnesses, never reconstructed after settlement.
+    """
+
+    if strategy_key not in {"forecast_qkernel_entry", "day0_nowcast_entry"}:
+        raise ValueError("market-relative alpha strategy is not canonical")
+    if not math.isfinite(rejection_evalue) or rejection_evalue <= 1.0:
+        raise ValueError("market-relative alpha rejection_evalue must exceed 1")
+    if not math.isfinite(window_days) or window_days <= 0.0 or window_days > 7.0:
+        raise ValueError("market-relative alpha window_days must be in (0, 7]")
+    evaluated_at = as_of or datetime.now(timezone.utc)
+    if evaluated_at.tzinfo is None:
+        evaluated_at = evaluated_at.replace(tzinfo=timezone.utc)
+    not_before = evaluated_at - timedelta(days=window_days)
+
+    cohorts: dict[tuple[str, tuple[str, ...]], dict[tuple[str, str], dict]] = {}
+    missing_benchmark_count = 0
+    for row in rows:
+        if str(row.get("strategy") or "").strip() != strategy_key:
+            continue
+        decision_law_id = str(row.get("decision_law_id") or "").strip()
+        if (
+            strategy_key == "day0_nowcast_entry"
+            and decision_law_id != "executable_min_order_capital_gain_v2"
+        ):
+            continue
+        if row.get("probability_semantics_ready") is not True:
+            continue
+        try:
+            settled_at = datetime.fromisoformat(
+                str(row.get("settled_at") or "").replace("Z", "+00:00")
+            )
+        except ValueError:
+            continue
+        if settled_at.tzinfo is None:
+            settled_at = settled_at.replace(tzinfo=timezone.utc)
+        if settled_at < not_before or settled_at > evaluated_at:
+            continue
+        if not row.get("entry_market_benchmark_ready", False):
+            missing_benchmark_count += 1
+            continue
+        try:
+            q = float(row["p_posterior"])
+            market = float(row["entry_market_benchmark"])
+            outcome = int(row["outcome"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        family = tuple(row.get("entry_market_benchmark_family") or ())
+        if (
+            len(family) != 3
+            or not all(str(value).strip() for value in family)
+            or outcome not in {0, 1}
+            or not math.isfinite(q)
+            or not math.isfinite(market)
+            or not 0.0 <= q <= 1.0
+            or not 0.0 < market < 1.0
+        ):
+            continue
+        revisions = tuple(
+            sorted(
+                str(revision).strip()
+                for revision in (row.get("probability_semantics_revisions") or ())
+                if str(revision).strip()
+            )
+        )
+        cohort_key = (decision_law_id, revisions)
+        # Sibling bins and HIGH/LOW from one city-date share weather,
+        # observation, and market-information shocks.  Different cities are
+        # distinct settlement claims; collapsing them by calendar date alone
+        # discards executable evidence from unrelated market families.
+        evidence_cluster = (
+            str(family[0]).strip(),
+            str(family[1]).strip(),
+        )
+        try:
+            capital_committed = float(
+                row.get("hypothetical_capital_committed_usd")
+            )
+            capital_pnl = float(row.get("hypothetical_realized_pnl_usd"))
+        except (TypeError, ValueError):
+            capital_committed = 0.0
+            capital_pnl = 0.0
+        capital_gain_proof_ready = bool(
+            row.get("capital_gain_proof_ready") is True
+            and math.isfinite(capital_committed)
+            and capital_committed > 0.0
+            and math.isfinite(capital_pnl)
+        )
+        candidate = {
+            "trade_id": str(row.get("trade_id") or ""),
+            "q": q,
+            "market": market,
+            "outcome": outcome,
+            "claimed_edge": abs(q - market),
+            "capital_gain_proof_ready": capital_gain_proof_ready,
+            "hypothetical_capital_committed_usd": capital_committed,
+            "hypothetical_realized_pnl_usd": capital_pnl,
+        }
+        cluster_rows = cohorts.setdefault(cohort_key, {})
+        incumbent = cluster_rows.get(evidence_cluster)
+        if incumbent is None or (
+            candidate["claimed_edge"], candidate["trade_id"]
+        ) > (incumbent["claimed_edge"], incumbent["trade_id"]):
+            cluster_rows[evidence_cluster] = candidate
+
+    cohort_evidence: list[dict[str, object]] = []
+    for (decision_law_id, revisions), cluster_rows in sorted(cohorts.items()):
+        log_model_over_market = 0.0
+        for row in cluster_rows.values():
+            q = min(max(float(row["q"]), 1e-12), 1.0 - 1e-12)
+            market = min(max(float(row["market"]), 1e-12), 1.0 - 1e-12)
+            outcome = int(row["outcome"])
+            model_probability = q if outcome else 1.0 - q
+            market_probability = market if outcome else 1.0 - market
+            log_model_over_market += math.log(model_probability / market_probability)
+        market_over_model_evalue = math.exp(min(700.0, -log_model_over_market))
+        model_over_market_evalue = math.exp(min(700.0, log_model_over_market))
+        capital_rows = [
+            row
+            for row in cluster_rows.values()
+            if row["capital_gain_proof_ready"]
+        ]
+        capital_committed = sum(
+            float(row["hypothetical_capital_committed_usd"])
+            for row in capital_rows
+        )
+        capital_pnl = sum(
+            float(row["hypothetical_realized_pnl_usd"])
+            for row in capital_rows
+        )
+        capital_proof_ready = bool(capital_rows) and len(capital_rows) == len(
+            cluster_rows
+        )
+        capital_gain_validated = (
+            capital_proof_ready
+            and math.isfinite(capital_committed)
+            and math.isfinite(capital_pnl)
+            and capital_committed > 0.0
+            and capital_pnl > 0.0
+        )
+        statistical_validation = model_over_market_evalue >= rejection_evalue
+        # A probability system can beat the market on log score while still
+        # losing money at the executable prices and minimum sizes that were
+        # available at decision time.  Both entry strategies therefore require
+        # the same positive forward-capital proof; likelihood evidence alone is
+        # diagnostic, never validation for re-opening capital.
+        validated = statistical_validation and capital_gain_validated
+        cohort_evidence.append(
+            {
+                "decision_law_id": decision_law_id,
+                "probability_semantics_revisions": list(revisions),
+                "independent_cluster_count": len(cluster_rows),
+                "candidate_count": sum(
+                    1
+                    for row in rows
+                    if str(row.get("strategy") or "").strip() == strategy_key
+                    and str(row.get("decision_law_id") or "").strip()
+                    == decision_law_id
+                    and tuple(sorted(row.get("probability_semantics_revisions") or ()))
+                    == revisions
+                    and row.get("entry_market_benchmark_ready", False)
+                ),
+                "log_model_over_market": round(log_model_over_market, 6),
+                "market_over_model_evalue": round(market_over_model_evalue, 6),
+                "model_over_market_evalue": round(model_over_market_evalue, 6),
+                "capital_gain_proof_ready": capital_proof_ready,
+                "hypothetical_capital_committed_usd": round(capital_committed, 6),
+                "hypothetical_realized_pnl_usd": round(capital_pnl, 6),
+                "hypothetical_return_on_capital": (
+                    round(capital_pnl / capital_committed, 6)
+                    if capital_committed > 0.0
+                    else None
+                ),
+                "capital_gain_validated": capital_gain_validated,
+                "rejected": market_over_model_evalue >= rejection_evalue,
+                "validated": validated,
+            }
+        )
+
+    rejected = [cohort for cohort in cohort_evidence if cohort["rejected"]]
+    validated = [cohort for cohort in cohort_evidence if cohort["validated"]]
+    return {
+        "strategy_key": strategy_key,
+        "status": (
+            "rejected"
+            if rejected
+            else (
+                "validated"
+                if validated
+                else ("inconclusive" if cohort_evidence else "no_evidence")
+            )
+        ),
+        "rejection_evalue": rejection_evalue,
+        "window_days": window_days,
+        "evaluated_at": evaluated_at.isoformat(),
+        "rejected": bool(rejected),
+        "validated": bool(validated) and not bool(rejected),
+        "missing_benchmark_count": missing_benchmark_count,
+        "cohorts": cohort_evidence,
+    }
+
+
+def _qkernel_market_relative_alpha_evidence(
+    rows: list[dict],
+    *,
+    rejection_evalue: float,
+    window_days: float = 7.0,
+    as_of: datetime | None = None,
+) -> dict[str, object]:
+    """Compatibility projection for the rejection-only forecast entry gate."""
+
+    evidence = _market_relative_alpha_evidence(
+        rows,
+        strategy_key="forecast_qkernel_entry",
+        rejection_evalue=rejection_evalue,
+        window_days=window_days,
+        as_of=as_of,
+    )
+    cohorts = []
+    for cohort in evidence["cohorts"]:
+        projected = dict(cohort)
+        projected.pop("model_over_market_evalue", None)
+        projected.pop("validated", None)
+        cohorts.append(projected)
+    return {
+        "status": (
+            "rejected"
+            if evidence["rejected"]
+            else ("ok" if cohorts else "no_evidence")
+        ),
+        "rejection_evalue": evidence["rejection_evalue"],
+        "window_days": evidence["window_days"],
+        "evaluated_at": evidence["evaluated_at"],
+        "rejected": evidence["rejected"],
+        "missing_benchmark_count": evidence["missing_benchmark_count"],
+        "cohorts": cohorts,
+    }
+
+
+def _market_relative_alpha_gate_reason(
+    semantics_binding: Mapping[str, object],
+    causal_alpha_evidence: Mapping[str, object],
+    *,
+    required_evalue: float,
+) -> str | None:
+    """Return the licensed revisions' missing capital-proof gate reason.
+
+    SCOPE: only the strategy and exact probability-semantics revisions named by
+    ``semantics_binding``. DRAIN: settled, walk-forward model-vs-market capital
+    evidence is refreshed every RiskGuard tick. RESET: a revision disappears
+    from the reason when it attains the required e-value and positive realized-
+    capital proof; a new revision starts its own cohort.
+    """
+
+    if semantics_binding.get("status") != "ok":
+        return None
+    current_revision = str(
+        semantics_binding.get("current_revision") or ""
+    ).strip()
+    licensed_revisions = tuple(
+        sorted(
+            {
+                str(revision).strip()
+                for revision in (
+                    semantics_binding.get("licensed_revisions") or ()
+                )
+                if str(revision).strip()
+            }
+        )
+    )
+    target_revisions = (
+        (current_revision,) if current_revision else licensed_revisions
+    )
+    cohorts = [
+        cohort
+        for cohort in (causal_alpha_evidence.get("cohorts") or [])
+        if isinstance(cohort, Mapping)
+        and cohort.get("decision_law_id")
+        == "executable_min_order_capital_gain_v2"
+        and (
+            not target_revisions
+            or bool(
+                set(target_revisions).intersection(
+                    {
+                        str(revision).strip()
+                        for revision in cohort.get(
+                            "probability_semantics_revisions", []
+                        )
+                        if str(revision).strip()
+                    }
+                )
+            )
+        )
+    ]
+    validated_revisions = {
+        str(revision).strip()
+        for cohort in cohorts
+        if cohort.get("validated") is True
+        for revision in cohort.get("probability_semantics_revisions", [])
+        if str(revision).strip()
+    }
+    unproven_revisions = tuple(
+        revision
+        for revision in target_revisions
+        if revision not in validated_revisions
+    )
+    if target_revisions and not unproven_revisions:
+        return None
+    if not target_revisions and any(
+        cohort.get("validated") is True for cohort in cohorts
+    ):
+        return None
+    relevant_revisions = set(unproven_revisions)
+    relevant_cohorts = [
+        cohort
+        for cohort in cohorts
+        if not relevant_revisions
+        or relevant_revisions.intersection(
+            {
+                str(revision).strip()
+                for revision in cohort.get(
+                    "probability_semantics_revisions", []
+                )
+                if str(revision).strip()
+            }
+        )
+    ]
+    strongest = (
+        max(
+            relevant_cohorts,
+            key=lambda cohort: float(cohort["model_over_market_evalue"]),
+        )
+        if relevant_cohorts
+        else None
+    )
+    model_evalue = (
+        float(strongest["model_over_market_evalue"])
+        if strongest is not None
+        else 0.0
+    )
+    clusters = (
+        int(strongest["independent_cluster_count"])
+        if strongest is not None
+        else 0
+    )
+    current_status = (
+        "rejected"
+        if any(cohort.get("rejected") is True for cohort in relevant_cohorts)
+        else ("inconclusive" if relevant_cohorts else "no_evidence")
+    )
+    revision_label = (
+        ",".join(unproven_revisions)
+        if unproven_revisions
+        else semantics_binding.get("current_revision")
+    )
+    return (
+        "market_relative_alpha_unproven("
+        f"status={current_status},"
+        f"model_evalue={model_evalue},"
+        f"required={required_evalue},"
+        f"clusters={clusters},"
+        "law=executable_min_order_capital_gain_v2,"
+        f"revision={revision_label}"
+        ")"
+    )
+
+
+def _market_relative_alpha_unproven_revisions(
+    semantics_binding: Mapping[str, object],
+    causal_alpha_evidence: Mapping[str, object],
+) -> tuple[str, ...]:
+    """Return only licensed probability revisions still lacking capital proof."""
+
+    current_revision = str(
+        semantics_binding.get("current_revision") or ""
+    ).strip()
+    revisions = (
+        (current_revision,)
+        if current_revision
+        else tuple(
+            sorted(
+                {
+                    str(revision).strip()
+                    for revision in (
+                        semantics_binding.get("licensed_revisions") or ()
+                    )
+                    if str(revision).strip()
+                }
+            )
+        )
+    )
+    validated = {
+        str(revision).strip()
+        for cohort in (causal_alpha_evidence.get("cohorts") or [])
+        if isinstance(cohort, Mapping)
+        and cohort.get("decision_law_id")
+        == "executable_min_order_capital_gain_v2"
+        and cohort.get("validated") is True
+        for revision in cohort.get("probability_semantics_revisions", [])
+        if str(revision).strip()
+    }
+    return tuple(revision for revision in revisions if revision not in validated)
+
+
+def _market_relative_alpha_rejected_revisions(
+    semantics_binding: Mapping[str, object],
+    causal_alpha_evidence: Mapping[str, object],
+) -> tuple[str, ...]:
+    """Return licensed revisions with direct capital-law rejection evidence."""
+
+    licensed = set(
+        _market_relative_alpha_unproven_revisions(
+            semantics_binding,
+            {"cohorts": []},
+        )
+    )
+    rejected = {
+        str(revision).strip()
+        for cohort in (causal_alpha_evidence.get("cohorts") or [])
+        if isinstance(cohort, Mapping)
+        and cohort.get("decision_law_id")
+        == "executable_min_order_capital_gain_v2"
+        and cohort.get("rejected") is True
+        for revision in cohort.get("probability_semantics_revisions", [])
+        if str(revision).strip()
+    }
+    return tuple(sorted(licensed.intersection(rejected)))
+
+
+def _market_relative_alpha_rejection_gate_reason(
+    semantics_binding: Mapping[str, object],
+    causal_alpha_evidence: Mapping[str, object],
+    *,
+    required_evalue: float,
+) -> tuple[str | None, tuple[str, ...]]:
+    """Gate only an explicitly rejected capital law, never missing history."""
+
+    revisions = _market_relative_alpha_rejected_revisions(
+        semantics_binding,
+        causal_alpha_evidence,
+    )
+    if not revisions:
+        return None, ()
+    reason = _market_relative_alpha_gate_reason(
+        {
+            "status": semantics_binding.get("status"),
+            "licensed_revisions": revisions,
+        },
+        causal_alpha_evidence,
+        required_evalue=required_evalue,
+    )
+    return reason, revisions
+
+
 # Below this many settled observations a per-strategy Brier score is noise,
 # not a verdict (a single loss at p=0.6 scores 0.36 > brier_red). Thin
-# strategies are still counted in the portfolio pool and the loss gates.
+# Thin rows remain visible in raw portfolio telemetry and the loss gates. They
+# cannot combine across unrelated probability cohorts to manufacture a verdict.
 _STRATEGY_BRIER_MIN_SAMPLE = 10
 
 _PROBABILITY_MECHANISM_SNAPSHOT_PREFIXES = frozenset({
@@ -2150,6 +4264,78 @@ def _probability_mechanism_key(row: dict) -> str | None:
     return f"law:{decision_law_id}:decision_snapshot:{namespace}"
 
 
+def _brier_probability_cohort_keys(row: dict) -> tuple[str, ...]:
+    """Return outcome-independent identities that may share Brier evidence."""
+
+    strategy = str(row.get("strategy") or "").strip()
+    decision_law_id = str(row.get("decision_law_id") or "").strip()
+    if strategy in CANONICAL_STRATEGY_KEYS:
+        owner = f"strategy:{strategy}"
+    elif decision_law_id:
+        owner = f"law:{decision_law_id}"
+    else:
+        return ()
+    revisions = _probability_semantics_revisions(row)
+    revision_identity = ",".join(revisions) if revisions else "unstamped"
+    keys = [f"{owner}:probability_semantics:{revision_identity}"]
+    mechanism = _probability_mechanism_key(row)
+    if mechanism is not None:
+        keys.append(f"mechanism:{mechanism}")
+    return tuple(keys)
+
+
+def _brier_independent_target_date(row: Mapping[str, object]) -> str | None:
+    """Return the canonical independent evidence unit for a weather outcome."""
+
+    raw = str(row.get("target_date") or "").strip()
+    if not raw:
+        return None
+    try:
+        return datetime.fromisoformat(raw).date().isoformat()
+    except ValueError:
+        return None
+
+
+def _probability_semantics_revisions(row: Mapping[str, object]) -> tuple[str, ...]:
+    """Return the exact immutable probability-law revisions on one fill."""
+
+    return tuple(
+        sorted(
+            str(revision).strip()
+            for revision in (row.get("probability_semantics_revisions") or ())
+            if str(revision).strip()
+        )
+    )
+
+
+def _brier_evidence_ready_rows(rows: list[dict]) -> list[dict]:
+    """Keep rows in at least one homogeneous evidence-complete cohort.
+
+    The action law is not the probability law. Two thin strategies using
+    different probability semantics cannot acquire statistical authority by
+    being pooled merely because both actions used the same EV decision law.
+    An explicitly recorded shared probability mechanism may still pool its
+    member strategies. The minimum evidence unit is a distinct target date;
+    correlated city/metric cells remain in the score but cannot inflate the
+    admission sample count.
+    """
+
+    keyed_rows = [(row, _brier_probability_cohort_keys(row)) for row in rows]
+    target_dates: dict[str, set[str]] = {}
+    for row, keys in keyed_rows:
+        target_date = _brier_independent_target_date(row)
+        if target_date is None:
+            continue
+        for key in keys:
+            target_dates.setdefault(key, set()).add(target_date)
+    ready = {
+        key
+        for key, dates in target_dates.items()
+        if len(dates) >= _STRATEGY_BRIER_MIN_SAMPLE
+    }
+    return [row for row, keys in keyed_rows if any(key in ready for key in keys)]
+
+
 def _strategy_brier_breakdown(rows: list[dict], thresholds: dict) -> dict[str, object]:
     """Per-strategy probability-quality attribution for localized protection.
 
@@ -2162,7 +4348,7 @@ def _strategy_brier_breakdown(rows: list[dict], thresholds: dict) -> dict[str, o
     global YELLOW because there is no safe strategy-local enforcement target.
     """
 
-    buckets: dict[str, dict[str, object]] = {}
+    buckets: dict[str, dict[str, dict[str, object]]] = {}
     mechanism_buckets: dict[str, dict[str, object]] = {}
     unclassified_count = 0
     for row in rows:
@@ -2179,52 +4365,159 @@ def _strategy_brier_breakdown(rows: list[dict], thresholds: dict) -> dict[str, o
         else:
             unclassified_count += 1
             continue
-        bucket = buckets.setdefault(bucket_key, {"p": [], "o": []})
+        revisions = _probability_semantics_revisions(row)
+        revision_identity = ",".join(revisions) if revisions else "unstamped"
+        cohort_key = (
+            f"strategy:{bucket_key}:probability_semantics:{revision_identity}"
+        )
+        bucket = buckets.setdefault(bucket_key, {}).setdefault(
+            cohort_key,
+            {
+                "p": [],
+                "o": [],
+                "revisions": revisions,
+                "target_dates": set(),
+                "missing_target_date_count": 0,
+            },
+        )
         bucket["p"].append(float(row["p_posterior"]))  # type: ignore[index, union-attr]
         bucket["o"].append(int(row["outcome"]))  # type: ignore[index, union-attr]
+        target_date = _brier_independent_target_date(row)
+        if target_date is None:
+            bucket["missing_target_date_count"] = int(
+                bucket["missing_target_date_count"]
+            ) + 1
+        else:
+            bucket["target_dates"].add(target_date)  # type: ignore[union-attr]
         mechanism_key = _probability_mechanism_key(row)
         if mechanism_key is not None and strategy in CANONICAL_STRATEGY_KEYS:
             mechanism_bucket = mechanism_buckets.setdefault(
                 mechanism_key,
-                {"p": [], "o": [], "strategy_counts": {}},
+                {
+                    "p": [],
+                    "o": [],
+                    "strategy_counts": {},
+                    "target_dates": set(),
+                    "missing_target_date_count": 0,
+                },
             )
             mechanism_bucket["p"].append(float(row["p_posterior"]))  # type: ignore[index, union-attr]
             mechanism_bucket["o"].append(int(row["outcome"]))  # type: ignore[index, union-attr]
+            if target_date is None:
+                mechanism_bucket["missing_target_date_count"] = int(
+                    mechanism_bucket["missing_target_date_count"]
+                ) + 1
+            else:
+                mechanism_bucket["target_dates"].add(target_date)  # type: ignore[union-attr]
             strategy_counts = mechanism_bucket["strategy_counts"]  # type: ignore[index]
             strategy_counts[strategy] = int(strategy_counts.get(strategy, 0)) + 1
 
     by_strategy: dict[str, dict[str, object]] = {}
     degraded: dict[str, dict[str, object]] = {}
-    for strategy, bucket in sorted(buckets.items()):
-        p_values = list(bucket["p"])  # type: ignore[index]
-        outcomes = list(bucket["o"])  # type: ignore[index]
-        score = brier_score(p_values, outcomes)
-        level = evaluate_brier(score, thresholds)
-        sample_size = len(p_values)
-        payload = {
-            "sample_size": sample_size,
-            "brier": round(float(score), 6),
-            "level": level.value,
+    for strategy, cohort_buckets in sorted(buckets.items()):
+        cohort_payloads: dict[str, dict[str, object]] = {}
+        all_p: list[float] = []
+        all_o: list[int] = []
+        all_target_dates: set[str] = set()
+        missing_target_date_count = 0
+        degraded_cohorts: list[dict[str, object]] = []
+        for cohort_key, bucket in sorted(cohort_buckets.items()):
+            p_values = list(bucket["p"])  # type: ignore[index]
+            outcomes = list(bucket["o"])  # type: ignore[index]
+            cohort_target_dates = set(bucket["target_dates"])  # type: ignore[arg-type]
+            cohort_missing_target_dates = int(
+                bucket["missing_target_date_count"]
+            )
+            all_p.extend(p_values)
+            all_o.extend(outcomes)
+            all_target_dates.update(cohort_target_dates)
+            missing_target_date_count += cohort_missing_target_dates
+            score = brier_score(p_values, outcomes)
+            level = evaluate_brier(score, thresholds)
+            sample_size = len(p_values)
+            independent_target_date_count = len(cohort_target_dates)
+            cohort_payload: dict[str, object] = {
+                "sample_size": sample_size,
+                "independent_target_date_count": independent_target_date_count,
+                "missing_target_date_count": cohort_missing_target_dates,
+                "brier": round(float(score), 6),
+                "level": level.value,
+                "cohort": cohort_key,
+            }
+            revisions = tuple(bucket.get("revisions") or ())
+            if revisions:
+                cohort_payload["probability_semantics_revisions"] = list(revisions)
+            if independent_target_date_count < _STRATEGY_BRIER_MIN_SAMPLE:
+                cohort_payload["level"] = RiskLevel.GREEN.value
+                cohort_payload["thin_sample_no_verdict"] = True
+            elif level != RiskLevel.GREEN:
+                degraded_cohorts.append(cohort_payload)
+            cohort_payloads[cohort_key] = cohort_payload
+
+        aggregate_score = brier_score(all_p, all_o) if all_p else 0.0
+        aggregate_payload: dict[str, object] = {
+            "sample_size": len(all_p),
+            "independent_target_date_count": len(all_target_dates),
+            "missing_target_date_count": missing_target_date_count,
+            "brier": round(float(aggregate_score), 6),
+            "level": RiskLevel.GREEN.value,
+            "cohorts": cohort_payloads,
         }
-        # Minimum-evidence floor (2026-07-05): a per-strategy Brier verdict
-        # below n=10 is statistically empty — one confident settled loss
-        # scores far above any threshold (p=0.79 loss -> (0.79-0)^2 = 0.6241)
-        # and would gate a whole lane on a single coin flip (live
-        # incident: forecast_qkernel_entry gated RED on n=1 while its
-        # candidates showed the book's best positive edges). Thin strategies
-        # stay in by_strategy for observability but never enter
-        # degraded_strategies; portfolio-level Brier (which pools them) and
-        # the loss gates still bind. Same attribute-don't-convict principle
-        # as ORANGE/execution localization; K3's coverage min_n=30 is the
-        # calibration-lane analogue.
-        if sample_size < _STRATEGY_BRIER_MIN_SAMPLE:
-            payload["level"] = RiskLevel.GREEN.value
-            payload["thin_sample_no_verdict"] = True
-            by_strategy[strategy] = payload
-            continue
-        by_strategy[strategy] = payload
-        if level != RiskLevel.GREEN:
-            degraded[strategy] = payload
+        if degraded_cohorts:
+            degraded_cohort_keys = {
+                str(payload["cohort"]) for payload in degraded_cohorts
+            }
+            degraded_levels = [
+                RiskLevel(str(payload["level"])) for payload in degraded_cohorts
+            ]
+            degraded_level = overall_level(*degraded_levels)
+            degraded_p = [
+                value
+                for cohort_key, bucket in cohort_buckets.items()
+                if cohort_key in degraded_cohort_keys
+                for value in bucket["p"]  # type: ignore[index]
+            ]
+            degraded_o = [
+                value
+                for cohort_key, bucket in cohort_buckets.items()
+                if cohort_key in degraded_cohort_keys
+                for value in bucket["o"]  # type: ignore[index]
+            ]
+            revisions = sorted(
+                {
+                    str(revision)
+                    for payload in degraded_cohorts
+                    for revision in payload.get(
+                        "probability_semantics_revisions", []
+                    )
+                }
+            )
+            degraded_payload: dict[str, object] = {
+                "sample_size": len(degraded_p),
+                "independent_target_date_count": len(
+                    {
+                        target_date
+                        for cohort_key, bucket in cohort_buckets.items()
+                        if cohort_key in degraded_cohort_keys
+                        for target_date in bucket["target_dates"]  # type: ignore[union-attr]
+                    }
+                ),
+                "brier": round(float(brier_score(degraded_p, degraded_o)), 6),
+                "level": degraded_level.value,
+                "cohorts": [str(payload["cohort"]) for payload in degraded_cohorts],
+            }
+            if len(degraded_cohorts) == 1:
+                degraded_payload["cohort"] = degraded_cohorts[0]["cohort"]
+            if revisions:
+                degraded_payload["probability_semantics_revisions"] = revisions
+            degraded[strategy] = degraded_payload
+            aggregate_payload["level"] = degraded_level.value
+        elif all_p and all(
+            bool(payload.get("thin_sample_no_verdict"))
+            for payload in cohort_payloads.values()
+        ):
+            aggregate_payload["thin_sample_no_verdict"] = True
+        by_strategy[strategy] = aggregate_payload
 
     by_mechanism: dict[str, dict[str, object]] = {}
     for mechanism, bucket in sorted(mechanism_buckets.items()):
@@ -2234,13 +4527,16 @@ def _strategy_brier_breakdown(rows: list[dict], thresholds: dict) -> dict[str, o
         score = brier_score(p_values, outcomes)
         level = evaluate_brier(score, thresholds)
         sample_size = len(p_values)
+        independent_target_date_count = len(bucket["target_dates"])  # type: ignore[arg-type]
         payload = {
             "sample_size": sample_size,
+            "independent_target_date_count": independent_target_date_count,
+            "missing_target_date_count": int(bucket["missing_target_date_count"]),
             "brier": round(float(score), 6),
             "level": level.value,
             "strategy_counts": strategy_counts,
         }
-        if sample_size < _STRATEGY_BRIER_MIN_SAMPLE:
+        if independent_target_date_count < _STRATEGY_BRIER_MIN_SAMPLE:
             payload["level"] = RiskLevel.GREEN.value
             payload["thin_sample_no_verdict"] = True
             by_mechanism[mechanism] = payload
@@ -2254,6 +4550,7 @@ def _strategy_brier_breakdown(rows: list[dict], thresholds: dict) -> dict[str, o
                 continue
             degraded[strategy] = {
                 "sample_size": sample_size,
+                "independent_target_date_count": independent_target_date_count,
                 "brier": round(float(score), 6),
                 "level": level.value,
                 "cohort": mechanism,
@@ -2281,6 +4578,7 @@ def _sync_riskguard_strategy_gate_actions(
     conn: sqlite3.Connection,
     recommended_strategy_gate_reasons: dict[str, list[str]],
     *,
+    probability_semantics_scopes: Mapping[str, set[str]] | None = None,
     issued_at: str,
 ) -> dict[str, int | str]:
     if not _table_exists(conn, "risk_actions"):
@@ -2291,8 +4589,46 @@ def _sync_riskguard_strategy_gate_actions(
             "expired_count": 0,
         }
 
+    def _scope_covers_reason(reason: str, revisions: set[str]) -> bool:
+        if reason.startswith("brier_degraded("):
+            return True
+        if reason.startswith("market_relative_alpha_unproven("):
+            marker = ",revision="
+            if marker not in reason or not reason.endswith(")"):
+                return False
+            reason_revisions = {
+                revision.strip()
+                for revision in reason.rsplit(marker, 1)[1][:-1].split(",")
+                if revision.strip()
+            }
+            return bool(reason_revisions) and reason_revisions.issubset(revisions)
+        return False
+
     recommended = {
-        strategy: "|".join(sorted(reasons))
+        strategy: (
+            "|".join(sorted(reasons)),
+            json.dumps(
+                {
+                    "gate": True,
+                    "probability_semantics_revisions": sorted(
+                        (probability_semantics_scopes or {}).get(strategy, set())
+                    ),
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            if (probability_semantics_scopes or {}).get(strategy)
+            and all(
+                _scope_covers_reason(
+                    reason,
+                    (probability_semantics_scopes or {}).get(
+                        strategy, set()
+                    ),
+                )
+                for reason in reasons
+            )
+            else "true",
+        )
         for strategy, reasons in sorted(recommended_strategy_gate_reasons.items())
     }
 
@@ -2308,7 +4644,7 @@ def _sync_riskguard_strategy_gate_actions(
     existing_by_strategy = {str(row["strategy_key"]): str(row["action_id"]) for row in existing_rows}
     expired_count = 0
 
-    for strategy, reason in recommended.items():
+    for strategy, (reason, value) in recommended.items():
         action_id = existing_by_strategy.get(strategy, f"riskguard:gate:{strategy}")
         conn.execute(
             """
@@ -2323,7 +4659,7 @@ def _sync_riskguard_strategy_gate_actions(
                 source,
                 precedence,
                 status
-            ) VALUES (?, ?, 'gate', 'true', ?, NULL, ?, 'riskguard', 50, 'active')
+            ) VALUES (?, ?, 'gate', ?, ?, NULL, ?, 'riskguard', 50, 'active')
             ON CONFLICT(action_id) DO UPDATE SET
                 strategy_key = excluded.strategy_key,
                 value = excluded.value,
@@ -2333,7 +4669,7 @@ def _sync_riskguard_strategy_gate_actions(
                 precedence = excluded.precedence,
                 status = 'active'
             """,
-            (action_id, strategy, issued_at, reason),
+            (action_id, strategy, value, issued_at, reason),
         )
 
     for strategy, action_id in existing_by_strategy.items():
@@ -2445,6 +4781,7 @@ def _refresh_riskguard_auxiliary_bookkeeping(
     zeus_conn: sqlite3.Connection,
     *,
     recommended_strategy_gate_reasons: dict[str, list[str]],
+    recommended_strategy_gate_scopes: Mapping[str, set[str]] | None = None,
     now: str,
     position_view: dict | None = None,
 ) -> tuple[dict, dict, dict]:
@@ -2487,6 +4824,7 @@ def _refresh_riskguard_auxiliary_bookkeeping(
         durable_action_status = _sync_riskguard_strategy_gate_actions(
             zeus_conn,
             recommended_strategy_gate_reasons,
+            probability_semantics_scopes=recommended_strategy_gate_scopes,
             issued_at=now,
         )
         strategy_health_refresh = refresh_strategy_health(
@@ -2652,12 +4990,41 @@ def _rollback_and_close(conn: sqlite3.Connection | None) -> None:
     _close_conn(conn)
 
 
-def _full_risk_row_is_fresh(row: sqlite3.Row, *, now: datetime) -> bool:
+_RISK_DETAILS_CONTRACT_KEYS = (
+    "execution_quality_level",
+    "strategy_signal_level",
+    "recommended_controls",
+    "recommended_strategy_gates",
+)
+
+
+def _risk_details_from_row(row: sqlite3.Row) -> dict:
     try:
         details = json.loads(row["details_json"]) if row["details_json"] else {}
     except (json.JSONDecodeError, TypeError):
-        details = {}
-    if isinstance(details, dict) and details.get("riskguard_degraded_reason"):
+        return {}
+    return details if isinstance(details, dict) else {}
+
+
+def _risk_details_contract_from_full_row(row: sqlite3.Row) -> dict:
+    details = _risk_details_from_row(row)
+    return {key: details[key] for key in _RISK_DETAILS_CONTRACT_KEYS}
+
+
+def _degraded_risk_details_contract() -> dict:
+    return {
+        "execution_quality_level": RiskLevel.DATA_DEGRADED.value,
+        "strategy_signal_level": RiskLevel.DATA_DEGRADED.value,
+        "recommended_controls": [],
+        "recommended_strategy_gates": [],
+    }
+
+
+def _full_risk_row_is_fresh(row: sqlite3.Row, *, now: datetime) -> bool:
+    details = _risk_details_from_row(row)
+    if details.get("riskguard_degraded_reason"):
+        return False
+    if any(key not in details for key in _RISK_DETAILS_CONTRACT_KEYS):
         return False
     checked_at = datetime.fromisoformat(str(row["checked_at"]).replace("Z", "+00:00"))
     return (now - checked_at).total_seconds() <= 300
@@ -2695,6 +5062,7 @@ def _persist_dependency_db_locked_attestation(exc: sqlite3.OperationalError) -> 
         if previous_full is None:
             level = RiskLevel.DATA_DEGRADED
             details = {
+                **_degraded_risk_details_contract(),
                 "status": "dependency_db_locked",
                 "riskguard_degraded_reason": "dependency_db_locked",
                 "bankroll_truth_source": "polymarket_wallet",
@@ -2718,6 +5086,7 @@ def _persist_dependency_db_locked_attestation(exc: sqlite3.OperationalError) -> 
             previous_level = RiskLevel(previous_full["level"])
             level = previous_level
             details = {
+                **_risk_details_contract_from_full_row(previous_full),
                 "status": "dependency_db_locked_previous_risk_level_preserved",
                 "riskguard_degraded_reason": "dependency_db_locked",
                 "bankroll_truth_source": "polymarket_wallet",
@@ -2767,6 +5136,7 @@ def _persist_tick_in_progress_attestation() -> None:
         if previous_full is None:
             return
         details = {
+            **_risk_details_contract_from_full_row(previous_full),
             "status": "metrics_in_progress_previous_risk_level_preserved",
             "riskguard_degraded_reason": "metrics_refresh_in_progress",
             "full_metrics_status": "in_progress_previous_fresh_level_preserved",
@@ -2861,7 +5231,37 @@ def _tick_once() -> RiskLevel:
         # The fail-closed write below needs risk_conn, so the None-handling stays
         # here; direct venue I/O itself never runs under a held conn.
         if bankroll_of_record is None:
-            now_ts = datetime.now(timezone.utc).isoformat()
+            now_dt = datetime.now(timezone.utc)
+            now_ts = now_dt.isoformat()
+            previous_full = _latest_fresh_full_risk_row(risk_conn, now=now_dt)
+            contract = _degraded_risk_details_contract()
+            if previous_full is not None:
+                previous_contract = _risk_details_contract_from_full_row(previous_full)
+                contract["recommended_controls"] = previous_contract["recommended_controls"]
+                contract["recommended_strategy_gates"] = previous_contract[
+                    "recommended_strategy_gates"
+                ]
+            details = {
+                **contract,
+                "status": "bankroll_provider_unavailable",
+                "riskguard_degraded_reason": "bankroll_provider_unavailable",
+                "full_metrics_status": (
+                    "bankroll_unavailable_previous_fresh_contract_preserved"
+                    if previous_full is not None
+                    else "bankroll_unavailable_no_fresh_full_risk_row"
+                ),
+                "bankroll_truth": {
+                    "source": "polymarket_wallet",
+                    "value_usd": None,
+                    "fetched_at": None,
+                    "staleness_seconds": None,
+                    "cached": False,
+                    "reason": "collateral snapshot and direct wallet query both unavailable",
+                },
+            }
+            if previous_full is not None:
+                details["previous_full_risk_level"] = previous_full["level"]
+                details["previous_full_risk_checked_at"] = previous_full["checked_at"]
             risk_conn.execute(
                 """
                 INSERT INTO risk_state (level, brier, accuracy, win_rate, details_json, checked_at)
@@ -2869,17 +5269,7 @@ def _tick_once() -> RiskLevel:
                 """,
                 (
                     RiskLevel.DATA_DEGRADED.value,
-                    json.dumps({
-                        "status": "bankroll_provider_unavailable",
-                        "bankroll_truth": {
-                            "source": "polymarket_wallet",
-                            "value_usd": None,
-                            "fetched_at": None,
-                            "staleness_seconds": None,
-                            "cached": False,
-                            "reason": "collateral snapshot and direct wallet query both unavailable",
-                        },
-                    }),
+                    json.dumps(details),
                     now_ts,
                 ),
             )
@@ -2895,6 +5285,13 @@ def _tick_once() -> RiskLevel:
             zeus_conn,
             limit=max(RISKGUARD_SETTLEMENT_LIMIT, RISKGUARD_BRIER_SCAN_LIMIT),
         )
+        realized_settlement_rows = query_authoritative_settlement_rows(
+            zeus_conn,
+            limit=None,
+            not_before=(
+                datetime.now(timezone.utc) - RISKGUARD_REALIZED_TELEMETRY_WINDOW
+            ).isoformat(),
+        )
         settlement_scan_rows = _bind_brier_probability_identities(
             zeus_conn,
             settlement_scan_rows,
@@ -2903,6 +5300,14 @@ def _tick_once() -> RiskLevel:
             settlement_scan_rows,
             probability_semantics_binding,
         ) = _bind_qkernel_probability_semantics(settlement_scan_rows)
+        (
+            settlement_scan_rows,
+            day0_probability_semantics_binding,
+        ) = _bind_day0_probability_semantics(settlement_scan_rows)
+        settlement_scan_rows = _bind_entry_market_benchmarks(
+            zeus_conn,
+            settlement_scan_rows,
+        )
         settlement_rows = settlement_scan_rows[:RISKGUARD_SETTLEMENT_LIMIT]
         brier_candidate_rows = settlement_scan_rows[:RISKGUARD_BRIER_SCAN_LIMIT]
         settlement_row_storage_sources = sorted({str(r.get("source", "unknown")) for r in settlement_rows})
@@ -2926,11 +5331,7 @@ def _tick_once() -> RiskLevel:
             # temperature. That row is complete for P&L/risk, but remains excluded
             # from physical calibration through metric_ready=False. Only a malformed
             # economic row may actuate settlement_quality and freeze new entries.
-            required_missing = tuple(row.get("required_missing_fields") or ())
-            economic_ready = (
-                authority_level != "durable_event_malformed"
-                and not required_missing
-            )
+            economic_ready = settlement_economic_ready(row)
             if economic_ready:
                 settlement_economic_ready_rows.append(row)
             else:
@@ -2946,12 +5347,129 @@ def _tick_once() -> RiskLevel:
 
         realized_exits, realized_truth_source, realized_degraded = _current_mode_realized_exits(
             zeus_conn,
-            settlement_rows=settlement_rows,
+            settlement_rows=realized_settlement_rows,
         )
         portfolio = replace(portfolio, recent_exits=realized_exits)
 
         brier_metric_rows = _riskguard_brier_metric_rows(brier_candidate_rows)
         brier_actuating_rows = _riskguard_brier_actuating_rows(brier_metric_rows)
+        market_relative_alpha_evalue = float(
+            thresholds.get("market_relative_alpha_rejection_evalue", 10.0)
+        )
+        market_relative_alpha_window_days = float(
+            thresholds.get("market_relative_alpha_window_days", 7.0)
+        )
+        market_relative_alpha_as_of = datetime.now(timezone.utc)
+        (
+            qkernel_market_relative_alpha_shadow_rows,
+            qkernel_market_relative_alpha_shadow_status,
+        ) = _settled_qkernel_market_relative_alpha_shadow_rows(
+            zeus_conn,
+            window_days=market_relative_alpha_window_days,
+            as_of=market_relative_alpha_as_of,
+        )
+        qkernel_live_realized_capital_curve = (
+            _qkernel_live_realized_capital_curve(
+                zeus_conn,
+                window_days=market_relative_alpha_window_days,
+                as_of=market_relative_alpha_as_of,
+            )
+        )
+        (
+            qkernel_actual_global_capital_rows,
+            qkernel_actual_global_capital_binding,
+        ) = _bind_actual_global_capital_evidence(
+            zeus_conn,
+            brier_actuating_rows,
+            strategy_key="forecast_qkernel_entry",
+            capital_curve=qkernel_live_realized_capital_curve,
+        )
+        market_relative_alpha_evidence = _qkernel_market_relative_alpha_evidence(
+            qkernel_actual_global_capital_rows
+            + qkernel_market_relative_alpha_shadow_rows,
+            rejection_evalue=market_relative_alpha_evalue,
+            window_days=market_relative_alpha_window_days,
+            as_of=market_relative_alpha_as_of,
+        )
+        qkernel_market_relative_alpha_gate_evidence = (
+            _market_relative_alpha_evidence(
+                qkernel_actual_global_capital_rows
+                + qkernel_market_relative_alpha_shadow_rows,
+                strategy_key="forecast_qkernel_entry",
+                rejection_evalue=market_relative_alpha_evalue,
+                window_days=market_relative_alpha_window_days,
+                as_of=market_relative_alpha_as_of,
+            )
+        )
+        qkernel_market_relative_alpha_observation = (
+            _market_relative_alpha_gate_reason(
+                probability_semantics_binding,
+                qkernel_market_relative_alpha_gate_evidence,
+                required_evalue=market_relative_alpha_evalue,
+            )
+        )
+        (
+            qkernel_market_relative_alpha_gate_reason,
+            qkernel_market_relative_alpha_gate_revisions,
+        ) = _market_relative_alpha_rejection_gate_reason(
+            probability_semantics_binding,
+            qkernel_market_relative_alpha_gate_evidence,
+            required_evalue=market_relative_alpha_evalue,
+        )
+        qkernel_market_relative_alpha_unproven_revisions = (
+            _market_relative_alpha_unproven_revisions(
+                probability_semantics_binding,
+                qkernel_market_relative_alpha_gate_evidence,
+            )
+        )
+        (
+            day0_market_relative_alpha_shadow_rows,
+            day0_market_relative_alpha_shadow_status,
+        ) = _settled_day0_market_relative_alpha_shadow_rows(
+            zeus_conn,
+            window_days=market_relative_alpha_window_days,
+            as_of=market_relative_alpha_as_of,
+        )
+        day0_live_realized_capital_curve = _day0_live_realized_capital_curve(
+            zeus_conn,
+            window_days=market_relative_alpha_window_days,
+            as_of=market_relative_alpha_as_of,
+        )
+        (
+            day0_actual_global_capital_rows,
+            day0_actual_global_capital_binding,
+        ) = _bind_actual_global_capital_evidence(
+            zeus_conn,
+            brier_actuating_rows,
+            strategy_key="day0_nowcast_entry",
+            capital_curve=day0_live_realized_capital_curve,
+        )
+        day0_market_relative_alpha_evidence = _market_relative_alpha_evidence(
+            day0_actual_global_capital_rows
+            + day0_market_relative_alpha_shadow_rows,
+            strategy_key="day0_nowcast_entry",
+            rejection_evalue=market_relative_alpha_evalue,
+            window_days=market_relative_alpha_window_days,
+            as_of=market_relative_alpha_as_of,
+        )
+        day0_market_relative_alpha_observation = (
+            _market_relative_alpha_gate_reason(
+                day0_probability_semantics_binding,
+                day0_market_relative_alpha_evidence,
+                required_evalue=market_relative_alpha_evalue,
+            )
+        )
+        (
+            day0_market_relative_alpha_gate_reason,
+            day0_market_relative_alpha_gate_revisions,
+        ) = _market_relative_alpha_rejection_gate_reason(
+            day0_probability_semantics_binding,
+            day0_market_relative_alpha_evidence,
+            required_evalue=market_relative_alpha_evalue,
+        )
+        day0_market_relative_alpha_gate_required = (
+            day0_market_relative_alpha_gate_reason is not None
+        )
         probability_identity_ready_count = sum(
             bool(row.get("probability_identity_ready", False))
             for row in brier_candidate_rows
@@ -2986,6 +5504,15 @@ def _tick_once() -> RiskLevel:
         observed_outcomes = [int(r["outcome"]) for r in brier_metric_rows]
         p_forecasts = [float(r["p_posterior"]) for r in brier_actuating_rows]
         outcomes = [int(r["outcome"]) for r in brier_actuating_rows]
+        brier_evidence_ready_rows = _brier_evidence_ready_rows(
+            brier_actuating_rows
+        )
+        evidence_p_forecasts = [
+            float(r["p_posterior"]) for r in brier_evidence_ready_rows
+        ]
+        evidence_outcomes = [
+            int(r["outcome"]) for r in brier_evidence_ready_rows
+        ]
         strategy_settlement_summary = _strategy_settlement_summary(settlement_metric_ready_rows)
         entry_execution_summary = _entry_execution_summary(zeus_conn)
         try:
@@ -3007,6 +5534,11 @@ def _tick_once() -> RiskLevel:
             else 0.0
         )
         b_score = brier_score(p_forecasts, outcomes) if p_forecasts else 0.0
+        evidence_b_score = (
+            brier_score(evidence_p_forecasts, evidence_outcomes)
+            if evidence_p_forecasts
+            else 0.0
+        )
         d_accuracy = directional_accuracy(p_forecasts, outcomes) if p_forecasts else 0.5
 
         # Evaluate levels. Portfolio Brier is the headline quality metric, but
@@ -3019,27 +5551,54 @@ def _tick_once() -> RiskLevel:
         portfolio_brier_raw_level = (
             evaluate_brier(b_score, thresholds) if p_forecasts else RiskLevel.GREEN
         )
-        portfolio_brier_thin_sample = (
-            0 < len(p_forecasts) < _STRATEGY_BRIER_MIN_SAMPLE
-        )
-        # A pooled probability score has no more authority than its evidence.
-        # One confident loss can exceed the RED threshold, but it cannot prove
-        # that every current candidate is unsafe.  Keep the raw score/level for
-        # learning and operator telemetry; only let it actuate RiskGuard once
-        # the same minimum evidence floor used by strategy attribution exists.
-        portfolio_brier_level = (
-            RiskLevel.GREEN
-            if portfolio_brier_thin_sample
-            else portfolio_brier_raw_level
-        )
-        brier_level = portfolio_brier_level
-        brier_strategy_breakdown = _strategy_brier_breakdown(brier_actuating_rows, thresholds) if p_forecasts else {
+        portfolio_brier_thin_sample = bool(p_forecasts) and not evidence_p_forecasts
+        empty_brier_breakdown = {
             "by_strategy": {},
             "by_mechanism": {},
             "degraded_strategies": {},
             "unclassified_count": 0,
             "classified_count": 0,
         }
+        brier_strategy_breakdown = (
+            _strategy_brier_breakdown(brier_actuating_rows, thresholds)
+            if p_forecasts
+            else empty_brier_breakdown
+        )
+        brier_verdict_breakdown = (
+            _strategy_brier_breakdown(brier_evidence_ready_rows, thresholds)
+            if evidence_p_forecasts
+            else empty_brier_breakdown
+        )
+        risk_level_values = {level.value for level in RiskLevel}
+        degraded_brier_levels = [
+            RiskLevel(str(payload["level"]))
+            for payload in brier_verdict_breakdown.get(
+                "degraded_strategies", {}
+            ).values()
+            if isinstance(payload, dict)
+            and str(payload.get("level") or "") in risk_level_values
+        ]
+        # Only a homogeneous probability cohort with enough evidence may
+        # actuate. The shared EV action law is not a probability identity.
+        # Raw pooled Brier remains telemetry; current-law cohorts retain the
+        # settlement -> learning -> admission feedback loop independently.
+        #
+        # Brier governs entry admission only. It cannot authorize a
+        # price-insensitive held-position liquidation; all unlocalized Brier
+        # breaches are capped to YELLOW below. Current-state RED inputs retain
+        # their normal sweep authority.
+        #
+        # SCOPE: evidence-complete current-law probability cohorts.
+        # DRAIN: every 60-second tick rebinds immutable fill q identities and
+        # recomputes the bounded settlement sample.
+        # RESET: a strategy gate expires when its current-law verdict clears;
+        # superseded/unstamped laws are excluded before this point.
+        portfolio_brier_level = (
+            overall_level(*degraded_brier_levels)
+            if degraded_brier_levels
+            else RiskLevel.GREEN
+        )
+        brier_level = portfolio_brier_level
         brier_strategy_localization: dict[str, object] = {
             "status": "not_applicable",
             "reason": (
@@ -3058,6 +5617,12 @@ def _tick_once() -> RiskLevel:
         execution_observed = int(execution_overall.get("terminal_observed", 0) or 0)
         recommended_control_reasons: dict[str, list[str]] = {}
         recommended_strategy_gate_reasons: dict[str, list[str]] = {}
+        recommended_strategy_gate_scopes: dict[str, set[str]] = {}
+        # Current q/book/wealth economics are the decision authority. Walk-forward
+        # market-relative evidence remains revision-bound, but missing or
+        # inconclusive history cannot create an absorbing no-entry state: doing
+        # so prevents the fills that can ever settle that evidence. Only direct
+        # rejection of the same executable capital law emits an alpha gate.
         probability_semantics_level = RiskLevel.GREEN
         if probability_semantics_binding.get("status") == "unavailable":
             probability_semantics_level = RiskLevel.DATA_DEGRADED
@@ -3066,11 +5631,43 @@ def _tick_once() -> RiskLevel:
                 "forecast_qkernel_entry",
                 "probability_semantics_authority_unavailable",
             )
-        degraded_brier_strategies = brier_strategy_breakdown.get("degraded_strategies", {})
+        for strategy, binding, reason, alpha_gate_revisions in (
+            (
+                "forecast_qkernel_entry",
+                probability_semantics_binding,
+                qkernel_market_relative_alpha_gate_reason,
+                qkernel_market_relative_alpha_gate_revisions,
+            ),
+            (
+                "day0_nowcast_entry",
+                day0_probability_semantics_binding,
+                day0_market_relative_alpha_gate_reason,
+                day0_market_relative_alpha_gate_revisions,
+            ),
+        ):
+            if reason is None:
+                continue
+            _append_reason(
+                recommended_strategy_gate_reasons,
+                strategy,
+                reason,
+            )
+            revisions = {
+                str(revision).strip()
+                for revision in alpha_gate_revisions
+                if str(revision).strip()
+            }
+            if revisions:
+                recommended_strategy_gate_scopes.setdefault(
+                    strategy, set()
+                ).update(revisions)
+        degraded_brier_strategies = brier_verdict_breakdown.get(
+            "degraded_strategies", {}
+        )
         clean_brier_attribution = (
             isinstance(degraded_brier_strategies, dict)
             and bool(degraded_brier_strategies)
-            and int(brier_strategy_breakdown.get("unclassified_count", 0) or 0) == 0
+            and int(brier_verdict_breakdown.get("unclassified_count", 0) or 0) == 0
             and all(
                 str(strategy) in CANONICAL_STRATEGY_KEYS
                 for strategy in degraded_brier_strategies
@@ -3081,7 +5678,18 @@ def _tick_once() -> RiskLevel:
             for strategy, payload in sorted(degraded_brier_strategies.items()):
                 if not isinstance(payload, dict):
                     continue
-                cohort = payload.get("cohort")
+                revisions = {
+                    str(revision).strip()
+                    for revision in payload.get(
+                        "probability_semantics_revisions", []
+                    )
+                    if str(revision).strip()
+                }
+                if revisions:
+                    recommended_strategy_gate_scopes.setdefault(
+                        str(strategy), set()
+                    ).update(revisions)
+                cohort = payload.get("cohort") if revisions else None
                 cohort_suffix = f",cohort={cohort}" if cohort else ""
                 _append_reason(
                     recommended_strategy_gate_reasons,
@@ -3099,37 +5707,34 @@ def _tick_once() -> RiskLevel:
         if portfolio_brier_level == RiskLevel.YELLOW and clean_brier_attribution:
             brier_strategy_localization = {
                 "status": "pending_durable_strategy_gate",
-                "gated_strategies": sorted(str(strategy) for strategy in degraded_brier_strategies),
+                "gated_strategies": sorted(
+                    str(strategy) for strategy in degraded_brier_strategies
+                ),
             }
             _append_brier_degraded_gate_reasons()
         elif (
             portfolio_brier_level in {RiskLevel.ORANGE, RiskLevel.RED}
             and clean_brier_attribution
         ):
-            # Strong-level localization (live incident 2026-07-04,
-            # opening_inertia
-            # trailing-30d Brier 0.322 froze healthy strategies for ~30 trailing
-            # days). Unlike YELLOW, ORANGE/RED localization additionally requires
-            # (checked after the durable bookkeeping write below): a
-            # read-after-write CONFIRMED active gate per degraded strategy, and
-            # the residual (non-gated) portfolio itself recomputing to GREEN.
-            # Until both are confirmed this stays "pending" and the level below
-            # remains the global portfolio_brier_level (fail closed). SCOPE:
-            # exact canonical strategy keys. DRAIN: every RiskGuard tick
-            # recomputes the settled window. RESET: durable strategy actions
-            # expire when the recomputed strategy verdict clears.
             strength = portfolio_brier_level.value.lower()
             brier_strategy_localization = {
                 "status": f"pending_durable_strategy_gate_{strength}",
-                "gated_strategies": sorted(str(strategy) for strategy in degraded_brier_strategies),
+                "gated_strategies": sorted(
+                    str(strategy) for strategy in degraded_brier_strategies
+                ),
             }
             _append_brier_degraded_gate_reasons()
         elif portfolio_brier_level != RiskLevel.GREEN:
+            # Historical probability quality can stop new exposure, but it
+            # cannot create price-insensitive SELL authority.
+            brier_level = RiskLevel.YELLOW
             brier_strategy_localization = {
                 "status": "not_localized",
                 "reason": "portfolio_brier_requires_global_level",
                 "portfolio_brier_level": portfolio_brier_level.value,
-                "unclassified_count": int(brier_strategy_breakdown.get("unclassified_count", 0) or 0),
+                "unclassified_count": int(
+                    brier_verdict_breakdown.get("unclassified_count", 0) or 0
+                ),
                 "degraded_strategy_count": (
                     len(degraded_brier_strategies)
                     if isinstance(degraded_brier_strategies, dict)
@@ -3149,12 +5754,9 @@ def _tick_once() -> RiskLevel:
         # branches (tighten_risk control append; execution-quality localization;
         # the YELLOW alert) are now inert — execution_quality_level can no longer
         # be YELLOW. Collapsing that dead apparatus is tracked as a follow-up.
-        strategy_signal_level = RiskLevel.YELLOW if (edge_compression_alerts or strategy_tracker_error) else RiskLevel.GREEN
-        for alert in edge_compression_alerts:
-            if not alert.startswith("EDGE_COMPRESSION: "):
-                continue
-            strategy = alert.split(": ", 1)[1].split(" edge", 1)[0]
-            _append_reason(recommended_strategy_gate_reasons, strategy, "edge_compression")
+        # Tracker edge compression summarizes past decisions and stays learning
+        # telemetry. Current executable edge is recomputed inside the auction.
+        strategy_signal_level = RiskLevel.GREEN
         # execution_decay is NOT a per-strategy selection gate (2026-07-05,
         # INV-05 advisory-risk-forbidden). REMOVED: the fill-rate loop that
         # appended execution_decay(...) to recommended_strategy_gate_reasons and
@@ -3167,9 +5769,8 @@ def _tick_once() -> RiskLevel:
         #      to overpay; re-decision pulls on book drift) as "decay". It
         #      penalizes correct behavior — low maker-fill is EXPECTED for a
         #      maker-patient strategy, not a defect.
-        #   3. Calibration failure (the real risk) is caught by brier_degraded
-        #      (settled Brier) and edge_compression, which STILL gate above.
-        #      execution_decay measured fills, not calibration — orthogonal.
+        #   3. Current probability/source authority and executable economics
+        #      already fail closed; execution_decay measured fills, not either.
         #   4. It self-perpetuated: gate -> strategy quiet -> no terminals ->
         #      frozen window -> re-gate, blocking the only fat-edge strategy
         #      (forecast_qkernel_entry) every cycle and starving the
@@ -3206,9 +5807,50 @@ def _tick_once() -> RiskLevel:
         ) = _refresh_riskguard_auxiliary_bookkeeping(
             zeus_conn,
             recommended_strategy_gate_reasons=recommended_strategy_gate_reasons,
+            recommended_strategy_gate_scopes=recommended_strategy_gate_scopes,
             now=now,
             position_view=portfolio_truth.get("_strategy_health_position_view"),
         )
+        market_relative_alpha_gate_confirmation: dict[str, bool] = {}
+        day0_market_relative_alpha_gate_confirmation: dict[str, bool] = {}
+        if qkernel_market_relative_alpha_gate_reason is not None:
+            market_relative_alpha_gate_confirmation = (
+                _confirm_active_durable_strategy_gates(
+                    zeus_conn,
+                    ["forecast_qkernel_entry"],
+                )
+            )
+        if day0_market_relative_alpha_gate_required:
+            day0_market_relative_alpha_gate_confirmation = (
+                _confirm_active_durable_strategy_gates(
+                    zeus_conn,
+                    ["day0_nowcast_entry"],
+                )
+            )
+        required_alpha_gates_confirmed = all(
+            confirmation.get(strategy, False)
+            for strategy, confirmation, required in (
+                (
+                    "forecast_qkernel_entry",
+                    market_relative_alpha_gate_confirmation,
+                    qkernel_market_relative_alpha_gate_reason is not None,
+                ),
+                (
+                    "day0_nowcast_entry",
+                    day0_market_relative_alpha_gate_confirmation,
+                    day0_market_relative_alpha_gate_required,
+                ),
+            )
+            if required
+        )
+        if (
+            qkernel_market_relative_alpha_gate_reason is not None
+            or day0_market_relative_alpha_gate_required
+        ) and not required_alpha_gates_confirmed:
+            # A missing durable localized gate must not turn missing capital
+            # authority into permission. DATA_DEGRADED blocks new entries while
+            # preserving monitor/exit lanes.
+            probability_semantics_level = RiskLevel.DATA_DEGRADED
         if brier_strategy_localization.get("status") == "pending_durable_strategy_gate":
             if durable_action_status.get("status") == "emitted":
                 brier_level = RiskLevel.GREEN
@@ -3274,11 +5916,7 @@ def _tick_once() -> RiskLevel:
                     # strong localization cannot prove a GREEN residual, block
                     # every new entry (YELLOW) but do not convert historical
                     # scoring error into a price-insensitive RED liquidation.
-                    brier_level = (
-                        RiskLevel.YELLOW
-                        if portfolio_brier_level == RiskLevel.RED
-                        else portfolio_brier_level
-                    )
+                    brier_level = RiskLevel.YELLOW
                     brier_strategy_localization = {
                         **brier_strategy_localization,
                         "status": f"{strong_scope}_residual_portfolio_not_green",
@@ -3292,11 +5930,7 @@ def _tick_once() -> RiskLevel:
             else:
                 # Missing durable scope enforcement falls back to the global
                 # entry block. It does not create SELL authority.
-                brier_level = (
-                    RiskLevel.YELLOW
-                    if portfolio_brier_level == RiskLevel.RED
-                    else portfolio_brier_level
-                )
+                brier_level = RiskLevel.YELLOW
                 brier_strategy_localization = {
                     **brier_strategy_localization,
                     "status": (
@@ -3407,7 +6041,7 @@ def _tick_once() -> RiskLevel:
         weekly_loss_snapshot = _realized_window_loss_telemetry(
             realized_exits,
             now=now,
-            lookback=timedelta(days=7),
+            lookback=RISKGUARD_REALIZED_TELEMETRY_WINDOW,
             degraded=realized_degraded,
             source=loss_source,
         )
@@ -3430,6 +6064,8 @@ def _tick_once() -> RiskLevel:
         # the SAME risk lane every other "missing truth input" condition
         # already uses, single-seam.
         unresolved_exposure_level = _unresolved_exposure_data_degraded_level(zeus_conn, portfolio)
+        storage_capacity = storage_capacity_snapshot()
+        storage_capacity_level = RiskLevel(str(storage_capacity["level"]))
 
         level = overall_level(
             brier_level,
@@ -3440,6 +6076,7 @@ def _tick_once() -> RiskLevel:
             portfolio_consistency_level,
             unresolved_exposure_level,
             probability_semantics_level,
+            storage_capacity_level,
         )
 
         risk_conn.execute("""
@@ -3455,6 +6092,10 @@ def _tick_once() -> RiskLevel:
                 "brier_observed_all_lineage_score": round(float(observed_b_score), 6),
                 "brier_observed_all_lineage_sample_size": len(brier_metric_rows),
                 "brier_actuating_sample_size": len(brier_actuating_rows),
+                "brier_evidence_ready_score": round(float(evidence_b_score), 6),
+                "brier_evidence_ready_sample_size": len(
+                    brier_evidence_ready_rows
+                ),
                 # ORANGE-localization audit surface (2026-07-04): the raw,
                 # unfiltered portfolio view (all strategies pooled) vs. the
                 # view that actually DRIVES admission after any localization
@@ -3462,20 +6103,81 @@ def _tick_once() -> RiskLevel:
                 # Kept as an explicit alias of portfolio_brier_level/brier_level
                 # so downstream consumers see a coherent, self-describing pair
                 # regardless of which localization branch (if any) fired.
-                "brier_all_strategies_level": portfolio_brier_level.value,
+                "brier_all_strategies_level": portfolio_brier_raw_level.value,
                 "brier_active_portfolio_level": brier_level.value,
                 "localized_orange_scope": localized_orange_scope,
                 "localized_red_scope": localized_red_scope,
                 "brier_strategy_breakdown": brier_strategy_breakdown,
+                "brier_verdict_breakdown": brier_verdict_breakdown,
                 "brier_strategy_localization": brier_strategy_localization,
                 "probability_semantics_level": probability_semantics_level.value,
                 "probability_semantics_binding": probability_semantics_binding,
+                "day0_probability_semantics_binding": (
+                    day0_probability_semantics_binding
+                ),
+                "market_relative_alpha_evidence": market_relative_alpha_evidence,
+                "market_relative_alpha_gate_evidence": (
+                    qkernel_market_relative_alpha_gate_evidence
+                ),
+                "market_relative_alpha_gate_reason": (
+                    qkernel_market_relative_alpha_gate_reason
+                ),
+                "market_relative_alpha_observation": (
+                    qkernel_market_relative_alpha_observation
+                ),
+                "market_relative_alpha_unproven_revisions": (
+                    qkernel_market_relative_alpha_unproven_revisions
+                ),
+                "market_relative_alpha_admission_role": (
+                    "revision_scoped_rejection_gate"
+                ),
+                "qkernel_market_relative_alpha_shadow": (
+                    qkernel_market_relative_alpha_shadow_status
+                ),
+                "qkernel_actual_global_capital_binding": (
+                    qkernel_actual_global_capital_binding
+                ),
+                "market_relative_alpha_gate_confirmation": (
+                    market_relative_alpha_gate_confirmation
+                ),
+                "qkernel_live_realized_capital_curve": (
+                    qkernel_live_realized_capital_curve
+                ),
+                "day0_market_relative_alpha_evidence": (
+                    day0_market_relative_alpha_evidence
+                ),
+                "day0_market_relative_alpha_admission_role": (
+                    "revision_scoped_rejection_gate"
+                ),
+                "day0_market_relative_alpha_gate_reason": (
+                    day0_market_relative_alpha_gate_reason
+                ),
+                "day0_market_relative_alpha_observation": (
+                    day0_market_relative_alpha_observation
+                ),
+                "day0_market_relative_alpha_shadow": (
+                    day0_market_relative_alpha_shadow_status
+                ),
+                "day0_actual_global_capital_binding": (
+                    day0_actual_global_capital_binding
+                ),
+                "day0_live_realized_capital_curve": (
+                    day0_live_realized_capital_curve
+                ),
+                "day0_market_relative_alpha_gate_required": (
+                    day0_market_relative_alpha_gate_required
+                ),
+                "day0_market_relative_alpha_gate_confirmation": (
+                    day0_market_relative_alpha_gate_confirmation
+                ),
                 "settlement_quality_level": settlement_quality_level.value,
                 "execution_quality_level": execution_quality_level.value,
                 "strategy_signal_level": strategy_signal_level.value,
                 # T2 (quarantine excision, BLOCKER-1): unbounded obligation or
                 # unmapped-family ChainOnlyFact -> DATA_DEGRADED leg.
                 "unresolved_exposure_level": unresolved_exposure_level.value,
+                "storage_capacity_level": storage_capacity_level.value,
+                "storage_capacity": storage_capacity,
                 "daily_loss_level": daily_loss_level.value,
                 "weekly_loss_level": weekly_loss_level.value,
                 "trailing_loss_decision_role": "record_only",
@@ -3829,6 +6531,8 @@ def tick_with_portfolio(portfolio: PortfolioState) -> RiskLevel:
             return RiskLevel.DATA_DEGRADED
 
         collateral_identity_level = _collateral_identity_level(zeus_conn)
+        storage_capacity = storage_capacity_snapshot()
+        storage_capacity_level = RiskLevel(str(storage_capacity["level"]))
 
         level = overall_level(
             RiskLevel.DATA_DEGRADED if portfolio.portfolio_loader_degraded else RiskLevel.GREEN,
@@ -3836,6 +6540,7 @@ def tick_with_portfolio(portfolio: PortfolioState) -> RiskLevel:
             RiskLevel.GREEN,
             RiskLevel.GREEN,
             collateral_identity_level,
+            storage_capacity_level,
         )
 
         return level

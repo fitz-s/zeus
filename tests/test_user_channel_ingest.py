@@ -519,6 +519,92 @@ def test_ws_order_timestamp_accepts_epoch_milliseconds(conn):
     assert _parse_dt(epoch_millis) == NOW
 
 
+def test_ws_cancel_terminal_fact_releases_exact_obligation_and_preserves_existing_position():
+    from src.state.entry_exposure_obligation import open_entry_exposure_obligation
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    init_schema(conn)
+    init_schema_trade_only(conn)
+    insert_snapshot(conn, _snapshot())
+    insert_submission_envelope(conn, _envelope(), envelope_id="env-ws")
+    conn.execute(
+        """
+        INSERT INTO venue_commands (
+            command_id, snapshot_id, envelope_id, position_id, decision_id,
+            idempotency_key, intent_kind, market_id, token_id, side, size,
+            price, venue_order_id, state, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "cmd-ws", "snap-ws", "env-ws", "1", "dec-ws",
+            "idem-cmd-ws", "ENTRY", "condition-ws", "yes-token-ws", "BUY",
+            10.0, 0.5, "ord-ws", "ACKED", NOW.isoformat(), NOW.isoformat(),
+        ),
+    )
+    conn.execute(
+        """
+        INSERT INTO position_current (
+            position_id, phase, shares, cost_basis_usd, entry_price,
+            chain_state, chain_shares, chain_cost_basis_usd,
+            direction, token_id, no_token_id, condition_id,
+            order_id, order_status, updated_at, temperature_metric
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "1", "active", 7.0, 3.5, 0.5,
+            "synced", 7.0, 3.5,
+            "buy_yes", "yes-token-ws", "no-token-ws", "condition-ws",
+            "ord-prior-fill", "filled", NOW.isoformat(), "high",
+        ),
+    )
+    open_entry_exposure_obligation(
+        conn,
+        command_id="cmd-ws",
+        owner_domain="trade",
+        token_id="yes-token-ws",
+        condition_id="condition-ws",
+        shares=10.0,
+        cost_basis_usd=5.0,
+        now=NOW.isoformat(),
+    )
+    conn.commit()
+    try:
+        result = _ingestor(conn).handle_message(
+            _order_message(type="CANCELLATION", size="10", size_matched="0")
+        )
+
+        assert result and result["order_fact_id"]
+        assert _command_state(conn) == "EXPIRED"
+        assert conn.execute(
+            "SELECT status FROM entry_exposure_obligations WHERE command_id = 'cmd-ws'"
+        ).fetchone()["status"] == "RESOLVED"
+        position = conn.execute(
+            """
+            SELECT phase, shares, cost_basis_usd, chain_shares, order_id, order_status
+              FROM position_current
+             WHERE position_id = '1'
+            """
+        ).fetchone()
+        assert dict(position) == {
+            "phase": "active",
+            "shares": 7.0,
+            "cost_basis_usd": 3.5,
+            "chain_shares": 7.0,
+            "order_id": "ord-prior-fill",
+            "order_status": "filled",
+        }
+        assert [
+            row["event_type"]
+            for row in conn.execute(
+                "SELECT event_type FROM venue_command_events "
+                "WHERE command_id = 'cmd-ws' ORDER BY sequence_no"
+            )
+        ][-1] == "EXPIRED"
+    finally:
+        conn.close()
+
+
 def test_unmatched_order_event_is_deferred_not_thread_fatal(conn):
     result = _ingestor(conn).handle_message(_order_message(id="ord-race-before-commit"))
 

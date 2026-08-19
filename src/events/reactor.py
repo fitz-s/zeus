@@ -47,7 +47,7 @@ import os
 import sqlite3
 import threading
 import time
-from dataclasses import dataclass, field, replace as dataclass_replace
+from dataclasses import dataclass, field as dataclass_field, replace as dataclass_replace
 from collections import Counter
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -73,6 +73,8 @@ from src.strategy.live_inference.live_admission import (
 UTC = timezone.utc
 
 DEFAULT_REACTOR_CYCLE_BUDGET_SECONDS = 22.0
+DEFAULT_REACTOR_CONSTRUCT_WORK_CUT_SECONDS = 45.0
+DEFAULT_REACTOR_CONSTRUCT_CONNECT_CUT_SECONDS = 1.0
 DEFAULT_REACTOR_FETCH_BATCH_LIMIT = 50
 DEFAULT_SNAPSHOT_BLOCK_RETRY_DELAY_SECONDS = 60.0
 DEFAULT_SNAPSHOT_BLOCK_RETRY_MAX_DELAY_SECONDS = 600.0
@@ -506,7 +508,7 @@ class EventSubmissionReceipt:
     side_effect_status: str = "NO_SUBMIT"
     reason: str = ""
     proof_accepted: bool | None = None
-    decision_proof_bundle: Any | None = field(default=None, repr=False, compare=False)
+    decision_proof_bundle: Any | None = dataclass_field(default=None, repr=False, compare=False)
     # B2 (PR-4, 2026-06-03): edge-axis plumbing.
     # alpha_gap = q_live - c_fee_adjusted (direction-adjusted posterior minus
     # executable market price).  Positive = our estimate exceeds the ask price.
@@ -587,6 +589,10 @@ class EventSubmissionReceipt:
     # so existing-row hashes stay byte-stable).
     posterior_id: int | None = None
     probability_authority: str | None = None
+    # Immutable probability-law revision that produced this candidate's q.
+    # RiskGuard scopes statistical evidence to this identity at selection and
+    # submit; None remains fail-closed for a revision-scoped automated gate.
+    probability_semantics_revision: str | None = None
     # P0 mode-authority (operator review 2026-06-10): the selected proof's maker/taker
     # execution_mode_intent and its maker limit price are FIRST-CLASS receipt fields, not
     # opportunity-book decoration. They are PROVEN through submit recapture under that
@@ -614,23 +620,23 @@ class EventSubmissionReceipt:
     # deadlock-free P1 write. compare=False + repr=False so it NEVER affects receipt equality or
     # the receipt hash (it is internal plumbing, never serialized into receipt_json). None on every
     # legacy / gate-reject receipt that never reached candidate-proof generation.
-    belief_payload: "dict[str, Any] | None" = field(default=None, repr=False, compare=False)
+    belief_payload: "dict[str, Any] | None" = dataclass_field(default=None, repr=False, compare=False)
     # Cross-family auction transport. The adapter prepares the complete family
     # probability/token/book set without reserving or submitting; the reactor compares
     # every prepared family before one winner may reserve. Internal only: never serialized.
-    prepared_global_family: "Any | None" = field(default=None, repr=False, compare=False)
+    prepared_global_family: "Any | None" = dataclass_field(default=None, repr=False, compare=False)
     # Exact cross-family winner certificate. Present only on the one event selected
     # from a complete current universe; the live certificate builder consumes its
     # immutable shares/limit/book/wealth identities and may not re-size it locally.
-    global_actuation: "Any | None" = field(default=None, repr=False, compare=False)
+    global_actuation: "Any | None" = dataclass_field(default=None, repr=False, compare=False)
     # Submit-time curve observed by the side-effect-free winner preflight when it
     # supersedes the selected curve. Internal only: the global runtime overlays it
     # into the frozen complete universe and reruns the same optimizer.
-    global_jit_candidate: "Any | None" = field(default=None, repr=False, compare=False)
+    global_jit_candidate: "Any | None" = dataclass_field(default=None, repr=False, compare=False)
     # Candidate-local executable probability bound discovered by winner preflight.
     # Internal only: the global runtime feeds it back into the same complete auction
     # and re-sizes/re-ranks before any venue side effect.
-    global_jit_payoff_q_lcb: "float | None" = field(
+    global_jit_payoff_q_lcb: "float | None" = dataclass_field(
         default=None,
         repr=False,
         compare=False,
@@ -638,11 +644,11 @@ class EventSubmissionReceipt:
     # Direct reduce-only executor boundary facts.  They are internal control
     # evidence: reactor disposition and live counters must never infer venue
     # contact or ACK from an outcome string.
-    venue_call_started: bool = field(default=False, repr=False, compare=False)
-    venue_ack_received: bool = field(default=False, repr=False, compare=False)
-    venue_command_id: str | None = field(default=None, repr=False, compare=False)
-    venue_command_state: str | None = field(default=None, repr=False, compare=False)
-    venue_order_type: str | None = field(default=None, repr=False, compare=False)
+    venue_call_started: bool = dataclass_field(default=False, repr=False, compare=False)
+    venue_ack_received: bool = dataclass_field(default=False, repr=False, compare=False)
+    venue_command_id: str | None = dataclass_field(default=None, repr=False, compare=False)
+    venue_command_state: str | None = dataclass_field(default=None, repr=False, compare=False)
+    venue_order_type: str | None = dataclass_field(default=None, repr=False, compare=False)
     # D1 FILL-UP LEASE CONTEXT (2026-06-22 lifecycle consult REQ-20260622-060011).
     # When this receipt is an APPROVED same-token fill-up (stake overridden to the
     # residual delta), the family-rebalance lease intent_id + the owned-exposure
@@ -652,7 +658,7 @@ class EventSubmissionReceipt:
     # receipt equality or the receipt hash (internal plumbing, never serialized into
     # receipt_json). None on EVERY non-fill-up receipt — the fresh-entry path never
     # populates it, so the entry path is byte-identical.
-    fill_up_lease_payload: "dict[str, Any] | None" = field(default=None, repr=False, compare=False)
+    fill_up_lease_payload: "dict[str, Any] | None" = dataclass_field(default=None, repr=False, compare=False)
     # D2 SHIFT-BIN LEASE CONTEXT (2026-06-22 lifecycle consult REQ-20260622-060011).
     # The close-before-open carrier. Two shapes, both keyed by the SHIFT_BIN lease
     # intent_id + old-leg identity (old_position_id / old_token_id):
@@ -665,7 +671,7 @@ class EventSubmissionReceipt:
     # compare=False + repr=False so it NEVER affects receipt equality or the receipt
     # hash. None on EVERY fresh-entry / fill-up receipt — the entry + D1 paths never
     # populate it, so both are byte-identical.
-    shift_bin_lease_payload: "dict[str, Any] | None" = field(default=None, repr=False, compare=False)
+    shift_bin_lease_payload: "dict[str, Any] | None" = dataclass_field(default=None, repr=False, compare=False)
     # SUBMIT-LANE STAMP (silent-trade-kill antibody 2026-06-12; root cause
     # /tmp/allpass_nosubmit_rootcause.md). Records that the sole live adapter ran
     # this decision; it either submits, emits a venue terminal, or records a typed
@@ -693,7 +699,12 @@ def _is_global_reduce_only_exit_receipt(receipt: EventSubmissionReceipt) -> bool
         and receipt.side_effect_status == "EXIT_SUBMITTED"
         and receipt.venue_call_started
         and bool(receipt.venue_command_id)
-        and receipt.venue_order_type == "FAK"
+        and receipt.venue_order_type
+        == (
+            "FAK"
+            if getattr(candidate, "execution_mode", "") == "TAKER_LIMIT"
+            else "GTC"
+        )
         and str(receipt.reason or "").startswith(
             ("GLOBAL_SELL_EXIT:", "GLOBAL_SELL_EXIT_UNKNOWN:")
         )
@@ -703,6 +714,144 @@ def _is_global_reduce_only_exit_receipt(receipt: EventSubmissionReceipt) -> bool
         and str(getattr(candidate, "token_id", "") or "") == receipt.token_id
         and receipt.direction == f"sell_{side.lower()}"
         and side in {"YES", "NO"}
+    )
+
+
+def _paused_entry_wake_should_park(
+    *,
+    pause_reason: str | None,
+    held_sell_reauction_requests: tuple[object, ...] = (),
+    held_sell_request_exposure_provider: (
+        Callable[[], frozenset[tuple[str, tuple[str, str, str]]]] | None
+    ) = None,
+    allow_forecast_carrier_progress: bool = False,
+    durable_exact_held_completion: bool = False,
+    allow_capital_proof_progress: bool = False,
+    monitor_completion_reserved: bool = False,
+) -> bool:
+    """Park paused BUY work unless this wake has protected non-BUY progress."""
+
+    # SCOPE: global new-entry BUY actuation only; it never blocks a targeted
+    # forecast_posterior_advanced carrier from enqueue/supersession or its bounded
+    # no-submit redecision bookkeeping. DRAIN: that targeted carrier reaches the
+    # existing adapter pause fence and remains retryable, while ordinary paused
+    # queue rows stay unclaimed; exact canonical held-SELL work keeps its existing
+    # reduce-only route. RESET: clearing the global pause re-decides the same latest
+    # carrier identity. Unknown control retains the exit path; unavailable exact
+    # exposure parks global held-SELL actuation while the local monitor keeps running.
+    if (
+        pause_reason is None
+        or str(pause_reason).startswith("entries_pause_control_unreadable:")
+    ):
+        return False
+    if allow_forecast_carrier_progress:
+        return False
+    if durable_exact_held_completion:
+        return False
+    if allow_capital_proof_progress:
+        # SCOPE: admission-paused BUY carriers may enter only the existing
+        # adapter/global-batch cut, where actual BUY remains rejected and the
+        # schema-22 capital counterfactual has no actuator. DRAIN: each current
+        # carrier freezes one settlement-grade proof receipt. RESET: a passing
+        # capital evaluator clears the independent entry gate; disabling this
+        # flag restores queue parking without changing venue authority.
+        return False
+    if monitor_completion_reserved:
+        # A generic completion debt is the durable successor of a global cut
+        # that yielded to the held monitor.  Parking it while BUY is paused
+        # breaks its RESET path: no later cut can attest current held coverage,
+        # so both monitor fairness and the deploy restart guard remain armed.
+        # Generic fairness debt is cut-scoped, not exposure-scoped: even an
+        # empty current portfolio must finish the reserved cut so the debt can
+        # RESET.  The existing entry pause remains part of the adapter/action
+        # law and still forbids every BUY submission.
+        return False
+    if not held_sell_reauction_requests:
+        return True
+    if held_sell_request_exposure_provider is None:
+        logging.getLogger("zeus.events.reactor").warning(
+            "paused held-SELL admission: exact exposure unavailable; parking debt"
+        )
+        return True
+    try:
+        canonical_exposure = held_sell_request_exposure_provider()
+    except Exception:  # noqa: BLE001 - global actuation needs exact exposure proof
+        logging.getLogger("zeus.events.reactor").warning(
+            "paused held-SELL admission: exact exposure unavailable; parking debt",
+            exc_info=True,
+        )
+        return True
+    if canonical_exposure is None:
+        logging.getLogger("zeus.events.reactor").warning(
+            "paused held-SELL admission: exact exposure unavailable; parking debt"
+        )
+        return True
+    for request in held_sell_reauction_requests:
+        position_id = str(getattr(request, "position_id", "") or "").strip()
+        raw_family = getattr(request, "family", ())
+        if not position_id or not isinstance(raw_family, tuple) or len(raw_family) != 3:
+            continue
+        family = (
+            str(raw_family[0] or "").strip(),
+            str(raw_family[1] or "").strip(),
+            str(raw_family[2] or "").strip().lower(),
+        )
+        if all(family) and (position_id, family) in canonical_exposure:
+            return False
+    return True
+
+
+def _paused_forecast_carrier_requires_held_auction(
+    held_family_provider: Callable[[], object] | None,
+) -> bool:
+    """Keep a paused carrier alive when current held capital needs redecision."""
+
+    # SCOPE: one materialized forecast carrier while new entries are paused.
+    # DRAIN: current held exposure enters the existing reduce-only global cut;
+    # BUY remains disabled and SELL/HOLD/CASH receive one common-axis receipt.
+    # RESET: an exact empty held-family read completes the carrier without an
+    # auction; clearing the entry pause restores the ordinary global cut. An
+    # unavailable read is exposure-unknown, so it must not erase the exit lane.
+    if held_family_provider is None:
+        logging.getLogger("zeus.events.reactor").warning(
+            "paused forecast carrier held-family read unavailable; retaining "
+            "reduce-only auction"
+        )
+        return True
+    try:
+        held_families = held_family_provider()
+    except Exception:  # noqa: BLE001 - unknown exposure must keep exit redecision alive
+        logging.getLogger("zeus.events.reactor").warning(
+            "paused forecast carrier held-family read failed; retaining "
+            "reduce-only auction",
+            exc_info=True,
+        )
+        return True
+    if held_families is None:
+        logging.getLogger("zeus.events.reactor").warning(
+            "paused forecast carrier held-family read unavailable; retaining "
+            "reduce-only auction"
+        )
+        return True
+    return bool(held_families)
+
+
+def _entry_reactor_park_reason(conn: sqlite3.Connection | None) -> str | None:
+    """Return the current runtime block that should park ordinary BUY work."""
+
+    from src.engine.event_reactor_adapter import (
+        _entry_global_submit_suppression_reason,
+        _entry_pause_blocks_live_submit,
+    )
+
+    # SCOPE: ordinary BUY-capable reactor cycles only; targeted forecast
+    # materialization and exact held-SELL completion bypass the caller's park.
+    # DRAIN: pending immutable carriers remain unclaimed, so the blocked state
+    # creates no retry writes. RESET: every wake re-reads both authorities and
+    # resumes the same pending carriers when neither block remains.
+    return (
+        _entry_pause_blocks_live_submit(conn)
+        or _entry_global_submit_suppression_reason()
     )
 
 
@@ -865,12 +1014,18 @@ class ReactorResult:
     retried: int = 0
     # Exact epoch outcome, never inferred from aggregate rejection/retry counts.
     global_auction_completed_non_cancelled: int = 0
+    # Immutable held-SELL completion evidence emitted by each completed global
+    # epoch.  This deliberately survives process-local monitor coverage cache
+    # invalidation between selection, venue actuation, and later epochs.
+    global_held_sell_completion_cuts: list[
+        "GlobalHeldSellCompletionCut"
+    ] = dataclass_field(default_factory=list)
     # VISIBILITY (2026-06-11 claim-storm incident): claim() lock bounces were
     # silently folded into ``retried`` — a 0/250 storm cycle was indistinguishable
     # from 250 honest snapshot-pending retries (reasons=[]). Counted separately so
     # the status pulse / logs expose lock contention as lock contention.
     claim_lock_bounces: int = 0
-    rejection_reasons: list[str] = field(default_factory=list)
+    rejection_reasons: list[str] = dataclass_field(default_factory=list)
     # ALWAYS-DECIDABLE invariant (2026-06-12): how many family-substrate refreshes the reactor
     # invoked this cycle in response to transient substrate blocks, and how many single-family
     # cycle-advance reseeds it enqueued for stale/absent posterior blocks. Visibility only — the
@@ -893,8 +1048,66 @@ class ReactorResult:
 
 
 @dataclass(frozen=True)
+class GlobalHeldSellCompletionCut:
+    """One immutable global-cut answer for held-SELL completion debt.
+
+    ``holding_coverage`` is the exact selection partition, not a later
+    process-cache lookup.  An ACTUATED outcome names the held SELL that crossed
+    the venue boundary; a CAPITAL_REJECTED outcome names a completed HOLD/CASH
+    cut. An INCOMPLETE cut is evidence only, except that exact fresh V4
+    ``NO_EXECUTABLE_BOOK`` coverage may terminalize that one immutable attempt.
+    """
+
+    holding_coverage: tuple[object, ...]
+    economic_cut_completed: bool
+    outcome: str
+    selected_position_id: str | None = None
+    selected_token_id: str | None = None
+    selected_candidate_id: str | None = None
+    terminal_no_trade_reason: str = ""
+    request_bindings: tuple[object, ...] = ()
+
+    def __post_init__(self) -> None:
+        if self.outcome not in {
+            "INCOMPLETE",
+            "ACTUATED",
+            "CAPITAL_REJECTED",
+            "DEADLINE_EXPIRED",
+        }:
+            raise ValueError("GLOBAL_HELD_SELL_COMPLETION_OUTCOME_INVALID")
+        selected = (
+            str(self.selected_position_id or "").strip(),
+            str(self.selected_token_id or "").strip(),
+            str(self.selected_candidate_id or "").strip(),
+        )
+        if self.outcome == "ACTUATED" and (
+            not self.economic_cut_completed or not all(selected)
+        ):
+            raise ValueError("GLOBAL_HELD_SELL_ACTUATION_IDENTITY_INVALID")
+        if self.outcome == "CAPITAL_REJECTED" and (
+            not self.economic_cut_completed
+            or any(selected)
+            or not str(self.terminal_no_trade_reason or "").strip()
+        ):
+            raise ValueError("GLOBAL_HELD_SELL_CAPITAL_OUTCOME_INVALID")
+        if self.outcome == "DEADLINE_EXPIRED" and (
+            self.economic_cut_completed
+            or any(selected)
+            or not self.request_bindings
+            or self.terminal_no_trade_reason != "HELD_SELL_DEADLINE_EXPIRED"
+        ):
+            raise ValueError("GLOBAL_HELD_SELL_DEADLINE_OUTCOME_INVALID")
+
+
+@dataclass(frozen=True)
 class GlobalBatchSubmitResult:
-    """Opaque batch-actuation result: all events finalized, at most one venue call."""
+    """Opaque batch-actuation result: all events finalized, at most one venue call.
+
+    ``economic_cut_completed`` means a side-effect-free terminal HOLD/CASH cut.
+    A successful submit instead carries a continuation and remains ``False``;
+    exact held-SELL actuation completion belongs to
+    ``held_sell_completion_cut``.
+    """
 
     receipts: Mapping[str, EventSubmissionReceipt]
     winner_event_id: str | None
@@ -902,6 +1115,7 @@ class GlobalBatchSubmitResult:
     next_claim_event: OpportunityEvent | None = None
     continuation_event: OpportunityEvent | None = None
     economic_cut_completed: bool = False
+    held_sell_completion_cut: GlobalHeldSellCompletionCut | None = None
 
     def __post_init__(self) -> None:
         if self.venue_submit_count not in {0, 1}:
@@ -1020,6 +1234,7 @@ class OpportunityEventReactor:
         reject: Reject,
         config: ReactorConfig | None = None,
         cycle_entry_gate: Callable[[], bool] | None = None,
+        paused_entry_wake_gate: Callable[[], bool] | None = None,
         regret_ledger: Any | None = None,
         decision_provenance_hook: Any | None = None,
         family_snapshot_refresher: "Callable[..., bool] | None" = None,
@@ -1037,6 +1252,7 @@ class OpportunityEventReactor:
         self._reject = reject
         self._config = config or ReactorConfig()
         self._cycle_entry_gate = cycle_entry_gate
+        self._paused_entry_wake_gate = paused_entry_wake_gate
         self._regret_ledger = regret_ledger
         # ALWAYS-DECIDABLE invariant (operator law 2026-06-12). The SAME decision-time targeted
         # family snapshot refresher the adapter uses (main._edli_decision_family_snapshot_refresher,
@@ -1152,9 +1368,25 @@ class OpportunityEventReactor:
         limit: int | None = 100,
         targeted_event_ids: frozenset[str] = frozenset(),
         targeted_only: bool = False,
+        bridge_stale_debt_slots: int = 0,
         cancelled: Callable[[], bool] | None = None,
     ) -> ReactorResult:
         result = ReactorResult()
+        paused_entry_wake_gate = getattr(self, "_paused_entry_wake_gate", None)
+        if paused_entry_wake_gate is not None:
+            try:
+                should_park = bool(paused_entry_wake_gate())
+            except Exception:  # noqa: BLE001 - unknown held state must keep exits alive
+                logging.getLogger("zeus.events.reactor").warning(
+                    "reactor paused-entry park probe failed; retaining reactor work",
+                    exc_info=True,
+                )
+                should_park = False
+            if should_park:
+                result.rejection_reasons.append(
+                    "ENTRIES_PAUSED_NO_CANONICAL_HELD_FAMILIES"
+                )
+                return result
         self._drain_no_submit_claim_requeues(
             wait_ms=_reactor_claim_busy_timeout_ms()
         )
@@ -1215,6 +1447,7 @@ class OpportunityEventReactor:
             fetch_limit = (
                 request_limit
                 if remaining is None
+                or (targeted_only and bridge_stale_debt_slots > 0)
                 else _lane_fairness_fetch_limit(request_limit)
             )
             fetch_kwargs = {
@@ -1225,7 +1458,14 @@ class OpportunityEventReactor:
                 fetch_kwargs["targeted_event_ids"] = targeted_event_ids
             if targeted_only:
                 fetch_kwargs["targeted_only"] = True
+            if bridge_stale_debt_slots > 0:
+                fetch_kwargs["bridge_stale_debt_slots"] = bridge_stale_debt_slots
             events = self._store.fetch_pending(**fetch_kwargs)
+            if bridge_stale_debt_slots > 0:
+                # The reserve is per producer bridge invocation, not per
+                # multi-winner epoch or pagination fetch. Subsequent re-fetches
+                # retain target/winner continuity without claiming more debt.
+                fetch_kwargs["bridge_stale_debt_slots"] = 0
             if not events:
                 break
             # FAIR LANE INTERLEAVE (2026-06-15). The per-cycle wall-clock budget completes
@@ -1505,11 +1745,25 @@ class OpportunityEventReactor:
             return max(decision_time, claimed_at.astimezone(UTC))
 
         try:
-            batch_result = process_batch(
-                tuple(claimed),
-                decision_time.astimezone(UTC),
-                claim_unpaged_winner=_claim_unpaged_winner,
+            bind_claim_generations = getattr(
+                self._submit,
+                "bind_global_claim_generations",
+                None,
             )
+            if callable(bind_claim_generations):
+                bind_claim_generations(
+                    claim_generations,
+                    claim_attempt_counts,
+                )
+            try:
+                batch_result = process_batch(
+                    tuple(claimed),
+                    decision_time.astimezone(UTC),
+                    claim_unpaged_winner=_claim_unpaged_winner,
+                )
+            finally:
+                if callable(bind_claim_generations):
+                    bind_claim_generations(None, None)
             if not isinstance(batch_result, GlobalBatchSubmitResult):
                 raise TypeError("global batch adapter returned an invalid result")
             claimed_ids = frozenset(event.event_id for event in claimed)
@@ -1687,6 +1941,27 @@ class OpportunityEventReactor:
                     finalized
                     and self._unknown_dead_letter_calls == dead_letters_before
                 )
+        if batch_result.held_sell_completion_cut is not None:
+            completion_cut = batch_result.held_sell_completion_cut
+            # No-trade is terminal only after every Window-B disposition is
+            # durable. A submitted held SELL crossed the venue boundary already.
+            if completion_cut.outcome == "CAPITAL_REJECTED" and (
+                completion_cut.economic_cut_completed
+                != batch_result.economic_cut_completed
+                or not all_claimed_finalized
+            ):
+                completion_cut = dataclass_replace(
+                    completion_cut,
+                    economic_cut_completed=False,
+                    outcome="INCOMPLETE",
+                    selected_position_id=None,
+                    selected_token_id=None,
+                    selected_candidate_id=None,
+                    terminal_no_trade_reason="",
+                )
+            result.global_held_sell_completion_cuts.append(
+                completion_cut
+            )
         return GlobalEpochOutcome(
             attempted=attempted,
             submitted=batch_result.venue_submit_count == 1,
@@ -4466,6 +4741,10 @@ def _receipt_money_path_blocker(
 # venue order was never placed (PRICE_MOVED aborts pre-POST, MODE_FLIPPED refuses
 # the stale plan, would_cross_book fails the pre-submit revalidation certificate).
 TRANSIENT_MONEY_PATH_REASONS: frozenset[str] = frozenset({
+    # A bounded global-auction cut expired before actuation.  Requeueing starts
+    # a new cut with fresh q/book/wealth truth; terminalizing would consume a
+    # still-live opportunity, while replaying the expired cut is forbidden.
+    "GLOBAL_REAUCTION_EPOCH_EXPIRED",
     # Forecast-source re-ingested AFTER this cycle's decision moment.
     "SOURCE_CAPTURED_AFTER_DECISION_TIME",
     # Replacement posterior substrate is missing/stale relative to live inputs.
@@ -4576,6 +4855,10 @@ TRANSIENT_MONEY_PATH_REASONS: frozenset[str] = frozenset({
     "GLOBAL_AUCTION_NO_TRADE",
     "GLOBAL_AUCTION_FAILED",
     "GLOBAL_AUCTION_SUPERSEDED_BY_NEW_FACT",
+    # Absolute work-cut yields preserve every carrier for the next cycle. They
+    # are control-flow outcomes, never book-unavailable or economic no-trades.
+    "DEFERRED_PREEMPTED",
+    "DEFERRED_DEADLINE",
     # No family has a current admissible probability yet. Retain the events and
     # release the trading lane long enough for the posterior substrate to advance.
     "GLOBAL_AUCTION_NO_CURRENT_PROBABILITY_FAMILY",
@@ -4643,6 +4926,11 @@ _RUNTIME_TERMINAL_MONEY_PATH_REASONS: frozenset[str] = frozenset({
     # lifecycle recovery; REJECTED/CANCELLED/EXPIRED commands should be replaced
     # only by a fresh redecision event with a fresh executable identity.
     "idempotency_collision",
+    # The executor found an already-open position or live command for the same
+    # token before any venue call. That existing owner is the final disposition
+    # for this immutable event; fresh evidence emits a new event after the owner
+    # advances. Requeueing this carrier only repeats the duplicate gate.
+    "duplicate_entry_same_token",
     # Receipt missing or not bound to this event (submit returned True / a
     # non-matching receipt): a structural expressibility failure, not a race.
     "EVENT_SUBMISSION_RECEIPT_MISSING_OR_UNBOUND",
@@ -4693,6 +4981,12 @@ _RUNTIME_TERMINAL_MONEY_PATH_REASONS: frozenset[str] = frozenset({
     # epoch; recurring producers create the next event, so requeueing this one
     # only duplicates a completed comparison.
     "GLOBAL_PREFLIGHT_HOLD_CASH_OPTIMAL",
+    # SCOPE: this immutable global decision cut when BUY is disabled and no
+    # canonical held family exists. DRAIN: consume its carriers as a completed
+    # no-trade instead of retrying an action set that is provably empty. RESET:
+    # forecast, price, or control advancement emits a fresh event and reruns the
+    # complete auction under the then-current action set.
+    "GLOBAL_AUCTION_NO_REDUCE_ONLY_FAMILY",
 })
 
 
@@ -5074,6 +5368,49 @@ def _edli_reactor_held_family_provider():
     return _provider
 
 
+def _edli_held_sell_request_exposure_provider():
+    """Read exact canonical held position/family pairs for paused SELL admission."""
+
+    def _provider() -> frozenset[tuple[str, tuple[str, str, str]]]:
+        from src.contracts.position_truth import CURRENT_MONEY_RISK_CHAIN_STATES
+        from src.state.db import get_trade_connection_read_only
+
+        conn_t = get_trade_connection_read_only()
+        try:
+            chain_states = tuple(sorted(CURRENT_MONEY_RISK_CHAIN_STATES))
+            placeholders = ",".join("?" for _ in chain_states)
+            rows = conn_t.execute(
+                f"""
+                SELECT position_id, city, target_date, temperature_metric
+                  FROM position_current
+                 WHERE phase IN ('active', 'day0_window', 'pending_exit')
+                   AND COALESCE(chain_state, '') IN ({placeholders})
+                   AND COALESCE(chain_shares, 0) > 0
+                   AND COALESCE(chain_cost_basis_usd, 0) > 0
+                """,
+                chain_states,
+            ).fetchall()
+        finally:
+            conn_t.close()
+        return frozenset(
+            (
+                str(row[0] or "").strip(),
+                (
+                    str(row[1] or "").strip(),
+                    str(row[2] or "").strip(),
+                    str(row[3] or "").strip().lower(),
+                ),
+            )
+            for row in rows
+            if str(row[0] or "").strip()
+            and str(row[1] or "").strip()
+            and str(row[2] or "").strip()
+            and str(row[3] or "").strip().lower() in {"high", "low"}
+        )
+
+    return _provider
+
+
 def _edli_current_held_position_family_keys() -> set[tuple[str, str, str]]:
     """Current held-position families for monitor and duplicate-entry suppression.
 
@@ -5181,17 +5518,167 @@ def _edli_latest_day0_hourly_blocked_families(
         return set()
 
 
+@dataclass(frozen=True)
+class _Day0HourlyPriorityProbe:
+    refresh_due_families: frozenset[tuple[str, str, str]] = frozenset()
+    window_starts: tuple[tuple[str, str, datetime], ...] = ()
+    proved: bool = False
+
+
+def _edli_day0_hourly_refresh_due_families(
+    *,
+    cities: Iterable[Any],
+    decision_time: datetime,
+) -> _Day0HourlyPriorityProbe:
+    """Current authorized Day0 facts whose hourly authority is due to refresh.
+
+    This is a producer scheduling predicate, not a health gate: it reads the
+    same authorized fact and strict persisted bundle contract that health and
+    the money path consume.  A completed local day is excluded before any
+    fact/readiness work, and one city/date remains one fetch target even when
+    HIGH and LOW both expose a missing family.
+    """
+    from src.config import runtime_cities_by_name
+    from src.data.day0_hourly_vectors import (
+        DAY0_HOURLY_BUNDLE_MAX_AGE_HOURS,
+        DAY0_HOURLY_BUNDLE_MAX_SKEW_MINUTES,
+        DAY0_HOURLY_REFRESH_HEADROOM_HOURS,
+        day0_hourly_models_for_city,
+        read_freshest_day0_hourly_vectors,
+    )
+    from src.data.replacement_forecast_current_target_plan import (
+        _latest_authorized_day0_fact,
+    )
+    from src.state.db import (
+        get_forecasts_connection_read_only,
+        get_world_connection_read_only,
+    )
+
+    now = decision_time.astimezone(timezone.utc)
+    try:
+        city_map = runtime_cities_by_name()
+    except Exception as exc:  # noqa: BLE001 -- no city authority means no priority borrow.
+        logging.getLogger("zeus.events.reactor").warning(
+            "edli_day0_hourly_refresh: runtime city map failed: %s", exc
+        )
+        return _Day0HourlyPriorityProbe()
+    missing: set[tuple[str, str, str]] = set()
+    window_starts: dict[tuple[str, str], datetime] = {}
+    fact_conn = None
+    vector_conn = None
+
+    def close_connections() -> list[str]:
+        errors: list[str] = []
+        for role, conn in (("world", fact_conn), ("forecasts", vector_conn)):
+            if conn is None:
+                continue
+            try:
+                conn.close()
+            except Exception as exc:  # noqa: BLE001 -- both handles still need a close attempt.
+                errors.append(f"{role}:{type(exc).__name__}:{exc}")
+        return errors
+
+    try:
+        fact_conn = get_world_connection_read_only()
+        vector_conn = get_forecasts_connection_read_only()
+    except Exception as exc:  # noqa: BLE001 -- no authority proof means no priority borrow.
+        close_errors = close_connections()
+        logging.getLogger("zeus.events.reactor").warning(
+            "edli_day0_hourly_refresh: strict readiness connection failed: %s; "
+            "close_errors=%s",
+            exc,
+            close_errors,
+        )
+        return _Day0HourlyPriorityProbe()
+    read_error = None
+    try:
+        for city in cities:
+            city_name = str(getattr(city, "name", "") or "").strip()
+            timezone_name = str(getattr(city, "timezone", "") or "").strip()
+            city_obj = city_map.get(city_name)
+            if not city_name or not timezone_name or city_obj is None:
+                continue
+            try:
+                target_date = now.astimezone(ZoneInfo(timezone_name)).date().isoformat()
+            except (ValueError, ZoneInfoNotFoundError):
+                continue
+            expected_models = day0_hourly_models_for_city(city_obj)
+            if not expected_models:
+                continue
+            for metric in ("high", "low"):
+                fact = _latest_authorized_day0_fact(
+                    fact_conn,
+                    city=city_name,
+                    target_date=target_date,
+                    temperature_metric=metric,
+                    decision_time=now,
+                )
+                if fact is None:
+                    continue
+                try:
+                    observation_time = datetime.fromisoformat(
+                        str(fact.get("observation_time") or "").replace("Z", "+00:00")
+                    )
+                    if observation_time.tzinfo is None:
+                        continue
+                    observation_time = observation_time.astimezone(timezone.utc)
+                except (TypeError, ValueError):
+                    continue
+                if observation_time > now:
+                    continue
+                city_date = (city_name, target_date)
+                prior_window_start = window_starts.get(city_date)
+                if prior_window_start is None or observation_time < prior_window_start:
+                    window_starts[city_date] = observation_time
+                vectors = read_freshest_day0_hourly_vectors(
+                    city=city_name,
+                    target_date=target_date,
+                    now=now,
+                    # Producer priority must lead consumer expiry.  Waiting
+                    # for the 3h strict reader to go empty creates a batch of
+                    # already-dark families that the 3-city microbatch can
+                    # only repair after the authority cliff.
+                    max_age_hours=(
+                        DAY0_HOURLY_BUNDLE_MAX_AGE_HOURS
+                        - DAY0_HOURLY_REFRESH_HEADROOM_HOURS
+                    ),
+                    expected_models=expected_models,
+                    require_expected=True,
+                    max_bundle_skew_minutes=DAY0_HOURLY_BUNDLE_MAX_SKEW_MINUTES,
+                    remaining_window_start=observation_time,
+                    require_complete_remaining_window=True,
+                    raise_on_db_error=True,
+                    conn=vector_conn,
+                )
+                if not vectors:
+                    missing.add((city_name, target_date, metric))
+    except Exception as exc:  # noqa: BLE001 -- priority is fail-closed, maintenance remains safe.
+        read_error = exc
+    close_errors = close_connections()
+    if read_error is not None or close_errors:
+        logging.getLogger("zeus.events.reactor").warning(
+            "edli_day0_hourly_refresh: strict readiness check failed: %s; "
+            "close_errors=%s",
+            read_error,
+            close_errors,
+        )
+        return _Day0HourlyPriorityProbe()
+    return _Day0HourlyPriorityProbe(
+        refresh_due_families=frozenset(missing),
+        window_starts=tuple(
+            (city_name, target_date, window_start)
+            for (city_name, target_date), window_start in sorted(window_starts.items())
+        ),
+        proved=True,
+    )
+
+
 def _edli_day0_hourly_priority_families(
     *,
     held_families: Iterable[tuple[str, str, str]] | None = None,
-    blocked_families: Iterable[tuple[str, str, str]] = (),
+    refresh_due_families: Iterable[tuple[str, str, str]] = (),
 ) -> list[tuple[str, str, str]]:
-    """Money-path families that should drive Day0 hourly-vector refresh order."""
-    import logging as _logging
-
-    from src.main import _pending_family_rows_for_refresh
-
-    _log = _logging.getLogger("zeus.events.reactor")
+    """Held Day0 first, then current-day bundles due before authority expiry."""
 
     families: list[tuple[str, str, str]] = []
     seen: set[tuple[str, str, str]] = set()
@@ -5203,46 +5690,14 @@ def _edli_day0_hourly_priority_families(
                 seen.add(key)
                 families.append(key)
 
-    # Held money is the first refresh consumer. Pending event queues can grow
-    # large when the reactor is behind; putting them first lets stale candidates
-    # delay fresh held-position Day0 probabilities.
+    # Held money is the only consumer allowed to use the critical reserve.
     held = (
         _edli_current_held_position_family_keys()
         if held_families is None
         else held_families
     )
     add(sorted(held))
-    add(sorted(blocked_families))
-
-    try:
-        world_ro = get_world_connection_read_only()
-        try:
-            rows = _pending_family_rows_for_refresh(
-                world_ro,
-                consumer_name="edli_reactor_v1",
-                event_window_limit=int(os.environ.get("ZEUS_DAY0_HOURLY_PRIORITY_EVENT_WINDOW_LIMIT", "2000")),
-            )
-        finally:
-            world_ro.close()
-        add(
-            (
-                row[0],
-                row[1],
-                row[2],
-            )
-            for row in rows
-        )
-    except Exception as exc:  # noqa: BLE001
-        _log.warning("edli_day0_hourly_refresh: pending-family priority read failed: %s", exc)
-
-    try:
-        trade_ro = get_trade_connection_read_only()
-        try:
-            add(_open_rest_family_rows_for_refresh(trade_ro))
-        finally:
-            trade_ro.close()
-    except Exception as exc:  # noqa: BLE001
-        _log.warning("edli_day0_hourly_refresh: open-rest priority read failed: %s", exc)
+    add(sorted(refresh_due_families))
 
     return families
 
@@ -5272,10 +5727,20 @@ def _day0_hourly_refresh_budget_seconds() -> float:
 
 
 def _day0_hourly_fetch_timeout_seconds() -> float:
+    from src.data.day0_hourly_vectors import DEFAULT_FETCH_TIMEOUT_S
+
     try:
-        return max(0.25, float(os.environ.get("ZEUS_DAY0_HOURLY_FETCH_TIMEOUT_SECONDS", "1.5")))
+        return max(
+            0.25,
+            float(
+                os.environ.get(
+                    "ZEUS_DAY0_HOURLY_FETCH_TIMEOUT_SECONDS",
+                    str(DEFAULT_FETCH_TIMEOUT_S),
+                )
+            ),
+        )
     except (TypeError, ValueError):
-        return 1.5
+        return DEFAULT_FETCH_TIMEOUT_S
 
 
 def _rotate_day0_refresh_segment(items: list[Any], cursor: int) -> list[Any]:
@@ -5366,8 +5831,10 @@ def run_edli_day0_hourly_refresh_cycle(*, trading_lane_active: bool) -> None:
     waits, and held-position probability authority retains critical-quota
     precedence.
 
-    ``trading_lane_active`` is injected from src.main after atomic admission
-    against the reactor, redecision, and held-monitor scheduling primitives.
+    ``trading_lane_active`` is a dispatcher snapshot of the reactor,
+    redecision, and held-monitor scheduling primitives. The producer never
+    acquires those locks; an over-budget provider call therefore cannot block
+    current-capital redecision.
     """
     global _DAY0_HOURLY_REFRESH_CURSOR
 
@@ -5381,14 +5848,21 @@ def run_edli_day0_hourly_refresh_cycle(*, trading_lane_active: bool) -> None:
         decision_time = datetime.now(timezone.utc)
         cities = _rc()
         held_families = sorted(_edli_current_held_position_family_keys())
-        blocked_families = _edli_latest_day0_hourly_blocked_families(
+        priority_probe = _edli_day0_hourly_refresh_due_families(
             cities=cities,
             decision_time=decision_time,
         )
-        priority_families = _edli_day0_hourly_priority_families(
-            held_families=held_families,
-            blocked_families=blocked_families,
-        )
+        try:
+            priority_families = _edli_day0_hourly_priority_families(
+                held_families=held_families,
+                refresh_due_families=priority_probe.refresh_due_families,
+            )
+        except Exception as exc:  # noqa: BLE001 -- priority fails closed; held remains critical.
+            _log.warning(
+                "edli_day0_hourly_refresh: priority family probe failed: %s", exc
+            )
+            priority_probe = _Day0HourlyPriorityProbe()
+            priority_families = list(held_families)
         ordered_cities, priority_city_count = _edli_order_day0_hourly_refresh_cities(
             cities,
             decision_time=decision_time,
@@ -5410,32 +5884,60 @@ def run_edli_day0_hourly_refresh_cycle(*, trading_lane_active: bool) -> None:
         max_cities = _day0_hourly_refresh_max_cities(
             priority_city_count=priority_city_count,
         )
-        quota_priority_cities = held_city_count
+        held_refresh_due = bool(
+            set(held_families).intersection(priority_probe.refresh_due_families)
+        )
+        quota_critical_cities = 0
+        quota_priority_cities = 0
         if trading_lane_active:
             held = ordered_cities[:held_city_count]
-            pending = ordered_cities[held_city_count:priority_city_count]
-            if not held and not pending:
-                _log.info(
-                    "edli_day0_hourly_refresh deferred: trading lane active; "
-                    "no same-day held or pending cities"
-                )
-                return
-            if held and pending and max_cities >= 2:
+            priority = ordered_cities[held_city_count:priority_city_count]
+            if not held and not priority:
+                if priority_probe.proved:
+                    _log.info(
+                        "edli_day0_hourly_refresh deferred: trading lane active; "
+                        "no same-day held or strict-bundle priority cities"
+                    )
+                    return
+                # Priority proof failed locally. Do not promote an unproved city,
+                # but preserve the ordinary maintenance universe sweep.
+                ordered_cities = ordered_cities[:max_cities]
+                cursor_advance = min(max_cities, cursor_span)
+            elif held_refresh_due:
+                # Current capital is approaching the strict bundle cliff.
+                # Discovery cannot consume one of this bounded cut's slots
+                # until every offered held city retains critical-quota
+                # authority. Cursor rotation preserves fairness across a held
+                # segment larger than the microbatch.
+                ordered_cities = held[:max_cities]
+                quota_critical_cities = len(ordered_cities)
+                cursor_advance = len(ordered_cities)
+            elif held and priority and max_cities >= 2:
                 # First protect one money-at-risk city, then make discovery
                 # progress before a slow held fetch can exhaust the whole
                 # budget.  Any remaining slots return to held capital.
-                ordered_cities = [held[0], pending[0]] + held[1:max_cities - 1]
+                ordered_cities = [held[0], priority[0]] + held[1:max_cities - 1]
+                quota_critical_cities = 1
                 quota_priority_cities = 1
                 cursor_advance = 1 + len(held[1:max_cities - 1])
             elif held:
                 ordered_cities = held[:max_cities]
-                quota_priority_cities = len(ordered_cities)
+                quota_critical_cities = len(ordered_cities)
                 cursor_advance = len(ordered_cities)
             else:
-                ordered_cities = pending[:max_cities]
-                quota_priority_cities = 0
+                ordered_cities = priority[:max_cities]
+                quota_priority_cities = len(ordered_cities)
                 cursor_advance = len(ordered_cities)
         else:
+            # Preserve capital priority for the whole proved prefix, not just
+            # the first ``max_cities`` list positions. The fetcher itself caps
+            # actual calls at ``max_cities``; a throttled front page therefore
+            # may scan forward without silently demoting another current-
+            # authority gap into the 30-minute maintenance retry lane.
+            quota_critical_cities = held_city_count
+            quota_priority_cities = max(
+                0, priority_city_count - held_city_count
+            )
             cursor_advance = min(max_cities, cursor_span)
         stats = maybe_refresh_day0_hourly_vectors(
             ordered_cities,
@@ -5443,7 +5945,15 @@ def run_edli_day0_hourly_refresh_cycle(*, trading_lane_active: bool) -> None:
             budget_s=_day0_hourly_refresh_budget_seconds(),
             max_cities=max_cities,
             timeout_s=_day0_hourly_fetch_timeout_seconds(),
+            quota_critical_cities=quota_critical_cities,
             quota_priority_cities=quota_priority_cities,
+            allow_priority_recovery=(
+                held_city_count == 0 and priority_city_count > 0
+            ),
+            remaining_window_starts={
+                (city_name, target_date): window_start
+                for city_name, target_date, window_start in priority_probe.window_starts
+            },
             persist_lock_blocking=False,
             return_stats=True,
         )
@@ -5460,19 +5970,24 @@ def run_edli_day0_hourly_refresh_cycle(*, trading_lane_active: bool) -> None:
         if vectors_written or priority_city_count:
             _log.info(
                 "edli_day0_hourly_refresh: vectors_written=%d priority_cities=%d "
-                "held_cities=%d trading_lane_active=%s "
+                "held_cities=%d critical_cities=%d priority_lane_cities=%d "
+                "trading_lane_active=%s "
                 "max_cities=%d cities_attempted=%d skipped_throttle=%d "
                 "skipped_quota=%d incomplete_expected_bundles=%d "
-                "budget_exhausted=%s cursor=%d cursor_span=%d cursor_advance=%d",
+                "priority_reserve_exhausted=%s budget_exhausted=%s "
+                "cursor=%d cursor_span=%d cursor_advance=%d",
                 vectors_written,
                 priority_city_count,
                 held_city_count,
+                quota_critical_cities,
+                quota_priority_cities,
                 trading_lane_active,
                 max_cities,
                 cities_attempted,
                 int(getattr(stats, "cities_skipped_throttle", 0) or 0),
                 int(getattr(stats, "cities_skipped_quota", 0) or 0),
                 int(getattr(stats, "incomplete_expected_bundles", 0) or 0),
+                bool(getattr(stats, "priority_reserve_exhausted", False)),
                 bool(getattr(stats, "budget_exhausted", False)),
                 _DAY0_HOURLY_REFRESH_CURSOR,
                 cursor_span,
@@ -5555,6 +6070,25 @@ def _current_local_day_families(
         if target == local_today:
             current.add((city, target_date, metric))
     return current
+
+
+def _day0_redecision_carrier_families(
+    *,
+    producer_wake_reason: str | None,
+    forecast_wake_families: set[tuple[str, str, str]],
+    decision_time: datetime,
+) -> set[tuple[str, str, str]]:
+    """Route current-day belief and held-exit wakes through the Day0 carrier."""
+
+    if producer_wake_reason not in {
+        "forecast_posterior_advanced",
+        GLOBAL_AUCTION_COMPLETION_WAKE_REASON,
+    }:
+        return set()
+    return _current_local_day_families(
+        forecast_wake_families,
+        decision_time=decision_time,
+    )
 
 
 def _build_day0_posterior_redecision_events(
@@ -5666,6 +6200,7 @@ class _Day0LiveFamilyAdmission:
     admitted_families: frozenset[tuple[str, str, str]]
     expiry_safe: bool
     scan_cities: frozenset[str] = frozenset()
+    held_families: frozenset[tuple[str, str, str]] = frozenset()
 
     def __call__(self, observation: dict[str, Any]) -> bool:
         family = _substrate_refresh_family_key(
@@ -5758,6 +6293,7 @@ def _edli_day0_live_family_admission(
         )
 
     exposure_families: set[tuple[str, str, str]] = set()
+    held_families: set[tuple[str, str, str]] = set()
     exposure_surface_read_ok = False
     try:
         trade_tables = {
@@ -5787,7 +6323,12 @@ def _edli_day0_live_family_admission(
     try:
         from src.data.replacement_cycle_advance_trigger import _held_position_families
 
-        _add_families(_held_position_families(trade_conn))
+        raw_held_families = _held_position_families(trade_conn)
+        _add_families(raw_held_families)
+        for city, target_date, metric in raw_held_families:
+            family = _substrate_refresh_family_key(city, target_date, metric)
+            if all(family):
+                held_families.add(family)
     except Exception as exc:  # noqa: BLE001
         _log.warning("EDLI day0 live family admission: held-position family read failed: %r", exc)
 
@@ -5801,6 +6342,7 @@ def _edli_day0_live_family_admission(
             for city_name in cities_by_name
             if _substrate_refresh_family_text_key(city_name) in admitted_city_keys
         ),
+        held_families=frozenset(held_families),
     )
 
 
@@ -6077,12 +6619,41 @@ def _process_pending_cancelled(
     producer_fast_path: bool,
     urgent_wake_pending: Callable[[], bool],
     urgent_day0_pending: Callable[[], bool] | None,
+    held_position_monitor_debt_pending: Callable[[], bool] | None = None,
+    exact_held_completion: bool = False,
 ) -> Callable[[], bool] | None:
     if committed_day0_wake:
         return None
-    if producer_fast_path:
-        return urgent_day0_pending
-    return urgent_wake_pending
+    base_cancelled = urgent_day0_pending if producer_fast_path else urgent_wake_pending
+    if exact_held_completion or held_position_monitor_debt_pending is None:
+        return base_cancelled
+
+    def cancelled() -> bool:
+        if base_cancelled is not None and base_cancelled():
+            return True
+        return _held_position_monitor_preemption_pending(
+            None,
+            held_position_monitor_debt_pending,
+        )
+
+    return cancelled
+
+
+def _held_position_monitor_preemption_pending(
+    monitor_pending: Callable[[], bool] | None,
+    monitor_debt_pending: Callable[[], bool] | None,
+) -> bool:
+    """Read scheduler monitor pressure without letting a failed hint veto work."""
+
+    for probe in (monitor_debt_pending, monitor_pending):
+        if probe is None:
+            continue
+        try:
+            if probe():
+                return True
+        except Exception:  # noqa: BLE001 - scheduler hint failure cannot veto trading.
+            continue
+    return False
 
 
 def _reactor_wake_cancellation_probe(
@@ -6092,20 +6663,45 @@ def _reactor_wake_cancellation_probe(
     producer_wake_published_at: str | None,
     forecast_wake_families: set[tuple[str, str, str]],
     urgent_day0_pending: Callable[[], bool] | None,
+    allow_paused_forecast_snapshot_completion: bool = False,
+    ignore_preexisting_wakes: bool = False,
 ) -> Callable[[], bool]:
-    """Cancel only when a newer wake invalidates the current work scope."""
+    """Cancel only when a newer wake invalidates the current work scope.
+
+    ``allow_paused_forecast_snapshot_completion`` is a main-boundary decision
+    for one already-selected, no-submit forecast carrier. It can absorb only
+    an overlapping forecast wake; every other capital-risk or unknown reason
+    retains the cancellation path.
+
+    ``ignore_preexisting_wakes`` is reserved for an ordinary scheduler cut
+    that already owns monitor-fairness completion. Its snapshot is part of the
+    cut's starting truth; only a wake published after that snapshot cancels it.
+    """
 
     from src.runtime.reactor_wake import (
+        reactor_urgent_wake_identity,
         reactor_urgent_wake_revision,
         reactor_wakes_since,
     )
 
     observed_revision = reactor_urgent_wake_revision()
+    preexisting_wakes = (
+        tuple(reactor_wakes_since(None)) if ignore_preexisting_wakes else ()
+    )
+    preexisting_wake_ids = frozenset(wake.wake_id for wake in preexisting_wakes)
+    preexisting_urgent_identity = (
+        reactor_urgent_wake_identity() if ignore_preexisting_wakes else None
+    )
+    if (
+        preexisting_urgent_identity is not None
+        and preexisting_urgent_identity[0] not in preexisting_wake_ids
+    ):
+        preexisting_urgent_identity = None
     owned_wake_ids = frozenset(
         wake_id
         for raw_wake_id in producer_wake_ids
         if (wake_id := str(raw_wake_id or "").strip())
-    )
+    ) | preexisting_wake_ids
     targeted_forecast = (
         producer_wake_reason == "forecast_posterior_advanced"
         and bool(forecast_wake_families)
@@ -6118,8 +6714,14 @@ def _reactor_wake_cancellation_probe(
         if superseded:
             return True
         if urgent_day0_pending is not None and urgent_day0_pending():
-            superseded = True
-            return True
+            current_urgent_identity = reactor_urgent_wake_identity()
+            if not (
+                ignore_preexisting_wakes
+                and preexisting_urgent_identity is not None
+                and current_urgent_identity == preexisting_urgent_identity
+            ):
+                superseded = True
+                return True
 
         current_revision = reactor_urgent_wake_revision()
         if current_revision is None or current_revision == observed_revision:
@@ -6136,27 +6738,31 @@ def _reactor_wake_cancellation_probe(
                 "market_price_advanced",
                 "money_path_substrate_refreshed",
             }:
+                if targeted_forecast and allow_paused_forecast_snapshot_completion:
+                    superseded = True
+                    return True
                 # Book producers do not invalidate probability work. The global
                 # auction independently rebinds current books at its JIT fence,
                 # so restarting the whole decision cannot make that evidence
-                # fresher and can starve a hot price stream.
+                # fresher and can starve a hot price stream. The paused snapshot
+                # exception is narrower: a newer executable-substrate input ends
+                # that cycle before its frozen no-submit decision.
                 continue
             if not targeted_forecast:
                 superseded = True
                 return True
-            if wake.reason in {
-                "day0_extreme_event_committed",
-                "market_price_advanced",
-            }:
+            if wake.reason == "day0_extreme_event_committed":
                 superseded = True
                 return True
             if wake.reason != "forecast_posterior_advanced":
                 superseded = True
                 return True
-            if (
-                not wake.forecast_families
-                or set(wake.forecast_families) & forecast_wake_families
-            ):
+            if not wake.forecast_families:
+                superseded = True
+                return True
+            if set(wake.forecast_families) & forecast_wake_families:
+                if allow_paused_forecast_snapshot_completion:
+                    continue
                 superseded = True
                 return True
 
@@ -6177,13 +6783,27 @@ def request_global_auction_completion(
     reason: str,
     position_id: str,
     family: tuple[str, str, str] | None = None,
+    probability_content_identity: str = "",
+    held_token_id: str = "",
+    held_best_bid: float | None = None,
+    bid_observed_at: str = "",
+    book_state: str | None = None,
+    probability_observed_at: str = "",
+    completion_deadline_at: str = "",
+    generation: str | None = None,
+    scope_identity: str = "",
+    schema_version: int = 4,
+    wake_path: Path | None = None,
     force_new_generation: bool = False,
-) -> bool:
+    return_request: bool = False,
+    prepare_only: bool = False,
+) -> bool | tuple[bool, object | None]:
     """Persistently reserve one complete global cut for a held SELL.
 
     Returns whether a matching durable wake already existed or was published.
     """
 
+    caller_supplied_scope = bool(str(scope_identity or "").strip())
     already_due = _GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.is_set()
     _GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.set()
     clean_family = tuple(
@@ -6199,22 +6819,242 @@ def request_global_auction_completion(
         )
     try:
         from src.runtime.reactor_wake import (
+            held_sell_reauction_material_identity,
+            held_sell_reauction_scope_identity,
+            latest_v4_held_sell_reauction_request,
+            make_held_sell_reauction_request,
             publish_reactor_wake,
             reactor_wakes_since,
+            v4_held_sell_reauction_request_is_queued,
         )
 
-        durable_wakes = tuple(
-            wake
-            for wake in reactor_wakes_since(None)
-            if wake.reason == GLOBAL_AUCTION_COMPLETION_WAKE_REASON
+        held_request = None
+        held_request_material_identity = ""
+        held_request_kwargs = None
+        if held_token_id:
+            inferred_book_state = str(book_state or "").strip().upper()
+            if not inferred_book_state:
+                if held_best_bid is None:
+                    inferred_book_state = "UNKNOWN"
+                elif (
+                    not math.isfinite(float(held_best_bid))
+                    or not 0.05 <= float(held_best_bid) <= 1.0
+                ):
+                    inferred_book_state = "NO_EXECUTABLE_BOOK"
+                elif not bid_observed_at:
+                    inferred_book_state = "STALE"
+                else:
+                    inferred_book_state = "EXECUTABLE"
+            if not scope_identity:
+                scope_identity = held_sell_reauction_scope_identity(
+                    position_id=str(position_id or ""),
+                    family=clean_family,
+                    probability_content_identity=probability_content_identity,
+                    held_token_id=held_token_id,
+                    schema_version=schema_version,
+                )
+            held_request_kwargs = {
+                "position_id": str(position_id or ""),
+                "family": clean_family,
+                "probability_content_identity": probability_content_identity,
+                "held_token_id": held_token_id,
+                "held_best_bid": held_best_bid,
+                "bid_observed_at": bid_observed_at,
+                "schema_version": schema_version,
+                "scope_identity": scope_identity,
+                "book_state": inferred_book_state,
+                "probability_observed_at": probability_observed_at,
+                "completion_deadline_at": completion_deadline_at,
+            }
+            if generation:
+                held_request_kwargs["generation"] = generation
+            held_request_material_identity = held_sell_reauction_material_identity(
+                **{
+                    key: value
+                    for key, value in held_request_kwargs.items()
+                    if key not in {"generation", "completion_deadline_at"}
+                }
+            )
+
+        if held_request_kwargs is not None and int(schema_version) == 4:
+            existing_v4 = latest_v4_held_sell_reauction_request(
+                str(scope_identity or ""),
+                path=wake_path,
+            )
+            if (
+                existing_v4 is not None
+                and generation
+                and str(generation) != existing_v4.generation
+                and not force_new_generation
+            ):
+                raise ValueError("HELD_SELL_REAUCTION_GENERATION_CONFLICT")
+            if existing_v4 is not None and not generation and not force_new_generation:
+                held_request_kwargs["generation"] = existing_v4.generation
+            held_request = make_held_sell_reauction_request(**held_request_kwargs)
+            if existing_v4 is not None and (
+                existing_v4.position_id != held_request.position_id
+                or existing_v4.family != held_request.family
+                or existing_v4.held_token_id != held_request.held_token_id
+                or existing_v4.scope_identity != held_request.scope_identity
+            ):
+                raise ValueError("HELD_SELL_REAUCTION_LINEAGE_SCOPE_CONFLICT")
+            existing_request_is_queued = bool(
+                existing_v4 is not None
+                and v4_held_sell_reauction_request_is_queued(
+                    existing_v4,
+                    path=wake_path,
+                )
+            )
+            context_upgrade = bool(
+                existing_request_is_queued
+                and existing_v4.book_state != "EXECUTABLE"
+                and held_request.book_state == "EXECUTABLE"
+            )
+            if (
+                existing_request_is_queued
+                and not context_upgrade
+                and not force_new_generation
+            ):
+                # SCOPE: one outstanding position/token SELL obligation.
+                # DRAIN: the global auction rebinds current q/book and writes a
+                # terminal receipt for this queued attempt. RESET: only an
+                # executable-book upgrade or terminal receipt advances it.
+                # Monitor timestamps are evidence refreshes, not new debts;
+                # replacing the deterministic slot on every refresh can starve
+                # the global cut that is already answering this obligation.
+                held_request = existing_v4
+            durable_request_exists = bool(
+                existing_request_is_queued
+                and existing_v4.request_id == held_request.request_id
+                and existing_v4.attempt_identity == held_request.attempt_identity
+            )
+            attempt_refresh = bool(
+                existing_v4 is not None
+                and existing_v4.attempt_identity != held_request.attempt_identity
+            )
+        else:
+            queued_wakes = (
+                reactor_wakes_since(None)
+                if wake_path is None
+                else reactor_wakes_since(None, path=wake_path)
+            )
+            durable_wakes = tuple(
+                wake
+                for wake in queued_wakes
+                if wake.reason == GLOBAL_AUCTION_COMPLETION_WAKE_REASON
+            )
+            same_asset_versioned_requests = tuple(
+                request
+                for wake in durable_wakes
+                for request in getattr(wake, "held_sell_reauction_requests", ())
+                if (
+                    int(getattr(request, "schema_version", 1) or 1) in {2, 3}
+                    and str(getattr(request, "position_id", "") or "")
+                    == str(position_id or "")
+                    and tuple(getattr(request, "family", ()) or ()) == clean_family
+                    and str(getattr(request, "held_token_id", "") or "")
+                    == str(held_token_id or "")
+                )
+            )
+            if (
+                held_request_kwargs is not None
+                and int(schema_version) in {2, 3}
+                and not caller_supplied_scope
+                and same_asset_versioned_requests
+                and not force_new_generation
+            ):
+                existing_scope = str(
+                    getattr(same_asset_versioned_requests[-1], "scope_identity", "")
+                    or ""
+                ).strip()
+                if existing_scope:
+                    held_request_kwargs["scope_identity"] = existing_scope
+                    held_request_material_identity = held_sell_reauction_material_identity(
+                        **{
+                            key: value
+                            for key, value in held_request_kwargs.items()
+                            if key not in {
+                                "generation",
+                                "completion_deadline_at",
+                            }
+                        }
+                    )
+            matching_versioned_requests = tuple(
+                request
+                for request in same_asset_versioned_requests
+                if str(getattr(request, "material_identity", "") or "")
+                == held_request_material_identity
+            )
+            if (
+                held_request_kwargs is not None
+                and int(schema_version) in {2, 3}
+                and not generation
+                and matching_versioned_requests
+                and not force_new_generation
+            ):
+                held_request_kwargs["generation"] = str(
+                    getattr(matching_versioned_requests[-1], "generation", "") or ""
+                )
+            if held_request_kwargs is not None:
+                held_request = make_held_sell_reauction_request(**held_request_kwargs)
+
+            def _context_rank(request: object) -> tuple[int, int, int]:
+                state = str(
+                    getattr(request, "book_state", "UNKNOWN") or "UNKNOWN"
+                ).upper()
+                state_rank = {
+                    "UNKNOWN": 0,
+                    "NO_EXECUTABLE_BOOK": 1,
+                    "STALE": 1,
+                    "EXECUTABLE": 2,
+                }.get(state, -1)
+                return (
+                    state_rank,
+                    int(bool(getattr(request, "probability_content_identity", ""))),
+                    int(bool(getattr(request, "bid_observed_at", ""))),
+                )
+
+            durable_request_exists = (
+                any(
+                    str(getattr(request, "request_id", "") or "")
+                    == held_request.request_id
+                    for wake in durable_wakes
+                    for request in getattr(wake, "held_sell_reauction_requests", ())
+                )
+                if held_request is not None
+                else (
+                    any(
+                        wake_families[0] in wake.forecast_families
+                        for wake in durable_wakes
+                    )
+                    if wake_families
+                    else bool(durable_wakes)
+                )
+            )
+            context_upgrade = bool(
+                held_request is not None
+                and matching_versioned_requests
+                and _context_rank(held_request)
+                > max(_context_rank(request) for request in matching_versioned_requests)
+            )
+            attempt_refresh = False
+    except ValueError:
+        logging.getLogger("zeus.events.reactor").error(
+            "held SELL reauction request rejected before durable publish: "
+            "position_id=%s reason=%s",
+            str(position_id or "unknown"),
+            str(reason or "authority_unavailable"),
         )
-        durable_request_exists = (
-            any(wake_families[0] in wake.forecast_families for wake in durable_wakes)
-            if wake_families
-            else bool(durable_wakes)
-        )
+        return (False, None) if return_request else False
     except OSError:
-        durable_request_exists = False
+        logging.getLogger("zeus.events.reactor").exception(
+            "held SELL reauction queue read failed before a durable "
+            "request could be accepted: position_id=%s",
+            str(position_id or "unknown"),
+        )
+        return (False, None) if return_request else False
+    if return_request and held_request is None:
+        return False, None
     if not already_due:
         logger = logging.getLogger("zeus.events.reactor")
         logger.warning(
@@ -6227,26 +7067,328 @@ def request_global_auction_completion(
         logger = logging.getLogger("zeus.events.reactor")
     if force_new_generation:
         durable_request_exists = False
-    if not durable_request_exists:
+    if prepare_only:
+        # SCOPE: prepare exactly this held-position V4 request without making a
+        # wake visible. DRAIN: the caller commits its position-scoped outbox
+        # first, then calls publish_prepared_global_auction_completion().
+        # RESET: the canonical terminal receipt or position-no-longer-exposed
+        # proof retires this same request generation.
+        return (True, held_request) if return_request else True
+    if not durable_request_exists or context_upgrade or attempt_refresh:
         try:
             publish_reactor_wake(
                 source="held_position_monitor",
                 reason=GLOBAL_AUCTION_COMPLETION_WAKE_REASON,
+                path=wake_path,
                 forecast_families=wake_families,
+                held_sell_reauction_requests=(held_request,)
+                if held_request is not None
+                else (),
             )
         except OSError:
             logger.exception(
                 "held SELL global-auction wake publish failed; "
                 "durable completion was not accepted"
             )
+            return (False, held_request) if return_request else False
+    return (True, held_request) if return_request else True
+
+
+def publish_prepared_global_auction_completion(
+    *,
+    reason: str,
+    prepared_request: object,
+    wake_path: Path | None = None,
+) -> bool:
+    """Publish one already prepared V4 held-SELL request without rebinding it."""
+
+    request_id = str(getattr(prepared_request, "request_id", "") or "").strip()
+    material_identity = str(
+        getattr(prepared_request, "material_identity", "") or ""
+    ).strip()
+    generation = str(getattr(prepared_request, "generation", "") or "").strip()
+    attempt_identity = str(
+        getattr(prepared_request, "attempt_identity", "") or ""
+    ).strip()
+    scope_identity = str(
+        getattr(prepared_request, "scope_identity", "") or ""
+    ).strip()
+    if not all((request_id, material_identity, generation, attempt_identity, scope_identity)):
+        logging.getLogger("zeus.events.reactor").warning(
+            "prepared held SELL reauction request is incomplete: reason=%s",
+            str(reason or "authority_unavailable"),
+        )
+        return False
+    try:
+        from src.runtime.reactor_wake import (
+            latest_v4_held_sell_reauction_request,
+            publish_reactor_wake,
+            v4_held_sell_reauction_request_is_queued,
+        )
+
+        latest = latest_v4_held_sell_reauction_request(
+            scope_identity,
+            path=wake_path,
+        )
+        if latest is not None and latest.generation != generation:
+            # SCOPE: the exact prepared scope and generation. DRAIN: a newer
+            # generation owns the next immutable obligation. RESET: never let
+            # an old generation overwrite a newer lineage.
             return False
-    return True
+        if (
+            latest is not None
+            and latest.attempt_identity == attempt_identity
+            and v4_held_sell_reauction_request_is_queued(
+                latest,
+                path=wake_path,
+            )
+        ):
+            return True
+        family = tuple(getattr(prepared_request, "family", ()) or ())
+        clean_family = tuple(
+            str(value or "").strip().lower()
+            if index == 2
+            else str(value or "").strip()
+            for index, value in enumerate(family)
+        )
+        publish_reactor_wake(
+            source="held_position_monitor",
+            reason=GLOBAL_AUCTION_COMPLETION_WAKE_REASON,
+            path=wake_path,
+            forecast_families=(clean_family,) if len(clean_family) == 3 else (),
+            held_sell_reauction_requests=(prepared_request,),
+        )
+        return True
+    except (OSError, TypeError, ValueError):
+        logging.getLogger("zeus.events.reactor").exception(
+            "prepared held SELL global-auction wake publish failed: reason=%s",
+            str(reason or "authority_unavailable"),
+        )
+        return False
+
+
+def _held_sell_reauction_receipts_from_global_cut(
+    *,
+    requests: tuple[object, ...],
+    result: object,
+) -> tuple[object, ...]:
+    """Bind each durable held request to the exact global cut that answered it.
+
+    A request absent from the current held-position coverage remains pending.
+    Terminal-position stale-debt retirement is a separate contract and must not
+    be inferred as an ACTUATED or CAPITAL_REJECTED completion here.
+    """
+
+    from src.runtime.reactor_wake import (
+        DEADLINE_EXPIRED,
+        NO_EXECUTABLE_BOOK,
+        HeldSellReauctionReceipt,
+    )
+
+    receipts: list[HeldSellReauctionReceipt] = []
+    for request in requests:
+        request_deadline = str(
+            getattr(request, "completion_deadline_at", "") or ""
+        )
+        receipt_identity = {
+            "request_id": str(getattr(request, "request_id", "") or ""),
+            "material_identity": str(
+                getattr(request, "material_identity", "") or ""
+            ),
+            "generation": str(getattr(request, "generation", "") or ""),
+            "attempt_identity": str(
+                getattr(request, "attempt_identity", "") or ""
+            ),
+            "completion_deadline_at": request_deadline,
+        }
+        request_schema_version = int(getattr(request, "schema_version", 1) or 1)
+        request_position_id = str(getattr(request, "position_id", "") or "")
+        request_token_id = str(getattr(request, "held_token_id", "") or "")
+        for cut in getattr(result, "global_held_sell_completion_cuts", ()):
+            cut_bindings = tuple(getattr(cut, "request_bindings", ()) or ())
+            exact_cut_binding = any(
+                (
+                    str(getattr(binding, "scope_identity", "") or ""),
+                    str(getattr(binding, "request_id", "") or ""),
+                    str(getattr(binding, "material_identity", "") or ""),
+                    str(getattr(binding, "generation", "") or ""),
+                    str(getattr(binding, "attempt_identity", "") or ""),
+                    str(getattr(binding, "completion_deadline_at", "") or ""),
+                )
+                == (
+                    str(getattr(request, "scope_identity", "") or ""),
+                    receipt_identity["request_id"],
+                    receipt_identity["material_identity"],
+                    receipt_identity["generation"],
+                    receipt_identity["attempt_identity"],
+                    request_deadline,
+                )
+                for binding in cut_bindings
+            )
+            if (
+                request_schema_version == 4
+                and request_deadline
+                and not exact_cut_binding
+            ):
+                continue
+            if str(getattr(cut, "outcome", "") or "") == DEADLINE_EXPIRED:
+                receipts.append(
+                    HeldSellReauctionReceipt(
+                        **receipt_identity,
+                        schema_version=request_schema_version,
+                        scope_identity=str(
+                            getattr(request, "scope_identity", "") or ""
+                        ),
+                        book_state=str(
+                            getattr(request, "book_state", "UNKNOWN") or "UNKNOWN"
+                        ),
+                        status=DEADLINE_EXPIRED,
+                        reason="HELD_SELL_ACTUATION_DEADLINE_EXPIRED",
+                    )
+                )
+                break
+            coverage = next(
+                (
+                    row
+                    for row in tuple(getattr(cut, "holding_coverage", ()) or ())
+                    if str(getattr(row, "position_id", "") or "")
+                    == request_position_id
+                    and str(getattr(row, "token_id", "") or "")
+                    == request_token_id
+                ),
+                None,
+            )
+            if coverage is None:
+                continue
+            coverage_q = str(
+                getattr(coverage, "probability_content_identity", "") or ""
+            )
+            if request_schema_version >= 2 and not coverage_q:
+                continue
+            selection_epoch_identity = str(
+                getattr(coverage, "selection_epoch_identity", "") or ""
+            )
+            sell_book_witness_identity = str(
+                getattr(coverage, "sell_book_witness_identity", "") or ""
+            )
+            coverage_status = str(getattr(coverage, "status", "") or "")
+            coverage_book_state = str(
+                getattr(coverage, "book_state", "") or ""
+            ).upper()
+            if (
+                request_schema_version == 4
+                and coverage_status == "EXCLUDED"
+                and coverage_book_state == NO_EXECUTABLE_BOOK
+                and selection_epoch_identity
+                and sell_book_witness_identity
+            ):
+                receipts.append(
+                    HeldSellReauctionReceipt(
+                        **receipt_identity,
+                        schema_version=request_schema_version,
+                        scope_identity=str(
+                            getattr(request, "scope_identity", "") or ""
+                        ),
+                        book_state=NO_EXECUTABLE_BOOK,
+                        status=NO_EXECUTABLE_BOOK,
+                        reason="GLOBAL_AUCTION_CURRENT_HOLDING_NO_EXECUTABLE_BOOK",
+                        selection_epoch_identity=selection_epoch_identity,
+                        sell_book_witness_identity=sell_book_witness_identity,
+                        answered_probability_content_identity=coverage_q,
+                    )
+                )
+                break
+            if (
+                coverage_status != "EVALUATED"
+                or not selection_epoch_identity
+                or not sell_book_witness_identity
+            ):
+                continue
+            outcome = str(getattr(cut, "outcome", "") or "")
+            if outcome == "ACTUATED":
+                if (
+                    str(getattr(cut, "selected_position_id", "") or "")
+                    != request_position_id
+                    or str(getattr(cut, "selected_token_id", "") or "")
+                    != request_token_id
+                ):
+                    continue
+                receipts.append(
+                    HeldSellReauctionReceipt(
+                        **receipt_identity,
+                        schema_version=request_schema_version,
+                        scope_identity=str(
+                            getattr(request, "scope_identity", "") or ""
+                        ),
+                        book_state="EXECUTABLE",
+                        status="ACTUATED",
+                        reason="GLOBAL_AUCTION_CURRENT_HOLDING_COVERAGE_ACTUATED",
+                        selection_epoch_identity=selection_epoch_identity,
+                        sell_book_witness_identity=sell_book_witness_identity,
+                        answered_probability_content_identity=(
+                            coverage_q if request_schema_version >= 2 else ""
+                        ),
+                    )
+                )
+                break
+            if (
+                outcome != "CAPITAL_REJECTED"
+                or not bool(getattr(cut, "economic_cut_completed", False))
+            ):
+                continue
+            global_no_trade_reason = str(
+                getattr(cut, "terminal_no_trade_reason", "") or ""
+            )
+            economic_reason = global_no_trade_reason.removeprefix(
+                "GLOBAL_AUCTION_NO_TRADE:"
+            )
+            if economic_reason not in {
+                "CASH_DOMINATES",
+                "NO_CURRENT_EXECUTABLE_POSITIVE_ORDER",
+                "ROBUST_MAJORITY_LOSS",
+            }:
+                continue
+            if request_schema_version < 2:
+                receipts.append(
+                    HeldSellReauctionReceipt(
+                        **receipt_identity,
+                        status="REJECTED",
+                        reason=(
+                            "GLOBAL_AUCTION_CURRENT_HOLDING_REJECTED:"
+                            f"{global_no_trade_reason}"
+                        ),
+                    )
+                )
+                break
+            receipts.append(
+                HeldSellReauctionReceipt(
+                    **receipt_identity,
+                    schema_version=request_schema_version,
+                    scope_identity=str(
+                        getattr(request, "scope_identity", "") or ""
+                    ),
+                    book_state="EXECUTABLE",
+                    status="CAPITAL_REJECTED",
+                    reason="GLOBAL_AUCTION_CAPITAL_REJECTED",
+                    selection_epoch_identity=selection_epoch_identity,
+                    sell_book_witness_identity=sell_book_witness_identity,
+                    capital_objective_proof=(
+                        "global_single_order_terminal_wealth:"
+                        f"{global_no_trade_reason}"
+                    ),
+                    answered_probability_content_identity=coverage_q,
+                )
+            )
+            break
+    return tuple(receipts)
 
 
 def _global_auction_monitor_cancellation_probe(
     monitor_pending: Callable[[], bool] | None,
     *,
+    monitor_debt_pending: Callable[[], bool] | None = None,
     completion_due: bool = False,
+    exact_held_completion: bool = False,
 ) -> tuple[bool, Callable[[], bool]]:
     """Allow one periodic-monitor preemption, then reserve auction completion."""
 
@@ -6266,12 +7408,30 @@ def _global_auction_monitor_cancellation_probe(
 
         if cancelled_this_cycle:
             return True
-        if completion_due_at_start or monitor_pending is None:
+        debt_pending = False
+        if monitor_debt_pending is not None:
+            try:
+                debt_pending = bool(monitor_debt_pending())
+            except Exception:  # noqa: BLE001 - scheduler hint failure cannot veto trading.
+                debt_pending = False
+        if completion_due_at_start:
+            # SCOPE: this one reserved global economic cut. DRAIN: monitor debt
+            # remains independently queued and runs after the cut; the cut
+            # itself rebuilds held q/book proposals and submit-time authority.
+            # RESET: a non-cancelled result clears completion debt, while a
+            # genuinely newer Day0 fact still cancels through the hard-authority
+            # probe and leaves completion debt armed. Scheduler debt is not a
+            # market fact and cannot repeatedly preempt the very completion it
+            # reserved.
             return False
-        try:
-            pending = bool(monitor_pending())
-        except Exception:  # noqa: BLE001 - scheduler hint failure cannot veto trading.
+        if monitor_pending is None and not debt_pending:
             return False
+        pending = debt_pending
+        if not pending and monitor_pending is not None:
+            try:
+                pending = bool(monitor_pending())
+            except Exception:  # noqa: BLE001 - scheduler hint failure cannot veto trading.
+                return False
         if not pending:
             return False
         # SCOPE: cancel this in-flight global selection once so the claimed
@@ -6298,8 +7458,170 @@ def _global_auction_monitor_cancellation_probe(
     return completion_due_at_start, _cancelled
 
 
+@dataclass(frozen=True)
+class _GlobalAuctionCompletionMode:
+    fairness_reserved: bool
+    reduce_only: bool
+    terminal_without_cut: bool = False
+
+
+def _global_auction_completion_mode(
+    *,
+    completion_due: bool,
+    exact_held_completion: bool,
+    entries_blocked: bool = False,
+    trade_conn: object,
+) -> _GlobalAuctionCompletionMode:
+    """Reserve a completion cut for held capital only when it still exists.
+
+    Generic fairness keeps the complete BUY/SELL/HOLD/CASH feasible set while
+    entry is allowed.  When entry is blocked, it becomes reduce-only if held
+    capital exists; without held capital there is no economic cut to complete,
+    so the in-process fairness debt may terminate.  An exact held-SELL wake
+    enters reduce-only only while canonical held capital still exists; its
+    durable request still owns terminalization after the exposure is gone.
+
+    SCOPE: this one completion auction. DRAIN: the next completion cycle
+    rereads canonical runtime-open positions. RESET: a successful empty read
+    either restores ordinary BUY selection or terminalizes blocked generic
+    fairness without granting entry authority.
+    """
+
+    if not completion_due:
+        return _GlobalAuctionCompletionMode(False, False)
+    if not exact_held_completion and not entries_blocked:
+        return _GlobalAuctionCompletionMode(True, False)
+    try:
+        row = trade_conn.execute(
+            """
+            SELECT 1
+              FROM position_current
+             WHERE phase IN ('active', 'day0_window', 'pending_exit')
+               AND COALESCE(chain_shares, shares, 0) > 0
+             LIMIT 1
+            """
+        ).fetchone()
+    except Exception as exc:  # noqa: BLE001
+        # Unknown exposure must stay reduce-only.
+        logging.getLogger("zeus.events.reactor").warning(
+            "global auction completion exposure read failed; retaining reduce-only "
+            "scope: %r",
+            exc,
+        )
+        return _GlobalAuctionCompletionMode(True, True)
+    if row is not None:
+        return _GlobalAuctionCompletionMode(True, True)
+    return _GlobalAuctionCompletionMode(
+        True,
+        False,
+        terminal_without_cut=not exact_held_completion,
+    )
+
+
+_DURABLE_EXACT_HELD_COMPLETION_SEEN: set[str] = set()
+_DURABLE_EXACT_HELD_COMPLETION_LOCK = threading.Lock()
+
+
+def _durable_exact_held_sell_completion_pending() -> bool:
+    """Read durable exact held-SELL debt without claiming its auction turn."""
+
+    try:
+        from src.runtime.reactor_wake import exact_held_sell_completion_wake_ids
+
+        return bool(exact_held_sell_completion_wake_ids(fail_on_error=True))
+    except (OSError, ValueError):
+        logging.getLogger("zeus.events.reactor").warning(
+            "durable held SELL completion queue unreadable; retaining ordinary "
+            "reactor scheduling",
+            exc_info=True,
+        )
+        return False
+
+
+def _durable_exact_held_sell_completion_requests() -> tuple[object, ...]:
+    """Read the exact requests that authorize a durable fallback cut.
+
+    SCOPE: current queued exact held-SELL debt only. DRAIN: each request's
+    immutable terminal receipt. RESET: completed requests disappear on the
+    next queue read, so stale debt cannot reserve later auction turns.
+    """
+
+    try:
+        from src.runtime.reactor_wake import (
+            GLOBAL_AUCTION_COMPLETION_WAKE_REASON,
+            held_sell_reauction_requests_completed,
+            reactor_wakes_for_reason,
+        )
+
+        return tuple(
+            dict.fromkeys(
+                request
+                for wake in reactor_wakes_for_reason(
+                    GLOBAL_AUCTION_COMPLETION_WAKE_REASON,
+                    max_wakes=100,
+                    fail_on_error=True,
+                )
+                for request in wake.held_sell_reauction_requests
+                if not held_sell_reauction_requests_completed((request,))
+            )
+        )
+    except (OSError, TypeError, ValueError):
+        logging.getLogger("zeus.events.reactor").warning(
+            "durable held SELL completion requests unreadable; retaining debt",
+            exc_info=True,
+        )
+        return ()
+
+
+def _held_sell_completion_cut_requests(
+    *,
+    completion_wake: bool,
+    producer_requests: tuple[object, ...],
+    durable_turn_claimed: bool,
+    durable_requests: tuple[object, ...],
+) -> tuple[object, ...]:
+    """Bind one global cut to the exact debt that authorized reduce-only mode."""
+
+    if completion_wake and producer_requests:
+        return producer_requests
+    if durable_turn_claimed:
+        return durable_requests
+    return ()
+
+
+def _claim_durable_exact_held_sell_completion_turn() -> bool:
+    """Reserve one ordinary auction turn per durable exact-debt generation.
+
+    The queue survives a lost in-process hint, but an unfillable old request
+    must not turn every future BUY-capable auction into reduce-only. A replaced
+    V4 wake has a new wake id and earns one new bounded turn.
+    """
+
+    try:
+        from src.runtime.reactor_wake import exact_held_sell_completion_wake_ids
+
+        queued = set(exact_held_sell_completion_wake_ids(fail_on_error=True))
+    except (OSError, ValueError):
+        logging.getLogger("zeus.events.reactor").warning(
+            "durable held SELL completion queue unreadable; retaining ordinary "
+            "reactor scheduling",
+            exc_info=True,
+        )
+        return False
+    with _DURABLE_EXACT_HELD_COMPLETION_LOCK:
+        _DURABLE_EXACT_HELD_COMPLETION_SEEN.intersection_update(queued)
+        unserved = queued.difference(_DURABLE_EXACT_HELD_COMPLETION_SEEN)
+        if not unserved:
+            return False
+        _DURABLE_EXACT_HELD_COMPLETION_SEEN.update(unserved)
+        return True
+
+
 def _settle_global_auction_monitor_fairness(
-    *, completion_due_at_start: bool, result: object
+    *,
+    completion_due_at_start: bool,
+    result: object,
+    terminal_no_book_completion: bool = False,
 ) -> bool:
     """Clear a prior monitor preemption only after useful auction completion."""
 
@@ -6308,10 +7630,10 @@ def _settle_global_auction_monitor_fairness(
     completed = int(
         getattr(result, "global_auction_completed_non_cancelled", 0) or 0
     )
-    if completed > 0:
+    if completed > 0 or terminal_no_book_completion:
         _GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.clear()
         logging.getLogger("zeus.events.reactor").info(
-            "global auction completion debt cleared after economic cut"
+            "global auction completion debt cleared after terminal current cut"
         )
         return True
     _GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.set()
@@ -6326,8 +7648,11 @@ def run_edli_event_reactor_cycle(
     producer_wake_published_at: str | None = None,
     producer_wake_event_ids: tuple[str, ...] = (),
     producer_wake_families: tuple[tuple[str, str, str], ...] = (),
+    producer_held_sell_reauction_requests: tuple[object, ...] = (),
+    allow_paused_forecast_snapshot_completion: bool = False,
     urgent_day0_pending: Callable[[], bool] | None = None,
     held_position_monitor_pending: Callable[[], bool] | None = None,
+    held_position_monitor_debt_pending: Callable[[], bool] | None = None,
     live_entry_block_reason: str | None = None,
     live_entry_family_block_reasons: Mapping[str, str] | None = None,
 ) -> bool:
@@ -6356,6 +7681,15 @@ def run_edli_event_reactor_cycle(
     completes, so neither lane can starve the other. Urgent forecast and Day0
     monitors do not consume this fairness token. Newly committed Day0 facts
     retain their independent urgent cancellation path inside the live adapter.
+
+    ``held_position_monitor_debt_pending`` remains set after a handoff timeout.
+    Unlike the transient handoff signal, it also cancels an already-reserved
+    completion auction so an in-flight selection cannot outlive monitor debt.
+
+    ``allow_paused_forecast_snapshot_completion`` is qualified once by
+    ``src.main`` from durable global entries-pause state. It applies only to
+    the selected no-submit forecast carrier's overlapping forecast wakes;
+    Day0, fills, held SELL completion, and unknown wakes still cancel it.
     """
     import logging as _logging
     from src.main import (
@@ -6409,33 +7743,183 @@ def run_edli_event_reactor_cycle(
         if all(family) and family not in forecast_wake_families:
             forecast_wake_families.add(family)
             forecast_wake_family_order.append(family)
-    targeted_forecast_wake = (
-        producer_wake_reason
-        in {"forecast_posterior_advanced", GLOBAL_AUCTION_COMPLETION_WAKE_REASON}
+    forecast_posterior_wake = (
+        producer_wake_reason == "forecast_posterior_advanced"
         and bool(forecast_wake_families)
     )
+    targeted_forecast_wake = (
+        forecast_posterior_wake
+        or (
+            producer_wake_reason == GLOBAL_AUCTION_COMPLETION_WAKE_REASON
+            and bool(forecast_wake_families)
+        )
+    )
     producer_fast_path = committed_event_wake or targeted_forecast_wake
+    completion_reserved_at_start = (
+        producer_wake_reason is None
+        and _GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.is_set()
+    )
     _urgent_wake_pending = _reactor_wake_cancellation_probe(
         producer_wake_reason=producer_wake_reason,
         producer_wake_ids=producer_wake_ids,
         producer_wake_published_at=producer_wake_published_at,
         forecast_wake_families=forecast_wake_families,
         urgent_day0_pending=urgent_day0_pending,
+        allow_paused_forecast_snapshot_completion=(
+            allow_paused_forecast_snapshot_completion
+        ),
+        # A reserved completion cut starts after these durable wakes already
+        # existed, so its current q/book reads include their committed truth.
+        # Only a later wake revision may supersede that cut. Submit-time q/book
+        # revalidation remains the independent final authority.
+        ignore_preexisting_wakes=completion_reserved_at_start,
     )
 
-    if _defer_for_held_position_monitor("edli_event_reactor"):
+    # SCOPE: admission of the one global cut already owed after a monitor
+    # handoff. DRAIN: that cut reaches the bounded in-reactor fairness probe;
+    # ordinary monitor pressure may still preempt the first unreserved cycle.
+    # RESET: a non-cancelled terminal cut clears the completion token.
+    if (
+        not _GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.is_set()
+        and _defer_for_held_position_monitor("edli_event_reactor")
+    ):
         return False
     if active_lock.locked():
         _log.warning("EDLI reactor skipped: previous EDLI reactor cycle is still running")
         return False
+    if not producer_fast_path and _urgent_wake_pending():
+        return False
+    if (
+        not _GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.is_set()
+        and _defer_for_held_position_monitor("edli_event_reactor")
+    ):
+        return False
     from src.riskguard.risk_level import RiskLevel
     from src.riskguard.riskguard import get_current_level
 
-    if get_current_level() != RiskLevel.GREEN:
+    durable_exact_held_completion_pending = (
+        _durable_exact_held_sell_completion_pending()
+    )
+    durable_exact_held_completion_requests = (
+        _durable_exact_held_sell_completion_requests()
+        if durable_exact_held_completion_pending
+        else ()
+    )
+    held_sell_completion_cycle = bool(
+        (completion_wake and producer_held_sell_reauction_requests)
+        or durable_exact_held_completion_pending
+    )
+    paused_forecast_held_auction = False
+
+    def _yield_for_held_position_monitor(stage: str) -> bool:
+        if (
+            held_sell_completion_cycle
+            or paused_forecast_held_auction
+            or committed_day0_wake
+            or _GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.is_set()
+        ):
+            # SCOPE: only the already-reserved fairness completion cut. DRAIN:
+            # the existing bounded cancellation probe may still yield once to
+            # current monitor debt, otherwise one terminal global cut runs.
+            # RESET: _settle_global_auction_monitor_fairness clears the token
+            # only after that cut reaches a non-cancelled terminal result.
+            return False
+        if not _held_position_monitor_preemption_pending(
+            held_position_monitor_pending,
+            held_position_monitor_debt_pending,
+        ):
+            return False
+        # SCOPE: only this replayable global-auction cycle. DRAIN: the monitor
+        # receives this handoff, while the durable completion wake and in-process
+        # token force the next cycle past this early-yield boundary. RESET: one
+        # non-cancelled terminal global cut clears the token through
+        # _settle_global_auction_monitor_fairness().
+        completion_reserved = request_global_auction_completion(
+            reason="periodic_monitor_preemption",
+            position_id="",
+        )
+        if not completion_reserved:
+            _log.warning(
+                "EDLI reactor retained global auction before %s because monitor "
+                "completion wake was not durably accepted",
+                stage,
+            )
+            return False
+        _log.info(
+            "EDLI reactor yielded once before %s for held-position monitor "
+            "pressure; completion debt armed",
+            stage,
+        )
+        return True
+
+    def _ordinary_stage_cancelled() -> bool:
+        return _urgent_wake_pending() or _held_position_monitor_preemption_pending(
+            (
+                None
+                if (
+                    held_sell_completion_cycle
+                    or paused_forecast_held_auction
+                    or committed_day0_wake
+                )
+                else held_position_monitor_pending
+            ),
+            (
+                None
+                if (
+                    held_sell_completion_cycle
+                    or paused_forecast_held_auction
+                    or committed_day0_wake
+                )
+                else held_position_monitor_debt_pending
+            ),
+        )
+
+    completion_recovery_cycle = bool(
+        held_sell_completion_cycle
+        or _GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.is_set()
+    )
+    paused_forecast_carrier = (
+        allow_paused_forecast_snapshot_completion and forecast_posterior_wake
+    )
+    if _yield_for_held_position_monitor("paused-entry/runtime setup"):
+        return False
+    if (
+        get_current_level() != RiskLevel.GREEN
+        and not completion_recovery_cycle
+        and not paused_forecast_carrier
+    ):
+        # SCOPE: BUY-capable reactor work only. A main-qualified paused forecast
+        # carrier is already frozen no-submit and must still materialize the
+        # newest probability identity. DRAIN: RiskGuard returning GREEN or a
+        # qualified carrier commit completes this wake. RESET: every cycle
+        # re-reads RiskGuard and durable pause authority before qualification.
         _log.info(
             "EDLI reactor skipped before runtime DB setup: new entries are globally blocked"
         )
         return not completion_wake
+    held_family_provider = _edli_reactor_held_family_provider()
+    held_sell_request_exposure_provider = _edli_held_sell_request_exposure_provider()
+    if _paused_entry_wake_should_park(
+        pause_reason=_entry_reactor_park_reason(None),
+        held_sell_reauction_requests=(
+            producer_held_sell_reauction_requests if completion_wake else ()
+        ),
+        held_sell_request_exposure_provider=held_sell_request_exposure_provider,
+        allow_forecast_carrier_progress=forecast_posterior_wake,
+        durable_exact_held_completion=held_sell_completion_cycle,
+        allow_capital_proof_progress=True,
+        monitor_completion_reserved=completion_recovery_cycle,
+    ):
+        if active_lock.acquire(blocking=False):
+            try:
+                _edli_prune_paused_mutable_working_set()
+            finally:
+                active_lock.release()
+        _log.info(
+            "EDLI reactor parked paused new-entry wake before active-lock acquire: "
+            "no exact canonical held-SELL request; pending entry work remains queued"
+        )
+        return False
     import sqlite3  # transient world-DB lock classification for fail-soft emit boundary
     from src.engine.event_reactor_adapter import (
         edli_source_truth_gate,
@@ -6444,10 +7928,18 @@ def run_edli_event_reactor_cycle(
         riskguard_allows_new_entries,
     )
     from src.engine.event_bound_final_intent import submit_event_bound_final_intent_via_existing_executor
+    from src.engine.global_auction_universe import (
+        WorkContext,
+        WorkDeferred,
+        WorkDeferredCode,
+        bounded_work_sqlite,
+    )
     from src.events.event_store import EventStore
     from src.risk_allocator import snapshot_global_auction_capital_authority
     from src.state.db import ZEUS_FORECASTS_DB_PATH, get_forecasts_connection_read_only, get_trade_connection_with_world_required, get_world_connection
     from src.strategy.live_inference.no_trade_regret import NoTradeRegretLedger
+
+    _reactor_construct_complete = True
 
     if not active_lock.acquire(blocking=False):
         _log.warning("EDLI reactor skipped: previous EDLI reactor cycle is still running")
@@ -6456,7 +7948,13 @@ def run_edli_event_reactor_cycle(
         if not producer_fast_path and _urgent_wake_pending():
             active_lock.release()
             return False
-        if _defer_for_held_position_monitor("edli_event_reactor"):
+        if (
+            not _GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.is_set()
+            and _defer_for_held_position_monitor("edli_event_reactor")
+        ):
+            active_lock.release()
+            return False
+        if _yield_for_held_position_monitor("runtime_db_setup"):
             active_lock.release()
             return False
     except BaseException:
@@ -6538,6 +8036,8 @@ def run_edli_event_reactor_cycle(
         store = EventStore(conn)
         targeted_event_ids = set(producer_wake_event_ids)
         catchup_day0_event_ids: tuple[str, ...] = ()
+        if _yield_for_held_position_monitor("day0_ledger_sync"):
+            return False
         if not producer_fast_path:
             try:
                 from src.config import runtime_cities as _runtime_cities
@@ -6559,6 +8059,8 @@ def run_edli_event_reactor_cycle(
                     _day0_sync_exc,
                 )
         _log_stage("day0_ledger_sync")
+        if _yield_for_held_position_monitor("day0_admission_and_prune"):
+            return False
         _day0_family_admission: _Day0LiveFamilyAdmission | None = None
         if not producer_fast_path:
             try:
@@ -6610,7 +8112,7 @@ def run_edli_event_reactor_cycle(
                     store,
                     decision_time=now,
                     day0_family_admission=_day0_family_admission,
-                    urgent_wake_pending=_urgent_wake_pending,
+                    urgent_wake_pending=_ordinary_stage_cancelled,
                     yield_write_lease=_yield_prune_write_lease,
                 )
                 if _prune_lease_held:
@@ -6630,12 +8132,16 @@ def run_edli_event_reactor_cycle(
                 "before processing fresh fact"
             )
         _log_stage("pending_prune")
+        if _yield_for_held_position_monitor("forecast_snapshot_build"):
+            return False
         if not producer_fast_path and _urgent_wake_pending():
             _log.info(
                 "EDLI reactor maintenance preempted after prune by urgent producer wake"
             )
             return False
         _fsr_events = []
+        forecast_carrier_completion_proved = False
+        paused_forecast_carrier_materialized = False
         if not committed_event_wake:
             try:
                 _fair_source = _edli_next_redecision_source()
@@ -6653,15 +8159,14 @@ def run_edli_event_reactor_cycle(
                             if _pending_key_budget_s > 0
                             else None
                         ),
-                        cancelled=_urgent_wake_pending,
+                        cancelled=_ordinary_stage_cancelled,
                     )
                 _day0_posterior_wake_families = (
-                    _current_local_day_families(
-                        forecast_wake_families,
+                    _day0_redecision_carrier_families(
+                        producer_wake_reason=producer_wake_reason,
+                        forecast_wake_families=forecast_wake_families,
                         decision_time=now,
                     )
-                    if producer_wake_reason == "forecast_posterior_advanced"
-                    else set()
                 )
                 _forecast_only_wake_families = (
                     forecast_wake_families - _day0_posterior_wake_families
@@ -6680,7 +8185,7 @@ def run_edli_event_reactor_cycle(
                         if targeted_forecast_wake
                         else None
                     ),
-                    cancelled=_urgent_wake_pending,
+                    cancelled=_ordinary_stage_cancelled,
                 )
                 if _day0_posterior_wake_families:
                     _day0_posterior_carriers = (
@@ -6699,7 +8204,7 @@ def run_edli_event_reactor_cycle(
                             phase_filter_exempt_families=(
                                 _day0_posterior_wake_families
                             ),
-                            cancelled=_urgent_wake_pending,
+                            cancelled=_ordinary_stage_cancelled,
                         )
                     )
                     _fsr_events.extend(
@@ -6721,6 +8226,11 @@ def run_edli_event_reactor_cycle(
                         _fsr_events,
                         forecast_wake_family_order,
                     )
+                    # A successful empty build is a completed no-op for this
+                    # immutable posterior wake, not a materialization failure.
+                    # Actual build faults and supersession leave this false via
+                    # their exception/early-return paths.
+                    forecast_carrier_completion_proved = not _fsr_events
                 _log_stage("forecast_snapshot_build")
             except sqlite3.OperationalError as _emit_lock_exc:
                 if "locked" in str(_emit_lock_exc).lower() or "busy" in str(_emit_lock_exc).lower():
@@ -6736,6 +8246,8 @@ def run_edli_event_reactor_cycle(
                 "EDLI reactor maintenance preempted after forecast discovery "
                 "by urgent producer wake"
             )
+            return False
+        if _yield_for_held_position_monitor("forecast_snapshot_emit"):
             return False
         # EDLI live contention fix (2026-05-31): the FSR/Day0/redecision
         # EMIT block writes opportunity_events to the WAL zeus-world.db shared
@@ -6772,6 +8284,14 @@ def run_edli_event_reactor_cycle(
                                 result.event_id
                                 for result in _fsr_write_results[:proof_limit]
                             )
+                            paused_forecast_carrier_materialized = any(
+                                result.inserted or result.duplicate
+                                for result in _fsr_write_results
+                            )
+                            # INSERT and idempotent-existing outcomes both prove
+                            # durable materialization. EventWriter failures never
+                            # reach this assignment.
+                            forecast_carrier_completion_proved = True
                         _log_stage("forecast_snapshot_emit")
                     except sqlite3.OperationalError as _emit_lock_exc:
                         if "locked" in str(_emit_lock_exc).lower() or "busy" in str(_emit_lock_exc).lower():
@@ -6799,7 +8319,7 @@ def run_edli_event_reactor_cycle(
                                 limit=day0_emit_limit,
                                 budget_seconds=_edli_day0_emit_budget_seconds(edli_cfg),
                                 family_admission=_day0_family_admission,
-                                urgent_wake_pending=_urgent_wake_pending,
+                                urgent_wake_pending=_ordinary_stage_cancelled,
                             )
                             _log_stage("day0_emit")
                         except sqlite3.OperationalError as _day0_emit_lock_exc:
@@ -6836,39 +8356,107 @@ def run_edli_event_reactor_cycle(
                 len(targeted_event_ids),
             )
             _log_stage("committed_event_fast_path")
-        if catchup_day0_event_ids:
-            # EVENT-DRIVEN Day0 recompute bridge (2026-07-19): the catch-up scan lane
-            # (non-METAR / WU / HKO sources, and reboot catch-up) commits DAY0_EXTREME_UPDATED
-            # events here just like the fast METAR source clock does in ingest_main.py's
-            # _commit_pending_day0_metar. Bridge those families to an immediate
-            # re-materialization seed too, so this lane does not stay on the ~40-min
-            # scheduled cadence while the fast lane already races the book. Runs AFTER
-            # conn.commit() and the world-write mutex release above — no txn is open.
-            _edli_bridge_day0_extreme_materialization_seeds(catchup_day0_event_ids)
-            try:
-                from src.runtime.reactor_wake import publish_reactor_wake
-
-                publish_reactor_wake(
-                    source="edli_reactor_day0_catchup",
-                    reason="day0_extreme_event_committed",
-                    event_ids=catchup_day0_event_ids,
-                )
-            except OSError:
-                _log.exception(
-                    "EDLI Day0 catch-up wake publish failed; retaining current-cycle "
-                    "processing as the durable fallback"
-                )
-            else:
+        # EVENT-DRIVEN Day0 recompute bridge (2026-07-19): only newly inserted
+        # catch-up facts bridge to materialization and publish a targeted wake.
+        # Duplicate EventWriteResults are filtered at the emitter boundary, and
+        # this helper independently treats an empty set as a strict no-op.
+        if _edli_publish_committed_day0_catchup(catchup_day0_event_ids):
+            return False
+        paused_forecast_carrier_completion = (
+            allow_paused_forecast_snapshot_completion
+            and forecast_posterior_wake
+            and not producer_wake_event_ids
+            and not producer_held_sell_reauction_requests
+            and not durable_exact_held_completion_requests
+        )
+        if paused_forecast_carrier_completion:
+            if not paused_forecast_carrier_materialized:
                 _log.info(
-                    "EDLI reactor yielded periodic cycle to targeted Day0 wake: events=%d",
-                    len(catchup_day0_event_ids),
+                    "EDLI paused forecast wake retained: carrier materialization incomplete"
                 )
                 return False
+            paused_forecast_held_auction = (
+                _paused_forecast_carrier_requires_held_auction(
+                    held_family_provider
+                )
+            )
+            if not paused_forecast_held_auction:
+                _log.info(
+                    "EDLI paused forecast wake materialized carriers without auction: "
+                    "no current held families"
+                )
+                return True
+            _log.info(
+                "EDLI paused forecast wake continuing into reduce-only held auction"
+            )
+        if forecast_posterior_wake and not targeted_event_ids:
+            # SCOPE: this exact forecast-posterior publisher wake. DRAIN: a
+            # successful builder no-op is complete for this immutable posterior;
+            # a write success is complete even when idempotency inserts no new
+            # row. Build/write faults retain the wake. RESET: the next posterior,
+            # price, or control fact emits a fresh wake and reruns the full cut.
+            if not forecast_carrier_completion_proved:
+                _log.info(
+                    "EDLI targeted forecast wake retained: carrier materialization incomplete"
+                )
+                return False
+            _log.info(
+                "EDLI targeted forecast wake completed without a new carrier"
+            )
         if not producer_fast_path and _urgent_wake_pending():
             _log.info(
                 "EDLI reactor maintenance preempted after emit by urgent producer wake"
             )
             return False
+        if _yield_for_held_position_monitor("reactor_construct"):
+            return False
+        try:
+            construct_cut_seconds = float(
+                edli_cfg.get(
+                    "reactor_construct_work_cut_seconds",
+                    DEFAULT_REACTOR_CONSTRUCT_WORK_CUT_SECONDS,
+                )
+            )
+        except (TypeError, ValueError):
+            construct_cut_seconds = DEFAULT_REACTOR_CONSTRUCT_WORK_CUT_SECONDS
+        if not math.isfinite(construct_cut_seconds) or construct_cut_seconds <= 0.0:
+            construct_cut_seconds = DEFAULT_REACTOR_CONSTRUCT_WORK_CUT_SECONDS
+        if (
+            held_sell_completion_cycle
+            or paused_forecast_held_auction
+            or committed_day0_wake
+            or _GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.is_set()
+        ):
+            def _construct_monitor_cancelled() -> bool:
+                return False
+        else:
+            _, _construct_monitor_cancelled = (
+                _global_auction_monitor_cancellation_probe(
+                    held_position_monitor_pending,
+                    monitor_debt_pending=held_position_monitor_debt_pending,
+                    completion_due=False,
+                )
+            )
+        construct_context = WorkContext(
+            deadline_monotonic=time.monotonic() + construct_cut_seconds,
+            cancel_requested=lambda: (
+                _urgent_wake_pending() or _construct_monitor_cancelled()
+            ),
+        )
+        _reactor_construct_complete = False
+
+        def _construct_checkpoint(stage: str) -> None:
+            construct_context.checkpoint(f"reactor_construct:{stage}")
+
+        def _construct_sql(stage: str, operation):
+            with bounded_work_sqlite(
+                trade_conn,
+                construct_context,
+                stage=f"reactor_construct:{stage}",
+                shared_connection=True,
+            ) as bounded_conn:
+                return operation(bounded_conn)
+
         # THROUGHPUT STRUCTURAL FIX (2026-06-01): the executable-snapshot refresh
         # (_refresh_pending_family_snapshots) runs a full-universe Gamma scan
         # (find_weather_markets → _get_active_events, benchmarked ~76s COLD; TTL 300s
@@ -6882,9 +8470,30 @@ def run_edli_event_reactor_cycle(
         # microseconds) and reaches process_pending → submit in seconds. Decision
         # semantics are UNCHANGED: a family not yet captured by the warm job still
         # requeues via the reactor's existing EXECUTABLE_SNAPSHOT_RETRY path (fail-closed).
-        trade_conn = get_trade_connection_with_world_required(write_class=None)
+        _construct_checkpoint("before_trade_connection")
+        connect_cut_seconds = construct_context.clipped_timeout(
+            DEFAULT_REACTOR_CONSTRUCT_CONNECT_CUT_SECONDS,
+            stage="reactor_construct:trade_connection_budget",
+        )
+        try:
+            trade_conn = get_trade_connection_with_world_required(
+                write_class=None,
+                busy_timeout_ms=max(1, math.ceil(connect_cut_seconds * 1000.0)),
+                deadline_monotonic=min(
+                    construct_context.deadline_monotonic,
+                    time.monotonic() + connect_cut_seconds,
+                ),
+            )
+        except TimeoutError as exc:
+            raise WorkDeferred(
+                WorkDeferredCode.DEADLINE,
+                stage="reactor_construct:trade_connection",
+                remaining_s=construct_context.remaining(),
+            ) from exc
+        _construct_checkpoint("after_trade_connection")
 
         regret_ledger = NoTradeRegretLedger(conn)
+        _construct_checkpoint("after_regret_ledger")
         # Configure the process-wide risk allocator/governor BEFORE the submit adapter is
         # built so the live submit path's select_global_order_type does not raise
         # AllocationDenied("allocator_not_configured"). The legacy discover cycle wires this
@@ -6910,8 +8519,13 @@ def run_edli_event_reactor_cycle(
         _portfolio_state_provider = None
         _portfolio_snapshot = None
         try:
-            _portfolio_snapshot = load_runtime_open_portfolio(trade_conn)
+            _portfolio_snapshot = _construct_sql(
+                "portfolio",
+                load_runtime_open_portfolio,
+            )
             _portfolio_state_provider = lambda: _portfolio_snapshot  # noqa: E731 — cycle-scoped closure
+        except WorkDeferred:
+            raise
         except Exception as _portfolio_exc:  # noqa: BLE001 — mode-sensitive fail-closed below
             _log.warning(
                 "EDLI reactor: portfolio snapshot load failed; live entry will fail closed: %r",
@@ -6923,9 +8537,12 @@ def run_edli_event_reactor_cycle(
                 "EDLI reactor: live entry blocked this cycle because portfolio_state_unavailable"
             )
         if _live_entry_block_reason is None:
-            _alloc_refresh = _edli_refresh_global_allocator(
-                trade_conn,
-                portfolio_snapshot=_portfolio_snapshot,
+            _alloc_refresh = _construct_sql(
+                "allocator",
+                lambda bounded_conn: _edli_refresh_global_allocator(
+                    bounded_conn,
+                    portfolio_snapshot=_portfolio_snapshot,
+                ),
             )
             if not _alloc_refresh.get("configured"):
                 _alloc_reason = _alloc_refresh.get("entry", {}).get("reason") or "allocator_not_configured"
@@ -6938,9 +8555,13 @@ def run_edli_event_reactor_cycle(
                 )
             elif _alloc_refresh.get("configured"):
                 try:
+                    _construct_checkpoint("before_capital_authority")
                     _auction_capital_authority = (
                         snapshot_global_auction_capital_authority()
                     )
+                    _construct_checkpoint("after_capital_authority")
+                except WorkDeferred:
+                    raise
                 except Exception as _capacity_exc:  # noqa: BLE001 - incoherent pair blocks live lane
                     _live_entry_block_reason = (
                         f"capital_authority_snapshot:{type(_capacity_exc).__name__}:"
@@ -6957,6 +8578,7 @@ def run_edli_event_reactor_cycle(
         # and portfolio reads; use the actual processing timestamp so fresh executable/book
         # parent certificates are never later than the decision they support.
         process_pending_decision_time = datetime.now(timezone.utc)
+        _construct_checkpoint("decision_time")
         # Decision-triggered targeted substrate marker: when the adapter sees stale
         # executable prices, it marks the family for sidecar capture and returns
         # False so the stale event requeues fail-closed. Snapshot writes are owned
@@ -6975,6 +8597,7 @@ def run_edli_event_reactor_cycle(
         _reactor_family_market_absence_provider = (
             _edli_reactor_family_market_absence_provider()
         )
+        _construct_checkpoint("after_provider_factories")
         _live_jit_book_quote_provider = (
             _edli_pre_submit_jit_book_quote_provider(
                 trade_conn,
@@ -6985,13 +8608,78 @@ def run_edli_event_reactor_cycle(
             if _live_entry_block_reason is None
             else None
         )
+        durable_exact_held_completion = (
+            _claim_durable_exact_held_sell_completion_turn()
+        )
+        if (
+            durable_exact_held_completion
+            and not durable_exact_held_completion_requests
+        ):
+            durable_exact_held_completion_requests = (
+                _durable_exact_held_sell_completion_requests()
+            )
+        held_sell_completion_cut_requests = (
+            _held_sell_completion_cut_requests(
+                completion_wake=completion_wake,
+                producer_requests=producer_held_sell_reauction_requests,
+                durable_turn_claimed=durable_exact_held_completion,
+                durable_requests=durable_exact_held_completion_requests,
+            )
+        )
+        active_held_sell_completion_cycle = bool(
+            held_sell_completion_cut_requests
+            or durable_exact_held_completion
+            or paused_forecast_held_auction
+        )
         (
             _monitor_completion_due_at_start,
             _monitor_selection_cancelled,
         ) = _global_auction_monitor_cancellation_probe(
             held_position_monitor_pending,
-            completion_due=completion_wake,
+            monitor_debt_pending=held_position_monitor_debt_pending,
+            completion_due=(
+                completion_wake
+                or durable_exact_held_completion
+                or paused_forecast_held_auction
+            ),
+            exact_held_completion=active_held_sell_completion_cycle,
         )
+        _construct_checkpoint("before_completion_mode")
+        _completion_risk_level = get_current_level()
+        _monitor_completion_mode = _construct_sql(
+            "completion_mode",
+            lambda bounded_conn: _global_auction_completion_mode(
+                completion_due=_monitor_completion_due_at_start,
+                exact_held_completion=(
+                    active_held_sell_completion_cycle
+                ),
+                entries_blocked=(
+                    _completion_risk_level != RiskLevel.GREEN
+                ),
+                trade_conn=bounded_conn,
+            ),
+        )
+        if _monitor_completion_mode.terminal_without_cut:
+            _settle_global_auction_monitor_fairness(
+                completion_due_at_start=_monitor_completion_due_at_start,
+                result=None,
+                terminal_no_book_completion=True,
+            )
+            _log.info(
+                "EDLI reactor cleared blocked generic completion debt: "
+                "no canonical runtime-open held exposure"
+            )
+            return not completion_wake
+        if (
+            _completion_risk_level != RiskLevel.GREEN
+            and not _monitor_completion_mode.reduce_only
+        ):
+            _log.info(
+                "EDLI reactor completion wake retained without BUY risk bypass: "
+                "no canonical runtime-open held exposure"
+            )
+            return not completion_wake
+        _construct_checkpoint("before_adapter")
         submit_adapter = event_bound_live_adapter_from_trade_conn(
             trade_conn,
             live_cap_conn=conn,
@@ -7023,11 +8711,33 @@ def run_edli_event_reactor_cycle(
             producer_wake_ids=producer_wake_ids,
             producer_wake_published_at=producer_wake_published_at,
             selection_cancelled=_monitor_selection_cancelled,
-            selection_completion_reserved=(
-                _monitor_completion_due_at_start
+            selection_completion_fairness_reserved=(
+                _monitor_completion_mode.fairness_reserved
             ),
+            selection_completion_reserved=(
+                _monitor_completion_mode.reduce_only
+            ),
+            selection_completion_sell_keys=(
+                frozenset(
+                    (
+                        str(getattr(request, "position_id", "") or "").strip(),
+                        str(getattr(request, "held_token_id", "") or "").strip(),
+                    )
+                    for request in held_sell_completion_cut_requests
+                )
+                if _monitor_completion_mode.reduce_only
+                else frozenset()
+            ),
+            held_sell_reauction_requests=held_sell_completion_cut_requests,
+            held_family_provider=held_family_provider,
+            construction_work_context=construct_context,
         )
+        _construct_checkpoint("after_adapter")
 
+        entry_risk_gate = riskguard_allows_new_entries(
+            get_current_level=get_current_level
+        )
+        _construct_checkpoint("before_reactor")
         reactor = OpportunityEventReactor(
             store,
             source_truth_gate=edli_source_truth_gate,
@@ -7035,8 +8745,31 @@ def run_edli_event_reactor_cycle(
                 trade_conn,
                 topology_conn=forecasts_conn,
             ),
-            riskguard_gate=riskguard_allows_new_entries(get_current_level=get_current_level),
-            cycle_entry_gate=lambda: get_current_level() == RiskLevel.GREEN,
+            # A typed held-SELL completion wake is an exit-capital decision, not
+            # entry authority.  Keep its globally comparable SELL/HOLD/CASH cut
+            # alive in reduce-only/YELLOW/ORANGE/RED operation.  The adapter's
+            # selection_completion_reserved path removes every BUY candidate;
+            # ordinary entry events retain both independent GREEN gates.
+            riskguard_gate=lambda event: (
+                _monitor_completion_mode.reduce_only or entry_risk_gate(event)
+            ),
+            cycle_entry_gate=lambda: (
+                _monitor_completion_mode.reduce_only
+                or get_current_level() == RiskLevel.GREEN
+            ),
+            paused_entry_wake_gate=lambda: _paused_entry_wake_should_park(
+                pause_reason=_entry_reactor_park_reason(conn),
+                held_sell_reauction_requests=held_sell_completion_cut_requests,
+                held_sell_request_exposure_provider=(
+                    held_sell_request_exposure_provider
+                ),
+                allow_forecast_carrier_progress=forecast_posterior_wake,
+                durable_exact_held_completion=(
+                    active_held_sell_completion_cycle
+                ),
+                allow_capital_proof_progress=True,
+                monitor_completion_reserved=completion_recovery_cycle,
+            ),
             final_intent_submit=submit_adapter,
             reject=lambda _event, _stage, _reason: None,
             regret_ledger=regret_ledger,
@@ -7049,7 +8782,7 @@ def run_edli_event_reactor_cycle(
             day0_hourly_refresher=_reactor_day0_hourly_refresher,
             # Held-position families are refreshed FIRST (money at risk); NO liquidity ordering
             # (operator correction 2026-06-12). Fail-soft read-only provider on zeus_trades.
-            held_family_provider=_edli_reactor_held_family_provider(),
+            held_family_provider=held_family_provider,
             # Current Gamma-empty/no-listed-market proof terminalizes only the blocked event; a
             # future event for the same family can still process if the venue lists later.
             family_market_absence_provider=_reactor_family_market_absence_provider,
@@ -7059,24 +8792,67 @@ def run_edli_event_reactor_cycle(
             world_schema_initialized=True,
             config=ReactorConfig(),
         )
+        _construct_checkpoint("after_reactor")
         _log_stage("reactor_construct")
+        _reactor_construct_complete = True
+        targeted_only_fast_path = producer_fast_path and (
+            forecast_posterior_wake or bool(targeted_event_ids)
+        )
         _rr = reactor.process_pending(
             decision_time=process_pending_decision_time,
             limit=proof_limit,
             targeted_event_ids=frozenset(targeted_event_ids),
-            targeted_only=producer_fast_path and bool(targeted_event_ids),
+            targeted_only=targeted_only_fast_path,
+            bridge_stale_debt_slots=1 if targeted_only_fast_path else 0,
             cancelled=_process_pending_cancelled(
                 committed_day0_wake=committed_day0_wake,
                 producer_fast_path=producer_fast_path,
                 urgent_wake_pending=_urgent_wake_pending,
                 urgent_day0_pending=urgent_day0_pending,
+                held_position_monitor_debt_pending=held_position_monitor_debt_pending,
+                exact_held_completion=active_held_sell_completion_cycle,
             ),
         )
+        terminal_no_book_completion = False
+        if held_sell_completion_cut_requests:
+            from src.runtime.reactor_wake import (
+                NO_EXECUTABLE_BOOK,
+                held_sell_reauction_requests_completed,
+                persist_held_sell_reauction_receipts,
+            )
+
+            held_sell_reauction_receipts = _held_sell_reauction_receipts_from_global_cut(
+                requests=held_sell_completion_cut_requests,
+                result=_rr,
+            )
+            if held_sell_reauction_receipts and not persist_held_sell_reauction_receipts(
+                held_sell_reauction_receipts
+            ):
+                completion_wake_needs_retry = True
+            # A completed global cut is not completion authority for a wake
+            # until every request in that wake has its own immutable terminal
+            # receipt.  Keep the exact durable debt queued across witness,
+            # partition, and receipt-write failures; this is deliberately not
+            # folded into the generic monitor HOLD reason.
+            requests_completed = held_sell_reauction_requests_completed(
+                held_sell_completion_cut_requests
+            )
+            if not requests_completed:
+                completion_wake_needs_retry = True
+            terminal_no_book_completion = bool(
+                requests_completed
+                and held_sell_reauction_receipts
+                and any(
+                    getattr(receipt, "status", "") == NO_EXECUTABLE_BOOK
+                    for receipt in held_sell_reauction_receipts
+                )
+            )
         completion_satisfied = _settle_global_auction_monitor_fairness(
             completion_due_at_start=_monitor_completion_due_at_start,
             result=_rr,
+            terminal_no_book_completion=terminal_no_book_completion,
         )
-        completion_wake_needs_retry = (
+        completion_wake_needs_retry = completion_wake_needs_retry or (
             completion_wake and not completion_satisfied
         )
         _log_stage("process_pending")
@@ -7141,6 +8917,22 @@ def run_edli_event_reactor_cycle(
             _rr.processed, _rr.proof_accepted, _rr.rejected, _rr.retried, _rr.dead_lettered,
             getattr(_rr, "claim_lock_bounces", 0), _rr.rejection_reasons[:8],
         )
+    except WorkDeferred as exc:
+        if _reactor_construct_complete:
+            raise
+        # INV-47 SCOPE: only this in-flight reactor cut. DRAIN: durable events
+        # stay pending and the held monitor receives the released single-writer
+        # turn. RESET: the next scheduler/wake invocation creates a fresh
+        # WorkContext; periodic monitor preemption reserves one ordinary global
+        # cut so unrelated evidence-complete families remain admissible.
+        _log.info(
+            "EDLI reactor deferred during reactor_construct: code=%s stage=%s "
+            "remaining_s=%.3f",
+            exc.code.value,
+            exc.stage,
+            exc.remaining_s,
+        )
+        return False
     finally:
         try:
             try:
@@ -7505,9 +9297,141 @@ def _edli_active_rmf_forecast_snapshot_pending_count(world_conn, *, limit: int) 
     return int(row[0] or 0) if row is not None else 0
 
 _EDLI_LAST_PRUNE_MONOTONIC: float | None = None
+_EDLI_LAST_PAUSED_PRUNE_MONOTONIC: float | None = None
+_EDLI_LAST_PAUSED_PRUNE_ATTEMPT_MONOTONIC: float | None = None
+_EDLI_PAUSED_PRUNE_LOCK = threading.Lock()
 _EDLI_DAY0_PAUSE_RECOVERY_PENDING: bool | None = None
 _EDLI_STATIC_CLOSE_RECOVERY_PENDING = True
 _EDLI_SNAPSHOT_DEADLINE_RECOVERY_PENDING = True
+
+
+def _edli_prune_paused_mutable_working_set() -> dict[str, int]:
+    """Bound paused BUY debt without claiming work or touching immutable facts.
+
+    SCOPE: only superseded ``edli_reactor_v1`` FSR/redecision and Day0 mutable
+    processing rows. Immutable opportunity events, global-winner fenced rows,
+    held-SELL debt, intents, commands, and venue state are untouched. DRAIN:
+    parked reactor wakes run this at the configured prune cadence with the
+    existing bounded canonical archive helpers. RESET: clearing the pause lets
+    the retained latest family keepers resume normal claim/redecision; a lock,
+    budget, or DB failure retries on the next cadence.
+    """
+    import logging as _logging
+    from src.main import _settings_section
+    from src.state.db import get_world_connection
+
+    global _EDLI_LAST_PAUSED_PRUNE_MONOTONIC
+    global _EDLI_LAST_PAUSED_PRUNE_ATTEMPT_MONOTONIC
+    _log = _logging.getLogger("zeus.events.reactor")
+    edli_cfg = _settings_section("edli", {})
+    interval_s = _edli_prune_interval_seconds(edli_cfg)
+    now_mono = time.monotonic()
+    if (
+        interval_s > 0
+        and _EDLI_LAST_PAUSED_PRUNE_MONOTONIC is not None
+        and now_mono - _EDLI_LAST_PAUSED_PRUNE_MONOTONIC < interval_s
+    ):
+        return {"forecast_snapshot": 0, "day0": 0}
+    retry_s = min(interval_s, 5.0) if interval_s > 0 else 1.0
+    if (
+        _EDLI_LAST_PAUSED_PRUNE_ATTEMPT_MONOTONIC is not None
+        and now_mono - _EDLI_LAST_PAUSED_PRUNE_ATTEMPT_MONOTONIC < retry_s
+    ):
+        return {"forecast_snapshot": 0, "day0": 0}
+    if not _EDLI_PAUSED_PRUNE_LOCK.acquire(blocking=False):
+        return {"forecast_snapshot": 0, "day0": 0}
+
+    write_lock = None
+    write_lock_acquired = False
+    conn = None
+    started = time.monotonic()
+    deadline = started + min(
+        max(_edli_prune_budget_seconds(edli_cfg), 0.1),
+        2.0,
+    )
+
+    def _remaining_seconds() -> float:
+        return max(0.0, deadline - time.monotonic())
+
+    def _require_budget(stage: str) -> None:
+        if _remaining_seconds() <= 0:
+            raise TimeoutError(f"EDLI_PAUSED_PRUNE_BUDGET_EXHAUSTED:{stage}")
+
+    try:
+        now_mono = time.monotonic()
+        if (
+            interval_s > 0
+            and _EDLI_LAST_PAUSED_PRUNE_MONOTONIC is not None
+            and now_mono - _EDLI_LAST_PAUSED_PRUNE_MONOTONIC < interval_s
+        ):
+            return {"forecast_snapshot": 0, "day0": 0}
+        _EDLI_LAST_PAUSED_PRUNE_ATTEMPT_MONOTONIC = now_mono
+        write_lock = world_write_mutex()
+        write_lock_acquired = write_lock.acquire(
+            timeout=min(
+                _edli_prune_lock_timeout_seconds(edli_cfg),
+                _remaining_seconds(),
+            )
+        )
+        if not write_lock_acquired:
+            _log.warning("EDLI paused mutable working-set drain deferred: world writer busy")
+            return {"forecast_snapshot": 0, "day0": 0}
+        _require_budget("connect")
+        conn = get_world_connection(
+            busy_timeout_ms=max(
+                1,
+                min(int(_remaining_seconds() * 1_000), 500),
+            )
+        )
+        _require_budget("connected")
+        conn.set_progress_handler(
+            lambda: int(time.monotonic() >= deadline),
+            1_000,
+        )
+        store = EventStore(conn)
+        batch_limit = _edli_prune_batch_limit(edli_cfg)
+        _require_budget("forecast_snapshot")
+        forecast_snapshot = store.archive_superseded_forecast_snapshot_events(
+            batch_limit=batch_limit,
+        )
+        _require_budget("day0")
+        day0 = store.archive_superseded_day0_events(batch_limit=batch_limit)
+        _require_budget("commit")
+        conn.execute(
+            "PRAGMA busy_timeout = %d"
+            % max(1, min(int(_remaining_seconds() * 1_000), 500))
+        )
+        conn.commit()
+        _require_budget("committed")
+        _EDLI_LAST_PAUSED_PRUNE_MONOTONIC = time.monotonic()
+        result = {
+            "forecast_snapshot": int(forecast_snapshot or 0),
+            "day0": int(day0 or 0),
+        }
+        if any(result.values()):
+            _log.info("EDLI paused mutable working-set drain: %s", result)
+        return result
+    except Exception as exc:  # noqa: BLE001 - pause remains fail-closed
+        if conn is not None:
+            try:
+                conn.rollback()
+            except Exception:  # noqa: BLE001
+                pass
+        _log.warning(
+            "EDLI paused mutable working-set drain deferred: %r",
+            exc,
+        )
+        return {"forecast_snapshot": 0, "day0": 0}
+    finally:
+        if conn is not None:
+            try:
+                conn.set_progress_handler(None, 0)
+                conn.close()
+            except Exception:  # noqa: BLE001
+                pass
+        if write_lock is not None and write_lock_acquired:
+            write_lock.release()
+        _EDLI_PAUSED_PRUNE_LOCK.release()
 
 
 def _edli_note_day0_pause_rejection(event_type: str, reason: str) -> None:
@@ -8049,14 +9973,15 @@ def _reactor_day0_hourly_refresh_budget_seconds() -> float:
         return 2.5
 
 def _reactor_day0_hourly_fetch_timeout_seconds() -> float:
+    default_timeout = _day0_hourly_fetch_timeout_seconds()
     raw = os.environ.get(
         "ZEUS_REACTOR_DAY0_HOURLY_FETCH_TIMEOUT_SECONDS",
-        os.environ.get("ZEUS_DAY0_HOURLY_FETCH_TIMEOUT_SECONDS", "1.5"),
+        str(default_timeout),
     )
     try:
         return max(0.25, float(raw))
     except (TypeError, ValueError):
-        return 1.5
+        return default_timeout
 
 def _edli_bridge_day0_extreme_materialization_seeds(event_ids: tuple[str, ...]) -> None:
     """Bridge freshly-committed DAY0_EXTREME_UPDATED events to immediate re-materialization.
@@ -8142,6 +10067,36 @@ def _edli_bridge_day0_extreme_materialization_seeds(event_ids: tuple[str, ...]) 
                 city, target_date, metric, exc,
             )
 
+
+def _edli_publish_committed_day0_catchup(event_ids: tuple[str, ...]) -> bool:
+    """Bridge and wake only for events inserted by this catch-up transaction."""
+
+    if not event_ids:
+        return False
+    import logging as _logging
+
+    _log = _logging.getLogger("zeus.events.reactor")
+    _edli_bridge_day0_extreme_materialization_seeds(event_ids)
+    try:
+        from src.runtime.reactor_wake import publish_reactor_wake
+
+        publish_reactor_wake(
+            source="edli_reactor_day0_catchup",
+            reason="day0_extreme_event_committed",
+            event_ids=event_ids,
+        )
+    except OSError:
+        _log.exception(
+            "EDLI Day0 catch-up wake publish failed; retaining current-cycle "
+            "processing as the durable fallback"
+        )
+        return False
+    _log.info(
+        "EDLI reactor yielded periodic cycle to targeted Day0 wake: events=%d",
+        len(event_ids),
+    )
+    return True
+
 def _edli_emit_day0_extreme_events(
     world_conn,
     trade_conn,
@@ -8152,7 +10107,7 @@ def _edli_emit_day0_extreme_events(
     budget_seconds: float | None = None,
     family_admission: _Day0LiveFamilyAdmission | None = None,
     urgent_wake_pending: Callable[[], bool] | None = None,
-) -> int:
+) -> tuple[str, ...]:
     """Emit DB-only Day0 catch-up events.
 
     The data-ingest source clock exclusively owns fast METAR capture and direct
@@ -8164,6 +10119,7 @@ def _edli_emit_day0_extreme_events(
         _edli_clear_sqlite_progress_handler,
         _edli_install_sqlite_deadline,
         _settings_section,
+        _substrate_refresh_family_text_key,
     )
     _log = _logging.getLogger("zeus.events.reactor")
 
@@ -8192,29 +10148,76 @@ def _edli_emit_day0_extreme_events(
         cancelled=urgent_wake_pending,
     )
     try:
-        trigger = Day0ExtremeUpdatedTrigger(
-            EventWriter(world_conn),
-            suppress_recent_no_value_refutations=True,
-            family_admission=family_admission,
-            scan_cities=(
-                family_admission.scan_cities
-                if family_admission is not None
-                else None
-            ),
-            scan_families=(
-                family_admission.admitted_families
-                if family_admission is not None
-                else ()
-            ),
+        def _scan(
+            admission: _Day0LiveFamilyAdmission | None,
+            *,
+            suppress_recent_no_value_refutations: bool,
+            scan_limit: int,
+        ) -> tuple[list, list]:
+            trigger = Day0ExtremeUpdatedTrigger(
+                EventWriter(world_conn),
+                suppress_recent_no_value_refutations=suppress_recent_no_value_refutations,
+                family_admission=admission,
+                scan_cities=admission.scan_cities if admission is not None else None,
+                scan_families=admission.admitted_families if admission is not None else (),
+            )
+            return _edli_scan_day0_with_lock_retry(
+                trigger=trigger,
+                world_conn=world_conn,
+                trade_conn=trade_conn,
+                decision_time=decision_time,
+                received_at=received_at,
+                limit=scan_limit,
+            )
+
+        held_families = (
+            frozenset()
+            if family_admission is None
+            else family_admission.held_families & family_admission.admitted_families
         )
-        authority_results, observation_results = _edli_scan_day0_with_lock_retry(
-            trigger=trigger,
-            world_conn=world_conn,
-            trade_conn=trade_conn,
-            decision_time=decision_time,
-            received_at=received_at,
-            limit=limit,
-        )
+        if not held_families:
+            authority_results, observation_results = _scan(
+                family_admission,
+                suppress_recent_no_value_refutations=True,
+                scan_limit=limit,
+            )
+        else:
+            held_city_keys = {family[0] for family in held_families}
+            held_admission = _Day0LiveFamilyAdmission(
+                admitted_families=held_families,
+                expiry_safe=family_admission.expiry_safe,
+                scan_cities=frozenset(
+                    city
+                    for city in family_admission.scan_cities
+                    if _substrate_refresh_family_text_key(city) in held_city_keys
+                ),
+                held_families=held_families,
+            )
+            authority_results, observation_results = _scan(
+                held_admission,
+                suppress_recent_no_value_refutations=False,
+                scan_limit=limit,
+            )
+            remaining_limit = max(0, limit - len(authority_results) - len(observation_results))
+            other_families = family_admission.admitted_families - held_families
+            if other_families and remaining_limit:
+                other_city_keys = {family[0] for family in other_families}
+                other_admission = _Day0LiveFamilyAdmission(
+                    admitted_families=frozenset(other_families),
+                    expiry_safe=family_admission.expiry_safe,
+                    scan_cities=frozenset(
+                        city
+                        for city in family_admission.scan_cities
+                        if _substrate_refresh_family_text_key(city) in other_city_keys
+                    ),
+                )
+                other_authority_results, other_observation_results = _scan(
+                    other_admission,
+                    suppress_recent_no_value_refutations=True,
+                    scan_limit=remaining_limit,
+                )
+                authority_results.extend(other_authority_results)
+                observation_results.extend(other_observation_results)
         _log.info(
             "EDLI day0 catch-up emit: day0_authority_emitted=%d "
             "day0_observation_instants_emitted=%d admitted_families=%d",
@@ -8226,7 +10229,8 @@ def _edli_emit_day0_extreme_events(
             dict.fromkeys(
                 str(result.event_id)
                 for result in (*authority_results, *observation_results)
-                if str(getattr(result, "event_id", "") or "").strip()
+                if bool(getattr(result, "inserted", False))
+                and str(getattr(result, "event_id", "") or "").strip()
             )
         )
     except sqlite3.OperationalError as exc:
@@ -8449,7 +10453,8 @@ def _edli_fresh_projected_pre_submit_book(
             return None
         captured_at = captured_at.astimezone(timezone.utc)
         freshness_deadline = freshness_deadline.astimezone(timezone.utc)
-        checked_at = datetime.now(timezone.utc)
+        gate_checked_at = datetime.now(timezone.utc)
+        checked_at = gate_checked_at
         age_ms = (checked_at - captured_at).total_seconds() * 1000.0
         if (
             age_ms < 0.0
@@ -8766,10 +10771,12 @@ def _edli_decision_family_snapshot_refresher(topology_conn):
 
     return _refresh
 
-def _edli_reactor_day0_hourly_refresher():
+def _edli_reactor_day0_hourly_refresher(*, held_family_provider=None):
     """Build the reactor-drain refresher for Day0 remaining-day weather vectors."""
     import logging as _logging
     _log = _logging.getLogger("zeus.events.reactor")
+    if held_family_provider is None:
+        held_family_provider = _edli_reactor_held_family_provider()
 
     def _refresh(*, city, target_date, metric, **_ignored):
         family = (
@@ -8792,6 +10799,22 @@ def _edli_reactor_day0_hourly_refresher():
                     family[2],
                 )
                 return False
+            held = False
+            if held_family_provider is not None:
+                try:
+                    held_key = _substrate_refresh_family_key(*family)
+                    held = held_key in {
+                        _substrate_refresh_family_key(*raw_family)
+                        for raw_family in (held_family_provider() or ())
+                    }
+                except Exception as exc:  # noqa: BLE001 -- no proof means no reserve borrow.
+                    _log.warning(
+                        "reactor day0-hourly held-family proof failed for %s/%s/%s: %r",
+                        family[0],
+                        family[1],
+                        family[2],
+                        exc,
+                    )
             stats = maybe_refresh_day0_hourly_vectors(
                 [city_obj],
                 decision_time=datetime.now(timezone.utc),
@@ -8799,6 +10822,11 @@ def _edli_reactor_day0_hourly_refresher():
                 budget_s=_reactor_day0_hourly_refresh_budget_seconds(),
                 max_cities=1,
                 timeout_s=_reactor_day0_hourly_fetch_timeout_seconds(),
+                # SCOPE: only a canonical currently-held family may borrow the
+                # final Open-Meteo tranche. DRAIN: this one targeted complete
+                # bundle attempt. RESET: the next reactor drain re-reads held
+                # exposure, so closure immediately removes critical authority.
+                quota_critical_cities=int(held),
                 persist_lock_blocking=False,
                 return_stats=True,
             )
@@ -9179,8 +11207,12 @@ def _edli_pre_submit_authority_provider_from_book_evidence_conn(
     evidence remains useful for screening but never licenses venue submission.
     """
     from src.main import _row_get
+    from src.data.market_scanner import _sha256_json
 
-    from src.engine.event_reactor_adapter import PreSubmitAuthorityWitness
+    from src.engine.event_reactor_adapter import (
+        PreSubmitAuthorityWitness,
+        SealedBookOverride,
+    )
 
     max_quote_age_ms = int(edli_cfg.get("pre_submit_max_quote_age_ms", 1000) or 1000)
     venue_summary_cache: dict[str, object] | None = None
@@ -9219,9 +11251,16 @@ def _edli_pre_submit_authority_provider_from_book_evidence_conn(
                 )
         return full_collateral_payload_cache
 
-    def _provider(final_intent, _executable_snapshot, decision_time):
+    def _provider(
+        final_intent,
+        _executable_snapshot,
+        decision_time,
+        *,
+        sealed_book_override: SealedBookOverride | None = None,
+    ):
         del decision_time
-        checked_at = datetime.now(timezone.utc)
+        gate_checked_at = datetime.now(timezone.utc)
+        checked_at = gate_checked_at
         intent = final_intent.payload
         token_id = str(intent["token_id"])
 
@@ -9241,19 +11280,16 @@ def _edli_pre_submit_authority_provider_from_book_evidence_conn(
                 "PRE_SUBMIT_HEARTBEAT_ORDER_TYPE_BLOCKED:"
                 f"order_type={heartbeat_order_type}"
             )
-        user_ws_summary = _edli_user_ws_authority_summary(checked_at)
-        venue_summary = _cached_venue_summary(checked_at)
-        (
-            balance_status,
-            balance_authority_id,
-            balance_allowance_checked_at,
-        ) = _edli_balance_allowance_status(
-            final_intent,
-            checked_at,
-            collateral_payload=_cached_collateral_payload(
-                str(intent.get("side") or ""),
-                checked_at,
-            ),
+        user_ws_summary = _edli_user_ws_authority_summary(gate_checked_at)
+        venue_summary = _cached_venue_summary(gate_checked_at)
+        balance_status, balance_authority_id, balance_allowance_checked_at = (
+            _edli_balance_allowance_status(
+                final_intent,
+                gate_checked_at,
+                collateral_payload=_cached_collateral_payload(
+                    str(intent.get("side") or ""), gate_checked_at
+                ),
+            )
         )
         # Price is read last so slow venue/balance checks cannot age the book
         # before the full-depth curve binds to this same observation.
@@ -9268,14 +11304,87 @@ def _edli_pre_submit_authority_provider_from_book_evidence_conn(
             raw_book.update(current)
             return response
 
-        jit = _edli_pre_submit_book_from_jit_fetch(
-            _capture_book,
-            token_id=token_id,
-            side=side,
-            limit_price=float(intent["limit_price"]) if has_limit_price else None,
-            size=float(intent["size"]) if has_size else None,
-            post_only=intent.get("post_only") is True,
-        )
+        if sealed_book_override is not None:
+            override = sealed_book_override
+            if (
+                override.token_id != token_id
+                or override.side != side
+                or str(_executable_snapshot.payload.get("identity") or "")
+                != override.snapshot_id
+            ):
+                raise ValueError("PRE_SUBMIT_SEALED_BOOK_IDENTITY_MISMATCH")
+            captured_at = datetime.fromisoformat(override.captured_at)
+            deadline = datetime.fromisoformat(override.freshness_deadline)
+            now_utc = checked_at.astimezone(timezone.utc)
+            if (
+                captured_at.tzinfo is None
+                or deadline.tzinfo is None
+                or now_utc > deadline.astimezone(timezone.utc)
+                or now_utc
+                > captured_at.astimezone(timezone.utc)
+                + timedelta(seconds=float(override.curve_ttl_seconds))
+                or not override.raw_orderbook_hash
+            ):
+                raise ValueError("PRE_SUBMIT_SEALED_BOOK_FRESHNESS_INVALID")
+            try:
+                sealed_depth = json.loads(override.orderbook_depth_jsonb)
+            except (TypeError, ValueError, json.JSONDecodeError) as exc:
+                raise ValueError("PRE_SUBMIT_SEALED_BOOK_DEPTH_INVALID") from exc
+            if not isinstance(sealed_depth, dict):
+                raise ValueError("PRE_SUBMIT_SEALED_BOOK_DEPTH_INVALID")
+            if _sha256_json(sealed_depth) != override.raw_orderbook_hash:
+                raise ValueError("PRE_SUBMIT_SEALED_BOOK_HASH_MISMATCH")
+            raw_book.update(sealed_depth)
+            helper_book = dict(raw_book)
+            helper_book["hash"] = override.raw_orderbook_hash
+            sealed_observed_at = captured_at.astimezone(timezone.utc)
+
+            def _sealed_book(_selected_token_id: str):
+                return helper_book, sealed_observed_at, "clob_jit_book"
+
+            sealed_jit = _edli_pre_submit_book_from_jit_fetch(
+                _sealed_book,
+                token_id=token_id,
+                side=side,
+                limit_price=float(intent["limit_price"]) if has_limit_price else None,
+                size=float(intent["size"]) if has_size else None,
+                post_only=intent.get("post_only") is True,
+            )
+            if sealed_jit is None or str(sealed_jit[2]) != override.raw_orderbook_hash:
+                raise ValueError("PRE_SUBMIT_SEALED_BOOK_HASH_MISMATCH")
+            if (
+                sealed_jit[0] != override.best_bid
+                or sealed_jit[1] != override.best_ask
+                or float(intent["tick_size"]) != override.tick_size
+                or float(intent["min_order_size"]) != override.min_order_size
+                or bool(intent.get("neg_risk", False)) is not override.neg_risk
+            ):
+                raise ValueError("PRE_SUBMIT_SEALED_BOOK_WITNESS_MISMATCH")
+            # The sealed cut proves which globally ranked action reached this seam;
+            # it is not submit-time price authority.  Probability, wealth, and
+            # collateral checks can consume most of the 1s quote-age budget, so
+            # re-observe the selected token only after those checks complete.  The
+            # final intent's limit/size plus downstream maker-cross and executor
+            # recapture guards decide whether harmless book motion remains
+            # executable; raw-hash equality with the earlier cut is intentionally
+            # not required.
+            jit = _edli_pre_submit_book_from_jit_fetch(
+                _capture_book,
+                token_id=token_id,
+                side=side,
+                limit_price=float(intent["limit_price"]) if has_limit_price else None,
+                size=float(intent["size"]) if has_size else None,
+                post_only=intent.get("post_only") is True,
+            )
+        else:
+            jit = _edli_pre_submit_book_from_jit_fetch(
+                _capture_book,
+                token_id=token_id,
+                side=side,
+                limit_price=float(intent["limit_price"]) if has_limit_price else None,
+                size=float(intent["size"]) if has_size else None,
+                post_only=intent.get("post_only") is True,
+            )
         if jit is None:
             raise ValueError("PRE_SUBMIT_BOOK_AUTHORITY_JIT_REQUIRED")
         best_bid, best_ask, book_hash, book_observed_at, book_authority_id = jit
@@ -9297,11 +11406,11 @@ def _edli_pre_submit_authority_provider_from_book_evidence_conn(
             book_authority_id=book_authority_id,
             book_captured_at=quote_seen_at,
             heartbeat_authority_id=str(heartbeat_summary["authority_id"]),
-            heartbeat_checked_at=checked_at.isoformat(),
+            heartbeat_checked_at=gate_checked_at.isoformat(),
             user_ws_authority_id=str(user_ws_summary["authority_id"]),
-            user_ws_checked_at=checked_at.isoformat(),
+            user_ws_checked_at=gate_checked_at.isoformat(),
             venue_connectivity_authority_id=str(venue_summary["authority_id"]),
-            venue_connectivity_checked_at=checked_at.isoformat(),
+            venue_connectivity_checked_at=gate_checked_at.isoformat(),
             balance_allowance_authority_id=balance_authority_id,
             balance_allowance_checked_at=balance_allowance_checked_at,
             orderbook_depth_jsonb=json.dumps(
@@ -9452,6 +11561,14 @@ def _row_float(row, key: str) -> float | None:
     return float(value)
 
 
+def _finite_nonnegative_float(value: object) -> float | None:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if math.isfinite(parsed) and parsed >= 0.0 else None
+
+
 # ---------------------------------------------------------------------------
 # R4-b4 (2026-07-08 main.py slimming): continuous-redecision-screen cluster,
 # extracted from src/main.py::_edli_continuous_redecision_screen_cycle and its
@@ -9531,13 +11648,17 @@ def _edli_open_maker_rests_for_screen(trade_conn, world_conn, *, beliefs=None) -
     decision belief via condition_id. Pure read on both DBs.
 
     The rest's condition_id (token_id → executable_market_snapshots) joins to the belief's
-    per-bin condition_ids → (family_id, bin_label, resting_posterior, resting_snapshot_id). The
-    resting_posterior is the belief's posterior at that bin from the LATEST cached belief whose
-    snapshot matches the rest's pricing snapshot (anti-twitch: screen_reprice fires only when the
-    LATEST belief is from a NEWER snapshot than the rest's). When the bin/belief cannot be resolved
-    the rest still gets the book/stale checks (which need no posterior)."""
+    per-bin condition_ids → family identity. Its resting posterior and probability snapshot are
+    then reconstructed from the latest causal belief recorded at or before command creation; the
+    CLOB snapshot is a different identity namespace and must never stand in for probability
+    evidence. When the historical belief is unavailable, the current belief remains a conservative
+    fallback and current-fill economics still protect the rest."""
     from datetime import datetime, timezone
-    from src.events.continuous_redecision import OpenRest, _all_latest_beliefs
+    from src.events.continuous_redecision import (
+        OpenRest,
+        _all_latest_beliefs,
+        latest_cached_belief,
+    )
     from src.execution.staleness_cancel import OPEN_REST_FACT_STATES
 
     now = datetime.now(timezone.utc)
@@ -9549,6 +11670,14 @@ def _edli_open_maker_rests_for_screen(trade_conn, world_conn, *, beliefs=None) -
         command_cols = {str(row[1]) for row in trade_conn.execute("PRAGMA table_info(venue_commands)").fetchall()}
     except Exception:  # noqa: BLE001
         command_cols = set()
+    try:
+        has_trade_facts = bool(
+            trade_conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'venue_trade_facts'"
+            ).fetchone()
+        )
+    except Exception:  # noqa: BLE001
+        has_trade_facts = False
     matched_select = "matched_size" if "matched_size" in fact_cols else "NULL AS matched_size"
     command_state_filter = (
         "AND state IN ('ACKED', 'POST_ACKED', 'PARTIAL')" if "state" in command_cols else ""
@@ -9565,8 +11694,28 @@ def _edli_open_maker_rests_for_screen(trade_conn, world_conn, *, beliefs=None) -
     ).fetchall()
     rows = []
     if command_rows:
+        trade_matched_select = (
+            """
+            , (
+                WITH latest_trade AS (
+                    SELECT filled_size, state,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY trade_id ORDER BY local_sequence DESC
+                           ) AS rn
+                      FROM venue_trade_facts
+                     WHERE command_id = ? AND venue_order_id = ?
+                )
+                SELECT COALESCE(SUM(CAST(filled_size AS REAL)), 0)
+                  FROM latest_trade
+                 WHERE rn = 1
+                   AND state IN ('MATCHED', 'MINED', 'CONFIRMED')
+              ) AS trade_matched_size
+            """
+            if has_trade_facts
+            else ", NULL AS trade_matched_size"
+        )
         fact_sql = f"""
-            SELECT state, {matched_select}
+            SELECT state, {matched_select}{trade_matched_select}
               FROM venue_order_facts
              WHERE venue_order_id = ?
              ORDER BY local_sequence DESC
@@ -9574,13 +11723,23 @@ def _edli_open_maker_rests_for_screen(trade_conn, world_conn, *, beliefs=None) -
         """
         open_states = set(OPEN_REST_FACT_STATES)
         for vc in command_rows:
-            latest_fact = trade_conn.execute(fact_sql, (vc[1],)).fetchone()
+            fact_params = (vc[0], vc[1], vc[1]) if has_trade_facts else (vc[1],)
+            latest_fact = trade_conn.execute(fact_sql, fact_params).fetchone()
             if latest_fact is None:
                 continue
             fact_state = str(latest_fact[0] or "")
             if fact_state not in open_states:
                 continue
-            rows.append(tuple(vc) + (fact_state, latest_fact[1]))
+            matched_candidates = [
+                value
+                for value in (
+                    _finite_nonnegative_float(latest_fact[1]),
+                    _finite_nonnegative_float(latest_fact[2]),
+                )
+                if value is not None
+            ]
+            matched_size = max(matched_candidates) if matched_candidates else None
+            rows.append(tuple(vc) + (fact_state, matched_size))
     if not rows:
         return []
     # Resolve token_id -> condition_id and held-side direction from the freshest
@@ -9633,25 +11792,50 @@ def _edli_open_maker_rests_for_screen(trade_conn, world_conn, *, beliefs=None) -
             cond_by_token = {}
             side_by_token = {}
             min_order_by_token = {}
-        tokens_with_partial_fill: set[str] = set()
-        for row in rows:
-            token = str(row[2] or "")
-            if not token:
-                continue
+        # The latest mirror may predate min_order_size. Recover the venue
+        # minimum from each rest's exact submit snapshot before screening: a
+        # fill can arrive after selection but before cancel, so waiting until
+        # matched_size is already positive leaves the cancel side effect blind.
+        snapshot_token = {
+            str(row[6] or ""): str(row[2] or "")
+            for row in rows
+            if row[6]
+            and row[2]
+            and min_order_by_token.get(str(row[2] or "")) in (None, "")
+        }
+        if snapshot_token:
             try:
-                matched = float(row[9]) if row[9] is not None else 0.0
-            except (TypeError, ValueError):
-                matched = 0.0
-            if matched > 0.0:
-                tokens_with_partial_fill.add(token)
+                snapshot_cols = {
+                    str(row[1])
+                    for row in trade_conn.execute(
+                        "PRAGMA table_info(executable_market_snapshots)"
+                    ).fetchall()
+                }
+                snapshot_min_order_select = (
+                    ", min_order_size"
+                    if "min_order_size" in snapshot_cols
+                    else ", NULL AS min_order_size"
+                )
+                sph = ",".join("?" for _ in snapshot_token)
+                for cr in trade_conn.execute(
+                    f"""
+                    SELECT snapshot_id, selected_outcome_token_id, condition_id,
+                           yes_token_id, no_token_id{snapshot_min_order_select}
+                      FROM executable_market_snapshots
+                     WHERE snapshot_id IN ({sph})
+                    """,
+                    tuple(snapshot_token),
+                ).fetchall():
+                    token = snapshot_token.get(str(cr[0] or ""), "")
+                    if token and token in {str(cr[1] or ""), str(cr[3] or ""), str(cr[4] or "")}:
+                        min_order_by_token[token] = cr[5]
+            except Exception:  # noqa: BLE001 — exact snapshot recovery is best-effort
+                pass
         fallback_token_ids = {
             token
             for token in token_ids
             if token not in cond_by_token
-            or (
-                token in tokens_with_partial_fill
-                and min_order_by_token.get(token) in (None, "")
-            )
+            or min_order_by_token.get(token) in (None, "")
         }
         if fallback_token_ids:
             try:
@@ -9723,7 +11907,28 @@ def _edli_open_maker_rests_for_screen(trade_conn, world_conn, *, beliefs=None) -
         target_date = str(getattr(belief_hit[0], "target_date", "") or "") if belief_hit else ""
         metric = str(getattr(belief_hit[0], "metric", "") or "") if belief_hit else ""
         bin_label = belief_hit[1] if belief_hit else ""
+        resting_belief = None
+        if belief_hit and created_at:
+            try:
+                resting_belief = latest_cached_belief(
+                    world_conn,
+                    family_id=str(belief_hit[0].family_id or ""),
+                    at_or_before=created_at,
+                )
+            except sqlite3.Error:
+                resting_belief = None
+        resting_belief = resting_belief or (belief_hit[0] if belief_hit else None)
         resting_posterior = belief_hit[2] if belief_hit else 0.0
+        resting_probability_snapshot_id = ""
+        if resting_belief is not None:
+            try:
+                resting_idx = list(resting_belief.condition_ids or ()).index(cond)
+                resting_posterior = float(resting_belief.p_posterior_vec[resting_idx])
+                resting_probability_snapshot_id = str(
+                    getattr(resting_belief, "snapshot_id", "") or ""
+                )
+            except (ValueError, IndexError, TypeError):
+                pass
         # quote_age_ms from the command's creation (the order has rested since created_at).
         try:
             from datetime import datetime as _dt
@@ -9749,7 +11954,7 @@ def _edli_open_maker_rests_for_screen(trade_conn, world_conn, *, beliefs=None) -
                 side=screen_side,
                 condition_id=cond,
                 resting_posterior=resting_held_side_posterior,
-                resting_snapshot_id=snap_id,
+                resting_snapshot_id=resting_probability_snapshot_id or snap_id,
                 limit_price=float(price) if price is not None else 0.0,
                 quote_age_ms=age_ms,
                 created_at=created_at,
@@ -9762,6 +11967,151 @@ def _edli_open_maker_rests_for_screen(trade_conn, world_conn, *, beliefs=None) -
             )
         )
     return out
+
+
+def _edli_policy_blocked_open_rest_commands(
+    trade_conn,
+    open_rests,
+    *,
+    decision_time,
+) -> dict[str, str]:
+    """Return open ENTRY rests whose immutable evidence is no longer admissible.
+
+    A resting BUY is still an unexecuted capital decision.  Its original
+    certificate therefore must remain allowed by the current strategy policy;
+    otherwise a gate that correctly blocks a fresh submit would leave the same
+    stale decision live on the venue.  The caller supplies a trade-main
+    connection with canonical ``world`` attached so risk actions, manual
+    controls, and certificate payloads are read in one snapshot.
+
+    SCOPE: one exact open ENTRY command.  DRAIN: the continuous redecision
+    screen cancels it through the durable cancel journal before quote refresh.
+    RESET: a newly certified command whose exact probability revision is allowed
+    by current policy is absent from this result and may enter through the normal
+    fresh-certificate scan.
+    """
+
+    command_ids = sorted(
+        {
+            str(getattr(rest, "command_id", "") or "").strip()
+            for rest in open_rests
+            if str(getattr(rest, "command_id", "") or "").strip()
+        }
+    )
+    if not command_ids:
+        return {}
+
+    required = {
+        "venue_commands",
+        "position_current",
+        "position_decision_attribution",
+        "risk_actions",
+    }
+    main_tables = {
+        str(row[0])
+        for row in trade_conn.execute(
+            "SELECT name FROM main.sqlite_master WHERE type='table'"
+        ).fetchall()
+    }
+    world_tables = {
+        str(row[0])
+        for row in trade_conn.execute(
+            "SELECT name FROM world.sqlite_master WHERE type IN ('table','view')"
+        ).fetchall()
+    }
+    if not required.issubset(main_tables) or not {
+        "decision_certificates",
+        "control_overrides",
+    }.issubset(world_tables):
+        return {command_id: "ENTRY_POLICY_AUTHORITY_UNAVAILABLE" for command_id in command_ids}
+
+    placeholders = ",".join("?" for _ in command_ids)
+    rows = trade_conn.execute(
+        f"""
+        SELECT vc.command_id,
+               pc.strategy_key,
+               pda.decision_certificate_hash,
+               dc.payload_json
+          FROM main.venue_commands vc
+          LEFT JOIN main.position_current pc
+            ON pc.position_id = vc.position_id
+          LEFT JOIN main.position_decision_attribution pda
+            ON pda.command_id = vc.command_id
+          LEFT JOIN world.decision_certificates dc
+            ON lower(dc.certificate_hash) = lower(pda.decision_certificate_hash)
+         WHERE vc.command_id IN ({placeholders})
+        """,
+        tuple(command_ids),
+    ).fetchall()
+    rows_by_command = {str(row[0] or ""): row for row in rows}
+
+    from src.riskguard.policy import resolve_strategy_policy
+
+    blocked: dict[str, str] = {}
+    for command_id in command_ids:
+        row = rows_by_command.get(command_id)
+        if row is None or not row[2] or not row[3]:
+            blocked[command_id] = "ENTRY_DECISION_CERTIFICATE_UNAVAILABLE"
+            continue
+        try:
+            payload = json.loads(str(row[3]))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            blocked[command_id] = "ENTRY_DECISION_CERTIFICATE_INVALID"
+            continue
+        if not isinstance(payload, dict):
+            blocked[command_id] = "ENTRY_DECISION_CERTIFICATE_INVALID"
+            continue
+        strategy_key = str(payload.get("strategy_key") or row[1] or "").strip()
+        revision = str(payload.get("probability_semantics_revision") or "").strip()
+        if not strategy_key or not revision:
+            blocked[command_id] = "ENTRY_POLICY_IDENTITY_MISSING"
+            continue
+        try:
+            policy = resolve_strategy_policy(
+                trade_conn,
+                strategy_key,
+                decision_time,
+                probability_semantics_revision=revision,
+            )
+        except Exception:  # noqa: BLE001 - authority loss pulls unfilled BUY risk
+            blocked[command_id] = "ENTRY_POLICY_AUTHORITY_UNAVAILABLE"
+            continue
+        if policy.gated:
+            blocked[command_id] = "STRATEGY_POLICY_GATED"
+        elif policy.exit_only:
+            blocked[command_id] = "STRATEGY_POLICY_EXIT_ONLY"
+    return blocked
+
+
+def _edli_cancel_rest_pulls(rest_pulls) -> int:
+    """Cancel screened maker rests through the one durable cancel journal."""
+
+    if not rest_pulls:
+        return 0
+    from src.data.polymarket_client import PolymarketClient
+    from src.execution.venue_cancel_journal import run_persisted_cancels_for_expired_rests
+    from src.state.db import get_trade_connection
+
+    to_cancel = [
+        {
+            "command_id": rest.command_id,
+            "venue_order_id": rest.venue_order_id,
+            "created_at": rest.created_at,
+            "fact_state": rest.fact_state,
+            "matched_size": rest.matched_size,
+            "min_order_size": rest.min_order_size,
+            "cancel_reason": decision.reason,
+            "cancel_action": decision.action,
+            "cancel_detail": decision.detail,
+        }
+        for rest, decision in rest_pulls
+    ]
+    stats = run_persisted_cancels_for_expired_rests(
+        to_cancel,
+        PolymarketClient(),
+        conn_factory=lambda: get_trade_connection(write_class="live"),
+    )
+    return int(stats.get("cancelled", 0) or 0)
 
 
 def _edli_family_key_from_belief(belief: Any) -> tuple[str, str, str] | None:
@@ -10556,7 +12906,9 @@ def _edli_plan_unadmitted_redecision_expiry(
     row seconds before the next reactor claim cycle. Pending rows must survive a
     claim grace window; processing rows are eligible only after the EventStore
     claim lease has expired. An in-flight reactor event must not be terminalized
-    by the screen job that emitted it.
+    by the screen job that emitted it. The typed projection is usable only after
+    migration has atomically seeded every active row and persisted its receipt;
+    absent, unseeded, or damaged authority raises a fail-closed cycle error.
     """
 
     from src.events.continuous_redecision import REDECISION_EVENT_TYPE as _REDECISION_EVENT_TYPE
@@ -10589,86 +12941,109 @@ def _edli_plan_unadmitted_redecision_expiry(
         stale_processing_cutoff = ""
         pending_admission_cutoff = ""
 
+    from src.state.schema.opportunity_event_processing_schema import (
+        assert_active_projection_ready,
+    )
+
+    try:
+        assert_active_projection_ready(
+            world_conn,
+            consumer_name="edli_reactor_v1",
+        )
+    except Exception as exc:  # noqa: BLE001
+        raise RuntimeError(
+            f"EDLI_ACTIVE_REDECISION_PROJECTION_READINESS_FAILED:{exc}"
+        ) from exc
+
     try:
         candidate_generations: dict[str, tuple[str, str, int, str | None, str]] = {}
-        if pending_admission_cutoff:
-            for row in world_conn.execute(
-                """
-                    SELECT p.event_id, p.processing_status, p.attempt_count,
-                           p.claimed_at, p.updated_at
-                     FROM opportunity_event_processing p
-                           INDEXED BY idx_opportunity_event_processing_status
-                     WHERE p.consumer_name = 'edli_reactor_v1'
-                       AND p.processing_status = 'pending'
-                     ORDER BY p.updated_at ASC
-                     LIMIT 5000
-                """,
-            ).fetchall():
-                event_id = str(row[0] or "")
-                if event_id:
-                    candidate_generations[event_id] = (
-                        event_id,
-                        str(row[1] or ""),
-                        int(row[2] or 0),
-                        None if row[3] is None else str(row[3]),
-                        str(row[4] or ""),
-                    )
-        if stale_processing_cutoff:
-            for row in world_conn.execute(
-                """
-                    SELECT p.event_id, p.processing_status, p.attempt_count,
-                           p.claimed_at, p.updated_at
-                      FROM opportunity_event_processing p
-                           INDEXED BY idx_opportunity_event_processing_pending_retry_floor
-                     WHERE p.consumer_name = 'edli_reactor_v1'
-                       AND p.processing_status = 'processing'
-                       AND p.claimed_at IS NOT NULL
-                       AND p.claimed_at <= ?
-                     ORDER BY p.claimed_at ASC
-                     LIMIT 5000
-                """,
-                (stale_processing_cutoff,),
-            ).fetchall():
-                event_id = str(row[0] or "")
-                if event_id:
-                    candidate_generations[event_id] = (
-                        event_id,
-                        str(row[1] or ""),
-                        int(row[2] or 0),
-                        None if row[3] is None else str(row[3]),
-                        str(row[4] or ""),
-                    )
-        candidate_ids = list(candidate_generations)
         rows = []
-        for start in range(0, len(candidate_ids), 250):
-            chunk = candidate_ids[start : start + 250]
-            placeholders = ",".join("?" for _ in chunk)
+        if pending_admission_cutoff:
             rows.extend(
                 world_conn.execute(
-                    f"""
-                    SELECT e.event_id, e.payload_json, e.created_at
-                      FROM opportunity_events e
-                     WHERE e.event_type = ?
+                    """
+                    SELECT p.event_id, p.processing_status, p.attempt_count,
+                           p.claimed_at, p.updated_at, e.payload_json, e.created_at
+                      FROM opportunity_event_processing_type_projection AS t
+                           INDEXED BY idx_event_processing_type_pending
+                      JOIN opportunity_event_processing AS p
+                           INDEXED BY sqlite_autoindex_opportunity_event_processing_1
+                        ON p.consumer_name = t.consumer_name
+                       AND p.event_id = t.event_id
+                      JOIN opportunity_events AS e
+                           INDEXED BY sqlite_autoindex_opportunity_events_1
+                        ON e.event_id = t.event_id
+                     WHERE t.consumer_name = 'edli_reactor_v1'
+                       AND t.event_type = ?
+                       AND t.processing_status = 'pending'
+                       AND p.processing_status = 'pending'
                        AND e.created_at <= ?
                        AND e.received_at <= ?
-                       AND e.event_id IN ({placeholders})
+                     ORDER BY t.updated_at ASC, t.event_id ASC
+                     LIMIT 5000
                     """,
                     (
                         _REDECISION_EVENT_TYPE,
                         pending_admission_cutoff,
                         pending_admission_cutoff,
-                        *chunk,
                     ),
                 ).fetchall()
             )
-    except Exception:  # noqa: BLE001
-        return {}
+        if stale_processing_cutoff:
+            rows.extend(
+                world_conn.execute(
+                    """
+                    SELECT p.event_id, p.processing_status, p.attempt_count,
+                           p.claimed_at, p.updated_at, e.payload_json, e.created_at
+                      FROM opportunity_event_processing_type_projection AS t
+                           INDEXED BY idx_event_processing_type_stale_claim
+                      JOIN opportunity_event_processing AS p
+                           INDEXED BY sqlite_autoindex_opportunity_event_processing_1
+                        ON p.consumer_name = t.consumer_name
+                       AND p.event_id = t.event_id
+                      JOIN opportunity_events AS e
+                           INDEXED BY sqlite_autoindex_opportunity_events_1
+                        ON e.event_id = t.event_id
+                     WHERE t.consumer_name = 'edli_reactor_v1'
+                       AND t.event_type = ?
+                       AND t.processing_status = 'processing'
+                       AND t.claimed_at IS NOT NULL
+                       AND t.claimed_at <= ?
+                       AND p.processing_status = 'processing'
+                       AND p.claimed_at IS NOT NULL
+                       AND e.created_at <= ?
+                       AND e.received_at <= ?
+                     ORDER BY t.claimed_at ASC, t.event_id ASC
+                     LIMIT 5000
+                    """,
+                    (
+                        _REDECISION_EVENT_TYPE,
+                        stale_processing_cutoff,
+                        pending_admission_cutoff,
+                        pending_admission_cutoff,
+                    ),
+                ).fetchall()
+            )
+        for row in rows:
+            event_id = str(row[0] or "")
+            if event_id:
+                candidate_generations[event_id] = (
+                    event_id,
+                    str(row[1] or ""),
+                    int(row[2] or 0),
+                    None if row[3] is None else str(row[3]),
+                    str(row[4] or ""),
+                )
+    except Exception as exc:  # noqa: BLE001
+        raise RuntimeError(
+            f"EDLI_ACTIVE_REDECISION_PROJECTION_QUERY_FAILED:{type(exc).__name__}"
+        ) from exc
     expire_by_reason: dict[str, list[tuple[str, str, int, str | None, str]]] = {}
     for row in rows:
         try:
             event_id = str(row[0] or "")
-            payload = json.loads(str(row[1] or "{}"))
-            event_created_at = str(row[2] or "")
+            payload = json.loads(str(row[5] or "{}"))
+            event_created_at = str(row[6] or "")
             family = (
                 str(payload.get("city") or "").strip(),
                 str(payload.get("target_date") or "").strip(),
@@ -10700,15 +13075,14 @@ def _edli_apply_unadmitted_redecision_expiry(
     *,
     decision_time: str,
 ) -> int:
-    """Apply a precomputed expiry plan with claim-state CAS predicates."""
+    """Apply a precomputed expiry plan with exact claim-state CAS predicates."""
 
     if not expire_by_reason:
         return 0
     now = str(decision_time)
     changed = 0
     for reason, generations in expire_by_reason.items():
-        before = world_conn.total_changes
-        world_conn.executemany(
+        cur = world_conn.executemany(
             """
                 UPDATE opportunity_event_processing
                    SET processing_status = 'expired',
@@ -10727,7 +13101,10 @@ def _edli_apply_unadmitted_redecision_expiry(
                 for generation in generations
             ),
         )
-        changed += int(world_conn.total_changes - before)
+        # Projection triggers add their own DELETE/INSERT changes. The expiry
+        # result is the number of processing rows whose exact CAS generation
+        # terminalized, not SQLite's aggregate trigger side effects.
+        changed += int(cur.rowcount or 0)
     return changed
 
 
@@ -10829,6 +13206,7 @@ def run_edli_continuous_redecision_screen_cycle(*, screen_lock) -> None:
             _all_latest_beliefs,
             entry_substrate_refresh_scope,
             filter_redecisions_with_spine_members,
+            RepriceDecision,
             screen_entry_redecisions,
             screened_family_keys,
             screen_resting_orders,
@@ -10837,6 +13215,7 @@ def run_edli_continuous_redecision_screen_cycle(*, screen_lock) -> None:
         from src.state.db import (
             get_world_connection_read_only,
             get_trade_connection_read_only,
+            get_trade_connection_with_world_required,
             get_world_connection,
             get_forecasts_connection_read_only,
         )
@@ -10850,12 +13229,22 @@ def run_edli_continuous_redecision_screen_cycle(*, screen_lock) -> None:
 
         # 1) ENTRY screen + rest screen on RO connections (pure read, no HTTP).
         world_ro = get_world_connection_read_only()
-        trade_ro = get_trade_connection_read_only()
+        trade_ro = get_trade_connection_with_world_required(write_class=None)
+        trade_ro.execute("PRAGMA query_only=ON")
+        policy_rest_pulls = []
         try:
             all_beliefs = _all_latest_beliefs(
                 world_ro,
                 decision_time=received_at,
                 forecast_only_admissible=True,
+            )
+            # Entry admission is forecast-phase scoped; management of an order
+            # Zeus already submitted is not.  Day0 maker rests must remain
+            # enumerable after the family leaves forecast-only admission, or a
+            # live order silently disappears from cancel/reprice re-decision.
+            management_beliefs = _all_latest_beliefs(
+                world_ro,
+                decision_time=received_at,
             )
             beliefs, screened_belief_keys, total_beliefs = _edli_redecision_screen_belief_batch(
                 all_beliefs,
@@ -10903,7 +13292,7 @@ def run_edli_continuous_redecision_screen_cycle(*, screen_lock) -> None:
             open_rests = _edli_open_maker_rests_for_screen(
                 trade_ro,
                 world_ro,
-                beliefs=all_beliefs,
+                beliefs=management_beliefs,
             )
             entry_refresh_condition_scope = entry_substrate_refresh_scope(
                 trade_ro,
@@ -10918,8 +13307,35 @@ def run_edli_continuous_redecision_screen_cycle(*, screen_lock) -> None:
                 open_rests=open_rests,
                 decision_time=received_at,
             )
+            policy_blocks = _edli_policy_blocked_open_rest_commands(
+                trade_ro,
+                open_rests,
+                decision_time=now,
+            )
+            policy_rest_pulls = [
+                (
+                    rest,
+                    RepriceDecision(
+                        family_id=rest.family_id,
+                        bin_label=rest.bin_label,
+                        side=rest.side,
+                        action="CANCEL_REPLACE",
+                        reason=policy_blocks[rest.command_id],
+                    ),
+                )
+                for rest in open_rests
+                if rest.command_id in policy_blocks
+            ]
+            if policy_blocks:
+                rest_pulls = [
+                    pair for pair in rest_pulls
+                    if pair[0].command_id not in policy_blocks
+                ]
             entry_condition_scope = _edli_redecision_condition_scope(entry_redecisions, beliefs)
-            open_rest_condition_scope = _edli_open_rest_condition_scope(open_rests, all_beliefs)
+            open_rest_condition_scope = _edli_open_rest_condition_scope(
+                open_rests,
+                management_beliefs,
+            )
             rest_condition_scope = _edli_rest_pull_condition_scope(rest_pulls, beliefs)
         finally:
             try:
@@ -10930,6 +13346,14 @@ def run_edli_continuous_redecision_screen_cycle(*, screen_lock) -> None:
                 trade_ro.close()
             except Exception:  # noqa: BLE001
                 pass
+
+        # Policy-invalid rests are executable stale decisions, not quote-driven
+        # reprices.  Cancel them before any confirmation refresh or world-write
+        # contention can defer the venue side effect.  A later allowed revision
+        # re-enters through the ordinary fresh certificate path.
+        policy_cancelled = 0
+        if policy_rest_pulls and get_mode() == "live":
+            policy_cancelled = _edli_cancel_rest_pulls(policy_rest_pulls)
 
         # A rest-pull family must also re-decide (cancel + re-decide at fresh price). Add its
         # family key to the re-emit restriction so the reactor re-certifies it; the cancel itself
@@ -11108,6 +13532,10 @@ def run_edli_continuous_redecision_screen_cycle(*, screen_lock) -> None:
                     decision_time=received_at,
                     forecast_only_admissible=True,
                 )
+                management_beliefs = _all_latest_beliefs(
+                    world_ro,
+                    decision_time=received_at,
+                )
                 beliefs = _edli_filter_beliefs_to_family_keys(
                     all_beliefs,
                     screened_belief_keys,
@@ -11142,7 +13570,7 @@ def run_edli_continuous_redecision_screen_cycle(*, screen_lock) -> None:
                 open_rests = _edli_open_maker_rests_for_screen(
                     trade_ro,
                     world_ro,
-                    beliefs=all_beliefs,
+                    beliefs=management_beliefs,
                 )
                 rest_pulls = screen_resting_orders(
                     world_ro,
@@ -11251,11 +13679,14 @@ def run_edli_continuous_redecision_screen_cycle(*, screen_lock) -> None:
             _log.info(
                 "edli_redecision_screen: entry_candidates=%d entry_spine_confirmed=%d "
                 "entry_families=0 rest_pulls=%d "
+                "policy_rest_pulls=%d policy_rests_cancelled=%d "
                 "held_monitor_families=%d held_reemit_families=0 families_reemitted=0 "
                 "events_emitted=0 rests_cancelled=0 expired_unadmitted=%d reason=no_screened_families",
                 len(redecisions),
                 len(entry_redecisions),
                 len(rest_pulls),
+                len(policy_rest_pulls),
+                policy_cancelled,
                 len(held_families),
                 expired_unadmitted,
             )
@@ -11340,7 +13771,15 @@ def run_edli_continuous_redecision_screen_cycle(*, screen_lock) -> None:
                     already_pending_keys=pending,
                     event_type=REDECISION_EVENT_TYPE,
                     restrict_to_families=emit_families,
-                    phase_filter_exempt_families=set(),
+                    # A pulled rest and a held position are existing capital
+                    # obligations, not new-entry discovery.  They must keep
+                    # re-deciding after the family enters Day0; otherwise the
+                    # forecast-phase filter drops the escalation event after a
+                    # venue-confirmed cancel and the next generic price event
+                    # can recreate the same maker rest.
+                    phase_filter_exempt_families=(
+                        set(rest_pull_families) | set(held_reemit_families)
+                    ),
                 )
             else:
                 events_to_emit = []
@@ -11429,32 +13868,18 @@ def run_edli_continuous_redecision_screen_cycle(*, screen_lock) -> None:
         #    venue call site). The next reactor cycle re-decides the re-emitted family at fresh price.
         cancelled = 0
         if rest_pulls and get_mode() == "live":
-            from src.data.polymarket_client import PolymarketClient
-            from src.execution.venue_cancel_journal import run_persisted_cancels_for_expired_rests
-            from src.state.db import get_trade_connection
-
-            to_cancel = [
-                {"command_id": rest.command_id, "venue_order_id": rest.venue_order_id,
-                 "created_at": rest.created_at, "fact_state": rest.fact_state,
-                 "matched_size": rest.matched_size, "cancel_reason": decision.reason,
-                 "cancel_action": decision.action, "cancel_detail": decision.detail}
-                for rest, decision in rest_pulls
-            ]
-            cstats = run_persisted_cancels_for_expired_rests(
-                to_cancel,
-                PolymarketClient(),
-                conn_factory=lambda: get_trade_connection(write_class="live"),
-            )
-            cancelled = cstats.get("cancelled", 0)
+            cancelled = _edli_cancel_rest_pulls(rest_pulls)
 
         _log.info(
             "edli_redecision_screen: entry_candidates=%d entry_spine_confirmed=%d "
             "entry_families=%d rest_pulls=%d "
+            "policy_rest_pulls=%d policy_rests_cancelled=%d "
             "held_monitor_families=%d held_reemit_families=%d families_reemitted=%d "
             "pending_redecision_families=%d suppressed_existing_pending=%d "
             "events_emitted=%d rests_cancelled=%d expired_unadmitted=%d "
             "expired_stale_pending=%d expired_rest_pull_blockers=%d",
-            len(redecisions), len(entry_redecisions), len(family_keys), len(rest_pulls), len(held_families),
+            len(redecisions), len(entry_redecisions), len(family_keys), len(rest_pulls),
+            len(policy_rest_pulls), policy_cancelled, len(held_families),
             len(held_reemit_families),
             len(all_families),
             len(pending_families),

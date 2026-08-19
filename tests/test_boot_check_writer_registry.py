@@ -1,6 +1,6 @@
 # Created: 2026-05-18
 # Last reused or audited: 2026-05-18
-# Authority basis: /Users/leofitz/.claude/jobs/9ea6f95c/briefs/f44_recurrence_prevention.md §Slice 3
+# Authority basis: ~/.claude/jobs/9ea6f95c/briefs/f44_recurrence_prevention.md §Slice 3
 """A5 boot-check antibody tests — assert_writer_jobs_registered.
 
 Three test cases per the F44 recurrence-prevention brief:

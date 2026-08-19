@@ -1,8 +1,10 @@
 # Created: 2026-04-27
-# Lifecycle: created=2026-04-27; last_reviewed=2026-04-27; last_reused=2026-04-27
+# Last reused/audited: 2026-08-10
+# Lifecycle: created=2026-04-27; last_reviewed=2026-08-10; last_reused=2026-08-10
 # Purpose: M1 antibodies for command-side grammar amendment without collapsing U2 order/trade facts.
 # Reuse: Run when CommandState, CommandEventType, or venue_command_repo transitions change.
-# Authority basis: docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/M1.yaml
+# Authority basis: docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/M1.yaml;
+#                  architecture/invariants.yaml INV-29 current command-event amendment.
 """M1 command grammar amendment tests."""
 
 from __future__ import annotations
@@ -34,10 +36,21 @@ def conn():
     c.row_factory = sqlite3.Row
     init_schema(c)
     init_schema_trade_only(c)
+    c.execute("ATTACH DATABASE ':memory:' AS world")
+    c.execute(
+        "CREATE TABLE world.decision_certificates (certificate_hash TEXT PRIMARY KEY, certificate_type TEXT NOT NULL, mode TEXT NOT NULL, verifier_status TEXT NOT NULL, payload_json TEXT NOT NULL)"
+    )
     insert_snapshot(c, _snapshot())
-    insert_submission_envelope(c, _envelope(), envelope_id="env-m1")
     yield c
     c.close()
+
+
+@pytest.fixture(autouse=True)
+def offline_command_grammar_context(monkeypatch):
+    """Grammar-only tests exercise offline journal construction explicitly."""
+    monkeypatch.delenv("ZEUS_ENTRY_Q_VERSION_STRICT", raising=False)
+    monkeypatch.delenv("ZEUS_MODE", raising=False)
+    monkeypatch.delenv("XPC_SERVICE_NAME", raising=False)
 
 
 def _snapshot(snapshot_id: str = "snap-m1") -> ExecutableMarketSnapshot:
@@ -91,11 +104,11 @@ def _envelope(envelope_id: str = "env-m1") -> VenueSubmissionEnvelope:
         no_token_id="no-m1",
         selected_outcome_token_id="yes-m1",
         outcome_label="YES",
-        side="SELL",
+        side="BUY",
         price=Decimal("0.50"),
         size=Decimal("10"),
         order_type="GTC",
-        post_only=False,
+        post_only=True,
         tick_size=Decimal("0.01"),
         min_order_size=Decimal("0.01"),
         neg_risk=False,
@@ -115,22 +128,31 @@ def _envelope(envelope_id: str = "env-m1") -> VenueSubmissionEnvelope:
 
 
 def _insert(conn, command_id: str = "cmd-m1") -> None:
+    import hashlib
+    envelope = _envelope()
+    envelope_id = hashlib.sha256(envelope.to_json().encode("utf-8")).hexdigest()
+    conn.execute(
+        "INSERT OR REPLACE INTO world.decision_certificates VALUES (?, 'ActionableTradeCertificate', 'LIVE', 'VERIFIED', ?)",
+        (f"cert-{command_id}", '{"condition_id":"condition-m1","token_id":"yes-m1","direction":"buy_yes"}'),
+    )
     insert_command(
         conn,
         command_id=command_id,
         snapshot_id="snap-m1",
-        envelope_id="env-m1",
+        envelope_id=envelope_id,
+        submission_envelope=envelope,
         position_id="pos-m1",
         decision_id="dec-m1",
         idempotency_key=command_id.replace("-", "")[:8].ljust(32, "0"),
         intent_kind="ENTRY",
         market_id="condition-m1",
         token_id="yes-m1",
-        side="SELL",
+        side="BUY",
         size=10,
         price=0.50,
         created_at=NOW.isoformat(),
         snapshot_checked_at=NOW.isoformat(),
+        decision_certificate_hash=f"cert-{command_id}",
     )
 
 
@@ -185,7 +207,34 @@ def test_m1_pre_side_effect_transition_chain_is_legal(conn):
 
 def test_submit_timeout_unknown_enters_side_effect_unknown_state(conn):
     _insert(conn)
-    append_event(conn, command_id="cmd-m1", event_type="SUBMIT_REQUESTED", occurred_at=NOW.isoformat())
+    append_event(
+        conn,
+        command_id="cmd-m1",
+        event_type="SUBMIT_REQUESTED",
+        occurred_at=NOW.isoformat(),
+        payload={
+            "execution_capability": {
+                "allowed": True,
+                "components": [
+                    {
+                        "component": "entry_economics",
+                        "allowed": True,
+                        "details": {
+                            "q_live": 0.6, "q_lcb_5pct": 0.5,
+                            "expected_edge": 0.1, "min_entry_price": 0.05,
+                            "limit_price": 0.5, "submit_edge": 0.1,
+                            "expected_profit_usd": 1.0,
+                            "min_expected_profit_usd": 0.01,
+                            "submit_edge_density": 0.1,
+                            "min_submit_edge_density": 0.01,
+                            "shares": 10.0, "qkernel_side": "buy_yes",
+                        },
+                    },
+                    {"component": "entry_actionable_certificate", "allowed": True},
+                ],
+            }
+        },
+    )
     append_event(conn, command_id="cmd-m1", event_type="SUBMIT_TIMEOUT_UNKNOWN", occurred_at=NOW.isoformat())
 
     assert get_command(conn, "cmd-m1")["state"] == "SUBMIT_UNKNOWN_SIDE_EFFECT"
@@ -202,23 +251,16 @@ def test_cancel_failure_events_are_grammar_bound_to_review_required(conn):
 def test_inv_29_amendment_is_incorporated_with_planning_lock_receipt():
     from src.execution.command_bus import CommandEventType, CommandState
 
-    index = open(
-        "docs/operations/task_2026-04-26_ultimate_plan/r3/operator_decisions/INDEX.md",
-        encoding="utf-8",
-    ).read()
-    receipt_path = (
-        "docs/operations/task_2026-04-26_ultimate_plan/r3/operator_decisions/"
-        "inv_29_amendment_2026-04-27.md"
-    )
-    assert "INV-29 amendment" in index
-    assert receipt_path in index
+    receipt_path = "docs/operations/current/finite_evidence_probability_symmetry/PLAN.md"
 
     invariants = yaml.safe_load(open("architecture/invariants.yaml", encoding="utf-8"))
     inv29 = next(item for item in invariants["invariants"] if item["id"] == "INV-29")
     amendment = inv29["amendment"]
 
+    assert amendment["id"] == "GLOBAL-CAPITAL-NC18-CREATION-EVENTS-2026-08-10"
     assert amendment["status"] == "incorporated"
     assert amendment["receipt"] == receipt_path
+    assert amendment["supersedes_id"] == "R3-M1-INV-29-2026-04-27"
     assert set(amendment["command_state_values"]) == {state.value for state in CommandState}
     assert set(amendment["command_event_type_values"]) == {
         event.value for event in CommandEventType

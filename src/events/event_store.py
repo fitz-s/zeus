@@ -22,6 +22,10 @@ from typing import Any, Callable
 from src.events.opportunity_event import OpportunityEvent, make_opportunity_event
 
 GLOBAL_WINNER_TARGETED_CLAIM = "GLOBAL_WINNER_TARGETED_CLAIM"
+GLOBAL_WINNER_SUBMIT_FENCED = "GLOBAL_WINNER_SUBMIT_FENCED"
+_GLOBAL_WINNER_CLAIM_REASONS = frozenset(
+    {GLOBAL_WINNER_TARGETED_CLAIM, GLOBAL_WINNER_SUBMIT_FENCED}
+)
 _GLOBAL_WINNER_TARGET_SOURCE_PREFIX = "global_auction_winner_target:"
 _GLOBAL_WINNER_POINTER_SUFFIX = ":global_winner_v1"
 _GLOBAL_WINNER_EMPTY_POINTER_EVENT_ID = "__global_winner_none__"
@@ -236,9 +240,87 @@ class EventStore:
         with _winner_hint_lock:
             _winner_hints[self._winner_hint_key] = (candidate, None)
 
-    def _bind_winner_pointer(self, event_id: str, *, updated_at: str) -> None:
+    def _bind_winner_pointer(
+        self,
+        event_id: str,
+        *,
+        updated_at: str,
+        preserve_processing_event_ids: frozenset[str] = frozenset(),
+    ) -> None:
         """Persist the sole global winner through an existing indexed consumer."""
 
+        superseded_target_ids = tuple(
+            str(row[0])
+            for row in self.conn.execute(
+                """
+                SELECT event_id
+                  FROM opportunity_event_processing
+                 WHERE consumer_name = ?
+                   AND processing_status = 'pending'
+                   AND event_id <> ?
+                """,
+                (self._winner_pointer_consumer_name, event_id),
+            ).fetchall()
+            if str(row[0] or "")
+        )
+        terminalizable_target_ids = tuple(
+            target_id
+            for target_id in superseded_target_ids
+            if target_id not in preserve_processing_event_ids
+        )
+        if terminalizable_target_ids:
+            # SCOPE: only superseded global-winner main claims without a venue
+            # submit attempt are terminalized, excluding claims owned by the
+            # current reactor epoch. DRAIN: the epoch finalizes its preserved
+            # claims from their exact receipts; pointer supersession expires
+            # abandoned claims in this transaction. RESET: after finalization
+            # the preserved generation leaves processing, while a carrier with
+            # a durable venue attempt remains recovery-owned.
+            live_order_events_available = _table_exists(
+                self.conn,
+                "edli_live_order_events",
+            )
+            for start in range(0, len(terminalizable_target_ids), 250):
+                chunk = terminalizable_target_ids[start : start + 250]
+                placeholders = ",".join("?" for _ in chunk)
+                durable_command_predicate = (
+                    """
+                       AND NOT EXISTS (
+                            SELECT 1
+                              FROM edli_live_order_events AS order_event
+                             WHERE order_event.event_type IN (
+                                       'ExecutionCommandCreated',
+                                       'VenueSubmitAttempted'
+                                   )
+                               AND order_event.aggregate_id
+                                   GLOB main.event_id || ':*'
+                       )
+                    """
+                    if live_order_events_available
+                    else ""
+                )
+                self.conn.execute(
+                    f"""
+                    UPDATE opportunity_event_processing AS main
+                       SET processing_status = 'expired',
+                           claimed_at = NULL,
+                           processed_at = ?,
+                           last_error = 'GLOBAL_WINNER_TARGET_SUPERSEDED',
+                           updated_at = ?
+                     WHERE main.consumer_name = ?
+                       AND main.processing_status IN ('pending', 'processing')
+                       AND main.event_id IN ({placeholders})
+                       {durable_command_predicate}
+                    """,
+                    (
+                        updated_at,
+                        updated_at,
+                        self.consumer_name,
+                        *chunk,
+                    ),
+                )
+                for superseded_id in chunk:
+                    self._forget_winner(superseded_id)
         self.conn.execute(
             """
             UPDATE opportunity_event_processing
@@ -921,6 +1003,7 @@ class EventStore:
         limit: int = 100,
         targeted_event_ids: frozenset[str] = frozenset(),
         targeted_only: bool = False,
+        bridge_stale_debt_slots: int = 0,
     ) -> list[OpportunityEvent]:
         """Fetch pending events in deterministic replay/inference order.
 
@@ -955,6 +1038,12 @@ class EventStore:
         may select an unpaged winner from its complete current universe, so its
         persisted claim must remain reachable even while producer wakes are
         continuous.
+
+        ``bridge_stale_debt_slots`` is an invocation-local fairness reserve for
+        that producer bridge only. SCOPE is non-target FSR/redecision debt for
+        this consumer and page. DRAIN selects the oldest currently claimable
+        row into the reserved tail slot. RESET is automatic when that row is
+        processed, expires, or ceases to be claimable; no process latch exists.
         """
 
         self._require_world_event_tables()
@@ -1007,6 +1096,11 @@ class EventStore:
                 if (event_id := str(raw_event_id or "").strip())
             )
         )[:100]
+        debt_slot_count = (
+            max(0, min(int(bridge_stale_debt_slots), max(0, int(limit))))
+            if targeted_only and self.consumer_name == "edli_reactor_v1"
+            else 0
+        )
         if targeted_only and not clean_targeted_event_ids:
             return []
         rows: list[tuple[object, ...]] = []
@@ -1019,6 +1113,7 @@ class EventStore:
         winner_hint = self._discover_winner(parsed_decision_time)
         hinted_winner_id = winner_hint[0] if winner_hint is not None else ""
         event_cols = ", ".join(f"e.{key}" for key in _EVENT_ROW_KEYS)
+        bridge_debt_event_ids: list[str] = []
         if targeted_only:
             lookup_event_ids = tuple(
                 event_id
@@ -1088,6 +1183,126 @@ class EventStore:
                 ):
                     continue
                 rows.append(event_tuple + (attempt_by_event[event_id],))
+            if debt_slot_count:
+                excluded_ids = tuple(
+                    event_id
+                    for event_id in dict.fromkeys(
+                        (*clean_targeted_event_ids, hinted_winner_id)
+                    )
+                    if event_id
+                )
+                excluded_sql = ""
+                excluded_args: tuple[str, ...] = ()
+                if excluded_ids:
+                    excluded_sql = (
+                        "AND p.event_id NOT IN ("
+                        + ",".join("?" for _ in excluded_ids)
+                        + ")"
+                    )
+                    excluded_args = excluded_ids
+                probe_limit = max(32, debt_slot_count * 8)
+                debt_candidates: list[tuple[str, int, str, int, str]] = []
+                lane_specs = (
+                    (
+                        "idx_opportunity_event_processing_pending_retry_floor",
+                        "p.processing_status = 'pending' AND p.claimed_at IS NULL",
+                        (),
+                        0,
+                    ),
+                    (
+                        "idx_opportunity_event_processing_pending_retry_floor",
+                        "p.processing_status = 'pending' "
+                        "AND p.claimed_at IS NOT NULL AND p.claimed_at <= ?",
+                        (parsed_decision_time.isoformat(),),
+                        0,
+                    ),
+                    (
+                        "idx_opportunity_event_processing_stale_claim",
+                        "p.processing_status = 'processing' "
+                        "AND p.claimed_at IS NOT NULL AND p.claimed_at <= ?",
+                        (stale_processing_before,),
+                        1,
+                    ),
+                )
+                for index_name, lane_sql, lane_args, stale_reclaim in lane_specs:
+                    lane_rows = self.conn.execute(
+                        f"""
+                        SELECT p.event_id,
+                               p.attempt_count,
+                               p.last_error,
+                               p.updated_at
+                          FROM opportunity_event_processing p
+                               INDEXED BY {index_name}
+                         WHERE p.consumer_name = ?
+                           AND {lane_sql}
+                           {excluded_sql}
+                           AND COALESCE(p.last_error, '') <> ?
+                           AND EXISTS (
+                                SELECT 1
+                                  FROM opportunity_events e
+                                 WHERE e.event_id = p.event_id
+                                   AND e.event_type IN (
+                                        'FORECAST_SNAPSHOT_READY',
+                                        'EDLI_REDECISION_PENDING'
+                                   )
+                                   AND e.available_at <= ?
+                                   AND e.received_at <= ?
+                                   AND (e.expires_at IS NULL OR e.expires_at > ?)
+                           )
+                         ORDER BY p.updated_at ASC, p.event_id ASC
+                         LIMIT ?
+                        """,
+                        (
+                            self.consumer_name,
+                            *lane_args,
+                            *excluded_args,
+                            GLOBAL_WINNER_TARGETED_CLAIM,
+                            parsed_decision_time.isoformat(),
+                            parsed_decision_time.isoformat(),
+                            parsed_decision_time.isoformat(),
+                            probe_limit,
+                        ),
+                    ).fetchall()
+                    debt_candidates.extend(
+                        (
+                            str(row[0] or ""),
+                            _safe_int(row[1]),
+                            str(row[2] or ""),
+                            stale_reclaim,
+                            str(row[3] or ""),
+                        )
+                        for row in lane_rows
+                    )
+                seen_debt_ids: set[str] = set()
+                for event_id, attempt_count, last_error, stale_reclaim, _updated_at in sorted(
+                    debt_candidates,
+                    key=lambda item: (item[4], item[0]),
+                ):
+                    if not event_id or event_id in seen_debt_ids:
+                        continue
+                    seen_debt_ids.add(event_id)
+                    event_row = self.conn.execute(
+                        f"SELECT {event_cols} FROM opportunity_events e WHERE e.event_id = ?",
+                        (event_id,),
+                    ).fetchone()
+                    if event_row is None:
+                        continue
+                    event_tuple = tuple(event_row[:event_col_count])
+                    if _selection_deadline_past(
+                        last_error,
+                        parsed_decision_time,
+                    ):
+                        continue
+                    event = _event_from_row(event_tuple)
+                    if not self._is_timely(event, parsed_decision_time):
+                        continue
+                    attempt_by_event[event_id] = attempt_count
+                    last_error_by_event[event_id] = last_error
+                    stale_reclaim_by_event[event_id] = stale_reclaim
+                    bridge_debt_event_ids.append(event_id)
+                    rows.append(event_tuple + (attempt_count,))
+                    if len(bridge_debt_event_ids) >= debt_slot_count:
+                        break
         point_event_ids = tuple(
             event_id
             for event_id in dict.fromkeys(
@@ -1125,6 +1340,7 @@ class EventStore:
                                 p.processing_status = 'processing'
                                 AND p.claimed_at IS NOT NULL
                                 AND p.claimed_at <= ?
+                                AND COALESCE(p.last_error, '') <> ?
                             )
                        )
                     """,
@@ -1133,6 +1349,7 @@ class EventStore:
                         *point_event_ids,
                         parsed_decision_time.isoformat(),
                         stale_processing_before,
+                        GLOBAL_WINNER_SUBMIT_FENCED,
                     ),
                 ).fetchall()
             )
@@ -1210,10 +1427,16 @@ class EventStore:
                        AND p.processing_status = 'processing'
                        AND p.claimed_at IS NOT NULL
                        AND p.claimed_at <= ?
+                       AND COALESCE(p.last_error, '') <> ?
                      ORDER BY p.claimed_at ASC
                      LIMIT ?
                     """,
-                    (self.consumer_name, stale_processing_before, active_limit),
+                    (
+                        self.consumer_name,
+                        stale_processing_before,
+                        GLOBAL_WINNER_SUBMIT_FENCED,
+                        active_limit,
+                    ),
                 ).fetchall()
             )
         if not rows and not active_rows:
@@ -1351,6 +1574,13 @@ class EventStore:
         )
         events = [event for event, _attempt_count in ranked]
         timely = [event for event in events if self._is_timely(event, parsed_decision_time)]
+        if targeted_only and debt_slot_count and bridge_debt_event_ids:
+            debt_ids = frozenset(bridge_debt_event_ids)
+            debt = [event for event in timely if event.event_id in debt_ids]
+            if debt:
+                reserved = min(debt_slot_count, int(limit), len(debt))
+                priority = [event for event in timely if event.event_id not in debt_ids]
+                return priority[: max(0, int(limit) - reserved)] + debt[:reserved]
         return timely[:limit]
 
     def archive_expired_candidates(
@@ -2050,9 +2280,12 @@ class EventStore:
             where_sql="""
                AND e.event_type IN ('FORECAST_SNAPSHOT_READY', 'EDLI_REDECISION_PENDING')
                AND e.entity_key IS NOT NULL
-               AND COALESCE(p.last_error, '') <> ?
+               AND COALESCE(p.last_error, '') NOT IN (?, ?)
             """,
-            params=(GLOBAL_WINNER_TARGETED_CLAIM,),
+            params=(
+                GLOBAL_WINNER_TARGETED_CLAIM,
+                GLOBAL_WINNER_SUBMIT_FENCED,
+            ),
             batch_limit=batch_limit,
         )
         if not candidate_rows:
@@ -2487,8 +2720,7 @@ class EventStore:
             )
         if not updates:
             return 0
-        before = self.conn.total_changes
-        self.conn.executemany(
+        cur = self.conn.executemany(
             """
             UPDATE opportunity_event_processing
                SET processing_status = 'expired',
@@ -2501,7 +2733,8 @@ class EventStore:
             """,
             updates,
         )
-        return int(self.conn.total_changes - before)
+        rowcount = cur.rowcount
+        return rowcount if isinstance(rowcount, int) and rowcount > 0 else 0
 
     @staticmethod
     def _strictly_past_in_tz(
@@ -2653,6 +2886,20 @@ class EventStore:
                     processing_status = 'processing'
                     AND claimed_at IS NOT NULL
                     AND claimed_at <= ?
+                    AND COALESCE(last_error, '') <> ?
+                    AND (
+                        COALESCE(last_error, '') <> ?
+                        OR NOT EXISTS (
+                            SELECT 1
+                              FROM edli_live_order_events AS order_event
+                             WHERE order_event.event_type IN (
+                                       'ExecutionCommandCreated',
+                                       'VenueSubmitAttempted'
+                                   )
+                               AND order_event.aggregate_id
+                                   GLOB opportunity_event_processing.event_id || ':*'
+                        )
+                    )
                  )
                )
             """,
@@ -2664,6 +2911,8 @@ class EventStore:
                 (_parse_utc(claimed_at) - timedelta(seconds=self.processing_lease_seconds)).isoformat()
                 if claimed_at is not None
                 else (datetime.now(timezone.utc) - timedelta(seconds=self.processing_lease_seconds)).isoformat(),
+                GLOBAL_WINNER_SUBMIT_FENCED,
+                GLOBAL_WINNER_TARGETED_CLAIM,
             ),
         )
         return cur.rowcount == 1
@@ -2763,7 +3012,7 @@ class EventStore:
             "WHERE consumer_name = ? AND event_id = ?",
             (not_before, last_error, _utc_now(), self.consumer_name, event_id),
         )
-        if last_error == GLOBAL_WINNER_TARGETED_CLAIM:
+        if last_error in _GLOBAL_WINNER_CLAIM_REASONS:
             row = self.conn.execute(
                 "SELECT received_at FROM opportunity_events WHERE event_id = ?",
                 (event_id,),
@@ -2816,7 +3065,7 @@ class EventStore:
                 if owns_transaction:
                     self.conn.commit()
                 return False
-            targeted = str(row[0] or "") == GLOBAL_WINNER_TARGETED_CLAIM
+            targeted = str(row[0] or "") in _GLOBAL_WINNER_CLAIM_REASONS
             pointer_current = bool(
                 targeted
                 and self.conn.execute(
@@ -2832,7 +3081,82 @@ class EventStore:
                 ).fetchone()
             )
             now = _utc_now()
-            if targeted and not pointer_current:
+            side_effect_free_rejected_command = bool(
+                targeted
+                and _table_exists(self.conn, "edli_live_order_events")
+                and self.conn.execute(
+                    """
+                    SELECT 1
+                      FROM edli_live_order_events AS rejected
+                     WHERE rejected.event_type = 'SubmitRejected'
+                       AND rejected.aggregate_id GLOB ?
+                       AND COALESCE(
+                            json_extract(
+                                rejected.payload_json,
+                                '$.pre_submit_rejection'
+                            ),
+                            0
+                       ) = 1
+                       AND COALESCE(
+                            json_extract(
+                                rejected.payload_json,
+                                '$.venue_call_started'
+                            ),
+                            0
+                       ) = 0
+                       AND EXISTS (
+                            SELECT 1
+                              FROM edli_live_order_events AS command
+                             WHERE command.event_type = 'ExecutionCommandCreated'
+                               AND command.aggregate_id = rejected.aggregate_id
+                       )
+                       AND NOT EXISTS (
+                            SELECT 1
+                              FROM edli_live_order_events AS attempted
+                             WHERE attempted.event_type = 'VenueSubmitAttempted'
+                               AND attempted.aggregate_id GLOB ?
+                       )
+                     LIMIT 1
+                    """,
+                    (f"{event_id}:*", f"{event_id}:*"),
+                ).fetchone()
+            )
+            if side_effect_free_rejected_command:
+                # A command certificate is immutable once appended, so retrying
+                # this carrier would collide with its terminal no-submit proof
+                # and fail the command fence forever.  No venue call occurred:
+                # retire only this carrier.  The next auction materializes the
+                # same current opportunity under a fresh claim_retry identity.
+                # SCOPE: one targeted carrier with explicit pre-submit rejection
+                # and no VenueSubmitAttempted event. DRAIN: the next global cut
+                # creates and claims a fresh carrier. RESET: any venue attempt
+                # makes this branch false and leaves recovery in authority.
+                cur = self.conn.execute(
+                    """
+                    UPDATE opportunity_event_processing
+                       SET processing_status = 'expired',
+                           claimed_at = NULL,
+                           processed_at = ?,
+                           last_error = 'GLOBAL_WINNER_TARGET_SUPERSEDED',
+                           updated_at = ?
+                     WHERE consumer_name = ?
+                       AND event_id = ?
+                       AND processing_status = 'processing'
+                       AND claimed_at = ?
+                       AND attempt_count = ?
+                    """,
+                    (
+                        now,
+                        now,
+                        self.consumer_name,
+                        event_id,
+                        claimed_at,
+                        int(attempt_count),
+                    ),
+                )
+                if cur.rowcount == 1:
+                    self._forget_winner(event_id)
+            elif targeted and not pointer_current:
                 cur = self.conn.execute(
                     """
                     UPDATE opportunity_event_processing
@@ -2962,7 +3286,7 @@ class EventStore:
                    claimed_at = NULL,
                    processed_at = NULL,
                    last_error = CASE
-                       WHEN last_error = ? THEN last_error
+                       WHEN last_error IN (?, ?) THEN ?
                        ELSE 'PROCESS_OWNER_RESTARTED'
                    END,
                    updated_at = ?
@@ -2972,6 +3296,8 @@ class EventStore:
                AND claimed_at < ?
             """,
             (
+                GLOBAL_WINNER_TARGETED_CLAIM,
+                GLOBAL_WINNER_SUBMIT_FENCED,
                 GLOBAL_WINNER_TARGETED_CLAIM,
                 now,
                 self.consumer_name,
@@ -3030,17 +3356,18 @@ class EventStore:
             ordered_ids = sorted(allowed_claims)
             for start in range(0, len(ordered_ids), 250):
                 chunk = ordered_ids[start : start + 250]
-                placeholders = ",".join("?" for _ in chunk)
+                requested_values = ",".join("(?)" for _ in chunk)
                 rows = self.conn.execute(
                     f"""
-                    SELECT event_id, claimed_at
-                      FROM opportunity_event_processing
-                     WHERE consumer_name = ?
-                       AND processing_status = 'processing'
-                       AND claimed_at IS NOT NULL
-                       AND event_id IN ({placeholders})
+                    WITH requested(event_id) AS (VALUES {requested_values})
+                    SELECT p.event_id, p.claimed_at
+                      FROM requested CROSS JOIN opportunity_event_processing AS p
+                     WHERE p.consumer_name = ?
+                       AND p.event_id = requested.event_id
+                       AND p.processing_status = 'processing'
+                       AND p.claimed_at IS NOT NULL
                     """,
-                    (self.consumer_name, *chunk),
+                    (*chunk, self.consumer_name),
                 ).fetchall()
                 current_claims.update(
                     (str(row[0]), str(row[1]))
@@ -3050,6 +3377,13 @@ class EventStore:
             if current_claims != allowed_claims:
                 return None
 
+        now = _utc_now()
+        stale_processing_before = (
+            _parse_utc(now) - timedelta(seconds=self.processing_lease_seconds)
+        )
+        venue_attempt_ledger_available = _table_exists(
+            self.conn, "edli_live_order_events"
+        )
         processing_claims: dict[str, str] = {}
         target_source_event_id = _global_winner_target_source_event_id(
             event.source
@@ -3066,7 +3400,7 @@ class EventStore:
             }[event_type]
             rows = self.conn.execute(
                 f"""
-                SELECT e.event_id, p.processing_status, p.claimed_at
+                SELECT e.event_id, p.claimed_at, p.last_error
                   FROM opportunity_event_processing p
                        INDEXED BY idx_opportunity_event_processing_status
                   JOIN opportunity_events e ON e.event_id = p.event_id
@@ -3086,7 +3420,59 @@ class EventStore:
                 event_id = str(row[0] or "")
                 if not event_id:
                     continue
-                processing_claims[event_id] = str(row[2] or "")
+                claimed_at = str(row[1] or "")
+                targeted = str(row[2] or "") == GLOBAL_WINNER_TARGETED_CLAIM
+                stale_targeted = bool(
+                    targeted
+                    and claimed_at
+                    and _parse_utc(claimed_at) <= stale_processing_before
+                    and venue_attempt_ledger_available
+                )
+                if stale_targeted:
+                    # SCOPE: only a same-family global-winner carrier whose
+                    # processing lease expired may stop blocking a new carrier.
+                    # DRAIN: command recovery owns any already-persisted
+                    # pre-network command or venue side effect; this transaction
+                    # terminalizes the abandoned event claim after its finite
+                    # lease. RESET: a fresh target gets a new lease below and
+                    # blocks duplicates until that exact generation is finalized.
+                    cur = self.conn.execute(
+                        """
+                        UPDATE opportunity_event_processing
+                           SET processing_status = 'expired',
+                               claimed_at = NULL,
+                               processed_at = ?,
+                               last_error = 'GLOBAL_WINNER_TARGET_SUPERSEDED',
+                               updated_at = ?
+                         WHERE consumer_name = ?
+                           AND event_id = ?
+                           AND processing_status = 'processing'
+                           AND claimed_at = ?
+                           AND last_error = ?
+                           AND NOT EXISTS (
+                                SELECT 1
+                                  FROM edli_live_order_events AS order_event
+                                 WHERE order_event.event_type IN (
+                                           'ExecutionCommandCreated',
+                                           'VenueSubmitAttempted'
+                                       )
+                                   AND order_event.aggregate_id
+                                       GLOB opportunity_event_processing.event_id || ':*'
+                           )
+                        """,
+                        (
+                            now,
+                            now,
+                            self.consumer_name,
+                            event_id,
+                            claimed_at,
+                            GLOBAL_WINNER_TARGETED_CLAIM,
+                        ),
+                    )
+                    if cur.rowcount == 1:
+                        self._forget_winner(event_id)
+                        continue
+                processing_claims[event_id] = claimed_at
 
         if any(
             allowed_claims.get(event_id) != claimed_at
@@ -3094,7 +3480,6 @@ class EventStore:
         ):
             return None
 
-        now = _utc_now()
         pending_targets = [
             (target.event_id, target.source, target.received_at)
             for target in self._recent_pending_winner_targets()
@@ -3173,7 +3558,11 @@ class EventStore:
                     for row in same_source_targets
                     if str(row[0] or "") == retained_target_id
                 )
-                self._bind_winner_pointer(retained_target_id, updated_at=now)
+                self._bind_winner_pointer(
+                    retained_target_id,
+                    updated_at=now,
+                    preserve_processing_event_ids=frozenset(allowed_claims),
+                )
                 self._set_winner(retained_target_id, retained_received_at)
                 event_cols = ", ".join(_EVENT_ROW_KEYS)
                 row = self.conn.execute(
@@ -3259,7 +3648,11 @@ class EventStore:
         )
         prioritized = cur.rowcount == 1
         if prioritized:
-            self._bind_winner_pointer(event.event_id, updated_at=now)
+            self._bind_winner_pointer(
+                event.event_id,
+                updated_at=now,
+                preserve_processing_event_ids=frozenset(allowed_claims),
+            )
             self._set_winner(event.event_id, event.received_at)
             return event
         return None

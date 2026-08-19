@@ -131,6 +131,7 @@ def test_c2_underfill_of_full_close_command_is_not_a_close(conn, filled):
         size=1.0,
         price=0.60,
         state="ACKED",
+        exit_close_position=True,
     )
     append_trade_fact(
         conn,
@@ -166,6 +167,7 @@ def test_c2_exact_full_fill_of_command_still_closes(conn):
         size=1.0,
         price=0.60,
         state="ACKED",
+        exit_close_position=True,
     )
     append_trade_fact(
         conn,
@@ -201,6 +203,7 @@ def test_c2_underfill_check_pending_exits_preserves_chain_shares(conn):
         size=1.0,
         price=0.60,
         state="ACKED",
+        exit_close_position=True,
     )
     append_trade_fact(
         conn,
@@ -258,6 +261,7 @@ def test_c3_multi_fill_accumulates_exact_decimal_not_float(conn):
         size=0.3,
         price=0.50,
         state="ACKED",
+        exit_close_position=True,
     )
     append_trade_fact(
         conn,

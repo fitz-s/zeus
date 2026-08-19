@@ -1,5 +1,5 @@
 # Created: 2026-06-01
-# Last reused/audited: 2026-06-08
+# Last reused/audited: 2026-08-10
 # P3 lift (system_decomposition_plan §8 Step 3): _edli_durable_fill_bridge_scan moved from
 #   src.main to src.ingest.price_channel_ingest (it WRITES the durable bridge in the P3
 #   reconcile cycle; src.main's boot recovery imports the SAME canonical copy). Logic unchanged.
@@ -118,6 +118,7 @@ def _seed_confirmed_fill_aggregate(
     filled_size: float = 120.0,
     avg_fill_price: float = 0.42,
     execution_command_id: str | None = None,
+    venue_order_id: str = "vo-MF1",
 ) -> None:
     """Persist a FILL_CONFIRMED aggregate WITHOUT a position_current row.
 
@@ -176,7 +177,7 @@ def _seed_confirmed_fill_aggregate(
             "filled_size": filled_size,
             "avg_fill_price": avg_fill_price,
             "fees": 0.13,
-            "venue_order_id": "vo-MF1",
+            "venue_order_id": venue_order_id,
         },
         source_authority="user_channel",
     )
@@ -275,6 +276,44 @@ class TestDurableFillBridgeScan:
             (position_id,),
         ).fetchone()[0]
         assert entry_events == 1, "idempotency: no duplicate ENTRY position_events"
+
+    def test_bounded_multi_fill_drain_monotonically_reduces_orphan_backlog(self):
+        """A bounded repair pass cannot leave later confirmed fills indefinitely pending."""
+        from src.ingest.price_channel_ingest import _edli_durable_fill_bridge_scan
+
+        conn = _make_conn()
+        aggregate_ids = [f"evt-drain-{index}:fill-drain-{index}" for index in range(3)]
+        for index, aggregate_id in enumerate(aggregate_ids):
+            _seed_confirmed_fill_aggregate(
+                conn,
+                aggregate_id=aggregate_id,
+                token_id=f"0xNOTOKEN{index}",
+                execution_command_id=f"cmd-drain-{index}",
+                venue_order_id=f"vo-drain-{index}",
+            )
+
+        def _remaining() -> int:
+            return conn.execute("SELECT COUNT(*) FROM position_current").fetchone()[0]
+
+        remaining_before = len(aggregate_ids) - _remaining()
+        first = _edli_durable_fill_bridge_scan(
+            conn,
+            now=datetime(2026, 6, 1, tzinfo=timezone.utc),
+            limit=2,
+        )
+        conn.commit()
+        remaining_after_first = len(aggregate_ids) - _remaining()
+        second = _edli_durable_fill_bridge_scan(
+            conn,
+            now=datetime(2026, 6, 1, 0, 5, tzinfo=timezone.utc),
+            limit=2,
+        )
+        conn.commit()
+        remaining_after_second = len(aggregate_ids) - _remaining()
+
+        assert first == 2
+        assert second == 1
+        assert remaining_before > remaining_after_first > remaining_after_second == 0
 
     def test_existing_position_scan_repairs_stale_venue_command_position_link(self):
         """Already-bridged EDLI fills still need command-journal convergence.
@@ -476,6 +515,7 @@ class TestDurableFillBridgeScan:
                 "metric": "high",
                 "unit": "C",
                 "market_id": "mkt-MF1",
+                "executable_snapshot_id": "snap-mf1e",
             },
             source_authority="decision_kernel",
         )
@@ -504,9 +544,10 @@ class TestDurableFillBridgeScan:
         position_id = edli_bridge_position_id(aggregate_id)
         conn.execute(
             """INSERT INTO position_current
-               (position_id, phase, trade_id, strategy_key, updated_at, temperature_metric)
-               VALUES (?, 'active', ?, 'opening_inertia', '2026-06-01T00:00:00+00:00', 'high')""",
-            (position_id, position_id),
+               (position_id, phase, trade_id, strategy_key, updated_at, temperature_metric,
+                decision_snapshot_id)
+               VALUES (?, 'active', ?, 'opening_inertia', '2026-06-01T00:00:00+00:00', 'high', ?)""",
+            (position_id, position_id, "snap-mf1e"),
         )
         conn.execute(
             """

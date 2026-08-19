@@ -20,6 +20,7 @@ import math
 import os
 import sqlite3
 import tempfile
+import time
 from dataclasses import asdict, dataclass, field, fields
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
@@ -131,7 +132,7 @@ _CI_SEP_EPS: float = 1e-9
 _ZERO_D: Decimal = Decimal(0)
 # Single global friction margin M_x (COLLISION.md §保号: m_e = m_x = 1 tick).
 # Polymarket price granularity is one cent; the exit stop charges one tick per
-# share to the sell branch (exit_margin = _EXIT_TICK × shares).
+# sold share to the sell branch (margin = _EXIT_TICK × shares_sold).
 _EXIT_TICK: Decimal = Decimal("0.01")
 _EXIT_BID_FEE_EPS: float = 1e-6  # keep polymarket_fee finite at extreme bids
 # Breadcrumbs the exit stop re-derives every cycle. Stripped from the carried
@@ -277,12 +278,13 @@ class ExitContext:
     # 2026-05-31 severance deadlocked because the belief read opened a SECOND world connection
     # inside the reactor SAVEPOINT; threading the bounds through this frozen context means the
     # live CI-separation gate performs ZERO DB I/O, so that deadlock category is impossible.
-    #   entry_posterior : held-side belief point at entry (Position.p_posterior, frozen).
-    #   entry_ci        : (lo, hi) entry belief CI (entry_posterior ± entry_ci_width/2).
+    #   entry_posterior : optional held-side belief point at entry (attribution only).
+    #   entry_ci        : optional entry belief CI (attribution only).
     #   current_ci      : (lo, hi) CURRENT belief CI (fresh bootstrap from this cycle).
     #   belief_available: False when current belief math is degraded (day0 absorbing-mask /
     #                     obs gap) — the EVIDENCE_UNAVAILABLE third state (distinct from
-    #                     belief-reversed). Missing current_ci cannot authorize a local SELL.
+    #                     belief-reversed). Missing current_ci cannot authorize a local SELL;
+    #                     missing historical entry belief cannot suppress a complete current CI.
     entry_posterior: Optional[float] = None
     entry_ci: Optional[tuple] = None
     current_ci: Optional[tuple] = None
@@ -900,19 +902,19 @@ class Position:
         in lifecycle, risk, or monitor logic."""
         return self.city == QUARANTINE_SENTINEL
 
-    def _held_side_robust_lower(
+    def _held_side_point_with_confidence(
         self, exit_context: ExitContext
     ) -> tuple[Decimal, bool]:
-        """Held-side robust lower bound q⁻ and whether evidence supports a stop.
+        """Held-side posterior-predictive mean q and confidence-carrier validity.
 
         The current-belief CI arrives already in held-side native space
         (cycle_runtime shifts the edge band by the held-side price into the same
-        space as ``p_posterior``), so the NO-side native flip q⁻_NO = 1−q⁺_YES has
-        happened upstream — ``current_ci[0]`` is the genuine held-side q⁻ and must
-        NOT be re-derived by complementing the YES bound here. Returns
+        space as ``p_posterior``), so the NO-side native flip has already happened
+        upstream. The fresh point is the fixed-action payoff probability; the CI
+        proves current confidence/freshness but must not replace that point. Returns
         ``(0, False)`` whenever belief is degraded, the fresh probability is stale
-        or non-finite, or the CI is missing/malformed: evidence is then not ok and
-        the law holds EVIDENCE_UNAVAILABLE unless a settlement lock decides.
+        or non-finite, or the CI carrier is missing/malformed: evidence is then not
+        ok and the law holds EVIDENCE_UNAVAILABLE unless a settlement lock decides.
         """
         if not exit_context.belief_available:
             return _ZERO_D, False
@@ -933,7 +935,7 @@ class Position:
             return _ZERO_D, False
         if not (0.0 <= lo <= point <= hi <= 1.0):
             return _ZERO_D, False
-        return Decimal(str(lo)), True
+        return Decimal(str(point)), True
 
     def _settlement_preimage_lock(self, exit_context: ExitContext) -> LockState:
         """Map the Day0 absorbing hard-fact authority to a settlement lock.
@@ -963,9 +965,9 @@ class Position:
 
         Actuation is ALL-shares (build_exit_intent hard-codes shares=effective_shares;
         the partial-quantity path is the separate global-auction authority), so the
-        local stop is a boolean SELL, never a partial x*. The honest curve is the
-        single fillable-prefix breakpoint: walk the held-side bid ladder best-first,
-        x_fill = min(held, visible cumulative depth), proceeds = Σ rung·(price − fee).
+        local stop is a boolean signal into that auction. The caller must still expose
+        every executable cumulative prefix: walk the held-side bid ladder best-first
+        and append ``(x, L(x))`` after each positive rung up to the holding.
         Proceeds are NEVER extrapolated past visible depth — the unfillable remainder
         (held − x_fill) is held on BOTH sides of predicted_bin_law's comparison
         ((held−x)·q⁻ + L(x) vs held·q⁻) and cancels, so pricing the fillable prefix
@@ -998,6 +1000,7 @@ class Position:
             remaining = held
             proceeds = 0.0
             filled = 0.0
+            breakpoints: list[tuple[Decimal, Decimal]] = []
             for price, size in levels:
                 if remaining <= 0.0:
                     break
@@ -1007,7 +1010,10 @@ class Position:
                 proceeds += take * _net_per_share(float(price))
                 filled += take
                 remaining -= take
-            return ((Decimal(str(filled)), Decimal(str(proceeds))),)
+                breakpoints.append(
+                    (Decimal(str(filled)), Decimal(str(proceeds)))
+                )
+            return tuple(breakpoints)
 
         bid_size = exit_context.bid_size
         if bid_size is not None and float(bid_size) >= 0.0:
@@ -1020,12 +1026,12 @@ class Position:
         """Position knows how to exit ITSELF via the one predicted-bin stopping law.
 
         The verdict is the unified PR-1 optimal stop (COLLISION.md C3, ΔJ≡0):
-        SELL ⟺ net liquidation proceeds L(x) beat the robust hold value h·q⁻,
+        SELL ⟺ net liquidation proceeds L(x) beat the posterior-mean hold value h·q,
         evaluated over the bid-depth breakpoints by predicted_bin_law.exit_decision.
         There is no per-direction branch, no repeated-cycle (neg_edge_count)
         confirmation, no divergence / velocity / flash-crash / vig trigger, and no
         near-settlement price floor: a near-certain winner holds because its bid
-        sits below q⁻≈1, and a reversed bin sells because the bid beats q⁻. The
+        sits below q≈1, and a reversed bin sells because the bid beats q. The
         entry price / cost basis is sunk and never enters the verdict.
 
         Precedence is the law's: RiskGuard RED force-exits in every phase (the
@@ -1040,15 +1046,15 @@ class Position:
         ]
 
         held_shares = Decimal(str(self.effective_shares))
-        q_lcb, evidence_ok = self._held_side_robust_lower(exit_context)
+        q_mean, evidence_ok = self._held_side_point_with_confidence(exit_context)
         lock = self._settlement_preimage_lock(exit_context)
         bid_breakpoints = self._exit_bid_breakpoints(exit_context, held_shares)
 
         verdict = predicted_bin_law.exit_decision(
             held_shares=held_shares,
-            q_lcb=q_lcb,
+            q_mean=q_mean,
             bid_breakpoints=bid_breakpoints,
-            exit_margin=_EXIT_TICK * held_shares,
+            exit_margin_per_share=_EXIT_TICK,
             lock=lock,
             evidence_ok=evidence_ok,
             riskguard_red=self.exit_reason == "red_force_exit",
@@ -1304,12 +1310,35 @@ def _load_d6_field(row: dict, field_name: str, default: float = 0.0) -> float:
 
 
 def _runtime_strategy_key_from_projection_row(row: dict) -> str:
-    """Repair only the legacy EDLI forecast bridge label that predates strategy certs."""
+    """Repair projection labels that contradict their persisted probability."""
 
     strategy_key = str(row.get("strategy_key") or "")
     if strategy_key != "settlement_capture":
         return strategy_key
-    if str(row.get("entry_method") or "") != "ens_member_counting":
+    entry_method = str(row.get("entry_method") or "")
+    if entry_method == "qkernel_spine":
+        try:
+            q = float(row.get("p_posterior"))
+            ci_width = float(row.get("entry_ci_width"))
+        except (TypeError, ValueError):
+            q = math.nan
+            ci_width = math.nan
+        if (
+            math.isfinite(q)
+            and math.isfinite(ci_width)
+            and math.isclose(q, 1.0, abs_tol=1e-12)
+            and math.isclose(ci_width, 0.0, abs_tol=1e-12)
+        ):
+            return strategy_key
+        logger.warning(
+            "runtime repaired probabilistic Day0 strategy label: position_id=%s "
+            "settlement_capture -> day0_nowcast_entry q=%s ci_width=%s",
+            row.get("position_id") or row.get("trade_id") or "",
+            row.get("p_posterior"),
+            row.get("entry_ci_width"),
+        )
+        return "day0_nowcast_entry"
+    if entry_method != "ens_member_counting":
         return strategy_key
     if str(row.get("direction") or "").strip().lower() != "buy_no":
         return strategy_key
@@ -1881,9 +1910,11 @@ def _position_from_projection_row(row: dict, *, current_mode: str) -> Position:
 
 
 def _canonical_recent_exits_from_settlement_rows(rows: list[dict]) -> list[dict]:
+    from src.state.db import settlement_economic_ready
+
     exits: list[dict] = []
     for row in rows:
-        if not row.get("metric_ready", False):
+        if not settlement_economic_ready(row):
             continue
         pnl = row.get("pnl")
         if pnl is None:
@@ -2072,10 +2103,17 @@ def load_portfolio(
     *,
     open_positions_only: bool = False,
     target_families: Collection[tuple[str, str, str]] | None = None,
+    connection: sqlite3.Connection | None = None,
+    deadline_monotonic: float | None = None,
 ) -> PortfolioState:
     """Load canonical portfolio truth, optionally limited to runtime-open rows."""
     if target_families is not None and not open_positions_only:
         raise ValueError("target_families requires open_positions_only=True")
+    if (
+        deadline_monotonic is not None
+        and time.monotonic() >= float(deadline_monotonic)
+    ):
+        raise TimeoutError("PORTFOLIO_LOAD_DEADLINE_EXPIRED")
     path = path or POSITIONS_PATH
 
     current_mode = get_mode()
@@ -2105,15 +2143,19 @@ def load_portfolio(
     elif path == POSITIONS_PATH:
         mode_override = current_mode
 
+    owns_connection = connection is None
     try:
         # v4 plan §AX3: portfolio loader runs in the live cycle path.
-        trade_db = path.parent / "zeus_trades.db"
-        if trade_db.exists():
-            conn = get_connection(trade_db, write_class="live")
-        elif mode_override is not None:
-            conn = get_trade_connection_with_world(write_class="live")
+        if connection is not None:
+            conn = connection
         else:
-            conn = get_connection(path.parent / "zeus.db", write_class="live")
+            trade_db = path.parent / "zeus_trades.db"
+            if trade_db.exists():
+                conn = get_connection(trade_db, write_class="live")
+            elif mode_override is not None:
+                conn = get_trade_connection_with_world(write_class="live")
+            else:
+                conn = get_connection(path.parent / "zeus.db", write_class="live")
     except Exception:
         logger.error(
             "load_portfolio DB connection failed; returning empty portfolio (entries suppressed this cycle)",
@@ -2169,7 +2211,8 @@ def load_portfolio(
                 )
                 settlement_rows = []
     finally:
-        conn.close()
+        if owns_connection:
+            conn.close()
 
     policy = choose_portfolio_truth_source(snapshot.get("status"))
     if policy.source != "canonical_db":
@@ -2210,6 +2253,11 @@ def load_portfolio(
     # it never hides them: the log line carries the row identity and error.
     positions = []
     for row in snapshot.get("positions", []):
+        if (
+            deadline_monotonic is not None
+            and time.monotonic() >= float(deadline_monotonic)
+        ):
+            raise TimeoutError("PORTFOLIO_MATERIALIZATION_DEADLINE_EXPIRED")
         try:
             positions.append(
                 _position_from_projection_row(row, current_mode=current_mode)
@@ -2499,6 +2547,41 @@ def _positive_chain_exposure_shares(pos: "Position") -> float:
     return value
 
 
+def current_tradable_exposure_shares(pos: "Position") -> float:
+    """Return shares backed by the newest causal venue exposure fact.
+
+    A venue-confirmed trade owns its current open shares even while the slower
+    chain projection still shows the balance before a BUY or SELL fill.  A
+    balance-only recovery continues to use chain shares.  Explicit no-exposure
+    chain states win over stale local numbers.  Optimistic submitted orders
+    never pass these authorities and therefore cannot mint inventory here.
+    """
+
+    chain_state = _semantic_value(getattr(pos, "chain_state", ""))
+    if (
+        chain_state in NO_EXPOSURE_CHAIN_STATES
+        and chain_state != VenueVisibilityStatus.LOCAL_ONLY.value
+    ):
+        return 0.0
+    if (
+        chain_state not in CURRENT_MONEY_RISK_CHAIN_STATES
+        and chain_state != VenueVisibilityStatus.LOCAL_ONLY.value
+    ):
+        return 0.0
+    if has_verified_trade_fill(pos):
+        try:
+            shares = float(getattr(pos, "effective_shares", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            return 0.0
+        if math.isfinite(shares) and shares > _POSITIVE_CHAIN_EXPOSURE_EPS:
+            return shares
+        return 0.0
+    chain_shares = _positive_chain_exposure_shares(pos)
+    if chain_shares > 0.0:
+        return chain_shares
+    return 0.0
+
+
 def _semantic_value(value: object) -> str:
     if hasattr(value, "value"):
         value = getattr(value, "value")
@@ -2519,12 +2602,15 @@ def _is_runtime_open_position(pos: Position) -> bool:
     state = _semantic_value(getattr(pos, "state", ""))
     chain_state = _semantic_value(getattr(pos, "chain_state", ""))
     chain_shares = _positive_chain_exposure_shares(pos)
+    tradable_shares = current_tradable_exposure_shares(pos)
     no_exposure_chain_state = chain_state in NO_EXPOSURE_CHAIN_STATES
+    if tradable_shares > 0.0:
+        no_exposure_chain_state = False
     if state == "pending_exit" and chain_shares > 0.0:
         no_exposure_chain_state = False
     local_projection_without_chain_exposure = (
         chain_state == VenueVisibilityStatus.LOCAL_ONLY.value
-        and chain_shares <= 0.0
+        and tradable_shares <= 0.0
     )
     return (
         state not in INACTIVE_RUNTIME_STATES
@@ -2587,6 +2673,8 @@ def compute_settlement_close(
     trade_id: str,
     settlement_price: float,
     exit_reason: str = "SETTLEMENT",
+    *,
+    audit_conn: sqlite3.Connection | None = None,
 ) -> Optional[Position]:
     """Finalize settlement and remove the position from active runtime truth."""
 
@@ -2609,7 +2697,7 @@ def compute_settlement_close(
         if not was_economically_closed:
             pos.exit_price = settlement_price
             pos.pnl = _compute_realized_pnl(pos, settlement_price)
-            _track_exit(state, pos)
+            _track_exit(state, pos, audit_conn=audit_conn)
         closed = pos
 
     return closed
@@ -2648,7 +2736,11 @@ def mark_admin_closed(
 
 
 def void_position(
-    state: PortfolioState, trade_id: str, reason: str,
+    state: PortfolioState,
+    trade_id: str,
+    reason: str,
+    *,
+    audit_conn: sqlite3.Connection | None = None,
 ) -> Optional[Position]:
     """Close with pnl=0 when real exit price is unknown. L3.
 
@@ -2667,7 +2759,7 @@ def void_position(
             pos.exit_price = 0.0
             pos.pnl = 0.0
             pos.last_exit_at = datetime.now(timezone.utc).isoformat()
-            _track_exit(state, pos)
+            _track_exit(state, pos, audit_conn=audit_conn)
             return pos
     return None
 
@@ -2701,7 +2793,12 @@ def _project_d6_field(pos: "Position", field_name: str, chain_value: float, fill
     return chain_value
 
 
-def _track_exit(state: PortfolioState, pos: Position) -> None:
+def _track_exit(
+    state: PortfolioState,
+    pos: Position,
+    *,
+    audit_conn: sqlite3.Connection | None = None,
+) -> None:
     """Track exit for reentry/cooldown checks AND replay auditability.
 
     CRITICAL: All fields required by equity/report replay consumers must be
@@ -2772,7 +2869,14 @@ def _track_exit(state: PortfolioState, pos: Position) -> None:
         "exited_at": pos.last_exit_at,
     })
 
-    if state.audit_logging_enabled:
+    if state.audit_logging_enabled and audit_conn is not None:
+        from src.state.db import log_trade_exit
+
+        # The caller owns this transaction. Settlement already holds the
+        # canonical writer slot, so opening another trade connection here would
+        # wait on our own BEGIN IMMEDIATE and starve held-position monitoring.
+        log_trade_exit(audit_conn, pos)
+    elif state.audit_logging_enabled:
         conn = None
         try:
             from src.state.db import get_trade_connection_with_world, log_trade_exit

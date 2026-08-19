@@ -1,5 +1,6 @@
 # Created: 2026-06-02
-# Last reused or audited: 2026-06-02
+# Last reused or audited: 2026-08-12
+# Lifecycle: created=2026-06-02; last_reviewed=2026-08-12; last_reused=2026-08-12
 # Authority basis: BUG #128 (SEV1) — realized P&L has no durable DB column.
 """BUG #128 antibody: realized P&L must survive the in-memory Portfolio object.
 
@@ -265,6 +266,99 @@ def test_economic_close_persists_realized_pnl_durable() -> None:
     assert row["exit_price"] == pytest.approx(0.75)
     assert row["exit_reason"] == "shoulder_sell"
 
+    conn.close()
+
+
+def test_monitor_refresh_cannot_overwrite_partial_exit_realized_pnl() -> None:
+    """A stale runtime Position must not rewrite fill-owned open economics."""
+
+    from src.engine.lifecycle_events import (
+        build_monitor_refreshed_canonical_write,
+        build_position_current_projection,
+    )
+    from src.state.db import append_many_and_project
+    from src.state.projection import upsert_position_current
+
+    conn = _setup_world_db()
+    pos = _make_filled_position(
+        trade_id="partial-exit-monitor-owner",
+        city="TYO",
+        entry_price=0.41,
+        shares=12.990168,
+        cost_basis_usd=5.325900119998448,
+    )
+    booked_pnl = 6.683499880001552
+    initial = build_position_current_projection(pos)
+    initial["phase"] = "day0_window"
+    initial["realized_pnl_usd"] = booked_pnl
+    booked_exit_price = 0.9245111624326405
+    initial["exit_price"] = booked_exit_price
+    upsert_position_current(conn, initial)
+
+    # Reproduce the observed stale in-memory overwrite shape: the monitor owns
+    # neither this scaled PnL nor the partial fill's execution price.
+    pos.pnl = booked_pnl / 100000
+    pos.exit_price = 0.23
+    events, projection = build_monitor_refreshed_canonical_write(
+        pos,
+        sequence_no=1,
+        phase_after="day0_window",
+        occurred_at="2026-08-12T10:20:00+00:00",
+    )
+
+    assert projection["realized_pnl_usd"] is None
+    assert projection["exit_price"] is None
+    append_many_and_project(conn, events, projection)
+
+    row = conn.execute(
+        "SELECT realized_pnl_usd, exit_price FROM position_current "
+        "WHERE position_id = ?",
+        (pos.trade_id,),
+    ).fetchone()
+    assert row is not None
+    assert row["realized_pnl_usd"] == pytest.approx(booked_pnl)
+    assert row["exit_price"] == pytest.approx(booked_exit_price)
+    conn.close()
+
+
+def test_monitor_shaped_partial_fill_projection_can_advance_realized_pnl() -> None:
+    """A fill-owned non-NULL cumulative PnL outranks the older projection."""
+
+    from src.engine.lifecycle_events import (
+        build_monitor_refreshed_canonical_write,
+        build_position_current_projection,
+    )
+    from src.state.db import append_many_and_project
+    from src.state.projection import upsert_position_current
+
+    conn = _setup_world_db()
+    pos = _make_filled_position(
+        trade_id="partial-exit-monitor-repair",
+        city="TYO",
+        entry_price=0.41,
+        shares=12.990168,
+        cost_basis_usd=5.325900119998448,
+    )
+    initial = build_position_current_projection(pos)
+    initial["phase"] = "day0_window"
+    initial["realized_pnl_usd"] = None
+    upsert_position_current(conn, initial)
+
+    events, projection = build_monitor_refreshed_canonical_write(
+        pos,
+        sequence_no=1,
+        phase_after="day0_window",
+        occurred_at="2026-08-12T10:21:00+00:00",
+    )
+    projection["realized_pnl_usd"] = -1.25
+    append_many_and_project(conn, events, projection)
+
+    row = conn.execute(
+        "SELECT realized_pnl_usd FROM position_current WHERE position_id = ?",
+        (pos.trade_id,),
+    ).fetchone()
+    assert row is not None
+    assert row["realized_pnl_usd"] == pytest.approx(-1.25)
     conn.close()
 
 

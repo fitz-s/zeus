@@ -1,5 +1,5 @@
 # Created: prior to 2026-05-24
-# Last reused or audited: 2026-07-28
+# Last reused or audited: 2026-07-30
 # Authority basis: EDLI v1 §10 online MarketChannelIngestor contract.
 #   2026-06-04: 5th-instance WAL-bloat fix — pre-capture pattern for on_connect
 #   REST orderbook fetch; seed_from_rest gains pre_cached kwarg; on_connect gains
@@ -32,6 +32,7 @@ MARKET_CHANNEL_WS_ENDPOINT = "wss://ws-subscriptions-clob.polymarket.com/ws/mark
 REST_SEED_COMMIT_CHUNK_SIZE = 16
 REST_SEED_FETCH_BATCH_SIZE = 128
 MARKET_CHANNEL_QUOTE_FLUSH_BATCH_SIZE = 128
+MARKET_CHANNEL_QUOTE_WRITE_BATCH_SIZE = 4
 MARKET_CHANNEL_INITIAL_BOOK_GRACE_SECONDS = 1.0
 MARKET_CHANNEL_CONTINUITY_PUBLISH_INTERVAL_SECONDS = 0.25
 MARKET_CHANNEL_QUOTE_MIN_COMMIT_INTERVAL_SECONDS = 0.01
@@ -118,6 +119,24 @@ class MarketChannelQuoteResult:
 
 
 @dataclass(frozen=True)
+class _PreparedQuote:
+    """A normalized quote row that is ready for the bounded TRADE append."""
+
+    event: OpportunityEvent
+    payload: dict[str, Any]
+    evidence_rows: tuple[dict[str, Any], ...]
+
+
+@dataclass(frozen=True)
+class _PreparedCoalescedQuotes:
+    """A drained quote batch that can be requeued unchanged after a failed commit."""
+
+    events: tuple[OpportunityEvent, ...]
+    quotes: tuple[_PreparedQuote, ...]
+    results: tuple[MarketChannelQuoteResult, ...]
+
+
+@dataclass(frozen=True)
 class MarketTokenMetadata:
     condition_id: str
     token_id: str
@@ -180,6 +199,7 @@ class MarketChannelIngestor:
         coalescer: EventCoalescer | None = None,
         market_event_sink: Callable[[list[OpportunityEvent]], None] | None = None,
         market_event_sink_independently_coordinated: bool = False,
+        append_evidence_token_ids: Callable[[], Iterable[str]] | None = None,
     ) -> None:
         self._writer = writer
         if feasibility_conn is None:
@@ -202,6 +222,7 @@ class MarketChannelIngestor:
         self._market_event_sink_independently_coordinated = bool(
             market_event_sink_independently_coordinated
         )
+        self._append_evidence_token_ids = append_evidence_token_ids
         self._deferred_market_event_sink_depth = 0
         self._deferred_market_event_sink_events: list[OpportunityEvent] = []
         self._deferred_market_event_sink_indexes: dict[tuple[str, ...], int] = {}
@@ -216,6 +237,8 @@ class MarketChannelIngestor:
         self._seen_quote_event_ids: set[str] = set()
         self._seen_quote_event_order: deque[str] = deque()
         self._seen_quote_event_limit = 20_000
+        self._pending_quote_event_ids: dict[str, str] = {}
+        self._pending_quote_seen_at: dict[str, str] = {}
 
     def _token_is_open_at(self, token_id: str, *, now: datetime | None = None) -> bool:
         metadata = self._token_metadata.get(str(token_id))
@@ -297,6 +320,8 @@ class MarketChannelIngestor:
         if self._market_top_of_book_unchanged(event):
             self._cache_event_payload(event)
             return None
+        if self._coalescer is not None:
+            return self._write_market_event(event)
         self._cache_event_payload(event)
         return self._write_market_event(event)
 
@@ -307,41 +332,9 @@ class MarketChannelIngestor:
         commit: Callable[[], None] | None = None,
         rollback: Callable[[], None] | None = None,
     ) -> list[EventWriteResult | MarketChannelQuoteResult]:
-        if self._coalescer is None:
-            return []
-        events = self._coalescer.drain(market_budget=market_budget)
-        quote_events: list[OpportunityEvent] = []
-        results: list[EventWriteResult | MarketChannelQuoteResult] = []
+        prepared = self.prepare_coalesced_quote_flush(market_budget=market_budget)
         try:
-            for event in events:
-                if event.event_type not in {"BOOK_SNAPSHOT", "BEST_BID_ASK_CHANGED"}:
-                    results.append(self._commit_market_event(event))
-                    continue
-                if self._quote_event_seen(event.event_id):
-                    results.append(
-                        MarketChannelQuoteResult(
-                            event_id=event.event_id,
-                            event_type=event.event_type,
-                            inserted=False,
-                            duplicate=True,
-                            evidence_written=False,
-                        )
-                    )
-                    continue
-                quote_events.append(event)
-                results.append(
-                    MarketChannelQuoteResult(
-                        event_id=event.event_id,
-                        event_type=event.event_type,
-                        inserted=True,
-                        duplicate=False,
-                        evidence_written=True,
-                    )
-                )
-            self._write_feasibility_evidence_batch(quote_events)
-            self._notify_market_event_sink(quote_events)
-            if not self._market_event_sink_independently_coordinated:
-                self.flush_deferred_market_event_sink()
+            written = self.write_prepared_quote_events(prepared.quotes)
             if commit is not None:
                 commit()
         except BaseException:
@@ -349,12 +342,102 @@ class MarketChannelIngestor:
                 if rollback is not None:
                     rollback()
             finally:
-                for event in events:
-                    self._coalescer.enqueue(event)
+                self.requeue_prepared_coalesced_quotes(prepared)
             raise
-        for event in quote_events:
-            self._remember_quote_event(event.event_id)
-        return results
+        self.finalize_prepared_quote_events(written)
+        self.flush_deferred_market_event_sink()
+        return list(prepared.results)
+
+    def prepare_coalesced_quote_flush(
+        self,
+        *,
+        market_budget: int | None = None,
+    ) -> _PreparedCoalescedQuotes:
+        """Drain and normalize a quote batch before acquiring the TRADE lease."""
+
+        if self._coalescer is None:
+            return _PreparedCoalescedQuotes((), (), ())
+        events = tuple(self._coalescer.drain(market_budget=market_budget))
+        if any(
+            event.event_type not in {"BOOK_SNAPSHOT", "BEST_BID_ASK_CHANGED"}
+            for event in events
+        ):
+            for event in events:
+                self._coalescer.enqueue(event)
+            raise MarketChannelAuthorityError(
+                "quote coalescer received a non-quote market event"
+            )
+        fresh = tuple(
+            event
+            for event in events
+            if self._pending_quote_is_current(event)
+            and not self._quote_event_seen(event.event_id)
+        )
+        try:
+            quotes = self.prepare_quote_events(fresh)
+        except BaseException:
+            for event in events:
+                self._coalescer.enqueue(event)
+            raise
+        fresh_ids = {quote.event.event_id for quote in quotes}
+        results = tuple(
+            MarketChannelQuoteResult(
+                event_id=event.event_id,
+                event_type=event.event_type,
+                inserted=event.event_id in fresh_ids,
+                duplicate=event.event_id not in fresh_ids,
+                evidence_written=event.event_id in fresh_ids,
+            )
+            for event in events
+        )
+        return _PreparedCoalescedQuotes(events, quotes, results)
+
+    def prepare_quote_messages(
+        self,
+        messages: Iterable[dict[str, Any]],
+        *,
+        received_at: str,
+    ) -> _PreparedCoalescedQuotes:
+        """Normalize non-coalesced websocket quotes before the TRADE lease."""
+
+        events: list[OpportunityEvent] = []
+        result_events: list[tuple[OpportunityEvent, bool]] = []
+        batch_ids: set[str] = set()
+        for message in messages:
+            event = self.event_from_message(message, received_at=received_at)
+            if event is None or self._market_quote_is_older(event):
+                continue
+            if self._market_top_of_book_unchanged(event):
+                continue
+            if self._quote_event_seen(event.event_id) or event.event_id in batch_ids:
+                result_events.append((event, False))
+                continue
+            batch_ids.add(event.event_id)
+            events.append(event)
+            result_events.append((event, True))
+        quotes = self.prepare_quote_events(events)
+        prepared_ids = {quote.event.event_id for quote in quotes}
+        results = tuple(
+            MarketChannelQuoteResult(
+                event_id=event.event_id,
+                event_type=event.event_type,
+                inserted=fresh and event.event_id in prepared_ids,
+                duplicate=not fresh or event.event_id not in prepared_ids,
+                evidence_written=fresh and event.event_id in prepared_ids,
+            )
+            for event, fresh in result_events
+        )
+        return _PreparedCoalescedQuotes(tuple(events), quotes, results)
+
+    def requeue_prepared_coalesced_quotes(
+        self,
+        prepared: _PreparedCoalescedQuotes,
+    ) -> None:
+        if self._coalescer is None:
+            return
+        for event in prepared.events:
+            if self._pending_quote_is_current(event):
+                self._coalescer.enqueue(event)
 
     def event_from_message(self, message: dict[str, Any], *, received_at: str) -> OpportunityEvent | None:
         event_type = str(message.get("event_type") or message.get("type") or "")
@@ -373,6 +456,64 @@ class MarketChannelIngestor:
             self._cache_event_payload(event)
             return event
         return None
+
+    def prepare_rest_seed_events(
+        self,
+        *,
+        pre_captured_books: dict[str, dict],
+        token_ids: Iterable[str],
+        received_at: str,
+        past_end_exit_refresh: bool = False,
+    ) -> tuple[_PreparedQuote, ...]:
+        """Build REST quote rows before the bounded TRADE append phase."""
+
+        events: list[OpportunityEvent] = []
+        for token_id in token_ids:
+            book = pre_captured_books.get(str(token_id))
+            if not isinstance(book, dict):
+                continue
+            message = dict(book)
+            message.setdefault("event_type", "book")
+            message.setdefault("asset_id", str(token_id))
+            message.setdefault("timestamp", received_at)
+            event = self._book_event(
+                message,
+                received_at=received_at,
+                gap_marked=False,
+                past_end_exit_refresh=past_end_exit_refresh,
+            )
+            if event is not None and not self._market_quote_is_older(event):
+                events.append(event)
+        return self.prepare_quote_events(events)
+
+    def prepare_reconnect_rest_events(
+        self,
+        *,
+        pre_captured_books: dict[str, dict],
+        token_ids: Iterable[str],
+        gap_start: str,
+        received_at: str,
+    ) -> tuple[_PreparedQuote, ...]:
+        """Build gap-marked REST quote rows before the bounded TRADE append phase."""
+
+        events: list[OpportunityEvent] = []
+        for token_id in token_ids:
+            book = pre_captured_books.get(str(token_id))
+            if not isinstance(book, dict):
+                continue
+            message = dict(book)
+            message.setdefault("event_type", "book")
+            message.setdefault("asset_id", str(token_id))
+            message.setdefault("timestamp", received_at)
+            event = self._book_event(
+                message,
+                received_at=received_at,
+                gap_marked=True,
+                gap_start=gap_start,
+            )
+            if event is not None and not self._market_quote_is_older(event):
+                events.append(event)
+        return self.prepare_quote_events(events)
 
     def seed_from_rest(
         self,
@@ -560,6 +701,13 @@ class MarketChannelIngestor:
             return
         if not isinstance(payload, dict):
             return
+        self._cache_quote_payload(event, payload)
+
+    def _cache_quote_payload(
+        self,
+        event: OpportunityEvent,
+        payload: dict[str, Any],
+    ) -> None:
         if event.event_type not in {"BOOK_SNAPSHOT", "BEST_BID_ASK_CHANGED"}:
             return
         self.quote_cache.update(
@@ -635,7 +783,15 @@ class MarketChannelIngestor:
         self,
         events: Iterable[OpportunityEvent],
     ) -> None:
-        rows: list[dict[str, Any]] = []
+        self.write_prepared_quote_events(self.prepare_quote_events(events))
+
+    def prepare_quote_events(
+        self,
+        events: Iterable[OpportunityEvent],
+    ) -> tuple[_PreparedQuote, ...]:
+        """Normalize quote payloads and build insert bindings before the TRADE lease."""
+
+        prepared: list[_PreparedQuote] = []
         for event in events:
             if event.event_type not in {"BOOK_SNAPSHOT", "BEST_BID_ASK_CHANGED"}:
                 continue
@@ -649,16 +805,82 @@ class MarketChannelIngestor:
                 raise MarketChannelAuthorityError(
                     "market-channel token lacks canonical YES/NO outcome metadata"
                 )
-            rows.extend(
-                feasibility_evidence_from_quote(event, direction=direction)
+            rows = prepare_execution_feasibility_evidence_rows(
+                feasibility_evidence_from_quote(
+                    event,
+                    direction=direction,
+                    payload=payload,
+                )
                 for direction in directions
             )
+            prepared.append(
+                _PreparedQuote(
+                    event=event,
+                    payload=payload,
+                    evidence_rows=tuple(rows),
+                )
+            )
+
+        return tuple(prepared)
+
+    def write_prepared_quote_events(
+        self,
+        prepared: Iterable[_PreparedQuote],
+    ) -> tuple[_PreparedQuote, ...]:
+        """Append pre-built quote evidence inside the TRADE writer lease."""
+
+        current = tuple(
+            quote for quote in prepared if self._pending_quote_is_current(quote.event)
+        )
+        rows = [row for quote in current for row in quote.evidence_rows]
         insert_execution_feasibility_evidence_batch(
             self._feasibility_conn,
             rows,
             schema=self._feasibility_schema,
             append_evidence=False,
+            prepared_rows=True,
         )
+        append_tokens: set[str] = set()
+        if self._append_evidence_token_ids is not None:
+            try:
+                append_tokens = {
+                    str(token_id)
+                    for token_id in self._append_evidence_token_ids()
+                    if str(token_id)
+                }
+            except Exception:  # noqa: BLE001 - audit retention cannot blind quote ingest
+                _logger.exception(
+                    "selective market-channel evidence append set unavailable"
+                )
+        audit_rows = [
+            row
+            for row in rows
+            if str(row.get("token_id") or "") in append_tokens
+            and str(row.get("direction") or "").startswith("buy_")
+            and row.get("depth_before_json") not in {None, ""}
+        ]
+        if audit_rows:
+            insert_execution_feasibility_evidence_batch(
+                self._feasibility_conn,
+                audit_rows,
+                schema=self._feasibility_schema,
+                append_evidence=True,
+                prepared_rows=True,
+            )
+        return current
+
+    def finalize_prepared_quote_events(
+        self,
+        prepared: Iterable[_PreparedQuote],
+    ) -> None:
+        """Advance cache, dedupe, and derived work only after a successful commit."""
+
+        quotes = tuple(prepared)
+        for quote in quotes:
+            self._cache_quote_payload(quote.event, quote.payload)
+            self._remember_quote_event(quote.event.event_id)
+            self._clear_pending_quote_event(quote.event)
+        self._notify_market_event_sink([quote.event for quote in quotes])
 
     def _new_market_event(self, message: dict[str, Any], *, received_at: str) -> OpportunityEvent | None:
         token_ids = [str(token) for token in message.get("clob_token_ids") or message.get("assets_ids") or []]
@@ -702,6 +924,8 @@ class MarketChannelIngestor:
 
     def _write_market_event(self, event: OpportunityEvent) -> EventWriteResult | None:
         if self._coalescer is not None:
+            if not self._remember_pending_quote_event(event):
+                return None
             self._coalescer.enqueue(event)
             return None
         return self._commit_market_event(event)
@@ -738,6 +962,51 @@ class MarketChannelIngestor:
 
     def _quote_event_seen(self, event_id: str) -> bool:
         return event_id in self._seen_quote_event_ids
+
+    @staticmethod
+    def _quote_event_token_and_seen_at(event: OpportunityEvent) -> tuple[str, str] | None:
+        if event.event_type not in {"BOOK_SNAPSHOT", "BEST_BID_ASK_CHANGED"}:
+            return None
+        try:
+            payload = json.loads(event.payload_json)
+        except json.JSONDecodeError:
+            return None
+        token_id = str(payload.get("token_id") or "")
+        quote_seen_at = str(payload.get("quote_seen_at") or event.available_at)
+        if not token_id or not quote_seen_at:
+            return None
+        return token_id, quote_seen_at
+
+    def _remember_pending_quote_event(self, event: OpportunityEvent) -> bool:
+        """Keep the newest token quote pending without asserting durable state."""
+
+        identity = self._quote_event_token_and_seen_at(event)
+        if identity is None:
+            return True
+        token_id, quote_seen_at = identity
+        previous = self._pending_quote_seen_at.get(token_id)
+        if previous is not None and _quote_instant(quote_seen_at) < _quote_instant(previous):
+            return False
+        self._pending_quote_event_ids[token_id] = event.event_id
+        self._pending_quote_seen_at[token_id] = quote_seen_at
+        return True
+
+    def _pending_quote_is_current(self, event: OpportunityEvent) -> bool:
+        identity = self._quote_event_token_and_seen_at(event)
+        if identity is None:
+            return True
+        token_id, _quote_seen_at = identity
+        current = self._pending_quote_event_ids.get(token_id)
+        return current is None or current == event.event_id
+
+    def _clear_pending_quote_event(self, event: OpportunityEvent) -> None:
+        identity = self._quote_event_token_and_seen_at(event)
+        if identity is None:
+            return
+        token_id, _quote_seen_at = identity
+        if self._pending_quote_event_ids.get(token_id) == event.event_id:
+            self._pending_quote_event_ids.pop(token_id, None)
+            self._pending_quote_seen_at.pop(token_id, None)
 
     def _remember_quote_event(self, event_id: str) -> None:
         self._seen_quote_event_ids.add(event_id)
@@ -1430,6 +1699,8 @@ class MarketChannelOnlineService:
     reload_token_metadata: TokenMetadataReload | None = None
     universe_refresh_interval_seconds: float = 15.0
     continuity_sink: Callable[[dict[str, Any]], None] | None = None
+    quote_flush_batch_size: int = MARKET_CHANNEL_QUOTE_FLUSH_BATCH_SIZE
+    quote_write_batch_size: int = MARKET_CHANNEL_QUOTE_WRITE_BATCH_SIZE
     connected: bool = False
     gap_start: str | None = None
     refresh_action_count: int = 0
@@ -1493,6 +1764,11 @@ class MarketChannelOnlineService:
     depth_repair_failure_count: int = field(default=0, init=False)
 
     def __post_init__(self) -> None:
+        self.quote_flush_batch_size = max(1, int(self.quote_flush_batch_size))
+        self.quote_write_batch_size = max(
+            1,
+            min(int(self.quote_write_batch_size), self.quote_flush_batch_size),
+        )
         self._replace_seed_first_token_ids(self.seed_first_token_ids)
         repair_tokens = (
             self.seed_first_token_ids
@@ -1532,8 +1808,10 @@ class MarketChannelOnlineService:
         if event_type not in {"book", "best_bid_ask", "price_change"}:
             return
         token_id = _message_token_id(message)
-        cached = self.ingestor.quote_cache.get(token_id)
-        if cached is not None and cached.depth_json not in (None, ""):
+        has_depth = event_type == "book" and bool(
+            message.get("bids") or message.get("asks")
+        )
+        if has_depth:
             self._current_generation_depth_tokens.add(token_id)
             return
         self._current_generation_depth_tokens.discard(token_id)
@@ -1700,53 +1978,30 @@ class MarketChannelOnlineService:
                     break
             if not captured:
                 continue
-            if self._quote_projection_pump_active:
-                results = self.ingestor.seed_from_rest(
-                    self.fetch_orderbook,
-                    received_at=received_at,
-                    pre_cached=captured,
-                    token_ids=captured.keys(),
-                    coalesce_market_events=True,
-                    past_end_exit_refresh=past_end_exit_refresh,
-                )
-                written += len(results)
+            prepared = self.ingestor.prepare_rest_seed_events(
+                pre_captured_books=captured,
+                token_ids=captured,
+                received_at=received_at,
+                past_end_exit_refresh=past_end_exit_refresh,
+            )
+            if not prepared:
                 continue
-            prior_quotes = {
-                token_id: self.ingestor.quote_cache.get(token_id)
-                for token_id in captured
-            }
-            seen_order_size = len(self.ingestor._seen_quote_event_order)
-            prior_sink_events = list(
-                self.ingestor._deferred_market_event_sink_events
-            )
-            prior_sink_indexes = dict(
-                self.ingestor._deferred_market_event_sink_indexes
-            )
-            prior_sink_coalesced = (
-                self.ingestor.deferred_market_event_sink_coalesced_count
-            )
-            prior_sink_overflow = (
-                self.ingestor.deferred_market_event_sink_overflow_count
-            )
+            if self._quote_projection_pump_active:
+                for quote in prepared:
+                    self.ingestor._write_market_event(quote.event)
+                written += len(prepared)
+                continue
             with self.ingestor.defer_market_event_sink():
                 try:
                     with write_gate:
-                        results = self.ingestor.seed_from_rest(
-                            self.fetch_orderbook,
-                            received_at=received_at,
-                            pre_cached=captured,
-                            token_ids=captured.keys(),
-                            past_end_exit_refresh=past_end_exit_refresh,
+                        committed_quotes = self.ingestor.write_prepared_quote_events(
+                            prepared
                         )
-                        if not self.ingestor._market_event_sink_independently_coordinated:
-                            self.ingestor.flush_deferred_market_event_sink()
                         if commit is not None:
                             commit()
-                    if self.ingestor._market_event_sink_independently_coordinated:
-                        self.ingestor.flush_deferred_market_event_sink()
-                except (TimeoutError, sqlite3.OperationalError) as exc:
-                    if not _is_sqlite_write_contention(exc):
-                        raise
+                    self.ingestor.finalize_prepared_quote_events(committed_quotes)
+                    self.ingestor.flush_deferred_market_event_sink()
+                except BaseException as exc:
                     try:
                         self.ingestor._feasibility_conn.rollback()
                     except sqlite3.Error:
@@ -1754,37 +2009,8 @@ class MarketChannelOnlineService:
                             logger.exception(
                                 "EDLI market-channel REST seed rollback failed"
                             )
-                    for token_id, previous in prior_quotes.items():
-                        if previous is None:
-                            self.ingestor.quote_cache.by_token_id.pop(token_id, None)
-                        else:
-                            self.ingestor.quote_cache.by_token_id[token_id] = previous
-                    if len(self.ingestor._seen_quote_event_order) >= seen_order_size:
-                        while (
-                            len(self.ingestor._seen_quote_event_order)
-                            > seen_order_size
-                        ):
-                            event_id = self.ingestor._seen_quote_event_order.pop()
-                            self.ingestor._seen_quote_event_ids.discard(event_id)
-                    else:
-                        # The bounded dedupe queue evicted an older id while this
-                        # uncommitted chunk was being built. Clearing is conservative:
-                        # a retry may repeat an idempotent projection write, but it
-                        # cannot suppress the rolled-back quote as already durable.
-                        self.ingestor._seen_quote_event_order.clear()
-                        self.ingestor._seen_quote_event_ids.clear()
-                    self.ingestor._deferred_market_event_sink_events = (
-                        prior_sink_events
-                    )
-                    self.ingestor._deferred_market_event_sink_indexes = (
-                        prior_sink_indexes
-                    )
-                    self.ingestor.deferred_market_event_sink_coalesced_count = (
-                        prior_sink_coalesced
-                    )
-                    self.ingestor.deferred_market_event_sink_overflow_count = (
-                        prior_sink_overflow
-                    )
+                    if not _is_sqlite_write_contention(exc):
+                        raise
                     self.rest_seed_backpressure_count += 1
                     self.rest_seed_backpressure_reason = str(exc)
                     if logger is not None:
@@ -1796,12 +2022,12 @@ class MarketChannelOnlineService:
                             exc,
                         )
                     break
-            written += len(results)
+            written += len(prepared)
             if logger is not None:
                 logger.debug(
                     "EDLI market-channel REST seed committed chunk: tokens=%d events=%d",
                     len(captured),
-                    len(results),
+                    len(prepared),
                 )
         return written
 
@@ -2074,22 +2300,34 @@ class MarketChannelOnlineService:
                 )
                 if remaining > 0.0:
                     await asyncio.sleep(remaining)
-            try:
+            if not hasattr(self.ingestor._coalescer, "drain"):
+                # Minimal duck-typed test doubles retain the historical public
+                # flush seam; real EventCoalescer instances always prepare first.
                 with self.ingestor.defer_market_event_sink():
                     with write_gate:
                         self.ingestor.flush_coalesced(
-                            market_budget=MARKET_CHANNEL_QUOTE_FLUSH_BATCH_SIZE,
+                            market_budget=self.quote_flush_batch_size,
                             commit=commit,
                             rollback=rollback,
                         )
-                    if self.ingestor._market_event_sink_independently_coordinated:
-                        self.ingestor.flush_deferred_market_event_sink()
+                last_commit_monotonic = time.monotonic()
+                if connection_done.is_set() and initial_seed_done.is_set():
+                    return
+                continue
+            try:
+                prepared = self.ingestor.prepare_coalesced_quote_flush(
+                    market_budget=self.quote_flush_batch_size,
+                )
+                await self._persist_prepared_quote_batch_fairly(
+                    prepared,
+                    write_gate=write_gate,
+                    commit=commit,
+                    rollback=rollback,
+                )
             except (TimeoutError, sqlite3.OperationalError) as exc:
                 if not _is_sqlite_write_contention(exc):
                     raise
                 self.quote_projection_backpressure_count += 1
-                if rollback is not None:
-                    rollback()
                 if logger is not None:
                     logger.warning(
                         "EDLI market-channel quote projection backpressure; "
@@ -2128,6 +2366,61 @@ class MarketChannelOnlineService:
                 wake.set()
             elif connection_done.is_set() and initial_seed_done.is_set():
                 return
+
+    async def _persist_prepared_quote_batch_fairly(
+        self,
+        prepared: _PreparedCoalescedQuotes,
+        *,
+        write_gate: Any,
+        commit: Callable[[], None] | None,
+        rollback: Callable[[], None] | None,
+    ) -> None:
+        """Commit bounded quote groups as short TRADE writer units.
+
+        One commit per quote multiplies lock and fsync work until the quote
+        projection cannot drain venue bursts. One commit for the whole flush
+        batch can instead delay held-position monitor writes. Bounded groups
+        preserve both properties: amortize commit cost, then release the TRADE
+        gate and yield before the next group. Only the unfinished tail is
+        requeued after a failed group.
+        """
+
+        for offset in range(0, len(prepared.quotes), self.quote_write_batch_size):
+            quote_group = prepared.quotes[
+                offset : offset + self.quote_write_batch_size
+            ]
+            with self.ingestor.defer_market_event_sink():
+                try:
+                    with write_gate:
+                        committed_quotes = self.ingestor.write_prepared_quote_events(
+                            quote_group
+                        )
+                        if commit is not None:
+                            commit()
+                except BaseException:
+                    try:
+                        if rollback is not None:
+                            rollback()
+                    finally:
+                        tail = prepared.quotes[offset:]
+                        self.ingestor.requeue_prepared_coalesced_quotes(
+                            _PreparedCoalescedQuotes(
+                                events=tuple(item.event for item in tail),
+                                quotes=tail,
+                                results=(),
+                            )
+                        )
+                    raise
+                self.ingestor.finalize_prepared_quote_events(committed_quotes)
+                self.ingestor.flush_deferred_market_event_sink()
+
+            queued = self.ingestor._coalescer.pending_counts()
+            if (
+                offset + len(quote_group) < len(prepared.quotes)
+                or queued["lossless"]
+                or queued["market"]
+            ):
+                await asyncio.sleep(0)
 
     async def _repair_missing_depth_once(
         self,
@@ -2478,6 +2771,8 @@ class MarketChannelOnlineService:
 
         if self.fetch_orderbook is None:
             return 0
+        self.rest_seed_backpressure_count = 0
+        self.rest_seed_backpressure_reason = None
         gap_start_captured = self.gap_start or received_at
         size = max(1, int(chunk_size or REST_SEED_COMMIT_CHUNK_SIZE))
         ordered = sorted(
@@ -2495,26 +2790,60 @@ class MarketChannelOnlineService:
             )
             if not pre_captured_books:
                 continue
-            with self.ingestor.defer_market_event_sink():
-                with write_gate:
-                    results = self.on_reconnect(
-                        received_at=received_at,
-                        pre_captured_books=pre_captured_books,
-                        token_ids=pre_captured_books.keys(),
-                        gap_start=gap_start_captured,
-                    )
-                    if not self.ingestor._market_event_sink_independently_coordinated:
-                        self.ingestor.flush_deferred_market_event_sink()
-                    if commit is not None:
-                        commit()
-                if self.ingestor._market_event_sink_independently_coordinated:
+            prepared = self.ingestor.prepare_reconnect_rest_events(
+                pre_captured_books=pre_captured_books,
+                token_ids=pre_captured_books,
+                gap_start=gap_start_captured,
+                received_at=received_at,
+            )
+            if not prepared:
+                continue
+            self.connected = True
+            try:
+                with self.ingestor.defer_market_event_sink():
+                    with write_gate:
+                        insert_market_channel_connectivity_event(
+                            self.ingestor._feasibility_conn,
+                            channel="market_channel",
+                            transition="connected",
+                            occurred_at=received_at,
+                            schema=self.ingestor._feasibility_schema,
+                        )
+                        committed_quotes = self.ingestor.write_prepared_quote_events(
+                            prepared
+                        )
+                        if commit is not None:
+                            commit()
+                    self.ingestor.finalize_prepared_quote_events(committed_quotes)
                     self.ingestor.flush_deferred_market_event_sink()
-            written += len(results)
+            except BaseException as exc:
+                try:
+                    self.ingestor._feasibility_conn.rollback()
+                except sqlite3.Error:
+                    if logger is not None:
+                        logger.exception(
+                            "EDLI market-channel reconnect REST seed rollback failed"
+                        )
+                if not _is_sqlite_write_contention(exc):
+                    raise
+                self.rest_seed_backpressure_count += 1
+                self.rest_seed_backpressure_reason = str(exc)
+                if logger is not None:
+                    logger.warning(
+                        "EDLI market-channel reconnect REST seed write backpressure: "
+                        "written=%d remaining=%d reason=%s",
+                        written,
+                        max(0, len(ordered) - offset),
+                        exc,
+                    )
+                return written
+            self.ingestor.quote_cache.reconnect_gap_count += len(prepared)
+            written += len(prepared)
             if logger is not None:
                 logger.debug(
                     "EDLI market-channel reconnect REST seed committed chunk: tokens=%d events=%d",
                     len(pre_captured_books),
-                    len(results),
+                    len(prepared),
                 )
         self.gap_start = None
         return written
@@ -2607,6 +2936,7 @@ class MarketChannelOnlineService:
                             len(active_token_ids),
                         )
                     pending_world_messages: list[dict[str, Any]] = []
+                    pending_quote_messages: list[dict[str, Any]] = []
                     connection_done = asyncio.Event()
                     initial_seed_done = asyncio.Event()
                     quote_flush_wake = asyncio.Event()
@@ -2701,38 +3031,51 @@ class MarketChannelOnlineService:
                                     quote_flush_wake.set()
                                 should_flush_quotes = False
                             else:
-                                should_flush_quotes = bool(quote_messages)
+                                pending_quote_messages.extend(quote_messages)
+                                should_flush_quotes = bool(pending_quote_messages)
 
                             if should_flush_quotes:
                                 try:
+                                    prepared = (
+                                        self.ingestor.prepare_coalesced_quote_flush(
+                                            market_budget=self.quote_flush_batch_size,
+                                        )
+                                        if self.ingestor._coalescer is not None
+                                        else self.ingestor.prepare_quote_messages(
+                                            pending_quote_messages,
+                                            received_at=datetime.now(UTC).isoformat(),
+                                        )
+                                    )
                                     with self.ingestor.defer_market_event_sink():
-                                        with _quote_write_gate:
-                                            if self.ingestor._coalescer is not None:
-                                                self.ingestor.flush_coalesced(
-                                                    market_budget=MARKET_CHANNEL_QUOTE_FLUSH_BATCH_SIZE,
-                                                    commit=commit,
-                                                    rollback=rollback,
+                                        try:
+                                            with _quote_write_gate:
+                                                committed_quotes = self.ingestor.write_prepared_quote_events(
+                                                    prepared.quotes
                                                 )
-                                            else:
-                                                for message in quote_messages:
-                                                    self.ingestor.handle_message(
-                                                        message,
-                                                        received_at=datetime.now(UTC).isoformat(),
-                                                    )
-                                                    self._record_current_generation_depth(message)
-                                                if not self.ingestor._market_event_sink_independently_coordinated:
-                                                    self.ingestor.flush_deferred_market_event_sink()
                                                 if commit is not None:
                                                     commit()
-                                        if self.ingestor._market_event_sink_independently_coordinated:
-                                            self.ingestor.flush_deferred_market_event_sink()
+                                        except BaseException:
+                                            try:
+                                                if rollback is not None:
+                                                    rollback()
+                                            finally:
+                                                self.ingestor.requeue_prepared_coalesced_quotes(
+                                                    prepared
+                                                )
+                                            raise
+                                        self.ingestor.finalize_prepared_quote_events(
+                                            committed_quotes
+                                        )
+                                        self.ingestor.flush_deferred_market_event_sink()
+                                    if self.ingestor._coalescer is None:
+                                        for message in pending_quote_messages:
+                                            self._record_current_generation_depth(message)
+                                        pending_quote_messages.clear()
                                     self._clear_durable_missing_depth_tokens(logger=logger)
                                 except (TimeoutError, sqlite3.OperationalError) as exc:
                                     if not _is_sqlite_write_contention(exc):
                                         raise
                                     quote_projection_durable = False
-                                    if rollback is not None:
-                                        rollback()
                                     if logger is not None:
                                         logger.warning(
                                             "EDLI market-channel quote projection backpressure; "
@@ -2740,7 +3083,7 @@ class MarketChannelOnlineService:
                                             (
                                                 self.ingestor._coalescer.pending_counts()
                                                 if self.ingestor._coalescer is not None
-                                                else {"lossless": 0, "market": len(quote_messages)}
+                                                else {"lossless": 0, "market": len(pending_quote_messages)}
                                             ),
                                             exc,
                                         )
@@ -3130,17 +3473,11 @@ def insert_execution_feasibility_evidence(
     )
 
 
-def insert_execution_feasibility_evidence_batch(
-    conn: sqlite3.Connection,
+def prepare_execution_feasibility_evidence_rows(
     rows: Iterable[dict[str, Any]],
-    *,
-    schema: str = "",
-    append_evidence: bool = True,
-) -> None:
-    if schema not in _FEASIBILITY_EVIDENCE_ALLOWED_SCHEMAS:
-        raise ValueError(
-            f"insert_execution_feasibility_evidence: disallowed schema {schema!r}"
-        )
+) -> list[dict[str, Any]]:
+    """Build validated, idempotent row bindings before the writer lease."""
+
     values_rows: list[dict[str, Any]] = []
     for row in rows:
         assert_market_channel_not_fill_authority(
@@ -3148,7 +3485,10 @@ def insert_execution_feasibility_evidence_batch(
         )
         values = dict(row)
         values.setdefault("schema_version", 1)
-        values.setdefault("created_at", datetime.now(UTC).isoformat())
+        values.setdefault(
+            "created_at",
+            str(values.get("quote_seen_at") or values.get("event_id") or ""),
+        )
         values.setdefault(
             "evidence_id",
             stable_event_id(
@@ -3159,6 +3499,22 @@ def insert_execution_feasibility_evidence_batch(
             ),
         )
         values_rows.append(values)
+    return values_rows
+
+
+def insert_execution_feasibility_evidence_batch(
+    conn: sqlite3.Connection,
+    rows: Iterable[dict[str, Any]],
+    *,
+    schema: str = "",
+    append_evidence: bool = True,
+    prepared_rows: bool = False,
+) -> None:
+    if schema not in _FEASIBILITY_EVIDENCE_ALLOWED_SCHEMAS:
+        raise ValueError(
+            f"insert_execution_feasibility_evidence: disallowed schema {schema!r}"
+        )
+    values_rows = list(rows) if prepared_rows else prepare_execution_feasibility_evidence_rows(rows)
     if not values_rows:
         return
     if schema:
@@ -3287,8 +3643,9 @@ def feasibility_evidence_from_quote(
     *,
     direction: str,
     order_intent_time: str | None = None,
+    payload: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    payload = json.loads(event.payload_json)
+    payload = payload if payload is not None else json.loads(event.payload_json)
     # The exchange book is token-scoped, so buy/sell directions for the same
     # token would otherwise duplicate the same depth JSON on every quote tick.
     depth_before_json = payload.get("depth_json") if str(direction).lower().startswith("buy_") else None

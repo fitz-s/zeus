@@ -1,9 +1,10 @@
 # Created: 2026-05-24
-# Last reused/audited: 2026-07-23
+# Last reused/audited: 2026-08-10
 # Authority basis: EDLI v1 implementation prompt §7 EventStore acceptance A01-A04.
 from __future__ import annotations
 
 import dataclasses
+import importlib
 import inspect
 import json
 import sqlite3
@@ -223,6 +224,83 @@ def _world_conn() -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     init_schema(conn)
     return conn
+
+
+class _ClaimLookupConnection(sqlite3.Connection):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.claim_lookup_calls: list[tuple[str, tuple[object, ...]]] = []
+
+    def execute(self, sql, parameters=(), /):
+        if "WITH requested(event_id)" in sql:
+            self.claim_lookup_calls.append((sql, tuple(parameters)))
+        return super().execute(sql, parameters)
+
+
+def _claim_lookup_world_conn() -> _ClaimLookupConnection:
+    conn = sqlite3.connect(":memory:", factory=_ClaimLookupConnection)
+    conn.row_factory = sqlite3.Row
+    init_schema(conn)
+    conn.claim_lookup_calls.clear()
+    return conn
+
+
+def _insert_processing_claims(
+    conn: sqlite3.Connection,
+    claims: dict[str, str],
+    *,
+    consumer_name: str = "edli_reactor_v1",
+) -> None:
+    # Use a valid append-only channel parent so these synthetic claims are
+    # structurally legal without becoming forecast/global-winner candidates.
+    parent = _channel_event("BOOK_SNAPSHOT")
+    parent_rows = []
+    processing_rows = []
+    for event_id, claimed_at in claims.items():
+        event_id = str(event_id or "").strip()
+        if not event_id:
+            # Empty IDs are lookup inputs only. Never create an active orphan
+            # row just to exercise the missing-ID branch.
+            continue
+        parent_rows.append(
+            (
+                event_id,
+                parent.event_type,
+                f"claim-parent:{event_id}",
+                parent.source,
+                parent.observed_at,
+                parent.available_at,
+                parent.received_at,
+                parent.causal_snapshot_id,
+                parent.payload_hash,
+                f"claim-idempotency:{event_id}",
+                parent.priority,
+                parent.expires_at,
+                parent.payload_json,
+                parent.schema_version,
+                parent.created_at,
+            )
+        )
+        processing_rows.append((consumer_name, event_id, claimed_at, claimed_at))
+    conn.executemany(
+        """
+        INSERT OR IGNORE INTO opportunity_events (
+            event_id, event_type, entity_key, source, observed_at, available_at,
+            received_at, causal_snapshot_id, payload_hash, idempotency_key,
+            priority, expires_at, payload_json, schema_version, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        parent_rows,
+    )
+    conn.executemany(
+        """
+        INSERT INTO opportunity_event_processing (
+            consumer_name, event_id, processing_status, attempt_count,
+            claimed_at, updated_at
+        ) VALUES (?, ?, 'processing', 1, ?, ?)
+        """,
+        processing_rows,
+    )
 
 
 def _insert_no_value_regret(
@@ -543,6 +621,10 @@ def test_archive_orphan_processing_rows_expires_only_rows_without_event_provenan
         "2026-05-24T04:16:00+00:00",
     )
     store.insert_or_ignore(live_event)
+    migration = importlib.import_module(
+        "scripts.migrations.202608_edli_active_redecision_projection"
+    )
+    migration.down(conn)
     conn.execute(
         """
         INSERT INTO opportunity_event_processing (
@@ -580,6 +662,17 @@ def test_archive_orphan_processing_rows_expires_only_rows_without_event_provenan
     assert rows[live_event.event_id] == "pending:"
     assert rows["missing-event-row"] == "expired:ORPHAN_EVENT_ROW_MISSING"
     assert rows["missing-processing-row"] == "expired:ORPHAN_EVENT_ROW_MISSING"
+
+    migration.up(conn)
+    with pytest.raises(sqlite3.IntegrityError, match="ACTIVE_PROCESSING_REQUIRES_APPEND_ONLY_EVENT"):
+        conn.execute(
+            """
+            INSERT INTO opportunity_event_processing (
+                consumer_name, event_id, processing_status, attempt_count, updated_at
+            ) VALUES (?, ?, 'pending', 1, ?)
+            """,
+            ("edli_reactor_v1", "new-active-orphan", "2026-05-24T04:17:00+00:00"),
+        )
 
 
 def test_archive_orphan_processing_rows_avoids_live_antijoin_scan():
@@ -855,6 +948,220 @@ def test_forecast_supersession_preserves_and_safely_recovers_targeted_global_win
             "GLOBAL_WINNER_TARGETED_CLAIM",
         )
     )
+
+
+def test_global_winner_current_claim_lookup_preserves_exact_equivalence_and_empty_ids():
+    conn = _claim_lookup_world_conn()
+    store = EventStore(conn)
+    claimed_at = "2026-05-24T04:17:00+00:00"
+    claims = {"current-claim": claimed_at}
+    _insert_processing_claims(conn, claims)
+    conn.commit()
+    target = _event(
+        "claim-lookup-exact",
+        0,
+        "2026-05-24T04:18:00+00:00",
+        "2026-05-24T04:19:00+00:00",
+    )
+
+    conn.execute("BEGIN IMMEDIATE")
+    assert (
+        store.prioritized_global_winner_event(
+            target,
+            current_batch_claim_generations=claims,
+        )
+        is not None
+    )
+    conn.rollback()
+
+    conn.execute("BEGIN IMMEDIATE")
+    assert (
+        store.prioritized_global_winner_event(
+            target,
+            current_batch_claim_generations={"current-claim": claimed_at + "-wrong"},
+        )
+        is None
+    )
+    conn.rollback()
+
+    _insert_processing_claims(conn, {"": claimed_at})
+    conn.commit()
+    conn.execute("BEGIN IMMEDIATE")
+    assert (
+        store.prioritized_global_winner_event(
+            target,
+            current_batch_claim_generations={"": claimed_at},
+        )
+        is None
+    )
+    conn.rollback()
+
+    conn.claim_lookup_calls.clear()
+    assert not conn.in_transaction
+    assert (
+        store.prioritized_global_winner_event(
+            target,
+            current_batch_claim_generations={},
+        )
+        is not None
+    )
+    assert conn.claim_lookup_calls == []
+    conn.rollback()
+
+
+def test_global_winner_pointer_rebind_preserves_current_epoch_claim_generations():
+    conn = _world_conn()
+    store = EventStore(conn)
+    current_claimed_at = datetime.now().astimezone().isoformat()
+    base = _event(
+        "pointer-rebind-base",
+        0,
+        "2026-05-24T04:17:00+00:00",
+        "2026-05-24T04:18:00+00:00",
+    )
+    store.insert_or_ignore(base)
+    base_claimed_at = current_claimed_at
+    assert store.claim(base.event_id, claimed_at=base_claimed_at)
+    conn.commit()
+    claims = {base.event_id: base_claimed_at}
+
+    claimed_targets = []
+    for index in range(3):
+        target = _event(
+            f"pointer-rebind-target-{index}",
+            index + 1,
+            "2026-05-24T04:17:00+00:00",
+            f"2026-05-24T04:18:0{index + 2}+00:00",
+        )
+        conn.execute("BEGIN IMMEDIATE")
+        prioritized = store.prioritized_global_winner_event(
+            target,
+            current_batch_claim_generations=claims,
+        )
+        assert prioritized == target
+        claimed_at = current_claimed_at
+        assert store.claim(target.event_id, claimed_at=claimed_at)
+        conn.commit()
+        claims[target.event_id] = claimed_at
+        claimed_targets.append(target.event_id)
+
+    rows = conn.execute(
+        "SELECT event_id, processing_status, claimed_at "
+        "FROM opportunity_event_processing "
+        "WHERE consumer_name = ? AND event_id IN (?, ?, ?) "
+        "ORDER BY event_id",
+        (store.consumer_name, *claimed_targets),
+    ).fetchall()
+    assert {
+        str(row[0]): (str(row[1]), str(row[2])) for row in rows
+    } == {
+        event_id: ("processing", claims[event_id])
+        for event_id in claimed_targets
+    }
+    pointer_rows = conn.execute(
+        "SELECT event_id, processing_status "
+        "FROM opportunity_event_processing "
+        "WHERE consumer_name = ? AND event_id IN (?, ?, ?) "
+        "ORDER BY processing_status, event_id",
+        (store._winner_pointer_consumer_name, *claimed_targets),
+    ).fetchall()
+    assert [row[1] for row in pointer_rows].count("pending") == 1
+    assert [row[1] for row in pointer_rows].count("expired") == 2
+
+
+def test_global_winner_current_claim_lookup_caps_chunk_at_251_parameters():
+    conn = _claim_lookup_world_conn()
+    store = EventStore(conn)
+    claims = {
+        f"current-claim-{index:03d}": "2026-05-24T04:17:00+00:00"
+        for index in range(250)
+    }
+    _insert_processing_claims(conn, claims)
+    conn.commit()
+    target = _event(
+        "claim-lookup-250",
+        0,
+        "2026-05-24T04:18:00+00:00",
+        "2026-05-24T04:19:00+00:00",
+    )
+
+    conn.execute("BEGIN IMMEDIATE")
+    assert (
+        store.prioritized_global_winner_event(
+            target,
+            current_batch_claim_generations=claims,
+        )
+        is not None
+    )
+    assert len(conn.claim_lookup_calls) == 1
+    sql, parameters = conn.claim_lookup_calls[0]
+    assert sql.count("?") == 251
+    assert len(parameters) == 251
+    assert parameters[:-1] == tuple(sorted(claims))
+    assert parameters[-1] == store.consumer_name
+    conn.rollback()
+
+
+def test_global_winner_current_claim_lookup_uses_pk_and_bounded_vm_work():
+    conn = _claim_lookup_world_conn()
+    store = EventStore(conn)
+    claimed_at = "2026-05-24T04:17:00+00:00"
+    claims = {f"requested-{index}": claimed_at for index in range(4)}
+    _insert_processing_claims(conn, claims)
+    conn.commit()
+    target = _event(
+        "claim-lookup-plan",
+        0,
+        "2026-05-24T04:18:00+00:00",
+        "2026-05-24T04:19:00+00:00",
+    )
+
+    conn.execute("BEGIN IMMEDIATE")
+    assert (
+        store.prioritized_global_winner_event(
+            target,
+            current_batch_claim_generations=claims,
+        )
+        is not None
+    )
+    sql, parameters = conn.claim_lookup_calls[0]
+    conn.rollback()
+
+    plan = conn.execute("EXPLAIN QUERY PLAN " + sql, parameters).fetchall()
+    search_details = [str(row[3]) for row in plan if "SEARCH p " in str(row[3])]
+    assert len(search_details) == 1
+    lookup_terms = search_details[0].split("(", 1)[-1]
+    assert "consumer_name=?" in lookup_terms
+    assert "event_id=?" in lookup_terms
+    assert "processing_status" not in lookup_terms
+    assert "claimed_at" not in lookup_terms
+
+    def measured_lookup() -> tuple[int, dict[str, str]]:
+        steps = 0
+
+        def count_step() -> int:
+            nonlocal steps
+            steps += 1
+            return 0
+
+        conn.set_progress_handler(count_step, 1)
+        try:
+            rows = conn.execute(sql, parameters).fetchall()
+        finally:
+            conn.set_progress_handler(None, 0)
+        return steps, {str(row[0]): str(row[1]) for row in rows}
+
+    baseline_steps, baseline_result = measured_lookup()
+    historical_claims = {
+        f"historical-{index:05d}": claimed_at for index in range(20_000)
+    }
+    _insert_processing_claims(conn, historical_claims)
+    conn.commit()
+    historical_steps, historical_result = measured_lookup()
+
+    assert baseline_result == claims
+    assert historical_result == claims
+    assert historical_steps <= baseline_steps * 2
 
 
 def test_archive_superseded_forecast_snapshot_events_capped_batch_checks_newer_tail():

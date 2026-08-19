@@ -1,5 +1,5 @@
 # Created: 2026-07-02
-# Last reused/audited: 2026-07-02
+# Last reused/audited: 2026-08-01
 # Authority basis: architecture/invariants.yaml
 #   section 1 row "q_version + input HWMs (A1)".
 """Shared read-time raw-input high-water-mark (HWM) lag check.
@@ -22,14 +22,18 @@ names and signatures (``family=...``) so its existing call sites and tests
 
 from __future__ import annotations
 
+import hashlib
 import json
-import logging
 import sqlite3
+import time
 from collections.abc import Callable, Iterable, Mapping
+from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from functools import lru_cache
+from pathlib import Path
+from types import MappingProxyType
 
 from src.data.market_topology_rows import (
     _database_names,
@@ -42,16 +46,220 @@ from src.data.openmeteo_ecmwf_ifs9_anchor import (
 )
 
 UTC = timezone.utc
-_LOG = logging.getLogger(__name__)
+
+
+class ReplacementInputHwmReadUnavailable(sqlite3.OperationalError):
+    """The exact raw-input HWM read could not establish current authority."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        basis: str = "replacement_input_hwm_read_unavailable",
+    ) -> None:
+        super().__init__(message)
+        self.basis = basis
+
+    def blocker_reason(self) -> str:
+        return f"basis={self.basis}:sqlite_error={self}"
+
+
+def _is_transient_sqlite_read_error(exc: sqlite3.OperationalError) -> bool:
+    transient_codes = {
+        code
+        for code in (
+            getattr(sqlite3, "SQLITE_BUSY", None),
+            getattr(sqlite3, "SQLITE_LOCKED", None),
+            getattr(sqlite3, "SQLITE_INTERRUPT", None),
+        )
+        if isinstance(code, int)
+    }
+    error_code = getattr(exc, "sqlite_errorcode", None)
+    if isinstance(error_code, int) and (error_code & 0xFF) in transient_codes:
+        return True
+    if getattr(exc, "sqlite_errorname", None) in {
+        "SQLITE_BUSY",
+        "SQLITE_LOCKED",
+        "SQLITE_INTERRUPT",
+    }:
+        return True
+
+    message = str(exc).strip().lower()
+    if message in {
+        "interrupted",
+        "database is locked",
+        "database table is locked",
+        "database schema is locked",
+        "database is busy",
+        "sqlite_read_deadline_exceeded",
+        "sqlite_read_cancelled",
+        "sqlite_read_canceled",
+    }:
+        return True
+    return any(
+        message.startswith(prefix) and bool(message.removeprefix(prefix).strip())
+        for prefix in (
+            "database table is locked:",
+            "database schema is locked:",
+        )
+    )
+
+
+def _raise_hwm_read_unavailable(
+    exc: sqlite3.OperationalError,
+    *,
+    basis: str,
+) -> None:
+    if _is_transient_sqlite_read_error(exc):
+        raise ReplacementInputHwmReadUnavailable(
+            str(exc),
+            basis=basis,
+        ) from exc
+    raise exc
+
+
+def _raise_hwm_deadline_elapsed(*, basis: str) -> None:
+    raise ReplacementInputHwmReadUnavailable(
+        "replacement input HWM read deadline elapsed",
+        basis=basis,
+    )
+
+
+@contextmanager
+def _bounded_hwm_sql(
+    conn: sqlite3.Connection,
+    deadline_monotonic: float | None,
+    sql_timeout_seconds: float | None,
+):
+    """Bound one SQL statement on a dedicated HWM read connection."""
+
+    if deadline_monotonic is None and sql_timeout_seconds is None:
+        yield
+        return
+    started = time.monotonic()
+    outer_deadline = (
+        None if deadline_monotonic is None else float(deadline_monotonic)
+    )
+    remaining = (
+        float("inf")
+        if outer_deadline is None
+        else outer_deadline - started
+    )
+    sql_cpu_deadline = None
+    if sql_timeout_seconds is not None:
+        sql_timeout = max(0.0, float(sql_timeout_seconds))
+        remaining = min(remaining, sql_timeout)
+        sql_cpu_deadline = time.thread_time() + sql_timeout
+    if remaining <= 0.0:
+        _raise_hwm_deadline_elapsed(
+            basis="raw_artifact_input_hwm_sql_deadline",
+        )
+    previous_busy_timeout_row = conn.execute("PRAGMA busy_timeout").fetchone()
+    previous_busy_timeout_ms = int(
+        (previous_busy_timeout_row[0] if previous_busy_timeout_row else 0) or 0
+    )
+
+    def deadline_elapsed() -> bool:
+        return bool(
+            (outer_deadline is not None and time.monotonic() >= outer_deadline)
+            or (
+                sql_cpu_deadline is not None
+                and time.thread_time() >= sql_cpu_deadline
+            )
+        )
+
+    handler_installed = False
+    try:
+        lock_wait_seconds = min(1.0, remaining)
+        conn.execute(
+            "PRAGMA busy_timeout = "
+            f"{max(0, int(lock_wait_seconds * 1000))}"
+        )
+        conn.set_progress_handler(lambda: int(deadline_elapsed()), 1_000)
+        handler_installed = True
+        yield
+        if deadline_elapsed():
+            _raise_hwm_deadline_elapsed(
+                basis="raw_artifact_input_hwm_sql_deadline",
+            )
+    except ReplacementInputHwmReadUnavailable:
+        raise
+    except sqlite3.OperationalError as exc:
+        _raise_hwm_read_unavailable(
+            exc,
+            basis="raw_artifact_input_hwm_read_unavailable",
+        )
+    finally:
+        try:
+            if handler_installed:
+                conn.set_progress_handler(None, 0)
+        finally:
+            conn.execute(f"PRAGMA busy_timeout = {previous_busy_timeout_ms}")
+
+
+def _require_hwm_deadline(
+    deadline_monotonic: float | None,
+    *,
+    basis: str,
+) -> None:
+    if (
+        deadline_monotonic is not None
+        and time.monotonic() >= float(deadline_monotonic)
+    ):
+        _raise_hwm_deadline_elapsed(basis=basis)
+
+
+def _bounded_artifact_table_ref(
+    conn: sqlite3.Connection,
+    *,
+    deadline_monotonic: float | None,
+    sql_timeout_seconds: float | None,
+) -> str | None:
+    with _bounded_hwm_sql(conn, deadline_monotonic, sql_timeout_seconds):
+        attached = _database_names(conn)
+    for candidate in (
+        *(("forecasts.raw_forecast_artifacts",) if "forecasts" in attached else ()),
+        *(("world.raw_forecast_artifacts",) if "world" in attached else ()),
+        "raw_forecast_artifacts",
+    ):
+        with _bounded_hwm_sql(conn, deadline_monotonic, sql_timeout_seconds):
+            if _table_ref_exists(conn, candidate):
+                return candidate
+    return None
+
+
+def _bounded_hwm_table_ref_columns(
+    conn: sqlite3.Connection,
+    table_ref: str,
+    *,
+    deadline_monotonic: float | None,
+    sql_timeout_seconds: float | None,
+) -> frozenset[str]:
+    with _bounded_hwm_sql(conn, deadline_monotonic, sql_timeout_seconds):
+        return _hwm_table_ref_columns(conn, table_ref)
+
+
+def _hwm_table_ref_columns(
+    conn: sqlite3.Connection,
+    table_ref: str,
+) -> frozenset[str]:
+    try:
+        return frozenset(_table_ref_columns(conn, table_ref))
+    except sqlite3.OperationalError as exc:
+        _raise_hwm_read_unavailable(
+            exc,
+            basis="replacement_input_hwm_schema_read_unavailable",
+        )
 
 
 @dataclass(frozen=True)
 class _FrozenInputHwm:
-    conn: sqlite3.Connection
+    conn: sqlite3.Connection | None
     decision_iso: str
     requests: frozenset[tuple[str, str, str]]
     artifact_loaded: bool
     artifact_cycles: Mapping[tuple[str, str, str], datetime]
+    blocker_reason: str | None = None
 
 
 _FROZEN_INPUT_HWM: ContextVar[_FrozenInputHwm | None] = ContextVar(
@@ -87,10 +295,19 @@ def _authority_table_ref(conn: sqlite3.Connection, table_name: str) -> str | Non
         if "world" in attached:
             if _table_ref_exists(conn, f"world.{table_name}"):
                 return f"world.{table_name}"
-    except Exception:  # noqa: BLE001 - live gate must fail closed at the caller
-        pass
-    if _table_ref_exists(conn, table_name):
-        return table_name
+    except sqlite3.OperationalError as exc:
+        _raise_hwm_read_unavailable(
+            exc,
+            basis="replacement_input_hwm_table_lookup_unavailable",
+        )
+    try:
+        if _table_ref_exists(conn, table_name):
+            return table_name
+    except sqlite3.OperationalError as exc:
+        _raise_hwm_read_unavailable(
+            exc,
+            basis="replacement_input_hwm_table_lookup_unavailable",
+        )
     return None
 
 
@@ -106,7 +323,7 @@ def latest_raw_model_input_cycle(
     table_ref = _authority_table_ref(conn, "raw_model_forecasts")
     if table_ref is None:
         return None
-    columns = _table_ref_columns(conn, table_ref)
+    columns = _hwm_table_ref_columns(conn, table_ref)
     required = {"model", "city", "target_date", "metric", "source_cycle_time"}
     if not required.issubset(columns):
         return None
@@ -145,8 +362,11 @@ def latest_raw_model_input_cycle(
             """,
             tuple([*params, decision_iso]),
         ).fetchone()
-    except Exception:  # noqa: BLE001 - live gate must fail closed at the caller
-        return None
+    except sqlite3.OperationalError as exc:
+        _raise_hwm_read_unavailable(
+            exc,
+            basis="raw_model_input_hwm_read_unavailable",
+        )
     if row is None:
         return None
     try:
@@ -169,16 +389,22 @@ def latest_raw_artifact_input_cycle(
     frozen = _FROZEN_INPUT_HWM.get()
     if (
         frozen is not None
-        and frozen.conn is conn
+        and (frozen.conn is None or frozen.conn is conn)
         and frozen.decision_iso == decision_iso
-        and frozen.artifact_loaded
         and key in frozen.requests
     ):
+        if frozen.blocker_reason:
+            raise ReplacementInputHwmReadUnavailable(
+                frozen.blocker_reason,
+                basis="frozen_artifact_input_hwm_prefetch_unavailable",
+            )
+        if not frozen.artifact_loaded:
+            return None
         return frozen.artifact_cycles.get(key)
     table_ref = _authority_table_ref(conn, "raw_forecast_artifacts")
     if table_ref is None:
         return None
-    columns = _table_ref_columns(conn, table_ref)
+    columns = _hwm_table_ref_columns(conn, table_ref)
     required = {
         "source_cycle_time",
         "captured_at",
@@ -190,7 +416,16 @@ def latest_raw_artifact_input_cycle(
     if {"source_id", "product_id"}.issubset(columns):
         try:
             data_version_row = conn.execute("PRAGMA data_version").fetchone()
+        except sqlite3.OperationalError as exc:
+            _raise_hwm_read_unavailable(
+                exc,
+                basis="raw_artifact_input_hwm_read_unavailable",
+            )
+        try:
             data_version = int(data_version_row[0]) if data_version_row is not None else -1
+        except (IndexError, KeyError, TypeError, ValueError):
+            return None
+        try:
             return _raw_artifact_cycle_for_frozen_request(
                 conn,
                 table_ref,
@@ -200,8 +435,11 @@ def latest_raw_artifact_input_cycle(
                 data_version,
                 conn.total_changes,
             )
-        except Exception:  # noqa: BLE001 - live gate must fail closed at the caller
-            return None
+        except sqlite3.OperationalError as exc:
+            _raise_hwm_read_unavailable(
+                exc,
+                basis="raw_artifact_input_hwm_read_unavailable",
+            )
     predicates = [
         "json_extract(artifact_metadata_json, '$.city') = ?",
         "json_extract(artifact_metadata_json, '$.target_date') = ?",
@@ -227,7 +465,16 @@ def latest_raw_artifact_input_cycle(
     if conn.in_transaction:
         try:
             data_version_row = conn.execute("PRAGMA data_version").fetchone()
+        except sqlite3.OperationalError as exc:
+            _raise_hwm_read_unavailable(
+                exc,
+                basis="raw_artifact_input_hwm_read_unavailable",
+            )
+        try:
             data_version = int(data_version_row[0]) if data_version_row is not None else -1
+        except (IndexError, KeyError, TypeError, ValueError):
+            return None
+        try:
             cached = dict(
                 _raw_artifact_cycles_for_frozen_target(
                     conn,
@@ -240,8 +487,11 @@ def latest_raw_artifact_input_cycle(
                     conn.total_changes,
                 )
             )
-        except Exception:  # noqa: BLE001 - live gate must fail closed at the caller
-            return None
+        except sqlite3.OperationalError as exc:
+            _raise_hwm_read_unavailable(
+                exc,
+                basis="raw_artifact_input_hwm_read_unavailable",
+            )
         return cached.get(city)
     try:
         rows = conn.execute(
@@ -255,8 +505,11 @@ def latest_raw_artifact_input_cycle(
             """,
             tuple([*params, decision_iso]),
         ).fetchall()
-    except Exception:  # noqa: BLE001 - live gate must fail closed at the caller
-        return None
+    except sqlite3.OperationalError as exc:
+        _raise_hwm_read_unavailable(
+            exc,
+            basis="raw_artifact_input_hwm_read_unavailable",
+        )
     for row in rows:
         try:
             raw_value = row["source_cycle_time"]
@@ -401,12 +654,20 @@ def _artifact_cycles_from_rows(
         if metadata_type != "object":
             continue
         if "artifact_path" in columns:
-            if payload_path_type in {"", "null", "text"}:
-                metadata = (
-                    {"openmeteo_payload_json": payload_path}
-                    if payload_path_type == "text"
-                    else {}
-                )
+            if payload_path_type == "text":
+                if not _cached_artifact_payload_covers_target_local_day(
+                    artifact_path=artifact_path,
+                    payload_path=str(payload_path or ""),
+                    city_timezone=str(
+                        getattr(cities_by_name.get(artifact_city), "timezone", "")
+                        or ""
+                    ),
+                    target_date=target_date,
+                ):
+                    continue
+                metadata = {}
+            elif payload_path_type in {"", "null"}:
+                metadata = {}
             else:
                 try:
                     metadata = json.loads(str(metadata_raw or "{}"))
@@ -414,19 +675,85 @@ def _artifact_cycles_from_rows(
                     continue
                 if not isinstance(metadata, dict):
                     continue
-            city_cfg = cities_by_name.get(artifact_city)
-            city_timezone = str(getattr(city_cfg, "timezone", "") or "") or None
-            if not _openmeteo_payload_covers_target_local_day(
-                metadata,
-                artifact_path=artifact_path,
-                city_timezone=city_timezone,
-                target_date=target_date,
-            ):
-                continue
+            if payload_path_type != "text":
+                city_cfg = cities_by_name.get(artifact_city)
+                city_timezone = str(getattr(city_cfg, "timezone", "") or "") or None
+                if not _openmeteo_payload_covers_target_local_day(
+                    metadata,
+                    artifact_path=artifact_path,
+                    city_timezone=city_timezone,
+                    target_date=target_date,
+                ):
+                    continue
         cycle = _parse_source_cycle_utc(raw_cycle)
         if cycle is not None:
             cycles[key] = cycle
     return cycles
+
+
+@lru_cache(maxsize=4096)
+def _cached_artifact_payload_coverage(
+    *,
+    artifact_path: str,
+    payload_path: str,
+    city_timezone: str,
+    target_date: str,
+    payload_inode: int,
+    payload_ctime_ns: int,
+    payload_mtime_ns: int,
+    payload_size: int,
+) -> bool:
+    """Verify one immutable payload identity once per process."""
+
+    del payload_inode, payload_ctime_ns, payload_mtime_ns, payload_size
+    from src.data.replacement_forecast_current_target_plan import (
+        _openmeteo_payload_covers_target_local_day,
+    )
+
+    return _openmeteo_payload_covers_target_local_day(
+        {"openmeteo_payload_json": payload_path},
+        artifact_path=artifact_path,
+        city_timezone=city_timezone or None,
+        target_date=target_date,
+    )
+
+
+def _cached_artifact_payload_covers_target_local_day(
+    *,
+    artifact_path: str,
+    payload_path: str,
+    city_timezone: str,
+    target_date: str,
+) -> bool:
+    """Reuse coverage proof while the referenced payload bytes are unchanged."""
+
+    if not str(payload_path).strip():
+        return True
+    resolved = Path(payload_path)
+    if not resolved.is_absolute():
+        resolved = Path(artifact_path).parent / resolved
+    try:
+        stat = resolved.stat()
+    except (OSError, ValueError):
+        payload_inode = -1
+        payload_ctime_ns = -1
+        payload_mtime_ns = -1
+        payload_size = -1
+    else:
+        payload_inode = int(stat.st_ino)
+        payload_ctime_ns = int(stat.st_ctime_ns)
+        payload_mtime_ns = int(stat.st_mtime_ns)
+        payload_size = int(stat.st_size)
+    return _cached_artifact_payload_coverage(
+        artifact_path=artifact_path,
+        payload_path=str(resolved),
+        city_timezone=city_timezone,
+        target_date=target_date,
+        payload_inode=payload_inode,
+        payload_ctime_ns=payload_ctime_ns,
+        payload_mtime_ns=payload_mtime_ns,
+        payload_size=payload_size,
+    )
 
 
 def _batch_product_cycle_artifact_cycles(
@@ -436,36 +763,49 @@ def _batch_product_cycle_artifact_cycles(
     columns: frozenset[str],
     requests: frozenset[tuple[str, str, str]],
     decision_iso: str,
+    deadline_monotonic: float | None = None,
+    sql_timeout_seconds: float | None = None,
 ) -> dict[tuple[str, str, str], datetime]:
     """Resolve requested HWMs from newest product-cycle partitions first."""
 
-    cycle_rows = conn.execute(
-        f"""
-        SELECT source_cycle_time
-          FROM {table_ref}
-         WHERE source_id = ?
-           AND product_id = ?
-         GROUP BY source_cycle_time
-         ORDER BY source_cycle_time DESC
-        """,
-        (
-            OPENMETEO_ANCHOR_SOURCE_ID,
-            OPENMETEO_ANCHOR_PRODUCT_ID,
-        ),
-    ).fetchall()
     select_path = "artifact_path" if "artifact_path" in columns else "NULL"
     cycles: dict[tuple[str, str, str], datetime] = {}
-    for cycle_row in cycle_rows:
+    cycle_ceiling = decision_iso
+    inclusive_ceiling = True
+    while True:
+        remaining = requests.difference(cycles)
+        if not remaining:
+            break
+        comparison = "<=" if inclusive_ceiling else "<"
+        with _bounded_hwm_sql(conn, deadline_monotonic, sql_timeout_seconds):
+            cycle_row = conn.execute(
+                f"""
+                SELECT MAX(source_cycle_time) AS source_cycle_time
+                  FROM {table_ref}
+                 WHERE source_id = ?
+                   AND product_id = ?
+                   AND source_cycle_time {comparison} ?
+                """,
+                (
+                    OPENMETEO_ANCHOR_SOURCE_ID,
+                    OPENMETEO_ANCHOR_PRODUCT_ID,
+                    cycle_ceiling,
+                ),
+            ).fetchone()
+        if cycle_row is None:
+            break
         try:
             source_cycle = cycle_row["source_cycle_time"]
         except Exception:  # noqa: BLE001 - tuple row compatibility
             source_cycle = cycle_row[0]
-        remaining = requests.difference(cycles)
-        if not remaining:
+        if source_cycle in (None, ""):
             break
-        rows = conn.execute(
-            f"""
-            SELECT CASE WHEN json_valid(artifact_metadata_json)
+        cycle_ceiling = str(source_cycle)
+        inclusive_ceiling = False
+        with _bounded_hwm_sql(conn, deadline_monotonic, sql_timeout_seconds):
+            rows = conn.execute(
+                f"""
+                SELECT CASE WHEN json_valid(artifact_metadata_json)
                         THEN json_extract(artifact_metadata_json, '$.city')
                    END AS artifact_city,
                    CASE WHEN json_valid(artifact_metadata_json)
@@ -499,24 +839,28 @@ def _batch_product_cycle_artifact_cycles(
                AND datetime(source_cycle_time) <= datetime(?)
                AND datetime(captured_at) <= datetime(?)
                AND datetime(source_available_at) <= datetime(?)
-             ORDER BY datetime(captured_at) DESC,
-                      datetime(source_available_at) DESC
-            """,
-            (
-                OPENMETEO_ANCHOR_SOURCE_ID,
-                OPENMETEO_ANCHOR_PRODUCT_ID,
-                source_cycle,
-                decision_iso,
-                decision_iso,
-                decision_iso,
-            ),
-        ).fetchall()
+                 ORDER BY datetime(captured_at) DESC,
+                          datetime(source_available_at) DESC
+                """,
+                (
+                    OPENMETEO_ANCHOR_SOURCE_ID,
+                    OPENMETEO_ANCHOR_PRODUCT_ID,
+                    source_cycle,
+                    decision_iso,
+                    decision_iso,
+                    decision_iso,
+                ),
+            ).fetchall()
         cycles.update(
             _artifact_cycles_from_rows(
                 rows,
                 columns=columns,
                 requested_keys=frozenset(remaining),
             )
+        )
+        _require_hwm_deadline(
+            deadline_monotonic,
+            basis="raw_artifact_input_hwm_payload_validation_deadline",
         )
     return cycles
 
@@ -548,11 +892,22 @@ def _batch_artifact_cycles(
     *,
     requests: frozenset[tuple[str, str, str]],
     decision_iso: str,
+    deadline_monotonic: float | None = None,
+    sql_timeout_seconds: float | None = None,
 ) -> tuple[bool, dict[tuple[str, str, str], datetime]]:
-    table_ref = _authority_table_ref(conn, "raw_forecast_artifacts")
+    table_ref = _bounded_artifact_table_ref(
+        conn,
+        deadline_monotonic=deadline_monotonic,
+        sql_timeout_seconds=sql_timeout_seconds,
+    )
     if table_ref is None:
         return True, {}
-    columns = frozenset(_table_ref_columns(conn, table_ref))
+    columns = _bounded_hwm_table_ref_columns(
+        conn,
+        table_ref,
+        deadline_monotonic=deadline_monotonic,
+        sql_timeout_seconds=sql_timeout_seconds,
+    )
     required = {
         "source_cycle_time",
         "captured_at",
@@ -568,6 +923,8 @@ def _batch_artifact_cycles(
             columns=columns,
             requests=requests,
             decision_iso=decision_iso,
+            deadline_monotonic=deadline_monotonic,
+            sql_timeout_seconds=sql_timeout_seconds,
         )
     select_path = "artifact.artifact_path" if "artifact_path" in columns else "NULL"
     source_predicate = (
@@ -582,9 +939,10 @@ def _batch_artifact_cycles(
     for offset in range(0, len(ordered), chunk_size):
         chunk = ordered[offset : offset + chunk_size]
         values_sql = ",".join("(?,?,?)" for _ in chunk)
-        rows = conn.execute(
-            f"""
-            WITH requested(city, target_date, metric) AS (VALUES {values_sql})
+        with _bounded_hwm_sql(conn, deadline_monotonic, sql_timeout_seconds):
+            rows = conn.execute(
+                f"""
+                WITH requested(city, target_date, metric) AS (VALUES {values_sql})
             SELECT requested.city AS artifact_city,
                    requested.target_date AS artifact_target_date,
                    requested.metric AS artifact_metric,
@@ -623,32 +981,43 @@ def _batch_artifact_cycles(
                AND datetime(artifact.source_cycle_time) <= datetime(?)
              GROUP BY requested.city, requested.target_date, requested.metric,
                       artifact.source_cycle_time
-             ORDER BY requested.city, requested.target_date, requested.metric,
-                      datetime(artifact.source_cycle_time) DESC
-            """,
-            (*[value for key in chunk for value in key], decision_iso, decision_iso, decision_iso),
-        ).fetchall()
+                 ORDER BY requested.city, requested.target_date, requested.metric,
+                          datetime(artifact.source_cycle_time) DESC
+                """,
+                (
+                    *[value for key in chunk for value in key],
+                    decision_iso,
+                    decision_iso,
+                    decision_iso,
+                ),
+            ).fetchall()
         cycles.update(_artifact_cycles_from_rows(rows, columns=columns))
+        _require_hwm_deadline(
+            deadline_monotonic,
+            basis="raw_artifact_input_hwm_payload_validation_deadline",
+        )
     return True, cycles
 
 
-def prime_frozen_replacement_artifact_hwm(
+def freeze_replacement_artifact_hwm(
     conn: sqlite3.Connection,
     *,
     requests: Iterable[tuple[str, str, str]],
     decision_time: datetime,
-) -> Callable[[], None]:
-    """Prime artifact HWMs for one explicitly owned read transaction."""
+    deadline_monotonic: float | None = None,
+    sql_timeout_seconds: float | None = None,
+) -> _FrozenInputHwm | None:
+    """Read one immutable artifact-HWM cut for a set of held families."""
 
     if not isinstance(conn, sqlite3.Connection) or not conn.in_transaction:
-        return lambda: None
+        return None
     normalized = frozenset(
         (str(city), str(target_date), str(metric))
         for city, target_date, metric in requests
         if city and target_date and metric
     )
     if not normalized:
-        return lambda: None
+        return None
     decision_iso = decision_time.astimezone(UTC).isoformat()
     artifact_loaded = False
     artifact_cycles: dict[tuple[str, str, str], datetime] = {}
@@ -657,19 +1026,63 @@ def prime_frozen_replacement_artifact_hwm(
             conn,
             requests=normalized,
             decision_iso=decision_iso,
+            deadline_monotonic=deadline_monotonic,
+            sql_timeout_seconds=sql_timeout_seconds,
         )
-    except Exception as exc:  # noqa: BLE001 - scalar fail-closed fallback remains authoritative
-        _LOG.warning("frozen artifact HWM prime failed; using scalar reads: %s", exc)
+        _require_hwm_deadline(
+            deadline_monotonic,
+            basis="raw_artifact_input_hwm_payload_validation_deadline",
+        )
+    except ReplacementInputHwmReadUnavailable:
+        raise
+    except sqlite3.OperationalError as exc:
+        _raise_hwm_read_unavailable(
+            exc,
+            basis="raw_artifact_input_hwm_read_unavailable",
+        )
 
-    token = _FROZEN_INPUT_HWM.set(
-        _FrozenInputHwm(
-            conn=conn,
-            decision_iso=decision_iso,
-            requests=normalized,
-            artifact_loaded=artifact_loaded,
-            artifact_cycles=artifact_cycles,
-        )
+    return _FrozenInputHwm(
+        conn=None,
+        decision_iso=decision_iso,
+        requests=normalized,
+        artifact_loaded=artifact_loaded,
+        artifact_cycles=MappingProxyType(dict(artifact_cycles)),
     )
+
+
+def frozen_replacement_artifact_hwm_unavailable(
+    *,
+    requests: Iterable[tuple[str, str, str]],
+    decision_time: datetime,
+    blocker_reason: str,
+) -> _FrozenInputHwm | None:
+    """Build one cycle-scoped UNKNOWN verdict after a failed batch read."""
+
+    normalized = frozenset(
+        (str(city), str(target_date), str(metric))
+        for city, target_date, metric in requests
+        if city and target_date and metric
+    )
+    if not normalized:
+        return None
+    return _FrozenInputHwm(
+        conn=None,
+        decision_iso=decision_time.astimezone(UTC).isoformat(),
+        requests=normalized,
+        artifact_loaded=False,
+        artifact_cycles=MappingProxyType({}),
+        blocker_reason=str(blocker_reason or "batch read unavailable"),
+    )
+
+
+def install_frozen_replacement_artifact_hwm(
+    snapshot: _FrozenInputHwm | None,
+) -> Callable[[], None]:
+    """Install an immutable HWM cut for one synchronous consumer call."""
+
+    if snapshot is None:
+        return lambda: None
+    token = _FROZEN_INPUT_HWM.set(snapshot)
     released = False
 
     def release() -> None:
@@ -682,6 +1095,31 @@ def prime_frozen_replacement_artifact_hwm(
     return release
 
 
+def prime_frozen_replacement_artifact_hwm(
+    conn: sqlite3.Connection,
+    *,
+    requests: Iterable[tuple[str, str, str]],
+    decision_time: datetime,
+) -> Callable[[], None]:
+    """Prime artifact HWMs for one explicitly owned read transaction."""
+
+    snapshot = freeze_replacement_artifact_hwm(
+        conn,
+        requests=requests,
+        decision_time=decision_time,
+    )
+    if snapshot is not None:
+        snapshot = _FrozenInputHwm(
+            conn=conn,
+            decision_iso=snapshot.decision_iso,
+            requests=snapshot.requests,
+            artifact_loaded=snapshot.artifact_loaded,
+            artifact_cycles=snapshot.artifact_cycles,
+            blocker_reason=snapshot.blocker_reason,
+        )
+    return install_frozen_replacement_artifact_hwm(snapshot)
+
+
 def _posterior_provenance_for_cycle(
     conn: sqlite3.Connection,
     *,
@@ -689,14 +1127,23 @@ def _posterior_provenance_for_cycle(
     target_date: object,
     metric: str,
     posterior_source_cycle_time: object,
-) -> dict[str, object]:
+    posterior_computed_at: object | None = None,
+) -> dict[str, object] | None:
     table_ref = _authority_table_ref(conn, "forecast_posteriors")
     if table_ref is None:
-        return {}
-    columns = _table_ref_columns(conn, table_ref)
+        return None
+    columns = _hwm_table_ref_columns(conn, table_ref)
     required = {"city", "target_date", "temperature_metric", "source_cycle_time", "provenance_json"}
     if not required.issubset(columns):
-        return {}
+        return None
+    parsed_computed_at = _parse_source_cycle_utc(posterior_computed_at)
+    if posterior_computed_at not in (None, "") and parsed_computed_at is None:
+        return None
+    exact_computed_at = (
+        parsed_computed_at.isoformat() if parsed_computed_at is not None else None
+    )
+    if exact_computed_at is not None and "computed_at" not in columns:
+        return None
     order_terms = []
     if "computed_at" in columns:
         order_terms.append("datetime(computed_at) DESC")
@@ -704,23 +1151,39 @@ def _posterior_provenance_for_cycle(
         order_terms.append("posterior_id DESC")
     order_sql = ", ".join(order_terms) if order_terms else "rowid DESC"
     try:
-        row = conn.execute(
+        rows = conn.execute(
             f"""
-            SELECT provenance_json
+            SELECT provenance_json, computed_at
               FROM {table_ref}
              WHERE city = ?
                AND target_date = ?
                AND temperature_metric = ?
                AND datetime(source_cycle_time) = datetime(?)
              ORDER BY {order_sql}
-             LIMIT 1
             """,
             (city, target_date, metric, str(posterior_source_cycle_time)),
-        ).fetchone()
-    except Exception:  # noqa: BLE001 - live gate must fail closed at the caller
-        return {}
-    if row is None:
-        return {}
+        ).fetchall()
+    except sqlite3.OperationalError as exc:
+        _raise_hwm_read_unavailable(
+            exc,
+            basis="posterior_provenance_hwm_read_unavailable",
+        )
+    if not rows:
+        return None
+    if exact_computed_at is not None:
+        exact_rows = []
+        for candidate in rows:
+            try:
+                candidate_computed_at = candidate["computed_at"]
+            except Exception:  # noqa: BLE001 - tuple row compatibility
+                candidate_computed_at = candidate[1]
+            if _parse_source_cycle_utc(candidate_computed_at) == parsed_computed_at:
+                exact_rows.append(candidate)
+        if len(exact_rows) != 1:
+            return None
+        row = exact_rows[0]
+    else:
+        row = rows[0]
     try:
         raw = row["provenance_json"]
     except Exception:  # noqa: BLE001
@@ -728,8 +1191,8 @@ def _posterior_provenance_for_cycle(
     try:
         provenance = json.loads(str(raw or "{}"))
     except (TypeError, ValueError):
-        return {}
-    return provenance if isinstance(provenance, dict) else {}
+        return None
+    return provenance if isinstance(provenance, dict) else None
 
 
 def _posterior_used_models_for_cycle(
@@ -756,15 +1219,14 @@ def _posterior_used_models_for_cycle(
 def _used_models_from_provenance(
     provenance: Mapping[str, object],
 ) -> frozenset[str]:
-    candidates: list[object] = []
-    candidates.append(provenance.get("used_models"))
     fusion = provenance.get("bayes_precision_fusion")
+    candidates: list[object] = []
     if isinstance(fusion, dict):
-        candidates.append(fusion.get("used_models"))
         source_clock = fusion.get("source_clock_one_scheme")
         if isinstance(source_clock, dict):
             candidates.append(source_clock.get("used_weights"))
-            candidates.append(source_clock.get("configured_sources"))
+        candidates.append(fusion.get("used_models"))
+    candidates.append(provenance.get("used_models"))
     models: set[str] = set()
     for candidate in candidates:
         if isinstance(candidate, dict):
@@ -777,6 +1239,8 @@ def _used_models_from_provenance(
             text = str(value or "").strip()
             if text:
                 models.add(text)
+        if models:
+            break
     return frozenset(models)
 
 
@@ -788,6 +1252,367 @@ def _provenance_has_current_value_serving(
         return False
     serving = fusion.get("current_value_serving")
     return isinstance(serving, dict) and bool(serving)
+
+
+def _exact_current_value_serving_lag(
+    conn: sqlite3.Connection,
+    *,
+    city: str,
+    target_date: object,
+    metric: str,
+    decision_time: datetime,
+    posterior_computed_at: datetime | None,
+    provenance: Mapping[str, object],
+) -> tuple[bool, str | None, datetime | None]:
+    """Check rich current-value provenance against each model's latest row.
+
+    ``forecast_posteriors.source_cycle_time`` is the carrier/shape cycle.  A
+    source-clock posterior may intentionally consume newer, model-specific
+    deterministic values, recorded in ``current_value_serving``.  Comparing
+    those rows back to the carrier cycle makes a fully current posterior look
+    stale forever.  Exact raw-row identities are the narrower authority.
+    """
+
+    fusion = provenance.get("bayes_precision_fusion")
+    if not isinstance(fusion, Mapping):
+        return False, None, None
+    serving = fusion.get("current_value_serving")
+    used_models = _used_models_from_provenance(provenance)
+    if not isinstance(serving, Mapping) or not used_models:
+        return True, "basis=current_value_serving_provenance_unverifiable", None
+
+    consumed: dict[str, tuple[int, datetime, datetime | None]] = {}
+    for model in used_models:
+        item = serving.get(model)
+        if not isinstance(item, Mapping):
+            return (
+                True,
+                f"basis=current_value_serving_provenance_unverifiable:model={model}",
+                None,
+            )
+        try:
+            raw_id = int(item.get("raw_model_forecast_id"))
+        except (TypeError, ValueError):
+            return (
+                True,
+                f"basis=current_value_serving_provenance_unverifiable:model={model}",
+                None,
+            )
+        served_cycle = _parse_source_cycle_utc(item.get("served_cycle"))
+        if raw_id <= 0 or served_cycle is None:
+            return (
+                True,
+                f"basis=current_value_serving_provenance_unverifiable:model={model}",
+                None,
+            )
+        consumed[model] = (
+            raw_id,
+            served_cycle,
+            _parse_source_cycle_utc(item.get("captured_at")),
+        )
+        if (
+            posterior_computed_at is not None
+            and consumed[model][2] is not None
+            and consumed[model][2] > posterior_computed_at
+        ):
+            return (
+                True,
+                "basis=used_raw_model_forecasts_same_cycle_late_input:"
+                f"model={model}:"
+                f"consumed_raw_id={raw_id}:"
+                f"latest_raw_input_at={consumed[model][2].isoformat()}:"
+                f"posterior_computed_at={posterior_computed_at.isoformat()}",
+                consumed.get("ecmwf_ifs", (0, served_cycle, None))[1],
+            )
+
+    decision_iso = decision_time.astimezone(UTC).isoformat()
+    from src.data.replacement_current_value_serving import (
+        read_current_instrument_values,
+    )
+
+    try:
+        selected = read_current_instrument_values(
+            conn,
+            city=city,
+            metric=metric,
+            target_date=str(target_date),
+            source_cycle_time_iso=max(
+                item[1] for item in consumed.values()
+            ).isoformat(),
+            include_station_sources=True,
+            decision_time_iso=decision_iso,
+        )
+    except sqlite3.OperationalError as exc:
+        _raise_hwm_read_unavailable(
+            exc,
+            basis="current_value_serving_read_unavailable",
+        )
+    newer_cycle_changes: list[
+        tuple[str, int, int, datetime, datetime]
+    ] = []
+    for model, (consumed_id, consumed_cycle, consumed_at) in consumed.items():
+        current = selected.get(model)
+        if current is None:
+            return (
+                True,
+                "basis=current_value_serving_raw_hwm_unavailable:"
+                f"model={model}:consumed_raw_id={consumed_id}",
+                consumed.get("ecmwf_ifs", (0, consumed_cycle, None))[1],
+            )
+        current_cycle = _parse_source_cycle_utc(current.served_cycle)
+        current_at = _parse_source_cycle_utc(current.captured_at)
+        latest_id = int(current.raw_model_forecast_id)
+        if current_cycle is None:
+            return (
+                True,
+                "basis=current_value_serving_raw_row_identity_mismatch:"
+                f"model={model}:consumed_raw_id={consumed_id}",
+                consumed.get("ecmwf_ifs", (0, consumed_cycle, None))[1],
+            )
+        if (
+            posterior_computed_at is not None
+            and current_at is not None
+            and current_at > posterior_computed_at
+            and current_cycle == consumed_cycle
+        ):
+            return (
+                True,
+                "basis=used_raw_model_forecasts_same_cycle_late_input:"
+                f"model={model}:"
+                f"latest_raw_id={latest_id}:"
+                f"latest_raw_input_at={current_at.isoformat()}:"
+                f"posterior_computed_at={posterior_computed_at.isoformat()}",
+                consumed.get("ecmwf_ifs", (0, consumed_cycle, None))[1],
+            )
+        if latest_id == consumed_id:
+            if (
+                current_cycle != consumed_cycle
+                or (
+                    consumed_at is not None
+                    and current_at != consumed_at
+                )
+            ):
+                return (
+                    True,
+                    "basis=current_value_serving_raw_row_identity_mismatch:"
+                    f"model={model}:consumed_raw_id={consumed_id}",
+                    consumed.get("ecmwf_ifs", (0, consumed_cycle, None))[1],
+                )
+            continue
+        if current_cycle > consumed_cycle:
+            newer_cycle_changes.append(
+                (model, latest_id, consumed_id, current_cycle, consumed_cycle)
+            )
+            continue
+        return (
+            True,
+            "basis=used_raw_model_forecasts_superseded:"
+            f"model={model}:"
+            f"latest_raw_id={latest_id}:"
+            f"consumed_raw_id={consumed_id}:"
+            f"latest_raw_cycle={current_cycle.isoformat()}:"
+            f"consumed_raw_cycle={consumed_cycle.isoformat()}",
+            consumed.get("ecmwf_ifs", (0, consumed_cycle, None))[1],
+        )
+
+    if newer_cycle_changes:
+        # Freshness asks whether the posterior consumed every current input it
+        # claims to use, not whether enough peers have arrived to materialize a
+        # replacement yet.  Waiting for a coherent cohort here would brand an
+        # exactly superseded provider row current and, after the scalar carrier
+        # check is correctly demoted to telemetry, fail open.  The materializer
+        # may still wait for its complete probability shape; held redecision
+        # remains honestly stale until that producer commits a new posterior.
+        model, latest_id, consumed_id, current_cycle, consumed_cycle = (
+            newer_cycle_changes[0]
+        )
+        return (
+            True,
+            "basis=used_raw_model_forecasts_superseded:"
+            f"model={model}:"
+            f"latest_raw_id={latest_id}:"
+            f"consumed_raw_id={consumed_id}:"
+            f"latest_raw_cycle={current_cycle.isoformat()}:"
+            f"consumed_raw_cycle={consumed_cycle.isoformat()}",
+            consumed.get("ecmwf_ifs", (0, consumed_cycle, None))[1],
+        )
+
+    anchor = consumed.get("ecmwf_ifs")
+    return True, None, anchor[1] if anchor is not None else None
+
+
+def _exact_consumed_anchor_artifact_cycle(
+    conn: sqlite3.Connection,
+    *,
+    city: str,
+    target_date: object,
+    metric: str,
+    decision_time: datetime,
+    provenance: Mapping[str, object],
+) -> tuple[str | None, datetime | None]:
+    """Return the exact OpenMeteo artifact cycle consumed by a posterior.
+
+    ``current_value_serving.ecmwf_ifs`` identifies the deterministic model row,
+    not the OpenMeteo anchor artifact.  The two clocks may legitimately straddle
+    a UTC cycle boundary.  HWM comparison therefore binds to the immutable
+    artifact id persisted by the materializer and rejects any unverifiable
+    identity instead of substituting a nearby model clock.
+    """
+
+    try:
+        artifact_id = int(provenance.get("openmeteo_anchor_artifact_id"))
+    except (TypeError, ValueError):
+        return "basis=openmeteo_anchor_artifact_provenance_unverifiable", None
+    if artifact_id <= 0:
+        return "basis=openmeteo_anchor_artifact_provenance_unverifiable", None
+
+    table_ref = _authority_table_ref(conn, "raw_forecast_artifacts")
+    if table_ref is None:
+        return "basis=openmeteo_anchor_artifact_table_unavailable", None
+    columns = _hwm_table_ref_columns(conn, table_ref)
+    required = {
+        "artifact_id",
+        "source_id",
+        "product_id",
+        "data_version",
+        "source_cycle_time",
+        "source_available_at",
+        "captured_at",
+        "artifact_path",
+        "sha256",
+        "artifact_metadata_json",
+    }
+    if not required.issubset(columns):
+        return "basis=openmeteo_anchor_artifact_table_unverifiable", None
+
+    try:
+        row = conn.execute(
+            f"""
+            SELECT artifact_id, source_id, product_id, data_version,
+                   source_cycle_time, source_available_at, captured_at,
+                   artifact_path, sha256, artifact_metadata_json
+              FROM {table_ref}
+             WHERE artifact_id = ?
+             LIMIT 1
+            """,
+            (artifact_id,),
+        ).fetchone()
+    except sqlite3.OperationalError as exc:
+        _raise_hwm_read_unavailable(
+            exc,
+            basis="anchor_artifact_hwm_read_unavailable",
+        )
+    if row is None:
+        return (
+            f"basis=openmeteo_anchor_artifact_missing:artifact_id={artifact_id}",
+            None,
+        )
+    values = dict(row) if hasattr(row, "keys") else dict(
+        zip(
+            (
+                "artifact_id",
+                "source_id",
+                "product_id",
+                "data_version",
+                "source_cycle_time",
+                "source_available_at",
+                "captured_at",
+                "artifact_path",
+                "sha256",
+                "artifact_metadata_json",
+            ),
+            row,
+            strict=True,
+        )
+    )
+    normalized_metric = str(metric).strip().lower()
+    if (
+        str(values["source_id"]) != OPENMETEO_ANCHOR_SOURCE_ID
+        or str(values["product_id"]) != OPENMETEO_ANCHOR_PRODUCT_ID
+        or str(values["data_version"])
+        != f"openmeteo_ecmwf_ifs9_anchor_localday_{normalized_metric}"
+    ):
+        return (
+            "basis=openmeteo_anchor_artifact_identity_mismatch:"
+            f"artifact_id={artifact_id}",
+            None,
+        )
+
+    source_cycle = _parse_source_cycle_utc(values["source_cycle_time"])
+    source_available_at = _parse_source_cycle_utc(values["source_available_at"])
+    captured_at = _parse_source_cycle_utc(values["captured_at"])
+    decision_utc = decision_time.astimezone(UTC)
+    if (
+        source_cycle is None
+        or source_available_at is None
+        or captured_at is None
+        or source_cycle > decision_utc
+        or source_available_at > decision_utc
+        or captured_at > decision_utc
+    ):
+        return (
+            "basis=openmeteo_anchor_artifact_causality_mismatch:"
+            f"artifact_id={artifact_id}",
+            None,
+        )
+
+    artifact_path = Path(str(values["artifact_path"] or ""))
+    expected_sha = str(values["sha256"] or "").strip().lower()
+    try:
+        actual_sha = hashlib.sha256(artifact_path.read_bytes()).hexdigest()
+    except OSError:
+        return (
+            "basis=openmeteo_anchor_artifact_payload_unavailable:"
+            f"artifact_id={artifact_id}",
+            None,
+        )
+    if actual_sha != expected_sha:
+        return (
+            "basis=openmeteo_anchor_artifact_payload_identity_mismatch:"
+            f"artifact_id={artifact_id}",
+            None,
+        )
+
+    try:
+        metadata = json.loads(str(values["artifact_metadata_json"] or "{}"))
+    except (TypeError, ValueError):
+        metadata = None
+    if not isinstance(metadata, Mapping):
+        return (
+            "basis=openmeteo_anchor_artifact_metadata_unverifiable:"
+            f"artifact_id={artifact_id}",
+            None,
+        )
+    artifact_row = {
+        "artifact_city": metadata.get("city"),
+        # One immutable Open-Meteo payload can cover several local days. Bind
+        # this HWM proof to the posterior's consumed day; the validator below
+        # still checks the original payload bytes, hash, city, metric, and
+        # actual local-day coverage.
+        "artifact_target_date": str(target_date),
+        "artifact_metric": metadata.get("metric"),
+        "source_cycle_time": values["source_cycle_time"],
+        "artifact_path": values["artifact_path"],
+        "metadata_type": "object",
+        "payload_path_type": (
+            "text" if isinstance(metadata.get("openmeteo_payload_json"), str) else ""
+        ),
+        "payload_path": metadata.get("openmeteo_payload_json"),
+        "artifact_metadata_json": values["artifact_metadata_json"],
+    }
+    key = (str(city), str(target_date), normalized_metric)
+    validated_cycle = _artifact_cycles_from_rows(
+        (artifact_row,),
+        columns=columns,
+        requested_keys=frozenset((key,)),
+    ).get(key)
+    if validated_cycle != source_cycle:
+        return (
+            "basis=openmeteo_anchor_artifact_scope_mismatch:"
+            f"artifact_id={artifact_id}",
+            None,
+        )
+    return None, source_cycle
 
 
 def latest_used_raw_model_input_mark(
@@ -818,7 +1643,7 @@ def latest_used_raw_model_input_mark(
     table_ref = _authority_table_ref(conn, "raw_model_forecasts")
     if table_ref is None:
         return None
-    columns = _table_ref_columns(conn, table_ref)
+    columns = _hwm_table_ref_columns(conn, table_ref)
     required = {"model", "city", "target_date", "metric", "source_cycle_time"}
     if not required.issubset(columns):
         return None
@@ -864,8 +1689,11 @@ def latest_used_raw_model_input_mark(
             """,
             tuple([*params, decision_iso]),
         ).fetchone()
-    except Exception:  # noqa: BLE001 - live gate must fail closed at the caller
-        return None
+    except sqlite3.OperationalError as exc:
+        _raise_hwm_read_unavailable(
+            exc,
+            basis="used_raw_model_input_hwm_read_unavailable",
+        )
     if row is None:
         return None
     try:
@@ -930,7 +1758,94 @@ def latest_live_input_cycle(
     return max(candidates, key=lambda item: item[0])
 
 
-def replacement_live_input_lag_reason(
+def _latest_eligible_ensemble_input_mark(
+    conn: sqlite3.Connection,
+    *,
+    city: str,
+    target_date: object,
+    metric: str,
+    decision_time: datetime,
+) -> tuple[int, datetime] | None:
+    """Return the newest decision-time-available full ENS cycle for one family."""
+
+    table_ref = _authority_table_ref(conn, "ensemble_snapshots")
+    if table_ref is None:
+        return None
+    columns = _hwm_table_ref_columns(conn, table_ref)
+    required = {"snapshot_id", "city", "target_date", "temperature_metric"}
+    if not required.issubset(columns):
+        return None
+    cycle_expr = (
+        "COALESCE(source_cycle_time, issue_time)"
+        if {"source_cycle_time", "issue_time"}.issubset(columns)
+        else "source_cycle_time"
+        if "source_cycle_time" in columns
+        else "issue_time"
+        if "issue_time" in columns
+        else None
+    )
+    available_expr = (
+        "COALESCE(source_available_at, available_at)"
+        if {"source_available_at", "available_at"}.issubset(columns)
+        else "source_available_at"
+        if "source_available_at" in columns
+        else "available_at"
+        if "available_at" in columns
+        else None
+    )
+    if cycle_expr is None or available_expr is None:
+        return None
+    predicates = [
+        "city = ?",
+        "target_date = ?",
+        "temperature_metric = ?",
+        f"datetime({available_expr}) <= datetime(?)",
+    ]
+    params: list[object] = [
+        city,
+        str(target_date),
+        metric,
+        decision_time.astimezone(UTC).isoformat(),
+    ]
+    if "authority" in columns:
+        predicates.append("COALESCE(authority, 'VERIFIED') = 'VERIFIED'")
+    if "causality_status" in columns:
+        predicates.append("COALESCE(causality_status, 'OK') = 'OK'")
+    if "boundary_ambiguous" in columns:
+        predicates.append("COALESCE(boundary_ambiguous, 0) = 0")
+    if "contributes_to_target_extrema" in columns:
+        predicates.append("COALESCE(contributes_to_target_extrema, 0) = 1")
+    try:
+        row = conn.execute(
+            f"""
+            SELECT snapshot_id, {cycle_expr} AS source_cycle_time
+              FROM {table_ref}
+             WHERE {' AND '.join(predicates)}
+             ORDER BY datetime({cycle_expr}) DESC,
+                      datetime({available_expr}) DESC,
+                      snapshot_id DESC
+             LIMIT 1
+            """,
+            tuple(params),
+        ).fetchone()
+    except sqlite3.OperationalError as exc:
+        _raise_hwm_read_unavailable(
+            exc,
+            basis="ensemble_snapshot_hwm_read_unavailable",
+        )
+    if row is None:
+        return None
+    try:
+        snapshot_id = int(row["snapshot_id"])
+        raw_cycle = row["source_cycle_time"]
+    except Exception:  # noqa: BLE001 - tuple row compatibility
+        snapshot_id = int(row[0])
+        raw_cycle = row[1]
+    cycle = _parse_source_cycle_utc(raw_cycle)
+    return (snapshot_id, cycle) if cycle is not None else None
+
+
+def _replacement_live_input_lag_reason(
     conn: sqlite3.Connection,
     *,
     city: str,
@@ -945,18 +1860,115 @@ def replacement_live_input_lag_reason(
     if posterior_cycle is None:
         return f"posterior_source_cycle_unparseable={posterior_source_cycle_time!s}"
     posterior_computed = _parse_source_cycle_utc(posterior_computed_at)
-    provenance = (
-        posterior_provenance
-        if posterior_provenance is not None
-        else _posterior_provenance_for_cycle(
+    provenance = posterior_provenance
+    if provenance is None:
+        provenance = _posterior_provenance_for_cycle(
             conn,
             city=city,
             target_date=target_date,
             metric=metric,
             posterior_source_cycle_time=posterior_source_cycle_time,
+            posterior_computed_at=posterior_computed_at,
         )
+        if provenance is None:
+            return "basis=posterior_provenance_unverifiable"
+    fusion = provenance.get("bayes_precision_fusion")
+    shape = (
+        fusion.get("current_evidence_shape")
+        if isinstance(fusion, Mapping)
+        else None
     )
+    consumed_ensemble_cycle = (
+        _parse_source_cycle_utc(shape.get("source_cycle_time"))
+        if isinstance(shape, Mapping)
+        else None
+    )
+    latest_ensemble_mark = _latest_eligible_ensemble_input_mark(
+        conn,
+        city=city,
+        target_date=target_date,
+        metric=metric,
+        decision_time=decision_time,
+    )
+    if latest_ensemble_mark is not None:
+        latest_snapshot_id, latest_ensemble_cycle = latest_ensemble_mark
+        if consumed_ensemble_cycle is None:
+            return "basis=current_ensemble_snapshot_provenance_unverifiable"
+        # FAIL-CLOSED GATE CONTRACT
+        # SCOPE: probability authority for this one city/date/metric family.
+        # DRAIN: the normal materializer consumes the newest eligible ENS cycle.
+        # RESET: the consumed shape cycle catches up to the latest available cycle.
+        if latest_ensemble_cycle > consumed_ensemble_cycle:
+            lag_hours = (
+                latest_ensemble_cycle - consumed_ensemble_cycle
+            ).total_seconds() / 3600.0
+            return (
+                "basis=current_ensemble_snapshot_superseded:"
+                f"latest_snapshot_id={latest_snapshot_id}:"
+                f"latest_ensemble_cycle={latest_ensemble_cycle.isoformat()}:"
+                f"consumed_ensemble_cycle={consumed_ensemble_cycle.isoformat()}:"
+                f"lag_h={lag_hours:.2f}"
+            )
     rich_used_input_provenance = _provenance_has_current_value_serving(provenance)
+    exact_serving_checked = False
+    if rich_used_input_provenance:
+        (
+            exact_serving_checked,
+            exact_serving_lag,
+            _consumed_model_anchor_cycle,
+        ) = _exact_current_value_serving_lag(
+            conn,
+            city=city,
+            target_date=target_date,
+            metric=metric,
+            decision_time=decision_time,
+            posterior_computed_at=posterior_computed,
+            provenance=provenance,
+        )
+        if exact_serving_lag is not None:
+            return exact_serving_lag
+
+    artifact_cycle = latest_raw_artifact_input_cycle(
+        conn,
+        city=city,
+        target_date=target_date,
+        metric=metric,
+        decision_time=decision_time,
+    )
+    artifact_reference_cycle = posterior_cycle
+    declared_anchor_artifact = provenance.get("openmeteo_anchor_artifact_id")
+    if rich_used_input_provenance and (
+        artifact_cycle is not None or declared_anchor_artifact is not None
+    ):
+        artifact_identity_lag, exact_anchor_cycle = (
+            _exact_consumed_anchor_artifact_cycle(
+                conn,
+                city=city,
+                target_date=target_date,
+                metric=metric,
+                decision_time=decision_time,
+                provenance=provenance,
+            )
+        )
+        if artifact_identity_lag is not None:
+            return artifact_identity_lag
+        if exact_anchor_cycle is None:
+            return "basis=openmeteo_anchor_artifact_provenance_unverifiable"
+        artifact_reference_cycle = exact_anchor_cycle
+    if artifact_cycle is not None and artifact_cycle > artifact_reference_cycle:
+        lag_hours = (
+            artifact_cycle - artifact_reference_cycle
+        ).total_seconds() / 3600.0
+        return (
+            "basis=source_cycle_time_raw_forecast_artifacts_lag:"
+            f"latest_raw_cycle={artifact_cycle.isoformat()}:"
+            f"posterior_cycle={posterior_cycle.isoformat()}:"
+            f"consumed_anchor_cycle={artifact_reference_cycle.isoformat()}:"
+            f"lag_h={lag_hours:.2f}"
+        )
+    if exact_serving_checked:
+        return None
+
     used_raw_mark = latest_used_raw_model_input_mark(
         conn,
         city=city,
@@ -984,16 +1996,6 @@ def replacement_live_input_lag_reason(
             f"lag_s={lag_seconds:.0f}"
         )
     candidates = [
-        (
-            latest_raw_artifact_input_cycle(
-                conn,
-                city=city,
-                target_date=target_date,
-                metric=metric,
-                decision_time=decision_time,
-            ),
-            "source_cycle_time_raw_forecast_artifacts_lag",
-        ),
         (
             latest_raw_model_input_cycle(
                 conn,
@@ -1043,3 +2045,33 @@ def replacement_live_input_lag_reason(
         f"posterior_cycle={posterior_cycle.isoformat()}:"
         f"lag_h={lag_hours:.2f}"
     )
+
+
+def replacement_live_input_lag_reason(
+    conn: sqlite3.Connection,
+    *,
+    city: str,
+    target_date: object,
+    metric: str,
+    decision_time: datetime,
+    posterior_source_cycle_time: object,
+    posterior_computed_at: object | None = None,
+    posterior_provenance: Mapping[str, object] | None = None,
+) -> str | None:
+    """Return lag/absence state, or a dedicated blocker for transient read loss."""
+
+    try:
+        return _replacement_live_input_lag_reason(
+            conn,
+            city=city,
+            target_date=target_date,
+            metric=metric,
+            decision_time=decision_time,
+            posterior_source_cycle_time=posterior_source_cycle_time,
+            posterior_computed_at=posterior_computed_at,
+            posterior_provenance=posterior_provenance,
+        )
+    except ReplacementInputHwmReadUnavailable as exc:
+        # A retryable SQLite failure is UNKNOWN authority, never honest absence.
+        # Consumers treat every non-None reason as fail-closed stale evidence.
+        return exc.blocker_reason()

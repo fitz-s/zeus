@@ -1,6 +1,6 @@
 # Created: 2026-06-16
-# Last reused or audited: 2026-07-19
-# Lifecycle: created=2026-06-16; last_reviewed=2026-07-19; last_reused=2026-07-19
+# Last reused or audited: 2026-08-19
+# Lifecycle: created=2026-06-16; last_reviewed=2026-08-19; last_reused=2026-08-19
 # Authority basis: docs/evidence/timing_audit/capture_reactor_stall_rootcause_2026-06-16.md
 #   (PRIMARY/CODE fix) + docs/evidence/timing_audit/impl_flat_threshold_capture_fix_2026-06-16.md.
 #   BAYES_PRECISION_FUSION_SPEC §6 F1 (the q-path consumes the persisted single_runs capture).
@@ -16,7 +16,7 @@ the still-uncaptured lead+1/lead+2 scopes -> q-path CAPTURE_MISSING -> legacy q_
 
 Proven here:
   (a) a cycle with a FULL near-day leg but MISSING lead+1 scopes is INCOMPLETE (gate re-runs);
-  (b) a cycle with ALL planned scopes captured is COMPLETE (gate skips -> terminates);
+  (b) one provider family is partial, while two provider families are COMPLETE;
   (c) an UNSERVABLE-upstream residual does NOT loop forever: once a fan-out pass lands 0 new
       rows while still incomplete, the per-cycle fixpoint latch flips the gate to
       complete-with-gap (terminates), and the latch auto-clears when the cycle advances.
@@ -94,37 +94,122 @@ def _insert_single_runs(db: Path, *, city: str, metric: str, target_date: str, m
         conn.close()
 
 
-def test_source_cycle_full_local_day_geometry_is_timezone_aware() -> None:
+def test_source_cycle_local_decision_window_is_timezone_aware() -> None:
     cycle = datetime(2026, 7, 18, 0, 0, tzinfo=UTC)
+    decision_time = datetime(2026, 7, 18, 12, 0, tzinfo=UTC)
 
-    assert prod._source_cycle_can_cover_full_local_day(
+    assert prod._source_cycle_can_cover_local_decision_window(
         cycle=cycle,
         target_date="2026-07-18",
         timezone_name="Europe/Paris",
+        decision_time=decision_time,
     )
-    assert prod._source_cycle_can_cover_full_local_day(
+    assert prod._source_cycle_can_cover_local_decision_window(
         cycle=cycle,
         target_date="2026-07-18",
         timezone_name="America/New_York",
+        decision_time=decision_time,
     )
-    assert not prod._source_cycle_can_cover_full_local_day(
+    assert prod._source_cycle_can_cover_local_decision_window(
         cycle=cycle,
         target_date="2026-07-18",
         timezone_name="Asia/Manila",
+        decision_time=decision_time,
     )
-    assert not prod._source_cycle_can_cover_full_local_day(
+    assert not prod._source_cycle_can_cover_local_decision_window(
         cycle=cycle,
         target_date="2026-07-18",
         timezone_name="Pacific/Auckland",
+        decision_time=decision_time,
     )
-    assert prod._source_cycle_can_cover_full_local_day(
+    assert prod._source_cycle_can_cover_local_decision_window(
         cycle=cycle,
         target_date="2026-07-19",
         timezone_name="Asia/Manila",
+        decision_time=decision_time,
+    )
+    assert not prod._source_cycle_can_cover_local_decision_window(
+        cycle=datetime(2026, 7, 18, 18, 0, tzinfo=UTC),
+        target_date="2026-07-18",
+        timezone_name="America/New_York",
+        decision_time=decision_time,
     )
 
 
-def test_source_clock_does_not_retry_structurally_partial_day0(
+def test_extras_coverage_includes_current_day0_remaining_window(
+    tmp_path, monkeypatch
+) -> None:
+    import src.data.replacement_forecast_current_target_plan as target_plan
+
+    cycle = datetime(2026, 8, 5, 0, tzinfo=UTC)
+    decision_time = datetime(2026, 8, 5, 6, tzinfo=UTC)
+    db = _make_forecast_db(tmp_path)
+    monkeypatch.setattr(
+        target_plan,
+        "build_replacement_forecast_current_target_plan",
+        lambda _path: _Plan(
+            rows=(
+                _PlanRow("Tokyo", "high", "2026-08-05"),
+                _PlanRow("Tokyo", "high", "2026-08-06"),
+            )
+        ),
+    )
+
+    missing, planned = prod._extras_coverage_missing(
+        {"forecast_db": db},
+        cycle,
+        decision_time=decision_time,
+    )
+
+    assert planned == 2
+    assert missing == {
+        ("Tokyo", "high", "2026-08-05"),
+        ("Tokyo", "high", "2026-08-06"),
+    }
+
+
+def test_extras_coverage_includes_held_day0_missing_from_market_plan(
+    tmp_path, monkeypatch
+) -> None:
+    import src.data.replacement_forecast_current_target_plan as target_plan
+    import src.data.replacement_forecast_seed_discovery as seed_discovery
+
+    cycle = datetime(2026, 7, 18, 0, tzinfo=UTC)
+    decision_time = datetime(2026, 7, 18, 6, tzinfo=UTC)
+    db = _make_forecast_db(tmp_path)
+    monkeypatch.setattr(
+        target_plan,
+        "build_replacement_forecast_current_target_plan",
+        lambda _db: _Plan(
+            rows=(
+                _PlanRow(
+                    city="Tokyo",
+                    target_date="2026-07-19",
+                    temperature_metric="high",
+                ),
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        seed_discovery,
+        "held_position_family_priorities",
+        lambda: {("Manila", "2026-07-18", "high"): 0},
+    )
+
+    missing, planned = prod._extras_coverage_missing(
+        {"forecast_db": db},
+        cycle,
+        decision_time=decision_time,
+    )
+
+    assert planned == 2
+    assert missing == {
+        ("Manila", "high", "2026-07-18"),
+        ("Tokyo", "high", "2026-07-19"),
+    }
+
+
+def test_source_clock_attempts_current_day0_remaining_window(
     tmp_path, monkeypatch
 ) -> None:
     import src.data.bayes_precision_fusion_download as dl
@@ -165,37 +250,51 @@ def test_source_clock_does_not_retry_structurally_partial_day0(
     monkeypatch.setattr(
         target_plan,
         "replacement_forecast_current_target_keys",
-        lambda _path: (
-            target_plan.ReplacementForecastTargetKey(
-                "Manila", "2026-07-18", "high"
-            ),
-        ),
+        lambda _path: (),
     )
-    monkeypatch.setattr(seed_discovery, "held_position_family_priorities", lambda: {})
+    monkeypatch.setattr(
+        seed_discovery,
+        "held_position_family_priorities",
+        lambda: {("Manila", "2026-07-18", "high"): 0},
+    )
     monkeypatch.setattr(
         city_weights,
         "affected_cities_for_source_updates",
         lambda _sources: {"Manila"},
     )
+    captured: list[object] = []
+
+    def _download(**kwargs):
+        captured.extend(kwargs["targets"])
+        return {
+            "status": "BAYES_PRECISION_FUSION_EXTRA_RAW_INPUTS_DOWNLOADED",
+            "written_row_count": 1,
+        }
+
     monkeypatch.setattr(
         dl,
         "download_bayes_precision_fusion_extra_raw_inputs",
-        lambda **_kwargs: (_ for _ in ()).throw(
-            AssertionError("partial Day0 must not consume source-clock quota")
-        ),
+        _download,
     )
 
     report = prod._download_bayes_precision_fusion_source_clock_raw_inputs_if_needed(
         {"forecast_db": str(_make_forecast_db(tmp_path))},
         source_clock_report=_Report(),
         max_wall_clock_seconds=1.0,
+        decision_time=datetime(2026, 7, 18, 6, tzinfo=UTC),
     )
 
-    assert report["status"] == "SOURCE_CLOCK_BPF_SCOPED_NO_TARGETS"
+    assert report["status"] == (
+        "SOURCE_CLOCK_SCOPED_BAYES_PRECISION_FUSION_EXTRA_RAW_INPUTS_DOWNLOADED"
+    )
     assert report["missing_target_count"] == 1
-    assert report["actionable_missing_target_count"] == 0
-    assert report["structurally_unservable_target_count"] == 1
-    assert report["structurally_unservable_by_source"] == {"ecmwf_ifs": 1}
+    assert report["actionable_missing_target_count"] == 1
+    assert report["structurally_unservable_target_count"] == 0
+    assert report["structurally_unservable_by_source"] == {"ecmwf_ifs": 0}
+    assert [
+        (target.city, target.target_date, target.metric)
+        for target in captured
+    ] == [("Manila", "2026-07-18", "high")]
 
 
 # Near-day (lead=0) scope: target_date == cycle date. Six cities -> a "full" near-day leg.
@@ -286,6 +385,22 @@ def test_all_planned_scopes_captured_is_complete(_cfg_with_db, _redirect_health)
     for c in _LEAD1_CITIES:
         _insert_single_runs(db, city=c, metric="high", target_date=_LEAD1, models=_MODELS)
     assert prod._extras_cycle_incomplete(cfg, _CYCLE) is False
+
+
+def test_one_provider_family_does_not_complete_a_scope(
+    _cfg_with_db, _redirect_health
+):
+    cfg, db = _cfg_with_db
+    for row in _plan_full_two_leads().rows:
+        _insert_single_runs(
+            db,
+            city=row.city,
+            metric=row.temperature_metric,
+            target_date=row.target_date,
+            models=["icon_global", "icon_eu"],
+        )
+
+    assert prod._extras_cycle_incomplete(cfg, _CYCLE) is True
 
 
 def test_no_planned_scopes_is_complete(_cfg_with_db, _redirect_health, monkeypatch):
@@ -617,13 +732,17 @@ def test_source_clock_scoped_capture_refuses_unresolved_source_cycle(
     }
 
 
+@pytest.mark.parametrize("priority_cooldown", [0, 37])
 def test_source_clock_scoped_capture_prioritizes_held_families(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, priority_cooldown
 ) -> None:
+    import threading
+
     import src.data.bayes_precision_fusion_download as dl
     import src.data.openmeteo_model_updates as updates
     import src.data.replacement_forecast_current_target_plan as target_plan
     import src.data.replacement_forecast_seed_discovery as seed_discovery
+    import src.strategy.live_inference.source_clock_city_weights as city_weights
 
     class _Report:
         updated_sources = ("ecmwf_ifs",)
@@ -640,26 +759,47 @@ def test_source_clock_scoped_capture_prioritizes_held_families(
         target_plan.ReplacementForecastTargetKey("Seoul", "2026-07-17", "high"),
         target_plan.ReplacementForecastTargetKey("Seoul", "2026-07-16", "high"),
     )
-    seen: list[tuple[str, str, str]] = []
-    priority_active = [False]
+    seen: list[tuple[str, str, str, str]] = []
+    active_lane = threading.local()
 
     class _PriorityLane:
         def __enter__(self):
-            priority_active[0] = True
+            active_lane.name = "priority"
 
         def __exit__(self, *_exc):
-            priority_active[0] = False
+            active_lane.name = None
+
+    class _CriticalLane:
+        def __enter__(self):
+            active_lane.name = "critical"
+
+        def __exit__(self, *_exc):
+            active_lane.name = None
 
     monkeypatch.setitem(
         prod.settings["edli"],
         "replacement_0_1_bayes_precision_fusion_capture_enabled",
         True,
     )
-    monkeypatch.setattr(dl, "bayes_precision_fusion_quota_cooldown_seconds", lambda: 0)
+    monkeypatch.setattr(
+        dl,
+        "bayes_precision_fusion_quota_cooldown_seconds",
+        lambda: priority_cooldown,
+    )
+    monkeypatch.setattr(
+        dl,
+        "bayes_precision_fusion_held_quota_cooldown_seconds",
+        lambda: 0,
+    )
     monkeypatch.setattr(
         dl,
         "bayes_precision_fusion_source_clock_quota_priority",
         _PriorityLane,
+    )
+    monkeypatch.setattr(
+        dl,
+        "bayes_precision_fusion_held_quota_priority",
+        _CriticalLane,
     )
     monkeypatch.setattr(
         updates,
@@ -682,10 +822,16 @@ def test_source_clock_scoped_capture_prioritizes_held_families(
         "held_position_family_priorities",
         lambda: {("Seoul", "2026-07-17", "high"): 0},
     )
+    monkeypatch.setattr(
+        city_weights,
+        "affected_cities_for_source_updates",
+        lambda _sources: {"Paris", "Seoul"},
+    )
     def _download(**kwargs):
-        assert priority_active[0] is True
+        lane = active_lane.name
+        assert lane in {"critical", "priority"}
         seen.extend(
-            (target.city, target.target_date, target.metric)
+            (target.city, target.target_date, target.metric, lane)
             for target in kwargs["targets"]
         )
         return {
@@ -704,15 +850,137 @@ def test_source_clock_scoped_capture_prioritizes_held_families(
         max_wall_clock_seconds=5.0,
     )
 
-    assert seen == [
-        ("Seoul", "2026-07-17", "high"),
-        ("Seoul", "2026-07-16", "high"),
-        ("Paris", "2026-07-16", "high"),
+    expected_seen = [
+        ("Seoul", "2026-07-17", "high", "critical"),
+        ("Seoul", "2026-07-16", "high", "critical"),
     ]
+    if priority_cooldown == 0:
+        expected_seen.append(("Paris", "2026-07-16", "high", "priority"))
+    assert seen == expected_seen
     assert report["priority_probe_families"] == (
         ("Seoul", "2026-07-17"),
         ("Seoul", "2026-07-16"),
     )
+    assert report["status"] == (
+        "SOURCE_CLOCK_SCOPED_BAYES_PRECISION_FUSION_EXTRA_RAW_INPUTS_DOWNLOADED"
+        if priority_cooldown == 0
+        else "SOURCE_CLOCK_SCOPED_BAYES_PRECISION_FUSION_EXTRA_TRANSPORT_RETRYABLE"
+    )
+
+
+def test_source_clock_scoped_capture_drains_held_family_across_sources_before_broad_fanout(
+    tmp_path, monkeypatch
+) -> None:
+    import src.data.bayes_precision_fusion_download as dl
+    import src.data.replacement_forecast_current_target_plan as target_plan
+    import src.data.replacement_forecast_seed_discovery as seed_discovery
+    import src.strategy.live_inference.source_clock_city_weights as city_weights
+
+    sources = ("ecmwf_ifs", "icon_global")
+
+    class _Report:
+        updated_sources = sources
+        affected_cities = ("Seoul", "Wellington")
+
+        def as_dict(self):
+            return {
+                "updated_sources": list(self.updated_sources),
+                "affected_cities": list(self.affected_cities),
+                "source_runs": {
+                    source: {
+                        "initialisation_time": _CYCLE.isoformat(),
+                        "availability_time": _CYCLE.isoformat(),
+                        "update_interval_seconds": 3600,
+                    }
+                    for source in self.updated_sources
+                },
+            }
+
+    keys = (
+        target_plan.ReplacementForecastTargetKey(
+            "Wellington", "2026-07-17", "high"
+        ),
+        target_plan.ReplacementForecastTargetKey("Seoul", "2026-07-17", "high"),
+    )
+    calls: list[tuple[str, str]] = []
+    lock = threading.Lock()
+    held_sources: set[str] = set()
+    all_held_started = threading.Event()
+    held_completed: set[str] = set()
+    all_held_completed = threading.Event()
+
+    monkeypatch.setitem(
+        prod.settings["edli"],
+        "replacement_0_1_bayes_precision_fusion_capture_enabled",
+        True,
+    )
+    monkeypatch.setattr(dl, "bayes_precision_fusion_quota_cooldown_seconds", lambda: 0)
+    monkeypatch.setattr(
+        target_plan,
+        "replacement_forecast_current_target_keys",
+        lambda _path: keys,
+    )
+    monkeypatch.setattr(
+        seed_discovery,
+        "held_position_family_priorities",
+        lambda: {("Wellington", "2026-07-17", "high"): 0},
+    )
+    monkeypatch.setattr(
+        city_weights,
+        "affected_cities_for_source_updates",
+        lambda _sources: {"Seoul", "Wellington"},
+    )
+
+    def _download(**kwargs):
+        source = tuple(kwargs["models"])[0]
+        cities = tuple(dict.fromkeys(target.city for target in kwargs["targets"]))
+        assert len(cities) == 1
+        city = cities[0]
+        with lock:
+            calls.append((source, city))
+            if city == "Wellington":
+                held_sources.add(source)
+                if held_sources == set(sources):
+                    all_held_started.set()
+        if city == "Wellington":
+            assert all_held_started.wait(0.5)
+            with lock:
+                held_completed.add(source)
+                if held_completed == set(sources):
+                    all_held_completed.set()
+        if city == "Seoul":
+            assert all_held_completed.is_set(), (
+                "broad source I/O must wait for the held-family tranche to terminate"
+            )
+        return {
+            "status": "BAYES_PRECISION_FUSION_EXTRA_RAW_INPUTS_DOWNLOADED",
+            "target_count": len(kwargs["targets"]),
+            "written_row_count": len(kwargs["targets"]),
+            "committed_families": tuple(
+                (target.city, target.target_date, target.metric)
+                for target in kwargs["targets"]
+            ),
+            "global_models_expected": 1,
+            "global_models_unavailable": [],
+            "single_runs_request_cycles": {source: _CYCLE.isoformat()},
+        }
+
+    monkeypatch.setattr(dl, "download_bayes_precision_fusion_extra_raw_inputs", _download)
+
+    report = prod._download_bayes_precision_fusion_source_clock_raw_inputs_if_needed(
+        {
+            "forecast_db": str(tmp_path / "zeus-forecasts.db"),
+            "source_clock_fanout_workers": 4,
+        },
+        source_clock_report=_Report(),
+        max_wall_clock_seconds=1.0,
+    )
+
+    assert {source for source, city in calls[:2] if city == "Wellington"} == set(sources)
+    assert all(city == "Wellington" for _source, city in calls[:2])
+    assert all(city == "Seoul" for _source, city in calls[2:])
+    assert report["priority_probe_sources"] == sources
+    assert report["priority_probe_families"] == (("Wellington", "2026-07-17"),)
     assert report["status"] == (
         "SOURCE_CLOCK_SCOPED_BAYES_PRECISION_FUSION_EXTRA_RAW_INPUTS_DOWNLOADED"
     )
@@ -821,6 +1089,13 @@ def test_source_clock_scoped_capture_batches_city_dates_into_priority_request(
     )
     assert report["target_count"] == 8
     assert report["written_row_count"] == 8
+    assert report["committed_families"] == tuple(
+        sorted(
+            (city, "2026-07-16", metric)
+            for city in _Report.affected_cities
+            for metric in ("high", "low")
+        )
+    )
     assert report["global_models_expected"] == 1
     assert report["fanout_errors"] == ()
     assert all({metric for _, metric in group} == {"high", "low"} for group in seen)
@@ -1835,6 +2110,7 @@ def _wire_poll(monkeypatch, tmp_path, *, download_report):
         "trades_db": tmp_path / "empty-zeus-trades.db",
         "download_output_dir": tmp_path,
         "download_release_lag_hours": 14.0,
+        "bpf_extra_rotation_state_path": tmp_path / "bpf-extra-rotation.json",
     }
     return cfg
 

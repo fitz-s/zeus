@@ -7,6 +7,7 @@ tracked.
 Canonical schema, invariants, and reproducible source code live in `src/`,
 `architecture/`, `tests/`, and `docs/authority/`.
 
-The only tracked files here are:
-- `assumptions.json` — config seed / reference data
-- `*.sha256` / `*.md5` — DB snapshot audit hash sidecars
+The only files tracked here right now are this `README.md` and `.gitkeep`.
+`.gitignore` also carves out `*.sha256` / `*.md5` (DB snapshot audit hash
+sidecars) so they can be tracked when present; none exist in the tree at
+present.

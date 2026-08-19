@@ -1,6 +1,7 @@
 # Created: 2026-06-10
-# Last reused or audited: 2026-06-10
-# Authority basis: status dual-writer oscillation fix 2026-06-10
+# Last reused or audited: 2026-07-31
+# Authority basis: status dual-writer oscillation fix 2026-06-10; daemon
+#   pulse/result command-projection contract repair 2026-07-31
 """Antibody: status_summary.json single-writer principle.
 
 Root cause: control_plane._apply_command("request_status") called write_status()
@@ -173,6 +174,27 @@ class TestDaemonWriteCadenceCoversFreshnessBudget:
 
         target = tmp_path / "status_summary.json"
         monkeypatch.setattr(ss_module, "STATUS_PATH", target, raising=True)
+        monkeypatch.setattr(
+            ss_module,
+            "_refresh_minimal_runtime_read_model_for_status",
+            lambda status: True,
+        )
+        monkeypatch.setattr(ss_module, "_get_execution_capability_status", lambda: {})
+        monkeypatch.setattr(
+            ss_module,
+            "_refresh_current_open_entry_orders_for_status",
+            lambda status: None,
+        )
+        monkeypatch.setattr(
+            ss_module,
+            "_refresh_control_status_for_pulse",
+            lambda status: status.setdefault("control", {}),
+        )
+        monkeypatch.setattr(
+            ss_module,
+            "_refresh_pulse_infrastructure_status",
+            lambda status, cycle, risk_level_refreshed_by_pulse: None,
+        )
 
         write_cycle_pulse({"monitors": 0, "exits": 0})
 
@@ -194,3 +216,109 @@ class TestDaemonWriteCadenceCoversFreshnessBudget:
             f"{STATUS_FRESH_BUDGET_SECONDS}s.  Dropping request_status write would "
             f"trigger STATUS_SUMMARY_STALE if daemon cadence exceeds budget."
         )
+
+
+class TestDaemonWritersKeepCommandProjectionContract:
+    @staticmethod
+    def _install_command_projection_spies(monkeypatch, ss_module):
+        monkeypatch.setattr(
+            ss_module,
+            "recommended_autosafe_commands_from_status",
+            lambda status: [{"command": "autosafe", "risk": status.get("risk", {})}],
+        )
+        monkeypatch.setattr(
+            ss_module,
+            "review_required_commands_from_status",
+            lambda status: [{"command": "review", "cycle": status.get("cycle", {})}],
+        )
+
+        def _recommended(status, *, include_review_required):
+            assert include_review_required is True
+            return [{"command": "combined", "control": bool(status.get("control"))}]
+
+        monkeypatch.setattr(ss_module, "recommended_commands_from_status", _recommended)
+
+    def test_cycle_result_self_heals_missing_command_projection(self, tmp_path, monkeypatch):
+        from src.observability import status_summary as ss_module
+
+        target = tmp_path / "status_summary.json"
+        target.write_text(json.dumps({"control": {"entries_paused": False}}))
+        monkeypatch.setattr(ss_module, "STATUS_PATH", target, raising=True)
+        self._install_command_projection_spies(monkeypatch, ss_module)
+
+        ss_module.write_cycle_result({"mode": "test_result"})
+
+        control = json.loads(target.read_text())["control"]
+        assert control["recommended_auto_commands"][0]["command"] == "autosafe"
+        assert control["review_required_commands"][0]["command"] == "review"
+        assert control["recommended_commands"][0]["command"] == "combined"
+
+    def test_cycle_pulse_self_heals_empty_prior_from_canonical_projection(
+        self, tmp_path, monkeypatch
+    ):
+        from src.observability import status_summary as ss_module
+
+        target = tmp_path / "status_summary.json"
+        monkeypatch.setattr(ss_module, "STATUS_PATH", target, raising=True)
+        self._install_command_projection_spies(monkeypatch, ss_module)
+        monkeypatch.setattr(
+            ss_module,
+            "_refresh_minimal_runtime_read_model_for_status",
+            lambda status: True,
+        )
+        monkeypatch.setattr(ss_module, "_get_execution_capability_status", lambda: {})
+        monkeypatch.setattr(
+            ss_module,
+            "_refresh_current_open_entry_orders_for_status",
+            lambda status: None,
+        )
+        monkeypatch.setattr(
+            ss_module,
+            "_refresh_control_status_for_pulse",
+            lambda status: status.setdefault("control", {"entries_paused": False}),
+        )
+        monkeypatch.setattr(
+            ss_module,
+            "_refresh_pulse_infrastructure_status",
+            lambda status, cycle, risk_level_refreshed_by_pulse: None,
+        )
+
+        ss_module.write_cycle_pulse({"mode": "test_pulse"})
+
+        control = json.loads(target.read_text())["control"]
+        assert control["recommended_auto_commands"][0]["command"] == "autosafe"
+        assert control["review_required_commands"][0]["command"] == "review"
+        assert control["recommended_commands"][0]["command"] == "combined"
+
+    def test_full_status_writer_uses_the_same_command_projection(
+        self, tmp_path, monkeypatch
+    ):
+        from src.observability import status_summary as ss_module
+        from src.runtime import bankroll_provider
+
+        target = tmp_path / "status_summary.json"
+        monkeypatch.setattr(ss_module, "STATUS_PATH", target, raising=True)
+        self._install_command_projection_spies(monkeypatch, ss_module)
+        monkeypatch.setattr(ss_module, "refresh_control_state", lambda: None)
+        monkeypatch.setattr(ss_module, "_get_risk_details", lambda: {})
+        monkeypatch.setattr(ss_module, "_get_risk_level", lambda: "GREEN")
+        monkeypatch.setattr(ss_module, "is_entries_paused", lambda: False)
+        monkeypatch.setattr(ss_module, "get_entries_pause_source", lambda: None)
+        monkeypatch.setattr(ss_module, "get_entries_pause_reason", lambda: None)
+        monkeypatch.setattr(ss_module, "get_entries_pause_evidence", lambda: {})
+        monkeypatch.setattr(ss_module, "get_edge_threshold_multiplier", lambda: 1.0)
+        monkeypatch.setattr(ss_module, "strategy_gates", lambda: {})
+        monkeypatch.setattr(
+            ss_module,
+            "get_trade_connection_with_world",
+            lambda: (_ for _ in ()).throw(RuntimeError("test has no canonical DB")),
+        )
+        monkeypatch.setattr(ss_module, "_get_execution_capability_status", lambda: {})
+        monkeypatch.setattr(bankroll_provider, "current", lambda: None)
+
+        ss_module.write_status({"mode": "test_full"})
+
+        control = json.loads(target.read_text())["control"]
+        assert control["recommended_auto_commands"][0]["command"] == "autosafe"
+        assert control["review_required_commands"][0]["command"] == "review"
+        assert control["recommended_commands"][0]["command"] == "combined"

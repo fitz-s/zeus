@@ -1,5 +1,5 @@
 # Created: 2026-06-10
-# Last reused or audited: 2026-07-28
+# Last reused or audited: 2026-08-12
 # Authority basis: operator staleness/cycle-physics directive 2026-06-10 (#1 graceful-degradation:
 #   readiness expiring + no fresher cycle => re-materialize from newest persisted cycle) +
 #   tradeable-grade coverage antibody (a NULL-q_lcb / untradeable posterior must not satisfy the
@@ -63,6 +63,7 @@ def _seed() -> dict[str, object]:
         "city": _CITY,
         "target_date": _TARGET_DATE,
         "temperature_metric": _METRIC,
+        "computed_at": "2026-06-06T02:00:00+00:00",
         "baseline_source_run_id": _BASELINE_RUN,
         "openmeteo_source_run_id": _OPENMETEO_RUN,
     }
@@ -114,6 +115,10 @@ def _insert_posterior(db_path: str, *, q_lcb_json: str | None) -> None:
                         "used_models": ["gfs_global"],
                         "current_evidence_shape": {
                             "semantics_revision": CURRENT_EVIDENCE_SEMANTICS_REVISION,
+                            "shape_lag_hours": 0.0,
+                            "source_cycle_time": "2026-06-06T00:00:00+00:00",
+                            "stale_shape_reused": False,
+                            "translation_applied": False,
                         },
                     },
                 }
@@ -370,6 +375,10 @@ def test_day0_seed_coverage_requires_exact_conditioning_identity(tmp_path) -> No
                                 "semantics_revision": (
                                     CURRENT_EVIDENCE_SEMANTICS_REVISION
                                 ),
+                                "shape_lag_hours": 0.0,
+                                "source_cycle_time": "2026-06-06T00:00:00+00:00",
+                                "stale_shape_reused": False,
+                                "translation_applied": False,
                             },
                         },
                         provenance_key: conditioning,
@@ -479,6 +488,10 @@ def test_day0_coverage_prefers_active_provisional_over_fallback_conditioning(tmp
                             "used_models": ["gfs_global"],
                             "current_evidence_shape": {
                                 "semantics_revision": CURRENT_EVIDENCE_SEMANTICS_REVISION,
+                                "shape_lag_hours": 0.0,
+                                "source_cycle_time": "2026-06-06T00:00:00+00:00",
+                                "stale_shape_reused": False,
+                                "translation_applied": False,
                             },
                         },
                         "day0_provisional_observation": provisional,
@@ -516,6 +529,10 @@ def test_consumed_regional_clock_newer_than_anchor_cycle_is_covered(tmp_path) ->
                         "used_models": ["gfs_global", "regional_clock"],
                         "current_evidence_shape": {
                             "semantics_revision": CURRENT_EVIDENCE_SEMANTICS_REVISION,
+                            "shape_lag_hours": 0.0,
+                            "source_cycle_time": "2026-06-06T00:00:00+00:00",
+                            "stale_shape_reused": False,
+                            "translation_applied": False,
                         },
                         "current_value_serving": {
                             "gfs_global": {
@@ -978,10 +995,10 @@ def test_nontransaction_scalar_artifact_hwm_uses_product_cycle_partition() -> No
     cycle_queries = [
         statement.upper()
         for statement in traced
-        if "SELECT SOURCE_CYCLE_TIME" in statement.upper()
-        and "GROUP BY SOURCE_CYCLE_TIME" in statement.upper()
+        if "SELECT MAX(SOURCE_CYCLE_TIME)" in statement.upper()
     ]
     assert cycle_queries
+    assert all("GROUP BY SOURCE_CYCLE_TIME" not in statement for statement in cycle_queries)
     assert all("DATETIME(CAPTURED_AT)" not in statement for statement in cycle_queries)
     assert all(
         "DATETIME(SOURCE_AVAILABLE_AT)" not in statement

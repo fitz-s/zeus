@@ -1,4 +1,4 @@
-# Lifecycle: created=2026-06-07; last_reviewed=2026-07-27; last_reused=2026-07-27
+# Lifecycle: created=2026-06-07; last_reviewed=2026-08-10; last_reused=2026-08-10
 # Purpose: Prove material-bin BUY_NO admission uses native side uncertainty without weakening live gates.
 # Reuse: Re-audit replacement bound identity, receipt plumbing, and legacy-source behavior before relying on it.
 # Authority basis: PR_SPEC.md §2 FIX-4 (close the buy_no escape hatch; allow-list ⊆ carrier
@@ -20,7 +20,10 @@ from types import SimpleNamespace
 
 import pytest
 
+import src.engine.event_reactor_adapter as era
 from src.calibration.qlcb_provenance import CALIBRATION_SOURCES
+from src.contracts.global_auction_receipt import GlobalAuctionReceiptRef
+from src.contracts.strategy_capital_allocation import STRATEGY_LOG_UTILITY_BASIS
 from src.decision_kernel.canonicalization import (
     qkernel_current_state_identity_hash,
     stable_hash,
@@ -150,6 +153,135 @@ def _global_current_actuation() -> SimpleNamespace:
             )
         ),
     )
+
+
+def _sealed_global_current_jit_economics() -> dict[str, object]:
+    economics = _sealed_global_current_buy_no_economics()
+    economics.update(
+        {
+            "global_execution_mode": "TAKER_LIMIT",
+            "global_winner_event_id": "event-current",
+            "global_auction_receipt": GlobalAuctionReceiptRef(
+                decision_log_id=1,
+                decision_log_mode="global_single_order_auction",
+                receipt_hash="a" * 64,
+                execution_binding_hash="b" * 64,
+                artifact_summary_hash="c" * 64,
+                schema_version=21,
+                winner_event_id="event-current",
+                winner_candidate_id="candidate-current",
+                winner_actuation_identity="actuation-current",
+                selection_epoch_identity="epoch-current",
+            ).as_payload(),
+            "global_utility_basis": STRATEGY_LOG_UTILITY_BASIS,
+            "global_ruin_probability_reduction": 0.0,
+            "global_terminal_ruin_probability_reduction": 0.0,
+            "global_proposal_expected_delta_log_wealth": 0.01,
+            "global_proposal_expected_ev_usd": 2.9,
+            "global_proposal_capital_lock_hours": 24.0,
+            "global_proposal_expected_log_growth_per_hour": 0.01 / 24.0,
+            "global_proposal_expected_capital_efficiency": 0.01,
+            "global_proposal_fill_semantics": "IMMEDIATE_FILL",
+        }
+    )
+    economics["current_state_identity_hash"] = qkernel_current_state_identity_hash(
+        economics
+    )
+    return economics
+
+
+def test_global_jit_rebind_projects_one_selected_economics_authority() -> None:
+    selected_id = "family-current:condition-current:NO"
+    old_economics = _sealed_global_current_jit_economics()
+    rebound_economics = {
+        **old_economics,
+        "global_jit_book_snapshot_id": "snapshot-jit",
+        "global_jit_book_hash": "book-jit",
+        "global_jit_venue_book_hash": "book-jit",
+        "global_jit_execution_curve_identity": "curve-jit",
+    }
+    rebound_economics["current_state_identity_hash"] = (
+        qkernel_current_state_identity_hash(rebound_economics)
+    )
+    book = {
+        "selected_candidate_id": selected_id,
+        "actual_receipt_selected_candidate_id": selected_id,
+        "selection_authority": "qkernel_spine",
+        "selected_qkernel_execution_economics": old_economics,
+        "cache_summary": {
+            "selected_qkernel_execution_economics": old_economics,
+        },
+        "candidates": [
+            {
+                "candidate_id": selected_id,
+                "condition_id": "condition-current",
+                "token_id": "token-no-current",
+                "direction": "buy_no",
+                "admitted": True,
+                "live_decision_selected": True,
+                "live_selection_authority": "qkernel_spine",
+                "missing_reason": None,
+                "trade_score": 0.29,
+                "qkernel_execution_economics": old_economics,
+            },
+            {
+                "candidate_id": "family-current:condition-sibling:YES",
+                "qkernel_execution_economics": {"sibling": True},
+            },
+        ],
+    }
+
+    rebound_book = era._opportunity_book_with_selected_qkernel_economics(
+        book,
+        rebound_economics,
+    )
+
+    assert rebound_book is not None
+    assert stable_hash(rebound_book["selected_qkernel_execution_economics"]) == (
+        stable_hash(rebound_economics)
+    )
+    assert stable_hash(
+        rebound_book["cache_summary"]["selected_qkernel_execution_economics"]
+    ) == stable_hash(rebound_economics)
+    selected = rebound_book["candidates"][0]
+    assert stable_hash(selected["qkernel_execution_economics"]) == stable_hash(
+        rebound_economics
+    )
+    assert rebound_book["candidates"][1]["qkernel_execution_economics"] == {
+        "sibling": True
+    }
+
+    receipt = EventSubmissionReceipt(
+        submitted=False,
+        event_id="event-current",
+        condition_id="condition-current",
+        token_id="token-no-current",
+        direction="buy_no",
+        q_live=0.65,
+        q_lcb_5pct=0.61,
+        q_source="qkernel_spine",
+        qkernel_execution_economics=rebound_economics,
+        opportunity_book=rebound_book,
+    )
+    assert era._assert_receipt_qkernel_execution_economics(
+        receipt,
+        rebound_book,
+        selected_id,
+    ) is rebound_economics
+    with pytest.raises(
+        ValueError,
+        match="GLOBAL_JIT_OPPORTUNITY_BOOK_SELECTED_CARDINALITY:0",
+    ):
+        era._opportunity_book_with_selected_qkernel_economics(
+            {
+                **book,
+                "selected_candidate_id": "missing-candidate",
+                "actual_receipt_selected_candidate_id": "missing-candidate",
+            },
+            rebound_economics,
+        )
+
+
 _REPLACEMENT_CANONICAL_BOUND_HASH = replacement_probability_bundle_hash(
     posterior_id=271828,
     posterior_identity_hash="1" * 64,
@@ -812,6 +944,11 @@ def test_replacement_builder_binds_raw_complement_and_served_shrink() -> None:
         q_lcb=_REPLACEMENT_Q_LCB,
         provenance_json={
             "bin_topology": _REPLACEMENT_TOPOLOGY,
+            "bayes_precision_fusion": {
+                "current_evidence_shape": {
+                    "semantics_revision": "current_evidence_test_v1",
+                },
+            },
             "q_ucb_json_role": "fused_center_bootstrap_ucb",
             "q_bootstrap_samples_hash": "3" * 64,
             "replacement_q_mode": "FUSED_NORMAL_FULL",
@@ -840,6 +977,7 @@ def test_replacement_builder_binds_raw_complement_and_served_shrink() -> None:
         no_q_lcb=0.60,
     )
     assert certificate is not None
+    assert certificate["probability_semantics_revision"] == "current_evidence_test_v1"
     assert certificate["side_q_lcb_raw"] == 0.62
     assert certificate["side_q_lcb_served"] == 0.60
     assert certificate["coverage_shrink_applied"] is True

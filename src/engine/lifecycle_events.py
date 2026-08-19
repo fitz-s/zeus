@@ -624,6 +624,8 @@ def build_monitor_refreshed_canonical_write(
     final_should_exit: bool | None = None,
     final_exit_reason: str | None = None,
     final_exit_trigger: str | None = None,
+    decision_unavailable_reason: str | None = None,
+    decision_unavailable_trigger: str | None = None,
 ) -> tuple[list[dict], dict]:
     """Persist a no-transition monitor refresh for an open position."""
     if phase_after not in {ACTIVE, DAY0_WINDOW, PENDING_EXIT}:
@@ -633,6 +635,13 @@ def build_monitor_refreshed_canonical_write(
     )
     projection = build_position_current_projection(position)
     projection["phase"] = phase_after
+    # MONITOR_REFRESHED owns current belief/book observations, not realized
+    # execution economics.  An open runtime Position can lag a partial-exit
+    # fill/correction fold; projecting its non-NULL pnl would overwrite the
+    # canonical cumulative value.  NULL delegates realized PnL preservation to
+    # the projection layer, while open positions never own a terminal exit price.
+    projection["realized_pnl_usd"] = None
+    projection["exit_price"] = None
     event_occurred_at = _non_empty(
         occurred_at,
         getattr(position, "last_monitor_at", ""),
@@ -686,7 +695,32 @@ def build_monitor_refreshed_canonical_write(
         and bool(getattr(position, "last_monitor_prob_is_fresh", False))
     ):
         payload_dict["monitor_probability_receipt"] = probability_receipt
-    if exit_decision is not None:
+    held_sell_reauction_obligation = getattr(
+        position, "_held_sell_reauction_obligation", None
+    )
+    if isinstance(held_sell_reauction_obligation, dict):
+        payload_dict["held_sell_reauction_obligation"] = dict(
+            held_sell_reauction_obligation
+        )
+    if exit_decision is not None and decision_unavailable_reason is not None:
+        raise ValueError("monitor decision cannot be both available and unavailable")
+    if decision_unavailable_reason is not None:
+        payload_dict.update(
+            {
+                "exit_decision_available": False,
+                "exit_decision_should_exit": False,
+                "exit_decision_reason": str(decision_unavailable_reason),
+                "exit_decision_trigger": str(
+                    decision_unavailable_trigger or decision_unavailable_reason
+                ),
+                "exit_decision_urgency": "",
+                "exit_decision_selected_method": "",
+                "exit_decision_neg_edge_count": _nullable(
+                    getattr(position, "neg_edge_count", None)
+                ),
+            }
+        )
+    elif exit_decision is not None:
         exit_validations = list(
             getattr(exit_decision, "applied_validations", []) or []
         )
@@ -774,6 +808,7 @@ def build_entry_fill_only_canonical_write(
     *,
     sequence_no: int,
     phase_after: str = ACTIVE,
+    phase_before: str = PENDING_ENTRY,
     decision_id: str | None = None,
     source_module: str = "src.execution.fill_tracker",
 ) -> tuple[list[dict], dict]:
@@ -791,10 +826,15 @@ def build_entry_fill_only_canonical_write(
     day0-window fills). The builder overrides the projection's phase with this
     value so the canonical phase no longer depends on Position.state strings.
     """
-    if phase_after not in {ACTIVE, DAY0_WINDOW}:
+    if phase_after not in {ACTIVE, DAY0_WINDOW, PENDING_EXIT}:
         raise ValueError(
             f"entry fill-only builder requires phase_after in "
-            f"{{ACTIVE, DAY0_WINDOW}}, got {phase_after!r}"
+            f"{{ACTIVE, DAY0_WINDOW, PENDING_EXIT}}, got {phase_after!r}"
+        )
+    if phase_before not in {PENDING_ENTRY, ACTIVE, DAY0_WINDOW, PENDING_EXIT}:
+        raise ValueError(
+            "entry fill-only builder phase_before must be a live entry phase; "
+            f"got {phase_before!r}"
         )
     projection = build_position_current_projection(position)
     projection["phase"] = phase_after
@@ -811,8 +851,8 @@ def build_entry_fill_only_canonical_write(
             event_type="ENTRY_ORDER_FILLED",
             sequence_no=sequence_no,
             occurred_at=filled_at,
-            phase_before=PENDING_ENTRY,
-            phase_after=fold_lifecycle_phase(PENDING_ENTRY, canonical_phase).value,
+            phase_before=phase_before,
+            phase_after=fold_lifecycle_phase(phase_before, canonical_phase).value,
             decision_id=decision_id,
             source_module=source_module,
             order_id=order_id,
@@ -839,9 +879,9 @@ def build_entry_increment_canonical_write(
     event/idempotency identity and self-fold the current open phase.
     """
 
-    if phase_after not in {ACTIVE, DAY0_WINDOW}:
+    if phase_after not in {ACTIVE, DAY0_WINDOW, PENDING_EXIT}:
         raise ValueError(
-            "entry increment requires an active/day0 position, "
+            "entry increment requires an exposure-bearing position, "
             f"got phase_after={phase_after!r}"
         )
     order_id = str(order_id or "").strip()
@@ -1111,7 +1151,19 @@ def build_venue_position_observed_canonical_write(
             "applied_validations": list(getattr(position, "applied_validations", []) or []),
             "entry_fill_verified": getattr(position, "entry_fill_verified", False),
             "shares": getattr(position, "shares", None),
+            "shares_submitted": getattr(position, "shares_submitted", None),
+            "shares_filled": getattr(position, "shares_filled", None),
+            "shares_remaining": getattr(position, "shares_remaining", None),
             "cost_basis_usd": getattr(position, "cost_basis_usd", None),
+            "filled_cost_basis_usd": getattr(
+                position, "filled_cost_basis_usd", None
+            ),
+            "entry_price_avg_fill": getattr(
+                position, "entry_price_avg_fill", None
+            ),
+            "entry_economics_authority": getattr(
+                position, "entry_economics_authority", None
+            ),
             "size_usd": getattr(position, "size_usd", None),
             "condition_id": getattr(position, "condition_id", ""),
             "rescue_condition_id": getattr(position, "condition_id", ""),
@@ -1201,7 +1253,19 @@ def build_reconciliation_rescue_canonical_write(
             "applied_validations": list(getattr(position, "applied_validations", []) or []),
             "entry_fill_verified": getattr(position, "entry_fill_verified", False),
             "shares": getattr(position, "shares", None),
+            "shares_submitted": getattr(position, "shares_submitted", None),
+            "shares_filled": getattr(position, "shares_filled", None),
+            "shares_remaining": getattr(position, "shares_remaining", None),
             "cost_basis_usd": getattr(position, "cost_basis_usd", None),
+            "filled_cost_basis_usd": getattr(
+                position, "filled_cost_basis_usd", None
+            ),
+            "entry_price_avg_fill": getattr(
+                position, "entry_price_avg_fill", None
+            ),
+            "entry_economics_authority": getattr(
+                position, "entry_economics_authority", None
+            ),
             "size_usd": getattr(position, "size_usd", None),
             "condition_id": getattr(position, "condition_id", ""),
             "rescue_condition_id": getattr(position, "condition_id", ""),

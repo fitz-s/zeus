@@ -1,5 +1,5 @@
 # Created: prior; restructured 2026-05-01
-# Last reused or audited: 2026-05-15
+# Last reused or audited: 2026-08-14
 # Authority basis: architect D1 (ECMWF throttle), AGENTS.md money path
 #   Prior: PLAN docs/operations/task_2026-05-11_ecmwf_download_replacement/PLAN.md
 #   ECMWF Open Data has ~6-8h latency (vs. TIGGE's 48h public embargo) so it
@@ -56,8 +56,9 @@ import hashlib
 import tempfile
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor, wait
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext
+from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Mapping, Optional
@@ -93,11 +94,70 @@ from src.state.source_run_repo import write_source_run
 
 logger = logging.getLogger(__name__)
 
-FIFTY_ONE_ROOT = PROJECT_ROOT / "51 source data"
+
+@dataclass(frozen=True)
+class OpenDataPaths:
+    raw_root: Path
+    asset_root: Path
+    extract_script: Path
+    manifest_path: Path
+    origin: str
+
+
+def _has_extract_assets(root: Path) -> bool:
+    return (
+        (root / "scripts" / "extract_open_ens_localday.py").is_file()
+        and (root / "docs" / "tigge_city_coordinate_manifest_full_latest.json").is_file()
+    )
+
+
+def _resolve_opendata_paths(
+    *,
+    source_root: Path | None = None,
+    environ: Mapping[str, str] | None = None,
+    legacy_external_root: Path | None = None,
+) -> OpenDataPaths:
+    """Bind raw storage and extractor assets once for one collection cycle.
+
+    The home-repo migration left the active OpenData cache under the new repo
+    while the extractor package remained in the external source-data checkout.
+    An explicit ZEUS_51_SOURCE_ROOT is a complete-root assertion and is never
+    silently bypassed. The unset-env migration bridge keeps current raw bytes
+    in place while selecting the external asset package only when both required
+    assets exist. The returned immutable bundle prevents per-stage path drift.
+    """
+    env = os.environ if environ is None else environ
+    configured = str(env.get("ZEUS_51_SOURCE_ROOT", "")).strip()
+    raw_root = Path(
+        configured or source_root or FIFTY_ONE_ROOT
+    ).expanduser().resolve()
+    if configured or _has_extract_assets(raw_root):
+        asset_root = raw_root
+        origin = "env_complete_root" if configured else "source_root_complete"
+    else:
+        fallback = (
+            legacy_external_root
+            if legacy_external_root is not None
+            else Path.home() / ".openclaw" / "workspace-venus" / "51 source data"
+        ).expanduser().resolve()
+        if _has_extract_assets(fallback):
+            asset_root = fallback
+            origin = "home_repo_migration_split"
+        else:
+            asset_root = raw_root
+            origin = "source_root_missing_assets"
+    return OpenDataPaths(
+        raw_root=raw_root,
+        asset_root=asset_root,
+        extract_script=asset_root / "scripts" / "extract_open_ens_localday.py",
+        manifest_path=asset_root / "docs" / "tigge_city_coordinate_manifest_full_latest.json",
+        origin=origin,
+    )
+
+
+FIFTY_ONE_ROOT = (PROJECT_ROOT / "51 source data").resolve()
 # DOWNLOAD_SCRIPT deleted 2026-05-11: replaced by in-process parallel SDK fetch
 # (see PLAN docs/operations/task_2026-05-11_ecmwf_download_replacement/PLAN.md)
-EXTRACT_SCRIPT = FIFTY_ONE_ROOT / "scripts" / "extract_open_ens_localday.py"
-EXTRACT_MANIFEST_PATH = FIFTY_ONE_ROOT / "docs" / "tigge_city_coordinate_manifest_full_latest.json"
 INGEST_SCRIPT_DIR = PROJECT_ROOT / "scripts"
 
 # ECMWF hang antibody #1 (2026-05-13) — eager-import ingest_grib_to_snapshots
@@ -253,6 +313,27 @@ _PER_STEP_RETRY_AFTER: int = int(os.environ.get("ZEUS_ECMWF_PER_STEP_RETRY_AFTER
 _RETRYABLE_HTTP: frozenset[int] = frozenset({500, 502, 503, 504, 408, 429})
 
 
+def _remaining_step_timeout(deadline: float | None) -> float:
+    """Return the request timeout remaining inside one step-owned deadline."""
+
+    if deadline is None:
+        return float(_PER_STEP_TIMEOUT_SECONDS)
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise requests.Timeout("STEP_DEADLINE_EXCEEDED")
+    return max(0.001, min(float(_PER_STEP_TIMEOUT_SECONDS), remaining))
+
+
+def _sleep_step_retry(deadline: float) -> bool:
+    """Sleep only inside the step budget; false means retries are exhausted by time."""
+
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        return False
+    time.sleep(min(float(_PER_STEP_RETRY_AFTER), remaining))
+    return time.monotonic() < deadline
+
+
 def _is_ecmwf_download_url(url: str) -> bool:
     return (
         "ecmwf-forecasts" in url
@@ -294,7 +375,12 @@ def _http_error_for_response(response: requests.Response, message: str) -> reque
     return err
 
 
-def _resolve_index_parts(client: Any, result: Any) -> list[tuple[str, tuple[tuple[int, int], ...]]]:
+def _resolve_index_parts(
+    client: Any,
+    result: Any,
+    *,
+    deadline: float | None = None,
+) -> list[tuple[str, tuple[tuple[int, int], ...]]]:
     """Resolve ECMWF ``.index`` parts without multiurl's 120-second retry loop."""
 
     for_index = getattr(result, "for_index", {}) or {}
@@ -309,7 +395,7 @@ def _resolve_index_parts(client: Any, result: Any) -> list[tuple[str, tuple[tupl
         response = client.session.get(
             index_url,
             stream=True,
-            timeout=_PER_STEP_TIMEOUT_SECONDS,
+            timeout=_remaining_step_timeout(deadline),
             verify=verify,
         )
         try:
@@ -317,6 +403,7 @@ def _resolve_index_parts(client: Any, result: Any) -> list[tuple[str, tuple[tupl
                 response.raise_for_status()
             parts: list[tuple[int, int]] = []
             for raw_line in response.iter_lines():
+                _remaining_step_timeout(deadline)
                 if not raw_line:
                     continue
                 line = json.loads(raw_line)
@@ -334,7 +421,13 @@ def _resolve_index_parts(client: Any, result: Any) -> list[tuple[str, tuple[tupl
     return resolved
 
 
-def _retrieve_step_with_controlled_ranges(client: Any, *, target: Path, **kwargs: Any) -> Any:
+def _retrieve_step_with_controlled_ranges(
+    client: Any,
+    *,
+    target: Path,
+    _deadline: float | None = None,
+    **kwargs: Any,
+) -> Any:
     """Retrieve one indexed OpenData step with Zeus-owned single Range GETs.
 
     ecmwf-opendata's default ``Client.retrieve`` delegates indexed GRIB assembly
@@ -351,7 +444,7 @@ def _retrieve_step_with_controlled_ranges(client: Any, *, target: Path, **kwargs
 
     client.session = _RateLimitedSession()
     result = client._get_urls(target=str(target), use_index=False, **kwargs)
-    indexed_parts = _resolve_index_parts(client, result)
+    indexed_parts = _resolve_index_parts(client, result, deadline=_deadline)
     if indexed_parts:
         result.urls = indexed_parts
 
@@ -372,7 +465,7 @@ def _retrieve_step_with_controlled_ranges(client: Any, *, target: Path, **kwargs
                         url,
                         stream=True,
                         headers={"Range": f"bytes={offset}-{end}"},
-                        timeout=_PER_STEP_TIMEOUT_SECONDS,
+                        timeout=_remaining_step_timeout(_deadline),
                         verify=verify,
                     )
                     try:
@@ -384,6 +477,7 @@ def _retrieve_step_with_controlled_ranges(client: Any, *, target: Path, **kwargs
                                 f"Expected HTTP 206 for range GET, got {response.status_code}",
                             )
                         for chunk in response.iter_content(chunk_size=1024 * 1024):
+                            _remaining_step_timeout(_deadline)
                             if chunk:
                                 out.write(chunk)
                                 bytes_written += len(chunk)
@@ -395,13 +489,14 @@ def _retrieve_step_with_controlled_ranges(client: Any, *, target: Path, **kwargs
                 response = session.get(
                     item,
                     stream=True,
-                    timeout=_PER_STEP_TIMEOUT_SECONDS,
+                    timeout=_remaining_step_timeout(_deadline),
                     verify=verify,
                 )
                 try:
                     if response.status_code != 200:
                         response.raise_for_status()
                     for chunk in response.iter_content(chunk_size=1024 * 1024):
+                        _remaining_step_timeout(_deadline)
                         if chunk:
                             out.write(chunk)
                             bytes_written += len(chunk)
@@ -414,21 +509,74 @@ def _retrieve_step_with_controlled_ranges(client: Any, *, target: Path, **kwargs
     return result
 
 
+_CONDA_PYTHON_PROBE_MODULE = "eccodes"
+_CONDA_PYTHON_PROBE_TIMEOUT_SECONDS = 8.0
+
+
+def _interpreter_has_dependency(candidate: str, *, probe_module: str) -> bool:
+    """Return True iff `candidate` is executable and can `import probe_module`.
+
+    Existence alone does not prove the interpreter is the right one — a
+    ~/miniconda3/bin/python that exists but predates the ecmwf deps (or
+    belongs to an unrelated env) would otherwise be silently accepted and
+    every extract subprocess launched under it would fail. A dependency
+    probe is the only cheap proof that matters.
+    """
+    path = Path(candidate)
+    if not path.is_file() or not os.access(path, os.X_OK):
+        return False
+    try:
+        result = subprocess.run(
+            [candidate, "-c", f"import {probe_module}"],
+            capture_output=True,
+            timeout=_CONDA_PYTHON_PROBE_TIMEOUT_SECONDS,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return result.returncode == 0
+
+
 def _conda_python() -> str:
     """Path to the Python interpreter with ecmwf.opendata + eccodes installed.
 
     Resolution order:
-      1. ZEUS_ECMWF_PYTHON env var (explicit deployment config)
-      2. /Users/leofitz/miniconda3/bin/python (dev-machine fallback if it exists)
-      3. sys.executable (test environments that already carry ecmwf deps)
+      1. ZEUS_ECMWF_PYTHON env var (explicit deployment config; trusted
+         as-is — an operator who sets this is asserting it is correct).
+      2. ~/miniconda3/bin/python (conda default install location, portable
+         across machines/usernames via Path.home()), ACCEPTED ONLY if it is
+         executable and can import eccodes.
+      3. `python3`, then `python`, resolved on PATH (covers non-default
+         conda install dirs) — `python3` first because a bare `python` can
+         resolve to Python 2 on some systems; same executability +
+         dependency-import validation either way (belt-and-suspenders: the
+         import probe alone already rejects a Python 2 interpreter, since
+         these deps aren't installed there).
+      4. sys.executable, with a logged warning — no candidate proved it has
+         the ecmwf deps, so the extract subprocess launched under it is
+         expected to fail; this keeps the daemon alive to log the failure
+         rather than crash outright, and test/dry-run environments that
+         already carry the deps on sys.executable are unaffected.
     """
-    import os as _os
-    from_env = _os.environ.get("ZEUS_ECMWF_PYTHON")
+    from_env = os.environ.get("ZEUS_ECMWF_PYTHON")
     if from_env:
         return from_env
-    candidate = Path("/Users/leofitz/miniconda3/bin/python")
-    if candidate.exists():
-        return str(candidate)
+    candidate = str(Path.home() / "miniconda3" / "bin" / "python")
+    if _interpreter_has_dependency(candidate, probe_module=_CONDA_PYTHON_PROBE_MODULE):
+        return candidate
+    for path_candidate in (shutil.which("python3"), shutil.which("python")):
+        if path_candidate and _interpreter_has_dependency(
+            path_candidate, probe_module=_CONDA_PYTHON_PROBE_MODULE
+        ):
+            return path_candidate
+    logger.warning(
+        "_conda_python: no interpreter with '%s' importable found (checked "
+        "ZEUS_ECMWF_PYTHON, %s, PATH `python3`/`python`); falling back to "
+        "sys.executable (%s) — the extract subprocess will fail if it lacks "
+        "ecmwf deps.",
+        _CONDA_PYTHON_PROBE_MODULE,
+        candidate,
+        sys.executable,
+    )
     return sys.executable
 
 
@@ -448,10 +596,16 @@ def _step_hours_signature() -> str:
     return f"{min(STEP_HOURS)}to{max(STEP_HOURS)}_n{len(STEP_HOURS)}_h{digest}"
 
 
-def _download_output_path(*, run_date: date, run_hour: int, param: str) -> Path:
+def _download_output_path(
+    *,
+    run_date: date,
+    run_hour: int,
+    param: str,
+    raw_root: Path | None = None,
+) -> Path:
     steps_sig = _step_hours_signature()
     return (
-        FIFTY_ONE_ROOT
+        (raw_root or FIFTY_ONE_ROOT)
         / "raw"
         / "ecmwf_open_ens"
         / "ecmwf"
@@ -528,6 +682,7 @@ def _select_cycle_for_track(*, track: str, now_utc: datetime) -> tuple[FetchDeci
         source_id=SOURCE_ID,
         track=track,
         required_max_step_hours=max(STEP_HOURS),
+        allow_partial=True,
     )
 
 
@@ -1226,8 +1381,11 @@ def _fetch_one_step(
     from ecmwf.opendata import Client  # imported here: conda env only on main interpreter
 
     last_err: str | None = None
+    deadline = time.monotonic() + float(_PER_STEP_TIMEOUT_SECONDS)
     for mirror in mirrors:
         for attempt in range(_PER_STEP_MAX_RETRIES):
+            if time.monotonic() >= deadline:
+                return ("FAILED", "STEP_DEADLINE_EXCEEDED")
             try:
                 client = Client(source=mirror)
                 pf_partial = partial.with_suffix(".pf.partial")
@@ -1241,6 +1399,7 @@ def _fetch_one_step(
                     step=[step],
                     param=[param],
                     target=pf_partial,
+                    _deadline=deadline,
                 )
                 try:
                     _retrieve_step_with_controlled_ranges(
@@ -1252,6 +1411,7 @@ def _fetch_one_step(
                         step=[step],
                         param=[param],
                         target=cf_partial,
+                        _deadline=deadline,
                     )
                 except ValueError as exc:
                     if "Cannot find index entries matching" not in str(exc):
@@ -1265,6 +1425,7 @@ def _fetch_one_step(
                         step=[step],
                         param=[param],
                         target=cf_partial,
+                        _deadline=deadline,
                     )
                 with partial.open("wb") as out:
                     out.write(cf_partial.read_bytes())
@@ -1282,15 +1443,17 @@ def _fetch_one_step(
                     return ("NOT_RELEASED", None)
                 if code in _RETRYABLE_HTTP:
                     last_err = f"HTTP_{code}_mirror_{mirror}_attempt_{attempt}"
-                    if attempt + 1 < _PER_STEP_MAX_RETRIES:
-                        time.sleep(_PER_STEP_RETRY_AFTER)
+                    if attempt + 1 < _PER_STEP_MAX_RETRIES and not _sleep_step_retry(deadline):
+                        return ("FAILED", "STEP_DEADLINE_EXCEEDED")
                     continue
                 last_err = f"HTTP_{code}_mirror_{mirror}"
                 break   # non-retryable; try next mirror
             except (requests.ConnectionError, requests.Timeout) as exc:
                 last_err = f"NET_{type(exc).__name__}_mirror_{mirror}_attempt_{attempt}"
-                if attempt + 1 < _PER_STEP_MAX_RETRIES:
-                    time.sleep(_PER_STEP_RETRY_AFTER)
+                if time.monotonic() >= deadline:
+                    return ("FAILED", "STEP_DEADLINE_EXCEEDED")
+                if attempt + 1 < _PER_STEP_MAX_RETRIES and not _sleep_step_retry(deadline):
+                    return ("FAILED", "STEP_DEADLINE_EXCEEDED")
                 continue
             except OSError as exc:
                 # disk/path errors during atomic rename or partial-file write
@@ -1421,6 +1584,7 @@ def collect_open_ens_cycle(
     conn=None,
     _runner=None,
     _fetch_impl=None,  # test seam: replaces _fetch_one_step; callable with same signature
+    _paths: OpenDataPaths | None = None,
     now_utc: datetime | None = None,
 ) -> dict:
     """Download + extract + ingest one Open Data ENS run for one track.
@@ -1492,10 +1656,45 @@ def collect_open_ens_cycle(
     source_run_id = f"{SOURCE_ID}:{track}:{cycle_date.isoformat()}T{cycle_hour:02d}Z"
     release_calendar_key = f"{SOURCE_ID}:{track}:{horizon_profile}"
 
+    paths = _paths or _resolve_opendata_paths()
     output_path = _download_output_path(
-        run_date=cycle_date, run_hour=cycle_hour, param=cfg["open_data_param"],
+        run_date=cycle_date,
+        run_hour=cycle_hour,
+        param=cfg["open_data_param"],
+        raw_root=paths.raw_root,
     )
     stages: list[dict] = []
+
+    if not skip_extract:
+        missing_extract_assets = [
+            str(path)
+            for path in (paths.extract_script, paths.manifest_path)
+            if not path.is_file()
+        ]
+        if missing_extract_assets:
+            reason = "MISSING_EXTRACT_ASSETS:" + ",".join(missing_extract_assets)
+            stage = {
+                "label": f"extract_assets_preflight_{track}",
+                "ok": False,
+                "status": "MISSING_EXTRACT_ASSETS",
+                "stderr_tail": reason,
+            }
+            logger.error("ecmwf_open_data: %s", reason)
+            return {
+                "status": "extract_failed",
+                "track": track,
+                "data_version": cfg["data_version"],
+                "reason": reason,
+                "stages": [stage],
+                "snapshots_inserted": 0,
+            }
+        if paths.asset_root != paths.raw_root:
+            logger.info(
+                "ecmwf_open_data: path_bundle origin=%s raw_root=%s asset_root=%s",
+                paths.origin,
+                paths.raw_root,
+                paths.asset_root,
+            )
 
     # download_observed_steps / _partial_cycle track which steps were actually
     # fetched so _write_source_authority_chain can set the authoritative
@@ -1519,9 +1718,10 @@ def collect_open_ens_cycle(
         # constant; no call-site kwarg (antibody: makes per-step parallelism
         # category structurally module-owned, not caller-configured).
         # Single-writer antibody: fetch_fn does HTTP only; no SQLite writes.
-        # Do not submit the entire step grid at once: a single hung SDK fetch
-        # must fail its batch after _PER_STEP_TIMEOUT_SECONDS instead of making
-        # as_completed wait timeout * len(tasks) before live readiness can move.
+        # Do not submit the entire step grid at once. Each real worker owns one
+        # total deadline across requests, retries, and mirrors; the batch must
+        # wait for that bounded result instead of inventing a second timeout and
+        # abandoning a still-running HTTP thread.
         tasks = [(s, cfg["open_data_param"]) for s in STEP_HOURS]
         results: dict[int, tuple[str, Any]] = {}
         # M5-COLLECTION-CLOCK: fetch_started = the real wall-clock immediately before the first
@@ -1529,8 +1729,7 @@ def collect_open_ens_cycle(
         _fetch_started_at = datetime.now(timezone.utc)
         for offset in range(0, len(tasks), _DOWNLOAD_MAX_WORKERS):
             batch = tasks[offset:offset + _DOWNLOAD_MAX_WORKERS]
-            ex = ThreadPoolExecutor(max_workers=len(batch))
-            try:
+            with ThreadPoolExecutor(max_workers=len(batch)) as ex:
                 fut2step = {
                     ex.submit(
                         fetch_fn,
@@ -1543,19 +1742,11 @@ def collect_open_ens_cycle(
                     ): s
                     for s, p in batch
                 }
-                done, not_done = wait(fut2step, timeout=_PER_STEP_TIMEOUT_SECONDS)
-                for fut in done:
-                    step = fut2step[fut]
+                for fut, step in fut2step.items():
                     try:
                         results[step] = fut.result()
                     except Exception as exc:  # noqa: BLE001
                         results[step] = ("FAILED", f"UNCAUGHT_{type(exc).__name__}: {exc}")
-                for fut in not_done:
-                    step = fut2step[fut]
-                    fut.cancel()
-                    results[step] = ("FAILED", "STEP_TIMEOUT")
-            finally:
-                ex.shutdown(wait=False, cancel_futures=True)
 
         # M5-COLLECTION-CLOCK: fetch_finished = the real wall-clock once every batch future has
         # resolved (bytes received, timed out, or failed) — the moment the download phase ends.
@@ -1748,11 +1939,11 @@ def collect_open_ens_cycle(
         extract = runner(
             [
                 _conda_python(),
-                str(EXTRACT_SCRIPT),
+                str(paths.extract_script),
                 "--grib-path", str(output_path),
                 "--track", cfg["ingest_track"],
-                "--output-root", str(FIFTY_ONE_ROOT / "raw"),
-                "--manifest-path", str(EXTRACT_MANIFEST_PATH),
+                "--output-root", str(paths.raw_root / "raw"),
+                "--manifest-path", str(paths.manifest_path),
             ],
             label=f"extract_{track}",
             timeout=extract_timeout_seconds,
@@ -1832,7 +2023,7 @@ def collect_open_ens_cycle(
             try:
                 with tempfile.TemporaryDirectory(prefix="zeus_opendata_cycle_") as scoped_tmp:
                     scoped_json_root, cycle_extract_dir, cycle_json_files = _build_cycle_scoped_json_root(
-                        raw_root=FIFTY_ONE_ROOT / "raw",
+                        raw_root=paths.raw_root / "raw",
                         extract_subdir=cfg["extract_subdir"],
                         run_date=cycle_date,
                         run_hour=cycle_hour,

@@ -14,6 +14,14 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DISPATCH_PATH = REPO_ROOT / ".claude" / "hooks" / "dispatch.py"
 ROUTER_PATH = REPO_ROOT / ".codex" / "hooks" / "zeus-router.mjs"
+# NOT a synthetic identity by design: DISPATCH_PATH is invoked as a subprocess
+# (no monkeypatch reaches it), and .claude/hooks/dispatch.py hardcodes
+# `_MAIN_TREE = Path("/Users/leofitz/zeus").resolve()` with no env-var
+# override. LIVE_ROOT must equal that literal value or every "is this the
+# live checkout?" assertion below silently degrades to always-False and the
+# test stops proving anything. Changing this requires also changing
+# dispatch.py's _MAIN_TREE (out of scope here — that guard belongs to a
+# separate control-plane change).
 LIVE_ROOT = Path("/Users/leofitz/zeus")
 
 

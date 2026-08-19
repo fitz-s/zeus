@@ -1,11 +1,11 @@
 # Created: 2026-06-08
-# Last reused or audited: 2026-07-26
+# Last reused or audited: 2026-08-12
 # Reuse: Run when post-trade-capital process recovery, poller ownership, or launchd liveness changes.
-# Authority basis: docs/architecture/system_decomposition_plan.md
+# Authority basis: docs/reference/design_system_decomposition_plan.md
 #   §4.3 (Post-Trade Capital Lifecycle), §6 (P4 row + co-location decision),
 #   §7 (I3 P4->riskguard/P1 no-back-coupling + commit-before-HTTP; I4 ingest->P4),
 #   §8 Step 2 (split chain-sync READ from exit-SUBMIT), §9 (regression-unconstructable).
-# Lifecycle: created=2026-06-08; last_reviewed=2026-07-26; last_reused=2026-07-26
+# Lifecycle: created=2026-06-08; last_reviewed=2026-08-12; last_reused=2026-08-12
 # Purpose: RELATIONSHIP TESTS for process-topology refactor STEP P4 — lift the
 #   post-trade capital lifecycle (settlement P&L resolve -> redeem -> wrap +
 #   chain-sync READ phase) OUT of the order daemon into its own process.
@@ -202,13 +202,14 @@ def test_no_regression_p4_daemon_and_plist_artifacts_exist():
     assert "POLYMARKET_CLOB_V2_SIGNATURE_TYPE" in plist
 
 
-def test_harvester_runs_on_daemon_start_then_keeps_hourly_cadence():
-    """A short-lived restart must still drain newly resolved held positions."""
+def test_harvester_runs_on_daemon_start_then_keeps_bounded_settlement_cadence():
+    """A short-lived restart and every later five-minute tick drain resolved positions."""
     call = _add_job_call(_P4_DAEMON, "harvester")
     assert call is not None
     keywords = {kw.arg: kw.value for kw in call.keywords if kw.arg}
-    assert isinstance(keywords.get("hours"), ast.Constant)
-    assert keywords["hours"].value == 1
+    assert isinstance(keywords.get("minutes"), ast.Constant)
+    assert 0 < keywords["minutes"].value <= 5
+    assert "hours" not in keywords
     assert isinstance(keywords.get("max_instances"), ast.Constant)
     assert keywords["max_instances"].value == 1
     assert isinstance(keywords.get("coalesce"), ast.Constant)
@@ -852,6 +853,9 @@ def test_collateral_degraded_snapshot_is_scheduler_failure(monkeypatch, tmp_path
 
     monkeypatch.setattr("src.state.db._zeus_trade_db_path", lambda: tmp_path / "trades.db")
     monkeypatch.setattr("src.data.polymarket_client.PolymarketClient", _Client)
+    from src.state.collateral_ledger import CollateralLedger
+
+    CollateralLedger(db_path=tmp_path / "trades.db").close()
 
     with pytest.raises(
         post_trade_capital.CollateralSnapshotDegraded,

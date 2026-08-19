@@ -4,7 +4,8 @@
   Zeus 24/7 improvement loop v3 — single tick trigger.
   Authority: docs/operations/current/plans/allday_improvement_loop_v3_codex_2026-07-09.md.
 
-  TEMPLATE ONLY — not installed by any script in this repo. No secrets.
+  TEMPLATE ONLY — not auto-loaded by any script in this repo (install is an
+  explicit operator step; see INSTALL below). No secrets.
 
   Fires loop/tick.sh hourly at :17 — the FINEST granularity, not the
   effective cadence. loop/INTERVAL (a number of hours, operator-edited,
@@ -16,8 +17,16 @@
   (~/.npm-global/bin). The engine is `codex exec` under an OS sandbox —
   see loop/tick.sh.
 
-  INSTALL (operator, after scripts/ops/loop_enable.sh preflight passes):
-    1. cp deploy/launchd/com.zeus.loop-tick.plist ~/Library/LaunchAgents/
+  ZEUS_REPO_PLACEHOLDER and ZEUS_HOME_PLACEHOLDER are substituted with the
+  repo's absolute path and $HOME respectively at install time via
+  scripts/install_launchd_plist.py (plistlib-based — parses the plist,
+  substitutes inside string values only, refuses to write if any
+  placeholder survives, plutil -lints, writes atomically) — this file
+  never names an operator's machine.
+
+  INSTALL (operator, after scripts/ops/loop_enable.sh preflight passes;
+  run from the repo root):
+    1. python3 scripts/install_launchd_plist.py deploy/launchd/com.zeus.loop-tick.plist
     2. launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.zeus.loop-tick.plist
 
   DISABLE: `touch <repo>/loop/HALT` (soft — daemon stays loaded, next fire
@@ -28,22 +37,22 @@
 	<key>EnvironmentVariables</key>
 	<dict>
 		<key>PATH</key>
-		<string>/Users/leofitz/zeus/.venv/bin:/Users/leofitz/.npm-global/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+		<string>ZEUS_REPO_PLACEHOLDER/.venv/bin:ZEUS_HOME_PLACEHOLDER/.npm-global/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
 		<key>PYTHONPATH</key>
-		<string>/Users/leofitz/zeus</string>
+		<string>ZEUS_REPO_PLACEHOLDER</string>
 		<key>ZEUS_PRIMARY_ROOT</key>
-		<string>/Users/leofitz/zeus</string>
+		<string>ZEUS_REPO_PLACEHOLDER</string>
 	</dict>
 	<key>Label</key>
 	<string>com.zeus.loop-tick</string>
 	<key>ProgramArguments</key>
 	<array>
-		<string>/Users/leofitz/zeus/loop/tick.sh</string>
+		<string>ZEUS_REPO_PLACEHOLDER/loop/tick.sh</string>
 	</array>
 	<key>StandardErrorPath</key>
-	<string>/Users/leofitz/zeus/loop/logs/launchd-tick.err</string>
+	<string>ZEUS_REPO_PLACEHOLDER/loop/logs/launchd-tick.err</string>
 	<key>StandardOutPath</key>
-	<string>/Users/leofitz/zeus/loop/logs/launchd-tick.log</string>
+	<string>ZEUS_REPO_PLACEHOLDER/loop/logs/launchd-tick.log</string>
 	<key>StartCalendarInterval</key>
 	<dict>
 		<key>Minute</key>
@@ -52,6 +61,6 @@
 	<key>ThrottleInterval</key>
 	<integer>60</integer>
 	<key>WorkingDirectory</key>
-	<string>/Users/leofitz/zeus</string>
+	<string>ZEUS_REPO_PLACEHOLDER</string>
 </dict>
 </plist>

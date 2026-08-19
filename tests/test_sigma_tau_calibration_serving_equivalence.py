@@ -57,6 +57,10 @@ def _install_current_evidence_fusion(monkeypatch: pytest.MonkeyPatch) -> None:
         provider_values_c={"ecmwf_ifs": 24.8, "icon_global": 25.2},
         provider_weights={"ecmwf_ifs": 0.5, "icon_global": 0.5},
         center_c=25.0,
+        provider_cycles={
+            "ecmwf_ifs": "2026-06-06T00:00:00+00:00",
+            "icon_global": "2026-06-06T00:00:00+00:00",
+        },
     )
     override = _BayesPrecisionFusionFusionOverride(
         anchor_value_c=25.0,

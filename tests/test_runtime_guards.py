@@ -1,8 +1,9 @@
 """Runtime guard and live-cycle wiring tests."""
-# Lifecycle: created=2026-04-28; last_reviewed=2026-07-28; last_reused=2026-07-28
+# Lifecycle: created=2026-04-28; last_reviewed=2026-08-15; last_reused=2026-08-15
 # Created: 2026-04-28
-# Last reused/audited: 2026-07-24
+# Last reused/audited: 2026-08-15
 # Authority basis: docs/archive/2026-Q2/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md; task_2026-04-28_contamination_remediation Batch G; Phase 1B ENS snapshot persistence; Phase 1D forecast source policy; PR #56 MarketPhaseEvidence sidecar propagation; Wave26 explicit position env authority; task.md B3 exit executable snapshot identity; docs/operations/task_2026-05-21_live_side_effect_risk_boundaries/task.md P1-2 cluster projection; docs/archive/2026-Q2/task_2026-05-22_crosscheck_valid_window/CROSSCHECK_VALID_WINDOW_PLAN.md.
+#                  2026-08-15 economic-ready recent-exit hotfix.
 # Purpose: Lock runtime guard and live-cycle wiring contracts.
 # Reuse: Run for runtime guard, live-only cleanup, and cycle wiring changes.
 
@@ -13,9 +14,12 @@ from zoneinfo import ZoneInfo
 from pathlib import Path
 from datetime import date, datetime, timedelta, timezone
 import types
+import hashlib
 import json
 import logging
+import os
 import sqlite3
+import subprocess
 import sys
 import tempfile
 import threading
@@ -43,6 +47,9 @@ from src.data.openmeteo_quota import (
     MAX_REQUEST_STATES,
     MAINTENANCE_DAILY_LIMIT,
     PRIORITY_DAILY_LIMIT,
+    RECOVERY_DAILY_LIMIT,
+    RECOVERY_HOURLY_LIMIT,
+    RECOVERY_MINUTE_LIMIT,
     OpenMeteoQuotaTracker,
 )
 from src.contracts import EdgeContext, EntryMethod, SettlementSemantics
@@ -86,6 +93,71 @@ from src.types import Bin, BinEdge, Day0TemporalContext
 from src.strategy.market_analysis_family_scan import FullFamilyHypothesis
 from src.types.temperature import TemperatureDelta
 from src.types.metric_identity import HIGH_LOCALDAY_MAX
+
+
+def test_pytest_collection_installs_a_private_state_root_before_src_use():
+    marker = os.environ.get("ZEUS_TEST_STATE_ROOT")
+    assert marker, "pytest must install ZEUS_TEST_STATE_ROOT before src imports"
+
+    test_root = Path(marker).resolve()
+    from src.config import RUNTIME_ROOT, STATE_DIR, state_path
+
+    assert test_root != Path(tempfile.gettempdir()).resolve()
+    assert RUNTIME_ROOT.resolve() != test_root
+    assert STATE_DIR.resolve() == test_root
+    assert state_path("collection-antibody.json").resolve().is_relative_to(test_root)
+
+
+@pytest.mark.parametrize(
+    "raw_root",
+    ("", "relative-test-state", tempfile.gettempdir(), str(Path(__file__).resolve().parents[1])),
+)
+def test_test_state_root_validation_rejects_empty_relative_and_overbroad_roots(raw_root):
+    from src.config import validate_test_state_root
+
+    with pytest.raises(ValueError):
+        validate_test_state_root(raw_root)
+
+
+def test_test_state_root_is_inherited_by_subprocess():
+    repo_root = Path(__file__).resolve().parents[1]
+    output = subprocess.check_output(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import os; from src.config import STATE_DIR; "
+                "assert str(STATE_DIR.resolve()) == os.environ['ZEUS_TEST_STATE_ROOT']"
+            ),
+        ],
+        cwd=repo_root,
+        env=os.environ.copy(),
+        text=True,
+    )
+    assert output == ""
+
+
+def test_reactor_wake_rejects_repo_and_symlinked_paths_but_allows_tmp_path(tmp_path):
+    from src.runtime.reactor_wake import publish_reactor_wake
+
+    wake_kwargs = {"source": "test", "reason": "state-isolation-antibody"}
+    repo_state = Path(__file__).resolve().parents[1] / "state"
+    for path in (
+        repo_state / "edli-reactor-wake.json",
+        repo_state / "edli-reactor-wake.json.d" / "child.json",
+    ):
+        with pytest.raises(ValueError, match="test state path"):
+            publish_reactor_wake(path=path, **wake_kwargs)
+
+    symlink = tmp_path / "wake-through-repo-state.json"
+    symlink.symlink_to(repo_state / "edli-reactor-wake.json")
+    with pytest.raises(ValueError, match="test state path"):
+        publish_reactor_wake(path=symlink, **wake_kwargs)
+
+    safe_path = tmp_path / "wake.json"
+    wake = publish_reactor_wake(path=safe_path, **wake_kwargs)
+    assert wake.wake_id
+    assert safe_path.exists()
 
 
 def test_evaluator_fee_rate_uses_canonical_fraction_from_clob_details():
@@ -581,6 +653,314 @@ def test_exact_zero_quote_allows_one_retry_after_failed_batch(monkeypatch):
     assert clob.orderbook_calls == 1
 
 
+def test_monitor_quote_uses_fresh_exact_canonical_book_after_failed_batch(tmp_path):
+    from src.engine import monitor_refresh
+    from src.state.snapshot_repo import init_snapshot_schema
+
+    conn = get_connection(tmp_path / "canonical-monitor-fallback.db")
+    init_schema(conn)
+    init_schema_trade_only(conn)
+    init_snapshot_schema(conn)
+    captured_at = datetime.now(timezone.utc) - timedelta(seconds=2)
+    _insert_executable_snapshot(
+        conn,
+        snapshot_id="canonical-monitor-fallback",
+        selected_outcome_token_id="yes123",
+        yes_token_id="yes123",
+        no_token_id="no456",
+        condition_id="cond-canonical-monitor-fallback",
+        top_bid="0.999",
+        top_ask="1",
+        orderbook_depth={
+            "asset_id": "yes123",
+            "bids": [{"price": "0.999", "size": "20"}],
+            "asks": [],
+        },
+        captured_at=captured_at,
+    )
+    conn.commit()
+
+    class NoNetworkClob:
+        def get_orderbook(self, _token_id):
+            raise AssertionError("failed batch must read fresh canonical held truth")
+
+    clob = NoNetworkClob()
+    monitor_refresh.install_monitor_orderbook_prefetch(
+        clob,
+        {},
+        attempted_token_ids=("yes123",),
+    )
+    pos = _position(
+        state="day0_window",
+        condition_id="cond-canonical-monitor-fallback",
+    )
+
+    quote = monitor_refresh.monitor_quote_refresh(conn, clob, pos)
+
+    assert quote is not None
+    assert quote.token_id == "yes123"
+    assert quote.best_bid == pytest.approx(0.999)
+    assert quote.best_ask is None
+    assert quote.mark_price == pytest.approx(0.999)
+    assert quote.source_timestamp == captured_at.isoformat()
+    assert monitor_refresh.prefetched_monitor_orderbook(clob, "yes123") is None
+
+    class ProgrammingFailureClob:
+        def get_orderbook(self, _token_id):
+            raise ValueError("malformed adapter response")
+
+    assert (
+        monitor_refresh.monitor_quote_refresh(conn, ProgrammingFailureClob(), pos)
+        is None
+    )
+    conn.close()
+
+
+def test_canonical_monitor_book_prefers_fresher_independent_commit(tmp_path):
+    from src.engine import monitor_refresh
+    from src.state.snapshot_repo import init_snapshot_schema
+
+    db_path = tmp_path / "canonical-monitor-independent-reader.db"
+    caller = get_connection(db_path)
+    init_schema(caller)
+    init_schema_trade_only(caller)
+    init_snapshot_schema(caller)
+    now_utc = datetime.now(timezone.utc)
+    old_at = now_utc - timedelta(seconds=10)
+    new_at = now_utc - timedelta(seconds=1)
+    _insert_executable_snapshot(
+        caller,
+        snapshot_id="canonical-monitor-old-reader",
+        selected_outcome_token_id="yes123",
+        yes_token_id="yes123",
+        no_token_id="no456",
+        condition_id="cond-canonical-monitor-reader",
+        top_bid="0.40",
+        top_ask="0.42",
+        captured_at=old_at,
+    )
+    caller.commit()
+    caller.execute("BEGIN")
+    caller.execute(
+        "SELECT snapshot_id FROM executable_market_snapshot_latest "
+        "WHERE condition_id = ? AND selected_outcome_token_id = ?",
+        ("cond-canonical-monitor-reader", "yes123"),
+    ).fetchone()
+
+    writer = get_connection(db_path)
+    _insert_executable_snapshot(
+        writer,
+        snapshot_id="canonical-monitor-new-reader",
+        selected_outcome_token_id="yes123",
+        yes_token_id="yes123",
+        no_token_id="no456",
+        condition_id="cond-canonical-monitor-reader",
+        top_bid="0.55",
+        top_ask="0.57",
+        captured_at=new_at,
+        active=False,
+        executable_allowed=True,
+    )
+    writer.commit()
+    writer.close()
+
+    pos = _position(condition_id="cond-canonical-monitor-reader")
+    hit = monitor_refresh._fresh_canonical_monitor_orderbook(
+        caller,
+        pos,
+        "yes123",
+        now_utc=now_utc,
+    )
+
+    assert hit is not None
+    book, source_timestamp = hit
+    assert book["bids"][0]["price"] == "0.55"
+    assert source_timestamp == new_at.isoformat()
+    caller.rollback()
+    caller.close()
+
+
+def test_canonical_monitor_book_rejects_stale_invalidated_and_wrong_token(tmp_path):
+    from src.engine import monitor_refresh
+    from src.state.snapshot_repo import (
+        init_snapshot_schema,
+        record_snapshot_invalidation,
+    )
+
+    conn = get_connection(tmp_path / "canonical-monitor-rejections.db")
+    init_schema(conn)
+    init_schema_trade_only(conn)
+    init_snapshot_schema(conn)
+    now_utc = datetime.now(timezone.utc)
+    fresh_at = now_utc - timedelta(seconds=2)
+    stale_at = now_utc - timedelta(minutes=2)
+    _insert_executable_snapshot(
+        conn,
+        snapshot_id="canonical-monitor-invalidated",
+        selected_outcome_token_id="yes123",
+        yes_token_id="yes123",
+        no_token_id="no456",
+        condition_id="cond-canonical-monitor-invalidated",
+        captured_at=fresh_at,
+    )
+    _insert_executable_snapshot(
+        conn,
+        snapshot_id="canonical-monitor-stale",
+        selected_outcome_token_id="stale-token",
+        yes_token_id="stale-token",
+        no_token_id="stale-no",
+        condition_id="cond-canonical-monitor-stale",
+        captured_at=stale_at,
+    )
+    _insert_executable_snapshot(
+        conn,
+        snapshot_id="canonical-monitor-not-accepting",
+        selected_outcome_token_id="closed-token",
+        yes_token_id="closed-token",
+        no_token_id="closed-no",
+        condition_id="cond-canonical-monitor-not-accepting",
+        captured_at=fresh_at,
+        accepting_orders=False,
+    )
+    _insert_executable_snapshot(
+        conn,
+        snapshot_id="canonical-monitor-explicitly-blocked",
+        selected_outcome_token_id="blocked-token",
+        yes_token_id="blocked-token",
+        no_token_id="blocked-no",
+        condition_id="cond-canonical-monitor-explicitly-blocked",
+        captured_at=fresh_at,
+        executable_allowed=False,
+    )
+    conn.commit()
+    record_snapshot_invalidation(
+        conn,
+        condition_id="cond-canonical-monitor-invalidated",
+        token_id="yes123",
+        reason="test_market_channel_change",
+        invalidated_at=now_utc - timedelta(seconds=1),
+    )
+
+    invalidated_pos = _position(
+        condition_id="cond-canonical-monitor-invalidated",
+    )
+    stale_pos = _position(
+        condition_id="cond-canonical-monitor-stale",
+        token_id="stale-token",
+    )
+    wrong_token_pos = _position(
+        condition_id="cond-canonical-monitor-invalidated",
+        token_id="different-token",
+    )
+    not_accepting_pos = _position(
+        condition_id="cond-canonical-monitor-not-accepting",
+        token_id="closed-token",
+    )
+    explicitly_blocked_pos = _position(
+        condition_id="cond-canonical-monitor-explicitly-blocked",
+        token_id="blocked-token",
+    )
+
+    assert conn.in_transaction
+
+    assert (
+        monitor_refresh._fresh_canonical_monitor_orderbook(
+            conn,
+            invalidated_pos,
+            "yes123",
+            now_utc=now_utc,
+        )
+        is None
+    )
+    assert (
+        monitor_refresh._fresh_canonical_monitor_orderbook(
+            conn,
+            explicitly_blocked_pos,
+            "blocked-token",
+            now_utc=now_utc,
+        )
+        is None
+    )
+    assert (
+        monitor_refresh._fresh_canonical_monitor_orderbook(
+            conn,
+            stale_pos,
+            "stale-token",
+            now_utc=now_utc,
+        )
+        is None
+    )
+    assert (
+        monitor_refresh._fresh_canonical_monitor_orderbook(
+            conn,
+            wrong_token_pos,
+            "different-token",
+            now_utc=now_utc,
+        )
+        is None
+    )
+    assert (
+        monitor_refresh._fresh_canonical_monitor_orderbook(
+            conn,
+            not_accepting_pos,
+            "closed-token",
+            now_utc=now_utc,
+        )
+        is None
+    )
+    conn.close()
+
+
+def test_canonical_monitor_book_rejects_latest_append_identity_mismatch(tmp_path):
+    from src.engine import monitor_refresh
+    from src.state.snapshot_repo import init_snapshot_schema
+
+    conn = get_connection(tmp_path / "canonical-monitor-identity.db")
+    init_schema(conn)
+    init_schema_trade_only(conn)
+    init_snapshot_schema(conn)
+    captured_at = datetime.now(timezone.utc) - timedelta(seconds=2)
+    _insert_executable_snapshot(
+        conn,
+        snapshot_id="canonical-monitor-identity-a",
+        selected_outcome_token_id="yes123",
+        yes_token_id="yes123",
+        no_token_id="no456",
+        condition_id="cond-canonical-monitor-identity-a",
+        captured_at=captured_at,
+    )
+    _insert_executable_snapshot(
+        conn,
+        snapshot_id="canonical-monitor-identity-b",
+        selected_outcome_token_id="other-token",
+        yes_token_id="other-token",
+        no_token_id="other-no",
+        condition_id="cond-canonical-monitor-identity-b",
+        captured_at=captured_at,
+    )
+    conn.execute(
+        "UPDATE executable_market_snapshot_latest SET snapshot_id = ? "
+        "WHERE condition_id = ? AND selected_outcome_token_id = ?",
+        (
+            "canonical-monitor-identity-b",
+            "cond-canonical-monitor-identity-a",
+            "yes123",
+        ),
+    )
+    conn.commit()
+
+    pos = _position(condition_id="cond-canonical-monitor-identity-a")
+    assert (
+        monitor_refresh._fresh_canonical_monitor_orderbook(
+            conn,
+            pos,
+            "yes123",
+        )
+        is None
+    )
+    conn.close()
+
+
 def test_held_monitor_uses_fresh_local_depth_before_network(monkeypatch, tmp_path):
     from src.engine import cycle_runtime, monitor_refresh
 
@@ -601,6 +981,8 @@ def test_held_monitor_uses_fresh_local_depth_before_network(monkeypatch, tmp_pat
         top_bid="0.40",
         top_ask="0.44",
         captured_at=captured_at,
+        active=False,
+        executable_allowed=True,
     )
 
     class NoNetworkClob:
@@ -633,6 +1015,196 @@ def test_held_monitor_uses_fresh_local_depth_before_network(monkeypatch, tmp_pat
     assert quote.best_ask == pytest.approx(0.44)
     assert summary["held_monitor_orderbooks_local"] == 1
     assert summary["held_monitor_orderbooks_network_requested"] == 0
+    conn.close()
+
+
+@pytest.mark.parametrize(
+    ("status", "active", "closed", "accepting_orders", "expected"),
+    (
+        ('{"executable_allowed":true}', False, False, 1, True),
+        ('{"executable_allowed":false}', True, False, 1, False),
+        ('{"reason":"missing_authority"}', True, False, 1, False),
+        ("not-json", True, False, 1, False),
+        (None, True, False, 1, True),
+        (None, False, False, 1, False),
+    ),
+)
+def test_monitor_snapshot_tradeability_requires_normalized_authority_or_legacy_null(
+    status,
+    active,
+    closed,
+    accepting_orders,
+    expected,
+):
+    from src.engine.monitor_refresh import _monitor_snapshot_is_executable
+
+    assert _monitor_snapshot_is_executable(
+        active=active,
+        closed=closed,
+        accepting_orders=accepting_orders,
+        tradeability_status_json=status,
+    ) is expected
+
+
+def test_local_monitor_book_rejects_blocked_future_invalidated_and_identity_mismatch(
+    tmp_path,
+):
+    from src.engine import cycle_runtime
+    from src.state.snapshot_repo import (
+        init_snapshot_schema,
+        record_snapshot_invalidation,
+    )
+
+    conn = get_connection(tmp_path / "local-monitor-rejections.db")
+    init_schema(conn)
+    init_schema_trade_only(conn)
+    init_snapshot_schema(conn)
+    now_utc = datetime.now(timezone.utc)
+    fresh_at = now_utc - timedelta(seconds=2)
+    cases = (
+        ("blocked", fresh_at, False),
+        ("future", now_utc + timedelta(seconds=2), True),
+        ("invalidated", fresh_at, True),
+        ("identity", fresh_at, True),
+    )
+    positions = []
+    for name, captured_at, executable_allowed in cases:
+        token_id = f"{name}-token"
+        condition_id = f"{name}-condition"
+        _insert_executable_snapshot(
+            conn,
+            snapshot_id=f"local-{name}",
+            selected_outcome_token_id=token_id,
+            yes_token_id=token_id,
+            no_token_id=f"{name}-no",
+            condition_id=condition_id,
+            captured_at=captured_at,
+            executable_allowed=executable_allowed,
+        )
+        positions.append(_position(condition_id=condition_id, token_id=token_id))
+    conn.execute(
+        "UPDATE executable_market_snapshot_latest SET snapshot_id = ? "
+        "WHERE condition_id = ? AND selected_outcome_token_id = ?",
+        ("local-blocked", "identity-condition", "identity-token"),
+    )
+    conn.commit()
+    record_snapshot_invalidation(
+        conn,
+        condition_id="invalidated-condition",
+        token_id="invalidated-token",
+        reason="test_market_channel_change",
+        invalidated_at=now_utc - timedelta(seconds=1),
+    )
+    summary = {}
+    deps = types.SimpleNamespace(
+        logger=types.SimpleNamespace(warning=lambda *args, **kwargs: None)
+    )
+
+    books = cycle_runtime._fresh_local_held_monitor_orderbooks(
+        conn,
+        positions,
+        now_utc=now_utc,
+        summary=summary,
+        deps=deps,
+    )
+
+    assert books == {}
+    conn.close()
+
+
+def test_monitor_book_readers_reject_missing_asset_status_drift_and_offset_invalidation(
+    tmp_path,
+):
+    from src.engine import cycle_runtime, monitor_refresh
+    from src.state.snapshot_repo import (
+        init_snapshot_schema,
+        record_snapshot_invalidation,
+    )
+
+    conn = get_connection(tmp_path / "monitor-book-exact-truth.db")
+    init_schema(conn)
+    init_schema_trade_only(conn)
+    init_snapshot_schema(conn)
+    now_utc = datetime(2026, 8, 18, 16, 0, 1, tzinfo=timezone.utc)
+    fresh_at = now_utc - timedelta(seconds=1)
+    _insert_executable_snapshot(
+        conn,
+        snapshot_id="missing-asset",
+        selected_outcome_token_id="missing-asset-token",
+        yes_token_id="missing-asset-token",
+        no_token_id="missing-asset-no",
+        condition_id="missing-asset-condition",
+        captured_at=fresh_at,
+        executable_allowed=True,
+        orderbook_depth={
+            "bids": [{"price": "0.40", "size": "10"}],
+            "asks": [{"price": "0.42", "size": "10"}],
+        },
+    )
+    _insert_executable_snapshot(
+        conn,
+        snapshot_id="status-drift",
+        selected_outcome_token_id="status-drift-token",
+        yes_token_id="status-drift-token",
+        no_token_id="status-drift-no",
+        condition_id="status-drift-condition",
+        captured_at=fresh_at,
+        executable_allowed=False,
+    )
+    conn.execute(
+        "UPDATE executable_market_snapshot_latest "
+        "SET tradeability_status_json = ? WHERE condition_id = ?",
+        ('{"executable_allowed":true}', "status-drift-condition"),
+    )
+    offset_capture = datetime.fromisoformat("2026-08-18T16:00:00+00:00")
+    _insert_executable_snapshot(
+        conn,
+        snapshot_id="offset-invalidation",
+        selected_outcome_token_id="offset-token",
+        yes_token_id="offset-token",
+        no_token_id="offset-no",
+        condition_id="offset-condition",
+        captured_at=offset_capture,
+        executable_allowed=True,
+    )
+    conn.commit()
+    record_snapshot_invalidation(
+        conn,
+        condition_id="offset-condition",
+        token_id="offset-token",
+        reason="same_instant_different_offset",
+        invalidated_at=datetime.fromisoformat("2026-08-18T11:00:00-05:00"),
+    )
+    positions = (
+        _position(
+            condition_id="missing-asset-condition",
+            token_id="missing-asset-token",
+        ),
+        _position(
+            condition_id="status-drift-condition",
+            token_id="status-drift-token",
+        ),
+        _position(condition_id="offset-condition", token_id="offset-token"),
+    )
+    summary = {}
+    deps = types.SimpleNamespace(
+        logger=types.SimpleNamespace(warning=lambda *args, **kwargs: None)
+    )
+
+    assert cycle_runtime._fresh_local_held_monitor_orderbooks(
+        conn,
+        positions,
+        now_utc=now_utc,
+        summary=summary,
+        deps=deps,
+    ) == {}
+    for pos in positions:
+        assert monitor_refresh._fresh_canonical_monitor_orderbook(
+            conn,
+            pos,
+            pos.token_id,
+            now_utc=now_utc,
+        ) is None
     conn.close()
 
 
@@ -694,6 +1266,31 @@ def test_target_local_day_active_position_uses_bid_only_quote_when_asks_absent(m
     assert quote.best_bid == pytest.approx(0.998)
     assert quote.best_ask is None
     assert quote.mark_price == pytest.approx(0.998)
+
+
+def test_post_target_active_position_uses_bid_only_quote_when_asks_absent(monkeypatch):
+    from src.engine import monitor_refresh
+
+    monkeypatch.setattr("src.state.db.log_microstructure", lambda *args, **kwargs: None)
+    pos = _position(target_date="2020-01-01")
+    pos.state = "active"
+
+    quote = monitor_refresh.monitor_quote_refresh(None, _BidOnlyDay0Clob(), pos)
+
+    assert quote is not None
+    assert quote.best_bid == pytest.approx(0.998)
+    assert quote.best_ask is None
+    assert quote.mark_price == pytest.approx(0.998)
+
+
+def test_post_target_active_position_does_not_invent_bid_from_ask_only_book(monkeypatch):
+    from src.engine import monitor_refresh
+
+    monkeypatch.setattr("src.state.db.log_microstructure", lambda *args, **kwargs: None)
+    pos = _position(target_date="2020-01-01")
+    pos.state = "active"
+
+    assert monitor_refresh.monitor_quote_refresh(None, _AskOnlyDay0Clob(), pos) is None
 
 
 def test_day0_refresh_keeps_current_market_fresh_with_bid_only_book(monkeypatch):
@@ -979,8 +1576,14 @@ def _insert_executable_snapshot(
     fee_details: dict | None = None,
     min_tick_size: str = "0.01",
     accepting_orders: bool = True,
+    active: bool = True,
+    closed: bool = False,
+    executable_allowed: bool | None = None,
 ) -> None:
-    from src.contracts.executable_market_snapshot import ExecutableMarketSnapshot
+    from src.contracts.executable_market_snapshot import (
+        ExecutableMarketSnapshot,
+        ExecutableTradeabilityStatus,
+    )
     from src.state.snapshot_repo import insert_snapshot
 
     captured_at = captured_at or datetime.now(timezone.utc)
@@ -998,8 +1601,8 @@ def _insert_executable_snapshot(
             selected_outcome_token_id=selected_outcome_token_id,
             outcome_label=outcome_label,
             enable_orderbook=True,
-            active=True,
-            closed=False,
+            active=active,
+            closed=closed,
             accepting_orders=accepting_orders,
             market_start_at=None,
             market_end_at=None,
@@ -1017,6 +1620,7 @@ def _insert_executable_snapshot(
                 orderbook_depth
                 if orderbook_depth is not None
                 else {
+                    "asset_id": selected_outcome_token_id,
                     "bids": [{"price": top_bid, "size": bid_size}],
                     "asks": [{"price": top_ask, "size": ask_size}],
                 }
@@ -1027,6 +1631,19 @@ def _insert_executable_snapshot(
             authority_tier="CLOB",
             captured_at=captured_at,
             freshness_deadline=captured_at + timedelta(seconds=30),
+            tradeability_status=(
+                ExecutableTradeabilityStatus(
+                    child_active=active,
+                    child_closed=closed,
+                    accepting_orders=accepting_orders,
+                    clob_archived=False,
+                    clob_enable_order_book=True,
+                    executable_allowed=executable_allowed,
+                    reason="test_normalized_tradeability",
+                )
+                if executable_allowed is not None
+                else None
+            ),
         ),
     )
 
@@ -9089,12 +9706,12 @@ def test_load_portfolio_reads_recent_exits_from_authoritative_settlement_rows(tm
         "exit_price": 1.0,
         "pnl": 4.2,
         "exit_reason": "SETTLEMENT",
-        "settlement_authority": "VERIFIED",
-        "settlement_truth_source": "world.settlements",
+        "settlement_authority": "VENUE_RESOLVED",
+        "settlement_truth_source": "gamma_exact_held_event",
         "settlement_market_slug": "nyc-high-2026-04-01",
         "settlement_temperature_metric": "high",
-        "settlement_source": "WU",
-        "settlement_value": 40.0,
+        "settlement_source": "GAMMA",
+        "settlement_value": None,
     }
     conn.execute(
         """
@@ -9166,45 +9783,49 @@ def test_load_portfolio_reads_recent_exits_from_authoritative_settlement_rows(tm
     }]
 
 
-def test_recent_exits_skip_settlement_rows_without_metric_authority():
+def test_recent_exits_use_economic_not_metric_readiness():
     from src.state.portfolio import _canonical_recent_exits_from_settlement_rows
 
     rows = [
         {
             "city": "NYC",
-            "range_label": "legacy-bin",
+            "range_label": "economic-only-bin",
             "target_date": "2026-04-01",
             "direction": "buy_yes",
             "exit_reason": "SETTLEMENT",
             "settled_at": "2026-04-01T23:00:00Z",
-            "pnl": 99.0,
+            "pnl": -3.5,
             "metric_ready": False,
-            "settlement_authority": "LEGACY_UNKNOWN",
+            "settlement_authority": "VENUE_RESOLVED",
+            "authority_level": "durable_event",
+            "required_missing_fields": [],
         },
         {
             "city": "NYC",
-            "range_label": "39-40°F",
+            "range_label": "malformed-bin",
             "target_date": "2026-04-01",
             "direction": "buy_yes",
             "exit_reason": "SETTLEMENT",
-            "settled_at": "2026-04-02T00:00:00Z",
-            "pnl": 4.2,
+            "settled_at": "2026-04-01T23:30:00Z",
+            "pnl": 99.0,
             "metric_ready": True,
             "settlement_authority": "VERIFIED",
+            "authority_level": "durable_event_malformed",
+            "required_missing_fields": ["trade_id"],
         },
     ]
 
     assert _canonical_recent_exits_from_settlement_rows(rows) == [
         {
             "city": "NYC",
-            "bin_label": "39-40°F",
+            "bin_label": "economic-only-bin",
             "target_date": "2026-04-01",
             "direction": "buy_yes",
             "token_id": "",
             "no_token_id": "",
             "exit_reason": "SETTLEMENT",
-            "exited_at": "2026-04-02T00:00:00Z",
-            "pnl": 4.2,
+            "exited_at": "2026-04-01T23:00:00Z",
+            "pnl": -3.5,
         }
     ]
 
@@ -11411,6 +12032,11 @@ def test_main_registers_only_policy_owned_ecmwf_open_data_jobs(monkeypatch, tmp_
 
 def _write_live_sidecar_heartbeats(root: Path, *, sha: str, at: datetime) -> None:
     root.mkdir(parents=True, exist_ok=True)
+    (root / "daemon-heartbeat-ingest.json").write_text(json.dumps({
+        "daemon": "data-ingest",
+        "git_head": sha,
+        "alive_at": at.isoformat(),
+    }))
     (root / "forecast-live-heartbeat.json").write_text(json.dumps({
         "daemon": "forecast-live",
         "git_head": sha,
@@ -11569,6 +12195,125 @@ def test_openmeteo_request_embargo_does_not_block_other_request(monkeypatch, tmp
     assert reason is None
 
 
+def test_openmeteo_unmetered_request_keeps_lease_without_consuming_quota(
+    monkeypatch, tmp_path
+):
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+    path = tmp_path / "openmeteo_quota.json"
+    tracker = OpenMeteoQuotaTracker(state_path=path)
+    now = datetime.now(timezone.utc)
+    state = tracker._default_state(now)
+    state["day_count"] = PRIORITY_DAILY_LIMIT
+    state["hour_count"] = openmeteo_quota.PRIORITY_HOURLY_LIMIT
+    state["minute_count"] = openmeteo_quota.PRIORITY_MINUTE_LIMIT
+    path.write_text(json.dumps(state), encoding="utf-8")
+
+    with tracker.priority_lane():
+        allowed, reason, lease_id = tracker.acquire_request(
+            "metadata-a",
+            endpoint="api.open-meteo.com/data/ecmwf_ifs/static/meta.json",
+            job="source-clock-metadata",
+            count_toward_quota=False,
+        )
+        assert (allowed, reason) == (True, None)
+        assert lease_id
+        assert tracker.record_request_success(
+            "metadata-a",
+            endpoint="api.open-meteo.com/data/ecmwf_ifs/static/meta.json",
+            job="source-clock-metadata",
+            lease_id=lease_id,
+        ) is True
+
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    assert payload["day_count"] == PRIORITY_DAILY_LIMIT
+    assert payload["hour_count"] == openmeteo_quota.PRIORITY_HOURLY_LIMIT
+    assert payload["minute_count"] == openmeteo_quota.PRIORITY_MINUTE_LIMIT
+    assert payload["requests"]["metadata-a"]["outcome"] == "success"
+    assert payload["requests"]["metadata-a"]["quota_cost"] == 0
+
+    with tracker.priority_lane():
+        retry_allowed, _, retry_lease = tracker.acquire_request(
+            "metadata-retry", count_toward_quota=False
+        )
+        assert retry_allowed is True
+        tracker.record_request_retry(
+            "metadata-retry", lease_id=retry_lease
+        )
+        terminal_allowed, _, terminal_lease = tracker.acquire_request(
+            "metadata-terminal", count_toward_quota=False
+        )
+        assert terminal_allowed is True
+        tracker.record_request_terminal(
+            "metadata-terminal",
+            lease_id=terminal_lease,
+            http_outcome={"status_code": 404, "retry_class": "terminal"},
+        )
+
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    assert payload["requests"]["metadata-retry"]["quota_cost"] == 0
+    assert payload["requests"]["metadata-terminal"]["quota_cost"] == 0
+
+    with tracker.priority_lane():
+        metered, metered_reason, _ = tracker.acquire_request(
+            "forecast-a", endpoint="api.open-meteo.com/v1/forecast"
+        )
+    assert metered is False
+    assert metered_reason is not None and metered_reason.startswith("day_limit=")
+
+
+def test_openmeteo_unmetered_local_tracker_matches_shared_semantics(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setenv("PYTEST_CURRENT_TEST", "local-unmetered")
+    tracker = OpenMeteoQuotaTracker(state_path=tmp_path / "unused.json")
+    tracker._count = PRIORITY_DAILY_LIMIT
+    tracker._hour_count = openmeteo_quota.PRIORITY_HOURLY_LIMIT
+    tracker._minute_count = openmeteo_quota.PRIORITY_MINUTE_LIMIT
+
+    with tracker.priority_lane():
+        allowed, reason, lease_id = tracker.acquire_request(
+            "metadata-local", count_toward_quota=False
+        )
+
+    assert (allowed, reason) == (True, None)
+    assert lease_id
+    assert tracker._count == PRIORITY_DAILY_LIMIT
+    assert tracker._hour_count == openmeteo_quota.PRIORITY_HOURLY_LIMIT
+    assert tracker._minute_count == openmeteo_quota.PRIORITY_MINUTE_LIMIT
+    assert tracker._request_states["metadata-local"]["quota_cost"] == 0
+
+
+def test_openmeteo_recovery_lane_preserves_held_capital_floor(monkeypatch, tmp_path):
+    monkeypatch.setenv("PYTEST_CURRENT_TEST", "recovery-floor")
+    tracker = OpenMeteoQuotaTracker(state_path=tmp_path / "unused.json")
+    tracker._count = PRIORITY_DAILY_LIMIT
+
+    with tracker.recovery_lane():
+        allowed, reason, lease_id = tracker.acquire_request("recovery-a")
+    assert (allowed, reason) == (True, None)
+    assert lease_id
+    assert tracker._request_states["recovery-a"]["priority"] == "recovery"
+    assert tracker._limits(False, False, True) == (
+        RECOVERY_DAILY_LIMIT,
+        RECOVERY_HOURLY_LIMIT,
+        RECOVERY_MINUTE_LIMIT,
+    )
+
+    tracker._count = RECOVERY_DAILY_LIMIT
+    with tracker.recovery_lane():
+        allowed, reason, lease_id = tracker.acquire_request("recovery-floor")
+    assert allowed is False
+    assert reason == f"day_limit={RECOVERY_DAILY_LIMIT}/{RECOVERY_DAILY_LIMIT}"
+    assert lease_id is None
+
+    with tracker.critical_lane():
+        critical_allowed, critical_reason, critical_lease = tracker.acquire_request(
+            "held-capital"
+        )
+    assert (critical_allowed, critical_reason) == (True, None)
+    assert critical_lease
+
+
 def test_openmeteo_request_success_clears_embargo(monkeypatch, tmp_path):
     monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
     tracker = OpenMeteoQuotaTracker(state_path=tmp_path / "openmeteo_quota.json")
@@ -11614,6 +12359,44 @@ def test_openmeteo_request_single_flight_is_shared(monkeypatch, tmp_path):
     )
     assert (allowed, reason) == (True, None)
     assert next_lease and next_lease != lease_id
+
+
+
+def test_openmeteo_request_reserves_provider_equivalent_quota_cost(monkeypatch, tmp_path):
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+    path = tmp_path / "openmeteo_quota.json"
+    tracker = OpenMeteoQuotaTracker(state_path=path)
+
+    allowed, reason, lease_id = tracker.acquire_request(
+        "multi-location", quota_cost=25
+    )
+
+    assert (allowed, reason) == (True, None)
+    assert lease_id
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    assert payload["day_count"] == 25
+    assert payload["hour_count"] == 25
+    assert payload["minute_count"] == 25
+    assert payload["requests"]["multi-location"]["quota_cost"] == 25
+
+
+def test_openmeteo_request_cost_cannot_cross_lane_reserve(monkeypatch, tmp_path):
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+    path = tmp_path / "openmeteo_quota.json"
+    tracker = OpenMeteoQuotaTracker(state_path=path)
+    now = datetime.now(timezone.utc)
+    state = tracker._default_state(now)
+    state["day_count"] = MAINTENANCE_DAILY_LIMIT - 10
+    path.write_text(json.dumps(state), encoding="utf-8")
+
+    allowed, reason, lease_id = tracker.acquire_request(
+        "too-expensive", quota_cost=25
+    )
+
+    assert allowed is False
+    assert reason == f"day_limit={MAINTENANCE_DAILY_LIMIT - 10}/{MAINTENANCE_DAILY_LIMIT}"
+    assert lease_id is None
+    assert tracker.calls_today() == MAINTENANCE_DAILY_LIMIT - 10
 
 
 def test_openmeteo_active_request_state_is_not_evicted(monkeypatch, tmp_path):
@@ -11834,7 +12617,131 @@ def test_openmeteo_429_persists_cooldown_without_sleeping(monkeypatch, tmp_path)
         )
 
     assert slept == []
-    assert tracker.cooldown_remaining_seconds() > 0
+    assert tracker.cooldown_remaining_seconds(
+        "api.open-meteo.com/v1/forecast"
+    ) > 0
+
+
+
+def test_openmeteo_multi_location_fetch_uses_weighted_quota(monkeypatch, tmp_path):
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+    tracker = OpenMeteoQuotaTracker(state_path=tmp_path / "openmeteo_quota.json")
+
+    class _FreshClient:
+        def get(self, *_args, **_kwargs):
+            return httpx.Response(
+                200,
+                json=[{"fresh": True}] * 3,
+                request=httpx.Request("GET", "https://api.open-meteo.com"),
+            )
+
+    result = openmeteo_client.fetch(
+        "https://api.open-meteo.com/v1/forecast",
+        {
+            "latitude": "1,2,3",
+            "longitude": "4,5,6",
+            "hourly": "temperature_2m",
+            "forecast_hours": 120,
+        },
+        max_retries=1,
+        quota=tracker,
+        client=_FreshClient(),
+    )
+
+    assert result == [{"fresh": True}] * 3
+    assert tracker.calls_today() == 3
+
+
+def test_openmeteo_long_archive_fetch_uses_weighted_quota(monkeypatch, tmp_path):
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+    tracker = OpenMeteoQuotaTracker(state_path=tmp_path / "openmeteo_quota.json")
+
+    class _FreshClient:
+        def get(self, *_args, **_kwargs):
+            return httpx.Response(
+                200,
+                json={"fresh": True},
+                request=httpx.Request("GET", "https://archive-api.open-meteo.com"),
+            )
+
+    openmeteo_client.fetch(
+        "https://archive-api.open-meteo.com/v1/archive",
+        {
+            "latitude": 1,
+            "longitude": 2,
+            "hourly": "temperature_2m",
+            "start_date": "2026-01-01",
+            "end_date": "2026-03-31",
+        },
+        max_retries=1,
+        quota=tracker,
+        client=_FreshClient(),
+    )
+
+    assert tracker.calls_today() == 7
+
+
+def test_openmeteo_daily_429_blocks_until_next_utc_day(monkeypatch, tmp_path):
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+    tracker = OpenMeteoQuotaTracker(state_path=tmp_path / "openmeteo_quota.json")
+
+    class _DailyLimitedClient:
+        def get(self, *_args, **_kwargs):
+            return httpx.Response(
+                429,
+                json={"reason": "Daily API request limit exceeded. Please try again tomorrow."},
+                request=httpx.Request("GET", "https://api.open-meteo.com"),
+            )
+
+    with pytest.raises(openmeteo_client.OpenMeteoHTTPStatusError) as raised:
+        openmeteo_client.fetch(
+            "https://api.open-meteo.com/v1/forecast",
+            {"latitude": 2, "longitude": 1},
+            max_retries=1,
+            quota=tracker,
+            client=_DailyLimitedClient(),
+        )
+
+    assert raised.value.outcome.reason == "daily_api_request_limit_exceeded"
+    assert tracker.cooldown_remaining_seconds(
+        "api.open-meteo.com/v1/forecast"
+    ) > 3600
+
+
+def test_openmeteo_daily_429_is_scoped_to_provider_host(monkeypatch, tmp_path):
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+    tracker = OpenMeteoQuotaTracker(state_path=tmp_path / "openmeteo_quota.json")
+
+    class _SingleRunsLimitedClient:
+        def get(self, *_args, **_kwargs):
+            return httpx.Response(
+                429,
+                json={"reason": "Daily API request limit exceeded. Please try again tomorrow."},
+                request=httpx.Request("GET", "https://single-runs-api.open-meteo.com"),
+            )
+
+    with pytest.raises(openmeteo_client.OpenMeteoHTTPStatusError):
+        openmeteo_client.fetch(
+            "https://single-runs-api.open-meteo.com/v1/forecast",
+            {"latitude": 2, "longitude": 1, "run": "2026-08-18T00:00"},
+            max_retries=1,
+            quota=tracker,
+            client=_SingleRunsLimitedClient(),
+        )
+
+    allowed, reason, lease_id = tracker.acquire_request(
+        "standard-host",
+        endpoint="api.open-meteo.com/v1/forecast",
+    )
+    assert (allowed, reason) == (True, None)
+    assert lease_id
+    blocked, blocked_reason, blocked_lease = tracker.acquire_request(
+        "different-single-runs-request",
+        endpoint="single-runs-api.open-meteo.com/v1/forecast",
+    )
+    assert blocked is False
+    assert blocked_reason is not None and blocked_reason.startswith("cooldown_until=")
+    assert blocked_lease is None
 
 
 def test_openmeteo_generic_400_is_terminal_and_persisted_across_polls(
@@ -11883,7 +12790,19 @@ def test_openmeteo_generic_400_is_terminal_and_persisted_across_polls(
     assert "https://api.open-meteo.com" not in persisted
 
 
-def test_openmeteo_not_published_400_is_conditional_retry(monkeypatch, tmp_path):
+@pytest.mark.parametrize(
+    "provider_reason",
+    (
+        "run_not_published",
+        (
+            "The requested model run is not available. "
+            "Model: ecmwf_ifs, run: 2026-08-19T00:00Z"
+        ),
+    ),
+)
+def test_openmeteo_not_published_400_is_conditional_retry(
+    monkeypatch, tmp_path, provider_reason
+):
     monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
     monkeypatch.setattr(openmeteo_quota.random, "uniform", lambda _low, _high: 0.0)
     monkeypatch.setattr(openmeteo_client.time, "sleep", lambda _seconds: threading.Event().wait(0.002))
@@ -11896,7 +12815,7 @@ def test_openmeteo_not_published_400_is_conditional_retry(monkeypatch, tmp_path)
             request = httpx.Request("GET", "https://api.open-meteo.com/v1/forecast")
             return httpx.Response(
                 400,
-                json={"reason": "run_not_published"},
+                json={"reason": provider_reason, "error": True},
                 request=request,
             )
 
@@ -11911,6 +12830,98 @@ def test_openmeteo_not_published_400_is_conditional_retry(monkeypatch, tmp_path)
         )
     assert calls["count"] == 2
     assert raised.value.outcome.retry_class is openmeteo_client.OpenMeteoRetryClass.CONDITIONAL
+
+
+def test_openmeteo_single_runs_classifier_revision_drains_old_terminal_state(
+    monkeypatch, tmp_path
+):
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+    tracker = OpenMeteoQuotaTracker(state_path=tmp_path / "openmeteo_quota.json")
+    url = "https://single-runs-api.open-meteo.com/v1/forecast"
+    params = {"latitude": 2, "longitude": 1, "run": "2026-08-19T00:00"}
+    legacy_payload = json.dumps(
+        {"url": url, "params": params},
+        default=str,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    legacy_id = hashlib.sha256(legacy_payload).hexdigest()
+    allowed, reason, lease_id = tracker.acquire_request(legacy_id)
+    assert (allowed, reason) == (True, None)
+    assert tracker.record_request_terminal(
+        legacy_id,
+        lease_id=lease_id,
+        http_outcome={
+            "status_code": 400,
+            "retry_class": "terminal",
+            "retry_after_seconds": None,
+            "reason": "http_400",
+            "body_sha256": "old-classifier",
+        },
+    )
+
+    class _PublishedClient:
+        def get(self, *_args, **_kwargs):
+            request = httpx.Request("GET", url)
+            return httpx.Response(200, json={"hourly": {}}, request=request)
+
+    assert openmeteo_client.fetch(
+        url,
+        params,
+        max_retries=1,
+        quota=tracker,
+        client=_PublishedClient(),
+    ) == {"hourly": {}}
+    assert tracker.request_terminal_outcome(legacy_id) is not None
+    assert tracker.request_terminal_outcome(
+        openmeteo_client.request_identity(url, params)
+    ) is None
+
+
+def test_openmeteo_caller_conditional_status_is_retryable_and_identity_scoped(
+    monkeypatch, tmp_path
+):
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+    monkeypatch.setattr(openmeteo_quota.random, "uniform", lambda _low, _high: 0.0)
+    monkeypatch.setattr(
+        openmeteo_client.time,
+        "sleep",
+        lambda _seconds: threading.Event().wait(0.002),
+    )
+    tracker = OpenMeteoQuotaTracker(state_path=tmp_path / "openmeteo_quota.json")
+    url = "https://single-runs-api.open-meteo.com/v1/forecast"
+    params = {"latitude": 2, "longitude": 1, "run": "2026-08-19T00:00"}
+    calls = {"count": 0}
+
+    class _Transient400Client:
+        def get(self, *_args, **_kwargs):
+            calls["count"] += 1
+            request = httpx.Request("GET", url)
+            return httpx.Response(400, json={"reason": "transient probe miss"}, request=request)
+
+    with pytest.raises(openmeteo_client.OpenMeteoHTTPStatusError) as raised:
+        openmeteo_client.fetch(
+            url,
+            params,
+            max_retries=2,
+            backoff_sec=0,
+            quota=tracker,
+            client=_Transient400Client(),
+            conditional_status_codes=frozenset({400}),
+        )
+    assert calls["count"] == 2
+    assert raised.value.outcome.retry_class is openmeteo_client.OpenMeteoRetryClass.CONDITIONAL
+    policy_id = openmeteo_client.request_identity(
+        url,
+        params,
+        conditional_status_codes=frozenset({400}),
+    )
+    assert policy_id != openmeteo_client.request_identity(url, params)
+    request_state = json.loads(
+        (tmp_path / "openmeteo_quota.json").read_text(encoding="utf-8")
+    )["requests"][policy_id]
+    assert request_state["outcome"] == "transport_error"
+    assert request_state["http_outcome"]["retry_class"] == "conditional"
 
 
 def test_openmeteo_5xx_retries_with_a_bounded_attempt_count(monkeypatch, tmp_path):
@@ -11961,7 +12972,9 @@ def test_openmeteo_429_honors_retry_after_in_typed_route_embargo(monkeypatch, tm
         )
     assert raised.value.outcome.retry_class is openmeteo_client.OpenMeteoRetryClass.RATE_LIMITED
     assert raised.value.outcome.retry_after_seconds == 30.0
-    assert tracker.cooldown_remaining_seconds() >= 59
+    assert tracker.cooldown_remaining_seconds(
+        "api.open-meteo.com/v1/forecast"
+    ) >= 59
 
 
 def test_openmeteo_request_state_is_bounded_and_migrates_v1(monkeypatch, tmp_path):
@@ -11994,6 +13007,32 @@ def test_openmeteo_request_state_is_bounded_and_migrates_v1(monkeypatch, tmp_pat
     assert len(payload["requests"]) <= MAX_REQUEST_STATES
 
 
+def test_openmeteo_v2_state_adds_attributable_scope_map(
+    monkeypatch, tmp_path
+):
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+    now = datetime.now(timezone.utc)
+    path = tmp_path / "openmeteo_quota.json"
+    state = OpenMeteoQuotaTracker._default_state(now)
+    state["schema_version"] = 2
+    state.pop("blocked_until_by_endpoint")
+    state["blocked_until"] = None
+    path.write_text(json.dumps(state), encoding="utf-8")
+    tracker = OpenMeteoQuotaTracker(state_path=path)
+
+    allowed, reason, lease_id = tracker.acquire_request(
+        "standard-after-migration",
+        endpoint="api.open-meteo.com/v1/forecast",
+    )
+
+    assert (allowed, reason) == (True, None)
+    assert lease_id
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    assert payload["schema_version"] == 2
+    assert payload["blocked_until"] is None
+    assert payload["blocked_until_by_endpoint"] == {}
+
+
 def test_openmeteo_quota_reserves_capacity_for_source_clock():
     tracker = OpenMeteoQuotaTracker()
     tracker._count = MAINTENANCE_DAILY_LIMIT
@@ -12024,10 +13063,18 @@ def test_openmeteo_fetch_fast_fail_429_marks_cooldown_without_sleep(monkeypatch,
             req = httpx.Request("GET", "https://x")
             raise httpx.HTTPStatusError("429", request=req, response=httpx.Response(429, request=req))
 
+    class _Client:
+        def get(self, *_args, **_kwargs):
+            return _Resp()
+
     slept: list[float] = []
     monkeypatch.setattr(openmeteo_client.quota_tracker, "acquire_call", lambda _label="": True)
-    monkeypatch.setattr(openmeteo_client.quota_tracker, "note_rate_limited", lambda wait: None)
-    monkeypatch.setattr(openmeteo_client.httpx, "get", lambda *a, **k: _Resp())
+    monkeypatch.setattr(
+        openmeteo_client.quota_tracker,
+        "note_rate_limited",
+        lambda wait, **_kwargs: None,
+    )
+    monkeypatch.setattr(openmeteo_client, "_SHARED_HTTP_CLIENT", _Client())
     monkeypatch.setattr(openmeteo_client.time, "sleep", lambda seconds: slept.append(float(seconds)))
 
     with caplog.at_level("WARNING", logger="src.data.openmeteo_client"), pytest.raises(httpx.HTTPStatusError):
@@ -12279,6 +13326,39 @@ def test_monitoring_phase_uses_tracker_record_exit_for_deferred_sell_fills(monke
     assert artifact.exit_cases[0].trade_id == "filled-1"
 
 
+def test_held_monitor_commit_cannot_inherit_sqlite_autocheckpoint(monkeypatch):
+    """The live monitor connection leaves WAL draining to the scheduled backstop."""
+
+    conn = sqlite3.connect(":memory:")
+    conn.execute("PRAGMA wal_autocheckpoint = 1")
+    observed = {}
+
+    def _execute(*args, **kwargs):
+        observed["wal_autocheckpoint"] = args[0].execute(
+            "PRAGMA wal_autocheckpoint"
+        ).fetchone()[0]
+        return False, False
+
+    monkeypatch.setattr(cycle_runner._runtime, "execute_monitoring_phase", _execute)
+    summary = {"monitors": 0, "exits": 0}
+
+    try:
+        result = cycle_runner._execute_monitoring_phase(
+            conn,
+            object(),
+            PortfolioState(),
+            object(),
+            StrategyTracker(),
+            summary,
+        )
+    finally:
+        conn.close()
+
+    assert result == (False, False)
+    assert observed["wal_autocheckpoint"] == 0
+    assert summary["held_monitor_wal_autocheckpoint"] == "disabled"
+
+
 def _monitor_chain_deps(now: datetime):
     return types.SimpleNamespace(
         MonitorResult=cycle_runner.MonitorResult,
@@ -12482,7 +13562,7 @@ def test_orange_risk_exits_favorable_position_through_monitor_lifecycle(monkeypa
     portfolio = PortfolioState(positions=[pos])
     artifact = CycleArtifact(mode="opening_hunt", started_at="2026-04-01T20:00:00Z")
     summary = {"monitors": 0, "exits": 0, "risk_level": RiskLevel.ORANGE.value}
-    captured = {}
+    auction_requests = []
 
     def _refresh_position(conn, clob, refreshed_pos):
         refreshed_pos.last_monitor_market_price = 0.43
@@ -12491,6 +13571,7 @@ def test_orange_risk_exits_favorable_position_through_monitor_lifecycle(monkeypa
         refreshed_pos.last_monitor_best_ask = 0.43
         refreshed_pos.last_monitor_prob = 0.62
         refreshed_pos.last_monitor_prob_is_fresh = True
+        refreshed_pos.last_monitor_edge = 0.21
         return types.SimpleNamespace(
             p_market=np.array([0.43]),
             p_posterior=0.62,
@@ -12499,13 +13580,34 @@ def test_orange_risk_exits_favorable_position_through_monitor_lifecycle(monkeypa
             forward_edge=0.21,
         )
 
-    def _execute_exit(**kwargs):
-        captured["exit_context"] = kwargs["exit_context"]
-        captured["position"] = kwargs["position"]
-        return "sell_pending: orange"
-
     monkeypatch.setattr("src.engine.monitor_refresh.refresh_position", _refresh_position)
-    monkeypatch.setattr("src.execution.exit_lifecycle.execute_exit", _execute_exit)
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_orange_favorable_exit_decision",
+        lambda position, context, decision: ExitDecision(
+            True,
+            "ORANGE_FAVORABLE_EXIT",
+            urgency="normal",
+            trigger="ORANGE_FAVORABLE_EXIT",
+            selected_method=position.selected_method or position.entry_method,
+            applied_validations=[
+                *list(position.applied_validations or []),
+                "risk_orange",
+                "orange_favorable_bid_gate",
+                "orange_favorable_net_exit_gate",
+            ],
+        ),
+    )
+    monkeypatch.setattr(
+        "src.execution.exit_lifecycle.execute_exit",
+        lambda **kwargs: (_ for _ in ()).throw(
+            AssertionError("ORANGE statistical SELL must not use local authority")
+        ),
+    )
+    monkeypatch.setattr(
+        "src.events.reactor.request_global_auction_completion",
+        lambda **kwargs: auction_requests.append(kwargs) or True,
+    )
 
     p_dirty, t_dirty = cycle_runtime.execute_monitoring_phase(
         conn=None,
@@ -12520,13 +13622,20 @@ def test_orange_risk_exits_favorable_position_through_monitor_lifecycle(monkeypa
     assert p_dirty is True
     assert t_dirty is False
     assert summary["risk_orange_favorable_exits"] == 1
-    assert summary["exits"] == 1
-    assert artifact.monitor_results[0].should_exit is True
-    assert artifact.monitor_results[0].exit_reason == "ORANGE_FAVORABLE_EXIT"
+    assert summary["exits"] == 0
+    assert summary["monitor_statistical_sells_blocked_without_global_authority"] == 1
+    assert summary["monitor_statistical_sell_auction_completion_requested"] == 1
+    assert artifact.monitor_results[0].should_exit is False
+    assert artifact.monitor_results[0].exit_reason == (
+        "GLOBAL_AUCTION_STATISTICAL_SELL_AUTHORITY_UNAVAILABLE"
+    )
     assert artifact.monitor_results[0].fresh_prob == pytest.approx(0.62)
     assert artifact.monitor_results[0].fresh_edge == pytest.approx(0.21)
-    assert captured["exit_context"].exit_reason == "ORANGE_FAVORABLE_EXIT"
-    assert captured["position"].exit_trigger == "ORANGE_FAVORABLE_EXIT"
+    assert len(auction_requests) == 1
+    assert auction_requests[0]["reason"] == (
+        "GLOBAL_AUCTION_STATISTICAL_SELL_AUTHORITY_UNAVAILABLE"
+    )
+    assert auction_requests[0]["position_id"] == "orange-favorable"
     assert "orange_favorable_bid_gate" in pos.applied_validations
     assert "orange_favorable_net_exit_gate" in pos.applied_validations
 
@@ -12622,7 +13731,9 @@ def test_pending_exit_retry_snapshot_identity_seed_uses_current_clob_quote(tmp_p
     assert t_dirty is False
     assert clob.tokens == ["no-from-snapshot"]
     assert pos.no_token_id == "no-from-snapshot"
-    assert captured["context"].current_market_price == pytest.approx(0.435)
+    # Preflight released this retry into Day0; exit economics therefore use
+    # the executable same-side bid, not the midpoint/VWMP telemetry price.
+    assert captured["context"].current_market_price == pytest.approx(0.42)
     assert captured["context"].current_market_price_is_fresh is True
     assert captured["context"].best_bid == pytest.approx(0.42)
     assert captured["context"].best_ask == pytest.approx(0.45)
@@ -12883,7 +13994,7 @@ def test_incomplete_exit_context_missing_exit_quote_is_not_chain_missing(monkeyp
     assert artifact.monitor_results[0].fresh_edge is None
 
 
-def test_monitor_execution_failure_does_not_become_chain_missing(monkeypatch):
+def test_monitor_statistical_sell_authority_failure_publishes_isolated_wake(monkeypatch):
     pos = _position(trade_id="monitor-execution-failed", state="day0_window")
     portfolio = PortfolioState(positions=[pos])
     artifact = CycleArtifact(mode="day0_capture", started_at="2026-04-01T20:00:00Z")
@@ -12911,12 +14022,6 @@ def test_monitor_execution_failure_does_not_become_chain_missing(monkeypatch):
         "evaluate_exit",
         lambda self, exit_context: ExitDecision(True, "SETTLEMENT_IMMINENT", trigger="SETTLEMENT_IMMINENT"),
     )
-    monkeypatch.setattr("src.execution.exit_lifecycle.build_exit_intent", lambda *args, **kwargs: object())
-    monkeypatch.setattr(
-        "src.execution.exit_lifecycle.execute_exit",
-        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("execution failed")),
-    )
-
     cycle_runtime.execute_monitoring_phase(
         conn=None,
         clob=types.SimpleNamespace(),
@@ -12927,10 +14032,28 @@ def test_monitor_execution_failure_does_not_become_chain_missing(monkeypatch):
         deps=_monitor_chain_deps(datetime(2026, 4, 1, 20, 0, tzinfo=timezone.utc)),
     )
 
-    assert summary["monitor_failed"] == 1
+    assert summary.get("monitor_failed", 0) == 0
     assert "monitor_chain_missing" not in summary
     assert len(artifact.monitor_results) == 1
-    assert artifact.monitor_results[0].exit_reason == "SETTLEMENT_IMMINENT"
+    assert summary["monitor_statistical_sells_blocked_without_global_authority"] == 1
+    assert summary["monitor_statistical_sell_auction_completion_requested"] == 1
+    assert artifact.monitor_results[0].should_exit is False
+    assert artifact.monitor_results[0].exit_reason == (
+        "GLOBAL_AUCTION_STATISTICAL_SELL_AUTHORITY_UNAVAILABLE"
+    )
+
+    test_root = Path(os.environ["ZEUS_TEST_STATE_ROOT"]).resolve()
+    from src.config import STATE_DIR
+
+    assert STATE_DIR.resolve() == test_root
+    synthetic_paths = (
+        STATE_DIR / "edli-reactor-wake.json",
+        STATE_DIR / "edli-reactor-wake.json.d",
+        STATE_DIR / "edli-reactor-wake.json.held-sell-reauction-receipts",
+    )
+    assert synthetic_paths[0].exists()
+    for path in synthetic_paths:
+        assert path.resolve().is_relative_to(test_root)
 
 
 def _entry_decision_evidence() -> DecisionEvidence:
@@ -14309,7 +15432,7 @@ def test_check_pending_entries_ignores_non_pending_states():
     assert pos.state == "entered"
 
 
-def test_check_pending_exits_restores_day0_window_state_after_bare_exit_intent_release():
+def test_check_pending_exits_without_db_keeps_bare_exit_intent_pending():
     pos = _position(state="day0_window")
     pos.day0_entered_at = "2026-04-04T00:00:00Z"
     pos.exit_state = "exit_intent"
@@ -14320,8 +15443,8 @@ def test_check_pending_exits_restores_day0_window_state_after_bare_exit_intent_r
 
     assert stats["retried"] == 0
     assert stats["unchanged"] == 1
-    assert pos.exit_state == ""
-    assert pos.state == "day0_window"
+    assert pos.exit_state == "exit_intent"
+    assert pos.state == "pending_exit"
 
 
 # T5 BRIDGE RETIREMENT (docs/rebuild/quarantine_excision_2026-07-11.md): the
@@ -14338,7 +15461,7 @@ def test_check_pending_exits_restores_day0_window_state_after_bare_exit_intent_r
 # current "active" phase) as the REPLACEMENT PHASE LAW carrier.
 
 
-def test_check_pending_exits_restores_pre_exit_state_after_bare_exit_intent_release_no_conn():
+def test_check_pending_exits_without_db_preserves_pre_exit_state_and_pending_owner():
     pos = _position(
         state="pending_exit",
         pre_exit_state="entered",
@@ -14352,9 +15475,10 @@ def test_check_pending_exits_restores_pre_exit_state_after_bare_exit_intent_rele
 
     assert stats["retried"] == 0
     assert stats["unchanged"] == 1
-    assert pos.exit_state == ""
-    assert pos.state == "entered"
-    assert pos.order_status == "filled"
+    assert pos.exit_state == "exit_intent"
+    assert pos.state == "pending_exit"
+    assert pos.pre_exit_state == "entered"
+    assert pos.order_status == "exit_intent"
 
 
 def test_check_pending_exits_persists_bare_exit_intent_release(tmp_path):
@@ -14561,14 +15685,704 @@ def test_check_pending_exits_releases_loaded_pre_exit_state_bare_exit_intent_wit
 
 
 @pytest.mark.parametrize(
+    ("exit_state", "last_exit_error"),
+    [
+        ("exit_intent", ""),
+        ("retry_pending", "pre_submit_db_locked_transient"),
+        ("retry_pending", "ctf_tokens_insufficient"),
+    ],
+)
+def test_global_sell_without_command_survives_restart_as_v4_reauction_debt(
+    tmp_path,
+    monkeypatch,
+    exit_state,
+    last_exit_error,
+):
+    from src.engine.lifecycle_events import build_position_current_projection
+    from src.execution.exit_lifecycle import (
+        check_pending_retries,
+        needs_global_sell_snapshot_reauction,
+        release_pending_exit_without_order_if_retryable,
+    )
+    from src.state.db import query_portfolio_loader_view
+    from src.state.portfolio import _position_from_projection_row
+    from src.state.projection import upsert_position_current
+
+    conn = get_connection(tmp_path / f"global-sell-no-command-{exit_state}.db")
+    init_schema(conn)
+    init_schema_trade_only(conn)
+    pos = _position(
+        trade_id=f"global-sell-no-command-{exit_state}-{last_exit_error or 'bare'}",
+        state="pending_exit",
+        pre_exit_state="entered",
+        exit_state=exit_state,
+        order_status=exit_state,
+    )
+    pos.last_exit_error = last_exit_error
+    pos.next_exit_retry_at = ""
+    upsert_position_current(conn, build_position_current_projection(pos))
+    conn.execute(
+        """
+        INSERT INTO position_events (
+            event_id, position_id, event_version, sequence_no, event_type, occurred_at,
+            phase_before, phase_after, strategy_key, decision_id, snapshot_id, order_id,
+            command_id, caused_by, idempotency_key, venue_status, source_module, payload_json,
+            env
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            f"{pos.trade_id}:exit-intent",
+            pos.trade_id,
+            1,
+            1,
+            "EXIT_INTENT",
+            "2026-08-05T20:00:00+00:00",
+            "active",
+            "pending_exit",
+            pos.strategy_key,
+            f"exit:{pos.trade_id}",
+            pos.decision_snapshot_id,
+            None,
+            None,
+            "global_auction",
+            f"{pos.trade_id}:exit-intent",
+            None,
+            "src.execution.exit_lifecycle",
+            json.dumps(
+                {
+                    "status": "exit_intent",
+                    "exit_intent_reason": "GLOBAL_CAPITAL_OPTIMAL_SELL",
+                    "exit_reason": "GLOBAL_CAPITAL_OPTIMAL_SELL",
+                    "exit_intent_close_position": True,
+                    "exit_intent_shares": pos.shares,
+                }
+            ),
+            "live",
+        ),
+    )
+    conn.commit()
+
+    if exit_state == "exit_intent":
+        released = release_pending_exit_without_order_if_retryable(pos, conn=conn)
+    else:
+        released = check_pending_retries(
+            pos,
+            conn=conn,
+            global_sell_reauction_requester=lambda _position, _force: True,
+        )
+    assert released is True
+    conn.commit()
+
+    event = conn.execute(
+        """
+        SELECT json_extract(payload_json, '$.release_reason'),
+               json_extract(payload_json, '$.held_sell_reauction_obligation.schema_version')
+          FROM position_events
+         WHERE position_id = ? AND event_type = 'EXIT_RETRY_RELEASED'
+         ORDER BY sequence_no DESC LIMIT 1
+        """,
+        (pos.trade_id,),
+    ).fetchone()
+    assert tuple(event) == ("GLOBAL_SELL_SNAPSHOT_REAUCTION_REQUIRED", 4)
+    assert conn.execute(
+        "SELECT COUNT(*) FROM venue_commands WHERE position_id = ? AND intent_kind = 'EXIT'",
+        (pos.trade_id,),
+    ).fetchone()[0] == 0
+
+    loaded = query_portfolio_loader_view(conn)["positions"][0]
+    restarted = _position_from_projection_row(loaded, current_mode="live")
+    assert needs_global_sell_snapshot_reauction(restarted, conn) is True
+    requests: list[dict] = []
+    from src.execution.exit_safety import (
+        global_sell_reauction_publish_claim_blocks_exit_command,
+    )
+
+    def request_reauction(**kwargs):
+        assert global_sell_reauction_publish_claim_blocks_exit_command(
+            conn,
+            pos.trade_id,
+        ) is True
+        requests.append(kwargs)
+        return True
+
+    monkeypatch.setattr(
+        "src.events.reactor.request_global_auction_completion",
+        request_reauction,
+    )
+    monkeypatch.setattr(cycle_runtime, "_monitoring_phase_positions", lambda *args, **kwargs: [])
+    summary = {"monitors": 0, "exits": 0}
+    cycle_runtime.execute_monitoring_phase(
+        conn=conn,
+        clob=types.SimpleNamespace(),
+        portfolio=PortfolioState(positions=[restarted]),
+        artifact=CycleArtifact(mode="opening_hunt", started_at="2026-08-05T20:00:00Z"),
+        tracker=StrategyTracker(),
+        summary=summary,
+        deps=_monitor_chain_deps(datetime(2026, 8, 5, 20, 1, tzinfo=timezone.utc)),
+        run_exit_preflight=False,
+    )
+    assert len(requests) == 1
+    assert requests[0]["position_id"] == pos.trade_id
+    assert requests[0]["force_new_generation"] is True
+    assert requests[0]["schema_version"] == 4
+    assert summary["global_sell_snapshot_reauction_debts_recovered"] == 1
+    assert needs_global_sell_snapshot_reauction(restarted, conn) is False
+    assert global_sell_reauction_publish_claim_blocks_exit_command(
+        conn,
+        pos.trade_id,
+    ) is False
+    conn.close()
+
+
+def test_global_sell_with_persisted_command_stays_owned_by_command_recovery(tmp_path):
+    from src.execution.exit_lifecycle import (
+        _canonical_global_sell_command_ownership,
+        release_pending_exit_without_order_if_retryable,
+    )
+
+    conn = get_connection(tmp_path / "global-sell-command-owned.db")
+    init_schema(conn)
+    init_schema_trade_only(conn)
+    pos = _position(
+        trade_id="global-sell-command-owned",
+        state="pending_exit",
+        pre_exit_state="entered",
+        exit_state="exit_intent",
+        order_status="exit_intent",
+    )
+    conn.execute(
+        """
+        INSERT INTO position_events (
+            event_id, position_id, event_version, sequence_no, event_type, occurred_at,
+            phase_before, phase_after, strategy_key, caused_by, idempotency_key,
+            source_module, payload_json, env
+        ) VALUES (?, ?, 1, 1, 'EXIT_INTENT', ?, 'active', 'pending_exit', ?, ?, ?, ?, ?, 'live')
+        """,
+        (
+            f"{pos.trade_id}:exit-intent",
+            pos.trade_id,
+            "2026-08-05T20:00:00+00:00",
+            pos.strategy_key,
+            "global_auction",
+            f"{pos.trade_id}:exit-intent",
+            "src.execution.exit_lifecycle",
+            json.dumps(
+                {
+                    "exit_intent_reason": "GLOBAL_CAPITAL_OPTIMAL_SELL",
+                    "exit_intent_close_position": True,
+                    "exit_intent_shares": pos.shares,
+                }
+            ),
+        ),
+    )
+    conn.execute(
+        """
+        INSERT INTO venue_commands (
+            command_id, snapshot_id, envelope_id, position_id, decision_id,
+            idempotency_key, intent_kind, market_id, token_id, side, size,
+            price, state, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, 'EXIT', ?, ?, 'SELL', ?, ?, ?, ?, ?)
+        """,
+        (
+            "cmd-global-sell-command-owned",
+            "snapshot-global-sell-command-owned",
+            "envelope-global-sell-command-owned",
+            pos.trade_id,
+            "decision-global-sell-command-owned",
+            "idem-global-sell-command-owned",
+            pos.market_id,
+            pos.token_id,
+            pos.shares,
+            0.30,
+            "INTENT_CREATED",
+            "2026-08-05T19:59:59+00:00",
+            "2026-08-05T19:59:59+00:00",
+        ),
+    )
+
+    assert _canonical_global_sell_command_ownership(conn, pos) == "COMMAND_OWNED"
+    assert release_pending_exit_without_order_if_retryable(pos, conn=conn) is False
+    assert pos.state == "pending_exit"
+    assert pos.exit_state == "exit_intent"
+    assert conn.execute(
+        "SELECT COUNT(*) FROM position_events WHERE position_id = ? "
+        "AND event_type = 'EXIT_RETRY_RELEASED'",
+        (pos.trade_id,),
+    ).fetchone()[0] == 0
+    pos.exit_state = "retry_pending"
+    pos.order_status = "retry_pending"
+    pos.last_exit_error = "global_sell_exit_executable_snapshot_error:timeout"
+    assert exit_lifecycle_module.check_pending_retries(
+        pos,
+        conn=conn,
+        global_sell_reauction_requester=lambda *_args: (_ for _ in ()).throw(
+            AssertionError("command-owned SELL must not request a second global auction")
+        ),
+    ) is False
+    conn.close()
+
+
+@pytest.mark.parametrize("runtime_state", ["pending_exit", "day0_window"])
+def test_global_sell_reauction_debt_waits_for_in_band_bid_before_publish_claim(
+    tmp_path,
+    monkeypatch,
+    runtime_state,
+):
+    """No-bid retry debt must not contend for the monitor writer lease."""
+    conn = get_connection(tmp_path / "global-sell-no-bid-debt.db")
+    init_schema(conn)
+    init_schema_trade_only(conn)
+    pos = _position(
+        trade_id="global-sell-no-bid-debt",
+        state=runtime_state,
+        pre_exit_state="day0_window",
+        exit_state="retry_pending",
+        order_status="retry_pending",
+    )
+    requested = []
+    monkeypatch.setattr(
+        exit_lifecycle_module,
+        "needs_global_sell_snapshot_reauction",
+        lambda *_args, **_kwargs: True,
+    )
+    monkeypatch.setattr(
+        exit_lifecycle_module,
+        "latest_held_sell_reauction_obligation",
+        lambda *_args, **_kwargs: {
+            "schema_version": 4,
+            "position_id": pos.trade_id,
+            "held_token_id": pos.token_id,
+            "scope_identity": "scope-1",
+            "generation": "generation-1",
+        },
+    )
+    monkeypatch.setattr(
+        exit_lifecycle_module,
+        "_pending_exit_no_order_waits_for_liquidity",
+        lambda *_args, **_kwargs: True,
+    )
+    monkeypatch.setattr(
+        exit_lifecycle_module,
+        "_record_global_sell_reauction_publish_claim",
+        lambda *_args, **_kwargs: pytest.fail(
+            "no-bid debt must not acquire or persist a publish claim"
+        ),
+    )
+
+    assert exit_lifecycle_module.recover_global_sell_snapshot_reauction_debt(
+        pos,
+        conn=conn,
+        requester=lambda *_args: requested.append(True) or True,
+    ) is False
+    assert requested == []
+    conn.close()
+
+
+def test_pending_exit_global_sell_reauction_claims_with_monitor_priority(
+    tmp_path,
+    monkeypatch,
+):
+    """Executable V4 debt may atomically rearm without losing pending-exit ownership."""
+    from contextlib import nullcontext
+
+    from src.engine.lifecycle_events import build_position_current_projection
+    from src.execution import executor as executor_module
+    from src.state.projection import upsert_position_current
+    from src.state.write_coordinator import WritePriority
+
+    conn = get_connection(tmp_path / "global-sell-pending-exit-rearm.db")
+    init_schema(conn)
+    init_schema_trade_only(conn)
+    pos = _position(
+        trade_id="global-sell-pending-exit-rearm",
+        state="pending_exit",
+        pre_exit_state="day0_window",
+        exit_state="retry_pending",
+        order_status="retry_pending",
+    )
+    upsert_position_current(conn, build_position_current_projection(pos))
+    conn.commit()
+    obligation = {
+        "schema_version": 4,
+        "position_id": pos.trade_id,
+        "held_token_id": pos.token_id,
+        "scope_identity": "scope-1",
+        "generation": "generation-1",
+    }
+    priorities = []
+    requests = []
+    monkeypatch.setattr(
+        exit_lifecycle_module,
+        "needs_global_sell_snapshot_reauction",
+        lambda *_args, **_kwargs: True,
+    )
+    monkeypatch.setattr(
+        exit_lifecycle_module,
+        "latest_held_sell_reauction_obligation",
+        lambda *_args, **_kwargs: obligation,
+    )
+    monkeypatch.setattr(
+        exit_lifecycle_module,
+        "_pending_exit_no_order_waits_for_liquidity",
+        lambda *_args, **_kwargs: False,
+    )
+    monkeypatch.setattr(
+        exit_lifecycle_module,
+        "_canonical_global_sell_command_ownership",
+        lambda *_args, **_kwargs: "GLOBAL_NO_COMMAND",
+    )
+
+    def lease(*_args, **kwargs):
+        priorities.append(kwargs.get("priority"))
+        return nullcontext()
+
+    monkeypatch.setattr(executor_module, "_canonical_trade_write_lease", lease)
+
+    assert exit_lifecycle_module.recover_global_sell_snapshot_reauction_debt(
+        pos,
+        conn=conn,
+        requester=lambda position, force: requests.append(
+            (position.trade_id, force)
+        )
+        or True,
+    ) is True
+    assert priorities == [WritePriority.MONITOR]
+    assert requests == [(pos.trade_id, True)]
+    statuses = conn.execute(
+        "SELECT json_extract(payload_json, '$.global_sell_reauction_status') "
+        "FROM position_events WHERE position_id = ? "
+        "AND event_type = 'EXIT_RETRY_RELEASED' ORDER BY sequence_no",
+        (pos.trade_id,),
+    ).fetchall()
+    assert [row[0] for row in statuses] == [
+        "publish_claimed",
+        "durable_wake_reserved",
+    ]
+    conn.close()
+
+
+def test_global_sell_command_ownership_uses_event_sequence_not_caller_timestamp(tmp_path):
+    conn = get_connection(tmp_path / "global-sell-command-sequence.db")
+    init_schema(conn)
+    init_schema_trade_only(conn)
+    pos = _position(
+        trade_id="global-sell-command-sequence",
+        state="pending_exit",
+        pre_exit_state="entered",
+        exit_state="exit_intent",
+        order_status="exit_intent",
+    )
+
+    def insert_command(command_id, created_at):
+        conn.execute(
+            """
+            INSERT INTO venue_commands (
+                command_id, snapshot_id, envelope_id, position_id, decision_id,
+                idempotency_key, intent_kind, market_id, token_id, side, size,
+                price, state, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, 'EXIT', ?, ?, 'SELL', ?, 0.30,
+                      'REJECTED', ?, ?)
+            """,
+            (
+                command_id,
+                f"snapshot-{command_id}",
+                f"envelope-{command_id}",
+                pos.trade_id,
+                f"decision-{command_id}",
+                f"idem-{command_id}",
+                pos.market_id,
+                pos.token_id,
+                pos.shares,
+                created_at,
+                created_at,
+            ),
+        )
+
+    def insert_event(sequence_no, event_type, *, command_id=None, payload=None):
+        conn.execute(
+            """
+            INSERT INTO position_events (
+                event_id, position_id, event_version, sequence_no, event_type,
+                occurred_at, phase_before, phase_after, strategy_key, command_id,
+                caused_by, idempotency_key, source_module, payload_json, env
+            ) VALUES (?, ?, 1, ?, ?, ?, 'pending_exit', 'pending_exit', ?, ?,
+                      'test_sequence_binding', ?, 'src.execution.exit_lifecycle', ?, 'live')
+            """,
+            (
+                f"{pos.trade_id}:{event_type}:{sequence_no}",
+                pos.trade_id,
+                sequence_no,
+                event_type,
+                f"2026-08-05T20:00:0{sequence_no}+00:00",
+                pos.strategy_key,
+                command_id,
+                f"{pos.trade_id}:{event_type}:{sequence_no}",
+                json.dumps(payload or {}),
+            ),
+        )
+
+    insert_command("old-command", "2026-08-05T21:00:00+00:00")
+    insert_event(2, "EXIT_ORDER_POSTED", command_id="old-command")
+    insert_event(
+        3,
+        "EXIT_INTENT",
+        payload={"exit_intent_reason": "GLOBAL_CAPITAL_OPTIMAL_SELL"},
+    )
+    assert (
+        exit_lifecycle_module._canonical_global_sell_command_ownership(conn, pos)
+        == "GLOBAL_NO_COMMAND"
+    )
+
+    insert_command("new-command", "2026-08-05T19:00:00+00:00")
+    insert_event(4, "EXIT_ORDER_POSTED", command_id="new-command")
+    assert (
+        exit_lifecycle_module._canonical_global_sell_command_ownership(conn, pos)
+        == "COMMAND_OWNED"
+    )
+    conn.close()
+
+
+def test_late_command_after_v4_release_blocks_restart_enqueue_and_preserves_debt(tmp_path):
+    from src.engine.lifecycle_events import build_position_current_projection
+    from src.state.projection import upsert_position_current
+
+    conn = get_connection(tmp_path / "late-command-after-v4-release.db")
+    init_schema(conn)
+    init_schema_trade_only(conn)
+    pos = _position(
+        trade_id="late-command-after-v4-release",
+        state="pending_exit",
+        pre_exit_state="entered",
+        exit_state="exit_intent",
+        order_status="exit_intent",
+    )
+    upsert_position_current(conn, build_position_current_projection(pos))
+    conn.execute(
+        """
+        INSERT INTO position_events (
+            event_id, position_id, event_version, sequence_no, event_type, occurred_at,
+            phase_before, phase_after, strategy_key, caused_by, idempotency_key,
+            source_module, payload_json, env
+        ) VALUES (?, ?, 1, 1, 'EXIT_INTENT', ?, 'active', 'pending_exit', ?, ?, ?, ?, ?, 'live')
+        """,
+        (
+            f"{pos.trade_id}:exit-intent",
+            pos.trade_id,
+            "2026-08-05T20:00:00+00:00",
+            pos.strategy_key,
+            "global_auction",
+            f"{pos.trade_id}:exit-intent",
+            "src.execution.exit_lifecycle",
+            json.dumps({"exit_intent_reason": "GLOBAL_CAPITAL_OPTIMAL_SELL"}),
+        ),
+    )
+    assert exit_lifecycle_module.release_pending_exit_without_order_if_retryable(
+        pos,
+        conn=conn,
+    ) is True
+    conn.commit()
+    assert exit_lifecycle_module.needs_global_sell_snapshot_reauction(pos, conn) is True
+
+    conn.execute(
+        """
+        INSERT INTO venue_commands (
+            command_id, snapshot_id, envelope_id, position_id, decision_id,
+            idempotency_key, intent_kind, market_id, token_id, side, size,
+            price, state, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, 'EXIT', ?, ?, 'SELL', ?, 0.30,
+                  'INTENT_CREATED', ?, ?)
+        """,
+        (
+            "late-command",
+            "snapshot-late-command",
+            "envelope-late-command",
+            pos.trade_id,
+            "decision-late-command",
+            "idem-late-command",
+            pos.market_id,
+            pos.token_id,
+            pos.shares,
+            "2026-08-05T19:00:00+00:00",
+            "2026-08-05T19:00:00+00:00",
+        ),
+    )
+    conn.execute(
+        """
+        INSERT INTO position_events (
+            event_id, position_id, event_version, sequence_no, event_type, occurred_at,
+            phase_before, phase_after, strategy_key, command_id, caused_by,
+            idempotency_key, source_module, payload_json, env
+        ) VALUES (?, ?, 1, 3, 'EXIT_ORDER_POSTED', ?, 'active', 'pending_exit', ?, ?,
+                  'late_command', ?, 'src.execution.exit_lifecycle', '{}', 'live')
+        """,
+        (
+            f"{pos.trade_id}:late-command-posted",
+            pos.trade_id,
+            "2026-08-05T20:00:03+00:00",
+            pos.strategy_key,
+            "late-command",
+            f"{pos.trade_id}:late-command-posted",
+        ),
+    )
+    conn.commit()
+
+    assert exit_lifecycle_module.recover_global_sell_snapshot_reauction_debt(
+        pos,
+        conn=conn,
+        requester=lambda *_args: (_ for _ in ()).throw(
+            AssertionError("late command must prevent restart reauction enqueue")
+        ),
+    ) is False
+    assert exit_lifecycle_module.needs_global_sell_snapshot_reauction(pos, conn) is True
+    conn.close()
+
+
+def test_malformed_latest_exit_intent_holds_pending_instead_of_generic_release(tmp_path):
+    conn = get_connection(tmp_path / "malformed-global-sell-intent.db")
+    init_schema(conn)
+    init_schema_trade_only(conn)
+    pos = _position(
+        trade_id="malformed-global-sell-intent",
+        state="pending_exit",
+        pre_exit_state="entered",
+        exit_state="exit_intent",
+        order_status="exit_intent",
+    )
+    conn.execute(
+        """
+        INSERT INTO position_events (
+            event_id, position_id, event_version, sequence_no, event_type, occurred_at,
+            phase_before, phase_after, strategy_key, caused_by, idempotency_key,
+            source_module, payload_json, env
+        ) VALUES (?, ?, 1, 1, 'EXIT_INTENT', ?, 'active', 'pending_exit', ?, ?, ?, ?, ?, 'live')
+        """,
+        (
+            f"{pos.trade_id}:exit-intent",
+            pos.trade_id,
+            "2026-08-05T20:00:00+00:00",
+            pos.strategy_key,
+            "global_auction",
+            f"{pos.trade_id}:exit-intent",
+            "src.execution.exit_lifecycle",
+            "{",
+        ),
+    )
+
+    assert exit_lifecycle_module.release_pending_exit_without_order_if_retryable(
+        pos,
+        conn=conn,
+    ) is False
+    assert (pos.state, pos.exit_state, pos.order_status) == (
+        "pending_exit",
+        "exit_intent",
+        "exit_intent",
+    )
+    conn.close()
+
+
+def test_chain_zero_exposure_does_not_create_global_sell_reauction_debt(tmp_path):
+    conn = get_connection(tmp_path / "chain-zero-global-sell.db")
+    init_schema(conn)
+    init_schema_trade_only(conn)
+    pos = _position(
+        trade_id="chain-zero-global-sell",
+        state="pending_exit",
+        pre_exit_state="entered",
+        exit_state="exit_intent",
+        order_status="exit_intent",
+    )
+    pos.fill_authority = "venue_position_observed"
+    pos.chain_shares = 0.0
+    assert pos.shares > 0
+    conn.execute(
+        """
+        INSERT INTO position_events (
+            event_id, position_id, event_version, sequence_no, event_type, occurred_at,
+            phase_before, phase_after, strategy_key, caused_by, idempotency_key,
+            source_module, payload_json, env
+        ) VALUES (?, ?, 1, 1, 'EXIT_INTENT', ?, 'active', 'pending_exit', ?, ?, ?, ?, ?, 'live')
+        """,
+        (
+            f"{pos.trade_id}:exit-intent",
+            pos.trade_id,
+            "2026-08-05T20:00:00+00:00",
+            pos.strategy_key,
+            "global_auction",
+            f"{pos.trade_id}:exit-intent",
+            "src.execution.exit_lifecycle",
+            json.dumps(
+                {"exit_intent_reason": "GLOBAL_CAPITAL_OPTIMAL_SELL"}
+            ),
+        ),
+    )
+
+    assert (
+        exit_lifecycle_module._canonical_global_sell_command_ownership(conn, pos)
+        == "NOT_GLOBAL"
+    )
+    conn.close()
+
+
+def test_no_order_release_write_failure_restores_complete_runtime_state(
+    tmp_path,
+    monkeypatch,
+):
+    conn = get_connection(tmp_path / "no-order-release-write-failure.db")
+    init_schema(conn)
+    init_schema_trade_only(conn)
+    pos = _position(
+        trade_id="no-order-release-write-failure",
+        state="pending_exit",
+        pre_exit_state="day0_window",
+        exit_state="exit_intent",
+        order_status="exit_intent",
+    )
+    before = (
+        pos.state,
+        pos.pre_exit_state,
+        pos.exit_state,
+        pos.next_exit_retry_at,
+        pos.exit_retry_count,
+        pos.order_status,
+    )
+    monkeypatch.setattr(
+        exit_lifecycle_module,
+        "_dual_write_exit_retry_released_if_available",
+        lambda *args, **kwargs: False,
+    )
+
+    assert exit_lifecycle_module.release_pending_exit_without_order_if_retryable(
+        pos,
+        conn=conn,
+    ) is False
+    assert (
+        pos.state,
+        pos.pre_exit_state,
+        pos.exit_state,
+        pos.next_exit_retry_at,
+        pos.exit_retry_count,
+        pos.order_status,
+    ) == before
+    conn.close()
+
+
+@pytest.mark.parametrize(
     "error",
     ["exit_no_executable_bid", "exit_no_in_band_bid"],
+)
+@pytest.mark.parametrize(
+    ("blocked_bid", "blocked_ask"),
+    [("0.049", "0.051"), ("0.999", "1.0")],
 )
 def test_check_pending_exits_keeps_no_order_liquidity_rejection_pending_until_fresh_in_band_bid(
     tmp_path,
     error,
+    blocked_bid,
+    blocked_ask,
 ):
-    conn = get_connection(tmp_path / f"pending-exit-liquidity-wait-{error}.db")
+    conn = get_connection(
+        tmp_path / f"pending-exit-liquidity-wait-{error}-{blocked_bid}.db"
+    )
     init_schema(conn)
     init_schema_trade_only(conn)
     now = datetime.now(timezone.utc)
@@ -14581,12 +16395,12 @@ def test_check_pending_exits_keeps_no_order_liquidity_rejection_pending_until_fr
     )
     _insert_executable_snapshot(
         conn,
-        snapshot_id=f"snapshot-low-bid-{error}",
+        snapshot_id=f"snapshot-blocked-bid-{error}-{blocked_bid}",
         selected_outcome_token_id=pos.token_id,
         yes_token_id=pos.token_id,
         no_token_id=pos.no_token_id,
-        top_bid="0.049",
-        top_ask="0.051",
+        top_bid=blocked_bid,
+        top_ask=blocked_ask,
         captured_at=now,
     )
     assert exit_lifecycle_module._dual_write_canonical_pending_exit_if_available(

@@ -1,6 +1,6 @@
 # Created: 2026-06-12
-# Last reused or audited: 2026-07-23
-# Lifecycle: created=2026-06-12; last_reviewed=2026-07-23; last_reused=2026-07-23
+# Last reused or audited: 2026-08-08
+# Lifecycle: created=2026-06-12; last_reviewed=2026-08-08; last_reused=2026-08-08
 # Authority basis: operator stagnation root-cause 2026-06-12 ("continuous redecision没有作用中") +
 #   /tmp/continuous_redecision_resurrection.md. RELATIONSHIP antibodies for the P1 deadlock-free
 #   belief write, the P2 cheap screen, §4.5 rest management, and the EDLI_REDECISION_PENDING consume
@@ -107,6 +107,14 @@ def test_belief_reads_use_indexable_prefix_ranges_not_like_scans():
         assert " LIKE " not in upper
         assert "DECISION_ID >= ?" in upper
         assert "DECISION_ID < ?" in upper
+    all_latest = next(
+        stmt
+        for stmt in probability_reads
+        if "LATEST_TRACE AS MATERIALIZED" in stmt.upper()
+    )
+    inner_select = all_latest.split(")", 1)[0].upper()
+    assert "P_POSTERIOR_JSON" not in inner_select
+    assert "BIN_LABELS_JSON" not in inner_select
     assert "ROW_NUMBER" not in statements
     assert "PARTITION BY" not in statements
 
@@ -606,6 +614,51 @@ def test_rest_pull_holds_on_same_snapshot_price_wiggle():
         decision_time="2026-06-12T00:45:00+00:00",
     )
     assert pulls == [], "a bare wiggle on the same snapshot must never pull a rest (anti-twitch)"
+
+
+def test_rest_pull_cancels_current_negative_ev_when_historical_identity_is_misbound():
+    """A live rest cannot remain fillable after q reverses merely because its
+    historical identity was accidentally populated with a CLOB snapshot id and
+    its resting posterior was reconstructed from the latest belief.
+    """
+
+    world = _mem_world()
+    trade = _mem_trade()
+    family_id = "hyp|live|Sao Paulo|2026-08-09|high|disc"
+    # Latest YES=.88 means this BUY_NO has current q=.12 against a 41c fill.
+    _cache(
+        world,
+        family_id=family_id,
+        p_yes=0.88,
+        snapshot_id="day0-current",
+        cond="0xc26",
+        recorded_at="2026-08-09T15:00:42+00:00",
+    )
+    rest = cr.OpenRest(
+        command_id="cmd-stale-entry",
+        venue_order_id="venue-stale-entry",
+        family_id=family_id,
+        bin_label="b30",
+        side="buy_no",
+        condition_id="0xc26",
+        # Reproduces the live bug: latest q was used as the alleged resting q,
+        # while a market-data snapshot occupied the probability identity slot.
+        resting_posterior=0.12,
+        resting_snapshot_id="clob-executable-snapshot",
+        limit_price=0.41,
+        quote_age_ms=90_000.0,
+    )
+
+    pulls = cr.screen_resting_orders(
+        world,
+        trade,
+        open_rests=[rest],
+        decision_time="2026-08-09T15:01:00+00:00",
+    )
+
+    assert len(pulls) == 1
+    assert pulls[0][1].reason == "CURRENT_MEAN_EDGE_NON_POSITIVE"
+    assert pulls[0][1].detail < 0.0
 
 
 def test_rest_pull_does_not_cancel_by_order_age_alone():
@@ -1529,7 +1582,135 @@ def test_open_maker_rests_preserve_no_token_direction_and_held_side_posterior():
     assert rests[0].min_order_size == pytest.approx(5.0)
 
 
-def test_open_maker_rests_resolve_token_from_latest_snapshot_mirror_without_append_scan():
+def test_open_maker_rest_recovers_causal_entry_belief_not_latest_belief():
+    from src.events import reactor
+
+    world = _mem_world()
+    trade = _mem_trade()
+    trade.execute(
+        "CREATE TABLE venue_commands ("
+        "command_id TEXT, venue_order_id TEXT, token_id TEXT, market_id TEXT, "
+        "side TEXT, price REAL, snapshot_id TEXT, created_at TEXT, intent_kind TEXT)"
+    )
+    trade.execute(
+        "CREATE TABLE venue_order_facts ("
+        "venue_order_id TEXT, state TEXT, local_sequence INTEGER)"
+    )
+    family_id = "hyp|live|Sao Paulo|2026-08-09|high|disc"
+    _cache(
+        world,
+        family_id=family_id,
+        p_yes=0.16,
+        snapshot_id="day0-entry",
+        cond="0xc26",
+        recorded_at="2026-08-09T14:57:35+00:00",
+    )
+    _cache(
+        world,
+        family_id=family_id,
+        p_yes=0.88,
+        snapshot_id="day0-reversal",
+        cond="0xc26",
+        recorded_at="2026-08-09T15:00:42+00:00",
+    )
+    _snapshot(
+        trade,
+        condition_id="0xc26",
+        yes_token_id="yes-c26",
+        no_token_id="no-c26",
+        selected_outcome_token_id="no-c26",
+        snapshot_id="clob-entry",
+    )
+    trade.execute(
+        "INSERT INTO venue_commands VALUES (?,?,?,?,?,?,?,?,?)",
+        (
+            "cmd-causal",
+            "order-causal",
+            "no-c26",
+            "m1",
+            "BUY",
+            0.41,
+            "clob-entry",
+            "2026-08-09T14:57:41+00:00",
+            "ENTRY",
+        ),
+    )
+    trade.execute(
+        "INSERT INTO venue_order_facts VALUES (?,?,?)",
+        ("order-causal", "LIVE", 1),
+    )
+    trade.commit()
+
+    rests = reactor._edli_open_maker_rests_for_screen(trade, world)
+
+    assert len(rests) == 1
+    assert rests[0].resting_posterior == pytest.approx(0.84)
+    assert rests[0].resting_snapshot_id == "day0-entry"
+    pulls = cr.screen_resting_orders(
+        world,
+        trade,
+        open_rests=rests,
+        decision_time="2026-08-09T15:01:00+00:00",
+    )
+    assert len(pulls) == 1
+    assert pulls[0][1].reason == "BELIEF_WORSENING"
+
+
+def test_open_maker_rests_use_current_trade_fill_when_order_fact_is_stale():
+    """A user-channel partial fill must prevent a cancel that would create dust."""
+    from src.events import reactor
+
+    world = _mem_world()
+    trade = _mem_trade()
+    trade.execute(
+        "CREATE TABLE venue_commands ("
+        "command_id TEXT, venue_order_id TEXT, token_id TEXT, market_id TEXT, "
+        "side TEXT, price REAL, snapshot_id TEXT, created_at TEXT, intent_kind TEXT)"
+    )
+    trade.execute(
+        "CREATE TABLE venue_order_facts ("
+        "venue_order_id TEXT, state TEXT, matched_size TEXT, local_sequence INTEGER)"
+    )
+    trade.execute(
+        "CREATE TABLE venue_trade_facts ("
+        "trade_id TEXT, command_id TEXT, venue_order_id TEXT, state TEXT, filled_size TEXT, "
+        "local_sequence INTEGER)"
+    )
+    _cache(world, p_yes=0.90, snapshot_id="snap1", cond="0xc30")
+    _snapshot(trade, snapshot_id="snap1", min_order_size="5")
+    trade.execute(
+        "INSERT INTO venue_commands VALUES (?,?,?,?,?,?,?,?,?)",
+        (
+            "cmd1", "order1", "yes-c30", "m1", "BUY", 0.70, "snap1",
+            "2026-06-12T00:00:00+00:00", "ENTRY",
+        ),
+    )
+    trade.execute(
+        "INSERT INTO venue_order_facts VALUES ('order1', 'LIVE', '0', 1)"
+    )
+    # MATCHED -> CONFIRMED is one trade's state progression, not two fills.
+    trade.execute(
+        "INSERT INTO venue_trade_facts VALUES "
+        "('trade1', 'cmd1', 'order1', 'MATCHED', '1.724135', 1), "
+        "('trade1', 'cmd1', 'order1', 'CONFIRMED', '1.724135', 2)"
+    )
+    trade.commit()
+
+    rests = reactor._edli_open_maker_rests_for_screen(trade, world)
+
+    assert len(rests) == 1
+    assert rests[0].matched_size == pytest.approx(1.724135)
+    assert rests[0].min_order_size == pytest.approx(5.0)
+    assert cr.screen_resting_orders(
+        world,
+        trade,
+        open_rests=rests,
+        decision_time="2026-06-12T00:45:00+00:00",
+        value_refresh_min_age_seconds=5 * 60,
+    ) == []
+
+
+def test_open_maker_rests_use_exact_snapshot_for_minimum_without_append_scan():
     from src.events import reactor
 
     world = _mem_world()
@@ -1585,9 +1766,17 @@ def test_open_maker_rests_resolve_token_from_latest_snapshot_mirror_without_appe
 
     assert len(rests) == 1
     assert rests[0].side == "buy_no"
+    assert rests[0].min_order_size == pytest.approx(5.0)
     statements = "\n".join(captured_trade.statements)
     assert "FROM executable_market_snapshot_latest" in statements
-    assert "FROM executable_market_snapshots" not in statements
+    assert "FROM executable_market_snapshots" in statements
+    append_reads = [
+        statement
+        for statement in captured_trade.statements
+        if "FROM executable_market_snapshots\n" in statement
+    ]
+    assert len(append_reads) == 1
+    assert "WHERE snapshot_id IN" in append_reads[0]
 
 
 def test_open_maker_rests_avoids_full_order_fact_window_scan():

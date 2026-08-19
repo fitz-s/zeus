@@ -1,5 +1,5 @@
 # Created: 2026-05 (R3 M5)
-# Last reused/audited: 2026-07-19
+# Last reused/audited: 2026-08-11
 # Authority basis (operator external-close incident chain 2026-06-10): the operator
 #   manually SOLD Zeus's position on the SHARED proxy wallet. When the order FILLED the
 #   void-misbooking double-counted the same 66.25 economic claim (journal buy-claim +
@@ -71,6 +71,7 @@ from src.state.fill_dedup import (
 )
 from src.state.portfolio import INACTIVE_RUNTIME_STATES
 from src.state.venue_command_repo import trade_fact_has_positive_fill_economics
+from src.venue.response_contracts import VenueOrderNotFound
 
 logger = logging.getLogger(__name__)
 
@@ -116,7 +117,10 @@ _CONFIRMED_POSITION_FACT_STATES = frozenset({"CONFIRMED"})
 _OPTIMISTIC_POSITION_FACT_STATES = frozenset({"MATCHED", "MINED"})
 _POSITION_DRIFT_ABS_TOLERANCE = Decimal("0.0001")
 _POSITION_API_VISIBILITY_FLOOR = Decimal("0.01")
-_ENTRY_FILL_PROJECTION_PHASES = frozenset({"pending_entry", "active", "day0_window"})
+_TRADE_PRICE_WIRE_ABS_TOLERANCE = Decimal("0.00000001")
+_ENTRY_FILL_PROJECTION_PHASES = frozenset(
+    {"pending_entry", "active", "day0_window", "pending_exit"}
+)
 _TERMINAL_ENTRY_COMMAND_STATES = frozenset(
     {"CANCELLED", "CANCELED", "EXPIRED", "REJECTED", "SUBMIT_REJECTED", "FILLED"}
 )
@@ -250,10 +254,16 @@ def fresh_reconcile_snapshot(
     missing_local_order_ids = sorted(local_order_ids - open_order_ids)
     get_order = getattr(adapter, "get_order", None)
     if callable(get_order) and missing_local_order_ids:
-        captured["point_orders"] = {
-            order_id: get_order(order_id)
-            for order_id in missing_local_order_ids
-        }
+        point_orders: dict[str, Any] = {}
+        for order_id in missing_local_order_ids:
+            try:
+                point_orders[order_id] = get_order(order_id)
+            except VenueOrderNotFound:
+                # Authenticated 404 is exact absence, not surface failure. Keep
+                # the order in the immutable snapshot with a None value so the
+                # reconcile law can combine absence with trades/positions.
+                point_orders[order_id] = None
+        captured["point_orders"] = point_orders
     for surface, method in (("trades", "get_trades"), ("positions", "get_positions")):
         fn = getattr(adapter, method, None)
         if not callable(fn):
@@ -474,7 +484,11 @@ def refresh_unresolved_reconcile_findings(
         if finding is not None:
             new_findings.append(finding)
 
-    repair_summary = reconcile_recorded_maker_fill_economics(conn, observed_at=observed)
+    repair_summary = reconcile_recorded_maker_fill_economics(
+        conn,
+        observed_at=observed,
+        live_tick_scope=True,
+    )
     before_remaining = _unresolved_position_drift_count(conn, token_ids) + _unresolved_trade_count(conn, trade_ids)
     if token_ids:
         _resolve_position_drift_tokens_from_current_truth(
@@ -543,6 +557,34 @@ def run_reconcile_sweep(
         order_id = _order_id(order)
         if not order_id:
             continue
+        # Re-snapshot adopted ghost EXIT orders so the reducer has an
+        # authenticated order aggregate for every RESTING/TERMINAL tick.  The
+        # first adoption already writes this fact; subsequent fresh reads must
+        # advance it before durable trade-leg economics are folded.
+        existing_local = local_by_order.get(order_id)
+        if existing_local is not None and str(existing_local.get("command_id") or "").startswith("recovered_exit:"):
+            raw_local = _raw(order)
+            matched_local = _order_matched_size(raw_local)
+            original_local = _positive_decimal_or_none(
+                _first_present(raw_local, "original_size", "size", default=None)
+            )
+            if original_local is not None and matched_local > Decimal("0"):
+                remaining_local = max(original_local - matched_local, Decimal("0"))
+                from src.state.venue_command_repo import append_order_fact
+
+                append_order_fact(
+                    conn,
+                    venue_order_id=order_id,
+                    command_id=str(existing_local["command_id"]),
+                    state=("MATCHED" if remaining_local == Decimal("0") else "PARTIALLY_MATCHED"),
+                    remaining_size=_decimal_text(remaining_local),
+                    matched_size=_decimal_text(matched_local),
+                    source="REST",
+                    observed_at=observed,
+                    venue_timestamp=observed,
+                    raw_payload_hash=_hash_payload(raw_local),
+                    raw_payload_json=raw_local,
+                )
         if order_id not in local_by_order:
             raw = _raw(order)
             recovered = _recover_live_ghost_sell_order_for_known_position(
@@ -720,7 +762,27 @@ def run_reconcile_sweep(
     _resolve_disappeared_ghost_order_findings(
         adapter, conn, open_order_ids, trades=trades if trades_available else None, observed_at=observed
     )
-    reconcile_recorded_maker_fill_economics(conn, observed_at=observed)
+    reconcile_recorded_maker_fill_economics(
+        conn,
+        observed_at=observed,
+        live_tick_scope=context == "ws_gap",
+    )
+    # Fold adopted ghost-SELL economics only after every generic projection
+    # writer has finished. The fresh account residual and its chain timestamp
+    # must be the final canonical projection of this account snapshot; an
+    # earlier fold could be overwritten by the normal fill-reconcile lane.
+    try:
+        from src.execution.command_recovery import reconcile_recovered_partial_exit_economics
+
+        reconcile_recovered_partial_exit_economics(
+            conn,
+            observed_at=observed.isoformat(),
+            fresh_exchange_positions=(
+                exchange_positions if positions_available else None
+            ),
+        )
+    except Exception:
+        logger.exception("exchange_reconcile: recovered partial EXIT reducer failed")
     return findings
 
 
@@ -1117,15 +1179,35 @@ def _recover_live_ghost_sell_order_for_known_position(
         return None
 
     command_id = "recovered_exit:" + sha256(order_id.encode()).hexdigest()[:24]
-    existing = conn.execute(
-        "SELECT * FROM venue_commands WHERE command_id = ? OR venue_order_id = ? LIMIT 1",
-        (command_id, order_id),
-    ).fetchone()
-    if existing is not None:
-        return dict(existing)
-
     observed_text = observed_at.isoformat()
     decision_id = str(entry["decision_id"] or f"m5_recovered_exit:{order_id}")
+    remaining_size = max(original_size - matched_size, Decimal("0"))
+    baseline_shares = _position_shares_for_recovery(position_map)
+    baseline_cost_basis = _positive_decimal_or_none(position_map.get("cost_basis_usd"))
+    baseline_entry_price = _positive_decimal_or_none(position_map.get("entry_price"))
+    # A recovered EXIT is admissible only with a complete immutable lot basis.
+    # The conservation proof is captured before the position is reduced to the
+    # fresh exchange residual and is later consumed by command_recovery's
+    # exactly-once economics reducer.
+    baseline = {
+        "position_id": str(position_map["position_id"]),
+        "command_id": command_id,
+        "venue_order_id": order_id,
+        "baseline_shares": _decimal_text(baseline_shares),
+        "baseline_cost_basis_usd": (
+            _decimal_text(baseline_cost_basis) if baseline_cost_basis is not None else None
+        ),
+        "baseline_entry_price": (
+            _decimal_text(baseline_entry_price) if baseline_entry_price is not None else None
+        ),
+        "matched_sell_shares": _decimal_text(matched_size),
+        "first_conservation_proof": {
+            "baseline_shares": _decimal_text(baseline_shares),
+            "exchange_residual_shares": _decimal_text(exchange_size),
+            "matched_sell_shares": _decimal_text(matched_size),
+            "equation": "baseline_shares=exchange_residual_shares+matched_sell_shares",
+        },
+    }
     recovery_payload = {
         "schema_version": 1,
         "reason": "m5_live_ghost_sell_order_recovered_for_known_position",
@@ -1137,87 +1219,31 @@ def _recover_live_ghost_sell_order_for_known_position(
         "matched_sell_size": _decimal_text(matched_size),
         "known_position_shares": _decimal_text(_position_shares_for_recovery(position_map)),
         "source_entry_command_id": entry["command_id"],
+        "exchange_order": dict(raw),
+        "recovered_exit_baseline": baseline,
     }
-    conn.execute(
-        """
-        INSERT INTO venue_commands (
-            command_id, snapshot_id, envelope_id, position_id, decision_id,
-            idempotency_key, intent_kind, market_id, token_id, side, size, price,
-            venue_order_id, state, created_at, updated_at, review_required_reason
-        ) VALUES (?, ?, ?, ?, ?, ?, 'EXIT', ?, ?, 'SELL', ?, ?, ?, 'INTENT_CREATED', ?, ?, ?)
-        """,
-        (
-            command_id,
-            str(entry["snapshot_id"]),
-            str(entry["envelope_id"]),
-            str(position_map["position_id"]),
-            decision_id,
-            command_id,
-            str(entry["market_id"] or raw.get("market") or token_id),
-            token_id,
-            float(original_size),
-            float(price),
-            order_id,
-            observed_text,
-            observed_text,
-            "m5_live_ghost_sell_recovery",
-        ),
-    )
-    conn.execute(
-        """
-        INSERT INTO venue_command_events (
-            event_id, command_id, sequence_no, event_type, occurred_at, payload_json, state_after
-        ) VALUES (?, ?, 1, 'INTENT_CREATED', ?, ?, 'INTENT_CREATED')
-        """,
-        (
-            uuid.uuid4().hex[:16],
-            command_id,
-            observed_text,
-            json.dumps(recovery_payload, sort_keys=True),
-        ),
-    )
+    from src.execution.command_bus import RecoveredExitOrderAdoption
+    from src.state.venue_command_repo import adopt_recovered_exit_order
 
-    from src.state.venue_command_repo import append_event, append_order_fact
-
-    append_event(
+    adopt_recovered_exit_order(
         conn,
-        command_id=command_id,
-        event_type="SUBMIT_REQUESTED",
-        occurred_at=observed_text,
-        payload=recovery_payload,
-    )
-    append_event(
-        conn,
-        command_id=command_id,
-        event_type="SUBMIT_ACKED",
-        occurred_at=observed_text,
-        payload={"venue_order_id": order_id, **recovery_payload},
-    )
-    remaining_size = max(original_size - matched_size, Decimal("0"))
-    append_order_fact(
-        conn,
-        venue_order_id=order_id,
-        command_id=command_id,
-        state="PARTIALLY_MATCHED",
-        remaining_size=_decimal_text(remaining_size),
-        matched_size=_decimal_text(matched_size),
-        source="REST",
-        observed_at=observed_at,
-        venue_timestamp=observed_at,
-        raw_payload_hash=_hash_payload({"exchange_order": dict(raw), **recovery_payload}),
-        raw_payload_json={"exchange_order": dict(raw), **recovery_payload},
-    )
-    append_event(
-        conn,
-        command_id=command_id,
-        event_type="PARTIAL_FILL_OBSERVED",
-        occurred_at=observed_text,
-        payload={
-            "venue_order_id": order_id,
-            "matched_size": _decimal_text(matched_size),
-            "remaining_size": _decimal_text(remaining_size),
-            **recovery_payload,
-        },
+        RecoveredExitOrderAdoption(
+            command_id=command_id,
+            venue_order_id=order_id,
+            position_id=str(position_map["position_id"]),
+            decision_id=decision_id,
+            market_id=str(entry["market_id"] or raw.get("market") or token_id),
+            token_id=token_id,
+            size=str(original_size),
+            matched_size=str(matched_size),
+            remaining_size=str(remaining_size),
+            resting_order_price=str(price),
+            observed_at=observed_text,
+            source_entry_command_id=str(entry["command_id"]),
+            source_entry_snapshot_id=str(entry["snapshot_id"] or "") or None,
+            source_entry_envelope_id=str(entry["envelope_id"] or "") or None,
+            provenance=recovery_payload,
+        ),
     )
     _restore_position_to_pending_exit_for_recovered_sell(
         conn,
@@ -1399,6 +1425,16 @@ def _restore_position_to_pending_exit_for_recovered_sell(
     else:
         remaining_cost_basis = exchange_size * entry_price
     observed_text = observed_at.isoformat()
+    existing_recovery_event = conn.execute(
+        """
+        SELECT 1 FROM position_events
+         WHERE position_id = ? AND command_id = ?
+           AND event_type = 'EXIT_INTENT'
+           AND caused_by = 'm5_live_ghost_sell_recovery'
+         LIMIT 1
+        """,
+        (position_id, command_id),
+    ).fetchone()
     conn.execute(
         """
         UPDATE position_current
@@ -1406,6 +1442,7 @@ def _restore_position_to_pending_exit_for_recovered_sell(
                shares = ?,
                chain_shares = ?,
                cost_basis_usd = ?,
+               chain_cost_basis_usd = ?,
                exit_reason = ?,
                order_id = ?,
                order_status = 'sell_pending_confirmation',
@@ -1417,12 +1454,15 @@ def _restore_position_to_pending_exit_for_recovered_sell(
             float(exchange_size),
             float(exchange_size),
             float(remaining_cost_basis) if remaining_cost_basis is not None else None,
+            float(remaining_cost_basis) if remaining_cost_basis is not None else None,
             "M5_LIVE_GHOST_SELL_RECOVERY",
             venue_order_id,
             observed_text,
             position_id,
         ),
     )
+    if existing_recovery_event is not None:
+        return
     seq_row = conn.execute(
         "SELECT COALESCE(MAX(sequence_no), 0) + 1 FROM position_events WHERE position_id = ?",
         (position_id,),
@@ -1445,6 +1485,29 @@ def _restore_position_to_pending_exit_for_recovered_sell(
         "phase_before": phase_before,
         "phase_after": "pending_exit",
         "source_module": "src.execution.exchange_reconcile",
+        "recovered_exit_baseline": {
+            "position_id": position_id,
+            "command_id": command_id,
+            "venue_order_id": venue_order_id,
+            "baseline_shares": _decimal_text(_position_shares_for_recovery(position)),
+            "baseline_cost_basis_usd": (
+                _decimal_text(_positive_decimal_or_none(position.get("cost_basis_usd")))
+                if _positive_decimal_or_none(position.get("cost_basis_usd")) is not None
+                else None
+            ),
+            "baseline_entry_price": (
+                _decimal_text(_positive_decimal_or_none(position.get("entry_price")))
+                if _positive_decimal_or_none(position.get("entry_price")) is not None
+                else None
+            ),
+            "matched_sell_shares": _decimal_text(matched_size),
+            "first_conservation_proof": {
+                "baseline_shares": _decimal_text(_position_shares_for_recovery(position)),
+                "exchange_residual_shares": _decimal_text(exchange_size),
+                "matched_sell_shares": _decimal_text(matched_size),
+                "equation": "baseline_shares=exchange_residual_shares+matched_sell_shares",
+            },
+        },
     }
     conn.execute(
         """
@@ -1631,11 +1694,12 @@ def _absorb_operator_external_close(
 
 
 def _assert_no_live_reservation_for_carve_out(conn: sqlite3.Connection, command_id: str) -> None:
-    """Write-gate for the sole terminalization-centrality carve-out (SCH-W1.1-CAS-LEDGER).
+    """Caller-side incident guard for an operator absorption repair.
 
-    Raises if a live (unreleased, unconverted) collateral reservation exists for
-    a command_id about to be minted terminal by a direct write instead of
-    append_event.
+    The typed repository helper owns the command/trade journal write.  This
+    exchange-reconcile check remains outside the repo because it protects the
+    operator-specific carve-out from an unexpected reservation before that
+    helper is invoked; ordinary repo callers do not perform this assertion.
     """
     try:
         row = conn.execute(
@@ -1671,8 +1735,6 @@ def _book_external_operator_close_exit_fact(
     deterministic command_id / trade_id, so a re-sweep does not double-book.
     """
 
-    from src.state.venue_command_repo import append_trade_fact
-
     entry = conn.execute(
         """
         SELECT command_id, snapshot_id, envelope_id, position_id, decision_id,
@@ -1688,57 +1750,9 @@ def _book_external_operator_close_exit_fact(
     ).fetchone()
     if entry is None:
         return False
-    command_id = "external_operator_close:" + sha256(token_id.encode()).hexdigest()[:24]
-    trade_id = "external_operator_close_fact:" + sha256(token_id.encode()).hexdigest()[:24]
-    existing = conn.execute(
-        "SELECT 1 FROM venue_trade_facts WHERE trade_id = ? LIMIT 1",
-        (trade_id,),
-    ).fetchone()
-    if existing is not None:
-        return False
-    # Insert the synthetic EXIT/SELL command via a DIRECT write, NOT insert_command():
-    # insert_command is the U1 pre-side-effect SUBMISSION gate (snapshot freshness, tick
-    # alignment, price-in-(0,1)) — entirely inappropriate for a reconciliation correction
-    # and would CRASH the sweep on a long-stale snapshot. This row is journal-only truth
-    # (a SELL side for _journal_positions_by_token to net the buy claim), never submitted.
-    # It reuses the entry command's valid snapshot/envelope FKs.
-    if conn.execute(
-        "SELECT 1 FROM venue_commands WHERE command_id = ? LIMIT 1", (command_id,)
-    ).fetchone() is None:
-        # SCH-W1.1-CAS-LEDGER terminalization-centrality invariant: this synthetic
-        # command is born already-terminal via this DIRECT write, bypassing
-        # append_event (the sole seam that converts/releases collateral). It is
-        # the ONE sanctioned carve-out — an externally-closed foreign order was
-        # never reserve-backed by Zeus, so no live reservation can legitimately
-        # exist for this command_id. If one does, that is a real incident: fail
-        # loudly instead of silently minting a synthetic terminal command over a
-        # phantom hold.
-        _assert_no_live_reservation_for_carve_out(conn, command_id)
-        conn.execute(
-            """
-            INSERT INTO venue_commands (
-                command_id, snapshot_id, envelope_id, position_id, decision_id,
-                idempotency_key, intent_kind, market_id, token_id, side, size, price,
-                venue_order_id, state, created_at, updated_at, review_required_reason
-            ) VALUES (?, ?, ?, ?, ?, ?, 'EXIT', ?, ?, 'SELL', ?, ?, ?, 'FILLED', ?, ?, ?)
-            """,
-            (
-                command_id,
-                str(entry["snapshot_id"]),
-                str(entry["envelope_id"]),
-                str(entry["position_id"] or ""),
-                str(entry["decision_id"] or f"dec-{command_id}"),
-                command_id,
-                str(entry["market_id"] or token_id),
-                token_id,
-                float(close_size),
-                float(close_price),
-                str(entry["venue_order_id"] or "") or None,
-                observed_at.isoformat(),
-                observed_at.isoformat(),
-                "operator_external_close_absorption",
-            ),
-        )
+    from src.execution.command_bus import ExternalOperatorCloseAbsorption
+    from src.state.venue_command_repo import absorb_external_operator_close
+
     payload = {
         "schema_version": 1,
         "reason": "operator_external_close_absorption",
@@ -1749,20 +1763,37 @@ def _book_external_operator_close_exit_fact(
         "price_basis": _OPERATOR_EXTERNAL_CLOSE_PRICE_BASIS,
         "classification": "external_operator_close",
         "source_entry_command_id": entry["command_id"],
+        "source_entry_snapshot_id": entry["snapshot_id"],
+        "source_entry_envelope_id": entry["envelope_id"],
     }
-    append_trade_fact(
+    # The operator path retains its caller-side incident guard.  The typed repo
+    # helper itself remains free of reservation assertions so it is reusable by
+    # deterministic backfill/replay fixtures.
+    identity_material = "|".join(
+        (token_id, str(entry["position_id"] or ""), str(entry["command_id"] or ""))
+    )
+    synthetic_command_id = "external_operator_close:" + sha256(identity_material.encode()).hexdigest()[:24]
+    _assert_no_live_reservation_for_carve_out(conn, synthetic_command_id)
+    # Compatibility with the pre-typed carve-out guard: older reservations were
+    # keyed by token alone and must still fail closed rather than being bypassed.
+    _assert_no_live_reservation_for_carve_out(
+        conn, "external_operator_close:" + sha256(token_id.encode()).hexdigest()[:24]
+    )
+    absorb_external_operator_close(
         conn,
-        trade_id=trade_id,
-        venue_order_id=str(entry["venue_order_id"] or ""),
-        command_id=command_id,
-        state="CONFIRMED",
-        filled_size=str(close_size),
-        fill_price=str(close_price),
-        source="OPERATOR",
-        observed_at=observed_at,
-        venue_timestamp=observed_at,
-        raw_payload_hash=_hash_payload(payload),
-        raw_payload_json=payload,
+        ExternalOperatorCloseAbsorption(
+            token_id=token_id,
+            position_id=str(entry["position_id"] or ""),
+            market_id=str(entry["market_id"] or token_id),
+            close_size=str(close_size),
+            close_price=str(close_price),
+            observed_at=observed_at.isoformat(),
+            source_entry_command_id=str(entry["command_id"]),
+            source_entry_snapshot_id=str(entry["snapshot_id"] or "") or None,
+            source_entry_envelope_id=str(entry["envelope_id"] or "") or None,
+            venue_order_id=None,
+            provenance=payload,
+        ),
     )
     logger.warning(
         "operator_external_close: booked external close exit fact for token %s "
@@ -1833,13 +1864,15 @@ def reconcile_recorded_maker_fill_economics(
     observed_at: datetime | str | None = None,
     live_tick_scope: bool = False,
 ) -> dict[str, int]:
-    """Repair recorded trade facts whose raw maker leg contradicts top-level trade economics.
+    """Repair recorded trade facts whose raw legs contradict top-level trade economics.
 
-    The venue user stream emits a trade-level top-line from the taker side while
-    Zeus can be the maker.  The immutable raw payload already contains the
-    command-owned maker order.  This repair appends a corrected fact instead of
-    rewriting the old row, then replays the entry-fill projection from the
-    latest fact chain.
+    The venue user stream emits a rounded trade-level top-line.  When Zeus is
+    maker, its exact command leg is nested in ``maker_orders``.  When Zeus is a
+    taker, every nested maker leg supplies either the selected token or its
+    binary complement and therefore proves exact selected-token quote cost for
+    BUY or quote proceeds for SELL.  This repair appends a corrected fact
+    instead of rewriting the old row, then replays the canonical projection
+    from the latest fact chain.
 
     ``live_tick_scope`` keeps the high-cadence command-recovery tick on current
     money-path rows. Historical terminal entry positions are still repaired by
@@ -1899,10 +1932,44 @@ def reconcile_recorded_maker_fill_economics(
                     )
                     )
                )
+            UNION
+            SELECT DISTINCT cmd.command_id
+              FROM venue_commands cmd
+              JOIN venue_trade_facts fact
+                ON fact.command_id = cmd.command_id
+              JOIN position_current pc
+                ON pc.position_id = cmd.position_id
+             WHERE UPPER(COALESCE(cmd.intent_kind, '')) = 'ENTRY'
+               AND UPPER(COALESCE(cmd.side, '')) = 'BUY'
+               AND COALESCE(pc.phase, '') IN ({phase_placeholders})
+               AND fact.state IN ('MATCHED', 'MINED', 'CONFIRMED')
+               AND CAST(COALESCE(fact.filled_size, '0') AS REAL) > 0
+               AND json_valid(fact.raw_payload_json)
+               AND UPPER(COALESCE(
+                       json_extract(fact.raw_payload_json, '$.trader_side'),
+                       json_extract(
+                           fact.raw_payload_json,
+                           '$.trade_fact_proof.trade.trader_side'
+                       ),
+                       json_extract(fact.raw_payload_json, '$.trade.trader_side'),
+                       ''
+                   )) = 'TAKER'
+               AND NOT EXISTS (
+                       SELECT 1
+                         FROM venue_trade_facts repaired
+                        WHERE repaired.command_id = fact.command_id
+                          AND repaired.trade_id = fact.trade_id
+                          AND json_valid(repaired.raw_payload_json)
+                          AND json_extract(
+                                  repaired.raw_payload_json,
+                                  '$.zeus_repair.reason'
+                              ) = 'taker_maker_legs_selected_token_quote_cost'
+                   )
         ),
         """
         params.extend(sorted(_ENTRY_FILL_PROJECTION_PHASES))
         params.extend(sorted(_TERMINAL_ENTRY_COMMAND_STATES))
+        params.extend(sorted(_ENTRY_FILL_PROJECTION_PHASES))
         source_clause_sql = """
                               JOIN live_tick_entry_repair_commands live_cmd
                                 ON live_cmd.command_id = fact.command_id
@@ -1928,10 +1995,18 @@ def reconcile_recorded_maker_fill_economics(
             cmd.venue_order_id AS cmd_venue_order_id,
             cmd.state AS cmd_state,
             cmd.created_at AS cmd_created_at,
-            cmd.updated_at AS cmd_updated_at
+            cmd.updated_at AS cmd_updated_at,
+            pc.phase AS cmd_position_phase,
+            envelope.yes_token_id AS envelope_yes_token_id,
+            envelope.no_token_id AS envelope_no_token_id,
+            envelope.selected_outcome_token_id AS envelope_selected_token_id
           FROM canonical_trade_fact tf
           JOIN venue_commands cmd
             ON cmd.command_id = tf.command_id
+          JOIN venue_submission_envelopes envelope
+            ON envelope.envelope_id = cmd.envelope_id
+          LEFT JOIN position_current pc
+            ON pc.position_id = cmd.position_id
          WHERE tf.state IN ('MATCHED', 'MINED', 'CONFIRMED')
            AND COALESCE(tf.raw_payload_json, '') LIKE '%maker_orders%'
          ORDER BY tf.observed_at, tf.trade_fact_id
@@ -1946,11 +2021,47 @@ def reconcile_recorded_maker_fill_economics(
             raw_payload = _json_mapping(fact.get("raw_payload_json"))
             raw = _trade_payload_for_maker_economics(raw_payload)
             order_id = str(command.get("venue_order_id") or fact.get("venue_order_id") or "")
-            if _selected_maker_order(raw, order_id) is None:
+            selected_maker = _selected_maker_order(raw, order_id)
+            phase = str(fact.get("cmd_position_phase") or "").strip()
+            taker_buy_economics = (
+                _taker_buy_trade_economics(
+                    raw,
+                    venue_order_id=order_id,
+                    selected_token_id=str(
+                        fact.get("envelope_selected_token_id")
+                        or command.get("token_id")
+                        or ""
+                    ),
+                    yes_token_id=str(fact.get("envelope_yes_token_id") or ""),
+                    no_token_id=str(fact.get("envelope_no_token_id") or ""),
+                )
+                if not phase or phase in _ENTRY_FILL_PROJECTION_PHASES
+                else None
+            )
+            taker_sell_economics = _taker_sell_trade_economics(
+                raw,
+                venue_order_id=order_id,
+                selected_token_id=str(
+                    fact.get("envelope_selected_token_id")
+                    or command.get("token_id")
+                    or ""
+                ),
+                yes_token_id=str(fact.get("envelope_yes_token_id") or ""),
+                no_token_id=str(fact.get("envelope_no_token_id") or ""),
+            )
+            taker_economics = taker_buy_economics or taker_sell_economics
+            if selected_maker is None and taker_economics is None:
                 summary["stayed"] += 1
                 continue
-            corrected_size_raw = _trade_filled_size(raw, order_id)
-            corrected_price_raw = _trade_fill_price(raw, order_id)
+            if taker_economics is not None:
+                corrected_shares, corrected_cost = taker_economics
+                corrected_size_raw = _decimal_text(corrected_shares)
+                corrected_price_raw = _decimal_text(
+                    corrected_cost / corrected_shares
+                )
+            else:
+                corrected_size_raw = _trade_filled_size(raw, order_id)
+                corrected_price_raw = _trade_fill_price(raw, order_id)
             missing = _missing_trade_fill_economics(
                 state=str(fact.get("state") or ""),
                 filled_size=corrected_size_raw,
@@ -1966,7 +2077,7 @@ def reconcile_recorded_maker_fill_economics(
                 filled_size=corrected_size,
                 fill_price=corrected_price,
             ):
-                _append_maker_fill_economic_correction(
+                _append_fill_economic_correction(
                     conn,
                     fact=fact,
                     command=command,
@@ -1974,9 +2085,67 @@ def reconcile_recorded_maker_fill_economics(
                     venue_order_id=order_id,
                     filled_size=corrected_size,
                     fill_price=corrected_price,
+                    reason=(
+                        "taker_maker_legs_selected_token_quote_cost"
+                        if taker_buy_economics is not None
+                        else "taker_maker_legs_selected_token_quote_proceeds"
+                        if taker_sell_economics is not None
+                        else "maker_leg_economics_selected_for_command_order"
+                    ),
                     observed_at=observed,
                 )
                 summary["corrected"] += 1
+            if taker_sell_economics is not None:
+                from src.state.fill_dedup import recorded_partial_exit_fill_cursors
+
+                position_id = str(command.get("position_id") or "").strip()
+                economic_identity = (
+                    f"economic-fill:v2:{command.get('command_id')}:"
+                    f"{order_id.lower()}:{str(fact.get('trade_id') or '').lower()}"
+                )
+                current = conn.execute(
+                    "SELECT * FROM position_current WHERE position_id = ?",
+                    (position_id,),
+                ).fetchone()
+                cursors = recorded_partial_exit_fill_cursors(conn, position_id)
+                if current is not None and economic_identity in cursors:
+                    current_map = dict(current)
+                    residual = _positive_decimal_or_none(current_map.get("shares"))
+                    chain_residual = _positive_decimal_or_none(
+                        current_map.get("chain_shares")
+                    )
+                    residual_cost = _positive_decimal_or_none(
+                        current_map.get("cost_basis_usd")
+                    )
+                    chain_residual_cost = _positive_decimal_or_none(
+                        current_map.get("chain_cost_basis_usd")
+                    )
+                    if (
+                        residual is not None
+                        and chain_residual is not None
+                        and residual_cost is not None
+                        and chain_residual_cost is not None
+                        and abs(residual - chain_residual) <= Decimal("0.000001")
+                        and abs(residual_cost - chain_residual_cost)
+                        <= Decimal("0.000001")
+                    ):
+                        from src.execution.command_recovery import (
+                            _append_unrecorded_partial_exit_economics,
+                        )
+
+                        repaired = _append_unrecorded_partial_exit_economics(
+                            conn,
+                            current=current_map,
+                            command_id=str(command.get("command_id") or ""),
+                            venue_order_id=order_id,
+                            expected_filled_size=corrected_shares,
+                            observed_at=observed.isoformat(),
+                        )
+                        if repaired:
+                            summary["exit_partial_economics_corrected"] = (
+                                summary.get("exit_partial_economics_corrected", 0)
+                                + repaired
+                            )
             _ensure_entry_fill_position_event(
                 conn,
                 command=command,
@@ -1990,7 +2159,7 @@ def reconcile_recorded_maker_fill_economics(
         except Exception:
             summary["errors"] += 1
             logger.exception(
-                "exchange_reconcile: maker fill economics repair failed for trade_fact_id=%s",
+                "exchange_reconcile: fill economics repair failed for trade_fact_id=%s",
                 fact.get("trade_fact_id"),
             )
     if live_tick_scope:
@@ -2021,6 +2190,192 @@ def _trade_payload_for_maker_economics(raw: Mapping[str, Any]) -> Mapping[str, A
     if isinstance(trade, Mapping):
         return trade
     return raw
+
+
+def _taker_buy_trade_economics(
+    raw: Mapping[str, Any],
+    *,
+    venue_order_id: str,
+    selected_token_id: str,
+    yes_token_id: str,
+    no_token_id: str,
+) -> tuple[Decimal, Decimal] | None:
+    """Return exact selected-token shares and quote cost for a taker BUY.
+
+    A binary CLOB taker BUY can match two economically equivalent maker legs:
+    a SELL of the selected token at ``p`` or a BUY of the complementary token
+    at ``1-p``.  The REST/user-stream top-line price is tick-rounded, so it is
+    not cost-basis authority when these exact legs are present.
+    """
+
+    order_id = str(venue_order_id or "").strip()
+    selected = str(selected_token_id or "").strip()
+    yes_token = str(yes_token_id or "").strip()
+    no_token = str(no_token_id or "").strip()
+    token_pair = {yes_token, no_token}
+    if (
+        not order_id
+        or not selected
+        or len(token_pair) != 2
+        or "" in token_pair
+        or selected not in token_pair
+        or str(raw.get("trader_side") or "").upper() != "TAKER"
+        or str(raw.get("side") or "").upper() != "BUY"
+        or str(raw.get("taker_order_id") or "").strip() != order_id
+        or str(raw.get("asset_id") or "").strip() != selected
+    ):
+        return None
+    complement = next(token for token in token_pair if token != selected)
+    maker_orders = raw.get("maker_orders")
+    if not isinstance(maker_orders, list) or not maker_orders:
+        return None
+
+    shares = Decimal("0")
+    cost = Decimal("0")
+    for maker in maker_orders:
+        if not isinstance(maker, Mapping):
+            return None
+        amount = _positive_decimal_or_none(
+            _first_present(
+                maker,
+                "matched_amount",
+                "matchedAmount",
+                "filled_size",
+                "size",
+                "amount",
+                default=None,
+            )
+        )
+        price = _positive_decimal_or_none(
+            _first_present(
+                maker,
+                "avgPrice",
+                "avg_price",
+                "fillPrice",
+                "fill_price",
+                "price",
+                default=None,
+            )
+        )
+        asset = str(maker.get("asset_id") or "").strip()
+        side = str(maker.get("side") or "").upper()
+        if amount is None or price is None or price >= Decimal("1"):
+            return None
+        if asset == selected and side == "SELL":
+            selected_price = price
+        elif asset == complement and side == "BUY":
+            selected_price = Decimal("1") - price
+        else:
+            return None
+        if selected_price <= Decimal("0") or selected_price >= Decimal("1"):
+            return None
+        shares += amount
+        cost += amount * selected_price
+
+    root_size = _positive_decimal_or_none(
+        _first_present(raw, "filled_size", "size", "amount", default=None)
+    )
+    if (
+        shares <= Decimal("0")
+        or cost <= Decimal("0")
+        or root_size is None
+        or abs(root_size - shares) > Decimal("0.000001")
+    ):
+        return None
+    return shares, cost
+
+
+def _taker_sell_trade_economics(
+    raw: Mapping[str, Any],
+    *,
+    venue_order_id: str,
+    selected_token_id: str,
+    yes_token_id: str,
+    no_token_id: str,
+) -> tuple[Decimal, Decimal] | None:
+    """Return exact selected-token shares and quote proceeds for a taker SELL.
+
+    A binary CLOB taker SELL can match a BUY of the selected token at ``p`` or
+    a SELL of the complementary token at ``1-p``.  The confirmed REST trade's
+    top-line price is tick-rounded, so the complete maker legs are the exact
+    proceeds authority when they cover the taker order.
+    """
+
+    order_id = str(venue_order_id or "").strip()
+    selected = str(selected_token_id or "").strip()
+    yes_token = str(yes_token_id or "").strip()
+    no_token = str(no_token_id or "").strip()
+    token_pair = {yes_token, no_token}
+    if (
+        not order_id
+        or not selected
+        or len(token_pair) != 2
+        or "" in token_pair
+        or selected not in token_pair
+        or str(raw.get("trader_side") or "").upper() != "TAKER"
+        or str(raw.get("side") or "").upper() != "SELL"
+        or str(raw.get("taker_order_id") or "").strip() != order_id
+        or str(raw.get("asset_id") or "").strip() != selected
+    ):
+        return None
+    complement = next(token for token in token_pair if token != selected)
+    maker_orders = raw.get("maker_orders")
+    if not isinstance(maker_orders, list) or not maker_orders:
+        return None
+
+    shares = Decimal("0")
+    proceeds = Decimal("0")
+    for maker in maker_orders:
+        if not isinstance(maker, Mapping):
+            return None
+        amount = _positive_decimal_or_none(
+            _first_present(
+                maker,
+                "matched_amount",
+                "matchedAmount",
+                "filled_size",
+                "size",
+                "amount",
+                default=None,
+            )
+        )
+        price = _positive_decimal_or_none(
+            _first_present(
+                maker,
+                "avgPrice",
+                "avg_price",
+                "fillPrice",
+                "fill_price",
+                "price",
+                default=None,
+            )
+        )
+        asset = str(maker.get("asset_id") or "").strip()
+        side = str(maker.get("side") or "").upper()
+        if amount is None or price is None or price >= Decimal("1"):
+            return None
+        if asset == selected and side == "BUY":
+            selected_price = price
+        elif asset == complement and side == "SELL":
+            selected_price = Decimal("1") - price
+        else:
+            return None
+        if selected_price <= Decimal("0") or selected_price >= Decimal("1"):
+            return None
+        shares += amount
+        proceeds += amount * selected_price
+
+    root_size = _positive_decimal_or_none(
+        _first_present(raw, "filled_size", "size", "amount", default=None)
+    )
+    if (
+        shares <= Decimal("0")
+        or proceeds <= Decimal("0")
+        or root_size is None
+        or abs(root_size - shares) > Decimal("0.000001")
+    ):
+        return None
+    return shares, proceeds
 
 
 def _reconcile_recorded_nonfinal_exit_command_fill_state(
@@ -2301,7 +2656,7 @@ def _command_from_prefixed_trade_fact_row(row: Mapping[str, Any]) -> dict[str, A
     }
 
 
-def _append_maker_fill_economic_correction(
+def _append_fill_economic_correction(
     conn: sqlite3.Connection,
     *,
     fact: Mapping[str, Any],
@@ -2310,6 +2665,7 @@ def _append_maker_fill_economic_correction(
     venue_order_id: str,
     filled_size: str,
     fill_price: str,
+    reason: str,
     observed_at: datetime,
 ) -> int:
     from src.state.venue_command_repo import append_trade_fact
@@ -2317,7 +2673,7 @@ def _append_maker_fill_economic_correction(
     payload = dict(raw)
     payload["zeus_repair"] = {
         "schema_version": 1,
-        "reason": "maker_leg_economics_selected_for_command_order",
+        "reason": reason,
         "source_trade_fact_id": fact.get("trade_fact_id"),
         "source_filled_size": fact.get("filled_size"),
         "source_fill_price": fact.get("fill_price"),
@@ -2811,6 +3167,27 @@ def _record_position_drift_findings(
                 conn,
                 token,
                 resolution="position_drift_cleared",
+                resolved_at=observed_at,
+            )
+            continue
+        # SCOPE: only an exchange-absent token whose positive residual is
+        # reproduced by both the confirmed journal and chain, and is smaller
+        # than a fresh executable snapshot's minimum order. DRAIN: resolve the
+        # accounting finding while the real residual stays in position_current
+        # for monitoring/settlement. RESET: any missing/stale witness, size
+        # disagreement, or newly executable residual stops matching this branch.
+        if _chain_confirmed_non_executable_dust(
+            conn,
+            token_id=token,
+            exchange_size=exchange_size,
+            confirmed_wallet_size=confirmed_wallet_size,
+            chain_confirmed_size=_chain_confirmed_size,
+            observed_at=observed_at,
+        ):
+            _resolve_open_position_drift_findings(
+                conn,
+                token,
+                resolution="position_drift_chain_confirmed_non_executable_dust",
                 resolved_at=observed_at,
             )
             continue
@@ -3414,6 +3791,21 @@ def _resolve_position_drift_tokens_from_current_truth(
                 resolved_at=observed_at,
             )
             continue
+        if _chain_confirmed_non_executable_dust(
+            conn,
+            token_id=token,
+            exchange_size=exchange_size,
+            confirmed_wallet_size=confirmed_wallet_size,
+            chain_confirmed_size=_chain_confirmed_size,
+            observed_at=observed_at,
+        ):
+            _resolve_open_position_drift_findings(
+                conn,
+                token,
+                resolution="position_drift_chain_confirmed_non_executable_dust",
+                resolved_at=observed_at,
+            )
+            continue
         if closed_position_size > Decimal("0") and _position_size_matches(
             exchange_size,
             expected_wallet_size,
@@ -3552,6 +3944,67 @@ def _resolve_position_drift_tokens_from_current_truth(
 
 def _position_size_matches(left: Decimal, right: Decimal) -> bool:
     return abs(left - right) <= _POSITION_DRIFT_ABS_TOLERANCE
+
+
+def _chain_confirmed_non_executable_dust(
+    conn: sqlite3.Connection,
+    *,
+    token_id: str,
+    exchange_size: Decimal,
+    confirmed_wallet_size: Decimal,
+    chain_confirmed_size: Decimal,
+    observed_at: datetime,
+) -> bool:
+    """Recognize exact, real exposure that is too small for a venue order."""
+
+    if (
+        exchange_size > Decimal("0")
+        or confirmed_wallet_size <= Decimal("0")
+        or chain_confirmed_size <= Decimal("0")
+        or not _position_size_matches(
+            confirmed_wallet_size,
+            chain_confirmed_size,
+        )
+    ):
+        return False
+    try:
+        row = conn.execute(
+            """
+            SELECT pc.chain_shares, snapshot.min_order_size
+              FROM position_current pc
+              JOIN executable_market_snapshot_latest latest
+                ON latest.condition_id = pc.condition_id
+               AND latest.selected_outcome_token_id = ?
+              JOIN executable_market_snapshots snapshot
+                ON snapshot.snapshot_id = latest.snapshot_id
+             WHERE (pc.token_id = ? OR pc.no_token_id = ?)
+               AND pc.phase IN ('active', 'day0_window', 'pending_exit')
+               AND pc.chain_state = 'synced'
+               AND julianday(latest.freshness_deadline) >= julianday(?)
+             ORDER BY julianday(latest.captured_at) DESC
+             LIMIT 1
+            """,
+            (
+                token_id,
+                token_id,
+                token_id,
+                observed_at.isoformat(),
+            ),
+        ).fetchone()
+    except sqlite3.OperationalError:
+        return False
+    if row is None:
+        return False
+    try:
+        projected_chain_size = _decimal(row["chain_shares"])
+        min_order_size = _decimal(row["min_order_size"])
+    except (InvalidOperation, TypeError, ValueError):
+        return False
+    return (
+        min_order_size > Decimal("0")
+        and _position_size_matches(projected_chain_size, chain_confirmed_size)
+        and confirmed_wallet_size < min_order_size
+    )
 
 
 def _nonnegative_wallet_size(value: Decimal) -> Decimal:
@@ -3901,6 +4354,199 @@ def _pending_exit_optimistic_sell_offsets_confirmed_position(
     return row is not None
 
 
+def _canonical_event_filled_size(
+    conn: sqlite3.Connection,
+    *,
+    command_id: str,
+    fallback: str,
+) -> str:
+    """Use the command's deduplicated trade-leg aggregate for event grammar."""
+
+    aggregate = _canonical_filled_size_for_command(conn, command_id)
+    return _decimal_text(aggregate) if aggregate > Decimal("0") else fallback
+
+
+def persisted_terminal_late_entry_fill_command_ids(
+    conn: sqlite3.Connection,
+    *,
+    command_id: str | None = None,
+) -> list[str]:
+    """Return open exposure whose terminal no-fill command contradicts facts."""
+
+    required = {
+        "position_current",
+        "venue_commands",
+        "venue_command_events",
+        "venue_order_facts",
+        "venue_trade_facts",
+        "collateral_reservations",
+    }
+    if not all(_table_exists(conn, table) for table in required):
+        return []
+    scoped = str(command_id or "").strip()
+    scope_sql = " AND command.command_id = ?" if scoped else ""
+    params = (scoped,) if scoped else ()
+    rows = conn.execute(
+        f"""
+        SELECT command.command_id
+          FROM venue_commands command
+          JOIN position_current position
+            ON position.position_id = command.position_id
+         WHERE command.intent_kind = 'ENTRY'
+           AND command.side = 'BUY'
+           AND position.phase IN ('active', 'day0_window', 'pending_exit')
+           AND CAST(COALESCE(position.shares, '0') AS REAL) > 0
+           AND command.state IN (
+               'CANCELLED', 'EXPIRED', 'REJECTED', 'SUBMIT_REJECTED'
+           )
+           AND TRIM(COALESCE(command.venue_order_id, '')) <> ''
+           AND EXISTS (
+               SELECT 1
+                 FROM venue_command_events terminal
+                WHERE terminal.command_id = command.command_id
+                  AND terminal.state_after = command.state
+                  AND terminal.sequence_no = (
+                      SELECT MAX(candidate.sequence_no)
+                        FROM venue_command_events candidate
+                       WHERE candidate.command_id = command.command_id
+                         AND candidate.state_after = command.state
+                  )
+                  AND (
+                      terminal.event_type IN (
+                          'REVIEW_CLEARED_NO_VENUE_EXPOSURE',
+                          'REVIEW_CLEARED_NO_VENUE_SIDE_EFFECT'
+                      )
+                      OR (
+                          json_valid(terminal.payload_json)
+                          AND json_type(
+                              terminal.payload_json,
+                              '$.terminal_no_fill'
+                          ) = 'true'
+                      )
+                  )
+           )
+           AND EXISTS (
+               SELECT 1
+                 FROM venue_trade_facts trade
+                WHERE trade.command_id = command.command_id
+                  AND trade.venue_order_id = command.venue_order_id
+                  AND trade.state = 'CONFIRMED'
+                  AND trade.source IN ('REST', 'WS_USER')
+                  AND CAST(COALESCE(trade.filled_size, '0') AS REAL) > 0
+                  AND CAST(COALESCE(trade.fill_price, '0') AS REAL) > 0
+           )
+           {scope_sql}
+         ORDER BY command.updated_at, command.command_id
+        """,
+        params,
+    ).fetchall()
+    return [str(row["command_id"] if hasattr(row, "keys") else row[0]) for row in rows]
+
+
+def reconcile_persisted_terminal_late_entry_fills(
+    conn: sqlite3.Connection,
+    *,
+    command_id: str | None = None,
+    observed_at: datetime | str | None = None,
+) -> dict[str, Any]:
+    """Correct terminal ENTRY commands from already-persisted fill truth.
+
+    The account-wide M5 sweep is event-triggered, so a confirmed trade already
+    in the journal cannot rely on another WS gap to revisit its command. The
+    open position plus contradictory command/facts is itself durable scheduled
+    debt. The strict terminal-late-fill validator remains the only authority.
+    """
+
+    summary: dict[str, Any] = {
+        "scanned": 0,
+        "advanced": 0,
+        "stayed": 0,
+        "errors": 0,
+    }
+    candidate_ids = persisted_terminal_late_entry_fill_command_ids(
+        conn,
+        command_id=command_id,
+    )
+    if not candidate_ids:
+        return summary
+
+    from src.state.venue_command_repo import append_event, get_command
+
+    occurred_at = _coerce_dt(observed_at).isoformat()
+    for candidate_id in candidate_ids:
+        summary["scanned"] += 1
+        command = get_command(conn, candidate_id)
+        if command is None:
+            summary["errors"] += 1
+            continue
+        trade = conn.execute(
+            """
+            SELECT trade_id, venue_order_id, filled_size, fill_price
+              FROM venue_trade_facts
+             WHERE command_id = ?
+               AND venue_order_id = ?
+               AND state = 'CONFIRMED'
+               AND source IN ('REST', 'WS_USER')
+               AND CAST(COALESCE(filled_size, '0') AS REAL) > 0
+               AND CAST(COALESCE(fill_price, '0') AS REAL) > 0
+             ORDER BY julianday(observed_at) DESC, local_sequence DESC
+             LIMIT 1
+            """,
+            (candidate_id, str(command.get("venue_order_id") or "")),
+        ).fetchone()
+        if trade is None:
+            summary["stayed"] += 1
+            continue
+        trade_map = (
+            dict(trade)
+            if hasattr(trade, "keys")
+            else {
+                "trade_id": trade[0],
+                "venue_order_id": trade[1],
+                "filled_size": trade[2],
+                "fill_price": trade[3],
+            }
+        )
+        filled_size = str(trade_map.get("filled_size") or "0")
+        canonical_filled_size = _canonical_event_filled_size(
+            conn,
+            command_id=candidate_id,
+            fallback=filled_size,
+        )
+        event_type = _fill_event_for_command(
+            command,
+            canonical_filled_size,
+            trade_state="CONFIRMED",
+        )
+        if event_type is None:
+            summary["stayed"] += 1
+            continue
+        try:
+            append_event(
+                conn,
+                command_id=candidate_id,
+                event_type=event_type,
+                occurred_at=occurred_at,
+                payload=_fill_event_payload_for_command(
+                    command,
+                    event_type=event_type,
+                    venue_order_id=str(trade_map.get("venue_order_id") or ""),
+                    trade_id=str(trade_map.get("trade_id") or ""),
+                    filled_size=filled_size,
+                    canonical_filled_size=canonical_filled_size,
+                    fill_price=str(trade_map.get("fill_price") or "0"),
+                ),
+            )
+        except ValueError as exc:
+            summary["stayed"] += 1
+            summary.setdefault("rejection_reasons", []).append(
+                {"command_id": candidate_id, "reason": str(exc)}
+            )
+            continue
+        summary["advanced"] += 1
+    return summary
+
+
 def _append_linkable_trade_fact_if_missing(
     conn: sqlite3.Connection,
     command: Mapping[str, Any],
@@ -3984,7 +4630,16 @@ def _append_linkable_trade_fact_if_missing(
                     resolution="trade_finality_confirmed",
                     resolved_at=observed_at,
                 )
-            existing_event = _fill_event_for_command(command, filled_size, trade_state=state)
+            canonical_filled_size = _canonical_event_filled_size(
+                conn,
+                command_id=str(command["command_id"]),
+                fallback=filled_size,
+            )
+            existing_event = _fill_event_for_command(
+                command,
+                canonical_filled_size,
+                trade_state=state,
+            )
             if existing_event is not None:
                 try:
                     append_event(
@@ -3992,15 +4647,33 @@ def _append_linkable_trade_fact_if_missing(
                         command_id=str(command["command_id"]),
                         event_type=existing_event,
                         occurred_at=observed_at.isoformat(),
-                        payload={
-                            "venue_order_id": order_id,
-                            "trade_id": trade_id,
-                            "filled_size": filled_size,
-                            "fill_price": fill_price,
-                            "source": "M5_EXCHANGE_RECONCILE",
-                        },
+                        payload=_fill_event_payload_for_command(
+                            command,
+                            event_type=existing_event,
+                            venue_order_id=order_id,
+                            trade_id=trade_id,
+                            filled_size=filled_size,
+                            canonical_filled_size=canonical_filled_size,
+                            fill_price=fill_price,
+                        ),
                     )
                 except ValueError:
+                    if str(command.get("state") or "") in {
+                        "CANCELLED",
+                        "EXPIRED",
+                        "REJECTED",
+                        "SUBMIT_REJECTED",
+                    }:
+                        return _record_nonfinal_full_exit_fill_finality_finding(
+                            conn,
+                            trade_id=trade_id,
+                            command=command,
+                            raw=raw,
+                            state=state,
+                            filled_size=filled_size,
+                            observed_at=observed_at,
+                            context=context,
+                        )
                     existing_event = None
             elif str(command.get("state") or "") == "FILLED" and state == "CONFIRMED":
                 existing_event = "FILL_CONFIRMED"
@@ -4023,6 +4696,7 @@ def _append_linkable_trade_fact_if_missing(
                 fill_price=fill_price,
                 observed_at=observed_at,
                 command_event=existing_event if state == "CONFIRMED" else None,
+                venue_order_payload=raw,
             )
             return _record_nonfinal_full_exit_fill_finality_finding(
                 conn,
@@ -4136,7 +4810,16 @@ def _append_linkable_trade_fact_if_missing(
     latest = get_command(conn, str(command["command_id"]))
     if latest is None:
         return finality_finding
-    event = _fill_event_for_command(latest, filled_size, trade_state=state)
+    canonical_filled_size = _canonical_event_filled_size(
+        conn,
+        command_id=str(latest["command_id"]),
+        fallback=filled_size,
+    )
+    event = _fill_event_for_command(
+        latest,
+        canonical_filled_size,
+        trade_state=state,
+    )
     if event is None:
         _ensure_entry_fill_position_event(
             conn,
@@ -4149,6 +4832,16 @@ def _append_linkable_trade_fact_if_missing(
             order_fact_source="REST",
             context=context,
         )
+        _ensure_exit_fill_position_event(
+            conn,
+            command=latest,
+            venue_order_id=order_id,
+            filled_size=filled_size,
+            fill_price=fill_price,
+            observed_at=observed_at,
+            command_event=None,
+            venue_order_payload=raw,
+        )
         return finality_finding
     try:
         append_event(
@@ -4156,19 +4849,28 @@ def _append_linkable_trade_fact_if_missing(
             command_id=str(latest["command_id"]),
             event_type=event,
             occurred_at=observed_at.isoformat(),
-            payload={
-                "venue_order_id": order_id,
-                "trade_id": trade_id,
-                "filled_size": filled_size,
-                "fill_price": fill_price,
-                "source": "M5_EXCHANGE_RECONCILE",
-            },
+            payload=_fill_event_payload_for_command(
+                latest,
+                event_type=event,
+                venue_order_id=order_id,
+                trade_id=trade_id,
+                filled_size=filled_size,
+                canonical_filled_size=canonical_filled_size,
+                fill_price=fill_price,
+            ),
         )
     except ValueError:
         # The fact is still append-only venue truth.  Illegal command-state
         # transitions stay fail-closed by not inventing grammar or forcing a
         # local command mutation.
-        return finality_finding
+        if str(latest.get("state") or "") in {
+            "CANCELLED",
+            "EXPIRED",
+            "REJECTED",
+            "SUBMIT_REJECTED",
+        }:
+            return finality_finding
+        event = None
     _ensure_entry_fill_position_event(
         conn,
         command=latest,
@@ -4188,6 +4890,7 @@ def _append_linkable_trade_fact_if_missing(
         fill_price=fill_price,
         observed_at=observed_at,
         command_event=event if state == "CONFIRMED" else None,
+        venue_order_payload=raw,
     )
     return finality_finding
 
@@ -4690,7 +5393,7 @@ def _missing_entry_projection_from_linked_fill(
         "last_monitor_edge": None,
         "last_monitor_market_price": None,
         "decision_snapshot_id": str(command.get("snapshot_id") or snapshot.get("snapshot_id") or ""),
-        "entry_method": str(_meta("entry_method", "exchange_reconcile_fill_recovery") or ""),
+        "entry_method": str(_meta("entry_method", "qkernel_spine") or ""),
         "strategy_key": str(_meta("strategy_key", "opening_inertia") or "opening_inertia"),
         "edge_source": str(_meta("edge_source", "exchange_reconcile_linked_fill") or ""),
         "discovery_mode": str(_meta("discovery_mode", "exchange_reconcile") or ""),
@@ -4841,14 +5544,13 @@ def _ensure_entry_fill_position_event(
         return
     shares_dec, entry_price_dec, cost_basis_dec = fill_economics
     shares = _decimal_text(shares_dec)
-    entry_price = _decimal_text(entry_price_dec)
     cost_basis = _decimal_text(cost_basis_dec)
     order_status = "filled" if _entry_fill_covers_command(conn, command, shares_dec) else "partial"
     if command_event == "PARTIAL_FILL_OBSERVED":
         order_status = "partial"
     existing = conn.execute(
         """
-        SELECT 1
+        SELECT sequence_no
           FROM position_events
          WHERE position_id = ?
            AND event_type = 'ENTRY_ORDER_FILLED'
@@ -4857,14 +5559,54 @@ def _ensure_entry_fill_position_event(
         """,
         (position_id, venue_order_id),
     ).fetchone()
+    if existing is not None:
+        later_reduction = conn.execute(
+            """
+            SELECT 1
+              FROM position_events
+             WHERE position_id = ?
+               AND sequence_no > ?
+               AND (
+                    event_type = 'EXIT_ORDER_FILLED'
+                    OR (
+                        json_valid(payload_json)
+                        AND json_extract(payload_json, '$.semantic_event')
+                            = 'CAPITAL_REDUCTION_FILLED'
+                    )
+               )
+             LIMIT 1
+            """,
+            (position_id, int(existing["sequence_no"])),
+        ).fetchone()
+        if later_reduction is not None:
+            # An entry fact is immutable acquisition provenance, not current
+            # exposure authority after capital has been released.  Replaying
+            # its cumulative fill here would resurrect already-sold shares;
+            # any late economics revision needs a reduction-aware correction
+            # atom instead of an entry projection rewrite.
+            logger.info(
+                "exchange_reconcile: preserve post-reduction exposure on "
+                "entry reobservation position_id=%s order_id=%s",
+                position_id,
+                venue_order_id,
+            )
+            return
     current_shares = _positive_decimal_or_none(current.get("shares"))
     current_cost = _positive_decimal_or_none(current.get("cost_basis_usd"))
     incremental_fill = bool(
         not missing_projection
-        and phase in {"active", "day0_window"}
+        and phase in {"active", "day0_window", "pending_exit"}
         and current_shares is not None
         and current_cost is not None
         and str(current.get("order_id") or "").strip() != venue_order_id
+    )
+    cumulative_reobservation = bool(
+        existing is not None
+        and not missing_projection
+        and phase in {"active", "day0_window", "pending_exit"}
+        and current_shares is not None
+        and current_cost is not None
+        and str(current.get("order_id") or "").strip() == venue_order_id
     )
     chain_shares = _positive_decimal_or_none(current.get("chain_shares"))
     chain_cost = _positive_decimal_or_none(current.get("chain_cost_basis_usd"))
@@ -4889,9 +5631,114 @@ def _ensure_entry_fill_position_event(
     projection_order_id = venue_order_id
     projection_order_status = order_status
     projection_size_usd: object = current.get("size_usd") or cost_basis
-    if incremental_fill:
+    if cumulative_reobservation:
+        command_id = str(command.get("command_id") or "")
+        command_count = int(
+            conn.execute(
+                """
+                SELECT COUNT(*)
+                  FROM venue_commands
+                 WHERE position_id = ?
+                   AND intent_kind = 'ENTRY'
+                   AND side = 'BUY'
+                """,
+                (position_id,),
+            ).fetchone()[0]
+            or 0
+        )
+        prior = conn.execute(
+            """
+            SELECT shares, fill_price
+              FROM execution_fact
+             WHERE position_id = ?
+               AND command_id = ?
+               AND order_role = 'entry'
+               AND voided_at IS NULL
+             ORDER BY filled_at DESC, intent_id
+             LIMIT 1
+            """,
+            (position_id, command_id),
+        ).fetchone()
+        if command_count == 1:
+            projection_shares = shares_dec
+            projection_cost = cost_basis_dec
+        elif prior is None:
+            if command_count > 1:
+                logger.error(
+                    "exchange_reconcile: refuse cumulative reobservation without "
+                    "command provenance on a multi-command position "
+                    "position_id=%s command_id=%s",
+                    position_id,
+                    command_id,
+                )
+                return
+        else:
+            prior_shares = _positive_decimal_or_none(prior["shares"])
+            prior_price = _positive_decimal_or_none(prior["fill_price"])
+            if prior_shares is None or prior_price is None:
+                logger.error(
+                    "exchange_reconcile: refuse cumulative reobservation with "
+                    "invalid prior command provenance position_id=%s command_id=%s",
+                    position_id,
+                    command_id,
+                )
+                return
+            projection_shares = current_shares - prior_shares + shares_dec
+            projection_cost = current_cost - (prior_shares * prior_price) + cost_basis_dec
+            if projection_shares <= 0 or projection_cost <= 0:
+                logger.error(
+                    "exchange_reconcile: refuse non-positive cumulative reobservation "
+                    "position_id=%s command_id=%s shares=%s cost=%s",
+                    position_id,
+                    command_id,
+                    projection_shares,
+                    projection_cost,
+                )
+                return
+        projection_entry_price = projection_cost / projection_shares
+        projection_order_id = str(current.get("order_id") or venue_order_id)
+        projection_order_status = order_status
+        projection_size_usd = _decimal_text(projection_cost)
+    elif incremental_fill:
         from src.state.db import query_entry_execution_fill_aggregate
 
+        selected_token_id = str(command.get("token_id") or "").strip()
+        token_scope = conn.execute(
+            """
+            SELECT COUNT(*) AS fact_count,
+                   SUM(
+                       CASE
+                           WHEN fact.command_id IS NULL
+                             OR command.command_id IS NULL
+                             OR command.token_id != ?
+                           THEN 1 ELSE 0
+                       END
+                   ) AS invalid_count
+              FROM execution_fact fact
+              LEFT JOIN venue_commands command
+                ON command.command_id = fact.command_id
+             WHERE fact.position_id = ?
+               AND fact.order_role = 'entry'
+               AND fact.voided_at IS NULL
+               AND lower(COALESCE(fact.terminal_exec_status, ''))
+                   IN ('filled', 'partial')
+            """,
+            (selected_token_id, position_id),
+        ).fetchone()
+        if (
+            not selected_token_id
+            or token_scope is None
+            or int(token_scope["fact_count"] or 0) == 0
+            or int(token_scope["invalid_count"] or 0) != 0
+        ):
+            logger.error(
+                "exchange_reconcile: refuse entry increment without exact "
+                "execution token scope position_id=%s command_id=%s token_id=%s",
+                position_id,
+                command.get("command_id"),
+                selected_token_id,
+            )
+            return
         historical = query_entry_execution_fill_aggregate(
             conn,
             position_id,
@@ -4934,6 +5781,40 @@ def _ensure_entry_fill_position_event(
             # the same result until the command becomes terminal.
             projection_shares += shares_dec
             projection_cost += cost_basis_dec
+        else:
+            # The current command's execution_fact is the durable projection
+            # written by this helper. Reconcile can receive a newer
+            # append-only trade-leg aggregate before that row is refreshed;
+            # replace the command's prior execution economics rather than
+            # treating the stale row as already represented. Invalid prior
+            # economics fail closed at the exact command/token scope.
+            prior = conn.execute(
+                """
+                SELECT shares, fill_price
+                  FROM execution_fact
+                 WHERE position_id = ?
+                   AND command_id = ?
+                   AND order_role = 'entry'
+                   AND voided_at IS NULL
+                 ORDER BY filled_at DESC, intent_id
+                 LIMIT 1
+                """,
+                (position_id, current_command_id),
+            ).fetchone()
+            prior_shares = _positive_decimal_or_none(prior["shares"]) if prior else None
+            prior_price = _positive_decimal_or_none(prior["fill_price"]) if prior else None
+            if prior_shares is None or prior_price is None:
+                logger.error(
+                    "exchange_reconcile: refuse entry increment replacement "
+                    "without prior command economics position_id=%s command_id=%s",
+                    position_id,
+                    current_command_id,
+                )
+                return
+            projection_shares -= prior_shares
+            projection_cost -= prior_shares * prior_price
+            projection_shares += shares_dec
+            projection_cost += cost_basis_dec
 
         # Chain truth can land before the command/event fold.  Consume it
         # only when it covers the entire command-derived aggregate; never
@@ -4959,16 +5840,47 @@ def _ensure_entry_fill_position_event(
                     chain_shares,
                 )
                 return
+            else:
+                # A confirmed command fill is current exposure truth while the
+                # chain mirror can still show the pre-fill balance.  Preserve
+                # exact command-derived exposure, but never label the lagging
+                # chain quantity as synchronized.
+                chain_state_after = "unknown"
+        if projection_shares <= Decimal("0") or projection_cost <= Decimal("0"):
+            logger.error(
+                "exchange_reconcile: refuse non-positive entry increment "
+                "replacement position_id=%s command_id=%s shares=%s cost=%s",
+                position_id,
+                current_command_id,
+                projection_shares,
+                projection_cost,
+            )
+            return
         projection_entry_price = projection_cost / projection_shares
         projection_order_id = str(current.get("order_id") or venue_order_id)
         projection_order_status = str(current.get("order_status") or "filled")
         projection_size_usd = _decimal_text(projection_cost)
+    if phase == "pending_exit":
+        projection_order_status = str(
+            current.get("order_status") or projection_order_status
+        )
+    projection_exit_state = str(current.get("exit_state") or "")
+    if (
+        phase == "pending_exit"
+        and projection_order_status == "backoff_exhausted"
+        and not projection_exit_state
+    ):
+        # position_current persists terminal exit backoff through order_status;
+        # rehydrate that proxy before rebuilding a projection for a later
+        # entry-fill observation so the active SELL lifecycle is not erased.
+        projection_exit_state = projection_order_status
     position = SimpleNamespace(
         **{
             **current,
             "trade_id": position_id,
+            "command_id": str(command.get("command_id") or ""),
             "state": runtime_state,
-            "exit_state": current.get("exit_state") or "",
+            "exit_state": projection_exit_state,
             "chain_state": chain_state_after,
             "env": current.get("env") or "live",
             "order_id": projection_order_id,
@@ -5001,6 +5913,7 @@ def _ensure_entry_fill_position_event(
         from src.engine.lifecycle_events import build_position_current_projection
 
         projection = build_position_current_projection(position)
+        projection["phase"] = phase
         if incremental_fill:
             projection["updated_at"] = occurred_at
         _apply_entry_fill_projection_and_execution_fact(
@@ -5052,8 +5965,23 @@ def _ensure_entry_fill_position_event(
         events, projection = build_entry_fill_only_canonical_write(
             position,
             sequence_no=sequence_no,
+            phase_after=(
+                phase
+                if phase in {"active", "day0_window", "pending_exit"}
+                else "active"
+            ),
+            phase_before=(
+                phase
+                if phase in {"active", "day0_window", "pending_exit"}
+                else "pending_entry"
+            ),
             source_module="src.execution.exchange_reconcile",
         )
+        command_id = str(command.get("command_id") or "")
+        if command_id:
+            for event in events:
+                if event.get("event_type") == "ENTRY_ORDER_FILLED":
+                    event["command_id"] = command_id
     _apply_entry_fill_projection_and_execution_fact(
         conn,
         events=events,
@@ -5084,8 +6012,15 @@ def _entry_fill_economics_for_command(
         + ", "
         + _economic_trade_fact_cte()
         + """
-        SELECT tf.state, tf.filled_size, tf.fill_price
+        SELECT tf.state, tf.filled_size, tf.fill_price, tf.raw_payload_json,
+               cmd.venue_order_id, cmd.token_id,
+               envelope.yes_token_id, envelope.no_token_id,
+               envelope.selected_outcome_token_id
           FROM economic_trade_fact tf
+          JOIN venue_commands cmd
+            ON cmd.command_id = tf.command_id
+          JOIN venue_submission_envelopes envelope
+            ON envelope.envelope_id = cmd.envelope_id
          WHERE tf.state IN ('MATCHED', 'MINED', 'CONFIRMED')
         """,
         (command_id,),
@@ -5093,6 +6028,23 @@ def _entry_fill_economics_for_command(
     shares = Decimal("0")
     cost_basis = Decimal("0")
     for row in rows:
+        raw = _trade_payload_for_maker_economics(
+            _json_mapping(row["raw_payload_json"])
+        )
+        exact_taker = _taker_buy_trade_economics(
+            raw,
+            venue_order_id=str(row["venue_order_id"] or ""),
+            selected_token_id=str(
+                row["selected_outcome_token_id"] or row["token_id"] or ""
+            ),
+            yes_token_id=str(row["yes_token_id"] or ""),
+            no_token_id=str(row["no_token_id"] or ""),
+        )
+        if exact_taker is not None:
+            filled, exact_cost = exact_taker
+            shares += filled
+            cost_basis += exact_cost
+            continue
         filled = _positive_decimal_or_none(row["filled_size"])
         price = _positive_decimal_or_none(row["fill_price"])
         if filled is None or price is None:
@@ -5115,6 +6067,79 @@ def _entry_fill_economics_for_command(
     return fallback_shares, fallback_price, fallback_shares * fallback_price
 
 
+def _exit_fill_identity_matches_position(
+    conn: sqlite3.Connection,
+    *,
+    command: Mapping[str, Any],
+    position: Mapping[str, Any],
+    venue_order_payload: Mapping[str, Any] | None,
+) -> bool:
+    """Bind an EXIT fill to the position's exact held CTF asset."""
+
+    command_id = str(command.get("command_id") or "").strip()
+    direction = str(position.get("direction") or "").strip().lower()
+    held_token = str(
+        position.get("no_token_id" if direction == "buy_no" else "token_id") or ""
+    ).strip()
+    command_token = str(command.get("token_id") or "").strip()
+    position_condition = str(position.get("condition_id") or "").strip()
+    if (
+        not command_id
+        or direction not in {"buy_yes", "buy_no"}
+        or not held_token
+        or command_token != held_token
+        or not position_condition
+    ):
+        return False
+    if not all(
+        _table_exists(conn, table)
+        for table in (
+            "venue_commands",
+            "venue_submission_envelopes",
+            "executable_market_snapshots",
+        )
+    ):
+        return False
+    canonical = conn.execute(
+        """
+        SELECT cmd.position_id, cmd.token_id,
+               env.condition_id, env.selected_outcome_token_id,
+               snap.condition_id, snap.selected_outcome_token_id
+          FROM venue_commands cmd
+          JOIN venue_submission_envelopes env
+            ON env.envelope_id = cmd.envelope_id
+          JOIN executable_market_snapshots snap
+            ON snap.snapshot_id = cmd.snapshot_id
+         WHERE cmd.command_id = ?
+           AND cmd.intent_kind = 'EXIT'
+           AND cmd.side = 'SELL'
+         LIMIT 1
+        """,
+        (command_id,),
+    ).fetchone()
+    if canonical is None:
+        return False
+    if (
+        str(canonical[0] or "").strip() != str(position.get("position_id") or "").strip()
+        or str(canonical[1] or "").strip() != command_token
+        or {str(canonical[2] or "").strip(), str(canonical[4] or "").strip()}
+        != {position_condition}
+        or {str(canonical[3] or "").strip(), str(canonical[5] or "").strip()}
+        != {held_token}
+    ):
+        return False
+
+    if venue_order_payload is not None:
+        venue_assets = {
+            str(venue_order_payload.get(key) or "").strip()
+            for key in ("asset_id", "assetId", "asset", "token_id", "tokenId")
+            if str(venue_order_payload.get(key) or "").strip()
+        }
+        if venue_assets and venue_assets != {held_token}:
+            return False
+    return True
+
+
 def _ensure_exit_fill_position_event(
     conn: sqlite3.Connection,
     *,
@@ -5124,16 +6149,17 @@ def _ensure_exit_fill_position_event(
     fill_price: str,
     observed_at: datetime,
     command_event: str | None = None,
-) -> None:
+    venue_order_payload: Mapping[str, Any] | None = None,
+) -> bool:
     if command_event != "FILL_CONFIRMED":
-        return
+        return False
     if str(command.get("intent_kind") or "").upper() != "EXIT":
-        return
+        return False
     if str(command.get("side") or "").upper() != "SELL":
-        return
+        return False
     position_id = str(command.get("position_id") or "").strip()
     if not position_id:
-        return
+        return False
     row = conn.execute(
         """
         SELECT *
@@ -5145,9 +6171,23 @@ def _ensure_exit_fill_position_event(
         (position_id,),
     ).fetchone()
     if row is None:
-        return
+        return False
 
     current = dict(row)
+    if not _exit_fill_identity_matches_position(
+        conn,
+        command=command,
+        position=current,
+        venue_order_payload=venue_order_payload,
+    ):
+        logger.warning(
+            "exchange_reconcile: refuse exit fill projection with ambiguous or "
+            "mismatched asset identity command_id=%s position_id=%s order_id=%s",
+            command.get("command_id"),
+            position_id,
+            venue_order_id,
+        )
+        return False
     phase = str(current.get("phase") or "")
     if phase not in _EXIT_FILL_PROJECTION_PHASES:
         logger.info(
@@ -5156,7 +6196,7 @@ def _ensure_exit_fill_position_event(
             phase,
             venue_order_id,
         )
-        return
+        return False
     # A fully-filled SELL command is not necessarily a fully-closed position.
     # Capital reallocation may intentionally sell only part of the holding.  The
     # linked EXIT_INTENT is the position-finality authority; command size alone
@@ -5181,7 +6221,7 @@ def _ensure_exit_fill_position_event(
             venue_order_id,
             position_id,
         )
-        return
+        return False
     full_close_target = _canonical_full_exit_intent_shares(
         conn,
         SimpleNamespace(trade_id=position_id),
@@ -5199,7 +6239,7 @@ def _ensure_exit_fill_position_event(
             command_size,
             venue_order_id,
         )
-        return
+        return False
     fill_economics = _exit_fill_economics_for_command(
         conn,
         command_id=str(command.get("command_id") or ""),
@@ -5207,7 +6247,7 @@ def _ensure_exit_fill_position_event(
         fallback_fill_price=fill_price,
     )
     if fill_economics is None:
-        return
+        return False
     shares_dec, exit_price_dec = fill_economics
     holding_sizes = [
         _positive_decimal_or_none(current.get("shares")),
@@ -5218,26 +6258,54 @@ def _ensure_exit_fill_position_event(
     holding_disagrees = any(
         size != current_holding for size in holding_sizes[1:]
     )
-    if (
+    exact_current_holding_close = not (
         current_holding is None
         or holding_disagrees
         or full_close_target != current_holding
         or command_size != current_holding
         or shares_dec != current_holding
-    ):
+    )
+    # A chain-confirmed zero can arrive before position_current sheds its
+    # pre-close residual.  It is safe to accept that stale local residual only
+    # when the immutable full-close intent and the deduplicated canonical fill
+    # aggregate independently prove the entire command was sold.  Do not use
+    # chain cost basis here: it is chain truth for the now-zero holding, not
+    # authority for realized exit economics.
+    canonical_filled = _canonical_filled_size_for_command(
+        conn, str(command.get("command_id") or "")
+    )
+    canonical_fill_economics = _exit_fill_economics_for_command(
+        conn,
+        command_id=str(command.get("command_id") or ""),
+        fallback_filled_size="",
+        fallback_fill_price="",
+    )
+    chain_zero_authenticated_close = (
+        str(current.get("chain_state") or "").lower() == "chain_confirmed_zero"
+        and _same_decimal_value(current.get("chain_shares"), 0)
+        and canonical_fill_economics is not None
+        and canonical_fill_economics[0] == shares_dec
+        and canonical_fill_economics[1] == exit_price_dec
+        and canonical_filled == shares_dec
+        and canonical_filled == command_size
+        and canonical_filled == full_close_target
+    )
+    if not exact_current_holding_close and not chain_zero_authenticated_close:
         logger.warning(
             "exchange_reconcile: refuse non-exact exit economic close "
             "command_id=%s filled=%s command_size=%s intended=%s "
-            "current_holding=%s holding_disagrees=%s order_id=%s",
+            "current_holding=%s holding_disagrees=%s chain_zero_authenticated=%s "
+            "order_id=%s",
             command.get("command_id"),
             shares_dec,
             command.get("size"),
             full_close_target,
             current_holding,
             holding_disagrees,
+            chain_zero_authenticated_close,
             venue_order_id,
         )
-        return
+        return False
     occurred_at = observed_at.isoformat()
     exit_reason = _strategy_exit_reason_for_reconciled_fill(conn, position_id, current)
     # Bug A (truth-path PnL booking, 2026-07-07; structurally unified R0-a
@@ -5245,7 +6313,7 @@ def _ensure_exit_fill_position_event(
     # (src.state.close_economics) so this SimpleNamespace stand-in carries a
     # "pnl" attribute -- without it, _settled_economics_value(position, "pnl")
     # returns None and realized_pnl_usd is booked NULL forever.
-    from src.state.close_economics import compute_realized_pnl_usd
+    from src.execution.exit_lifecycle import _cumulative_close_realized_pnl
 
     current_shares = _positive_decimal_or_none(current.get("shares"))
     current_cost_basis = _positive_decimal_or_none(current.get("cost_basis_usd"))
@@ -5263,11 +6331,13 @@ def _ensure_exit_fill_position_event(
         filled_cost_basis = entry_price_guard * shares_dec
     else:
         filled_cost_basis = Decimal("0")
-    realized_pnl = compute_realized_pnl_usd(
-        shares=float(shares_dec),
-        exit_price=float(exit_price_dec),
-        cost_basis_usd=float(filled_cost_basis),
-        entry_price=float(entry_price_guard) if entry_price_guard is not None else 0.0,
+    realized_pnl = _cumulative_close_realized_pnl(
+        conn,
+        position_id=position_id,
+        shares=shares_dec,
+        exit_price=exit_price_dec,
+        cost_basis_usd=filled_cost_basis,
+        entry_price=entry_price_guard if entry_price_guard is not None else 0,
     )
     position = SimpleNamespace(
         **{
@@ -5315,7 +6385,7 @@ def _ensure_exit_fill_position_event(
             exit_price=exit_price_dec,
             realized_pnl=realized_pnl,
         ):
-            return
+            return True
         from src.engine.lifecycle_events import build_position_current_projection
 
         projection = build_position_current_projection(position)
@@ -5330,7 +6400,7 @@ def _ensure_exit_fill_position_event(
             exit_price=exit_price_dec,
             upsert_only=True,
         )
-        return
+        return True
     seq_row = conn.execute(
         "SELECT COALESCE(MAX(sequence_no), 0) FROM position_events WHERE position_id = ?",
         (position_id,),
@@ -5362,6 +6432,7 @@ def _ensure_exit_fill_position_event(
         exit_price=exit_price_dec,
         upsert_only=False,
     )
+    return True
 
 
 def _exit_fill_materialization_is_current(
@@ -5554,6 +6625,40 @@ def _apply_entry_fill_projection_and_execution_fact(
         conn.execute(f"ROLLBACK TO SAVEPOINT {sp_name}")
         conn.execute(f"RELEASE SAVEPOINT {sp_name}")
         raise
+
+    if command_id:
+        try:
+            from src.execution.command_recovery import (
+                reconcile_terminal_entry_exposure_obligations,
+            )
+
+            obligation = reconcile_terminal_entry_exposure_obligations(
+                conn,
+                command_id=command_id,
+            )
+            if obligation["advanced"]:
+                logger.info(
+                    "exchange_reconcile: released terminal entry obligation "
+                    "with the materialized fill command_id=%s",
+                    command_id,
+                )
+            elif obligation["errors"]:
+                logger.warning(
+                    "exchange_reconcile: terminal entry obligation release "
+                    "remained conservative command_id=%s errors=%d",
+                    command_id,
+                    obligation["errors"],
+                )
+        except sqlite3.Error:
+            # The fill projection is authoritative even when this conservative
+            # capital-release optimization cannot finish. The normal recovery
+            # sweep retains the obligation and retries it fail-closed.
+            logger.warning(
+                "exchange_reconcile: terminal entry obligation release deferred "
+                "command_id=%s",
+                command_id,
+                exc_info=True,
+            )
 
 
 def _apply_exit_fill_projection_and_execution_fact(
@@ -5775,7 +6880,7 @@ def _missing_trade_fill_economics(
     missing: list[str] = []
     if not _positive_decimal(filled_size):
         missing.append("filled_size")
-    if not _positive_decimal(fill_price):
+    if not _venue_fill_price(fill_price):
         missing.append("fill_price")
     return tuple(missing)
 
@@ -5788,6 +6893,12 @@ def _positive_decimal(value: Any) -> bool:
     except (InvalidOperation, ValueError):
         return False
     return decimal.is_finite() and decimal > Decimal("0")
+
+
+def _venue_fill_price(value: Any) -> bool:
+    if not _positive_decimal(value):
+        return False
+    return _decimal(value) <= Decimal("1")
 
 
 def _positive_decimal_or_none(value: Any) -> Decimal | None:
@@ -5849,13 +6960,29 @@ def _same_trade_fill_economics(
 ) -> bool:
     return (
         _same_decimal_value(fact.get("filled_size"), filled_size)
-        and _same_decimal_value(fact.get("fill_price"), fill_price)
+        and _same_decimal_value_with_abs_tolerance(
+            fact.get("fill_price"),
+            fill_price,
+            tolerance=_TRADE_PRICE_WIRE_ABS_TOLERANCE,
+        )
     )
 
 
 def _same_decimal_value(left: Any, right: Any) -> bool:
     try:
         return _decimal(left) == _decimal(right)
+    except (InvalidOperation, ValueError):
+        return False
+
+
+def _same_decimal_value_with_abs_tolerance(
+    left: Any,
+    right: Any,
+    *,
+    tolerance: Decimal,
+) -> bool:
+    try:
+        return abs(_decimal(left) - _decimal(right)) <= tolerance
     except (InvalidOperation, ValueError):
         return False
 
@@ -5931,6 +7058,52 @@ def _trade_lifecycle_transition_allowed(previous: str, current: str) -> bool:
     return current in allowed.get(previous, set())
 
 
+def _fill_event_payload_for_command(
+    command: Mapping[str, Any],
+    *,
+    event_type: str,
+    venue_order_id: str,
+    trade_id: str,
+    filled_size: str,
+    canonical_filled_size: str,
+    fill_price: str,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "venue_order_id": venue_order_id,
+        "trade_id": trade_id,
+        "filled_size": filled_size,
+        "canonical_filled_size": canonical_filled_size,
+        "fill_price": fill_price,
+        "source": "M5_EXCHANGE_RECONCILE",
+    }
+    terminal_state = str(command.get("state") or "")
+    if terminal_state in {
+        "CANCELLED",
+        "EXPIRED",
+        "REJECTED",
+        "SUBMIT_REJECTED",
+    }:
+        payload.update(
+            {
+                "schema_version": 1,
+                "reason": "authenticated_fill_after_terminal_no_fill",
+                "proof_class": "terminal_command_late_fill_correction",
+                "command_id": str(command.get("command_id") or ""),
+                "terminal_state_before": terminal_state,
+                "correction_event": event_type,
+                "required_predicates": {
+                    "terminal_event_was_no_fill": True,
+                    "terminal_event_precedes_trade_fact": True,
+                    "terminal_event_precedes_order_fact": True,
+                    "authenticated_confirmed_trade_fact": True,
+                    "bound_venue_order_identity": True,
+                    "order_matched_remainder_arithmetic": True,
+                },
+            }
+        )
+    return payload
+
+
 def _fill_event_for_command(
     command: Mapping[str, Any],
     filled_size: str,
@@ -5938,9 +7111,14 @@ def _fill_event_for_command(
     trade_state: str,
 ) -> str | None:
     state = str(command.get("state") or "")
-    if state in {"FILLED", "CANCELLED", "EXPIRED", "REJECTED", "SUBMIT_REJECTED"}:
+    if state == "FILLED":
         return None
     if trade_state in {"FAILED", "RETRYING"}:
+        return None
+    if (
+        state in {"CANCELLED", "EXPIRED", "REJECTED", "SUBMIT_REJECTED"}
+        and trade_state != "CONFIRMED"
+    ):
         return None
     size = _decimal(command.get("size", 0))
     filled = _decimal(filled_size)

@@ -2,8 +2,8 @@
 # Last reused or audited: 2026-05-16
 # Authority basis:
 #   maintenance_worker/core/forbidden_rules_loader.py
-#   bindings/universal/safety_defaults.yaml
-#   bindings/zeus/safety_overrides.yaml
+#   deploy/agent_safety/universal/safety_defaults.yaml
+#   deploy/agent_safety/zeus/safety_overrides.yaml
 """
 Tests for maintenance_worker.core.forbidden_rules_loader.
 
@@ -38,7 +38,7 @@ from maintenance_worker.core.forbidden_rules_loader import (
 # ---------------------------------------------------------------------------
 
 def _make_universal(tmp_path: Path, entries: list[dict] | None = None) -> Path:
-    """Create a minimal bindings/universal/safety_defaults.yaml."""
+    """Create a minimal deploy/agent_safety/universal/safety_defaults.yaml."""
     uni_dir = tmp_path / "universal"
     uni_dir.mkdir(parents=True, exist_ok=True)
     defaults_path = uni_dir / "safety_defaults.yaml"
@@ -57,7 +57,7 @@ def _make_universal(tmp_path: Path, entries: list[dict] | None = None) -> Path:
 
 
 def _make_project_overrides(bindings_root: Path, project: str, entries: list[dict]) -> Path:
-    """Create a project safety_overrides.yaml under bindings/<project>/."""
+    """Create a project safety_overrides.yaml under deploy/agent_safety/<project>/."""
     proj_dir = bindings_root / project
     proj_dir.mkdir(parents=True, exist_ok=True)
     overrides_path = proj_dir / "safety_overrides.yaml"

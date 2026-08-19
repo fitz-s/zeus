@@ -11,10 +11,10 @@ name: money-path-required
 
 on:
   pull_request:
-    branches: [main]
+    branches: [live]
     types: [opened, synchronize, reopened, ready_for_review]
   push:
-    branches: [main]
+    branches: [live]
   workflow_dispatch:
 
 permissions:

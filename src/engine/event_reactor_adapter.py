@@ -1,5 +1,6 @@
-# Last reused/audited: 2026-07-24
-#   Single-live readiness owner binding after retired hook-factory removal.
+# Last reused/audited: 2026-08-19
+#   Conditional Day0 remaining-path uncertainty no longer reuses the
+#   unconditional full-day source-clock predictive width as temperature noise.
 # Last reused/audited: 2026-06-12 (external deep-review fixes A-E: A taker depth
 #   twin-authority — fail closed LIVE_DEPTH_AUTHORITY_MISSING when the fresh-price
 #   witness does not match the swept snapshot depth; B free-cash bound under injected
@@ -153,6 +154,7 @@ import hashlib
 import json
 import logging
 import math
+import re
 import os
 import sqlite3
 import threading
@@ -163,9 +165,9 @@ from datetime import date, datetime, time, timedelta, timezone
 from enum import StrEnum
 from types import SimpleNamespace
 from zoneinfo import ZoneInfo
-from decimal import Decimal, ROUND_FLOOR
+from decimal import Decimal, InvalidOperation, ROUND_FLOOR
 from collections.abc import Iterable, Mapping
-from typing import TYPE_CHECKING, Any, Callable, TypeVar, get_args
+from typing import TYPE_CHECKING, Any, Callable, Protocol, TypeVar, get_args
 
 import numpy as np
 
@@ -182,8 +184,14 @@ from src.contracts.day0_payoff_truth import (
 )
 from src.contracts.execution_intent import ExecutableCostBasis
 from src.contracts.execution_price import ExecutionPrice, ExecutionPriceContractError
+from src.contracts.global_auction_receipt import (
+    GlobalAuctionReceiptRef,
+    GlobalSellReceiptClosure,
+)
+from src.contracts.strategy_capital_allocation import STRATEGY_LOG_UTILITY_BASIS
 from src.contracts.venue_submission_envelope import assert_live_order_unit_price
 from src.contracts.executable_cost_curve import (
+    BidBookLevel,
     BookLevel,
     ExecutableCostCurve,
     FeeModel,
@@ -204,7 +212,7 @@ from src.decision_kernel import claims
 from src.decision_kernel.canonicalization import (
     qkernel_declares_current_state,
     qkernel_current_state_identity_hash,
-    qkernel_global_buy_fak_prefix_rejection_reason,
+    qkernel_current_state_rejection_reason,
     qkernel_global_current_state_rejection_reason,
     stable_hash,
 )
@@ -243,6 +251,8 @@ from src.engine.event_bound_final_intent import (
 from src.data import replacement_input_hwm as _replacement_input_hwm
 from src.data.replacement_forecast_cycle_policy import (
     CURRENT_EVIDENCE_SEMANTICS_REVISION,
+    STALE_ENSEMBLE_ABSOLUTE_DISAGREEMENT_SEMANTICS_REVISION,
+    _current_evidence_shape,
     current_evidence_shape_semantics_mismatch,
 )
 from src.strategy.live_inference.source_clock_city_weights import (
@@ -258,7 +268,7 @@ from src.state.snapshot_repo import (
 from src.events.candidate_binding import MarketTopologyCandidate, weather_family_id
 from src.events.candidate_evaluation import CandidateEvaluation
 from src.events.decision_engine import EventBoundDecisionEngine, EventBoundDecisionRequest
-from src.events.event_store import EventStore
+from src.events.event_store import EventStore, GLOBAL_WINNER_SUBMIT_FENCED
 from src.events.family_book_telemetry_writer import enqueue_family_book_observation
 from src.events.forecast_completeness import ForecastCompletenessStatus
 from src.events.live_order_aggregate import LiveOrderAggregateError, LiveOrderAggregateLedger
@@ -288,6 +298,8 @@ from src.strategy.market_fusion import MODEL_ONLY_POSTERIOR_MODE
 
 if TYPE_CHECKING:
     from src.risk_allocator import AuctionCapitalAuthority
+    from src.contracts.executable_market_snapshot import ExecutableMarketSnapshot
+    from src.engine.global_auction_universe import WorkContext
 from src.strategy.market_phase import (
     MarketPhase,
     FORECAST_ONLY_ADMIT_PHASES as _FORECAST_ONLY_ADMIT_PHASES,
@@ -334,6 +346,8 @@ from src.calibration.emos import (
     bin_probability_settlement as _bin_probability_settlement,
 )
 
+_GLOBAL_AUCTION_WORK_CUT_SECONDS = 45.0
+
 
 UTC = timezone.utc
 
@@ -360,7 +374,9 @@ _GLOBAL_BOOK_METADATA_REFRESHED_AT_BY_FAMILY: dict[str, datetime] = {}
 
 _GLOBAL_PROBABILITY_FAMILY_CACHE_LOCK = threading.Lock()
 _GLOBAL_PROBABILITY_FAMILY_CACHE_NAMESPACE: str | None = None
-_GLOBAL_PROBABILITY_FAMILY_CACHE: dict[str, tuple[str, str, object]] = {}
+_GLOBAL_PROBABILITY_FAMILY_CACHE: dict[
+    tuple[str, str], tuple[str, str, object]
+] = {}
 _GLOBAL_PROBABILITY_FAMILY_INELIGIBLE_CACHE: dict[
     str,
     tuple[str, str, tuple[int, ...], EventSubmissionReceipt],
@@ -374,6 +390,7 @@ _GLOBAL_PROBABILITY_CACHEABLE_INELIGIBLE_REASONS = frozenset(
         "GLOBAL_DAY0_CURRENT_OBSERVATION_MISSING",
         "GLOBAL_DAY0_FAST_RESIDUAL_CURRENT_OBSERVATION_MISMATCH",
         "GLOBAL_DAY0_FAST_RESIDUAL_POSTERIOR_IDENTITY_INVALID",
+        "GLOBAL_DAY0_FAST_OBSERVATION_ENTRY_STALE",
         "GLOBAL_DAY0_PHYSICAL_FRONTIER_NOT_SETTLEMENT_CONFIRMED",
         "GLOBAL_DAY0_PROVISIONAL_OBSERVATION_NOT_ENTRY_AUTHORITY",
         "GLOBAL_DAY0_PROVISIONAL_POSTERIOR_IDENTITY_MISMATCH",
@@ -381,6 +398,7 @@ _GLOBAL_PROBABILITY_CACHEABLE_INELIGIBLE_REASONS = frozenset(
         "GLOBAL_DAY0_PROVISIONAL_ROLLOVER_UNCONFIRMED",
         "GLOBAL_DAY0_PROVISIONAL_REVISION_LIKELIHOOD_UNAVAILABLE",
         "GLOBAL_DAY0_PROVISIONAL_REPLACEMENT_BUNDLE_MISSING",
+        "GLOBAL_DAY0_REPLACEMENT_CONDITIONING_MISSING",
         "GLOBAL_CURRENT_POSTERIOR_IDENTITY_INCOMPLETE",
         "GLOBAL_CURRENT_POSTERIOR_SIMPLEX_INVALID",
         "GLOBAL_DAY0_SOURCE_AVAILABLE_AT_INVALID",
@@ -394,10 +412,12 @@ _GLOBAL_PROBABILITY_FAMILY_UNAVAILABLE_REASONS = frozenset(
         "EVENT_BOUND_MARKET_TOPOLOGY_MISSING",
         "GLOBAL_CURRENT_REPLACEMENT_READINESS_MISSING",
         "GLOBAL_DAY0_BASE_FORECAST_SNAPSHOT_MISSING",
+        "GLOBAL_DAY0_CONDITIONING_OBSERVATION_MISMATCH",
         "GLOBAL_DAY0_CONDITIONING_OBSERVATION_TIME_MISMATCH",
         "GLOBAL_DAY0_CURRENT_OBSERVATION_MISSING",
         "GLOBAL_DAY0_FAST_RESIDUAL_CURRENT_OBSERVATION_MISMATCH",
         "GLOBAL_DAY0_FAST_RESIDUAL_POSTERIOR_IDENTITY_INVALID",
+        "GLOBAL_DAY0_FAST_OBSERVATION_ENTRY_STALE",
         "GLOBAL_DAY0_PHYSICAL_FRONTIER_NOT_SETTLEMENT_CONFIRMED",
         "GLOBAL_DAY0_PROVISIONAL_OBSERVATION_NOT_ENTRY_AUTHORITY",
         "GLOBAL_DAY0_PROVISIONAL_POSTERIOR_IDENTITY_MISMATCH",
@@ -405,6 +425,8 @@ _GLOBAL_PROBABILITY_FAMILY_UNAVAILABLE_REASONS = frozenset(
         "GLOBAL_DAY0_PROVISIONAL_ROLLOVER_UNCONFIRMED",
         "GLOBAL_DAY0_PROVISIONAL_REVISION_LIKELIHOOD_UNAVAILABLE",
         "GLOBAL_DAY0_PROVISIONAL_REPLACEMENT_BUNDLE_MISSING",
+        "GLOBAL_DAY0_RAW_PROVENANCE_MISSING",
+        "GLOBAL_DAY0_REPLACEMENT_CONDITIONING_MISSING",
         "GLOBAL_CURRENT_POSTERIOR_IDENTITY_INCOMPLETE",
         "GLOBAL_CURRENT_POSTERIOR_SIMPLEX_INVALID",
         "GLOBAL_DAY0_SOURCE_AVAILABLE_AT_INVALID",
@@ -472,29 +494,192 @@ def _governed_global_gamma_get(
     )
 
 
-def _current_global_sell_fee_fraction(
+@dataclass(frozen=True)
+class _CurrentGlobalMarketAuthority:
+    """One full current Gamma+CLOB+book submit authority cut."""
+
+    snapshot: "ExecutableMarketSnapshot"
+    fee_rate: Decimal
+
+    @property
+    def fee_details(self) -> Mapping[str, object]:
+        return self.snapshot.fee_details
+
+    @property
+    def min_tick(self) -> Decimal:
+        return self.snapshot.min_tick_size
+
+    @property
+    def min_order_size(self) -> Decimal:
+        return self.snapshot.min_order_size
+
+    @property
+    def neg_risk(self) -> bool:
+        return self.snapshot.neg_risk
+
+
+@dataclass(frozen=True)
+class _GlobalJitHandoff:
+    """Typed preflight->actuation carrier for one exact JIT venue cut."""
+
+    candidate: object
+    authority: _CurrentGlobalMarketAuthority
+    raw_book_json: str
+
+    def __post_init__(self) -> None:
+        snapshot_id = str(self.authority.snapshot.snapshot_id or "")
+        candidate_snapshot_id = str(
+            getattr(self.candidate, "book_snapshot_id", "") or ""
+        )
+        curve = getattr(self.candidate, "executable_cost_curve", None)
+        if curve is None:
+            curve = getattr(self.candidate, "executable_sell_curve", None)
+        curve_snapshot_id = str(getattr(curve, "snapshot_id", "") or "")
+        if not snapshot_id or candidate_snapshot_id != snapshot_id or curve_snapshot_id != snapshot_id:
+            raise ValueError("GLOBAL_JIT_CANDIDATE_SNAPSHOT_BINDING_MISMATCH")
+        try:
+            book = json.loads(self.raw_book_json)
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise ValueError("GLOBAL_JIT_RAW_BOOK_CANONICAL_INVALID") from exc
+        if not isinstance(book, Mapping) or _hash_jsonish(book) != self.authority.snapshot.raw_orderbook_hash:
+            raise ValueError("GLOBAL_JIT_RAW_BOOK_HASH_MISMATCH")
+
+    @property
+    def raw_book(self) -> Mapping[str, object]:
+        """Return a fresh view of the sealed canonical book bytes."""
+
+        try:
+            book = json.loads(self.raw_book_json)
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise ValueError("GLOBAL_JIT_RAW_BOOK_CANONICAL_INVALID") from exc
+        if not isinstance(book, Mapping):
+            raise ValueError("GLOBAL_JIT_RAW_BOOK_MAPPING_REQUIRED")
+        if _hash_jsonish(book) != self.authority.snapshot.raw_orderbook_hash:
+            raise ValueError("GLOBAL_JIT_RAW_BOOK_HASH_MISMATCH")
+        return book
+
+def _persist_global_jit_authority_snapshot(
+    trade_conn: sqlite3.Connection,
+    authority: _CurrentGlobalMarketAuthority,
+) -> object:
+    """Append the exact Gamma+CLOB+raw-book snapshot before submit."""
+
+    from src.state.snapshot_repo import get_snapshot, insert_snapshot
+
+    snapshot = authority.snapshot
+    existing = get_snapshot(trade_conn, snapshot.snapshot_id)
+    if existing is None:
+        insert_snapshot(trade_conn, snapshot, capture_trigger="JIT_SUBMIT")
+    elif (
+        existing.raw_gamma_payload_hash != snapshot.raw_gamma_payload_hash
+        or existing.raw_clob_market_info_hash != snapshot.raw_clob_market_info_hash
+        or existing.raw_orderbook_hash != snapshot.raw_orderbook_hash
+        or existing.condition_id != snapshot.condition_id
+        or existing.selected_outcome_token_id != snapshot.selected_outcome_token_id
+        or existing.outcome_label != snapshot.outcome_label
+        or existing.captured_at != snapshot.captured_at
+    ):
+        raise ValueError("GLOBAL_JIT_SNAPSHOT_ID_COLLISION")
+    trade_conn.commit()
+    return snapshot
+
+
+def _canonical_global_jit_raw_book(raw_book: Mapping[str, object]) -> str:
+    """Freeze one raw venue book as canonical JSON for the typed handoff."""
+
+    return json.dumps(
+        raw_book,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        default=str,
+    )
+
+
+def _is_global_jit_authority_failure(reason: object) -> bool:
+    text = str(reason or "")
+    markers = (
+        "GLOBAL_JIT_RAW_BOOK_UNAVAILABLE",
+        "GLOBAL_JIT_GAMMA_MARKET_UNAVAILABLE",
+        "GLOBAL_JIT_CLOB_MARKET_UNAVAILABLE",
+        "GLOBAL_JIT_MARKET_",
+        "GLOBAL_JIT_CLOB_MARKET_",
+        "GLOBAL_BUY_JIT_CLOCK_INVALID",
+        "GLOBAL_BUY_JIT_NEG_RISK_AUTHORITY_MISSING",
+        "GLOBAL_BUY_JIT_TOKEN_MISMATCH",
+        "GLOBAL_BUY_JIT_ASKS_MISSING",
+        "GLOBAL_BUY_JIT_BID_LEVEL_INVALID",
+        "GLOBAL_BUY_JIT_ASK_LEVEL_INVALID",
+        "GLOBAL_BUY_JIT_MARKET_METADATA_CONFLICT",
+        "GLOBAL_BUY_JIT_PRECLIFF_LIQUIDATION_CAPACITY_INFEASIBLE",
+        "GLOBAL_SELL_JIT_CLOCK_INVALID",
+        "GLOBAL_SELL_JIT_NEG_RISK_AUTHORITY_MISSING",
+        "GLOBAL_SELL_JIT_TOKEN_MISMATCH",
+        "GLOBAL_SELL_JIT_BIDS_MISSING",
+        "GLOBAL_SELL_JIT_BID_LEVEL_INVALID",
+        "GLOBAL_SELL_JIT_ASK_LEVEL_INVALID",
+        "GLOBAL_SELL_JIT_MARKET_METADATA_CONFLICT",
+        "GLOBAL_SELL_JIT_MAKER_WITNESS_SUPERSEDED",
+        "GLOBAL_SELL_JIT_SELECTED_MODE_UNAVAILABLE",
+        "GLOBAL_SELL_EXECUTION_MAKER_WITNESS_INVALID",
+        "GLOBAL_SELL_EXECUTION_MAKER_WITNESS_SUPERSEDED",
+        "GLOBAL_SELL_JIT_FEE_FULL_MARKET_AUTHORITY_REQUIRED",
+        "PRE_SUBMIT_BOOK_AUTHORITY_JIT_REQUIRED",
+    )
+    return any(text.startswith(marker) or f":{marker}" in text for marker in markers)
+
+
+def _current_global_market_authority(
     *,
     condition_id: str,
     token_id: str,
+    side: str,
     gamma_get: Callable[..., object],
+    clob_market_get: Callable[..., object],
+    raw_book: Mapping[str, object] | None,
+    captured_at_utc: datetime | None,
     timeout: float,
-) -> Decimal:
-    """Read the selected market's current V2 fee schedule or fail closed."""
+    raw_book_provider: (
+        Callable[[], tuple[Mapping[str, object], datetime]] | None
+    ) = None,
+) -> _CurrentGlobalMarketAuthority:
+    """Capture exact current Gamma/CLOB/book submit authority.
+
+    SCOPE: one ``(condition_id, token_id)`` global candidate.  DRAIN: the next
+    auction cut refetches Gamma+CLOB+raw book after the venue changes.  RESET: only one
+    current, tradeable market owning this token rebuilds the candidate.
+    """
 
     from src.contracts.executable_market_snapshot import (
+        ExecutableMarketSnapshot,
+        FRESHNESS_WINDOW_DEFAULT,
         fee_details_from_gamma_fee_schedule,
         fee_rate_fraction_from_details,
     )
     from src.contracts.fee_authority import resolve_taker_fee_fraction
+    from src.data.market_scanner import (
+        _build_executable_tradeability_status,
+        _boolish_market_field,
+        _canonical_json,
+        _market_token_strings_from_payload,
+        _optional_top_book_level_decimal,
+        _required_bool_fact,
+        _required_decimal_fact,
+        _sha256_json,
+        ExecutableSnapshotCaptureError,
+    )
     from src.engine.global_auction_universe import fetch_current_gamma_markets
 
-    markets, _request_count = fetch_current_gamma_markets(
-        [condition_id],
-        gamma_get=gamma_get,
-        timeout=float(timeout),
-        chunk_size=1,
-        max_workers=1,
-    )
+    try:
+        markets, _request_count = fetch_current_gamma_markets(
+            [condition_id],
+            gamma_get=gamma_get,
+            timeout=float(timeout),
+            chunk_size=1,
+            max_workers=1,
+        )
+    except Exception as exc:  # noqa: BLE001 - authority transport is fail closed
+        raise ValueError("GLOBAL_JIT_GAMMA_MARKET_UNAVAILABLE") from exc
     matching = tuple(
         market
         for market in markets
@@ -506,19 +691,266 @@ def _current_global_sell_fee_fraction(
         == condition_id
     )
     if len(matching) != 1:
-        raise ValueError("GLOBAL_SELL_JIT_FEE_MARKET_IDENTITY_INVALID")
+        raise ValueError("GLOBAL_JIT_MARKET_IDENTITY_INVALID")
     market = matching[0]
-    schedule = market.get("feeSchedule") or market.get("fee_schedule")
-    details = fee_details_from_gamma_fee_schedule(
-        schedule,
-        source="global_sell_jit_gamma_fee_schedule",
-        token_id=token_id,
-        fee_type=str(market.get("feeType") or market.get("fee_type") or "")
-        or None,
-    )
-    schedule_fee = fee_rate_fraction_from_details(details)
-    fee_rate, _fee_source = resolve_taker_fee_fraction(schedule_fee)
-    return Decimal(str(fee_rate))
+    gamma_tokens = _market_token_strings_from_payload(dict(market))
+    if token_id not in gamma_tokens or len(gamma_tokens) != 2:
+        raise ValueError("GLOBAL_JIT_MARKET_TOKEN_OWNERSHIP_INVALID")
+    selected_side = str(side or "").strip().upper()
+    if selected_side not in {"YES", "NO"}:
+        raise ValueError("GLOBAL_JIT_MARKET_SIDE_INVALID")
+    try:
+        raw_clob_market = clob_market_get(condition_id, timeout=float(timeout))
+    except Exception as exc:  # noqa: BLE001 - authority transport is fail closed
+        raise ValueError("GLOBAL_JIT_CLOB_MARKET_UNAVAILABLE") from exc
+    raw_clob_market = getattr(raw_clob_market, "raw", raw_clob_market)
+    if not isinstance(raw_clob_market, Mapping):
+        raise ValueError("GLOBAL_JIT_CLOB_MARKET_INVALID")
+    raw_clob_market = dict(raw_clob_market)
+    clob_condition = str(
+        raw_clob_market.get("condition_id")
+        or raw_clob_market.get("conditionId")
+        or raw_clob_market.get("conditionID")
+        or raw_clob_market.get("market")
+        or ""
+    ).strip()
+    if clob_condition != condition_id:
+        raise ValueError("GLOBAL_JIT_CLOB_MARKET_IDENTITY_INVALID")
+    clob_tokens = _market_token_strings_from_payload(raw_clob_market)
+    if clob_tokens != gamma_tokens:
+        raise ValueError("GLOBAL_JIT_CLOB_MARKET_TOKEN_OWNERSHIP_INVALID")
+    market_active = _boolish_market_field(dict(market), "active", "isActive")
+    market_closed = _boolish_market_field(dict(market), "closed", "isClosed")
+    if market_active is None or market_closed is None:
+        raise ValueError("GLOBAL_JIT_MARKET_LIFECYCLE_INVALID")
+    if raw_book_provider is not None:
+        if raw_book is not None or captured_at_utc is not None:
+            raise ValueError("GLOBAL_JIT_MARKET_BOOK_AUTHORITY_AMBIGUOUS")
+        try:
+            provided = raw_book_provider()
+        except Exception as exc:  # noqa: BLE001 - authority transport
+            raise ValueError("GLOBAL_JIT_RAW_BOOK_UNAVAILABLE") from exc
+        if not isinstance(provided, tuple) or len(provided) != 2:
+            raise ValueError("GLOBAL_JIT_RAW_BOOK_UNAVAILABLE")
+        raw_book, captured_at_utc = provided
+    if not isinstance(raw_book, Mapping):
+        raise ValueError("GLOBAL_JIT_MARKET_BOOK_INVALID")
+    if not isinstance(captured_at_utc, datetime) or captured_at_utc.tzinfo is None:
+        raise ValueError("GLOBAL_JIT_MARKET_CLOCK_INVALID")
+    for field, names, expected in (
+        ("accepting_orders", ("acceptingOrders", "accepting_orders"), True),
+        (
+            "enable_orderbook",
+            ("enableOrderBook", "enable_orderbook", "orderbookEnabled"),
+            True,
+        ),
+    ):
+        if _boolish_market_field(dict(market), *names) is not expected:
+            raise ValueError(f"GLOBAL_JIT_MARKET_{field.upper()}_INVALID")
+    try:
+        min_tick = Decimal(
+            str(
+                market.get("orderPriceMinTickSize")
+                or market.get("min_tick_size")
+                or market.get("minTickSize")
+                or ""
+            )
+        )
+        min_order_size = Decimal(
+            str(
+                market.get("orderMinSize")
+                or market.get("min_order_size")
+                or market.get("minOrderSize")
+                or ""
+            )
+        )
+        neg_risk = _boolish_market_field(
+            dict(market), "negRisk", "neg_risk", "negative_risk"
+        )
+        if (
+            not min_tick.is_finite()
+            or min_tick <= 0
+            or not min_order_size.is_finite()
+            or min_order_size <= 0
+            or neg_risk is None
+        ):
+            raise ValueError("invalid market rules")
+        clob_accepting = _boolish_market_field(
+            raw_clob_market, "accepting_orders", "acceptingOrders"
+        )
+        clob_orderbook = _boolish_market_field(
+            raw_clob_market,
+            "enable_order_book",
+            "enableOrderBook",
+            "orderbookEnabled",
+        )
+        clob_archived = _boolish_market_field(
+            raw_clob_market, "archived", "isArchived"
+        )
+        if (
+            clob_accepting is not True
+            or clob_orderbook is not True
+            or clob_archived is not False
+        ):
+            raise ValueError("invalid CLOB tradeability")
+        current_tick_names = (
+            "tick_size",
+            "minimum_tick_size",
+            "min_tick_size",
+            "minTickSize",
+        )
+        current_min_order_names = (
+            "min_order_size",
+            "minimum_order_size",
+            "minOrderSize",
+        )
+        current_tick = (
+            _required_decimal_fact((dict(raw_book),), current_tick_names)
+            if any(raw_book.get(name) not in (None, "") for name in current_tick_names)
+            else None
+        )
+        current_min_order = (
+            _required_decimal_fact((dict(raw_book),), current_min_order_names)
+            if any(
+                raw_book.get(name) not in (None, "")
+                for name in current_min_order_names
+            )
+            else None
+        )
+        clob_tick = (
+            _required_decimal_fact((raw_clob_market,), current_tick_names)
+            if any(
+                raw_clob_market.get(name) not in (None, "")
+                for name in current_tick_names
+            )
+            else None
+        )
+        clob_min_order = (
+            _required_decimal_fact((raw_clob_market,), current_min_order_names)
+            if any(
+                raw_clob_market.get(name) not in (None, "")
+                for name in current_min_order_names
+            )
+            else None
+        )
+        clob_neg_risk = _required_bool_fact(
+            (raw_clob_market,), ("neg_risk", "negRisk", "negative_risk")
+        )
+        if (
+            (current_tick is None and clob_tick is None)
+            or (current_min_order is None and clob_min_order is None)
+            or (current_tick is not None and current_tick != min_tick)
+            or (
+                current_min_order is not None
+                and current_min_order != min_order_size
+            )
+            or (clob_tick is not None and clob_tick != min_tick)
+            or (
+                clob_min_order is not None
+                and clob_min_order != min_order_size
+            )
+            or clob_neg_risk != neg_risk
+        ):
+            raise ValueError("Gamma/CLOB/book market rules conflict")
+        details = fee_details_from_gamma_fee_schedule(
+            market.get("feeSchedule") or market.get("fee_schedule"),
+            source="global_current_gamma_fee_schedule",
+            token_id=token_id,
+            fee_type=str(market.get("feeType") or market.get("fee_type") or "")
+            or None,
+        )
+        schedule_fee = fee_rate_fraction_from_details(details)
+        fee_rate, _fee_source = resolve_taker_fee_fraction(schedule_fee)
+        rate = Decimal(str(fee_rate))
+        if not rate.is_finite() or rate < 0 or rate > 1:
+            raise ValueError("invalid fee rate")
+        other_token = next(token for token in gamma_tokens if token != token_id)
+        yes_token, no_token = (
+            (token_id, other_token)
+            if selected_side == "YES"
+            else (other_token, token_id)
+        )
+        top_bid, _ = _optional_top_book_level_decimal(dict(raw_book), "bids")
+        top_ask, _ = _optional_top_book_level_decimal(dict(raw_book), "asks")
+        raw_gamma_hash = _sha256_json(dict(market))
+        raw_clob_hash = _sha256_json(raw_clob_market)
+        raw_book_hash = _sha256_json(dict(raw_book))
+        snapshot = ExecutableMarketSnapshot(
+            snapshot_id=_sha256_json(
+                (
+                    condition_id,
+                    token_id,
+                    selected_side,
+                    captured_at_utc.isoformat(),
+                    raw_gamma_hash,
+                    raw_clob_hash,
+                    raw_book_hash,
+                )
+            ),
+            gamma_market_id=str(market.get("id") or condition_id),
+            event_id=str(market.get("eventId") or market.get("event_id") or condition_id),
+            event_slug=str(market.get("slug") or condition_id),
+            condition_id=condition_id,
+            question_id=str(market.get("questionID") or market.get("question_id") or condition_id),
+            yes_token_id=yes_token,
+            no_token_id=no_token,
+            selected_outcome_token_id=token_id,
+            outcome_label=selected_side,
+            enable_orderbook=True,
+            active=bool(market_active),
+            closed=bool(market_closed),
+            accepting_orders=True,
+            market_start_at=None,
+            market_end_at=None,
+            market_close_at=None,
+            sports_start_at=None,
+            min_tick_size=min_tick,
+            min_order_size=min_order_size,
+            fee_details=details,
+            token_map_raw={"YES": yes_token, "NO": no_token},
+            rfqe=None,
+            neg_risk=bool(neg_risk),
+            orderbook_top_bid=top_bid,
+            orderbook_top_ask=top_ask,
+            orderbook_depth_jsonb=_canonical_json(dict(raw_book)),
+            raw_gamma_payload_hash=raw_gamma_hash,
+            raw_clob_market_info_hash=raw_clob_hash,
+            raw_orderbook_hash=raw_book_hash,
+            authority_tier="CLOB",
+            captured_at=captured_at_utc,
+            freshness_deadline=captured_at_utc + FRESHNESS_WINDOW_DEFAULT,
+            tradeability_status=_build_executable_tradeability_status(
+                parent_market=dict(market),
+                child_outcome=dict(market),
+                gamma_market_raw=dict(market),
+                raw_clob_market=raw_clob_market,
+                accepting_orders=True,
+                child_active=bool(market_active),
+                child_closed=bool(market_closed),
+                require_explicit_clob_tradeability=True,
+            ),
+        )
+    except (
+        ValueError,
+        TypeError,
+        InvalidOperation,
+        ExecutableSnapshotCaptureError,
+    ) as exc:
+        raise ValueError("GLOBAL_JIT_MARKET_METADATA_INVALID") from exc
+    return _CurrentGlobalMarketAuthority(snapshot=snapshot, fee_rate=rate)
+
+
+def _current_global_sell_fee_fraction(
+    *,
+    condition_id: str,
+    token_id: str,
+    gamma_get: Callable[..., object],
+    timeout: float,
+) -> Decimal:
+    """Retired partial fee seam; submit requires complete market authority."""
+
+    _ = condition_id, token_id, gamma_get, timeout
+    raise ValueError("GLOBAL_SELL_JIT_FEE_FULL_MARKET_AUTHORITY_REQUIRED")
 
 
 def _global_probability_family_cache_namespace(
@@ -567,6 +999,15 @@ def _global_probability_family_cache_revision(
         except (AttributeError, IndexError, TypeError, ValueError, sqlite3.Error):
             return None
     return tuple(revisions) or None
+
+
+def _global_probability_family_cache_key(
+    family_key: str,
+    probability_use: _CurrentProbabilityUse,
+) -> tuple[str, str]:
+    """Keep entry and held-redecision authority distinct in cached q."""
+
+    return family_key, _CurrentProbabilityUse(probability_use).value
 
 
 def _cacheable_global_probability_ineligible(
@@ -647,13 +1088,18 @@ def _probe_global_probability_family_cache(
     event_id: str,
     causal_snapshot_id: str,
     captured_at_utc: datetime,
+    probability_use: _CurrentProbabilityUse,
 ) -> object | None:
     if not namespace or not family_key or not event_id or not causal_snapshot_id:
         return None
+    cache_key = _global_probability_family_cache_key(
+        family_key,
+        probability_use,
+    )
     with _GLOBAL_PROBABILITY_FAMILY_CACHE_LOCK:
         if _GLOBAL_PROBABILITY_FAMILY_CACHE_NAMESPACE != namespace:
             return None
-        cached = _GLOBAL_PROBABILITY_FAMILY_CACHE.get(family_key)
+        cached = _GLOBAL_PROBABILITY_FAMILY_CACHE.get(cache_key)
     if cached is None or cached[0] != event_id:
         return None
     try:
@@ -665,7 +1111,11 @@ def _probe_global_probability_family_cache(
             captured_at_utc=captured_at_utc,
         )
     except (AttributeError, TypeError, ValueError):
-        _evict_global_probability_family_cache(namespace, family_key=family_key)
+        _evict_global_probability_family_cache(
+            namespace,
+            family_key=family_key,
+            probability_use=probability_use,
+        )
         return None
 
 
@@ -676,9 +1126,14 @@ def _store_global_probability_family_cache(
     event_id: str,
     family_binding_hash: str,
     prepared: object,
+    probability_use: _CurrentProbabilityUse,
 ) -> None:
     global _GLOBAL_PROBABILITY_FAMILY_CACHE_NAMESPACE
 
+    cache_key = _global_probability_family_cache_key(
+        family_key,
+        probability_use,
+    )
     if (
         not namespace
         or not family_key
@@ -692,8 +1147,9 @@ def _store_global_probability_family_cache(
             _GLOBAL_PROBABILITY_FAMILY_CACHE.clear()
             _GLOBAL_PROBABILITY_FAMILY_INELIGIBLE_CACHE.clear()
             _GLOBAL_PROBABILITY_FAMILY_CACHE_NAMESPACE = namespace
-        _GLOBAL_PROBABILITY_FAMILY_INELIGIBLE_CACHE.pop(family_key, None)
-        _GLOBAL_PROBABILITY_FAMILY_CACHE[family_key] = (
+        if probability_use == _CurrentProbabilityUse.ENTRY:
+            _GLOBAL_PROBABILITY_FAMILY_INELIGIBLE_CACHE.pop(family_key, None)
+        _GLOBAL_PROBABILITY_FAMILY_CACHE[cache_key] = (
             event_id,
             family_binding_hash,
             prepared,
@@ -754,7 +1210,13 @@ def _store_global_probability_family_ineligible_cache(
             _GLOBAL_PROBABILITY_FAMILY_CACHE.clear()
             _GLOBAL_PROBABILITY_FAMILY_INELIGIBLE_CACHE.clear()
             _GLOBAL_PROBABILITY_FAMILY_CACHE_NAMESPACE = namespace
-        _GLOBAL_PROBABILITY_FAMILY_CACHE.pop(family_key, None)
+        _GLOBAL_PROBABILITY_FAMILY_CACHE.pop(
+            _global_probability_family_cache_key(
+                family_key,
+                _CurrentProbabilityUse.ENTRY,
+            ),
+            None,
+        )
         _GLOBAL_PROBABILITY_FAMILY_INELIGIBLE_CACHE[family_key] = (
             event_id,
             causal_snapshot_id,
@@ -767,13 +1229,30 @@ def _evict_global_probability_family_cache(
     namespace: str | None,
     *,
     family_key: str,
+    probability_use: _CurrentProbabilityUse | None = None,
 ) -> None:
     if not namespace or not family_key:
         return
+    scoped_use = (
+        None
+        if probability_use is None
+        else _CurrentProbabilityUse(probability_use)
+    )
+    cache_key = (
+        None
+        if scoped_use is None
+        else _global_probability_family_cache_key(family_key, scoped_use)
+    )
     with _GLOBAL_PROBABILITY_FAMILY_CACHE_LOCK:
         if _GLOBAL_PROBABILITY_FAMILY_CACHE_NAMESPACE == namespace:
-            _GLOBAL_PROBABILITY_FAMILY_CACHE.pop(family_key, None)
-            _GLOBAL_PROBABILITY_FAMILY_INELIGIBLE_CACHE.pop(family_key, None)
+            if cache_key is not None:
+                _GLOBAL_PROBABILITY_FAMILY_CACHE.pop(cache_key, None)
+            else:
+                for stored_key in tuple(_GLOBAL_PROBABILITY_FAMILY_CACHE):
+                    if stored_key[0] == family_key:
+                        _GLOBAL_PROBABILITY_FAMILY_CACHE.pop(stored_key, None)
+            if scoped_use in {None, _CurrentProbabilityUse.ENTRY}:
+                _GLOBAL_PROBABILITY_FAMILY_INELIGIBLE_CACHE.pop(family_key, None)
 
 
 def _evict_superseded_global_probability_family_cache(
@@ -910,9 +1389,13 @@ def _reuse_global_book_token_bindings_for_batch(
 def _reuse_global_book_superset_token_bindings(
     trade_conn: sqlite3.Connection,
     probabilities: Mapping[str, object],
+    *,
+    checked_at: datetime,
 ) -> tuple[dict[str, object] | None, str]:
-    """Reuse immutable token identity when the current scope narrows."""
+    """Reuse current, non-invalidated token identity for a stable/narrower scope."""
 
+    if checked_at.tzinfo is None:
+        return None, "checked_at_naive"
     namespace = _global_book_epoch_cache_namespace(trade_conn)
     if namespace is None:
         return None, "namespace_unavailable"
@@ -922,21 +1405,37 @@ def _reuse_global_book_superset_token_bindings(
         return None, "cache_empty"
     if entry.namespace != namespace:
         return None, "namespace_changed"
+    current_identity = getattr(entry.epoch, "current_identity", None)
+    if not callable(current_identity):
+        return None, "current_identity_missing"
+    try:
+        if current_identity(checked_at.astimezone(UTC)) is None:
+            return None, "expired"
+    except (TypeError, ValueError) as exc:
+        return None, f"current_identity_invalid:{type(exc).__name__}"
     cached = dict(entry.bound_probabilities)
-    if not set(probabilities) < set(cached):
+    if not set(probabilities) <= set(cached):
         return None, "not_cached_superset"
     try:
         cached_slice = {
             family_key: cached[family_key] for family_key in probabilities
         }
-        return (
-            _reuse_global_book_token_bindings(
-                probabilities,
-                cached_slice,
-            ),
-            "hit",
+        rebound = _reuse_global_book_token_bindings(
+            probabilities,
+            cached_slice,
         )
-    except (KeyError, TypeError, ValueError) as exc:
+        invalidated = _global_book_metadata_refresh_family_keys(
+            trade_conn,
+            rebound,
+            checked_at=checked_at,
+            refreshed_at_by_family=_global_book_metadata_refresh_hwm(
+                trade_conn
+            ),
+        )
+        if invalidated:
+            return None, f"metadata_invalidated:{len(invalidated)}"
+        return rebound, "hit"
+    except (KeyError, TypeError, ValueError, sqlite3.Error) as exc:
         return None, f"token_reuse_invalid:{type(exc).__name__}"
 
 
@@ -995,6 +1494,33 @@ def _global_book_prefetch_tokens(
         token_id
         for row in topology
         for token_id in (row[3], row[4])
+    )
+
+
+def _global_reduce_only_book_tokens(
+    probabilities: Mapping[str, object],
+    held_tokens_by_family: Mapping[str, set[str]],
+    tokens: Iterable[str] | None,
+) -> tuple[str, ...]:
+    """Keep reduce-only book I/O inside the exact held-token scope."""
+
+    scoped_held_tokens = {
+        str(token or "").strip()
+        for family_key in probabilities
+        for token in held_tokens_by_family.get(str(family_key), ())
+        if str(token or "").strip()
+    }
+    if tokens is None:
+        # An incomplete non-held bin makes the broad topology helper return
+        # None. In a reduce-only cut that cannot widen CLOB I/O to every bin:
+        # the exact held tokens remain the only authorized request scope.
+        return tuple(sorted(scoped_held_tokens))
+    return tuple(
+        dict.fromkeys(
+            clean
+            for raw_token in tokens
+            if (clean := str(raw_token or "").strip()) in scoped_held_tokens
+        )
     )
 
 
@@ -1273,7 +1799,7 @@ def _global_book_metadata_refresh_family_keys(
     if checked_at.tzinfo is None:
         raise ValueError("GLOBAL_BOOK_INVALIDATION_CHECK_TIME_NAIVE")
     from src.engine.global_auction_universe import (
-        _global_book_snapshot_rows,
+        _global_book_latest_invalidation_rows,
         _table_exists,
     )
 
@@ -1343,7 +1869,7 @@ def _global_book_metadata_refresh_family_keys(
     }
     invalidated: set[str] = set()
     seen_conditions: set[str] = set()
-    for row in _global_book_snapshot_rows(
+    for row in _global_book_latest_invalidation_rows(
         trade_conn,
         condition_ids=tuple(candidate_conditions),
         checked_at_utc=checked_at,
@@ -1424,7 +1950,7 @@ def _global_book_receipt_token_pairs(
     except sqlite3.Error:
         return {}
 
-    fields = (
+    legacy_fields = (
         "family_key",
         "bin_id",
         "condition_id",
@@ -1435,6 +1961,7 @@ def _global_book_receipt_token_pairs(
         "market_event_id",
         "gamma_market_id",
     )
+    current_fields = (*legacy_fields, "neg_risk")
     for receipt_row in receipt_rows:
         (
             schema_version,
@@ -1446,7 +1973,7 @@ def _global_book_receipt_token_pairs(
             compressed_b64,
         ) = receipt_row
         if (
-            schema_version not in {12, 13, 14, 15, 16, 17, 18, 19}
+            schema_version not in {12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22}
             or coverage_status != "COMPLETE"
             or coverage_complete != 1
             or encoding != "zlib+base64+canonical-json-v1"
@@ -1471,6 +1998,7 @@ def _global_book_receipt_token_pairs(
             continue
         if hashlib.sha256(encoded).hexdigest() != expected_hash:
             continue
+        fields = current_fields if schema_version in {21, 22} else legacy_fields
         if (
             not isinstance(payload, dict)
             or tuple(payload.get("fields") or ()) != fields
@@ -1484,6 +2012,12 @@ def _global_book_receipt_token_pairs(
         valid = True
         for raw_row in payload["rows"]:
             if not isinstance(raw_row, (list, tuple)) or len(raw_row) != len(fields):
+                valid = False
+                break
+            if schema_version in {21, 22} and (
+                type(raw_row[-1]) is not str
+                or raw_row[-1] not in {"False", "True"}
+            ):
                 valid = False
                 break
             row = tuple(str(value or "").strip() for value in raw_row)
@@ -1631,6 +2165,21 @@ def _global_book_refresh_family_keys(
     return _global_refresh_family_keys(
         events,
         event_types=frozenset({_EDLI_REDECISION_EVENT_TYPE}),
+    )
+
+
+def _effective_global_book_refresh_family_keys(
+    event_family_keys: frozenset[str] | None,
+    metadata_family_keys: frozenset[str],
+    market_authority_family_keys: set[str],
+) -> frozenset[str] | None:
+    """Merge refresh causes without narrowing a malformed-event full refresh."""
+
+    if event_family_keys is None:
+        return None
+    return event_family_keys.union(
+        metadata_family_keys,
+        market_authority_family_keys,
     )
 
 
@@ -2439,6 +2988,61 @@ def _projected_global_book_rows_hint(
     )
 
 
+def _monitor_first_global_book_projection(
+    tokens: Iterable[str],
+    *,
+    checked_at: datetime,
+    max_age: timedelta,
+    projected: tuple[dict[str, Mapping[str, object]], datetime] | None = None,
+    projected_loader: Callable[
+        [], tuple[dict[str, Mapping[str, object]], datetime] | None
+    ]
+    | None = None,
+) -> tuple[dict[str, Mapping[str, object]], datetime] | None:
+    """Prefer the exact monitor network cut, then fill its missing tokens."""
+
+    from src.engine.monitor_refresh import current_monitor_orderbook_batch
+
+    requested = tuple(
+        dict.fromkeys(
+            token_id
+            for token in tokens
+            if (token_id := str(token).strip())
+        )
+    )
+    monitor_projection = current_monitor_orderbook_batch(
+        requested,
+        checked_at_utc=checked_at,
+        max_age=max_age,
+    )
+    monitor_books, monitor_at = (
+        monitor_projection if monitor_projection is not None else ({}, None)
+    )
+    if monitor_books and all(token in monitor_books for token in requested):
+        logging.getLogger(__name__).info(
+            "global book projection reused monitor network cut: tokens=%d age_ms=%d",
+            len(requested),
+            max(0, int((checked_at - monitor_at).total_seconds() * 1000)),
+        )
+        return monitor_books, monitor_at
+    base = projected
+    if base is None and projected_loader is not None:
+        base = projected_loader()
+    projected_books, projected_at = base if base is not None else ({}, None)
+    if monitor_books:
+        projected_books = {**projected_books, **monitor_books}
+        projected_at = (
+            min(projected_at, monitor_at)
+            if projected_at is not None and monitor_at is not None
+            else projected_at or monitor_at
+        )
+    return (
+        (projected_books, projected_at)
+        if projected_books and projected_at is not None
+        else None
+    )
+
+
 def _global_book_prefetch_epoch_at(
     *,
     projected_at: datetime | None,
@@ -2855,6 +3459,7 @@ class _GlobalWinnerBindingToken:
     issued_at: datetime
     expires_at: datetime
     receipt: EventSubmissionReceipt
+    jit_handoff: _GlobalJitHandoff | None = None
 
 
 def _global_preflight_token_window(
@@ -2874,6 +3479,29 @@ def _global_preflight_token_window(
         issued + timedelta(seconds=10),
         actuation_deadline.astimezone(UTC),
     )
+
+
+def _global_final_actuation_block_reason(
+    *,
+    deadline: datetime,
+    hard_authority_cancelled: Callable[[], bool],
+    checked_at: datetime | None = None,
+    deadline_expired_reason: str = "GLOBAL_REAUCTION_EPOCH_EXPIRED",
+) -> str | None:
+    """Linearize one preflighted action at its actual pre-venue boundary."""
+
+    now = (checked_at or datetime.now(UTC)).astimezone(UTC)
+    if now >= deadline.astimezone(UTC):
+        return deadline_expired_reason
+    try:
+        if hard_authority_cancelled():
+            return "GLOBAL_AUCTION_NO_TRADE:GLOBAL_HARD_AUTHORITY_REVOKED"
+    except Exception as exc:  # noqa: BLE001 - hard authority loss is fail closed
+        return (
+            "GLOBAL_FINAL_AUTHORITY_UNAVAILABLE:"
+            f"{type(exc).__name__}:{str(exc)[:160]}"
+        )
+    return None
 
 # Continuous re-decision resurrection (2026-06-12): EDLI_REDECISION_PENDING is a PRICE-DRIVEN
 # re-decision of a FORECAST family — it routes through the SAME forecast decision path (same
@@ -3043,6 +3671,7 @@ class _CandidateProof:
     # canonical path. Observability only — never gates selection.
     posterior_id: int | None = None
     probability_authority: str | None = None
+    probability_semantics_revision: str | None = None
     # FIX C (mode-consistent EV; incident 0b5c305e26524042 / operator directive
     # 2026-06-10): the per-candidate maker/taker mode decision and BOTH EVs travel
     # on the proof so the receipt/settlement loop can recalibrate p_fill_maker and
@@ -3095,6 +3724,51 @@ class PreSubmitAuthorityWitness:
     orderbook_depth_jsonb: str | None = None
     checked_at: str | None = None
     max_quote_age_ms: int = 1000
+
+
+@dataclass(frozen=True)
+class SealedBookOverride:
+    """Typed sealed-book cut used by the live non-book authority provider."""
+
+    token_id: str
+    side: str
+    snapshot_id: str
+    raw_orderbook_hash: str
+    orderbook_depth_jsonb: str
+    best_bid: float | None
+    best_ask: float | None
+    tick_size: float
+    min_order_size: float
+    neg_risk: bool
+    captured_at: str
+    freshness_deadline: str
+    curve_ttl_seconds: float
+
+
+@dataclass(frozen=True)
+class SealedBookObservation:
+    """Narrow provisional book-only evidence; no non-book authority claims."""
+
+    quote_seen_at: str
+    book_hash: str
+    current_best_bid: float | None
+    current_best_ask: float | None
+    tick_size: float
+    min_order_size: float
+    neg_risk: bool
+    book_authority_id: str
+    book_captured_at: str
+    orderbook_depth_jsonb: str | None
+    checked_at: str | None = None
+
+
+class SealedBookEvidence(Protocol):
+    quote_seen_at: str
+    book_hash: str
+    current_best_bid: float | None
+    current_best_ask: float | None
+    book_captured_at: str
+    checked_at: str | None
 
 
 # K=1 STAGE 1 (docs/archive/2026-Q2/operations_historical/k1_final_snapshot_authority_plan_2026-06-11.md §4):
@@ -3272,7 +3946,12 @@ def persist_presubmit_jit_snapshot(
         )
         # capture_policy_spec.md §2 trigger 2: presubmit JIT witness, already
         # structurally full.
-        insert_snapshot(trade_conn, row, capture_trigger="JIT_SUBMIT")
+        insert_snapshot(
+            trade_conn,
+            row,
+            capture_trigger="JIT_SUBMIT",
+            advance_latest=False,
+        )
         trade_conn.commit()
         return row.snapshot_id
     except Exception as exc:  # noqa: BLE001 - fail-soft: persistence must never block submit
@@ -3324,6 +4003,80 @@ def _assert_taker_depth_authority_fresh(
 
 class _LiveOpportunityAlreadyLocked(RuntimeError):
     """Raised when continuous redecision rediscovers an already-locked opportunity."""
+
+
+def _fence_global_target_claim_before_command(
+    conn: sqlite3.Connection,
+    event: OpportunityEvent,
+    *,
+    claimed_at: str | None,
+    attempt_count: int | None,
+) -> None:
+    """Bind a global-winner claim to command creation under one writer lock.
+
+    A winner pointer may be superseded while an older carrier is still building
+    its final command.  The guarded no-op UPDATE is deliberately the first write
+    in the live-order savepoint: it serializes against pointer supersession and
+    proves that this exact carrier still owns both the main claim and pointer.
+    Once ``ExecutionCommandCreated`` is appended later in the same transaction,
+    supersession leaves the carrier recovery-owned.
+    """
+
+    if not str(event.source or "").startswith("global_auction_winner_target:"):
+        return
+    generation = str(claimed_at or "").strip()
+    if not generation or attempt_count is None:
+        raise _LiveOpportunityAlreadyLocked(
+            "GLOBAL_WINNER_CLAIM_GENERATION_MISSING:"
+            f"event_id={event.event_id}"
+        )
+    # SCOPE: this exact global-winner carrier. DRAIN: a superseded carrier with
+    # no durable command loses the fence immediately; a command-owning carrier
+    # drains through normal submit/recovery. RESET: a fresh carrier has a new
+    # event_id and can acquire the fence after the prior carrier is terminal.
+    cursor = conn.execute(
+        """
+        UPDATE opportunity_event_processing AS main
+           SET last_error = ?,
+               updated_at = ?
+         WHERE main.consumer_name = 'edli_reactor_v1'
+           AND main.event_id = ?
+           AND main.processing_status = 'processing'
+           AND main.claimed_at = ?
+           AND main.attempt_count = ?
+           AND main.last_error = 'GLOBAL_WINNER_TARGETED_CLAIM'
+           AND EXISTS (
+                SELECT 1
+                  FROM opportunity_event_processing AS pointer
+                 WHERE pointer.consumer_name =
+                           main.consumer_name || ':global_winner_v1'
+                   AND pointer.event_id = main.event_id
+                   AND pointer.processing_status = 'pending'
+                   AND pointer.last_error = 'GLOBAL_WINNER_TARGETED_CLAIM'
+           )
+           AND NOT EXISTS (
+                SELECT 1
+                  FROM edli_live_order_events AS order_event
+                 WHERE order_event.event_type IN (
+                           'ExecutionCommandCreated',
+                           'VenueSubmitAttempted'
+                       )
+                   AND order_event.aggregate_id GLOB main.event_id || ':*'
+           )
+        """,
+        (
+            GLOBAL_WINNER_SUBMIT_FENCED,
+            datetime.now(UTC).isoformat(),
+            event.event_id,
+            generation,
+            int(attempt_count),
+        ),
+    )
+    if cursor.rowcount != 1:
+        raise _LiveOpportunityAlreadyLocked(
+            "GLOBAL_WINNER_CLAIM_FENCE_LOST:"
+            f"event_id={event.event_id}"
+        )
 
 
 _DURABLE_LIVE_CAP_UNKNOWN_CITY = "__unknown_live_cap_city__"
@@ -4031,6 +4784,7 @@ def _durable_unmaterialized_live_cap_reservations(
     conn: sqlite3.Connection | None,
     *,
     trade_conn: sqlite3.Connection | None = None,
+    work_context: "WorkContext | None" = None,
 ) -> tuple[tuple[str, str, float], ...]:
     """Return durable live-cap exposure not yet represented by position truth.
 
@@ -4042,72 +4796,186 @@ def _durable_unmaterialized_live_cap_reservations(
     """
     if conn is None:
         return ()
+
+    from src.engine.global_auction_universe import (
+        WorkDeferred,
+        bounded_work_sqlite,
+    )
+
+    def bounded_read(read_conn: sqlite3.Connection, stage: str):
+        if work_context is None:
+            return contextlib.nullcontext(read_conn)
+        return bounded_work_sqlite(
+            read_conn,
+            work_context,
+            stage=f"durable_live_cap:{stage}",
+            shared_connection=True,
+        )
+
     try:
-        if not (
-            _adapter_table_exists(conn, "edli_live_cap_usage")
-            and _adapter_table_exists(conn, "edli_live_order_events")
-        ):
-            return ()
-        rows = conn.execute(
-            """
-            WITH live_cap AS (
+        with bounded_read(conn, "candidates") as read_conn:
+            if not (
+                _adapter_table_exists(read_conn, "edli_live_cap_usage")
+                and _adapter_table_exists(read_conn, "edli_live_order_events")
+            ):
+                return ()
+            raw_candidates = read_conn.execute(
+                """
                 SELECT
                     usage_id,
-                    event_id,
                     final_intent_id,
                     execution_command_id,
-                    reserved_notional_usd,
-                    event_id || ':' || COALESCE(final_intent_id, '') AS aggregate_id
+                    event_id || ':' || COALESCE(final_intent_id, '') AS aggregate_id,
+                    reserved_notional_usd
                 FROM edli_live_cap_usage
                 WHERE reservation_status IN ('RESERVED', 'CONSUMED')
                   AND reserved_notional_usd > 0
-            ),
-            observed AS (
-                SELECT DISTINCT aggregate_id
-                FROM edli_live_order_events
-                WHERE event_type = 'UserTradeObserved'
-                  AND json_extract(payload_json, '$.fill_authority_state') = 'FILL_CONFIRMED'
-            ),
-            absence_reconciled AS (
-                SELECT DISTINCT aggregate_id
-                FROM edli_live_order_events
-                WHERE event_type = 'Reconciled'
-                  AND (
-                    json_extract(payload_json, '$.cap_transition_recommendation') = 'RELEASED'
-                    OR json_type(payload_json, '$.authenticated_absence_proof') IS NOT NULL
-                  )
-            ),
-            pre_submit AS (
-                SELECT aggregate_id, payload_json
-                FROM edli_live_order_events
-                WHERE event_type = 'PreSubmitRevalidated'
-            ),
-            decision_audit AS (
-                SELECT aggregate_id, payload_json
-                FROM edli_live_order_events
-                WHERE event_type = 'DecisionProofAccepted'
+                ORDER BY usage_id
+                """
+            ).fetchall()
+        candidates = tuple(
+            (
+                str(
+                    row[0]
+                    if not isinstance(row, sqlite3.Row)
+                    else row["usage_id"]
+                ),
+                str(
+                    row[1]
+                    if not isinstance(row, sqlite3.Row)
+                    else row["final_intent_id"] or ""
+                ),
+                str(
+                    row[2]
+                    if not isinstance(row, sqlite3.Row)
+                    else row["execution_command_id"] or ""
+                ),
+                str(
+                    row[3]
+                    if not isinstance(row, sqlite3.Row)
+                    else row["aggregate_id"]
+                ),
+                float(
+                    row[4]
+                    if not isinstance(row, sqlite3.Row)
+                    else row["reserved_notional_usd"]
+                ),
             )
-            SELECT
-                live_cap.usage_id,
-                live_cap.final_intent_id,
-                live_cap.execution_command_id,
-                COALESCE(
-                    NULLIF(json_extract(pre_submit.payload_json, '$.city'), ''),
-                    NULLIF(json_extract(decision_audit.payload_json, '$.decision_audit.city'), ''),
-                    ?
-                ) AS city,
-                live_cap.reserved_notional_usd
-            FROM live_cap
-            LEFT JOIN observed ON observed.aggregate_id = live_cap.aggregate_id
-            LEFT JOIN absence_reconciled ON absence_reconciled.aggregate_id = live_cap.aggregate_id
-            LEFT JOIN pre_submit ON pre_submit.aggregate_id = live_cap.aggregate_id
-            LEFT JOIN decision_audit ON decision_audit.aggregate_id = live_cap.aggregate_id
-            WHERE observed.aggregate_id IS NULL
-              AND absence_reconciled.aggregate_id IS NULL
-            ORDER BY live_cap.usage_id
-            """,
-            (_DURABLE_LIVE_CAP_UNKNOWN_CITY,),
-        ).fetchall()
+            for row in raw_candidates
+        )
+        requested_pairs = tuple((row[2], row[1]) for row in candidates)
+        if trade_conn is None:
+            trade_truth_pairs = frozenset()
+        else:
+            with bounded_read(trade_conn, "trade_truth") as read_trade_conn:
+                trade_truth_pairs = _durable_live_cap_represented_pairs(
+                    read_trade_conn,
+                    requested_pairs,
+                )
+
+        unresolved = tuple(
+            row
+            for row in candidates
+            if (row[2], row[1]) not in trade_truth_pairs
+        )
+        out: list[tuple[str, str, float]] = []
+        with bounded_read(conn, "order_evidence") as read_conn:
+            evidence_by_aggregate: dict[str, list[tuple[str, str]]] = {}
+            aggregate_ids = tuple(dict.fromkeys(row[3] for row in unresolved))
+            variable_limit = read_conn.getlimit(
+                sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER
+            )
+            for offset in range(0, len(aggregate_ids), variable_limit):
+                chunk = aggregate_ids[offset : offset + variable_limit]
+                placeholders = ",".join("?" for _ in chunk)
+                evidence_rows = read_conn.execute(
+                    f"""
+                    SELECT aggregate_id, event_type, payload_json
+                    FROM edli_live_order_events INDEXED BY idx_edli_live_order_events_aggregate
+                    WHERE aggregate_id IN ({placeholders})
+                      AND event_type IN (
+                          'UserTradeObserved',
+                          'Reconciled',
+                          'PreSubmitRevalidated',
+                          'DecisionProofAccepted'
+                      )
+                    ORDER BY aggregate_id, event_sequence DESC
+                    """,
+                    chunk,
+                ).fetchall()
+                for evidence_row in evidence_rows:
+                    aggregate_id = str(
+                        evidence_row[0]
+                        if not isinstance(evidence_row, sqlite3.Row)
+                        else evidence_row["aggregate_id"]
+                    )
+                    event_type = str(
+                        evidence_row[1]
+                        if not isinstance(evidence_row, sqlite3.Row)
+                        else evidence_row["event_type"]
+                    )
+                    payload_json = str(
+                        evidence_row[2]
+                        if not isinstance(evidence_row, sqlite3.Row)
+                        else evidence_row["payload_json"]
+                    )
+                    evidence_by_aggregate.setdefault(aggregate_id, []).append(
+                        (event_type, payload_json)
+                    )
+            for (
+                usage_id,
+                _final_intent_id,
+                _execution_command_id,
+                aggregate_id,
+                reserved,
+            ) in unresolved:
+                pre_submit_city = ""
+                decision_city = ""
+                materialized_or_absent = False
+                for event_type, payload_json in evidence_by_aggregate.get(
+                    aggregate_id,
+                    (),
+                ):
+                    payload = json.loads(payload_json)
+                    if not isinstance(payload, dict):
+                        raise ValueError(
+                            "DURABLE_LIVE_CAP_EVENT_PAYLOAD_NOT_OBJECT"
+                        )
+                    if (
+                        event_type == "UserTradeObserved"
+                        and payload.get("fill_authority_state") == "FILL_CONFIRMED"
+                    ):
+                        materialized_or_absent = True
+                        break
+                    if event_type == "Reconciled" and (
+                        payload.get("cap_transition_recommendation") == "RELEASED"
+                        or "authenticated_absence_proof" in payload
+                    ):
+                        materialized_or_absent = True
+                        break
+                    if event_type == "PreSubmitRevalidated" and not pre_submit_city:
+                        pre_submit_city = str(payload.get("city") or "").strip()
+                    elif event_type == "DecisionProofAccepted" and not decision_city:
+                        decision_audit = payload.get("decision_audit")
+                        if isinstance(decision_audit, dict):
+                            decision_city = str(
+                                decision_audit.get("city") or ""
+                            ).strip()
+                if materialized_or_absent:
+                    continue
+                if usage_id and reserved > 0.0:
+                    out.append(
+                        (
+                            f"durable_live_cap:{usage_id}",
+                            pre_submit_city
+                            or decision_city
+                            or _DURABLE_LIVE_CAP_UNKNOWN_CITY,
+                            reserved,
+                        )
+                    )
+        return tuple(out)
+    except WorkDeferred:
+        raise
     except Exception as exc:  # noqa: BLE001 - sizing must fail closed on exposure ambiguity.
         import logging
 
@@ -4119,38 +4987,6 @@ def _durable_unmaterialized_live_cap_reservations(
         raise RuntimeError(
             f"DURABLE_LIVE_CAP_EXPOSURE_SEED_UNAVAILABLE:{type(exc).__name__}:{exc}"
         ) from exc
-    trade_truth_pairs = _durable_live_cap_represented_pairs(
-        trade_conn,
-        (
-            (
-                str(
-                    row[2]
-                    if not isinstance(row, sqlite3.Row)
-                    else row["execution_command_id"] or ""
-                ),
-                str(
-                    row[1]
-                    if not isinstance(row, sqlite3.Row)
-                    else row["final_intent_id"] or ""
-                ),
-            )
-            for row in rows
-        ),
-    )
-    out: list[tuple[str, str, float]] = []
-    for row in rows:
-        usage_id = str(row[0] if not isinstance(row, sqlite3.Row) else row["usage_id"])
-        final_intent_id = str(row[1] if not isinstance(row, sqlite3.Row) else row["final_intent_id"] or "")
-        execution_command_id = str(row[2] if not isinstance(row, sqlite3.Row) else row["execution_command_id"] or "")
-        city = str(row[3] if not isinstance(row, sqlite3.Row) else row["city"])
-        reserved = float(row[4] if not isinstance(row, sqlite3.Row) else row["reserved_notional_usd"])
-        if (execution_command_id, final_intent_id) in trade_truth_pairs:
-            continue
-        if usage_id and reserved > 0.0:
-            out.append((f"durable_live_cap:{usage_id}", city, reserved))
-    return tuple(out)
-
-
 def _same_token_pending_entry_usd(
     conn: sqlite3.Connection | None,
     *,
@@ -4979,11 +5815,13 @@ def _seed_portfolio_reservations_from_durable_live_cap(
     conn: sqlite3.Connection | None,
     *,
     trade_conn: sqlite3.Connection | None = None,
+    work_context: "WorkContext | None" = None,
 ) -> int:
     seeded = 0
     for reservation_id, city, reserved_usd in _durable_unmaterialized_live_cap_reservations(
         conn,
         trade_conn=trade_conn,
+        work_context=work_context,
     ):
         ledger.seed_committed(reservation_id, city, reserved_usd)
         seeded += 1
@@ -5123,20 +5961,24 @@ def _global_current_entry_feasibility_rejection_reason(
     candidate: object,
     *,
     strategy_key: str | None = None,
+    probability_semantics_revision: str | None = None,
     strategy_policy_conn: sqlite3.Connection | None = None,
-    strategy_policy_cache: dict[str, str | None] | None = None,
+    strategy_policy_cache: dict[tuple[str, str], str | None] | None = None,
+    observe_through_automated_risk_gate: bool = False,
 ) -> str | None:
-    """Reject BUY actions the global taker-limit solver cannot execute.
+    """Reject BUY execution proposals that current policy cannot execute.
 
     The auction still owns economic selection through current q bounds, fees,
     depth, robust utility, Kelly, wealth, and caps.  The strategy registry owns
     the narrower domain license: a BUY below its declared native entry-price
-    floor is not part of that strategy's feasible set. The global candidate
-    contract is explicitly immediate ``TAKER_LIMIT``; therefore an out-of-band,
-    one-sided, or spread-forbidden book is not a maker opportunity here. A
-    future maker proposal must compete as its own fill-contingent action rather
-    than being invented after this taker action wins. SELL compares against HOLD
-    and does not consume BUY authority.
+    floor is not part of that strategy's feasible set. Taker and passive-rest
+    proposals are distinct auction assets: the former carries exact executable
+    ask/depth/fee economics, while the latter carries its own non-crossing price
+    and fill/no-fill economics. A measurable taker bid is required for exact
+    liquidation capacity, but relative spread is not an eligibility wall: the
+    solver already compares the exact executable ask, fees, q, FDR, Kelly, and
+    expected log growth. SELL compares against HOLD and does not consume BUY
+    authority.
     """
 
     action = str(getattr(candidate, "action", "BUY") or "BUY").strip().upper()
@@ -5145,6 +5987,9 @@ def _global_current_entry_feasibility_rejection_reason(
     if action != "BUY":
         return "GLOBAL_ENTRY_FEASIBILITY_ACTION_INVALID"
     side = str(getattr(candidate, "side", "") or "").strip().upper()
+    execution_mode = str(
+        getattr(candidate, "execution_mode", "TAKER_LIMIT") or "TAKER_LIMIT"
+    ).strip().upper()
     curve = getattr(candidate, "executable_cost_curve", None)
     levels = tuple(getattr(curve, "levels", ()) or ())
     if side not in {"YES", "NO"} or not levels:
@@ -5159,49 +6004,75 @@ def _global_current_entry_feasibility_rejection_reason(
         assert_live_order_unit_price(best_ask)
     except (TypeError, ValueError) as exc:
         return f"GLOBAL_ENTRY_LIVE_UNIT_PRICE_INVALID:{exc}"
-    bid_levels = tuple(getattr(candidate, "native_bid_levels", ()) or ())
-    try:
-        best_bid = max(Decimal(level.price) for level in bid_levels)
-    except (ArithmeticError, AttributeError, TypeError, ValueError):
-        return "GLOBAL_ENTRY_FEASIBILITY_BID_INVALID"
-    if not best_bid.is_finite() or not Decimal("0") < best_bid < Decimal("1"):
-        return "GLOBAL_ENTRY_FEASIBILITY_BID_INVALID"
-    from src.strategy.live_inference.mode_consistent_ev import (
-        taker_spread_guard_reason,
+    proposal_curve = getattr(candidate, "economic_cost_curve", None)
+    proposal_price = (
+        Decimal(proposal_curve.levels[0].price)
+        if proposal_curve is not None and proposal_curve.levels
+        else best_ask
     )
-
-    taker_rejection = taker_spread_guard_reason(
-        float(best_bid),
-        float(best_ask),
-        max_relative_spread=_taker_max_relative_spread(),
-    )
-    if taker_rejection is not None:
-        return f"GLOBAL_ENTRY_TAKER_INADMISSIBLE:{taker_rejection}"
+    if execution_mode == "TAKER_LIMIT":
+        bid_levels = tuple(getattr(candidate, "native_bid_levels", ()) or ())
+        try:
+            best_bid = max(Decimal(level.price) for level in bid_levels)
+        except (ArithmeticError, AttributeError, TypeError, ValueError):
+            return "GLOBAL_ENTRY_FEASIBILITY_BID_INVALID"
+        if not best_bid.is_finite() or not Decimal("0") < best_bid < Decimal("1"):
+            return "GLOBAL_ENTRY_FEASIBILITY_BID_INVALID"
+    elif execution_mode == "MAKER_REST":
+        try:
+            assert_live_order_unit_price(proposal_price)
+        except (TypeError, ValueError) as exc:
+            return f"GLOBAL_ENTRY_LIVE_UNIT_PRICE_INVALID:{exc}"
+        if proposal_price >= best_ask:
+            return "GLOBAL_ENTRY_MAKER_NOT_PASSIVE"
+    else:
+        return "GLOBAL_ENTRY_EXECUTION_MODE_INVALID"
     normalized_strategy = str(strategy_key or "").strip()
     if normalized_strategy:
         if strategy_policy_conn is not None:
+            candidate_revision = (
+                str(probability_semantics_revision or "").strip()
+                or "__GLOBAL_CANDIDATE_SCOPE_UNRESOLVED__"
+            )
+            policy_cache_key = (normalized_strategy, candidate_revision)
             if strategy_policy_cache is None:
                 strategy_block = _entry_strategy_policy_blocks_live_submit(
                     strategy_policy_conn,
                     normalized_strategy,
+                    probability_semantics_revision=candidate_revision,
                 )
             else:
-                if normalized_strategy not in strategy_policy_cache:
-                    strategy_policy_cache[normalized_strategy] = (
+                if policy_cache_key not in strategy_policy_cache:
+                    strategy_policy_cache[policy_cache_key] = (
                         _entry_strategy_policy_blocks_live_submit(
                             strategy_policy_conn,
                             normalized_strategy,
+                            probability_semantics_revision=candidate_revision,
                         )
                     )
-                strategy_block = strategy_policy_cache[normalized_strategy]
+                strategy_block = strategy_policy_cache[policy_cache_key]
+            if (
+                observe_through_automated_risk_gate
+                and strategy_block is not None
+                and strategy_block.startswith("STRATEGY_POLICY_GATED:")
+                and "risk_action:gate"
+                in strategy_block.partition("sources=")[2].split(",")
+            ):
+                # The proof solve is side-effect-free and shares the exact live
+                # q/book/wealth cut.  Let it expose the economic frontier hidden
+                # by an automated performance gate without weakening live
+                # selection.  A restrictive manual gate never carries the
+                # risk_action source because it locks the field first, so it
+                # remains authoritative here.
+                strategy_block = None
             if strategy_block is not None:
                 return strategy_block
         floors = _event_bound_strategy_live_quality_floors(normalized_strategy)
         floor = Decimal(str(floors["min_entry_price"]))
-        if best_ask + Decimal("1e-12") < floor:
+        if proposal_price + Decimal("1e-12") < floor:
             return (
                 "GLOBAL_ENTRY_PRICE_BELOW_STRATEGY_FLOOR:"
-                f"strategy={normalized_strategy}:ask={best_ask}:floor={floor}"
+                f"strategy={normalized_strategy}:price={proposal_price}:floor={floor}"
             )
     return None
 
@@ -5553,6 +6424,9 @@ def _qkernel_current_state_solve_economics(cert: Any) -> bool:
 def _qkernel_current_state_solve_economics_rejection_reason(cert: Any) -> str | None:
     """Return the exact broken identity field for a current-band certificate."""
 
+    canonical_reason = qkernel_current_state_rejection_reason(cert)
+    if canonical_reason is not None:
+        return canonical_reason
     if not isinstance(cert, Mapping):
         return "payload_not_mapping"
     band_basis = "CURRENT_POSTERIOR_BAND"
@@ -6114,6 +6988,12 @@ def _entry_pause_blocks_live_submit(conn: sqlite3.Connection | None) -> str | No
     before reserving live cap or appending ``ExecutionCommandCreated``. Otherwise
     an operator pause still creates durable command/cap artifacts and depends on
     post-facto release recovery.
+
+    SCOPE: global new-entry admission only; the global SELL path is checked
+    before this gate and remains reduce-only eligible. DRAIN: the reactor parks
+    no-held wakes, while held families run with BUY candidates disabled. RESET:
+    each wake re-reads the durable control state, and resume naturally admits
+    the still-PENDING event identities.
     """
 
     def _pause_reason_from_state(state: Mapping[str, object]) -> str | None:
@@ -6162,6 +7042,8 @@ def _entry_pause_blocks_live_submit(conn: sqlite3.Connection | None) -> str | No
 def _entry_strategy_policy_blocks_live_submit(
     conn: sqlite3.Connection | None,
     strategy_key: str | None,
+    *,
+    probability_semantics_revision: str | None = None,
 ) -> str | None:
     """Re-read per-strategy authority at the final EDLI submit boundary."""
 
@@ -6181,6 +7063,15 @@ def _entry_strategy_policy_blocks_live_submit(
             conn,
             strategy,
             datetime.now(timezone.utc),
+            **(
+                {
+                    "probability_semantics_revision": (
+                        probability_semantics_revision
+                    )
+                }
+                if probability_semantics_revision
+                else {}
+            ),
         )
     except Exception as exc:  # noqa: BLE001 - unreadable control authority blocks submit
         return f"STRATEGY_POLICY_UNAVAILABLE:{strategy}:{type(exc).__name__}"
@@ -6193,6 +7084,66 @@ def _entry_strategy_policy_blocks_live_submit(
         return f"STRATEGY_POLICY_EXIT_ONLY:{strategy}:sources={source_text}"
     return None
 
+
+def _prepared_global_probability_semantics_revision(
+    prepared: object,
+    forecast_conn: sqlite3.Connection,
+) -> str | None:
+    """Resolve the exact probability-law revision before global BUY ranking."""
+
+    witness = getattr(prepared, "probability_witness", None)
+    from src.events.day0_authority import day0_probability_semantics_revision
+
+    day0_revision = day0_probability_semantics_revision(
+        getattr(witness, "q_version", None)
+    )
+    if day0_revision is not None:
+        return day0_revision
+    posterior_id = getattr(prepared, "posterior_id", None)
+    posterior_identity_hash = str(
+        getattr(witness, "posterior_identity_hash", "") or ""
+    ).strip()
+    if (
+        isinstance(posterior_id, bool)
+        or not isinstance(posterior_id, int)
+        or posterior_id <= 0
+        or not posterior_identity_hash
+    ):
+        return None
+    try:
+        row = forecast_conn.execute(
+            "SELECT provenance_json FROM forecast_posteriors "
+            "WHERE posterior_id = ? AND posterior_identity_hash = ?",
+            (posterior_id, posterior_identity_hash),
+        ).fetchone()
+    except sqlite3.Error:
+        return None
+    shape = _current_evidence_shape(row[0]) if row is not None else None
+    revision = str(
+        shape.get("semantics_revision") if shape is not None else ""
+    ).strip()
+    return revision or None
+
+
+def _stamp_global_receipt_probability_semantics_revision(
+    receipt: EventSubmissionReceipt,
+    global_actuation: object | None,
+    revisions_by_family: Mapping[str, str | None],
+) -> EventSubmissionReceipt:
+    """Bind the selected family's prepared probability law to its receipt."""
+
+    if str(receipt.probability_semantics_revision or "").strip():
+        return receipt
+    decision = getattr(global_actuation, "decision", None)
+    candidate = getattr(decision, "candidate", None)
+    family_key = str(getattr(candidate, "family_key", "") or "").strip()
+    revision = str(revisions_by_family.get(family_key) or "").strip()
+    if not family_key or not revision:
+        return receipt
+    return dataclass_replace(
+        receipt,
+        probability_semantics_revision=revision,
+    )
 
 
 def edli_trade_score_gate(event: OpportunityEvent) -> bool:
@@ -6239,6 +7190,30 @@ def _entry_family_blocked_candidate_reason(
     return f"LIVE_ENTRY_BLOCKED:entry_readiness_family:{block_reason}"
 
 
+def _day0_unresolved_entry_probability_rejection_reason(
+    *,
+    day0_payoff_truth: object,
+    probability_semantics_revision: object = None,
+) -> str | None:
+    """Reject unresolved Day0 entry only when current probability law is absent."""
+
+    if (
+        str(day0_payoff_truth or "").strip().lower()
+        != Day0PayoffTruth.UNRESOLVED.value
+    ):
+        return None
+    from src.events.day0_authority import DAY0_PROBABILITY_SEMANTICS_REVISION
+
+    revision = str(probability_semantics_revision or "").strip()
+    if revision in {
+        DAY0_PROBABILITY_SEMANTICS_REVISION,
+        CURRENT_EVIDENCE_SEMANTICS_REVISION,
+        STALE_ENSEMBLE_ABSOLUTE_DISAGREEMENT_SEMANTICS_REVISION,
+    }:
+        return None
+    return "GLOBAL_DAY0_UNRESOLVED_ENTRY_PROBABILITY_UNCALIBRATED"
+
+
 def event_bound_live_adapter_from_trade_conn(
     trade_conn: sqlite3.Connection,
     *,
@@ -6261,7 +7236,12 @@ def event_bound_live_adapter_from_trade_conn(
     producer_wake_ids: tuple[str, ...] = (),
     producer_wake_published_at: str | None = None,
     selection_cancelled: Callable[[], bool] | None = None,
+    selection_completion_fairness_reserved: bool = False,
     selection_completion_reserved: bool = False,
+    selection_completion_sell_keys: frozenset[tuple[str, str]] = frozenset(),
+    held_sell_reauction_requests: tuple[object, ...] = (),
+    held_family_provider: Callable[[], object] | None = None,
+    construction_work_context: "WorkContext | None" = None,
 ) -> Callable[[OpportunityEvent, datetime], EventSubmissionReceipt]:
     """Build the event-bound live certificate chain up to the executor boundary.
 
@@ -6275,11 +7255,6 @@ def event_bound_live_adapter_from_trade_conn(
     adapter instance (== per reactor cycle).
     """
 
-    if auction_capital_authority is None:
-        from src.risk_allocator import snapshot_global_auction_capital_authority
-
-        auction_capital_authority = snapshot_global_auction_capital_authority()
-
     # Live production scope is forecast_plus_day0 only. Forecast and Day0 events
     # both use this same execution adapter; unknown events fail closed before the
     # candidate pipeline. There is no non-live/no-submit scope inside production.
@@ -6288,6 +7263,18 @@ def event_bound_live_adapter_from_trade_conn(
     # after process_pending and populate live_submit_attempts accurately.
     # No-submit / submit-blocked cycles always read 0.
     _live_submit_count: list[int] = [0]
+    held_completion_deadlines = tuple(
+        datetime.fromisoformat(
+            str(getattr(request, "completion_deadline_at", "") or "")
+            .replace("Z", "+00:00")
+        ).astimezone(UTC)
+        for request in held_sell_reauction_requests
+        if int(getattr(request, "schema_version", 1) or 1) == 4
+        and str(getattr(request, "completion_deadline_at", "") or "").strip()
+    )
+    held_completion_deadline = (
+        min(held_completion_deadlines) if held_completion_deadlines else None
+    )
 
     # FIX-4 venue_acks: per-cycle counter of actual venue ACKs (successful
     # place_limit_order responses).  Incremented when venue_ack_received is
@@ -6298,6 +7285,58 @@ def event_bound_live_adapter_from_trade_conn(
         str,
         tuple[str, str, dict[tuple[str, str], str | None]],
     ] = {}
+    _global_entry_probability_revision_by_family: dict[str, str | None] = {}
+    _global_claim_generations: Mapping[str, str] = {}
+    _global_claim_attempt_counts: Mapping[str, int] = {}
+    exact_completion_sell_keys = frozenset(
+        (str(position_id or "").strip(), str(token_id or "").strip())
+        for position_id, token_id in selection_completion_sell_keys
+    )
+    if any(
+        not position_id or not token_id
+        for position_id, token_id in exact_completion_sell_keys
+    ):
+        raise ValueError("GLOBAL_EXACT_HELD_COMPLETION_SCOPE_INVALID")
+    if exact_completion_sell_keys and not selection_completion_reserved:
+        raise ValueError("GLOBAL_EXACT_HELD_COMPLETION_SCOPE_UNRESERVED")
+    exact_completion_family_keys: frozenset[str] | None = None
+    if (
+        selection_completion_reserved
+        and exact_completion_sell_keys
+        and held_sell_reauction_requests
+    ):
+        request_sell_keys: set[tuple[str, str]] = set()
+        request_family_keys: set[str] = set()
+        for request in held_sell_reauction_requests:
+            position_id = str(getattr(request, "position_id", "") or "").strip()
+            token_id = str(getattr(request, "held_token_id", "") or "").strip()
+            raw_family = getattr(request, "family", ())
+            if (
+                int(getattr(request, "schema_version", 1) or 1) != 4
+                or not position_id
+                or not token_id
+                or not isinstance(raw_family, tuple)
+                or len(raw_family) != 3
+            ):
+                raise ValueError("GLOBAL_EXACT_HELD_COMPLETION_REQUEST_INVALID")
+            city, target_date, metric = (
+                str(raw_family[0] or "").strip(),
+                str(raw_family[1] or "").strip(),
+                str(raw_family[2] or "").strip().lower(),
+            )
+            if not city or not target_date or metric not in {"high", "low"}:
+                raise ValueError("GLOBAL_EXACT_HELD_COMPLETION_FAMILY_INVALID")
+            request_sell_keys.add((position_id, token_id))
+            request_family_keys.add(
+                weather_family_id(
+                    city=city,
+                    target_date=target_date,
+                    metric=metric,
+                )
+            )
+        if request_sell_keys != exact_completion_sell_keys:
+            raise ValueError("GLOBAL_EXACT_HELD_COMPLETION_REQUEST_SCOPE_MISMATCH")
+        exact_completion_family_keys = frozenset(request_family_keys)
     from src.runtime.reactor_wake import (
         reactor_urgent_wake_identity,
         reactor_urgent_wake_reason,
@@ -6327,6 +7366,7 @@ def event_bound_live_adapter_from_trade_conn(
         portfolio_reservation,
         live_cap_conn,
         trade_conn=trade_conn,
+        work_context=construction_work_context,
     )
 
     def _submit_global_sell(
@@ -6336,17 +7376,34 @@ def event_bound_live_adapter_from_trade_conn(
         global_actuation: Any,
         preflight_only: bool,
         preflight_receipt: EventSubmissionReceipt | None,
+        final_authority_deadline: datetime | None,
+        hard_authority_cancelled: Callable[[], bool] | None,
+        jit_handoff: _GlobalJitHandoff | None = None,
     ) -> EventSubmissionReceipt:
         receipt = _submit_current_global_sell(
             event,
             decision_time=decision_time,
             global_actuation=global_actuation,
             trade_conn=trade_conn,
+            global_claim_conn=live_cap_conn,
             forecast_conn=forecast_conn,
             topology_conn=topology_conn,
             calibration_conn=calibration_conn,
             preflight_only=preflight_only,
             preflight_receipt=preflight_receipt,
+            final_authority_deadline=final_authority_deadline,
+            final_deadline_expired_reason=(
+                "HELD_SELL_DEADLINE_EXPIRED"
+                if held_completion_deadline is not None
+                and final_authority_deadline == held_completion_deadline
+                else "GLOBAL_REAUCTION_EPOCH_EXPIRED"
+            ),
+            hard_authority_cancelled=hard_authority_cancelled,
+            global_claimed_at=_global_claim_generations.get(event.event_id),
+            global_claim_attempt_count=_global_claim_attempt_counts.get(
+                event.event_id
+            ),
+            jit_handoff=jit_handoff,
         )
         if not preflight_only and receipt.venue_call_started:
             _live_submit_count[0] += 1
@@ -6378,6 +7435,12 @@ def event_bound_live_adapter_from_trade_conn(
                 or ""
             ).strip(),
             day0_truth_by_bin_side,
+        )
+        _global_entry_probability_revision_by_family[family_key] = (
+            _prepared_global_probability_semantics_revision(
+                prepared,
+                forecast_conn,
+            )
         )
         return EventSubmissionReceipt(
             False,
@@ -6442,6 +7505,9 @@ def event_bound_live_adapter_from_trade_conn(
         global_actuation: "Any | None" = None,
         preflight_only: bool = False,
         preflight_receipt: EventSubmissionReceipt | None = None,
+        final_authority_deadline: datetime | None = None,
+        hard_authority_cancelled: Callable[[], bool] | None = None,
+        jit_handoff: _GlobalJitHandoff | None = None,
     ) -> EventSubmissionReceipt:
         # Both forecast and Day0 events continue into the one live candidate
         # proof/submit path; unknown event types are rejected.
@@ -6480,6 +7546,9 @@ def event_bound_live_adapter_from_trade_conn(
                 global_actuation=global_actuation,
                 preflight_only=preflight_only,
                 preflight_receipt=preflight_receipt,
+                final_authority_deadline=final_authority_deadline,
+                hard_authority_cancelled=hard_authority_cancelled,
+                jit_handoff=jit_handoff,
             )
         if entry_submit_block_reason is not None:
             return EventSubmissionReceipt(
@@ -6569,6 +7638,11 @@ def event_bound_live_adapter_from_trade_conn(
                 family_snapshot_refresher=family_snapshot_refresher,
                 global_actuation=global_actuation,
             )
+        no_submit_receipt = _stamp_global_receipt_probability_semantics_revision(
+            no_submit_receipt,
+            global_actuation,
+            _global_entry_probability_revision_by_family,
+        )
         if preflight_only:
             return no_submit_receipt
         # D2 SHIFT-BIN CLOSE-BEFORE-OPEN — old-leg exit submission (2026-06-22 consult
@@ -6645,6 +7719,9 @@ def event_bound_live_adapter_from_trade_conn(
                 strategy_policy_reason = _entry_strategy_policy_blocks_live_submit(
                     build_conn,
                     no_submit_receipt.strategy_key,
+                    probability_semantics_revision=(
+                        no_submit_receipt.probability_semantics_revision
+                    ),
                 )
                 if strategy_policy_reason is not None:
                     _abort_family_rebalance_entry_payloads_after_no_submit(
@@ -6748,6 +7825,11 @@ def event_bound_live_adapter_from_trade_conn(
                     trade_conn=trade_conn,
                     pre_submit_authority_provider=pre_submit_authority_provider,
                     live_order_schema_initialized=live_order_schema_initialized,
+                    global_claimed_at=_global_claim_generations.get(event.event_id),
+                    global_claim_attempt_count=_global_claim_attempt_counts.get(
+                        event.event_id
+                    ),
+                    global_jit_handoff=jit_handoff,
                 )
                 _live_order_build_phase = "live_order_certificates_built"
                 final_intent = _required_cert(command_certificates, claims.FINAL_INTENT)
@@ -6760,10 +7842,36 @@ def event_bound_live_adapter_from_trade_conn(
                 command_certificates_persisted = True
                 _live_order_build_phase = "live_order_command_persisted"
                 assert executor_submit is not None
-                _live_order_build_phase = "calling_executor_submit"
-                submit_result = _normalize_event_bound_executor_submit_result(
-                    executor_submit(final_intent, command)
-                )
+                if preflight_receipt is None:
+                    final_block = None
+                elif (
+                    final_authority_deadline is None
+                    or hard_authority_cancelled is None
+                ):
+                    final_block = "GLOBAL_FINAL_ACTUATION_AUTHORITY_MISSING"
+                else:
+                    final_block = _global_final_actuation_block_reason(
+                        deadline=final_authority_deadline,
+                        hard_authority_cancelled=hard_authority_cancelled,
+                    )
+                if final_block is not None:
+                    submit_result = EventBoundExecutorSubmitResult(
+                        status="PRE_SUBMIT_ERROR",
+                        reason_code=final_block,
+                        submit_finished_at=datetime.now(UTC).isoformat(),
+                        raw_response={"final_authority_block": final_block},
+                        venue_call_started=False,
+                        venue_ack_received=False,
+                        side_effect_known=True,
+                    )
+                else:
+                    # This check is the causal linearization point: facts committed
+                    # after it belong to the next decision epoch, while this exact
+                    # command enters the sanctioned executor immediately.
+                    _live_order_build_phase = "calling_executor_submit"
+                    submit_result = _normalize_event_bound_executor_submit_result(
+                        executor_submit(final_intent, command)
+                    )
                 _live_order_build_phase = "executor_submit_completed"
                 if submit_result.venue_call_started:
                     _append_venue_submit_attempted_aggregate_event(
@@ -7107,8 +8215,13 @@ def event_bound_live_adapter_from_trade_conn(
             GlobalWinnerPreflight,
             process_current_global_batch,
         )
+        from src.engine.global_auction_universe import (
+            WorkContext,
+            bounded_work_sqlite,
+        )
 
         events = tuple(events)
+        global_batch_started = _time.monotonic()
         probability_refresh_family_keys = (
             _global_probability_refresh_family_keys(events)
         )
@@ -7116,7 +8229,18 @@ def event_bound_live_adapter_from_trade_conn(
         projected_book_refresh_tokens = _global_projected_book_refresh_tokens(
             events
         )
-        entry_submit_suppression_reason = _entry_global_submit_suppression_reason()
+        # SCOPE: BUY candidates in this adapter cycle only; SELL/HOLD/CASH stay
+        # comparable. DRAIN: the blocked global batch reaches its existing
+        # transient-retention result without touching BUY capital authority.
+        # RESET: the next cycle re-reads durable control and receives a fresh
+        # cycle-local block reason, so clearing both restores BUY re-decision.
+        entry_submit_suppression_reason = (
+            _entry_global_submit_suppression_reason()
+            or entry_submit_block_reason
+        )
+        entry_pause_reason = _entry_pause_blocks_live_submit(
+            live_cap_conn or trade_conn
+        )
         day0_urgent_batch = bool(events) and all(
             str(getattr(event, "event_type", "") or "")
             == "DAY0_EXTREME_UPDATED"
@@ -7155,7 +8279,10 @@ def event_bound_live_adapter_from_trade_conn(
                 _global_batch_wake_cutoff,
                 exclude_wake_ids=_global_batch_owned_wake_ids,
             )
-            if selection_completion_reserved:
+            if (
+                selection_completion_fairness_reserved
+                or selection_completion_reserved
+            ):
                 # SCOPE: one global auction cut after a held SELL or periodic
                 # monitor proved that prior work lacked current handoff.
                 # DRAIN: complete selection publishes the globally comparable
@@ -7208,18 +8335,33 @@ def event_bound_live_adapter_from_trade_conn(
 
         _stable_preflight_monitor_handoff = [False]
 
-        def _day0_selection_cancelled() -> bool:
+        def _hard_day0_authority_cancelled() -> bool:
             current = reactor_urgent_wake_revision()
-            if (
+            return bool(
                 current is not None
                 and current != _global_batch_urgent_wake_revision[0]
                 and reactor_urgent_wake_reason()
                 == "day0_extreme_event_committed"
-            ):
+            )
+
+        def _day0_selection_cancelled() -> bool:
+            try:
+                hard_cancelled = _hard_day0_authority_cancelled()
+            except Exception:  # noqa: BLE001 - unavailable hard truth is a veto
+                logging.getLogger(__name__).exception(
+                    "global hard Day0 authority probe failed"
+                )
+                _stable_preflight_monitor_handoff[0] = False
+                return True
+            if hard_cancelled:
                 _stable_preflight_monitor_handoff[0] = False
                 return True
             if _stable_preflight_monitor_handoff[0]:
-                _stable_preflight_monitor_handoff[0] = False
+                # A stable submit-time SELL proof owns the short final-actuation
+                # window. Periodic monitor pressure already has durable completion
+                # debt and cannot improve this exact globally ranked SELL. Keep
+                # probing above for a newer committed Day0 fact, which does revoke
+                # the capability before venue I/O.
                 return False
             if selection_cancelled is not None:
                 try:
@@ -7230,6 +8372,31 @@ def event_bound_live_adapter_from_trade_conn(
                         "global selection cancellation probe failed"
                     )
             return False
+
+        global_work_context = WorkContext(
+            # The periodic held-monitor handoff cadence is 30s and canonical
+            # monitor evidence is stale at 150s.  The cancellation probe still
+            # yields to pending monitor work, while a quiet cut gets enough
+            # time for the observed ~26s selected-family JIT revalidation after
+            # the global scope/book/solve stages.  Do not borrow the 180s book
+            # TTL as whole-batch authority.
+            deadline_monotonic=(
+                global_batch_started + _GLOBAL_AUCTION_WORK_CUT_SECONDS
+            ),
+            cancel_requested=_day0_selection_cancelled,
+            monotonic=_time.monotonic,
+        )
+        # INV-47 SCOPE: this current global cut only. DRAIN: a typed DEFERRED
+        # receipt leaves durable work retryable. RESET: the next cycle creates
+        # a new WorkContext from its own outer-cut start and monitor handoff.
+
+        def _work_sql(stage, operation):
+            with bounded_work_sqlite(
+                trade_conn,
+                global_work_context,
+                stage=stage,
+            ) as read_conn:
+                return operation(read_conn)
 
         if forecast_conn is None or topology_conn is None or calibration_conn is None:
             from src.events.reactor import GlobalBatchSubmitResult
@@ -7324,6 +8491,7 @@ def event_bound_live_adapter_from_trade_conn(
                 _evict_global_probability_family_cache(
                     probability_cache_namespace,
                     family_key=family_key,
+                    probability_use=_CurrentProbabilityUse.ENTRY,
                 )
             else:
                 cached = _probe_global_probability_family_cache(
@@ -7332,6 +8500,7 @@ def event_bound_live_adapter_from_trade_conn(
                     event_id=event.event_id,
                     causal_snapshot_id=event.causal_snapshot_id,
                     captured_at_utc=at,
+                    probability_use=_CurrentProbabilityUse.ENTRY,
                 )
                 if cached is not None:
                     probability_cache_stats["hit"] += 1
@@ -7365,6 +8534,7 @@ def event_bound_live_adapter_from_trade_conn(
                         cache_metadata.get("family_binding_hash") or ""
                     ),
                     prepared=prepared,
+                    probability_use=_CurrentProbabilityUse.ENTRY,
                 )
             else:
                 _store_global_probability_family_ineligible_cache(
@@ -7417,6 +8587,7 @@ def event_bound_live_adapter_from_trade_conn(
                     _evict_global_probability_family_cache(
                         probability_cache_namespace,
                         family_key=family_key,
+                        probability_use=_CurrentProbabilityUse.HELD_MONITOR,
                     )
                 else:
                     cached = _probe_global_probability_family_cache(
@@ -7425,6 +8596,7 @@ def event_bound_live_adapter_from_trade_conn(
                         event_id=event.event_id,
                         causal_snapshot_id=event.causal_snapshot_id,
                         captured_at_utc=at,
+                        probability_use=_CurrentProbabilityUse.HELD_MONITOR,
                     )
                     if cached is not None:
                         probability_cache_stats["hit"] += 1
@@ -7471,41 +8643,80 @@ def event_bound_live_adapter_from_trade_conn(
                         cache_metadata.get("family_binding_hash") or ""
                     ),
                     prepared=prepared,
+                    probability_use=_CurrentProbabilityUse.HELD_MONITOR,
                 )
             return _prepared_global_event_receipt(event, prepared)
 
         def _actuate(event, actuation, at):
-            return _stamp_live_adapter_lane(_submit_inner(event, at, global_actuation=actuation))
+            return _stamp_live_adapter_lane(
+                _submit_inner(event, at, global_actuation=actuation)
+            )
 
-        pending_preflight_jit_candidate: object | None = None
+        pending_preflight_jit_handoff: _GlobalJitHandoff | None = None
 
         def _preflight(event, actuation, at, authority):
-            nonlocal pending_preflight_jit_candidate
+            nonlocal pending_preflight_jit_handoff
             _stable_preflight_monitor_handoff[0] = False
-            jit_candidate = pending_preflight_jit_candidate
-            pending_preflight_jit_candidate = None
+            jit_handoff = pending_preflight_jit_handoff
+            pending_preflight_jit_handoff = None
+            selected_candidate = getattr(
+                getattr(actuation, "decision", None), "candidate", None
+            )
+            if jit_handoff is not None:
+                handoff_candidate = jit_handoff.candidate
+                identity_fields = (
+                    "candidate_id", "family_key", "bin_id", "condition_id",
+                    "side", "token_id", "probability_witness_identity",
+                    "resolution_identity", "ledger_snapshot_id", "book_snapshot_id",
+                    "execution_curve_identity",
+                )
+                identity_matches = selected_candidate is not None and all(
+                    str(getattr(handoff_candidate, field, "") or "")
+                    == str(getattr(selected_candidate, field, "") or "")
+                    for field in identity_fields
+                )
+                curve = getattr(handoff_candidate, "executable_cost_curve", None)
+                quote_ttl = getattr(curve, "quote_ttl", None)
+                captured = jit_handoff.authority.snapshot.captured_at
+                deadline = jit_handoff.authority.snapshot.freshness_deadline
+                ttl_ok = (
+                    isinstance(captured, datetime)
+                    and isinstance(deadline, datetime)
+                    and at.astimezone(UTC) <= deadline.astimezone(UTC)
+                    and isinstance(quote_ttl, timedelta)
+                    and at.astimezone(UTC) <= captured.astimezone(UTC) + quote_ttl
+                )
+                if not identity_matches or not ttl_ok:
+                    jit_handoff = None
             receipt = _global_preflight_candidate_receipt(
                 _submit_inner,
                 event=event,
                 actuation=actuation,
                 decision_time=at,
             )
-            receipt = _global_preflight_entry_authority_receipt(
-                event,
-                receipt,
-                decision_time=at,
-                live_cap_conn=live_cap_conn or trade_conn,
+            decision = getattr(actuation, "decision", None)
+            candidate = getattr(decision, "candidate", None)
+            action = str(getattr(candidate, "action", "") or "").upper()
+            sell_preflight = (
+                action == "SELL"
+                or str(receipt.reason or "").startswith("GLOBAL_SELL_")
             )
-            receipt = _global_preflight_entry_jit_receipt(
-                event,
-                receipt,
-                global_actuation=actuation,
-                book_quote_provider=pre_submit_book_quote_provider,
-                current_candidate_override=jit_candidate,
-                checked_at_utc=datetime.now(UTC),
-            )
-            if receipt.global_jit_candidate is not None:
-                pending_preflight_jit_candidate = receipt.global_jit_candidate
+            if not sell_preflight:
+                receipt = _global_preflight_entry_authority_receipt(
+                    event,
+                    receipt,
+                    decision_time=at,
+                    live_cap_conn=live_cap_conn or trade_conn,
+                )
+                receipt = _global_preflight_entry_jit_receipt(
+                    event,
+                    receipt,
+                    global_actuation=actuation,
+                    book_quote_provider=pre_submit_book_quote_provider,
+                    current_candidate_override=jit_handoff,
+                    checked_at_utc=datetime.now(UTC),
+                    trade_conn=trade_conn,
+                )
             reason = str(receipt.reason or "")
             if receipt.proof_accepted is True and (
                 receipt.decision_proof_bundle is not None
@@ -7548,15 +8759,28 @@ def event_bound_live_adapter_from_trade_conn(
                         issued_at=issued_at,
                         expires_at=expires_at,
                         receipt=receipt,
+                        jit_handoff=(
+                            receipt.global_jit_candidate
+                            if isinstance(
+                                receipt.global_jit_candidate, _GlobalJitHandoff
+                            )
+                            else None
+                        ),
                     ),
                 )
             curve_supersession = _global_curve_supersession_from_receipt(receipt)
             if curve_supersession is not None:
                 status, replacement_candidate, preflight_reason = curve_supersession
+                if (
+                    status == "CURVE_SUPERSEDED"
+                    and isinstance(receipt.global_jit_candidate, _GlobalJitHandoff)
+                ):
+                    pending_preflight_jit_handoff = receipt.global_jit_candidate
                 return GlobalWinnerPreflight(
                     status=status,
                     replacement_candidate=replacement_candidate,
                     reason=preflight_reason,
+                    rejection_receipt=receipt,
                 )
             probability_tightening = _global_probability_tightening_from_receipt(
                 receipt,
@@ -7567,6 +8791,7 @@ def event_bound_live_adapter_from_trade_conn(
                     status="PROBABILITY_TIGHTENED",
                     probability_tightening=probability_tightening,
                     reason=reason,
+                    rejection_receipt=receipt,
                 )
             _evict_superseded_global_probability_family_cache(
                 probability_cache_namespace,
@@ -7583,10 +8808,25 @@ def event_bound_live_adapter_from_trade_conn(
             return GlobalWinnerPreflight(
                 status=status,
                 reason=reason or "GLOBAL_WINNER_PREFLIGHT_REJECTED",
+                rejection_receipt=receipt,
             )
 
         def _actuate_preflighted(event, actuation, at, token, authority):
             now = at.astimezone(UTC)
+            if (
+                held_completion_deadline is not None
+                and authority.actuation_deadline == held_completion_deadline
+                and now >= held_completion_deadline
+            ):
+                return _stamp_live_adapter_lane(
+                    EventSubmissionReceipt(
+                        False,
+                        event.event_id,
+                        event.causal_snapshot_id,
+                        reason="HELD_SELL_DEADLINE_EXPIRED",
+                        proof_accepted=False,
+                    )
+                )
             for token_id, expires_at in tuple(
                 _consumed_global_preflight_tokens.items()
             ):
@@ -7607,10 +8847,11 @@ def event_bound_live_adapter_from_trade_conn(
                 or token.wealth_witness_identity
                 != str(getattr(actuation, "wealth_witness_identity", "") or "")
                 or now < token.issued_at
-                or now > token.expires_at
-                or now > token.actuation_deadline
+                or now >= token.expires_at
+                or now >= token.actuation_deadline
                 or token.token_id in _consumed_global_preflight_tokens
             ):
+                _stable_preflight_monitor_handoff[0] = False
                 return _stamp_live_adapter_lane(
                     EventSubmissionReceipt(
                         False,
@@ -7626,6 +8867,7 @@ def event_bound_live_adapter_from_trade_conn(
                 decision_time=now,
             )
             if wealth_block is not None:
+                _stable_preflight_monitor_handoff[0] = False
                 return _stamp_live_adapter_lane(
                     EventSubmissionReceipt(
                         False,
@@ -7635,6 +8877,48 @@ def event_bound_live_adapter_from_trade_conn(
                         proof_accepted=False,
                     )
                 )
+            final_block = _global_final_actuation_block_reason(
+                deadline=token.expires_at,
+                hard_authority_cancelled=_hard_day0_authority_cancelled,
+                checked_at=now,
+            )
+            if final_block is not None:
+                _stable_preflight_monitor_handoff[0] = False
+                return _stamp_live_adapter_lane(
+                    EventSubmissionReceipt(
+                        False,
+                        event.event_id,
+                        event.causal_snapshot_id,
+                        reason=final_block,
+                        proof_accepted=False,
+                    )
+                )
+            if (
+                not _stable_preflight_monitor_handoff[0]
+                and selection_cancelled is not None
+            ):
+                try:
+                    routine_cancelled = bool(selection_cancelled())
+                except Exception:  # noqa: BLE001 - routine fairness is fail-soft
+                    routine_cancelled = False
+                    logging.getLogger(__name__).exception(
+                        "global routine selection cancellation probe failed"
+                    )
+                if routine_cancelled:
+                    _stable_preflight_monitor_handoff[0] = False
+                    return _stamp_live_adapter_lane(
+                        EventSubmissionReceipt(
+                            False,
+                            event.event_id,
+                            event.causal_snapshot_id,
+                            reason=(
+                                "GLOBAL_AUCTION_NO_TRADE:"
+                                "GLOBAL_SELECTION_CANCELLED"
+                            ),
+                            proof_accepted=False,
+                        )
+                    )
+            _stable_preflight_monitor_handoff[0] = False
             _consumed_global_preflight_tokens[token.token_id] = token.expires_at
             return _stamp_live_adapter_lane(
                 _submit_inner(
@@ -7642,26 +8926,42 @@ def event_bound_live_adapter_from_trade_conn(
                     at,
                     global_actuation=actuation,
                     preflight_receipt=token.receipt,
+                    final_authority_deadline=token.expires_at,
+                    hard_authority_cancelled=_hard_day0_authority_cancelled,
+                    jit_handoff=token.jit_handoff,
                 )
             )
 
         book_metadata_by_key: dict[
             tuple[str, str], Mapping[str, object]
-        ] = _cached_global_book_metadata(
-            trade_conn,
-            checked_at=datetime.now(UTC),
-        )
-        speculative_book_metadata_by_key = (
-            dict(book_metadata_by_key)
-            or _cached_global_book_speculative_metadata(trade_conn)
-        )
+        ] = {}
+        speculative_book_metadata_by_key: dict[
+            tuple[str, str], Mapping[str, object]
+        ] = {}
+        market_authority_refresh_family_keys: set[str] = set()
+        reduce_only_book_tokens: frozenset[str] | None = None
+        held_tokens_by_family: dict[str, set[str]] = {}
 
-        def _current_book_epoch(probabilities, _at):
+        def _require_market_authority_refresh(
+            family_keys: frozenset[str],
+        ) -> None:
+            clean = {
+                str(family_key or "").strip()
+                for family_key in family_keys
+                if str(family_key or "").strip()
+            }
+            if clean != set(family_keys):
+                raise ValueError("GLOBAL_MARKET_AUTHORITY_REFRESH_SCOPE_INVALID")
+            market_authority_refresh_family_keys.update(clean)
+
+        def _current_book_epoch_with_context(probabilities, _at, work_context):
+            nonlocal reduce_only_book_tokens
             from src.contracts.executable_market_snapshot import (
                 FRESHNESS_WINDOW_DEFAULT,
             )
             from src.data.polymarket_client import PolymarketClient
             from src.data.polymarket_request_governor import (
+                RequestAdmissionDenied,
                 RequestPriority,
                 polymarket_request_governor,
             )
@@ -7672,10 +8972,102 @@ def event_bound_live_adapter_from_trade_conn(
                 fetch_current_global_books,
                 fetch_current_gamma_markets,
             )
+            book_metadata_by_key.clear()
+            book_metadata_by_key.update(
+                _work_sql(
+                    "book_initial_metadata",
+                    lambda read_conn: _cached_global_book_metadata(
+                        read_conn,
+                        checked_at=datetime.now(UTC),
+                    ),
+                )
+            )
+            speculative_book_metadata_by_key.clear()
+            speculative_book_metadata_by_key.update(
+                dict(book_metadata_by_key)
+                or _work_sql(
+                    "book_initial_speculative_metadata",
+                    lambda read_conn: _cached_global_book_speculative_metadata(
+                        read_conn
+                    ),
+                )
+            )
+            held_tokens_by_family.clear()
+            reduce_only_book_tokens = None
+            if (
+                entry_submit_suppression_reason is not None
+                or selection_completion_reserved
+            ):
+                try:
+                    held_token_rows = _work_sql(
+                        "book_held_token_projection",
+                        lambda read_conn: read_conn.execute(
+                            """
+                            SELECT position_id, city, target_date,
+                                   temperature_metric, direction, token_id,
+                                   no_token_id
+                              FROM position_current
+                             WHERE phase IN ('active', 'day0_window', 'pending_exit')
+                               AND COALESCE(chain_shares, shares, 0) > 0
+                            """
+                        ).fetchall(),
+                    )
+                except sqlite3.OperationalError as exc:
+                    if "no such table: position_current" not in str(exc).lower():
+                        raise
+                    held_token_rows = ()
+                for (
+                    position_id,
+                    city,
+                    target_date,
+                    metric,
+                    direction,
+                    token_id,
+                    no_token_id,
+                ) in held_token_rows:
+                    held_token = str(
+                        no_token_id
+                        if str(direction or "").strip().lower() == "buy_no"
+                        else token_id
+                    ).strip()
+                    if not held_token:
+                        continue
+                    if exact_completion_sell_keys and (
+                        str(position_id or "").strip(),
+                        held_token,
+                    ) not in exact_completion_sell_keys:
+                        continue
+                    family_key = weather_family_id(
+                        city=str(city or ""),
+                        target_date=str(target_date or ""),
+                        metric=str(metric or "").lower(),
+                    )
+                    held_tokens_by_family.setdefault(family_key, set()).add(
+                        held_token
+                    )
+                held_book_tokens = frozenset(
+                    token
+                    for family_tokens in held_tokens_by_family.values()
+                    for token in family_tokens
+                )
+                # An exact held-SELL completion cannot authorize another
+                # position, so its quote/binding I/O has the same scope.  Keep
+                # an empty exact scope empty (fail closed) instead of widening
+                # it back to every held token through the None sentinel.
+                reduce_only_book_tokens = (
+                    held_book_tokens
+                    if exact_completion_sell_keys
+                    else held_book_tokens or None
+                )
             _book_started = _time.monotonic()
             timeout = max(
                 1.0,
-                float(os.environ.get("ZEUS_GLOBAL_AUCTION_BOOK_TIMEOUT_SECONDS", "8.0")),
+                float(
+                    os.environ.get(
+                        "ZEUS_GLOBAL_AUCTION_BOOK_TIMEOUT_SECONDS",
+                        "8.0",
+                    )
+                ),
             )
             batch_size = max(
                 1,
@@ -7690,18 +9082,65 @@ def event_bound_live_adapter_from_trade_conn(
             )
 
             def _urgent_book_preemption(stage: str) -> bool:
-                if not _day0_selection_cancelled():
-                    return False
-                logging.getLogger(__name__).info(
-                    "global book epoch preempted by urgent input: stage=%s "
-                    "elapsed_s=%.3f",
+                remaining = work_context.checkpoint(f"book_epoch:{stage}")
+                logging.getLogger(__name__).debug(
+                    "global book epoch checkpoint: stage=%s elapsed_s=%.3f "
+                    "remaining_s=%.3f cancel=%s deadline=%s",
                     stage,
                     _time.monotonic() - _book_started,
+                    remaining,
+                    False,
+                    work_context.deadline_monotonic,
                 )
-                return True
+                return False
+
+            def _publish_book_epoch(probability_slice, epoch, *, stage):
+                work_context.checkpoint(f"book_epoch:{stage}:before_publish")
+                market_authority_refresh_family_keys.difference_update(
+                    probability_slice
+                )
+                return probability_slice, epoch
 
             if _urgent_book_preemption("start"):
                 return probabilities, None
+
+            def _reduce_only_tokens(tokens, probability_slice=None):
+                if tokens is None or reduce_only_book_tokens is None:
+                    if reduce_only_book_tokens is None:
+                        return tokens
+                return _global_reduce_only_book_tokens(
+                    (
+                        probabilities
+                        if probability_slice is None
+                        else probability_slice
+                    ),
+                    held_tokens_by_family,
+                    tokens,
+                )
+
+            def _missing_held_binding_families(
+                probability_slice,
+            ) -> frozenset[str]:
+                if reduce_only_book_tokens is None:
+                    return frozenset()
+                return frozenset(
+                    family_key
+                    for family_key, witness in probability_slice.items()
+                    if held_tokens_by_family.get(family_key)
+                    and not held_tokens_by_family[family_key].issubset(
+                        {
+                            str(token_id or "").strip()
+                            for binding in tuple(
+                                getattr(witness, "bindings", ()) or ()
+                            )
+                            for token_id in (
+                                getattr(binding, "yes_token_id", ""),
+                                getattr(binding, "no_token_id", ""),
+                            )
+                            if str(token_id or "").strip()
+                        }
+                    )
+                )
 
             def _bind(
                 probability_slice,
@@ -7710,30 +9149,92 @@ def event_bound_live_adapter_from_trade_conn(
                 metadata_sink=None,
                 force_current_gamma=False,
             ):
+                missing_held_binding_families = (
+                    _missing_held_binding_families(probability_slice)
+                )
+                if missing_held_binding_families and not force_current_gamma:
+                    valid_slice = {
+                        family_key: witness
+                        for family_key, witness in probability_slice.items()
+                        if family_key not in missing_held_binding_families
+                    }
+                    rebound = (
+                        _bind(
+                            valid_slice,
+                            mode=mode,
+                            metadata_sink=metadata_sink,
+                        )
+                        if valid_slice
+                        else {}
+                    )
+                    missing_slice = {
+                        family_key: probability_slice[family_key]
+                        for family_key in missing_held_binding_families
+                    }
+                    missing_metadata = {} if metadata_sink is not None else None
+                    try:
+                        repaired = _bind(
+                            missing_slice,
+                            mode=mode,
+                            metadata_sink=missing_metadata,
+                            force_current_gamma=True,
+                        )
+                    except (RequestAdmissionDenied, TimeoutError, ValueError) as exc:
+                        logging.getLogger(__name__).warning(
+                            "global reduce-only binding repair unavailable for "
+                            "%d held families; preserving the valid held cut: %s",
+                            len(missing_held_binding_families),
+                            exc,
+                        )
+                    else:
+                        rebound.update(repaired)
+                        if metadata_sink is not None and missing_metadata is not None:
+                            metadata_sink.update(missing_metadata)
+                    return rebound
+                force_current_gamma = (
+                    force_current_gamma
+                    or bool(missing_held_binding_families)
+                )
+                slice_required_tokens = (
+                    None
+                    if missing_held_binding_families
+                    else _reduce_only_tokens(
+                        _global_book_prefetch_tokens(probability_slice),
+                        probability_slice,
+                    )
+                )
+                if (
+                    reduce_only_book_tokens is not None
+                    and slice_required_tokens is not None
+                    and not slice_required_tokens
+                ):
+                    return dict(probability_slice)
                 gamma_batch_requests = 0
                 gamma_event_requests = 0
                 refresh_started_at = datetime.now(UTC)
                 started = _time.monotonic()
-                gamma_deadline: float | None = None
                 gamma = _global_current_gamma_client(
                     timeout_seconds=gamma_timeout,
+                )
+                clob_metadata = (
+                    PolymarketClient(
+                        public_http_timeout=gamma_timeout,
+                        public_request_priority=RequestPriority.SUBMIT_JIT,
+                    )
+                    if reduce_only_book_tokens is not None
+                    else contextlib.nullcontext(None)
                 )
                 # Batch futures may still be inside a slowly streaming response
                 # after the caller's absolute deadline. The process-scoped client
                 # stays valid for those bounded workers; closing a per-wave client
                 # here can wait on them and turn a 6s deadline into minutes.
-                with contextlib.nullcontext(gamma):
+                with contextlib.nullcontext(gamma), clob_metadata as clob:
 
                     def _remaining_gamma_timeout() -> float:
-                        nonlocal gamma_deadline
-                        if gamma_deadline is None:
-                            gamma_deadline = _time.monotonic() + gamma_timeout
-                        remaining = gamma_deadline - _time.monotonic()
-                        if remaining <= 0.0:
-                            raise ValueError(
-                                "GLOBAL_CURRENT_GAMMA_DEADLINE_EXCEEDED"
-                            )
-                        return min(gamma_timeout, remaining)
+                        return work_context.clipped_timeout(
+                            gamma_timeout,
+                            stage="book_metadata:gamma_timeout",
+                        )
 
                     def _gamma_get_once(path, *, params=None, timeout):
                         return _governed_global_gamma_get(
@@ -7744,14 +9245,50 @@ def event_bound_live_adapter_from_trade_conn(
                             priority=RequestPriority.SUBMIT_JIT,
                         )
 
+                    def _clob_market(condition_id):
+                        import httpx
+
+                        if clob is None:
+                            return None
+                        try:
+                            return clob.get_held_clob_market_info(
+                                condition_id,
+                                timeout=work_context.clipped_timeout(
+                                    gamma_timeout,
+                                    stage="book_metadata:clob_timeout",
+                                ),
+                            )
+                        except (
+                            httpx.HTTPError,
+                            RequestAdmissionDenied,
+                        ) as exc:
+                            logging.getLogger(__name__).warning(
+                                "held-risk market metadata unavailable: "
+                                "condition_id=%s error=%s",
+                                condition_id,
+                                type(exc).__name__,
+                            )
+                            return None
+
                     def _gamma_markets(condition_ids):
                         nonlocal gamma_batch_requests
-                        markets, batch_requests = fetch_current_gamma_markets(
-                            condition_ids,
-                            gamma_get=_gamma_get_once,
-                            timeout=gamma_timeout,
-                            total_timeout=_remaining_gamma_timeout(),
-                        )
+                        try:
+                            markets, batch_requests = fetch_current_gamma_markets(
+                                condition_ids,
+                                gamma_get=_gamma_get_once,
+                                timeout=gamma_timeout,
+                                total_timeout=_remaining_gamma_timeout(),
+                            )
+                        except ValueError as exc:
+                            if (
+                                str(exc)
+                                == "GLOBAL_CURRENT_GAMMA_MARKETS_DEADLINE_EXCEEDED"
+                            ):
+                                work_context.checkpoint(
+                                    "book_metadata:gamma_completion"
+                                )
+                            raise
+                        work_context.checkpoint("book_metadata:gamma_completion")
                         gamma_batch_requests += batch_requests
                         return markets
 
@@ -7784,10 +9321,21 @@ def event_bound_live_adapter_from_trade_conn(
                         probability_witnesses=probability_slice,
                         get_gamma_event=_gamma_event,
                         get_gamma_markets=_gamma_markets,
+                        get_clob_market=(
+                            _clob_market
+                            if reduce_only_book_tokens is not None
+                            else None
+                        ),
                         trade_conn=None if force_current_gamma else trade_conn,
                         checked_at_utc=_at,
                         max_workers=16,
                         metadata_sink=metadata_sink,
+                        required_token_ids=(
+                            frozenset(slice_required_tokens)
+                            if reduce_only_book_tokens is not None
+                            and slice_required_tokens is not None
+                            else None
+                        ),
                     )
                 logging.getLogger(__name__).info(
                     "global book epoch stage completed: mode=%s "
@@ -7820,10 +9368,13 @@ def event_bound_live_adapter_from_trade_conn(
                             for row in rows
                         ):
                             refreshed_family_keys.append(str(family_key))
-                    _record_global_book_metadata_refresh_hwm(
-                        trade_conn,
-                        refreshed_family_keys,
-                        refreshed_at=refresh_started_at,
+                    _work_sql(
+                        "book_metadata_refresh_hwm_write",
+                        lambda read_conn: _record_global_book_metadata_refresh_hwm(
+                            read_conn,
+                            refreshed_family_keys,
+                            refreshed_at=refresh_started_at,
+                        ),
                     )
                 return bound_probabilities
 
@@ -7852,6 +9403,10 @@ def event_bound_live_adapter_from_trade_conn(
                             str(getattr(binding, "yes_token_id", "") or ""),
                             str(getattr(binding, "no_token_id", "") or ""),
                         )
+                        if (
+                            reduce_only_book_tokens is None
+                            or token_id in reduce_only_book_tokens
+                        )
                     )
                 }
                 if not stale_family_keys:
@@ -7864,7 +9419,7 @@ def event_bound_live_adapter_from_trade_conn(
                     },
                     mode="capture_current_metadata",
                     metadata_sink=current_metadata,
-                    force_current_gamma=True,
+                    force_current_gamma=reduce_only_book_tokens is None,
                 )
                 refreshed = dict(probability_slice)
                 refreshed.update(rebound)
@@ -7886,18 +9441,34 @@ def event_bound_live_adapter_from_trade_conn(
                     )
                 if tokens is None:
                     tokens = token_hint
+                tokens = _reduce_only_tokens(tokens, probability_slice)
                 if tokens is None:
                     return None
                 projection_checked = captured_at is not None
                 captured_at = captured_at or datetime.now(UTC)
                 fetch_started = _time.monotonic()
-                if not projection_checked:
-                    projected = _projected_global_book_hint(
-                        trade_conn,
-                        tokens,
-                        checked_at=captured_at,
-                        max_age=FRESHNESS_WINDOW_DEFAULT,
+                projected = _monitor_first_global_book_projection(
+                    tokens,
+                    checked_at=captured_at,
+                    max_age=min(
+                        FRESHNESS_WINDOW_DEFAULT,
+                        timedelta(seconds=timeout),
+                    ),
+                    projected=projected,
+                    projected_loader=(
+                        None
+                        if projection_checked
+                        else lambda: _work_sql(
+                            "book_token_projection",
+                            lambda read_conn: _projected_global_book_hint(
+                                read_conn,
+                                tokens,
+                                checked_at=captured_at,
+                                max_age=FRESHNESS_WINDOW_DEFAULT,
+                            ),
+                        )
                     )
+                )
                 projected_books, projected_at = (
                     projected if projected is not None else ({}, None)
                 )
@@ -7945,7 +9516,7 @@ def event_bound_live_adapter_from_trade_conn(
                 ) as clob, polymarket_request_governor.fc03_span("global_book_prefetch"):
                     fetched_books = fetch_current_global_books(
                         missing_tokens,
-                        get_books=lambda chunk: (
+                        get_books=lambda chunk, *, timeout: (
                             clob.get_orderbook_snapshots(
                                 chunk,
                                 timeout=timeout,
@@ -7953,6 +9524,8 @@ def event_bound_live_adapter_from_trade_conn(
                         ),
                         batch_size=batch_size,
                         book_fetch_workers=4,
+                        work_context=work_context,
+                        request_timeout=timeout,
                     )
                     fetch_finished_at = datetime.now(UTC)
                     epoch_at = _global_book_prefetch_epoch_at(
@@ -7965,7 +9538,7 @@ def event_bound_live_adapter_from_trade_conn(
                     if epoch_at is None:
                         refreshed_projection = fetch_current_global_books(
                             tuple(projected_books),
-                            get_books=lambda chunk: (
+                            get_books=lambda chunk, *, timeout: (
                                 clob.get_orderbook_snapshots(
                                     chunk,
                                     timeout=timeout,
@@ -7973,6 +9546,8 @@ def event_bound_live_adapter_from_trade_conn(
                             ),
                             batch_size=batch_size,
                             book_fetch_workers=4,
+                            work_context=work_context,
+                            request_timeout=timeout,
                         )
                         projected_books = dict(refreshed_projection)
                         projection_refetched = len(projected_books)
@@ -8004,12 +9579,44 @@ def event_bound_live_adapter_from_trade_conn(
                 capture_started = _time.monotonic()
                 prefetched_tokens = prefetched[0] if prefetched is not None else None
                 exact_tokens = (
-                    _global_current_executable_prefetch_tokens(
+                    _reduce_only_tokens(
+                        _global_current_executable_prefetch_tokens(
+                            bound_probabilities,
+                            book_metadata_by_key,
+                            checked_at=prefetched[2],
+                        ),
                         bound_probabilities,
-                        book_metadata_by_key,
-                        checked_at=prefetched[2],
                     )
                     if prefetched is not None and prefetched[2] is not None
+                    else None
+                )
+                expected_tokens = (
+                    tuple(
+                        sorted(
+                            {
+                                token_id
+                                for witness in bound_probabilities.values()
+                                for binding in tuple(
+                                    getattr(witness, "bindings", ()) or ()
+                                )
+                                for token_id in (
+                                    str(
+                                        getattr(binding, "yes_token_id", "") or ""
+                                    ).strip(),
+                                    str(
+                                        getattr(binding, "no_token_id", "") or ""
+                                    ).strip(),
+                                )
+                                if token_id in reduce_only_book_tokens
+                            }
+                        )
+                    )
+                    if reduce_only_book_tokens is not None
+                    else _global_book_prefetch_tokens(bound_probabilities)
+                )
+                capture_required_tokens = (
+                    frozenset(expected_tokens)
+                    if reduce_only_book_tokens is not None
                     else None
                 )
                 matching_prefetch = (
@@ -8021,8 +9628,7 @@ def event_bound_live_adapter_from_trade_conn(
                         max_age=FRESHNESS_WINDOW_DEFAULT,
                     )
                     and (
-                        _global_book_prefetch_tokens(bound_probabilities)
-                        == prefetched_tokens
+                        expected_tokens == prefetched_tokens
                         or exact_tokens == prefetched_tokens
                     )
                     else None
@@ -8035,7 +9641,7 @@ def event_bound_live_adapter_from_trade_conn(
                         epoch = capture_current_global_book_epoch(
                             trade_conn,
                             probability_witnesses=bound_probabilities,
-                            get_books=lambda tokens: (
+                            get_books=lambda tokens, *, timeout: (
                                 clob.get_orderbook_snapshots(
                                     tokens,
                                     timeout=timeout,
@@ -8046,6 +9652,9 @@ def event_bound_live_adapter_from_trade_conn(
                             batch_size=batch_size,
                             book_fetch_workers=4,
                             metadata_overrides=book_metadata_by_key,
+                            required_token_ids=capture_required_tokens,
+                            work_context=work_context,
+                            request_timeout=timeout,
                         )
                 else:
                     _, books, captured_at = matching_prefetch
@@ -8060,6 +9669,8 @@ def event_bound_live_adapter_from_trade_conn(
                         metadata_overrides=book_metadata_by_key,
                         prefetched_books=books,
                         prefetched_at_utc=captured_at,
+                        required_token_ids=capture_required_tokens,
+                        work_context=work_context,
                     )
                 logging.getLogger(__name__).info(
                     "global book epoch stage completed: mode=%s "
@@ -8080,19 +9691,21 @@ def event_bound_live_adapter_from_trade_conn(
                 *,
                 mode,
             ):
-                exact_tokens = _global_current_executable_prefetch_tokens(
+                exact_tokens = _reduce_only_tokens(
+                    _global_current_executable_prefetch_tokens(
+                        probability_slice,
+                        book_metadata_by_key,
+                        checked_at=datetime.now(UTC),
+                    ),
                     probability_slice,
-                    book_metadata_by_key,
-                    checked_at=datetime.now(UTC),
                 )
                 if exact_tokens is None:
-                    full_tokens = _global_book_prefetch_tokens(probability_slice)
-                    return (
-                        prefetched
-                        if prefetched is not None
-                        and prefetched[0] == full_tokens
-                        else None
+                    exact_tokens = _reduce_only_tokens(
+                        _global_book_prefetch_tokens(probability_slice),
+                        probability_slice,
                     )
+                if exact_tokens is None:
+                    return None
                 if prefetched is None:
                     prefetched = _prefetch_books(
                         probability_slice,
@@ -8101,7 +9714,16 @@ def event_bound_live_adapter_from_trade_conn(
                     )
                     if prefetched is None:
                         return None
-                _, prefetched_books, prefetched_at = prefetched
+                prefetched_tokens, prefetched_books, prefetched_at = prefetched
+                if not set(exact_tokens).issubset(prefetched_tokens):
+                    prefetched = _prefetch_books(
+                        probability_slice,
+                        mode=mode,
+                        token_override=exact_tokens,
+                    )
+                    if prefetched is None:
+                        return None
+                    _, prefetched_books, prefetched_at = prefetched
                 missing_tokens = tuple(
                     token
                     for token in exact_tokens
@@ -8110,6 +9732,10 @@ def event_bound_live_adapter_from_trade_conn(
                 books = dict(prefetched_books)
                 epoch_at = prefetched_at
                 if missing_tokens:
+                    # SCOPE: only a token still absent after this exact retry is
+                    # non-executable in the cut. DRAIN: retry the missing token
+                    # set once now. RESET: the next cut fetches every actionable
+                    # token again, so confirmed absence cannot become a ratchet.
                     supplement = _prefetch_books(
                         probability_slice,
                         mode=mode,
@@ -8131,46 +9757,105 @@ def event_bound_live_adapter_from_trade_conn(
             # that can change this decision. Untouched families keep fresh q while
             # reusing the token identity already validated by the current epoch.
             cache_checked_at = datetime.now(UTC)
-            metadata_refresh_family_keys = (
-                _global_book_metadata_refresh_family_keys(
-                    trade_conn,
-                    probabilities,
-                    checked_at=cache_checked_at,
-                    refreshed_at_by_family=_global_book_metadata_refresh_hwm(
-                        trade_conn
+            held_binding_refresh_family_keys = (
+                _missing_held_binding_families(probabilities)
+            )
+            if held_binding_refresh_family_keys:
+                (
+                    cached_bound_probabilities,
+                    cached_binding_reason,
+                ) = _work_sql(
+                    "book_held_superset_reuse",
+                    lambda read_conn: _reuse_global_book_superset_token_bindings(
+                        read_conn,
+                        probabilities,
+                        checked_at=cache_checked_at,
                     ),
                 )
+                if cached_bound_probabilities is not None:
+                    probabilities = cached_bound_probabilities
+                    held_binding_refresh_family_keys = (
+                        _missing_held_binding_families(probabilities)
+                    )
+                    logging.getLogger(__name__).info(
+                        "global held-token topology rebound from current cache: "
+                        "families=%d",
+                        len(probabilities),
+                    )
+                elif cached_binding_reason not in {
+                    "cache_empty",
+                    "namespace_changed",
+                    "namespace_unavailable",
+                    "not_cached_superset",
+                }:
+                    logging.getLogger(__name__).info(
+                        "global held-token cached topology reuse rejected: reason=%s",
+                        cached_binding_reason,
+                    )
+            refreshed_at_by_family = _work_sql(
+                "book_metadata_refresh_hwm_read",
+                lambda read_conn: _global_book_metadata_refresh_hwm(read_conn),
+            )
+            metadata_refresh_family_keys = _work_sql(
+                "book_metadata_invalidation",
+                lambda read_conn: _global_book_metadata_refresh_family_keys(
+                    read_conn,
+                    probabilities,
+                    checked_at=cache_checked_at,
+                    refreshed_at_by_family=refreshed_at_by_family,
+                ),
+            )
+            market_authority_refresh_in_cut = frozenset(
+                market_authority_refresh_family_keys.intersection(probabilities)
+            )
+            metadata_refresh_family_keys = metadata_refresh_family_keys.union(
+                held_binding_refresh_family_keys,
+                market_authority_refresh_in_cut,
             )
             effective_book_refresh_family_keys = (
-                None
-                if book_refresh_family_keys is None
-                else book_refresh_family_keys.union(metadata_refresh_family_keys)
+                _effective_global_book_refresh_family_keys(
+                    book_refresh_family_keys,
+                    metadata_refresh_family_keys,
+                    set(market_authority_refresh_in_cut),
+                )
             )
             if metadata_refresh_family_keys:
                 logging.getLogger(__name__).info(
                     "global book metadata refresh required before book I/O: families=%d",
                     len(metadata_refresh_family_keys),
                 )
-            speculative_topology = _global_book_speculative_topology(
-                trade_conn,
-                probabilities,
-            )
-            effective_speculative_book_metadata = (
-                _global_book_speculative_snapshot_metadata(
-                    trade_conn,
-                    speculative_topology,
+            if held_binding_refresh_family_keys:
+                logging.getLogger(__name__).warning(
+                    "global held-token witness rebind required: families=%d",
+                    len(held_binding_refresh_family_keys),
                 )
+            speculative_topology = _work_sql(
+                "book_speculative_topology",
+                lambda read_conn: _global_book_speculative_topology(
+                    read_conn,
+                    probabilities,
+                ),
+            )
+            effective_speculative_book_metadata = _work_sql(
+                "book_speculative_snapshot_metadata",
+                lambda read_conn: _global_book_speculative_snapshot_metadata(
+                    read_conn,
+                    speculative_topology,
+                ),
             )
             effective_speculative_book_metadata.update(
                 speculative_book_metadata_by_key
             )
-            cached_before_bind, cache_before_reason = _probe_global_book_epoch_cache(
-                trade_conn,
-                probabilities,
-                checked_at=cache_checked_at,
-                allowed=True,
-                topology_hint=speculative_topology,
-                mutable_family_keys=effective_book_refresh_family_keys,
+            cached_before_bind, cache_before_reason = _work_sql(
+                "book_cache_probe_before_bind",
+                lambda read_conn: _probe_global_book_epoch_cache(
+                    read_conn,
+                    probabilities,
+                    checked_at=cache_checked_at,
+                    allowed=True,
+                    topology_hint=speculative_topology,
+                    mutable_family_keys=effective_book_refresh_family_keys,
+                ),
             )
             if cached_before_bind is None:
                 logging.getLogger(__name__).info(
@@ -8182,9 +9867,13 @@ def event_bound_live_adapter_from_trade_conn(
                 (
                     superset_bound_probabilities,
                     superset_reuse_reason,
-                ) = _reuse_global_book_superset_token_bindings(
-                    trade_conn,
-                    probabilities,
+                ) = _work_sql(
+                    "book_superset_reuse",
+                    lambda read_conn: _reuse_global_book_superset_token_bindings(
+                        read_conn,
+                        probabilities,
+                        checked_at=cache_checked_at,
+                    ),
                 )
                 if superset_bound_probabilities is not None:
                     logging.getLogger(__name__).info(
@@ -8205,12 +9894,15 @@ def event_bound_live_adapter_from_trade_conn(
             reusable_topology_entry = None
             if cached_before_bind is None and cache_before_reason == "expired":
                 reusable_topology_entry, topology_cache_reason = (
-                    _probe_global_book_cache_entry(
-                        trade_conn,
-                        probabilities,
-                        allowed=True,
-                        topology_hint=speculative_topology,
-                        mutable_family_keys=effective_book_refresh_family_keys,
+                    _work_sql(
+                        "book_expired_topology_cache_probe",
+                        lambda read_conn: _probe_global_book_cache_entry(
+                            read_conn,
+                            probabilities,
+                            allowed=True,
+                            topology_hint=speculative_topology,
+                            mutable_family_keys=effective_book_refresh_family_keys,
+                        ),
                     )
                 )
                 if reusable_topology_entry is None:
@@ -8273,9 +9965,13 @@ def event_bound_live_adapter_from_trade_conn(
                             len(rebound_probabilities),
                             len(getattr(epoch, "assets", ())),
                         )
-                        return rebound_probabilities, _scope_global_book_epoch(
-                            epoch,
+                        return _publish_book_epoch(
                             rebound_probabilities,
+                            _scope_global_book_epoch(
+                                epoch,
+                                rebound_probabilities,
+                            ),
+                            stage="cache_hit",
                         )
             if cached_before_bind is not None and eligible_refresh_family_keys:
                 cached_probabilities = _cached_global_book_probabilities(
@@ -8289,7 +9985,15 @@ def event_bound_live_adapter_from_trade_conn(
                     state_tokens_by_family.setdefault(str(state[0]), set()).add(
                         str(state[4])
                     )
-                exact_refresh_allowed = cached_probabilities is not None
+                exact_refresh_allowed = (
+                    cached_probabilities is not None
+                    and not held_binding_refresh_family_keys.intersection(
+                        eligible_refresh_family_keys
+                    )
+                    and not metadata_refresh_family_keys.intersection(
+                        eligible_refresh_family_keys
+                    )
+                )
                 for family_key in eligible_refresh_family_keys:
                     family_tokens = state_tokens_by_family.get(family_key, set())
                     event_tokens = projected_book_refresh_tokens.get(family_key)
@@ -8308,11 +10012,14 @@ def event_bound_live_adapter_from_trade_conn(
                         for family_key in eligible_refresh_family_keys
                         for token in state_tokens_by_family.get(family_key, ())
                     )
-                    projected_rows = _projected_global_book_rows_hint(
-                        trade_conn,
-                        projection_tokens,
-                        checked_at=cache_checked_at,
-                        max_age=FRESHNESS_WINDOW_DEFAULT,
+                    projected_rows = _work_sql(
+                        "book_exact_token_projection",
+                        lambda read_conn: _projected_global_book_rows_hint(
+                            read_conn,
+                            projection_tokens,
+                            checked_at=cache_checked_at,
+                            max_age=FRESHNESS_WINDOW_DEFAULT,
+                        ),
                     )
                     try:
                         if projected_rows is None:
@@ -8324,13 +10031,16 @@ def event_bound_live_adapter_from_trade_conn(
                         )
 
                         refreshed_epoch, changed_tokens = (
-                            refresh_current_global_book_epoch_tokens(
-                                trade_conn,
-                                epoch=cached_before_bind,
-                                projected_books=projected_rows,
-                                required_tokens=tuple(exact_refresh_tokens),
-                                checked_at_utc=cache_checked_at,
-                                metadata_overrides=book_metadata_by_key,
+                            _work_sql(
+                                "book_exact_token_refresh",
+                                lambda read_conn: refresh_current_global_book_epoch_tokens(
+                                    read_conn,
+                                    epoch=cached_before_bind,
+                                    projected_books=projected_rows,
+                                    required_tokens=tuple(exact_refresh_tokens),
+                                    checked_at_utc=cache_checked_at,
+                                    metadata_overrides=book_metadata_by_key,
+                                ),
                             )
                         )
                         cached_probability_slice = {
@@ -8350,12 +10060,15 @@ def event_bound_live_adapter_from_trade_conn(
                     else:
                         cache_probabilities = dict(cached_probabilities)
                         cache_probabilities.update(rebound_probabilities)
-                        _store_global_book_epoch(
-                            trade_conn,
-                            cache_probabilities,
-                            refreshed_epoch,
-                            checked_at=cache_checked_at,
-                            metadata_by_key=book_metadata_by_key,
+                        _work_sql(
+                            "book_token_projection_cache_store",
+                            lambda read_conn: _store_global_book_epoch(
+                                read_conn,
+                                cache_probabilities,
+                                refreshed_epoch,
+                                checked_at=cache_checked_at,
+                                metadata_by_key=book_metadata_by_key,
+                            ),
                         )
                         logging.getLogger(__name__).info(
                             "global book token projection refresh completed: "
@@ -8366,9 +10079,13 @@ def event_bound_live_adapter_from_trade_conn(
                             len(exact_refresh_tokens),
                             changed_tokens,
                         )
-                        return rebound_probabilities, _scope_global_book_epoch(
-                            refreshed_epoch,
+                        return _publish_book_epoch(
                             rebound_probabilities,
+                            _scope_global_book_epoch(
+                                refreshed_epoch,
+                                rebound_probabilities,
+                            ),
+                            stage="token_projection_refresh",
                         )
             prefetch_slice = None
             prefetch_mode = ""
@@ -8391,9 +10108,12 @@ def event_bound_live_adapter_from_trade_conn(
                     for family_key in eligible_refresh_family_keys
                 }
                 prefetch_mode = "family_delta_books"
-                delta_topology = _global_book_speculative_topology(
-                    trade_conn,
-                    prefetch_slice,
+                delta_topology = _work_sql(
+                    "book_delta_speculative_topology",
+                    lambda read_conn: _global_book_speculative_topology(
+                        read_conn,
+                        prefetch_slice,
+                    ),
                 )
                 if delta_topology is not None:
                     prefetch_token_hint = tuple(
@@ -8531,6 +10251,9 @@ def event_bound_live_adapter_from_trade_conn(
                         bind_slice,
                         mode="current_metadata",
                         metadata_sink=full_metadata,
+                        force_current_gamma=bool(
+                            market_authority_refresh_in_cut.intersection(bind_slice)
+                        ),
                     )
                 )
                 if _urgent_book_preemption("after_current_metadata"):
@@ -8545,6 +10268,9 @@ def event_bound_live_adapter_from_trade_conn(
                         bind_slice,
                         mode="current_metadata",
                         metadata_sink=full_metadata,
+                        force_current_gamma=bool(
+                            market_authority_refresh_in_cut.intersection(bind_slice)
+                        ),
                     )
                 )
                 if _urgent_book_preemption("after_day0_current_metadata"):
@@ -8575,11 +10301,14 @@ def event_bound_live_adapter_from_trade_conn(
                 if projection_tokens is None:
                     projection_tokens = prefetch_token_hint
                 projected = (
-                    _projected_global_book_hint(
-                        trade_conn,
-                        projection_tokens,
-                        checked_at=projection_at,
-                        max_age=FRESHNESS_WINDOW_DEFAULT,
+                    _work_sql(
+                        "book_parallel_token_projection",
+                        lambda read_conn: _projected_global_book_hint(
+                            read_conn,
+                            projection_tokens,
+                            checked_at=projection_at,
+                            max_age=FRESHNESS_WINDOW_DEFAULT,
+                        ),
                     )
                     if projection_tokens is not None
                     else None
@@ -8603,6 +10332,11 @@ def event_bound_live_adapter_from_trade_conn(
                             bind_slice,
                             mode="current_metadata",
                             metadata_sink=full_metadata,
+                            force_current_gamma=bool(
+                                market_authority_refresh_in_cut.intersection(
+                                    bind_slice
+                                )
+                            ),
                         )
                     )
                     while True:
@@ -8616,21 +10350,49 @@ def event_bound_live_adapter_from_trade_conn(
                             if future.done():
                                 raise
                 finally:
-                    # A running public-book request owns no canonical state. Let
-                    # its bounded HTTP timeout finish outside the reactor instead
-                    # of making executor teardown retain the global decision lane.
-                    pool.shutdown(wait=False, cancel_futures=True)
+                    # The worker owns a client whose request timeout is clipped
+                    # to this cut. Cancel queued work and keep that client alive
+                    # until every started request has terminated.
+                    pool.shutdown(wait=True, cancel_futures=True)
             if _urgent_book_preemption("after_initial_book_io"):
                 return probabilities, None
             bound_probabilities = dict(retained_bound_probabilities)
             bound_probabilities.update(rebound_probabilities)
+            if reduce_only_book_tokens is not None:
+                bound_probabilities = {
+                    family_key: witness
+                    for family_key, witness in bound_probabilities.items()
+                    if held_tokens_by_family.get(family_key)
+                    and held_tokens_by_family[family_key].issubset(
+                        {
+                            str(token_id or "").strip()
+                            for binding in tuple(
+                                getattr(witness, "bindings", ()) or ()
+                            )
+                            for token_id in (
+                                getattr(binding, "yes_token_id", ""),
+                                getattr(binding, "no_token_id", ""),
+                            )
+                            if str(token_id or "").strip()
+                        }
+                    )
+                }
+            if reduce_only_book_tokens is not None and not bound_probabilities:
+                logging.getLogger(__name__).warning(
+                    "global reduce-only book metadata unavailable for every "
+                    "held family; returning an empty executable cut"
+                )
+                return {}, None
             cache_checked_at = datetime.now(UTC)
-            cached, cache_after_reason = _probe_global_book_epoch_cache(
-                trade_conn,
-                bound_probabilities,
-                checked_at=cache_checked_at,
-                allowed=True,
-                mutable_family_keys=effective_book_refresh_family_keys,
+            cached, cache_after_reason = _work_sql(
+                "book_cache_probe_after_bind",
+                lambda read_conn: _probe_global_book_epoch_cache(
+                    read_conn,
+                    bound_probabilities,
+                    checked_at=cache_checked_at,
+                    allowed=True,
+                    mutable_family_keys=effective_book_refresh_family_keys,
+                ),
             )
             if cached is None:
                 logging.getLogger(__name__).info(
@@ -8647,9 +10409,13 @@ def event_bound_live_adapter_from_trade_conn(
                     len(bound_probabilities),
                     len(getattr(cached, "assets", ())),
                 )
-                return bound_probabilities, _scope_global_book_epoch(
-                    cached,
+                return _publish_book_epoch(
                     bound_probabilities,
+                    _scope_global_book_epoch(
+                        cached,
+                        bound_probabilities,
+                    ),
+                    stage="cache_after_bind",
                 )
 
             if (
@@ -8698,12 +10464,15 @@ def event_bound_live_adapter_from_trade_conn(
                             ),
                         )
                     )
-                    cache_store_status = _store_global_book_epoch(
-                        trade_conn,
-                        merged_probabilities,
-                        merged_epoch,
-                        checked_at=datetime.now(UTC),
-                        metadata_by_key=book_metadata_by_key,
+                    cache_store_status = _work_sql(
+                        "book_delta_cache_store",
+                        lambda read_conn: _store_global_book_epoch(
+                            read_conn,
+                            merged_probabilities,
+                            merged_epoch,
+                            checked_at=datetime.now(UTC),
+                            metadata_by_key=book_metadata_by_key,
+                        ),
                     )
                     if cache_store_status != "stored":
                         logging.getLogger(__name__).warning(
@@ -8719,9 +10488,13 @@ def event_bound_live_adapter_from_trade_conn(
                         len(merged_probabilities),
                         len(merged_epoch.assets),
                     )
-                    return bound_probabilities, _scope_global_book_epoch(
-                        merged_epoch,
+                    return _publish_book_epoch(
                         bound_probabilities,
+                        _scope_global_book_epoch(
+                            merged_epoch,
+                            bound_probabilities,
+                        ),
+                        stage="delta_merge",
                     )
                 except (TypeError, ValueError) as exc:
                     logging.getLogger(__name__).warning(
@@ -8734,6 +10507,11 @@ def event_bound_live_adapter_from_trade_conn(
                         probabilities,
                         mode="current_metadata_fallback",
                         metadata_sink=full_metadata,
+                        force_current_gamma=bool(
+                            market_authority_refresh_in_cut.intersection(
+                                probabilities
+                            )
+                        ),
                     )
                     if _urgent_book_preemption("after_fallback_metadata"):
                         return probabilities, None
@@ -8762,22 +10540,28 @@ def event_bound_live_adapter_from_trade_conn(
                 cache_epoch,
                 cache_metadata,
                 cache_extend_status,
-            ) = _extend_global_book_epoch_cache(
-                trade_conn,
-                bound_probabilities,
-                epoch,
-                checked_at=datetime.now(UTC),
-                metadata_by_key=book_metadata_by_key,
+            ) = _work_sql(
+                "book_full_cache_extend",
+                lambda read_conn: _extend_global_book_epoch_cache(
+                    read_conn,
+                    bound_probabilities,
+                    epoch,
+                    checked_at=datetime.now(UTC),
+                    metadata_by_key=book_metadata_by_key,
+                ),
             )
             cache_store_status = (
                 "stored"
                 if cache_extend_status == "extended"
-                else _store_global_book_epoch(
-                    trade_conn,
-                    cache_probabilities,
-                    cache_epoch,
-                    checked_at=datetime.now(UTC),
-                    metadata_by_key=cache_metadata,
+                else _work_sql(
+                    "book_full_cache_store",
+                    lambda read_conn: _store_global_book_epoch(
+                        read_conn,
+                        cache_probabilities,
+                        cache_epoch,
+                        checked_at=datetime.now(UTC),
+                        metadata_by_key=cache_metadata,
+                    ),
                 )
             )
             if cache_store_status != "stored":
@@ -8799,7 +10583,18 @@ def event_bound_live_adapter_from_trade_conn(
                     len(bound_probabilities),
                     len(getattr(epoch, "assets", ())),
                 )
-            return bound_probabilities, epoch
+            return _publish_book_epoch(
+                bound_probabilities,
+                epoch,
+                stage="full_capture",
+            )
+
+        def _current_book_epoch(probabilities, _at, work_context=None):
+            return _current_book_epoch_with_context(
+                probabilities,
+                _at,
+                work_context or global_work_context,
+            )
 
         def _current_entry_capital_limit(
             candidate,
@@ -8807,6 +10602,21 @@ def event_bound_live_adapter_from_trade_conn(
             market_event_id,
             _owner_event_id,
         ):
+            nonlocal auction_capital_authority
+            # Capital authority constrains risk-increasing BUYs only.  The
+            # solver evaluates SELL before this resolver and policy-rejected
+            # BUYs never call it, so resolve lazily: entry containment must not
+            # disable SELL/HOLD/CASH or forecast-carrier bookkeeping.  An
+            # entry-capable cycle still reaches the canonical snapshot here
+            # and fails closed unchanged when the allocator is unavailable.
+            if auction_capital_authority is None:
+                from src.risk_allocator import (
+                    snapshot_global_auction_capital_authority,
+                )
+
+                auction_capital_authority = (
+                    snapshot_global_auction_capital_authority()
+                )
             return auction_capital_authority.capacity_usd(
                 market_id=str(gamma_market_id),
                 event_id=str(market_event_id),
@@ -8814,15 +10624,34 @@ def event_bound_live_adapter_from_trade_conn(
                 correlation_key=_global_candidate_correlation_key(candidate),
             )
 
-        strategy_policy_cache: dict[str, str | None] = {}
+        strategy_policy_cache: dict[tuple[str, str], str | None] = {}
 
-        def _current_entry_candidate_policy(candidate):
+        def _current_entry_candidate_policy(
+            candidate,
+            *,
+            proof_only: bool = False,
+        ):
             action = str(
                 getattr(candidate, "action", "BUY") or "BUY"
             ).strip().upper()
             if action == "SELL":
+                # SCOPE: only unrelated held positions in this exact completion
+                # cut. DRAIN: the requested position's SELL/HOLD/CASH comparison
+                # reaches one terminal receipt or actuation. RESET: the next
+                # adapter is rebuilt from the remaining durable request keys.
+                if exact_completion_sell_keys and (
+                    str(getattr(candidate, "position_id", "") or "").strip(),
+                    str(getattr(candidate, "token_id", "") or "").strip(),
+                ) not in exact_completion_sell_keys:
+                    return "GLOBAL_EXACT_HELD_COMPLETION_OTHER_POSITION"
                 return None
-            if entry_submit_suppression_reason is not None:
+            # The proof solve has no actuator and therefore may ignore only
+            # admission state whose own recovery needs current economic
+            # evidence. Candidate-local data/source/price/capital laws and
+            # restrictive manual strategy controls remain identical to live
+            # selection; the feasibility helper also exposes economics behind
+            # an automated performance gate only in this proof solve.
+            if entry_submit_suppression_reason is not None and not proof_only:
                 return entry_submit_suppression_reason
             family_block_reason = _entry_family_blocked_candidate_reason(
                 candidate,
@@ -8837,12 +10666,33 @@ def event_bound_live_adapter_from_trade_conn(
                 return "GLOBAL_ENTRY_FEASIBILITY_OWNER_MISSING"
             event_type, metric, day0_truth_by_bin_side = owner
             bin_id = str(getattr(candidate, "bin_id", "") or "").strip()
+            day0_payoff_truth = day0_truth_by_bin_side.get((bin_id, side))
+            probability_semantics_revision = (
+                _global_entry_probability_revision_by_family.get(family_key)
+            )
+            # SCOPE: only risk-increasing BUYs whose current Day0 payoff is
+            # unresolved AND whose current probability semantics are absent or
+            # unknown; deterministic facts, current statistical witnesses, and
+            # every SELL/HOLD/CASH proposal remain eligible. DRAIN: probability
+            # preparation stamps the current Day0 or qkernel revision each cut.
+            # RESET: a current monotone fact makes this side LOCKED/REFUTED, or
+            # the next current probability witness restores statistical entry.
+            day0_probability_reason = (
+                _day0_unresolved_entry_probability_rejection_reason(
+                    day0_payoff_truth=day0_payoff_truth,
+                    probability_semantics_revision=(
+                        probability_semantics_revision
+                    ),
+                )
+            )
+            if day0_probability_reason is not None:
+                return day0_probability_reason
             try:
                 strategy_key = _event_bound_strategy_key(
                     event_type=event_type,
                     direction=f"buy_{side.lower()}",
                     metric=metric,
-                    day0_payoff_truth=day0_truth_by_bin_side.get((bin_id, side)),
+                    day0_payoff_truth=day0_payoff_truth,
                     require_metric_live=True,
                 )
             except ValueError as exc:
@@ -8850,8 +10700,12 @@ def event_bound_live_adapter_from_trade_conn(
             return _global_current_entry_feasibility_rejection_reason(
                 candidate,
                 strategy_key=strategy_key,
+                probability_semantics_revision=(
+                    probability_semantics_revision
+                ),
                 strategy_policy_conn=trade_conn,
                 strategy_policy_cache=strategy_policy_cache,
+                observe_through_automated_risk_gate=proof_only,
             )
 
         try:
@@ -8892,13 +10746,29 @@ def event_bound_live_adapter_from_trade_conn(
                 # positions from this same canonical trade connection at selection.
                 portfolio_state_provider=None,
                 current_book_epoch_provider=_current_book_epoch,
+                market_authority_refresh=_require_market_authority_refresh,
+                work_context=global_work_context,
                 current_capital_limit_resolver=_current_entry_capital_limit,
                 # Apply the same configured submit authority before expensive
                 # preflight. SELL remains eligible in reduce-only operation.
                 candidate_policy_rejection_resolver=(
                     _current_entry_candidate_policy
                 ),
-                buy_candidates_enabled=entry_submit_suppression_reason is None,
+                proof_candidate_policy_rejection_resolver=(
+                    lambda candidate: _current_entry_candidate_policy(
+                        candidate,
+                        proof_only=True,
+                    )
+                ),
+                # A held-SELL completion wake exists because local monitoring
+                # found a sell candidate that still needs the globally
+                # comparable SELL/HOLD/CASH cut.  Do not make that cut depend
+                # on metadata for unrelated speculative BUY families.
+                buy_candidates_enabled=(
+                    entry_submit_suppression_reason is None
+                    and entry_pause_reason is None
+                    and not selection_completion_reserved
+                ),
                 fractional_kelly_multiplier=Decimal(
                     str(_runtime_kelly_multiplier())
                 ),
@@ -8906,13 +10776,22 @@ def event_bound_live_adapter_from_trade_conn(
                 selection_snapshot_connections=(
                     forecast_conn,
                 ),
+                preflight_sqlite_connections=(
+                    forecast_conn,
+                    topology_conn,
+                    calibration_conn,
+                    live_cap_conn or trade_conn,
+                    trade_conn,
+                ),
                 epoch_superseded=_epoch_superseded,
                 selection_cancelled=_day0_selection_cancelled,
-                # Delta facts narrow refresh I/O, never the economic feasible set.
-                # Restricting the auction here made unchanged positive candidates
-                # disappear after another family moved, so CASH was only optimal
-                # inside the changed-family slice rather than across the venue.
-                restrict_to_family_keys=None,
+                final_actuation_cancelled=_hard_day0_authority_cancelled,
+                held_sell_reauction_requests=held_sell_reauction_requests,
+                # Ordinary proof-only entry evaluation remains global. An exact
+                # held-SELL completion instead owns only the requested actions:
+                # portfolio wealth still carries every holding, while unrelated
+                # speculative families cannot consume its bounded exit deadline.
+                restrict_to_family_keys=exact_completion_family_keys,
             )
             logging.getLogger(__name__).debug(
                 "global probability family cache: hits=%d ineligible_hits=%d "
@@ -8971,6 +10850,16 @@ def event_bound_live_adapter_from_trade_conn(
             except Exception:  # noqa: BLE001 - commit is a lock-release boundary; never mask the real result/raise
                 pass
 
+    def _bind_global_claim_generations(
+        generations: Mapping[str, str] | None,
+        attempt_counts: Mapping[str, int] | None,
+    ) -> None:
+        nonlocal _global_claim_generations, _global_claim_attempt_counts
+        _global_claim_generations = generations if generations is not None else {}
+        _global_claim_attempt_counts = (
+            attempt_counts if attempt_counts is not None else {}
+        )
+
     # FIX B: expose the per-cycle ledger so the reactor commits/rolls back
     # provisional reservations in its post-submit phase.
     _submit.reservation_ledger = portfolio_reservation  # type: ignore[attr-defined]
@@ -8981,6 +10870,9 @@ def event_bound_live_adapter_from_trade_conn(
     _submit._live_ack_count = _live_ack_count  # type: ignore[attr-defined]
     _submit.prepare_global_event = _prepare_global_event  # type: ignore[attr-defined]
     _submit.process_global_batch = _process_global_batch  # type: ignore[attr-defined]
+    _submit.bind_global_claim_generations = (  # type: ignore[attr-defined]
+        _bind_global_claim_generations
+    )
     return _submit
 
 
@@ -9256,6 +11148,10 @@ def _qkernel_selected_route_fdr_proof(
 
     Return ``None`` for non-qkernel proofs so the legacy BH path remains
     byte-for-byte responsible for legacy selections.
+
+    A sealed global current-state action has already been ranked on posterior-
+    mean expected log wealth.  Its false-edge rate remains recorded confidence
+    evidence, but it cannot delete that fixed action at preflight.
     """
 
     cert = _qkernel_fdr_execution_economics(selected_proof)
@@ -9267,7 +11163,10 @@ def _qkernel_selected_route_fdr_proof(
     from src.events.money_path_adapters import FdrProof
     from src.strategy.selection_family import DEFAULT_FDR_ALPHA
 
-    passed = bool(selected_proof.passed_prefilter) and false_edge_rate <= float(DEFAULT_FDR_ALPHA)
+    current_state_action = _declares_global_current_state_execution_economics(cert)
+    passed = bool(selected_proof.passed_prefilter) and (
+        current_state_action or false_edge_rate <= float(DEFAULT_FDR_ALPHA)
+    )
     return FdrProof(
         fdr_family_id=family_id,
         attempted_hypotheses=len(all_hypothesis_ids),
@@ -9842,11 +11741,13 @@ def _global_selected_order_economics_drift(
     decision: object,
     current_candidate: object,
 ) -> str | None:
-    """Name any current curve change that can alter the global argmax.
+    """Reject a JIT BUY unless the selected fixed order still dominates.
 
-    Snapshot and book hashes are evidence carriers.  Every economic field is
-    exact: even a cheaper prefix or an unconsumed tail change can move the
-    Fractional-Kelly optimum and therefore requires a new complete auction.
+    The global auction selected one exact share count, not an immutable book
+    serialization. A hash or unconsumed ask-tail change is elapsed-time
+    evidence, not an economic veto. The fixed BUY remains submit-safe when
+    identity and venue terms are unchanged and the fresh curve fills the same
+    shares for no more all-in cost at no worse a limit.
     """
 
     selected_candidate = getattr(decision, "candidate", None)
@@ -9854,24 +11755,89 @@ def _global_selected_order_economics_drift(
     current = getattr(current_candidate, "executable_cost_curve", None)
     if selected is None or current is None:
         return "curve_missing"
-    economic_fields = (
+    selected_neg_risk = getattr(selected_candidate, "neg_risk", None)
+    current_neg_risk = getattr(current_candidate, "neg_risk", None)
+    economic_fields = [
         ("token", selected.token_id, current.token_id),
         ("side", selected.side, current.side),
         ("fee", selected.fee_model.fee_rate, current.fee_model.fee_rate),
         ("tick", selected.min_tick, current.min_tick),
         ("min_order", selected.min_order_size, current.min_order_size),
         (
-            "levels",
-            tuple((level.price, level.size) for level in selected.levels),
-            tuple((level.price, level.size) for level in current.levels),
+            "execution_mode",
+            str(getattr(selected_candidate, "execution_mode", "") or ""),
+            str(getattr(current_candidate, "execution_mode", "") or ""),
         ),
-    )
+    ]
+    # Generic curve comparisons remain useful to the non-production solver
+    # tests. Actual JIT rebinding below requires typed negRisk authority before
+    # a candidate can reach submit; when both sides carry it, it is exact
+    # economics and any change requires re-auction.
+    if isinstance(selected_neg_risk, bool) and isinstance(current_neg_risk, bool):
+        economic_fields.append(("neg_risk", selected_neg_risk, current_neg_risk))
     drift = tuple(
         name
         for name, selected_value, current_value in economic_fields
         if selected_value != current_value
     )
-    return f"fields={','.join(drift)}" if drift else None
+    if drift:
+        return f"fields={','.join(drift)}"
+
+    shares = Decimal(str(getattr(decision, "shares", "0") or "0"))
+    selected_cost = Decimal(str(getattr(decision, "cost_usd", "0") or "0"))
+    selected_limit = Decimal(
+        str(getattr(decision, "limit_price", "0") or "0")
+    )
+    if shares == 0 and selected_cost == 0 and selected_limit == 0:
+        # Metadata-only callers use this helper to verify typed market-authority
+        # drift. Production GlobalSingleOrderDecision always carries all three.
+        return None
+    if shares <= 0 or selected_limit <= 0:
+        return "selected_economics_invalid"
+
+    def fixed_buy_economics(curve: object) -> tuple[Decimal, Decimal] | None:
+        remaining = shares
+        cost = Decimal("0")
+        limit = Decimal("0")
+        try:
+            for level in curve.levels:
+                take = min(level.size, remaining)
+                if take > 0:
+                    limit = level.price
+                    cost += take * curve.fee_model.all_in_price(level.price)
+                    remaining -= take
+                if remaining <= Decimal("1e-9"):
+                    break
+        except AttributeError:
+            return None
+        return None if remaining > Decimal("1e-9") else (cost, limit)
+
+    if selected_cost <= 0:
+        selected_curve = getattr(selected_candidate, "economic_cost_curve", selected)
+        selected_economics = fixed_buy_economics(selected_curve)
+        if selected_economics is None:
+            return "selected_economics_invalid:depth_infeasible"
+        selected_cost, _selected_curve_limit = selected_economics
+    curve = getattr(current_candidate, "economic_cost_curve", current)
+    current_economics = fixed_buy_economics(curve)
+    if current_economics is None:
+        return f"depth_infeasible:required={shares}"
+    current_cost, current_limit = current_economics
+    breaches = tuple(
+        name
+        for name, breached in (
+            ("all_in_cost", current_cost > selected_cost + Decimal("1e-9")),
+            ("limit", current_limit > selected_limit + Decimal("1e-9")),
+        )
+        if breached
+    )
+    if not breaches:
+        return None
+    return (
+        f"{','.join(breaches)}:shares={shares}:"
+        f"cost={selected_cost}->{current_cost}:"
+        f"limit={selected_limit}->{current_limit}"
+    )
 
 
 def _global_selected_order_economics_preserved(
@@ -9895,6 +11861,7 @@ def _global_buy_candidate_from_raw_book(
     raw_book: Mapping[str, object],
     *,
     captured_at_utc: datetime,
+    market_authority: _CurrentGlobalMarketAuthority,
 ) -> object:
     """Replace one BUY candidate with the exact full JIT ask curve."""
 
@@ -9910,6 +11877,8 @@ def _global_buy_candidate_from_raw_book(
     ).strip()
     if selected_curve is None or not token_id:
         raise ValueError("GLOBAL_BUY_SELECTED_CURVE_MISSING")
+    if not isinstance(getattr(candidate, "neg_risk", None), bool):
+        raise ValueError("GLOBAL_BUY_JIT_NEG_RISK_AUTHORITY_MISSING")
     if raw_token != token_id:
         raise ValueError("GLOBAL_BUY_JIT_TOKEN_MISMATCH")
     raw_asks = raw_book.get("asks")
@@ -9935,7 +11904,7 @@ def _global_buy_candidate_from_raw_book(
         bid_levels = tuple(
             sorted(
                 (
-                    BookLevel(
+                    BidBookLevel(
                         price=Decimal(str(raw["price"])),
                         size=Decimal(str(raw["size"])),
                     )
@@ -9950,43 +11919,185 @@ def _global_buy_candidate_from_raw_book(
         raise ValueError("GLOBAL_BUY_JIT_BID_LEVEL_INVALID") from exc
     if len(bid_levels) != len(raw_bids or ()):
         raise ValueError("GLOBAL_BUY_JIT_BID_LEVEL_INVALID")
-    try:
-        min_tick = Decimal(
-            str(raw_book.get("tick_size") or selected_curve.min_tick)
+    for level in bid_levels:
+        ratio = level.price / market_authority.min_tick
+        if abs(ratio - ratio.to_integral_value()) > Decimal("1e-9"):
+            raise ValueError(
+                "GLOBAL_BUY_JIT_BID_LEVEL_INVALID:off_tick:"
+                f"token_id={token_id}:price={level.price}:"
+                f"min_tick={market_authority.min_tick}"
+            )
+    for raw_names, current in (
+        (("tick_size", "min_tick_size", "minTickSize"), market_authority.min_tick),
+        (
+            ("min_order_size", "minOrderSize", "order_min_size"),
+            market_authority.min_order_size,
+        ),
+    ):
+        raw_value = next(
+            (raw_book[name] for name in raw_names if raw_book.get(name) not in (None, "")),
+            None,
         )
-        min_order_size = Decimal(
-            str(raw_book.get("min_order_size") or selected_curve.min_order_size)
-        )
-    except (ArithmeticError, TypeError, ValueError) as exc:
-        raise ValueError("GLOBAL_BUY_JIT_MARKET_RULE_INVALID") from exc
+        if raw_value is not None and Decimal(str(raw_value)) != current:
+            raise ValueError("GLOBAL_BUY_JIT_MARKET_METADATA_CONFLICT")
+    raw_neg_risk_names = ("neg_risk", "negRisk", "negative_risk")
+    if any(raw_book.get(name) is not None for name in raw_neg_risk_names):
+        from src.data.market_scanner import _boolish_market_field
+
+        raw_neg_risk = _boolish_market_field(dict(raw_book), *raw_neg_risk_names)
+        if raw_neg_risk is None or raw_neg_risk != market_authority.neg_risk:
+            raise ValueError("GLOBAL_BUY_JIT_MARKET_METADATA_CONFLICT")
     # Venue ``hash`` is opaque and is not guaranteed to be a SHA-256 digest.
     # Snapshot authority requires the digest of the actual raw book payload.
-    book_hash = stable_hash(dict(raw_book))
-    snapshot_id = stable_hash(
-        (
-            "global-buy-jit",
-            getattr(candidate, "family_key", ""),
-            getattr(candidate, "bin_id", ""),
-            getattr(candidate, "condition_id", ""),
-            getattr(candidate, "side", ""),
-            token_id,
-            book_hash,
-            captured_at_utc.isoformat(),
-        )
-    )
+    book_hash = market_authority.snapshot.raw_orderbook_hash
+    snapshot_id = market_authority.snapshot.snapshot_id
     curve = ExecutableCostCurve(
         token_id=token_id,
         side=getattr(candidate, "side"),
         snapshot_id=snapshot_id,
         book_hash=book_hash,
         levels=levels,
-        fee_model=selected_curve.fee_model,
-        min_tick=min_tick,
-        min_order_size=min_order_size,
+        fee_model=FeeModel(fee_rate=market_authority.fee_rate),
+        min_tick=market_authority.min_tick,
+        min_order_size=market_authority.min_order_size,
         quote_ttl=selected_curve.quote_ttl,
-        fee_details=selected_curve.fee_details,
+        fee_details=market_authority.fee_details,
     )
-    from src.solve.solver import executable_curve_identity
+    from src.solve.solver import (
+        CurrentMakerFillWitness,
+        current_maker_fill_witness_identity,
+        current_precliff_liquidation_capacity,
+        executable_curve_identity,
+        maker_fill_candidate_binding_identity,
+        passive_buy_proposal_curve,
+    )
+
+    proposal = None
+    maker_fill_witness = None
+    selected_execution_mode = str(
+        getattr(candidate, "execution_mode", "") or ""
+    ).strip().upper()
+    if selected_execution_mode == "MAKER_REST":
+        liquidation_capacity = current_precliff_liquidation_capacity(bid_levels)
+        if liquidation_capacity < Decimal(curve.min_order_size):
+            raise ValueError(
+                "GLOBAL_BUY_JIT_PRECLIFF_LIQUIDATION_CAPACITY_INFEASIBLE:"
+                f"token_id={token_id}:"
+                f"precliff_bid_shares={liquidation_capacity}"
+            )
+        selected_witness = getattr(candidate, "maker_fill_witness", None)
+        selected_proposal = getattr(candidate, "proposal_cost_curve", None)
+        asset_epoch_identity = str(
+            getattr(candidate, "asset_epoch_identity", "") or ""
+        ).strip()
+        selected_source = str(
+            getattr(candidate, "fill_probability_source", "") or ""
+        ).strip()
+        try:
+            if (
+                not isinstance(selected_witness, CurrentMakerFillWitness)
+                or selected_proposal is None
+                or not asset_epoch_identity
+                or selected_source != selected_witness.witness_identity
+            ):
+                raise ValueError("selected_witness_missing_or_unbound")
+            selected_binding = maker_fill_candidate_binding_identity(
+                action="BUY",
+                family_key=str(getattr(candidate, "family_key", "") or ""),
+                bin_id=str(getattr(candidate, "bin_id", "") or ""),
+                condition_id=str(getattr(candidate, "condition_id", "") or ""),
+                side=str(getattr(candidate, "side", "") or ""),
+                token_id=token_id,
+                ledger_snapshot_id=str(
+                    getattr(candidate, "ledger_snapshot_id", "") or ""
+                ),
+                position_id=None,
+                held_shares=None,
+                asset_epoch_identity=asset_epoch_identity,
+                proposal_identity=executable_curve_identity(selected_proposal),
+            )
+            if (
+                selected_witness.candidate_binding_identity != selected_binding
+                or selected_witness.asset_epoch_identity != asset_epoch_identity
+                or selected_witness.book_snapshot_id != selected_proposal.snapshot_id
+                or selected_witness.book_hash != selected_proposal.book_hash
+                or selected_witness.limit_price != selected_proposal.levels[0].price
+                or selected_witness.rest_deadline_minutes
+                != getattr(candidate, "rest_deadline_minutes", None)
+                or not math.isclose(
+                    selected_witness.fill_probability,
+                    float(getattr(candidate, "fill_probability", 0.0)),
+                )
+                or any(
+                    outcome.fill_fraction > 0
+                    and outcome.proceeds_per_share_usd
+                    != -selected_proposal.levels[0].price
+                    for outcome in selected_witness.outcomes
+                )
+            ):
+                raise ValueError("selected_witness_economics_mismatch")
+            selected_witness.assert_current_at(captured_at_utc)
+            proposal = passive_buy_proposal_curve(
+                curve,
+                native_bid_levels=bid_levels,
+            )
+            if (
+                proposal is None
+                or proposal.levels[0].price != selected_witness.limit_price
+            ):
+                raise ValueError("current_limit_or_cashflow_changed")
+            current_binding = maker_fill_candidate_binding_identity(
+                action="BUY",
+                family_key=str(getattr(candidate, "family_key", "") or ""),
+                bin_id=str(getattr(candidate, "bin_id", "") or ""),
+                condition_id=str(getattr(candidate, "condition_id", "") or ""),
+                side=str(getattr(candidate, "side", "") or ""),
+                token_id=token_id,
+                ledger_snapshot_id=str(
+                    getattr(candidate, "ledger_snapshot_id", "") or ""
+                ),
+                position_id=None,
+                held_shares=None,
+                asset_epoch_identity=asset_epoch_identity,
+                proposal_identity=executable_curve_identity(proposal),
+            )
+            maker_fill_witness = CurrentMakerFillWitness(
+                witness_identity=current_maker_fill_witness_identity(
+                    candidate_binding_identity=current_binding,
+                    asset_epoch_identity=asset_epoch_identity,
+                    book_snapshot_id=snapshot_id,
+                    book_hash=book_hash,
+                    limit_price=proposal.levels[0].price,
+                    rest_deadline_minutes=selected_witness.rest_deadline_minutes,
+                    source_identity=selected_witness.source_identity,
+                    model_identity=selected_witness.model_identity,
+                    sample_identity=selected_witness.sample_identity,
+                    training_cutoff_at_utc=selected_witness.training_cutoff_at_utc,
+                    issued_at_utc=selected_witness.issued_at_utc,
+                    valid_until_at_utc=selected_witness.valid_until_at_utc,
+                    outcomes=selected_witness.outcomes,
+                ),
+                candidate_binding_identity=current_binding,
+                asset_epoch_identity=asset_epoch_identity,
+                book_snapshot_id=snapshot_id,
+                book_hash=book_hash,
+                limit_price=proposal.levels[0].price,
+                rest_deadline_minutes=selected_witness.rest_deadline_minutes,
+                outcomes=selected_witness.outcomes,
+                source_identity=selected_witness.source_identity,
+                model_identity=selected_witness.model_identity,
+                sample_identity=selected_witness.sample_identity,
+                training_cutoff_at_utc=selected_witness.training_cutoff_at_utc,
+                issued_at_utc=selected_witness.issued_at_utc,
+                valid_until_at_utc=selected_witness.valid_until_at_utc,
+            )
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise ValueError(
+                "GLOBAL_BUY_JIT_MAKER_WITNESS_SUPERSEDED:"
+                f"{type(exc).__name__}:{exc}"
+            ) from exc
+    elif selected_execution_mode != "TAKER_LIMIT":
+        raise ValueError("GLOBAL_BUY_SELECTED_EXECUTION_MODE_INVALID")
 
     return dataclass_replace(
         candidate,
@@ -9994,7 +12105,25 @@ def _global_buy_candidate_from_raw_book(
         book_captured_at_utc=captured_at_utc,
         execution_curve_identity=executable_curve_identity(curve),
         executable_cost_curve=curve,
+        proposal_cost_curve=proposal,
+        maker_fill_witness=maker_fill_witness,
+        fill_probability=(
+            maker_fill_witness.fill_probability
+            if maker_fill_witness is not None
+            else 1.0
+        ),
+        fill_probability_source=(
+            maker_fill_witness.witness_identity
+            if maker_fill_witness is not None
+            else "immediate_taker"
+        ),
+        rest_deadline_minutes=(
+            maker_fill_witness.rest_deadline_minutes
+            if maker_fill_witness is not None
+            else None
+        ),
         native_bid_levels=bid_levels,
+        neg_risk=market_authority.neg_risk,
         eligibility_reason=None,
     )
 
@@ -10005,6 +12134,7 @@ def _persist_global_candidate_executable_snapshot(
     proof: "_CandidateProof",
     candidate: object,
     decision_time: datetime,
+    market_authority: _CurrentGlobalMarketAuthority | None = None,
 ) -> tuple[object, dict[str, Any]]:
     """Persist the selected global curve as the snapshot cited by execution.
 
@@ -10037,6 +12167,28 @@ def _persist_global_candidate_executable_snapshot(
         != str(getattr(curve, "snapshot_id", "") or "")
     ):
         raise ValueError("GLOBAL_JIT_SNAPSHOT_IDENTITY_INVALID")
+    if market_authority is not None:
+        snapshot = market_authority.snapshot
+        if (
+            snapshot.condition_id != candidate_condition
+            or snapshot.selected_outcome_token_id != candidate_token
+            or snapshot.outcome_label != candidate_side
+            or snapshot.raw_orderbook_hash != str(getattr(curve, "book_hash", "") or "")
+        ):
+            raise ValueError("GLOBAL_JIT_SNAPSHOT_MARKET_MISMATCH")
+        _persist_global_jit_authority_snapshot(trade_conn, market_authority)
+        saved_factory = trade_conn.row_factory
+        trade_conn.row_factory = sqlite3.Row
+        try:
+            row = trade_conn.execute(
+                "SELECT * FROM executable_market_snapshots WHERE snapshot_id = ?",
+                (snapshot.snapshot_id,),
+            ).fetchone()
+        finally:
+            trade_conn.row_factory = saved_factory
+        if row is None:
+            raise ValueError("GLOBAL_JIT_SNAPSHOT_PERSISTENCE_FAILED")
+        return snapshot, dict(row)
     base_id = str(getattr(proof, "executable_snapshot_id", "") or "")
     base = get_snapshot(trade_conn, base_id) if base_id else None
     if base is None:
@@ -10193,13 +12345,17 @@ def _bind_global_candidate_executable_snapshot(
     try:
         shares = Decimal(str(getattr(decision, "shares")))
         cost = Decimal(str(getattr(decision, "cost_usd")))
+        if not shares.is_finite() or not cost.is_finite() or shares <= 0:
+            raise ValueError("non-finite or non-positive global cost inputs")
         unit_cost = cost / shares
+        unit_cost_float = float(unit_cost)
     except (ArithmeticError, TypeError, ValueError) as exc:
         raise ValueError("GLOBAL_JIT_SNAPSHOT_COST_INVALID") from exc
     if (
-        shares <= 0
-        or not unit_cost.is_finite()
+        not unit_cost.is_finite()
         or not (Decimal("0") < unit_cost < Decimal("1"))
+        or not math.isfinite(unit_cost_float)
+        or not (0.0 < unit_cost_float < 1.0)
     ):
         raise ValueError("GLOBAL_JIT_SNAPSHOT_COST_INVALID")
     return dataclass_replace(
@@ -10207,11 +12363,16 @@ def _bind_global_candidate_executable_snapshot(
         row=row,
         executable_snapshot_id=snapshot.snapshot_id,
         execution_price=ExecutionPrice(
-            value=float(unit_cost),
+            value=unit_cost_float,
             price_type="fee_adjusted",
             fee_deducted=True,
             currency="probability_units",
         ),
+        # The global decision priced the selected size against its exact curve;
+        # that all-in unit cost is the single execution-cost authority after this
+        # rebind.  Do not retain the family-local proof's scalar (which can be
+        # absent for a globally licensed maker rest) beside the rebound price.
+        c_cost_95pct=unit_cost_float,
     )
 
 
@@ -10258,6 +12419,7 @@ def _global_sell_receipt(
     proof_accepted: bool,
     submitted: bool = False,
     jit_candidate: object | None = None,
+    jit_handoff: _GlobalJitHandoff | None = None,
     venue_call_started: bool = False,
     venue_ack_received: bool = False,
     venue_command_id: str = "",
@@ -10286,7 +12448,7 @@ def _global_sell_receipt(
         reason=reason,
         proof_accepted=proof_accepted,
         global_actuation=global_actuation,
-        global_jit_candidate=jit_candidate,
+        global_jit_candidate=jit_handoff or jit_candidate,
         venue_call_started=venue_call_started,
         venue_ack_received=venue_ack_received,
         venue_command_id=venue_command_id or None,
@@ -10299,9 +12461,12 @@ def _current_global_sell_position(
     trade_conn: sqlite3.Connection,
     candidate: object,
 ):
-    """Bind SELL to one current canonical position and exact chain shares."""
+    """Bind SELL to one current canonical position and causal venue shares."""
 
-    from src.state.portfolio import load_runtime_open_portfolio
+    from src.state.portfolio import (
+        current_tradable_exposure_shares,
+        load_runtime_open_portfolio,
+    )
 
     portfolio = load_runtime_open_portfolio(trade_conn)
     if (
@@ -10336,29 +12501,88 @@ def _current_global_sell_position(
     ):
         raise ValueError("GLOBAL_SELL_POSITION_TOKEN_SUPERSEDED")
     sellable = Decimal(str(getattr(candidate, "held_shares", "0") or "0"))
-    chain = Decimal(str(getattr(position, "chain_shares", 0) or 0))
+    current_exposure = Decimal(str(current_tradable_exposure_shares(position)))
     effective = Decimal(str(getattr(position, "effective_shares", 0) or 0))
     share_step = Decimal("0.01")
-    chain_sellable = chain.quantize(share_step, rounding=ROUND_FLOOR)
+    current_sellable = current_exposure.quantize(share_step, rounding=ROUND_FLOOR)
     effective_sellable = effective.quantize(share_step, rounding=ROUND_FLOOR)
     if (
         not all(
             value.is_finite() and value > 0
-            for value in (sellable, chain, effective)
+            for value in (sellable, current_exposure, effective)
         )
-        or chain_sellable != effective_sellable
-        or sellable != chain_sellable
+        or current_sellable != effective_sellable
+        or sellable != current_sellable
     ):
         raise ValueError("GLOBAL_SELL_POSITION_SHARES_SUPERSEDED")
-    exit_state_raw = getattr(position, "exit_state", "")
-    exit_state = str(getattr(exit_state_raw, "value", exit_state_raw) or "")
-    if exit_state or str(getattr(position, "last_exit_order_id", "") or ""):
+    if _global_sell_command_blocks_reauction(
+        trade_conn,
+        position=position,
+        position_id=position_id,
+        token_id=token_id,
+        legacy_order_id=str(getattr(position, "last_exit_order_id", "") or ""),
+    ):
         raise ValueError("GLOBAL_SELL_POSITION_EXIT_ALREADY_ACTIVE")
     state_raw = getattr(position, "state", "")
     state = str(getattr(state_raw, "value", state_raw) or "")
-    if state not in {"entered", "holding", "day0_window"}:
+    if state not in {"entered", "holding", "day0_window", "pending_exit"}:
         raise ValueError(f"GLOBAL_SELL_POSITION_PHASE_INVALID:{state or 'missing'}")
     return portfolio, position
+
+
+def _global_sell_command_blocks_reauction(
+    trade_conn: sqlite3.Connection,
+    *,
+    position: object,
+    position_id: str,
+    token_id: str,
+    legacy_order_id: str = "",
+) -> bool:
+    """Return whether venue truth still owns this position's SELL single-flight.
+
+    Lifecycle intent is not venue ownership. A pending exit with no command, or
+    with only commands that the canonical replacement-SELL authority has
+    terminalized, remains eligible for a fresh globally-ranked SELL. In-flight,
+    filled-but-not-yet-reconciled, and unknown command states stay fail-closed.
+    """
+
+    rows = trade_conn.execute(
+        """
+        SELECT state
+          FROM venue_commands
+         WHERE position_id = ?
+           AND token_id = ?
+           AND side = 'SELL'
+           AND intent_kind = 'EXIT'
+        """,
+        (position_id, token_id),
+    ).fetchall()
+    if not rows and str(legacy_order_id or "").strip():
+        return True
+    from src.execution.exit_safety import can_submit_replacement_sell
+
+    allowed, _reason = can_submit_replacement_sell(
+        trade_conn,
+        position_id,
+        token_id,
+    )
+    if not allowed:
+        return True
+    if any(str(row[0] or "").strip().upper() == "FILLED" for row in rows):
+        from src.execution.exit_lifecycle import (
+            _canonical_global_sell_command_ownership,
+        )
+
+        ownership = _canonical_global_sell_command_ownership(
+            trade_conn,
+            position,
+            require_pending_exit=False,
+        )
+        # A terminal fill releases the replacement mutex, but the same shares
+        # stay owned until canonical recovery proves a positive residual and
+        # explicitly hands the command back to global reauction.
+        return ownership != "GLOBAL_NO_COMMAND"
+    return False
 
 
 def _global_sell_candidate_from_raw_book(
@@ -10366,13 +12590,18 @@ def _global_sell_candidate_from_raw_book(
     raw_book: Mapping[str, object],
     *,
     captured_at_utc: datetime,
+    market_authority: _CurrentGlobalMarketAuthority,
 ):
     """Rebind a selected SELL to one freshly fetched native BID ladder."""
 
     from src.solve.solver import (
         BookLevel,
+        CurrentMakerFillWitness,
         ExecutableSellCurve,
+        current_maker_fill_witness_identity,
         executable_curve_identity,
+        global_sell_execution_terms,
+        maker_fill_candidate_binding_identity,
     )
 
     if captured_at_utc.tzinfo is None:
@@ -10394,7 +12623,7 @@ def _global_sell_candidate_from_raw_book(
         raise ValueError("GLOBAL_SELL_JIT_ASK_LEVEL_INVALID")
     try:
         levels = tuple(
-            BookLevel(
+            BidBookLevel(
                 price=Decimal(str(raw["price"])),
                 size=Decimal(str(raw["size"])),
             )
@@ -10426,47 +12655,197 @@ def _global_sell_candidate_from_raw_book(
     selected_curve = getattr(candidate, "executable_sell_curve", None)
     if selected_curve is None:
         raise ValueError("GLOBAL_SELL_SELECTED_CURVE_MISSING")
-    for raw_name, selected_value in (
-        ("tick_size", selected_curve.min_tick),
-        ("min_order_size", selected_curve.min_order_size),
+    if not isinstance(getattr(candidate, "neg_risk", None), bool):
+        raise ValueError("GLOBAL_SELL_JIT_NEG_RISK_AUTHORITY_MISSING")
+    for raw_name, current_value in (
+        ("tick_size", market_authority.min_tick),
+        ("min_order_size", market_authority.min_order_size),
     ):
         raw_value = raw_book.get(raw_name)
         if raw_value not in (None, "") and Decimal(str(raw_value)) != Decimal(
-            selected_value
+            current_value
         ):
-            raise ValueError(f"GLOBAL_SELL_JIT_{raw_name.upper()}_SUPERSEDED")
-    book_hash = stable_hash(dict(raw_book))
-    snapshot_id = stable_hash(
-        (
-            "global-sell-jit",
-            getattr(candidate, "family_key", ""),
-            getattr(candidate, "bin_id", ""),
-            getattr(candidate, "condition_id", ""),
-            getattr(candidate, "side", ""),
-            token_id,
-            book_hash,
-            captured_at_utc.isoformat(),
-        )
-    )
+            raise ValueError(f"GLOBAL_SELL_JIT_{raw_name.upper()}_METADATA_CONFLICT")
+    raw_neg_risk_names = ("neg_risk", "negRisk", "negative_risk")
+    if any(raw_book.get(name) is not None for name in raw_neg_risk_names):
+        from src.data.market_scanner import _boolish_market_field
+
+        raw_neg_risk = _boolish_market_field(dict(raw_book), *raw_neg_risk_names)
+        if raw_neg_risk is None or raw_neg_risk != market_authority.neg_risk:
+            raise ValueError("GLOBAL_SELL_JIT_MARKET_METADATA_CONFLICT")
+    book_hash = market_authority.snapshot.raw_orderbook_hash
+    snapshot_id = market_authority.snapshot.snapshot_id
     curve = ExecutableSellCurve(
         token_id=token_id,
         side=getattr(candidate, "side"),
         snapshot_id=snapshot_id,
         book_hash=book_hash,
         levels=levels,
-        fee_model=selected_curve.fee_model,
-        min_tick=selected_curve.min_tick,
-        min_order_size=selected_curve.min_order_size,
+        fee_model=FeeModel(fee_rate=market_authority.fee_rate),
+        min_tick=market_authority.min_tick,
+        min_order_size=market_authority.min_order_size,
         quote_ttl=selected_curve.quote_ttl,
     )
+    selected_execution_mode = str(
+        getattr(candidate, "execution_mode", "") or ""
+    ).strip().upper()
+    if selected_execution_mode not in {"TAKER_LIMIT", "MAKER_REST"}:
+        raise ValueError("GLOBAL_SELL_SELECTED_EXECUTION_MODE_INVALID")
+    maker_fill_witness = None
+    if selected_execution_mode == "MAKER_REST":
+        selected_witness = getattr(candidate, "maker_fill_witness", None)
+        asset_epoch_identity = str(
+            getattr(candidate, "asset_epoch_identity", "") or ""
+        ).strip()
+        selected_proposal = getattr(candidate, "proposal_sell_curve", None)
+        selected_deadline = getattr(candidate, "rest_deadline_minutes", None)
+        selected_source = str(
+            getattr(candidate, "fill_probability_source", "") or ""
+        ).strip()
+        selected_capacity = Decimal(
+            str(getattr(candidate, "held_shares", "0") or "0")
+        )
+        try:
+            if (
+                not isinstance(selected_witness, CurrentMakerFillWitness)
+                or selected_proposal is None
+                or not asset_epoch_identity
+                or selected_deadline is None
+                or selected_source != selected_witness.witness_identity
+            ):
+                raise ValueError("selected_witness_missing_or_unbound")
+            selected_binding = maker_fill_candidate_binding_identity(
+                action="SELL",
+                family_key=str(getattr(candidate, "family_key", "") or ""),
+                bin_id=str(getattr(candidate, "bin_id", "") or ""),
+                condition_id=str(getattr(candidate, "condition_id", "") or ""),
+                side=str(getattr(candidate, "side", "") or ""),
+                token_id=token_id,
+                ledger_snapshot_id=str(
+                    getattr(candidate, "ledger_snapshot_id", "") or ""
+                ),
+                position_id=str(getattr(candidate, "position_id", "") or "")
+                or None,
+                held_shares=selected_capacity,
+                asset_epoch_identity=asset_epoch_identity,
+                proposal_identity=executable_curve_identity(selected_proposal),
+            )
+            if (
+                selected_witness.candidate_binding_identity != selected_binding
+                or selected_witness.asset_epoch_identity != asset_epoch_identity
+                or selected_witness.book_snapshot_id != selected_proposal.snapshot_id
+                or selected_witness.book_hash != selected_proposal.book_hash
+                or selected_witness.limit_price != selected_proposal.levels[0].price
+                or selected_witness.rest_deadline_minutes != selected_deadline
+                or not math.isclose(
+                    selected_witness.fill_probability,
+                    float(getattr(candidate, "fill_probability", 0.0)),
+                )
+                or any(
+                    outcome.fill_fraction > 0
+                    and outcome.proceeds_per_share_usd
+                    != selected_proposal.levels[0].price
+                    for outcome in selected_witness.outcomes
+                )
+            ):
+                raise ValueError("selected_witness_economics_mismatch")
+            selected_witness.assert_current_at(captured_at_utc)
+            current_proposal, *_ = global_sell_execution_terms(
+                curve,
+                capacity=selected_capacity,
+                required_mode="MAKER_REST",
+                maker_fill_witness=selected_witness,
+            )
+            if (
+                current_proposal is None
+                or current_proposal.levels[0].price != selected_witness.limit_price
+            ):
+                raise ValueError("current_limit_or_cashflow_changed")
+            current_binding = maker_fill_candidate_binding_identity(
+                action="SELL",
+                family_key=str(getattr(candidate, "family_key", "") or ""),
+                bin_id=str(getattr(candidate, "bin_id", "") or ""),
+                condition_id=str(getattr(candidate, "condition_id", "") or ""),
+                side=str(getattr(candidate, "side", "") or ""),
+                token_id=token_id,
+                ledger_snapshot_id=str(
+                    getattr(candidate, "ledger_snapshot_id", "") or ""
+                ),
+                position_id=str(getattr(candidate, "position_id", "") or "")
+                or None,
+                held_shares=selected_capacity,
+                asset_epoch_identity=asset_epoch_identity,
+                proposal_identity=executable_curve_identity(current_proposal),
+            )
+            maker_fill_witness = CurrentMakerFillWitness(
+                witness_identity=current_maker_fill_witness_identity(
+                    candidate_binding_identity=current_binding,
+                    asset_epoch_identity=asset_epoch_identity,
+                    book_snapshot_id=snapshot_id,
+                    book_hash=book_hash,
+                    limit_price=current_proposal.levels[0].price,
+                    rest_deadline_minutes=selected_witness.rest_deadline_minutes,
+                    source_identity=selected_witness.source_identity,
+                    model_identity=selected_witness.model_identity,
+                    sample_identity=selected_witness.sample_identity,
+                    training_cutoff_at_utc=selected_witness.training_cutoff_at_utc,
+                    issued_at_utc=selected_witness.issued_at_utc,
+                    valid_until_at_utc=selected_witness.valid_until_at_utc,
+                    outcomes=selected_witness.outcomes,
+                ),
+                candidate_binding_identity=current_binding,
+                asset_epoch_identity=asset_epoch_identity,
+                book_snapshot_id=snapshot_id,
+                book_hash=book_hash,
+                limit_price=current_proposal.levels[0].price,
+                rest_deadline_minutes=selected_witness.rest_deadline_minutes,
+                outcomes=selected_witness.outcomes,
+                source_identity=selected_witness.source_identity,
+                model_identity=selected_witness.model_identity,
+                sample_identity=selected_witness.sample_identity,
+                training_cutoff_at_utc=selected_witness.training_cutoff_at_utc,
+                issued_at_utc=selected_witness.issued_at_utc,
+                valid_until_at_utc=selected_witness.valid_until_at_utc,
+            )
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise ValueError(
+                "GLOBAL_SELL_JIT_MAKER_WITNESS_SUPERSEDED:"
+                f"{type(exc).__name__}:{exc}"
+            ) from exc
+    (
+        proposal,
+        execution_mode,
+        fill_probability,
+        fill_probability_source,
+        rest_deadline_minutes,
+    ) = global_sell_execution_terms(
+        curve,
+        capacity=Decimal(str(getattr(candidate, "held_shares", "0") or "0")),
+        required_mode=selected_execution_mode,
+        maker_fill_witness=maker_fill_witness,
+    )
+    if proposal is None or execution_mode != selected_execution_mode:
+        raise ValueError(
+            "GLOBAL_SELL_JIT_SELECTED_MODE_UNAVAILABLE:"
+            f"{selected_execution_mode}"
+        )
     return dataclass_replace(
         candidate,
         book_snapshot_id=snapshot_id,
         book_captured_at_utc=captured_at_utc,
         execution_curve_identity=executable_curve_identity(curve),
         executable_sell_curve=curve,
+        proposal_sell_curve=proposal,
+        execution_mode=execution_mode,
+        fill_probability=fill_probability,
+        fill_probability_source=fill_probability_source,
+        rest_deadline_minutes=rest_deadline_minutes,
+        maker_fill_witness=maker_fill_witness,
         native_ask_levels=ask_levels,
-        eligibility_reason=None,
+        neg_risk=market_authority.neg_risk,
+        eligibility_reason=(
+            None if proposal is not None else "LIVE_UNIT_PRICE_OUT_OF_BOUNDS"
+        ),
     )
 
 
@@ -10475,15 +12854,52 @@ def _global_sell_execution_economics_drift(
     decision: object,
     current_candidate: object,
 ) -> str | None:
-    """Reject any current BID curve that worsens selected full-exit proceeds."""
+    """Reject a JIT SELL unless it still dominates the selected fixed action.
 
+    A book hash or an unconsumed bid-tail change is evidence of elapsed time,
+    not by itself an economic veto.  The selected SELL remains safe to submit
+    when its identity and venue terms are unchanged and the fresh executable
+    prefix covers the same shares for no less proceeds at no worse a limit.
+    """
+
+    selected_candidate = getattr(decision, "candidate", None)
+    selected_neg_risk = getattr(selected_candidate, "neg_risk", None)
+    current_neg_risk = getattr(current_candidate, "neg_risk", None)
+    if not isinstance(selected_neg_risk, bool) or not isinstance(
+        current_neg_risk, bool
+    ):
+        return "neg_risk_authority_missing"
+    if selected_neg_risk != current_neg_risk:
+        return "neg_risk"
+    selected_curve = getattr(selected_candidate, "executable_sell_curve", None)
+    current_curve = getattr(current_candidate, "executable_sell_curve", None)
+    if selected_curve is None or current_curve is None:
+        return "curve_missing"
+    curve_fields = (
+        ("token", selected_curve.token_id, current_curve.token_id),
+        ("side", selected_curve.side, current_curve.side),
+        ("fee", selected_curve.fee_model.fee_rate, current_curve.fee_model.fee_rate),
+        ("tick", selected_curve.min_tick, current_curve.min_tick),
+        ("min_order", selected_curve.min_order_size, current_curve.min_order_size),
+        (
+            "execution_mode",
+            str(getattr(selected_candidate, "execution_mode", "") or ""),
+            str(getattr(current_candidate, "execution_mode", "") or ""),
+        ),
+    )
+    curve_drift = tuple(
+        name for name, selected_value, current_value in curve_fields
+        if selected_value != current_value
+    )
+    if curve_drift:
+        return f"fields={','.join(curve_drift)}"
     shares = Decimal(str(getattr(decision, "shares", "0") or "0"))
     selected_proceeds = Decimal(
         str(getattr(decision, "cash_proceeds_usd", "0") or "0")
     )
     selected_limit = Decimal(str(getattr(decision, "limit_price", "0") or "0"))
     try:
-        proceeds, _vwap, limit = current_candidate.executable_sell_curve.proceeds_for_shares(
+        proceeds, _vwap, limit = current_candidate.economic_sell_curve.proceeds_for_shares(
             shares
         )
     except (AttributeError, ValueError) as exc:
@@ -10528,11 +12944,18 @@ def _submit_current_global_sell(
     decision_time: datetime,
     global_actuation: object,
     trade_conn: sqlite3.Connection,
+    global_claim_conn: sqlite3.Connection | None,
     forecast_conn: sqlite3.Connection | None,
     topology_conn: sqlite3.Connection | None,
     calibration_conn: sqlite3.Connection | None,
     preflight_only: bool,
     preflight_receipt: EventSubmissionReceipt | None,
+    final_authority_deadline: datetime | None = None,
+    final_deadline_expired_reason: str = "GLOBAL_REAUCTION_EPOCH_EXPIRED",
+    hard_authority_cancelled: Callable[[], bool] | None = None,
+    global_claimed_at: str | None = None,
+    global_claim_attempt_count: int | None = None,
+    jit_handoff: _GlobalJitHandoff | None = None,
 ) -> EventSubmissionReceipt:
     """Preflight or actuate one exact global SELL through reduce-only exit law."""
 
@@ -10566,7 +12989,12 @@ def _submit_current_global_sell(
             reason="GLOBAL_PREFLIGHT_BINDING_TOKEN_INVALID",
             proof_accepted=False,
         )
-    if forecast_conn is None or topology_conn is None or calibration_conn is None:
+    if (
+        global_claim_conn is None
+        or forecast_conn is None
+        or topology_conn is None
+        or calibration_conn is None
+    ):
         return _global_sell_receipt(
             event,
             global_actuation=global_actuation,
@@ -10648,40 +13076,94 @@ def _submit_current_global_sell(
             public_http_timeout=timeout,
             public_request_priority=RequestPriority.HELD_REDUCE_ONLY,
         ) as clob:
-            books = clob.get_orderbook_snapshots(
-                [str(getattr(candidate, "token_id", "") or "")],
-                timeout=timeout,
-            )
-            raw_book = books.get(str(getattr(candidate, "token_id", "") or ""))
-            if not isinstance(raw_book, Mapping):
-                raise ValueError("GLOBAL_SELL_JIT_BOOK_MISSING")
-            gamma = _global_current_gamma_client(timeout_seconds=timeout)
-
-            def _held_gamma_get(path, *, params=None, timeout):
-                return _governed_global_gamma_get(
-                    gamma,
-                    path,
-                    params=params,
-                    timeout=float(timeout),
-                    priority=RequestPriority.HELD_REDUCE_ONLY,
+            if jit_handoff is not None and preflight_only:
+                # A preflight retry may reuse its still-current exact venue
+                # cut.  Actuation must recapture the book after the slower
+                # probability/wealth/position checks above: the preflight book
+                # is ranking evidence, not submit-time executable truth.
+                current_candidate = jit_handoff.candidate
+                raw_book = dict(jit_handoff.raw_book)
+                market_authority = jit_handoff.authority
+                book_captured_at_utc = market_authority.snapshot.captured_at
+            else:
+                raw_book: dict[str, object] = {}
+                candidate_token_id = str(
+                    getattr(candidate, "token_id", "") or ""
                 )
 
-            current_fee = _current_global_sell_fee_fraction(
-                condition_id=str(
-                    getattr(candidate, "condition_id", "") or ""
-                ),
-                token_id=str(getattr(candidate, "token_id", "") or ""),
-                gamma_get=_held_gamma_get,
-                timeout=timeout,
-            )
-            if current_fee != Decimal(
-                candidate.executable_sell_curve.fee_model.fee_rate
-            ):
-                raise ValueError("GLOBAL_SELL_JIT_FEE_SUPERSEDED")
-            current_candidate = _global_sell_candidate_from_raw_book(
-                candidate,
-                raw_book,
-                captured_at_utc=datetime.now(UTC),
+                def _capture_final_sell_book():
+                    try:
+                        books = clob.get_orderbook_snapshots(
+                            [candidate_token_id],
+                            timeout=timeout,
+                        )
+                    except Exception as exc:  # noqa: BLE001 - authority transport
+                        raise ValueError("GLOBAL_JIT_RAW_BOOK_UNAVAILABLE") from exc
+                    current_book = books.get(candidate_token_id)
+                    if not isinstance(current_book, Mapping):
+                        raise ValueError("GLOBAL_JIT_RAW_BOOK_UNAVAILABLE")
+                    raw_book.clear()
+                    raw_book.update(dict(current_book))
+                    return raw_book, datetime.now(UTC)
+
+                try:
+                    gamma = _global_current_gamma_client(timeout_seconds=timeout)
+                except Exception as exc:  # noqa: BLE001 - authority transport
+                    raise ValueError("GLOBAL_JIT_GAMMA_MARKET_UNAVAILABLE") from exc
+
+                def _held_gamma_get(path, *, params=None, timeout):
+                    return _governed_global_gamma_get(
+                        gamma,
+                        path,
+                        params=params,
+                        timeout=float(timeout),
+                        priority=RequestPriority.HELD_REDUCE_ONLY,
+                    )
+
+                market_authority = _current_global_market_authority(
+                    condition_id=str(
+                        getattr(candidate, "condition_id", "") or ""
+                    ),
+                    token_id=str(getattr(candidate, "token_id", "") or ""),
+                    side=str(getattr(candidate, "side", "") or ""),
+                    gamma_get=_held_gamma_get,
+                    clob_market_get=clob.get_held_clob_market_info,
+                    raw_book=None,
+                    captured_at_utc=None,
+                    timeout=timeout,
+                    raw_book_provider=_capture_final_sell_book,
+                )
+                book_captured_at_utc = market_authority.snapshot.captured_at
+                try:
+                    current_candidate = _global_sell_candidate_from_raw_book(
+                        candidate,
+                        raw_book,
+                        captured_at_utc=book_captured_at_utc,
+                        market_authority=market_authority,
+                    )
+                except ValueError as exc:
+                    if not str(exc).startswith(
+                        (
+                            "GLOBAL_SELL_JIT_SELECTED_MODE_UNAVAILABLE:",
+                            "GLOBAL_SELL_JIT_MAKER_WITNESS_SUPERSEDED:",
+                        )
+                    ):
+                        raise
+                    return _global_sell_receipt(
+                        event,
+                        global_actuation=global_actuation,
+                        reason=(
+                            "GLOBAL_ACTUATION_MARKET_AUTHORITY_SUPERSEDED:"
+                            f"{exc}"
+                        ),
+                        proof_accepted=False,
+                        jit_handoff=jit_handoff,
+                    )
+            _persist_global_jit_authority_snapshot(trade_conn, market_authority)
+            jit_handoff = jit_handoff or _GlobalJitHandoff(
+                candidate=current_candidate,
+                authority=market_authority,
+                raw_book_json=_canonical_global_jit_raw_book(raw_book),
             )
             drift = _global_sell_execution_economics_drift(
                 decision=decision,
@@ -10697,24 +13179,124 @@ def _submit_current_global_sell(
                     ),
                     proof_accepted=False,
                     jit_candidate=current_candidate,
+                    jit_handoff=jit_handoff,
+                )
+            from src.execution.exit_lifecycle import GlobalSellExecutionAuthority
+
+            execution_authority = GlobalSellExecutionAuthority.from_current(
+                actuation=global_actuation,
+                jit_candidate=current_candidate,
+            )
+            try:
+                sell_limit_price = execution_authority.limit_price()
+            except ValueError as exc:
+                # SCOPE: only this SELL candidate lacks a venue-legal submitted
+                # price. DRAIN: the same cut can rank the remaining actions.
+                # RESET: the next cut rebuilds the JIT bid and tick.
+                return _global_sell_receipt(
+                    event,
+                    global_actuation=global_actuation,
+                    reason=f"GLOBAL_SELL_LEGAL_PRICE_UNAVAILABLE:{exc}",
+                    proof_accepted=False,
+                    jit_candidate=current_candidate,
+                )
+            try:
+                receipt_ref = getattr(global_actuation, "auction_receipt_ref", None)
+                if type(receipt_ref) is not GlobalAuctionReceiptRef:
+                    raise ValueError("GLOBAL_SELL_RECEIPT_REF_MISSING")
+                receipt_ref.assert_matches_actuation(
+                    winner_event_id=global_actuation.winner_event_id,
+                    winner_candidate_id=candidate.candidate_id,
+                    winner_actuation_identity=global_actuation.actuation_identity,
+                    selection_epoch_identity=global_actuation.selection_epoch_identity,
+                )
+                closure_token_id = (
+                    str(getattr(position, "token_id", "") or "")
+                    if str(getattr(candidate, "side", "") or "") == "YES"
+                    else str(getattr(position, "no_token_id", "") or "")
+                )
+                receipt_closure = GlobalSellReceiptClosure(
+                    receipt_ref=receipt_ref,
+                    position_id=str(getattr(position, "trade_id", "") or ""),
+                    condition_id=str(getattr(position, "condition_id", "") or ""),
+                    token_id=closure_token_id,
+                    action="SELL",
+                    execution_mode=str(
+                        getattr(current_candidate, "execution_mode", "") or ""
+                    ),
+                    winner_event_id=str(global_actuation.winner_event_id),
+                    winner_candidate_id=str(candidate.candidate_id),
+                    winner_actuation_identity=str(global_actuation.actuation_identity),
+                    selection_epoch_identity=str(
+                        global_actuation.selection_epoch_identity
+                    ),
+                )
+            except (AttributeError, TypeError, ValueError) as exc:
+                # INV-47 SCOPE: only this global SELL candidate is blocked.
+                # DRAIN: the next auction actuation must carry its exact receipt.
+                # RESET: a matching typed receipt reference rebuilds the closure.
+                return _global_sell_receipt(
+                    event,
+                    global_actuation=global_actuation,
+                    reason=f"GLOBAL_SELL_RECEIPT_CLOSURE_INVALID:{type(exc).__name__}:{exc}",
+                    proof_accepted=False,
+                    jit_candidate=current_candidate,
+                    jit_handoff=jit_handoff,
                 )
             if preflight_only:
+                from src.execution.collateral import (
+                    prepare_collateral_snapshot_for_submit,
+                )
+                from src.state.collateral_ledger import (
+                    CollateralInsufficient,
+                    assert_snapshot_allows_sell,
+                )
+
+                token_id = str(getattr(candidate, "token_id", "") or "")
+                shares = float(
+                    Decimal(str(getattr(decision, "shares", "0") or "0"))
+                )
+                prepared_collateral = prepare_collateral_snapshot_for_submit(
+                    trade_conn,
+                    action="exit_submit",
+                    token_id=token_id,
+                    shares=shares,
+                )
+                try:
+                    assert_snapshot_allows_sell(
+                        prepared_collateral.snapshot,
+                        token_id=token_id,
+                        size=shares,
+                    )
+                except CollateralInsufficient as exc:
+                    # SCOPE: this exact SELL token only. DRAIN: the batch
+                    # excludes it and re-solves the remaining actions in this
+                    # cut. RESET: the next cut re-reads targeted chain
+                    # inventory and approval before claim.
+                    return _global_sell_receipt(
+                        event,
+                        global_actuation=global_actuation,
+                        reason=f"GLOBAL_SELL_COLLATERAL_UNAVAILABLE:{exc}",
+                        proof_accepted=False,
+                        jit_candidate=current_candidate,
+                        jit_handoff=jit_handoff,
+                    )
                 return _global_sell_receipt(
                     event,
                     global_actuation=global_actuation,
                     reason="GLOBAL_SELL_PREFLIGHT_STABLE",
                     proof_accepted=True,
+                    jit_handoff=jit_handoff,
                 )
             from src.execution.exit_lifecycle import (
                 ExitExecutionEvidence,
                 ExitIntent,
-                GlobalSellExecutionAuthority,
                 execute_exit,
             )
             from src.state.portfolio import ExitContext
 
             proceeds, current_vwap, _current_limit = (
-                current_candidate.executable_sell_curve.proceeds_for_shares(
+                current_candidate.economic_sell_curve.proceeds_for_shares(
                     Decimal(str(getattr(decision, "shares", "0") or "0"))
                 )
             )
@@ -10726,10 +13308,6 @@ def _submit_current_global_sell(
             state_raw = getattr(position, "state", "")
             position_state = str(getattr(state_raw, "value", state_raw) or "")
             best_bid = float(current_candidate.executable_sell_curve.levels[0].price)
-            execution_authority = GlobalSellExecutionAuthority.from_current(
-                actuation=global_actuation,
-                jit_candidate=current_candidate,
-            )
             expected_growth = getattr(decision, "expected_growth", None)
             expected_terminal = getattr(
                 decision,
@@ -10738,6 +13316,8 @@ def _submit_current_global_sell(
             )
             if expected_growth is None:
                 raise ValueError("GLOBAL_SELL_EXPECTED_COMPARISON_MISSING")
+            if expected_growth.utility_basis != STRATEGY_LOG_UTILITY_BASIS:
+                raise ValueError("GLOBAL_SELL_UTILITY_BASIS_INVALID")
             if candidate.probability_functional == "POSTERIOR_PREDICTIVE_MEAN":
                 if expected_terminal is None:
                     raise ValueError("GLOBAL_SELL_EXPECTED_ECONOMICS_MISSING")
@@ -10755,6 +13335,9 @@ def _submit_current_global_sell(
                     "expected_sell_ev_usd": float(
                         expected_terminal.expected_ev_usd
                     ),
+                    "sell_ruin_probability_reduction": float(
+                        expected_terminal.ruin_probability_reduction
+                    ),
                 }
             else:
                 capital_economics = {
@@ -10765,6 +13348,9 @@ def _submit_current_global_sell(
                         getattr(decision, "robust_delta_log_wealth")
                     ),
                     "robust_ev_usd": float(getattr(decision, "robust_ev_usd")),
+                    "sell_ruin_probability_reduction": float(
+                        getattr(decision, "ruin_probability_reduction")
+                    ),
                 }
             capital_economics.update(
                 {
@@ -10777,6 +13363,16 @@ def _submit_current_global_sell(
                     "expected_comparison_log_growth_per_hour": float(
                         expected_growth.expected_log_growth_per_hour
                     ),
+                    "expected_comparison_capital_efficiency": float(
+                        expected_growth.expected_capital_efficiency
+                    ),
+                    "expected_comparison_capital_lock_hours": float(
+                        expected_growth.capital_lock_hours
+                    ),
+                    "ruin_probability_reduction": float(
+                        expected_growth.ruin_probability_reduction
+                    ),
+                    "utility_basis": expected_growth.utility_basis,
                 }
             )
             exit_context = ExitContext(
@@ -10795,10 +13391,12 @@ def _submit_current_global_sell(
                 shares=float(Decimal(str(getattr(decision, "shares", "0")))),
                 current_market_price=float(current_vwap),
                 best_bid=best_bid,
-                exact_limit_price=float(
-                    Decimal(str(getattr(decision, "limit_price", "0") or "0"))
+                exact_limit_price=float(sell_limit_price),
+                submit_order_type=(
+                    "FAK"
+                    if candidate.execution_mode == "TAKER_LIMIT"
+                    else "GTC"
                 ),
-                submit_order_type="FAK",
                 close_position=(
                     Decimal(str(getattr(decision, "shares", "0") or "0"))
                     >= Decimal(str(getattr(position, "effective_shares", "0") or "0"))
@@ -10809,6 +13407,11 @@ def _submit_current_global_sell(
                 position_state=position_state,
                 capital_certificate={
                     "action": "SELL",
+                    "position_id": str(getattr(position, "trade_id", "") or ""),
+                    "condition_id": str(
+                        getattr(candidate, "condition_id", "") or ""
+                    ),
+                    "token_id": str(getattr(candidate, "token_id", "") or ""),
                     "candidate_id": str(getattr(candidate, "candidate_id", "") or ""),
                     "actuation_identity": str(
                         getattr(global_actuation, "actuation_identity", "") or ""
@@ -10846,8 +13449,30 @@ def _submit_current_global_sell(
                     "jit_book_hash": str(
                         current_candidate.executable_sell_curve.book_hash
                     ),
+                    "book_snapshot_id": str(
+                        current_candidate.book_snapshot_id
+                    ),
                     "jit_curve_identity": str(
                         current_candidate.execution_curve_identity
+                    ),
+                    "execution_mode": candidate.execution_mode,
+                    "submit_order_type": (
+                        "FAK"
+                        if candidate.execution_mode == "TAKER_LIMIT"
+                        else "GTC"
+                    ),
+                    "fill_probability": float(candidate.fill_probability),
+                    "fill_probability_source": str(
+                        candidate.fill_probability_source
+                    ),
+                    **(
+                        {
+                            "rest_deadline_minutes": float(
+                                candidate.rest_deadline_minutes
+                            )
+                        }
+                        if candidate.rest_deadline_minutes is not None
+                        else {}
                     ),
                     "held_probability_point": held_q,
                     "sell_favorable_probability_functional": str(
@@ -10860,11 +13485,65 @@ def _submit_current_global_sell(
                     "selected_cash_proceeds_usd": str(
                         getattr(decision, "cash_proceeds_usd", "")
                     ),
-                    "exact_limit_price": str(getattr(decision, "limit_price", "")),
-                    "partial_fill_certificate": "positive_piecewise_concave_bid_prefix",
+                    "economic_limit_price": str(
+                        getattr(decision, "limit_price", "")
+                    ),
+                    "exact_limit_price": str(sell_limit_price),
+                    "partial_fill_certificate": (
+                        "marketable_limit_fill_all_prefixes_positive"
+                        if candidate.execution_mode == "TAKER_LIMIT"
+                        else "single_price_maker_fill_all_prefixes_positive"
+                    ),
+                    "global_auction_receipt": receipt_ref.as_payload(),
                 },
+                global_sell_receipt_closure=receipt_closure,
             )
             exit_evidence = ExitExecutionEvidence()
+            if (
+                final_authority_deadline is None
+                or hard_authority_cancelled is None
+            ):
+                return _global_sell_receipt(
+                    event,
+                    global_actuation=global_actuation,
+                    reason="GLOBAL_FINAL_ACTUATION_AUTHORITY_MISSING",
+                    proof_accepted=False,
+                )
+            final_block = _global_final_actuation_block_reason(
+                deadline=final_authority_deadline,
+                hard_authority_cancelled=hard_authority_cancelled,
+                deadline_expired_reason=final_deadline_expired_reason,
+            )
+            if final_block is not None:
+                return _global_sell_receipt(
+                    event,
+                    global_actuation=global_actuation,
+                    reason=final_block,
+                    proof_accepted=False,
+                )
+            _fence_global_target_claim_before_command(
+                global_claim_conn,
+                event,
+                claimed_at=global_claimed_at,
+                attempt_count=global_claim_attempt_count,
+            )
+            # The SELL command is owned by trade_conn, unlike the world-owned
+            # live-order aggregate used by the BUY path.  Persist the world claim
+            # fence before opening the independent trade write unit; a write
+            # transaction must never span the two canonical DBs.
+            global_claim_conn.commit()
+            final_block = _global_final_actuation_block_reason(
+                deadline=final_authority_deadline,
+                hard_authority_cancelled=hard_authority_cancelled,
+                deadline_expired_reason=final_deadline_expired_reason,
+            )
+            if final_block is not None:
+                return _global_sell_receipt(
+                    event,
+                    global_actuation=global_actuation,
+                    reason=final_block,
+                    proof_accepted=False,
+                )
             outcome = execute_exit(
                 portfolio,
                 position,
@@ -10874,6 +13553,10 @@ def _submit_current_global_sell(
                 exit_intent=exit_intent,
                 execution_evidence=exit_evidence,
                 global_sell_authority=execution_authority,
+                global_sell_prefetched_orderbook=raw_book,
+                global_sell_required_snapshot_id=str(
+                    market_authority.snapshot.snapshot_id
+                ),
             )
     except Exception as exc:  # noqa: BLE001 - exit safety remains fail closed
         if exit_evidence is not None and exit_evidence.venue_call_started:
@@ -10900,11 +13583,26 @@ def _submit_current_global_sell(
                 venue_command_state=exit_evidence.command_state,
                 venue_order_type=exit_evidence.order_type,
             )
+        failure_text = f"{type(exc).__name__}:{exc}"
+        if _is_global_jit_authority_failure(failure_text) and not (
+            exit_evidence is not None and exit_evidence.venue_call_started
+        ):
+            return _global_sell_receipt(
+                event,
+                global_actuation=global_actuation,
+                reason=(
+                    "GLOBAL_ACTUATION_MARKET_AUTHORITY_SUPERSEDED:"
+                    f"{failure_text}"
+                ),
+                proof_accepted=False,
+                jit_handoff=jit_handoff,
+            )
         return _global_sell_receipt(
             event,
             global_actuation=global_actuation,
-            reason=f"GLOBAL_SELL_EXECUTION_FAILED:{type(exc).__name__}:{exc}",
+            reason=f"GLOBAL_SELL_EXECUTION_FAILED:{failure_text}",
             proof_accepted=False,
+            jit_handoff=jit_handoff,
         )
 
     outcome_text = str(outcome)
@@ -10940,12 +13638,27 @@ def _global_curve_supersession_from_receipt(
     """Lift a typed current curve into the side-effect-free global preflight."""
 
     reason = str(receipt.reason or "")
+    market_prefix = "GLOBAL_ACTUATION_MARKET_AUTHORITY_SUPERSEDED:"
+    if reason.startswith(market_prefix):
+        return "MARKET_AUTHORITY_SUPERSEDED", None, reason
     prefix = "GLOBAL_ACTUATION_EXECUTION_BINDING_SUPERSEDED:curve_economics:"
     if not reason.startswith(prefix):
         return None
+    metadata_fields = {"fee", "fee_details", "tick", "min_order", "neg_risk"}
+    fields_marker = "jit_detail=fields="
+    field_text = reason.split(fields_marker, 1)[1].split(":", 1)[0] if fields_marker in reason else ""
+    if metadata_fields.intersection(field_text.split(",")):
+        return "MARKET_AUTHORITY_SUPERSEDED", None, reason
     replacement = receipt.global_jit_candidate
     if replacement is None:
         return "BLOCKED", None, f"{reason}:replacement_candidate_missing"
+    if isinstance(replacement, _GlobalJitHandoff):
+        replacement = replacement.candidate
+    # A SELL curve does not carry canonical fee_details for its synthetic BUY
+    # twin.  A local overlay would retain the prior BUY fee payload without a
+    # proof that it is still current, so only a complete venue cut may use it.
+    if str(getattr(replacement, "action", "BUY") or "BUY").upper() == "SELL":
+        return "MARKET_AUTHORITY_SUPERSEDED", None, reason
     return "CURVE_SUPERSEDED", replacement, reason
 
 
@@ -11051,6 +13764,32 @@ def _global_preflight_block_status(reason: str) -> str:
         # family cache before this classification and rebuilds one complete
         # current q/book/wealth auction without venue I/O.
         return "PROBABILITY_SUPERSEDED"
+    if reason == (
+        "GLOBAL_ACTUATION_PREPARE_FAILED:"
+        "SELECTION_SCOPE_EMPTY:live_selection:input=1:"
+        "classes=STRATEGY_POLICY_GATED=1"
+    ):
+        # Selection admitted a candidate whose exact probability-semantics
+        # revision is now strategy-gated. It cannot keep the stale winner at
+        # the head of every cut while current-revision candidates go unseen.
+        # SCOPE: the selected candidate's probability revision. DRAIN: evict
+        # its probability cache and rebuild the complete BUY/SELL/HOLD/CASH
+        # cut once. RESET: a fresh policy lookup admits only current eligible
+        # revisions; repeated drift remains fail-closed at the reauction cap.
+        return "PROBABILITY_SUPERSEDED"
+    if reason.startswith(
+        "EDLI_LIVE_CERTIFICATE_BUILD_FAILED:"
+        "GLOBAL_BUY_JIT_MAKER_WITNESS_SUPERSEDED:"
+    ) and reason.endswith("current_limit_or_cashflow_changed"):
+        # The selected passive price is no longer current, so its typed maker
+        # witness and economics cannot be reused.  This is market-authority
+        # drift, not an unclassified certificate defect: rebuild the complete
+        # Gamma/CLOB/raw-book cut and rank BUY/SELL/HOLD/CASH again.
+        # SCOPE: this selected maker BUY's sealed market cut.
+        # DRAIN: the existing bounded full-market supersession reauction.
+        # RESET: a complete current cut with an exact price-bound witness;
+        # repeat drift remains fail-closed under the reauction limit.
+        return "MARKET_AUTHORITY_SUPERSEDED"
     if (
         reason.startswith("GLOBAL_PREFLIGHT_WEALTH_SUPERSEDED:")
         or reason
@@ -11072,18 +13811,55 @@ def _global_preflight_block_status(reason: str) -> str:
         # current probability, book, and wealth epoch remain valid for every
         # other candidate, so exclude this SELL and re-run the same auction.
         return "CANDIDATE_BLOCKED"
+    if reason.startswith("GLOBAL_SELL_COLLATERAL_UNAVAILABLE:"):
+        # Targeted chain inventory/approval governs only this exact SELL. The
+        # batch can safely compare the remaining BUY/SELL/HOLD/CASH actions,
+        # while the next cut retries this token with fresh chain truth.
+        return "CANDIDATE_BLOCKED"
+    if reason.startswith(
+        (
+            "GLOBAL_SELL_LEGAL_PRICE_UNAVAILABLE:",
+            "GLOBAL_SELL_LEGAL_MAKER_PRICE_UNAVAILABLE:",
+            "GLOBAL_SELL_JIT_SELECTED_MODE_UNAVAILABLE:",
+        )
+    ):
+        return "CANDIDATE_BLOCKED"
+    if reason.startswith(
+        "EDLI_LIVE_CERTIFICATE_BUILD_FAILED:"
+        "PRE_SUBMIT_BOOK_AUTHORITY_JIT_CROSSED_BOOK:"
+    ):
+        # A locked/crossed JIT book cannot authorize this token's selected
+        # action, but it does not invalidate the frozen q, wealth, or the
+        # independent books of every runner-up. SCOPE: this exact candidate.
+        # DRAIN: the batch excludes it and re-ranks the remaining current cut.
+        # RESET: the next recurring cut fetches a fresh book for the token.
+        return "CANDIDATE_BLOCKED"
+    if reason == "risk_allocator_pre_submit_blocked: unknown_side_effect_same_market":
+        # The allocator's scope lattice has already proved this block belongs
+        # to the selected market, not the complete auction.  Keep that market
+        # fail-closed while comparing independent candidates from the same
+        # frozen q/book/wealth cut.  SCOPE: the exact selected candidate.
+        # DRAIN: exclude it and re-rank the remaining feasible set. RESET: the
+        # recurring command reconciler clears the market-scoped unknown, after
+        # which a later current cut may admit the candidate again.
+        return "CANDIDATE_BLOCKED"
     if reason.startswith(
         (
             "LIVE_ENTRY_BLOCKED:entry_readiness:",
             "LIVE_ENTRY_BLOCKED:entry_readiness_family:",
+            (
+                "EDLI_LIVE_CERTIFICATE_BUILD_FAILED:"
+                "LIVE_ENTRY_PROBABILITY_AUTHORITY_UNQUALIFIED:"
+            ),
         )
     ):
-        # SCOPE: entry readiness governs BUY admission only. The batch runner
-        # expands this typed reason to every BUY in the reported global/family
-        # scope while preserving SELL. DRAIN: re-run this complete
+        # SCOPE: entry readiness and an unqualified probability binding govern
+        # BUY admission only. The batch runner expands these typed reasons to
+        # their BUY scope while preserving SELL. DRAIN: re-run this complete
         # BUY/SELL/HOLD/CASH cut immediately. RESET: the next cut rebuilds
-        # readiness from current state. Rejecting the complete epoch here would
-        # let an entry hold starve an executable reduce-only SELL.
+        # readiness and probability authority from current state. Rejecting the
+        # complete epoch here would let an impossible entry starve an executable
+        # qualified BUY or reduce-only SELL.
         return "CANDIDATE_BLOCKED"
     if reason.startswith(
         (
@@ -11106,6 +13882,18 @@ def _global_preflight_block_status(reason: str) -> str:
     ):
         # The selected token/side lost its executable quote at JIT preflight.
         # That invalidates this candidate, not the frozen q/book/wealth epoch.
+        return "CANDIDATE_BLOCKED"
+    if (
+        reason.startswith(
+            "GLOBAL_ACTUATION_PREPARE_FAILED:"
+            "SELECTION_SCOPE_EMPTY:admission:input=1:classes="
+        )
+        and " exceeds executable depth on token " in reason
+        and "fail closed rather than fabricate a fill price=1" in reason
+    ):
+        # The exact selected BUY cannot satisfy the venue minimum on this
+        # current book. Exclude it and compare sibling SELL/HOLD/CASH now;
+        # a later book event rebuilds the candidate from new depth.
         return "CANDIDATE_BLOCKED"
     if (
         reason.startswith(
@@ -11217,6 +14005,258 @@ def _global_preflight_entry_authority_receipt(
     return receipt
 
 
+def _rebind_global_jit_receipt_snapshot(
+    receipt: EventSubmissionReceipt,
+    handoff: _GlobalJitHandoff,
+    *,
+    trade_conn: sqlite3.Connection,
+) -> EventSubmissionReceipt:
+    """Rebind every executor-facing BUY reference to one exact JIT row."""
+
+    from src.state.snapshot_repo import get_snapshot
+
+    snapshot = get_snapshot(trade_conn, handoff.authority.snapshot.snapshot_id)
+    if snapshot is None:
+        raise ValueError("GLOBAL_JIT_SNAPSHOT_PERSISTENCE_FAILED")
+    bundle = receipt.decision_proof_bundle
+    if bundle is None:
+        return receipt
+    execution_price = ExecutionPrice(
+        value=float(receipt.c_fee_adjusted or 0.0),
+        price_type="fee_adjusted",
+        fee_deducted=True,
+        currency="probability_units",
+    )
+    direction = str(receipt.direction or "buy_yes")
+    cost_basis = _require_cost_basis(
+        snapshot,
+        direction=direction,
+        size_usd=float(receipt.kelly_size_usd or 0.01),
+        execution_price=execution_price,
+    )
+    executable = bundle.executable_snapshot
+    executable_payload = dict(executable.payload)
+    executable_payload.update(
+        {
+            "identity": snapshot.snapshot_id,
+            "selected_snapshot_id": snapshot.snapshot_id,
+            "condition_id": snapshot.condition_id,
+            "token_id": snapshot.selected_outcome_token_id,
+            "orderbook_hash": snapshot.raw_orderbook_hash,
+            "fee_details_hash": _hash_jsonish(snapshot.fee_details),
+            "min_tick_size": str(snapshot.min_tick_size),
+            "min_order_size": str(snapshot.min_order_size),
+            "neg_risk": snapshot.neg_risk,
+            "captured_at": snapshot.captured_at.isoformat(),
+            "freshness_deadline": snapshot.freshness_deadline.isoformat(),
+            "active": snapshot.active,
+            "closed": snapshot.closed,
+            "executable_snapshot_hash": snapshot.executable_snapshot_hash,
+        }
+    )
+    jit_clock = EvidenceClock(
+        snapshot.captured_at,
+        snapshot.captured_at,
+        snapshot.captured_at,
+    )
+    executable = dataclass_replace(
+        executable,
+        payload=executable_payload,
+        clock=jit_clock,
+    )
+    quote = bundle.quote_feasibility
+    quote_payload = dict(quote.payload)
+    quote_payload.update(
+        {
+            "quote_book_condition_id": snapshot.condition_id,
+            "quote_book_token_id": snapshot.selected_outcome_token_id,
+            "quote_depth_hash": snapshot.raw_orderbook_hash,
+            "best_bid": float(snapshot.orderbook_top_bid) if snapshot.orderbook_top_bid is not None else None,
+            "best_ask": float(snapshot.orderbook_top_ask) if snapshot.orderbook_top_ask is not None else None,
+        }
+    )
+    quote = dataclass_replace(quote, payload=quote_payload, clock=jit_clock)
+    cost = bundle.cost_model
+    cost_payload = dict(cost.payload)
+    cost_payload.update(
+        {
+            "identity": cost_basis.cost_basis_id,
+            "cost_basis_id": cost_basis.cost_basis_id,
+            "cost_basis_hash": cost_basis.cost_basis_hash,
+        }
+    )
+    cost = dataclass_replace(cost, payload=cost_payload, clock=jit_clock)
+    sizing = bundle.sizing
+    sizing_payload = dict(sizing.payload)
+    sizing_payload["cost_basis_id"] = cost_basis.cost_basis_id
+    sizing = dataclass_replace(sizing, payload=sizing_payload)
+    projection = dict(bundle.pre_submit_projection)
+    projection["executable_snapshot_id"] = snapshot.snapshot_id
+    projection["projection_hash"] = stable_hash(projection)
+    executable_payload["family_snapshot_ids"] = tuple(
+        sorted(
+            set(executable_payload.get("family_snapshot_ids") or ())
+            | {snapshot.snapshot_id}
+        )
+    )
+    executable = dataclass_replace(executable, payload=executable_payload)
+    rebound_bundle = dataclass_replace(
+        bundle,
+        executable_snapshot=executable,
+        quote_feasibility=quote,
+        cost_model=cost,
+        sizing=sizing,
+        pre_submit_projection=projection,
+    )
+    economics = receipt.qkernel_execution_economics
+    if isinstance(economics, Mapping):
+        economics = dict(economics)
+        economics.update(
+            {
+                "global_jit_book_snapshot_id": snapshot.snapshot_id,
+                "global_jit_book_hash": snapshot.raw_orderbook_hash,
+                "global_jit_venue_book_hash": snapshot.raw_orderbook_hash,
+                "global_jit_execution_curve_identity": str(
+                    getattr(handoff.candidate, "execution_curve_identity", "") or ""
+                ),
+            }
+        )
+        if str(economics.get("global_execution_mode") or "").strip().upper() == (
+            "MAKER_REST"
+        ):
+            maker_witness = getattr(handoff.candidate, "maker_fill_witness", None)
+            economics.update(
+                {
+                    "global_fill_probability": float(
+                        getattr(handoff.candidate, "fill_probability", 0.0)
+                    ),
+                    "global_fill_probability_source": str(
+                        getattr(maker_witness, "witness_identity", "") or ""
+                    ),
+                    "global_rest_deadline_minutes": float(
+                        getattr(handoff.candidate, "rest_deadline_minutes", 0.0)
+                    ),
+                    "global_maker_fill_witness": (
+                        _current_maker_fill_witness_certificate_payload(
+                            handoff.candidate,
+                            validated_at_utc=snapshot.captured_at,
+                        )
+                    ),
+                }
+            )
+        # The JIT authority fields are part of the qkernel certificate identity;
+        # recompute the digest after rebinding them and mirror it on BELIEF.
+        curve_identity = str(
+            getattr(handoff.candidate, "execution_curve_identity", "") or ""
+        )
+        if "global_buy_fak_execution_curve_identity" in economics:
+            economics["global_buy_fak_execution_curve_identity"] = curve_identity
+        economics["current_state_identity_hash"] = qkernel_current_state_identity_hash(
+            economics
+        )
+        belief = rebound_bundle.belief
+        belief_payload = dict(belief.payload)
+        belief_payload[
+            "qkernel_current_state_identity_hash"
+        ] = economics["current_state_identity_hash"]
+        rebound_bundle = dataclass_replace(
+            rebound_bundle,
+            belief=dataclass_replace(belief, payload=belief_payload),
+        )
+    opportunity_book = _opportunity_book_with_selected_qkernel_economics(
+        receipt.opportunity_book,
+        economics,
+    )
+    rebound = dataclass_replace(
+        receipt,
+        executable_snapshot_id=snapshot.snapshot_id,
+        kelly_cost_basis_id=cost_basis.cost_basis_id,
+        neg_risk=snapshot.neg_risk,
+        qkernel_execution_economics=economics,
+        opportunity_book=opportunity_book,
+        decision_proof_bundle=rebound_bundle,
+    )
+    rebound_snapshot_id = str(
+        rebound_bundle.executable_snapshot.payload.get("selected_snapshot_id") or ""
+    )
+    projection_snapshot_id = str(
+        rebound_bundle.pre_submit_projection.get("executable_snapshot_id") or ""
+    )
+    qkernel_snapshot_id = str(
+        (economics or {}).get("global_jit_book_snapshot_id") or ""
+        if isinstance(economics, Mapping)
+        else ""
+    )
+    if not (
+        rebound.executable_snapshot_id
+        == rebound_snapshot_id
+        == projection_snapshot_id
+        == qkernel_snapshot_id
+        == str(handoff.authority.snapshot.snapshot_id)
+        == str(getattr(handoff.candidate, "book_snapshot_id", "") or "")
+    ):
+        raise ValueError("GLOBAL_JIT_RECEIPT_SNAPSHOT_BINDING_MISMATCH")
+    return rebound
+
+
+def _opportunity_book_with_selected_qkernel_economics(
+    opportunity_book: Mapping[str, object] | None,
+    economics: Mapping[str, object] | None,
+) -> dict[str, object] | None:
+    """Project one rebound certificate onto every selected-book receipt view.
+
+    The selected global BUY has one execution-economics authority. JIT changes
+    that certificate's book identity, so the receipt-level certificate and the
+    selected OpportunityBook candidate must advance atomically. Leaving the
+    book copy at the pre-JIT generation creates a twin authority that the final
+    live consistency wall correctly rejects.
+    """
+
+    if economics is None:
+        return dict(opportunity_book) if isinstance(opportunity_book, Mapping) else None
+    if not isinstance(opportunity_book, Mapping):
+        raise ValueError("GLOBAL_JIT_OPPORTUNITY_BOOK_MISSING")
+    selected_candidate_id = str(
+        opportunity_book.get("selected_candidate_id") or ""
+    ).strip()
+    actual_candidate_id = str(
+        opportunity_book.get("actual_receipt_selected_candidate_id") or ""
+    ).strip()
+    if not selected_candidate_id:
+        raise ValueError("GLOBAL_JIT_OPPORTUNITY_BOOK_SELECTED_MISSING")
+    if actual_candidate_id and actual_candidate_id != selected_candidate_id:
+        raise ValueError("GLOBAL_JIT_OPPORTUNITY_BOOK_SELECTION_MISMATCH")
+    candidates = opportunity_book.get("candidates")
+    if not isinstance(candidates, list):
+        raise ValueError("GLOBAL_JIT_OPPORTUNITY_BOOK_CANDIDATES_MISSING")
+
+    canonical_economics = _json_finite(economics)
+    rebound_candidates: list[object] = []
+    selected_count = 0
+    for candidate in candidates:
+        if not isinstance(candidate, Mapping):
+            rebound_candidates.append(candidate)
+            continue
+        rebound_candidate = dict(candidate)
+        if str(candidate.get("candidate_id") or "").strip() == selected_candidate_id:
+            selected_count += 1
+            rebound_candidate["qkernel_execution_economics"] = canonical_economics
+        rebound_candidates.append(rebound_candidate)
+    if selected_count != 1:
+        raise ValueError(
+            f"GLOBAL_JIT_OPPORTUNITY_BOOK_SELECTED_CARDINALITY:{selected_count}"
+        )
+
+    rebound_book = dict(opportunity_book)
+    rebound_book["candidates"] = rebound_candidates
+    rebound_book["selected_qkernel_execution_economics"] = canonical_economics
+    cache_summary = opportunity_book.get("cache_summary")
+    rebound_cache = dict(cache_summary) if isinstance(cache_summary, Mapping) else {}
+    rebound_cache["selected_qkernel_execution_economics"] = canonical_economics
+    rebound_book["cache_summary"] = rebound_cache
+    return rebound_book
+
+
 def _global_preflight_entry_jit_receipt(
     event: OpportunityEvent,
     receipt: EventSubmissionReceipt,
@@ -11225,6 +14265,7 @@ def _global_preflight_entry_jit_receipt(
     book_quote_provider: Callable[[str], Mapping[str, object]] | None,
     current_candidate_override: object | None = None,
     checked_at_utc: datetime | None = None,
+    trade_conn: sqlite3.Connection | None = None,
 ) -> EventSubmissionReceipt:
     """Bind selected BUY to the full JIT curve before any persistence."""
 
@@ -11254,11 +14295,16 @@ def _global_preflight_entry_jit_receipt(
     try:
         from src.events.reactor import _edli_pre_submit_book_from_jit_fetch
 
-        current_candidate = _reusable_global_preflight_jit_candidate(
-            candidate,
-            current_candidate_override,
-            checked_at_utc=checked_at_utc,
+        # SCOPE: this exact global BUY. DRAIN: the next auction cut repeats
+        # Gamma+CLOB+raw book reads. RESET: only one current raw book plus one current
+        # Gamma market can rebind the selected curve.  A prior JIT candidate is a
+        # re-auction hint, never submit authority.
+        handoff = (
+            current_candidate_override
+            if isinstance(current_candidate_override, _GlobalJitHandoff)
+            else None
         )
+        current_candidate = handoff.candidate if handoff is not None else None
         fresh_best_bid: float | None = None
         fresh_best_ask: float | None = None
         mode_checked_at = checked_at_utc
@@ -11275,7 +14321,10 @@ def _global_preflight_entry_jit_receipt(
                     else None
                 )
                 if response is None:
-                    response = book_quote_provider(token_id)
+                    try:
+                        response = book_quote_provider(token_id)
+                    except Exception as exc:  # noqa: BLE001 - authority transport
+                        raise ValueError("GLOBAL_JIT_RAW_BOOK_UNAVAILABLE") from exc
                     if callable(consume_last):
                         consume_last(token_id)
                 current = dict(
@@ -11293,10 +14342,53 @@ def _global_preflight_entry_jit_receipt(
             )
             if jit is None:
                 raise ValueError("PRE_SUBMIT_BOOK_AUTHORITY_JIT_REQUIRED")
+            from src.data.polymarket_client import PolymarketClient
+            from src.data.polymarket_request_governor import RequestPriority
+
+            timeout = max(
+                1.0,
+                float(os.environ.get("ZEUS_GLOBAL_AUCTION_BOOK_TIMEOUT_SECONDS", "8.0")),
+            )
+            try:
+                gamma = _global_current_gamma_client(timeout_seconds=timeout)
+            except Exception as exc:  # noqa: BLE001 - authority transport
+                raise ValueError("GLOBAL_JIT_GAMMA_MARKET_UNAVAILABLE") from exc
+
+            def _entry_gamma_get(path, *, params=None, timeout):
+                return _governed_global_gamma_get(
+                    gamma,
+                    path,
+                    params=params,
+                    timeout=float(timeout),
+                    priority=RequestPriority.SUBMIT_JIT,
+                )
+
+            with PolymarketClient(
+                public_http_timeout=timeout,
+                public_request_priority=RequestPriority.SUBMIT_JIT,
+            ) as authority_clob:
+                market_authority = _current_global_market_authority(
+                    condition_id=str(
+                        getattr(candidate, "condition_id", "") or ""
+                    ),
+                    token_id=str(getattr(candidate, "token_id", "") or ""),
+                    side=str(getattr(candidate, "side", "") or ""),
+                    gamma_get=_entry_gamma_get,
+                    clob_market_get=authority_clob.get_clob_market_info,
+                    raw_book=raw_book,
+                    captured_at_utc=jit[3],
+                    timeout=timeout,
+                )
             current_candidate = _global_buy_candidate_from_raw_book(
                 candidate,
                 raw_book,
                 captured_at_utc=jit[3],
+                market_authority=market_authority,
+            )
+            handoff = _GlobalJitHandoff(
+                candidate=current_candidate,
+                authority=market_authority,
+                raw_book_json=_canonical_global_jit_raw_book(raw_book),
             )
             fresh_best_bid = jit[0]
             fresh_best_ask = jit[1]
@@ -11340,33 +14432,187 @@ def _global_preflight_entry_jit_receipt(
                     f"current={current_candidate.execution_curve_identity}"
                 ),
                 proof_accepted=False,
-                global_jit_candidate=current_candidate,
+                global_jit_candidate=handoff,
             )
         shares = Decimal(str(getattr(decision, "shares", "0") or "0"))
         limit = Decimal(str(getattr(decision, "limit_price", "0") or "0"))
-        executable_shares = sum(
-            (
-                level.size
-                for level in current_candidate.executable_cost_curve.levels
-                if level.price <= limit
-            ),
-            Decimal("0"),
+        if shares <= 0:
+            raise ValueError("GLOBAL_BUY_JIT_SELECTED_SIZE_INVALID")
+        from src.solve.solver import (
+            DeterministicBinPayoffWitness,
+            ExpectedBuyTerminalWealthCertificate,
+            current_precliff_liquidation_capacity,
         )
-        if shares <= 0 or executable_shares + Decimal("1e-9") < shares:
-            raise ValueError(
-                "GLOBAL_BUY_JIT_SELECTED_SIZE_INFEASIBLE:"
-                f"token_id={candidate.token_id}:limit_price={limit}:"
-                f"required_shares={shares}:executable_shares={executable_shares}"
+
+        execution_mode = str(
+            getattr(candidate, "execution_mode", "") or ""
+        ).upper()
+        settlement_locked_exact_payoff = (
+            getattr(candidate, "settlement_locked_exact_payoff", False) is True
+            and getattr(
+                current_candidate,
+                "settlement_locked_exact_payoff",
+                False,
             )
+            is True
+        )
+        expected_terminal = getattr(decision, "expected_terminal_wealth", None)
+        witness = getattr(global_actuation, "probability_witness", None)
+        binding = None
+        if isinstance(witness, DeterministicBinPayoffWitness):
+            binding = next(
+                (
+                    item
+                    for item in witness.bindings
+                    if item.bin_id == str(getattr(candidate, "bin_id", "") or "")
+                ),
+                None,
+            )
+        side = str(getattr(candidate, "side", "") or "").upper()
+        expected_token = (
+            binding.yes_token_id
+            if binding is not None and side == "YES"
+            else binding.no_token_id
+            if binding is not None and side == "NO"
+            else None
+        )
+        exact_yes_payoff = (
+            witness.exact_yes_payoff(binding.bin_id)
+            if isinstance(witness, DeterministicBinPayoffWitness)
+            and binding is not None
+            else None
+        )
+        exact_held_payoff = (
+            exact_yes_payoff == 1
+            if side == "YES"
+            else exact_yes_payoff == 0
+            if side == "NO"
+            else False
+        )
+        witness_fresh = (
+            isinstance(witness, DeterministicBinPayoffWitness)
+            and witness.captured_at_utc <= mode_checked_at
+            and mode_checked_at <= witness.captured_at_utc + witness.max_age
+        )
+        typed_exact_payoff_binding = (
+            isinstance(witness, DeterministicBinPayoffWitness)
+            and binding is not None
+            and witness_fresh
+            and witness.family_key == str(getattr(candidate, "family_key", "") or "")
+            and witness.resolution_identity
+            == str(getattr(candidate, "resolution_identity", "") or "")
+            and witness.witness_identity
+            == str(getattr(candidate, "probability_witness_identity", "") or "")
+            and binding.condition_id
+            == str(getattr(candidate, "condition_id", "") or "")
+            and expected_token == str(getattr(candidate, "token_id", "") or "")
+            and str(getattr(current_candidate, "family_key", "") or "")
+            == witness.family_key
+            and str(getattr(current_candidate, "bin_id", "") or "")
+            == binding.bin_id
+            and str(getattr(current_candidate, "condition_id", "") or "")
+            == binding.condition_id
+            and str(getattr(current_candidate, "resolution_identity", "") or "")
+            == witness.resolution_identity
+            and str(getattr(current_candidate, "token_id", "") or "")
+            == expected_token
+            and str(getattr(current_candidate, "side", "") or "").upper() == side
+            and str(
+                getattr(current_candidate, "probability_witness_identity", "") or ""
+            )
+            == witness.witness_identity
+            and exact_held_payoff
+        )
+        exact_payoff_decision = (
+            str(getattr(decision, "capital_action_mode", "") or "")
+            == "SETTLEMENT_LOCKED_BUY"
+            and isinstance(expected_terminal, ExpectedBuyTerminalWealthCertificate)
+            and expected_terminal.win_probability_mean == 1.0
+            and expected_terminal.loss_probability_mean == 0.0
+        )
+        statistical_settlement_hold = (
+            execution_mode == "TAKER_LIMIT"
+            and not settlement_locked_exact_payoff
+            and str(getattr(decision, "capital_action_mode", "") or "")
+            == "SETTLEMENT_LOCKED_BUY"
+            and isinstance(expected_terminal, ExpectedBuyTerminalWealthCertificate)
+        )
+        liquidation_capacity = current_precliff_liquidation_capacity(
+            current_candidate.native_bid_levels
+        )
+        if (
+            not (
+                statistical_settlement_hold
+                or (
+                    execution_mode == "TAKER_LIMIT"
+                    and settlement_locked_exact_payoff
+                    and typed_exact_payoff_binding
+                    and exact_payoff_decision
+                )
+            )
+            and liquidation_capacity + Decimal("1e-9") < shares
+        ):
+            raise ValueError(
+                "GLOBAL_BUY_JIT_PRECLIFF_LIQUIDATION_CAPACITY_INFEASIBLE:"
+                f"token_id={candidate.token_id}:required_shares={shares}:"
+                f"precliff_bid_shares={liquidation_capacity}"
+            )
+        if execution_mode == "TAKER_LIMIT":
+            executable_shares = sum(
+                (
+                    level.size
+                    for level in current_candidate.executable_cost_curve.levels
+                    if level.price <= limit
+                ),
+                Decimal("0"),
+            )
+            if executable_shares + Decimal("1e-9") < shares:
+                raise ValueError(
+                    "GLOBAL_BUY_JIT_SELECTED_SIZE_INFEASIBLE:"
+                    f"token_id={candidate.token_id}:limit_price={limit}:"
+                    f"required_shares={shares}:executable_shares={executable_shares}"
+                )
+        if handoff is None:
+            raise ValueError("GLOBAL_JIT_HANDOFF_MISSING")
+        if trade_conn is not None:
+            _persist_global_jit_authority_snapshot(trade_conn, handoff.authority)
     except Exception as exc:  # noqa: BLE001 - typed fail-closed preflight receipt
+        reason = str(exc)
+        if _is_global_jit_authority_failure(reason):
+            if reason == "PRE_SUBMIT_BOOK_AUTHORITY_JIT_REQUIRED":
+                reason = "GLOBAL_JIT_RAW_BOOK_UNAVAILABLE"
+            reason = f"GLOBAL_ACTUATION_MARKET_AUTHORITY_SUPERSEDED:{reason}"
+        else:
+            reason = f"EDLI_LIVE_CERTIFICATE_BUILD_FAILED:{reason}"
         return dataclass_replace(
             receipt,
             submitted=False,
             side_effect_status="NO_SUBMIT",
-            reason=f"EDLI_LIVE_CERTIFICATE_BUILD_FAILED:{exc}",
+            reason=reason,
             proof_accepted=False,
         )
-    return receipt
+    if trade_conn is not None and handoff is not None:
+        try:
+            receipt = _rebind_global_jit_receipt_snapshot(
+                receipt,
+                handoff,
+                trade_conn=trade_conn,
+            )
+        except Exception as exc:  # noqa: BLE001 - final JIT binding is fail closed
+            reason = str(exc)
+            if not _is_global_jit_authority_failure(reason):
+                reason = f"EDLI_LIVE_CERTIFICATE_BUILD_FAILED:{reason}"
+            else:
+                reason = f"GLOBAL_ACTUATION_MARKET_AUTHORITY_SUPERSEDED:{reason}"
+            return dataclass_replace(
+                receipt,
+                submitted=False,
+                side_effect_status="NO_SUBMIT",
+                reason=reason,
+                proof_accepted=False,
+                global_jit_candidate=handoff,
+            )
+    return dataclass_replace(receipt, global_jit_candidate=handoff)
 
 
 def _global_preflight_candidate_mode_receipt(
@@ -11440,6 +14686,7 @@ def _global_preflight_candidate_mode_receipt(
             fresh_best_bid=fresh_best_bid,
             fresh_best_ask=fresh_best_ask,
             tick_size=float(curve.min_tick),
+            taker_fee_rate=float(curve.fee_model.fee_rate),
             decision_time=checked_at_utc,
         )
         if fresh_mode == "NO_TRADE":
@@ -11487,6 +14734,29 @@ def _global_preflight_candidate_mode_receipt(
             passive_maker_context=None,
         )
         assert_live_order_unit_price(limit_price)
+        economics = receipt.qkernel_execution_economics
+        selected_limit = (
+            _optional_float(economics.get("global_limit_price"))
+            if isinstance(economics, Mapping)
+            else None
+        )
+        if selected_limit is None or not math.isclose(
+            float(limit_price),
+            selected_limit,
+            rel_tol=0.0,
+            abs_tol=max(float(curve.min_tick) / 2.0, 1e-12),
+        ):
+            return dataclass_replace(
+                receipt,
+                submitted=False,
+                side_effect_status="NO_SUBMIT",
+                reason=(
+                    "GLOBAL_PREFLIGHT_CANDIDATE_MODE_FLIPPED:"
+                    "MAKER_LIMIT_SUPERSEDED:"
+                    f"selected={selected_limit}:current={limit_price}"
+                ),
+                proof_accepted=False,
+            )
     except (TypeError, ValueError) as exc:
         return dataclass_replace(
             receipt,
@@ -11513,6 +14783,7 @@ def _reusable_global_preflight_jit_candidate(
     ):
         return None
     identity_fields = (
+        "candidate_id",
         "family_key",
         "bin_id",
         "condition_id",
@@ -11523,6 +14794,7 @@ def _reusable_global_preflight_jit_candidate(
         "ledger_snapshot_id",
         "book_snapshot_id",
         "execution_curve_identity",
+        "execution_mode",
     )
     if any(
         str(getattr(current_candidate, field, "") or "")
@@ -11579,6 +14851,7 @@ def _global_current_state_execution_economics(
     decision: object,
     witness: object,
     payoff_q_lcb_cap: float | None = None,
+    decision_time: datetime | None = None,
 ) -> dict[str, Any]:
     """Bind actuation to the current source-clock band and order certificate."""
 
@@ -11988,6 +15261,15 @@ def _global_current_state_execution_economics(
                 ),
             }
         )
+    if str(current.get("global_execution_mode") or "").strip().upper() == "MAKER_REST":
+        if decision_time is None or decision_time.tzinfo is None:
+            raise ValueError("GLOBAL_MAKER_FILL_WITNESS_VALIDATION_CLOCK_REQUIRED")
+        current["global_maker_fill_witness"] = (
+            _current_maker_fill_witness_certificate_payload(
+                candidate,
+                validated_at_utc=decision_time,
+            )
+        )
     current["current_state_identity_hash"] = qkernel_current_state_identity_hash(
         current
     )
@@ -11999,6 +15281,75 @@ def _global_current_state_execution_economics(
             f"GLOBAL_CURRENT_STATE_CERTIFICATE_INVALID:{current_state_reason}"
         )
     return current
+
+
+def _current_maker_fill_witness_certificate_payload(
+    candidate: object,
+    *,
+    validated_at_utc: datetime,
+) -> dict[str, object]:
+    """Serialize one fully rebound maker witness into the decision certificate."""
+
+    from src.solve.solver import (
+        CurrentMakerFillWitness,
+        _maker_witness_rejection,
+        executable_curve_identity,
+    )
+
+    if validated_at_utc.tzinfo is None:
+        raise ValueError("GLOBAL_MAKER_FILL_WITNESS_VALIDATION_CLOCK_REQUIRED")
+    rejection = _maker_witness_rejection(
+        candidate,
+        decision_at_utc=validated_at_utc,
+    )
+    witness = getattr(candidate, "maker_fill_witness", None)
+    if rejection is not None or not isinstance(witness, CurrentMakerFillWitness):
+        raise ValueError(rejection or "CURRENT_MAKER_FILL_WITNESS_UNAVAILABLE")
+    action = str(getattr(candidate, "action", "BUY") or "BUY").strip().upper()
+    proposal = (
+        getattr(candidate, "economic_sell_curve", None)
+        if action == "SELL"
+        else getattr(candidate, "economic_cost_curve", None)
+    )
+    if proposal is None:
+        raise ValueError("CURRENT_MAKER_PROPOSAL_INVALID")
+
+    def utc_iso(value: datetime) -> str:
+        return value.astimezone(UTC).isoformat()
+
+    held_shares = getattr(candidate, "held_shares", None)
+    return {
+        "schema_version": 1,
+        "witness_identity": witness.witness_identity,
+        "candidate_binding_identity": witness.candidate_binding_identity,
+        "action": action,
+        "ledger_snapshot_id": str(
+            getattr(candidate, "ledger_snapshot_id", "") or ""
+        ),
+        "position_id": str(getattr(candidate, "position_id", "") or ""),
+        "held_shares": str(held_shares or ""),
+        "asset_epoch_identity": witness.asset_epoch_identity,
+        "proposal_identity": executable_curve_identity(proposal),
+        "book_snapshot_id": witness.book_snapshot_id,
+        "book_hash": witness.book_hash,
+        "limit_price": str(witness.limit_price),
+        "rest_deadline_minutes": float(witness.rest_deadline_minutes),
+        "source_identity": witness.source_identity,
+        "model_identity": witness.model_identity,
+        "sample_identity": witness.sample_identity,
+        "training_cutoff_at_utc": utc_iso(witness.training_cutoff_at_utc),
+        "issued_at_utc": utc_iso(witness.issued_at_utc),
+        "valid_until_at_utc": utc_iso(witness.valid_until_at_utc),
+        "validated_at_utc": utc_iso(validated_at_utc),
+        "outcomes": [
+            {
+                "probability": str(outcome.probability),
+                "fill_fraction": str(outcome.fill_fraction),
+                "proceeds_per_share_usd": str(outcome.proceeds_per_share_usd),
+            }
+            for outcome in witness.outcomes
+        ],
+    }
 
 
 def _global_current_state_economics_seed(proof: "_CandidateProof") -> dict[str, Any]:
@@ -12021,16 +15372,25 @@ def _positive_global_current_objective(cert: Mapping[str, Any]) -> bool:
         cert.get("global_probability_functional")
         == "POSTERIOR_PREDICTIVE_MEAN"
     )
+    proposal_mean = (
+        mean_action
+        and str(cert.get("global_execution_mode") or "").strip().upper()
+        == "MAKER_REST"
+    )
     delta_log_wealth = _optional_float(
         cert.get(
-            "global_expected_delta_log_wealth"
+            "global_proposal_expected_delta_log_wealth"
+            if proposal_mean
+            else "global_expected_delta_log_wealth"
             if mean_action
             else "global_robust_delta_log_wealth"
         )
     )
     ev = _optional_float(
         cert.get(
-            "global_expected_ev_usd"
+            "global_proposal_expected_ev_usd"
+            if proposal_mean
+            else "global_expected_ev_usd"
             if mean_action
             else "global_robust_ev_usd"
         )
@@ -12178,6 +15538,36 @@ def _bind_global_current_state_economics_to_proof(
             taker_forbidden_reason=None,
             p_fill_lcb=1.0,
         )
+    elif str(cert.get("global_execution_mode") or "").strip().upper() == (
+        "MAKER_REST"
+    ):
+        maker_limit = _optional_float(cert.get("global_limit_price"))
+        fill_probability = _optional_float(
+            cert.get("global_fill_probability")
+        )
+        deadline = _optional_float(cert.get("global_rest_deadline_minutes"))
+        source = str(
+            cert.get("global_fill_probability_source") or ""
+        ).strip()
+        if (
+            maker_limit is None
+            or fill_probability is None
+            or not 0.0 < fill_probability <= 1.0
+            or deadline is None
+            or deadline <= 0.0
+            or not source
+        ):
+            raise ValueError("GLOBAL_MAKER_REST_ECONOMICS_INVALID")
+        replacement.update(
+            execution_mode_intent="MAKER",
+            rest_then_cross_policy="REST_DEFAULT",
+            maker_limit_price=maker_limit,
+            maker_fill_probability=fill_probability,
+            maker_fill_probability_source=source,
+            rest_escalation_deadline_minutes=deadline,
+            taker_forbidden_reason=None,
+            p_fill_lcb=fill_probability,
+        )
     return dataclass_replace(
         proof,
         **replacement,
@@ -12185,7 +15575,7 @@ def _bind_global_current_state_economics_to_proof(
 
 
 def _global_current_state_may_rebind_scalar_rejection(reason: str | None) -> bool:
-    """Let the sealed global objective replace only obsolete scalar admission."""
+    """Let the sealed global objective replace only obsolete local scalars."""
 
     text = str(reason or "").strip()
     if not text:
@@ -12195,7 +15585,10 @@ def _global_current_state_may_rebind_scalar_rejection(reason: str | None) -> boo
     )
 
     return _qkernel_may_clear_legacy_missing_reason(text) or text.startswith(
-        "ADMISSION_NEAR_SETTLED_PRICE"
+        (
+            "ADMISSION_NEAR_SETTLED_PRICE",
+            "LIVE_UNIT_PRICE_OUT_OF_BOUNDS:",
+        )
     )
 
 
@@ -12423,6 +15816,8 @@ def _bind_global_selected_probability_parent(
     proof_authority = str(
         getattr(proof, "probability_authority", None) or ""
     ).strip()
+    proof_q_source = str(getattr(proof, "q_source", None) or "").strip()
+    q_source = "replacement_0_1"
     if proof_posterior_id not in (None, ""):
         try:
             proof_posterior_id = int(proof_posterior_id)
@@ -12432,10 +15827,13 @@ def _bind_global_selected_probability_parent(
             raise ValueError("GLOBAL_ACTUATION_POSTERIOR_BINDING_MISMATCH")
     if proof_authority and proof_authority != authority:
         raise ValueError("GLOBAL_ACTUATION_POSTERIOR_BINDING_MISMATCH")
+    if proof_q_source and proof_q_source != q_source:
+        raise ValueError("GLOBAL_ACTUATION_POSTERIOR_BINDING_MISMATCH")
     return dataclass_replace(
         proof,
         posterior_id=posterior_id,
         probability_authority=authority,
+        q_source=q_source,
     )
 
 
@@ -12448,6 +15846,12 @@ def _global_buy_prefix_certificate_for_proof(
     """Require taker fragmentation proof only when this proof crosses now."""
 
     from src.solve.solver import global_buy_fak_prefix_certificate
+
+    selected_candidate = getattr(decision, "candidate", None)
+    if str(
+        getattr(selected_candidate, "execution_mode", "") or ""
+    ).strip().upper() == "MAKER_REST":
+        return {}
 
     try:
         return global_buy_fak_prefix_certificate(
@@ -12489,8 +15893,21 @@ def _global_actuation_selected_proof(
     candidate = getattr(decision, "candidate", None)
     prepared_witness = getattr(prepared_global_family, "probability_witness", None)
     witness = getattr(global_actuation, "probability_witness", None)
+    receipt_ref = getattr(global_actuation, "auction_receipt_ref", None)
     if candidate is None or witness is None or prepared_witness is None:
         raise ValueError("GLOBAL_ACTUATION_AUTHORITY_MISSING")
+    if not isinstance(receipt_ref, GlobalAuctionReceiptRef):
+        raise ValueError("GLOBAL_ACTUATION_RECEIPT_REF_MISSING")
+    receipt_ref.assert_matches_actuation(
+        winner_event_id=getattr(global_actuation, "winner_event_id", None),
+        winner_candidate_id=getattr(candidate, "candidate_id", None),
+        winner_actuation_identity=getattr(
+            global_actuation, "actuation_identity", None
+        ),
+        selection_epoch_identity=getattr(
+            global_actuation, "selection_epoch_identity", None
+        ),
+    )
     probability_fields = (
         "family_key",
         "q_version",
@@ -12593,7 +16010,7 @@ def _global_actuation_selected_proof(
     global_execution_mode = str(
         getattr(candidate, "execution_mode", "") or ""
     ).strip().upper()
-    if global_execution_mode != "TAKER_LIMIT":
+    if global_execution_mode not in {"TAKER_LIMIT", "MAKER_REST"}:
         raise ValueError("GLOBAL_ACTUATION_EXECUTION_MODE_INVALID")
     cert = _global_current_state_economics_seed(proof)
     cert.update(
@@ -12605,6 +16022,10 @@ def _global_actuation_selected_proof(
             "global_actuation_identity": str(
                 getattr(global_actuation, "actuation_identity", "") or ""
             ),
+            "global_winner_event_id": str(
+                getattr(global_actuation, "winner_event_id", "") or ""
+            ),
+            "global_auction_receipt": receipt_ref.as_payload(),
             "global_economic_identity": str(
                 getattr(global_actuation, "economic_identity", "") or ""
             ),
@@ -12628,6 +16049,17 @@ def _global_actuation_selected_proof(
             ),
             "global_candidate_id": candidate.candidate_id,
             "global_execution_mode": global_execution_mode,
+            "global_fill_probability": float(
+                getattr(candidate, "fill_probability", 1.0)
+            ),
+            "global_fill_probability_source": str(
+                getattr(candidate, "fill_probability_source", "") or ""
+            ),
+            "global_rest_deadline_minutes": getattr(
+                candidate,
+                "rest_deadline_minutes",
+                None,
+            ),
             "global_condition_id": candidate.condition_id,
             "global_token_id": candidate.token_id,
             "global_family_key": candidate.family_key,
@@ -12654,6 +16086,55 @@ def _global_actuation_selected_proof(
             "global_optimum_semantics": "CUT_TIME_GLOBAL_OPTIMUM",
         }
     )
+    if str(getattr(candidate, "action", "BUY") or "BUY").upper() == "BUY":
+        cert.update(
+            {
+                "global_current_token_shares": str(
+                    decision.current_token_shares
+                ),
+                "global_full_kelly_target_shares": str(
+                    decision.full_kelly_target_shares
+                ),
+                "global_fractional_kelly_target_shares": str(
+                    decision.fractional_kelly_target_shares
+                ),
+                "global_buy_sizing_mode": str(decision.buy_sizing_mode),
+            }
+        )
+    expected_growth = getattr(decision, "expected_growth", None)
+    if global_execution_mode == "MAKER_REST" and expected_growth is None:
+        raise ValueError("GLOBAL_MAKER_REST_COMPARISON_MISSING")
+    if expected_growth is not None:
+        if expected_growth.utility_basis != STRATEGY_LOG_UTILITY_BASIS:
+            raise ValueError("GLOBAL_EXPECTED_GROWTH_UTILITY_BASIS_INVALID")
+        cert.update(
+            {
+                "global_proposal_expected_delta_log_wealth": (
+                    expected_growth.expected_delta_log_wealth
+                ),
+                "global_proposal_expected_ev_usd": (
+                    expected_growth.expected_ev_usd
+                ),
+                "global_proposal_expected_log_growth_per_hour": (
+                    expected_growth.expected_log_growth_per_hour
+                ),
+                "global_proposal_expected_capital_efficiency": (
+                    expected_growth.expected_capital_efficiency
+                ),
+                "global_ruin_probability_reduction": (
+                    expected_growth.ruin_probability_reduction
+                ),
+                "global_utility_basis": expected_growth.utility_basis,
+                "global_proposal_capital_lock_hours": (
+                    expected_growth.capital_lock_hours
+                ),
+                "global_proposal_fill_semantics": (
+                    "FILL_WEIGHTED_ZERO_CONTINUATION_LOWER_BOUND"
+                    if global_execution_mode == "MAKER_REST"
+                    else "IMMEDIATE_FILL"
+                ),
+            }
+        )
     if getattr(decision, "expected_terminal_wealth", None) is not None:
         expected_terminal = decision.expected_terminal_wealth
         cert.update(
@@ -12665,6 +16146,9 @@ def _global_actuation_selected_proof(
                     expected_terminal.expected_delta_log_wealth
                 ),
                 "global_expected_ev_usd": expected_terminal.expected_ev_usd,
+                "global_terminal_ruin_probability_reduction": (
+                    expected_terminal.ruin_probability_reduction
+                ),
                 "global_expected_capital_efficiency": (
                     expected_terminal.expected_delta_log_wealth
                     / float(decision.cost_usd)
@@ -12682,6 +16166,9 @@ def _global_actuation_selected_proof(
                 ),
                 "global_robust_ev_usd": decision.robust_ev_usd,
                 "global_capital_efficiency": decision.capital_efficiency,
+                "global_terminal_ruin_probability_reduction": (
+                    decision.ruin_probability_reduction
+                ),
             }
         )
     prefix = _global_buy_prefix_certificate_for_proof(
@@ -12698,6 +16185,7 @@ def _global_actuation_selected_proof(
             prepared_global_family,
             candidate,
         ),
+        decision_time=decision_time,
     )
     if not all(
         str(cert.get(field) or "").strip()
@@ -12732,6 +16220,7 @@ def _global_actuation_current_admission_proofs(
     prepared_global_family: object,
     family: object,
     day0_payload: Mapping[str, object] | None = None,
+    decision_time: datetime | None = None,
 ) -> tuple["_CandidateProof", ...]:
     """Rebind only the selected proof to its sealed current global authority."""
 
@@ -12741,7 +16230,19 @@ def _global_actuation_current_admission_proofs(
     cap_rows = tuple(
         getattr(prepared_global_family, "candidate_payoff_q_lcb_caps", ()) or ()
     )
-    if candidate is None or witness is None or not cap_rows:
+    if candidate is None or witness is None:
+        return proofs
+    global_action = str(getattr(candidate, "action", "BUY") or "BUY").strip().upper()
+    if global_action != "BUY":
+        return proofs
+    global_execution_mode = str(
+        getattr(candidate, "execution_mode", "") or ""
+    ).strip().upper()
+    if (
+        not cap_rows
+        and not day0_payload
+        and global_execution_mode not in {"TAKER_LIMIT", "MAKER_REST"}
+    ):
         return proofs
     side = str(getattr(candidate, "side", "") or "").strip().upper()
     direction = {"YES": "buy_yes", "NO": "buy_no"}.get(side)
@@ -12772,6 +16273,74 @@ def _global_actuation_current_admission_proofs(
         raise ValueError("GLOBAL_ACTUATION_CURRENT_ADMISSION_PROOF_MISSING")
     selected_proof = matches[0]
     selected = selected_proof
+    if (
+        global_execution_mode == "TAKER_LIMIT"
+        and str(getattr(selected, "execution_mode_intent", "") or "")
+        .strip()
+        .upper()
+        == "MAKER"
+        and str(getattr(selected, "missing_reason", "") or "").strip()
+        == _CURRENT_MAKER_FILL_WITNESS_UNAVAILABLE
+    ):
+        # The complete global cut ranked this exact candidate as an immediate
+        # taker. Local proof reconstruction may independently prefer MAKER and
+        # attach the maker-witness wall before it sees that sealed decision. Bind
+        # only the exact selected TAKER_LIMIT mode here; a MAKER_REST winner still
+        # requires its typed CurrentMakerFillWitness and remains fail closed.
+        selected = dataclass_replace(
+            selected,
+            execution_mode_intent="TAKER",
+            rest_then_cross_policy="GLOBAL_TAKER_LIMIT",
+            taker_forbidden_reason=None,
+            p_fill_lcb=1.0,
+            missing_reason=None,
+        )
+    elif (
+        global_execution_mode == "MAKER_REST"
+        and str(getattr(selected, "execution_mode_intent", "") or "")
+        .strip()
+        .upper()
+        == "MAKER"
+        and str(getattr(selected, "missing_reason", "") or "").strip()
+        == _CURRENT_MAKER_FILL_WITNESS_UNAVAILABLE
+        and decision_time is not None
+    ):
+        # Local family reconstruction deliberately owns no maker-fill model, so
+        # it marks every local MAKER proof unavailable.  A globally selected
+        # MAKER_REST candidate is different: it carries the typed witness that
+        # won the complete BUY/SELL/HOLD/CASH comparison.  Preserve that exact
+        # authority across the JIT handoff, but only after re-running the
+        # solver's full binding/book/limit/deadline/temporal validator now.
+        from src.solve.solver import _maker_witness_rejection
+
+        maker_rejection = _maker_witness_rejection(
+            candidate,
+            decision_at_utc=decision_time,
+        )
+        if maker_rejection is not None:
+            raise ValueError(
+                "GLOBAL_PREFLIGHT_CANDIDATE_PROOF_INVALID:"
+                f"{maker_rejection}"
+            )
+        proposal = getattr(candidate, "economic_cost_curve", None)
+        levels = tuple(getattr(proposal, "levels", ()) or ())
+        if len(levels) != 1:
+            raise ValueError(
+                "GLOBAL_PREFLIGHT_CANDIDATE_PROOF_INVALID:"
+                "CURRENT_MAKER_PROPOSAL_INVALID"
+            )
+        selected = dataclass_replace(
+            selected,
+            execution_mode_intent="MAKER",
+            rest_then_cross_policy="REST_DEFAULT",
+            maker_limit_price=float(levels[0].price),
+            maker_fill_probability=float(candidate.fill_probability),
+            maker_fill_probability_source=str(candidate.fill_probability_source),
+            rest_escalation_deadline_minutes=float(candidate.rest_deadline_minutes),
+            taker_forbidden_reason=None,
+            p_fill_lcb=float(candidate.fill_probability),
+            missing_reason=None,
+        )
     current_q_source = ""
     current_probability_authority = ""
     if day0_payload:
@@ -12789,6 +16358,11 @@ def _global_actuation_current_admission_proofs(
             selected,
             q_source=current_q_source,
             probability_authority=current_probability_authority,
+        )
+    if not cap_rows:
+        return tuple(
+            selected if proof is selected_proof else proof
+            for proof in proofs
         )
     missing_reason = str(getattr(selected, "missing_reason", "") or "")
     if not missing_reason.startswith(
@@ -12856,6 +16430,47 @@ def _global_actuation_current_admission_proofs(
     return tuple(
         rebound if proof is selected_proof else proof
         for proof in proofs
+    )
+
+
+def _global_actuation_exact_buy_proofs(
+    *,
+    proofs: tuple["_CandidateProof", ...],
+    global_actuation: object,
+) -> tuple["_CandidateProof", ...]:
+    """Return only the BUY proof selected by the complete global auction.
+
+    Global selection has already compared every BUY/SELL/HOLD/CASH action.  JIT
+    may revalidate that exact action, but it must not run a second local-family
+    selection whose unselected siblings can veto the winner with their own
+    execution-mode authority failures.
+    """
+
+    decision = getattr(global_actuation, "decision", None)
+    candidate = getattr(decision, "candidate", None)
+    if candidate is None:
+        return ()
+    # BUY candidates predate the cross-action auction and therefore do not
+    # carry an explicit ``action`` field.  Absence means BUY; only the newer
+    # SELL/HOLD/CASH candidates name their action explicitly.
+    action = str(getattr(candidate, "action", "BUY") or "BUY").strip().upper()
+    if action != "BUY":
+        return proofs
+    side = str(getattr(candidate, "side", "") or "").strip().upper()
+    direction = {"YES": "buy_yes", "NO": "buy_no"}.get(side)
+    condition_id = str(getattr(candidate, "condition_id", "") or "").strip()
+    bin_id = str(getattr(candidate, "bin_id", "") or "").strip()
+    token_id = str(getattr(candidate, "token_id", "") or "").strip()
+    if direction is None or not all((condition_id, bin_id, token_id)):
+        return ()
+    return tuple(
+        proof
+        for proof in proofs
+        if str(getattr(proof.candidate, "condition_id", "") or "")
+        == condition_id
+        and _candidate_bin_id_from_topology(proof.candidate) == bin_id
+        and str(getattr(proof, "token_id", "") or "") == token_id
+        and str(getattr(proof, "direction", "") or "") == direction
     )
 
 
@@ -13015,8 +16630,15 @@ def _current_global_actuation_prepared_family(
         max_age=FRESHNESS_WINDOW_DEFAULT,
         day0_payload_out=current_day0_payload,
         required_condition_id=required_condition_id,
-        allow_partial_deterministic=isinstance(
-            selected, DeterministicBinPayoffWitness
+        # Submit-time truth may become stronger than selection-time truth.  A
+        # reduce-only SELL selected from a statistical witness must therefore
+        # permit the current resolver to materialize a newly available partial
+        # deterministic payoff for this exact held condition.  The content
+        # mismatch below then supersedes the stale SELL instead of letting it
+        # liquidate a claim that current hard fact proves will pay $1.
+        allow_partial_deterministic=(
+            isinstance(selected, DeterministicBinPayoffWitness)
+            or probability_use is _CurrentProbabilityUse.REDUCE_ONLY_EXIT
         ),
         allow_unobserved_day0_replacement=(
             probability_use is _CurrentProbabilityUse.REDUCE_ONLY_EXIT
@@ -13587,15 +17209,21 @@ def _build_event_bound_no_submit_receipt_core(
                 prepared_global_family=current_actuation_family,
                 family=family,
                 day0_payload=current_actuation_day0_payload,
+                decision_time=decision_time,
             )
         except ValueError as exc:
+            reason = str(exc)
             return EventSubmissionReceipt(
                 False,
                 event.event_id,
                 event.causal_snapshot_id,
                 reason=(
-                    "GLOBAL_ACTUATION_CURRENT_ADMISSION_REBIND_FAILED:"
-                    f"{exc}"
+                    reason
+                    if reason.startswith("GLOBAL_PREFLIGHT_CANDIDATE_PROOF_INVALID:")
+                    else (
+                        "GLOBAL_ACTUATION_CURRENT_ADMISSION_REBIND_FAILED:"
+                        f"{reason}"
+                    )
                 ),
                 city=family.city,
                 target_date=family.target_date,
@@ -13675,7 +17303,51 @@ def _build_event_bound_no_submit_receipt_core(
             selection_exposure_by_outcome=_selection_exposure,
         )
     )
-    if deterministic_global_proofs is not None:
+    _global_selected_candidate = getattr(
+        getattr(global_actuation, "decision", None),
+        "candidate",
+        None,
+    )
+    # Global BUY candidates have no ``action`` attribute.  Preserve the
+    # auction contract used by _global_actuation_current_admission_proofs:
+    # missing action is BUY, not an unknown action that falls through to a
+    # second local-family selection.
+    _global_selected_action = str(
+        getattr(_global_selected_candidate, "action", "BUY") or "BUY"
+    ).strip().upper()
+    if global_actuation is not None and _global_selected_action == "BUY":
+        # The complete global auction already selected one action across every
+        # BUY/SELL/HOLD/CASH alternative.  Re-run current admission only for
+        # that exact proof.  Feeding the whole local family back through this
+        # gate lets unselected maker-only siblings erase a valid TAKER winner
+        # and turns an action-specific proof wall into a batch-wide veto.
+        _global_exact_proofs = _global_actuation_exact_buy_proofs(
+            proofs=proofs,
+            global_actuation=global_actuation,
+        )
+        _selection_scope_telemetry: dict[str, object] = {}
+        _spine_entry_proofs = _selection_scoped_proofs(
+            proofs=_global_exact_proofs,
+            locked_opportunity_conn=locked_opportunity_conn,
+            held_position_conn=trade_conn,
+            strategy_policy_conn=trade_conn,
+            strategy_policy_event_type=event.event_type,
+            decision_time=decision_time,
+            allow_same_family_monitor_owned=_selection_scope_allows_same_family_monitor_owned,
+            honor_admission_rejections=False,
+            allow_global_near_settled_rebind=True,
+            allow_global_current_state_rebind=True,
+            enforce_win_rate_floor=False,
+            telemetry_out=_selection_scope_telemetry,
+            rejection_reason_by_candidate=_selection_scope_rejections,
+        )
+        proof = _spine_entry_proofs[0] if len(_spine_entry_proofs) == 1 else None
+        if proof is None:
+            _global_prepare_reason = str(
+                _selection_scope_telemetry.get("empty_reason")
+                or "SELECTION_SCOPE_EMPTY:exact_global_buy"
+            )
+    elif deterministic_global_proofs is not None:
         _selection_scope_telemetry: dict[str, object] = {}
         _spine_entry_proofs = _selection_scoped_proofs(
             proofs=proofs,
@@ -15357,6 +19029,9 @@ def _build_event_bound_no_submit_receipt_core(
             "replacement_no_bound_certificate": _json_finite(
                 proof.replacement_no_bound_certificate
             ),
+            "probability_semantics_revision": (
+                proof.probability_semantics_revision
+            ),
             "q_source": proof.q_source,  # #120 calibrator provenance
             # B3 authority stamp must ride the receipt round-trip alongside q_source:
             # qkernel_spine_bridge preserves q_source as the probability-track label
@@ -15942,6 +19617,9 @@ def _event_submission_receipt_from_typed_receipt_payload(
         ),
         posterior_id=_optional_int(raw_receipt.get("posterior_id")),  # H2_E2E
         probability_authority=raw_receipt.get("probability_authority"),  # H2_E2E
+        probability_semantics_revision=raw_receipt.get(
+            "probability_semantics_revision"
+        ),
         strategy_key=raw_receipt.get("strategy_key"),
         opportunity_book=raw_receipt.get("opportunity_book"),
         replacement_forecast=raw_receipt.get("replacement_forecast"),
@@ -16210,6 +19888,124 @@ def _execution_command_id_from_command_certificate(command: DecisionCertificate)
 # source of truth for the reason string is _SUBMIT_ABORT_RECEIPT_REASON keyed on
 # CandidateLifecycleState.SUBMIT_ABORTED_MODE_FLIPPED.
 _MODE_FLIPPED_ABORT_PREFIX = "SUBMIT_ABORTED_MODE_FLIPPED"
+_CURRENT_MAKER_FILL_WITNESS_UNAVAILABLE = (
+    "CURRENT_MAKER_FILL_WITNESS_UNAVAILABLE"
+)
+
+
+def _current_maker_fill_authority_rejection_reason(
+    *,
+    proof_mode: str | None,
+    fresh_mode: str | None,
+    current_candidate: object | None = None,
+    certificate_economics: Mapping[str, object] | None = None,
+    validated_at_utc: datetime | None = None,
+    current_at_utc: datetime | None = None,
+) -> str | None:
+    """Admit only the exact current JIT maker witness already sealed in qkernel."""
+
+    modes = {
+        str(value or "").strip().upper()
+        for value in (proof_mode, fresh_mode)
+    }
+    if "MAKER" not in modes:
+        return None
+    if (
+        modes != {"MAKER"}
+        or current_candidate is None
+        or not isinstance(certificate_economics, Mapping)
+        or not isinstance(validated_at_utc, datetime)
+        or validated_at_utc.tzinfo is None
+        or not isinstance(current_at_utc, datetime)
+        or current_at_utc.tzinfo is None
+    ):
+        return _CURRENT_MAKER_FILL_WITNESS_UNAVAILABLE
+    try:
+        from src.solve.solver import _maker_witness_rejection
+
+        if (
+            _maker_witness_rejection(
+                current_candidate,
+                decision_at_utc=current_at_utc,
+            )
+            is not None
+        ):
+            return _CURRENT_MAKER_FILL_WITNESS_UNAVAILABLE
+        expected = _current_maker_fill_witness_certificate_payload(
+            current_candidate,
+            validated_at_utc=validated_at_utc,
+        )
+        witness = getattr(current_candidate, "maker_fill_witness", None)
+        declared_identity = str(
+            certificate_economics.get("current_state_identity_hash") or ""
+        )
+        expected_identity = qkernel_current_state_identity_hash(
+            certificate_economics
+        )
+        exact = (
+            str(
+                certificate_economics.get("global_execution_mode") or ""
+            ).strip().upper()
+            == "MAKER_REST"
+            and certificate_economics.get("global_maker_fill_witness")
+            == expected
+            and str(
+                certificate_economics.get("global_family_key") or ""
+            )
+            == str(getattr(current_candidate, "family_key", "") or "")
+            and str(
+                certificate_economics.get("global_condition_id") or ""
+            )
+            == str(getattr(current_candidate, "condition_id", "") or "")
+            and str(certificate_economics.get("global_token_id") or "")
+            == str(getattr(current_candidate, "token_id", "") or "")
+            and Decimal(
+                str(certificate_economics.get("global_limit_price"))
+            )
+            == Decimal(str(getattr(witness, "limit_price", "NaN")))
+            and str(
+                certificate_economics.get(
+                    "global_jit_execution_curve_identity"
+                )
+                or ""
+            )
+            == str(
+                getattr(current_candidate, "execution_curve_identity", "")
+                or ""
+            )
+            and math.isclose(
+                float(certificate_economics.get("global_fill_probability")),
+                float(getattr(current_candidate, "fill_probability", float("nan"))),
+                rel_tol=0.0,
+                abs_tol=1e-12,
+            )
+            and str(
+                certificate_economics.get("global_fill_probability_source")
+                or ""
+            )
+            == str(getattr(witness, "witness_identity", "") or "")
+            and math.isclose(
+                float(
+                    certificate_economics.get(
+                        "global_rest_deadline_minutes"
+                    )
+                ),
+                float(
+                    getattr(
+                        current_candidate,
+                        "rest_deadline_minutes",
+                        float("nan"),
+                    )
+                ),
+                rel_tol=0.0,
+                abs_tol=1e-12,
+            )
+            and bool(declared_identity)
+            and declared_identity == expected_identity
+        )
+    except (ArithmeticError, TypeError, ValueError):
+        exact = False
+    return None if exact else _CURRENT_MAKER_FILL_WITNESS_UNAVAILABLE
 _PRICE_MOVED_ABORT_PREFIX = "SUBMIT_ABORTED_PRICE_MOVED"
 
 
@@ -16307,6 +20103,7 @@ def _fresh_rest_then_cross_mode(
     fresh_best_ask: float | None,
     tick_size: float,
     decision_time: datetime,
+    taker_fee_rate: float | None = None,
 ) -> str:
     """Fresh-book mode via the SAME K4.0 rest-then-cross policy as the proof.
 
@@ -16346,10 +20143,23 @@ def _fresh_rest_then_cross_mode(
     escalated_after_rest = proof_policy == POLICY_TAKER_ESCALATED_AFTER_REST
     q_lcb = _optional_float(actionable_payload.get("q_lcb_5pct"))
     reservation = _optional_float(actionable_payload.get("c_fee_adjusted"))
+    economics = actionable_payload.get("qkernel_execution_economics")
+    global_jit_mode = (
+        isinstance(economics, Mapping)
+        and str(economics.get("global_execution_mode") or "").strip().upper()
+        in {"MAKER_REST", "TAKER_LIMIT"}
+    )
+    if global_jit_mode:
+        fee_rate = _optional_float(taker_fee_rate)
+        if fee_rate is None or not math.isfinite(fee_rate) or fee_rate < 0.0:
+            return "NO_TRADE"
+    else:
+        # Non-global callers retain their established compatibility behavior.
+        fee_rate = 0.05
     taker_all_in = None
     if fresh_best_ask is not None and 0.0 < float(fresh_best_ask) < 1.0:
         ask = float(fresh_best_ask)
-        taker_all_in = ask + 0.05 * ask * (1.0 - ask)
+        taker_all_in = ask + fee_rate * ask * (1.0 - ask)
     minutes_to_event_end: float | None = None
     market_end_raw = executable_snapshot.payload.get("market_end_at")
     end_dt = _parse_utc(str(market_end_raw)) if market_end_raw else None
@@ -16357,7 +20167,16 @@ def _fresh_rest_then_cross_mode(
         minutes_to_event_end = max(
             0.0, (end_dt - decision_time.astimezone(UTC)).total_seconds() / 60.0
         )
-    economics = actionable_payload.get("qkernel_execution_economics")
+    if (
+        isinstance(economics, Mapping)
+        and str(economics.get("global_execution_mode") or "").strip().upper()
+        == "MAKER_REST"
+    ):
+        return (
+            "MAKER"
+            if _positive_global_current_objective(economics)
+            else "NO_TRADE"
+        )
     if (
         isinstance(economics, Mapping)
         and str(economics.get("global_execution_mode") or "").strip().upper()
@@ -17051,7 +20870,7 @@ def _day0_live_submit_admission_rejection_reason(
     *,
     event: OpportunityEvent,
     actionable_payload: Mapping[str, object],
-    authority_witness: PreSubmitAuthorityWitness,
+    authority_witness: SealedBookEvidence,
     order_mode: str,
     decision_time: datetime,
     world_conn: sqlite3.Connection | None = None,
@@ -17186,6 +21005,9 @@ def _build_live_execution_command_certificates(
     trade_conn: sqlite3.Connection | None = None,
     pre_submit_authority_provider: Callable[[DecisionCertificate, DecisionCertificate, datetime], PreSubmitAuthorityWitness] | None = None,
     live_order_schema_initialized: bool = False,
+    global_claimed_at: str | None = None,
+    global_claim_attempt_count: int | None = None,
+    global_jit_handoff: _GlobalJitHandoff | None = None,
 ) -> tuple[DecisionCertificate, ...]:
     global_actuation = receipt.global_actuation
     global_decision = (
@@ -17284,6 +21106,26 @@ def _build_live_execution_command_certificates(
             )
         from types import SimpleNamespace
 
+        sealed_book_override = None
+        if global_jit_handoff is not None and global_candidate is not None:
+            snap = global_jit_handoff.authority.snapshot
+            curve = getattr(global_jit_handoff.candidate, "executable_cost_curve", None)
+            sealed_book_override = SealedBookOverride(
+                token_id=str(snap.selected_outcome_token_id),
+                side="BUY",
+                snapshot_id=str(snap.snapshot_id),
+                raw_orderbook_hash=str(snap.raw_orderbook_hash),
+                orderbook_depth_jsonb=str(snap.orderbook_depth_jsonb),
+                best_bid=float(snap.orderbook_top_bid) if snap.orderbook_top_bid is not None else None,
+                best_ask=float(snap.orderbook_top_ask) if snap.orderbook_top_ask is not None else None,
+                tick_size=float(snap.min_tick_size),
+                min_order_size=float(snap.min_order_size),
+                neg_risk=bool(snap.neg_risk),
+                captured_at=snap.captured_at.isoformat(),
+                freshness_deadline=snap.freshness_deadline.isoformat(),
+                curve_ttl_seconds=float(getattr(curve, "quote_ttl", timedelta()).total_seconds()),
+            )
+
         side = "BUY" if str(actionable.payload.get("direction")) in {"buy_yes", "buy_no"} else "SELL"
         provisional_final_intent = SimpleNamespace(
             payload={
@@ -17294,32 +21136,37 @@ def _build_live_execution_command_certificates(
                 "neg_risk": bool(actionable.payload.get("neg_risk", False)),
             }
         )
-        authority_witness = _require_pre_submit_authority_witness(
-            pre_submit_authority_provider,
-            provisional_final_intent,
-            executable_snapshot,
-            decision_time,
-        )
+        if sealed_book_override is None:
+            authority_witness = _require_pre_submit_authority_witness(
+                pre_submit_authority_provider,
+                provisional_final_intent,
+                executable_snapshot,
+                decision_time,
+            )
+        else:
+            # Global BUY provisional mode needs only the already-sealed book
+            # touch/depth. Non-book gates run once, against the exact final intent.
+            authority_witness = SealedBookObservation(
+                quote_seen_at=sealed_book_override.captured_at,
+                book_hash=sealed_book_override.raw_orderbook_hash,
+                current_best_bid=sealed_book_override.best_bid,
+                current_best_ask=sealed_book_override.best_ask,
+                tick_size=sealed_book_override.tick_size,
+                min_order_size=sealed_book_override.min_order_size,
+                neg_risk=sealed_book_override.neg_risk,
+                book_authority_id="clob_jit_book",
+                book_captured_at=sealed_book_override.captured_at,
+                orderbook_depth_jsonb=sealed_book_override.orderbook_depth_jsonb,
+                checked_at=sealed_book_override.captured_at,
+            )
         fresh_best_bid = _optional_float(authority_witness.current_best_bid)
         fresh_best_ask = _optional_float(authority_witness.current_best_ask)
         best_bid = _optional_float(quote_payload.get("best_bid"))
         best_ask = _optional_float(quote_payload.get("best_ask"))
-        # Mode redecision at the live submit boundary: proof mode is not decorative, but
-        # a MAKER proof is only a resting plan. If the same rest-then-cross policy now
-        # says the fresh book should be crossed, the builder may upgrade to TAKER and
-        # must then pass taker quality, pre-submit revalidation, live-cap, and executor
-        # certificates on that same fresh book. If the policy now says MAKER, the
-        # builder rebuilds through passive-maker walls. Missing/unknown modes still
-        # fail closed because those are unproven submit economics.
-        # SINGLE MODE AUTHORITY (twin-authority #9, 2026-06-11 live): the proof
-        # mode comes from the K4.0 rest-then-cross policy; the validator's fresh
-        # mode MUST come from the SAME policy evaluated on the FRESH book —
-        # otherwise the two doctrines disagree systematically and every plan
-        # aborts MODE_FLIPPED. The old bug was two independent doctrines: proof
-        # mode from rest-then-cross, then a separate late EV override. The repair is
-        # one doctrine, not forced maker: both proof and fresh validation use the
-        # same conservative q/q_exec bound, spread/fee law, maker haircut, and
-        # mode-consistent EV margin.
+        # The globally ranked execution mode is part of the proposal identity.
+        # Fresh submit truth may supersede that proposal, never rewrite it into
+        # the opposite mode without a new global auction. The maker branch below
+        # still rebuilds the exact passive price and proves post-only non-crossing.
         _fresh_mode = _fresh_rest_then_cross_mode(
             actionable_payload=actionable.payload,
             executable_snapshot=executable_snapshot,
@@ -17327,11 +21174,43 @@ def _build_live_execution_command_certificates(
             fresh_best_ask=fresh_best_ask,
             tick_size=float(provisional_final_intent.payload["tick_size"]),
             decision_time=decision_time,
+            taker_fee_rate=(
+                float(global_candidate.executable_cost_curve.fee_model.fee_rate)
+                if global_candidate is not None
+                and getattr(global_candidate, "executable_cost_curve", None) is not None
+                else None
+            ),
         )
         proof_order_mode = (
             str(actionable.payload.get("proof_execution_mode_intent") or "").strip().upper()
             or None
         )
+        maker_fill_rejection = _current_maker_fill_authority_rejection_reason(
+            proof_mode=proof_order_mode,
+            fresh_mode=_fresh_mode,
+            current_candidate=(
+                global_jit_handoff.candidate
+                if global_jit_handoff is not None
+                else None
+            ),
+            certificate_economics=(
+                receipt.qkernel_execution_economics
+                if isinstance(receipt.qkernel_execution_economics, Mapping)
+                else None
+            ),
+            validated_at_utc=(
+                global_jit_handoff.authority.snapshot.captured_at
+                if global_jit_handoff is not None
+                else None
+            ),
+            current_at_utc=datetime.now(UTC),
+        )
+        if maker_fill_rejection is not None:
+            # SCOPE — this new maker-dependent entry only; taker candidates and
+            # held-position monitoring continue. DRAIN — the next full decision
+            # cut rebuilds the candidate and fresh book. RESET — only a reviewed,
+            # candidate-bound current maker-fill witness can remove this wall.
+            raise ValueError(maker_fill_rejection)
         order_mode = _validate_final_order_mode_or_abort(
             proof_mode=proof_order_mode,
             fresh_mode=_fresh_mode,
@@ -17642,20 +21521,7 @@ def _build_live_execution_command_certificates(
                 f"incremental_profit={None if not isinstance(taker_quality_proof, dict) else taker_quality_proof.get('incremental_expected_profit_usd')}:"
                 f"confidence={None if not isinstance(taker_quality_proof, dict) else taker_quality_proof.get('model_confidence')}"
             )
-        if (
-            global_decision is not None
-            and str(order_mode).strip().upper() == "TAKER"
-        ):
-            prefix_reason = qkernel_global_buy_fak_prefix_rejection_reason(
-                actionable.payload.get("qkernel_execution_economics") or {},
-                direction=str(actionable.payload.get("direction") or ""),
-            )
-            if prefix_reason is not None:
-                raise ValueError(
-                    "GLOBAL_TAKER_PREFIX_CERTIFICATE_INVALID:"
-                    f"{prefix_reason}"
-                )
-        global_fak_authorized = bool(
+        global_fok_authorized = bool(
             global_decision is not None
             and str(order_mode).strip().upper() == "TAKER"
         )
@@ -17673,8 +21539,12 @@ def _build_live_execution_command_certificates(
             passive_maker_context=passive_maker_context,
             decision_time=decision_time,
             order_mode=order_mode,
-            order_type="FAK_LIMIT" if global_fak_authorized else None,
-            time_in_force="FAK" if global_fak_authorized else None,
+            # The global solve already certifies the exact target size against
+            # current depth.  Preserve the allocator's atomic taker semantics:
+            # FAK may confirm an arbitrary positive entry prefix below the venue
+            # minimum SELL lot and create exposure that cannot be exited.
+            order_type="FOK_LIMIT" if global_fok_authorized else None,
+            time_in_force="FOK" if global_fok_authorized else None,
             # BUG #92 structural fix (2026-06-02): the intent's tick_size MUST be the
             # min_tick_size of the SAME snapshot the executor re-hydrates at submit
             # time (intent.snapshot_id == proof.executable_snapshot_id ==
@@ -17744,6 +21614,7 @@ def _build_live_execution_command_certificates(
             final_intent,
             executable_snapshot,
             decision_time,
+            sealed_book_override=sealed_book_override,
         )
         _assert_final_jit_witness_revalidates_intent(
             provisional=authority_witness,
@@ -17759,8 +21630,19 @@ def _build_live_execution_command_certificates(
                 or executable_snapshot.payload.get("selected_snapshot_id")
                 or ""
             )
-            _k1_elected_snapshot = None
-            if _k1_elected_id:
+            # A global cut already revalidated this exact snapshot identity and
+            # sealed its current metadata/book before final intent construction.
+            # Re-reading the selection-time DB row here can cap the new JIT book
+            # with an older freshness deadline, making submit-time evidence stale
+            # at birth. Keep the existing min-deadline safety law, but apply it to
+            # the current sealed authority that actually reached this seam.
+            _k1_elected_snapshot = (
+                global_jit_handoff.authority.snapshot
+                if global_jit_handoff is not None
+                and global_candidate is not None
+                else None
+            )
+            if _k1_elected_snapshot is None and _k1_elected_id:
                 try:
                     _k1_elected_snapshot = get_snapshot(trade_conn, _k1_elected_id)
                 except Exception:  # noqa: BLE001 - fail-soft: never block submit on a read
@@ -17865,6 +21747,12 @@ def _build_live_execution_command_certificates(
         executor_native_intent_hash = validate_final_intent_cert_for_existing_executor(final_intent)
 
         def _append_live_order_state() -> tuple[DecisionCertificate, DecisionCertificate, DecisionCertificate]:
+            _fence_global_target_claim_before_command(
+                live_cap_conn,
+                event,
+                claimed_at=global_claimed_at,
+                attempt_count=global_claim_attempt_count,
+            )
             aggregate_ledger = LiveOrderAggregateLedger(
                 live_cap_conn,
                 initialize_schema=False,
@@ -18063,13 +21951,51 @@ def _assert_live_entry_submit_authority(actionable_payload: Mapping[str, object]
     """Fail closed unless the event's live entry lane has its own executable authority."""
 
     event_type = str(actionable_payload.get("event_type") or "").strip()
-    if event_type in _FORECAST_DECISION_EVENT_TYPES or (
-        event_type in _DAY0_LANE_EVENT_TYPES
-        and _uses_replacement_probability_authority(actionable_payload)
-    ):
+    probability_authority = str(
+        actionable_payload.get("probability_authority") or ""
+    ).strip()
+    canonical_q_source = str(actionable_payload.get("q_source") or "").strip()
+    q_source = str(actionable_payload.get("_edli_q_source") or "").strip()
+    qkernel_economics = actionable_payload.get("qkernel_execution_economics")
+    q_version = str(
+        qkernel_economics.get("q_version")
+        if isinstance(qkernel_economics, Mapping)
+        else ""
+    ).strip()
+    def reject_binding() -> None:
+        # INV-47:
+        # SCOPE = one BUY whose event/source grammar is internally inconsistent.
+        # Held monitor/SELL and settlement are outside this scope.
+        # DRAIN = dispatch the next current producer payload to its owning
+        # forecast or Day0 content validator below; no second promotion registry
+        # exists here to ratchet independently of the producer contract.
+        # RESET = the next fresh re-decision rebuilds that exact typed payload.
+        raise ValueError(
+            "LIVE_ENTRY_PROBABILITY_AUTHORITY_UNQUALIFIED:"
+            f"authority={probability_authority or 'missing'}:"
+            f"q_source={q_source or 'missing'}:"
+            f"canonical_q_source={canonical_q_source or 'missing'}:"
+            f"event_type={event_type or 'missing'}:"
+            f"q_version={q_version or 'missing'}"
+        )
+
+    if canonical_q_source != q_source:
+        reject_binding()
+    if event_type in _FORECAST_DECISION_EVENT_TYPES:
+        if not (
+            probability_authority == "replacement_0_1"
+            and q_source == "replacement_0_1"
+        ):
+            reject_binding()
         _assert_forecast_entry_uses_qkernel_authority(actionable_payload)
         return
     if event_type in _DAY0_LANE_EVENT_TYPES:
+        if (
+            probability_authority == "replacement_0_1"
+            and q_source == "replacement_0_1"
+        ):
+            _assert_forecast_entry_uses_qkernel_authority(actionable_payload)
+            return
         _assert_day0_entry_uses_live_observation_authority(actionable_payload)
         return
     raise ValueError(f"LIVE_ENTRY_AUTHORITY_UNSUPPORTED_EVENT_TYPE:{event_type or 'missing'}")
@@ -18305,8 +22231,18 @@ def _actionable_payload_from_receipt(
         # qkernel cert to THIS selected leg across the two candidate_id namespaces.
         "candidate_bin_id": receipt.candidate_bin_id,
         "qkernel_execution_economics": qkernel_execution_economics,
+        "global_auction_receipt": (
+            qkernel_execution_economics.get("global_auction_receipt")
+            if isinstance(qkernel_execution_economics, dict)
+            else None
+        ),
         "day0_probability_authority": day0_probability_authority,
-        "_edli_q_source": _day0_probability_value("q_source"),
+        # Keep the internal provenance projection byte-consistent with the
+        # receipt's canonical probability witness. Day0 may carry a more
+        # specific nested witness; ordinary forecast events do not.
+        "_edli_q_source": _first_present(
+            _day0_probability_value("q_source"), receipt.q_source
+        ),
         "_edli_day0_q_mode": _day0_probability_value("q_mode"),
         "_edli_day0_remaining_models": _day0_probability_value("remaining_models"),
         "_edli_day0_remaining_model_names": _day0_probability_value("remaining_model_names"),
@@ -18380,6 +22316,9 @@ def _actionable_payload_from_receipt(
         "replacement_no_bound_certificate": _json_finite(
             receipt.replacement_no_bound_certificate
         ),
+        "probability_semantics_revision": (
+            receipt.probability_semantics_revision
+        ),
         "posterior_id": receipt.posterior_id,
         "probability_authority": receipt.probability_authority,
         "c_fee_adjusted": receipt.c_fee_adjusted,
@@ -18446,6 +22385,26 @@ def _actionable_payload_from_receipt(
             _day0_observation_value("raw_value"),
             _day0_observation_value("observed_extreme_native"),
             _event_identity_value(event, "raw_value"),
+        ),
+        "station_id": _first_present(
+            _day0_observation_value("station_id"),
+            _event_identity_value(event, "station_id"),
+        ),
+        "configured_station_id": _first_present(
+            _day0_observation_value("configured_station_id"),
+            _event_identity_value(event, "configured_station_id"),
+        ),
+        "settlement_source": _first_present(
+            _day0_observation_value("settlement_source"),
+            _event_identity_value(event, "settlement_source"),
+        ),
+        "raw_payload_sha256": _first_present(
+            _day0_observation_value("raw_payload_sha256"),
+            _event_identity_value(event, "raw_payload_sha256"),
+        ),
+        "day0_observation_provenance_hash": _first_present(
+            _day0_observation_value("day0_observation_provenance_hash"),
+            _event_identity_value(event, "day0_observation_provenance_hash"),
         ),
         "rounded_value": _first_present(
             _day0_observation_value("rounded_value"),
@@ -18531,6 +22490,9 @@ def _live_decision_audit_payload(
         "settlement_coverage_status": receipt.settlement_coverage_status,
         "replacement_no_bound_certificate": _json_finite(
             receipt.replacement_no_bound_certificate
+        ),
+        "probability_semantics_revision": (
+            receipt.probability_semantics_revision
         ),
         "q_live": receipt.q_live,
         "q_lcb_5pct": receipt.q_lcb_5pct,
@@ -19065,6 +23027,9 @@ def _pre_submit_revalidation_payload_from_final_intent(
         "replacement_no_bound_certificate": payload.get(
             "replacement_no_bound_certificate"
         ),
+        "probability_semantics_revision": payload.get(
+            "probability_semantics_revision"
+        ),
         "posterior_id": payload.get("posterior_id"),
         "probability_authority": payload.get("probability_authority"),
         "expected_edge": expected_edge,
@@ -19108,6 +23073,13 @@ def _pre_submit_revalidation_payload_from_final_intent(
         "live_authority_status": payload.get("live_authority_status"),
         "raw_value": payload.get("raw_value"),
         "rounded_value": payload.get("rounded_value"),
+        "station_id": payload.get("station_id"),
+        "configured_station_id": payload.get("configured_station_id"),
+        "settlement_source": payload.get("settlement_source"),
+        "raw_payload_sha256": payload.get("raw_payload_sha256"),
+        "day0_observation_provenance_hash": payload.get(
+            "day0_observation_provenance_hash"
+        ),
         "high_so_far": payload.get("high_so_far"),
         "low_so_far": payload.get("low_so_far"),
         "observation_time": payload.get("observation_time"),
@@ -19157,14 +23129,24 @@ def _pre_submit_expected_edge(
 
 
 def _require_pre_submit_authority_witness(
-    provider: Callable[[DecisionCertificate, DecisionCertificate, datetime], PreSubmitAuthorityWitness] | None,
+    provider: Callable[..., PreSubmitAuthorityWitness] | None,
     final_intent: DecisionCertificate,
     executable_snapshot: DecisionCertificate,
     decision_time: datetime,
+    *,
+    sealed_book_override: SealedBookOverride | None = None,
 ) -> PreSubmitAuthorityWitness:
     if provider is None:
         raise ValueError("PRE_SUBMIT_AUTHORITY_WITNESS_REQUIRED")
-    witness = provider(final_intent, executable_snapshot, decision_time)
+    if sealed_book_override is None:
+        witness = provider(final_intent, executable_snapshot, decision_time)
+    else:
+        witness = provider(
+            final_intent,
+            executable_snapshot,
+            decision_time,
+            sealed_book_override=sealed_book_override,
+        )
     if not isinstance(witness, PreSubmitAuthorityWitness):
         raise ValueError("PRE_SUBMIT_AUTHORITY_WITNESS_REQUIRED")
     required_text_fields = {
@@ -19188,19 +23170,15 @@ def _require_pre_submit_authority_witness(
 
 def _assert_final_jit_witness_revalidates_intent(
     *,
-    provisional: PreSubmitAuthorityWitness,
+    provisional: SealedBookEvidence,
     final: PreSubmitAuthorityWitness,
 ) -> None:
-    """Require two current executable-book observations without freezing the book.
+    """Require the sealed preflight book plus one complete final witness.
 
-    The provisional fetch supplies the touch used to build the intent.  The
-    final fetch independently validates that exact side, limit, and size against
-    current depth in the provider.  The provider may serve a fresh canonical
-    price-channel projection, continuity-proven channel depth, or a direct CLOB
-    fetch; all three are current venue-book authorities and run the same final
-    depth validation.  Requiring identical hashes, source routes, or opposite-
-    side prices after that validation rejects harmless book movement and adds no
-    execution guarantee.
+    Global JIT binds the provisional intent to a sealed book observation, then
+    the provider revalidates the exact final intent and all non-book gates once.
+    Non-global routes may obtain their own current book observation in the
+    provider; no hash/source equality is required across harmless book motion.
     """
 
     current_book_authorities = {
@@ -19644,7 +23622,7 @@ def _passive_maker_context_from_authorities(
     quote_feasibility_cert: DecisionCertificate,
     executable_snapshot_cert: DecisionCertificate,
     decision_time: datetime,
-    fresh_authority_witness: PreSubmitAuthorityWitness | None = None,
+    fresh_authority_witness: SealedBookEvidence | None = None,
 ) -> dict[str, object]:
     """Build one passive context, optionally from the fresh submit-time book."""
 
@@ -20158,9 +24136,14 @@ def _day0_live_source_parent_certificates(
             "target_date": payload.get("target_date"),
             "metric": payload.get("metric") or payload.get("temperature_metric"),
             "station_id": payload.get("station_id"),
+            "configured_station_id": payload.get("configured_station_id"),
             "settlement_source": payload.get("settlement_source"),
             "observation_time": observation_time,
             "observation_available_at": observation_available_at,
+            "raw_payload_sha256": payload.get("raw_payload_sha256"),
+            "day0_observation_provenance_hash": payload.get(
+                "day0_observation_provenance_hash"
+            ),
             "raw_value": payload.get("raw_value"),
             "rounded_value": rounded_value,
             "source_match_status": payload.get("source_match_status"),
@@ -20256,6 +24239,15 @@ def _final_intent_decision_source_context_payload(
     observation_available_at = _nonnull(day0_authority.payload.get("observation_available_at"))
     if not observation_time or not observation_available_at:
         raise ValueError("DAY0_DECISION_SOURCE_CONTEXT_MISSING_OBSERVATION_CLOCK")
+    raw_payload_sha256 = _nonnull(day0_authority.payload.get("raw_payload_sha256"))
+    configured_station_id = _nonnull(
+        day0_authority.payload.get("configured_station_id")
+    )
+    provenance_hash = _nonnull(
+        day0_authority.payload.get("day0_observation_provenance_hash")
+    )
+    if not raw_payload_sha256 or not configured_station_id or not provenance_hash:
+        raise ValueError("DAY0_DECISION_SOURCE_CONTEXT_MISSING_RAW_PROVENANCE")
 
     base_source_id = _nonnull(
         forecast_payload.get("forecast_source_id") or forecast_payload.get("source_id")
@@ -20277,6 +24269,9 @@ def _final_intent_decision_source_context_payload(
             "base_raw_payload_hash": forecast_payload.get("raw_payload_hash"),
             "observation_time": observation_time,
             "observation_available_at": observation_available_at,
+            "raw_payload_sha256": raw_payload_sha256,
+            "configured_station_id": configured_station_id,
+            "day0_observation_provenance_hash": provenance_hash,
         }
     )
     combined = {
@@ -20292,6 +24287,9 @@ def _final_intent_decision_source_context_payload(
         "authority_tier": "OBSERVATION",
         "observation_time": observation_time,
         "observation_available_at": observation_available_at,
+        "raw_payload_sha256": raw_payload_sha256,
+        "configured_station_id": configured_station_id,
+        "day0_observation_provenance_hash": provenance_hash,
         "provider_reported_time": day0_authority.payload.get("provider_reported_time"),
         "decision_source_basis": "day0_live_observation_over_base_forecast",
         "base_forecast_source_id": base_source_id,
@@ -21648,9 +25646,13 @@ def _source_clock_model_count_certificate(
         observed = int(observed)
     except (TypeError, ValueError):
         return True, None
+    fallback_reason = scheme.get("fallback_reason")
     horizon_fallback = (
-        scheme.get("fallback_reason")
-        == "configured_current_provider_pair_unavailable"
+        fallback_reason
+        in {
+            "configured_current_provider_pair_unavailable",
+            "configured_current_provider_cohort_unavailable",
+        }
         and scheme.get("fallback_to") == "current_precision_fusion"
     )
     if horizon_fallback:
@@ -21658,6 +25660,12 @@ def _source_clock_model_count_certificate(
         try:
             configured_family_count = int(
                 scheme.get("configured_current_provider_family_count")
+            )
+            configured_cohort_family_count = (
+                int(scheme.get("configured_current_provider_cohort_family_count"))
+                if fallback_reason
+                == "configured_current_provider_cohort_unavailable"
+                else 0
             )
             shape_provider_count = int(
                 current_shape.get("provider_count")
@@ -21678,7 +25686,17 @@ def _source_clock_model_count_certificate(
             len(configured) < 2
             or any(not value for value in configured)
             or len(set(configured)) != len(configured)
-            or configured_family_count >= 2
+            or (
+                fallback_reason == "configured_current_provider_pair_unavailable"
+                and configured_family_count >= 2
+            )
+            or (
+                fallback_reason == "configured_current_provider_cohort_unavailable"
+                and (
+                    configured_family_count < 2
+                    or configured_cohort_family_count >= 2
+                )
+            )
             or len(used) < 2
             or any(not value for value in used)
             or len(set(used)) != len(used)
@@ -22314,6 +26332,13 @@ def _day0_calibration_authority_payload_and_clock(
         observation_time=str(payload.get("observation_time") or ""),
         raw_value=raw_value,
         rounded_value=rounded_value,
+        station_id=str(payload.get("station_id") or ""),
+        configured_station_id=str(payload.get("configured_station_id") or ""),
+        settlement_source=str(payload.get("settlement_source") or ""),
+        raw_payload_sha256=str(payload.get("raw_payload_sha256") or ""),
+        day0_observation_provenance_hash=str(
+            payload.get("day0_observation_provenance_hash") or ""
+        ),
         settlement_semantics=semantics,
     )
     try:
@@ -22404,7 +26429,49 @@ def _day0_calibration_authority_payload_and_clock(
         assert_live_day0_probability_authority(payload)
     except Exception as exc:
         raise ValueError(f"DAY0_CALIBRATION_AUTHORITY_BLOCKED:{exc}") from exc
+    probability_block = payload.get("day0_probability_authority")
+    probability_payload = (
+        dict(probability_block) if isinstance(probability_block, Mapping) else {}
+    )
+    probability_authority = str(
+        payload.get("probability_authority")
+        or probability_payload.get("probability_authority")
+        or ""
+    ).strip()
+    q_source = str(
+        payload.get("_edli_q_source")
+        or payload.get("q_source")
+        or probability_payload.get("q_source")
+        or ""
+    ).strip()
+    q_mode = str(
+        payload.get("_edli_day0_q_mode")
+        or probability_payload.get("q_mode")
+        or ""
+    ).strip()
+    remaining_models = (
+        payload.get("_edli_day0_remaining_models")
+        or probability_payload.get("remaining_models")
+    )
     lcb_transform = payload.get("_edli_day0_lcb_transform")
+    if not isinstance(lcb_transform, Mapping):
+        lcb_transform = payload.get("day0_lcb_transform")
+    if not isinstance(lcb_transform, Mapping):
+        lcb_transform = probability_payload.get("lcb_transform")
+    probability_payload.update(
+        {
+            "probability_authority": probability_authority,
+            "q_source": q_source,
+            "q_mode": q_mode,
+            "remaining_models": remaining_models,
+            "rounded_value": evidence.rounded_value,
+            "observation_time": evidence.observation_time,
+            "observation_available_at": evidence.observation_available_at,
+            "lcb_transform": (
+                lcb_transform if isinstance(lcb_transform, Mapping) else None
+            ),
+        }
+    )
     lcb_transform_hash = _hash_jsonish(lcb_transform) if isinstance(lcb_transform, Mapping) else ""
     model_key = (
         "day0_remaining_window_probability_v1:"
@@ -22427,9 +26494,10 @@ def _day0_calibration_authority_payload_and_clock(
                 "source": payload.get("source") or payload.get("settlement_source"),
                 "rounding_rule": semantics.rounding_rule,
                 "rounded_value": evidence.rounded_value,
-                "q_source": payload.get("_edli_q_source"),
-                "q_mode": payload.get("_edli_day0_q_mode"),
-                "remaining_models": payload.get("_edli_day0_remaining_models"),
+                "probability_authority": probability_authority,
+                "q_source": q_source,
+                "q_mode": q_mode,
+                "remaining_models": remaining_models,
                 "lcb_transform_hash": lcb_transform_hash,
             }
         ),
@@ -22444,27 +26512,24 @@ def _day0_calibration_authority_payload_and_clock(
         "observation_available_at": evidence.observation_available_at,
         "source_authorized_status": evidence.source_authorized_status,
         "live_authority_status": evidence.live_authority_status,
+        "city": evidence.city,
+        "target_date": evidence.target_date,
+        "metric": evidence.metric,
+        "temperature_metric": evidence.metric,
         "input_space": "day0_remaining_window_probability",
-        "q_source": payload.get("_edli_q_source"),
-        "q_mode": payload.get("_edli_day0_q_mode"),
-        "remaining_models": payload.get("_edli_day0_remaining_models"),
+        "probability_authority": probability_authority,
+        "q_source": q_source,
+        "q_mode": q_mode,
+        "remaining_models": remaining_models,
         "remaining_model_names": payload.get("_edli_day0_remaining_model_names"),
         "remaining_source_cycle_time_utc": payload.get("_edli_day0_remaining_source_cycle_time_utc"),
         "remaining_capture_times_utc": payload.get("_edli_day0_remaining_capture_times_utc"),
         "day0_exit_authority_status": payload.get("_edli_day0_exit_authority_status"),
         "day0_exit_authority_reason": payload.get("_edli_day0_exit_authority_reason"),
         "lcb_transform_hash": lcb_transform_hash,
-        "day0_probability_authority": {
-            "q_source": payload.get("_edli_q_source"),
-            "q_mode": payload.get("_edli_day0_q_mode"),
-            "remaining_models": payload.get("_edli_day0_remaining_models"),
-            "rounded_value": evidence.rounded_value,
-            "observation_time": evidence.observation_time,
-            "observation_available_at": evidence.observation_available_at,
-            "lcb_transform": lcb_transform if isinstance(lcb_transform, Mapping) else None,
-        },
+        "day0_probability_authority": probability_payload,
         "maturity_level": 4,
-        "n_samples": payload.get("_edli_day0_remaining_models") or 0,
+        "n_samples": remaining_models or 0,
         "authority": DAY0_REMAINING_WINDOW_CALIBRATION_AUTHORITY,
     }
     return payload_out, EvidenceClock(source_time, available_time, decision_time)
@@ -23633,7 +27698,16 @@ def _selection_scoped_proofs(
             f"{class_counts or 'UNKNOWN=0'}"
         )
 
-    executable = [proof for proof in proofs if proof.execution_price is not None]
+    # A globally selected BUY is rebound to the exact auction/JIT curve after
+    # current lock, policy, and holding checks below.  Its locally reconstructed
+    # proof may therefore be deliberately unpriced at this seam.  The global
+    # current-state flag licenses only that later exact rebind; ordinary family
+    # selection still requires a local execution price here.
+    executable = (
+        list(proofs)
+        if allow_global_current_state_rebind
+        else [proof for proof in proofs if proof.execution_price is not None]
+    )
     if not executable:
         record_empty(
             "execution_price",
@@ -23698,6 +27772,20 @@ def _selection_scoped_proofs(
             )
         )
 
+    def _global_current_book_may_rebind_rejection(
+        missing_reason: str | None,
+    ) -> bool:
+        """Defer only a stale local quote rejection to the selected BUY JIT."""
+
+        # SCOPE: the exact globally selected BUY proof only; callers must also
+        # set allow_global_current_state_rebind. DRAIN: winner preflight fetches
+        # the selected native token's raw CLOB book and reconstructs its full
+        # curve before any venue side effect. RESET: that JIT curve must preserve
+        # the selected in-band limit/cost or the candidate is superseded.
+        return str(missing_reason or "").startswith(
+            "LIVE_UNIT_PRICE_OUT_OF_BOUNDS:"
+        )
+
     if honor_admission_rejections:
         admission_input = executable
         executable = []
@@ -23716,9 +27804,18 @@ def _selection_scoped_proofs(
         executable = []
         admission_rejections = []
         for proof in admission_input:
-            if _qkernel_may_rescore_rejected_proof(proof.missing_reason) or (
-                allow_same_family_monitor_owned
-                and _is_entry_held_redecision_reason(proof.missing_reason)
+            if (
+                _qkernel_may_rescore_rejected_proof(proof.missing_reason)
+                or (
+                    allow_global_current_state_rebind
+                    and _global_current_book_may_rebind_rejection(
+                        proof.missing_reason
+                    )
+                )
+                or (
+                    allow_same_family_monitor_owned
+                    and _is_entry_held_redecision_reason(proof.missing_reason)
+                )
             ):
                 executable.append(proof)
             else:
@@ -23817,7 +27914,17 @@ def _strategy_policy_selection_rejection_reason(
             )
         from src.riskguard.policy import resolve_strategy_policy
 
-        policy = resolve_strategy_policy(strategy_policy_conn, strategy_key, policy_now)
+        probability_revision = _proof_probability_semantics_revision(proof)
+        policy = resolve_strategy_policy(
+            strategy_policy_conn,
+            strategy_key,
+            policy_now,
+            **(
+                {"probability_semantics_revision": probability_revision}
+                if probability_revision
+                else {}
+            ),
+        )
     except Exception as exc:  # noqa: BLE001
         return f"STRATEGY_POLICY_UNAVAILABLE:{type(exc).__name__}"
 
@@ -23828,6 +27935,23 @@ def _strategy_policy_selection_rejection_reason(
     if policy.exit_only:
         return f"STRATEGY_POLICY_EXIT_ONLY:{strategy_key}:sources={sources}"
     return None
+
+
+def _proof_probability_semantics_revision(proof: _CandidateProof) -> str | None:
+    """Return the exact probability-law revision bound to one candidate."""
+
+    revision = str(
+        getattr(proof, "probability_semantics_revision", None) or ""
+    ).strip()
+    if revision:
+        return revision
+    certificate = getattr(proof, "replacement_no_bound_certificate", None)
+    if not isinstance(certificate, Mapping):
+        return None
+    revision = str(
+        certificate.get("probability_semantics_revision") or ""
+    ).strip()
+    return revision or None
 
 
 def _strategy_policy_has_selection_gate(sources: tuple[str, ...]) -> bool:
@@ -25573,6 +29697,7 @@ def _generate_candidate_proofs(
             c_cost_95pct: float | None = None
             p_fill_lcb = 0.0
             missing_reason: str | None = None
+            action_price_reason: str | None = None
             if independent_no_missing_reason is not None:
                 missing_reason = independent_no_missing_reason
             elif not token_id:
@@ -25599,15 +29724,28 @@ def _generate_candidate_proofs(
                         _sibling_complement_bid = _optional_float(
                             _yes_row.get("orderbook_top_bid")
                         )
-                try:
-                    execution_price, p_fill_lcb, c_cost_95pct = _execution_price_from_snapshot(
-                        row,
-                        selected_token_id=token_id,
-                        direction=direction,
-                        complementary_top_bid=_sibling_complement_bid,
-                    )
-                except ValueError as exc:
-                    missing_reason = str(exc)
+                    try:
+                        execution_price, p_fill_lcb, c_cost_95pct = _execution_price_from_snapshot(
+                            row,
+                            selected_token_id=token_id,
+                            direction=direction,
+                            complementary_top_bid=_sibling_complement_bid,
+                        )
+                        # INV-47 SCOPE: this exact candidate token only.
+                        # DRAIN: the next event/JIT cycle consumes a fresh quote.
+                        # RESET: no latch; an in-band quote restores eligibility.
+                        assert_live_order_unit_price(execution_price.value)
+                    except ValueError as exc:
+                        execution_price = None
+                        p_fill_lcb = 0.0
+                        c_cost_95pct = None
+                        error = str(exc)
+                        action_price_reason = (
+                            f"LIVE_UNIT_PRICE_OUT_OF_BOUNDS:{error}"
+                            if error.startswith("live order unit price")
+                            else None
+                        )
+                        missing_reason = action_price_reason or error
             # FIX C (mode-consistent EV; operator directive 2026-06-10): the
             # trade_score is the CHOSEN execution mode's EV, never the hybrid
             # taker-cost x visible-depth-p_fill. TAKER-chosen scores are
@@ -25633,6 +29771,15 @@ def _generate_candidate_proofs(
                 unexpired_family_rest=_rtc_unexpired_rest,
                 escalated_after_rest=_rtc_escalated,
             )
+            maker_fill_authority_reason = (
+                _CURRENT_MAKER_FILL_WITNESS_UNAVAILABLE
+                if mode_ev is not None
+                and (
+                    str(mode_ev.chosen_mode).strip().upper() == "MAKER"
+                    or _day0_proof_maker_only
+                )
+                else None
+            )
             if mode_ev is not None:
                 if _day0_proof_maker_only:
                     try:
@@ -25650,6 +29797,10 @@ def _generate_candidate_proofs(
                     c_cost_95pct=c_cost_95pct,
                     p_fill_lcb=p_fill_lcb,
                 )
+            if maker_fill_authority_reason is not None:
+                score = 0.0
+                if missing_reason is None:
+                    missing_reason = maker_fill_authority_reason
             # REMOVED 2026-06-08 (S4; "bin selection.md" §6/§9 Hidden #3/#10/§13 +
             # operator directive): the scalar market-disagreement buy_no demotion
             # (cheap-NO-overconfidence -> score=0) is GONE. It is SUBSUMED by the
@@ -25716,6 +29867,9 @@ def _generate_candidate_proofs(
                 score = 0.0
                 if missing_reason is None:
                     missing_reason = direction_law_reason
+            if action_price_reason is not None:
+                score = 0.0
+                missing_reason = action_price_reason
             p_value = generated_p_values[(condition_id, direction)]
             passed_prefilter = bool(generated_prefilter.get((condition_id, direction), execution_price is not None and score > 0.0))
             # A structurally non-tradeable candidate must not enter the FDR family
@@ -25727,6 +29881,8 @@ def _generate_candidate_proofs(
                 capital_efficiency_reason is not None
                 or buy_no_conservative_evidence_reason is not None
                 or direction_law_reason is not None
+                or maker_fill_authority_reason is not None
+                or action_price_reason is not None
             ):
                 passed_prefilter = False
             proof_execution_mode_intent = (
@@ -25797,6 +29953,15 @@ def _generate_candidate_proofs(
                     # typed column / FK to forecast_posteriors(posterior_id).
                     posterior_id=_optional_int(probability_evidence.get("posterior_id")),
                     probability_authority=probability_evidence.get("probability_authority"),
+                    probability_semantics_revision=(
+                        str(
+                            probability_evidence.get(
+                                "probability_semantics_revision"
+                            )
+                            or ""
+                        ).strip()
+                        or None
+                    ),
                     # FIX C: the mode decision + BOTH EVs ride the proof to the
                     # receipt (settlement-loop recalibration provenance).
                     execution_mode_intent=proof_execution_mode_intent,
@@ -26864,7 +31029,12 @@ def _robust_marginal_utility_stake_and_price(
                     "payoff_q_action" if mean_action else "payoff_q_lcb"
                 ]
             )
+            # Preserve the complete frozen certificate.  This provenance mapping
+            # may be inspected independently of the final receipt, so retaining a
+            # global actuation marker without its exact auction receipt would create
+            # a second, unverifiable representation of the selected action.
             stake_floor_out["qkernel_execution_economics"] = {
+                **global_qkernel_cert,
                 "payoff_q_lcb": float(global_qkernel_cert["payoff_q_lcb"]),
                 "payoff_q_point": float(global_qkernel_cert["payoff_q_point"]),
                 "payoff_q_action": action_q,
@@ -26873,9 +31043,6 @@ def _robust_marginal_utility_stake_and_price(
                 "global_expected_cost_usd": float(target_cost),
                 "global_target_shares": float(
                     global_qkernel_cert["global_target_shares"]
-                ),
-                "global_actuation_identity": global_qkernel_cert.get(
-                    "global_actuation_identity"
                 ),
             }
         return float(chosen), price
@@ -27691,6 +31858,11 @@ def _family_existing_exposure_for_selection_by_bin_id(
 
     if held_position_conn is not None:
         try:
+            from src.state.portfolio import (
+                FILL_AUTHORITY_VENUE_POSITION_OBSERVED,
+                FILL_GRADE_FILL_AUTHORITIES,
+            )
+
             columns = _position_current_columns(held_position_conn)
             required_columns = {"condition_id", "direction"}
             missing_required = sorted(required_columns - columns)
@@ -27712,6 +31884,11 @@ def _family_existing_exposure_for_selection_by_bin_id(
                 raise RuntimeError("position_current exposure columns missing")
             condition_placeholders = ",".join("?" for _ in bin_id_by_condition)
             direction_select = "direction"
+            fill_authority_select = (
+                "fill_authority"
+                if "fill_authority" in columns
+                else "NULL AS fill_authority"
+            )
             chain_cost_select = (
                 "chain_cost_basis_usd"
                 if "chain_cost_basis_usd" in columns
@@ -27753,7 +31930,7 @@ def _family_existing_exposure_for_selection_by_bin_id(
                 scope_params.extend([family_city, family_target_date, family_metric])
             rows = held_position_conn.execute(
                 f"""
-                SELECT condition_id, {direction_select},
+                SELECT condition_id, {direction_select}, {fill_authority_select},
                        {chain_cost_select}, {cost_select}, {size_select},
                        {city_select}, {target_date_select}, {metric_select}
                   FROM position_current
@@ -27767,27 +31944,29 @@ def _family_existing_exposure_for_selection_by_bin_id(
                 try:
                     condition_id = str(row["condition_id"] or "")
                     direction_raw = row["direction"]
+                    fill_authority = str(row["fill_authority"] or "")
                     row_city = row["city"]
                     row_target_date = row["target_date"]
                     row_metric = row["temperature_metric"]
-                    committed = (
-                        _optional_float(row["chain_cost_basis_usd"])
-                        or _optional_float(row["cost_basis_usd"])
-                        or _optional_float(row["size_usd"])
-                        or 0.0
-                    )
+                    chain_cost = _optional_float(row["chain_cost_basis_usd"])
+                    open_cost = _optional_float(row["cost_basis_usd"])
+                    submitted_cost = _optional_float(row["size_usd"])
                 except Exception:
                     condition_id = str(row[0] or "")
                     direction_raw = row[1]
-                    row_city = row[5] if len(row) > 5 else None
-                    row_target_date = row[6] if len(row) > 6 else None
-                    row_metric = row[7] if len(row) > 7 else None
-                    committed = (
-                        _optional_float(row[2])
-                        or _optional_float(row[3])
-                        or _optional_float(row[4])
-                        or 0.0
-                    )
+                    fill_authority = str(row[2] or "")
+                    chain_cost = _optional_float(row[3])
+                    open_cost = _optional_float(row[4])
+                    submitted_cost = _optional_float(row[5])
+                    row_city = row[6] if len(row) > 6 else None
+                    row_target_date = row[7] if len(row) > 7 else None
+                    row_metric = row[8] if len(row) > 8 else None
+                if fill_authority in FILL_GRADE_FILL_AUTHORITIES:
+                    committed = open_cost or submitted_cost or chain_cost or 0.0
+                elif fill_authority == FILL_AUTHORITY_VENUE_POSITION_OBSERVED:
+                    committed = chain_cost or open_cost or submitted_cost or 0.0
+                else:
+                    committed = chain_cost or open_cost or submitted_cost or 0.0
                 if condition_id not in bin_id_by_condition and _is_same_weather_family(
                     city=row_city,
                     target_date=row_target_date,
@@ -28549,6 +32728,8 @@ def _day0_replacement_conditioning(
     provisional: bool,
     metric: str,
     unit: str,
+    decision_time: datetime,
+    entry_authority: bool,
 ) -> Mapping[str, object]:
     """Return the current observation conditioning carried by replacement q."""
 
@@ -28574,6 +32755,49 @@ def _day0_replacement_conditioning(
         or conditioned_unit != expected_unit
     ):
         raise ValueError("GLOBAL_DAY0_REPLACEMENT_CONDITIONING_INVALID")
+    if entry_authority:
+        from src.data.day0_fast_obs import (
+            FAST_LANE_ENTRY_MAX_CACHE_AGE_S,
+            FAST_OBS_SOURCE_ID,
+        )
+        from src.events.day0_authority import DAY0_WU_FAST_RESIDUAL_SOURCE
+
+        conditioned_source = str(conditioning.get("source") or "").strip().lower()
+        fast_sources = {
+            FAST_OBS_SOURCE_ID.lower(),
+            "same_station_fast_tail",
+            DAY0_WU_FAST_RESIDUAL_SOURCE.lower(),
+        }
+        if conditioned_source in fast_sources:
+            try:
+                observation_time = datetime.fromisoformat(
+                    str(conditioning.get("observation_time") or "").replace(
+                        "Z", "+00:00"
+                    )
+                )
+            except ValueError as exc:
+                raise ValueError(
+                    "GLOBAL_DAY0_FAST_OBSERVATION_ENTRY_CLOCK_INVALID"
+                ) from exc
+            if (
+                decision_time.tzinfo is None
+                or observation_time.tzinfo is None
+                or observation_time.astimezone(UTC) > decision_time.astimezone(UTC)
+            ):
+                raise ValueError(
+                    "GLOBAL_DAY0_FAST_OBSERVATION_ENTRY_CLOCK_INVALID"
+                )
+            age_seconds = (
+                decision_time.astimezone(UTC) - observation_time.astimezone(UTC)
+            ).total_seconds()
+            if age_seconds > FAST_LANE_ENTRY_MAX_CACHE_AGE_S:
+                # SCOPE: only new ENTRY risk for this Day0 family; held redecision
+                # and reduce-only SELL continue on their independent authority.
+                # DRAIN: the station fast lane publishes its next causal print and
+                # the normal materializer writes a posterior carrying that clock.
+                # RESET: the next global cut and submit rebind reproduce an active
+                # conditioning age inside the existing 15-minute entry contract.
+                raise ValueError("GLOBAL_DAY0_FAST_OBSERVATION_ENTRY_STALE")
     return {
         **conditioning,
         "metric": conditioned_metric,
@@ -28923,6 +33147,17 @@ def _replacement_no_bound_authority(
     q_lcb_basis = str(provenance.get("q_lcb_basis") or "").strip()
     q_ucb_role = str(provenance.get("q_ucb_json_role") or "").strip()
     samples_hash = str(provenance.get("q_bootstrap_samples_hash") or "").strip()
+    fusion = provenance.get("bayes_precision_fusion")
+    current_shape = (
+        fusion.get("current_evidence_shape")
+        if isinstance(fusion, Mapping)
+        else None
+    )
+    probability_semantics_revision = str(
+        current_shape.get("semantics_revision")
+        if isinstance(current_shape, Mapping)
+        else ""
+    ).strip()
     bin_topology = provenance.get("bin_topology")
     bootstrap_draws = provenance.get("q_lcb_bootstrap_draws")
     if isinstance(posterior_id, bool) or isinstance(bootstrap_draws, bool):
@@ -28961,7 +33196,7 @@ def _replacement_no_bound_authority(
         q_lcb=q_lcb,
         q_ucb=q_ucb,
     )
-    return {
+    authority = {
         "posterior_id": posterior_id,
         "posterior_identity_hash": identity_hash,
         "family_id": family_id,
@@ -28973,6 +33208,11 @@ def _replacement_no_bound_authority(
         "joint_samples_hash": samples_hash,
         "canonical_bound_hash": canonical_bound_hash,
     }
+    if probability_semantics_revision:
+        authority["probability_semantics_revision"] = (
+            probability_semantics_revision
+        )
+    return authority
 
 
 def _replacement_calibration_payload_from_credential(
@@ -29401,6 +33641,7 @@ def _global_day0_execution_payload(
     )
     conditioning_clock_lag_seconds: float | None = None
     conditioning_observation_time: str | None = None
+    conditioning_clock_role: str | None = None
     if conditioning is not None:
         conditioned_metric = (
             str(conditioning.get("metric") or "").strip().lower()
@@ -29441,7 +33682,6 @@ def _global_day0_execution_payload(
             if (
                 str(conditioning.get("unit") or "").strip().upper() != unit
                 or str(fast_unit or "").strip().upper() != unit
-                or conditioned_at != fast_at
                 or not math.isclose(
                     conditioned_c,
                     float(fast_c),
@@ -29452,6 +33692,20 @@ def _global_day0_execution_payload(
                 raise ValueError(
                     "GLOBAL_DAY0_FAST_RESIDUAL_CURRENT_OBSERVATION_MISMATCH"
                 )
+            if conditioned_at != fast_at:
+                if (
+                    not allow_equivalent_conditioning_clock_advance
+                    or fast_at <= conditioned_at
+                ):
+                    raise ValueError(
+                        "GLOBAL_DAY0_FAST_RESIDUAL_CURRENT_OBSERVATION_MISMATCH"
+                    )
+                conditioning_at = fast_at
+                conditioning_observation_time = conditioned_at.isoformat()
+                conditioning_clock_lag_seconds = (
+                    fast_at - conditioned_at
+                ).total_seconds()
+                conditioning_clock_role = "same_extreme_newer_observation_clock"
         else:
             # A held-position posterior may be statistically conditioned on the
             # faster same-station physical frontier while deterministic payoff
@@ -29480,16 +33734,6 @@ def _global_day0_execution_payload(
                 conditioning_fact.get("observation_time"),
                 reason="GLOBAL_DAY0_CURRENT_OBSERVATION_TIME_INVALID",
             )
-            if (
-                conditioned_at != conditioning_at
-                and (
-                    not allow_equivalent_conditioning_clock_advance
-                    or conditioned_at > conditioning_at
-                )
-            ):
-                raise ValueError(
-                    "GLOBAL_DAY0_CONDITIONING_OBSERVATION_TIME_MISMATCH"
-                )
             try:
                 conditioning_native = float(
                     conditioning_fact["observed_extreme_native"]
@@ -29513,11 +33757,23 @@ def _global_day0_execution_payload(
                 or str(conditioning.get("unit") or "").strip().upper() != unit
             ):
                 raise ValueError("GLOBAL_DAY0_CONDITIONING_OBSERVATION_MISMATCH")
-            if conditioned_at < conditioning_at:
+            if (
+                conditioned_at != conditioning_at
+                and not allow_equivalent_conditioning_clock_advance
+            ):
+                raise ValueError(
+                    "GLOBAL_DAY0_CONDITIONING_OBSERVATION_TIME_MISMATCH"
+                )
+            if conditioned_at != conditioning_at:
                 conditioning_observation_time = conditioned_at.isoformat()
-                conditioning_clock_lag_seconds = (
-                    conditioning_at - conditioned_at
-                ).total_seconds()
+                conditioning_clock_lag_seconds = abs(
+                    (conditioning_at - conditioned_at).total_seconds()
+                )
+                conditioning_clock_role = (
+                    "same_extreme_newer_observation_clock"
+                    if conditioned_at < conditioning_at
+                    else "same_extreme_conditioning_ahead_of_reader_clock"
+                )
 
     station_id = str(fact.get("station_id") or "").strip().upper()
     observation_source = str(fact.get("observation_source") or "").strip()
@@ -29540,6 +33796,9 @@ def _global_day0_execution_payload(
         )
     ):
         raise ValueError("GLOBAL_DAY0_CONDITIONING_SOURCE_IDENTITY_MISMATCH")
+    raw_payload_sha256 = str(fact.get("raw_payload_sha256") or "").strip()
+    if not re.fullmatch(r"[0-9a-f]{64}", raw_payload_sha256):
+        raise ValueError("GLOBAL_DAY0_RAW_PROVENANCE_MISSING")
     if fast_residual_conditioning is not None:
         likelihood = fast_residual_conditioning["fast_residual_likelihood"]
         if (
@@ -29565,10 +33824,25 @@ def _global_day0_execution_payload(
         "rounded_value": rounded,
         "sample_count": observed_samples,
         "station_id": station_id,
+        "configured_station_id": expected_station,
         "settlement_source": observation_source,
         "settlement_unit": unit,
+        "raw_payload_sha256": raw_payload_sha256,
         "evidence_finality": evidence_finality,
     }
+    binding["day0_observation_provenance_hash"] = stable_hash(
+        {
+            "city": binding["city"],
+            "target_date": binding["target_date"],
+            "metric": binding["metric"],
+            "settlement_source": binding["settlement_source"],
+            "station_id": binding["station_id"],
+            "configured_station_id": binding["configured_station_id"],
+            "raw_payload_sha256": binding["raw_payload_sha256"],
+            "observation_time": binding["observation_time"],
+            "observation_available_at": binding["observation_available_at"],
+        }
+    )
     if conditioning_clock_lag_seconds is not None:
         binding.update(
             {
@@ -29577,9 +33851,7 @@ def _global_day0_execution_payload(
                 ),
                 "current_observation_time": conditioning_at.isoformat(),
                 "conditioning_clock_lag_seconds": conditioning_clock_lag_seconds,
-                "conditioning_clock_role": (
-                    "same_extreme_newer_observation_clock"
-                ),
+                "conditioning_clock_role": conditioning_clock_role,
             }
         )
     if fast_residual_conditioning is not None:
@@ -29677,8 +33949,13 @@ def _global_day0_execution_payload(
         "samples_count": observed_samples,
         "sample_count": observed_samples,
         "station_id": station_id,
+        "configured_station_id": expected_station,
         "settlement_source": observation_source,
         "settlement_unit": unit,
+        "raw_payload_sha256": raw_payload_sha256,
+        "day0_observation_provenance_hash": binding[
+            "day0_observation_provenance_hash"
+        ],
         "evidence_finality": evidence_finality,
         "source_match_status": "MATCH",
         "local_date_status": "MATCH",
@@ -29799,6 +34076,10 @@ def _global_day0_probability_authority_payload(
             ("remaining_models", "_edli_day0_remaining_models"),
             ("remaining_model_names", "_edli_day0_remaining_model_names"),
             (
+                "provider_representative_models",
+                "_edli_day0_provider_representative_models",
+            ),
+            (
                 "remaining_source_cycle_time_utc",
                 "_edli_day0_remaining_source_cycle_time_utc",
             ),
@@ -29828,6 +34109,16 @@ def _global_day0_probability_authority_payload(
                 "current_state_innovation_e_fold_hours",
                 "_edli_day0_current_state_innovation_e_fold_hours",
             ),
+            (
+                "source_clock_predictive_sigma_native",
+                "_edli_day0_source_clock_predictive_sigma_native",
+            ),
+            (
+                "source_clock_predictive_sigma_basis",
+                "_edli_day0_source_clock_predictive_sigma_basis",
+            ),
+            ("process_sigma_native", "_edli_day0_process_sigma_native"),
+            ("process_sigma_basis", "_edli_day0_process_sigma_basis"),
             ("exit_authority_status", "_edli_day0_exit_authority_status"),
             ("exit_authority_reason", "_edli_day0_exit_authority_reason"),
             ("bound_classification", "_edli_day0_bound_classification"),
@@ -29952,7 +34243,7 @@ _GLOBAL_DAY0_DETERMINISTIC_BIN_PAYOFF_BAND_BASIS = (
     "day0_deterministic_bin_payoff_v1"
 )
 _GLOBAL_DAY0_CURRENT_SETTLEMENT_SIMPLEX_BAND_BASIS = (
-    "current_coherent_day0_remaining_model_bootstrap_v3"
+    "current_coherent_day0_fast_residual_remaining_model_bootstrap_v6"
 )
 _GLOBAL_DAY0_CONDITIONED_REPLACEMENT_SIMPLEX_BAND_BASIS = (
     "current_coherent_day0_conditioned_replacement_simplex_v1"
@@ -29964,6 +34255,144 @@ _GLOBAL_DAY0_ABSORBING_EXACT_SETTLEMENT_SIMPLEX_BAND_BASIS = (
     "day0_absorbing_observation_exact_settlement_simplex_v1"
 )
 _GLOBAL_CURRENT_EVIDENCE_TAIL_ALPHA = 0.05
+_DAY0_PEAK_SET_MIN_EMPIRICAL_SAMPLES = 30
+_DAY0_PEAK_SET_PROBABILITY_BASIS = "monthly_empirical_jeffreys_v1"
+_DAY0_PEAK_SET_MIXTURE_BASIS = (
+    "peak_set_atom_plus_truncated_remaining_path_v1"
+)
+
+
+def _day0_empirical_peak_set_probability(
+    *,
+    temporal_context: object,
+    world_conn: sqlite3.Connection | None,
+    city: str,
+    month: int,
+) -> tuple[float, int, str] | None:
+    """Return a finite-evidence probability that today's HIGH is already set."""
+
+    source = str(
+        getattr(temporal_context, "confidence_source", "") or ""
+    ).strip()
+    if source != "monthly_empirical" or world_conn is None:
+        return None
+    local_hour = float(getattr(temporal_context, "current_local_hour", math.nan))
+    if not math.isfinite(local_hour):
+        return None
+    lower_hour = int(math.floor(local_hour))
+    upper_hour = int(math.ceil(local_hour))
+    hours = (lower_hour,) if lower_hour == upper_hour else (lower_hour, upper_hour)
+    placeholders = ",".join("?" for _ in hours)
+    try:
+        rows = world_conn.execute(
+            "SELECT hour, p_high_set, n_obs FROM diurnal_peak_prob "
+            "WHERE city = ? AND month = ? "
+            f"AND hour IN ({placeholders})",
+            (city, month, *hours),
+        ).fetchall()
+    except sqlite3.Error:
+        return None
+    empirical_by_hour: dict[int, tuple[float, int]] = {}
+    for row in rows:
+        try:
+            row_hour = int(row[0])
+            probability = float(row[1])
+            sample_count = int(row[2])
+        except (IndexError, TypeError, ValueError):
+            continue
+        if sample_count > 0 and math.isfinite(probability) and 0.0 <= probability <= 1.0:
+            empirical_by_hour[row_hour] = (probability, sample_count)
+    if set(empirical_by_hour) != set(hours):
+        return None
+    sample_count = min(empirical_by_hour[hour][1] for hour in hours)
+    if sample_count < _DAY0_PEAK_SET_MIN_EMPIRICAL_SAMPLES:
+        return None
+    lower_probability = empirical_by_hour[lower_hour][0]
+    if upper_hour == lower_hour:
+        raw_probability = lower_probability
+    else:
+        upper_probability = empirical_by_hour[upper_hour][0]
+        weight = min(1.0, max(0.0, local_hour - lower_hour))
+        raw_probability = lower_probability + (
+            upper_probability - lower_probability
+        ) * weight
+    # The empirical cell may contain 0/1.  A Jeffreys update preserves the
+    # finite observation count without turning historical frequency into an
+    # impossible certainty about today's unresolved weather path.
+    probability = (raw_probability * sample_count + 0.5) / (sample_count + 1.0)
+    return probability, sample_count, _DAY0_PEAK_SET_PROBABILITY_BASIS
+
+
+def _day0_peak_set_probability_for_distribution(
+    *,
+    payload: dict[str, object],
+    metric: str,
+) -> float | None:
+    """Reject marginal clock frequency as conditional live probability.
+
+    ``diurnal_peak_prob`` estimates P(peak set | city, month, local hour).  A
+    live distribution needs P(peak set | today's current state and remaining
+    path).  The former remains useful telemetry, but using it as the latter
+    double-counts the historical clock prior and can overwhelm today's rising
+    temperature and provider trajectory.  No validated conditional basis is
+    live yet, so the remaining-path generator is the sole statistical source.
+    """
+
+    basis = str(payload.get("_edli_day0_peak_set_probability_basis") or "").strip()
+    if metric != "high" or not basis:
+        return None
+    if basis != _DAY0_PEAK_SET_PROBABILITY_BASIS:
+        raise ValueError("GLOBAL_DAY0_PEAK_SET_PROBABILITY_BASIS_INVALID")
+    return None
+
+
+def _sample_day0_extreme_with_peak_state(
+    *,
+    rng: np.random.Generator,
+    member_means: np.ndarray,
+    sigma: float,
+    movement_boundary: float,
+    peak_set_atom: float,
+    metric: str,
+    peak_set_probability: float,
+) -> np.ndarray:
+    """Draw one coherent latent state, conditioning the other state to move."""
+
+    means = np.asarray(member_means, dtype=np.float64)
+    if (
+        means.size == 0
+        or not np.isfinite(means).all()
+        or not math.isfinite(sigma)
+        or sigma <= 0.0
+        or not math.isfinite(movement_boundary)
+        or not math.isfinite(peak_set_atom)
+        or metric not in {"high", "low"}
+        or not 0.0 < peak_set_probability < 1.0
+    ):
+        raise ValueError("DAY0_PEAK_STATE_GENERATOR_INPUT_INVALID")
+    from scipy.special import ndtr, ndtri
+
+    boundary_cdf = ndtr((movement_boundary - means) / sigma)
+    uniforms = rng.random(means.shape)
+    eps = np.finfo(np.float64).eps
+    if metric == "high":
+        conditional_u = boundary_cdf + uniforms * (1.0 - boundary_cdf)
+        conditional_u = np.clip(conditional_u, eps, 1.0 - eps)
+        moving = means + sigma * ndtri(conditional_u)
+        moving = np.maximum(
+            moving,
+            np.nextafter(movement_boundary, math.inf),
+        )
+    else:
+        conditional_u = uniforms * boundary_cdf
+        conditional_u = np.clip(conditional_u, eps, 1.0 - eps)
+        moving = means + sigma * ndtri(conditional_u)
+        moving = np.minimum(
+            moving,
+            np.nextafter(movement_boundary, -math.inf),
+        )
+    peak_is_set = rng.random(means.shape) < peak_set_probability
+    return np.where(peak_is_set, peak_set_atom, moving)
 
 
 def _final_daily_exact_probability_components(
@@ -30583,16 +35012,23 @@ def _prepare_current_global_probability_family(
     allow_unobserved_day0_replacement: bool = False,
     allow_provisional_day0_replacement: bool = False,
     probability_use: _CurrentProbabilityUse = _CurrentProbabilityUse.ENTRY,
+    raw_input_hwm_conn: sqlite3.Connection | None = None,
+    raw_input_hwm_deadline_monotonic: float | None = None,
+    raw_input_hwm_read_max_seconds: float | None = None,
+    before_raw_input_hwm_read: Callable[[], float | None] | None = None,
 ):
     """Build current simplex or exact-bin payoff authority without price dependency.
 
-    Whole-family preparation prefers one joint Day0 simplex. If the remaining-
-    day forecast is unavailable, exact observation-proved bins may still form a
-    partial witness; unknown siblings remain ineligible. JIT revalidation
-    preserves the selected witness kind.
+    Whole-family preparation uses one current-state Day0 simplex. The persisted
+    replacement posterior remains the source-clock prior and identity carrier;
+    the action probability is the final extreme conditioned on observations
+    through ``decision_time`` and the hourly trajectories that remain. Exact
+    observation-proved bins may still form a partial witness; unknown siblings
+    remain ineligible. JIT revalidation preserves the selected witness kind.
     """
 
     from src.data.replacement_forecast_bundle_reader import (
+        ReplacementForecastAuthorityPurpose,
         market_bin_topology_hash_from_rows,
         read_replacement_forecast_bundle,
     )
@@ -30615,6 +35051,12 @@ def _prepare_current_global_probability_family(
 
     if decision_time.tzinfo is None:
         raise ValueError("GLOBAL_PROBABILITY_DECISION_TIME_NAIVE")
+
+    def _raw_input_hwm_deadline() -> float | None:
+        if before_raw_input_hwm_read is not None:
+            return before_raw_input_hwm_read()
+        return raw_input_hwm_deadline_monotonic
+
     if max_age <= timedelta(0):
         raise ValueError("GLOBAL_PROBABILITY_FRESHNESS_CONTRACT_MISSING")
     if not isinstance(allow_unobserved_day0_replacement, bool):
@@ -30624,6 +35066,11 @@ def _prepare_current_global_probability_family(
     if not isinstance(probability_use, _CurrentProbabilityUse):
         raise ValueError("GLOBAL_PROBABILITY_USE_INVALID")
     entry_authority = probability_use is _CurrentProbabilityUse.ENTRY
+    bundle_authority_purpose = (
+        ReplacementForecastAuthorityPurpose.ENTRY
+        if entry_authority
+        else ReplacementForecastAuthorityPurpose.HELD_REDECISION
+    )
     decision_time = decision_time.astimezone(UTC)
     payload = _payload(event)
     rows = _event_family_market_topology_rows(topology_conn, payload)
@@ -30666,6 +35113,7 @@ def _prepare_current_global_probability_family(
     source_available_at = ""
     bundle = None
     day0_source_clock_bound_identity = ""
+    current_day0_redecision_only = False
     if is_day0:
         city = runtime_cities_by_name().get(str(family.city))
         if city is None:
@@ -30836,6 +35284,60 @@ def _prepare_current_global_probability_family(
                         )
                     )
         if final_daily_observation is None:
+            current_day0_redecision_only = bool(
+                provisional_day0_fact is not None
+                and (
+                    provisional_day0_observation
+                    or post_local_incomplete_monitor_authority
+                )
+                and (
+                    local_target == local_now.date()
+                    or post_local_incomplete_monitor_authority
+                )
+                and probability_use
+                in {
+                    _CurrentProbabilityUse.HELD_MONITOR,
+                    _CurrentProbabilityUse.REDUCE_ONLY_EXIT,
+                }
+            )
+        if final_daily_observation is None and current_day0_redecision_only:
+            # SCOPE: this already-held family's genuinely provisional Day0 or
+            # post-local incomplete monitor/reduce-only submit revalidation.
+            # Definitive current-day evidence uses the replacement bundle for
+            # the same probability authority as ENTRY.
+            # DRAIN: the strict remaining-window builder below consumes a fresh,
+            # complete expected-provider vector bundle on every redecision.
+            # RESET: missing/stale vectors or the next local day fail closed;
+            # final-daily evidence upgrades to the exact simplex instead.
+            source_cycle_raw = str(
+                provisional_day0_fact.get("observation_time") or ""
+            ).strip()
+            source_available_at = str(
+                provisional_day0_fact.get("observation_available_at")
+                or source_cycle_raw
+            ).strip()
+            day0_base_identity = stable_hash(
+                {
+                    "authority_scope": "held_exposure_current_day0_only_v1",
+                    "city": family.city,
+                    "target_date": str(family.target_date),
+                    "metric": family.metric,
+                    "observation_source": provisional_day0_fact.get(
+                        "observation_source"
+                    ),
+                    "station_id": provisional_day0_fact.get("station_id"),
+                    "unit": provisional_day0_fact.get("unit"),
+                    "observation_time": source_cycle_raw,
+                    "observation_available_at": source_available_at,
+                    "observed_extreme_native": provisional_day0_fact.get(
+                        "observed_extreme_native"
+                    ),
+                    "raw_payload_sha256": provisional_day0_fact.get(
+                        "raw_payload_sha256"
+                    ),
+                }
+            )
+        elif final_daily_observation is None:
             readiness = latest_replacement_readiness(
                 forecast_conn,
                 city=family.city,
@@ -30856,6 +35358,10 @@ def _prepare_current_global_probability_family(
                 require_baseline_bundle=False,
                 current_bin_topology_hash=current_topology_hash,
                 enforce_raw_input_hwm=True,
+                raw_input_hwm_conn=raw_input_hwm_conn,
+                raw_input_hwm_deadline_monotonic=_raw_input_hwm_deadline(),
+                raw_input_hwm_read_max_seconds=raw_input_hwm_read_max_seconds,
+                authority_purpose=bundle_authority_purpose,
             )
             if not result.ok or result.bundle is None:
                 raise ValueError(
@@ -30962,6 +35468,10 @@ def _prepare_current_global_probability_family(
             require_baseline_bundle=False,
             current_bin_topology_hash=current_topology_hash,
             enforce_raw_input_hwm=True,
+            raw_input_hwm_conn=raw_input_hwm_conn,
+            raw_input_hwm_deadline_monotonic=_raw_input_hwm_deadline(),
+            raw_input_hwm_read_max_seconds=raw_input_hwm_read_max_seconds,
+            authority_purpose=bundle_authority_purpose,
         )
         if not result.ok or result.bundle is None:
             raise ValueError(
@@ -31026,6 +35536,8 @@ def _prepare_current_global_probability_family(
                         provisional=provisional_day0_observation,
                         metric=str(family.metric),
                         unit=str(omega.resolution.measurement_unit),
+                        decision_time=decision_time,
+                        entry_authority=entry_authority,
                     )
                     if bundle is not None
                     else None
@@ -31038,11 +35550,16 @@ def _prepare_current_global_probability_family(
                 probability_base_identity=day0_base_identity,
                 allow_equivalent_conditioning_clock_advance=not entry_authority,
             )
-            if provisional_day0_observation:
-                if bundle is None:
+            if current_day0_redecision_only:
+                current_day0_payload[
+                    "_edli_day0_redecision_authority_scope"
+                ] = "held_exposure_current_day0_only_v1"
+            if provisional_day0_observation and bundle is None:
+                if not current_day0_redecision_only:
                     raise ValueError(
                         "GLOBAL_DAY0_PROVISIONAL_REPLACEMENT_BUNDLE_MISSING"
                     )
+            elif provisional_day0_observation:
                 if fast_residual_conditioning is not None:
                     _assert_provisional_day0_replacement_bundle(
                         bundle,
@@ -31066,6 +35583,42 @@ def _prepare_current_global_probability_family(
                         bundle,
                         current_day0_payload,
                     )
+            if bundle is not None:
+                predictive_sigma_c = _amber_inflated_predictive_sigma_c(
+                    bundle,
+                    family=family,
+                    decision_time=decision_time,
+                )
+                if predictive_sigma_c is None:
+                    raise ValueError(
+                        "GLOBAL_DAY0_SOURCE_CLOCK_PREDICTIVE_SIGMA_MISSING"
+                    )
+                settlement_unit = str(
+                    getattr(city, "settlement_unit", "") or ""
+                ).strip().upper()
+                predictive_sigma_native = (
+                    float(predictive_sigma_c) * 9.0 / 5.0
+                    if settlement_unit == "F"
+                    else float(predictive_sigma_c)
+                )
+                if not (
+                    settlement_unit in {"C", "F"}
+                    and predictive_sigma_native > 0.0
+                    and math.isfinite(predictive_sigma_native)
+                ):
+                    raise ValueError(
+                        "GLOBAL_DAY0_SOURCE_CLOCK_PREDICTIVE_SIGMA_INVALID"
+                    )
+                current_day0_payload.update(
+                    {
+                        "_edli_day0_source_clock_predictive_sigma_native": (
+                            predictive_sigma_native
+                        ),
+                        "_edli_day0_source_clock_predictive_sigma_basis": (
+                            "replacement_current_evidence_predictive_sigma_v1"
+                        ),
+                    }
+                )
         payload.update(current_day0_payload)
         if day0_payload_out is not None:
             day0_payload_out.update(current_day0_payload)
@@ -31169,7 +35722,17 @@ def _prepare_current_global_probability_family(
                 }
             )
         else:
-            if fast_residual_conditioning is not None:
+            if (
+                fast_residual_conditioning is not None
+                and post_local_incomplete_monitor_authority
+            ):
+                # Once the local day is over there is no remaining weather
+                # interval to price.  A qualified same-station residual carrier
+                # may then describe the still-unpublished settlement value for
+                # reduce-only redecision.  During the target day it must not
+                # replace the remaining-window random variable: doing so freezes
+                # q between fast-observation updates even as wall clock, current
+                # temperature, and the executable book move.
                 components = _replacement_global_probability_components(
                     bundle,
                     candidates=family.candidates,
@@ -31190,14 +35753,18 @@ def _prepare_current_global_probability_family(
                         "_edli_day0_q_mode": "fast_residual_conditioned_replacement",
                     }
                 )
-            elif post_local_incomplete_monitor_authority:
+            else:
                 # Wall-clock completion does not make the information set
                 # complete.  The interval after the latest authorized
                 # settlement-channel observation and before local midnight has
                 # happened physically, but remains unobserved by that channel.
                 # Held-position redecision must keep pricing that causal tail;
                 # only the complete final-daily proof may upgrade it to an
-                # exact settlement simplex.  Entry authority remains blocked.
+                # exact settlement simplex.  During the local day this same
+                # builder continuously shortens the stochastic interval and
+                # consumes the current physical frontier; fast residual evidence
+                # is boundary/time evidence, never a frozen full-day action q.
+                # Entry authority remains blocked after local completion.
                 components = _day0_remaining_global_probability_components(
                     event,
                     forecast_conn=forecast_conn,
@@ -31217,30 +35784,14 @@ def _prepare_current_global_probability_family(
                         "_edli_q_source": "day0_remaining_day",
                         "_edli_day0_q_mode": (
                             "post_local_provisional_tail"
-                            if provisional_day0_observation
-                            else "post_local_incomplete_settlement_tail"
+                            if post_local_incomplete_monitor_authority
+                            and provisional_day0_observation
+                            else (
+                                "post_local_incomplete_settlement_tail"
+                                if post_local_incomplete_monitor_authority
+                                else "remaining_day"
+                            )
                         ),
-                    }
-                )
-            else:
-                components = _day0_remaining_global_probability_components(
-                    event,
-                    forecast_conn=forecast_conn,
-                    calibration_conn=day0_observation_conn,
-                    family=family,
-                    payload=payload,
-                    decision_time=decision_time,
-                    snapshot=day0_snapshot,
-                )
-                probability_authority = (
-                    "day0_remaining_day_global_probability_v1"
-                )
-                payload.update(
-                    {
-                        "probability_authority": probability_authority,
-                        "q_source": "day0_remaining_day",
-                        "_edli_q_source": "day0_remaining_day",
-                        "_edli_day0_q_mode": "remaining_day",
                     }
                 )
     elif current_day0_payload is not None:
@@ -31341,13 +35892,19 @@ def _prepare_current_global_probability_family(
                         "exact_yes_payoffs": exact_yes_payoffs,
                     }
                 )
-                q_version = stable_hash(
-                    {
-                        "authority": probability_authority,
-                        "posterior_identity_hash": posterior_identity_hash,
-                        "topology_identity": omega.topology_hash,
-                        "exact_yes_payoffs": exact_yes_payoffs,
-                    }
+                from src.events.day0_authority import (
+                    bind_day0_probability_semantics,
+                )
+
+                q_version = bind_day0_probability_semantics(
+                    stable_hash(
+                        {
+                            "authority": probability_authority,
+                            "posterior_identity_hash": posterior_identity_hash,
+                            "topology_identity": omega.topology_hash,
+                            "exact_yes_payoffs": exact_yes_payoffs,
+                        }
+                    )
                 )
                 authority_certificate_hash = stable_hash(
                     {
@@ -31488,7 +36045,16 @@ def _prepare_current_global_probability_family(
                     "probability_authority": probability_authority,
                     "q_source": "day0_remaining_day",
                     "_edli_q_source": "day0_remaining_day",
-                    "_edli_day0_q_mode": "remaining_day",
+                    "_edli_day0_q_mode": (
+                        "post_local_provisional_tail"
+                        if post_local_incomplete_monitor_authority
+                        and provisional_day0_observation
+                        else (
+                            "post_local_incomplete_settlement_tail"
+                            if post_local_incomplete_monitor_authority
+                            else "remaining_day"
+                        )
+                    ),
                 }
             )
     else:
@@ -31502,6 +36068,38 @@ def _prepare_current_global_probability_family(
     if components is None:
         raise ValueError("GLOBAL_CURRENT_POSTERIOR_SIMPLEX_INVALID")
     samples, point_q, band_basis = components
+    if (
+        current_day0_redecision_only
+        and local_target < local_now.date()
+    ):
+        raw_capture_times = payload.get(
+            "_edli_day0_remaining_capture_times_utc"
+        )
+        if not isinstance(raw_capture_times, list) or not raw_capture_times:
+            raise ValueError("GLOBAL_DAY0_POST_LOCAL_VECTOR_CAPTURE_MISSING")
+        target_end = datetime.combine(
+            local_target + timedelta(days=1),
+            time.min,
+            tzinfo=ZoneInfo(str(city.timezone)),
+        ).astimezone(UTC)
+        try:
+            capture_times = tuple(
+                datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+                for value in raw_capture_times
+            )
+        except ValueError as exc:
+            raise ValueError(
+                "GLOBAL_DAY0_POST_LOCAL_VECTOR_CAPTURE_INVALID"
+            ) from exc
+        if any(
+            captured.tzinfo is None
+            or captured.astimezone(UTC) > target_end
+            for captured in capture_times
+        ):
+            raise ValueError("GLOBAL_DAY0_POST_LOCAL_VECTOR_CAPTURE_AFTER_TARGET")
+        payload["_edli_day0_post_local_vector_cutoff_utc"] = (
+            target_end.isoformat()
+        )
     if exact_yes_payoffs:
         column_by_bin = {
             binding.bin_id: index for index, binding in enumerate(bindings)
@@ -31538,7 +36136,10 @@ def _prepare_current_global_probability_family(
             decision_time=decision_time,
         )
         current_caps = day0_caps
-        if probability_authority == "day0_remaining_day_global_probability_v1":
+        if (
+            probability_authority == "day0_remaining_day_global_probability_v1"
+            and not current_day0_redecision_only
+        ):
             bound_bundle = bundle
             if bound_bundle is None:
                 readiness = latest_replacement_readiness(
@@ -31563,6 +36164,10 @@ def _prepare_current_global_probability_family(
                     require_baseline_bundle=False,
                     current_bin_topology_hash=current_topology_hash,
                     enforce_raw_input_hwm=True,
+                    raw_input_hwm_conn=raw_input_hwm_conn,
+                    raw_input_hwm_deadline_monotonic=_raw_input_hwm_deadline(),
+                    raw_input_hwm_read_max_seconds=raw_input_hwm_read_max_seconds,
+                    authority_purpose=bundle_authority_purpose,
                 )
                 if not bound_result.ok or bound_result.bundle is None:
                     raise ValueError(
@@ -31634,7 +36239,7 @@ def _prepare_current_global_probability_family(
                     ),
                 }
             )
-        if not provisional_day0_observation:
+        if not provisional_day0_observation and not current_day0_redecision_only:
             candidate_payoff_q_lcb_caps = current_caps
     if (
         current_day0_payload is not None
@@ -31648,6 +36253,7 @@ def _prepare_current_global_probability_family(
             "_edli_day0_q_mode",
             "_edli_day0_remaining_models",
             "_edli_day0_remaining_model_names",
+            "_edli_day0_provider_representative_models",
             "_edli_day0_remaining_source_cycle_time_utc",
             "_edli_day0_remaining_capture_times_utc",
             "_edli_day0_remaining_expected_models",
@@ -31659,6 +36265,9 @@ def _prepare_current_global_probability_family(
             "_edli_day0_current_state_innovation_e_fold_hours",
             "_edli_day0_probability_clock_utc",
             "_edli_day0_process_sigma_native",
+            "_edli_day0_process_sigma_basis",
+            "_edli_day0_source_clock_predictive_sigma_native",
+            "_edli_day0_source_clock_predictive_sigma_basis",
             "_edli_day0_exit_authority_status",
             "_edli_day0_exit_authority_reason",
             "_edli_day0_bound_classification",
@@ -31666,14 +36275,28 @@ def _prepare_current_global_probability_family(
             "_edli_day0_source_clock_bound_posterior_identity",
             "_edli_day0_source_clock_bound_identity",
             "_edli_day0_source_clock_bound_basis",
+            "_edli_day0_redecision_authority_scope",
+            "_edli_day0_post_local_vector_cutoff_utc",
             "_edli_day0_provisional_revision_likelihood",
             "_edli_day0_provisional_boundary_survival_probability",
+            "_edli_day0_post_peak_confidence_source",
+            "_edli_day0_peak_set_probability",
+            "_edli_day0_peak_set_sample_count",
+            "_edli_day0_peak_set_probability_basis",
+            "_edli_day0_peak_set_mixture_basis",
         ):
             if key in payload:
                 day0_payload_out[key] = payload[key]
     sample_identity = probability_sample_matrix_identity(samples)
     if current_day0_payload is not None:
+        from src.events.day0_authority import (
+            DAY0_PROBABILITY_SEMANTICS_REVISION,
+        )
+
         source_truth = {
+            "probability_semantics_revision": (
+                DAY0_PROBABILITY_SEMANTICS_REVISION
+            ),
             "probability_base_identity": day0_base_identity,
             "source_cycle_time": source_cycle.astimezone(UTC).isoformat(),
             "source_available_at": source_available_at,
@@ -31706,19 +36329,47 @@ def _prepare_current_global_probability_family(
             "process_sigma_native": payload.get(
                 "_edli_day0_process_sigma_native"
             ),
+            "process_sigma_basis": payload.get(
+                "_edli_day0_process_sigma_basis"
+            ),
+            "source_clock_predictive_sigma_native": payload.get(
+                "_edli_day0_source_clock_predictive_sigma_native"
+            ),
+            "source_clock_predictive_sigma_basis": payload.get(
+                "_edli_day0_source_clock_predictive_sigma_basis"
+            ),
             "provisional_revision_likelihood": payload.get(
                 "_edli_day0_provisional_revision_likelihood"
             ),
             "provisional_boundary_survival_probability": payload.get(
                 "_edli_day0_provisional_boundary_survival_probability"
             ),
+            "peak_set_probability": payload.get(
+                "_edli_day0_peak_set_probability"
+            ),
+            "peak_set_sample_count": payload.get(
+                "_edli_day0_peak_set_sample_count"
+            ),
+            "peak_set_probability_basis": payload.get(
+                "_edli_day0_peak_set_probability_basis"
+            ),
+            "peak_set_mixture_basis": payload.get(
+                "_edli_day0_peak_set_mixture_basis"
+            ),
             "source_clock_bound_identity": (
                 day0_source_clock_bound_identity or None
+            ),
+            "redecision_authority_scope": payload.get(
+                "_edli_day0_redecision_authority_scope"
+            ),
+            "post_local_vector_cutoff_utc": payload.get(
+                "_edli_day0_post_local_vector_cutoff_utc"
             ),
         }
         source_truth_identity = stable_hash(source_truth)
         if (
-            not provisional_day0_observation
+            bundle is None
+            or not provisional_day0_observation
             or probability_authority
             == "day0_remaining_day_global_probability_v1"
         ):
@@ -31738,7 +36389,7 @@ def _prepare_current_global_probability_family(
             "source_available_at": bundle.source_available_at,
         }
         source_truth_identity = stable_hash(source_truth)
-    q_version = stable_hash(
+    raw_q_version = stable_hash(
         {
             "authority": probability_authority,
             "posterior_identity_hash": posterior_identity_hash,
@@ -31747,6 +36398,12 @@ def _prepare_current_global_probability_family(
             "point_q": [float(value) for value in point_q],
         }
     )
+    if current_day0_payload is not None:
+        from src.events.day0_authority import bind_day0_probability_semantics
+
+        q_version = bind_day0_probability_semantics(raw_q_version)
+    else:
+        q_version = raw_q_version
     authority_certificate_hash = stable_hash(
         {
             "event_id": event.event_id,
@@ -32111,6 +36768,14 @@ def _replacement_authority_probability_and_fdr_proof(
         replacement_bundle,
         posterior_identity_hash=posterior_identity_hash,
     )
+    if replacement_no_bound_authority is None:
+        raise ValueError("REPLACEMENT_PROBABILITY_SEMANTICS_AUTHORITY_MISSING")
+    probability_semantics_revision = str(
+        replacement_no_bound_authority.get("probability_semantics_revision")
+        or ""
+    ).strip()
+    if not probability_semantics_revision:
+        raise ValueError("REPLACEMENT_PROBABILITY_SEMANTICS_AUTHORITY_MISSING")
     joint_samples_key = "_edli_spine_served_joint_q_samples_by_condition"
     joint_samples_reason_key = "_edli_spine_joint_q_samples_unavailable_reason"
     joint_samples_requested = payload.get("_edli_global_auction_prepare") is True
@@ -32348,6 +37013,7 @@ def _replacement_authority_probability_and_fdr_proof(
         "posterior_id": str(replacement_bundle.posterior_id),
         "posterior_identity_hash": posterior_identity_hash,
         "replacement_no_bound_authority": replacement_no_bound_authority,
+        "probability_semantics_revision": probability_semantics_revision,
         "replacement_product_id": replacement_bundle.product_id,
         "p_cal_vector_hash": _probability_vector_hash(
             q_by_condition[str(candidate.condition_id or "")]
@@ -33793,11 +38459,15 @@ def _day0_process_sigma_native(
     """Day0 observation/process width in the settlement native unit.
 
     Day0 remaining-day q is conditioned on a fixed observed running boundary.
-    This width belongs to the still-unobserved trajectory: instrument noise plus
-    publication-latency and unseen-peak uncertainty are applied before the
-    physical max/min with that boundary.  The helper is shared by point q and
-    q_lcb bootstrap, so a single-model remaining-day bundle still carries a real
-    positive predictive width instead of failing with MU_SIGMA_NOT_STASHED.
+    This width belongs to the still-unobserved conditional trajectory:
+    instrument noise plus publication-latency uncertainty are applied before the
+    physical max/min with that boundary.  Peak timing and provider disagreement
+    are already represented by the explicit remaining-hour trajectories.  The
+    replacement carrier's ``sigma_pred`` describes the unconditional full-day
+    extreme and remains confidence/source authority; injecting it again as
+    conditional path noise would double-count a different random variable and
+    systematically manufacture anti-modal NO probability.  The helper is shared
+    by point q and q_lcb bootstrap.
     """
     try:
         from src.signal.forecast_uncertainty import sigma_instrument
@@ -33812,23 +38482,24 @@ def _day0_process_sigma_native(
         margin = stale_extreme_uncertainty_margin(
             unit=unit, obs_age_minutes=obs_age_min, budget_minutes=budget_min
         )
-        unseen_peak_sigma = 0.0
-        metric = str(payload.get("metric") or payload.get("temperature_metric") or "")
-        if metric == "high":
-            post_peak_confidence = _optional_float(payload.get("_edli_day0_post_peak_confidence"))
-            if post_peak_confidence is not None:
-                peak = min(1.0, max(0.0, float(post_peak_confidence)))
-                precision = _optional_float(payload.get("members_precision") or payload.get("precision"))
-                if precision is None or precision <= 0.0:
-                    precision = 1.0
-                unseen_peak_sigma = (1.0 - peak) * 3.0 * float(precision)
-        sigma = float(np.sqrt(base_sigma ** 2 + (margin / 2.0) ** 2 + unseen_peak_sigma ** 2))
-        if unseen_peak_sigma > 0.0:
-            payload["_edli_day0_unseen_peak_sigma_native"] = float(unseen_peak_sigma)
+        sigma = float(np.sqrt(base_sigma ** 2 + (margin / 2.0) ** 2))
     except Exception:  # noqa: BLE001 - caller turns absence into typed no-trade/log evidence.
         return None
+    source_clock_sigma_raw = payload.get(
+        "_edli_day0_source_clock_predictive_sigma_native"
+    )
+    if source_clock_sigma_raw is not None:
+        try:
+            source_clock_sigma = float(source_clock_sigma_raw)
+        except (TypeError, ValueError):
+            return None
+        if not (source_clock_sigma > 0.0 and np.isfinite(source_clock_sigma)):
+            return None
     if not (sigma > 0.0 and np.isfinite(sigma)):
         return None
+    payload["_edli_day0_process_sigma_basis"] = (
+        "conditional_remaining_path_instrument_plus_observation_latency_v2"
+    )
     payload["_edli_day0_process_sigma_native"] = sigma
     return sigma
 
@@ -33843,9 +38514,10 @@ def _day0_extra_member_sigma_native(
     """Extra member-space sigma for Day0 point q integration.
 
     The Day0 point-q operator already adds instrument sigma to raw future
-    extrema.  The process seam includes instrument + staleness + unseen-peak
+    extrema.  The process seam includes instrument + observation-staleness
     uncertainty because q_lcb samples those same raw future values.  Pass only
-    the extra part to point q so instrument noise is not double-counted.
+    the extra part to point q so instrument noise is not double-counted.  Peak
+    timing is carried by the remaining-hour trajectories themselves.
     """
 
     sigma = _day0_process_sigma_native(
@@ -33855,6 +38527,8 @@ def _day0_extra_member_sigma_native(
         decision_time=decision_time,
     )
     if sigma is None:
+        if "_edli_day0_source_clock_predictive_sigma_native" in payload:
+            raise ValueError("DAY0_SOURCE_CLOCK_PREDICTIVE_SIGMA_INVALID")
         return 0.0
     try:
         from src.signal.forecast_uncertainty import sigma_instrument
@@ -33874,14 +38548,70 @@ class _Day0BootstrapSampler:
     metric: str
     sigma: float
     mask: np.ndarray
+    peak_set_probability: float | None = None
+    peak_set_atom: float | None = None
+    boundary_scenarios: tuple[tuple[float, float], ...] = ()
 
-    def _apply_probability_boundary(self, analysis, draws: np.ndarray) -> np.ndarray:
-        if self.rounded is None:
+    def _sample_member_draws(
+        self,
+        analysis,
+        *,
+        members_per_row: int,
+    ) -> np.ndarray:
+        idx = analysis._rng.integers(
+            0,
+            self.members.size,
+            members_per_row,
+        )
+        means = self.members[idx]
+        boundary = self.rounded
+        if self.boundary_scenarios:
+            scenario = int(
+                analysis._rng.choice(
+                    len(self.boundary_scenarios),
+                    p=[weight for _bound, weight in self.boundary_scenarios],
+                )
+            )
+            boundary = self.boundary_scenarios[scenario][0]
+        if self.peak_set_probability is not None:
+            peak_set_atom = (
+                boundary if self.boundary_scenarios else self.peak_set_atom
+            )
+            if (
+                boundary is None
+                or peak_set_atom is None
+                or self.boundary_survival_probability < 1.0
+            ):
+                raise ValueError("DAY0_PEAK_STATE_BOUNDARY_INVALID")
+            return _sample_day0_extreme_with_peak_state(
+                rng=analysis._rng,
+                member_means=means,
+                sigma=self.sigma,
+                movement_boundary=boundary,
+                peak_set_atom=peak_set_atom,
+                metric=self.metric,
+                peak_set_probability=self.peak_set_probability,
+            )
+        draws = means + analysis._rng.normal(
+            0.0,
+            self.sigma,
+            members_per_row,
+        )
+        return self._apply_probability_boundary(analysis, draws, boundary=boundary)
+
+    def _apply_probability_boundary(
+        self,
+        analysis,
+        draws: np.ndarray,
+        *,
+        boundary: float | None,
+    ) -> np.ndarray:
+        if boundary is None:
             return draws
         bounded = (
-            np.maximum(draws, self.rounded)
+            np.maximum(draws, boundary)
             if self.metric == "high"
-            else np.minimum(draws, self.rounded)
+            else np.minimum(draws, boundary)
         )
         if self.boundary_survival_probability >= 1.0:
             return bounded
@@ -33893,9 +38623,10 @@ class _Day0BootstrapSampler:
 
     def __call__(self, analysis, n_members):
         n = max(1, int(n_members))
-        idx = analysis._rng.integers(0, self.members.size, n)
-        draws = self.members[idx] + analysis._rng.normal(0.0, self.sigma, n)
-        draws = self._apply_probability_boundary(analysis, draws)
+        draws = self._sample_member_draws(
+            analysis,
+            members_per_row=n,
+        )
         measured = analysis._settle(draws)
         vec = bin_counts_from_array(measured, analysis.bins).astype(float)
         vec /= float(len(measured))
@@ -33914,14 +38645,9 @@ class _Day0BootstrapSampler:
         members_per_row = max(1, int(n_members))
         draws = np.empty((rows, members_per_row), dtype=np.float64)
         for row in range(rows):
-            idx = analysis._rng.integers(0, self.members.size, members_per_row)
-            draws[row] = (
-                self.members[idx]
-                + analysis._rng.normal(0.0, self.sigma, members_per_row)
-            )
-            draws[row] = self._apply_probability_boundary(
+            draws[row] = self._sample_member_draws(
                 analysis,
-                draws[row],
+                members_per_row=members_per_row,
             )
         return self._probability_matrix(analysis, draws)
 
@@ -33942,14 +38668,9 @@ class _Day0BootstrapSampler:
         draws = np.empty((rows, members_per_row), dtype=np.float64)
         noise = np.empty((rows, width), dtype=np.float64)
         for row in range(rows):
-            idx = analysis._rng.integers(0, self.members.size, members_per_row)
-            draws[row] = (
-                self.members[idx]
-                + analysis._rng.normal(0.0, self.sigma, members_per_row)
-            )
-            draws[row] = self._apply_probability_boundary(
+            draws[row] = self._sample_member_draws(
                 analysis,
-                draws[row],
+                members_per_row=members_per_row,
             )
             noise[row] = analysis._rng.normal(0.0, normal_sigma, width)
         return self._probability_matrix(analysis, draws), noise
@@ -34011,6 +38732,11 @@ def _make_day0_bootstrap_sampler(
         if metric not in {"high", "low"}:
             raise ValueError(f"unsupported day0 metric for bootstrap: {metric!r}")
         finality = day0_evidence_finality(payload)
+        boundary_scenarios = _day0_probability_boundary_scenarios_native(
+            payload,
+            metric=metric,
+            unit=unit,
+        )
         if finality in DAY0_ABSORBING_FINALITIES:
             probability_boundary = _day0_probability_boundary_native(
                 payload,
@@ -34049,6 +38775,15 @@ def _make_day0_bootstrap_sampler(
         )
         return None
 
+    peak_set_probability = _day0_peak_set_probability_for_distribution(
+        payload=payload,
+        metric=metric,
+    )
+    peak_set_atom = None
+    if peak_set_probability is not None:
+        peak_set_atom = probability_boundary
+        if peak_set_atom is None:
+            raise ValueError("DAY0_PEAK_STATE_SETTLEMENT_ATOM_MISSING")
     return _Day0BootstrapSampler(
         members=members,
         rounded=probability_boundary,
@@ -34056,6 +38791,9 @@ def _make_day0_bootstrap_sampler(
         metric=metric,
         sigma=float(sigma),
         mask=np.asarray(mask, dtype=float),
+        peak_set_probability=peak_set_probability,
+        peak_set_atom=peak_set_atom,
+        boundary_scenarios=boundary_scenarios,
     )
 
 
@@ -35157,6 +39895,14 @@ def _day0_remaining_p_raw_vector(
     metric = str(
         payload.get("metric") or payload.get("temperature_metric") or ""
     ).strip().lower()
+    boundary_scenarios = _day0_probability_boundary_scenarios_native(
+        payload,
+        metric=metric,
+        unit=str(getattr(city, "settlement_unit", "") or ""),
+    )
+    fast_residual_mixture = (
+        "_edli_day0_fast_residual_probability_update" in payload
+    )
     probability_boundary = _day0_probability_boundary_native(payload, metric)
     from src.events.day0_authority import day0_evidence_finality
 
@@ -35199,6 +39945,7 @@ def _day0_remaining_p_raw_vector(
         "city": str(getattr(city, "name", "") or ""),
         "metric": metric,
         "probability_boundary": probability_boundary,
+        "probability_boundary_scenarios": boundary_scenarios,
         "future_extremes": sorted(float(v) for v in members.tolist()),
         "sigma": sigma,
         "n_mc": n_mc,
@@ -35209,31 +39956,70 @@ def _day0_remaining_p_raw_vector(
             boundary_survival_probability
         )
     seed = int(stable_hash(seed_payload)[:16], 16)
-    rng = np.random.default_rng(seed)
-    future = members + rng.normal(0.0, sigma, (n_mc, members.size))
-    bounded = (
-        np.maximum(future, probability_boundary)
-        if metric == "high"
-        else np.minimum(future, probability_boundary)
+    peak_set_probability = _day0_peak_set_probability_for_distribution(
+        payload=payload,
+        metric=metric,
     )
-    if boundary_survival_probability < 1.0:
-        survives = (
-            rng.random((n_mc, members.size))
-            < boundary_survival_probability
+    probability_rows: list[np.ndarray] = []
+    for scenario_boundary, scenario_weight in boundary_scenarios:
+        scenario_rng = np.random.default_rng(seed)
+        if peak_set_probability is not None:
+            if boundary_survival_probability < 1.0:
+                raise ValueError("DAY0_PEAK_STATE_PROVISIONAL_BOUNDARY_INVALID")
+            final = _sample_day0_extreme_with_peak_state(
+                rng=scenario_rng,
+                member_means=np.broadcast_to(members, (n_mc, members.size)),
+                sigma=sigma,
+                movement_boundary=scenario_boundary,
+                peak_set_atom=scenario_boundary,
+                metric=metric,
+                peak_set_probability=peak_set_probability,
+            )
+        else:
+            future = members + scenario_rng.normal(
+                0.0,
+                sigma,
+                (n_mc, members.size),
+            )
+            bounded = (
+                np.maximum(future, scenario_boundary)
+                if metric == "high"
+                else np.minimum(future, scenario_boundary)
+            )
+            if boundary_survival_probability < 1.0:
+                survives = (
+                    scenario_rng.random((n_mc, members.size))
+                    < boundary_survival_probability
+                )
+                final = np.where(survives, bounded, future)
+            else:
+                final = bounded
+        measured = settlement_semantics.round_values(final)
+        row = bin_counts_from_array(measured.reshape(-1), bins).astype(float)
+        row /= float(n_mc * members.size)
+        probability_rows.append(float(scenario_weight) * row)
+    probabilities = np.sum(probability_rows, axis=0)
+    if peak_set_probability is not None:
+        payload["_edli_day0_peak_set_mixture_basis"] = (
+            _DAY0_PEAK_SET_MIXTURE_BASIS
         )
-        final = np.where(survives, bounded, future)
-    else:
-        final = bounded
-    measured = settlement_semantics.round_values(final)
-    probabilities = bin_counts_from_array(measured.reshape(-1), bins).astype(float)
-    probabilities /= float(n_mc * members.size)
     total = float(probabilities.sum())
     if total > 0.0:
         probabilities /= total
     payload["_edli_day0_probability_operator"] = (
-        "revision_mixture_extreme_observed_then_noisy_future_v2"
-        if boundary_survival_probability < 1.0
-        else "extreme_observed_then_noisy_future_v1"
+        (
+            "fast_residual_boundary_mixture_peak_set_plus_remaining_path_v1"
+            if fast_residual_mixture
+            else "peak_set_atom_plus_truncated_remaining_path_v1"
+        )
+        if peak_set_probability is not None
+        else (
+            "fast_residual_boundary_mixture_extreme_then_noisy_future_v1"
+            if fast_residual_mixture
+            else "revision_mixture_extreme_observed_then_noisy_future_v2"
+            if boundary_survival_probability < 1.0
+            else "extreme_observed_then_noisy_future_v1"
+        )
     )
     return probabilities
 
@@ -35528,6 +40314,104 @@ def _day0_probability_boundary_native(
     return settlement_boundary
 
 
+def _day0_probability_boundary_scenarios_native(
+    payload: Mapping[str, object],
+    *,
+    metric: str,
+    unit: str,
+) -> tuple[tuple[float, float], ...]:
+    """Return the current fast-residual boundary mixture in settlement units.
+
+    A same-station fast observation is probability evidence, not a second
+    settlement oracle.  Its residual scenarios therefore condition the Day0
+    point distribution and each coherent bootstrap row.  Treating the faster
+    physical frontier as a deterministic boundary while leaving the peak-set
+    atom on the slower WU value creates the impossible state that lost Munich:
+    the receipt knew 31C, but 95% of q remained an atom at 30C.
+    """
+
+    normalized_metric = str(metric or "").strip().lower()
+    normalized_unit = str(unit or "").strip().upper()
+    if normalized_metric not in {"high", "low"} or normalized_unit not in {
+        "C",
+        "F",
+    }:
+        raise ValueError("DAY0_FAST_RESIDUAL_BOUNDARY_IDENTITY_INVALID")
+    default_boundary = _day0_probability_boundary_native(
+        payload,
+        normalized_metric,
+    )
+    if default_boundary is None:
+        raise ValueError("DAY0_FAST_RESIDUAL_BOUNDARY_MISSING")
+    binding = payload.get("_edli_global_day0_binding")
+    conditioning = (
+        binding.get("statistical_probability_conditioning")
+        if isinstance(binding, Mapping)
+        else None
+    )
+    validated = _validated_fast_residual_day0_conditioning(conditioning)
+    if validated is None:
+        return ((float(default_boundary), 1.0),)
+    likelihood = validated["fast_residual_likelihood"]
+    if not isinstance(likelihood, Mapping):
+        raise ValueError("DAY0_FAST_RESIDUAL_BOUNDARY_IDENTITY_INVALID")
+    scenario_rows = likelihood.get("scenario_weights")
+    if not isinstance(scenario_rows, (list, tuple)) or not scenario_rows:
+        raise ValueError("DAY0_FAST_RESIDUAL_BOUNDARY_IDENTITY_INVALID")
+    settlement_boundary = _observed_day0_extreme_native(
+        payload,
+        normalized_metric,
+    )
+    if settlement_boundary is None:
+        settlement_boundary = _optional_float(payload.get("rounded_value"))
+    if settlement_boundary is None:
+        raise ValueError("DAY0_FAST_RESIDUAL_SETTLEMENT_BOUNDARY_MISSING")
+
+    weights_by_boundary: dict[float, float] = {}
+    for row in scenario_rows:
+        if not isinstance(row, Mapping):
+            raise ValueError("DAY0_FAST_RESIDUAL_BOUNDARY_IDENTITY_INVALID")
+        raw_c = row.get("observed_bound_c")
+        boundary = (
+            float(settlement_boundary)
+            if raw_c is None
+            else (
+                float(raw_c)
+                if normalized_unit == "C"
+                else float(raw_c) * 9.0 / 5.0 + 32.0
+            )
+        )
+        boundary = (
+            max(float(settlement_boundary), boundary)
+            if normalized_metric == "high"
+            else min(float(settlement_boundary), boundary)
+        )
+        weight = float(row["weight"])
+        weights_by_boundary[boundary] = (
+            weights_by_boundary.get(boundary, 0.0) + weight
+        )
+    total = sum(weights_by_boundary.values())
+    if not math.isclose(total, 1.0, rel_tol=0.0, abs_tol=1e-9):
+        raise ValueError("DAY0_FAST_RESIDUAL_BOUNDARY_WEIGHTS_INVALID")
+    scenarios = tuple(sorted(weights_by_boundary.items()))
+    if not scenarios or any(
+        not math.isfinite(boundary)
+        or not math.isfinite(weight)
+        or weight < 0.0
+        for boundary, weight in scenarios
+    ):
+        raise ValueError("DAY0_FAST_RESIDUAL_BOUNDARY_IDENTITY_INVALID")
+    if isinstance(payload, dict):
+        payload["_edli_day0_fast_residual_boundary_scenarios_native"] = [
+            {"observed_bound_native": boundary, "weight": weight}
+            for boundary, weight in scenarios
+        ]
+        payload["_edli_day0_fast_residual_probability_update"] = (
+            "joint_point_and_bootstrap_boundary_mixture_v1"
+        )
+    return scenarios
+
+
 def _settled_day0_extreme(
     payload: dict[str, object],
     *,
@@ -35613,10 +40497,17 @@ def _record_day0_remaining_day_exit_authority(
                 "day0_extreme_maturity_unavailable:no_intraday_extreme"
             )
             return
-        if classification == BoundClassification.DETERMINISTIC:
-            payload["_edli_day0_model_bound_classification"] = "deterministic"
+        if classification == BoundClassification.MODEL_SUPPORT_COLLAPSED:
+            payload["_edli_day0_model_bound_classification"] = (
+                "model_support_collapsed"
+            )
             payload["_edli_day0_model_bound_classification_role"] = (
                 "forecast_remaining_window_evidence_only"
+            )
+        elif classification == BoundClassification.DETERMINISTIC:
+            payload["_edli_day0_model_bound_classification"] = "deterministic"
+            payload["_edli_day0_model_bound_classification_role"] = (
+                "final_settlement_witness"
             )
         _record_day0_temporal_exit_authority(
             payload=payload,
@@ -35732,8 +40623,27 @@ def _record_day0_temporal_exit_authority(
             post_peak_confidence = float(
                 getattr(temporal_context, "post_peak_confidence", 0.0) or 0.0
             )
+            confidence_source = str(
+                getattr(temporal_context, "confidence_source", "") or ""
+            ).strip()
             payload["_edli_day0_daypart"] = daypart
             payload["_edli_day0_post_peak_confidence"] = post_peak_confidence
+            payload["_edli_day0_post_peak_confidence_source"] = confidence_source
+            peak_set_evidence = _day0_empirical_peak_set_probability(
+                temporal_context=temporal_context,
+                world_conn=world_conn,
+                city=str(family.city),
+                month=target.month,
+            )
+            if peak_set_evidence is not None:
+                probability, sample_count, probability_basis = peak_set_evidence
+                payload.update(
+                    {
+                        "_edli_day0_peak_set_probability": probability,
+                        "_edli_day0_peak_set_sample_count": sample_count,
+                        "_edli_day0_peak_set_probability_basis": probability_basis,
+                    }
+                )
             if daypart == "post_peak" and post_peak_confidence >= 0.5:
                 payload[status_key] = "mature"
                 payload[reason_key] = "day0_high_extreme_post_peak"
@@ -36178,6 +41088,26 @@ def _day0_remaining_day_members(
                 payload["_edli_day0_remaining_expected_models"] = list(expected_models)
                 payload["_edli_day0_remaining_unavailable_reason"] = "incomplete_hourly_model_bundle"
             return None
+        from src.strategy.live_inference.source_clock_vnext import (
+            provider_family_for_source,
+        )
+
+        # These are deterministic provider trajectories, not exchangeable
+        # outcomes. A regional and global product from the same provider share
+        # one physics family; input order is specificity-first, so only its
+        # first current trajectory may contribute a center.
+        provider_representatives: list[object] = []
+        represented_families: set[str] = set()
+        for vector in vectors:
+            provider_family = provider_family_for_source(str(vector.model))
+            if provider_family in represented_families:
+                continue
+            represented_families.add(provider_family)
+            provider_representatives.append(vector)
+        vectors = provider_representatives
+        payload["_edli_day0_provider_representative_models"] = [
+            str(vector.model) for vector in vectors
+        ]
         if current_state is None:
             # Telemetry/test callers without the canonical world connection
             # retain the pure forecast seam. Live callers always pass it.
@@ -36263,7 +41193,9 @@ def _day0_remaining_day_members(
                 else np.minimum(values, float(probability_boundary))
             )
         payload["_edli_day0_remaining_models"] = int(values.size)
-        payload["_edli_day0_remaining_model_names"] = [str(vector.model) for vector in vectors]
+        payload["_edli_day0_remaining_model_names"] = [
+            str(vector.model) for vector in vectors
+        ]
         captured_times: list[str] = []
         for vector in vectors:
             try:
@@ -37219,13 +42151,11 @@ def current_global_execution_authority(
         return None
     if (
         _optional_bool(row.get("enable_orderbook")) is not True
-        or _optional_bool(row.get("active")) is not True
-        or _optional_bool(row.get("closed")) is not False
         or _optional_bool(row.get("accepting_orders")) is not True
     ):
         return None
     tradeability = _json_object(row.get("tradeability_status_json") or {})
-    if tradeability.get("executable_allowed") is False:
+    if tradeability.get("executable_allowed") is not True:
         return None
     expected_token = str(
         (
@@ -37245,11 +42175,19 @@ def current_global_execution_authority(
         )
     except (KeyError, TypeError, ValueError):
         return None
+    raw_neg_risk = row.get("neg_risk")
+    if isinstance(raw_neg_risk, bool):
+        neg_risk = raw_neg_risk
+    elif isinstance(raw_neg_risk, int) and raw_neg_risk in (0, 1):
+        neg_risk = bool(raw_neg_risk)
+    else:
+        return None
     return CurrentExecutionAuthority(
         token_id=token_id,
         side=side,
         book_snapshot_id=str(row.get("snapshot_id") or ""),
         execution_curve_identity=executable_curve_identity(curve),
+        neg_risk=neg_risk,
     )
 
 
@@ -37299,7 +42237,13 @@ def _native_quote_book_from_snapshot_row(row: dict[str, Any]):
     fee_rate, _fee_source = resolve_taker_fee_fraction(
         fee_rate_fraction_from_details(fee_details)
     )
-    neg_risk = bool(_optional_bool(row.get("neg_risk")) or False)
+    raw_neg_risk = row.get("neg_risk")
+    if isinstance(raw_neg_risk, bool):
+        neg_risk = raw_neg_risk
+    elif isinstance(raw_neg_risk, int) and raw_neg_risk in (0, 1):
+        neg_risk = bool(raw_neg_risk)
+    else:
+        raise ValueError("current executable snapshot neg_risk authority missing")
     depth = _json_object(row.get("orderbook_depth_json") or row.get("orderbook_depth_jsonb") or {})
     yes_token_id = str(row.get("yes_token_id") or "")
     no_token_id = str(row.get("no_token_id") or "")

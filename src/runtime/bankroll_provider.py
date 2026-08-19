@@ -40,6 +40,10 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Optional
 
+from src.contracts.strategy_capital_allocation import (
+    resolve_allocated_equity_usd,
+)
+
 logger = logging.getLogger(__name__)
 
 _DEFAULT_MAX_AGE_SECONDS = 30.0
@@ -452,25 +456,32 @@ def _split_positions_by_domain(
     return zeus_positions, foreign_positions, foreign_value_usd
 
 
-_ZEUS_CAPITAL_ALLOCATION_MODES = frozenset({"fraction", "absolute", "wallet_total"})
-
-
 def _load_zeus_capital_allocation_setting() -> dict:
-    """Read the `zeus_capital_allocation` settings key, defaulting to wallet_total.
+    """Read the active allocation; absence defaults, malformed presence blocks."""
 
-    Defensive `.get()` (not strict `Settings.__getitem__`) — this key is
-    additive/optional so test fixtures and pre-existing operator settings.json
-    files without it keep today's behavior instead of a startup KeyError.
+    return current_zeus_capital_allocation_setting()
+
+
+def current_zeus_capital_allocation_setting() -> dict[str, object]:
+    """Return a detached, explicit view of the allocation active in-process.
+
+    Absence preserves the historical ``wallet_total`` default.  A present but
+    malformed setting is authority loss, not absence, and must fail closed.
     """
+
     from src.config import settings
 
     source = settings._data if hasattr(settings, "_data") else settings
     if not isinstance(source, dict):
+        raise ValueError("zeus_capital_allocation active config is unavailable")
+    if "zeus_capital_allocation" not in source:
         return {"mode": "wallet_total"}
-    allocation = source.get("zeus_capital_allocation")
+    allocation = source["zeus_capital_allocation"]
     if not isinstance(allocation, dict) or "mode" not in allocation:
-        return {"mode": "wallet_total"}
-    return allocation
+        raise ValueError("zeus_capital_allocation active config is malformed")
+    resolve_allocated_equity_usd(0, allocation=allocation)
+
+    return dict(allocation)
 
 
 def resolve_zeus_equity_base(
@@ -506,15 +517,16 @@ def resolve_zeus_equity_base(
     fork: "配额数字仍属操作员一句话"); this function only makes the mechanism
     explicit instead of silently equating Zeus equity with wallet aggregate.
     """
-    resolved_allocation = allocation if allocation is not None else _load_zeus_capital_allocation_setting()
-    mode = str(resolved_allocation.get("mode") or "wallet_total")
-    if mode not in _ZEUS_CAPITAL_ALLOCATION_MODES:
-        raise ValueError(
-            f"zeus_capital_allocation.mode must be one of {sorted(_ZEUS_CAPITAL_ALLOCATION_MODES)}; "
-            f"got {mode!r}"
-        )
-
-    wallet_equity_usd = float(wallet_equity_usd)
+    resolved_allocation = (
+        allocation
+        if allocation is not None
+        else _load_zeus_capital_allocation_setting()
+    )
+    mode = str(resolved_allocation.get("mode") or "wallet_total").strip()
+    allocated = resolve_allocated_equity_usd(
+        wallet_equity_usd,
+        allocation=resolved_allocation,
+    )
 
     if mode == "wallet_total":
         logger.warning(
@@ -523,24 +535,9 @@ def resolve_zeus_equity_base(
             "include co-tenant/operator capital on the shared wallet, not proven Zeus-only "
             "capital. Set config/settings.json zeus_capital_allocation to mode=fraction or "
             "mode=absolute with an explicit value to resolve this DEGRADED attribution.",
-            wallet_equity_usd,
+            float(allocated),
         )
-        return wallet_equity_usd
-
-    value = resolved_allocation.get("value")
-    if value is None:
-        raise ValueError(f"zeus_capital_allocation mode={mode!r} requires a numeric 'value'")
-    value = float(value)
-
-    if mode == "fraction":
-        if not (0.0 <= value <= 1.0):
-            raise ValueError(f"zeus_capital_allocation fraction value must be in [0, 1]; got {value!r}")
-        return max(0.0, wallet_equity_usd) * value
-
-    # mode == "absolute"
-    if value < 0.0:
-        raise ValueError(f"zeus_capital_allocation absolute value must be >= 0; got {value!r}")
-    return min(value, max(0.0, wallet_equity_usd))
+    return float(allocated)
 
 
 def _fetch_balance() -> tuple[float, float, float]:
@@ -777,7 +774,11 @@ def warm_from_collateral_snapshot(
     if ledger is None:
         logger.error("bankroll ledger warm -> None: collateral_ledger_unconfigured")
         return None
-    snapshot = ledger.snapshot()
+    # Bankroll authority consumes pUSD truth only. Generic portfolio snapshot
+    # selection deliberately prefers a recent non-empty CTF witness while any
+    # token exposure remains open; using it here can roll a newer pUSD-only
+    # sidecar wake back to an older submit-time target-token row.
+    snapshot = ledger.snapshot(witness="pusd")
     if snapshot.authority_tier == "DEGRADED":
         logger.error("bankroll ledger warm -> None: collateral snapshot degraded")
         return None
@@ -826,7 +827,7 @@ def warm_from_collateral_snapshot(
     )
 
 
-def run_warm_cycle() -> None:
+def run_warm_cycle() -> bool:
     """Scheduler entrypoint (R4-b extraction from src/main.py::_edli_bankroll_warm_cycle).
 
     Dedicated frequent (~60s) bankroll-of-record cache warmer.
@@ -852,12 +853,11 @@ def run_warm_cycle() -> None:
     Called from the main daemon's ``edli_bankroll_warm`` scheduler job (60s
     cadence). Behavior-preserving relocation — was inline in src/main.py.
     """
-    from src.config import settings
-
-    source = settings._data if hasattr(settings, "_data") else settings
-    edli_cfg = source.get("edli", {}) if isinstance(source, dict) else {}
-    if not edli_cfg.get("enabled"):
-        return
+    # The one live topology registers this job unconditionally.  ``edli.enabled``
+    # is not a current runtime control and is absent from production config; an
+    # earlier retained check therefore made the registered 60-second job a
+    # permanent no-op. BUY admission belongs to the control plane, while wallet
+    # truth freshness is required by both allocation and reduce-only actuation.
     try:
         warm = warm_from_collateral_snapshot()
     except Exception as exc:  # noqa: BLE001 — fail-soft; consumers fail-closed on None
@@ -866,13 +866,15 @@ def run_warm_cycle() -> None:
             "did not advance this tick): %r",
             exc,
         )
-        return
+        return False
     if warm is None:
         logger.error(
             "EDLI bankroll warm: collateral snapshot warm returned None — cached() will "
             "fail closed (KELLY_PROOF_MISSING) until post-trade-capital publishes a fresh "
             "non-degraded collateral snapshot."
         )
+        return False
+    return True
 
 
 def reset_cache_for_tests() -> None:

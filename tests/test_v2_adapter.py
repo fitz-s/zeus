@@ -1,22 +1,25 @@
-# Lifecycle: created=2026-04-27; last_reviewed=2026-07-28; last_reused=2026-07-28
+# Lifecycle: created=2026-04-27; last_reviewed=2026-08-13; last_reused=2026-08-13
 # Purpose: R3 Z2 Polymarket V2 adapter and submission envelope antibodies.
 # Reuse: Run when V2 SDK adapter, envelope provenance, or Q1 preflight behavior changes.
 # Created: 2026-04-27
-# Last reused/audited: 2026-07-28
+# Last reused/audited: 2026-08-13
 # Authority basis: docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/Z2.yaml
 #                  + docs/archive/2026-Q2/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md
 #                  + docs/archive/2026-Q2/task_2026-05-15_live_order_e2e_goal/LIVE_ORDER_E2E_GOAL_PLAN.md
 #                  + 2026-05-17 public CLOB HTTP reuse for live opening_hunt backpressure.
+#                  + 2026-08-10 certified taker/maker mode matrix and adapter-owned heartbeat transport.
 """R3 Z2 Polymarket V2 adapter antibodies."""
 
 from __future__ import annotations
 
 import asyncio
+import ast
 import hashlib
 import importlib
 import json
 import sqlite3
 import sys
+import threading
 import time
 import types
 from dataclasses import dataclass, field
@@ -166,6 +169,18 @@ class FakeOrderManagerNotReady425Client(FakeTwoStepClient):
         response = SimpleNamespace(
             status_code=425,
             json=lambda: {"error": "order manager not ready, please retry"},
+        )
+        raise PolyApiException(response)
+
+
+class FakePostOnlyCross400Client(FakeTwoStepClient):
+    def post_order(self, order, order_type=None, post_only=False, defer_exec=False):
+        from py_clob_client_v2.exceptions import PolyApiException
+
+        self.calls.append(("post_order", order, order_type, post_only, defer_exec))
+        response = SimpleNamespace(
+            status_code=400,
+            json=lambda: {"error": "invalid post-only order: order crosses book"},
         )
         raise PolyApiException(response)
 
@@ -832,44 +847,560 @@ def test_pusd_collateral_payload_does_not_enumerate_ctf_positions(tmp_path):
     ]
 
 
-def test_target_ctf_collateral_payload_does_not_enumerate_all_positions(tmp_path):
-    from src.venue.polymarket_v2_adapter import PolymarketV2Adapter
+def test_target_ctf_collateral_payload_does_not_enumerate_all_positions(
+    monkeypatch,
+    tmp_path,
+):
+    from src.venue import polymarket_v2_adapter as adapter_module
 
-    class FakeClientWithTargetCtf(FakeBalanceAllowanceClient):
-        def get_positions(self):
-            raise AssertionError("target exit CTF proof must not enumerate every position")
+    token_id = "21427700"
+    calls = []
 
-        def get_balance_allowance(self, params):
-            self.calls.append(("get_balance_allowance", params))
-            asset_type = str(getattr(params, "asset_type", "")).upper()
-            if "CONDITIONAL" in asset_type:
-                assert getattr(params, "token_id") == "exit-token"
-                return {"balance": "21427700"}
-            return {"balance": "100000000", "allowance": "50000000"}
+    def batch_call(_url, requested, *, timeout_seconds):
+        calls.extend(requested)
+        assert timeout_seconds == 8.0
+        return [
+            f"0x{100_000_000:064x}",
+            f"0x{50_000_000:064x}",
+            f"0x{40_000_000:064x}",
+            f"0x{21_427_700:064x}",
+            f"0x{1:064x}",
+            f"0x{1:064x}",
+        ]
 
-    fake = FakeClientWithTargetCtf()
-    adapter = PolymarketV2Adapter(
+    monkeypatch.setattr(
+        adapter_module,
+        "_json_rpc_batch_call_hard_deadline",
+        batch_call,
+    )
+    adapter = adapter_module.PolymarketV2Adapter(
         host="https://clob.polymarket.com",
-        funder_address="0xfunder",
+        funder_address="0x0000000000000000000000000000000000000001",
         signer_key="test-key",
         chain_id=137,
         signature_type=3,
+        polygon_rpc_url="https://polygon.invalid",
         q1_egress_evidence_path=tmp_path / "unused.txt",
-        client_factory=lambda **kwargs: fake,
+        client_factory=lambda **_kwargs: pytest.fail(
+            "targeted submit proof must not create a CLOB client"
+        ),
     )
 
-    payload = adapter.get_ctf_collateral_payload(token_ids=["exit-token"])
+    payload = adapter.get_ctf_collateral_payload(
+        token_ids=["", token_id, token_id]
+    )
 
     assert payload["ctf_token_scope"] == "targeted"
-    assert payload["ctf_token_balances_units"] == {"exit-token": 21427700}
-    assert payload["ctf_token_allowances_units"] == {"exit-token": 21427700}
-    call_asset_types = [
-        str(getattr(call[1], "asset_type", "")).upper()
-        for call in fake.calls
-        if call[0] == "get_balance_allowance"
-    ]
-    assert any("COLLATERAL" in asset for asset in call_asset_types)
-    assert any("CONDITIONAL" in asset for asset in call_asset_types)
+    assert payload["ctf_token_balances_units"] == {token_id: 21427700}
+    assert payload["ctf_token_allowances_units"] == {token_id: 21427700}
+    assert payload["authority_tier"] == "CHAIN"
+    assert len(calls) == 6
+
+
+def test_target_ctf_chain_batch_finishes_inside_submit_guard(
+    monkeypatch,
+    tmp_path,
+):
+    from src.venue import polymarket_v2_adapter as adapter_module
+
+    observed = {}
+
+    token_one = "123456789"
+    token_two = "987654321"
+
+    def batch_call(_url, requested, *, timeout_seconds):
+        observed["calls"] = requested
+        observed["timeout_seconds"] = timeout_seconds
+        return [
+            f"0x{100_000_000:064x}",
+            f"0x{90_000_000:064x}",
+            f"0x{80_000_000:064x}",
+            f"0x{13_000_000:064x}",
+            f"0x{1:064x}",
+            f"0x{1:064x}",
+            f"0x{17_000_000:064x}",
+            f"0x{1:064x}",
+            f"0x{0:064x}",
+        ]
+
+    monkeypatch.setattr(
+        adapter_module,
+        "_json_rpc_batch_call_hard_deadline",
+        batch_call,
+    )
+    adapter = adapter_module.PolymarketV2Adapter(
+        funder_address="0x0000000000000000000000000000000000000001",
+        signer_key="test-key",
+        polygon_rpc_url="https://polygon.invalid",
+        network_timeout_seconds=30.0,
+        q1_egress_evidence_path=tmp_path / "unused.txt",
+        client_factory=lambda **_kwargs: pytest.fail("CLOB is not submit authority"),
+    )
+
+    payload = adapter.get_ctf_collateral_payload(
+        token_ids=["", token_one, token_one, token_two]
+    )
+
+    assert observed["timeout_seconds"] == 10.0
+    calls = observed["calls"]
+    assert len(calls) == 9
+    collateral, spenders = adapter_module._collateral_allowance_contracts(137)
+    funder_word = adapter_module._abi_address(adapter.funder_address)
+    assert calls[0] == (
+        "eth_call",
+        [
+            {
+                "to": collateral,
+                "data": "0x70a08231" + funder_word,
+            },
+            "latest",
+        ],
+    )
+    for index, spender in enumerate(spenders, start=1):
+        assert calls[index] == (
+            "eth_call",
+            [
+                {
+                    "to": collateral,
+                    "data": (
+                        "0xdd62ed3e"
+                        + funder_word
+                        + adapter_module._abi_address(spender)
+                    ),
+                },
+                "latest",
+            ],
+        )
+    for token_offset, token_id in enumerate((token_one, token_two)):
+        base = 3 + token_offset * 3
+        assert calls[base] == (
+            "eth_call",
+            [
+                {
+                    "to": adapter_module.POLYGON_CTF_ADDRESS,
+                    "data": (
+                        adapter_module.ERC1155_BALANCE_OF_SELECTOR
+                        + funder_word
+                        + format(int(token_id), "064x")
+                    ),
+                },
+                "latest",
+            ],
+        )
+        for approval_offset, spender in enumerate(spenders, start=1):
+            assert calls[base + approval_offset] == (
+                "eth_call",
+                [
+                    {
+                        "to": adapter_module.POLYGON_CTF_ADDRESS,
+                        "data": (
+                            adapter_module.ERC1155_IS_APPROVED_FOR_ALL_SELECTOR
+                            + funder_word
+                            + adapter_module._abi_address(spender)
+                        ),
+                    },
+                    "latest",
+                ],
+            )
+    assert payload["pusd_allowance_micro"] == 80_000_000
+    assert payload["ctf_token_balances_units"] == {
+        token_one: 13_000_000,
+        token_two: 17_000_000,
+    }
+    assert payload["ctf_token_allowances_units"] == {
+        token_one: 13_000_000,
+        token_two: 0,
+    }
+
+
+@pytest.mark.parametrize("token_id", ["not-a-token", "-1", str(2**256)])
+def test_target_ctf_chain_batch_rejects_invalid_uint256_token(
+    monkeypatch,
+    tmp_path,
+    token_id,
+):
+    from src.venue import polymarket_v2_adapter as adapter_module
+
+    monkeypatch.setattr(
+        adapter_module,
+        "_json_rpc_batch_call_hard_deadline",
+        lambda *_args, **_kwargs: pytest.fail(
+            "invalid token must fail before Polygon I/O"
+        ),
+    )
+    adapter = adapter_module.PolymarketV2Adapter(
+        funder_address="0x0000000000000000000000000000000000000001",
+        signer_key="test-key",
+        polygon_rpc_url="https://polygon.invalid",
+        q1_egress_evidence_path=tmp_path / "unused.txt",
+    )
+
+    with pytest.raises(
+        adapter_module.V2AdapterError,
+        match="invalid targeted|outside uint256",
+    ):
+        adapter.get_ctf_collateral_payload(token_ids=[token_id])
+
+
+def test_target_ctf_chain_batch_rejects_noncanonical_approval_bool(
+    monkeypatch,
+    tmp_path,
+):
+    from src.venue import polymarket_v2_adapter as adapter_module
+
+    monkeypatch.setattr(
+        adapter_module,
+        "_json_rpc_batch_call_hard_deadline",
+        lambda *_args, **_kwargs: [
+            f"0x{100_000_000:064x}",
+            f"0x{90_000_000:064x}",
+            f"0x{80_000_000:064x}",
+            f"0x{13_000_000:064x}",
+            f"0x{2:064x}",
+            f"0x{1:064x}",
+        ],
+    )
+    adapter = adapter_module.PolymarketV2Adapter(
+        funder_address="0x0000000000000000000000000000000000000001",
+        signer_key="test-key",
+        polygon_rpc_url="https://polygon.invalid",
+        q1_egress_evidence_path=tmp_path / "unused.txt",
+    )
+
+    with pytest.raises(
+        adapter_module.V2AdapterError,
+        match="canonical bools",
+    ):
+        adapter.get_ctf_collateral_payload(token_ids=["123456789"])
+
+
+def test_target_ctf_chain_batch_hard_deadline_kills_slow_drip_worker():
+    import multiprocessing
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    from src.venue import polymarket_v2_adapter as adapter_module
+
+    body = json.dumps(
+        [{"jsonrpc": "2.0", "id": 1, "result": f"0x{1:064x}"}]
+    ).encode()
+
+    class SlowDripHandler(BaseHTTPRequestHandler):
+        def log_message(self, *_args):
+            return
+
+        def do_POST(self):
+            self.send_response(200)
+            self.send_header("content-type", "application/json")
+            self.send_header("content-length", str(len(body)))
+            self.end_headers()
+            try:
+                for byte in body:
+                    self.wfile.write(bytes([byte]))
+                    self.wfile.flush()
+                    time.sleep(0.05)
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), SlowDripHandler)
+    server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+    server_thread.start()
+    try:
+        with pytest.raises(TimeoutError, match="hard deadline"):
+            adapter_module._json_rpc_batch_call_hard_deadline(
+                f"http://127.0.0.1:{server.server_port}",
+                [("eth_call", [{"to": "0x1"}, "latest"])],
+                timeout_seconds=0.25,
+            )
+        assert all(
+            child.name != "zeus-targeted-collateral-rpc"
+            for child in multiprocessing.active_children()
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+        server_thread.join(timeout=1.0)
+
+
+def test_target_ctf_chain_batch_subprocess_rejects_partial_rpc_truth():
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    from src.venue import polymarket_v2_adapter as adapter_module
+
+    body = json.dumps(
+        [{"jsonrpc": "2.0", "id": 1, "result": f"0x{1:064x}"}]
+    ).encode()
+
+    class PartialBatchHandler(BaseHTTPRequestHandler):
+        def log_message(self, *_args):
+            return
+
+        def do_POST(self):
+            self.send_response(200)
+            self.send_header("content-type", "application/json")
+            self.send_header("content-length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), PartialBatchHandler)
+    server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+    server_thread.start()
+    try:
+        with pytest.raises(
+            adapter_module.V2ReadUnavailable,
+            match="incomplete",
+        ):
+            adapter_module._json_rpc_batch_call_hard_deadline(
+                f"http://127.0.0.1:{server.server_port}",
+                [
+                    ("eth_call", [{"to": "0x1"}, "latest"]),
+                    ("eth_call", [{"to": "0x2"}, "latest"]),
+                ],
+                timeout_seconds=2.0,
+            )
+    finally:
+        server.shutdown()
+        server.server_close()
+        server_thread.join(timeout=1.0)
+
+
+def test_target_ctf_collateral_falls_back_to_chain_without_inventing_zero(tmp_path):
+    from src.venue.polymarket_v2_adapter import (
+        ERC1155_BALANCE_OF_SELECTOR,
+        ERC1155_IS_APPROVED_FOR_ALL_SELECTOR,
+        PolymarketV2Adapter,
+    )
+
+    token_id = "123456789"
+
+    class ConditionalReadUnavailable(FakeBalanceAllowanceClient):
+        def get_balance_allowance(self, params):
+            asset_type = str(getattr(params, "asset_type", "")).upper()
+            if "CONDITIONAL" in asset_type:
+                return {"balance": "0"}
+            return {"balance": "100000000", "allowance": "50000000"}
+
+    rpc_calls = []
+
+    def rpc_call(_url, method, params):
+        assert method == "eth_call"
+        data = params[0]["data"]
+        rpc_calls.append(data)
+        if data.startswith(ERC1155_BALANCE_OF_SELECTOR):
+            return hex(13_000_000)
+        if data.startswith(ERC1155_IS_APPROVED_FOR_ALL_SELECTOR):
+            return hex(1)
+        raise AssertionError(data)
+
+    adapter = PolymarketV2Adapter(
+        host="https://clob.polymarket.com",
+        funder_address="0x0000000000000000000000000000000000000001",
+        signer_key="test-key",
+        chain_id=137,
+        signature_type=3,
+        polygon_rpc_url="https://polygon.invalid",
+        rpc_call=rpc_call,
+        q1_egress_evidence_path=tmp_path / "unused.txt",
+        client_factory=lambda **_kwargs: ConditionalReadUnavailable(),
+    )
+
+    payload = adapter.get_ctf_collateral_payload(token_ids=[token_id])
+
+    assert payload["ctf_token_balances_units"] == {token_id: 13_000_000}
+    assert payload["ctf_token_allowances_units"] == {token_id: 13_000_000}
+    assert sum(data.startswith(ERC1155_BALANCE_OF_SELECTOR) for data in rpc_calls) == 1
+    assert (
+        sum(
+            data.startswith(ERC1155_IS_APPROVED_FOR_ALL_SELECTOR)
+            for data in rpc_calls
+        )
+        == 2
+    )
+
+
+def test_target_ctf_chain_proof_reads_balance_and_approvals_concurrently(tmp_path):
+    from src.venue.polymarket_v2_adapter import (
+        ERC1155_BALANCE_OF_SELECTOR,
+        ERC1155_IS_APPROVED_FOR_ALL_SELECTOR,
+        PolymarketV2Adapter,
+    )
+
+    token_id = "123456789"
+    started = threading.Barrier(3)
+    callers: set[int] = set()
+    callers_lock = threading.Lock()
+
+    def rpc_call(_url, method, params):
+        assert method == "eth_call"
+        data = params[0]["data"]
+        with callers_lock:
+            callers.add(threading.get_ident())
+        started.wait(timeout=1.0)
+        if data.startswith(ERC1155_BALANCE_OF_SELECTOR):
+            return hex(13_000_000)
+        if data.startswith(ERC1155_IS_APPROVED_FOR_ALL_SELECTOR):
+            return hex(1)
+        raise AssertionError(data)
+
+    adapter = PolymarketV2Adapter(
+        host="https://clob.polymarket.com",
+        funder_address="0x0000000000000000000000000000000000000001",
+        signer_key="test-key",
+        chain_id=137,
+        signature_type=3,
+        polygon_rpc_url="https://polygon.invalid",
+        rpc_call=rpc_call,
+        q1_egress_evidence_path=tmp_path / "unused.txt",
+        client_factory=lambda **_kwargs: object(),
+    )
+
+    proof = adapter._chain_conditional_balance_allowance_raw(token_id)
+
+    assert proof["balance"] == "13000000"
+    assert proof["allowance"] == "13000000"
+    assert len(callers) == 3
+
+
+def test_parallel_chain_collateral_guards_fail_loud_under_world_mutex(tmp_path):
+    from src.state.db import WorldMutexIOViolation, world_write_mutex
+    from src.venue.polymarket_v2_adapter import PolymarketV2Adapter
+
+    adapter = PolymarketV2Adapter(
+        host="https://clob.polymarket.com",
+        funder_address="0x0000000000000000000000000000000000000001",
+        signer_key="test-key",
+        chain_id=137,
+        signature_type=3,
+        polygon_rpc_url="https://polygon.invalid",
+        rpc_call=lambda *_args: (_ for _ in ()).throw(
+            AssertionError("world-mutex guard must preempt RPC")
+        ),
+        q1_egress_evidence_path=tmp_path / "unused.txt",
+        client_factory=lambda **_kwargs: object(),
+    )
+
+    mutex = world_write_mutex()
+    mutex.acquire()
+    try:
+        with pytest.raises(WorldMutexIOViolation, match="onchain.ctf_parallel"):
+            adapter._chain_conditional_balance_allowance_raw("123456789")
+        with pytest.raises(
+            WorldMutexIOViolation,
+            match="onchain.pusd_allowance_parallel",
+        ):
+            adapter._chain_collateral_allowance_micro()
+        production_adapter = PolymarketV2Adapter(
+            host="https://clob.polymarket.com",
+            funder_address="0x0000000000000000000000000000000000000001",
+            signer_key="test-key",
+            chain_id=137,
+            signature_type=3,
+            polygon_rpc_url="https://polygon.invalid",
+            q1_egress_evidence_path=tmp_path / "unused.txt",
+        )
+        with pytest.raises(
+            WorldMutexIOViolation,
+            match="onchain.batch_hard_deadline",
+        ):
+            production_adapter.get_ctf_collateral_payload(
+                token_ids=["123456789"]
+            )
+    finally:
+        mutex.release()
+
+
+def test_target_ctf_collateral_keeps_dual_read_failure_unknown(tmp_path):
+    from src.venue.polymarket_v2_adapter import (
+        PolymarketV2Adapter,
+        V2ReadUnavailable,
+    )
+
+    class ConditionalReadUnavailable(FakeBalanceAllowanceClient):
+        def get_balance_allowance(self, params):
+            asset_type = str(getattr(params, "asset_type", "")).upper()
+            if "CONDITIONAL" in asset_type:
+                raise TimeoutError("CLOB conditional read unavailable")
+            return {"balance": "100000000", "allowance": "50000000"}
+
+    adapter = PolymarketV2Adapter(
+        host="https://clob.polymarket.com",
+        funder_address="0x0000000000000000000000000000000000000001",
+        signer_key="test-key",
+        chain_id=137,
+        signature_type=3,
+        polygon_rpc_url="https://polygon.invalid",
+        rpc_call=lambda *_args: (_ for _ in ()).throw(TimeoutError("RPC unavailable")),
+        q1_egress_evidence_path=tmp_path / "unused.txt",
+        client_factory=lambda **_kwargs: ConditionalReadUnavailable(),
+    )
+
+    with pytest.raises(V2ReadUnavailable, match="both CLOB and chain"):
+        adapter.get_ctf_collateral_payload(token_ids=["123456789"])
+
+
+@pytest.mark.parametrize(
+    "client_mode",
+    ("timeout", "missing_method", "construction_failure"),
+)
+def test_target_ctf_collateral_uses_chain_when_entire_clob_read_is_unavailable(
+    tmp_path,
+    monkeypatch,
+    client_mode,
+):
+    from src.venue import polymarket_v2_adapter as adapter_module
+
+    token_id = "123456789"
+
+    class FullClobTimeout(FakeBalanceAllowanceClient):
+        def get_balance_allowance(self, _params):
+            raise TimeoutError("CLOB balance endpoint unavailable")
+
+    client = FullClobTimeout() if client_mode == "timeout" else object()
+
+    def client_factory(**_kwargs):
+        if client_mode == "construction_failure":
+            raise RuntimeError("SDK construction failed")
+        return client
+    monkeypatch.setattr(
+        adapter_module,
+        "_json_rpc_batch_call",
+        lambda *_args, **_kwargs: [
+            "0x" + format(100_000_000, "064x"),
+            "0x" + format(90_000_000, "064x"),
+            "0x" + format(80_000_000, "064x"),
+        ],
+    )
+    rpc_calls = []
+
+    def rpc_call(_url, method, params):
+        assert method == "eth_call"
+        data = params[0]["data"]
+        rpc_calls.append(data)
+        if data.startswith(adapter_module.ERC1155_BALANCE_OF_SELECTOR):
+            return hex(13_000_000)
+        if data.startswith(adapter_module.ERC1155_IS_APPROVED_FOR_ALL_SELECTOR):
+            return hex(1)
+        raise AssertionError(data)
+
+    adapter = adapter_module.PolymarketV2Adapter(
+        host="https://clob.polymarket.com",
+        funder_address="0x0000000000000000000000000000000000000001",
+        signer_key="test-key",
+        chain_id=137,
+        signature_type=3,
+        polygon_rpc_url="https://polygon.invalid",
+        rpc_call=rpc_call,
+        q1_egress_evidence_path=tmp_path / "unused.txt",
+        client_factory=client_factory,
+    )
+
+    payload = adapter.get_ctf_collateral_payload(token_ids=[token_id])
+
+    assert payload["authority_tier"] == "CHAIN"
+    assert payload["pusd_balance_micro"] == 100_000_000
+    assert payload["pusd_allowance_micro"] == 80_000_000
+    assert payload["ctf_token_balances_units"] == {token_id: 13_000_000}
+    assert payload["ctf_token_allowances_units"] == {token_id: 13_000_000}
+    assert rpc_calls
 
 
 def test_pusd_collateral_payload_can_skip_allowance_update_for_heartbeat(tmp_path):
@@ -1474,6 +2005,7 @@ def test_polymarket_client_honors_q1_egress_evidence_env(monkeypatch, tmp_path):
         lambda: {"private_key": "0xabc", "funder_address": "0xfunder"},
     )
     monkeypatch.setenv("POLYMARKET_CLOB_V2_Q1_EGRESS_EVIDENCE", str(evidence))
+    monkeypatch.setenv("POLYMARKET_CLOB_V2_SIGNATURE_TYPE", "2")
 
     adapter = pm.PolymarketClient()._ensure_v2_adapter()
 
@@ -1502,8 +2034,17 @@ def test_adapter_module_imports_without_py_clob_client_v2_installed(monkeypatch)
 def test_py_clob_client_v2_import_is_confined_to_venue_adapter():
     offenders = []
     for path in Path("src").rglob("*.py"):
-        text = path.read_text()
-        if "py_clob_client_v2" in text and path.as_posix() != "src/venue/polymarket_v2_adapter.py":
+        tree = ast.parse(path.read_text(), filename=path.as_posix())
+        imported_modules = []
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                imported_modules.extend(alias.name for alias in node.names)
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                imported_modules.append(node.module)
+        if any(
+            module == "py_clob_client_v2" or module.startswith("py_clob_client_v2.")
+            for module in imported_modules
+        ) and path.as_posix() != "src/venue/polymarket_v2_adapter.py":
             offenders.append(path.as_posix())
     assert offenders == []
 
@@ -1966,7 +2507,7 @@ def test_order_manager_not_ready_425_is_deterministic_rejection(
     envelope = adapter.create_submission_envelope(
         _intent(),
         FakeSnapshot(),
-        order_type="FAK",
+        order_type="GTC",
     )
     monkeypatch.setattr(
         adapter_mod,
@@ -1988,6 +2529,32 @@ def test_order_manager_not_ready_425_is_deterministic_rejection(
     assert legacy["success"] is False
     assert legacy["status"] == "rejected"
     assert legacy["errorCode"] == "venue_order_manager_not_ready_425"
+
+
+def test_post_only_cross_400_is_deterministic_rejection(tmp_path, monkeypatch):
+    import src.venue.polymarket_v2_adapter as adapter_mod
+
+    fake = FakePostOnlyCross400Client()
+    adapter, _ = _adapter(tmp_path, fake)
+    envelope = adapter.create_submission_envelope(
+        _intent(),
+        FakeSnapshot(),
+        order_type="GTC",
+    )
+    monkeypatch.setattr(
+        adapter_mod,
+        "_deterministic_v2_order_id",
+        lambda *args, **kwargs: "0xexpected-order-id",
+    )
+
+    result = _submit(adapter, envelope)
+
+    assert result.status == "rejected"
+    assert result.error_code == "venue_rejected_400"
+    assert result.envelope.error_code == "venue_rejected_400"
+    assert result.envelope.order_id is None
+    assert result.envelope.signed_order == fake.signed_order
+    assert any(call[0] == "post_order" for call in fake.calls)
 
 
 def test_other_425_response_remains_ambiguous(tmp_path, monkeypatch):
@@ -2017,7 +2584,7 @@ def test_other_425_response_remains_ambiguous(tmp_path, monkeypatch):
     envelope = adapter.create_submission_envelope(
         _intent(),
         FakeSnapshot(),
-        order_type="FAK",
+        order_type="GTC",
     )
     monkeypatch.setattr(
         adapter_mod,
@@ -2065,7 +2632,7 @@ def test_runtime_error_cannot_impersonate_order_manager_425(
     envelope = adapter.create_submission_envelope(
         _intent(),
         FakeSnapshot(),
-        order_type="FAK",
+        order_type="GTC",
     )
     monkeypatch.setattr(
         adapter_mod,
@@ -2304,7 +2871,7 @@ def test_geoblock_403_is_definitive_rejection_without_venue_identity(
     fake = FakeGeoblockClient()
     adapter, _ = _adapter(tmp_path, fake)
     envelope = adapter.create_submission_envelope(
-        _intent(), FakeSnapshot(), order_type="FAK"
+        _intent(), FakeSnapshot(), order_type="GTC"
     )
     monkeypatch.setattr(
         adapter_mod,
@@ -2323,105 +2890,229 @@ def test_geoblock_403_is_definitive_rejection_without_venue_identity(
     assert any(call[0] == "post_order" for call in fake.calls)
 
 
-def test_fok_killed_400_is_definitive_rejection(tmp_path, monkeypatch):
+def test_fok_killed_400_classifier_remains_available_for_recovery():
     import src.venue.polymarket_v2_adapter as adapter_mod
 
     fake = FakeFokKilledClient()
-    adapter, _ = _adapter(tmp_path, fake)
-    envelope = adapter.create_submission_envelope(_intent(), FakeSnapshot(), order_type="FOK")
-    monkeypatch.setattr(
-        adapter_mod,
-        "_deterministic_v2_order_id",
-        lambda *args, **kwargs: "0xexpected-order-id",
-    )
+    with pytest.raises(RuntimeError) as caught:
+        fake.post_order(fake.signed_order, order_type="FOK")
 
-    result = _submit(adapter, envelope)
-
-    assert result.status == "rejected"
-    assert result.error_code == "venue_fok_not_fully_filled_400"
-    assert result.envelope.order_id == "0xexpected-order-id"
-    assert result.envelope.signed_order == fake.signed_order
+    assert adapter_mod._is_polymarket_fok_killed_error(caught.value)
 
 
-def test_fak_no_match_400_is_definitive_zero_fill_rejection(tmp_path, monkeypatch):
+def test_fak_no_match_400_classifier_remains_available_for_recovery():
     import src.venue.polymarket_v2_adapter as adapter_mod
 
     fake = FakeFakNoMatchClient()
+    with pytest.raises(RuntimeError) as caught:
+        fake.post_order(fake.signed_order, order_type="FAK")
+
+    assert adapter_mod._is_polymarket_fak_no_match_error(caught.value)
+
+
+@pytest.mark.parametrize("order_type", ["FAK", "FOK"])
+def test_buy_taker_capable_order_crosses_all_sdk_boundaries(
+    tmp_path, monkeypatch, order_type
+):
+    fake = FakeTwoStepClient()
     adapter, _ = _adapter(tmp_path, fake)
-    envelope = adapter.create_submission_envelope(_intent(), FakeSnapshot(), order_type="FAK")
+    envelope = adapter.create_submission_envelope(
+        _intent(), FakeSnapshot(), order_type=order_type, post_only=False
+    )
     monkeypatch.setattr(
-        adapter_mod,
-        "_deterministic_v2_order_id",
-        lambda *args, **kwargs: "0xexpected-order-id",
+        "src.venue.polymarket_v2_adapter._deterministic_v2_order_id",
+        lambda *args, **kwargs: "ord-two-step",
     )
 
     result = _submit(adapter, envelope)
 
-    assert result.status == "rejected"
-    assert result.error_code == "venue_fak_no_match_400"
-    assert result.envelope.order_id == "0xexpected-order-id"
-    assert result.envelope.signed_order == fake.signed_order
-
-    from src.data.polymarket_client import _legacy_order_result_from_submit
-
-    payload = _legacy_order_result_from_submit(result)
-    assert payload["success"] is False
-    assert payload["errorCode"] == "venue_fak_no_match_400"
-
-
-def test_fok_rechecks_full_depth_after_signing_immediately_before_post(tmp_path, monkeypatch):
-    import src.venue.polymarket_v2_adapter as adapter_mod
-
-    fake = FakeTwoStepClient(post_response={"orderID": "0xexpected", "status": "LIVE"})
-    adapter, _ = _adapter(tmp_path, fake)
-    envelope = adapter.create_submission_envelope(_intent(), FakeSnapshot(), order_type="FOK")
-    monkeypatch.setattr(adapter_mod, "_deterministic_v2_order_id", lambda *a, **k: "0xexpected")
-
-    result = _submit(adapter, envelope)
-
-    names = [call[0] for call in fake.calls]
     assert result.status == "accepted"
-    assert names.index("create_order") < names.index("get_order_book") < names.index("post_order")
+    assert result.envelope.order_id == "ord-two-step"
+    assert any(call[0] == "create_order" for call in fake.calls)
+    assert any(
+        call[0] == "post_order" and call[2] == order_type and call[3] is False
+        for call in fake.calls
+    )
 
 
-def test_fok_depth_loss_after_signing_rejects_without_post(tmp_path, monkeypatch):
+def test_final_sdk_boundary_independently_rejects_non_maker_before_post(
+    tmp_path, monkeypatch
+):
     import src.venue.polymarket_v2_adapter as adapter_mod
+    from src.contracts.venue_submission_envelope import VenueSubmissionEnvelope
 
-    class ThinFinalBookClient(FakeTwoStepClient):
-        def get_order_book(self, token_id):
-            self.calls.append(("get_order_book", token_id))
-            return {
-                "asset_id": token_id,
-                "bids": [{"price": "0.49", "size": "100"}],
-                "asks": [{"price": "0.50", "size": "19.99"}],
-            }
-
-    fake = ThinFinalBookClient()
+    fake = FakeTwoStepClient()
     adapter, _ = _adapter(tmp_path, fake)
-    envelope = adapter.create_submission_envelope(_intent(), FakeSnapshot(), order_type="FOK")
-    monkeypatch.setattr(adapter_mod, "_deterministic_v2_order_id", lambda *a, **k: "0xexpected")
-
-    result = _submit(adapter, envelope)
-
-    assert result.status == "rejected"
-    assert result.error_code == "SUBMIT_ABORTED_PRICE_MOVED"
-    assert "FOK_FINAL_DEPTH_INSUFFICIENT" in (result.error_message or "")
-    assert result.envelope.signed_order == fake.signed_order
-    assert not any(call[0] == "post_order" for call in fake.calls)
-
-
-def test_fok_one_step_only_client_fails_closed_before_submit(tmp_path):
-    fake = FakeOneStepClient()
-    adapter, _ = _adapter(tmp_path, fake)
-    envelope = adapter.create_submission_envelope(_intent(), FakeSnapshot(), order_type="FOK")
+    envelope = adapter.create_submission_envelope(
+        _intent(), FakeSnapshot(), order_type="GTC", post_only=False
+    )
+    monkeypatch.setattr(
+        VenueSubmissionEnvelope,
+        "assert_live_fill_price_bound",
+        lambda self: None,
+    )
+    monkeypatch.setattr(
+        adapter_mod,
+        "_deterministic_v2_order_id",
+        lambda *args, **kwargs: "0xexpected",
+    )
 
     result = _submit(adapter, envelope)
 
     assert result.status == "rejected"
     assert result.error_code == "V2_PRE_SUBMIT_EXCEPTION"
-    assert "pre-POST signed identity persistence requires two-step SDK submit" in (
+    assert "LIVE_FILL_PRICE_UNBOUNDED:FINAL_SDK_BOUNDARY" in (result.error_message or "")
+    assert any(call[0] == "create_order" for call in fake.calls)
+    assert not any(call[0] == "post_order" for call in fake.calls)
+
+
+def test_final_sdk_boundary_independently_rejects_size_below_minimum_before_post(
+    tmp_path, monkeypatch
+):
+    from src.contracts.venue_submission_envelope import VenueSubmissionEnvelope
+
+    fake = FakeTwoStepClient()
+    adapter, _ = _adapter(tmp_path, fake)
+    envelope = adapter.create_submission_envelope(
+        _intent(), FakeSnapshot(), order_type="GTC", post_only=True
+    ).with_updates(size=Decimal("0.5"), min_order_size=Decimal("1"))
+    monkeypatch.setattr(
+        "src.venue.polymarket_v2_adapter._deterministic_v2_order_id",
+        lambda *args, **kwargs: "0xexpected",
+    )
+    monkeypatch.setattr(
+        VenueSubmissionEnvelope,
+        "assert_live_fill_price_bound",
+        lambda self: None,
+    )
+
+    result = _submit(adapter, envelope)
+
+    assert result.status == "rejected"
+    assert result.error_code == "V2_PRE_SUBMIT_EXCEPTION"
+    assert "LIVE_ORDER_SIZE_INVALID:FINAL_SDK_BOUNDARY" in (
         result.error_message or ""
     )
+    assert any(call[0] == "create_order" for call in fake.calls)
+    assert not any(call[0] == "post_order" for call in fake.calls)
+
+
+def test_final_sdk_boundary_independently_rejects_off_tick_before_post(
+    tmp_path, monkeypatch
+):
+    from src.contracts.venue_submission_envelope import VenueSubmissionEnvelope
+
+    fake = FakeTwoStepClient()
+    adapter, _ = _adapter(tmp_path, fake)
+    envelope = adapter.create_submission_envelope(
+        _intent(), FakeSnapshot(), order_type="GTC", post_only=True
+    ).with_updates(price=Decimal("0.505"), tick_size=Decimal("0.01"))
+    monkeypatch.setattr(
+        "src.venue.polymarket_v2_adapter._deterministic_v2_order_id",
+        lambda *args, **kwargs: "0xexpected",
+    )
+    monkeypatch.setattr(
+        VenueSubmissionEnvelope,
+        "assert_live_fill_price_bound",
+        lambda self: None,
+    )
+
+    result = _submit(adapter, envelope)
+
+    assert result.status == "rejected"
+    assert result.error_code == "V2_PRE_SUBMIT_EXCEPTION"
+    assert "LIVE_ORDER_TICK_INVALID:FINAL_SDK_BOUNDARY" in (
+        result.error_message or ""
+    )
+    assert any(call[0] == "create_order" for call in fake.calls)
+    assert not any(call[0] == "post_order" for call in fake.calls)
+
+
+@pytest.mark.parametrize(
+    ("size", "minimum"),
+    (("NaN", "1"), ("1", "NaN"), ("0", "1"), ("1", "0")),
+)
+def test_live_envelope_rejects_invalid_size_authority_before_sdk(
+    tmp_path, size, minimum
+):
+    fake = FakeTwoStepClient()
+    adapter, _ = _adapter(tmp_path, fake)
+    envelope = adapter.create_submission_envelope(
+        _intent(), FakeSnapshot(), order_type="GTC", post_only=True
+    ).with_updates(size=Decimal(size), min_order_size=Decimal(minimum))
+
+    result = _submit(adapter, envelope)
+
+    assert result.status == "rejected"
+    assert result.error_code == "BOUND_ENVELOPE_NOT_LIVE_AUTHORITY"
+    assert "live order size is below venue minimum or invalid" in (
+        result.error_message or ""
+    )
+    assert fake.calls == []
+
+
+@pytest.mark.parametrize(
+    ("side", "order_type"),
+    [("BUY", "GTC"), ("BUY", "GTD"), ("SELL", "FOK")],
+)
+def test_illegal_side_order_type_tuple_fails_closed_before_sdk(
+    tmp_path, side, order_type
+):
+    fake = FakeTwoStepClient()
+    adapter, _ = _adapter(tmp_path, fake)
+    envelope = adapter.create_submission_envelope(
+        _intent(), FakeSnapshot(), order_type=order_type, post_only=False
+    ).with_updates(side=side)
+
+    result = _submit(adapter, envelope)
+
+    assert result.status == "rejected"
+    assert result.error_code == "LIVE_FILL_PRICE_UNBOUNDED"
+    assert fake.calls == []
+
+
+def test_final_sdk_boundary_allows_fak_sell_with_limit_price_floor(
+    tmp_path,
+    monkeypatch,
+):
+    import src.venue.polymarket_v2_adapter as adapter_mod
+
+    fake = FakeTwoStepClient(
+        post_response={"orderID": "0xexpected", "status": "LIVE"}
+    )
+    adapter, _ = _adapter(tmp_path, fake)
+    envelope = adapter.create_submission_envelope(
+        _intent(), FakeSnapshot(), order_type="GTC"
+    ).with_updates(side="SELL", order_type="FAK", post_only=False)
+    monkeypatch.setattr(
+        adapter_mod,
+        "_deterministic_v2_order_id",
+        lambda *args, **kwargs: "0xexpected",
+    )
+
+    result = _submit(adapter, envelope)
+
+    assert result.status == "accepted"
+    assert any(
+        call[0] == "post_order"
+        and call[2] == "FAK"
+        and call[3] is False
+        for call in fake.calls
+    )
+
+
+def test_fok_one_step_only_client_fails_closed_before_submit(tmp_path):
+    fake = FakeOneStepClient()
+    adapter, _ = _adapter(tmp_path, fake)
+    envelope = adapter.create_submission_envelope(
+        _intent(), FakeSnapshot(), order_type="FOK", post_only=False
+    )
+
+    result = _submit(adapter, envelope)
+
+    assert result.status == "rejected"
+    assert result.error_code == "V2_PRE_SUBMIT_EXCEPTION"
+    assert "pre-POST signed identity persistence" in (result.error_message or "")
     assert not any(call[0] == "create_and_post_order" for call in fake.calls)
 
 
@@ -2496,7 +3187,11 @@ def test_invalid_safe_signature_is_deterministic_rejection_not_l2_credential_ret
     assert result.status == "rejected"
     assert result.error_code == "venue_auth_invalid_signature_400"
     assert "invalid POLY_GNOSIS_SAFE signature" in (result.error_message or "")
-    assert [call[0] for call in fake.calls] == ["get_ok", "create_order", "post_order"]
+    assert [call[0] for call in fake.calls] == [
+        "get_ok",
+        "create_order",
+        "post_order",
+    ]
     assert adapter_mod._cached_derived_api_creds(
         host="https://clob-v2.polymarket.com",
         chain_id=137,
@@ -2523,7 +3218,11 @@ def test_two_step_invalid_safe_signature_preserves_signed_order_hash(tmp_path, m
     assert result.error_code == "venue_auth_invalid_signature_400"
     assert result.envelope.signed_order == signed
     assert result.envelope.signed_order_hash == hashlib.sha256(signed).hexdigest()
-    assert [call[0] for call in fake.calls] == ["get_ok", "create_order", "post_order"]
+    assert [call[0] for call in fake.calls] == [
+        "get_ok",
+        "create_order",
+        "post_order",
+    ]
 
 
 def test_create_submission_envelope_captures_all_provenance_fields(tmp_path):
@@ -3144,6 +3843,8 @@ def test_polymarket_client_requires_pre_post_identity_persister(tmp_path):
 def test_polymarket_client_fee_rate_accepts_current_base_fee_shape(monkeypatch):
     from src.data import polymarket_client as pm
 
+    pm._FEE_RATE_CACHE.clear()
+
     class Response:
         def raise_for_status(self):
             return None
@@ -3163,14 +3864,13 @@ def test_polymarket_client_fee_rate_accepts_current_base_fee_shape(monkeypatch):
 
     assert client.get_fee_rate("token-1") == pytest.approx(0.003)
     assert client.get_fee_rate_details("token-1")["fee_rate_bps"] == pytest.approx(30.0)
-    assert calls == [
-        (f"{pm.CLOB_BASE}/fee-rate", {"token_id": "token-1"}),
-        (f"{pm.CLOB_BASE}/fee-rate", {"token_id": "token-1"}),
-    ]
+    assert calls == [(f"{pm.CLOB_BASE}/fee-rate", {"token_id": "token-1"})]
 
 
 def test_polymarket_client_fee_rate_rejects_malformed_shape(monkeypatch):
     from src.data import polymarket_client as pm
+
+    pm._FEE_RATE_CACHE.clear()
 
     class Response:
         def raise_for_status(self):
@@ -3193,6 +3893,8 @@ def test_polymarket_client_fee_rate_rejects_malformed_shape(monkeypatch):
 
 def test_polymarket_client_reuses_public_http_client_for_clob_reads(monkeypatch):
     from src.data import polymarket_client as pm
+
+    pm._FEE_RATE_CACHE.clear()
 
     class Response:
         def __init__(self, payload):
@@ -3458,6 +4160,27 @@ def test_polymarket_client_maps_typed_point_order_absence_to_none():
     assert client.get_order("ord-missing") is None
 
 
+@pytest.mark.parametrize(
+    "error",
+    (
+        RuntimeError("order not found after transport reset"),
+        RuntimeError("upstream returned 404 without typed venue proof"),
+    ),
+)
+def test_polymarket_client_does_not_infer_point_absence_from_error_text(error):
+    from src.data.polymarket_client import PolymarketClient
+
+    class FakeAdapter:
+        def get_order(self, _order_id):
+            raise error
+
+    client = PolymarketClient()
+    client._v2_adapter = FakeAdapter()
+
+    with pytest.raises(RuntimeError, match=str(error)):
+        client.get_order("ord-unknown")
+
+
 def test_polymarket_client_wrapper_fails_closed_before_unbound_v2_preflight():
     from src.data.polymarket_client import PolymarketClient
 
@@ -3492,9 +4215,22 @@ def test_old_v1_sdk_import_is_removed_from_live_client_paths():
     live_paths = [
         Path("src/data/polymarket_client.py"),
         Path("src/execution/executor.py"),
-        Path("src/execution/exit_triggers.py"),
+        Path("src/execution/exit_lifecycle.py"),
     ]
-    offenders = [path.as_posix() for path in live_paths if "py_clob_client" in path.read_text()]
+    offenders = []
+    for path in live_paths:
+        tree = ast.parse(path.read_text(), filename=path.as_posix())
+        imported_modules = []
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                imported_modules.extend(alias.name for alias in node.names)
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                imported_modules.append(node.module)
+        if any(
+            module == "py_clob_client" or module.startswith("py_clob_client.")
+            for module in imported_modules
+        ):
+            offenders.append(path.as_posix())
     assert offenders == []
 
 
@@ -3579,7 +4315,7 @@ def _priced_intent(price: float) -> ExecutionIntent:
     return replace(_intent(), limit_price=price)
 
 
-def _batch_envelopes(adapter, n: int, *, post_only: bool = False):
+def _batch_envelopes(adapter, n: int, *, post_only: bool = True):
     # FakeSnapshot's yes_token_id is fixed ("yes-token"); vary limit_price
     # per order instead of token_id so create_submission_envelope's
     # assert_live_submit_bound (selected_outcome_token_id must equal the
@@ -3646,6 +4382,62 @@ class TestSubmitBatch:
         )
         assert not fake.calls
 
+    def test_sdk_boundary_rejects_subminimum_batch_even_if_envelope_guard_is_bypassed(
+        self, tmp_path, monkeypatch
+    ):
+        from src.contracts.venue_submission_envelope import VenueSubmissionEnvelope
+
+        fake = FakeBatchTwoStepClient()
+        adapter, _ = _adapter(tmp_path, fake)
+        envelopes = _batch_envelopes(adapter, 2)
+        envelopes[1] = envelopes[1].with_updates(
+            size=Decimal("0.5"),
+            min_order_size=Decimal("1"),
+        )
+        monkeypatch.setattr(
+            VenueSubmissionEnvelope,
+            "assert_live_fill_price_bound",
+            lambda self: None,
+        )
+
+        results = adapter.submit_batch(envelopes)
+
+        assert [result.status for result in results] == ["rejected", "rejected"]
+        assert all(
+            "LIVE_ORDER_SIZE_INVALID:FINAL_SDK_BOUNDARY"
+            in str(result.error_message)
+            for result in results
+        )
+        assert not any(call[0] == "post_orders" for call in fake.calls)
+
+    def test_sdk_boundary_rejects_off_tick_batch_even_if_envelope_guard_is_bypassed(
+        self, tmp_path, monkeypatch
+    ):
+        from src.contracts.venue_submission_envelope import VenueSubmissionEnvelope
+
+        fake = FakeBatchTwoStepClient()
+        adapter, _ = _adapter(tmp_path, fake)
+        envelopes = _batch_envelopes(adapter, 2)
+        envelopes[1] = envelopes[1].with_updates(
+            price=Decimal("0.505"),
+            tick_size=Decimal("0.01"),
+        )
+        monkeypatch.setattr(
+            VenueSubmissionEnvelope,
+            "assert_live_fill_price_bound",
+            lambda self: None,
+        )
+
+        results = adapter.submit_batch(envelopes)
+
+        assert [result.status for result in results] == ["rejected", "rejected"]
+        assert all(
+            "LIVE_ORDER_TICK_INVALID:FINAL_SDK_BOUNDARY"
+            in str(result.error_message)
+            for result in results
+        )
+        assert not any(call[0] == "post_orders" for call in fake.calls)
+
     def test_index_fallback_maps_results_in_order(self, tmp_path):
         fake = FakeBatchTwoStepClient(
             post_orders_response=[
@@ -3702,7 +4494,7 @@ class TestSubmitBatch:
         assert len(results) == 3
         assert all(r.status == "unmapped" for r in results)
 
-    def test_mixed_post_only_rejects_whole_batch_before_signing(self, tmp_path):
+    def test_non_post_only_rejects_whole_batch_before_signing(self, tmp_path):
         fake = FakeBatchTwoStepClient()
         adapter, _ = _adapter(tmp_path, fake)
         mixed = [
@@ -3712,7 +4504,7 @@ class TestSubmitBatch:
 
         results = adapter.submit_batch(mixed)
 
-        assert all(r.status == "rejected" and r.error_code == "BATCH_POST_ONLY_MISMATCH" for r in results)
+        assert all(r.status == "rejected" and r.error_code == "LIVE_FILL_PRICE_UNBOUNDED" for r in results)
         assert not any(c[0] == "create_order" for c in fake.calls)
 
     def test_signing_failure_for_any_envelope_rejects_whole_batch_before_network(self, tmp_path):
@@ -3725,22 +4517,22 @@ class TestSubmitBatch:
         assert all(r.status == "rejected" and r.error_code == "V2_PRE_SUBMIT_EXCEPTION" for r in results)
         assert not any(c[0] == "post_orders" for c in fake.calls)
 
-    def test_fok_batch_checks_depth_after_all_signing_before_post(self, tmp_path):
+    def test_fok_batch_crosses_final_sdk_boundary(self, tmp_path):
         fake = FakeBatchTwoStepClient(
             post_orders_response=[{"orderID": "ord-0", "status": "LIVE"}]
         )
         adapter, _ = _adapter(tmp_path, fake)
         envelope = adapter.create_submission_envelope(
-            _priced_intent(0.50), FakeSnapshot(), order_type="FOK"
+            _priced_intent(0.50), FakeSnapshot(), order_type="FOK", post_only=False
         )
 
         results = adapter.submit_batch([envelope])
 
-        names = [call[0] for call in fake.calls]
         assert results[0].status == "accepted"
-        assert names.index("create_order") < names.index("get_order_book") < names.index("post_orders")
+        assert any(c[0] == "create_order" for c in fake.calls)
+        assert any(c[0] == "post_orders" for c in fake.calls)
 
-    def test_fok_batch_depth_loss_rejects_whole_batch_without_post(self, tmp_path):
+    def test_fok_batch_does_not_reintroduce_legacy_book_gate(self, tmp_path):
         class ThinBatchClient(FakeBatchTwoStepClient):
             def get_order_book(self, token_id):
                 self.calls.append(("get_order_book", token_id))
@@ -3753,15 +4545,14 @@ class TestSubmitBatch:
         fake = ThinBatchClient()
         adapter, _ = _adapter(tmp_path, fake)
         envelope = adapter.create_submission_envelope(
-            _priced_intent(0.50), FakeSnapshot(), order_type="FOK"
+            _priced_intent(0.50), FakeSnapshot(), order_type="FOK", post_only=False
         )
 
         results = adapter.submit_batch([envelope])
 
-        assert results[0].status == "rejected"
-        assert results[0].error_code == "SUBMIT_ABORTED_PRICE_MOVED"
-        assert "FOK_FINAL_DEPTH_INSUFFICIENT" in (results[0].error_message or "")
-        assert not any(call[0] == "post_orders" for call in fake.calls)
+        assert results[0].status == "unmapped"
+        assert results[0].error_code == "BATCH_RESPONSE_UNMAPPED"
+        assert any(c[0] == "post_orders" for c in fake.calls)
 
     def test_post_orders_exception_propagates_as_ambiguous_side_effect(self, tmp_path):
         fake = FakePostOrdersExceptionClient()
@@ -3894,3 +4685,105 @@ class TestCancelBatch:
 
         assert results[0].status == "UNKNOWN"
         assert results[0].error_code == "BATCH_RESPONSE_UNMAPPED"
+
+
+def test_deadline_order_read_cancels_transport_without_sdk_get_order(
+    tmp_path,
+    monkeypatch,
+):
+    import httpx
+
+    from src.venue.polymarket_v2_adapter import IncompleteOrderTruthError
+
+    class FakeAuthenticatedClient:
+        host = "https://clob-v2.polymarket.com"
+        signer = object()
+        creds = object()
+
+        def get_order(self, _order_id):
+            raise AssertionError("deadline path must not call blocking SDK get_order")
+
+    class SlowHttp:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+        async def get(self, *_args, **_kwargs):
+            await asyncio.sleep(1.0)
+            raise AssertionError("absolute deadline must cancel the transport")
+
+    adapter, _ = _adapter(tmp_path, FakeAuthenticatedClient())
+    adapter._client = FakeAuthenticatedClient()
+
+    async def fake_headers(*_args, **_kwargs):
+        return {"x-test": "signed"}, 1_700_000_000
+
+    monkeypatch.setattr(adapter, "_account_truth_headers_async", fake_headers)
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **_kwargs: SlowHttp())
+
+    started = time.monotonic()
+    with pytest.raises(IncompleteOrderTruthError, match="deadline elapsed"):
+        adapter.get_order(
+            "ord-never-returns",
+            deadline_monotonic=started + 0.02,
+        )
+    assert time.monotonic() - started < 0.20
+
+
+def test_deadline_order_read_never_invokes_lazy_client_factory(tmp_path):
+    from src.venue.polymarket_v2_adapter import IncompleteOrderTruthError
+
+    factory_calls = []
+
+    def blocking_factory(**_kwargs):
+        factory_calls.append("called")
+        time.sleep(0.15)
+        return object()
+
+    adapter, _ = _adapter(tmp_path, object())
+    adapter._client_factory = blocking_factory
+    started = time.monotonic()
+    with pytest.raises(IncompleteOrderTruthError, match="client was not prepared"):
+        adapter.get_order(
+            "ord-unprepared",
+            deadline_monotonic=started + 0.01,
+        )
+
+    assert factory_calls == []
+    assert time.monotonic() - started < 0.10
+
+
+def test_polymarket_client_prepares_same_adapter_used_by_deadline_order_read():
+    from src.data.polymarket_client import PolymarketClient
+    from src.venue.polymarket_v2_adapter import OrderState
+
+    class FakeAdapter:
+        def __init__(self):
+            self.prepared = False
+            self.deadlines = []
+
+        def prepare_order_truth_reader(self):
+            self.prepared = True
+
+        def get_order(self, order_id, *, deadline_monotonic):
+            assert self.prepared
+            self.deadlines.append(deadline_monotonic)
+            return OrderState(
+                order_id=order_id,
+                status="LIVE",
+                raw={"orderID": order_id, "status": "LIVE"},
+            )
+
+    client = PolymarketClient()
+    adapter = FakeAdapter()
+    client._v2_adapter = adapter
+    client.prepare_order_truth_reader()
+    deadline = time.monotonic() + 1.0
+
+    assert client.get_order("ord-prepared", deadline_monotonic=deadline) == {
+        "orderID": "ord-prepared",
+        "status": "LIVE",
+    }
+    assert adapter.deadlines == [deadline]

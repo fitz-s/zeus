@@ -13,6 +13,7 @@ This module owns all exit state transitions. CycleRunner calls it;
 CycleRunner does not contain exit business logic.
 """
 
+import copy
 import hashlib
 import logging
 import json
@@ -23,25 +24,32 @@ import sqlite3
 import threading
 import time as _time_module
 from collections.abc import Collection, Mapping
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation, ROUND_FLOOR
+from enum import Enum
 from inspect import Parameter, signature
 from types import SimpleNamespace
-from typing import Callable, Optional
+from typing import Callable, Optional, Sequence
 
-from src.execution.collateral import check_sell_collateral
-from src.state.collateral_ledger import CollateralInsufficient
+# Compatibility exports for callers that patch the former lifecycle seam.
+# Submit-time authority is owned by executor.py below.
+from src.execution.collateral import check_sell_collateral  # noqa: F401
+from src.state.collateral_ledger import CollateralInsufficient  # noqa: F401
 from src.observability.counters import increment as _cnt_inc
 from src.execution.executor import (
     OrderResult,
     create_exit_order_intent,
     execute_exit_order,
     _exit_execution_authority_deadline_error,
-    _refresh_exit_collateral_snapshot_for_submit,
+    _refresh_exit_collateral_snapshot_for_submit,  # noqa: F401
 )
-from src.contracts.venue_submission_envelope import LIVE_ORDER_MIN_UNIT_PRICE
+from src.contracts.global_auction_receipt import GlobalSellReceiptClosure
+from src.contracts.venue_submission_envelope import (
+    LIVE_ORDER_MAX_UNIT_PRICE,
+    LIVE_ORDER_MIN_UNIT_PRICE,
+)
 from src.state.lifecycle_manager import (
     LifecyclePhase,
     enter_pending_exit_runtime_state,
@@ -61,6 +69,33 @@ logger = logging.getLogger(__name__)
 _HELD_MONITOR_CLOB_CLIENT = None
 _HELD_MONITOR_CLOB_CLIENT_FACTORY = None
 _HELD_MONITOR_CLOB_CLIENT_LOCK = threading.Lock()
+GLOBAL_SELL_REAUCTION_COMPLETION_DEADLINE_SECONDS = 30.0
+HELD_SELL_REAUCTION_CLASSIFICATION_IO_MAX_SECONDS = 0.75
+
+
+class GlobalSellSnapshotReauctionDebtStatus(str, Enum):
+    """Bounded monitor classification of one durable global SELL debt."""
+
+    DEBT = "DEBT"
+    NO_DEBT = "NO_DEBT"
+    DEFERRED = "DEFERRED"
+
+
+def preserve_held_sell_reauction_deadline(
+    obligation: Mapping[str, object],
+    existing: Mapping[str, object],
+) -> dict[str, object]:
+    """Keep one attempt's original actuation deadline across monitor refreshes."""
+
+    result = dict(obligation)
+    same_attempt = all(
+        str(existing.get(field) or "") == str(result.get(field) or "")
+        for field in ("scope_identity", "generation", "attempt_identity")
+    )
+    if same_attempt and existing.get("completion_deadline_at"):
+        result["armed_at"] = existing.get("armed_at")
+        result["completion_deadline_at"] = existing["completion_deadline_at"]
+    return result
 
 
 def _held_monitor_clob_timeout():
@@ -131,11 +166,12 @@ def warm_held_monitor_clob_client() -> bool:
     """Warm the reduce-only transport outside an observation-triggered exit."""
 
     try:
-        return bool(
-            _held_monitor_clob_client().warm_public_connection(
-                timeout=_held_monitor_clob_warmup_timeout()
-            )
+        client = _held_monitor_clob_client()
+        public_ready = bool(
+            client.warm_public_connection(timeout=_held_monitor_clob_warmup_timeout())
         )
+        client.prepare_order_truth_reader()
+        return public_ready
     except Exception:  # noqa: BLE001 - keepalive is advisory; monitor fails closed.
         return False
 
@@ -313,6 +349,39 @@ _VENUE_OPEN_ORDER_TERMINAL_STATUSES = frozenset(
     }
 )
 _PENDING_EXIT_SCAN_CURSOR = 0
+_PENDING_EXIT_ISOLATABLE_REDUCTION_PRECONDITION_ERRORS = frozenset(
+    {
+        "reduction finality has an invalid confirmed fill size",
+        "intentional reduction would manufacture a full close",
+        "intentional reduction current exposure exceeds intent holding",
+        "intentional reduction current exposure is below fill target",
+    }
+)
+
+
+def _isolate_pending_exit_reduction_precondition(
+    stats: dict,
+    position: Position,
+    exc: RuntimeError,
+) -> bool:
+    """Keep one malformed pre-write reduction proof from aborting the scan."""
+
+    error = str(exc)
+    if error not in _PENDING_EXIT_ISOLATABLE_REDUCTION_PRECONDITION_ERRORS:
+        return False
+    position_id = str(getattr(position, "trade_id", "") or "")
+    logger.error(
+        "pending-exit reduction precondition rejected position_id=%s; "
+        "continuing scan: %s",
+        position_id,
+        error,
+    )
+    stats["pending_exit_position_errors"] = (
+        stats.get("pending_exit_position_errors", 0) + 1
+    )
+    stats.setdefault("pending_exit_position_error_ids", []).append(position_id)
+    stats["unchanged"] += 1
+    return True
 
 
 def _pending_exit_status_max_positions() -> int:
@@ -337,7 +406,7 @@ def _pending_exit_status_budget_seconds() -> float:
         return DEFAULT_PENDING_EXIT_STATUS_BUDGET_SECONDS
 
 
-def _is_sub_floor_exit_price_error(error: object) -> bool:
+def _is_out_of_band_exit_price_error(error: object) -> bool:
     text = str(error or "")
     if "absolute inclusive [0.05, 0.95]" not in text:
         return False
@@ -345,13 +414,37 @@ def _is_sub_floor_exit_price_error(error: object) -> bool:
     if match is None:
         return False
     try:
-        return Decimal(match.group(1)) < LIVE_ORDER_MIN_UNIT_PRICE
+        price = Decimal(match.group(1))
+        return not LIVE_ORDER_MIN_UNIT_PRICE <= price <= LIVE_ORDER_MAX_UNIT_PRICE
     except InvalidOperation:
         return False
 
 
+def _is_legacy_favorable_bid_rejection(error: object) -> bool:
+    """Recognize the retired executor check that treated a bid as a limit.
+
+    The old boundary rejected a probability-domain counterparty bid above the
+    submitted-action ceiling even though the legal SELL limit remained 0.95.
+    Only that exact historical shape, with a finite bid in ``(0.95, 1]``, is
+    recovery authority; malformed or genuinely impossible prices stay closed.
+    """
+
+    match = re.fullmatch(
+        r"live_order_executable_price_out_of_bounds:\s*"
+        r"best_bid=([0-9]+(?:\.[0-9]+)?)",
+        str(error or "").strip().lower(),
+    )
+    if match is None:
+        return False
+    try:
+        bid = Decimal(match.group(1))
+    except InvalidOperation:
+        return False
+    return LIVE_ORDER_MAX_UNIT_PRICE < bid <= Decimal("1")
+
+
 def _is_exit_liquidity_wait_error(error: object) -> bool:
-    return str(error or "") in _EXIT_LIQUIDITY_WAIT_ERRORS or _is_sub_floor_exit_price_error(error)
+    return str(error or "") in _EXIT_LIQUIDITY_WAIT_ERRORS or _is_out_of_band_exit_price_error(error)
 
 
 def _pending_exit_scan_candidate(position: Position) -> bool:
@@ -442,14 +535,915 @@ def _is_pre_submit_db_locked_error(error: str) -> bool:
 
 
 def _is_global_sell_snapshot_reauction_error(error: object) -> bool:
-    """True when a global SELL stopped before command persistence for snapshot I/O."""
+    """True when a global SELL must discard its stale executable certificate."""
 
-    return str(error or "").lower().startswith(
+    normalized = str(error or "").lower()
+    return normalized.startswith(
         (
             "global_sell_exit_executable_snapshot_unavailable",
             "global_sell_exit_executable_snapshot_error:",
+            "global_sell_exit_capital_authority_reauction:",
+            "global_sell_exit_partial_residual_reauction:",
+            "global_sell_exit_post_only_cross_reauction:",
+            "global_sell_exit_fak_no_fill_reauction:",
+            "global_sell_exit_terminal_no_fill_reauction:",
         )
     )
+
+
+def _is_post_only_cross_reauction_error(error: object) -> bool:
+    return str(error or "").lower().startswith(
+        "global_sell_exit_post_only_cross_reauction:"
+    )
+
+
+def _is_fak_no_fill_reauction_error(error: object) -> bool:
+    return str(error or "").lower().startswith(
+        "global_sell_exit_fak_no_fill_reauction:"
+    )
+
+
+def _global_sell_sync_no_side_effect_reauction_error(
+    conn: sqlite3.Connection | None,
+    sell_result: OrderResult,
+) -> str:
+    """Classify a proved synchronous no-side-effect SELL for re-auction.
+
+    A post-only SELL can become marketable after its executable snapshot is
+    captured but before the venue validates it.  The synchronous 400 proves no
+    order was created, while the crossed book proves the old maker certificate
+    no longer describes executable truth.  Preserve every other 400 as the
+    generic retry path; only the exact durable command receipt can authorize
+    this zero-cooldown release.
+    """
+
+    command_id = str(getattr(sell_result, "command_id", "") or "").strip()
+    if (
+        conn is None
+        or not command_id
+        or str(getattr(sell_result, "status", "") or "").lower() != "rejected"
+        or str(getattr(sell_result, "command_state", "") or "").upper()
+        != "REJECTED"
+    ):
+        return ""
+    try:
+        command = conn.execute(
+            """
+            SELECT commands.position_id, commands.token_id, commands.side,
+                   commands.intent_kind, commands.state,
+                   commands.venue_order_id, envelopes.order_type,
+                   envelopes.post_only
+              FROM venue_commands AS commands
+              JOIN venue_submission_envelopes AS envelopes
+                ON envelopes.envelope_id = commands.envelope_id
+             WHERE commands.command_id = ?
+             LIMIT 1
+            """,
+            (command_id,),
+        ).fetchone()
+        if command is None or str(command[4] or "").upper() != "REJECTED":
+            return ""
+        if str(getattr(sell_result, "trade_id", "") or "").strip() != str(
+            command[0] or ""
+        ).strip():
+            return ""
+        if (
+            str(command[2] or "").upper() != "SELL"
+            or str(command[3] or "").upper() != "EXIT"
+        ):
+            return ""
+
+        latest_event = conn.execute(
+            """
+            SELECT event_type, state_after, payload_json
+              FROM venue_command_events
+             WHERE command_id = ?
+             ORDER BY sequence_no DESC
+             LIMIT 1
+            """,
+            (command_id,),
+        ).fetchone()
+        if (
+            latest_event is None
+            or str(latest_event[0] or "") != "SUBMIT_REJECTED"
+            or str(latest_event[1] or "").upper() != "REJECTED"
+        ):
+            return ""
+        payload = json.loads(str(latest_event[2] or "{}"))
+        if not isinstance(payload, dict):
+            return ""
+
+        unknown_or_review_event_types = {
+            "SUBMIT_UNKNOWN",
+            "SUBMIT_TIMEOUT_UNKNOWN",
+            "CLOSED_MARKET_UNKNOWN",
+            "SUBMIT_UNKNOWN_SIDE_EFFECT",
+            "REVIEW_REQUIRED",
+        }
+        unknown_or_review_states = {
+            "UNKNOWN",
+            "SUBMIT_UNKNOWN_SIDE_EFFECT",
+            "REVIEW_REQUIRED",
+        }
+        history = conn.execute(
+            """
+            SELECT event_type, state_after
+              FROM venue_command_events
+             WHERE command_id = ?
+            """,
+            (command_id,),
+        ).fetchall()
+        if any(
+            str(row[0] or "") in unknown_or_review_event_types
+            or str(row[0] or "").startswith("REVIEW_")
+            or str(row[1] or "").upper() in unknown_or_review_states
+            for row in history
+        ):
+            return ""
+
+        active_sell = conn.execute(
+            """
+            SELECT 1
+              FROM venue_commands
+             WHERE position_id = ?
+               AND token_id = ?
+               AND side = 'SELL'
+               AND intent_kind = 'EXIT'
+               AND command_id <> ?
+               AND UPPER(COALESCE(state, '')) IN (
+                   'INTENT_CREATED', 'SNAPSHOT_BOUND', 'SIGNED_PERSISTED',
+                   'POSTING', 'POST_ACKED', 'SUBMITTING', 'ACKED', 'UNKNOWN',
+                   'SUBMIT_UNKNOWN_SIDE_EFFECT', 'PARTIAL', 'CANCEL_PENDING',
+                   'REVIEW_REQUIRED'
+               )
+             LIMIT 1
+            """,
+            (str(command[0] or ""), str(command[1] or ""), command_id),
+        ).fetchone()
+        if active_sell is not None:
+            return ""
+    except (sqlite3.Error, TypeError, ValueError, json.JSONDecodeError):
+        return ""
+
+    reason = str(payload.get("reason") or "").strip()
+    detail = str(
+        payload.get("detail")
+        or payload.get("exception_message")
+        or ""
+    ).strip().lower()
+    order_type = str(command[6] or "").strip().upper()
+    post_only = bool(command[7])
+    if (
+        order_type == "FAK"
+        and not post_only
+        and reason == "venue_fak_no_match_400"
+        and payload.get("proof_class")
+        == "deterministic_venue_fak_no_match_400"
+        and payload.get("terminal_no_fill") is True
+        and payload.get("exposure_created") is False
+    ):
+        venue_order_id = str(command[5] or "").strip()
+        predicates = payload.get("required_predicates")
+        final_envelope_id = str(
+            payload.get("final_submission_envelope_id") or ""
+        ).strip()
+        if (
+            not venue_order_id
+            or str(payload.get("venue_order_id") or "").strip()
+            != venue_order_id
+            or str(payload.get("final_submission_envelope_command_id") or "")
+            != command_id
+            or not isinstance(predicates, dict)
+            or not all(
+                predicates.get(key) is True
+                for key in (
+                    "structured_v2_fak_no_match",
+                    "final_envelope_command_matches",
+                    "final_envelope_is_fak",
+                    "deterministic_order_id_matches",
+                )
+            )
+            or not final_envelope_id
+        ):
+            return ""
+        try:
+            final_envelope = conn.execute(
+                """
+                SELECT order_type, post_only, order_id, error_code,
+                       signed_order_hash
+                  FROM venue_submission_envelopes
+                 WHERE envelope_id = ?
+                 LIMIT 1
+                """,
+                (final_envelope_id,),
+            ).fetchone()
+            order_fact = conn.execute(
+                "SELECT 1 FROM venue_order_facts WHERE command_id = ? LIMIT 1",
+                (command_id,),
+            ).fetchone()
+            trade_fact = conn.execute(
+                "SELECT 1 FROM venue_trade_facts WHERE command_id = ? LIMIT 1",
+                (command_id,),
+            ).fetchone()
+        except sqlite3.Error:
+            return ""
+        if (
+            final_envelope is None
+            or str(final_envelope[0] or "").upper() != "FAK"
+            or bool(final_envelope[1])
+            or str(final_envelope[2] or "").strip() != venue_order_id
+            or str(final_envelope[3] or "") != "venue_fak_no_match_400"
+            or not str(final_envelope[4] or "").strip()
+            or order_fact is not None
+            or trade_fact is not None
+        ):
+            return ""
+        return "global_sell_exit_fak_no_fill_reauction:venue_fak_no_match_400"
+    if not (
+        post_only
+        and order_type in {"GTC", "GTD"}
+        and reason == "venue_rejected_400"
+        and "invalid post-only order" in detail
+        and "crosses book" in detail
+    ):
+        return ""
+
+    # INV-47 SCOPE: only this global SELL command with an exact synchronous
+    # no-side-effect post-only-cross receipt is released.
+    # DRAIN: cooldown=0 publishes a fresh held-SELL global-auction obligation.
+    # RESET: the next command must carry a new q/book/wealth certificate; no
+    # latch survives the re-auction receipt.
+    return "global_sell_exit_post_only_cross_reauction:venue_rejected_400"
+
+
+def _global_sell_post_only_cross_reauction_error(
+    conn: sqlite3.Connection | None,
+    sell_result: OrderResult,
+) -> str:
+    error = _global_sell_sync_no_side_effect_reauction_error(conn, sell_result)
+    return error if _is_post_only_cross_reauction_error(error) else ""
+
+
+def _global_sell_fak_no_fill_reauction_error(
+    conn: sqlite3.Connection | None,
+    sell_result: OrderResult,
+) -> str:
+    error = _global_sell_sync_no_side_effect_reauction_error(conn, sell_result)
+    return error if str(error).startswith("global_sell_exit_fak_no_fill_reauction:") else ""
+
+
+def _post_only_cross_command_id_for_position(
+    conn: sqlite3.Connection | None,
+    position: Position,
+) -> str:
+    """Read the command binding persisted with a post-only-cross retry."""
+
+    if conn is None:
+        return ""
+    try:
+        row = conn.execute(
+            """
+            SELECT payload_json
+              FROM position_events
+             WHERE position_id = ?
+               AND event_type = 'EXIT_ORDER_REJECTED'
+             ORDER BY sequence_no DESC
+             LIMIT 1
+            """,
+            (str(getattr(position, "trade_id", "") or ""),),
+        ).fetchone()
+        payload = json.loads(str(row[0] or "{}")) if row is not None else {}
+    except (sqlite3.Error, TypeError, ValueError, json.JSONDecodeError):
+        return ""
+    if not isinstance(payload, dict):
+        return ""
+    if not _is_global_sell_snapshot_reauction_error(payload.get("error")):
+        return ""
+    return str(payload.get("post_only_cross_command_id") or "").strip()
+
+
+def _post_only_cross_reauction_proof_for_position(
+    conn: sqlite3.Connection | None,
+    position: Position,
+) -> bool:
+    """Revalidate the typed command proof at retry/recovery boundaries."""
+
+    command_id = _post_only_cross_command_id_for_position(conn, position)
+    if not command_id:
+        return False
+    result = OrderResult(
+        trade_id=str(getattr(position, "trade_id", "") or ""),
+        status="rejected",
+        reason="venue_rejected_400",
+        command_id=command_id,
+        command_state="REJECTED",
+    )
+    return bool(_global_sell_post_only_cross_reauction_error(conn, result))
+
+
+def _fak_no_fill_command_id_for_position(
+    conn: sqlite3.Connection | None,
+    position: Position,
+) -> str:
+    """Read the command bound to a synchronous FAK terminal no-fill retry."""
+
+    if conn is None:
+        return ""
+    try:
+        row = conn.execute(
+            """
+            SELECT payload_json
+              FROM position_events
+             WHERE position_id = ?
+               AND event_type = 'EXIT_ORDER_REJECTED'
+             ORDER BY sequence_no DESC
+             LIMIT 1
+            """,
+            (str(getattr(position, "trade_id", "") or ""),),
+        ).fetchone()
+        payload = json.loads(str(row[0] or "{}")) if row is not None else {}
+    except (sqlite3.Error, TypeError, ValueError, json.JSONDecodeError):
+        return ""
+    if (
+        not isinstance(payload, dict)
+        or not _is_fak_no_fill_reauction_error(payload.get("error"))
+    ):
+        return ""
+    return str(payload.get("fak_no_fill_command_id") or "").strip()
+
+
+def _fak_no_fill_reauction_proof_for_position(
+    conn: sqlite3.Connection | None,
+    position: Position,
+) -> bool:
+    command_id = _fak_no_fill_command_id_for_position(conn, position)
+    if not command_id:
+        return False
+    result = OrderResult(
+        trade_id=str(getattr(position, "trade_id", "") or ""),
+        status="rejected",
+        reason="venue_rejected_400",
+        command_id=command_id,
+        command_state="REJECTED",
+    )
+    return bool(_global_sell_fak_no_fill_reauction_error(conn, result))
+
+
+def _held_sell_reauction_obligation(
+    position: Position,
+    *,
+    generation_material: Mapping[str, object],
+) -> dict[str, object]:
+    """Build the V4 durable scope without treating a missing book as a price."""
+
+    raw_direction = getattr(position, "direction", "")
+    direction = str(getattr(raw_direction, "value", raw_direction) or "").lower()
+    token_id = str(
+        getattr(position, "no_token_id", "")
+        if direction == "buy_no"
+        else getattr(position, "token_id", "")
+    ).strip()
+    position_id = str(
+        getattr(position, "position_id", "")
+        or getattr(position, "trade_id", "")
+        or ""
+    ).strip()
+    family = (
+        str(getattr(position, "city", "") or "").strip(),
+        str(getattr(position, "target_date", "") or "").strip(),
+        str(getattr(position, "temperature_metric", "") or "").strip().lower(),
+    )
+    probability_receipt = getattr(position, "_day0_monitor_probability_receipt", None)
+    probability_content_identity = (
+        str(probability_receipt.get("probability_content_identity") or "").strip()
+        if isinstance(probability_receipt, Mapping)
+        else ""
+    )
+    if not all((position_id, token_id, *family)):
+        return {}
+    from src.runtime.reactor_wake import held_sell_reauction_scope_identity
+
+    scope_identity = held_sell_reauction_scope_identity(
+        position_id=position_id,
+        family=family,
+        probability_content_identity=probability_content_identity,
+        held_token_id=token_id,
+        schema_version=4,
+    )
+    generation = hashlib.sha256(
+        json.dumps(
+            {
+                "scope_identity": scope_identity,
+                "generation_material": dict(generation_material),
+            },
+            sort_keys=True,
+            default=str,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    return {
+        "schema_version": 4,
+        "scope_identity": scope_identity,
+        "generation": generation,
+        "position_id": position_id,
+        "family": family,
+        "held_token_id": token_id,
+        "probability_content_identity": probability_content_identity,
+        "probability_observed_at": str(
+            getattr(position, "last_monitor_at", "") or ""
+        ),
+        "held_best_bid": None,
+        "bid_observed_at": "",
+        "book_state": "UNKNOWN",
+    }
+
+
+def latest_held_sell_reauction_obligation(
+    conn: sqlite3.Connection | None,
+    position: Position,
+    *,
+    strict: bool = False,
+    deadline_monotonic: float | None = None,
+) -> dict[str, object]:
+    """Return the newest durable versioned SELL obligation for a position."""
+
+    if conn is None:
+        return {}
+    if (
+        deadline_monotonic is not None
+        and _time_module.monotonic() >= float(deadline_monotonic)
+    ):
+        if strict:
+            raise TimeoutError("held SELL obligation deadline expired")
+        return {}
+    position_id = str(getattr(position, "trade_id", "") or "")
+    if not position_id:
+        return {}
+    try:
+        rows = conn.execute(
+            """
+            SELECT payload_json FROM position_events
+             WHERE position_id = ?
+               AND event_type IN ('EXIT_RETRY_RELEASED', 'MONITOR_REFRESHED')
+               AND payload_json LIKE '%"held_sell_reauction_obligation"%'
+             ORDER BY sequence_no DESC, datetime(occurred_at) DESC LIMIT 16
+            """,
+            (position_id,),
+        ).fetchall()
+    except (sqlite3.Error, AttributeError):
+        if strict:
+            raise
+        return {}
+    if (
+        deadline_monotonic is not None
+        and _time_module.monotonic() >= float(deadline_monotonic)
+    ):
+        if strict:
+            raise TimeoutError("held SELL obligation deadline expired")
+        return {}
+    for row in rows:
+        if (
+            deadline_monotonic is not None
+            and _time_module.monotonic() >= float(deadline_monotonic)
+        ):
+            if strict:
+                raise TimeoutError("held SELL obligation deadline expired")
+            return {}
+        try:
+            payload = json.loads(str(row[0] or "{}"))
+        except (TypeError, json.JSONDecodeError):
+            if strict:
+                raise ValueError("held SELL obligation payload is unreadable")
+            continue
+        obligation = payload.get("held_sell_reauction_obligation")
+        if (
+            not isinstance(obligation, dict)
+            or obligation.get("schema_version") not in {2, 3, 4}
+        ):
+            continue
+        required = ("scope_identity", "generation", "position_id", "held_token_id")
+        if all(str(obligation.get(key) or "").strip() for key in required):
+            return dict(obligation)
+    return {}
+
+
+def _held_sell_reauction_recovery_due(
+    obligation: Mapping[str, object],
+    *,
+    durable_reserved: bool = False,
+    deadline_monotonic: float | None = None,
+) -> bool:
+    """Whether an exact V4 SELL debt lacks timely terminal proof.
+
+    The deadline is an actuation contract, not telemetry. A queued request may
+    wait only until that deadline; a missing or mismatched queue attempt is an
+    immediate crash-recovery debt. A DEADLINE_EXPIRED receipt terminalizes only
+    that attempt; the economic SELL obligation remains debt until a fresh
+    successor reaches an authoritative terminal outcome.
+    """
+
+    try:
+        schema_version = int(obligation.get("schema_version") or 0)
+    except (TypeError, ValueError):
+        return False
+    if schema_version != 4:
+        return False
+    scope_identity = str(obligation.get("scope_identity") or "").strip()
+    deadline_text = str(obligation.get("completion_deadline_at") or "").strip()
+    if not scope_identity or not deadline_text:
+        return True
+    try:
+        deadline = datetime.fromisoformat(deadline_text.replace("Z", "+00:00"))
+    except ValueError:
+        return True
+    if deadline.tzinfo is None:
+        return True
+    now = _utcnow()
+    deadline_utc = deadline.astimezone(timezone.utc)
+    if durable_reserved and now <= deadline_utc:
+        return False
+
+    try:
+        from src.runtime.reactor_wake import (
+            DEADLINE_EXPIRED,
+            held_sell_reauction_request_completion_status,
+            held_sell_reauction_recovery_snapshot_hard_deadline,
+            latest_v4_held_sell_reauction_request,
+        )
+
+        expected = (
+            str(obligation.get("request_id") or ""),
+            str(obligation.get("material_identity") or ""),
+            str(obligation.get("generation") or ""),
+            str(obligation.get("attempt_identity") or ""),
+        )
+        if deadline_monotonic is None:
+            request = latest_v4_held_sell_reauction_request(scope_identity)
+            if request is None:
+                return True
+            current = (
+                request.request_id,
+                request.material_identity,
+                request.generation,
+                request.attempt_identity,
+            )
+            completion_status = held_sell_reauction_request_completion_status(
+                request
+            )
+            completed = completion_status is not None
+        else:
+            remaining = float(deadline_monotonic) - _time_module.monotonic()
+            if remaining < 0.01:
+                raise TimeoutError("held SELL recovery classification deadline expired")
+            current, completed, completion_status = (
+                held_sell_reauction_recovery_snapshot_hard_deadline(
+                    scope_identity,
+                    timeout_seconds=min(
+                        remaining,
+                        HELD_SELL_REAUCTION_CLASSIFICATION_IO_MAX_SECONDS,
+                    ),
+                )
+            )
+            if current is None:
+                return True
+        if completed:
+            return completion_status == DEADLINE_EXPIRED
+        if current != expected:
+            return True
+        return now > deadline_utc
+    except TimeoutError:
+        raise
+    except (OSError, RuntimeError, ValueError) as exc:
+        if deadline_monotonic is not None:
+            raise TimeoutError(
+                "held SELL recovery classification unavailable"
+            ) from exc
+        # An unreadable queue cannot prove that the deadline was satisfied.
+        return True
+
+
+def _is_exact_held_sell_command(
+    conn: sqlite3.Connection,
+    *,
+    position_id: str,
+    command_id: str,
+    held_token_id: str,
+    venue_order_id: str = "",
+    expected_state: str = "",
+) -> bool:
+    """Bind a handoff witness to the exact position-side-token command."""
+
+    if not all((position_id, command_id, held_token_id)):
+        return False
+    try:
+        row = conn.execute(
+            """
+            SELECT position_id, intent_kind, side, token_id, venue_order_id, state
+              FROM venue_commands
+             WHERE command_id = ?
+             LIMIT 1
+            """,
+            (command_id,),
+        ).fetchone()
+    except sqlite3.Error:
+        return False
+    expected_state = expected_state.strip().upper()
+    if expected_state in {
+        "UNKNOWN",
+        "SUBMIT_UNKNOWN",
+        "SUBMIT_UNKNOWN_SIDE_EFFECT",
+        "REVIEW_REQUIRED",
+    }:
+        return False
+    return bool(
+        row is not None
+        and str(row[0] or "") == position_id
+        and str(row[1] or "").upper() == "EXIT"
+        and str(row[2] or "").upper() == "SELL"
+        and str(row[3] or "") == held_token_id
+        and (
+            not venue_order_id
+            or str(row[4] or "").lower() == venue_order_id.lower()
+        )
+        and (
+            not expected_state
+            or str(row[5] or "").upper() == expected_state
+        )
+    )
+
+
+def _relinquished_global_sell_command_id(
+    conn: sqlite3.Connection | None,
+    position: Position,
+) -> str:
+    """Return the one command canonically handed from recovery to reauction.
+
+    Command state alone is never handoff proof.  An exact post-only rejection,
+    terminal no-fill debt, or authenticated residual debt must cite the command.
+    Every other command remains command-recovery owned.
+    """
+
+    if conn is None:
+        return ""
+    position_id = str(getattr(position, "trade_id", "") or "").strip()
+    if not position_id:
+        return ""
+    post_only_command_id = _post_only_cross_command_id_for_position(conn, position)
+    fak_no_fill_command_id = _fak_no_fill_command_id_for_position(conn, position)
+    raw_direction = getattr(position, "direction", "")
+    direction = str(getattr(raw_direction, "value", raw_direction) or "").lower()
+    held_token_id = str(
+        getattr(position, "no_token_id", "")
+        if direction == "buy_no"
+        else getattr(position, "token_id", "")
+    ).strip()
+    if (
+        post_only_command_id
+        and _is_exact_held_sell_command(
+            conn,
+            position_id=position_id,
+            command_id=post_only_command_id,
+            held_token_id=held_token_id,
+        )
+        and _post_only_cross_reauction_proof_for_position(conn, position)
+    ):
+        return post_only_command_id
+    if (
+        fak_no_fill_command_id
+        and _is_exact_held_sell_command(
+            conn,
+            position_id=position_id,
+            command_id=fak_no_fill_command_id,
+            held_token_id=held_token_id,
+        )
+        and _fak_no_fill_reauction_proof_for_position(conn, position)
+    ):
+        return fak_no_fill_command_id
+
+    obligation = latest_held_sell_reauction_obligation(conn, position)
+    if obligation.get("schema_version") != 4:
+        return ""
+    residual = obligation.get("residual_proof")
+    if isinstance(residual, dict):
+        residual_command_id = str(residual.get("command_id") or "").strip()
+        try:
+            residual_row = conn.execute(
+                """
+                SELECT command_id, caused_by, venue_status, source_module,
+                       payload_json
+                  FROM position_events
+                 WHERE position_id = ?
+                   AND event_type = 'EXIT_RETRY_RELEASED'
+                   AND command_id = ?
+                   AND source_module = 'src.execution.command_recovery'
+                 ORDER BY sequence_no DESC, datetime(occurred_at) DESC
+                 LIMIT 1
+                """,
+                (position_id, residual_command_id),
+            ).fetchone()
+            residual_payload = (
+                json.loads(str(residual_row[4] or "{}"))
+                if residual_row is not None
+                else {}
+            )
+        except (sqlite3.Error, TypeError, json.JSONDecodeError):
+            return ""
+        released_obligation = (
+            residual_payload.get("held_sell_reauction_obligation")
+            if isinstance(residual_payload, dict)
+            else None
+        )
+        if (
+            residual_row is None
+            or not residual_command_id
+            or not isinstance(released_obligation, dict)
+            or released_obligation.get("residual_proof") != residual
+            or str(residual_row[1] or "")
+            != f"venue_command:{residual_command_id}"
+        ):
+            return ""
+        proof_class = str(residual_payload.get("proof_class") or "")
+        obligation_token_id = str(obligation.get("held_token_id") or "").strip()
+        if (
+            proof_class
+            not in {
+                "post_fill_chain_confirmed_positive_remainder",
+                "cancel_pending_partial_exit_authenticated_remainder",
+                "terminal_positive_exit_order_fact",
+            }
+            or obligation_token_id != held_token_id
+            or str(residual.get("command_token_id") or "").strip()
+            != obligation_token_id
+            or not str(residual_payload.get("command_state") or "").strip()
+            or not _is_exact_held_sell_command(
+                conn,
+                position_id=position_id,
+                command_id=residual_command_id,
+                held_token_id=obligation_token_id,
+                expected_state=str(residual_payload.get("command_state") or ""),
+            )
+        ):
+            return ""
+        try:
+            from src.execution.command_recovery import _canonical_order_truth_cte
+
+            truth = conn.execute(
+                "WITH "
+                + _canonical_order_truth_cte()
+                + """
+                SELECT cmd.token_id, cmd.state, cmd.size,
+                       fact.fact_id, fact.state, fact.matched_size,
+                       fact.remaining_size,
+                       CASE WHEN LOWER(COALESCE(pc.direction, '')) = 'buy_no'
+                            THEN pc.no_token_id ELSE pc.token_id END,
+                       pc.shares, pc.chain_shares, pc.chain_state
+                  FROM venue_commands cmd
+                  JOIN canonical_order_truth fact
+                    ON fact.command_id = cmd.command_id
+                   AND fact.venue_order_id = cmd.venue_order_id
+                  JOIN position_current pc
+                    ON pc.position_id = cmd.position_id
+                 WHERE cmd.position_id = ? AND cmd.command_id = ?
+                 LIMIT 1
+                """,
+                (position_id, residual_command_id),
+            ).fetchone()
+            command_size = Decimal(str(truth[2]))
+            matched_size = Decimal(str(truth[5]))
+            remaining_size = Decimal(str(truth[6]))
+            current_shares = Decimal(str(truth[8]))
+            current_chain_shares = Decimal(str(truth[9]))
+            proof_matched_size = Decimal(str(residual.get("matched_size")))
+            proof_remaining_size = Decimal(
+                str(residual.get("order_remaining_size"))
+            )
+            proof_residual_shares = Decimal(str(residual.get("residual_shares")))
+        except (
+            AttributeError,
+            InvalidOperation,
+            sqlite3.Error,
+            TypeError,
+            ValueError,
+        ):
+            return ""
+        exact_tolerance = Decimal("0.000000001")
+        share_tolerance = Decimal("0.011")
+        command_state = str(truth[1] or "").upper()
+        order_fact_state = str(truth[4] or "").upper()
+        proof_shape_valid = (
+            proof_class == "post_fill_chain_confirmed_positive_remainder"
+            and command_state == "FILLED"
+            and order_fact_state == "MATCHED"
+            and command_size > 0
+            and abs(command_size - matched_size) <= exact_tolerance
+            and abs(remaining_size) <= exact_tolerance
+        ) or (
+            proof_class == "cancel_pending_partial_exit_authenticated_remainder"
+            and command_state == "CANCELLED"
+            and order_fact_state == "PARTIALLY_MATCHED"
+            and command_size > matched_size > 0
+            and abs(remaining_size) <= exact_tolerance
+            and abs(
+                current_chain_shares - (command_size - matched_size)
+            ) <= exact_tolerance
+        ) or (
+            proof_class == "terminal_positive_exit_order_fact"
+            and command_state in {"CANCELLED", "EXPIRED"}
+            and order_fact_state in {
+                "CANCEL_CONFIRMED",
+                "EXPIRED",
+                "VENUE_WIPED",
+            }
+            and command_size >= matched_size > 0
+        )
+        if (
+            truth is None
+            or str(truth[0] or "").strip() != obligation_token_id
+            or command_state
+            != str(residual_payload.get("command_state") or "").upper()
+            or str(truth[3] or "") != str(residual.get("order_fact_id") or "")
+            or order_fact_state
+            != str(residual.get("order_fact_state") or "").upper()
+            or str(truth[7] or "").strip() != obligation_token_id
+            or str(truth[10] or "").lower() != "synced"
+            or not proof_shape_valid
+            or abs(matched_size - proof_matched_size) > exact_tolerance
+            or abs(remaining_size - proof_remaining_size) > exact_tolerance
+            or current_chain_shares <= 0
+            or abs(current_shares - current_chain_shares) > share_tolerance
+            or abs(current_chain_shares - proof_residual_shares) > share_tolerance
+        ):
+            return ""
+        return residual_command_id
+
+    try:
+        row = conn.execute(
+            """
+            SELECT command_id, caused_by, venue_status, source_module, payload_json
+              FROM position_events
+             WHERE position_id = ? AND event_type = 'EXIT_RETRY_RELEASED'
+             ORDER BY sequence_no DESC, datetime(occurred_at) DESC
+             LIMIT 1
+            """,
+            (position_id,),
+        ).fetchone()
+        payload = json.loads(str(row[4] or "{}")) if row is not None else {}
+    except (sqlite3.Error, TypeError, json.JSONDecodeError):
+        return ""
+    if (
+        row is None
+        or not isinstance(payload, dict)
+        or payload.get("held_sell_reauction_obligation") != obligation
+    ):
+        return ""
+
+    if str(row[3] or "") != "src.execution.command_recovery":
+        return ""
+    command_id = str(row[0] or "").strip()
+    if not command_id or str(row[1] or "") != f"venue_command:{command_id}":
+        return ""
+    obligation_token_id = str(obligation.get("held_token_id") or "").strip()
+
+    proof_class = str(payload.get("proof_class") or "")
+    error = str(payload.get("error") or "")
+    if proof_class == "exit_point_order_terminal_no_fill_plus_open_trade_absence":
+        if (
+            str(row[2] or "") != "TERMINAL_NO_FILL"
+            or payload.get("release_reason")
+            != "GLOBAL_SELL_SNAPSHOT_REAUCTION_REQUIRED"
+            or error
+            != "global_sell_exit_terminal_no_fill_reauction:venue_terminal_no_fill"
+            or str(payload.get("command_id") or "").strip() != command_id
+            or not str(payload.get("venue_order_id") or "").strip()
+            or not str(payload.get("venue_command_state") or "").strip()
+            or not isinstance(payload.get("terminal_order_fact"), dict)
+            or not _is_exact_held_sell_command(
+                conn,
+                position_id=position_id,
+                command_id=command_id,
+                held_token_id=obligation_token_id,
+                venue_order_id=str(payload.get("venue_order_id") or ""),
+                expected_state=str(payload.get("venue_command_state") or ""),
+            )
+        ):
+            return ""
+        try:
+            from src.execution.command_recovery import (
+                _exit_command_has_positive_or_unresolved_cancel_truth,
+            )
+
+            if _exit_command_has_positive_or_unresolved_cancel_truth(
+                conn,
+                position_id=position_id,
+                command_id=command_id,
+                venue_order_id=str(payload["venue_order_id"]),
+            ):
+                return ""
+        except Exception:  # noqa: BLE001 - unreadable venue truth stays owned.
+            return ""
+        return command_id
+
+    return ""
 
 
 def has_global_sell_snapshot_reauction_retry(
@@ -458,57 +1452,308 @@ def has_global_sell_snapshot_reauction_retry(
 ) -> bool:
     """Recognize the retry from runtime or its canonical reject event."""
 
+    command_ownership = _canonical_global_sell_command_ownership(conn, position)
+    if command_ownership == "GLOBAL_NO_COMMAND":
+        return True
+    if command_ownership in {"COMMAND_OWNED", "UNKNOWN"}:
+        return False
+
     error = str(getattr(position, "last_exit_error", "") or "")
     if not error:
         error = _latest_exit_reject_error(conn, position)
+    if _is_post_only_cross_reauction_error(error):
+        return _post_only_cross_reauction_proof_for_position(conn, position)
     return _is_global_sell_snapshot_reauction_error(error)
+
+
+def has_proven_sync_no_side_effect_sell_reauction(
+    position: Position,
+    conn: sqlite3.Connection | None = None,
+) -> bool:
+    """Recognize only a command-proved synchronous SELL no-fill rejection."""
+
+    error = str(getattr(position, "last_exit_error", "") or "")
+    if not error:
+        error = _latest_exit_reject_error(conn, position)
+    if _is_post_only_cross_reauction_error(error):
+        return _post_only_cross_reauction_proof_for_position(conn, position)
+    if _is_fak_no_fill_reauction_error(error):
+        return _fak_no_fill_reauction_proof_for_position(conn, position)
+    return False
+
+
+def _canonical_global_sell_command_ownership(
+    conn: sqlite3.Connection | None,
+    position: Position,
+    *,
+    require_pending_exit: bool = True,
+) -> str:
+    """Classify the latest canonical global SELL at the command boundary.
+
+    Event sequence, not caller-supplied wall-clock timestamps, binds command
+    persistence to an EXIT_INTENT.  UNKNOWN is fail-closed at release callers.
+    """
+
+    if conn is None:
+        return "UNKNOWN"
+    if require_pending_exit and _runtime_state_value(position) != "pending_exit":
+        return "NOT_GLOBAL"
+    try:
+        exposure = position.effective_exposure()
+        if not math.isfinite(float(exposure.shares)) or float(exposure.shares) <= 0:
+            return "NOT_GLOBAL"
+    except (AttributeError, TypeError, ValueError):
+        return "UNKNOWN"
+    position_id = str(getattr(position, "trade_id", "") or "").strip()
+    if not position_id:
+        return "UNKNOWN"
+    try:
+        row = conn.execute(
+            """
+            SELECT sequence_no, payload_json
+              FROM position_events
+             WHERE position_id = ? AND event_type = 'EXIT_INTENT'
+             ORDER BY sequence_no DESC
+             LIMIT 1
+            """,
+            (position_id,),
+        ).fetchone()
+        if row is None:
+            obligation = latest_held_sell_reauction_obligation(conn, position)
+            if obligation.get("schema_version") != 4:
+                return "NOT_GLOBAL"
+            command_row = conn.execute(
+                """
+                SELECT 1 FROM venue_commands
+                 WHERE position_id = ? AND intent_kind = 'EXIT'
+                 LIMIT 1
+                """,
+                (position_id,),
+            ).fetchone()
+            return "COMMAND_OWNED" if command_row is not None else "GLOBAL_NO_COMMAND"
+        intent_sequence = int(row[0])
+        payload = json.loads(str(row[1] or "{}"))
+        if not isinstance(payload, dict):
+            return "UNKNOWN"
+        released_command_id = _relinquished_global_sell_command_id(conn, position)
+        if (
+            payload.get("exit_intent_reason") != "GLOBAL_CAPITAL_OPTIMAL_SELL"
+            and not released_command_id
+        ):
+            return (
+                "COMMAND_OWNED"
+                if latest_held_sell_reauction_obligation(conn, position).get(
+                    "schema_version"
+                )
+                == 4
+                else "NOT_GLOBAL"
+            )
+        command_rows = conn.execute(
+            """
+            SELECT command_id
+              FROM venue_commands
+             WHERE position_id = ? AND intent_kind = 'EXIT'
+            """,
+            (position_id,),
+        ).fetchall()
+    except (sqlite3.Error, TypeError, ValueError, json.JSONDecodeError):
+        return "UNKNOWN"
+    if not command_rows:
+        return "GLOBAL_NO_COMMAND"
+    for command_row in command_rows:
+        command_id = str(command_row[0] or "").strip()
+        if not command_id:
+            return "UNKNOWN"
+        if command_id == released_command_id:
+            continue
+        try:
+            binding = conn.execute(
+                """
+                SELECT sequence_no
+                  FROM position_events
+                 WHERE position_id = ?
+                   AND event_type = 'EXIT_ORDER_POSTED'
+                   AND command_id = ?
+                 ORDER BY sequence_no DESC
+                 LIMIT 1
+                """,
+                (position_id, command_id),
+            ).fetchone()
+        except sqlite3.Error:
+            return "UNKNOWN"
+        if binding is None or int(binding[0]) > intent_sequence:
+            return "COMMAND_OWNED"
+    return "GLOBAL_NO_COMMAND"
 
 
 def needs_global_sell_snapshot_reauction(
     position: Position,
     conn: sqlite3.Connection | None = None,
 ) -> bool:
-    """Whether canonical runtime state carries an unserved fresh-cut debt."""
+    """Compatibility boolean view of global SELL debt classification."""
 
-    runtime_error = _is_global_sell_snapshot_reauction_error(
-        getattr(position, "last_exit_error", "")
+    return (
+        classify_global_sell_snapshot_reauction_debt(
+            position,
+            conn,
+        )
+        is GlobalSellSnapshotReauctionDebtStatus.DEBT
     )
+
+
+def classify_global_sell_snapshot_reauction_debt(
+    position: Position,
+    conn: sqlite3.Connection | None,
+    *,
+    auxiliary_deadline: float | None = None,
+) -> GlobalSellSnapshotReauctionDebtStatus:
+    """Classify one global SELL debt without borrowing the primary reserve.
+
+    SCOPE: one held position's durable reauction obligation. DRAIN: the next
+    monitor pass repeats this bounded classification from canonical truth.
+    RESET: only an authoritative no-debt result or a recovered obligation.
+    """
+
+    if (
+        auxiliary_deadline is not None
+        and _time_module.monotonic() >= float(auxiliary_deadline)
+    ):
+        return GlobalSellSnapshotReauctionDebtStatus.DEFERRED
     if conn is None:
-        return runtime_error
+        runtime_error = _is_global_sell_snapshot_reauction_error(
+            getattr(position, "last_exit_error", "")
+        )
+        return (
+            GlobalSellSnapshotReauctionDebtStatus.DEBT
+            if runtime_error
+            and not _is_post_only_cross_reauction_error(
+                getattr(position, "last_exit_error", "")
+            )
+            else GlobalSellSnapshotReauctionDebtStatus.NO_DEBT
+        )
+
     trade_id = str(getattr(position, "trade_id", "") or "")
     if not trade_id:
-        return False
+        return GlobalSellSnapshotReauctionDebtStatus.NO_DEBT
+
+    def classify_from_row(row, payload, obligation):
+        if obligation.get("schema_version") == 4:
+            unarmed_residual = (
+                isinstance(obligation.get("residual_proof"), dict)
+                and not str(obligation.get("request_id") or "").strip()
+                and not str(obligation.get("attempt_identity") or "").strip()
+                and not str(obligation.get("completion_deadline_at") or "").strip()
+            )
+            closed_market_hold = (
+                str(row[0]) == "MONITOR_REFRESHED"
+                and payload.get("semantic_event")
+                == "MARKET_CLOSED_HOLD_TO_SETTLEMENT"
+                and str(payload.get("hold_reason") or "")
+                in {
+                    "MARKET_CLOSED_AWAITING_SETTLEMENT",
+                    "DAY0_HARD_FACT_BIN_DEAD_MARKET_CLOSED",
+                }
+                and payload.get("exit_order_submitted") is False
+                and payload.get("exit_failure") is False
+            )
+            if unarmed_residual and closed_market_hold:
+                return GlobalSellSnapshotReauctionDebtStatus.NO_DEBT
+            return (
+                GlobalSellSnapshotReauctionDebtStatus.DEBT
+                if _held_sell_reauction_recovery_due(
+                    obligation,
+                    durable_reserved=(
+                        payload.get("global_sell_reauction_status")
+                        == "durable_wake_reserved"
+                    ),
+                    deadline_monotonic=auxiliary_deadline,
+                )
+                else GlobalSellSnapshotReauctionDebtStatus.NO_DEBT
+            )
+        if payload.get("global_sell_reauction_status") == "durable_wake_reserved":
+            return GlobalSellSnapshotReauctionDebtStatus.NO_DEBT
+        canonical_debt = (
+            str(row[0]) == "EXIT_RETRY_RELEASED"
+            and payload.get("release_reason")
+            == "GLOBAL_SELL_SNAPSHOT_REAUCTION_REQUIRED"
+            and _is_global_sell_snapshot_reauction_error(payload.get("error"))
+        )
+        if canonical_debt and _is_post_only_cross_reauction_error(payload.get("error")):
+            canonical_debt = _post_only_cross_reauction_proof_for_position(
+                conn,
+                position,
+            )
+        return (
+            GlobalSellSnapshotReauctionDebtStatus.DEBT
+            if canonical_debt or bool(obligation)
+            else GlobalSellSnapshotReauctionDebtStatus.NO_DEBT
+        )
+
     try:
-        row = conn.execute(
-            """
-            SELECT event_type, payload_json
-             FROM position_events
-             WHERE position_id = ?
-               AND event_type = 'EXIT_RETRY_RELEASED'
-             ORDER BY sequence_no DESC, datetime(occurred_at) DESC
-             LIMIT 1
-            """,
-            (trade_id,),
-        ).fetchone()
-    except (sqlite3.Error, AttributeError):
-        return False
-    if row is None or str(row[0]) != "EXIT_RETRY_RELEASED":
-        return False
-    try:
-        payload = json.loads(str(row[1] or "{}"))
-    except (TypeError, json.JSONDecodeError):
-        return False
-    if (
-        payload.get("global_sell_reauction_status")
-        == "durable_wake_reserved"
+        if auxiliary_deadline is None:
+            row = conn.execute(
+                """
+                SELECT event_type, payload_json
+                 FROM position_events
+                 WHERE position_id = ?
+                   AND event_type IN ('EXIT_RETRY_RELEASED', 'MONITOR_REFRESHED')
+                 ORDER BY sequence_no DESC, datetime(occurred_at) DESC
+                 LIMIT 1
+                """,
+                (trade_id,),
+            ).fetchone()
+            if row is None:
+                return GlobalSellSnapshotReauctionDebtStatus.NO_DEBT
+            payload = json.loads(str(row[1] or "{}"))
+            if not isinstance(payload, dict):
+                return GlobalSellSnapshotReauctionDebtStatus.NO_DEBT
+            obligation = latest_held_sell_reauction_obligation(
+                conn,
+                position,
+            )
+            return classify_from_row(row, payload, obligation)
+        with _held_monitor_preparation_deadline(
+            conn,
+            float(auxiliary_deadline),
+        ) as ensure_live:
+            row = conn.execute(
+                """
+                SELECT event_type, payload_json
+                 FROM position_events
+                 WHERE position_id = ?
+                   AND event_type IN ('EXIT_RETRY_RELEASED', 'MONITOR_REFRESHED')
+                 ORDER BY sequence_no DESC, datetime(occurred_at) DESC
+                 LIMIT 1
+                """,
+                (trade_id,),
+            ).fetchone()
+            ensure_live()
+            if row is None:
+                return GlobalSellSnapshotReauctionDebtStatus.NO_DEBT
+            payload = json.loads(str(row[1] or "{}"))
+            if not isinstance(payload, dict):
+                return GlobalSellSnapshotReauctionDebtStatus.DEFERRED
+            obligation = latest_held_sell_reauction_obligation(
+                conn,
+                position,
+                strict=True,
+                deadline_monotonic=auxiliary_deadline,
+            )
+            ensure_live()
+            return classify_from_row(row, payload, obligation)
+    except (
+        AttributeError,
+        IndexError,
+        sqlite3.Error,
+        TimeoutError,
+        TypeError,
+        ValueError,
     ):
-        return False
-    canonical_debt = (
-        payload.get("release_reason")
-        == "GLOBAL_SELL_SNAPSHOT_REAUCTION_REQUIRED"
-        and _is_global_sell_snapshot_reauction_error(payload.get("error"))
-    )
-    return canonical_debt
+        return (
+            GlobalSellSnapshotReauctionDebtStatus.DEFERRED
+            if auxiliary_deadline is not None
+            else GlobalSellSnapshotReauctionDebtStatus.NO_DEBT
+        )
 
 
 def _is_runtime_submit_gate_block_error(error: str) -> bool:
@@ -630,13 +1875,64 @@ def _venue_open_exit_sell_order(
         remaining = _venue_open_order_remaining_size(payload)
         if remaining is None or remaining <= 0 or remaining > expected + tolerance:
             continue
+        price = _positive_decimal(
+            _payload_first(payload, "price", "limit_price")
+        )
+        order_type = str(
+            _payload_first(payload, "order_type", "orderType", "type") or ""
+        ).strip().upper()
+        post_only = _payload_first(payload, "post_only", "postOnly") is True
+        if (
+            price is None
+            or not LIVE_ORDER_MIN_UNIT_PRICE <= price <= LIVE_ORDER_MAX_UNIT_PRICE
+            or order_type not in {"GTC", "GTD"}
+            or not post_only
+        ):
+            # INV-47 SCOPE: only this matching token's unproved open SELL is
+            # canceled. DRAIN: authenticated cancel acknowledgment/chain
+            # recovery clears it. RESET: a later proved maker order is eligible.
+            cancel_order = getattr(clob, "cancel_order", None)
+            if callable(cancel_order):
+                try:
+                    cancel_order(order_id)
+                except Exception as exc:  # noqa: BLE001
+                    logger.critical(
+                        "UNSAFE_OPEN_EXIT_CANCEL_FAILED token=%s order=%s: %s",
+                        token_id,
+                        order_id,
+                        exc,
+                    )
+                else:
+                    logger.error(
+                        "UNSAFE_OPEN_EXIT_CANCELED token=%s order=%s price=%s "
+                        "order_type=%s post_only=%s",
+                        token_id,
+                        order_id,
+                        price,
+                        order_type or "ABSENT",
+                        post_only,
+                    )
+            else:
+                logger.critical(
+                    "UNSAFE_OPEN_EXIT_CANCEL_UNAVAILABLE token=%s order=%s",
+                    token_id,
+                    order_id,
+                )
+            return {
+                "unsafe_open_exit_order": True,
+                "command_id": "unsafe_venue_open_order",
+                "state": status or "LIVE",
+                "venue_order_id": order_id,
+                "price": str(price or ""),
+                "size": str(remaining),
+            }
         return {
             "command_id": "venue_open_order",
             "state": status or "LIVE",
             "venue_order_id": order_id,
             "updated_at": _payload_first(payload, "updated_at", "updatedAt") or "",
             "created_at": _payload_first(payload, "created_at", "createdAt") or "",
-            "price": _payload_first(payload, "price", "limit_price") or "",
+            "price": str(price),
             "size": str(remaining),
         }
     return None
@@ -655,17 +1951,31 @@ def _active_exit_sell_command(
     try:
         return conn.execute(
             f"""
-            SELECT command_id, state, venue_order_id, updated_at, created_at
-              FROM venue_commands
-             WHERE position_id = ?
-               AND token_id = ?
-               AND side = 'SELL'
-               AND intent_kind = 'EXIT'
-               AND UPPER(COALESCE(state, '')) IN ({placeholders})
-             ORDER BY datetime(updated_at) DESC, datetime(created_at) DESC, command_id DESC
+            SELECT command.command_id, command.state, command.venue_order_id,
+                   command.updated_at, command.created_at
+              FROM venue_commands AS command
+              JOIN venue_submission_envelopes AS envelope
+                ON envelope.envelope_id = command.envelope_id
+               AND envelope.post_only = 1
+               AND UPPER(envelope.order_type) IN ('GTC', 'GTD')
+               AND envelope.price BETWEEN ? AND ?
+             WHERE command.position_id = ?
+               AND command.token_id = ?
+               AND command.side = 'SELL'
+               AND command.intent_kind = 'EXIT'
+               AND UPPER(COALESCE(command.state, '')) IN ({placeholders})
+             ORDER BY datetime(command.updated_at) DESC,
+                      datetime(command.created_at) DESC,
+                      command.command_id DESC
              LIMIT 1
             """,
-            (position_id, token_id, *states),
+            (
+                str(LIVE_ORDER_MIN_UNIT_PRICE),
+                str(LIVE_ORDER_MAX_UNIT_PRICE),
+                position_id,
+                token_id,
+                *states,
+            ),
         ).fetchone()
     except sqlite3.Error:
         return None
@@ -691,6 +2001,10 @@ def _active_exit_sell_for_lock(
         token_id=token_id,
         expected_shares=float(getattr(position, "effective_shares", 0.0) or 0.0),
     )
+
+
+def _unsafe_open_exit_cancel_pending(row: object) -> bool:
+    return isinstance(row, Mapping) and row.get("unsafe_open_exit_order") is True
 
 
 def _active_exit_already_projected(
@@ -949,6 +2263,7 @@ class ExitIntent:
     submit_order_type: str | None = None
     close_position: bool = True
     capital_certificate: Mapping[str, object] | None = None
+    global_sell_receipt_closure: GlobalSellReceiptClosure | None = None
     decision_id: str = ""
     probability_receipt: Mapping[str, object] | None = None
     fresh_prob: float | None = None
@@ -1007,7 +2322,9 @@ class GlobalSellExecutionAuthority:
     def _identity(actuation: object, jit_candidate: object) -> str:
         from src.engine.global_single_order_auction import GlobalSingleOrderActuation
         from src.solve.solver import (
+            CurrentMakerFillWitness,
             GlobalSingleOrderSellCandidate,
+            _maker_witness_rejection,
             executable_curve_identity,
         )
 
@@ -1037,11 +2354,71 @@ class GlobalSellExecutionAuthority:
             "exit_authority_status",
             "exit_authority_reason",
             "sell_action_authority_identity",
+            "execution_mode",
+            "fill_probability",
+            "rest_deadline_minutes",
         )
         if any(
             getattr(selected, field) != getattr(jit_candidate, field)
             for field in fixed_fields
         ):
+            raise ValueError("GLOBAL_SELL_EXECUTION_JIT_IDENTITY_SUPERSEDED")
+        if selected.execution_mode == "MAKER_REST":
+            selected_witness = selected.maker_fill_witness
+            jit_witness = jit_candidate.maker_fill_witness
+            if not isinstance(
+                selected_witness, CurrentMakerFillWitness
+            ) or not isinstance(jit_witness, CurrentMakerFillWitness):
+                raise ValueError("GLOBAL_SELL_EXECUTION_MAKER_WITNESS_INVALID")
+            try:
+                # Recompute each nested hash at the final submit boundary. A
+                # candidate/source pair that merely agrees with a forged
+                # witness_identity is not canonical maker-fill authority.
+                selected_witness.__post_init__()
+                jit_witness.__post_init__()
+            except ValueError as exc:
+                raise ValueError(
+                    "GLOBAL_SELL_EXECUTION_MAKER_WITNESS_SUPERSEDED"
+                ) from exc
+            if (
+                _maker_witness_rejection(
+                    selected,
+                    decision_at_utc=actuation.decision_at_utc,
+                )
+                is not None
+                or _maker_witness_rejection(
+                    jit_candidate,
+                    decision_at_utc=jit_candidate.book_captured_at_utc,
+                )
+                is not None
+            ):
+                raise ValueError("GLOBAL_SELL_EXECUTION_MAKER_WITNESS_SUPERSEDED")
+            if (
+                selected.fill_probability_source
+                != selected_witness.witness_identity
+                or jit_candidate.fill_probability_source
+                != jit_witness.witness_identity
+            ):
+                raise ValueError("GLOBAL_SELL_EXECUTION_MAKER_WITNESS_INVALID")
+            # Snapshot id/hash and candidate binding may change on the final
+            # book recapture; each witness already proves its own exact binding.
+            if any(
+                getattr(selected_witness, field) != getattr(jit_witness, field)
+                for field in (
+                    "asset_epoch_identity",
+                    "limit_price",
+                    "rest_deadline_minutes",
+                    "outcomes",
+                    "source_identity",
+                    "model_identity",
+                    "sample_identity",
+                    "training_cutoff_at_utc",
+                    "issued_at_utc",
+                    "valid_until_at_utc",
+                )
+            ):
+                raise ValueError("GLOBAL_SELL_EXECUTION_MAKER_WITNESS_SUPERSEDED")
+        elif selected.fill_probability_source != jit_candidate.fill_probability_source:
             raise ValueError("GLOBAL_SELL_EXECUTION_JIT_IDENTITY_SUPERSEDED")
         curve = jit_candidate.executable_sell_curve
         mean_sell = (
@@ -1077,7 +2454,8 @@ class GlobalSellExecutionAuthority:
             or expected_growth.expected_ev_usd <= 0.0
         ):
             raise ValueError("GLOBAL_SELL_EXECUTION_ECONOMICS_INVALID")
-        proceeds, _vwap, limit = curve.proceeds_for_shares(decision.shares)
+        proposal = jit_candidate.economic_sell_curve
+        proceeds, _vwap, limit = proposal.proceeds_for_shares(decision.shares)
         if proceeds < decision.cash_proceeds_usd or limit < decision.limit_price:
             raise ValueError("GLOBAL_SELL_EXECUTION_ECONOMICS_WORSENED")
         deadline = jit_candidate.book_captured_at_utc + curve.quote_ttl
@@ -1101,6 +2479,17 @@ class GlobalSellExecutionAuthority:
             jit_candidate.exit_authority_status,
             jit_candidate.exit_authority_reason,
             jit_candidate.sell_action_authority_identity,
+            jit_candidate.execution_mode,
+            jit_candidate.fill_probability,
+            jit_candidate.fill_probability_source,
+            (
+                jit_candidate.maker_fill_witness.witness_identity
+                if jit_candidate.execution_mode == "MAKER_REST"
+                else ""
+            ),
+            jit_candidate.rest_deadline_minutes,
+            proposal.levels[0].price,
+            proposal.levels[0].size,
             deadline.isoformat(),
             decision.shares,
             decision.limit_price,
@@ -1130,6 +2519,234 @@ class GlobalSellExecutionAuthority:
         if self.authority_identity != expected:
             raise ValueError("GLOBAL_SELL_EXECUTION_AUTHORITY_IDENTITY_MISMATCH")
 
+    def limit_price(self) -> Decimal:
+        """Return the legal submitted SELL limit bound into JIT economics."""
+
+        from src.contracts.venue_submission_envelope import (
+            assert_live_order_unit_price,
+        )
+
+        candidate = self.jit_candidate
+        curve = candidate.executable_sell_curve
+        best_bid = Decimal(curve.levels[0].price)
+        if candidate.execution_mode == "TAKER_LIMIT":
+            economic_limit = Decimal(self.actuation.decision.limit_price)
+            limit = (
+                min(economic_limit, LIVE_ORDER_MAX_UNIT_PRICE)
+                / Decimal(curve.min_tick)
+            ).to_integral_value(rounding=ROUND_FLOOR) * Decimal(curve.min_tick)
+            try:
+                bounded = assert_live_order_unit_price(limit)
+            except ValueError as exc:
+                raise ValueError(
+                    "GLOBAL_SELL_LEGAL_TAKER_PRICE_UNAVAILABLE:"
+                    f"best_bid={best_bid}:tick={curve.min_tick}"
+                ) from exc
+            if best_bid < bounded or bounded > economic_limit:
+                raise ValueError("GLOBAL_SELL_TAKER_PRICE_NOT_MARKETABLE")
+            return bounded
+        try:
+            limit = Decimal(candidate.economic_sell_curve.levels[0].price)
+        except (AttributeError, IndexError, TypeError, ValueError) as exc:
+            raise ValueError(
+                "GLOBAL_SELL_LEGAL_MAKER_PRICE_UNAVAILABLE:proposal_missing"
+            ) from exc
+        try:
+            bounded = assert_live_order_unit_price(limit)
+        except ValueError as exc:
+            raise ValueError(
+                "GLOBAL_SELL_LEGAL_MAKER_PRICE_UNAVAILABLE:"
+                f"best_bid={best_bid}:tick={curve.min_tick}"
+            ) from exc
+        if bounded <= best_bid:
+            raise ValueError("GLOBAL_SELL_MAKER_PRICE_NOT_PASSIVE")
+        if bounded != best_bid + Decimal(curve.min_tick):
+            raise ValueError("GLOBAL_SELL_MAKER_PRICE_NOT_NEAREST_TICK")
+        return bounded
+
+    def maker_limit_price(self) -> Decimal:
+        """Compatibility wrapper for callers that require maker-rest authority."""
+
+        if self.jit_candidate.execution_mode != "MAKER_REST":
+            raise ValueError("GLOBAL_SELL_EXECUTION_MODE_NOT_MAKER_REST")
+        return self.limit_price()
+
+
+@dataclass(frozen=True)
+class BranchwiseDominantSellAuthority:
+    """Typed proof that every current payoff draw values HOLD at zero.
+
+    This is not a second statistical SELL route. It is the degenerate case in
+    which an in-band cash bid strictly dominates a zero-valued token in every
+    draw, so a global capital comparison has no competing state to resolve.
+    """
+
+    position_id: str
+    token_id: str
+    held_shares: str
+    probability_content_identity: str
+    probability_witness_identity: str
+    probability_observed_at: str
+    support_identity: str
+    authority_identity: str
+
+    @staticmethod
+    def _support_identity(samples: object) -> str:
+        try:
+            values = tuple(float(value) for value in samples)
+        except (TypeError, ValueError):
+            raise ValueError("BRANCHWISE_SELL_SUPPORT_INVALID") from None
+        if not values or not all(
+            math.isfinite(value) and 0.0 <= value <= 1e-12
+            for value in values
+        ):
+            raise ValueError("BRANCHWISE_SELL_SUPPORT_NOT_ZERO")
+        return hashlib.sha256(
+            json.dumps(values, separators=(",", ":"), allow_nan=False).encode("utf-8")
+        ).hexdigest()
+
+    @staticmethod
+    def _identity_payload(
+        *,
+        position_id: str,
+        token_id: str,
+        held_shares: str,
+        probability_content_identity: str,
+        probability_witness_identity: str,
+        probability_observed_at: str,
+        support_identity: str,
+    ) -> dict[str, str]:
+        return {
+            "position_id": position_id,
+            "token_id": token_id,
+            "held_shares": held_shares,
+            "probability_content_identity": probability_content_identity,
+            "probability_witness_identity": probability_witness_identity,
+            "probability_observed_at": probability_observed_at,
+            "support_identity": support_identity,
+        }
+
+    @classmethod
+    def from_current(
+        cls,
+        position: Position,
+        exit_context: ExitContext,
+    ) -> "BranchwiseDominantSellAuthority":
+        try:
+            fresh_prob = float(exit_context.fresh_prob)
+            best_bid = float(exit_context.best_bid)
+        except (TypeError, ValueError):
+            raise ValueError("BRANCHWISE_SELL_CURRENT_EVIDENCE_INVALID") from None
+        if (
+            not exit_context.fresh_prob_is_fresh
+            or not exit_context.current_market_price_is_fresh
+            or not math.isfinite(fresh_prob)
+            or not 0.0 <= fresh_prob <= 1e-12
+            or not math.isfinite(best_bid)
+            or not 0.05 <= best_bid <= 0.95
+        ):
+            raise ValueError("BRANCHWISE_SELL_CURRENT_EVIDENCE_INVALID")
+        receipt = exit_context.probability_receipt
+        if not isinstance(receipt, Mapping):
+            raise ValueError("BRANCHWISE_SELL_PROBABILITY_RECEIPT_MISSING")
+        probability_content_identity = str(
+            receipt.get("probability_content_identity") or ""
+        ).strip()
+        probability_witness_identity = str(
+            receipt.get("probability_witness_identity") or ""
+        ).strip()
+        probability_observed_at = str(
+            getattr(position, "last_monitor_at", "") or ""
+        ).strip()
+        raw_direction = getattr(position, "direction", "")
+        direction = str(getattr(raw_direction, "value", raw_direction) or "").lower()
+        token_id = str(
+            getattr(position, "no_token_id", "")
+            if direction == "buy_no"
+            else getattr(position, "token_id", "")
+        ).strip()
+        position_id = str(getattr(position, "trade_id", "") or "").strip()
+        held_shares = str(getattr(position, "effective_shares", "") or "").strip()
+        if not all(
+            (
+                position_id,
+                token_id,
+                held_shares,
+                probability_content_identity,
+                probability_witness_identity,
+                probability_observed_at,
+            )
+        ):
+            raise ValueError("BRANCHWISE_SELL_IDENTITY_INCOMPLETE")
+        support_identity = cls._support_identity(
+            getattr(position, "_current_global_held_probability_samples", None)
+        )
+        payload = cls._identity_payload(
+            position_id=position_id,
+            token_id=token_id,
+            held_shares=held_shares,
+            probability_content_identity=probability_content_identity,
+            probability_witness_identity=probability_witness_identity,
+            probability_observed_at=probability_observed_at,
+            support_identity=support_identity,
+        )
+        return cls(
+            **payload,
+            authority_identity=hashlib.sha256(
+                json.dumps(payload, sort_keys=True, separators=(",", ":")).encode(
+                    "utf-8"
+                )
+            ).hexdigest(),
+        )
+
+    def __post_init__(self) -> None:
+        payload = self._identity_payload(
+            position_id=self.position_id,
+            token_id=self.token_id,
+            held_shares=self.held_shares,
+            probability_content_identity=self.probability_content_identity,
+            probability_witness_identity=self.probability_witness_identity,
+            probability_observed_at=self.probability_observed_at,
+            support_identity=self.support_identity,
+        )
+        if not all(payload.values()):
+            raise ValueError("BRANCHWISE_SELL_IDENTITY_INCOMPLETE")
+        expected = hashlib.sha256(
+            json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+        if self.authority_identity != expected:
+            raise ValueError("BRANCHWISE_SELL_AUTHORITY_IDENTITY_MISMATCH")
+
+
+def _global_sell_execution_authority_shape_error(
+    authority: object | None,
+) -> str | None:
+    """Validate immutable SELL authority without relying on module object identity."""
+
+    if authority is None:
+        return "global_sell_execution_authority_required"
+    authority_type = type(authority)
+    dataclass_fields = getattr(authority_type, "__dataclass_fields__", None)
+    dataclass_params = getattr(authority_type, "__dataclass_params__", None)
+    if (
+        not isinstance(dataclass_fields, dict)
+        or tuple(dataclass_fields) != (
+            "actuation",
+            "jit_candidate",
+            "authority_identity",
+        )
+        or dataclass_params is None
+        or not bool(getattr(dataclass_params, "frozen", False))
+        or not callable(getattr(authority, "__post_init__", None))
+        or not callable(getattr(authority, "limit_price", None))
+    ):
+        return "global_sell_execution_authority_invalid"
+    try:
+        authority.__post_init__()
+    except (AttributeError, TypeError, ValueError):
+        return "global_sell_execution_authority_invalid"
+    return None
+
 
 def place_sell_order(
     *,
@@ -1150,7 +2767,12 @@ def place_sell_order(
     decision_id: str = "",
     q_version: str = "",
     execution_proof_verified: bool = False,
+    marketable_sell_certificate: Mapping[str, object] | None = None,
+    marketable_sell_certificate_identity: str = "",
+    marketable_sell_execution_authority: object | None = None,
+    global_sell_execution_authority: object | None = None,
     execution_authority_deadline_utc: str = "",
+    global_sell_receipt_closure: GlobalSellReceiptClosure | None = None,
 ) -> OrderResult:
     """Thin compatibility adapter over the executor-level exit-order path."""
 
@@ -1174,7 +2796,12 @@ def place_sell_order(
         executable_snapshot_min_tick_size=executable_snapshot_min_tick_size,
         executable_snapshot_min_order_size=executable_snapshot_min_order_size,
         executable_snapshot_neg_risk=executable_snapshot_neg_risk,
+        marketable_sell_certificate=marketable_sell_certificate,
+        marketable_sell_certificate_identity=marketable_sell_certificate_identity,
+        marketable_sell_execution_authority=marketable_sell_execution_authority,
+        global_sell_execution_authority=global_sell_execution_authority,
         execution_authority_deadline_utc=execution_authority_deadline_utc,
+        global_sell_receipt_closure=global_sell_receipt_closure,
     )
     deadline_error = _exit_execution_authority_deadline_error(intent)
     if deadline_error is not None:
@@ -1232,19 +2859,38 @@ def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def _commit_exit_write_boundary(conn: sqlite3.Connection | None, *, stage: str) -> None:
+def _commit_exit_write_boundary(
+    conn: sqlite3.Connection | None,
+    *,
+    stage: str,
+    deadline_monotonic: float | None = None,
+) -> bool:
     """Release trade DB writes before slow exit work or venue I/O."""
 
     if conn is None:
-        return
+        return True
     try:
-        conn.commit()
+        if deadline_monotonic is None:
+            conn.commit()
+        else:
+            with _held_monitor_preparation_deadline(
+                conn,
+                float(deadline_monotonic),
+            ) as ensure_live:
+                conn.commit()
+                ensure_live()
     except Exception as exc:  # noqa: BLE001
+        try:
+            conn.rollback()
+        except Exception:  # noqa: BLE001 - preserve the commit failure.
+            pass
         logger.warning(
             "exit lifecycle write-boundary commit failed at %s: %s",
             stage,
             exc,
         )
+        return False
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -1566,7 +3212,7 @@ def mark_market_closed_hold_to_settlement(
     error: str = "market_closed_non_accepting_orders",
     conn: sqlite3.Connection | None = None,
     preserve_exit_reason: bool = False,
-) -> None:
+) -> bool:
     """Record a market-closed hold without manufacturing a sell failure.
 
     Once the market is closed, quote freshness is no longer a solvable exit
@@ -1575,6 +3221,8 @@ def mark_market_closed_hold_to_settlement(
     and the position must keep flowing through held-position redecision and
     settlement harvesting.
     """
+
+    position_before = copy.deepcopy(vars(position))
 
     current_state = _runtime_state_value(position)
     if current_state in {
@@ -1619,14 +3267,28 @@ def mark_market_closed_hold_to_settlement(
         validations.append("monitor_probability_provenance_missing")
     if reason not in validations:
         validations.append(reason)
+    if "closed_market_hold_no_action_authority" not in validations:
+        validations.append("closed_market_hold_no_action_authority")
     position.applied_validations = validations
-    _dual_write_market_closed_hold_if_available(
+    position.last_monitor_prob_is_fresh = False
+    position.last_monitor_market_price_is_fresh = False
+    position.last_monitor_edge = None
+    position.last_monitor_market_price = None
+    position.last_monitor_best_bid = None
+    position.last_monitor_best_ask = None
+    position.last_monitor_market_vig = None
+    canonical_written = _dual_write_market_closed_hold_if_available(
         conn,
         position,
         reason=reason,
         error=error,
         preserve_exit_reason=preserve_exit_reason,
     )
+    succeeded = conn is None or canonical_written
+    if not succeeded:
+        vars(position).clear()
+        vars(position).update(position_before)
+    return succeeded
 
 
 def _restore_last_monitor_snapshot_for_closed_hold(
@@ -1727,7 +3389,7 @@ def _dual_write_market_closed_hold_if_available(
             reason=reason,
             error=error,
         ):
-            return False
+            return True
         monitor_basis_sequence_no = _latest_monitor_sequence_no(conn, trade_id)
         idempotency_key = _market_closed_hold_idempotency_key(
             trade_id=trade_id,
@@ -1737,16 +3399,15 @@ def _dual_write_market_closed_hold_if_available(
         )
         sequence_no = _next_canonical_sequence_no(conn, trade_id)
         occurred_at = datetime.now(timezone.utc).isoformat()
-        _restore_last_monitor_snapshot_for_closed_hold(conn, position)
         position.last_monitor_at = occurred_at
-        if "closed_market_hold_preserved_monitor_evidence" not in position.applied_validations:
-            position.applied_validations.append("closed_market_hold_preserved_monitor_evidence")
         phase_after = _runtime_state_value(position) or LifecyclePhase.DAY0_WINDOW.value
         events, projection = build_monitor_refreshed_canonical_write(
             position,
             sequence_no=sequence_no,
             phase_after=phase_after,
             source_module="src.execution.exit_lifecycle",
+            decision_unavailable_reason=reason,
+            decision_unavailable_trigger=reason,
         )
         event = dict(events[0])
         payload = json.loads(str(event.get("payload_json") or "{}"))
@@ -1779,7 +3440,12 @@ def _dual_write_market_closed_hold_if_available(
             append_many_and_project(conn, [event], projection)
         except sqlite3.IntegrityError as exc:
             if _is_position_event_idempotency_collision(exc):
-                return False
+                return _has_equivalent_market_closed_hold(
+                    conn,
+                    trade_id,
+                    reason=reason,
+                    error=error,
+                )
             raise
         return True
     except Exception as exc:  # noqa: BLE001 - monitor can retry next cycle
@@ -1957,30 +3623,33 @@ def _exit_token_id(position: Position) -> str:
     return str(token_id or "").strip()
 
 
-def _latest_fresh_snapshot_min_order(
-    position: Position,
+def _latest_fresh_snapshot_min_order_for_token(
+    token_id: str,
     *,
     conn: sqlite3.Connection | None,
     now: datetime | None = None,
 ) -> Decimal | None:
-    """min_order_size of the latest FRESH executable snapshot for the exit token.
+    """Return current min size from one fresh, non-invalidated token snapshot.
 
     C5: freshness requires a non-null, unexpired ``freshness_deadline``. A null
     or expired snapshot cannot suppress a live exit/re-decision — it is treated
-    as absent. Returns None when no fresh snapshot exists.
+    as absent. A later market-channel invalidation likewise makes the snapshot
+    unusable until a newer immutable snapshot exists. Malformed authority never
+    falls back to an older row.
     """
 
     if conn is None:
         return None
-    token_id = _exit_token_id(position)
-    if not token_id:
+    clean_token_id = str(token_id or "").strip()
+    if not clean_token_id:
         return None
+    checked_at = (now or _utcnow()).astimezone(timezone.utc)
     saved = conn.row_factory
     conn.row_factory = sqlite3.Row
     try:
         row = conn.execute(
             """
-            SELECT min_order_size
+            SELECT snapshot_id
               FROM executable_market_snapshots
              WHERE selected_outcome_token_id = ?
                AND freshness_deadline IS NOT NULL
@@ -1988,13 +3657,42 @@ def _latest_fresh_snapshot_min_order(
              ORDER BY captured_at DESC, snapshot_id DESC
              LIMIT 1
             """,
-            (token_id, (now or _utcnow()).astimezone(timezone.utc).isoformat()),
+            (clean_token_id, checked_at.isoformat()),
         ).fetchone()
     except sqlite3.Error:
         return None
     finally:
         conn.row_factory = saved
-    return _positive_decimal(row["min_order_size"] if row is not None else None)
+    if row is None:
+        return None
+    try:
+        from src.state.snapshot_repo import get_snapshot, snapshot_is_invalidated
+
+        snapshot = get_snapshot(conn, str(row["snapshot_id"] or ""))
+        if (
+            snapshot is None
+            or snapshot.selected_outcome_token_id != clean_token_id
+            or snapshot_is_invalidated(conn, snapshot, checked_at=checked_at)
+        ):
+            return None
+        return _positive_decimal(snapshot.min_order_size)
+    except (sqlite3.Error, InvalidOperation, TypeError, ValueError):
+        return None
+
+
+def _latest_fresh_snapshot_min_order(
+    position: Position,
+    *,
+    conn: sqlite3.Connection | None,
+    now: datetime | None = None,
+) -> Decimal | None:
+    """min_order_size of the current executable snapshot for the exit token."""
+
+    return _latest_fresh_snapshot_min_order_for_token(
+        _exit_token_id(position),
+        conn=conn,
+        now=now,
+    )
 
 
 def _dust_evidence_marks_non_executable(evidence: str) -> bool:
@@ -2012,6 +3710,7 @@ def _is_non_executable_dust_hold(
     position: Position,
     *,
     conn: sqlite3.Connection | None = None,
+    current_min_order_size: object = None,
 ) -> bool:
     """True for dust/min-size holds that redecision cannot make executable."""
 
@@ -2021,19 +3720,17 @@ def _is_non_executable_dust_hold(
     exit_state = getattr(exit_state, "value", exit_state)
     if str(exit_state or "") != "backoff_exhausted":
         return False
-    # C5: a FRESH snapshot is authoritative both ways. If it proves the size is
-    # below min_order -> dust hold; if it proves the size is executable -> NOT
-    # dust, and a stale "[DUST:...]" reason string may not suppress re-decision.
-    # Historical dust text is a fallback ONLY when no fresh snapshot exists.
-    fresh_min = _latest_fresh_snapshot_min_order(position, conn=conn)
-    if fresh_min is not None:
-        shares = _positive_decimal(getattr(position, "effective_shares", None))
-        if shares is None:
-            shares = _positive_decimal(getattr(position, "shares", None))
-        return shares is not None and shares < fresh_min
-    reason = str(getattr(position, "exit_reason", "") or "")
-    last_error = str(getattr(position, "last_exit_error", "") or "")
-    return _dust_evidence_marks_non_executable(f"{reason} {last_error}")
+    # C5: only a current fresh snapshot may prove a non-executable dust hold.
+    # Historical reason/error text is never current venue authority.
+    fresh_min = _positive_decimal(current_min_order_size)
+    if fresh_min is None:
+        fresh_min = _latest_fresh_snapshot_min_order(position, conn=conn)
+    if fresh_min is None:
+        return False
+    shares = _positive_decimal(getattr(position, "effective_shares", None))
+    if shares is None:
+        shares = _positive_decimal(getattr(position, "shares", None))
+    return shares is not None and shares < fresh_min
 
 
 def _canonical_non_executable_dust_hold(
@@ -2098,26 +3795,11 @@ def _canonical_non_executable_dust_hold(
     if shares is None:
         return None
 
-    saved = conn.row_factory
-    conn.row_factory = sqlite3.Row
-    try:
-        snapshot = conn.execute(
-            """
-            SELECT min_order_size
-              FROM executable_market_snapshots
-             WHERE selected_outcome_token_id = ?
-               AND freshness_deadline IS NOT NULL
-               AND datetime(freshness_deadline) >= datetime(?)
-             ORDER BY captured_at DESC, snapshot_id DESC
-             LIMIT 1
-            """,
-            (selected_token_id, (now or _utcnow()).astimezone(timezone.utc).isoformat()),
-        ).fetchone()
-    except sqlite3.Error:
-        return None
-    finally:
-        conn.row_factory = saved
-    min_order = _positive_decimal(snapshot["min_order_size"] if snapshot is not None else None)
+    min_order = _latest_fresh_snapshot_min_order_for_token(
+        selected_token_id,
+        conn=conn,
+        now=now,
+    )
     if min_order is None or shares >= min_order:
         return None
     error = f"executable_snapshot_gate: size {shares} is below snapshot min_order_size {min_order}"
@@ -2195,6 +3877,8 @@ def release_backoff_exhausted_pending_exit_for_redecision(
     position: Position,
     *,
     conn: sqlite3.Connection | None = None,
+    current_min_order_size: object = None,
+    legacy_favorable_bid_authorized: bool = False,
 ) -> bool:
     """Release a still-held exhausted exit attempt back to live redecision.
 
@@ -2211,7 +3895,18 @@ def release_backoff_exhausted_pending_exit_for_redecision(
     exit_state = getattr(exit_state, "value", exit_state)
     if str(exit_state or "") != "backoff_exhausted":
         return False
-    if _is_non_executable_dust_hold(position, conn=conn):
+    if (
+        _is_legacy_favorable_bid_rejection(
+            getattr(position, "last_exit_error", "")
+        )
+        and not legacy_favorable_bid_authorized
+    ):
+        return False
+    if _is_non_executable_dust_hold(
+        position,
+        conn=conn,
+        current_min_order_size=current_min_order_size,
+    ):
         return False
     chain_shares = _positive_decimal(getattr(position, "chain_shares", None))
     shares = _positive_decimal(getattr(position, "effective_shares", None))
@@ -2438,6 +4133,7 @@ def build_exit_intent(position: Position, exit_context: ExitContext) -> ExitInte
         shares=position.effective_shares,
         current_market_price=float(exit_context.current_market_price) if exit_context.current_market_price is not None else 0.0,
         best_bid=exit_context.best_bid,
+        submit_order_type=None,
         decision_id=f"exit:{position.trade_id}:{decision_digest}",
         probability_receipt=probability_receipt,
         fresh_prob=float(exit_context.fresh_prob) if exit_context.fresh_prob is not None else None,
@@ -2489,6 +4185,123 @@ def _validate_exit_intent(position: Position, exit_context: ExitContext, exit_in
         exit_intent.capital_certificate, Mapping
     ):
         raise ValueError("exit_intent capital_certificate must be a mapping")
+    if exit_intent.global_sell_receipt_closure is not None and type(
+        exit_intent.global_sell_receipt_closure
+    ) is not GlobalSellReceiptClosure:
+        raise ValueError("exit_intent global_sell_receipt_closure must be typed")
+
+
+def _global_sell_receipt_closure_error(
+    position: Position,
+    exit_intent: ExitIntent,
+    authority: GlobalSellExecutionAuthority | None,
+) -> str | None:
+    """Validate the typed global-auction receipt before lifecycle recording."""
+
+    closure = exit_intent.global_sell_receipt_closure
+    if closure is None:
+        return "global_sell_receipt_closure_required"
+    if type(closure) is not GlobalSellReceiptClosure:
+        return "global_sell_receipt_closure_invalid"
+    if not isinstance(authority, GlobalSellExecutionAuthority):
+        return "global_sell_receipt_closure_invalid"
+    try:
+        closure.__post_init__()
+        actuation = authority.actuation
+        candidate = actuation.decision.candidate
+        closure.receipt_ref.assert_matches_actuation(
+            winner_event_id=actuation.winner_event_id,
+            winner_candidate_id=candidate.candidate_id,
+            winner_actuation_identity=actuation.actuation_identity,
+            selection_epoch_identity=actuation.selection_epoch_identity,
+        )
+    except (AttributeError, TypeError, ValueError):
+        return "global_sell_receipt_closure_invalid"
+    expected_token = (
+        getattr(position, "token_id", "")
+        if str(getattr(candidate, "side", "") or "") == "YES"
+        else getattr(position, "no_token_id", "")
+    )
+    if (
+        closure.position_id != str(getattr(position, "trade_id", "") or "")
+        or closure.condition_id != str(getattr(position, "condition_id", "") or "")
+        or closure.token_id != str(expected_token or "")
+        or closure.action != "SELL"
+        or closure.execution_mode != str(getattr(candidate, "execution_mode", "") or "")
+        or closure.winner_event_id != str(getattr(actuation, "winner_event_id", "") or "")
+        or closure.winner_candidate_id != str(getattr(candidate, "candidate_id", "") or "")
+        or closure.winner_actuation_identity
+        != str(getattr(actuation, "actuation_identity", "") or "")
+        or closure.selection_epoch_identity
+        != str(getattr(actuation, "selection_epoch_identity", "") or "")
+    ):
+        return "global_sell_receipt_closure_identity_mismatch"
+    return None
+
+
+def _branchwise_dominant_sell_authority_error(
+    position: Position,
+    exit_intent: ExitIntent,
+    authority: BranchwiseDominantSellAuthority | None,
+    *,
+    snapshot_context: Mapping[str, object] | None = None,
+) -> str | None:
+    """Reproduce zero-support dominance at the live submit boundary."""
+
+    if str(exit_intent.reason or "").strip() != "POSTERIOR_SUPPORT_ZERO_SELL_DOMINATES":
+        return "branchwise_dominant_sell_intent_required"
+    if type(authority) is not BranchwiseDominantSellAuthority:
+        return "branchwise_dominant_sell_authority_required"
+    try:
+        authority.__post_init__()
+        support_identity = authority._support_identity(
+            getattr(position, "_current_global_held_probability_samples", None)
+        )
+        held_shares = Decimal(str(getattr(position, "effective_shares", "")))
+        intended_shares = Decimal(str(exit_intent.shares))
+        fresh_prob = float(exit_intent.fresh_prob)
+    except (AttributeError, InvalidOperation, TypeError, ValueError):
+        return "branchwise_dominant_sell_authority_invalid"
+    receipt = exit_intent.probability_receipt
+    if not isinstance(receipt, Mapping):
+        return "branchwise_dominant_sell_probability_receipt_missing"
+    receipt_content_identity = str(
+        receipt.get("probability_content_identity") or ""
+    ).strip()
+    receipt_witness_identity = str(
+        receipt.get("probability_witness_identity") or ""
+    ).strip()
+    if (
+        authority.position_id != str(getattr(position, "trade_id", "") or "")
+        or authority.token_id != exit_intent.token_id
+        or authority.held_shares != str(getattr(position, "effective_shares", "") or "")
+        or authority.probability_observed_at
+        != str(getattr(position, "last_monitor_at", "") or "")
+        or authority.probability_content_identity != receipt_content_identity
+        or authority.probability_witness_identity != receipt_witness_identity
+        or authority.support_identity != support_identity
+        or not held_shares.is_finite()
+        or not intended_shares.is_finite()
+        or held_shares <= 0
+        or intended_shares != held_shares
+        or not exit_intent.close_position
+        or exit_intent.fresh_prob_is_fresh is not True
+        or not math.isfinite(fresh_prob)
+        or not 0.0 <= fresh_prob <= 1e-12
+    ):
+        return "branchwise_dominant_sell_authority_mismatch"
+    if snapshot_context is not None:
+        submit_bid = _positive_decimal(
+            snapshot_context.get("executable_snapshot_orderbook_top_bid")
+        )
+        if (
+            submit_bid is None
+            or not LIVE_ORDER_MIN_UNIT_PRICE
+            <= submit_bid
+            <= LIVE_ORDER_MAX_UNIT_PRICE
+        ):
+            return "branchwise_dominant_sell_submit_bid_not_executable"
+    return None
 
 
 def _global_sell_capital_certificate_error(
@@ -2514,6 +4327,14 @@ def _global_sell_capital_certificate_error(
     decision = actuation.decision
     candidate = decision.candidate
     jit = authority.jit_candidate
+    closure_error = _global_sell_receipt_closure_error(
+        position,
+        exit_intent,
+        authority,
+    )
+    if closure_error is not None:
+        return closure_error
+    closure = exit_intent.global_sell_receipt_closure
     raw_direction = getattr(position, "direction", "")
     direction = str(getattr(raw_direction, "value", raw_direction) or "").lower()
     expected_direction = "buy_yes" if candidate.side == "YES" else "buy_no"
@@ -2545,20 +4366,34 @@ def _global_sell_capital_certificate_error(
     except (InvalidOperation, TypeError, ValueError):
         return "global_sell_execution_position_economics_mismatch"
     sellable = exact_held.quantize(Decimal("0.01"), rounding=ROUND_FLOOR)
+    chain_sellable = chain_held.quantize(Decimal("0.01"), rounding=ROUND_FLOOR)
     if not (
         exact_held.is_finite()
         and exact_held > 0
-        and chain_held == exact_held
+        and chain_held.is_finite()
+        and chain_held > 0
+        # Venue balance mirrors and fill facts may preserve different
+        # sub-cent share precision.  SELL is executable only in 0.01-share
+        # units, so exact float equality is neither necessary nor sufficient:
+        # bind both authorities to the same conservative sellable inventory.
+        and chain_sellable == sellable
         and matches_decimal(candidate.held_shares, sellable)
         and matches_decimal(exit_intent.shares, decision.shares)
-        and matches_decimal(exit_intent.exact_limit_price, decision.limit_price)
+        and matches_decimal(exit_intent.exact_limit_price, authority.limit_price())
+        and str(exit_intent.submit_order_type or "").upper()
+        == ("FAK" if candidate.execution_mode == "TAKER_LIMIT" else "GTC")
     ):
         return "global_sell_execution_position_economics_mismatch"
     certificate = exit_intent.capital_certificate
     if not isinstance(certificate, Mapping):
         return "capital_certificate_required"
+    if certificate.get("global_auction_receipt") != closure.receipt_ref.as_payload():
+        return "global_sell_receipt_closure_capital_certificate_mismatch"
     expected_text = {
         "action": "SELL",
+        "position_id": str(getattr(position, "trade_id", "") or ""),
+        "condition_id": candidate.condition_id,
+        "token_id": candidate.token_id,
         "candidate_id": candidate.candidate_id,
         "actuation_identity": actuation.actuation_identity,
         "economic_identity": actuation.economic_identity,
@@ -2573,7 +4408,13 @@ def _global_sell_capital_certificate_error(
         "wealth_witness_identity": actuation.wealth_witness_identity,
         "execution_authority_identity": authority.authority_identity,
         "jit_book_hash": jit.executable_sell_curve.book_hash,
+        "book_snapshot_id": jit.book_snapshot_id,
         "jit_curve_identity": jit.execution_curve_identity,
+        "execution_mode": candidate.execution_mode,
+        "submit_order_type": (
+            "FAK" if candidate.execution_mode == "TAKER_LIMIT" else "GTC"
+        ),
+        "fill_probability_source": candidate.fill_probability_source,
     }
     if any(
         str(certificate.get(field) or "") != str(expected)
@@ -2585,12 +4426,16 @@ def _global_sell_capital_certificate_error(
         "sellable_shares": candidate.held_shares,
         "selected_shares": decision.shares,
         "selected_cash_proceeds_usd": decision.cash_proceeds_usd,
-        "exact_limit_price": decision.limit_price,
+        "economic_limit_price": decision.limit_price,
+        "exact_limit_price": authority.limit_price(),
+        "fill_probability": candidate.fill_probability,
         "expected_comparison_delta_log_wealth": (
             decision.expected_growth.expected_delta_log_wealth
         ),
         "expected_comparison_ev_usd": decision.expected_growth.expected_ev_usd,
     }
+    if candidate.rest_deadline_minutes is not None:
+        expected_decimal["rest_deadline_minutes"] = candidate.rest_deadline_minutes
     if candidate.probability_functional == "POSTERIOR_PREDICTIVE_MEAN":
         expected_decimal.update(
             {
@@ -2653,7 +4498,7 @@ def _hard_fact_sell_authority_valid(
     conn: sqlite3.Connection | None,
     now: datetime,
 ) -> bool:
-    """Re-read current source evidence and recompute this position's bin death."""
+    """Re-read current evidence and recompute this position's semantic bin death."""
 
     from src.execution.day0_hard_fact_exit import (
         HardFactVerdict,
@@ -2703,7 +4548,6 @@ def _hard_fact_sell_authority_valid(
         and current.reason == authority.reason
         and current.metric == authority.metric
         and current.rounded_extreme == authority.rounded_extreme
-        and current.source == authority.source
         and expected.action == authority.action
         and expected.reason == authority.reason
         and expected.metric == authority.metric == metric
@@ -2712,19 +4556,292 @@ def _hard_fact_sell_authority_valid(
     )
 
 
-def _red_force_exit_authorized(position: Position, exit_context: ExitContext) -> bool:
-    """Require both the sweep marker and current durable RED/review authority."""
+_RED_FORCE_EXIT = "RED_FORCE_EXIT"
+_RED_FORCE_EXIT_MARKERS = frozenset(
+    {"red_force_exit", "dt2_red_force_exit_sweep_actuated"}
+)
+_RED_TERMINAL_PHASES = frozenset(
+    {
+        LifecyclePhase.ECONOMICALLY_CLOSED.value,
+        LifecyclePhase.SETTLED.value,
+        LifecyclePhase.VOIDED.value,
+        LifecyclePhase.ADMIN_CLOSED.value,
+    }
+)
+
+
+def _red_runtime_position_open(
+    conn: sqlite3.Connection | None,
+    position: Position,
+    *,
+    require_canonical: bool,
+) -> bool:
+    """Require canonical open phase, token identity, and positive residual."""
+
+    if _runtime_state_value(position) in _RED_TERMINAL_PHASES:
+        return False
+    if _positive_decimal(getattr(position, "effective_shares", None)) is None:
+        return False
+    if conn is None:
+        return not require_canonical
+    position_id = str(getattr(position, "trade_id", "") or "")
+    expected_token = _asset_id_for_position(position)
+    try:
+        row = conn.execute(
+            """
+            SELECT phase, direction, token_id, no_token_id, shares,
+                   chain_shares, chain_state
+              FROM position_current
+             WHERE position_id = ?
+             LIMIT 1
+            """,
+            (position_id,),
+        ).fetchone()
+    except sqlite3.Error:
+        return False
+    if row is None:
+        # A RED runtime read cannot reopen a position without canonical
+        # identity.  ``require_canonical`` remains part of the private API for
+        # callers that distinguish diagnostics, but missing canonical truth is
+        # fail-closed for every authority path.
+        return False
+    if str(_row_value(row, "phase", 0) or "").strip().lower() in _RED_TERMINAL_PHASES:
+        return False
+    canonical_direction = str(_row_value(row, "direction", 1) or "").strip().lower()
+    raw_direction = getattr(position, "direction", "")
+    expected_direction = str(
+        getattr(raw_direction, "value", raw_direction) or ""
+    ).strip().lower()
+    valid_directions = {"buy_yes", "buy_no"}
+    if (
+        canonical_direction not in valid_directions
+        or expected_direction not in valid_directions
+        or canonical_direction != expected_direction
+    ):
+        return False
+    canonical_yes_token = str(_row_value(row, "token_id", 2) or "").strip()
+    canonical_no_token = str(_row_value(row, "no_token_id", 3) or "").strip()
+    selected_token = (
+        canonical_yes_token
+        if canonical_direction == "buy_yes"
+        else canonical_no_token
+    )
+    if not selected_token or not expected_token or expected_token != selected_token:
+        return False
+    canonical_chain_raw = _row_value(row, "chain_shares", 5)
+    if canonical_chain_raw not in (None, ""):
+        from src.contracts.position_truth import has_current_money_risk_chain_state
+
+        if not has_current_money_risk_chain_state(
+            _row_value(row, "chain_state", 6)
+        ):
+            return False
+        return _positive_decimal(canonical_chain_raw) is not None
+    return _positive_decimal(_row_value(row, "shares", 4)) is not None
+
+
+def _red_monitor_provenance_matches(
+    payload: Mapping[str, object],
+) -> bool:
+    validations = {
+        str(value or "").strip()
+        for value in payload.get("applied_validations", []) or []
+    }
+    if not _RED_FORCE_EXIT_MARKERS.issubset(validations):
+        return False
+    if (
+        payload.get("exit_decision_should_exit") is not True
+        or str(payload.get("exit_decision_reason") or "").upper()
+        != _RED_FORCE_EXIT
+        or str(payload.get("exit_decision_trigger") or "").upper()
+        != _RED_FORCE_EXIT
+    ):
+        return False
+    return True
+
+
+def _red_intent_provenance_matches(
+    payload: Mapping[str, object],
+    *,
+    position: Position,
+    event_decision_id: str,
+) -> bool:
+    if str(payload.get("exit_intent_reason") or "").upper() != _RED_FORCE_EXIT:
+        return False
+    if str(payload.get("exit_intent_token_id") or "") != _asset_id_for_position(position):
+        return False
+    intended_shares = _positive_decimal(payload.get("exit_intent_shares"))
+    held_shares = _positive_decimal(getattr(position, "effective_shares", None))
+    if intended_shares is None or held_shares is None or intended_shares < held_shares:
+        return False
+    payload_decision_id = str(payload.get("exit_intent_decision_id") or "")
+    return bool(
+        event_decision_id
+        and payload_decision_id
+        and event_decision_id == payload_decision_id
+    )
+
+
+def _canonical_red_force_exit_provenance(
+    conn: sqlite3.Connection | None,
+    position: Position,
+) -> bool:
+    """Return true only for an open position with exact persisted RED authority."""
+
+    if not _red_runtime_position_open(conn, position, require_canonical=True):
+        return False
+    position_id = str(getattr(position, "trade_id", "") or "")
+
+    def terminal_after(sequence_no: int) -> bool:
+        try:
+            terminal = conn.execute(
+                """
+                SELECT 1
+                  FROM position_events
+                 WHERE position_id = ?
+                   AND env = 'live'
+                   AND sequence_no > ?
+                   AND phase_after IN (
+                       'economically_closed', 'settled', 'voided', 'admin_closed'
+                   )
+                 LIMIT 1
+                """,
+                (position_id, sequence_no),
+            ).fetchone()
+        except sqlite3.Error:
+            return True
+        return terminal is not None
+
+    try:
+        # Normal current path: the position/event index bounds this to the
+        # latest semantic intent.  A newer non-live or malformed intent is
+        # still authoritative evidence that the live handoff is not proven;
+        # do not fall through to an older monitor row in that case.
+        intent_row = conn.execute(
+            """
+            SELECT sequence_no, event_type, source_module, env,
+                   decision_id, phase_after, payload_json
+              FROM position_events INDEXED BY idx_position_events_position_type_sequence
+             WHERE position_id = ?
+               AND event_type = 'EXIT_INTENT'
+             ORDER BY sequence_no DESC
+             LIMIT 1
+            """,
+            (position_id,),
+        ).fetchone()
+    except sqlite3.Error:
+        return False
+
+    if intent_row is not None:
+        if (
+            str(intent_row["env"] or "") != "live"
+            or str(intent_row["source_module"] or "")
+            != "src.execution.exit_lifecycle"
+            or str(intent_row["phase_after"] or "")
+            in _RED_TERMINAL_PHASES
+            or terminal_after(int(intent_row["sequence_no"]))
+        ):
+            return False
+        try:
+            decoded_payload = json.loads(str(intent_row["payload_json"] or "{}"))
+        except (TypeError, ValueError):
+            decoded_payload = {}
+        payload = decoded_payload if isinstance(decoded_payload, Mapping) else {}
+        return _red_intent_provenance_matches(
+            payload,
+            position=position,
+            event_decision_id=str(intent_row["decision_id"] or ""),
+        )
+
+    # Wellington compatibility: historical RED monitor decisions predate the
+    # semantic EXIT_INTENT event.  This recovery is deliberately secondary and
+    # bounded to an open canonical live RED position.
+    try:
+        current = conn.execute(
+            """
+            SELECT exit_reason, phase
+              FROM position_current
+             WHERE position_id = ?
+             LIMIT 1
+            """,
+            (position_id,),
+        ).fetchone()
+        if (
+            current is None
+            or str(current["exit_reason"] or "").upper() != _RED_FORCE_EXIT
+            or str(current["phase"] or "").lower() in _RED_TERMINAL_PHASES
+        ):
+            return False
+        monitor_row = conn.execute(
+            """
+            SELECT sequence_no, event_type, source_module, env,
+                   phase_after, payload_json
+              FROM position_events INDEXED BY idx_position_events_position_type_sequence
+             WHERE position_id = ?
+               AND event_type = 'MONITOR_REFRESHED'
+               AND source_module = 'src.engine.cycle_runtime'
+               AND json_valid(payload_json)
+               AND json_extract(payload_json, '$.exit_decision_should_exit') = 1
+               AND UPPER(COALESCE(json_extract(
+                   payload_json, '$.exit_decision_reason'
+               ), '')) = ?
+               AND UPPER(COALESCE(json_extract(
+                   payload_json, '$.exit_decision_trigger'
+               ), '')) = ?
+               AND EXISTS (
+                   SELECT 1 FROM json_each(payload_json, '$.applied_validations')
+                    WHERE value = 'red_force_exit'
+               )
+               AND EXISTS (
+                   SELECT 1 FROM json_each(payload_json, '$.applied_validations')
+                    WHERE value = 'dt2_red_force_exit_sweep_actuated'
+               )
+             ORDER BY sequence_no DESC
+             LIMIT 1
+            """,
+            (position_id, _RED_FORCE_EXIT, _RED_FORCE_EXIT),
+        ).fetchone()
+    except sqlite3.Error:
+        return False
+    if (
+        monitor_row is None
+        or str(monitor_row["env"] or "") != "live"
+        or terminal_after(int(monitor_row["sequence_no"]))
+    ):
+        return False
+    try:
+        decoded_payload = json.loads(str(monitor_row["payload_json"] or "{}"))
+    except (TypeError, ValueError):
+        decoded_payload = {}
+    payload = decoded_payload if isinstance(decoded_payload, Mapping) else {}
+    return _red_monitor_provenance_matches(payload)
+
+
+def _red_force_exit_authorized(
+    position: Position,
+    exit_context: ExitContext,
+    *,
+    conn: sqlite3.Connection | None = None,
+) -> bool:
+    """Authorize RED from current RED or an exact, still-open RED handoff.
+
+    The current risk level authorizes a new sweep. Once the sweep's exact
+    decision is canonical, a later RiskGuard read must not revoke that exit
+    obligation. Caller strings alone never grant the emergency exemption.
+    """
 
     if (
         str(getattr(position, "exit_reason", "") or "").strip().lower()
         != "red_force_exit"
-        or str(exit_context.exit_reason or "").upper() != "RED_FORCE_EXIT"
+        or str(exit_context.exit_reason or "").upper() != _RED_FORCE_EXIT
     ):
         return False
-    from src.riskguard.risk_level import RiskLevel
-    from src.riskguard.riskguard import get_current_level
-
-    return get_current_level() == RiskLevel.RED
+    if not _red_runtime_position_open(conn, position, require_canonical=False):
+        return False
+    # Both current RED and a persisted handoff must prove canonical live
+    # provenance.  The later RiskLevel read is therefore never an authority
+    # downgrade or a row-missing fallback.
+    return _canonical_red_force_exit_provenance(conn, position)
 
 
 def is_exit_cooldown_active(position: Position) -> bool:
@@ -3481,7 +5598,6 @@ def _mark_exit_dust_hold(
     normalized_error = (error or "below_min_order_size")[:500]
     local_shares_before: float | None = None
     chain_projection_changed = False
-    projection_changed = False
     if chain_balance_units is not None and chain_balance_shares is not None:
         local_shares_before, chain_projection_changed = _sync_position_to_chain_dust(
             position,
@@ -3489,18 +5605,14 @@ def _mark_exit_dust_hold(
             chain_balance_shares=chain_balance_shares,
             asset_id=asset_id,
         )
-        projection_changed = chain_projection_changed
         normalized_error = (getattr(position, "last_exit_error", "") or normalized_error)[:500]
     already_held = (
         str(getattr(position, "exit_state", "") or "") == "backoff_exhausted"
         and str(getattr(position, "exit_reason", "") or "") == str(reason or "")
     )
     _mark_pending_exit(position)
-    old_order_status = str(getattr(position, "order_status", "") or "")
     position.exit_state = "backoff_exhausted"
     position.order_status = "backoff_exhausted"
-    if old_order_status != "backoff_exhausted":
-        projection_changed = True
     position.next_exit_retry_at = ""
     position.exit_reason = reason
     position.last_exit_error = normalized_error
@@ -3548,7 +5660,7 @@ def _positive_decimal(value: object) -> Decimal | None:
         numeric = Decimal(str(value))
     except (InvalidOperation, ValueError):
         return None
-    if numeric <= 0:
+    if not numeric.is_finite() or numeric <= 0:
         return None
     return numeric
 
@@ -3613,6 +5725,41 @@ def _below_snapshot_min_order_error(
     return f"executable_snapshot_gate: size {selected} is below snapshot min_order_size {min_order}"
 
 
+def _global_sell_partial_residual_min_order_error(
+    exit_intent: ExitIntent,
+    authority: GlobalSellExecutionAuthority,
+    snapshot_context: Mapping[str, object],
+) -> str:
+    """Reject a global partial SELL that strands fresh-snapshot dust."""
+
+    if exit_intent.close_position:
+        return ""
+    try:
+        held = Decimal(str(authority.jit_candidate.held_shares))
+        sold = Decimal(str(exit_intent.shares))
+    except (AttributeError, InvalidOperation, TypeError, ValueError):
+        return "global_sell_partial_residual_holding_unavailable"
+    if not held.is_finite() or not sold.is_finite() or held <= 0 or sold <= 0:
+        return "global_sell_partial_residual_holding_unavailable"
+    residual = held - sold
+    tolerance = Decimal("0.000001")
+    if abs(residual) <= tolerance:
+        return ""
+    if residual < 0:
+        return "global_sell_partial_residual_holding_mismatch"
+    min_order = _positive_decimal(
+        snapshot_context.get("executable_snapshot_min_order_size")
+    )
+    if min_order is None:
+        return "global_sell_partial_residual_snapshot_min_order_size_unavailable"
+    if residual < min_order - tolerance:
+        return (
+            "global_sell_partial_residual_below_snapshot_min_order_size: "
+            f"residual {residual} is below snapshot min_order_size {min_order}"
+        )
+    return ""
+
+
 def _latest_snapshot_min_order_dust_error(
     position: Position,
     *,
@@ -3640,9 +5787,12 @@ def _exit_sell_liquidity_error(
     if best_bid is None or snapshot_bid is None:
         return "exit_no_executable_bid"
     if (
-        best_bid < LIVE_ORDER_MIN_UNIT_PRICE
-        or snapshot_bid < LIVE_ORDER_MIN_UNIT_PRICE
+        not LIVE_ORDER_MIN_UNIT_PRICE <= best_bid <= Decimal("1")
+        or not LIVE_ORDER_MIN_UNIT_PRICE <= snapshot_bid <= Decimal("1")
     ):
+        # INV-47 SCOPE: only this token's SELL attempt is held for liquidity.
+        # DRAIN: the next monitor refresh captures a new executable snapshot.
+        # RESET: no latch is stored; matching in-band bids return an empty error.
         return "exit_no_in_band_bid"
     return ""
 
@@ -3651,7 +5801,7 @@ def _record_exit_intent_before_execution_gates(
     conn: sqlite3.Connection | None,
     position: Position,
     exit_intent: ExitIntent,
-) -> None:
+) -> bool:
     """Persist the semantic exit decision before executable-liquidity gates.
 
     Snapshot, liquidity, collateral, and venue checks are execution facts.  The
@@ -3662,16 +5812,55 @@ def _record_exit_intent_before_execution_gates(
     _mark_pending_exit(position)
     position.exit_state = "exit_intent"
     position.order_status = "exit_intent"
-    _dual_write_canonical_pending_exit_if_available(
-        conn,
-        position,
-        reason=exit_intent.reason or "EXIT_INTENT",
-        error="",
-        event_type="EXIT_INTENT",
-        extra_payload=_exit_intent_audit_payload(exit_intent),
-        decision_id=exit_intent.decision_id or None,
-    )
-    _commit_exit_write_boundary(conn, stage="exit_intent")
+    active_order_id = str(getattr(position, "last_exit_order_id", "") or "")
+    try:
+        canonical_written = _dual_write_canonical_pending_exit_if_available(
+            conn,
+            position,
+            reason=exit_intent.reason or "EXIT_INTENT",
+            error="",
+            event_type="EXIT_INTENT",
+            extra_payload=_exit_intent_audit_payload(exit_intent),
+            decision_id=exit_intent.decision_id or None,
+        )
+        if not canonical_written:
+            logger.warning(
+                "EXIT_INTENT persistence failed before execution for %s",
+                getattr(position, "trade_id", ""),
+            )
+            return False
+        if active_order_id and conn is not None:
+            # transition_phase intentionally clears order_id for a new intent.
+            # An already-adopted SELL is a single-flight fact, not a new order;
+            # restore its identity in the same transaction so the durable
+            # semantic intent cannot orphan or duplicate the active command.
+            conn.execute(
+                """
+                UPDATE position_current
+                   SET order_id = ?,
+                       order_status = CASE
+                           WHEN order_status IN ('sell_pending', 'sell_placed')
+                           THEN order_status
+                           ELSE 'sell_pending'
+                       END
+                 WHERE position_id = ?
+                """,
+                (active_order_id, str(getattr(position, "trade_id", "") or "")),
+            )
+        if not _commit_exit_write_boundary(conn, stage="exit_intent"):
+            logger.warning(
+                "EXIT_INTENT commit failed before execution for %s",
+                getattr(position, "trade_id", ""),
+            )
+            return False
+    except Exception as exc:  # noqa: BLE001 - fail closed before venue I/O.
+        logger.warning(
+            "EXIT_INTENT persistence raised before execution for %s: %s",
+            getattr(position, "trade_id", ""),
+            exc,
+        )
+        return False
+    return True
 
 
 def _exit_intent_audit_payload(exit_intent: ExitIntent) -> dict[str, object]:
@@ -3689,6 +5878,11 @@ def _exit_intent_audit_payload(exit_intent: ExitIntent) -> dict[str, object]:
         "exit_intent_capital_certificate": (
             dict(exit_intent.capital_certificate)
             if exit_intent.capital_certificate is not None
+            else None
+        ),
+        "exit_intent_global_sell_receipt_closure": (
+            exit_intent.global_sell_receipt_closure.as_payload()
+            if exit_intent.global_sell_receipt_closure is not None
             else None
         ),
         "exit_intent_decision_id": exit_intent.decision_id,
@@ -3821,14 +6015,43 @@ def execute_exit(
     exit_intent: ExitIntent | None = None,
     execution_evidence: ExitExecutionEvidence | None = None,
     global_sell_authority: GlobalSellExecutionAuthority | None = None,
+    branchwise_sell_authority: BranchwiseDominantSellAuthority | None = None,
     hard_fact_authority: object | None = None,
+    global_sell_prefetched_orderbook: Mapping[str, object] | None = None,
+    global_sell_required_snapshot_id: str | None = None,
 ) -> str:
     """Execute an exit decision. Returns outcome description.
 
     Live mode: place sell order, check fill, retry on failure.
     NEVER close a live position without confirmed fill.
     """
-    is_red_force_exit = _red_force_exit_authorized(position, exit_context)
+    exit_intent = exit_intent or build_exit_intent(position, exit_context)
+    _validate_exit_intent(position, exit_context, exit_intent)
+    is_red_force_exit = _red_force_exit_authorized(
+        position,
+        exit_context,
+        conn=conn,
+    )
+    if is_red_force_exit:
+        active_exit = _active_exit_sell_for_lock(
+            conn,
+            position,
+            token_id=exit_intent.token_id,
+            clob=clob,
+        )
+        if active_exit is not None:
+            return _adopt_active_exit_sell(
+                position,
+                active_exit,
+                conn=conn,
+                reason=f"{exit_context.exit_reason} [ACTIVE_EXIT_SELL_IN_FLIGHT]",
+            )
+        if not _record_exit_intent_before_execution_gates(
+            conn,
+            position,
+            exit_intent,
+        ):
+            return "exit_blocked: exit_intent_persistence_failed"
     # PR-S1 Bug #3: block SELL for tokens with unresolved aggregate violations.
     _eff_token_id = (
         position.token_id if getattr(position, "direction", "") == "buy_yes"
@@ -3861,21 +6084,19 @@ def execute_exit(
         retry_reason = f"{exit_context.exit_reason or 'EXIT'} [INCOMPLETE_CONTEXT]"
         _mark_exit_retry(position, reason=retry_reason, error="missing_current_market_price", conn=conn)
         return "exit_blocked: incomplete_context"
-    if not is_red_force_exit and not exit_context.current_market_price_is_fresh:
+    if not exit_context.current_market_price_is_fresh:
         if _exit_context_is_after_settlement_or_market_closed(exit_context):
-            mark_market_closed_hold_to_settlement(
-                position,
-                reason=_market_closed_hold_reason_from_exit_context(exit_context),
-                error="stale_current_market_price_after_settlement",
-                conn=conn,
-            )
-            return "exit_blocked: market_closed_hold_to_settlement"
+            if not is_red_force_exit:
+                mark_market_closed_hold_to_settlement(
+                    position,
+                    reason=_market_closed_hold_reason_from_exit_context(exit_context),
+                    error="stale_current_market_price_after_settlement",
+                    conn=conn,
+                )
+                return "exit_blocked: market_closed_hold_to_settlement"
         retry_reason = f"{exit_context.exit_reason or 'EXIT'} [STALE_MARKET_PRICE]"
         _mark_exit_retry(position, reason=retry_reason, error="stale_current_market_price", conn=conn)
         return "exit_blocked: stale_market_price"
-
-    exit_intent = exit_intent or build_exit_intent(position, exit_context)
-    _validate_exit_intent(position, exit_context, exit_intent)
 
     # Live path: sell order lifecycle
     return _execute_live_exit(
@@ -3888,7 +6109,11 @@ def execute_exit(
         execution_evidence=execution_evidence,
         is_red_force_exit=is_red_force_exit,
         global_sell_authority=global_sell_authority,
+        branchwise_sell_authority=branchwise_sell_authority,
         hard_fact_authority=hard_fact_authority,
+        global_sell_prefetched_orderbook=global_sell_prefetched_orderbook,
+        global_sell_required_snapshot_id=global_sell_required_snapshot_id,
+        exit_intent_already_recorded=is_red_force_exit,
     )
 
 
@@ -3902,8 +6127,12 @@ def _execute_live_exit(
     conn: sqlite3.Connection | None,
     execution_evidence: ExitExecutionEvidence | None,
     is_red_force_exit: bool,
-    global_sell_authority: GlobalSellExecutionAuthority | None,
-    hard_fact_authority: object | None,
+    global_sell_authority: GlobalSellExecutionAuthority | None = None,
+    branchwise_sell_authority: BranchwiseDominantSellAuthority | None = None,
+    hard_fact_authority: object | None = None,
+    global_sell_prefetched_orderbook: Mapping[str, object] | None = None,
+    global_sell_required_snapshot_id: str | None = None,
+    exit_intent_already_recorded: bool = False,
 ) -> str:
     """Live exit: place sell, check fill, retry on failure."""
     if conn is not None:
@@ -3947,6 +6176,8 @@ def _execute_live_exit(
             clob=clob,
         )
         if active_exit is not None:
+            if _unsafe_open_exit_cancel_pending(active_exit):
+                return "exit_blocked: unsafe_open_exit_cancel_pending"
             return _adopt_active_exit_sell(
                 position,
                 active_exit,
@@ -3954,10 +6185,15 @@ def _execute_live_exit(
                 reason=f"{exit_context.exit_reason} [ACTIVE_EXIT_SELL_IN_FLIGHT]",
             )
 
-    live_non_red = (
-        not is_red_force_exit
-        and str(getattr(position, "env", "live") or "live").lower() == "live"
-    )
+    # ``Position.env`` is creation provenance, not runtime authority; canonical
+    # open-position projections legitimately reload it as ``unknown_env``.
+    # Only an explicit non-live lane may bypass live submit authority checks.
+    position_env = str(getattr(position, "env", "") or "").strip().lower()
+    live_non_red = not is_red_force_exit and position_env not in {
+        "test",
+        "replay",
+        "backtest",
+    }
     hard_fact_authorized = bool(
         live_non_red
         and str(exit_intent.reason or "").startswith("DAY0_HARD_FACT_BIN_DEAD")
@@ -3969,16 +6205,30 @@ def _execute_live_exit(
         )
     )
     global_authorized = False
+    branchwise_authorized = False
     continuing_existing_exit = bool(
         str(getattr(position, "last_exit_order_id", "") or "")
     )
-    if live_non_red and not hard_fact_authorized:
-        if isinstance(global_sell_authority, GlobalSellExecutionAuthority):
-            try:
-                global_sell_authority.__post_init__()
-            except (TypeError, ValueError):
-                preliminary_error = "global_sell_execution_authority_invalid"
-            else:
+    if (
+        live_non_red
+        and not hard_fact_authorized
+    ):
+        branchwise_candidate = (
+            str(exit_intent.reason or "").strip()
+            == "POSTERIOR_SUPPORT_ZERO_SELL_DOMINATES"
+        )
+        if branchwise_candidate:
+            preliminary_error = _branchwise_dominant_sell_authority_error(
+                position,
+                exit_intent,
+                branchwise_sell_authority,
+            )
+            branchwise_authorized = preliminary_error is None
+        else:
+            preliminary_error = _global_sell_execution_authority_shape_error(
+                global_sell_authority
+            )
+            if preliminary_error is None:
                 global_authorized = (
                     str(exit_intent.reason or "") == "GLOBAL_CAPITAL_OPTIMAL_SELL"
                 )
@@ -3987,21 +6237,48 @@ def _execute_live_exit(
                     if global_authorized
                     else "global_capital_optimal_sell_intent_required"
                 )
-        else:
-            preliminary_error = (
-                "global_sell_execution_authority_required"
-                if str(exit_intent.reason or "") == "GLOBAL_CAPITAL_OPTIMAL_SELL"
-                else "global_capital_optimal_sell_intent_required"
-            )
-        if preliminary_error is not None and not continuing_existing_exit:
+            else:
+                preliminary_error = (
+                    preliminary_error
+                    if str(exit_intent.reason or "") == "GLOBAL_CAPITAL_OPTIMAL_SELL"
+                    else "global_capital_optimal_sell_intent_required"
+                )
+        if preliminary_error is not None and (
+            not continuing_existing_exit
+            or str(exit_intent.reason or "") == "GLOBAL_CAPITAL_OPTIMAL_SELL"
+        ):
             logger.warning(
                 "EXIT_SUBMIT_BLOCKED_CAPITAL_AUTHORITY trade_id=%s reason=%s",
                 position.trade_id,
                 preliminary_error,
             )
             return f"exit_blocked: {preliminary_error}"
-    _record_exit_intent_before_execution_gates(conn, position, exit_intent)
-
+    if global_authorized:
+        expected_order_type = (
+            "FAK"
+            if global_sell_authority.jit_candidate.execution_mode == "TAKER_LIMIT"
+            else "GTC"
+        )
+        if str(exit_intent.submit_order_type or "").upper() != expected_order_type:
+            return "exit_blocked: global_sell_order_type_mismatch"
+        closure_error = _global_sell_receipt_closure_error(
+            position,
+            exit_intent,
+            global_sell_authority,
+        )
+        if closure_error is not None:
+            # INV-47 SCOPE: only this global SELL actuation is blocked.
+            # DRAIN: the adapter must rebuild the closure from its exact receipt.
+            # RESET: a subsequent actuation with a matching typed closure clears it.
+            return f"exit_blocked: {closure_error}"
+    if not exit_intent_already_recorded:
+        intent_recorded = _record_exit_intent_before_execution_gates(
+            conn,
+            position,
+            exit_intent,
+        )
+        if not intent_recorded:
+            return "exit_blocked: exit_intent_persistence_failed"
     try:
         required_book_hash = (
             global_sell_authority.jit_candidate.executable_sell_curve.book_hash
@@ -4013,7 +6290,19 @@ def _execute_live_exit(
             clob,
             position,
             token_id,
+            now=(
+                global_sell_authority.jit_candidate.book_captured_at_utc
+                if global_authorized
+                else None
+            ),
             required_raw_orderbook_hash=required_book_hash,
+            required_snapshot_id=global_sell_required_snapshot_id,
+            prefetched_orderbook=(
+                global_sell_prefetched_orderbook
+                if global_authorized
+                else None
+            ),
+            require_exact_handoff_snapshot=global_authorized,
         )
     except Exception as exc:  # noqa: BLE001
         snapshot_reason = f"{exit_context.exit_reason} [EXECUTABLE_SNAPSHOT_ERROR]"
@@ -4056,6 +6345,13 @@ def _execute_live_exit(
                 snapshot_context=snapshot_context,
                 now=_utcnow(),
             )
+        elif branchwise_authorized:
+            authority_error = _branchwise_dominant_sell_authority_error(
+                position,
+                exit_intent,
+                branchwise_sell_authority,
+                snapshot_context=snapshot_context,
+            )
         elif hard_fact_authorized or continuing_existing_exit:
             authority_error = None
         else:
@@ -4066,7 +6362,42 @@ def _execute_live_exit(
                 position.trade_id,
                 authority_error,
             )
+            _mark_exit_retry(
+                position,
+                reason=(
+                    f"{exit_context.exit_reason} "
+                    "[CAPITAL_AUTHORITY_RECHECK_AFTER_INTENT]"
+                ),
+                error=(
+                    "global_sell_exit_capital_authority_reauction:"
+                    f"{authority_error}"
+                ),
+                conn=conn,
+            )
             return f"exit_blocked: {authority_error}"
+    if global_authorized and global_sell_authority is not None:
+        residual_error = _global_sell_partial_residual_min_order_error(
+            exit_intent,
+            global_sell_authority,
+            snapshot_context,
+        )
+        if residual_error:
+            # INV-47 SCOPE: this selected partial SELL only. DRAIN: the next
+            # global redecision binds current held shares and a fresh snapshot.
+            # RESET: a full close or residual meeting that snapshot's minimum.
+            _mark_exit_retry(
+                position,
+                reason=(
+                    f"{exit_context.exit_reason} "
+                    "[PARTIAL_RESIDUAL_RECHECK_AFTER_INTENT]"
+                ),
+                error=(
+                    "global_sell_exit_partial_residual_reauction:"
+                    f"{residual_error}"
+                ),
+                conn=conn,
+            )
+            return f"exit_blocked: {residual_error}"
 
     dust_error = _below_snapshot_min_order_error(
         position,
@@ -4121,9 +6452,19 @@ def _execute_live_exit(
             )
         return "exit_blocked: executable_snapshot_unavailable"
 
+    passive_global_rest = bool(
+        global_authorized
+        and global_sell_authority is not None
+        and global_sell_authority.jit_candidate.execution_mode == "MAKER_REST"
+    )
+    # A taker SELL needs an executable in-band bid.  A globally selected
+    # maker-rest SELL is different: its exact GTC limit is the executable
+    # price, and it may validly rest at 0.05 while the current bid is below
+    # that floor.  The capital certificate, exact snapshot, absolute submit
+    # band, post-only check, and venue boundary remain cumulative gates.
     liquidity_error = (
         _exit_sell_liquidity_error(exit_intent, snapshot_context)
-        if conn is not None
+        if conn is not None and not passive_global_rest
         else ""
     )
     if liquidity_error:
@@ -4169,91 +6510,18 @@ def _execute_live_exit(
             log_exit_retry_event(conn, position, reason=liquidity_reason, error=liquidity_error)
         return f"exit_blocked: {liquidity_error.removeprefix('exit_')}"
 
-    if conn is not None:
-        try:
-            _refresh_exit_collateral_snapshot_for_submit(
-                conn,
-                token_id=token_id,
-                shares=exit_intent.shares,
-            )
-        except CollateralInsufficient as exc:
-            collateral_reason = str(exc)
-            if _is_exit_transient_lock_error(collateral_reason):
-                active_exit = _active_exit_sell_for_lock(
-                    conn,
-                    position,
-                    token_id=token_id,
-                    clob=clob,
-                )
-                if active_exit is not None:
-                    return _adopt_active_exit_sell(
-                        position,
-                        active_exit,
-                        conn=conn,
-                        reason=f"{exit_context.exit_reason} [ACTIVE_EXIT_SELL_LOCKED_COLLATERAL]",
-                    )
-            retry_reason = f"{exit_context.exit_reason} [COLLATERAL_REFRESH: {collateral_reason}]"
-            _mark_exit_retry(
-                position,
-                reason=retry_reason,
-                error=collateral_reason,
-                conn=conn,
-            )
-            if conn is not None:
-                log_pending_exit_recovery_event(
-                    conn,
-                    position,
-                    event_type="EXIT_ORDER_REJECTED",
-                    reason=retry_reason,
-                    error=collateral_reason,
-                )
-                log_exit_retry_event(conn, position, reason=retry_reason, error=collateral_reason)
-            return f"collateral_blocked: {collateral_reason}"
-        _commit_exit_write_boundary(conn, stage="collateral_refresh")
-
-    # Pre-sell collateral check (fail-closed)
-    can_sell, collateral_reason = check_sell_collateral(
-        position.entry_price,
-        exit_intent.shares,
-        clob,
-        token_id=token_id,
-        conn=conn,
-    )
-    if not can_sell:
-        if _is_exit_transient_lock_error(collateral_reason or ""):
-            active_exit = _active_exit_sell_for_lock(
-                conn,
-                position,
-                token_id=token_id,
-                clob=clob,
-            )
-            if active_exit is not None:
-                return _adopt_active_exit_sell(
-                    position,
-                    active_exit,
-                    conn=conn,
-                    reason=f"{exit_context.exit_reason} [ACTIVE_EXIT_SELL_LOCKED_COLLATERAL]",
-                )
-        retry_reason = f"{exit_context.exit_reason} [COLLATERAL: {collateral_reason}]"
-        _mark_exit_retry(
-            position,
-            reason=retry_reason,
-            error=collateral_reason or "",
-            conn=conn,
-        )
-        if conn is not None:
-            log_pending_exit_recovery_event(
-                conn,
-                position,
-                event_type="EXIT_ORDER_REJECTED",
-                reason=retry_reason,
-                error=collateral_reason or "",
-            )
-            log_exit_retry_event(conn, position, reason=retry_reason, error=collateral_reason or "")
-        return f"collateral_blocked: {collateral_reason}"
+    # execute_exit_order owns the final targeted CTF refresh, persistence, and
+    # reservation immediately before command persistence.  A second lifecycle
+    # check here used the fetch-only preparation seam as if it had persisted,
+    # so a pUSD-only ledger could overwrite a successful chain preflight with
+    # false zero inventory.  Keep one submit-time collateral authority.
 
     current_market_price = exit_intent.current_market_price
     best_bid = exit_intent.best_bid
+    if branchwise_authorized:
+        submit_bid = float(snapshot_context["executable_snapshot_orderbook_top_bid"])
+        current_market_price = submit_bid
+        best_bid = submit_bid
 
     # Cancel stale sell order before retry.  M4: cancel uncertainty must not
     # fail open into a replacement sell.  When a command row is available, route
@@ -4383,7 +6651,7 @@ def _execute_live_exit(
                 return f"exit_blocked: cancel_{outcome.status.lower()}"
 
     if live_non_red and continuing_existing_exit and not (
-        global_authorized or hard_fact_authorized
+        global_authorized or branchwise_authorized or hard_fact_authorized
     ):
         logger.warning(
             "EXIT_REPLACEMENT_BLOCKED_FRESH_CAPITAL_AUTHORITY trade_id=%s",
@@ -4410,7 +6678,36 @@ def _execute_live_exit(
         submit_snapshot_context["execution_authority_deadline_utc"] = (
             execution_authority_deadline_utc
         )
-        raw_sell_result = place_sell_order(
+        marketable_certificate = (
+            dict(exit_intent.capital_certificate)
+            if global_authorized
+            and global_sell_authority is not None
+            and global_sell_authority.jit_candidate.execution_mode
+            == "TAKER_LIMIT"
+            and exit_intent.capital_certificate is not None
+            else None
+        )
+        if marketable_certificate is not None:
+            from src.execution.executor import marketable_sell_certificate_identity
+
+            marketable_certificate_hash = (
+                marketable_sell_certificate_identity(marketable_certificate)
+            )
+        else:
+            marketable_certificate_hash = ""
+        q_version = str(
+            (
+                exit_intent.probability_receipt.get("q_version")
+                or exit_intent.probability_receipt.get(
+                    "probability_content_identity"
+                )
+                or exit_intent.probability_receipt.get("posterior_id")
+                or ""
+            )
+            if exit_intent.probability_receipt is not None
+            else ""
+        )
+        executor_kwargs = dict(
             trade_id=position.trade_id,
             token_id=token_id,
             shares=exit_intent.shares,
@@ -4418,28 +6715,82 @@ def _execute_live_exit(
             best_bid=best_bid,
             exact_limit_price=exit_intent.exact_limit_price,
             submit_order_type=exit_intent.submit_order_type,
-            decision_id=exit_intent.decision_id or f"exit:{position.trade_id}",
-            q_version=str(
-                (
-                    exit_intent.probability_receipt.get("q_version")
-                    or exit_intent.probability_receipt.get(
-                        "probability_content_identity"
-                    )
-                    or exit_intent.probability_receipt.get("posterior_id")
-                    or ""
-                )
-                if exit_intent.probability_receipt is not None
-                else ""
+            marketable_sell_certificate=marketable_certificate,
+            marketable_sell_certificate_identity=(
+                marketable_certificate_hash
             ),
-            execution_proof_verified=True,
+            marketable_sell_execution_authority=(
+                global_sell_authority
+                if global_authorized
+                and global_sell_authority is not None
+                and global_sell_authority.jit_candidate.execution_mode
+                == "TAKER_LIMIT"
+                else None
+            ),
+            global_sell_execution_authority=(
+                global_sell_authority if global_authorized else None
+            ),
+            global_sell_receipt_closure=(
+                exit_intent.global_sell_receipt_closure
+                if global_authorized
+                else None
+            ),
             **submit_snapshot_context,
         )
+        decision_id = exit_intent.decision_id or f"exit:{position.trade_id}"
+        if (
+            global_authorized
+            and global_sell_authority is not None
+            and global_sell_authority.jit_candidate.execution_mode
+            == "TAKER_LIMIT"
+        ):
+            direct_executor_kwargs = dict(executor_kwargs)
+            direct_executor_kwargs.pop(
+                "executable_snapshot_orderbook_top_bid", None
+            )
+            direct_executor_kwargs.pop(
+                "executable_snapshot_orderbook_top_ask", None
+            )
+            executor_intent = create_exit_order_intent(
+                **direct_executor_kwargs
+            )
+            deadline_error = _exit_execution_authority_deadline_error(
+                executor_intent
+            )
+            raw_sell_result = (
+                OrderResult(
+                    trade_id=position.trade_id,
+                    status="rejected",
+                    reason=deadline_error,
+                )
+                if deadline_error is not None
+                else execute_exit_order(
+                    executor_intent,
+                    decision_id=decision_id,
+                    q_version=q_version,
+                )
+            )
+        else:
+            raw_sell_result = place_sell_order(
+                decision_id=decision_id,
+                q_version=q_version,
+                execution_proof_verified=True,
+                **executor_kwargs,
+            )
         sell_result = _coerce_sell_result(position.trade_id, raw_sell_result)
         if execution_evidence is not None:
             execution_evidence.observe(sell_result)
 
         if sell_result.status == "rejected":
             sell_error = sell_result.reason or "sell_rejected"
+            if global_authorized:
+                sync_no_side_effect_reauction = (
+                    _global_sell_sync_no_side_effect_reauction_error(
+                        conn, sell_result
+                    )
+                )
+                if sync_no_side_effect_reauction:
+                    sell_error = sync_no_side_effect_reauction
             if _is_exit_transient_lock_error(sell_error):
                 active_exit = _active_exit_sell_for_lock(
                     conn,
@@ -4448,6 +6799,8 @@ def _execute_live_exit(
                     clob=clob,
                 )
                 if active_exit is not None:
+                    if _unsafe_open_exit_cancel_pending(active_exit):
+                        return "exit_blocked: unsafe_open_exit_cancel_pending"
                     return _adopt_active_exit_sell(
                         position,
                         active_exit,
@@ -4477,6 +6830,18 @@ def _execute_live_exit(
                 position,
                 reason=retry_reason,
                 error=sell_error,
+                post_only_cross_command_id=(
+                    sell_result.command_id
+                    if _is_post_only_cross_reauction_error(sell_error)
+                    else ""
+                ),
+                fak_no_fill_command_id=(
+                    sell_result.command_id
+                    if str(sell_error).startswith(
+                        "global_sell_exit_fak_no_fill_reauction:"
+                    )
+                    else ""
+                ),
                 conn=conn,
             )
             if conn is not None:
@@ -4539,8 +6904,8 @@ def _execute_live_exit(
         if order_id and clob:
             status, status_payload = _check_order_fill(clob, order_id)
             if status in FILL_STATUSES:
-                actual_price = _extract_fill_price(status_payload)
-                if actual_price is None:
+                actual_price_decimal = _extract_fill_price_decimal(status_payload)
+                if actual_price_decimal is None:
                     _mark_exit_fill_economics_missing(
                         position,
                         status=status,
@@ -4568,7 +6933,7 @@ def _execute_live_exit(
                         position,
                         intended_shares=intended_shares,
                         confirmed_filled_shares=confirmed_shares,
-                        fill_price=actual_price,
+                        fill_price=actual_price_decimal,
                         order_id=order_id,
                         status=status,
                         conn=conn,
@@ -4577,9 +6942,18 @@ def _execute_live_exit(
                         "position_reduced: "
                         f"{reduced} shares; {exit_context.exit_reason}"
                     )
+                actual_price = float(actual_price_decimal)
                 phase_before = _canonical_phase_before_for_economic_close(position)
                 closed = compute_economic_close(portfolio, position.trade_id, actual_price, exit_context.exit_reason)
                 if closed is not None:
+                    closed.pnl = _cumulative_close_realized_pnl(
+                        conn,
+                        position_id=position.trade_id,
+                        shares=position.effective_shares,
+                        exit_price=actual_price,
+                        cost_basis_usd=position.effective_cost_basis_usd,
+                        entry_price=position.entry_price,
+                    )
                     closed.exit_state = "sell_filled"
                     _dual_write_canonical_economic_close_if_available(
                         conn,
@@ -4685,7 +7059,8 @@ def _latest_exit_snapshot_context(
 
     if conn is None or not token_id:
         return {}
-    now_s = (now or _utcnow()).isoformat()
+    checked_at = now or _utcnow()
+    now_s = checked_at.isoformat()
     saved = conn.row_factory
     conn.row_factory = sqlite3.Row
     try:
@@ -4718,11 +7093,20 @@ def _latest_exit_snapshot_context(
         conn.row_factory = saved
     if row is None:
         return {}
-    from src.state.snapshot_repo import get_snapshot
+    from src.state.snapshot_repo import get_snapshot, snapshot_is_invalidated
 
     snapshot_id = str(row["snapshot_id"])
-    snapshot = get_snapshot(conn, snapshot_id)
-    snapshot_hash = str(snapshot.executable_snapshot_hash or "") if snapshot is not None else ""
+    try:
+        snapshot = get_snapshot(conn, snapshot_id)
+        if snapshot is None or snapshot_is_invalidated(
+            conn,
+            snapshot,
+            checked_at=checked_at,
+        ):
+            return {}
+    except (sqlite3.Error, InvalidOperation, TypeError, ValueError):
+        return {}
+    snapshot_hash = str(snapshot.executable_snapshot_hash or "")
     return {
         "executable_snapshot_id": snapshot_id,
         "executable_snapshot_hash": snapshot_hash,
@@ -4732,6 +7116,100 @@ def _latest_exit_snapshot_context(
         "execution_authority_deadline_utc": str(row["freshness_deadline"]),
         "executable_snapshot_orderbook_top_bid": str(row["orderbook_top_bid"]),
         "executable_snapshot_orderbook_top_ask": str(row["orderbook_top_ask"]),
+    }
+
+
+def _exact_exit_snapshot_context(
+    conn: sqlite3.Connection | None,
+    token_id: str,
+    snapshot_id: str,
+    required_raw_orderbook_hash: str,
+    *,
+    now: datetime | None = None,
+) -> dict[str, object]:
+    """Return the persisted handoff row, without consulting the latest mirror.
+
+    A global SELL handoff is an authority certificate for one immutable snapshot.
+    Looking up the latest row first would let a newer row supersede that
+    certificate (or trigger a second network capture).  Query the canonical
+    append-only table by the required id and validate every submit-time fact
+    needed by the exit executor here.
+    """
+
+    clean_token = str(token_id or "").strip()
+    clean_snapshot_id = str(snapshot_id or "").strip()
+    clean_required_hash = str(required_raw_orderbook_hash or "").strip()
+    if conn is None or not clean_token or not clean_snapshot_id or not clean_required_hash:
+        return {}
+    checked_at = now or _utcnow()
+    saved = conn.row_factory
+    conn.row_factory = sqlite3.Row
+    try:
+        # Deliberately select by snapshot_id only; the token/hash/freshness/bid
+        # checks below preserve the precise failure evidence for a mismatched
+        # handoff rather than silently choosing another row.
+        row = conn.execute(
+            """
+            SELECT snapshot_id, selected_outcome_token_id, freshness_deadline,
+                   orderbook_top_bid, orderbook_top_ask, raw_orderbook_hash
+              FROM executable_market_snapshots
+             WHERE snapshot_id = ?
+             LIMIT 1
+            """,
+            (clean_snapshot_id,),
+        ).fetchone()
+    except sqlite3.OperationalError:
+        row = None
+    finally:
+        conn.row_factory = saved
+    if row is None:
+        return {}
+    if str(row["selected_outcome_token_id"] or "").strip() != clean_token:
+        return {}
+    if str(row["raw_orderbook_hash"] or "").strip() != clean_required_hash:
+        return {}
+    freshness_deadline = str(row["freshness_deadline"] or "").strip()
+    deadline = _parse_iso(freshness_deadline)
+    try:
+        deadline_stale = deadline is None or deadline < checked_at
+    except TypeError:
+        deadline_stale = True
+    if deadline_stale:
+        return {}
+    top_bid = str(row["orderbook_top_bid"] or "").strip()
+    if not top_bid or top_bid.upper() == "ABSENT":
+        return {}
+    try:
+        if not Decimal(top_bid).is_finite() or Decimal(top_bid) <= 0:
+            return {}
+    except (InvalidOperation, ValueError):
+        return {}
+
+    from src.state.snapshot_repo import get_snapshot, snapshot_is_invalidated
+
+    try:
+        snapshot = get_snapshot(conn, clean_snapshot_id)
+        invalidated = snapshot is not None and snapshot_is_invalidated(
+            conn,
+            snapshot,
+            checked_at=checked_at,
+        )
+    except (sqlite3.Error, InvalidOperation, TypeError, ValueError):
+        return {}
+    if snapshot is None or invalidated:
+        return {}
+    # The direct row query above is the authority selection.  Hydration only
+    # supplies the immutable executable identity hash and scalar fields used by
+    # the executor's existing U1 gate.
+    return {
+        "executable_snapshot_id": clean_snapshot_id,
+        "executable_snapshot_hash": snapshot.executable_snapshot_hash,
+        "executable_snapshot_min_tick_size": str(snapshot.min_tick_size),
+        "executable_snapshot_min_order_size": str(snapshot.min_order_size),
+        "executable_snapshot_neg_risk": bool(snapshot.neg_risk),
+        "execution_authority_deadline_utc": freshness_deadline,
+        "executable_snapshot_orderbook_top_bid": top_bid,
+        "executable_snapshot_orderbook_top_ask": str(row["orderbook_top_ask"] or ""),
     }
 
 
@@ -4947,6 +7425,9 @@ def _latest_or_capture_exit_snapshot_context(
     *,
     now: datetime | None = None,
     required_raw_orderbook_hash: str | None = None,
+    required_snapshot_id: str | None = None,
+    prefetched_orderbook: Mapping[str, object] | None = None,
+    require_exact_handoff_snapshot: bool = False,
 ) -> dict[str, object]:
     """Return fresh snapshot kwargs for exits, capturing one when possible.
 
@@ -4957,14 +7438,26 @@ def _latest_or_capture_exit_snapshot_context(
     executor rejects through the existing executable_snapshot_gate.
     """
 
+    if require_exact_handoff_snapshot:
+        return _exact_exit_snapshot_context(
+            conn,
+            token_id,
+            str(required_snapshot_id or ""),
+            str(required_raw_orderbook_hash or ""),
+            now=now,
+        )
+
     def matches_required_book(context: Mapping[str, object]) -> bool:
         required = str(required_raw_orderbook_hash or "").strip()
+        required_id = str(required_snapshot_id or "").strip()
         if not required:
-            return True
+            return not required_id
         if conn is None:
             return False
         snapshot_id = str(context.get("executable_snapshot_id") or "")
         if not snapshot_id:
+            return False
+        if required_id and snapshot_id != required_id:
             return False
         from src.state.snapshot_repo import get_snapshot
 
@@ -4980,8 +7473,27 @@ def _latest_or_capture_exit_snapshot_context(
         now=now,
         require_sell_bid=False,
     )
-    if conn is None or clob is None or not token_id:
+    if conn is None or not token_id:
         return no_bid_context
+    if clob is None:
+        # A caller can carry valid exit authority without owning the public CLOB
+        # transport (for example, a targeted wake after its quote reader was
+        # released). Reacquire the process-owned held-monitor client only when
+        # there is no fresh no-bid fact to classify as liquidity. The capture
+        # below still performs the FC-03 submit-time market/orderbook reads; this
+        # is transport recovery, never quote reuse.
+        if no_bid_context:
+            return no_bid_context
+        try:
+            clob = _held_monitor_clob_client()
+        except Exception as exc:  # noqa: BLE001 - acquisition remains fail-closed
+            logger.warning(
+                "Exit executable snapshot transport recovery failed for %s token=%s: %s",
+                position.trade_id,
+                token_id,
+                exc,
+            )
+            return {}
 
     market_id = str(
         getattr(position, "market_id", "")
@@ -5051,6 +7563,11 @@ def _latest_or_capture_exit_snapshot_context(
             captured_at=captured_at,
             scan_authority=scan_authority,
             execution_side="SELL",
+            prefetched_orderbook=(
+                dict(prefetched_orderbook)
+                if prefetched_orderbook is not None
+                else None
+            ),
             # capture_policy_spec.md §2 trigger 2: synchronous pre-submit
             # recapture (exit SELL path), already structurally full.
             capture_trigger="JIT_SUBMIT",
@@ -5071,7 +7588,12 @@ def _latest_or_capture_exit_snapshot_context(
             token_id,
             now=captured_at,
         )
-        if refreshed_context:
+        if (
+            refreshed_context
+            and str(refreshed_context.get("executable_snapshot_id") or "")
+            == snapshot_id
+            and matches_required_book(refreshed_context)
+        ):
             return refreshed_context
         refreshed_no_bid_context = _latest_exit_snapshot_context(
             conn,
@@ -5079,7 +7601,12 @@ def _latest_or_capture_exit_snapshot_context(
             now=captured_at,
             require_sell_bid=False,
         )
-        if refreshed_no_bid_context:
+        if (
+            refreshed_no_bid_context
+            and str(refreshed_no_bid_context.get("executable_snapshot_id") or "")
+            == snapshot_id
+            and matches_required_book(refreshed_no_bid_context)
+        ):
             return refreshed_no_bid_context
         from src.state.snapshot_repo import get_snapshot
 
@@ -5196,8 +7723,8 @@ def _partial_exit_delta(
     *,
     status: str,
     payload: object,
-    current_open_shares: float,
-) -> tuple[float, float] | None:
+    current_open_shares: object,
+) -> tuple[Decimal, Decimal] | None:
     """Return (newly_filled_shares, remaining_shares) for a partial exit fill."""
 
     remaining_keys = ("remaining_size", "remainingSize", "remaining", "open_size", "openSize")
@@ -5211,7 +7738,12 @@ def _partial_exit_delta(
     )
     if _payload_has_invalid_decimal(payload, *remaining_keys, *cumulative_keys):
         return None
-    open_shares = Decimal(str(max(0.0, float(current_open_shares))))
+    try:
+        open_shares = Decimal(str(current_open_shares))
+    except (InvalidOperation, TypeError, ValueError):
+        return None
+    if not open_shares.is_finite():
+        return None
     if open_shares <= 0:
         return None
     remaining = _payload_decimal(payload, *remaining_keys)
@@ -5232,15 +7764,15 @@ def _partial_exit_delta(
     newly_filled = open_shares - remaining
     if newly_filled <= 0:
         return None
-    return float(newly_filled), float(remaining)
+    return newly_filled, remaining
 
 
 def _apply_partial_exit_fill(
     position: Position,
     *,
-    filled_shares: float,
-    remaining_shares: float,
-    fill_price: float,
+    filled_shares: object,
+    remaining_shares: object,
+    fill_price: object,
     order_id: str,
     status: str,
 ) -> bool:
@@ -5251,46 +7783,60 @@ def _apply_partial_exit_fill(
     slice in nested_fills for audit/replay.
     """
 
-    open_shares = float(position.effective_shares)
-    if open_shares <= 0 or remaining_shares < 0 or remaining_shares >= open_shares:
+    open_shares = Decimal(str(position.effective_shares))
+    filled = Decimal(str(filled_shares))
+    remaining = Decimal(str(remaining_shares))
+    price = Decimal(str(fill_price))
+    if (
+        not all(value.is_finite() for value in (open_shares, filled, remaining, price))
+        or open_shares <= 0
+        or remaining < 0
+        or remaining >= open_shares
+    ):
         return False
-    filled_shares = max(0.0, min(float(filled_shares), open_shares))
-    remaining_shares = max(0.0, min(float(remaining_shares), open_shares))
-    filled_ratio = filled_shares / open_shares
-    remaining_ratio = remaining_shares / open_shares
-    original_size = float(position.size_usd or 0.0)
-    original_cost = float(position.effective_cost_basis_usd or 0.0)
+    filled = max(Decimal("0"), min(filled, open_shares))
+    remaining = max(Decimal("0"), min(remaining, open_shares))
+    filled_ratio = filled / open_shares
+    remaining_ratio = remaining / open_shares
+    original_size = Decimal(str(position.size_usd or 0))
+    original_cost = Decimal(str(position.effective_cost_basis_usd or 0))
     realized_cost = original_cost * filled_ratio
-    realized_pnl = round(filled_shares * float(fill_price) - realized_cost, 2)
+    realized_pnl = filled * price - realized_cost
     position.nested_fills.append(
         {
             "type": "partial_exit_fill",
             "order_id": order_id,
             "status": status,
-            "filled_shares": filled_shares,
-            "remaining_shares": remaining_shares,
-            "fill_price": float(fill_price),
-            "realized_cost_basis_usd": realized_cost,
-            "realized_pnl": realized_pnl,
+            "filled_shares": float(filled),
+            "remaining_shares": float(remaining),
+            "fill_price": float(price),
+            "realized_cost_basis_usd": float(realized_cost),
+            "realized_pnl": float(realized_pnl),
             "observed_at": _utcnow().isoformat(),
         }
     )
-    position.shares = remaining_shares
-    position.size_usd = original_size * remaining_ratio
+    position.shares = float(remaining)
+    position.size_usd = float(original_size * remaining_ratio)
     if position.cost_basis_usd > 0:
-        position.cost_basis_usd = original_cost * remaining_ratio
+        position.cost_basis_usd = float(original_cost * remaining_ratio)
     # F1 (PR1 critic SEV-1): balance-only positions route effective_shares via
     # chain_shares.  Without this block, effective_exposure() returns stale
     # pre-exit chain aggregate until the next reconcile cycle — exit-sizing code
     # that calls effective_exposure() between cycles would overstate exposure and
     # re-issue exit orders the venue rejects.
     if position.has_chain_observed_authority:
-        original_chain_shares = float(getattr(position, "chain_shares", 0.0) or 0.0)
-        original_chain_cost = float(getattr(position, "chain_cost_basis_usd", 0.0) or 0.0)
+        original_chain_shares = Decimal(
+            str(getattr(position, "chain_shares", 0) or 0)
+        )
+        original_chain_cost = Decimal(
+            str(getattr(position, "chain_cost_basis_usd", 0) or 0)
+        )
         if original_chain_shares > 0:
-            position.chain_shares = original_chain_shares * remaining_ratio
+            position.chain_shares = float(original_chain_shares * remaining_ratio)
         if original_chain_cost > 0:
-            position.chain_cost_basis_usd = original_chain_cost * remaining_ratio
+            position.chain_cost_basis_usd = float(
+                original_chain_cost * remaining_ratio
+            )
     position.exit_state = "sell_pending"
     return True
 
@@ -5300,8 +7846,8 @@ def _log_partial_exit_execution_fact(
     position: Position,
     *,
     status: str,
-    fill_price: float,
-    filled_shares: float,
+    fill_price: object,
+    filled_shares: object,
     order_id: str,
 ) -> None:
     from src.state.db import log_execution_fact
@@ -5318,8 +7864,8 @@ def _log_partial_exit_execution_fact(
         )
         or None,
         filled_at=_utcnow().isoformat(),
-        fill_price=fill_price,
-        shares=filled_shares,
+        fill_price=float(Decimal(str(fill_price))),
+        shares=float(Decimal(str(filled_shares))),
         venue_status=status or "PARTIAL",
         terminal_exec_status=status or "PARTIAL",
         command_id=_exit_command_id_for_order(conn, position, order_id),
@@ -5327,15 +7873,105 @@ def _log_partial_exit_execution_fact(
     )
 
 
+def _build_partial_exit_projection_event(
+    conn: sqlite3.Connection,
+    position: Position,
+    *,
+    sequence_no: int,
+    filled_shares: object,
+    remaining_shares: object,
+    fill_price: object,
+    order_id: str,
+    status: str,
+    fill_identity: str = "",
+    economic_fill_identity: str = "",
+    economic_fill_cumulative_shares: object | None = None,
+    economic_fill_cumulative_notional_usd: object | None = None,
+    filled_notional_usd: object | None = None,
+    allocated_cost_basis_usd: object | None = None,
+    realized_pnl_delta_usd: object | None = None,
+    cumulative_realized_pnl_usd: object | None = None,
+    remaining_cost_basis_usd: object | None = None,
+    semantic_event: str = "PARTIAL_FILL_OBSERVED",
+) -> tuple[dict, dict]:
+    import json as _json
+
+    from src.engine.lifecycle_events import build_monitor_refreshed_canonical_write
+    from src.state.fill_dedup import canonical_decimal_text
+
+    trade_id = str(getattr(position, "trade_id", "") or "")
+    if not trade_id:
+        raise ValueError("partial EXIT projection requires position_id")
+    occurred_at = _utcnow().isoformat()
+    if not str(getattr(position, "last_monitor_at", "") or "").strip():
+        position.last_monitor_at = occurred_at
+    env = str(getattr(position, "env", "") or "live")
+    if env not in {"live", "test", "replay", "backtest"}:
+        position.env = "live"
+    events, projection = build_monitor_refreshed_canonical_write(
+        position,
+        sequence_no=sequence_no,
+        phase_after="pending_exit",
+        source_module="src.execution.exit_lifecycle",
+    )
+    if not events:
+        raise RuntimeError("partial EXIT projection builder returned no event")
+    event = dict(events[0])
+    payload = _json.loads(str(event.get("payload_json") or "{}"))
+    decimal_fields = {
+        "filled_shares": filled_shares,
+        "remaining_shares": remaining_shares,
+        "fill_price": fill_price,
+        "economic_fill_cumulative_shares": economic_fill_cumulative_shares,
+        "economic_fill_cumulative_notional_usd": economic_fill_cumulative_notional_usd,
+        "filled_notional_usd": filled_notional_usd,
+        "allocated_cost_basis_usd": allocated_cost_basis_usd,
+        "realized_pnl_delta_usd": realized_pnl_delta_usd,
+        "cumulative_realized_pnl_usd": cumulative_realized_pnl_usd,
+        "remaining_cost_basis_usd": remaining_cost_basis_usd,
+    }
+    payload.update(
+        {
+            "semantic_event": semantic_event,
+            "order_id": order_id,
+            "venue_status": status or "PARTIAL",
+            "fill_identity": fill_identity or None,
+            "economic_fill_identity": economic_fill_identity or None,
+        }
+    )
+    payload.update(
+        {
+            key: None if value is None else canonical_decimal_text(value)
+            for key, value in decimal_fields.items()
+        }
+    )
+    event["event_id"] = f"{trade_id}:partial_exit_fill:{sequence_no}"
+    event["caused_by"] = "partial_exit_fill"
+    event["occurred_at"] = occurred_at
+    event["order_id"] = order_id or None
+    event["venue_status"] = status or "PARTIAL"
+    event["payload_json"] = _json.dumps(payload, sort_keys=True)
+    projection["updated_at"] = occurred_at
+    return event, projection
+
+
 def _dual_write_partial_exit_projection_if_available(
     conn: sqlite3.Connection | None,
     position: Position,
     *,
-    filled_shares: float,
-    remaining_shares: float,
-    fill_price: float,
+    filled_shares: object,
+    remaining_shares: object,
+    fill_price: object,
     order_id: str,
     status: str,
+    fill_identity: str = "",
+    economic_fill_identity: str = "",
+    economic_fill_cumulative_shares: object | None = None,
+    economic_fill_cumulative_notional_usd: object | None = None,
+    filled_notional_usd: object | None = None,
+    allocated_cost_basis_usd: object | None = None,
+    realized_pnl_delta_usd: object | None = None,
+    cumulative_realized_pnl_usd: object | None = None,
     semantic_event: str = "PARTIAL_FILL_OBSERVED",
 ) -> bool:
     """Persist the reduced open exposure after a partial exit fill."""
@@ -5343,48 +7979,34 @@ def _dual_write_partial_exit_projection_if_available(
     if conn is None:
         return False
     try:
-        import json as _json
-
-        from src.engine.lifecycle_events import build_monitor_refreshed_canonical_write
         from src.state.db import append_many_and_project
-
-        trade_id = str(getattr(position, "trade_id", "") or "")
-        if not trade_id:
-            return False
-        sequence_no = _next_canonical_sequence_no(conn, trade_id)
-        occurred_at = _utcnow().isoformat()
-        if not str(getattr(position, "last_monitor_at", "") or "").strip():
-            position.last_monitor_at = occurred_at
-        env = str(getattr(position, "env", "") or "live")
-        if env not in {"live", "test", "replay", "backtest"}:
-            position.env = "live"
-        events, projection = build_monitor_refreshed_canonical_write(
+        from src.state.fill_dedup import canonical_decimal_text
+        event, projection = _build_partial_exit_projection_event(
+            conn,
             position,
-            sequence_no=sequence_no,
-            phase_after="pending_exit",
-            source_module="src.execution.exit_lifecycle",
+            sequence_no=_next_canonical_sequence_no(
+                conn, str(getattr(position, "trade_id", "") or "")
+            ),
+            filled_shares=filled_shares,
+            remaining_shares=remaining_shares,
+            fill_price=fill_price,
+            order_id=order_id,
+            status=status,
+            fill_identity=fill_identity,
+            economic_fill_identity=economic_fill_identity,
+            economic_fill_cumulative_shares=economic_fill_cumulative_shares,
+            economic_fill_cumulative_notional_usd=economic_fill_cumulative_notional_usd,
+            filled_notional_usd=filled_notional_usd,
+            allocated_cost_basis_usd=allocated_cost_basis_usd,
+            realized_pnl_delta_usd=realized_pnl_delta_usd,
+            cumulative_realized_pnl_usd=cumulative_realized_pnl_usd,
+            semantic_event=semantic_event,
         )
-        if not events:
-            return False
-        event = dict(events[0])
-        payload = _json.loads(str(event.get("payload_json") or "{}"))
-        payload.update(
-            {
-                "semantic_event": semantic_event,
-                "order_id": order_id,
-                "venue_status": status or "PARTIAL",
-                "filled_shares": filled_shares,
-                "remaining_shares": remaining_shares,
-                "fill_price": fill_price,
-            }
+        projection["realized_pnl_usd"] = (
+            None
+            if cumulative_realized_pnl_usd is None
+            else canonical_decimal_text(cumulative_realized_pnl_usd)
         )
-        event["event_id"] = f"{trade_id}:partial_exit_fill:{sequence_no}"
-        event["caused_by"] = "partial_exit_fill"
-        event["occurred_at"] = occurred_at
-        event["order_id"] = order_id or None
-        event["venue_status"] = status or "PARTIAL"
-        event["payload_json"] = _json.dumps(payload, default=str, sort_keys=True)
-        projection["updated_at"] = occurred_at
         append_many_and_project(conn, [event], projection)
         return True
     except Exception:  # noqa: BLE001 - partial-fill projection must not hide venue facts
@@ -5394,6 +8016,76 @@ def _dual_write_partial_exit_projection_if_available(
             order_id,
         )
         return False
+
+
+def _dual_write_partial_exit_projection_batch(
+    conn: sqlite3.Connection | None,
+    fill_position: Position,
+    *,
+    order_id: str,
+    status: str,
+    slices: Sequence[dict[str, object]],
+    cumulative_realized_pnl_usd: object,
+    released_position: Position | None = None,
+    previous_next_retry_at: str = "",
+    previous_retry_count: int = 0,
+    previous_error: str = "",
+) -> bool:
+    """Append exact fill events and one final projection in one transaction."""
+
+    if conn is None or (not slices and released_position is None):
+        return False
+    from src.state.db import append_many_and_project
+    from src.state.fill_dedup import canonical_decimal_text
+
+    trade_id = str(getattr(fill_position, "trade_id", "") or "")
+    sequence_no = _next_canonical_sequence_no(conn, trade_id)
+    events: list[dict] = []
+    projection: dict | None = None
+    for offset, item in enumerate(slices):
+        event, projection = _build_partial_exit_projection_event(
+            conn,
+            fill_position,
+            sequence_no=sequence_no + offset,
+            filled_shares=item["quantity"],
+            remaining_shares=item["remaining_shares"],
+            fill_price=item["unit_price"],
+            order_id=order_id,
+            status=status,
+            fill_identity=str(item["identity"]),
+            economic_fill_identity=str(item["identity"]),
+            economic_fill_cumulative_shares=item["cumulative_qty"],
+            economic_fill_cumulative_notional_usd=item["cumulative_notional"],
+            filled_notional_usd=item["notional"],
+            allocated_cost_basis_usd=item["allocated_cost"],
+            realized_pnl_delta_usd=item["pnl_delta"],
+            cumulative_realized_pnl_usd=item["cumulative_realized"],
+            remaining_cost_basis_usd=item.get("remaining_cost_basis"),
+            semantic_event="CAPITAL_REDUCTION_FILLED",
+        )
+        events.append(event)
+    if released_position is not None:
+        released = _build_exit_retry_released_event_and_projection(
+            released_position,
+            sequence_no=sequence_no + len(events),
+            previous_next_retry_at=previous_next_retry_at,
+            previous_retry_count=previous_retry_count,
+            previous_error=previous_error,
+            release_reason="CAPITAL_REDUCTION_FILLED",
+            caused_by="capital_reduction_filled",
+            base_projection=projection,
+        )
+        if released is None:
+            raise RuntimeError("confirmed reduction canonical release build failed")
+        release_event, projection = released
+        events.append(release_event)
+    if not events or projection is None:
+        raise RuntimeError("partial EXIT canonical batch is empty")
+    projection["realized_pnl_usd"] = canonical_decimal_text(
+        cumulative_realized_pnl_usd
+    )
+    append_many_and_project(conn, events, projection)
+    return True
 
 
 def _canonical_exit_intent_payload(
@@ -5552,6 +8244,75 @@ def _canonical_exit_intent_payload(
     return payload if isinstance(payload, dict) else None
 
 
+def _is_canonical_global_maker_rest_exit(
+    conn: sqlite3.Connection | None,
+    position: Position,
+    *,
+    order_id: str,
+    command_id: str = "",
+) -> bool:
+    """Bind one held-token SELL command to its global MAKER_REST intent."""
+
+    if conn is None or not order_id:
+        return False
+    position_id = str(
+        getattr(position, "position_id", "")
+        or getattr(position, "trade_id", "")
+        or ""
+    ).strip()
+    raw_direction = getattr(position, "direction", "")
+    direction = str(getattr(raw_direction, "value", raw_direction) or "").lower()
+    held_token_id = str(
+        getattr(position, "no_token_id", "")
+        if direction == "buy_no"
+        else getattr(position, "token_id", "")
+    ).strip()
+    if not position_id or not held_token_id:
+        return False
+    try:
+        rows = conn.execute(
+            """
+            SELECT cmd.command_id, cmd.token_id, cmd.side, cmd.intent_kind,
+                   envelope.order_type, envelope.post_only
+              FROM venue_commands AS cmd
+              JOIN venue_submission_envelopes AS envelope
+                ON envelope.envelope_id = cmd.envelope_id
+             WHERE cmd.position_id = ?
+               AND cmd.venue_order_id = ?
+               AND cmd.intent_kind = 'EXIT'
+             ORDER BY cmd.updated_at DESC, cmd.created_at DESC, cmd.command_id DESC
+             LIMIT 2
+            """,
+            (position_id, order_id),
+        ).fetchall()
+    except sqlite3.Error:
+        return False
+    if len(rows) != 1:
+        return False
+    row = rows[0]
+    if (
+        (command_id and str(row[0] or "") != command_id)
+        or str(row[1] or "") != held_token_id
+        or str(row[2] or "").upper() != "SELL"
+        or str(row[3] or "").upper() != "EXIT"
+        or str(row[4] or "").upper() != "GTC"
+        or int(row[5] or 0) != 1
+    ):
+        return False
+    intent = _canonical_exit_intent_payload(conn, position, order_id=order_id)
+    certificate = (
+        intent.get("exit_intent_capital_certificate")
+        if isinstance(intent, Mapping)
+        else None
+    )
+    return bool(
+        isinstance(intent, Mapping)
+        and intent.get("exit_intent_reason") == "GLOBAL_CAPITAL_OPTIMAL_SELL"
+        and isinstance(certificate, Mapping)
+        and str(certificate.get("execution_mode") or "").upper() == "MAKER_REST"
+    )
+
+
 def _canonical_reduction_intent_shares(
     conn: sqlite3.Connection | None,
     position: Position,
@@ -5572,6 +8333,29 @@ def _canonical_reduction_intent_shares(
     if payload.get("exit_intent_close_position") is not False:
         return None
     return _positive_decimal(payload.get("exit_intent_shares"))
+
+
+def _canonical_reduction_intent_holding_shares(
+    conn: sqlite3.Connection | None,
+    position: Position,
+    *,
+    order_id: str,
+) -> Decimal | None:
+    """Return the immutable pre-reduction holding from its capital certificate."""
+
+    payload = _canonical_exit_intent_payload(
+        conn,
+        position,
+        order_id=order_id,
+    )
+    certificate = (
+        payload.get("exit_intent_capital_certificate")
+        if isinstance(payload, dict)
+        else None
+    )
+    if not isinstance(certificate, dict):
+        return None
+    return _positive_decimal(certificate.get("held_shares"))
 
 
 def _canonical_full_exit_intent_shares(
@@ -5663,22 +8447,70 @@ def _recorded_reduction_fill_shares(
     if conn is None or not position_id or not order_id:
         return Decimal("0")
     try:
-        row = conn.execute(
+        rows = conn.execute(
             """
-            SELECT COALESCE(
-                       SUM(CAST(json_extract(payload_json, '$.filled_shares') AS REAL)),
-                       0
-                   )
+            SELECT payload_json
               FROM position_events
              WHERE position_id = ?
                AND caused_by = 'partial_exit_fill'
                AND order_id = ?
+             ORDER BY sequence_no, event_id
             """,
             (position_id, order_id),
-        ).fetchone()
-    except sqlite3.Error:
+        ).fetchall()
+        total = Decimal("0")
+        for row in rows:
+            payload = json.loads(str(row[0] or "{}"))
+            value = payload.get("filled_shares")
+            if value is not None:
+                total += Decimal(str(value))
+        return total
+    except (sqlite3.Error, TypeError, ValueError, json.JSONDecodeError):
         return Decimal("0")
-    return Decimal(str(row[0] or "0"))
+
+
+def _recorded_reduction_realized_pnl(
+    conn: sqlite3.Connection | None,
+    *,
+    position_id: str,
+) -> Decimal:
+    """Return canonical realized PnL from already-persisted partial EXIT fills."""
+
+    if conn is None or not position_id:
+        return Decimal("0")
+    from src.state.fill_dedup import partial_exit_realized_pnl_fold
+
+    return partial_exit_realized_pnl_fold(conn, position_id)
+
+
+def _cumulative_close_realized_pnl(
+    conn: sqlite3.Connection | None,
+    *,
+    position_id: str,
+    shares: object,
+    exit_price: object,
+    cost_basis_usd: object,
+    entry_price: object,
+) -> float:
+    """Grade one terminal leg together with every exact prior reduction."""
+
+    from src.state.close_economics import compute_realized_pnl_usd
+
+    prior_realized = _recorded_reduction_realized_pnl(
+        conn,
+        position_id=position_id,
+    )
+    # The shared close formula rounds once at the canonical terminal boundary.
+    # Subtracting already-realized economics from the remaining basis is
+    # algebraically equivalent to adding it after the terminal leg, without
+    # first rounding that leg and fabricating a cent of drift.
+    cumulative_cost_basis = Decimal(str(cost_basis_usd)) - prior_realized
+    return compute_realized_pnl_usd(
+        shares=float(shares),
+        exit_price=float(exit_price),
+        cost_basis_usd=float(cumulative_cost_basis),
+        entry_price=float(entry_price),
+    )
 
 
 def _complete_intentional_position_reduction(
@@ -5686,12 +8518,17 @@ def _complete_intentional_position_reduction(
     *,
     intended_shares: Decimal,
     confirmed_filled_shares: Decimal,
-    fill_price: float,
+    fill_price: object,
     order_id: str,
     status: str,
     conn: sqlite3.Connection | None,
+    economic_fills: Sequence[object] | None = None,
+    intent_holding_shares: Decimal | None = None,
+    release_after_fill: bool = True,
 ) -> Decimal:
-    """Apply a confirmed partial-position SELL without manufacturing closure."""
+    """Append exact partial economics before publishing the local reduction."""
+
+    import copy
 
     trade_id = str(getattr(position, "trade_id", "") or "")
     already_applied = _recorded_reduction_fill_shares(
@@ -5701,76 +8538,319 @@ def _complete_intentional_position_reduction(
     )
     intended_shares = Decimal(intended_shares)
     total_filled = Decimal(confirmed_filled_shares)
+    fill_price_decimal = _positive_finite_decimal(fill_price)
     if (
-        total_filled <= Decimal("1e-9")
+        fill_price_decimal is None
+        or total_filled <= Decimal("1e-9")
         or total_filled > intended_shares + Decimal("1e-9")
     ):
         raise RuntimeError("reduction finality has an invalid confirmed fill size")
     total_filled = min(intended_shares, total_filled)
     newly_filled = total_filled - already_applied
-    if newly_filled > Decimal("1e-9"):
-        open_shares = Decimal(str(position.effective_shares))
-        if newly_filled >= open_shares:
-            raise RuntimeError("intentional reduction would manufacture a full close")
-        remaining_shares = open_shares - newly_filled
-        if not _apply_partial_exit_fill(
-            position,
-            filled_shares=float(newly_filled),
-            remaining_shares=float(remaining_shares),
-            fill_price=fill_price,
-            order_id=order_id,
-            status=status,
-        ):
-            raise RuntimeError("confirmed reduction could not update open exposure")
-        persisted = _dual_write_partial_exit_projection_if_available(
-            conn,
-            position,
-            filled_shares=float(newly_filled),
-            remaining_shares=float(remaining_shares),
-            fill_price=fill_price,
-            order_id=order_id,
-            status=status,
-            semantic_event="CAPITAL_REDUCTION_FILLED",
+    basis_shares = Decimal(str(position.effective_shares))
+    basis_cost = Decimal(str(position.effective_cost_basis_usd))
+    if basis_shares <= Decimal("1e-9") or basis_cost < 0:
+        from src.state.fill_dedup import PartialExitEconomicDebtError
+
+        raise PartialExitEconomicDebtError(
+            f"partial EXIT basis missing: position_id={trade_id}"
         )
-        if conn is not None and not persisted:
-            raise RuntimeError("confirmed reduction canonical projection failed")
+    unit_cost = basis_cost / basis_shares
+    staged_fill_position = copy.deepcopy(position)
+    remaining_shares = basis_shares
+    position_fill_to_apply = Decimal("0")
+    batch_slices: list[dict[str, object]] = []
+    cumulative_realized = (
+        _recorded_reduction_realized_pnl(conn, position_id=trade_id)
+        if conn is not None
+        else Decimal("0")
+    )
+    # A canonical MATCHED/CONFIRMED fact must still be reconciled after a
+    # status-first receipt already reduced the local position.
+    if newly_filled > Decimal("1e-9") or economic_fills:
+        open_shares = Decimal(str(position.effective_shares))
+        intent_holding = (
+            Decimal(intent_holding_shares)
+            if intent_holding_shares is not None
+            else _canonical_reduction_intent_holding_shares(
+                conn,
+                position,
+                order_id=order_id,
+            )
+        )
+        if intent_holding is None:
+            full_intent_shares = _canonical_full_exit_intent_shares(
+                conn,
+                position,
+                order_id=order_id,
+            )
+            if (
+                full_intent_shares is not None
+                and total_filled < full_intent_shares
+            ):
+                intent_holding = full_intent_shares
+        expected_remaining = (
+            intent_holding - total_filled
+            if intent_holding is not None
+            else None
+        )
+        if expected_remaining is not None:
+            tolerance = Decimal("0.000001")
+            if expected_remaining <= Decimal("1e-9"):
+                raise RuntimeError(
+                    "intentional reduction would manufacture a full close"
+                )
+            if open_shares > intent_holding + tolerance:
+                raise RuntimeError(
+                    "intentional reduction current exposure exceeds intent holding"
+                )
+            if open_shares + tolerance < expected_remaining:
+                raise RuntimeError(
+                    "intentional reduction current exposure is below fill target"
+                )
+            remaining_shares = expected_remaining
+            unreflected_fill = open_shares - expected_remaining
+            if abs(unreflected_fill) <= tolerance:
+                remaining_shares = open_shares
+            else:
+                position_fill_to_apply = unreflected_fill
+        else:
+            if newly_filled <= Decimal("1e-9"):
+                remaining_shares = open_shares
+            elif newly_filled >= open_shares:
+                raise RuntimeError(
+                    "intentional reduction would manufacture a full close"
+                )
+            else:
+                remaining_shares = open_shares - newly_filled
+                position_fill_to_apply = newly_filled
+        from src.state.fill_dedup import (
+            PartialExitEconomicDebtError,
+            partial_exit_realized_pnl_fold,
+            recorded_partial_exit_fill_cursors,
+        )
+
+        cursors = recorded_partial_exit_fill_cursors(conn, trade_id) if conn else {}
+        canonical_fills = list(economic_fills or ())
+        slices: list[dict[str, object]] = []
+        if canonical_fills:
+            status_identity = f"status-fill:v1:{trade_id}:{order_id}"
+            status_qty, status_notional = cursors.get(
+                status_identity, (Decimal("0"), Decimal("0"))
+            )
+            # The status receipt is one command-wide prefix, while canonical
+            # trade facts are cumulative per stable trade identity.  Allocate
+            # that prefix from the first canonical fill onward on every replay;
+            # never subtract prior canonical cursors from the status prefix or
+            # a later replay will consume the same fill twice.
+            status_remaining_qty = status_qty
+            status_remaining_notional = status_notional
+            canonical_total_qty = sum(
+                (Decimal(str(getattr(fact, "quantity", "0"))) for fact in canonical_fills),
+                Decimal("0"),
+            )
+            canonical_total_notional = sum(
+                (Decimal(str(getattr(fact, "notional", "0"))) for fact in canonical_fills),
+                Decimal("0"),
+            )
+            if status_qty and (
+                canonical_total_qty < status_qty
+                or canonical_total_notional < status_notional
+                or (
+                    canonical_total_qty == status_qty
+                    and canonical_total_notional != status_notional
+                )
+            ):
+                raise PartialExitEconomicDebtError(
+                    f"partial EXIT canonical economics do not reconcile status receipt: position_id={trade_id}"
+                )
+            for fact in canonical_fills:
+                identity = str(getattr(fact, "identity", "") or "")
+                cumulative_qty = Decimal(str(getattr(fact, "quantity", "0")))
+                cumulative_notional = Decimal(str(getattr(fact, "notional", "0")))
+                prior_qty, prior_notional = cursors.get(
+                    identity, (Decimal("0"), Decimal("0"))
+                )
+                if cumulative_qty < prior_qty or cumulative_notional < prior_notional:
+                    raise PartialExitEconomicDebtError(
+                        f"partial EXIT canonical fill regressed: position_id={trade_id} identity={identity}"
+                    )
+                covered_qty = min(status_remaining_qty, cumulative_qty)
+                covered_notional = (
+                    cumulative_notional * covered_qty / cumulative_qty
+                    if covered_qty > 0
+                    else Decimal("0")
+                )
+                if status_remaining_notional < covered_notional:
+                    raise PartialExitEconomicDebtError(
+                        f"partial EXIT status receipt notional cannot cover canonical fill: position_id={trade_id} identity={identity}"
+                    )
+                status_remaining_qty -= covered_qty
+                status_remaining_notional -= covered_notional
+                if prior_qty > covered_qty:
+                    accounted_qty, accounted_notional = prior_qty, prior_notional
+                elif prior_qty < covered_qty:
+                    accounted_qty, accounted_notional = covered_qty, covered_notional
+                else:
+                    if prior_qty and prior_notional != covered_notional:
+                        raise PartialExitEconomicDebtError(
+                            f"partial EXIT status/canonical economics disagree: position_id={trade_id} identity={identity}"
+                        )
+                    accounted_qty, accounted_notional = prior_qty, prior_notional
+                delta_qty = cumulative_qty - accounted_qty
+                delta_notional = cumulative_notional - accounted_notional
+                if delta_qty == 0:
+                    if delta_notional != 0:
+                        raise PartialExitEconomicDebtError(
+                            f"partial EXIT canonical fill revised price without a slice: position_id={trade_id} identity={identity}"
+                        )
+                    continue
+                if delta_notional <= 0:
+                    raise PartialExitEconomicDebtError(
+                        f"partial EXIT canonical fill has nonpositive delta notional: position_id={trade_id} identity={identity}"
+                    )
+                slices.append(
+                    {
+                        "identity": identity,
+                        "quantity": delta_qty,
+                        "notional": delta_notional,
+                        "unit_price": delta_notional / delta_qty,
+                        "cumulative_qty": cumulative_qty,
+                        "cumulative_notional": cumulative_notional,
+                    }
+                )
+            if status_remaining_qty != 0 or status_remaining_notional != 0:
+                raise PartialExitEconomicDebtError(
+                    f"partial EXIT status receipt remains unmatched: position_id={trade_id} order_id={order_id}"
+                )
+        else:
+            # A status-first receipt gets one stable command-bound cursor so a
+            # later MATCHED/CONFIRMED fact can verify it without double-booking.
+            identity = f"status-fill:v1:{trade_id}:{order_id}"
+            prior_qty, prior_notional = cursors.get(
+                identity,
+                (already_applied, already_applied * fill_price_decimal),
+            )
+            cumulative_notional = total_filled * fill_price_decimal
+            delta_qty = total_filled - prior_qty
+            delta_notional = cumulative_notional - prior_notional
+            if delta_qty > Decimal("1e-9") and delta_notional > 0:
+                slices.append(
+                    {
+                        "identity": identity,
+                        "quantity": delta_qty,
+                        "notional": delta_notional,
+                        "unit_price": delta_notional / delta_qty,
+                        "cumulative_qty": total_filled,
+                        "cumulative_notional": cumulative_notional,
+                    }
+                )
+        slice_quantity = sum(
+            (item["quantity"] for item in slices), Decimal("0")
+        )
+        if slice_quantity != newly_filled:
+            raise PartialExitEconomicDebtError(
+                f"partial EXIT fill/economics mismatch: position_id={trade_id} fill={newly_filled} economics={slice_quantity}"
+            )
+        cumulative_realized = (
+            partial_exit_realized_pnl_fold(conn, trade_id)
+            if conn
+            else Decimal("0")
+        )
+        remaining_quantity = slice_quantity
+        for item in slices:
+            quantity = item["quantity"]
+            notional = item["notional"]
+            remaining_quantity -= quantity
+            allocated_cost = quantity * unit_cost
+            event_remaining_shares = remaining_shares + remaining_quantity
+            remaining_cost_basis = event_remaining_shares * unit_cost
+            pnl_delta = notional - allocated_cost
+            cumulative_realized += pnl_delta
+            batch_slices.append(
+                {
+                    **item,
+                    "remaining_shares": event_remaining_shares,
+                    "allocated_cost": allocated_cost,
+                    "pnl_delta": pnl_delta,
+                    "cumulative_realized": cumulative_realized,
+                    "remaining_cost_basis": remaining_cost_basis,
+                }
+            )
+
+    if position_fill_to_apply > Decimal("1e-9") and not _apply_partial_exit_fill(
+        staged_fill_position,
+        filled_shares=position_fill_to_apply,
+        remaining_shares=remaining_shares,
+        fill_price=fill_price_decimal,
+        order_id=order_id,
+        status=status,
+    ):
+        raise RuntimeError("confirmed reduction could not converge to fill target")
 
     previous_next_retry_at = str(
         getattr(position, "next_exit_retry_at", "") or ""
     )
     previous_retry_count = int(getattr(position, "exit_retry_count", 0) or 0)
     previous_error = str(getattr(position, "last_exit_error", "") or "")
-    position.exit_state = ""
-    position.next_exit_retry_at = ""
-    position.exit_retry_count = 0
-    position.exit_reason = ""
-    position.last_exit_error = ""
-    position.last_exit_order_id = ""
-    position.order_status = "filled"
-    _release_pending_exit(position)
-    released = _dual_write_exit_retry_released_if_available(
-        conn,
-        position,
-        previous_next_retry_at=previous_next_retry_at,
-        previous_retry_count=previous_retry_count,
-        previous_error=previous_error,
-        release_reason="CAPITAL_REDUCTION_FILLED",
-        caused_by="capital_reduction_filled",
+    final_position = staged_fill_position
+    released_position: Position | None = None
+    raw_state = getattr(position, "state", "")
+    state_name = str(getattr(raw_state, "value", raw_state) or "")
+    # A historical reduction fact may be replayed while a later, unrelated
+    # exit is pending. Release only for new economics or confirmation of the
+    # still-owned order; otherwise the old fill creates an
+    # intent/reject/release loop on every monitor pass.
+    same_exit_order = (
+        bool(order_id)
+        and str(getattr(position, "last_exit_order_id", "") or "") == order_id
     )
-    if conn is not None and not released:
-        raise RuntimeError("confirmed reduction canonical release failed")
+    should_release = (
+        newly_filled > Decimal("1e-9") or bool(batch_slices) or same_exit_order
+    ) and (
+        state_name == "pending_exit"
+        or bool(str(getattr(position, "exit_state", "") or ""))
+    )
+    if release_after_fill and should_release:
+        released_position = copy.deepcopy(staged_fill_position)
+        released_position.exit_state = ""
+        released_position.next_exit_retry_at = ""
+        released_position.exit_retry_count = 0
+        released_position.exit_reason = ""
+        released_position.last_exit_error = ""
+        released_position.last_exit_order_id = ""
+        released_position.order_status = "filled"
+        _release_pending_exit(released_position)
+        final_position = released_position
+
+    if conn is not None and (batch_slices or released_position is not None):
+        _dual_write_partial_exit_projection_batch(
+            conn,
+            staged_fill_position,
+            order_id=order_id,
+            status=status,
+            slices=batch_slices,
+            cumulative_realized_pnl_usd=cumulative_realized,
+            released_position=released_position,
+            previous_next_retry_at=previous_next_retry_at,
+            previous_retry_count=previous_retry_count,
+            previous_error=previous_error,
+        )
+
+    position.__dict__.clear()
+    position.__dict__.update(final_position.__dict__)
     if conn is not None and newly_filled > Decimal("1e-9"):
         _log_partial_exit_execution_fact(
             conn,
             position,
             status=status,
-            fill_price=fill_price,
-            filled_shares=float(newly_filled),
+            fill_price=fill_price_decimal,
+            filled_shares=newly_filled,
             order_id=order_id,
         )
     if newly_filled > Decimal("1e-9"):
         _emit_typed_realized_fill(
-            actual_price=fill_price,
+            actual_price=float(fill_price_decimal),
             expected_price=float(
                 getattr(position, "last_monitor_market_price", 0.0)
                 or getattr(position, "entry_price", 0.0)
@@ -5957,39 +9037,11 @@ def _last_exit_order_id(
 
 
 def _canonical_exit_trade_fact_cte(cte_name: str = "canonical_exit_trade_fact") -> str:
-    """Rank duplicate trade facts so weaker later rows cannot hide a fill."""
+    """Use the state-owned stable revision identity for every EXIT reader."""
 
-    return f"""
-        {cte_name} AS (
-            SELECT ranked.*
-              FROM (
-                    SELECT scored.*,
-                           ROW_NUMBER() OVER (
-                               PARTITION BY command_id, trade_id
-                               ORDER BY proof_rank DESC, local_sequence DESC
-                           ) AS canonical_rank
-                      FROM (
-                            SELECT fact.*,
-                                   CASE
-                                       WHEN UPPER(COALESCE(fact.state, '')) = 'CONFIRMED'
-                                            AND CAST(COALESCE(fact.filled_size, '0') AS REAL) > 0
-                                       THEN 500
-                                       WHEN UPPER(COALESCE(fact.state, '')) = 'MINED'
-                                            AND CAST(COALESCE(fact.filled_size, '0') AS REAL) > 0
-                                       THEN 450
-                                       WHEN UPPER(COALESCE(fact.state, '')) = 'MATCHED'
-                                            AND CAST(COALESCE(fact.filled_size, '0') AS REAL) > 0
-                                       THEN 400
-                                       WHEN CAST(COALESCE(fact.filled_size, '0') AS REAL) > 0
-                                       THEN 300
-                                       ELSE 100
-                                   END AS proof_rank
-                              FROM venue_trade_facts fact
-                           ) scored
-                   ) ranked
-             WHERE ranked.canonical_rank = 1
-        )
-    """
+    from src.state.fill_dedup import canonical_trade_fact_cte
+
+    return canonical_trade_fact_cte(cte_name)
 
 
 def _economic_exit_trade_fact_cte(
@@ -5997,31 +9049,14 @@ def _economic_exit_trade_fact_cte(
     canonical_cte_name: str = "canonical_exit_trade_fact",
     cte_name: str = "economic_exit_trade_fact",
 ) -> str:
-    """Exclude a tx-hash alias once an exact child trade fact exists."""
+    """Use the full tx/source-trade-fact alias exclusion contract."""
 
-    return f"""
-        {cte_name} AS (
-            SELECT fact.*
-              FROM {canonical_cte_name} fact
-             WHERE NOT (
-                    TRIM(COALESCE(fact.tx_hash, '')) != ''
-                AND LOWER(TRIM(COALESCE(fact.trade_id, '')))
-                    = LOWER(TRIM(fact.tx_hash))
-                AND EXISTS (
-                        SELECT 1
-                          FROM {canonical_cte_name} exact
-                         WHERE exact.command_id = fact.command_id
-                           AND LOWER(TRIM(COALESCE(exact.tx_hash, '')))
-                               = LOWER(TRIM(fact.tx_hash))
-                           AND LOWER(TRIM(COALESCE(exact.trade_id, '')))
-                               != LOWER(TRIM(COALESCE(fact.trade_id, '')))
-                           AND UPPER(COALESCE(exact.state, ''))
-                               IN ('MATCHED', 'MINED', 'CONFIRMED')
-                           AND CAST(COALESCE(exact.filled_size, '0') AS REAL) > 0
-                    )
-                )
-        )
-    """
+    from src.state.fill_dedup import economic_trade_fact_cte
+
+    return economic_trade_fact_cte(
+        canonical_cte_name=canonical_cte_name,
+        cte_name=cte_name,
+    )
 
 
 def _accumulate_exact_fills(
@@ -6180,6 +9215,15 @@ def _exit_trade_fact_close_candidate(
     fill_price = fill_notional / filled_size
     if fill_price <= 0 or fill_price > 1:
         return None
+    from src.state.fill_dedup import economic_exit_fills_for_position
+
+    economic_fills = economic_exit_fills_for_position(
+        conn,
+        position_id,
+        venue_order_id=str(row["venue_order_id"] or ""),
+    )
+    if not economic_fills:
+        return None
     return {
         "command_id": str(row["command_id"] or ""),
         "venue_order_id": str(row["venue_order_id"] or ""),
@@ -6190,6 +9234,7 @@ def _exit_trade_fact_close_candidate(
         "command_state": str(row["command_state"] or ""),
         "closes_position": reduction_target is None,
         "intended_reduction_shares": reduction_target,
+        "economic_fills": economic_fills,
     }
 
 
@@ -6299,6 +9344,14 @@ def _close_pending_exit_from_trade_fact(
     if closed is None:
         return None
 
+    closed.pnl = _cumulative_close_realized_pnl(
+        conn,
+        position_id=position.trade_id,
+        shares=position.effective_shares,
+        exit_price=fill_price,
+        cost_basis_usd=position.effective_cost_basis_usd,
+        entry_price=position.entry_price,
+    )
     closed.exit_state = "sell_filled"
     closed.order_status = "sell_filled"
     closed.last_exit_order_id = order_id
@@ -6335,6 +9388,7 @@ def check_pending_exits(
     *,
     max_positions: int | None = None,
     cycle_budget_seconds: float | None = None,
+    deadline_monotonic: float | None = None,
     global_sell_reauction_requester: Callable[[Position, bool], bool] | None = None,
 ) -> dict:
     """Check fill status for positions with pending sell orders.
@@ -6365,7 +9419,12 @@ def check_pending_exits(
         if cycle_budget_seconds is None
         else max(0.25, float(cycle_budget_seconds))
     )
-    deadline = _time_module.monotonic() + budget_seconds
+    local_deadline = _time_module.monotonic() + budget_seconds
+    deadline = (
+        local_deadline
+        if deadline_monotonic is None
+        else min(local_deadline, float(deadline_monotonic))
+    )
     scan_positions = _rotated_pending_exit_scan_positions(portfolio, stats=stats)
     stats["pending_exit_scan_candidates"] = len(scan_positions)
     stats["pending_exit_scan_max_positions"] = max_scan_positions
@@ -6386,21 +9445,36 @@ def check_pending_exits(
             stats["pending_exit_defer_reason"] = "cycle_budget"
             break
         processed_scan_positions += 1
-        _commit_exit_write_boundary(conn, stage="pending_exit_position_scan")
+        if not _commit_exit_write_boundary(
+            conn,
+            stage="pending_exit_position_scan",
+            deadline_monotonic=deadline,
+        ):
+            stats["pending_exit_positions_deferred"] = len(scan_positions) - index
+            stats["pending_exit_defer_reason"] = "write_boundary_unavailable"
+            break
         raw_exit_state = getattr(pos, "exit_state", "")
         exit_state = str(getattr(raw_exit_state, "value", raw_exit_state) or "")
         fill = _exit_trade_fact_close_candidate(conn, pos)
         if fill is not None:
             if fill.get("closes_position") is False:
-                reduced = _complete_intentional_position_reduction(
-                    pos,
-                    intended_shares=Decimal(fill["intended_reduction_shares"]),
-                    confirmed_filled_shares=Decimal(fill["filled_size"]),
-                    fill_price=float(fill["fill_price"]),
-                    order_id=str(fill["venue_order_id"]),
-                    status=str(fill.get("fill_states") or "CONFIRMED"),
-                    conn=conn,
-                )
+                try:
+                    reduced = _complete_intentional_position_reduction(
+                        pos,
+                        intended_shares=Decimal(fill["intended_reduction_shares"]),
+                        confirmed_filled_shares=Decimal(fill["filled_size"]),
+                        fill_price=fill["fill_price"],
+                        order_id=str(fill["venue_order_id"]),
+                        status=str(fill.get("fill_states") or "CONFIRMED"),
+                        conn=conn,
+                        economic_fills=fill.get("economic_fills"),
+                    )
+                except RuntimeError as exc:
+                    if _isolate_pending_exit_reduction_precondition(
+                        stats, pos, exc
+                    ):
+                        continue
+                    raise
                 stats["reduced"] = stats.get("reduced", 0) + int(reduced > 0)
                 stats["reduced_from_trade_fact"] = (
                     stats.get("reduced_from_trade_fact", 0) + int(reduced > 0)
@@ -6446,14 +9520,46 @@ def check_pending_exits(
             stats["exit_confirmation_pending"] = stats.get("exit_confirmation_pending", 0) + 1
             continue
         if exit_state == "retry_pending":
-            if (
-                str(getattr(pos, "next_exit_retry_at", "") or "").strip()
-                and check_pending_retries(
-                    pos,
-                    conn=conn,
-                    global_sell_reauction_requester=global_sell_reauction_requester,
+            import copy
+
+            retry_released = False
+            retry_runtime_before = copy.deepcopy(pos.__dict__)
+            try:
+                if str(getattr(pos, "next_exit_retry_at", "") or "").strip():
+                    if conn is None:
+                        retry_released = check_pending_retries(
+                            pos,
+                            conn=conn,
+                            global_sell_reauction_requester=(
+                                global_sell_reauction_requester
+                            ),
+                        )
+                    else:
+                        with _held_monitor_preparation_deadline(
+                            conn,
+                            deadline,
+                        ) as ensure_live:
+                            retry_released = check_pending_retries(
+                                pos,
+                                conn=conn,
+                                global_sell_reauction_requester=(
+                                    global_sell_reauction_requester
+                                ),
+                            )
+                            ensure_live()
+            except (sqlite3.Error, TimeoutError):
+                try:
+                    if conn is not None:
+                        conn.rollback()
+                finally:
+                    pos.__dict__.clear()
+                    pos.__dict__.update(retry_runtime_before)
+                stats["pending_exit_positions_deferred"] = (
+                    len(scan_positions) - index
                 )
-            ):
+                stats["pending_exit_defer_reason"] = "retry_truth_deadline"
+                break
+            if retry_released:
                 stats["retried"] += 1
                 stats["released_retry"] = stats.get("released_retry", 0) + 1
             else:
@@ -6478,10 +9584,6 @@ def check_pending_exits(
                     stats["unchanged"] += 1
                     continue
                 if not _last_exit_order_id(pos, conn=conn):
-                    pos.exit_state = ""
-                    if str(getattr(pos, "order_status", "") or "") == "exit_intent":
-                        pos.order_status = "filled"
-                    _release_pending_exit(pos)
                     stats["unchanged"] += 1
                     continue
                 continue
@@ -6519,21 +9621,26 @@ def check_pending_exits(
                 log_exit_retry_event(conn, pos, reason="SELL_NO_ORDER_ID", error="no_order_id")
             stats["retried"] += 1
             continue
-        if not str(getattr(pos, "last_exit_order_id", "") or "").strip():
-            pos.last_exit_order_id = exit_order_id
-
         fill = _exit_trade_fact_close_candidate(conn, pos, exit_order_id=exit_order_id)
         if fill is not None:
             if fill.get("closes_position") is False:
-                reduced = _complete_intentional_position_reduction(
-                    pos,
-                    intended_shares=Decimal(fill["intended_reduction_shares"]),
-                    confirmed_filled_shares=Decimal(fill["filled_size"]),
-                    fill_price=float(fill["fill_price"]),
-                    order_id=exit_order_id,
-                    status=str(fill.get("fill_states") or "CONFIRMED"),
-                    conn=conn,
-                )
+                try:
+                    reduced = _complete_intentional_position_reduction(
+                        pos,
+                        intended_shares=Decimal(fill["intended_reduction_shares"]),
+                        confirmed_filled_shares=Decimal(fill["filled_size"]),
+                        fill_price=fill["fill_price"],
+                        order_id=exit_order_id,
+                        status=str(fill.get("fill_states") or "CONFIRMED"),
+                        conn=conn,
+                        economic_fills=fill.get("economic_fills"),
+                    )
+                except RuntimeError as exc:
+                    if _isolate_pending_exit_reduction_precondition(
+                        stats, pos, exc
+                    ):
+                        continue
+                    raise
                 stats["reduced"] = stats.get("reduced", 0) + int(reduced > 0)
                 stats["reduced_from_trade_fact"] = (
                     stats.get("reduced_from_trade_fact", 0) + int(reduced > 0)
@@ -6573,8 +9680,35 @@ def check_pending_exits(
                 stats["filled_from_trade_fact"] = stats.get("filled_from_trade_fact", 0) + 1
                 continue
 
-        _commit_exit_write_boundary(conn, stage="pending_exit_status_poll")
-        status, status_payload = _check_order_fill(clob, exit_order_id)
+        if not _commit_exit_write_boundary(
+            conn,
+            stage="pending_exit_status_poll",
+            deadline_monotonic=deadline,
+        ):
+            stats["pending_exit_positions_deferred"] = len(scan_positions) - index
+            stats["pending_exit_defer_reason"] = "write_boundary_unavailable"
+            break
+        try:
+            status, status_payload = _check_order_fill(
+                clob,
+                exit_order_id,
+                deadline_monotonic=deadline,
+            )
+        except _PendingExitOrderTruthIncomplete as exc:
+            # SCOPE: this pending-exit status read only. DRAIN: a later cycle
+            # obtains a complete authenticated order fact before its fresh
+            # deadline. RESET: that complete fact re-enters the normal fill /
+            # void / live-status state machine. Unknown truth never mutates the
+            # position or authorizes a replacement order.
+            stats["pending_exit_positions_deferred"] = len(scan_positions) - index
+            stats["pending_exit_defer_reason"] = "order_truth_incomplete"
+            stats["pending_exit_order_truth_error"] = str(exc)[:500]
+            break
+        if not str(getattr(pos, "last_exit_order_id", "") or "").strip():
+            # Canonical fallback identity becomes runtime projection only after
+            # the venue returned a complete order fact. Unknown truth leaves
+            # both memory and canonical state unchanged.
+            pos.last_exit_order_id = exit_order_id
         if conn is not None:
             if status:
                 log_pending_exit_status_event(conn, pos, status=status)
@@ -6584,8 +9718,8 @@ def check_pending_exits(
         if status in FILL_STATUSES:
             # A filled reduction order changes exposure but does not close the
             # remaining claim. Full-close intents retain the economic-close path.
-            actual_price = _extract_fill_price(status_payload)
-            if actual_price is None:
+            actual_price_decimal = _extract_fill_price_decimal(status_payload)
+            if actual_price_decimal is None:
                 _mark_exit_fill_economics_missing(
                     pos,
                     status=status,
@@ -6698,17 +9832,25 @@ def check_pending_exits(
                 continue
             is_reduction = reduction_target is not None or adopted_reduction
             if is_reduction:
-                reduced = _complete_intentional_position_reduction(
-                    pos,
-                    intended_shares=intended_shares,
-                    confirmed_filled_shares=confirmed_shares,
-                    fill_price=actual_price,
-                    order_id=exit_order_id,
-                    status=status,
-                    conn=conn,
-                )
+                try:
+                    reduced = _complete_intentional_position_reduction(
+                        pos,
+                        intended_shares=intended_shares,
+                        confirmed_filled_shares=confirmed_shares,
+                        fill_price=actual_price_decimal,
+                        order_id=exit_order_id,
+                        status=status,
+                        conn=conn,
+                    )
+                except RuntimeError as exc:
+                    if _isolate_pending_exit_reduction_precondition(
+                        stats, pos, exc
+                    ):
+                        continue
+                    raise
                 stats["reduced"] = stats.get("reduced", 0) + int(reduced > 0)
                 continue
+            actual_price = float(actual_price_decimal)
             closes_position = (
                 current_holding is not None
                 and holding_at_authority is not None
@@ -6726,6 +9868,14 @@ def check_pending_exits(
             filled_shares = float(pos.effective_shares)
             closed = compute_economic_close(portfolio, pos.trade_id, actual_price, exit_reason)
             if closed is not None:
+                closed.pnl = _cumulative_close_realized_pnl(
+                    conn,
+                    position_id=pos.trade_id,
+                    shares=pos.effective_shares,
+                    exit_price=actual_price,
+                    cost_basis_usd=pos.effective_cost_basis_usd,
+                    entry_price=pos.entry_price,
+                )
                 closed.exit_state = "sell_filled"
                 _dual_write_canonical_economic_close_if_available(
                     conn,
@@ -6770,9 +9920,9 @@ def check_pending_exits(
                 current_open_shares=pos.effective_shares,
             )
             if partial:
-                filled_shares, remaining_shares = partial
-                actual_price = _extract_fill_price(status_payload)
-                if actual_price is None:
+                _filled_delta, remaining_shares = partial
+                actual_price_decimal = _extract_fill_price_decimal(status_payload)
+                if actual_price_decimal is None:
                     _mark_exit_fill_economics_missing(
                         pos,
                         status=status,
@@ -6780,15 +9930,59 @@ def check_pending_exits(
                         conn=conn,
                     )
                 else:
-                    partial_applied = _apply_partial_exit_fill(
-                        pos,
-                        filled_shares=filled_shares,
-                        remaining_shares=remaining_shares,
-                        fill_price=actual_price,
-                        order_id=exit_order_id,
-                        status=status,
+                    command_row = None
+                    if conn is not None:
+                        command_row = conn.execute(
+                            """
+                            SELECT size, created_at
+                              FROM venue_commands
+                             WHERE position_id = ? AND venue_order_id = ?
+                             ORDER BY updated_at DESC, created_at DESC
+                             LIMIT 1
+                            """,
+                            (pos.trade_id, exit_order_id),
+                        ).fetchone()
+                    command_size = (
+                        _positive_decimal(command_row["size"])
+                        if command_row is not None
+                        else None
                     )
+                    intent_kwargs = (
+                        {
+                            "order_id": exit_order_id,
+                            "before_time": str(command_row["created_at"] or ""),
+                        }
+                        if command_row is not None
+                        else {"order_id": exit_order_id}
+                    )
+                    intended_shares = (
+                        _canonical_reduction_intent_shares(conn, pos, **intent_kwargs)
+                        or _canonical_full_exit_intent_shares(conn, pos, **intent_kwargs)
+                        or command_size
+                    )
+                    confirmed_shares = (
+                        _confirmed_reduction_fill_shares(
+                            status_payload,
+                            intended_shares=intended_shares,
+                        )
+                        if intended_shares is not None
+                        else None
+                    )
+                    if confirmed_shares is not None:
+                        reduced = _complete_intentional_position_reduction(
+                            pos,
+                            intended_shares=intended_shares,
+                            confirmed_filled_shares=confirmed_shares,
+                            fill_price=actual_price_decimal,
+                            order_id=exit_order_id,
+                            status=status or "PARTIAL",
+                            conn=conn,
+                            release_after_fill=False,
+                        )
+                        partial_applied = reduced > 0
                 if partial_applied and conn is not None:
+                    from src.state.fill_dedup import canonical_decimal_text
+
                     log_exit_attempt_event(
                         conn,
                         pos,
@@ -6796,33 +9990,44 @@ def check_pending_exits(
                         status=status or "PARTIAL",
                         current_market_price=pos.last_monitor_market_price or pos.entry_price,
                         best_bid=getattr(pos, "last_monitor_best_bid", None),
-                        shares=filled_shares,
+                        shares=float(confirmed_shares),
                         details={
                             "semantic_event": "PARTIAL_FILL_OBSERVED",
-                            "filled_shares": filled_shares,
-                            "remaining_shares": remaining_shares,
-                            "fill_price": actual_price,
+                            "filled_shares": canonical_decimal_text(confirmed_shares),
+                            "remaining_shares": canonical_decimal_text(remaining_shares),
+                            "fill_price": canonical_decimal_text(actual_price_decimal),
                         },
                     )
-                    _dual_write_partial_exit_projection_if_available(
+                    # EXIT_ORDER_ATTEMPTED deliberately clears non-final fill
+                    # fields. Restore the already-canonicalized partial receipt
+                    # only after both the event batch and telemetry append have
+                    # succeeded.
+                    _log_partial_exit_execution_fact(
                         conn,
                         pos,
-                        filled_shares=filled_shares,
-                        remaining_shares=remaining_shares,
-                        fill_price=actual_price,
-                        order_id=exit_order_id,
                         status=status or "PARTIAL",
+                        fill_price=actual_price_decimal,
+                        filled_shares=confirmed_shares,
+                        order_id=exit_order_id,
                     )
-                    if status not in VOID_STATUSES:
-                        _log_partial_exit_execution_fact(
-                            conn,
-                            pos,
-                            status=status or "PARTIAL",
-                            fill_price=actual_price,
-                            filled_shares=filled_shares,
-                            order_id=exit_order_id,
-                        )
             if status in VOID_STATUSES:
+                # INV-47 SCOPE: the exact position+command+held-token global
+                # MAKER_REST SELL. DRAIN: command recovery proves a durable,
+                # command-bound terminal zero-fill with no live/open side effect,
+                # then writes the V3 re-auction obligation. RESET: a fresh global
+                # auction reserves/acknowledges that obligation or exposure closes;
+                # unknown side effect never resets this single-flight gate.
+                if (
+                    partial is None
+                    and status in {"CANCELED", "CANCELLED", "EXPIRED"}
+                    and _is_canonical_global_maker_rest_exit(
+                        conn,
+                        pos,
+                        order_id=exit_order_id,
+                    )
+                ):
+                    stats["unchanged"] += 1
+                    continue
                 _mark_exit_retry(pos, reason=f"SELL_{status}", error=status, conn=conn)
                 if conn is not None:
                     log_pending_exit_recovery_event(
@@ -6833,13 +10038,13 @@ def check_pending_exits(
                         error=status,
                     )
                     log_exit_retry_event(conn, pos, reason=f"SELL_{status}", error=status)
-                    if partial_applied and actual_price is not None:
+                    if partial_applied:
                         _log_partial_exit_execution_fact(
                             conn,
                             pos,
-                            status=status or "PARTIAL",
-                            fill_price=actual_price,
-                            filled_shares=filled_shares,
+                            status=status,
+                            fill_price=actual_price_decimal,
+                            filled_shares=confirmed_shares,
                             order_id=exit_order_id,
                         )
                 stats["retried"] += 1
@@ -6859,7 +10064,18 @@ def check_pending_exits(
                     stats["unchanged"] += 1
             else:
                 token_id = _asset_id_for_position(pos)
-                _commit_exit_write_boundary(conn, stage="pending_exit_reprice")
+                if not _commit_exit_write_boundary(
+                    conn,
+                    stage="pending_exit_reprice",
+                    deadline_monotonic=deadline,
+                ):
+                    stats["pending_exit_positions_deferred"] = (
+                        len(scan_positions) - index
+                    )
+                    stats["pending_exit_defer_reason"] = (
+                        "write_boundary_unavailable"
+                    )
+                    break
                 if _cancel_stale_pending_exit_for_reprice(
                     conn=conn,
                     position=pos,
@@ -6901,13 +10117,51 @@ def check_pending_retries(
     previous_error = str(getattr(position, "last_exit_error", "") or "")
     if not previous_error:
         previous_error = _latest_exit_reject_error(conn, position)
+    command_ownership = _canonical_global_sell_command_ownership(conn, position)
+    if command_ownership in {"COMMAND_OWNED", "UNKNOWN"}:
+        return False
+    post_only_cross_reauction = _is_post_only_cross_reauction_error(previous_error)
+    if post_only_cross_reauction and not _post_only_cross_reauction_proof_for_position(
+        conn, position
+    ):
+        # A persisted marker is not authority. Keep the retry pending until the
+        # command-bound proof can be re-established; never fall through to a
+        # local immediate redecision after proof loss.
+        return False
     global_snapshot_reauction = has_global_sell_snapshot_reauction_retry(
         position,
         conn,
     )
+    command_witness = _latest_exit_command_release_witness(position, conn=conn)
+    if (
+        command_witness is not None
+        and not command_witness[0]
+        and not global_snapshot_reauction
+    ):
+        return False
 
     if position.exit_state == "backoff_exhausted":
-        if not _is_sub_floor_exit_price_error(previous_error):
+        if _is_legacy_favorable_bid_rejection(previous_error):
+            if command_ownership == "GLOBAL_NO_COMMAND":
+                _mark_exit_retry(
+                    position,
+                    reason=(
+                        f"{getattr(position, 'exit_reason', '') or 'EXIT'} "
+                        "[LEGACY_FAVORABLE_BID_REAUCTION]"
+                    ),
+                    error=(
+                        "global_sell_exit_executable_snapshot_error: "
+                        f"legacy_favorable_bid_rejection:{previous_error}"
+                    ),
+                    conn=conn,
+                )
+                return False
+            return release_backoff_exhausted_pending_exit_for_redecision(
+                position,
+                conn=conn,
+                legacy_favorable_bid_authorized=True,
+            )
+        if not _is_out_of_band_exit_price_error(previous_error):
             return False
         _mark_exit_retry(
             position,
@@ -6981,7 +10235,12 @@ def check_pending_retries(
         snapshot_bid = _positive_decimal(
             snapshot.get("executable_snapshot_orderbook_top_bid")
         )
-        if snapshot_bid is None or snapshot_bid < LIVE_ORDER_MIN_UNIT_PRICE:
+        if (
+            snapshot_bid is None
+            or not LIVE_ORDER_MIN_UNIT_PRICE
+            <= snapshot_bid
+            <= Decimal("1")
+        ):
             return False
 
     # Cooldown expired — position is eligible for exit re-evaluation.
@@ -7028,6 +10287,107 @@ def check_pending_retries(
     return True
 
 
+def _build_exit_retry_released_event_and_projection(
+    position: Position,
+    *,
+    sequence_no: int,
+    previous_next_retry_at: str,
+    previous_retry_count: int,
+    previous_error: str,
+    event_type: str = "EXIT_RETRY_RELEASED",
+    release_reason: str = "EXIT_RETRY_COOLDOWN_EXPIRED",
+    caused_by: str = "exit_retry_cooldown_expired",
+    base_projection: Mapping[str, object] | None = None,
+) -> tuple[dict, dict] | None:
+    """Build one retry-release event and its final active projection.
+
+    A released pending exit is still a live held position; it must immediately
+    re-enter normal monitor redecision. The release cannot be only an in-memory
+    mutation, because restart/chain-correction projection would reload the old
+    ``pending_exit/retry_pending`` state and strand the position again.
+    """
+
+    trade_id = str(getattr(position, "trade_id", "") or "")
+    if not trade_id:
+        return None
+    from src.engine.lifecycle_events import build_position_current_projection
+    from src.state.lifecycle_manager import fold_lifecycle_phase, phase_for_runtime_position
+
+    occurred_at = datetime.now(timezone.utc).isoformat()
+    phase_after = phase_for_runtime_position(
+        state=getattr(position, "state", ""),
+        exit_state=getattr(position, "exit_state", ""),
+        chain_state=getattr(position, "chain_state", ""),
+    ).value
+    if phase_after == LifecyclePhase.PENDING_EXIT.value:
+        return None
+    projection = (
+        dict(base_projection)
+        if base_projection is not None
+        else build_position_current_projection(position)
+    )
+    projection["phase"] = phase_after
+    projection["updated_at"] = occurred_at
+    projection["order_status"] = "filled"
+    projection["next_exit_retry_at"] = ""
+    projection["exit_retry_count"] = 0
+    env = str(getattr(position, "env", "") or "live")
+    if env not in {"live", "test", "replay", "backtest"}:
+        env = "live"
+    payload = {
+        "status": "ready",
+        "exit_reason": getattr(position, "exit_reason", "") or release_reason,
+        "error": previous_error,
+        "previous_retry_count": previous_retry_count,
+        "retry_count": 0,
+        "previous_next_retry_at": previous_next_retry_at,
+        "next_retry_at": "",
+        "release_reason": release_reason,
+    }
+    if release_reason == "GLOBAL_SELL_SNAPSHOT_REAUCTION_REQUIRED":
+        obligation = _held_sell_reauction_obligation(
+            position,
+            generation_material={
+                "event_type": event_type,
+                "sequence_no": sequence_no,
+                "previous_error": previous_error,
+                "release_reason": release_reason,
+            },
+        )
+        if not obligation:
+            return None
+        payload["held_sell_reauction_obligation"] = obligation
+    event = {
+        "event_id": f"{trade_id}:{event_type.lower()}:{sequence_no}",
+        "position_id": trade_id,
+        "event_version": 1,
+        "sequence_no": sequence_no,
+        "event_type": event_type,
+        "occurred_at": occurred_at,
+        "phase_before": LifecyclePhase.PENDING_EXIT.value,
+        "phase_after": fold_lifecycle_phase(
+            LifecyclePhase.PENDING_EXIT.value,
+            phase_after,
+        ).value,
+        "strategy_key": str(
+            getattr(position, "strategy_key", "")
+            or getattr(position, "strategy", "")
+            or ""
+        ),
+        "decision_id": None,
+        "snapshot_id": getattr(position, "decision_snapshot_id", "") or None,
+        "order_id": None,
+        "command_id": None,
+        "caused_by": caused_by,
+        "idempotency_key": f"{trade_id}:{event_type.lower()}:{sequence_no}",
+        "venue_status": "ready",
+        "source_module": "src.execution.exit_lifecycle",
+        "env": env,
+        "payload_json": json.dumps(payload, default=str, sort_keys=True),
+    }
+    return event, projection
+
+
 def _dual_write_exit_retry_released_if_available(
     conn: sqlite3.Connection | None,
     position: Position,
@@ -7039,13 +10399,7 @@ def _dual_write_exit_retry_released_if_available(
     release_reason: str = "EXIT_RETRY_COOLDOWN_EXPIRED",
     caused_by: str = "exit_retry_cooldown_expired",
 ) -> bool:
-    """Persist retry cooldown release and projection in one canonical write.
-
-    A released pending exit is still a live held position; it must immediately
-    re-enter normal monitor redecision. The release cannot be only an in-memory
-    mutation, because restart/chain-correction projection would reload the old
-    ``pending_exit/retry_pending`` state and strand the position again.
-    """
+    """Persist retry cooldown release and projection in one canonical write."""
 
     if conn is None:
         return False
@@ -7053,12 +10407,9 @@ def _dual_write_exit_retry_released_if_available(
     if not trade_id:
         return False
     try:
-        from src.engine.lifecycle_events import build_position_current_projection
         from src.state.db import append_many_and_project
-        from src.state.lifecycle_manager import fold_lifecycle_phase, phase_for_runtime_position
 
-        sequence_no = _next_canonical_sequence_no(conn, trade_id)
-        occurred_at = datetime.now(timezone.utc).isoformat()
+        base_projection = None
         if not any(
             getattr(position, field, "")
             for field in (
@@ -7070,61 +10421,33 @@ def _dual_write_exit_retry_released_if_available(
                 "order_posted_at",
             )
         ):
-            position.order_posted_at = occurred_at
-        phase_after = phase_for_runtime_position(
-            state=getattr(position, "state", ""),
-            exit_state=getattr(position, "exit_state", ""),
-            chain_state=getattr(position, "chain_state", ""),
-        ).value
-        if phase_after == LifecyclePhase.PENDING_EXIT.value:
+            cursor = conn.execute(
+                "SELECT * FROM position_current WHERE position_id = ? LIMIT 1",
+                (trade_id,),
+            )
+            current = cursor.fetchone()
+            if current is None:
+                return False
+            base_projection = (
+                dict(current)
+                if isinstance(current, sqlite3.Row)
+                else dict(zip((item[0] for item in cursor.description), current))
+            )
+
+        built = _build_exit_retry_released_event_and_projection(
+            position,
+            sequence_no=_next_canonical_sequence_no(conn, trade_id),
+            previous_next_retry_at=previous_next_retry_at,
+            previous_retry_count=previous_retry_count,
+            previous_error=previous_error,
+            event_type=event_type,
+            release_reason=release_reason,
+            caused_by=caused_by,
+            base_projection=base_projection,
+        )
+        if built is None:
             return False
-        projection = build_position_current_projection(position)
-        projection["phase"] = phase_after
-        projection["updated_at"] = occurred_at
-        projection["order_status"] = "filled"
-        projection["next_exit_retry_at"] = ""
-        projection["exit_retry_count"] = 0
-        env = str(getattr(position, "env", "") or "live")
-        if env not in {"live", "test", "replay", "backtest"}:
-            env = "live"
-        payload = {
-            "status": "ready",
-            "exit_reason": getattr(position, "exit_reason", "") or release_reason,
-            "error": previous_error,
-            "previous_retry_count": previous_retry_count,
-            "retry_count": 0,
-            "previous_next_retry_at": previous_next_retry_at,
-            "next_retry_at": "",
-            "release_reason": release_reason,
-        }
-        event = {
-            "event_id": f"{trade_id}:{event_type.lower()}:{sequence_no}",
-            "position_id": trade_id,
-            "event_version": 1,
-            "sequence_no": sequence_no,
-            "event_type": event_type,
-            "occurred_at": occurred_at,
-            "phase_before": LifecyclePhase.PENDING_EXIT.value,
-            "phase_after": fold_lifecycle_phase(
-                LifecyclePhase.PENDING_EXIT.value,
-                phase_after,
-            ).value,
-            "strategy_key": str(
-                getattr(position, "strategy_key", "")
-                or getattr(position, "strategy", "")
-                or ""
-            ),
-            "decision_id": None,
-            "snapshot_id": getattr(position, "decision_snapshot_id", "") or None,
-            "order_id": None,
-            "command_id": None,
-            "caused_by": caused_by,
-            "idempotency_key": f"{trade_id}:{event_type.lower()}:{sequence_no}",
-            "venue_status": "ready",
-            "source_module": "src.execution.exit_lifecycle",
-            "env": env,
-            "payload_json": json.dumps(payload, default=str, sort_keys=True),
-        }
+        event, projection = built
         append_many_and_project(conn, [event], projection)
         return True
     except Exception as exc:  # noqa: BLE001
@@ -7148,20 +10471,41 @@ def record_global_sell_reauction_reserved(
     if not trade_id:
         return False
     try:
-        from src.engine.lifecycle_events import build_position_current_projection
         from src.state.db import append_many_and_project
-        from src.state.lifecycle_manager import phase_for_runtime_position
 
-        phase = phase_for_runtime_position(
-            state=getattr(position, "state", ""),
-            exit_state=getattr(position, "exit_state", ""),
-            chain_state=getattr(position, "chain_state", ""),
-        ).value
-        if phase == LifecyclePhase.PENDING_EXIT.value:
+        cursor = conn.execute(
+            "SELECT * FROM position_current WHERE position_id = ? LIMIT 1",
+            (trade_id,),
+        )
+        current = cursor.fetchone()
+        if current is None:
             return False
+        projection = (
+            dict(current)
+            if isinstance(current, sqlite3.Row)
+            else dict(zip((item[0] for item in cursor.description), current))
+        )
+        phase = str(projection.get("phase") or "")
+        if phase == LifecyclePhase.PENDING_EXIT.value:
+            obligation = getattr(
+                position,
+                "_held_sell_reauction_obligation",
+                {},
+            )
+            if not isinstance(obligation, dict):
+                return False
+            held_token_id = str(obligation.get("held_token_id") or "").strip()
+            if (
+                int(obligation.get("schema_version") or 0) != 4
+                or str(obligation.get("position_id") or "").strip() != trade_id
+                or held_token_id != _asset_id_for_position(position)
+                or not str(obligation.get("scope_identity") or "").strip()
+                or not str(obligation.get("generation") or "").strip()
+                or float(projection.get("shares") or 0.0) <= 0.0
+            ):
+                return False
         sequence_no = _next_canonical_sequence_no(conn, trade_id)
         occurred_at = datetime.now(timezone.utc).isoformat()
-        projection = build_position_current_projection(position)
         projection["phase"] = phase
         projection["updated_at"] = occurred_at
         event_type = "EXIT_RETRY_RELEASED"
@@ -7197,7 +10541,12 @@ def record_global_sell_reauction_reserved(
                     "release_reason": (
                         "GLOBAL_SELL_SNAPSHOT_REAUCTION_REQUIRED"
                     ),
+                    "held_sell_reauction_obligation": dict(
+                        getattr(position, "_held_sell_reauction_obligation", {})
+                        or {}
+                    ),
                 },
+                default=str,
                 sort_keys=True,
             ),
         }
@@ -7212,27 +10561,231 @@ def record_global_sell_reauction_reserved(
         return False
 
 
+def _record_global_sell_reauction_publish_claim(
+    conn: sqlite3.Connection,
+    position: Position,
+    obligation: Mapping[str, object],
+) -> bool:
+    """Atomically claim command ownership before publishing a V4 wake."""
+
+    trade_id = str(getattr(position, "trade_id", "") or "").strip()
+    generation = str(obligation.get("generation") or "").strip()
+    if not trade_id or not generation:
+        return False
+    try:
+        latest = conn.execute(
+            """
+            SELECT payload_json
+              FROM position_events
+             WHERE position_id = ? AND event_type = 'EXIT_RETRY_RELEASED'
+             ORDER BY sequence_no DESC
+             LIMIT 1
+            """,
+            (trade_id,),
+        ).fetchone()
+        latest_payload = json.loads(str(latest[0] or "{}")) if latest else {}
+        latest_obligation = (
+            latest_payload.get("held_sell_reauction_obligation")
+            if isinstance(latest_payload, dict)
+            else None
+        )
+        if (
+            isinstance(latest_payload, dict)
+            and latest_payload.get("global_sell_reauction_status") == "publish_claimed"
+            and isinstance(latest_obligation, dict)
+            and str(latest_obligation.get("generation") or "") == generation
+        ):
+            return True
+        cursor = conn.execute(
+            "SELECT * FROM position_current WHERE position_id = ? LIMIT 1",
+            (trade_id,),
+        )
+        current = cursor.fetchone()
+        if current is None:
+            return False
+        projection = (
+            dict(current)
+            if isinstance(current, sqlite3.Row)
+            else dict(zip((item[0] for item in cursor.description), current))
+        )
+        phase = str(projection.get("phase") or "")
+        if _pending_exit_no_order_waits_for_liquidity(position, conn=conn):
+            return False
+        if phase == LifecyclePhase.PENDING_EXIT.value:
+            held_token_id = str(obligation.get("held_token_id") or "").strip()
+            if (
+                int(obligation.get("schema_version") or 0) != 4
+                or str(obligation.get("position_id") or "").strip() != trade_id
+                or held_token_id != _asset_id_for_position(position)
+                or not str(obligation.get("scope_identity") or "").strip()
+                or not str(obligation.get("generation") or "").strip()
+                or float(projection.get("shares") or 0.0) <= 0.0
+            ):
+                return False
+        from src.state.db import append_many_and_project
+
+        sequence_no = _next_canonical_sequence_no(conn, trade_id)
+        occurred_at = datetime.now(timezone.utc).isoformat()
+        projection["updated_at"] = occurred_at
+        event_type = "EXIT_RETRY_RELEASED"
+        event = {
+            "event_id": f"{trade_id}:{event_type.lower()}:{sequence_no}",
+            "position_id": trade_id,
+            "event_version": 1,
+            "sequence_no": sequence_no,
+            "event_type": event_type,
+            "occurred_at": occurred_at,
+            "phase_before": phase,
+            "phase_after": phase,
+            "strategy_key": str(
+                getattr(position, "strategy_key", "")
+                or getattr(position, "strategy", "")
+                or ""
+            ),
+            "decision_id": None,
+            "snapshot_id": getattr(position, "decision_snapshot_id", "") or None,
+            "order_id": None,
+            "command_id": None,
+            "caused_by": "global_sell_snapshot_reauction",
+            "idempotency_key": f"{trade_id}:{event_type.lower()}:{sequence_no}",
+            "venue_status": "publish_claimed",
+            "source_module": "src.execution.exit_lifecycle",
+            "env": str(getattr(position, "env", "") or "live"),
+            "payload_json": json.dumps(
+                {
+                    "status": "publish_claimed",
+                    "global_sell_reauction_status": "publish_claimed",
+                    "release_reason": "GLOBAL_SELL_SNAPSHOT_REAUCTION_REQUIRED",
+                    "held_sell_reauction_obligation": dict(obligation),
+                },
+                default=str,
+                sort_keys=True,
+            ),
+        }
+        append_many_and_project(conn, [event], projection)
+        return True
+    except Exception as exc:  # noqa: BLE001 - an unreadable claim is no fence.
+        logger.warning(
+            "GLOBAL_SELL_REAUCTION publish claim failed for %s: %s",
+            trade_id,
+            exc,
+        )
+        return False
+
+
 def recover_global_sell_snapshot_reauction_debt(
     position: Position,
     *,
     conn: sqlite3.Connection | None,
     requester: Callable[[Position, bool], bool],
+    deadline_monotonic: float | None = None,
 ) -> bool:
     """Publish and acknowledge one already-committed canonical release debt."""
 
+    def ensure_live() -> None:
+        if (
+            deadline_monotonic is not None
+            and _time_module.monotonic() >= float(deadline_monotonic)
+        ):
+            raise TimeoutError("GLOBAL_SELL_REAUCTION_DEADLINE_EXPIRED")
+
+    try:
+        ensure_live()
+    except TimeoutError:
+        return False
     if not needs_global_sell_snapshot_reauction(position, conn):
         return False
     if conn is None or conn.in_transaction:
         return False
-    raw_state = getattr(position, "state", "")
-    runtime_state = str(getattr(raw_state, "value", raw_state) or "")
-    if runtime_state == "pending_exit":
+    obligation = latest_held_sell_reauction_obligation(
+        conn,
+        position,
+        deadline_monotonic=deadline_monotonic,
+    )
+    if not obligation:
+        return False
+    if _pending_exit_no_order_waits_for_liquidity(position, conn=conn):
+        return False
+    from src.execution.executor import (
+        _EXIT_PRE_SUBMIT_WRITE_LEASE_DEADLINE_MS,
+        _EXIT_PRE_SUBMIT_WRITE_LEASE_MAX_HOLD_MS,
+        _canonical_trade_write_lease,
+    )
+    from src.state.write_coordinator import WritePriority
+
+    try:
+        ensure_live()
+        with _canonical_trade_write_lease(
+            conn,
+            owner="global_sell_reauction_publish_claim",
+            deadline_ms=_EXIT_PRE_SUBMIT_WRITE_LEASE_DEADLINE_MS,
+            max_hold_ms=_EXIT_PRE_SUBMIT_WRITE_LEASE_MAX_HOLD_MS,
+            priority=WritePriority.MONITOR,
+        ):
+            ensure_live()
+            if (
+                _canonical_global_sell_command_ownership(
+                    conn,
+                    position,
+                    require_pending_exit=False,
+                )
+                != "GLOBAL_NO_COMMAND"
+                or not _record_global_sell_reauction_publish_claim(
+                    conn,
+                    position,
+                    obligation,
+                )
+            ):
+                conn.rollback()
+                return False
+            ensure_live()
+            conn.commit()
+            ensure_live()
+    except Exception as exc:  # noqa: BLE001 - an uncommitted claim is no fence.
+        try:
+            conn.rollback()
+        except Exception:  # noqa: BLE001
+            pass
+        logger.warning(
+            "GLOBAL_SELL_REAUCTION publish claim failed for %s: %s",
+            getattr(position, "trade_id", ""),
+            exc,
+        )
+        return False
+    setattr(position, "_held_sell_reauction_obligation", obligation)
+    try:
+        ensure_live()
+    except TimeoutError:
         return False
     if not requester(position, True):
         return False
+    refreshed_obligation = getattr(
+        position,
+        "_held_sell_reauction_obligation",
+        obligation,
+    )
+    if not isinstance(refreshed_obligation, dict):
+        refreshed_obligation = dict(obligation)
+    if refreshed_obligation == obligation:
+        # Crash recovery may republish the still-live exact attempt, but a
+        # callback that did not bind fresh q/book cannot slide an expired one.
+        deadline_text = str(
+            obligation.get("completion_deadline_at") or ""
+        ).strip()
+        try:
+            original_deadline = datetime.fromisoformat(
+                deadline_text.replace("Z", "+00:00")
+            ).astimezone(timezone.utc)
+        except (ValueError, AttributeError):
+            return False
+        if _utcnow().astimezone(timezone.utc) >= original_deadline:
+            return False
     if not record_global_sell_reauction_reserved(conn, position):
+        conn.rollback()
         return False
     try:
+        # The wake is already externally visible. Always durably acknowledge it;
+        # a deadline overrun here must not turn one publication into replay debt.
         conn.commit()
     except Exception as exc:  # noqa: BLE001 - an uncommitted ack is not durable.
         try:
@@ -7247,6 +10800,71 @@ def recover_global_sell_snapshot_reauction_debt(
         return False
     position.last_exit_error = ""
     return True
+
+
+def _drain_same_turn_global_sell_reauction_after_no_fill(
+    position: Position,
+    *,
+    conn: sqlite3.Connection | None,
+    requester: Callable[[Position, bool], bool] | None,
+    deadline_monotonic: float | None = None,
+) -> bool:
+    """Commit a no-side-effect rejection, then publish its exact fresh reauction."""
+
+    if conn is None or requester is None:
+        return False
+    if not has_proven_sync_no_side_effect_sell_reauction(position, conn):
+        return False
+
+    def commit_before_external_publish() -> None:
+        if not conn.in_transaction:
+            return
+        if deadline_monotonic is None:
+            conn.commit()
+            return
+        with _held_monitor_preparation_deadline(
+            conn,
+            float(deadline_monotonic),
+        ) as ensure_live:
+            conn.commit()
+            ensure_live()
+
+    release_runtime_before = copy.deepcopy(position.__dict__)
+    release_started = False
+    try:
+        # First make the deterministic no-side-effect rejection authoritative.
+        commit_before_external_publish()
+        # Convert its immediate-eligibility marker into the same typed release
+        # event the recovery scanner would have written on a later pass.
+        if not check_pending_retries(
+            position,
+            conn=conn,
+            global_sell_reauction_requester=requester,
+        ):
+            return False
+        release_started = True
+        # The release event is the outbox. It must commit before any wake.
+        commit_before_external_publish()
+    except Exception as exc:  # noqa: BLE001 - uncommitted debt must never publish.
+        try:
+            conn.rollback()
+        except Exception:  # noqa: BLE001
+            pass
+        if release_started:
+            position.__dict__.clear()
+            position.__dict__.update(release_runtime_before)
+        logger.warning(
+            "GLOBAL_SELL_REAUCTION same-turn commit failed for %s: %s",
+            getattr(position, "trade_id", ""),
+            exc,
+        )
+        return False
+    return recover_global_sell_snapshot_reauction_debt(
+        position,
+        conn=conn,
+        requester=requester,
+        deadline_monotonic=deadline_monotonic,
+    )
 
 
 def release_pending_exit_without_order_if_retryable(
@@ -7266,13 +10884,41 @@ def release_pending_exit_without_order_if_retryable(
         return False
     if _last_exit_order_id(position, conn=conn):
         return False
+    command_witness = _latest_exit_command_release_witness(position, conn=conn)
+    if command_witness is not None and not command_witness[0]:
+        return False
     if _pending_exit_no_order_waits_for_liquidity(position, conn=conn):
         return False
     if exit_state in _EXIT_LIFECYCLE_IN_FLIGHT_STATES and conn is None:
         return False
+    if conn is not None:
+        from src.execution.command_recovery import (
+            pending_exit_has_terminal_order_release_debt,
+        )
+
+        if pending_exit_has_terminal_order_release_debt(
+            conn,
+            position_id=str(getattr(position, "trade_id", "") or ""),
+        ):
+            return False
     previous_next_retry_at = str(getattr(position, "next_exit_retry_at", "") or "")
     previous_retry_count = int(getattr(position, "exit_retry_count", 0) or 0)
     previous_error = str(getattr(position, "last_exit_error", "") or "")
+    previous_runtime = {
+        "state": position.state,
+        "pre_exit_state": getattr(position, "pre_exit_state", ""),
+        "exit_state": position.exit_state,
+        "next_exit_retry_at": getattr(position, "next_exit_retry_at", ""),
+        "exit_retry_count": getattr(position, "exit_retry_count", 0),
+        "order_status": getattr(position, "order_status", ""),
+    }
+    command_ownership = _canonical_global_sell_command_ownership(
+        conn,
+        position,
+    )
+    if command_ownership in {"COMMAND_OWNED", "UNKNOWN"}:
+        return False
+    global_snapshot_reauction = command_ownership == "GLOBAL_NO_COMMAND"
     position.exit_state = ""
     position.next_exit_retry_at = ""
     position.exit_retry_count = 0
@@ -7281,15 +10927,27 @@ def release_pending_exit_without_order_if_retryable(
         position.order_status = "filled"
     _release_pending_exit(position)
     if conn is not None:
-        _dual_write_exit_retry_released_if_available(
+        release_persisted = _dual_write_exit_retry_released_if_available(
             conn,
             position,
             previous_next_retry_at=previous_next_retry_at,
             previous_retry_count=previous_retry_count,
             previous_error=previous_error,
-            release_reason="PENDING_EXIT_NO_ORDER_RELEASED",
-            caused_by="pending_exit_no_order_released",
+            release_reason=(
+                "GLOBAL_SELL_SNAPSHOT_REAUCTION_REQUIRED"
+                if global_snapshot_reauction
+                else "PENDING_EXIT_NO_ORDER_RELEASED"
+            ),
+            caused_by=(
+                "global_sell_snapshot_reauction"
+                if global_snapshot_reauction
+                else "pending_exit_no_order_released"
+            ),
         )
+        if not release_persisted:
+            for field, value in previous_runtime.items():
+                setattr(position, field, value)
+            return False
     return True
 
 
@@ -7311,24 +10969,87 @@ def _pending_exit_no_order_waits_for_liquidity(
     snapshot_bid = _positive_decimal(
         snapshot.get("executable_snapshot_orderbook_top_bid")
     )
-    return snapshot_bid is None or snapshot_bid < LIVE_ORDER_MIN_UNIT_PRICE
+    return (
+        snapshot_bid is None
+        or not LIVE_ORDER_MIN_UNIT_PRICE
+        <= snapshot_bid
+        <= Decimal("1")
+    )
 
 
-def _check_order_fill(clob, order_id: str) -> tuple[str, object]:
+class _PendingExitOrderTruthIncomplete(RuntimeError):
+    """A bounded pending-exit read ended without authoritative order truth."""
+
+
+def _check_order_fill(
+    clob,
+    order_id: str,
+    *,
+    deadline_monotonic: float | None = None,
+) -> tuple[str, object]:
     """Check CLOB order status. Returns (normalized status, raw payload)."""
+    if (
+        deadline_monotonic is not None
+        and _time_module.monotonic() >= float(deadline_monotonic)
+    ):
+        raise _PendingExitOrderTruthIncomplete(
+            "pending-exit order truth deadline elapsed before request"
+        )
     try:
-        payload = clob.get_order_status(order_id)
+        get_order_status = clob.get_order_status
+        params = signature(get_order_status).parameters
+        accepts_deadline = "deadline_monotonic" in params or any(
+            param.kind == Parameter.VAR_KEYWORD for param in params.values()
+        )
+        if accepts_deadline:
+            payload = get_order_status(
+                order_id,
+                deadline_monotonic=deadline_monotonic,
+            )
+        else:
+            # Test doubles may retain the historical one-argument surface.
+            # Runtime-owned clients must never silently drop the deadline.
+            if str(getattr(get_order_status, "__module__", "")).startswith("src."):
+                raise _PendingExitOrderTruthIncomplete(
+                    "runtime order-status reader does not accept deadline_monotonic"
+                )
+            payload = get_order_status(order_id)
+        if (
+            deadline_monotonic is not None
+            and _time_module.monotonic() >= float(deadline_monotonic)
+        ):
+            raise _PendingExitOrderTruthIncomplete(
+                "pending-exit order truth deadline elapsed during request"
+            )
         if payload is None:
-            return "", None
+            raise _PendingExitOrderTruthIncomplete(
+                "pending-exit order truth unavailable: empty response"
+            )
         if isinstance(payload, str):
-            return payload.upper(), payload
+            status = payload.upper()
+            if status in {"FETCH_ERROR", "UNKNOWN"}:
+                raise _PendingExitOrderTruthIncomplete(
+                    f"pending-exit order truth unavailable: {status}"
+                )
+            return status, payload
         if isinstance(payload, dict):
             status = payload.get("status") or payload.get("state") or payload.get("orderStatus")
-            return (str(status).upper() if status else "", payload)
-        return "", payload
+            normalized = str(status).upper() if status else ""
+            if normalized in {"", "FETCH_ERROR", "UNKNOWN"}:
+                raise _PendingExitOrderTruthIncomplete(
+                    f"pending-exit order truth unavailable: {normalized}"
+                )
+            return normalized, payload
+        raise _PendingExitOrderTruthIncomplete(
+            "pending-exit order truth unavailable: malformed response"
+        )
+    except _PendingExitOrderTruthIncomplete:
+        raise
     except Exception as exc:
         logger.warning("Order fill check failed for %s: %s", order_id, exc)
-        return "", None
+        raise _PendingExitOrderTruthIncomplete(
+            f"pending-exit order truth read failed: {type(exc).__name__}"
+        ) from exc
 
 
 def _coerce_sell_result(trade_id: str, sell_result: OrderResult | dict) -> OrderResult:
@@ -7391,10 +11112,23 @@ def _extract_fill_price(
     sell_result: OrderResult | dict | object,
 ) -> Optional[float]:
     """Extract explicit venue fill price only."""
+    decimal = _extract_fill_price_decimal(sell_result)
+    return None if decimal is None else float(decimal)
+
+
+def _extract_fill_price_decimal(
+    sell_result: OrderResult | dict | object,
+) -> Decimal | None:
+    """Extract an exact venue fill price without crossing binary float."""
+
     if isinstance(sell_result, OrderResult) and sell_result.fill_price not in (None, ""):
-        return _positive_finite_float(sell_result.fill_price)
+        return _positive_finite_decimal(sell_result.fill_price)
     if isinstance(sell_result, dict):
-        return _first_explicit_fill_price(sell_result)
+        for key in ("avgPrice", "avg_price", "fillPrice", "fill_price"):
+            if key in sell_result and sell_result[key] not in (None, ""):
+                value = _positive_finite_decimal(sell_result[key])
+                if value is not None:
+                    return value
     return None
 
 
@@ -7408,12 +11142,23 @@ def _first_explicit_fill_price(payload: dict) -> Optional[float]:
 
 
 def _positive_finite_float(value: object) -> Optional[float]:
+    decimal = _positive_finite_decimal(value)
+    return None if decimal is None else float(decimal)
+
+
+def _positive_finite_decimal(value: object) -> Decimal | None:
     try:
-        numeric = float(value)
-    except (TypeError, ValueError):
+        numeric = Decimal(str(value))
+    except (InvalidOperation, TypeError, ValueError):
         return None
-    if not math.isfinite(numeric) or numeric <= 0.0 or numeric > 1.0:
+    if not numeric.is_finite() or numeric <= 0 or numeric > 1:
         return None
+    if not LIVE_ORDER_MIN_UNIT_PRICE <= numeric <= LIVE_ORDER_MAX_UNIT_PRICE:
+        logger.critical(
+            "LIVE_FILL_PRICE_OUT_OF_BOUNDS_RECEIPT price=%s; "
+            "preserving realized venue truth",
+            numeric,
+        )
     return numeric
 
 
@@ -7459,7 +11204,7 @@ def _exit_command_row_for_order(
     try:
         return conn.execute(
             """
-            SELECT command_id, price, size, venue_order_id
+            SELECT command_id, price, size, venue_order_id, created_at
               FROM venue_commands
              WHERE venue_order_id = ?
                AND position_id = ?
@@ -7485,7 +11230,12 @@ def _pending_exit_reprice_reason(
 
     if not math.isfinite(resting_price) or resting_price <= 0.0:
         return ""
-    if best_bid is None or best_bid < float(LIVE_ORDER_MIN_UNIT_PRICE):
+    if (
+        best_bid is None
+        or not float(LIVE_ORDER_MIN_UNIT_PRICE)
+        <= best_bid
+        <= float(LIVE_ORDER_MAX_UNIT_PRICE)
+    ):
         return ""
     min_move = max(float(min_tick) * PENDING_EXIT_REPRICE_MIN_TICKS, 0.001)
     if best_bid is not None and resting_price - float(best_bid) >= min_move:
@@ -7493,6 +11243,42 @@ def _pending_exit_reprice_reason(
     if best_bid is None and best_ask is not None and resting_price - float(best_ask) >= min_move:
         return "SELL_REPRICE_ONE_SIDED_NO_BID"
     return ""
+
+
+def _global_sell_rest_deadline_reason(
+    *,
+    conn: sqlite3.Connection | None,
+    position: Position,
+    order_id: str,
+    command_created_at: object,
+    now: datetime,
+) -> str:
+    """Expire one global maker SELL at the horizon used by its auction score."""
+
+    payload = _canonical_exit_intent_payload(conn, position, order_id=order_id)
+    if not isinstance(payload, dict) or payload.get("exit_intent_reason") != (
+        "GLOBAL_CAPITAL_OPTIMAL_SELL"
+    ):
+        return ""
+    certificate = payload.get("exit_intent_capital_certificate")
+    if not isinstance(certificate, dict) or (
+        str(certificate.get("execution_mode") or "").upper() != "MAKER_REST"
+    ):
+        # INV-47 SCOPE: only this global SELL rest lacks its ranked horizon.
+        # DRAIN: cancel acknowledgement releases the position for re-auction.
+        # RESET: a new maker intent carries a finite deadline certificate.
+        return "GLOBAL_SELL_REST_DEADLINE_AUTHORITY_MISSING"
+    minutes = _positive_decimal(certificate.get("rest_deadline_minutes"))
+    source = str(certificate.get("fill_probability_source") or "").strip()
+    created_at = _parse_iso(str(command_created_at or ""))
+    if minutes is None or not source or created_at is None:
+        return "GLOBAL_SELL_REST_DEADLINE_AUTHORITY_MISSING"
+    if created_at.tzinfo is None:
+        created_at = created_at.replace(tzinfo=timezone.utc)
+    deadline = created_at.astimezone(timezone.utc) + timedelta(
+        minutes=float(minutes)
+    )
+    return "GLOBAL_SELL_REST_DEADLINE_ELAPSED" if now >= deadline else ""
 
 
 def _cancel_stale_pending_exit_for_reprice(
@@ -7519,13 +11305,40 @@ def _cancel_stale_pending_exit_for_reprice(
         resting_price = float(row["price"] if isinstance(row, sqlite3.Row) else row[1])
     except (TypeError, ValueError):
         return False
-    best_bid, best_ask = _top_book_for_pending_exit_reprice(clob, token_id)
-    reason = _pending_exit_reprice_reason(
-        resting_price=resting_price,
-        best_bid=best_bid,
-        best_ask=best_ask,
-        min_tick=0.001,
+    order_id = str(
+        row["venue_order_id"] if isinstance(row, sqlite3.Row) else row[3]
     )
+    command_created_at = (
+        row["created_at"] if isinstance(row, sqlite3.Row) else row[4]
+    )
+    command_id = str(row["command_id"] if isinstance(row, sqlite3.Row) else row[0])
+    canonical_global_maker_rest = _is_canonical_global_maker_rest_exit(
+        conn,
+        position,
+        order_id=order_id,
+        command_id=command_id,
+    )
+    reason = _global_sell_rest_deadline_reason(
+        conn=conn,
+        position=position,
+        order_id=order_id,
+        command_created_at=command_created_at,
+        now=_utcnow(),
+    )
+    if canonical_global_maker_rest and not reason:
+        # The accepted global certificate owns this passive order until its
+        # certified rest deadline; a one-tick bid gap is not supersession.
+        return False
+    best_bid: float | None = None
+    best_ask: float | None = None
+    if not reason:
+        best_bid, best_ask = _top_book_for_pending_exit_reprice(clob, token_id)
+        reason = _pending_exit_reprice_reason(
+            resting_price=resting_price,
+            best_bid=best_bid,
+            best_ask=best_ask,
+            min_tick=0.001,
+        )
     if not reason:
         return False
 
@@ -7548,7 +11361,6 @@ def _cancel_stale_pending_exit_for_reprice(
     try:
         from src.execution.exit_safety import request_cancel_for_command
 
-        command_id = str(row["command_id"] if isinstance(row, sqlite3.Row) else row[0])
         outcome = request_cancel_for_command(
             conn,
             command_id,
@@ -7612,34 +11424,67 @@ def _mark_exit_retry(
     error: str = "",
     cooldown_seconds: int = DEFAULT_COOLDOWN_SECONDS,
     conn: sqlite3.Connection | None = None,
+    post_only_cross_command_id: str = "",
+    fak_no_fill_command_id: str = "",
 ) -> None:
     """Transition position to retry_pending with exponential backoff."""
     _mark_pending_exit(position)
 
-    if _is_global_sell_snapshot_reauction_error(error):
-        # The global auction owns this statistical SELL. Snapshot capture stopped
-        # before command persistence, so no venue side effect exists and the old
-        # q/book/wealth certificate must not be replayed. Make the position
-        # immediately releasable; the monitor commits that release and requests
-        # a new complete global auction through the injected orchestration hook.
+    snapshot_reauction = _is_global_sell_snapshot_reauction_error(error)
+    if _is_post_only_cross_reauction_error(error):
+        proof_result = OrderResult(
+            trade_id=str(getattr(position, "trade_id", "") or ""),
+            status="rejected",
+            reason="venue_rejected_400",
+            command_id=str(post_only_cross_command_id or "").strip(),
+            command_state="REJECTED",
+        )
+        if not _global_sell_post_only_cross_reauction_error(conn, proof_result):
+            # The typed/durable proof disappeared or was never bound to this
+            # position. A prefix must not authorize immediate re-auction.
+            error = "venue_rejected_400"
+            snapshot_reauction = False
+    if _is_fak_no_fill_reauction_error(error):
+        proof_result = OrderResult(
+            trade_id=str(getattr(position, "trade_id", "") or ""),
+            status="rejected",
+            reason="venue_rejected_400",
+            command_id=str(fak_no_fill_command_id or "").strip(),
+            command_state="REJECTED",
+        )
+        if not _global_sell_fak_no_fill_reauction_error(conn, proof_result):
+            error = "venue_rejected_400"
+            snapshot_reauction = False
+    if snapshot_reauction:
+        # The global auction owns this statistical SELL. The old q/book/wealth
+        # certificate must not be replayed. Release only this position to a new
+        # complete auction after the typed proof has been revalidated.
         position.last_exit_error = error[:500]
         position.exit_state = "retry_pending"
         position.order_status = "retry_pending"
         position.next_exit_retry_at = _utcnow().isoformat()
+        extra_payload = {
+            "status": "global_sell_snapshot_reauction_pending",
+            "retry_count": int(
+                getattr(position, "exit_retry_count", 0) or 0
+            ),
+            "next_retry_at": position.next_exit_retry_at,
+        }
+        if _is_post_only_cross_reauction_error(error):
+            extra_payload["post_only_cross_command_id"] = str(
+                post_only_cross_command_id or ""
+            ).strip()
+        if _is_fak_no_fill_reauction_error(error):
+            extra_payload["fak_no_fill_command_id"] = str(
+                fak_no_fill_command_id or ""
+            ).strip()
         _dual_write_canonical_pending_exit_if_available(
             conn,
             position,
             reason=reason,
             error=error,
             event_type="EXIT_ORDER_REJECTED",
-            extra_payload={
-                "status": "global_sell_snapshot_reauction_pending",
-                "side_effect_boundary_crossed": False,
-                "retry_count": int(
-                    getattr(position, "exit_retry_count", 0) or 0
-                ),
-                "next_retry_at": position.next_exit_retry_at,
-            },
+            extra_payload=extra_payload,
         )
         logger.info(
             "GLOBAL SELL SNAPSHOT REAUCTION %s: %s "
@@ -7761,7 +11606,7 @@ def _mark_exit_retry(
 
     if _is_exit_liquidity_wait_error(error):
         normalized_error = (
-            "exit_no_in_band_bid" if _is_sub_floor_exit_price_error(error) else error
+            "exit_no_in_band_bid" if _is_out_of_band_exit_price_error(error) else error
         )
         position.last_exit_error = normalized_error
         position.exit_state = "retry_pending"
@@ -7840,6 +11685,8 @@ def mark_settled(
     trade_id: str,
     settlement_price: float,
     exit_reason: str = "SETTLEMENT",
+    *,
+    audit_conn: sqlite3.Connection | None = None,
 ) -> Optional[Position]:
     """Single canonical entry point for settlement-driven position close.
 
@@ -7848,7 +11695,13 @@ def mark_settled(
     Covers buy_yes/buy_no settlements. Void/unknown-direction
     positions are handled separately by void_position.
     """
-    closed = compute_settlement_close(portfolio, trade_id, settlement_price, exit_reason)
+    closed = compute_settlement_close(
+        portfolio,
+        trade_id,
+        settlement_price,
+        exit_reason,
+        audit_conn=audit_conn,
+    )
     if closed is not None:
         logger.info(
             "EXIT_LIFECYCLE mark_settled %s: price=%.4f reason=%s",
@@ -7867,8 +11720,8 @@ def mark_settled(
 # src.main.
 # ---------------------------------------------------------------------------
 
-_EXIT_MONITOR_INTERVAL_SECONDS = 120.0
-_MONITOR_CADENCE_GAP_FACTOR = 2.0
+_EXIT_MONITOR_INTERVAL_SECONDS = 30.0
+_MONITOR_CADENCE_GAP_SECONDS = 120.0
 
 
 def _release_ws_gap_blocked_exit_retries_after_m5_clear(
@@ -7944,6 +11797,7 @@ def _append_exit_retry_release_events_and_update_projection(
     observed_at: datetime,
     release_reason: str,
     release_error: str,
+    deadline_monotonic: float | None = None,
 ) -> dict:
     """Append retry-release evidence before shortening projection cooldowns."""
 
@@ -7973,6 +11827,15 @@ def _append_exit_retry_release_events_and_update_projection(
     changed = 0
     released_ids: list[str] = []
     for row in rows:
+        if (
+            deadline_monotonic is not None
+            and _time_module.monotonic() >= float(deadline_monotonic)
+        ):
+            return {
+                "released": changed,
+                "position_ids": released_ids,
+                "error": "HELD_MONITOR_PREPARATION_DEADLINE_EXPIRED",
+            }
         position_id = str(row[0] or "")
         if not position_id:
             continue
@@ -8052,6 +11915,7 @@ def _release_allocator_config_blocked_exit_retries_after_refresh(
     portfolio,
     *,
     observed_at: datetime,
+    deadline_monotonic: float | None = None,
 ) -> dict:
     """Release exits delayed only because allocator refresh had not run yet."""
 
@@ -8097,6 +11961,7 @@ def _release_allocator_config_blocked_exit_retries_after_refresh(
         observed_at=observed_at,
         release_reason="ALLOCATOR_CONFIGURED_AFTER_REFRESH",
         release_error="allocator_not_configured_released",
+        deadline_monotonic=deadline_monotonic,
     )
     changed = int(released.get("released", 0) or 0)
     position_ids = list(released.get("position_ids", []) or [])
@@ -8168,70 +12033,229 @@ def _refresh_global_allocator_for_held_position_monitor(conn, portfolio) -> dict
 
 
 def _check_monitor_cadence_watchdog(conn, summary: dict) -> dict | None:
-    """Flag when MONITOR_REFRESHED cadence has lapsed beyond ~2× the interval.
+    """Flag any held position whose canonical monitor cadence is not current.
 
-    Reads the newest canonical MONITOR_REFRESHED occurred_at from position_events
-    (same trade DB this conn owns) and compares to now. Detection only — records
-    the gap in ``summary`` and logs a warning so operator supervision can act;
-    never restarts or back-fills. Returns the watchdog record dict when a gap is
-    flagged, else None. Fail-soft: any read/parse error returns None.
+    Detection is per positive-exposure position.  A fresh sibling must never
+    hide a stale, missing, malformed, or future-dated ``MONITOR_REFRESHED``.
+    This reader records evidence only; the independent durable monitor recovery
+    lane remains the sole recovery writer.
     """
     if conn is None:
         return None
-    threshold_seconds = _EXIT_MONITOR_INTERVAL_SECONDS * _MONITOR_CADENCE_GAP_FACTOR
-    try:
-        row = conn.execute(
-            """
-            SELECT MAX(
-                       (
-                           SELECT pe.occurred_at
-                             FROM position_events pe
-                            WHERE pe.position_id = pc.position_id
-                              AND pe.event_type = 'MONITOR_REFRESHED'
-                            ORDER BY pe.sequence_no DESC
-                            LIMIT 1
-                       )
-                   )
-              FROM position_current pc
-             WHERE pc.phase IN ('active', 'day0_window', 'pending_exit')
-            """
-        ).fetchone()
-    except Exception:
-        return None
-    if row is None or row[0] is None:
-        return None
-    last_refresh_raw = str(row[0])
-    try:
-        last_refresh = datetime.fromisoformat(last_refresh_raw.replace("Z", "+00:00"))
-    except (TypeError, ValueError):
-        return None
-    if last_refresh.tzinfo is None:
-        last_refresh = last_refresh.replace(tzinfo=timezone.utc)
+    threshold_seconds = _MONITOR_CADENCE_GAP_SECONDS
     now = datetime.now(timezone.utc)
-    gap_seconds = (now - last_refresh.astimezone(timezone.utc)).total_seconds()
-    summary["monitor_cadence_gap_seconds"] = round(gap_seconds, 1)
-    if gap_seconds <= threshold_seconds:
+    try:
+        from src.ops.monitor_cadence import (
+            collect_monitor_cadence_evidence,
+            monitor_cadence_blocking_evidence,
+        )
+
+        evidence = collect_monitor_cadence_evidence(
+            conn,
+            now=now,
+            max_age_seconds=threshold_seconds,
+            strict_future=True,
+            monitor_refreshed_only=True,
+            require_fresh_inputs=True,
+        )
+    except Exception as exc:  # noqa: BLE001 - watchdog must not break exits.
+        summary["monitor_cadence_watchdog_error"] = str(exc)
+        logger.warning("MONITOR_CADENCE_WATCHDOG_READ_FAILED: %s", exc)
         return None
+
+    cadence_groups = monitor_cadence_blocking_evidence(evidence)
+    stale = list(cadence_groups["blocking_stale_positions"])
+    quote_only_stale = list(cadence_groups["quote_only_stale_positions"])
+    future = list(evidence.get("future_monitor_events") or [])
+    summary["monitor_cadence_open_position_count"] = int(
+        evidence.get("open_position_count") or 0
+    )
+    summary["monitor_cadence_fresh_position_count"] = int(
+        evidence.get("fresh_position_count") or 0
+    )
+    summary["monitor_cadence_stale_or_missing_position_count"] = int(
+        evidence.get("stale_or_missing_position_count") or 0
+    )
+    summary["monitor_cadence_stale_or_missing_positions"] = list(
+        evidence.get("stale_or_missing_positions") or []
+    )
+    summary["monitor_cadence_blocking_stale_position_count"] = int(
+        cadence_groups["blocking_stale_position_count"]
+    )
+    summary["monitor_cadence_quote_only_stale_position_count"] = int(
+        cadence_groups["quote_only_stale_position_count"]
+    )
+    summary["monitor_cadence_quote_only_stale_positions"] = quote_only_stale
+    if not stale and not future:
+        return None
+
+    stale_with_age = [
+        item for item in stale if isinstance(item.get("age_seconds"), (int, float))
+    ]
+    worst = max(stale_with_age, key=lambda item: float(item["age_seconds"])) \
+        if stale_with_age else None
+    gap_seconds = float(worst["age_seconds"]) if worst is not None else None
     record = {
-        "last_monitor_refreshed_at": last_refresh_raw,
         "observed_at": now.isoformat(),
-        "gap_seconds": round(gap_seconds, 1),
         "interval_seconds": _EXIT_MONITOR_INTERVAL_SECONDS,
         "threshold_seconds": threshold_seconds,
-        "gap_factor": round(gap_seconds / _EXIT_MONITOR_INTERVAL_SECONDS, 2),
+        "open_position_count": int(evidence.get("open_position_count") or 0),
+        "fresh_position_count": int(evidence.get("fresh_position_count") or 0),
+        "stale_or_missing_position_count": int(
+            cadence_groups["blocking_stale_position_count"]
+        ),
+        "stale_or_missing_positions": stale,
+        "strict_stale_or_missing_position_count": int(
+            evidence.get("stale_or_missing_position_count") or 0
+        ),
+        "strict_stale_or_missing_positions": list(
+            evidence.get("stale_or_missing_positions") or []
+        ),
+        "quote_only_stale_position_count": int(
+            cadence_groups["quote_only_stale_position_count"]
+        ),
+        "quote_only_stale_positions": quote_only_stale,
+        "future_monitor_event_count": int(
+            evidence.get("future_monitor_event_count") or 0
+        ),
+        "future_monitor_events": future,
     }
+    if worst is not None and gap_seconds is not None:
+        record["last_monitor_refreshed_at"] = worst.get("last_monitor_refreshed_at")
+        record["gap_seconds"] = round(gap_seconds, 1)
+        record["gap_factor"] = round(
+            gap_seconds / _EXIT_MONITOR_INTERVAL_SECONDS,
+            2,
+        )
+        summary["monitor_cadence_gap_seconds"] = round(gap_seconds, 1)
     summary["monitor_cadence_gap_flagged"] = record
     logger.warning(
-        "MONITOR_CADENCE_GAP: last MONITOR_REFRESHED was %s (%.1fs ago, %.1f× the "
-        "%.0fs interval > %.1f× threshold). exit_monitor cadence lapsed — likely a "
-        "daemon/scheduler process gap (operator supervision, out of code).",
-        last_refresh_raw,
-        gap_seconds,
-        gap_seconds / _EXIT_MONITOR_INTERVAL_SECONDS,
-        _EXIT_MONITOR_INTERVAL_SECONDS,
-        _MONITOR_CADENCE_GAP_FACTOR,
+        "MONITOR_CADENCE_GAP: stale_or_missing=%d future=%d open=%d fresh=%d "
+        "threshold=%.1fs positions=%s",
+        record["stale_or_missing_position_count"],
+        record["future_monitor_event_count"],
+        record["open_position_count"],
+        record["fresh_position_count"],
+        threshold_seconds,
+        [
+            str(item.get("position_id") or "")
+            for item in stale + future
+        ],
     )
     return record
+
+
+def _full_book_monitor_completed_canonical_coverage(
+    summary: Mapping[str, object],
+    *,
+    open_position_count: int,
+) -> bool:
+    """Whether one full-book pass discharged every economic redecision obligation."""
+
+    if open_position_count <= 0:
+        return True
+    if "held_monitor_candidate_position_ids" not in summary:
+        return False
+    candidate_ids = {
+        str(value).strip()
+        for value in summary.get("held_monitor_candidate_position_ids", ()) or ()
+        if str(value).strip()
+    }
+    canonical_ids = {
+        str(value).strip()
+        for value in summary.get("held_monitor_canonical_position_ids", ()) or ()
+        if str(value).strip()
+    }
+    discharged_ids = {
+        str(value).strip()
+        for value in summary.get("held_monitor_discharged_position_ids", ()) or ()
+        if str(value).strip()
+    }
+    no_action_authority_ids = {
+        str(value).strip()
+        for value in summary.get(
+            "held_monitor_no_action_authority_position_ids",
+            (),
+        )
+        or ()
+        if str(value).strip()
+    }
+    completed_ids = (canonical_ids - no_action_authority_ids) | discharged_ids
+    return (
+        int(summary.get("held_monitor_candidates") or 0) == len(candidate_ids)
+        and candidate_ids.issubset(completed_ids)
+        and int(summary.get("monitor_canonical_write_failed") or 0) == 0
+        and not bool(summary.get("held_monitor_preempted"))
+    )
+
+
+@contextmanager
+def _held_monitor_preparation_deadline(
+    conn: sqlite3.Connection,
+    deadline_monotonic: float,
+):
+    """Bound pre-monitor SQLite waits and scans to the claim-clock deadline."""
+
+    remaining = float(deadline_monotonic) - _time_module.monotonic()
+    if not math.isfinite(remaining) or remaining <= 0.0:
+        raise TimeoutError("HELD_MONITOR_PREPARATION_DEADLINE_EXPIRED")
+    previous_busy_row = conn.execute("PRAGMA busy_timeout").fetchone()
+    previous_busy_ms = int(previous_busy_row[0] or 0)
+    def expired() -> int:
+        return int(_time_module.monotonic() >= float(deadline_monotonic))
+
+    def ensure_live() -> None:
+        if expired():
+            raise TimeoutError("HELD_MONITOR_PREPARATION_DEADLINE_EXPIRED")
+
+    # Every helper below can issue more than one SQL statement. A timeout based
+    # on the initial remaining budget can therefore be reused after that budget
+    # is gone. Keep lock acquisition effectively non-blocking; the progress
+    # handler bounds scans, and ensure_live fences each preparation step.
+    conn.execute("PRAGMA busy_timeout = 0")
+    conn.set_progress_handler(expired, 1_000)
+    try:
+        yield ensure_live
+        ensure_live()
+    finally:
+        conn.set_progress_handler(None, 0)
+        conn.execute(f"PRAGMA busy_timeout = {previous_busy_ms}")
+
+
+def _held_monitor_preparation_cutoff(
+    monitor_deadline_monotonic: float,
+    *,
+    reserve_primary_redecision: bool = True,
+) -> float:
+    """Cap monitor bootstrap so it cannot consume the first complete q read."""
+
+    outer_deadline = float(monitor_deadline_monotonic)
+    now = _time_module.monotonic()
+    if not reserve_primary_redecision:
+        return outer_deadline
+
+    from src.engine.monitor_refresh import HELD_MONITOR_PRIMARY_BELIEF_READ_MAX_SECONDS
+
+    primary_reserve = float(HELD_MONITOR_PRIMARY_BELIEF_READ_MAX_SECONDS)
+    remaining = outer_deadline - now
+    if not math.isfinite(remaining) or remaining <= primary_reserve:
+        return now
+    # Bootstrap is prerequisite work, not held-position redecision. Give it at
+    # most one q-read tranche and preserve another complete tranche for the
+    # probability/book path. SCOPE: this monitor attempt's DB/watchdog/load/
+    # allocator preparation only. DRAIN: the recurring monitor retries after
+    # the incumbent DB writer commits. RESET: the next attempt recomputes this
+    # cutoff from its own fresh claim.
+    preparation_budget = min(primary_reserve, remaining - primary_reserve)
+    return min(outer_deadline, now + preparation_budget)
+
+
+def held_monitor_pre_artifact_reserve_seconds() -> float:
+    """Minimum claim remainder needed for bootstrap plus one complete q read."""
+
+    from src.engine.monitor_refresh import HELD_MONITOR_PRIMARY_BELIEF_READ_MAX_SECONDS
+
+    return 2.0 * float(HELD_MONITOR_PRIMARY_BELIEF_READ_MAX_SECONDS)
 
 
 def run_exit_monitor_cycle(
@@ -8239,6 +12263,8 @@ def run_exit_monitor_cycle(
     held_position_monitor_active: threading.Event,
     mark_held_position_monitor_complete: Callable[[], None],
     monitor_claimed: bool = False,
+    monitor_deadline_monotonic: float | None = None,
+    monitor_handoff_elapsed_seconds: float = 0.0,
     target_families: Collection[tuple[str, str, str]] | None = None,
     should_preempt_for_urgent_day0: Callable[[], bool] | None = None,
 ) -> bool:
@@ -8256,15 +12282,19 @@ def run_exit_monitor_cycle(
     handoff priority is a separate dispatcher-owned event and ends before this
     function performs network work. ``monitor_claimed`` means
     the dispatcher already set the Event while waiting for an active reactor to
-    finish; direct callers retain the original local claim behavior.
+    finish; direct callers retain the original local claim behavior. When the
+    dispatcher owns the claim, ``monitor_deadline_monotonic`` carries the same
+    absolute claim-clock deadline through handoff, preparation, refresh, and
+    retry. Direct callers create that deadline immediately after their local
+    active claim.
     ``target_families`` limits event-triggered runs to the families changed by
     the committed observation while periodic runs retain the full portfolio.
 
     Called from the main daemon's ``exit_monitor`` scheduler job (2-minute
     cadence). Behavior-preserving relocation — was inline in src/main.py.
     """
-    from src.config import settings
     from src.engine.cycle_runner import (
+        _execute_force_exit_sweep,
         _execute_monitoring_phase,
         get_connection,
         get_tracker,
@@ -8272,57 +12302,139 @@ def run_exit_monitor_cycle(
         save_tracker,
         save_portfolio,
     )
+    from src.engine.cycle_runtime import _held_position_monitor_budget_seconds
     from src.observability.scheduler_health import _write_scheduler_health
     from src.state.canonical_write import commit_then_export
     from src.state.decision_chain import CycleArtifact
     from src.state.decision_chain import store_artifact
+    from src.riskguard.risk_level import RiskLevel
+    from src.riskguard.riskguard import get_current_level
 
-    _settings_source = settings._data if hasattr(settings, "_data") else settings
-    edli_cfg = _settings_source.get("edli", {}) if isinstance(_settings_source, dict) else {}
+    risk_level = get_current_level()
+    if risk_level is RiskLevel.RED:
+        # RED is portfolio-wide action authority.  A targeted observation wake
+        # cannot narrow the sweep to one family; the scheduled EDLI monitor is
+        # the live owner of the same marker -> evaluate -> submit path that the
+        # unscheduled legacy full cycle uses.
+        target_families = None
+
     if held_position_monitor_active.is_set() and not monitor_claimed:
         logger.warning("exit_monitor skipped: previous monitor cycle is still running")
         return False
     held_position_monitor_active.set()
-
-    conn = get_connection()
-    if conn is None:
-        logger.warning("exit_monitor: DB write-lock degrade — skipping cycle")
+    if monitor_deadline_monotonic is None:
+        monitor_deadline_monotonic = (
+            _time_module.monotonic() + _held_position_monitor_budget_seconds()
+        )
+    else:
+        monitor_deadline_monotonic = float(monitor_deadline_monotonic)
+        if not math.isfinite(monitor_deadline_monotonic):
+            logger.error("exit_monitor: held monitor deadline is not finite")
+            mark_held_position_monitor_complete()
+            return False
+    if monitor_deadline_monotonic <= _time_module.monotonic():
+        logger.warning("exit_monitor: claim budget expired before DB acquisition")
         mark_held_position_monitor_complete()
         return False
 
-    summary: dict = {"monitors": 0, "exits": 0}
+    preparation_started_monotonic = _time_module.monotonic()
+    preparation_deadline_monotonic = _held_monitor_preparation_cutoff(
+        monitor_deadline_monotonic,
+        reserve_primary_redecision=risk_level is not RiskLevel.RED,
+    )
+    if preparation_deadline_monotonic <= preparation_started_monotonic:
+        logger.warning(
+            "exit_monitor: insufficient claim budget for preparation plus one "
+            "complete probability redecision"
+        )
+        mark_held_position_monitor_complete()
+        return False
+
+    conn = get_connection(deadline_monotonic=preparation_deadline_monotonic)
+    if conn is None:
+        logger.warning(
+            "exit_monitor: DB preparation deadline expired — preserving primary "
+            "redecision reserve for the recurring retry"
+        )
+        mark_held_position_monitor_complete()
+        return False
+
+    summary: dict = {
+        "monitors": 0,
+        "exits": 0,
+        "risk_level": risk_level.value,
+        "held_monitor_preparation_budget_seconds": max(
+            0.0,
+            preparation_deadline_monotonic - preparation_started_monotonic,
+        ),
+        "held_monitor_reactor_handoff_elapsed_seconds": max(
+            0.0,
+            float(monitor_handoff_elapsed_seconds),
+        ),
+    }
+    full_book_open_position_count = 0
     succeeded = False
     monitor_completion_marked = False
-    # FIX 2c (2026-06-20): detect a lapsed MONITOR_REFRESHED cadence (whole-book
-    # silence) on the first cycle after recovery. Detection only; the underlying
-    # daemon supervision is operator infra.
-    if target_families is None:
-        try:
-            _check_monitor_cadence_watchdog(conn, summary)
-        except Exception as _wd_exc:  # noqa: BLE001 — watchdog must never break the cycle
-            logger.warning("exit_monitor: cadence watchdog failed (non-fatal): %s", _wd_exc)
     try:
-        portfolio = load_portfolio(
-            open_positions_only=True,
-            target_families=target_families,
-        )
-        held_monitor_allocator_refresh = _refresh_global_allocator_for_held_position_monitor(
+        with _held_monitor_preparation_deadline(
             conn,
-            portfolio,
-        )
-        summary["held_monitor_allocator_refresh"] = held_monitor_allocator_refresh
-        if (
-            target_families is None
-            and held_monitor_allocator_refresh.get("configured")
-        ):
-            summary["held_monitor_allocator_retry_release"] = (
-                _release_allocator_config_blocked_exit_retries_after_refresh(
+            preparation_deadline_monotonic,
+        ) as ensure_preparation_live:
+            # Cadence detection is owned by the independent durable recovery
+            # lane in ``src.main``.  Re-reading the same event history here put
+            # optional diagnosis ahead of portfolio/allocator preparation: on
+            # an I/O-contended canonical DB it could consume this whole claim
+            # and prevent every held position from reaching redecision.  Keep
+            # the actuation prerequisite tranche free of diagnostic reads.
+            ensure_preparation_live()
+            portfolio = load_portfolio(
+                open_positions_only=True,
+                target_families=target_families,
+                connection=conn,
+                deadline_monotonic=preparation_deadline_monotonic,
+            )
+            ensure_preparation_live()
+            if risk_level is RiskLevel.RED:
+                summary["force_exit_review_scope"] = "sweep_active_positions"
+                summary["force_exit_sweep_trigger"] = "risk_level_red"
+                summary["force_exit_sweep"] = _execute_force_exit_sweep(
+                    portfolio,
+                    conn=conn,
+                )
+                ensure_preparation_live()
+            held_monitor_allocator_refresh = (
+                _refresh_global_allocator_for_held_position_monitor(
                     conn,
                     portfolio,
-                    observed_at=datetime.now(timezone.utc),
                 )
             )
+            summary["held_monitor_allocator_refresh"] = (
+                held_monitor_allocator_refresh
+            )
+            if (
+                target_families is None
+                and held_monitor_allocator_refresh.get("configured")
+            ):
+                ensure_preparation_live()
+                summary["held_monitor_allocator_retry_release"] = (
+                    _release_allocator_config_blocked_exit_retries_after_refresh(
+                        conn,
+                        portfolio,
+                        observed_at=datetime.now(timezone.utc),
+                        deadline_monotonic=preparation_deadline_monotonic,
+                    )
+                )
+        summary["held_monitor_preparation_elapsed_seconds"] = max(
+            0.0,
+            _time_module.monotonic() - preparation_started_monotonic,
+        )
+        summary["held_monitor_primary_budget_remaining_seconds"] = max(
+            0.0,
+            monitor_deadline_monotonic - _time_module.monotonic(),
+        )
         monitor_portfolio = _portfolio_for_target_families(portfolio, target_families)
+        if target_families is None:
+            full_book_open_position_count = len(monitor_portfolio.positions)
         if target_families is not None:
             summary["targeted_exit_monitor"] = True
             summary["target_family_count"] = len(
@@ -8336,10 +12448,17 @@ def run_exit_monitor_cycle(
                 started_at=datetime.now(timezone.utc).isoformat(),
                 summary=summary,
             )
-            portfolio_dirty = False
+            portfolio_dirty = bool(
+                int(
+                    (summary.get("force_exit_sweep") or {}).get(
+                        "attempted",
+                        0,
+                    )
+                )
+            )
             tracker_dirty = False
             try:
-                portfolio_dirty, tracker_dirty = _execute_monitoring_phase(
+                monitor_portfolio_dirty, tracker_dirty = _execute_monitoring_phase(
                     conn,
                     clob,
                     monitor_portfolio,
@@ -8347,9 +12466,14 @@ def run_exit_monitor_cycle(
                     tracker,
                     summary,
                     run_exit_preflight=True,
+                    held_position_monitor_budget_seconds=max(
+                        0.0,
+                        monitor_deadline_monotonic - _time_module.monotonic(),
+                    ),
                     should_preempt_for_urgent_day0=should_preempt_for_urgent_day0,
                     defer_partial_orderbook_gaps=target_families is None,
                 )
+                portfolio_dirty = portfolio_dirty or monitor_portfolio_dirty
             except Exception as exc:
                 logger.error(
                     "exit_monitor: monitoring phase failed: %s",
@@ -8357,6 +12481,26 @@ def run_exit_monitor_cycle(
                     exc_info=True,
                 )
                 summary["monitoring_error"] = str(exc)
+
+            succeeded = "monitoring_error" not in summary
+            if (
+                succeeded
+                and target_families is None
+                and not _full_book_monitor_completed_canonical_coverage(
+                    summary,
+                    open_position_count=full_book_open_position_count,
+                )
+            ):
+                # SCOPE: this admitted periodic full-book pass only. DRAIN: a
+                # later pass writes canonical MONITOR_REFRESHED decisions for
+                # every admitted candidate, or proves that a candidate became
+                # terminal/economically closed. RESET: exact full coverage (or
+                # zero current open positions) returns True so the dispatcher
+                # may clear its one-turn urgent-yield guard.
+                summary["monitoring_error"] = (
+                    "FULL_BOOK_MONITOR_CANONICAL_COVERAGE_INCOMPLETE"
+                )
+                succeeded = False
 
             artifact.completed_at = datetime.now(timezone.utc).isoformat()
 
@@ -8388,43 +12532,9 @@ def run_exit_monitor_cycle(
                 db_op=_db_op,
                 json_exports=[_export_portfolio, _export_tracker],
             )
-            succeeded = "monitoring_error" not in summary
             mark_held_position_monitor_complete()
             monitor_completion_marked = True
 
-            # DAY0 resting-order cancel sweep (adversarial review
-            # 2026-06-10 fix 2 — finding 4 "standing free option"). Cancels OUR
-            # open resting ENTRY orders whose day0 bin is hard-fact dead for the
-            # order's side, or whose family is oracle-anomaly paused. Cancels
-            # only REDUCE standing risk. Fail-soft.
-            if (
-                not summary.get("held_monitor_preempted")
-                and bool(
-                    edli_cfg.get(
-                        "day0_dead_bin_order_cancel_enabled",
-                        True,
-                    )
-                )
-            ):
-                try:
-                    from src.config import runtime_cities_by_name
-                    from src.execution.day0_hard_fact_exit import (
-                        cancel_day0_dead_bin_resting_entries,
-                    )
-
-                    cancelled = cancel_day0_dead_bin_resting_entries(
-                        clob=clob,
-                        conn=conn,
-                        cities_by_name=runtime_cities_by_name(),
-                        target_families=target_families,
-                    )
-                    if cancelled:
-                        summary["day0_dead_bin_orders_cancelled"] = cancelled
-                except Exception as exc:  # noqa: BLE001 — sweep is additive
-                    logger.warning(
-                        "exit_monitor: day0 dead-bin cancel sweep failed (non-fatal): %s",
-                        exc,
-                    )
     except Exception as exc:
         logger.error(
             "exit_monitor: unexpected error: %s", exc, exc_info=True

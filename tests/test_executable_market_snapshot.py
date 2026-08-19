@@ -1,5 +1,5 @@
 # Created: 2026-04-27
-# Lifecycle: created=2026-04-27; last_reviewed=2026-05-27; last_reused=2026-05-27
+# Lifecycle: created=2026-04-27; last_reviewed=2026-08-12; last_reused=2026-08-12
 # Purpose: U1 snapshot antibodies plus pricing-semantics contract scaffolding.
 # Reuse: Run when executable snapshots, venue_commands gating, or V2 market preflight semantics change.
 # Authority basis: docs/archive/2026-Q2/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md
@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import sqlite3
 import json
+import threading
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, localcontext
@@ -655,6 +656,75 @@ def test_failed_compact_write_does_not_advance_keyframe_rotation(conn, monkeypat
     assert next_capture["capture_trigger"] == "KEYFRAME"
 
 
+def test_discovery_capture_staleness_does_not_override_keyframe_interval(
+    conn,
+    monkeypatch,
+):
+    market_scanner_module._discovery_captures_since_keyframe.clear()
+    monkeypatch.setenv("ZEUS_SUBSTRATE_CAPTURE_KEYFRAME_INTERVAL_CYCLES", "20")
+    capture_args = {
+        "market": _market_for_capture(),
+        "decision": _decision_for_capture(),
+        "clob": FakeClobFacts(),
+        "captured_at": NOW,
+        "scan_authority": "VERIFIED",
+        "capture_trigger": "DISCOVERY_SWEEP",
+    }
+
+    first = capture_executable_market_snapshot(conn, **capture_args)
+    assert first["snapshot_persistence_tier"] == "full"
+
+    conn.execute(
+        """
+        UPDATE executable_market_snapshot_latest
+           SET freshness_deadline = '2000-01-01T00:00:00+00:00'
+         WHERE condition_id = 'condition-1'
+           AND selected_outcome_token_id = 'yes-token'
+        """
+    )
+    conn.commit()
+
+    after_expiry = [
+        capture_executable_market_snapshot(conn, **capture_args)
+        for _ in range(20)
+    ]
+    assert [row["snapshot_persistence_tier"] for row in after_expiry] == (
+        ["compact"] * 19 + ["full"]
+    )
+    assert [row["capture_trigger"] for row in after_expiry] == (
+        ["DISCOVERY_SWEEP"] * 19 + ["KEYFRAME"]
+    )
+
+
+def test_discovery_capture_replaces_invalidated_keyframe(conn, monkeypatch):
+    market_scanner_module._discovery_captures_since_keyframe.clear()
+    monkeypatch.setenv("ZEUS_SUBSTRATE_CAPTURE_KEYFRAME_INTERVAL_CYCLES", "20")
+    capture_args = {
+        "market": _market_for_capture(),
+        "decision": _decision_for_capture(),
+        "clob": FakeClobFacts(),
+        "captured_at": NOW,
+        "scan_authority": "VERIFIED",
+        "capture_trigger": "DISCOVERY_SWEEP",
+    }
+
+    first = capture_executable_market_snapshot(conn, **capture_args)
+    assert first["snapshot_persistence_tier"] == "full"
+    loaded = get_snapshot(conn, first["executable_snapshot_id"])
+    assert loaded is not None
+    record_snapshot_invalidation(
+        conn,
+        condition_id="condition-1",
+        token_id="yes-token",
+        reason="market_channel_action",
+        invalidated_at=loaded.captured_at + timedelta(microseconds=1),
+    )
+
+    replacement = capture_executable_market_snapshot(conn, **capture_args)
+    assert replacement["snapshot_persistence_tier"] == "full"
+    assert replacement["capture_trigger"] == "KEYFRAME"
+
+
 def test_negrisk_active_false_child_captures_when_accepting_orders(conn):
     market = _market_for_capture(
         active=False,
@@ -983,29 +1053,131 @@ def test_capture_buy_snapshot_preserves_ask_only_book_without_fabricating_bid(co
         )
 
 
-def test_capture_executable_snapshot_timestamps_actual_clob_read_completion(conn):
-    stale_call_start = datetime(2000, 1, 1, tzinfo=timezone.utc)
-    before_capture = datetime.now(timezone.utc)
+def test_capture_executable_snapshot_preserves_request_boundary_time(conn):
+    request_started_at = datetime(2000, 1, 1, tzinfo=timezone.utc)
 
     fields = capture_executable_market_snapshot(
         conn,
         market=_market_for_capture(),
         decision=_decision_for_capture(),
         clob=FakeClobFacts(),
-        captured_at=stale_call_start,
+        captured_at=request_started_at,
         scan_authority="VERIFIED",
     )
-    after_capture = datetime.now(timezone.utc)
     loaded = get_snapshot(conn, fields["executable_snapshot_id"])
 
     assert loaded is not None
-    assert loaded.captured_at >= before_capture
-    assert loaded.captured_at <= after_capture
+    assert loaded.captured_at == request_started_at
     # Selection freshness window widened 30s -> 180s (2026-06-15, #122 oscillation fix;
     # submission stays tight via the separate presubmit window + revalidation).
     assert loaded.freshness_deadline == loaded.captured_at + timedelta(seconds=180)
     assert is_fresh(loaded, loaded.captured_at + timedelta(seconds=1))
     assert is_fresh(loaded, loaded.captured_at + timedelta(seconds=120))
+
+
+def test_capture_executable_snapshot_rejects_future_request_boundary(conn):
+    with pytest.raises(ExecutableSnapshotCaptureError, match="cannot be in the future"):
+        capture_executable_market_snapshot(
+            conn,
+            market=_market_for_capture(),
+            decision=_decision_for_capture(),
+            clob=FakeClobFacts(),
+            captured_at=datetime.now(timezone.utc) + timedelta(days=1),
+            scan_authority="VERIFIED",
+        )
+
+
+def test_late_broad_capture_cannot_replace_newer_exact_latest(tmp_path):
+    db_path = tmp_path / "late-broad.db"
+    setup = sqlite3.connect(db_path)
+    init_schema(setup)
+    init_schema_trade_only(setup)
+    setup.close()
+
+    exact_started_at = NOW + timedelta(seconds=10)
+    broad_started_at = NOW
+    broad_book_started = threading.Event()
+    release_broad_book = threading.Event()
+    failures: list[BaseException] = []
+
+    class _DelayedBroadClob(FakeClobFacts):
+        def get_orderbook_snapshot(self, token_id: str) -> dict:
+            broad_book_started.set()
+            if not release_broad_book.wait(timeout=2.0):
+                raise TimeoutError("test did not release delayed broad book")
+            return super().get_orderbook_snapshot(token_id)
+
+    def _late_broad_capture() -> None:
+        broad_conn = sqlite3.connect(db_path)
+        broad_conn.row_factory = sqlite3.Row
+        try:
+            capture_executable_market_snapshot(
+                broad_conn,
+                market=_market_for_capture(),
+                decision=_decision_for_capture(),
+                clob=_DelayedBroadClob(
+                    orderbook={
+                        "asset_id": "yes-token",
+                        "tick_size": "0.01",
+                        "min_order_size": "5",
+                        "neg_risk": False,
+                        "bids": [{"price": "0.47", "size": "100"}],
+                        "asks": [{"price": "0.53", "size": "100"}],
+                    }
+                ),
+                captured_at=broad_started_at,
+                scan_authority="VERIFIED",
+                commit_after_persist=True,
+            )
+        except BaseException as exc:  # noqa: BLE001 - thread assertion transport
+            failures.append(exc)
+        finally:
+            broad_conn.close()
+
+    broad_thread = threading.Thread(target=_late_broad_capture)
+    broad_thread.start()
+    assert broad_book_started.wait(timeout=1.0)
+
+    exact_conn = sqlite3.connect(db_path)
+    exact_conn.row_factory = sqlite3.Row
+    exact = capture_executable_market_snapshot(
+        exact_conn,
+        market=_market_for_capture(),
+        decision=_decision_for_capture(),
+        clob=FakeClobFacts(
+            orderbook={
+                "asset_id": "yes-token",
+                "tick_size": "0.01",
+                "min_order_size": "5",
+                "neg_risk": False,
+                "bids": [{"price": "0.48", "size": "100"}],
+                "asks": [{"price": "0.52", "size": "100"}],
+            }
+        ),
+        captured_at=exact_started_at,
+        scan_authority="VERIFIED",
+        commit_after_persist=True,
+    )
+    exact_conn.close()
+    release_broad_book.set()
+    broad_thread.join(timeout=2.0)
+
+    assert not broad_thread.is_alive()
+    assert failures == []
+    verify = sqlite3.connect(db_path)
+    verify.row_factory = sqlite3.Row
+    latest = verify.execute(
+        """
+        SELECT snapshot_id, orderbook_top_bid, captured_at
+        FROM executable_market_snapshot_latest
+        WHERE condition_id = ? AND selected_outcome_token_id = ?
+        """,
+        ("condition-1", "yes-token"),
+    ).fetchone()
+    verify.close()
+    assert latest["snapshot_id"] == exact["executable_snapshot_id"]
+    assert latest["orderbook_top_bid"] == "0.48"
+    assert latest["captured_at"] == exact_started_at.isoformat()
 
 
 def test_fee_details_canonicalize_base_fee_bps_to_fraction():
@@ -1170,6 +1342,24 @@ def test_polymarket_client_best_bid_ask_normalizes_unsorted_orderbook(monkeypatc
     monkeypatch.setattr(client, "get_orderbook", fake_orderbook)
 
     assert client.get_best_bid_ask("yes-token") == (0.47, 0.53, 100.0, 25.0)
+
+
+def test_top_book_parser_distinguishes_exact_one_bid_from_ask():
+    assert _top_book_level_decimal(
+        {"bids": [{"price": "1", "size": "7"}]},
+        "bids",
+    ) == (Decimal("1"), Decimal("7"))
+
+    with pytest.raises(ExecutableSnapshotCaptureError, match="price is out of bounds"):
+        _top_book_level_decimal(
+            {"asks": [{"price": "1", "size": "7"}]},
+            "asks",
+        )
+    with pytest.raises(ExecutableSnapshotCaptureError, match="price is out of bounds"):
+        _top_book_level_decimal(
+            {"bids": [{"price": "1.001", "size": "7"}]},
+            "bids",
+        )
 
 
 def test_polymarket_client_orderbook_parse_failure_is_empty_orderbook(monkeypatch):

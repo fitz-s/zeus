@@ -51,9 +51,12 @@ import logging
 import math
 import re
 import sqlite3
+import time
+from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import Mapping
+from zoneinfo import ZoneInfo
 
 from src.data.replacement_forecast_readiness import (
     LIVE_RUNTIME_LAYER,
@@ -61,7 +64,11 @@ from src.data.replacement_forecast_readiness import (
 )
 from src.data.replacement_forecast_cycle_policy import (
     CURRENT_EVIDENCE_SEMANTICS_REVISION,
+    current_evidence_shape_has_held_authority,
+    current_evidence_shape_source_cycle_time,
     current_evidence_shape_semantics_mismatch,
+    cycle_age_hours,
+    cycle_age_outside_bound,
 )
 
 logger = logging.getLogger(__name__)
@@ -72,6 +79,56 @@ SELECTED_METHOD_REPLACEMENT_POSTERIOR = "replacement_posterior"
 POSTERIOR_PREDICTIVE_MEAN = "POSTERIOR_PREDICTIVE_MEAN"
 
 _WS_RE = re.compile(r"\s+")
+
+
+class _BeliefReadDeadlineExceeded(TimeoutError):
+    """A bounded held-belief read exhausted its caller-owned deadline."""
+
+
+def _remaining_read_timeout(
+    deadline_monotonic: float | None,
+    *,
+    default_seconds: float = 2.0,
+) -> float:
+    if deadline_monotonic is None:
+        return float(default_seconds)
+    remaining = float(deadline_monotonic) - time.monotonic()
+    if remaining <= 0.0:
+        raise _BeliefReadDeadlineExceeded("held-belief read deadline elapsed")
+    return min(float(default_seconds), remaining)
+
+
+@contextmanager
+def _bounded_sqlite_read(conn: sqlite3.Connection, deadline_monotonic: float | None):
+    """Bound SQLite execution and lock wait to the held-monitor deadline."""
+
+    if deadline_monotonic is None:
+        yield
+        return
+    # SCOPE: one held family's private read-only SQLite connection.
+    # DRAIN: query progress and lock waits consume only the caller deadline.
+    # RESET: the handler is cleared here and the caller closes the connection.
+    remaining = _remaining_read_timeout(deadline_monotonic)
+    conn.execute(f"PRAGMA busy_timeout = {max(1, int(remaining * 1000.0))}")
+
+    def _deadline_expired() -> int:
+        return int(time.monotonic() >= float(deadline_monotonic))
+
+    conn.set_progress_handler(_deadline_expired, 1_000)
+    try:
+        yield
+        _remaining_read_timeout(deadline_monotonic)
+    except sqlite3.OperationalError as exc:
+        if time.monotonic() >= float(deadline_monotonic):
+            raise _BeliefReadDeadlineExceeded(
+                "held-belief SQLite read deadline elapsed"
+            ) from exc
+        raise
+    finally:
+        try:
+            conn.set_progress_handler(None, 0)
+        except sqlite3.Error:
+            pass
 
 
 def _normalize_label(label: str) -> str:
@@ -159,123 +216,26 @@ def _raw_input_lag_basis(reason: str | None) -> str | None:
     return text.split(":", 1)[0].removeprefix("basis=") or None
 
 
-def _latest_raw_single_runs_cycle(
-    conn: sqlite3.Connection,
+def _target_local_day_has_started(
     *,
     city: str,
     target_date: str,
-    temperature_metric: str,
     now: datetime,
-) -> datetime | None:
-    """Latest captured raw live-input cycle for the same family, if present."""
+) -> bool:
+    """Whether an observed extreme can exist for this settlement local day."""
 
-    columns = _table_columns(conn, "raw_model_forecasts")
-    required = {"model", "city", "target_date", "metric", "source_cycle_time"}
-    if not required.issubset(columns):
-        return None
-    predicates = ["city = ?", "target_date = ?", "metric = ?"]
-    params: list[object] = [city, target_date, temperature_metric]
-    if "endpoint" in columns:
-        predicates.append("endpoint = 'single_runs'")
-    if "coverage_status" in columns:
-        predicates.append("(coverage_status IS NULL OR coverage_status = 'COVERED')")
-    if "captured_at" in columns:
-        predicates.append("(captured_at IS NULL OR datetime(captured_at) <= datetime(?))")
-        params.append(now.isoformat())
-    if "source_available_at" in columns:
-        predicates.append(
-            "(source_available_at IS NULL OR datetime(source_available_at) <= datetime(?))"
-        )
-        params.append(now.isoformat())
-    anchor_terms = ["model = 'ecmwf_ifs'"]
-    if "source_id" in columns:
-        anchor_terms.append("source_id = 'ecmwf_ifs_single_runs'")
-    if "product_id" in columns:
-        anchor_terms.append("product_id = 'ecmwf_ifs::single_runs'")
-    anchor_expr = " OR ".join(anchor_terms)
     try:
-        row = conn.execute(
-            f"""
-            SELECT source_cycle_time
-            FROM raw_model_forecasts
-            WHERE {' AND '.join(predicates)}
-              AND datetime(source_cycle_time) <= datetime(?)
-            GROUP BY source_cycle_time
-            HAVING COUNT(DISTINCT model) >= 2
-               AND SUM(CASE WHEN ({anchor_expr}) THEN 1 ELSE 0 END) > 0
-            ORDER BY datetime(source_cycle_time) DESC
-            LIMIT 1
-            """,
-            tuple([*params, now.isoformat()]),
-        ).fetchone()
-    except sqlite3.Error:
-        return None
-    if row is None:
-        return None
-    try:
-        raw_value = row["source_cycle_time"]
-    except (TypeError, IndexError):
-        raw_value = row[0]
-    return _parse_computed_at(raw_value)
+        from src.config import runtime_cities_by_name
 
-
-def _latest_raw_artifact_cycle(
-    conn: sqlite3.Connection,
-    *,
-    city: str,
-    target_date: str,
-    temperature_metric: str,
-    now: datetime,
-) -> datetime | None:
-    """Latest captured current-target raw artifact cycle for the same family."""
-
-    columns = _table_columns(conn, "raw_forecast_artifacts")
-    required = {
-        "source_cycle_time",
-        "captured_at",
-        "source_available_at",
-        "artifact_metadata_json",
-    }
-    if not required.issubset(columns):
-        return None
-    predicates = [
-        "json_extract(artifact_metadata_json, '$.city') = ?",
-        "json_extract(artifact_metadata_json, '$.target_date') = ?",
-        "json_extract(artifact_metadata_json, '$.metric') = ?",
-        "datetime(captured_at) <= datetime(?)",
-        "datetime(source_available_at) <= datetime(?)",
-    ]
-    params: list[object] = [
-        city,
-        target_date,
-        temperature_metric,
-        now.isoformat(),
-        now.isoformat(),
-    ]
-    if "source_id" in columns:
-        predicates.append("source_id = 'openmeteo_ecmwf_ifs_9km'")
-    try:
-        row = conn.execute(
-            f"""
-            SELECT source_cycle_time
-            FROM raw_forecast_artifacts
-            WHERE {' AND '.join(predicates)}
-              AND datetime(source_cycle_time) <= datetime(?)
-            GROUP BY source_cycle_time
-            ORDER BY datetime(source_cycle_time) DESC
-            LIMIT 1
-            """,
-            tuple([*params, now.isoformat()]),
-        ).fetchone()
-    except sqlite3.Error:
-        return None
-    if row is None:
-        return None
-    try:
-        raw_value = row["source_cycle_time"]
-    except (TypeError, IndexError):
-        raw_value = row[0]
-    return _parse_computed_at(raw_value)
+        city_cfg = runtime_cities_by_name().get(city)
+        timezone_name = str(getattr(city_cfg, "timezone", "") or "")
+        target_d = date.fromisoformat(target_date)
+        now_utc = now if now.tzinfo is not None else now.replace(tzinfo=timezone.utc)
+        local_d = now_utc.astimezone(ZoneInfo(timezone_name)).date()
+    except (KeyError, TypeError, ValueError):
+        # Unknown time geometry cannot authorize skipping the canonical fact read.
+        return True
+    return local_d >= target_d
 
 
 def _latest_live_input_cycle(
@@ -286,19 +246,29 @@ def _latest_live_input_cycle(
     temperature_metric: str,
     now: datetime,
 ) -> tuple[datetime | None, str | None]:
-    raw_single_runs_cycle = _latest_raw_single_runs_cycle(
-        conn,
-        city=city,
-        target_date=target_date,
-        temperature_metric=temperature_metric,
-        now=now,
+    # One raw-input authority must serve entry and held redecision.  The shared
+    # readers consume the monitor's frozen cycle cut and use the indexed
+    # product/cycle route.  A private JSON scan here used to ignore that cut,
+    # reopen the large forecast DB for every position, and spend each complete
+    # belief deadline before probability redecision could start.
+    from src.data.replacement_input_hwm import (
+        latest_raw_artifact_input_cycle,
+        latest_raw_model_input_cycle,
     )
-    raw_artifact_cycle = _latest_raw_artifact_cycle(
+
+    raw_single_runs_cycle = latest_raw_model_input_cycle(
         conn,
         city=city,
         target_date=target_date,
-        temperature_metric=temperature_metric,
-        now=now,
+        metric=temperature_metric,
+        decision_time=now,
+    )
+    raw_artifact_cycle = latest_raw_artifact_input_cycle(
+        conn,
+        city=city,
+        target_date=target_date,
+        metric=temperature_metric,
+        decision_time=now,
     )
     candidates = [
         (raw_single_runs_cycle, "source_cycle_time_raw_model_forecasts_lag"),
@@ -514,17 +484,15 @@ def _observed_running_extreme_native(
     metric: str,
     now: datetime,
     world_db_path: str | None = None,
+    deadline_monotonic: float | None = None,
 ) -> float | None:
-    """Cheap O(1) read of the canonical observed running extreme from world.observation_instants.
+    """Read the canonical observed running extreme from the raw publication stream.
 
-    Returns the running high (``metric == "high"``) / running low (``metric == "low"``) in
-    the city's NATIVE settlement unit, or ``None`` when no VERIFIED settlement-grade row is
-    available up to ``now``. This is the SAME canonical surface + source filter the day0
-    hard-fact lane and the absorbing-floor reseed already treat as authoritative
-    (monitor_refresh._day0_observed_extreme_from_canonical_surface), lifted to the single
-    belief authority so the served belief is floored REGARDLESS of whether the upstream
-    day0 live-obs fetch fired. Best-effort: any read failure returns None (the belief is
-    then served unfloored — the floor only ever ADDS the measured fact, never blocks serving).
+    ``observation_prints`` is append-only audit truth; its canonical projection
+    resolves a same-source-clock correction before deriving the local-day
+    MAX/MIN.  ``observation_instants`` remains the compatibility fallback for
+    databases that predate that ledger.  Reading its monotone projection first
+    made a corrected provider print impossible to retract from held belief.
     """
     metric_l = str(metric or "").strip().lower()
     if metric_l not in {"high", "low"}:
@@ -537,15 +505,46 @@ def _observed_running_extreme_native(
     agg = "MIN" if metric_l == "low" else "MAX"
     now_iso = now.astimezone(timezone.utc).isoformat()
     try:
-        conn = sqlite3.connect(f"file:{world_db_path}?mode=ro", uri=True, timeout=2.0)
+        timeout = _remaining_read_timeout(deadline_monotonic)
+        conn = sqlite3.connect(
+            f"file:{world_db_path}?mode=ro", uri=True, timeout=timeout
+        )
+    except _BeliefReadDeadlineExceeded:
+        raise
     except sqlite3.Error:
         return None
     try:
         conn.row_factory = sqlite3.Row
-        for table_ref in ("world.observation_instants", "observation_instants"):
+        with _bounded_sqlite_read(conn, deadline_monotonic):
             try:
-                row = conn.execute(
-                    f"""
+                from src.data.replacement_forecast_current_target_plan import (
+                    _latest_authorized_day0_fact,
+                )
+
+                fact = _latest_authorized_day0_fact(
+                    conn,
+                    city=city,
+                    target_date=target_date,
+                    temperature_metric=metric_l,
+                    decision_time=now,
+                    require_settlement_channel=True,
+                )
+            except (sqlite3.Error, TypeError, ValueError):
+                fact = None
+            if fact is not None:
+                try:
+                    return float(fact["observed_extreme_native"])
+                except (KeyError, TypeError, ValueError):
+                    pass
+            for table_ref in ("world.observation_instants", "observation_instants"):
+                if deadline_monotonic is not None:
+                    remaining = _remaining_read_timeout(deadline_monotonic)
+                    conn.execute(
+                        f"PRAGMA busy_timeout = {max(1, int(remaining * 1000.0))}"
+                    )
+                try:
+                    row = conn.execute(
+                        f"""
                     SELECT {agg}(CAST({extreme_col} AS REAL)) AS extreme,
                            COUNT(*) AS n_rows
                     FROM {table_ref}
@@ -573,24 +572,56 @@ def _observed_running_extreme_native(
                             )
                       )
                       AND {extreme_col} IS NOT NULL
-                    """,
-                    (city, target_date, now_iso),
-                ).fetchone()
-            except sqlite3.Error:
-                continue
-            if row is None:
-                continue
-            extreme = row["extreme"] if hasattr(row, "keys") else row[0]
-            n_rows = int((row["n_rows"] if hasattr(row, "keys") else row[1]) or 0)
-            if extreme is None or n_rows <= 0:
-                continue
-            return float(extreme)
+                        """,
+                        (city, target_date, now_iso),
+                    ).fetchone()
+                except sqlite3.Error as exc:
+                    if (
+                        deadline_monotonic is not None
+                        and time.monotonic() >= float(deadline_monotonic)
+                    ):
+                        raise _BeliefReadDeadlineExceeded(
+                            "held-belief world-floor deadline elapsed"
+                        ) from exc
+                    continue
+                if row is None:
+                    continue
+                extreme = row["extreme"] if hasattr(row, "keys") else row[0]
+                n_rows = int(
+                    (row["n_rows"] if hasattr(row, "keys") else row[1]) or 0
+                )
+                if extreme is None or n_rows <= 0:
+                    continue
+                return float(extreme)
         return None
     finally:
         try:
             conn.close()
         except sqlite3.Error:
             pass
+
+
+def held_side_bounds(
+    q_yes_lcb: float, q_yes_ucb: float, direction: object
+) -> tuple[float, float]:
+    """Convert YES-bin confidence bounds into held-side bounds — the ONE place
+    this complement is taken (K1 single authority; see module docstring).
+
+    Order-reversal law: complementing a probability band swaps which YES
+    bound feeds which held bound. buy_yes passes the YES bounds through
+    unchanged. buy_no must cross them: held_lcb = 1 - q_yes_ucb (the YES
+    UPPER bound yields the held LOWER bound) and held_ucb = 1 - q_yes_lcb
+    (the YES LOWER bound yields the held UPPER bound). Swapping this —
+    1 - q_yes_lcb for held_lcb, or 1 - q_yes_ucb for held_ucb — overstates
+    confidence in the held direction; it is exactly the defect
+    tests/test_probability_complement_ast_guard.py exists to catch.
+    """
+    direction = str(getattr(direction, "value", direction))
+    if direction not in ("buy_yes", "buy_no"):
+        raise ValueError(f"unsupported direction {direction!r}")
+    if direction == "buy_yes":
+        return q_yes_lcb, q_yes_ucb
+    return 1.0 - q_yes_ucb, 1.0 - q_yes_lcb
 
 
 def load_replacement_belief(
@@ -604,6 +635,7 @@ def load_replacement_belief(
     max_age_hours: float = DEFAULT_MAX_AGE_HOURS,
     db_path: str | None = None,
     world_db_path: str | None = None,
+    deadline_monotonic: float | None = None,
 ) -> ReplacementBelief | None:
     """Freshest replacement-chain belief for a held bin, or None (fail-closed).
 
@@ -636,12 +668,30 @@ def load_replacement_belief(
     latest_raw_cycle_basis: str | None = None
     raw_input_lag_reason: str | None = None
     try:
-        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=2.0)
+        timeout = _remaining_read_timeout(deadline_monotonic)
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=timeout)
+    except _BeliefReadDeadlineExceeded:
+        return None
     except sqlite3.Error as exc:
         logger.warning("position_belief: read-only open failed: %s", exc)
         return None
     try:
         conn.row_factory = sqlite3.Row
+        if deadline_monotonic is not None:
+            deadline = float(deadline_monotonic)
+            conn.execute(
+                f"PRAGMA busy_timeout = "
+                f"{max(1, int(_remaining_read_timeout(deadline_monotonic) * 1000.0))}"
+            )
+
+            def _deadline_expired() -> int:
+                return int(time.monotonic() >= deadline)
+
+            # SCOPE: this held family's read-only probability lookup.
+            # DRAIN: SQLite query and lock waits stop at the caller deadline;
+            # the independent materializer/reseed producer restores authority.
+            # RESET: this private connection and handler close after the read.
+            conn.set_progress_handler(_deadline_expired, 1_000)
         columns = _table_columns(conn, "forecast_posteriors")
         if "runtime_layer" not in columns:
             logger.warning(
@@ -719,28 +769,70 @@ def load_replacement_belief(
                     temperature_metric,
                     exc,
                 )
+    except _BeliefReadDeadlineExceeded:
+        return None
     except sqlite3.Error as exc:
         logger.warning("position_belief: posterior read failed: %s", exc)
         return None
     finally:
+        if deadline_monotonic is not None:
+            try:
+                conn.set_progress_handler(None, 0)
+            except sqlite3.Error:
+                pass
         conn.close()
+    if deadline_monotonic is not None:
+        try:
+            _remaining_read_timeout(deadline_monotonic)
+        except _BeliefReadDeadlineExceeded:
+            return None
     if row is None:
         return None
-    provenance: Mapping[str, object] = {}
-    if row["provenance_json"] is not None:
-        try:
-            provenance = json.loads(str(row["provenance_json"]))
-        except (TypeError, ValueError, json.JSONDecodeError):
-            return None
-        if current_evidence_shape_semantics_mismatch(provenance):
-            logger.warning(
-                "position_belief: current-evidence semantics mismatch for %s/%s/%s; required=%s",
-                city,
-                target_date,
-                temperature_metric,
-                CURRENT_EVIDENCE_SEMANTICS_REVISION,
-            )
-            return None
+    provenance: Mapping[str, object]
+    selected_ensemble_cycle_outside_bound = False
+    if row["provenance_json"] is None:
+        logger.warning(
+            "position_belief: current-evidence provenance missing for %s/%s/%s",
+            city,
+            target_date,
+            temperature_metric,
+        )
+        return None
+    try:
+        decoded_provenance = json.loads(str(row["provenance_json"]))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None
+    if not isinstance(decoded_provenance, Mapping):
+        return None
+    provenance = decoded_provenance
+    if current_evidence_shape_semantics_mismatch(provenance):
+        logger.warning(
+            "position_belief: current-evidence semantics mismatch for %s/%s/%s; required=%s",
+            city,
+            target_date,
+            temperature_metric,
+            CURRENT_EVIDENCE_SEMANTICS_REVISION,
+        )
+        return None
+    if not current_evidence_shape_has_held_authority(provenance):
+        logger.warning(
+            "position_belief: current-evidence shape lacks held authority for %s/%s/%s",
+            city,
+            target_date,
+            temperature_metric,
+        )
+        return None
+    selected_ensemble_cycle = current_evidence_shape_source_cycle_time(provenance)
+    if selected_ensemble_cycle is None:
+        return None
+    if cycle_age_outside_bound(now_dt, selected_ensemble_cycle):
+        selected_ensemble_cycle_outside_bound = True
+        logger.warning(
+            "position_belief: selected ensemble cycle outside causal bound for %s/%s/%s",
+            city,
+            target_date,
+            temperature_metric,
+        )
     try:
         q = json.loads(row["q_json"] or "null")
         q_lcb = json.loads(row["q_lcb_json"] or "null")
@@ -757,13 +849,20 @@ def load_replacement_belief(
     # canonical read; best-effort (any failure serves the belief unfloored — the floor only
     # ever ADDS the measured fact). Pure measured-fact conditioning, not a fitted de-bias.
     try:
-        observed_extreme = _observed_running_extreme_native(
+        observed_extreme = None
+        if _target_local_day_has_started(
             city=city,
             target_date=target_date,
-            metric=temperature_metric,
             now=now_dt,
-            world_db_path=world_db_path,
-        )
+        ):
+            observed_extreme = _observed_running_extreme_native(
+                city=city,
+                target_date=target_date,
+                metric=temperature_metric,
+                now=now_dt,
+                world_db_path=world_db_path,
+                deadline_monotonic=deadline_monotonic,
+            )
         if observed_extreme is not None:
             q = apply_observed_floor_to_q_vector(
                 q,
@@ -786,6 +885,8 @@ def load_replacement_belief(
                     rounding_rule=_belief_rounding_rule(city),
                 ).items()
             }
+    except _BeliefReadDeadlineExceeded:
+        return None
     except Exception as exc:  # noqa: BLE001 — the floor must never kill belief serving
         logger.warning(
             "position_belief: observed-floor skipped for %s/%s/%s: %s",
@@ -813,21 +914,19 @@ def load_replacement_belief(
     fresh = 0.0 <= age_hours <= float(max_age_hours)
     if source_cycle_time is not None:
         try:
-            from src.data.replacement_forecast_cycle_policy import (
-                cycle_age_hours,
-                cycle_age_exceeds_bound,
-            )
-
             source_cycle_age_hours = cycle_age_hours(now_dt, source_cycle_time)
             fresh = (
                 0.0 <= age_hours
                 and 0.0 <= source_cycle_age_hours
-                and not cycle_age_exceeds_bound(now_dt, source_cycle_time)
+                and not cycle_age_outside_bound(now_dt, source_cycle_time)
             )
             freshness_basis = "source_cycle_time"
         except Exception:  # noqa: BLE001 - keep the old explicit age gate as fallback
             source_cycle_age_hours = (now_dt - source_cycle_time).total_seconds() / 3600.0
             fresh = 0.0 <= age_hours <= float(max_age_hours)
+    if selected_ensemble_cycle_outside_bound:
+        fresh = False
+        freshness_basis = "selected_ensemble_cycle_time"
     raw_cycle_lag_hours: float | None = None
     if (
         latest_raw_cycle_time is not None
@@ -837,14 +936,19 @@ def load_replacement_belief(
         raw_cycle_lag_hours = (
             latest_raw_cycle_time - source_cycle_time
         ).total_seconds() / 3600.0
-        fresh = False
-        freshness_basis = latest_raw_cycle_basis or "source_cycle_time_live_input_lag"
+        # ``source_cycle_time`` is the ENS/anchor carrier clock, not the
+        # complete multi-provider value clock.  A source-clock posterior may
+        # legitimately consume newer deterministic-provider rows while
+        # retaining an older causal shape carrier.  The vector-aware HWM check
+        # below compares exact ``current_value_serving`` row identities and is
+        # the sole authority for whether such an input remains unconsumed.
+        # Keep the scalar lag as telemetry, but never let it veto exact proof
+        # that the posterior already consumed every current provider revision.
     if raw_input_lag_reason:
         fresh = False
         freshness_basis = _raw_input_lag_basis(raw_input_lag_reason) or "replacement_raw_input_hwm"
     held = q_yes if direction == "buy_yes" else 1.0 - q_yes
-    held_lcb = q_yes_lcb if direction == "buy_yes" else 1.0 - q_yes_ucb
-    held_ucb = q_yes_ucb if direction == "buy_yes" else 1.0 - q_yes_lcb
+    held_lcb, held_ucb = held_side_bounds(q_yes_lcb, q_yes_ucb, direction)
     return ReplacementBelief(
         held_side_prob=held,
         held_side_lcb=held_lcb,

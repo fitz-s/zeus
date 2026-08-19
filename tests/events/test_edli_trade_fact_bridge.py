@@ -1,5 +1,6 @@
 # Created: 2026-06-06
-# Last reused/audited: 2026-07-25
+# Last reused/audited: 2026-08-09
+# Authority basis: WS_USER confirmed-fill authority and fill-bridge TOCTOU repair.
 # Purpose: Lock EDLI fill-audit bridge from authenticated WS trade facts.
 from __future__ import annotations
 
@@ -12,9 +13,12 @@ import pytest
 from src.events.edli_trade_fact_bridge import (
     append_confirmed_trade_facts_to_edli,
     append_rest_filled_orphan_trade_facts_to_edli,
+    discover_absorbed_confirmed_fill_aggregate_ids,
+    discover_confirmed_trade_fact_candidates,
+    discover_rest_filled_orphan_trade_fact_candidates,
 )
 from src.events.live_order_aggregate import LiveOrderAggregateLedger
-from src.state.db import init_schema
+from src.state.db import init_schema, init_schema_trade_only
 from src.state.venue_command_repo import append_order_fact, append_trade_fact
 
 
@@ -58,6 +62,197 @@ def test_confirmed_ws_trade_fact_appends_edli_user_trade_observed():
     assert payload["source_trade_fact_authority"] == "venue_trade_facts:WS_USER:CONFIRMED"
 
     assert append_confirmed_trade_facts_to_edli(conn, now=NOW) == 0
+
+
+def test_confirmed_candidate_is_revalidated_after_ws_append_race():
+    conn = _conn()
+    ledger = LiveOrderAggregateLedger(conn)
+    _seed_edli_chain(ledger)
+    _insert_command(conn)
+    append_trade_fact(
+        conn,
+        trade_id="trade-race",
+        venue_order_id="venue-1",
+        command_id="cmd-1",
+        state="CONFIRMED",
+        filled_size="7",
+        fill_price="0.72",
+        source="WS_USER",
+        observed_at=NOW,
+        venue_timestamp=NOW,
+        raw_payload_hash="b" * 64,
+        raw_payload_json="{}",
+    )
+
+    candidates = discover_confirmed_trade_fact_candidates(
+        conn,
+        trade_schema="main",
+        event_schema="main",
+        projection_schema="main",
+    )
+
+    assert len(candidates) == 1
+    assert append_confirmed_trade_facts_to_edli(conn, now=NOW) == 1
+    assert append_confirmed_trade_facts_to_edli(
+        conn, now=NOW, candidates=candidates
+    ) == 0
+    assert conn.execute(
+        "SELECT COUNT(*) FROM edli_live_order_events WHERE event_type='UserTradeObserved'"
+    ).fetchone()[0] == 1
+
+
+def test_readonly_trade_main_with_world_attach_discovers_cross_db_candidate(tmp_path):
+    world_path = tmp_path / "world.db"
+    trade_path = tmp_path / "trades.db"
+    world_conn = sqlite3.connect(world_path)
+    world_conn.row_factory = sqlite3.Row
+    init_schema(world_conn)
+    _seed_edli_chain(LiveOrderAggregateLedger(world_conn))
+    world_conn.commit()
+    world_conn.close()
+    trade_conn = sqlite3.connect(trade_path)
+    trade_conn.row_factory = sqlite3.Row
+    init_schema(trade_conn)
+    _seed_edli_chain(
+        LiveOrderAggregateLedger(trade_conn),
+        execution_command_id="stale-command",
+    )
+    _insert_command(trade_conn)
+    append_trade_fact(
+        trade_conn,
+        trade_id="trade-cross-db",
+        venue_order_id="venue-1",
+        command_id="cmd-1",
+        state="CONFIRMED",
+        filled_size="7",
+        fill_price="0.72",
+        source="WS_USER",
+        observed_at=NOW,
+        venue_timestamp=NOW,
+        raw_payload_hash="c" * 64,
+        raw_payload_json="{}",
+    )
+    trade_conn.commit()
+    trade_conn.close()
+
+    conn = sqlite3.connect(
+        f"file:{trade_path.resolve()}?mode=ro",
+        uri=True,
+    )
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA query_only = ON")
+    conn.execute(
+        "ATTACH DATABASE ? AS world",
+        (f"{world_path.resolve().as_uri()}?mode=ro",),
+    )
+    try:
+        candidates = discover_confirmed_trade_fact_candidates(
+            conn,
+            trade_schema="main",
+            event_schema="world",
+            projection_schema="world",
+            trade_db_path=trade_path,
+        )
+
+        assert len(candidates) == 1
+        assert candidates[0].trade_id == "trade-cross-db"
+        assert discover_confirmed_trade_fact_candidates(
+            conn,
+            trade_schema="main",
+            event_schema="main",
+            projection_schema="main",
+        ) == ()
+        assert discover_absorbed_confirmed_fill_aggregate_ids(
+            conn,
+            trade_schema="main",
+            event_schema="world",
+            projection_schema="world",
+            cap_schema="world",
+        ) == ()
+        schemas = {
+            str(row["name"]): str(row["file"])
+            for row in conn.execute("PRAGMA database_list").fetchall()
+        }
+        assert schemas["main"] == str(trade_path.resolve())
+        assert schemas["world"] == str(world_path.resolve())
+        with pytest.raises(sqlite3.OperationalError, match="readonly|read-only"):
+            conn.execute("UPDATE venue_commands SET state='FAILED'")
+    finally:
+        conn.close()
+
+
+def test_explicit_world_schema_missing_or_incomplete_fails_closed(tmp_path):
+    conn = _conn()
+    with pytest.raises(RuntimeError, match="EDLI_BRIDGE_SCHEMA_MISSING:world"):
+        discover_confirmed_trade_fact_candidates(
+            conn,
+            trade_schema="main",
+            event_schema="world",
+            projection_schema="world",
+        )
+
+    world_path = tmp_path / "incomplete-world.db"
+    sqlite3.connect(world_path).close()
+    conn.execute("ATTACH DATABASE ? AS world", (str(world_path),))
+    with pytest.raises(RuntimeError, match="EDLI_BRIDGE_TABLE_MISSING:world"):
+        discover_confirmed_trade_fact_candidates(
+            conn,
+            trade_schema="main",
+            event_schema="world",
+            projection_schema="world",
+        )
+
+
+def test_absorbed_discovery_ignores_stale_main_ghost_edli(tmp_path):
+    world_path = tmp_path / "world-absorbed.db"
+    trade_path = tmp_path / "trades-absorbed.db"
+
+    world_conn = sqlite3.connect(world_path)
+    world_conn.row_factory = sqlite3.Row
+    init_schema(world_conn)
+    _seed_edli_chain(LiveOrderAggregateLedger(world_conn))
+    _insert_reserved_cap(world_conn)
+    _seed_absorbed_trade_rows(world_conn)
+    assert append_confirmed_trade_facts_to_edli(
+        world_conn,
+        now=NOW,
+        trade_db_path=world_path,
+        absorbed_fill_aggregate_ids=(),
+    ) == 1
+    world_conn.commit()
+    world_conn.close()
+
+    trade_conn = sqlite3.connect(trade_path)
+    trade_conn.row_factory = sqlite3.Row
+    init_schema(trade_conn)  # Deliberate stale/empty MAIN ghost EDLI tables.
+    _seed_absorbed_trade_rows(trade_conn)
+    trade_conn.commit()
+    trade_conn.close()
+
+    conn = sqlite3.connect(f"file:{trade_path.resolve()}?mode=ro", uri=True)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA query_only = ON")
+    conn.execute(
+        "ATTACH DATABASE ? AS world",
+        (f"{world_path.resolve().as_uri()}?mode=ro",),
+    )
+    try:
+        assert discover_absorbed_confirmed_fill_aggregate_ids(
+            conn,
+            trade_schema="main",
+            event_schema="world",
+            projection_schema="world",
+            cap_schema="world",
+        ) == ("event-1:intent-1",)
+        assert discover_absorbed_confirmed_fill_aggregate_ids(
+            conn,
+            trade_schema="main",
+            event_schema="main",
+            projection_schema="main",
+            cap_schema="main",
+        ) == ()
+    finally:
+        conn.close()
 
 
 def test_confirmed_ws_trade_fact_uses_command_order_after_matched_submit_unknown():
@@ -206,6 +401,117 @@ def test_confirmed_absorbed_fill_consumes_stuck_cap_only_on_exact_entry_fill_pro
     assert conn.execute(
         "SELECT COUNT(*) FROM edli_live_order_events WHERE event_type='UserTradeObserved'"
     ).fetchone()[0] == 1
+
+
+def test_absorbed_fill_candidate_revalidates_latest_order_before_cap_consume():
+    conn = _conn()
+    ledger = LiveOrderAggregateLedger(conn)
+    _seed_edli_chain(ledger, include_ack=False)
+    ledger.append_event(
+        aggregate_id="event-1:intent-1",
+        event_type="SubmitUnknown",
+        payload={
+            "event_id": "event-1",
+            "final_intent_id": "intent-1",
+            "execution_command_id": "command-1",
+            "venue_call_started": True,
+            "side_effect_known": False,
+        },
+        occurred_at=NOW,
+        source_authority="existing_executor",
+    )
+    _insert_command(conn)
+    conn.execute(
+        """
+        INSERT INTO edli_live_cap_usage (
+            usage_id, event_id, decision_time, cap_scope,
+            max_notional_usd, max_orders_per_day, reserved_notional_usd,
+            order_count, reservation_status, final_intent_id,
+            execution_command_id, created_at, schema_version
+        ) VALUES (
+            'usage-1', 'event-1', ?, 'live_execution_reservation',
+            5.04, 1, 5.04, 1, 'RESERVED', 'intent-1',
+            'command-1', ?, 1
+        )
+        """,
+        (NOW.isoformat(), NOW.isoformat()),
+    )
+    conn.execute(
+        """
+        INSERT INTO position_current (
+            position_id, phase, condition_id, direction, token_id, no_token_id,
+            shares, entry_price, fill_authority, chain_state, chain_shares,
+            updated_at, temperature_metric
+        ) VALUES (
+            'pos-1', 'active', 'condition-1', 'buy_no', 'yes-token-1', 'token-1',
+            7, 0.72, 'venue_confirmed_full', 'synced', 7, ?, 'high'
+        )
+        """,
+        (NOW.isoformat(),),
+    )
+    _insert_entry_fill_event(conn, shares=7)
+    append_order_fact(
+        conn,
+        venue_order_id="venue-1",
+        command_id="cmd-1",
+        state="MATCHED",
+        remaining_size="0",
+        matched_size="7",
+        source="REST",
+        observed_at=NOW,
+        raw_payload_hash="d" * 64,
+        raw_payload_json={"test": "initial terminal order"},
+    )
+    append_trade_fact(
+        conn,
+        trade_id="trade-absorbed-race",
+        venue_order_id="venue-1",
+        command_id="cmd-1",
+        state="CONFIRMED",
+        filled_size="7",
+        fill_price="0.72",
+        source="WS_USER",
+        observed_at=NOW,
+        venue_timestamp=NOW,
+        raw_payload_hash="e" * 64,
+        raw_payload_json="{}",
+    )
+    assert append_confirmed_trade_facts_to_edli(
+        conn,
+        now=NOW,
+        absorbed_fill_aggregate_ids=(),
+    ) == 1
+    candidates = discover_absorbed_confirmed_fill_aggregate_ids(
+        conn,
+        trade_schema="main",
+        event_schema="main",
+        projection_schema="main",
+        cap_schema="main",
+    )
+    assert candidates == ("event-1:intent-1",)
+
+    conn.execute(
+        """
+        UPDATE venue_commands
+           SET state = 'ACKED',
+               updated_at = ?
+         WHERE command_id = 'cmd-1'
+        """,
+        ((NOW + timedelta(seconds=1)).isoformat(),),
+    )
+
+    assert append_confirmed_trade_facts_to_edli(
+        conn,
+        now=NOW + timedelta(seconds=1),
+        candidates=(),
+        absorbed_fill_aggregate_ids=candidates,
+    ) == 0
+    assert conn.execute(
+        "SELECT reservation_status FROM edli_live_cap_usage WHERE usage_id='usage-1'"
+    ).fetchone()[0] == "RESERVED"
+    projection = ledger.get_projection("event-1:intent-1")
+    assert projection.current_state == "USER_TRADE_OBSERVED"
+    assert projection.pending_reconcile is True
 
 
 def test_rest_confirmed_price_improvement_rebuilds_submit_and_drains_cap_after_exit():
@@ -521,11 +827,74 @@ def _insert_command(conn: sqlite3.Connection) -> None:
     )
 
 
+def _insert_reserved_cap(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        INSERT INTO edli_live_cap_usage (
+            usage_id, event_id, decision_time, cap_scope,
+            max_notional_usd, max_orders_per_day, reserved_notional_usd,
+            order_count, reservation_status, final_intent_id,
+            execution_command_id, created_at, schema_version
+        ) VALUES (
+            'usage-1', 'event-1', ?, 'live_execution_reservation',
+            5.04, 1, 5.04, 1, 'RESERVED', 'intent-1',
+            'command-1', ?, 1
+        )
+        """,
+        (NOW.isoformat(), NOW.isoformat()),
+    )
+
+
+def _seed_absorbed_trade_rows(conn: sqlite3.Connection) -> None:
+    _insert_command(conn)
+    conn.execute(
+        """
+        INSERT INTO position_current (
+            position_id, phase, condition_id, direction, token_id, no_token_id,
+            shares, entry_price, fill_authority, chain_state, chain_shares,
+            updated_at, temperature_metric
+        ) VALUES (
+            'pos-1', 'active', 'condition-1', 'buy_no', 'yes-token-1', 'token-1',
+            7, 0.72, 'venue_confirmed_full', 'synced', 7, ?, 'high'
+        )
+        """,
+        (NOW.isoformat(),),
+    )
+    _insert_entry_fill_event(conn, shares=7)
+    append_order_fact(
+        conn,
+        venue_order_id="venue-1",
+        command_id="cmd-1",
+        state="MATCHED",
+        remaining_size="0",
+        matched_size="7",
+        source="REST",
+        observed_at=NOW,
+        raw_payload_hash="7" * 64,
+        raw_payload_json={"test": "absorbed cross-db"},
+    )
+    append_trade_fact(
+        conn,
+        trade_id="trade-absorbed-cross-db",
+        venue_order_id="venue-1",
+        command_id="cmd-1",
+        state="CONFIRMED",
+        filled_size="7",
+        fill_price="0.72",
+        source="WS_USER",
+        observed_at=NOW,
+        venue_timestamp=NOW,
+        raw_payload_hash="8" * 64,
+        raw_payload_json="{}",
+    )
+
+
 def _seed_edli_chain(
     ledger: LiveOrderAggregateLedger,
     *,
     include_ack: bool = True,
     include_attempt: bool = True,
+    execution_command_id: str = "command-1",
 ) -> None:
     ledger.append_event(
         aggregate_id="event-1:intent-1",
@@ -561,7 +930,7 @@ def _seed_edli_chain(
         payload={
             "event_id": "event-1",
             "final_intent_id": "intent-1",
-            "execution_command_id": "command-1",
+            "execution_command_id": execution_command_id,
             "pre_submit_event_hash": pre_submit.event_hash,
             "live_cap_reserved_event_hash": live_cap.event_hash,
             "usage_id": "usage-1",
@@ -576,7 +945,7 @@ def _seed_edli_chain(
             payload={
                 "event_id": "event-1",
                 "final_intent_id": "intent-1",
-                "execution_command_id": "command-1",
+                "execution_command_id": execution_command_id,
             },
             occurred_at=NOW,
             source_authority="existing_executor",
@@ -589,7 +958,7 @@ def _seed_edli_chain(
             payload={
                 "event_id": "event-1",
                 "final_intent_id": "intent-1",
-                "execution_command_id": "command-1",
+                "execution_command_id": execution_command_id,
                 "venue_order_id": "venue-1",
             },
             occurred_at=NOW,
@@ -735,6 +1104,61 @@ def test_rest_orphan_past_grace_is_recovered_with_reconcile_provenance():
     assert append_rest_filled_orphan_trade_facts_to_edli(conn, now=NOW + timedelta(hours=3)) == 0
 
 
+def test_rest_candidate_yields_when_ws_confirmed_arrives_before_append():
+    conn = _conn()
+    ledger = LiveOrderAggregateLedger(conn)
+    _seed_edli_chain(ledger)
+    _insert_command(conn)
+    _insert_rest_only_fill(
+        conn,
+        observed_at=NOW + timedelta(minutes=1),
+        trade_id="trade-race",
+    )
+    candidates = discover_rest_filled_orphan_trade_fact_candidates(
+        conn,
+        trade_schema="main",
+        event_schema="main",
+        projection_schema="main",
+    )
+    assert len(candidates) == 1
+
+    append_trade_fact(
+        conn,
+        trade_id="trade-race",
+        venue_order_id="venue-1",
+        command_id="cmd-1",
+        state="CONFIRMED",
+        filled_size="5",
+        fill_price="0.72",
+        source="WS_USER",
+        observed_at=NOW + timedelta(minutes=2),
+        venue_timestamp=NOW + timedelta(minutes=2),
+        raw_payload_hash="a" * 64,
+        raw_payload_json="{}",
+    )
+
+    assert append_rest_filled_orphan_trade_facts_to_edli(
+        conn,
+        now=NOW + timedelta(hours=3),
+        candidates=candidates,
+        absorbed_fill_aggregate_ids=(),
+    ) == 0
+    assert append_confirmed_trade_facts_to_edli(
+        conn,
+        now=NOW + timedelta(hours=3),
+        absorbed_fill_aggregate_ids=(),
+    ) == 1
+    row = conn.execute(
+        "SELECT source_authority, payload_json "
+        "FROM edli_live_order_events WHERE event_type='UserTradeObserved'"
+    ).fetchone()
+    payload = json.loads(row["payload_json"])
+    assert row["source_authority"] == "user_channel"
+    assert payload["source_trade_fact_authority"] == (
+        "venue_trade_facts:WS_USER:CONFIRMED"
+    )
+
+
 def test_rest_orphan_inside_grace_window_is_left_for_the_user_channel():
     conn = _conn()
     ledger = LiveOrderAggregateLedger(conn)
@@ -776,6 +1200,54 @@ def test_rest_confirmed_fill_inside_grace_recovers_immediately():
     assert payload["recovery_basis"] == (
         "rest_confirmed_fill_fact;cmd_terminal_fill_state+rest_trade_fact"
     )
+
+
+def test_two_rest_confirmed_fills_on_one_order_are_each_bridged_once():
+    conn = _conn()
+    _seed_edli_chain(LiveOrderAggregateLedger(conn))
+    _insert_command(conn)
+    _insert_rest_only_fill(
+        conn,
+        observed_at=NOW + timedelta(minutes=1),
+        trade_id="trade-partial-small",
+        state="CONFIRMED",
+    )
+    _insert_rest_only_fill(
+        conn,
+        observed_at=NOW + timedelta(minutes=2),
+        trade_id="trade-partial-large",
+        state="CONFIRMED",
+    )
+
+    candidates = discover_rest_filled_orphan_trade_fact_candidates(
+        conn,
+        trade_schema="main",
+        event_schema="main",
+        projection_schema="main",
+    )
+
+    assert {candidate.trade_id for candidate in candidates} == {
+        "trade-partial-small",
+        "trade-partial-large",
+    }
+    assert append_rest_filled_orphan_trade_facts_to_edli(
+        conn,
+        now=NOW + timedelta(minutes=3),
+        candidates=candidates,
+        absorbed_fill_aggregate_ids=(),
+    ) == 2
+    assert {
+        json.loads(row[0])["trade_id"]
+        for row in conn.execute(
+            "SELECT payload_json FROM edli_live_order_events "
+            "WHERE event_type='UserTradeObserved'"
+        ).fetchall()
+    } == {"trade-partial-small", "trade-partial-large"}
+    assert append_rest_filled_orphan_trade_facts_to_edli(
+        conn,
+        now=NOW + timedelta(minutes=4),
+        absorbed_fill_aggregate_ids=(),
+    ) == 0
 
 
 def test_rest_orphan_with_ws_confirmed_sibling_never_double_recovers():

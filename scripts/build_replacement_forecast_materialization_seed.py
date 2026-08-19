@@ -51,6 +51,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--stdout", action="store_true")
     args = parser.parse_args(argv)
     try:
+        computed_at = _dt(args.computed_at, field_name="computed_at")
+        openmeteo_manifest = load_manifest_with_path(args.openmeteo_manifest_json)
         conn = _connect(args.forecast_db, write_class="live")
         conn.row_factory = sqlite3.Row
         try:
@@ -59,6 +61,8 @@ def main(argv: list[str] | None = None) -> int:
                 city=args.city,
                 target_date=args.target_date,
                 temperature_metric=args.temperature_metric,
+                not_after_source_cycle_time=openmeteo_manifest.source_cycle_time,
+                as_of_time=computed_at,
             )
             bins = market_bins_for_replacement_seed(
                 conn,
@@ -79,10 +83,10 @@ def main(argv: list[str] | None = None) -> int:
                 temperature_metric=args.temperature_metric,
                 market_bins=bins,
                 baseline_coverage=coverage,
-                openmeteo_manifest=load_manifest_with_path(args.openmeteo_manifest_json),
+                openmeteo_manifest=openmeteo_manifest,
                 openmeteo_payload_json=args.openmeteo_payload_json,
                 precision_metadata_json=args.precision_metadata_json,
-                computed_at=_dt(args.computed_at, field_name="computed_at"),
+                computed_at=computed_at,
                 expires_at=None if args.expires_at is None else _dt(args.expires_at, field_name="expires_at"),
                 base_dir=(args.output_json.parent if args.output_json is not None else Path.cwd()),
             )

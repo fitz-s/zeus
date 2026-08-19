@@ -64,6 +64,7 @@ DEFAULT_LIVE_TRADING_DAEMON_HEARTBEAT_MAX_AGE_SECONDS = 300
 _RESTING_ORDER_TYPES = {"GTC", "GTD"}
 _IMMEDIATE_ORDER_TYPES = {"FOK", "FAK"}
 _LIVE_TRADING_REQUIRED_SIDECAR_HEARTBEATS = (
+    ("data-ingest", "daemon-heartbeat-ingest.json", 180.0),
     ("forecast-live", "forecast-live-heartbeat.json", 120.0),
     ("substrate-observer", "daemon-heartbeat-substrate-observer.json", 180.0),
     ("price-channel-ingest", "daemon-heartbeat-price-channel-ingest.json", 180.0),
@@ -244,108 +245,34 @@ def install_dedicated_heartbeat_http_timeout(*, cadence_seconds: int) -> bool:
     if the request blocks for a full cadence, one network stall can consume the
     whole lease window and Polymarket may cancel resting GTC/GTD orders. The
     keeper runs in its own process, so replacing the SDK module's global client
-    here does not affect live evaluator/orderbook traffic.
+    here does not affect live evaluator/orderbook traffic. The actual SDK
+    transport mutation is delegated to the venue adapter boundary.
     """
 
     global _HEARTBEAT_REQUEST_CAUSE_PRESERVED
+
     timeout_seconds = heartbeat_http_timeout_seconds_from_env(cadence_seconds)
     try:
-        import httpx
-        from py_clob_client_v2.exceptions import PolyApiException
-        from py_clob_client_v2.http_helpers import helpers as heartbeat_http_helpers
+        from src.venue.polymarket_v2_adapter import (
+            install_dedicated_heartbeat_http_transport,
+        )
     except Exception as exc:  # pragma: no cover - dependency absence is runtime-specific
-        logger.warning("heartbeat HTTP timeout install skipped: %s", exc)
+        logger.warning("heartbeat HTTP transport helper unavailable: %s", exc)
         return False
-
-    old_client = getattr(heartbeat_http_helpers, "_http_client", None)
-    heartbeat_http_helpers._http_client = httpx.Client(
-        http2=False,
-        timeout=httpx.Timeout(timeout_seconds),
-        # One persistent HTTP/1.1 connection avoids paying the TLS handshake
-        # inside every short heartbeat timeout. Any RequestError replaces this
-        # entire dedicated pool through _reset_dedicated_heartbeat_http_transport.
-        limits=httpx.Limits(
-            max_connections=1,
-            max_keepalive_connections=1,
-            keepalive_expiry=30.0,
-        ),
+    installed = install_dedicated_heartbeat_http_transport(
+        timeout_seconds=timeout_seconds,
     )
-    close = getattr(old_client, "close", None)
-    if callable(close):
-        try:
-            close()
-        except Exception:
-            logger.debug("old heartbeat HTTP client close failed", exc_info=True)
-
-    if getattr(heartbeat_http_helpers, "_zeus_request_cause_preserved", False):
+    if installed:
         _HEARTBEAT_REQUEST_CAUSE_PRESERVED = True
-        return True
-
-    def _request_with_cause(endpoint: str, method: str, headers=None, data=None, params=None):
-        overloaded_headers = heartbeat_http_helpers._overload_headers(method, headers)
-        try:
-            if isinstance(data, str):
-                resp = heartbeat_http_helpers._http_client.request(
-                    method=method,
-                    url=endpoint,
-                    headers=overloaded_headers,
-                    content=data.encode("utf-8"),
-                    params=params,
-                )
-            else:
-                resp = heartbeat_http_helpers._http_client.request(
-                    method=method,
-                    url=endpoint,
-                    headers=overloaded_headers,
-                    json=data,
-                    params=params,
-                )
-
-            if resp.status_code != 200:
-                heartbeat_http_helpers.logger.error(
-                    "[py_clob_client_v2] request error status=%s url=%s body=%s",
-                    resp.status_code,
-                    endpoint,
-                    resp.text,
-                )
-                raise PolyApiException(resp)
-
-            try:
-                return resp.json()
-            except ValueError:
-                return resp.text
-        except PolyApiException:
-            raise
-        except httpx.RequestError as exc:
-            heartbeat_http_helpers.logger.error("[py_clob_client_v2] request error: %s", exc)
-            raise PolyApiException(
-                error_msg=f"Request exception: {type(exc).__name__}"
-            ) from exc
-
-    heartbeat_http_helpers.request = _request_with_cause
-    heartbeat_http_helpers._zeus_request_cause_preserved = True
-    _HEARTBEAT_REQUEST_CAUSE_PRESERVED = True
-    return True
+    return bool(installed)
 
 
 def _is_heartbeat_transport_error(exc: BaseException) -> bool:
     try:
-        import httpx
+        from src.venue.polymarket_v2_adapter import is_heartbeat_transport_error
     except Exception:  # pragma: no cover - dependency absence is runtime-specific
         return False
-
-    current: BaseException | None = exc
-    seen: set[int] = set()
-    while current is not None and id(current) not in seen:
-        seen.add(id(current))
-        if isinstance(current, httpx.RequestError):
-            return True
-        cause = getattr(current, "__cause__", None)
-        context = getattr(current, "__context__", None)
-        current = cause if isinstance(cause, BaseException) else context
-        if not isinstance(current, BaseException):
-            current = None
-    return False
+    return is_heartbeat_transport_error(exc)
 
 
 def _reset_dedicated_heartbeat_http_transport(

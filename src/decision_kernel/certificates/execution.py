@@ -318,6 +318,13 @@ def build_final_intent_certificate_from_actionable(
         "live_authority_status": action.get("live_authority_status"),
         "raw_value": action.get("raw_value"),
         "rounded_value": action.get("rounded_value"),
+        "station_id": action.get("station_id"),
+        "configured_station_id": action.get("configured_station_id"),
+        "settlement_source": action.get("settlement_source"),
+        "raw_payload_sha256": action.get("raw_payload_sha256"),
+        "day0_observation_provenance_hash": action.get(
+            "day0_observation_provenance_hash"
+        ),
         "high_so_far": action.get("high_so_far"),
         "low_so_far": action.get("low_so_far"),
         "observation_time": action.get("observation_time"),

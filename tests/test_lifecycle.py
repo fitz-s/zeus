@@ -7,7 +7,7 @@
 # Reuse: Referenced by regression suite; last touched 2026-05-08 for Wave28
 #        (HIGH→v2 route). Apply v2 schema in test fixtures when asserting
 #        post-harvest pair rows.
-# Last reused/audited: 2026-07-24
+# Last reused/audited: 2026-07-30
 # Authority basis: docs/operations/current/finite_evidence_probability_symmetry/PLAN.md
 """Tests for exit triggers and harvester."""
 
@@ -82,6 +82,41 @@ def _make_position(**kwargs) -> Position:
     return Position(**defaults)
 
 
+@pytest.mark.parametrize("direction", ["buy_yes", "buy_no"])
+def test_fixed_action_sell_uses_native_point_q_not_confidence_lcb(direction):
+    """INV-46: q_lcb certifies evidence; fixed-action HOLD uses point q."""
+    pos = _make_position(direction=direction)
+
+    # The net bid is above q_lcb=.40 (old law sold) but below q_mean=.60.
+    decision = _call_exit(
+        pos,
+        fresh_prob=0.60,
+        current_market_price=0.55,
+        best_bid=0.55,
+        current_ci=(0.40, 0.70),
+    )
+
+    assert decision.should_exit is False
+    assert decision.trigger == "HOLD"
+
+
+@pytest.mark.parametrize("direction", ["buy_yes", "buy_no"])
+def test_fixed_action_sell_exits_when_native_point_q_is_below_bid(direction):
+    """INV-46: the same native-side point-q law still sells on real dominance."""
+    pos = _make_position(direction=direction)
+
+    decision = _call_exit(
+        pos,
+        fresh_prob=0.40,
+        current_market_price=0.55,
+        best_bid=0.55,
+        current_ci=(0.30, 0.50),
+    )
+
+    assert decision.should_exit is True
+    assert decision.trigger == "SELL_REVERSAL"
+
+
 def test_legacy_edli_forecast_high_buy_no_strategy_label_repairs_at_runtime():
     from src.state.portfolio import _runtime_strategy_key_from_projection_row
 
@@ -125,6 +160,38 @@ def test_legacy_edli_same_day_high_buy_no_strategy_label_repairs_at_runtime():
     }
 
     assert _runtime_strategy_key_from_projection_row(row) == "opening_inertia"
+
+
+def test_probabilistic_qkernel_capture_label_repairs_to_day0_nowcast():
+    from src.state.portfolio import _runtime_strategy_key_from_projection_row
+
+    row = {
+        "position_id": "legacy-day0-probability",
+        "strategy_key": "settlement_capture",
+        "entry_method": "qkernel_spine",
+        "direction": "buy_no",
+        "temperature_metric": "high",
+        "p_posterior": 0.86868,
+        "entry_ci_width": 0.64936,
+    }
+
+    assert _runtime_strategy_key_from_projection_row(row) == "day0_nowcast_entry"
+
+
+def test_deterministic_qkernel_capture_label_stays_capture():
+    from src.state.portfolio import _runtime_strategy_key_from_projection_row
+
+    row = {
+        "position_id": "locked-day0-payoff",
+        "strategy_key": "settlement_capture",
+        "entry_method": "qkernel_spine",
+        "direction": "buy_no",
+        "temperature_metric": "high",
+        "p_posterior": 1.0,
+        "entry_ci_width": 0.0,
+    }
+
+    assert _runtime_strategy_key_from_projection_row(row) == "settlement_capture"
 
 
 def test_repaired_opening_inertia_position_does_not_emit_review_fact():

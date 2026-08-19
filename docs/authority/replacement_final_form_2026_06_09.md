@@ -3,7 +3,7 @@
 **Status:** Live replacement probability law. Runtime rows use `forecast_posteriors.runtime_layer='live'`; no second row-authority label or alternate runtime layer exists.
 **Supersedes:** `BAYES_PRECISION_FUSION_SPEC.md` (deleted).  
 **Created:** 2026-06-09  
-**Last audited:** 2026-07-15 (source-clock live q retains absolute ENS/provider-center disagreement and its executable band combines finite-member and distribution-free moment ambiguity symmetrically for YES/NO)
+**Last audited:** 2026-08-19 (Day0 remaining-path point q separates conditional path error from the immutable full-day source-clock width; the carrier and confidence bound remain mandatory)
 **Authority basis:** Commits 140d75ff6d · 6860f00a21 · edc598b440 · 94b584cc3f · 49492f1528 · 2b6936d3b5 · 9c594c9fc3 · df8199ef8e · e80c101c4c · 8541bc93cd · 8f20d39863 · a70436d478 · a1c2163e46 plus June 18 live-runtime cleanup. Historical experiment reports remain evidence only; they do not define the live execution layer.
 
 ---
@@ -160,6 +160,37 @@ YES and NO are exact complements of this one probability world. Side selection
 therefore depends only on executable cost and the same posterior-mean expected
 log-wealth objective, never on a side-specific probability recipe.
 
+#### Day0 conditional remaining-path operator
+
+Once a causal target-day observation and complete unresolved-hour provider
+trajectories exist, Day0 point q is a different conditional random variable from
+the source-clock full-day extreme:
+
+```
+provider_path_s = remaining_extreme(
+    condition(hourly_path_s, current_temperature, observation_time)
+)
+future_s        = provider_path_s + instrument_error + observation_latency_error
+final_s         = extreme(observed_running_boundary, future_s)
+```
+
+The provider-path distribution carries current provider disagreement and the
+explicit remaining diurnal shape. Instrument and observation-latency errors are
+applied once before the physical max/min. The source-clock `sigma_pred` remains
+mandatory immutable carrier and confidence-bound evidence, but it describes the
+unconditional full-day extreme and must not be injected again as symmetric
+temperature noise on the conditional remaining paths. Doing so mixes two random
+variables, double-counts uncertainty, and mechanically depresses every exact-bin
+YES probability into anti-modal NO probability.
+
+The source-clock posterior, finite-member/moment band, topology, and causal
+identity remain bound into the Day0 witness and are reproduced at submit. A
+missing or invalid source-clock carrier still fails closed; this separation is
+not permission to fall back to historical residual width, an unbound path set,
+or a market-price anchor. Any change to this conditional operator increments
+`DAY0_PROBABILITY_SEMANTICS_REVISION`, so settlement attribution never pools the
+new law with an older realized-capital record.
+
 ### 1f. Finite current-evidence tail limit
 
 The Normal point vector is a model expectation, not permission to claim
@@ -260,7 +291,7 @@ EB bias correction and the bias_treatment_v2 branches are deleted with their cod
 | Role | Model(s) | Domain / lead cap |
 |---|---|---|
 | Anchor (prior) | `ecmwf_ifs` | global, all leads |
-| DECORR_GLOBALS | `gfs_global`, `icon_global`, `gem_global`, `jma_seamless`, `ukmo_global_deterministic_10km` | global; gem previous_runs only (K2) |
+| DECORR_GLOBALS | `gfs_global`, `icon_global`, `gem_global`, `jma_seamless`, `ukmo_global_deterministic_10km` | global; current values may use the eligible same-product `previous_runs` serving law below (K2) |
 | GLOBAL_LIKELIHOOD | DECORR_GLOBALS + `icon_eu` + `ncep_nbm_conus` | per-polygon for domain-gated |
 | REGIONAL | `icon_d2` (2km, Central-EU, lead≤1), `meteofrance_arome_france_hd` (1.3km, France, lead≤1), `ukmo_uk_deterministic_2km` (2km, UK, lead≤2) | own polygon gates |
 | icon_eu | `icon_eu` (7km, lat 29–71N / lon −24–45E, lead≤3) | restored 2026-06-09 (6860f00a21) |
@@ -272,7 +303,7 @@ EB bias correction and the bias_treatment_v2 branches are deleted with their cod
 
 **Coordinate authority:** `config/cities.json` is the SINGLE coordinate source. 5 coarse coordinates re-pinned to verified WU/METAR station ARPs 2026-06-09 (e80c101c4c): Amsterdam EHAM (52.3086/4.7639), Chengdu ZUUU, Istanbul LTFM, Shanghai ZSPD, Zhengzhou ZHCC. Amsterdam was the material case (1.9 km off, inside icon_d2 2km domain).
 
-**gem_global current-value rule (K2, commit edc598b440):** open-meteo single-runs API does NOT serve `cmc_gem_gdps_15km` (curl-verified; modelRunUnavailable even at 00z). gem is served from its `previous_runs` row at the SAME natural key `(city, metric, target_date, source_cycle_time)` — source-identical to its de-bias history, zero bridge mismatch. Any other model missing single_runs remains LOUD (no masking).
+**Generalized current-value serving rule (K2; GEM was the first instance):** the single serving builder admits only the same model/product, city, metric, and target date.  A carrier-bound read prefers selected-cycle `single_runs`, then selected-cycle `previous_runs`, then the newest eligible prior-cycle row no later than the carrier.  A source-clock live read instead serves each provider's newest row possessed by decision time; the ECMWF ENS cycle remains the shape carrier, not a ceiling on deterministic provider values.  Missing, future, over-age, or product-mismatched rows stay dropped; in particular, ECMWF `ifs025` history cannot stand in for the 9 km live center.  Every admitted row preserves its real `served_via` and `served_cycle`, so substitution is explicit rather than silent.
 
 **K3 provider completeness:** 5 declared providers — NOAA/gfs|nbm, DWD-ICON one-of-{d2,eu,global}, CMC/gem, JMA/jma_seamless, UKMO one-of-{global,uk2km}. Family-aware check; ≥ 4/5 required or WARNING emitted. Commit 2b6936d3b5 surfaces subprocess WARNINGs to daemon log.
 
@@ -332,7 +363,16 @@ carrier; a changed point forces re-decision.
 **Statistical vs absolute honesty:**
 - Forecast superiority (bin-hit, MAE, bias) is settlement-graded, temporal holdout (TRAIN≤2026-05-10 / TEST 05-11..06-08), no look-ahead.
 - BACKTEST RESULT (wszeibgi0): de-bias is the dominant lever. Non-regional 39 cities: bin-hit +4.6 pt, MAE 1.435→1.305, bias −0.515→+0.071. Regional 12 cities: bin-hit +11.6 pt, MAE 1.101→0.850. Optimal = per-model de-bias then equal-weight.
-- Trading EV is proven ONLY by forward real fills. The strategy-selection settlement-2026-06-09 analysis showed in-sample EV was inflated; forward temporal holdout collapses to +1.2¢..−2.7¢ with large day-variance. **No promotion to live capital before forward fills license it.**
+- Realized trading EV is measured only from forward real fills. The
+  strategy-selection settlement-2026-06-09 analysis showed in-sample EV was
+  inflated; forward temporal holdout collapses to +1.2¢..−2.7¢ with large
+  day-variance. That result is learning and falsification evidence, not a
+  circular admission prerequisite: a current causal probability witness that
+  passes the live content, freshness, JIT book, portfolio, expected-log-growth,
+  and Fractional Kelly contracts may enter the capital auction before its first
+  fill. Forward fills then update walk-forward attribution and may reduce or
+  remove future authority; their absence cannot itself block every action that
+  could produce them.
 
 **Iron rules:** (1) coverage != currency — five instances fixed today, zero tolerance for recurrence. (2) source-identity — a model's live product must match its de-bias product. (3) no in-sample promotion. (4) buy_no derives from forecast YES bin — cold-bias corrupts the family. (5) operator promotion requires settlement-graded evidence at the same evidence class as icon_eu.
 
@@ -413,7 +453,7 @@ provider-completeness requirement.
 |---|---|
 | `tests/test_bayes_precision_fusion_persisted_read_lead_robust.py` | Lead-calendar mismatch makes fusion fire on 0 cells (140d75ff6d) |
 | `tests/test_bayes_precision_fusion_thin_anchor_retained.py` | Anchor center dropped from EQUAL_WEIGHT cells (49492f1528) |
-| `tests/test_bayes_precision_fusion_gem_current_value_previous_runs_fallback.py` | gem single_runs dead leg silently shrinks ensemble 4→3 (edc598b440) |
+| `tests/test_bayes_precision_fusion_gem_current_value_previous_runs_fallback.py`, `tests/data/test_previous_runs_substitution.py`, `tests/data/test_fusion_upgrade_trigger.py` | Generalized same-product current-value serving: `single_runs` preference, eligible prior `previous_runs`, source-clock newest-possession selection, explicit provenance, and rejection of future or product-mismatched ECMWF `ifs025` rows |
 | `tests/test_replacement_download_cycle_currency_gate.py` | Coverage-vs-currency conflation freezes anchor indefinitely (94b584cc3f) |
 | `tests/test_stale_cycle_download_includes_covered_targets.py` | Covered-target filter starves new-cycle raw inputs (9c594c9fc3) |
 | `tests/test_download_row_level_skip_only_missing_fetches.py` | Coverage filter on extras download; instance 5 coverage!=currency (df8199ef8e) |

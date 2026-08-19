@@ -151,9 +151,10 @@ constraints:
         - tests/test_p0_hardening.py::TestR4ExecutionIntentNoDecorativeLabels::test_execution_intent_has_no_decorative_fields
         - tests/test_p0_hardening.py::TestR4ExecutionIntentNoDecorativeLabels::test_executor_does_not_branch_on_decorative_labels
   - id: NC-18
-    statement: No direct UPDATE or DELETE on venue_commands / venue_command_events outside
-      src/state/venue_command_repo.py. Both tables are append-only via the repo seam;
-      mutations are recorded as new events, not edits to existing rows.
+    statement: No direct INSERT, UPDATE, or DELETE on venue_commands / venue_command_events
+      outside src/state/venue_command_repo.py. Command-journal creation and mutation are
+      owned by typed repo seams; corrections are new events or typed atomic repairs, never
+      caller-owned SQL.
     invariants: [INV-28]
     enforced_by:
       semgrep_rule_ids:

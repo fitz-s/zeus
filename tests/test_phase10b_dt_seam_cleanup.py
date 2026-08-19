@@ -1,7 +1,7 @@
 # Created: 2026-04-19
-# Last reused/audited: 2026-07-10
-# Authority basis: Phase 10B DT-Seam Cleanup, 2026-04-29 design simplification audit F4, 2026-05-01 stale live-state artifact tracking, and 2026-05-15 K1 forecast DB split status-summary false-flag repair.
-# Lifecycle: created=2026-04-19; last_reviewed=2026-05-21; last_reused=2026-07-10
+# Last reused/audited: 2026-08-09
+# Authority basis: Phase 10B DT-Seam Cleanup, 2026-04-29 design simplification audit F4, 2026-05-01 stale live-state artifact tracking, 2026-05-15 K1 forecast DB split status-summary false-flag repair, and 2026-08-09 terminal-partial proof convergence.
+# Lifecycle: created=2026-04-19; last_reviewed=2026-08-09; last_reused=2026-08-09
 # Purpose: Phase 10B "DT-Seam Cleanup" antibodies (R-CL..R-CP).
 #          Dedicated test file per critic-carol cycle-3 L2 convention.
 #          Do NOT co-locate with test_phase10a_hygiene.py.
@@ -424,6 +424,138 @@ class TestRCPV2RowCountSensor:
             },
             "source_errors": [],
         }
+
+    def _patch_status_pulse_projection_only(self, status_summary_module, status_path, monkeypatch):
+        """Keep merge tests on the status projection boundary, without DB I/O."""
+        monkeypatch.setattr(status_summary_module, "STATUS_PATH", status_path)
+        monkeypatch.setattr(
+            status_summary_module,
+            "_refresh_minimal_runtime_read_model_for_status",
+            lambda status: True,
+        )
+        monkeypatch.setattr(
+            status_summary_module,
+            "_refresh_current_open_entry_orders_for_status",
+            lambda status: None,
+        )
+        monkeypatch.setattr(status_summary_module, "_refresh_control_status_for_pulse", lambda status: None)
+        monkeypatch.setattr(
+            status_summary_module,
+            "_refresh_pulse_infrastructure_status",
+            lambda *args, **kwargs: None,
+        )
+        monkeypatch.setattr(status_summary_module, "_project_recommended_commands", lambda status: None)
+        monkeypatch.setattr(status_summary_module, "_get_execution_capability_status", lambda: {})
+        monkeypatch.setattr(
+            status_summary_module,
+            "annotate_truth_payload",
+            lambda payload, path, generated_at, authority: payload,
+        )
+
+    def test_full_book_exit_monitor_replaces_prior_transient_projection(self, tmp_path, monkeypatch):
+        """A healthy full-book pass cannot inherit prior monitor alarms or lists."""
+        from src.observability import status_summary as status_summary_module
+
+        status_path = tmp_path / "status_summary.json"
+        status_path.write_text(json.dumps({
+            "cycle": {
+                "mode": "exit_monitor",
+                "candidates": 7,
+                "processed": 7,
+                "monitoring_error": "FULL_BOOK_MONITOR_CANONICAL_PROGRESS_MISSING",
+                "monitor_canonical_write_failed": 2,
+                "monitor_exit_quote_missing_positions": ["stale-1"],
+                "monitor_exit_quote_missing_reasons": ["stale-reason"],
+                "monitor_future_transient_counter": 99,
+                "future_monitor_transient_counter": 101,
+                "held_monitor_defer_reason": "stale-defer",
+                "pending_exit_positions": ["stale-2"],
+                "monitor_closed_market_pending_settlement_positions": ["settled-1"],
+                "portfolio_rotation_error": "stale-rotation",
+                "day0_static_closed_market_tradable_bid_preserved": 1,
+            },
+        }))
+        self._patch_status_pulse_projection_only(status_summary_module, status_path, monkeypatch)
+
+        incoming = {
+            "started_at": "2026-08-02T20:40:00+00:00",
+            "completed_at": "2026-08-02T20:40:01+00:00",
+            "held_monitor_candidates": 2,
+            "monitors": 2,
+            "exits": 0,
+        }
+        status_summary_module.write_cycle_pulse(incoming)
+        cycle = json.loads(status_path.read_text())["cycle"]
+
+        assert cycle["candidates"] == 7
+        assert cycle["processed"] == 7
+        assert cycle["monitors"] == 2
+        assert cycle["exits"] == 0
+        for key in (
+            "monitoring_error",
+            "monitor_canonical_write_failed",
+            "monitor_exit_quote_missing_positions",
+            "monitor_exit_quote_missing_reasons",
+            "monitor_future_transient_counter",
+            "future_monitor_transient_counter",
+            "held_monitor_defer_reason",
+            "pending_exit_positions",
+            "monitor_closed_market_pending_settlement_positions",
+            "portfolio_rotation_error",
+            "day0_static_closed_market_tradable_bid_preserved",
+        ):
+            assert key not in cycle
+        assert "last_auxiliary_pulse" not in cycle
+
+    def test_targeted_exit_monitor_preserves_full_book_projection(self, tmp_path, monkeypatch):
+        """A targeted monitor artifact is never a replacement for full-book state."""
+        from src.observability import status_summary as status_summary_module
+
+        status_path = tmp_path / "status_summary.json"
+        prior_cycle = {
+            "mode": "exit_monitor",
+            "monitors": 2,
+            "monitoring_error": "FULL_BOOK_MONITOR_CANONICAL_PROGRESS_MISSING",
+            "monitor_canonical_write_failed": 1,
+            "monitor_exit_quote_missing_positions": ["current-1"],
+        }
+        status_path.write_text(json.dumps({"cycle": prior_cycle}))
+        self._patch_status_pulse_projection_only(status_summary_module, status_path, monkeypatch)
+
+        status_summary_module.write_cycle_pulse({
+            "targeted_exit_monitor": True,
+            "held_monitor_candidates": 1,
+            "monitors": 1,
+            "monitoring_error": "TARGETED_MONITOR_ONLY",
+        })
+
+        assert json.loads(status_path.read_text())["cycle"] == prior_cycle
+
+    def test_heartbeat_auxiliary_merge_preserves_business_and_monitor_projection(self, tmp_path, monkeypatch):
+        """A heartbeat pulse keeps prior business and full-book monitor fields."""
+        from src.observability import status_summary as status_summary_module
+
+        status_path = tmp_path / "status_summary.json"
+        prior_cycle = {
+            "mode": "exit_monitor",
+            "candidates": 7,
+            "processed": 7,
+            "monitoring_error": "FULL_BOOK_MONITOR_CANONICAL_PROGRESS_MISSING",
+            "monitor_canonical_write_failed": 2,
+            "monitor_exit_quote_missing_positions": ["current-1"],
+        }
+        status_path.write_text(json.dumps({"cycle": prior_cycle}))
+        self._patch_status_pulse_projection_only(status_summary_module, status_path, monkeypatch)
+
+        status_summary_module.write_cycle_pulse({"mode": "heartbeat_pulse", "heartbeat": True})
+        cycle = json.loads(status_path.read_text())["cycle"]
+
+        assert cycle["candidates"] == 7
+        assert cycle["processed"] == 7
+        assert cycle["monitoring_error"] == prior_cycle["monitoring_error"]
+        assert cycle["monitor_canonical_write_failed"] == 2
+        assert cycle["monitor_exit_quote_missing_positions"] == ["current-1"]
+        assert cycle["last_auxiliary_pulse"] == {"mode": "heartbeat_pulse", "heartbeat": True}
 
     def _empty_calibration_serving(self):
         return {
@@ -850,6 +982,7 @@ class TestRCPV2RowCountSensor:
                 ),
                 "count": 0,
                 "superseded_by_terminal_event_count": 0,
+                "terminal_partial_order_fact_count": 0,
                 "by_command_state": {},
                 "by_venue_state": {},
                 "by_position_phase": {},
@@ -1288,6 +1421,74 @@ class TestRCPV2RowCountSensor:
         assert open_orders["count"] == 0
         assert open_orders["orders"] == []
 
+    def test_current_open_entry_orders_includes_incremental_order_on_active_position(self):
+        """Position-level fill status cannot hide a later command-specific live add."""
+        from src.observability import status_summary as status_summary_module
+
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        conn.executescript(
+            """
+            CREATE TABLE venue_commands (
+                command_id TEXT PRIMARY KEY,
+                venue_order_id TEXT,
+                intent_kind TEXT,
+                state TEXT,
+                side TEXT,
+                size REAL,
+                price REAL,
+                position_id TEXT,
+                created_at TEXT,
+                updated_at TEXT
+            );
+            CREATE TABLE position_current (
+                position_id TEXT PRIMARY KEY,
+                phase TEXT,
+                order_status TEXT,
+                city TEXT,
+                target_date TEXT,
+                strategy_key TEXT
+            );
+            CREATE TABLE venue_order_facts (
+                fact_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                venue_order_id TEXT,
+                command_id TEXT,
+                state TEXT,
+                remaining_size TEXT,
+                matched_size TEXT,
+                source TEXT,
+                observed_at TEXT,
+                ingested_at TEXT,
+                local_sequence INTEGER
+            );
+            INSERT INTO position_current VALUES (
+                'pos-add', 'active', 'filled', 'London', '2026-08-19',
+                'forecast_qkernel_entry'
+            );
+            INSERT INTO venue_commands VALUES (
+                'cmd-add', 'ord-add', 'ENTRY', 'ACKED', 'BUY', 73.05, 0.20,
+                'pos-add', '2026-08-18T04:09:30+00:00',
+                '2026-08-18T04:09:53+00:00'
+            );
+            INSERT INTO venue_order_facts VALUES (
+                NULL, 'ord-add', 'cmd-add', 'LIVE', '73.05', '0', 'WS_USER',
+                '2026-08-18T04:09:53+00:00',
+                '2026-08-18T04:09:53+00:00', 1
+            );
+            """
+        )
+
+        open_orders = status_summary_module._query_current_open_entry_orders(conn)
+
+        assert open_orders["status"] == "ok"
+        assert open_orders["count"] == 1
+        assert open_orders["pending_entry_count"] == 0
+        assert open_orders["by_strategy"] == {"forecast_qkernel_entry": 1}
+        assert open_orders["orders"][0]["command_id"] == "cmd-add"
+        assert open_orders["orders"][0]["phase"] == "active"
+        assert open_orders["orders"][0]["order_status"] == "filled"
+        assert open_orders["orders"][0]["venue_state"] == "LIVE"
+
     def test_cycle_pulse_latest_fact_queries_are_command_driven(self):
         """Current-order visibility must not window-scan all historical facts."""
         import inspect
@@ -1518,6 +1719,182 @@ class TestRCPV2RowCountSensor:
         assert conflicts["count"] == 0
         assert conflicts["orders"] == []
         assert conflicts["superseded_by_terminal_event_count"] == 1
+
+    def test_authenticated_full_fill_sequence_supersedes_later_observed_partial_fact(self):
+        """Canonical sequence, not a source timestamp, orders authenticated fill repair."""
+        from src.observability import status_summary as status_summary_module
+
+        row = {
+            "terminal_event_type": "FILL_CONFIRMED",
+            "terminal_event_at": "2026-08-09T17:15:10+00:00",
+            "terminal_event_payload_json": json.dumps(
+                {
+                    "command_id": "cmd-full-fill",
+                    "venue_order_id": "ord-full-fill",
+                    "filled_size": "20.999023",
+                    "proof_class": "authenticated_trade_fact_full_fill",
+                    "required_predicates": {
+                        "authenticated_confirmed_trade_facts": True,
+                        "bound_venue_order_id_matches_trade": True,
+                        "command_state_review_required": True,
+                        "latest_event_is_review_boundary": True,
+                        "source_fill_time_valid": True,
+                        "trade_facts_cover_command_or_leave_only_dust": True,
+                    },
+                }
+            ),
+            "venue_observed_at": "2026-08-09T17:15:10.736000+00:00",
+            "command_id": "cmd-full-fill",
+            "venue_order_id": "ord-full-fill",
+            "command_state": "FILLED",
+            "matched_size": "20.999023",
+        }
+
+        assert status_summary_module._terminal_event_supersedes_nonterminal_fact(row)
+
+        payload = json.loads(row["terminal_event_payload_json"])
+        payload["required_predicates"]["authenticated_confirmed_trade_facts"] = False
+        row["terminal_event_payload_json"] = json.dumps(payload)
+        assert not status_summary_module._terminal_event_supersedes_nonterminal_fact(row)
+
+    def test_terminal_partial_order_fact_closes_cancelled_remainder_conflict(self):
+        """Typed zero-remainder repair proof is terminal despite partial-fill state."""
+        from src.observability import status_summary as status_summary_module
+
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        conn.executescript(
+            """
+            CREATE TABLE venue_commands (
+                command_id TEXT PRIMARY KEY,
+                venue_order_id TEXT,
+                intent_kind TEXT,
+                state TEXT,
+                side TEXT,
+                size REAL,
+                price REAL,
+                position_id TEXT,
+                created_at TEXT,
+                updated_at TEXT
+            );
+            CREATE TABLE position_current (
+                position_id TEXT PRIMARY KEY,
+                phase TEXT,
+                order_status TEXT,
+                chain_state TEXT,
+                city TEXT,
+                target_date TEXT,
+                strategy_key TEXT
+            );
+            CREATE TABLE venue_order_facts (
+                fact_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                venue_order_id TEXT,
+                command_id TEXT,
+                state TEXT,
+                remaining_size TEXT,
+                matched_size TEXT,
+                source TEXT,
+                observed_at TEXT,
+                ingested_at TEXT,
+                local_sequence INTEGER,
+                raw_payload_json TEXT
+            );
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO venue_commands (
+                command_id, venue_order_id, intent_kind, state, side, size, price,
+                position_id, created_at, updated_at
+            ) VALUES (
+                'cmd-terminal-partial', 'ord-terminal-partial', 'ENTRY', 'CANCELLED',
+                'BUY', 19.0, 0.13, 'pos-terminal-partial',
+                '2026-08-08T20:16:42+00:00', '2026-08-08T20:40:00+00:00'
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO position_current (
+                position_id, phase, order_status, chain_state, city, target_date, strategy_key
+            ) VALUES (
+                'pos-terminal-partial', 'pending_exit', 'retry_pending', 'synced',
+                'Shanghai', '2026-08-09', 'day0_nowcast_entry'
+            )
+            """
+        )
+        payload = {
+            "command_id": "cmd-terminal-partial",
+            "venue_order_id": "ord-terminal-partial",
+            "proof_class": "terminal_partial_order_fact",
+            "reason": "cancelled_entry_confirmed_partial_fill_projection_repair",
+            "remaining_size": "0",
+            "required_predicates": {
+                "cancel_acked": True,
+                "canonical_positive_trade_facts": True,
+                "canonical_trade_facts_match_terminal_order_fact": True,
+                "command_state_cancelled": True,
+                "cumulative_fill_below_requested_size": True,
+                "terminal_order_remainder_zero": True,
+            },
+        }
+        conn.execute(
+            """
+            INSERT INTO venue_order_facts (
+                venue_order_id, command_id, state, remaining_size, matched_size,
+                source, observed_at, ingested_at, local_sequence, raw_payload_json
+            ) VALUES (
+                'ord-terminal-partial', 'cmd-terminal-partial', 'PARTIALLY_MATCHED',
+                '0', '18.55', 'WS_USER', '2026-08-08T20:40:00+00:00',
+                '2026-08-08T21:57:34+00:00', 4, ?
+            )
+            """,
+            (json.dumps(payload),),
+        )
+        conn.commit()
+
+        conflicts = status_summary_module._query_terminal_entry_command_venue_fact_conflicts(conn)
+
+        assert conflicts["status"] == "ok"
+        assert conflicts["count"] == 0
+        assert conflicts["orders"] == []
+        assert conflicts["terminal_partial_order_fact_count"] == 1
+
+        payload["required_predicates"][
+            "canonical_trade_facts_match_terminal_order_fact"
+        ] = False
+        conn.execute(
+            "UPDATE venue_order_facts SET raw_payload_json = ?",
+            (json.dumps(payload),),
+        )
+        conn.commit()
+
+        conflicts = status_summary_module._query_terminal_entry_command_venue_fact_conflicts(conn)
+
+        assert conflicts["count"] == 1
+        assert conflicts["terminal_partial_order_fact_count"] == 0
+
+        reducer_payload = {
+            "command_id": "cmd-terminal-partial",
+            "venue_order_id": "ord-terminal-partial",
+            "reason": "m5_exchange_reconcile_entry_fill_order_fact",
+            "source_module": "src.execution.exchange_reconcile",
+            "remaining_size": "0",
+            "matched_size": "18.55",
+            "order_truth_proof_class": "TERMINAL_PARTIAL",
+            "order_truth_source_state": "PARTIALLY_MATCHED",
+        }
+        conn.execute(
+            "UPDATE venue_order_facts SET raw_payload_json = ?",
+            (json.dumps(reducer_payload),),
+        )
+        conn.commit()
+
+        conflicts = status_summary_module._query_terminal_entry_command_venue_fact_conflicts(conn)
+
+        assert conflicts["count"] == 0
+        assert conflicts["orders"] == []
+        assert conflicts["terminal_partial_order_fact_count"] == 1
 
     def test_ambiguous_not_canceled_matched_terminal_event_remains_conflict(self):
         """NOT_CANCELED with matched ambiguity is not terminal venue proof."""

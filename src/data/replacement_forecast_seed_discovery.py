@@ -737,7 +737,11 @@ def _source_run_coverage_schema_ready(conn: sqlite3.Connection) -> bool:
         "target_local_date",
         "temperature_metric",
         "data_version",
+        "completeness_status",
+        "readiness_status",
         "computed_at",
+        "expires_at",
+        "recorded_at",
     }
     return required.issubset(_columns(conn, "source_run_coverage"))
 
@@ -1139,6 +1143,8 @@ def discover_replacement_forecast_materialization_seeds(
                 city=city,
                 target_date=target_date,
                 temperature_metric=metric,
+                not_after_source_cycle_time=openmeteo.source_cycle_time,
+                as_of_time=computed,
             )
             bins = market_bins_for_replacement_seed(
                 conn,

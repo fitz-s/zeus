@@ -1,11 +1,12 @@
-# Lifecycle: created=2026-04-26; last_reviewed=2026-07-23; last_reused=2026-07-24
+# Lifecycle: created=2026-04-26; last_reviewed=2026-08-11; last_reused=2026-08-11
 # Purpose: Lock executor command split phase ordering and ACK invariants.
 # Reuse: Run when venue command persistence, live order submission, or ACK handling changes.
 # Created: 2026-04-26
-# Last reused/audited: 2026-07-24
+# Last reused/audited: 2026-08-11
 # Authority basis: docs/operations/task_2026-04-26_execution_state_truth_p1_command_bus/implementation_plan.md §P1.S3
 #                  + docs/archive/2026-Q2/task_2026-05-15_live_order_e2e_goal/LIVE_ORDER_E2E_GOAL_PLAN.md
 #                  + docs/operations/task_2026-05-21_live_side_effect_risk_boundaries/task.md P1-4 side-effect boundary.
+#                  + 2026-08-10 atomic DDL-free collateral admission and certified bounded taker ENTRY.
 """INV-30 relationship tests: executor split build/persist/submit/ack.
 
 Each test names the relationship it locks, not just the function.
@@ -18,6 +19,7 @@ import sqlite3
 from src.state.collateral_ledger import init_collateral_schema
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch, call
 import json
 
@@ -326,7 +328,7 @@ def test_executor_refuses_client_without_signed_identity_binder():
 # ---------------------------------------------------------------------------
 
 @pytest.fixture
-def mem_conn():
+def mem_conn(tmp_path, monkeypatch):
     """In-memory DB with full schema (venue_commands + venue_command_events)."""
     from src.state.db import init_schema, init_schema_trade_only
     from src.state.collateral_ledger import init_collateral_schema
@@ -337,6 +339,52 @@ def mem_conn():
     init_schema(c)
     init_schema_trade_only(c)
     init_collateral_schema(c)
+
+    # ENTRY admission is a sanctioned trade+WORLD pair. Keep the trade
+    # journal in-memory, but attach a real WORLD authority and expose a real
+    # FORECASTS file for canonical market-family identity lookup.
+    from src.state.db import (
+        apply_architecture_kernel_schema,
+        init_schema as init_world_schema,
+        init_schema_forecasts,
+    )
+
+    world_path = tmp_path / "zeus-world.db"
+    world_conn = sqlite3.connect(world_path)
+    world_conn.row_factory = sqlite3.Row
+    init_world_schema(world_conn)
+    apply_architecture_kernel_schema(world_conn)
+    world_conn.commit()
+    world_conn.close()
+    c.execute("ATTACH DATABASE ? AS world", (str(world_path),))
+
+    forecasts_path = tmp_path / "zeus-forecasts.db"
+    forecasts_conn = sqlite3.connect(forecasts_path)
+    forecasts_conn.row_factory = sqlite3.Row
+    init_schema_forecasts(forecasts_conn)
+    forecasts_conn.execute(
+        """
+        INSERT INTO market_events (
+            market_slug, city, target_date, temperature_metric, condition_id,
+            token_id, range_label, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "event-test", "Test City", "2026-04-27", "high", "condition-test",
+            "tok-000000000000000000000000000000000000", "50-51F", _NOW.isoformat(),
+        ),
+    )
+    forecasts_conn.commit()
+    forecasts_conn.close()
+
+    def _forecast_read_only():
+        opened = sqlite3.connect(forecasts_path)
+        opened.row_factory = sqlite3.Row
+        return opened
+
+    monkeypatch.setattr(
+        "src.state.db.get_forecasts_connection_read_only", _forecast_read_only
+    )
     yield c
     c.close()
 
@@ -349,6 +397,11 @@ def _cutover_guard_live_enabled(monkeypatch):
 
     monkeypatch.setattr("src.control.cutover_guard.assert_submit_allowed", lambda *args, **kwargs: None)
     monkeypatch.setattr("src.control.heartbeat_supervisor.assert_heartbeat_allows_order_type", lambda *args, **kwargs: None)
+    monkeypatch.setattr("src.riskguard.policy.is_entries_paused", lambda: False)
+    monkeypatch.setattr(
+        "src.riskguard.policy.get_edge_threshold_multiplier",
+        lambda: 1.0,
+    )
     monkeypatch.setattr("src.state.collateral_ledger.assert_buy_preflight", lambda *args, **kwargs: None)
     monkeypatch.setattr("src.state.collateral_ledger.assert_sell_preflight", lambda *args, **kwargs: None)
     # Pre-submit identity binding resolves the canonical funder address via the
@@ -482,7 +535,7 @@ def test_pre_submit_envelope_uses_canonical_funder_identity(mem_conn, monkeypatc
         price=0.56,
         size=10.0,
         order_type="GTC",
-        post_only=False,
+        post_only=True,
         captured_at=_NOW.isoformat(),
     )
 
@@ -513,7 +566,7 @@ def test_pre_submit_envelope_fails_closed_without_canonical_funder(mem_conn, mon
             price=0.56,
             size=10.0,
             order_type="GTC",
-            post_only=False,
+            post_only=True,
             captured_at=_NOW.isoformat(),
         )
 
@@ -556,7 +609,7 @@ def _ensure_envelope(
             price=price_dec,
             size=size_dec,
             order_type="GTC",
-            post_only=False,
+            post_only=True,
             tick_size=Decimal("0.01"),
             min_order_size=Decimal("0.01"),
             neg_risk=False,
@@ -583,6 +636,58 @@ def _ensure_envelope(
         envelope_id=envelope_id,
     )
     return envelope_id
+
+
+def _entry_submission_envelope(
+    *,
+    token_id: str,
+    side: str = "BUY",
+    price: float | Decimal = Decimal("0.50"),
+    size: float | Decimal = Decimal("10"),
+):
+    """Build an unpersisted ENTRY envelope for atomic command admission."""
+    from src.contracts.venue_submission_envelope import VenueSubmissionEnvelope
+
+    return VenueSubmissionEnvelope(
+        sdk_package="py-clob-client-v2",
+        sdk_version="test",
+        host="https://clob-v2.polymarket.com",
+        chain_id=137,
+        funder_address="0xfunder",
+        condition_id="condition-test",
+        question_id="question-test",
+        yes_token_id=token_id,
+        no_token_id=f"{token_id}-no",
+        selected_outcome_token_id=token_id,
+        outcome_label="YES",
+        side=side,
+        price=Decimal(str(price)),
+        size=Decimal(str(size)),
+        order_type="GTC",
+        post_only=True,
+        tick_size=Decimal("0.01"),
+        min_order_size=Decimal("0.01"),
+        neg_risk=False,
+        fee_details={
+            "source": "test",
+            "token_id": token_id,
+            "fee_rate_fraction": 0.0,
+            "fee_rate_bps": 0.0,
+            "fee_rate_source_field": "fee_rate_fraction",
+            "fee_rate_raw_unit": "fraction",
+        },
+        canonical_pre_sign_payload_hash="d" * 64,
+        signed_order=None,
+        signed_order_hash=None,
+        raw_request_hash="e" * 64,
+        raw_response_json=None,
+        order_id=None,
+        trade_ids=(),
+        transaction_hashes=(),
+        error_code=None,
+        error_message=None,
+        captured_at=_NOW.isoformat(),
+    )
 
 
 def _submit_requested_payload(command_id: str) -> dict:
@@ -716,6 +821,32 @@ def _decision_source_context(**overrides):
     return DecisionSourceContext(**fields)
 
 
+def test_day0_entry_q_version_stamps_probability_semantics_revision():
+    from src.events.day0_authority import (
+        DAY0_PROBABILITY_SEMANTICS_REVISION,
+        bind_day0_probability_semantics,
+    )
+    from src.execution.executor import _entry_q_version_from_authority
+
+    raw_hash = "d" * 64
+    context = _decision_source_context(
+        posterior_identity_hash=raw_hash,
+        forecast_source_role="day0_observed_probability",
+        authority_tier="DAY0_OBSERVATION",
+    )
+
+    q_version = _entry_q_version_from_authority(
+        SimpleNamespace(decision_source_context=context),
+        None,
+    )
+
+    assert q_version == (
+        f"day0-semrev:{DAY0_PROBABILITY_SEMANTICS_REVISION}:{raw_hash}"
+    )
+    old = "day0-semrev:retired-day0-v0:q-old"
+    assert bind_day0_probability_semantics(old) == old
+
+
 def _make_entry_intent(
     conn=None,
     limit_price: float = 0.55,
@@ -838,9 +969,8 @@ def _insert_actionable_certificate_for_intent(
     }
     payload_json = json.dumps(payload, sort_keys=True)
     payload_hash = "a" * 64
-    conn.execute(
-        """
-        INSERT INTO decision_certificates (
+    insert_sql = """
+        INSERT OR REPLACE INTO {table} (
             certificate_id, certificate_type, schema_version, canonicalization_version,
             semantic_key, claim_type, mode, decision_time, authority_id,
             authority_version, algorithm_id, algorithm_version, payload_json,
@@ -848,8 +978,8 @@ def _insert_actionable_certificate_for_intent(
         ) VALUES (?, 'ActionableTradeCertificate', 1, 'test-v1',
                   ?, 'actionable_trade', 'LIVE', ?, 'test-authority',
                   'v1', 'test-algorithm', 'v1', ?, ?, ?, 'VERIFIED', ?)
-        """,
-        (
+        """
+    values = (
             f"ActionableTradeCertificate:{certificate_hash[:24]}",
             f"actionable:event-entry-capability:{intent.token_id}",
             _NOW.isoformat(),
@@ -857,8 +987,17 @@ def _insert_actionable_certificate_for_intent(
             payload_hash,
             certificate_hash,
             _NOW.isoformat(),
-        ),
-    )
+        )
+    conn.execute(insert_sql.format(table="decision_certificates"), values)
+    # ENTRY closure reads the sanctioned WORLD ledger. Keep the main copy too
+    # because in-memory callers use it for the generic certificate path.
+    attached = {
+        str(row[1]).strip()
+        for row in conn.execute("PRAGMA database_list").fetchall()
+        if len(row) > 1 and str(row[1]).strip()
+    }
+    if "world" in attached:
+        conn.execute(insert_sql.format(table="world.decision_certificates"), values)
 
 
 def _make_exit_intent(
@@ -980,7 +1119,10 @@ def _allow_entry_submit_until_client(monkeypatch):
         "_entry_actionable_certificate_payload_and_component",
         lambda *args, **kwargs: (
             {"component": "entry_actionable_certificate", "allowed": True, "reason": "test"},
-            {"actionable_certificate_hash": "hash-test"},
+            {
+                "actionable_certificate_hash": "hash-test",
+                "strategy_key": "center_buy",
+            },
         ),
     )
     monkeypatch.setattr(
@@ -1095,6 +1237,149 @@ class TestLiveOrderCommandSplit:
         assert bound_envelope.condition_id == "condition-test"
         assert bound_envelope.selected_outcome_token_id == intent.token_id
 
+    def test_fresh_strategy_gate_blocks_before_command_persistence(
+        self,
+        mem_conn,
+        monkeypatch,
+    ):
+        """A gate committed after selection must still stop venue submission."""
+        from src.execution.executor import _live_order
+
+        _allow_entry_submit_until_client(monkeypatch)
+        intent = _make_entry_intent(mem_conn)
+        now = datetime.now(timezone.utc)
+        mem_conn.execute(
+            """
+            INSERT INTO risk_actions (
+                action_id, strategy_key, action_type, value, issued_at,
+                effective_until, reason, source, precedence, status
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "risk-action-submit-race",
+                "center_buy",
+                "gate",
+                "true",
+                (now - timedelta(seconds=1)).isoformat(),
+                (now + timedelta(hours=1)).isoformat(),
+                "test submit-time gate",
+                "riskguard",
+                10,
+                "active",
+            ),
+        )
+
+        with patch("src.data.polymarket_client.PolymarketClient") as MockClient:
+            mock_inst = MagicMock()
+            MockClient.return_value = mock_inst
+            result = _live_order(
+                trade_id="trd-strategy-policy-submit-race",
+                intent=intent,
+                shares=18.19,
+                conn=mem_conn,
+                decision_id="dec-strategy-policy-submit-race",
+            )
+
+        assert result.status == "rejected"
+        assert result.reason == (
+            "strategy_policy_pre_submit:gated:sources=risk_action:gate"
+        )
+        assert mock_inst.place_limit_order.called is False
+        assert mem_conn.execute(
+            "SELECT COUNT(*) FROM venue_commands WHERE position_id=?",
+            ("trd-strategy-policy-submit-race",),
+        ).fetchone()[0] == 0
+
+    def test_submit_strategy_policy_authority_loss_fails_closed(
+        self,
+        mem_conn,
+    ):
+        from src.execution.executor import (
+            _entry_strategy_policy_submit_component,
+        )
+
+        intent = _make_entry_intent(mem_conn)
+        mem_conn.execute("DROP TABLE risk_actions")
+
+        component = _entry_strategy_policy_submit_component(
+            mem_conn,
+            intent,
+            {"strategy_key": "center_buy"},
+        )
+
+        assert component["allowed"] is False
+        assert component["reason"] == "authority_schema_missing"
+        assert component["details"]["risk_actions_ready"] is False
+
+    def test_submit_strategy_policy_uses_exact_probability_revision(
+        self,
+        mem_conn,
+    ):
+        from src.execution.executor import (
+            _entry_strategy_policy_submit_component,
+        )
+
+        intent = _make_entry_intent(mem_conn)
+        old_revision = "stale_ensemble_absolute_disagreement_v2"
+        current_revision = "current_evidence_v4"
+        now = datetime.now(timezone.utc)
+        mem_conn.execute(
+            """
+            INSERT INTO risk_actions (
+                action_id, strategy_key, action_type, value, issued_at,
+                effective_until, reason, source, precedence, status
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "risk-action-old-probability-law",
+                "center_buy",
+                "gate",
+                json.dumps(
+                    {
+                        "gate": True,
+                        "probability_semantics_revisions": [old_revision],
+                    }
+                ),
+                (now - timedelta(seconds=1)).isoformat(),
+                (now + timedelta(hours=1)).isoformat(),
+                "old probability law degraded",
+                "riskguard",
+                10,
+                "active",
+            ),
+        )
+
+        current = _entry_strategy_policy_submit_component(
+            mem_conn,
+            intent,
+            {
+                "strategy_key": "center_buy",
+                "probability_semantics_revision": current_revision,
+            },
+            checked_at=now,
+        )
+        old = _entry_strategy_policy_submit_component(
+            mem_conn,
+            intent,
+            {
+                "strategy_key": "center_buy",
+                "probability_semantics_revision": old_revision,
+            },
+            checked_at=now,
+        )
+        missing = _entry_strategy_policy_submit_component(
+            mem_conn,
+            intent,
+            {"strategy_key": "center_buy"},
+            checked_at=now,
+        )
+
+        assert current["allowed"] is True
+        assert old["allowed"] is False
+        assert old["reason"] == "gated"
+        assert missing["allowed"] is False
+
+
     def test_entry_submit_requested_persists_execution_capability_proof(self, mem_conn, monkeypatch):
         """Entry SUBMIT_REQUESTED carries one pre-submit capability proof."""
         import json
@@ -1175,11 +1460,12 @@ class TestLiveOrderCommandSplit:
             "decision_source_integrity",
             "entry_economics",
             "entry_actionable_certificate",
+            "strategy_policy_submit",
             "executable_snapshot_gate",
         }
         assert components_by_name["entry_economics"]["allowed"] is True
         assert components_by_name["entry_economics"]["details"]["min_entry_price"] == 0.10
-        assert components_by_name["entry_economics"]["details"]["live_min_entry_price"] == 0.02
+        assert components_by_name["entry_economics"]["details"]["live_min_entry_price"] == 0.05
         assert components_by_name["entry_actionable_certificate"]["allowed"] is True
         assert (
             components_by_name["entry_actionable_certificate"]["details"]["certificate_hash"]
@@ -1459,12 +1745,12 @@ class TestLiveOrderCommandSplit:
                 'pos-open-existing', 'active', 'trade-existing', 'mkt-test-001',
                 'Shenzhen', '2026-06-19', '34C+', 'buy_no', 'C',
                 11.84, 16.0, 11.84, 0.74, 0.30, 'center_buy',
-                'replacement', 'live', 'synced', '', ?,
+                'replacement', 'live', 'synced', ?, ?,
                 'condition-test', 'order-existing', 'filled',
                 '2026-06-17T16:22:21+00:00', 'high'
             )
             """,
-            (token_id,),
+            (f"{token_id}-yes", token_id),
         )
         mem_conn.commit()
 
@@ -2446,6 +2732,10 @@ class TestLiveOrderCommandSplit:
         init_collateral_schema(setup_conn)
         intent = _make_entry_intent(setup_conn, token_id=token_id)
         setup_conn.commit()
+        world_path = tmp_path / "entry-pre-submit-world.db"
+        world_conn = sqlite3.connect(world_path)
+        setup_conn.backup(world_conn)
+        world_conn.close()
         setup_conn.close()
 
         def _trade_conn():
@@ -2453,6 +2743,7 @@ class TestLiveOrderCommandSplit:
             init_schema(conn)
             init_schema_trade_only(conn)
             init_collateral_schema(conn)
+            conn.execute("ATTACH DATABASE ? AS world", (str(world_path),))
             return conn
 
         # get_trade_connection_with_world (non-required variant) was deleted from
@@ -2465,6 +2756,11 @@ class TestLiveOrderCommandSplit:
             "_assert_ws_gap_allows_submit",
             lambda *args, **kwargs: {"component": "ws_gap_guard", "allowed": True, "reason": "allowed"},
         )
+        monkeypatch.setattr(
+            executor_module,
+            "_entry_replacement_family_from_snapshot",
+            lambda *args, **kwargs: ("Test City", "2026-04-27", "high"),
+        )
         monkeypatch.setattr(executor_module, "alert_trade", lambda *args, **kwargs: None)
 
         observed = {}
@@ -2475,6 +2771,9 @@ class TestLiveOrderCommandSplit:
 
             def bind_submission_envelope(self, envelope):
                 observed["bound_envelope"] = envelope
+
+            def bind_signed_submission_identity_persister(self, persister):
+                observed["identity_persister"] = persister
 
             def place_limit_order(self, **kwargs):
                 read_conn = get_connection(db_path)
@@ -2550,18 +2849,28 @@ class TestLiveOrderCommandSplit:
         init_collateral_schema(setup_conn)
         intent = _make_entry_intent(setup_conn, token_id=token_id)
         setup_conn.commit()
+        world_path = tmp_path / "entry-caller-world.db"
+        world_conn = sqlite3.connect(world_path)
+        setup_conn.backup(world_conn)
+        world_conn.close()
         setup_conn.close()
 
         submit_conn = get_connection(db_path)
         init_schema(submit_conn)
         init_schema_trade_only(submit_conn)
         init_collateral_schema(submit_conn)
+        submit_conn.execute("ATTACH DATABASE ? AS world", (str(world_path),))
         monkeypatch.setattr(executor_module, "_assert_risk_allocator_allows_submit", lambda *args, **kwargs: None)
         monkeypatch.setattr(executor_module, "_select_risk_allocator_order_type", lambda *args, **kwargs: "GTC")
         monkeypatch.setattr(
             executor_module,
             "_assert_ws_gap_allows_submit",
             lambda *args, **kwargs: {"component": "ws_gap_guard", "allowed": True, "reason": "allowed"},
+        )
+        monkeypatch.setattr(
+            executor_module,
+            "_entry_replacement_family_from_snapshot",
+            lambda *args, **kwargs: ("Test City", "2026-04-27", "high"),
         )
         monkeypatch.setattr(executor_module, "alert_trade", lambda *args, **kwargs: None)
 
@@ -2603,6 +2912,9 @@ class TestLiveOrderCommandSplit:
 
             def bind_submission_envelope(self, envelope):
                 observed["bound_envelope"] = envelope
+
+            def bind_signed_submission_identity_persister(self, persister):
+                observed["identity_persister"] = persister
 
             def place_limit_order(self, **kwargs):
                 final = observed["bound_envelope"].with_updates(
@@ -2666,6 +2978,9 @@ class TestLiveOrderCommandSplit:
 
             def bind_submission_envelope(self, envelope):
                 self.bound_envelope = envelope
+
+            def bind_signed_submission_identity_persister(self, persister):
+                self.identity_persister = persister
 
             def place_limit_order(self, **kwargs):
                 assert self.bound_envelope is not None
@@ -3317,6 +3632,9 @@ class TestLiveOrderCommandSplit:
             post_only=False,
             actionable_certificate_hash=certificate_hash,
         )
+        # FAK BUY uses fixed-cash binding; align the fixture's cash target
+        # with the ten-share wire amount at the submitted price.
+        object.__setattr__(intent, "target_size_usd", 3.4)
         object.__setattr__(
             intent,
             "taker_quality_proof",
@@ -3334,6 +3652,7 @@ class TestLiveOrderCommandSplit:
             intent,
             certificate_hash=certificate_hash,
         )
+        decision_at = datetime.now(timezone.utc).isoformat()
         mem_conn.execute(
             """
             INSERT INTO decision_log (
@@ -3342,8 +3661,8 @@ class TestLiveOrderCommandSplit:
             """,
             (
                 "live",
-                _NOW.isoformat(),
-                _NOW.isoformat(),
+                decision_at,
+                decision_at,
                 json.dumps(
                     {
                         "trade_cases": [
@@ -3365,7 +3684,7 @@ class TestLiveOrderCommandSplit:
                     },
                     sort_keys=True,
                 ),
-                _NOW.isoformat(),
+                decision_at,
                 "live",
             ),
         )
@@ -3414,7 +3733,6 @@ class TestLiveOrderCommandSplit:
                 conn=mem_conn,
                 decision_id="dec-fak-partial-v2",
             )
-
         command_id = command_ids_seen[0]
         assert result.status == "partial"
         assert result.command_state == "PARTIAL"
@@ -3704,7 +4022,10 @@ class TestLiveOrderCommandSplit:
             "_entry_actionable_certificate_payload_and_component",
             lambda *args, **kwargs: (
                 {"component": "entry_actionable_certificate", "allowed": True, "reason": "test"},
-                {"actionable_certificate_hash": "hash-test"},
+                {
+                    "actionable_certificate_hash": "hash-test",
+                    "strategy_key": "center_buy",
+                },
             ),
         )
 
@@ -3721,11 +4042,9 @@ class TestLiveOrderCommandSplit:
             mem_conn,
             command_id="pre-existing-cmd",
             snapshot_id=intent.executable_snapshot_id,
-            envelope_id=_ensure_envelope(
-                mem_conn,
-                token_id=intent.token_id,
-                price=intent.limit_price,
-                size=18.19,
+            envelope_id="pre-existing-envelope",
+            submission_envelope=_entry_submission_envelope(
+                token_id=intent.token_id, price=intent.limit_price, size=18.19
             ),
             position_id="trd-pre",
             decision_id="dec-collision",
@@ -3737,6 +4056,8 @@ class TestLiveOrderCommandSplit:
             size=18.19,
             price=intent.limit_price,
             created_at="2026-04-26T00:00:00+00:00",
+            q_version="a" * 64,
+            decision_certificate_hash=intent.actionable_certificate_hash,
         )
         mem_conn.commit()
 
@@ -3782,7 +4103,10 @@ class TestLiveOrderCommandSplit:
             "_entry_actionable_certificate_payload_and_component",
             lambda *args, **kwargs: (
                 {"component": "entry_actionable_certificate", "allowed": True, "reason": "test"},
-                {"actionable_certificate_hash": "hash-test"},
+                {
+                    "actionable_certificate_hash": "hash-test",
+                    "strategy_key": "center_buy",
+                },
             ),
         )
         monkeypatch.setattr(
@@ -4116,7 +4440,7 @@ class TestExitOrderCommandSplit:
                 decision_id="dec-exit-gate",
             )
 
-        assert checked[:2] == ["live_venue_submit", "settlement_write"]
+        assert checked[:2] == ["reduce_only_exit_submit", "settlement_write"]
 
     def test_exit_persist_precedes_submit(self, mem_conn):
         """insert_command must run before place_limit_order (exit path)."""
@@ -4225,6 +4549,9 @@ class TestExitOrderCommandSplit:
         class DurableVisibilityClient:
             def bind_submission_envelope(self, envelope):
                 observed["bound_envelope"] = envelope
+
+            def bind_signed_submission_identity_persister(self, persister):
+                observed["identity_persister"] = persister
 
             def place_limit_order(self, **kwargs):
                 read_conn = get_connection(db_path)
@@ -4361,8 +4688,8 @@ class TestExitOrderCommandSplit:
 
         assert capability["action"] == "EXIT"
         assert capability["intent_kind"] == "EXIT"
-        assert capability["order_type"] == "FAK"
-        assert capability["venue_order_type"] == "FAK"
+        assert capability["order_type"] == "GTC"
+        assert capability["venue_order_type"] == "GTC"
         assert capability["risk_allocator_selected_order_type"] == "FOK"
         assert capability["allowed"] is True
         assert len(capability["capability_id"]) == 32
@@ -4384,7 +4711,7 @@ class TestExitOrderCommandSplit:
         assert components_by_name["decision_source_integrity"]["reason"] == "not_applicable_reduce_only"
         order_type_selection = components_by_name["order_type_selection"]["details"]
         assert order_type_selection["selected_order_type"] == "FOK"
-        assert order_type_selection["order_type"] == "FAK"
+        assert order_type_selection["order_type"] == "GTC"
 
     def test_exit_collateral_refresh_precedes_sell_preflight_and_proof(self, mem_conn, monkeypatch):
         """Exit sell collateral truth must refresh before the CTF sell preflight."""
@@ -4506,27 +4833,10 @@ class TestExitOrderCommandSplit:
             "SELECT command_id, state FROM venue_commands WHERE position_id = ?",
             ("trd-exit-pre-sdk-collateral",),
         ).fetchone()
-        assert command["state"] == "REJECTED"
-        events = list_events(mem_conn, command["command_id"])
-        event_types = [event["event_type"] for event in events]
-        assert "SUBMIT_REQUESTED" in event_types
-        assert "SUBMIT_REJECTED" in event_types
-        assert "REVIEW_REQUIRED" not in event_types
-        rejected = [event for event in events if event["event_type"] == "SUBMIT_REJECTED"][0]
-        payload = json.loads(rejected["payload_json"])
-        assert payload["reason"] == "pre_submit_collateral_reservation_failed"
-        assert payload["side_effect_boundary_crossed"] is False
-        assert payload["sdk_submit_attempted"] is False
+        assert command is None
         unknown_count, unknown_markets = count_unknown_side_effects(mem_conn)
         assert unknown_count == 0
         assert unknown_markets == ()
-        mutex = mem_conn.execute(
-            "SELECT released_at, release_reason FROM exit_mutex_holdings WHERE command_id = ?",
-            (command["command_id"],),
-        ).fetchone()
-        assert mutex is not None
-        assert mutex["released_at"] is not None
-        assert mutex["release_reason"] == "REJECTED"
 
     def test_exit_binds_pre_submit_and_persists_final_submit_envelope(self, mem_conn, monkeypatch):
         """Exit ACK uses the U1 pre-submit envelope and appends final SDK facts."""
@@ -4552,6 +4862,9 @@ class TestExitOrderCommandSplit:
 
             def bind_submission_envelope(self, envelope):
                 self.bound_envelope = envelope
+
+            def bind_signed_submission_identity_persister(self, persister):
+                self.identity_persister = persister
 
             def place_limit_order(self, **kwargs):
                 assert self.bound_envelope is not None
@@ -5127,6 +5440,7 @@ class TestExitOrderCommandSplit:
             size=effective_shares,
             price=limit_price,
             created_at="2026-04-26T00:00:00+00:00",
+            q_version="a" * 64,
         )
         mem_conn.commit()
 
@@ -5347,11 +5661,9 @@ class TestIdempotencyCollisionRetry:
             mem_conn,
             command_id="pre-cmd-acked",
             snapshot_id=intent.executable_snapshot_id,
-            envelope_id=_ensure_envelope(
-                mem_conn,
-                token_id=intent.token_id,
-                price=intent.limit_price,
-                size=18.19,
+            envelope_id="pre-cmd-acked-envelope",
+            submission_envelope=_entry_submission_envelope(
+                token_id=intent.token_id, price=intent.limit_price, size=18.19
             ),
             position_id="trd-pre-acked",
             decision_id="dec-coll-acked",
@@ -5363,6 +5675,8 @@ class TestIdempotencyCollisionRetry:
             size=18.19,
             price=intent.limit_price,
             created_at="2026-04-26T00:00:00+00:00",
+            q_version="a" * 64,
+            decision_certificate_hash=intent.actionable_certificate_hash,
         )
         # Advance to ACKED via SUBMIT_REQUESTED -> SUBMIT_ACKED
         append_event(
@@ -5424,11 +5738,9 @@ class TestIdempotencyCollisionRetry:
             mem_conn,
             command_id="pre-cmd-filled",
             snapshot_id=intent.executable_snapshot_id,
-            envelope_id=_ensure_envelope(
-                mem_conn,
-                token_id=intent.token_id,
-                price=intent.limit_price,
-                size=18.19,
+            envelope_id="pre-cmd-filled-envelope",
+            submission_envelope=_entry_submission_envelope(
+                token_id=intent.token_id, price=intent.limit_price, size=18.19
             ),
             position_id="trd-pre-filled",
             decision_id="dec-coll-filled",
@@ -5440,6 +5752,8 @@ class TestIdempotencyCollisionRetry:
             size=18.19,
             price=intent.limit_price,
             created_at="2026-04-26T00:00:00+00:00",
+            q_version="a" * 64,
+            decision_certificate_hash=intent.actionable_certificate_hash,
         )
         append_event(
             mem_conn,
@@ -5504,11 +5818,9 @@ class TestIdempotencyCollisionRetry:
             mem_conn,
             command_id="pre-cmd-rejected",
             snapshot_id=intent.executable_snapshot_id,
-            envelope_id=_ensure_envelope(
-                mem_conn,
-                token_id=intent.token_id,
-                price=intent.limit_price,
-                size=18.19,
+            envelope_id="pre-cmd-rejected-envelope",
+            submission_envelope=_entry_submission_envelope(
+                token_id=intent.token_id, price=intent.limit_price, size=18.19
             ),
             position_id="trd-pre-rejected",
             decision_id="dec-coll-rejected",
@@ -5520,6 +5832,8 @@ class TestIdempotencyCollisionRetry:
             size=18.19,
             price=intent.limit_price,
             created_at="2026-04-26T00:00:00+00:00",
+            q_version="a" * 64,
+            decision_certificate_hash=intent.actionable_certificate_hash,
         )
         append_event(
             mem_conn,
@@ -5672,7 +5986,10 @@ def test_v2_preflight_payload_shape(mem_conn, monkeypatch):
         "_entry_actionable_certificate_payload_and_component",
         lambda *args, **kwargs: (
             {"component": "entry_actionable_certificate", "allowed": True, "reason": "test"},
-            {"actionable_certificate_hash": "hash-test"},
+            {
+                "actionable_certificate_hash": "hash-test",
+                "strategy_key": "center_buy",
+            },
         ),
     )
     monkeypatch.setattr(

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import sqlite3
@@ -13,6 +14,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from src.data.day0_fast_obs import (
     FAST_OBS_SOURCE_ID,
+    FAST_RESIDUAL_CONDITIONING_SOURCE_ID,
     latest_fast_station_conditioning,
     metar_observation_time_from_raw,
 )
@@ -30,6 +32,70 @@ from src.state.db import _connect_read_only
 
 
 SOURCE_ID = "openmeteo_ecmwf_ifs9_bayes_fusion"
+
+
+def _raw_payload_sha256(raw_payload: object) -> str:
+    """Return the SHA-256 of an exact persisted provider payload, if present."""
+
+    if not isinstance(raw_payload, str) or not raw_payload:
+        return ""
+    return hashlib.sha256(raw_payload.encode("utf-8")).hexdigest()
+
+
+def _persisted_payload_sha256(
+    raw_payload: object,
+    provenance_json: object,
+) -> str:
+    """Return the persisted provider digest without weakening provenance.
+
+    Native observation writers may retain the provider body in ``raw_response``
+    or retain its exact SHA-256 in the mandatory ``provenance_json.payload_hash``
+    identity.  Both are durable provider-payload evidence; an absent body must
+    not erase the writer-validated digest.
+    """
+
+    raw_digest = _raw_payload_sha256(raw_payload)
+    if raw_digest:
+        return raw_digest
+    if not isinstance(provenance_json, str) or not provenance_json:
+        return ""
+    try:
+        provenance = json.loads(provenance_json)
+    except (TypeError, ValueError):
+        return ""
+    if not isinstance(provenance, Mapping):
+        return ""
+    payload_hash = str(provenance.get("payload_hash") or "").strip().lower()
+    if payload_hash.startswith("sha256:"):
+        payload_hash = payload_hash.removeprefix("sha256:")
+    if len(payload_hash) != 64:
+        return ""
+    try:
+        int(payload_hash, 16)
+    except ValueError:
+        return ""
+    return payload_hash
+
+
+def _persisted_extreme_source_time(
+    provenance_json: object,
+    *,
+    metric: str,
+    fallback: object,
+) -> str:
+    """Return the writer's exact source clock for this projected extreme."""
+
+    if isinstance(provenance_json, str) and provenance_json:
+        try:
+            provenance = json.loads(provenance_json)
+        except (TypeError, ValueError):
+            provenance = None
+        if isinstance(provenance, Mapping):
+            key = "hour_min_raw_ts" if metric == "low" else "hour_max_raw_ts"
+            source_time = provenance.get(key)
+            if _utc_instant(source_time) is not None:
+                return str(source_time)
+    return str(fallback or "")
 
 
 @dataclass(frozen=True)
@@ -227,6 +293,16 @@ def _cycle_at_or_after(candidate: str, floor: str | None) -> bool:
     return candidate_dt >= floor_dt
 
 
+def _utc_instant(value: object) -> datetime | None:
+    try:
+        parsed = datetime.fromisoformat(str(value or "").replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    if parsed.tzinfo is None:
+        return None
+    return parsed.astimezone(timezone.utc)
+
+
 def _path_from_metadata_path(
     path_text: object,
     *,
@@ -311,6 +387,14 @@ def _openmeteo_manifest_metadata_allows_target_date(
     if isinstance(dates, list) and dates:
         if target_date in {str(item).strip() for item in dates}:
             return True
+        # A run-pinned single-runs payload may contain several local days, but
+        # its manifest also binds target-specific precision metadata.  The
+        # planner must not call that dependency complete for another day: doing
+        # so suppresses the downloader while seed discovery correctly refuses
+        # the mismatched certificate.  Meta-stamped artifacts are the legacy
+        # multi-day contract and remain horizon-admissible after payload proof.
+        if str(metadata.get("openmeteo_endpoint") or "") != "standard_api_meta_stamped":
+            return False
         return _openmeteo_manifest_horizon_allows_target_date(
             metadata, target_date=target_date
         )
@@ -709,12 +793,9 @@ def _latest_authorized_day0_fact(
     ).strip().upper()
     decision_utc = decision_time.astimezone(timezone.utc)
     facts: list[dict[str, object]] = []
-    # A committed DAY0_EXTREME_UPDATED event owns the availability clock that
-    # the enqueue marker and posterior already bind.  The ledger may contain
-    # earlier/later duplicate renderings of that same raw METAR; retain this
-    # event clock when reducing the matching report below rather than moving a
-    # deployed marker backwards or forwards on a duplicate writer receipt.
-    event_availability_by_source_report: dict[tuple[str, str], str] = {}
+    # A committed DAY0_EXTREME_UPDATED event remains a separate candidate
+    # below.  Ledger rows retain their own source-issued and fetched clocks;
+    # an older event availability must not rewrite either one.
     if "observation_instants" in _table_names(conn):
         extreme_col = "running_min" if metric == "low" else "running_max"
         extreme_order = "ASC" if metric == "low" else "DESC"
@@ -739,11 +820,7 @@ def _latest_authorized_day0_fact(
         def optional_column(name: str) -> str:
             return name if name in instant_columns else f"NULL AS {name}"
 
-        availability_clause = (
-            "AND imported_at <= ?"
-            if "imported_at" in instant_columns
-            else "AND 0 = 1"
-        )
+        availability_clause = "" if "imported_at" in instant_columns else "AND 0 = 1"
         time_geometry_clause = " ".join(
             clause
             for column, clause in (
@@ -761,11 +838,7 @@ def _latest_authorized_day0_fact(
         query_params: tuple[object, ...] = (
             city,
             target_date,
-            decision_utc.isoformat(),
-            decision_utc.isoformat(),
         )
-        if "imported_at" in instant_columns:
-            query_params += (decision_utc.isoformat(),)
         station_identity_clause = ""
         if expected_station and "station_id" in instant_columns:
             station_identity_clause = (
@@ -809,7 +882,7 @@ def _latest_authorized_day0_fact(
             else:
                 source_identity_clause = "LOWER(COALESCE(source, '')) = ?"
                 query_params += (f"ogimet_metar_{expected_station.lower()}",)
-        row = conn.execute(
+        instant_rows = conn.execute(
             f"""
             WITH authorized AS (
                 SELECT CAST({extreme_col} AS REAL) AS observed_extreme_native,
@@ -818,13 +891,13 @@ def _latest_authorized_day0_fact(
                        source,
                        {optional_column('station_id')},
                        {optional_column('temp_unit')},
-                       {optional_column('imported_at')}
+                       {optional_column('imported_at')},
+                       {optional_column('raw_response')},
+                       {optional_column('provenance_json')}
                   FROM observation_instants
                  WHERE city = ?
                    AND target_date = ?
                    AND substr(local_timestamp, 1, 10) = target_date
-                   AND utc_timestamp <= ?
-                   AND datetime({observation_fact_time_sql}) <= datetime(?)
                    {availability_clause}
                    {time_geometry_clause}
                    {station_identity_clause}
@@ -853,26 +926,40 @@ def _latest_authorized_day0_fact(
                    AND {extreme_col} IS NOT NULL
             )
             SELECT observed_extreme_native,
-                   (
-                       SELECT MAX(observation_fact_time)
-                         FROM authorized
-                   ) AS observation_time,
+                   utc_timestamp,
+                   observation_fact_time AS observation_time,
                    (SELECT COUNT(*) FROM authorized) AS sample_count,
                    source AS observation_source,
                    station_id,
                    temp_unit,
-                   (
-                       SELECT MAX(COALESCE(imported_at, utc_timestamp))
-                         FROM authorized
-                   ) AS observation_available_at
-              FROM authorized
+                   raw_response,
+                   provenance_json,
+                   imported_at AS observation_available_at
+             FROM authorized
              ORDER BY {instant_order},
                       source DESC
-             LIMIT 1
             """,
             query_params,
-        ).fetchone()
-        if row is not None and row["observation_time"] and row["observed_extreme_native"] is not None:
+        ).fetchall()
+        # Keep every bounded local-day projection available until the
+        # append-only print ledger has canonicalized corrections below. A
+        # single SQL extreme can be retracted, while a later plateau row can
+        # own the writer-validated digest of the canonical extreme.
+        for row in instant_rows:
+            if not row["observation_time"] or row["observed_extreme_native"] is None:
+                continue
+            utc_clock = _utc_instant(row["utc_timestamp"])
+            fact_clock = _utc_instant(row["observation_time"])
+            available_clock = _utc_instant(row["observation_available_at"])
+            if (
+                utc_clock is None
+                or fact_clock is None
+                or available_clock is None
+                or utc_clock > decision_utc
+                or fact_clock > decision_utc
+                or available_clock > decision_utc
+            ):
+                continue
             facts.append(
                 {
                     "observed_extreme_native": float(row["observed_extreme_native"]),
@@ -884,6 +971,15 @@ def _latest_authorized_day0_fact(
                     "unit": str(row["temp_unit"] or "").strip().upper(),
                     "observation_available_at": str(
                         row["observation_available_at"] or row["observation_time"]
+                    ),
+                    "extreme_source_time": _persisted_extreme_source_time(
+                        row["provenance_json"],
+                        metric=metric,
+                        fallback=row["observation_time"],
+                    ),
+                    "raw_payload_sha256": _persisted_payload_sha256(
+                        row["raw_response"],
+                        row["provenance_json"],
                     ),
                 }
             )
@@ -1058,16 +1154,11 @@ def _latest_authorized_day0_fact(
                     "observation_available_at": str(
                         observation_available_at.isoformat()
                     ),
+                    "raw_payload_sha256": _raw_payload_sha256(
+                        str(event_row["payload_json"] or "")
+                    ),
                 }
             )
-            event_key = (
-                event_source,
-                observation_time.isoformat(),
-            )
-            existing_event_clock = event_availability_by_source_report.get(event_key)
-            event_clock = observation_available_at.isoformat()
-            if existing_event_clock is None or event_clock > existing_event_clock:
-                event_availability_by_source_report[event_key] = event_clock
             break
 
     # LEDGER FACT (day0 defect-ledger, 2026-07-16): a third candidate, over
@@ -1129,9 +1220,9 @@ def _latest_authorized_day0_fact(
                       FROM observation_prints
                      WHERE city = ?
                        AND source_channel IN ({placeholders})
-                       AND publish_ts_utc >= ?
-                       AND publish_ts_utc < ?
-                       AND publish_ts_utc <= ?
+                       AND julianday(publish_ts_utc) >= julianday(?)
+                       AND julianday(publish_ts_utc) < julianday(?)
+                       AND julianday(publish_ts_utc) <= julianday(?)
                        AND julianday(fetched_at_utc) <= julianday(?)
                     """,
                     (
@@ -1149,11 +1240,19 @@ def _latest_authorized_day0_fact(
                 # publication timestamp.  Those rows carry no second physical
                 # observation: collapse them on the report's source-issued
                 # valid time + channel + conditioned value, retaining the
-                # first causal publication.  This keeps the ledger's
+                # first causally available rendering.  This keeps the ledger's
                 # append-only audit trail intact while making every consumer
                 # share one conditioning identity with the Day0 event bridge.
-                canonical_prints: dict[
-                    tuple[str, str, float], tuple[str, str, float]
+                # A publication clock identifies one provider fact version.
+                # The ledger is append-only, so a correction is another row
+                # with the SAME clock and a later fetched_at.  Canonical truth
+                # is therefore latest-version-per-clock, followed by MAX/MIN
+                # across distinct clocks.  Including value in this identity
+                # made a retracted WU 37C coexist forever with its corrected
+                # 36C version and falsely turned the derived running high into
+                # an absorbing 37C boundary.
+                print_versions: dict[
+                    tuple[str, str, float], tuple[str, str, float, str]
                 ] = {}
                 for print_row in print_rows:
                     channel = str(print_row["source_channel"])
@@ -1208,8 +1307,18 @@ def _latest_authorized_day0_fact(
                         continue
                     publish_ts = str(print_row["publish_ts_utc"])
                     fetched_at = str(print_row["fetched_at_utc"])
+                    publish_clock = _utc_instant(publish_ts)
+                    fetched_clock = _utc_instant(fetched_at)
+                    if (
+                        publish_clock is None
+                        or fetched_clock is None
+                        or publish_clock < local_day_start_utc
+                        or publish_clock >= local_day_end_utc
+                        or publish_clock > decision_utc
+                        or fetched_clock > decision_utc
+                    ):
+                        continue
                     source_clock = publish_ts
-                    event_clock: str | None = None
                     if channel == FAST_OBS_SOURCE_ID:
                         try:
                             published_at = datetime.fromisoformat(
@@ -1226,61 +1335,164 @@ def _latest_authorized_day0_fact(
                                     ).isoformat()
                         except (TypeError, ValueError, OSError, OverflowError):
                             pass
-                    event_clock = event_availability_by_source_report.get(
-                        (channel, source_clock)
-                    )
-                    canonical_publish_ts = event_clock or publish_ts
-                    canonical_fetched_at = event_clock or fetched_at
-                    print_identity = (channel, source_clock, float(value))
-                    previous = canonical_prints.get(print_identity)
+                    source_clock_utc = _utc_instant(source_clock)
+                    if (
+                        source_clock_utc is None
+                        or source_clock_utc < local_day_start_utc
+                        or source_clock_utc >= local_day_end_utc
+                        or source_clock_utc > decision_utc
+                    ):
+                        continue
+                    source_clock = source_clock_utc.isoformat()
+                    canonical_publish_ts = publish_ts
+                    canonical_fetched_at = fetched_at
+                    version_identity = (channel, source_clock, float(value))
+                    previous = print_versions.get(version_identity)
                     if previous is None or (
-                        canonical_publish_ts,
                         canonical_fetched_at,
-                    ) < previous[:2]:
-                        canonical_prints[print_identity] = (
+                        canonical_publish_ts,
+                    ) < (previous[1], previous[0]):
+                        print_versions[version_identity] = (
                             canonical_publish_ts,
                             canonical_fetched_at,
                             float(value),
+                            str(print_row["raw_report"] or ""),
                         )
 
-                best_value: float | None = None
-                best_channel = ""
-                latest_clock_by_channel: dict[str, tuple[str, str]] = {}
-                for (channel, _source_clock, _value), (
-                    publish_ts,
-                    fetched_at,
-                    value,
-                ) in canonical_prints.items():
-                    previous_clock = latest_clock_by_channel.get(channel)
-                    if previous_clock is None or (publish_ts, fetched_at) > previous_clock:
-                        latest_clock_by_channel[channel] = (publish_ts, fetched_at)
-                    if best_value is None or (
-                        (metric == "high" and value > best_value)
-                        or (metric == "low" and value < best_value)
-                        or (
-                            value == best_value
-                            and publish_ts
-                            > latest_clock_by_channel.get(best_channel, ("", ""))[0]
-                        )
-                    ):
-                        best_value = value
-                        best_channel = channel
-                if best_value is not None:
-                    best_publish_ts, best_fetched_at = latest_clock_by_channel[
-                        best_channel
+                canonical_prints: dict[
+                    tuple[str, str], tuple[str, str, float, str]
+                ] = {}
+                for (channel, source_clock, _value), version in print_versions.items():
+                    identity = (channel, source_clock)
+                    previous = canonical_prints.get(identity)
+                    if previous is None or (
+                        version[1],
+                        version[0],
+                        version[2],
+                    ) > (previous[1], previous[0], previous[2]):
+                        canonical_prints[identity] = version
+
+                ledger_facts: list[dict[str, object]] = []
+                for channel in sorted({key[0] for key in canonical_prints}):
+                    channel_prints = [
+                        (source_clock, value)
+                        for (candidate_channel, source_clock), value in canonical_prints.items()
+                        if candidate_channel == channel
                     ]
-                    facts.append(
+                    if not channel_prints:
+                        continue
+                    best_value = (min if metric == "low" else max)(
+                        value[2] for _source_clock, value in channel_prints
+                    )
+                    best_clock, best = max(
+                        (
+                            item
+                            for item in channel_prints
+                            if item[1][2] == best_value
+                        ),
+                        key=lambda item: (item[0], item[1][0], item[1][1]),
+                    )
+                    frontier = max(
+                        (value for _source_clock, value in channel_prints),
+                        key=lambda item: (item[0], item[1]),
+                    )
+                    ledger_facts.append(
                         {
-                            "observed_extreme_native": best_value,
-                            "observation_time": best_publish_ts,
-                            "sample_count": len(canonical_prints),
-                            "source": f"observation_prints:{best_channel}",
-                            "observation_source": best_channel,
+                            "observed_extreme_native": float(best[2]),
+                            "observation_time": str(frontier[0]),
+                            "sample_count": len(channel_prints),
+                            "source": f"observation_prints:{channel}",
+                            "observation_source": channel,
                             "station_id": expected_station or "",
                             "unit": expected_unit,
-                            "observation_available_at": best_fetched_at,
+                            "observation_available_at": str(frontier[1]),
+                            "extreme_source_time": str(best_clock),
+                            "raw_payload_sha256": _raw_payload_sha256(
+                                str(best[3] or "")
+                            ),
                         }
                     )
+
+                if ledger_facts:
+                    ledger_channels = {
+                        str(fact["observation_source"]).strip().lower()
+                        for fact in ledger_facts
+                    }
+                    # observation_instants and DAY0 events are projections of
+                    # these exact publication channels.  Once the raw ledger
+                    # is present, letting a stale projection vote alongside it
+                    # makes one retracted print count twice and permanently
+                    # wins the MAX/MIN reduction.  Preserve independent source
+                    # channels, but replace same-channel projections with the
+                    # canonical latest-version ledger projection.
+                    projected_facts = facts
+                    for ledger_fact in ledger_facts:
+                        if str(ledger_fact.get("raw_payload_sha256") or "").strip():
+                            continue
+                        channel = str(
+                            ledger_fact.get("observation_source") or ""
+                        ).strip().lower()
+                        ledger_extreme_clock = _utc_instant(
+                            ledger_fact.get("extreme_source_time")
+                        )
+                        ledger_available_clock = _utc_instant(
+                            ledger_fact.get("observation_available_at")
+                        )
+                        if ledger_extreme_clock is None or ledger_available_clock is None:
+                            continue
+                        exact_projection = [
+                            fact
+                            for fact in projected_facts
+                            if str(fact.get("source") or "")
+                            == "durable_observation_instants"
+                            and str(
+                                fact.get("observation_source") or ""
+                            ).strip().lower()
+                            == channel
+                            and str(fact.get("station_id") or "").strip().upper()
+                            == expected_station
+                            and str(fact.get("unit") or "").strip().upper()
+                            == expected_unit
+                            and str(fact.get("raw_payload_sha256") or "").strip()
+                            and (
+                                _utc_instant(fact.get("extreme_source_time"))
+                                == ledger_extreme_clock
+                                or _utc_instant(
+                                    fact.get("observation_available_at")
+                                )
+                                == ledger_available_clock
+                            )
+                        ]
+                        if exact_projection:
+                            ledger_fact["raw_payload_sha256"] = max(
+                                exact_projection,
+                                key=lambda fact: _utc_instant(
+                                    fact.get("observation_available_at")
+                                )
+                                or datetime.min.replace(tzinfo=timezone.utc),
+                            )["raw_payload_sha256"]
+                    facts = [
+                        fact
+                        for fact in projected_facts
+                        if str(fact.get("observation_source") or "").strip().lower()
+                        not in ledger_channels
+                    ]
+                    if {
+                        "wu_icao_history",
+                        "aviationweather_metar",
+                    }.issubset(ledger_channels):
+                        facts = [
+                            fact
+                            for fact in facts
+                            if str(
+                                fact.get("observation_source") or ""
+                            ).strip().lower()
+                            not in {
+                                "same_station_fast_tail",
+                                FAST_RESIDUAL_CONDITIONING_SOURCE_ID,
+                            }
+                        ]
+                    facts.extend(ledger_facts)
 
     def fact_time(fact: Mapping[str, object]) -> datetime:
         parsed = datetime.fromisoformat(
@@ -1334,6 +1546,27 @@ def _latest_authorized_day0_fact(
     candidates = [fact for fact in facts if fact_extreme(fact) == best_extreme]
     winner = max(candidates, key=fact_time)
     winner_source = str(winner.get("observation_source") or "").strip().lower()
+    if not str(winner.get("raw_payload_sha256") or "").strip():
+        # The append-only observation_prints migration ledger can carry the
+        # same native source print without retaining its provider body.  The
+        # canonical observation row still owns the writer-validated payload
+        # digest. Preserve that exact digest across duplicate representations
+        # of the same source/extreme; absence on both surfaces remains absent.
+        provenance_candidates = [
+            fact
+            for fact in candidates
+            if (
+                str(fact.get("observation_source") or "").strip().lower()
+                == winner_source
+                and len(str(fact.get("raw_payload_sha256") or "").strip()) == 64
+            )
+        ]
+        if provenance_candidates:
+            winner = dict(winner)
+            winner["raw_payload_sha256"] = max(
+                provenance_candidates,
+                key=fact_time,
+            )["raw_payload_sha256"]
     same_source_facts = [
         fact
         for fact in facts
@@ -1428,11 +1661,30 @@ def _day0_observation_lag_reason(
         else:
             served_source = ""
             served_extreme_c = float("nan")
+        same_station = True
+        if served_source == FAST_RESIDUAL_CONDITIONING_SOURCE_ID:
+            served_likelihood = (
+                conditioning.get("fast_residual_likelihood")
+                if isinstance(conditioning, Mapping)
+                else None
+            )
+            latest_likelihood = getattr(fast, "likelihood", None)
+            served_station = (
+                str(served_likelihood.get("station_id") or "").strip().upper()
+                if isinstance(served_likelihood, Mapping)
+                else ""
+            )
+            latest_station = str(
+                getattr(latest_likelihood, "station_id", "") or ""
+            ).strip().upper()
+            same_station = bool(served_station) and served_station == latest_station
         if latest_at.tzinfo is None:
             latest_at = latest_at.replace(tzinfo=timezone.utc)
         latest_at = latest_at.astimezone(timezone.utc)
         if (
-            served_source == FAST_OBS_SOURCE_ID
+            served_source
+            in {FAST_OBS_SOURCE_ID, FAST_RESIDUAL_CONDITIONING_SOURCE_ID}
+            and same_station
             and abs(served_extreme_c - fast.observed_extreme_c) <= 1e-9
             and served_at is not None
             and latest_at <= served_at
@@ -2075,7 +2327,9 @@ def build_replacement_forecast_current_target_plan(
         # predicate now keys on the certified bootstrap basis (single authority:
         # cycle_policy). Schema-conditional like the queue clause.
         posterior_tradeable_grade_clause = tradeable_grade_coverage_sql(
-            posterior_columns=posterior_columns, alias="p."
+            posterior_columns=posterior_columns,
+            decision_time=_ref_clock,
+            alias="p.",
         )
         if source_run_targets and "dependency_source_run_ids_json" not in posterior_columns:
             return _blocked_plan("REPLACEMENT_CURRENT_TARGET_PLAN_SOURCE_RUN_DEPENDENCY_SCHEMA_MISSING")

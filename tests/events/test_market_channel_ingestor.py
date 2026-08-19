@@ -1,12 +1,13 @@
 # Created: 2026-05-24
-# Last reused/audited: 2026-07-28
-# Authority basis: EDLI v1 implementation prompt §10 online MarketChannelIngestor contract.
+# Last reused/audited: 2026-08-08
+# Authority basis: EDLI v1 implementation prompt §10 online MarketChannelIngestor contract; bounded TRADE writer micro-batch hotfix.
 from __future__ import annotations
 
 import asyncio
 import json
 import sqlite3
 import threading
+import time
 from contextlib import nullcontext
 from datetime import datetime, timezone
 
@@ -61,6 +62,73 @@ def _metadata(token_id: str = "token-1", *, outcome_label: str = "YES") -> dict[
             executable_snapshot_id="snap-1",
         )
     }
+
+
+def test_quote_flush_batch_is_service_local_and_does_not_mutate_other_service():
+    """Background service batching cannot change an independently created service."""
+    from src.events.triggers import market_channel_ingestor as module
+
+    class _PendingCoalescer:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def pending_counts(self) -> dict[str, int]:
+            self.calls += 1
+            return {"lossless": 1, "market": 0} if self.calls == 1 else {"lossless": 0, "market": 0}
+
+    def _flush_budget(service: MarketChannelOnlineService) -> list[int]:
+        service.ingestor._coalescer = _PendingCoalescer()
+        observed: list[int] = []
+        done = asyncio.Event()
+        wake = asyncio.Event()
+        initial_seed_done = asyncio.Event()
+        wake.set()
+        initial_seed_done.set()
+
+        def _flush(*, market_budget, **_kwargs) -> list[object]:
+            observed.append(market_budget)
+            done.set()
+            return []
+
+        service.ingestor.flush_coalesced = _flush  # type: ignore[method-assign]
+        asyncio.run(
+            service._flush_quote_projection_forever(
+                connection_done=done,
+                wake=wake,
+                initial_seed_done=initial_seed_done,
+                active_token_ids=set(),
+                write_gate=nullcontext(),
+                commit=None,
+                rollback=None,
+                logger=None,
+            )
+        )
+        return observed
+
+    conn_a, writer_a = _conn_writer()
+    conn_b, writer_b = _conn_writer()
+    try:
+        background = MarketChannelOnlineService(
+            MarketChannelIngestor(
+                writer_a,
+                active_token_ids=set(),
+                coalescer=EventCoalescer(),
+            ),
+            quote_flush_batch_size=16,
+        )
+        foreground = MarketChannelOnlineService(
+            MarketChannelIngestor(
+                writer_b,
+                active_token_ids=set(),
+                coalescer=EventCoalescer(),
+            ),
+        )
+        assert _flush_budget(background) == [16]
+        assert _flush_budget(foreground) == [module.MARKET_CHANNEL_QUOTE_FLUSH_BATCH_SIZE]
+        assert module.MARKET_CHANNEL_QUOTE_FLUSH_BATCH_SIZE == 128
+    finally:
+        conn_a.close()
+        conn_b.close()
 
 
 def test_execution_feasibility_schema_indexes_token_created_at():
@@ -595,6 +663,47 @@ def test_quote_cache_seeded_from_rest_on_connect():
     assert latest_rows[1] == ("sell_yes", 0.48, 0.52, None)
 
 
+def test_selective_audit_token_appends_every_full_depth_quote():
+    conn, writer = _conn_writer()
+    audit_tokens = {"token-1"}
+    metadata = {
+        **_metadata("token-1"),
+        **_metadata("token-2"),
+    }
+    ingestor = MarketChannelIngestor(
+        writer,
+        active_token_ids=set(metadata),
+        token_metadata=metadata,
+        append_evidence_token_ids=lambda: set(audit_tokens),
+    )
+    service = MarketChannelOnlineService(
+        ingestor,
+        fetch_orderbook=lambda token_id: {
+            "asset_id": token_id,
+            "market": "0xcondition",
+            "bids": [{"price": "0.48", "size": "10"}],
+            "asks": [{"price": "0.52", "size": "10"}],
+            "hash": f"hash-{token_id}",
+        },
+    )
+
+    service.on_connect(received_at="2026-08-13T08:44:00+00:00")
+
+    assert conn.execute(
+        "SELECT token_id,direction,depth_before_json "
+        "FROM execution_feasibility_evidence"
+    ).fetchall() == [
+        (
+            "token-1",
+            "buy_yes",
+            '{"asks": [{"price": "0.52", "size": "10"}], "bids": [{"price": "0.48", "size": "10"}]}',
+        )
+    ]
+    assert conn.execute(
+        "SELECT COUNT(*) FROM execution_feasibility_latest"
+    ).fetchone()[0] == 4
+
+
 def test_buffered_older_delta_cannot_regress_seeded_quote():
     conn, writer = _conn_writer()
     cache = QuoteCache()
@@ -1090,7 +1199,7 @@ def test_rest_seed_preserves_partial_batch_before_single_fetch_embargo():
     assert single_fetches == ["token-2"]
 
 
-def test_quote_projection_pump_commits_one_available_stream_batch():
+def test_quote_projection_pump_commits_bounded_stream_batches():
     conn, writer = _conn_writer()
     metadata = {
         f"token-{idx}": _metadata(f"token-{idx}")[f"token-{idx}"]
@@ -1140,7 +1249,7 @@ def test_quote_projection_pump_commits_one_available_stream_batch():
         )
     )
 
-    assert commits == [200]
+    assert commits == list(range(8, 201, 8))
     assert ingestor._coalescer.pending_counts() == {"lossless": 0, "market": 0}
 
 
@@ -1217,13 +1326,199 @@ def test_quote_projection_pump_rate_limits_only_burst_commits(monkeypatch):
 
     assert commits == 2
     assert sleeps == pytest.approx(
-        [market_channel.MARKET_CHANNEL_QUOTE_MIN_COMMIT_INTERVAL_SECONDS]
+        [0, market_channel.MARKET_CHANNEL_QUOTE_MIN_COMMIT_INTERVAL_SECONDS]
     )
     assert conn.execute(
         "SELECT best_bid_before, best_ask_before "
         "FROM execution_feasibility_latest "
         "WHERE token_id='token-1' AND direction='buy_yes'"
     ).fetchone() == (0.49, 0.53)
+
+
+def test_quote_projection_pump_yields_trade_gate_between_bounded_batches():
+    total_quotes = 16
+    token_ids = {f"token-{index}" for index in range(total_quotes)}
+    metadata = {
+        token_id: _metadata(token_id)[token_id]
+        for token_id in token_ids
+    }
+    conn, writer = _conn_writer()
+    ingestor = MarketChannelIngestor(
+        writer,
+        active_token_ids=token_ids,
+        token_metadata=metadata,
+        coalescer=EventCoalescer(max_market_keys=total_quotes),
+    )
+    for token_id in sorted(token_ids):
+        ingestor.handle_message(
+            {
+                "event_type": "best_bid_ask",
+                "asset_id": token_id,
+                "market": "0xcondition",
+                "best_bid": "0.48",
+                "best_ask": "0.52",
+            },
+            received_at="2026-08-04T12:00:00+00:00",
+        )
+
+    gate_events: list[str] = []
+    background_windows: list[int] = []
+    completed = 0
+    gate_held = False
+
+    class Gate:
+        def __enter__(self):
+            nonlocal gate_held
+            assert not gate_held
+            gate_held = True
+            gate_events.append("enter")
+            return self
+
+        def __exit__(self, _exc_type, _exc, _tb):
+            nonlocal gate_held
+            gate_held = False
+            gate_events.append("exit")
+            return False
+
+    async def background_lease_probe() -> None:
+        while completed < total_quotes:
+            await asyncio.sleep(0)
+            if not gate_held and completed < total_quotes:
+                background_windows.append(completed)
+                return
+
+    def commit() -> None:
+        nonlocal completed
+        conn.commit()
+        completed = conn.execute(
+            "SELECT COUNT(*) FROM execution_feasibility_latest"
+        ).fetchone()[0] // 2
+
+    service = MarketChannelOnlineService(ingestor, quote_flush_batch_size=total_quotes)
+    wake = asyncio.Event()
+    wake.set()
+    connection_done = asyncio.Event()
+    connection_done.set()
+    initial_seed_done = asyncio.Event()
+    initial_seed_done.set()
+
+    async def run() -> None:
+        probe = asyncio.create_task(background_lease_probe())
+        await service._flush_quote_projection_forever(
+            wake=wake,
+            connection_done=connection_done,
+            initial_seed_done=initial_seed_done,
+            active_token_ids=token_ids,
+            write_gate=Gate(),
+            commit=commit,
+            rollback=conn.rollback,
+            logger=None,
+        )
+        await probe
+
+    asyncio.run(run())
+
+    assert completed == total_quotes
+    assert gate_events == [
+        event
+        for _ in range(total_quotes // service.quote_write_batch_size)
+        for event in ("enter", "exit")
+    ]
+    assert background_windows and 0 < background_windows[0] < total_quotes
+    assert conn.execute("SELECT COUNT(*) FROM execution_feasibility_latest").fetchone()[0] == 32
+
+
+def test_quote_projection_failure_requeues_unfinished_quotes_atomically(monkeypatch):
+    token_ids = {"token-1", "token-2", "token-3"}
+    metadata = {
+        token_id: _metadata(token_id)[token_id]
+        for token_id in token_ids
+    }
+    conn, writer = _conn_writer()
+    ingestor = MarketChannelIngestor(
+        writer,
+        active_token_ids=token_ids,
+        token_metadata=metadata,
+        coalescer=EventCoalescer(max_market_keys=3),
+    )
+    for token_id in sorted(token_ids):
+        ingestor.handle_message(
+            {
+                "event_type": "best_bid_ask",
+                "asset_id": token_id,
+                "market": "0xcondition",
+                "best_bid": "0.48",
+                "best_ask": "0.52",
+            },
+            received_at="2026-08-04T12:00:00+00:00",
+        )
+
+    sleep_calls: list[float] = []
+
+    async def fake_sleep(delay: float) -> None:
+        sleep_calls.append(delay)
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+    commit_calls = 0
+
+    def flaky_commit() -> None:
+        nonlocal commit_calls
+        commit_calls += 1
+        if commit_calls in {2, 3}:
+            raise sqlite3.OperationalError("database is locked")
+        conn.commit()
+
+    service = MarketChannelOnlineService(
+        ingestor,
+        quote_flush_batch_size=3,
+        quote_write_batch_size=2,
+    )
+    wake = asyncio.Event()
+    wake.set()
+    connection_done = asyncio.Event()
+    connection_done.set()
+    initial_seed_done = asyncio.Event()
+    initial_seed_done.set()
+
+    async def flush() -> None:
+        await service._flush_quote_projection_forever(
+            wake=wake,
+            connection_done=connection_done,
+            initial_seed_done=initial_seed_done,
+            active_token_ids=token_ids,
+            write_gate=nullcontext(),
+            commit=flaky_commit,
+            rollback=conn.rollback,
+            logger=None,
+        )
+
+    asyncio.run(flush())
+
+    assert sleep_calls == [0, pytest.approx(0.05)]
+    assert ingestor._coalescer.pending_counts() == {"lossless": 0, "market": 1}
+    assert len(ingestor._seen_quote_event_ids) == 2
+    assert conn.execute("SELECT COUNT(*) FROM execution_feasibility_latest").fetchone()[0] == 4
+    assert conn.execute(
+        "SELECT COUNT(*) FROM execution_feasibility_latest WHERE token_id='token-3'"
+    ).fetchone()[0] == 0
+
+    wake.set()
+    asyncio.run(
+        service._flush_quote_projection_forever(
+            wake=wake,
+            connection_done=connection_done,
+            initial_seed_done=initial_seed_done,
+            active_token_ids=token_ids,
+            write_gate=nullcontext(),
+            commit=conn.commit,
+            rollback=conn.rollback,
+            logger=None,
+        )
+    )
+
+    assert ingestor._coalescer.pending_counts() == {"lossless": 0, "market": 0}
+    assert len(ingestor._seen_quote_event_ids) == 3
+    assert conn.execute("SELECT COUNT(*) FROM execution_feasibility_latest").fetchone()[0] == 6
 
 
 def test_websocket_subscribes_before_rest_seed(monkeypatch):
@@ -1732,6 +2027,9 @@ def test_bba_only_quote_queues_and_repairs_missing_depth(tmp_path):
     assert service._current_generation_depth_tokens == set()
 
     quote_flush_wake = asyncio.Event()
+    prior_cache = ingestor.quote_cache.get("token-1")
+    assert prior_cache is not None
+    assert prior_cache.depth_json is None
     written = asyncio.run(
         service._repair_missing_depth_once(
             active_token_ids={"token-1"},
@@ -1745,8 +2043,10 @@ def test_bba_only_quote_queues_and_repairs_missing_depth(tmp_path):
     assert written == 1
     assert fetch_batches == [["token-1"]]
     assert service._missing_depth_tokens == {"token-1"}
-    assert service._depth_repair_inflight_tokens == {"token-1"}
-    assert ingestor.quote_cache.get("token-1").depth_json is not None
+    # The repair is only prepared/enqueued here.  No cache or inflight state
+    # may claim durability until the coalesced TRADE append commits.
+    assert service._depth_repair_inflight_tokens == set()
+    assert ingestor.quote_cache.get("token-1") is prior_cache
     assert quote_flush_wake.is_set()
     assert conn.in_transaction is False
 
@@ -1763,7 +2063,8 @@ def test_bba_only_quote_queues_and_repairs_missing_depth(tmp_path):
         ingestor.flush_coalesced(commit=fail_commit, rollback=conn.rollback)
     assert coalescer.pending_counts() == {"lossless": 0, "market": 1}
     assert service._missing_depth_tokens == {"token-1"}
-    assert service._depth_repair_inflight_tokens == {"token-1"}
+    assert service._depth_repair_inflight_tokens == set()
+    assert ingestor.quote_cache.get("token-1") is prior_cache
     assert independent.execute(
         "SELECT depth_before_json FROM execution_feasibility_latest "
         "WHERE token_id='token-1' AND direction='buy_yes'"
@@ -1786,7 +2087,8 @@ def test_bba_only_quote_queues_and_repairs_missing_depth(tmp_path):
             depth_repair_wake=asyncio.Event(),
         )
     )
-    assert service._missing_depth_tokens == set()
+    assert ingestor.quote_cache.get("token-1").depth_json is not None
+    assert service._missing_depth_tokens == {"token-1"}
     assert service._depth_repair_inflight_tokens == set()
     assert independent.execute(
         "SELECT depth_before_json FROM execution_feasibility_latest "
@@ -2217,6 +2519,170 @@ def test_coalesced_quote_commit_failure_requeues_without_false_dedupe():
     assert seen == [results[0].event_id]
 
 
+def test_coalesced_pending_watermark_keeps_newest_quote_through_requeue():
+    conn, writer = _conn_writer()
+    seen: list[str] = []
+    coalescer = EventCoalescer(max_market_keys=8)
+    ingestor = MarketChannelIngestor(
+        writer,
+        active_token_ids={"token-1"},
+        token_metadata=_metadata(),
+        coalescer=coalescer,
+        market_event_sink=lambda events: seen.extend(event.event_id for event in events),
+        market_event_sink_independently_coordinated=True,
+    )
+
+    def book(*, quote_seen_at: str, book_hash: str) -> dict[str, object]:
+        return {
+            "event_type": "book",
+            "asset_id": "token-1",
+            "market": "0xcondition",
+            "bids": [{"price": "0.48", "size": "10"}],
+            "asks": [{"price": "0.52", "size": "10"}],
+            "hash": book_hash,
+            "timestamp": quote_seen_at,
+        }
+
+    t2 = book(quote_seen_at="2026-07-30T12:00:02+00:00", book_hash="t2")
+    t1 = book(quote_seen_at="2026-07-30T12:00:01+00:00", book_hash="t1")
+    t3 = book(quote_seen_at="2026-07-30T12:00:03+00:00", book_hash="t3")
+    t3_event = ingestor.event_from_message(t3, received_at="2026-07-30T12:00:03+00:00")
+    assert t3_event is not None
+
+    assert ingestor.handle_message(t2, received_at="2026-07-30T12:00:02+00:00") is None
+    assert ingestor.handle_message(t1, received_at="2026-07-30T12:00:01+00:00") is None
+    assert ingestor._pending_quote_seen_at == {
+        "token-1": "2026-07-30T12:00:02+00:00"
+    }
+    assert coalescer.pending_counts() == {"lossless": 0, "market": 1}
+
+    prepared = ingestor.prepare_coalesced_quote_flush(market_budget=1)
+    assert len(prepared.quotes) == 1
+    ingestor.write_prepared_quote_events(prepared.quotes)
+    conn.rollback()
+    assert ingestor.quote_cache.get("token-1") is None
+    assert ingestor._seen_quote_event_ids == set()
+    assert seen == []
+
+    assert ingestor.handle_message(t3, received_at="2026-07-30T12:00:03+00:00") is None
+    ingestor.requeue_prepared_coalesced_quotes(prepared)
+    assert ingestor._pending_quote_seen_at == {
+        "token-1": "2026-07-30T12:00:03+00:00"
+    }
+    assert coalescer.pending_counts() == {"lossless": 0, "market": 1}
+
+    results = ingestor.flush_coalesced(commit=conn.commit, rollback=conn.rollback)
+
+    assert [result.event_id for result in results if result.inserted] == [t3_event.event_id]
+    assert conn.execute(
+        "SELECT DISTINCT book_hash_before FROM execution_feasibility_latest"
+    ).fetchall() == [("t3",)]
+    assert ingestor.quote_cache.get("token-1").book_hash == "t3"
+    assert ingestor._seen_quote_event_ids == {t3_event.event_id}
+    assert seen == [t3_event.event_id]
+
+
+def test_prepared_quote_rows_are_deterministic_from_event_clock():
+    conn, writer = _conn_writer()
+    ingestor = MarketChannelIngestor(
+        writer,
+        active_token_ids={"token-1"},
+        token_metadata=_metadata(),
+    )
+    event = ingestor.event_from_message(
+        {
+            "event_type": "book",
+            "asset_id": "token-1",
+            "market": "0xcondition",
+            "bids": [{"price": "0.48", "size": "10"}],
+            "asks": [{"price": "0.52", "size": "10"}],
+            "hash": "stable-event",
+            "timestamp": "2026-07-30T12:00:00+00:00",
+        },
+        received_at="2026-07-30T12:00:05+00:00",
+    )
+    assert event is not None
+
+    first = ingestor.prepare_quote_events((event,))
+    second = ingestor.prepare_quote_events((event,))
+
+    assert first == second
+    assert json.dumps(first[0].evidence_rows, sort_keys=True) == json.dumps(
+        second[0].evidence_rows,
+        sort_keys=True,
+    )
+    assert {
+        row["created_at"] for row in first[0].evidence_rows
+    } == {"2026-07-30T12:00:00+00:00"}
+
+
+def test_real_trade_lock_rolls_back_and_retries_latest_quote(tmp_path):
+    """A real 25ms WAL timeout leaves the newest coalesced quote retryable."""
+    db_path = tmp_path / "trades.db"
+    conn = sqlite3.connect(db_path, timeout=0.025)
+    init_schema_trade_only(conn)
+    from src.state.schema.execution_feasibility_evidence_schema import ensure_table
+
+    ensure_table(conn)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout = 25")
+    coalescer = EventCoalescer(max_market_keys=8)
+    ingestor = MarketChannelIngestor(
+        None,
+        active_token_ids={"token-1"},
+        token_metadata=_metadata(),
+        feasibility_conn=conn,
+        coalescer=coalescer,
+    )
+    assert ingestor.handle_message(
+        {
+            "event_type": "book",
+            "asset_id": "token-1",
+            "market": "0xcondition",
+            "bids": [{"price": "0.48", "size": "10"}],
+            "asks": [{"price": "0.52", "size": "10"}],
+            "hash": "locked-latest-hash",
+            "timestamp": "1766789469958",
+        },
+        received_at="2026-05-24T10:00:00+00:00",
+    ) is None
+
+    holder = sqlite3.connect(db_path, timeout=0.025)
+    holder.execute("PRAGMA journal_mode=WAL")
+    holder.execute("BEGIN IMMEDIATE")
+    started = time.monotonic()
+    try:
+        with ingestor.defer_market_event_sink():
+            with pytest.raises(sqlite3.OperationalError, match="database is locked"):
+                ingestor.flush_coalesced(
+                    market_budget=1,
+                    commit=conn.commit,
+                    rollback=conn.rollback,
+                )
+        assert time.monotonic() - started < 0.5
+        assert coalescer.pending_counts() == {"lossless": 0, "market": 1}
+        assert conn.execute(
+            "SELECT COUNT(*) FROM execution_feasibility_latest"
+        ).fetchone()[0] == 0
+    finally:
+        holder.rollback()
+        holder.close()
+
+    with ingestor.defer_market_event_sink():
+        results = ingestor.flush_coalesced(
+            market_budget=1,
+            commit=conn.commit,
+            rollback=conn.rollback,
+        )
+    assert len(results) == 1
+    assert coalescer.pending_counts() == {"lossless": 0, "market": 0}
+    assert conn.execute(
+        "SELECT book_hash_before FROM execution_feasibility_latest "
+        "WHERE token_id = 'token-1' AND direction = 'buy_yes'"
+    ).fetchone() == ("locked-latest-hash",)
+    conn.close()
+
+
 def test_quote_write_backpressure_retains_websocket_and_latest_event(monkeypatch):
     import websockets
 
@@ -2383,6 +2849,11 @@ def test_quote_burst_coalesces_before_bounded_write_retry(monkeypatch):
     assert gate.enters <= 4
     assert service.quote_projection_backpressure_count == gate.enters - 1
     assert coalescer.pending_counts() == {"lossless": 0, "market": 1}
+    # The bounded writer has not committed the retained latest quote, so the
+    # cache must not advertise phantom durability.  A later successful flush
+    # commits and then finalizes that exact coalesced quote.
+    assert ingestor.quote_cache.get("token-1") is None
+    ingestor.flush_coalesced(commit=conn.commit, rollback=conn.rollback)
     assert ingestor.quote_cache.get("token-1").book_hash == "burst-100"
 
 
@@ -2537,7 +3008,7 @@ def test_disconnect_transition_commits_after_rollback(monkeypatch):
     assert transitions == [("connected",), ("disconnected",)]
 
 
-def test_rest_seed_commits_deferred_sink_inside_world_writer_gate():
+def test_rest_seed_commits_then_publishes_deferred_sink_once_outside_writer_gate():
     conn, writer = _conn_writer()
     conn.execute("CREATE TABLE derived_sink_writes (event_id TEXT PRIMARY KEY)")
     order: list[str] = []
@@ -2557,12 +3028,14 @@ def test_rest_seed_commits_deferred_sink_inside_world_writer_gate():
             return False
 
     def sink(events) -> None:  # noqa: ANN001
-        assert held is True
+        assert held is False
+        assert conn.in_transaction is False
         order.append("sink")
         conn.executemany(
             "INSERT INTO derived_sink_writes(event_id) VALUES (?)",
             [(event.event_id,) for event in events],
         )
+        conn.commit()
 
     def commit() -> None:
         conn.commit()
@@ -2594,7 +3067,8 @@ def test_rest_seed_commits_deferred_sink_inside_world_writer_gate():
     )
 
     assert written == 1
-    assert order == ["enter", "sink", "commit", "exit"]
+    assert order == ["enter", "commit", "exit", "sink"]
+    assert order.count("sink") == 1
     assert conn.in_transaction is False
     assert conn.execute("SELECT COUNT(*) FROM derived_sink_writes").fetchone()[0] == 1
 
@@ -3214,6 +3688,79 @@ def test_reconnect_rest_seed_chunks_preserve_gap_snapshot_and_commit_progressive
     assert service.gap_start is None
 
 
+def test_reconnect_rest_seed_commit_failure_rolls_back_and_rebuilds_on_retry():
+    from contextlib import nullcontext
+
+    conn, writer = _conn_writer()
+    emitted: list[str] = []
+    ingestor = MarketChannelIngestor(
+        writer,
+        active_token_ids={"token-1"},
+        token_metadata=_metadata(),
+        quote_cache=QuoteCache(),
+        market_event_sink=lambda events: emitted.extend(event.event_id for event in events),
+        market_event_sink_independently_coordinated=True,
+    )
+    fetch_calls: list[str] = []
+
+    def fetch(token_id: str) -> dict[str, object]:
+        fetch_calls.append(token_id)
+        return {
+            "asset_id": token_id,
+            "event_type": "book",
+            "market": "0xcondition",
+            "bids": [{"price": "0.48", "size": "10"}],
+            "asks": [{"price": "0.52", "size": "10"}],
+            "hash": "retryable-reconnect-book",
+        }
+
+    service = MarketChannelOnlineService(ingestor, fetch_orderbook=fetch)
+    service.gap_start = "2026-07-30T11:58:00+00:00"
+
+    def locked_commit() -> None:
+        raise sqlite3.OperationalError("database is locked")
+
+    assert service.reconnect_rest_books_in_chunks(
+        token_ids={"token-1"},
+        received_at="2026-07-30T12:00:00+00:00",
+        write_gate=nullcontext(),
+        commit=locked_commit,
+        chunk_size=1,
+    ) == 0
+    assert service.rest_seed_backpressure_count == 1
+    assert service.rest_seed_backpressure_reason == "database is locked"
+    assert service.gap_start == "2026-07-30T11:58:00+00:00"
+    assert conn.in_transaction is False
+    assert conn.execute(
+        "SELECT COUNT(*) FROM execution_feasibility_latest"
+    ).fetchone()[0] == 0
+    assert conn.execute(
+        "SELECT COUNT(*) FROM market_channel_connectivity_events"
+    ).fetchone()[0] == 0
+    assert ingestor.quote_cache.get("token-1") is None
+    assert ingestor._seen_quote_event_ids == set()
+    assert emitted == []
+
+    assert service.reconnect_rest_books_in_chunks(
+        token_ids={"token-1"},
+        received_at="2026-07-30T12:00:00+00:00",
+        write_gate=nullcontext(),
+        commit=conn.commit,
+        chunk_size=1,
+    ) == 1
+    assert fetch_calls == ["token-1", "token-1"]
+    assert conn.execute(
+        "SELECT COUNT(*) FROM execution_feasibility_latest"
+    ).fetchone()[0] == 2
+    assert conn.execute(
+        "SELECT COUNT(*) FROM market_channel_connectivity_events"
+    ).fetchone()[0] == 1
+    assert ingestor.quote_cache.get("token-1").book_hash == "retryable-reconnect-book"
+    assert len(ingestor._seen_quote_event_ids) == 1
+    assert emitted == list(ingestor._seen_quote_event_ids)
+    assert service.gap_start is None
+
+
 def test_market_channel_quote_updates_latest_without_appending_history():
     conn, writer = _conn_writer()
     ingestor = MarketChannelIngestor(writer, active_token_ids={"token-1"}, token_metadata=_metadata())
@@ -3635,17 +4182,165 @@ def test_market_channel_refresh_queue_retries_exception_without_reinvalidating()
     assert service.refresh_action_dropped_count == 0
 
 
-def test_market_channel_condition_refresh_does_not_fallback_to_unrelated_markets():
-    from src.ingest.price_channel_ingest import _edli_filter_markets_for_condition
+def test_market_channel_condition_refresh_reconstructs_family_then_trims_siblings(monkeypatch):
+    import src.data.market_scanner as market_scanner
+    from src.ingest.price_channel_ingest import (
+        _edli_market_channel_refresh_kwargs,
+        _edli_reconstruct_exact_market_channel_market,
+    )
 
-    markets = [
-        {"condition_id": "condition-top", "outcomes": []},
-        {"condition_id": "condition-other", "outcomes": [{"condition_id": "condition-child"}]},
+    forecasts = sqlite3.connect(":memory:")
+    forecasts.row_factory = sqlite3.Row
+    forecasts.executescript(
+        """
+        CREATE TABLE market_events (
+            event_id INTEGER PRIMARY KEY,
+            market_slug TEXT NOT NULL,
+            city TEXT NOT NULL,
+            target_date TEXT NOT NULL,
+            temperature_metric TEXT NOT NULL,
+            condition_id TEXT,
+            token_id TEXT,
+            range_label TEXT,
+            range_low REAL,
+            range_high REAL,
+            outcome TEXT,
+            recorded_at TEXT NOT NULL
+        );
+        INSERT INTO market_events VALUES
+            (1, 'city-high', 'City', '2026-08-05', 'high',
+             'condition-exact', 'yes-exact', '70-71F', 70, 71, 'YES',
+             '2026-08-04T10:00:00+00:00'),
+            (2, 'city-high', 'City', '2026-08-05', 'high',
+             'condition-sibling', 'yes-sibling', '72-73F', 72, 73, 'YES',
+             '2026-08-04T10:00:00+00:00');
+        """
+    )
+    trade = object()
+    observed: dict[str, object] = {}
+
+    def reconstruct(snapshot_conn, *, topology_rows, now_utc):
+        observed["snapshot_conn"] = snapshot_conn
+        observed["condition_ids"] = [row["condition_id"] for row in topology_rows]
+        observed["now_utc"] = now_utc
+        return {
+            "slug": "city-high",
+            "outcomes": [
+                {
+                    "condition_id": "condition-exact",
+                    "token_id": "yes-exact",
+                    "no_token_id": "no-exact",
+                },
+                {
+                    "condition_id": "condition-sibling",
+                    "token_id": "yes-sibling",
+                    "no_token_id": "no-sibling",
+                },
+            ],
+            "condition_ids": ["condition-exact", "condition-sibling"],
+            "support_topology": {
+                "topology_status": "complete",
+                "support_child_count": 2,
+                "executable_child_count": 2,
+            },
+        }
+
+    monkeypatch.setattr(
+        market_scanner,
+        "reconstruct_weather_market_from_static_topology",
+        reconstruct,
+    )
+    now = datetime(2026, 8, 4, 12, tzinfo=timezone.utc)
+    market = _edli_reconstruct_exact_market_channel_market(
+        forecasts,
+        trade,
+        "condition-exact",
+        now_utc=now,
+    )
+
+    assert observed == {
+        "snapshot_conn": trade,
+        "condition_ids": ["condition-exact", "condition-sibling"],
+        "now_utc": now,
+    }
+    assert market is not None
+    assert market["condition_ids"] == ["condition-exact"]
+    assert market["outcomes"] == [
+        {
+            "condition_id": "condition-exact",
+            "token_id": "yes-exact",
+            "no_token_id": "no-exact",
+        }
     ]
+    assert market["support_topology"]["support_child_count"] == 1
+    assert market["support_topology"]["executable_child_count"] == 1
+    refresh_kwargs = _edli_market_channel_refresh_kwargs(
+        MarketChannelAction(
+            refresh_snapshot=True,
+            reason="tick_size_change",
+            token_id="yes-exact",
+            condition_id="condition-exact",
+        ),
+        [market],
+        object(),
+        now,
+    )
+    assert refresh_kwargs["priority_condition_ids"] == {"condition-exact"}
+    assert refresh_kwargs["force_refresh_condition_ids"] == {"condition-exact"}
 
-    assert _edli_filter_markets_for_condition(markets, "condition-top") == [markets[0]]
-    assert _edli_filter_markets_for_condition(markets, "condition-child") == [markets[1]]
-    assert _edli_filter_markets_for_condition(markets, "missing-condition") == []
+
+def test_market_channel_condition_refresh_missing_topology_is_not_completed(monkeypatch):
+    import src.data.market_scanner as market_scanner
+    from src.ingest.price_channel_ingest import (
+        _edli_reconstruct_exact_market_channel_market,
+    )
+
+    forecasts = sqlite3.connect(":memory:")
+    forecasts.row_factory = sqlite3.Row
+    forecasts.executescript(
+        """
+        CREATE TABLE market_events (
+            event_id INTEGER PRIMARY KEY,
+            market_slug TEXT NOT NULL,
+            city TEXT NOT NULL,
+            target_date TEXT NOT NULL,
+            temperature_metric TEXT NOT NULL,
+            condition_id TEXT,
+            token_id TEXT,
+            range_label TEXT,
+            range_low REAL,
+            range_high REAL,
+            outcome TEXT,
+            recorded_at TEXT NOT NULL
+        );
+        INSERT INTO market_events VALUES
+            (1, 'city-high', 'City', '2026-08-05', 'high',
+             'condition-exact', 'yes-exact', '70-71F', 70, 71, 'YES',
+             '2026-08-04T10:00:00+00:00');
+        """
+    )
+    monkeypatch.setattr(
+        market_scanner,
+        "reconstruct_weather_market_from_static_topology",
+        lambda *_args, **_kwargs: None,
+    )
+
+    assert (
+        _edli_reconstruct_exact_market_channel_market(
+            forecasts,
+            object(),
+            "condition-exact",
+        )
+        is None
+    )
+    assert (
+        _edli_reconstruct_exact_market_channel_market(
+            forecasts,
+            object(),
+            None,
+        )
+        is None
+    )
 
 
 def test_tick_size_change_records_append_only_snapshot_invalidation_until_refreshed():

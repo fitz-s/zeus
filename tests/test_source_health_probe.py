@@ -1,5 +1,5 @@
 # Created: 2026-04-30
-# Last reused/audited: 2026-05-16
+# Last reused/audited: 2026-08-04
 # Authority basis: docs/operations/task_2026-04-30_two_system_independence/design.md §2.1 + §6 antibody #5; PR #121 forecast-live OpenData-only source-health boundary
 """Antibody #5 (Phase 2): Source health probe contract tests.
 
@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -43,13 +44,15 @@ REQUIRED_FIELDS = {
     "degraded_since",
     "latency_ms",
     "error",
+    "disposition",
+    "deferred_at",
+    "deferred_count",
+    "defer_reason",
 }
 
 
 def _make_fake_probe(success: bool = True):
     """Return a probe fn that always succeeds or always fails."""
-    from datetime import datetime, timezone
-
     def _fn(timeout: float) -> dict:
         now = datetime.now(timezone.utc).isoformat()
         if success:
@@ -70,6 +73,47 @@ def _make_fake_probe(success: bool = True):
             "error": "Connection refused",
         }
     return _fn
+
+
+def _write_healthcheck_source_health(
+    path: Path,
+    *,
+    stale_source: str | None = None,
+    archive_disposition: str | None = None,
+    archive_defer_reason: str | None = None,
+) -> Path:
+    now = datetime.now(timezone.utc)
+    budgets = {
+        "open_meteo_archive": 6 * 3600,
+        "wu_pws": 6 * 3600,
+        "hko": 36 * 3600,
+        "ogimet": 36 * 3600,
+        "ecmwf_open_data": 24 * 3600,
+        "noaa": 36 * 3600,
+        "tigge_mars": 24 * 3600,
+    }
+    sources = {}
+    for source, budget_seconds in budgets.items():
+        age_seconds = budget_seconds + 60 if source == stale_source else budget_seconds // 2
+        sources[source] = {
+            "last_success_at": (now - timedelta(seconds=age_seconds)).isoformat(),
+            "last_failure_at": None,
+            "consecutive_failures": 0,
+            "degraded_since": None,
+            "latency_ms": 100,
+            "error": None,
+        }
+    if archive_disposition is not None:
+        sources["open_meteo_archive"].update(
+            {
+                "disposition": archive_disposition,
+                "deferred_at": now.isoformat(),
+                "deferred_count": 3,
+                "defer_reason": archive_defer_reason,
+            }
+        )
+    path.write_text(json.dumps({"written_at": now.isoformat(), "sources": sources}))
+    return path
 
 
 # ---------------------------------------------------------------------------
@@ -326,58 +370,270 @@ class TestPriorStateSemantics:
         assert results["ogimet"]["last_success_at"] == prior_success_at
         assert results["ogimet"]["consecutive_failures"] == 1
 
+    def test_openmeteo_reserve_lease_denial_is_deferred_without_http(self, monkeypatch):
+        """A maintenance reserve denial never becomes an archive provider failure."""
+        import src.data.openmeteo_client as omc
+        from src.data.openmeteo_client import (
+            OpenMeteoLocalPreflightQuotaDenied,
+            OpenMeteoPreflightDenialReason,
+        )
+        from src.data.openmeteo_quota import (
+            MAINTENANCE_DAILY_LIMIT,
+            OpenMeteoQuotaTracker,
+        )
+
+        tracker = OpenMeteoQuotaTracker()
+        tracker._count = MAINTENANCE_DAILY_LIMIT + 15
+        monkeypatch.setattr(omc, "quota_tracker", tracker)
+        http_calls = 0
+
+        def _unexpected_http(*_args, **_kwargs):
+            nonlocal http_calls
+            http_calls += 1
+            raise AssertionError("reserve-protected probe must not send HTTP")
+
+        class _Client:
+            get = staticmethod(_unexpected_http)
+
+        monkeypatch.setattr(omc, "_SHARED_HTTP_CLIENT", _Client())
+        with pytest.raises(OpenMeteoLocalPreflightQuotaDenied) as denied:
+            omc.fetch(
+                omc.ARCHIVE_URL,
+                {"latitude": 0, "longitude": 0},
+                max_retries=1,
+                quota=tracker,
+            )
+        assert denied.value.reason is OpenMeteoPreflightDenialReason.RESERVE_PROTECTED
+        assert denied.value.detail == (
+            f"day_limit={MAINTENANCE_DAILY_LIMIT + 15}/{MAINTENANCE_DAILY_LIMIT}"
+        )
+        prior = {
+            "open_meteo_archive": {
+                "last_success_at": "2026-05-21T16:00:00+00:00",
+                "last_failure_at": "2026-05-20T16:00:00+00:00",
+                "consecutive_failures": 15,
+                "degraded_since": "2026-05-20T16:00:00+00:00",
+            }
+        }
+
+        for expected_count in range(1, 4):
+            result = probe_sources(
+                ("open_meteo_archive",), _prior_state=prior
+            )["open_meteo_archive"]
+            assert result["disposition"] == "DEFERRED"
+            assert result["defer_reason"] == "RESERVE_PROTECTED"
+            assert result["deferred_at"] is not None
+            assert result["deferred_count"] == expected_count
+            assert result["last_success_at"] == "2026-05-21T16:00:00+00:00"
+            assert result["last_failure_at"] == "2026-05-20T16:00:00+00:00"
+            assert result["consecutive_failures"] == 15
+            prior = {"open_meteo_archive": result}
+
+        assert http_calls == 0
+        assert tracker.calls_today() == MAINTENANCE_DAILY_LIMIT + 15
+
+    def test_openmeteo_quota_wording_without_typed_exception_is_failure(
+        self, monkeypatch
+    ):
+        """Exception text can never manufacture reserve-protected deferral."""
+        import src.data.source_health_probe as shp
+
+        def _untyped_denial(*_args, **_kwargs):
+            raise RuntimeError("Open-Meteo quota exhausted (8515 calls today)")
+
+        monkeypatch.setattr(shp, "_fetch_openmeteo", _untyped_denial)
+        result = probe_sources(
+            ("open_meteo_archive",),
+            _prior_state={"open_meteo_archive": {"consecutive_failures": 7}},
+        )["open_meteo_archive"]
+
+        assert result["disposition"] == "FAILURE"
+        assert result["consecutive_failures"] == 8
+        assert result["defer_reason"] is None
+
     @pytest.mark.parametrize(
-        "blocked_error",
+        ("counter", "limit_name", "expected_reason"),
         [
-            "Open-Meteo quota exhausted (10000 calls today)",
-            "Open-Meteo request embargoed (request_retry_until=123)",
+            ("_hour_count", "MAINTENANCE_HOURLY_LIMIT", "HOURLY_LIMIT"),
+            ("_minute_count", "MAINTENANCE_MINUTE_LIMIT", "MINUTE_LIMIT"),
         ],
     )
-    def test_openmeteo_quota_block_does_not_retain_prior_success(self, monkeypatch, blocked_error):
-        """Quota denial or 429 embargo is a failed probe, never fresh health."""
+    def test_openmeteo_non_daily_local_limits_never_defer_archive(
+        self, monkeypatch, counter, limit_name, expected_reason
+    ):
+        """Hour/minute lease denials remain failures even in maintenance lane."""
+        import src.data.openmeteo_client as omc
+        from src.data.openmeteo_client import OpenMeteoPreflightDenialReason
+        from src.data import openmeteo_quota
+
+        tracker = openmeteo_quota.OpenMeteoQuotaTracker()
+        setattr(tracker, counter, getattr(openmeteo_quota, limit_name))
+        monkeypatch.setattr(omc, "quota_tracker", tracker)
+        monkeypatch.setattr(
+            omc.httpx,
+            "get",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError("preflight denial must not send HTTP")
+            ),
+        )
+
+        result = probe_sources(("open_meteo_archive",))["open_meteo_archive"]
+
+        assert result["disposition"] == "FAILURE"
+        assert expected_reason in result["error"]
+        assert result["defer_reason"] is None
+        assert getattr(OpenMeteoPreflightDenialReason, expected_reason).value in result["error"]
+
+    def test_openmeteo_global_cooldown_never_defers_archive(self, monkeypatch):
+        """A provider-induced global cooldown is a failure, not reserve protection."""
+        import src.data.openmeteo_client as omc
+        from src.data.openmeteo_quota import OpenMeteoQuotaTracker
+
+        tracker = OpenMeteoQuotaTracker()
+        tracker._blocked_until = datetime.now(timezone.utc) + timedelta(minutes=5)
+        monkeypatch.setattr(omc, "quota_tracker", tracker)
+        monkeypatch.setattr(
+            omc.httpx,
+            "get",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError("global cooldown must not send HTTP")
+            ),
+        )
+
+        result = probe_sources(
+            ("open_meteo_archive",),
+            _prior_state={"open_meteo_archive": {"consecutive_failures": 4}},
+        )["open_meteo_archive"]
+
+        assert result["disposition"] == "FAILURE"
+        assert result["consecutive_failures"] == 5
+        assert "GLOBAL_COOLDOWN" in result["error"]
+        assert result["defer_reason"] is None
+
+    @pytest.mark.parametrize(
+        ("lane", "limit_name", "expected_reason"),
+        [
+            ("priority_lane", "PRIORITY_DAILY_LIMIT", "PRIORITY_DAILY_LIMIT"),
+            ("critical_lane", "DAILY_HARD_CAP", "CRITICAL_HARD_DAILY_LIMIT"),
+        ],
+    )
+    def test_openmeteo_priority_and_critical_limits_never_defer_archive(
+        self, monkeypatch, lane, limit_name, expected_reason
+    ):
+        """Priority and critical hard-cap denials cannot masquerade as reserve deferral."""
+        import src.data.openmeteo_client as omc
+        from src.data import openmeteo_quota
+
+        tracker = openmeteo_quota.OpenMeteoQuotaTracker()
+        tracker._count = getattr(openmeteo_quota, limit_name)
+        monkeypatch.setattr(omc, "quota_tracker", tracker)
+        monkeypatch.setattr(
+            omc.httpx,
+            "get",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError("preflight denial must not send HTTP")
+            ),
+        )
+
+        with getattr(tracker, lane)():
+            result = probe_sources(("open_meteo_archive",))["open_meteo_archive"]
+
+        assert result["disposition"] == "FAILURE"
+        assert expected_reason in result["error"]
+        assert result["defer_reason"] is None
+
+    def test_successful_openmeteo_probe_clears_prior_deferred_state(self, monkeypatch):
+        """The next successful lease/fetch clears the deferred disposition."""
         import src.data.source_health_probe as shp
 
-        def _blocked(*args, **kwargs):
-            assert kwargs["max_retries"] == 1
-            assert kwargs["endpoint_label"] == "source_health_open_meteo_archive"
-            raise RuntimeError(blocked_error)
-
-        monkeypatch.setattr(shp, "_fetch_openmeteo", _blocked)
-
-        results = probe_sources(
+        monkeypatch.setattr(
+            shp,
+            "_fetch_openmeteo",
+            lambda *_args, **_kwargs: {
+                "daily": {
+                    "temperature_2m_max": [10],
+                    "temperature_2m_min": [2],
+                }
+            },
+        )
+        result = probe_sources(
             ("open_meteo_archive",),
             _prior_state={
                 "open_meteo_archive": {
                     "last_success_at": "2026-05-21T16:00:00+00:00",
-                    "consecutive_failures": 0,
-                    "degraded_since": None,
+                    "consecutive_failures": 15,
+                    "deferred_at": "2026-05-21T17:00:00+00:00",
+                    "deferred_count": 3,
+                    "defer_reason": "RESERVE_PROTECTED",
                 }
             },
-        )
+        )["open_meteo_archive"]
 
-        result = results["open_meteo_archive"]
-        assert result["last_success_at"] is None
-        assert result["last_failure_at"] is not None
-        assert result["consecutive_failures"] == 1
-        assert result["degraded_since"] == result["last_failure_at"]
-        assert result["error"] == blocked_error
+        assert result["disposition"] == "SUCCESS"
+        assert result["last_success_at"] != "2026-05-21T16:00:00+00:00"
+        assert result["consecutive_failures"] == 0
+        assert result["deferred_at"] is None
+        assert result["deferred_count"] == 0
+        assert result["defer_reason"] is None
 
-    def test_openmeteo_real_429_does_not_retain_prior_success(self, monkeypatch):
-        """The shared client's HTTPStatusError shape is a current quota block."""
+    def test_openmeteo_http_error_after_lease_remains_failure(self, monkeypatch):
+        """A provider error after a granted lease is not a local deferral."""
         import httpx
-        import src.data.source_health_probe as shp
+        import src.data.openmeteo_client as omc
+        from src.data.openmeteo_quota import OpenMeteoQuotaTracker
+
+        tracker = OpenMeteoQuotaTracker()
+        monkeypatch.setattr(omc, "quota_tracker", tracker)
+        request = httpx.Request("GET", "https://archive-api.open-meteo.com/v1/archive")
+        http_calls = 0
+
+        def _server_error(*_args, **_kwargs):
+            nonlocal http_calls
+            http_calls += 1
+            return httpx.Response(503, request=request)
+
+        class _Client:
+            get = staticmethod(_server_error)
+
+        monkeypatch.setattr(omc, "_SHARED_HTTP_CLIENT", _Client())
+        result = probe_sources(
+            ("open_meteo_archive",),
+            _prior_state={
+                "open_meteo_archive": {
+                    "last_success_at": "2026-05-21T16:00:00+00:00",
+                    "consecutive_failures": 15,
+                }
+            },
+        )["open_meteo_archive"]
+
+        assert http_calls == 1
+        assert tracker.calls_today() == 1
+        assert result["disposition"] == "FAILURE"
+        assert result["consecutive_failures"] == 16
+        assert result["last_success_at"] == "2026-05-21T16:00:00+00:00"
+        assert result["deferred_at"] is None
+        assert result["defer_reason"] is None
+
+    def test_openmeteo_real_429_is_failure_after_lease(self, monkeypatch):
+        """A provider 429 follows a lease and remains a counted failure."""
+        import httpx
+        import src.data.openmeteo_client as omc
+        from src.data.openmeteo_quota import OpenMeteoQuotaTracker
 
         request = httpx.Request("GET", "https://archive-api.open-meteo.com/v1/archive")
-        response = httpx.Response(429, request=request)
+        tracker = OpenMeteoQuotaTracker()
+        monkeypatch.setattr(omc, "quota_tracker", tracker)
+        http_calls = 0
 
         def _rate_limited(*_args, **_kwargs):
-            raise httpx.HTTPStatusError(
-                "429 Too Many Requests",
-                request=request,
-                response=response,
-            )
+            nonlocal http_calls
+            http_calls += 1
+            return httpx.Response(429, request=request)
 
-        monkeypatch.setattr(shp, "_fetch_openmeteo", _rate_limited)
+        class _Client:
+            get = staticmethod(_rate_limited)
+
+        monkeypatch.setattr(omc, "_SHARED_HTTP_CLIENT", _Client())
         results = probe_sources(
             ("open_meteo_archive",),
             _prior_state={
@@ -390,9 +646,88 @@ class TestPriorStateSemantics:
         )
 
         result = results["open_meteo_archive"]
-        assert result["last_success_at"] is None
+        assert http_calls == 1
+        assert tracker.calls_today() == 1
+        assert result["last_success_at"] == "2026-05-21T16:00:00+00:00"
         assert result["consecutive_failures"] == 1
-        assert result["error"] == "429 Too Many Requests"
+        assert result["disposition"] == "FAILURE"
+        assert result["deferred_at"] is None
+        assert result["deferred_count"] == 0
+        assert result["defer_reason"] is None
+        assert "Open-Meteo HTTP 429" in result["error"]
+
+
+class TestDeferredHealthcheckProjection:
+    """Archive deferral stays visible without weakening current-source health."""
+
+    def test_exact_archive_deferred_is_visible_without_capital_block(
+        self, monkeypatch, tmp_path
+    ):
+        from scripts import healthcheck
+
+        path = _write_healthcheck_source_health(
+            tmp_path / "source_health.json",
+            stale_source="open_meteo_archive",
+            archive_disposition="DEFERRED",
+            archive_defer_reason="RESERVE_PROTECTED",
+        )
+        monkeypatch.setattr(healthcheck, "_source_health_path", lambda: path)
+
+        result = healthcheck._source_health_status()
+
+        assert result["ok"] is True
+        assert result["branch"] == "STALE"
+        assert result["stale_sources"] == ["open_meteo_archive"]
+        assert result["blocking_stale_sources"] == []
+        assert result["capital_sources_fresh"] is True
+        assert result["deferred_sources"][0]["defer_reason"] == "RESERVE_PROTECTED"
+        assert result["day0_capture_disabled"] is False
+
+    @pytest.mark.parametrize(
+        ("disposition", "reason"),
+        [
+            ("DEFERRED", "GLOBAL_COOLDOWN"),
+            ("FAILURE", "RESERVE_PROTECTED"),
+        ],
+    )
+    def test_archive_exemption_requires_deferred_and_exact_reason(
+        self, monkeypatch, tmp_path, disposition, reason
+    ):
+        from scripts import healthcheck
+
+        path = _write_healthcheck_source_health(
+            tmp_path / "source_health.json",
+            stale_source="open_meteo_archive",
+            archive_disposition=disposition,
+            archive_defer_reason=reason,
+        )
+        monkeypatch.setattr(healthcheck, "_source_health_path", lambda: path)
+
+        result = healthcheck._source_health_status()
+
+        assert result["ok"] is False
+        assert result["blocking_stale_sources"] == ["open_meteo_archive"]
+        assert result["capital_sources_fresh"] is False
+
+    def test_legacy_schema_and_current_source_failure_keep_prior_semantics(
+        self, monkeypatch, tmp_path
+    ):
+        from scripts import healthcheck
+
+        fresh_path = _write_healthcheck_source_health(tmp_path / "source_health.json")
+        monkeypatch.setattr(healthcheck, "_source_health_path", lambda: fresh_path)
+        fresh = healthcheck._source_health_status()
+        assert fresh["ok"] is True
+        assert fresh["deferred_sources"] == []
+
+        stale_path = _write_healthcheck_source_health(
+            tmp_path / "source_health.json", stale_source="wu_pws"
+        )
+        monkeypatch.setattr(healthcheck, "_source_health_path", lambda: stale_path)
+        stale = healthcheck._source_health_status()
+        assert stale["ok"] is False
+        assert stale["blocking_stale_sources"] == ["wu_pws"]
+        assert stale["day0_capture_disabled"] is True
 
 
 class TestWriteSourceHealth:

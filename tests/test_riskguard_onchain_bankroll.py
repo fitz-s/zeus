@@ -1,5 +1,5 @@
 # Created: 2026-05-01
-# Last reused/audited: 2026-05-01
+# Last reused/audited: 2026-08-12
 # Authority basis: docs/operations/task_2026-05-01_bankroll_truth_chain/architect_memo.md §7
 #                  + docs/operations/task_2026-05-01_bankroll_truth_chain/followup_design.md §2.1, §6.2, §7
 #                  + PR #31 P0-A: riskguard.tick must read on-chain bankroll, not config constant.
@@ -150,6 +150,28 @@ def _install_collateral_snapshot(*, value_usd: float, age_seconds: float = 0.0) 
         )
     )
     configure_global_ledger(ledger)
+
+
+def test_riskguard_installs_read_only_preinitialized_collateral_reader(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    from src.state import collateral_ledger as ledger_module
+
+    db_path = tmp_path / "trades.db"
+    CollateralLedger(db_path=db_path).close()
+    configure_global_ledger(None)
+    monkeypatch.setattr(riskguard_module, "_zeus_trade_db_path", lambda: db_path)
+    monkeypatch.setattr(
+        ledger_module,
+        "init_collateral_schema",
+        lambda _conn: (_ for _ in ()).throw(
+            AssertionError("riskguard collateral reader must not run schema DDL")
+        ),
+    )
+
+    assert riskguard_module._install_riskguard_collateral_ledger() is True
+    assert ledger_module.get_global_ledger() is not None
 
 
 def test_tick_uses_onchain_wallet_for_trailing_loss(monkeypatch, tmp_path):

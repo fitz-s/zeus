@@ -62,15 +62,17 @@ same located-failure posture as ``assert_no_world_mutex_held_for_io``.
 from __future__ import annotations
 
 import contextlib
+import inspect
 import logging
 import math
 import sqlite3
 import threading
 import time
+from collections.abc import Mapping
 from typing import Callable, TypeVar
 
 from src.venue.polymarket_v2_adapter import IncompleteAccountTruthError
-from src.venue.response_contracts import VenueResponseShapeError
+from src.venue.response_contracts import VenueOrderNotFound, VenueResponseShapeError
 
 logger = logging.getLogger(__name__)
 
@@ -350,12 +352,49 @@ default_trade_conn_factory.requires_writer_flocks = True  # type: ignore[attr-de
 default_trade_conn_factory.supports_nonblocking_flocks = True  # type: ignore[attr-defined]
 
 
+def default_trade_only_conn_factory(
+    *,
+    blocking: bool = True,
+    busy_timeout_ms: int | None = None,
+) -> sqlite3.Connection:
+    """Open the canonical TRADE DB without attaching unrelated WORLD truth.
+
+    The caller must already own the unified TRADE ``WriteCoordinator`` lease.
+    This factory exists for exact recovery passes whose full read/write set is
+    trade-owned; it must not replace the cross-DB factory for general recovery.
+    ``blocking`` is accepted for the shared factory protocol.  Admission has
+    already been decided by the outer coordinator before this function runs.
+    """
+
+    _ = blocking
+    from src.state.db import get_trade_connection
+
+    conn = get_trade_connection(write_class="live")
+    try:
+        if busy_timeout_ms is not None:
+            conn.execute(f"PRAGMA busy_timeout = {int(busy_timeout_ms)}")
+    except BaseException:
+        conn.close()
+        raise
+    return conn
+
+
+default_trade_only_conn_factory.requires_writer_flocks = True  # type: ignore[attr-defined]
+default_trade_only_conn_factory.supports_nonblocking_flocks = (  # type: ignore[attr-defined]
+    True
+)
+# Test/fake factories without this explicit equivalent keep their existing seam.
+default_trade_conn_factory.trade_only_factory = (  # type: ignore[attr-defined]
+    default_trade_only_conn_factory
+)
+
+
 def default_trade_read_conn_factory() -> sqlite3.Connection:
-    """Canonical attached recovery read connection without writer flocks."""
+    """Bounded read-only recovery connection without cutover/writer flocks."""
 
-    from src.state.db import get_trade_connection_with_world_required
+    from src.state.db import get_trade_connection_read_only
 
-    return get_trade_connection_with_world_required(write_class=None)
+    return get_trade_connection_read_only()
 
 
 class SnapshotMissError(RuntimeError):
@@ -411,6 +450,7 @@ class VenueReadSnapshot:
         object.__setattr__(self, "_trades", list(trades) if trades is not None else None)
         object.__setattr__(self, "_idempotency", dict(idempotency))
         object.__setattr__(self, "_market_info", dict(market_info))
+        object.__setattr__(self, "_point_reads_complete", True)
 
     def get_open_orders(self):
         if self._open_orders is None:
@@ -452,6 +492,13 @@ class VenueReadSnapshot:
         return True
 
     @property
+    def authenticated_point_reads_are_complete(self) -> bool:
+        # Every requested identity was captured off-lock. Captured read errors
+        # replay as SnapshotMissError; only a successful exact read or the
+        # snapshot's authenticated absence sentinel can authorize APPLY.
+        return True
+
+    @property
     def __class__(self):  # noqa: A003 — preserve identity so `client.__class__.__name__`
         # reads in proof-payload pagination_scope strings stay byte-identical to
         # the live path (e.g. "PolymarketClient.get_open_orders:...").
@@ -476,6 +523,8 @@ def capture_venue_read_snapshot(
     idempotency_keys=(),
     condition_ids=(),
     account_truth_deadline_seconds: float = _ACCOUNT_TRUTH_DEADLINE_SECONDS,
+    deadline_monotonic: float | None = None,
+    derive_orders_from_account_truth: bool = False,
 ) -> VenueReadSnapshot:
     """NETWORK phase: capture every venue read the apply phase will need.
 
@@ -511,6 +560,12 @@ def capture_venue_read_snapshot(
     if not math.isfinite(budget) or budget <= 0.0:
         raise ValueError("account_truth_deadline_seconds must be finite and positive")
     account_deadline = time.monotonic() + budget
+    if deadline_monotonic is not None:
+        account_deadline = min(account_deadline, float(deadline_monotonic))
+    if account_deadline <= time.monotonic():
+        raise IncompleteAccountTruthError(
+            "INCOMPLETE_ACCOUNT_TRUTH: recovery snapshot deadline exhausted"
+        )
     account_reader = getattr(account_source, "get_account_truth", None)
     if not callable(account_reader):
         raise IncompleteAccountTruthError(
@@ -528,25 +583,47 @@ def capture_venue_read_snapshot(
     trades = list(account_truth.trades)
 
     orders: dict = {}
-    get_order_source = next((getattr(source, "get_order", None) for source in venue_sources if callable(getattr(source, "get_order", None))), None)
+    requested_order_ids = {str(o) for o in order_ids if str(o).strip()}
+    get_order_source = next(
+        (
+            getattr(source, "get_order", None)
+            for source in venue_sources
+            if callable(getattr(source, "get_order", None))
+        ),
+        None,
+    )
+    point_read_deadline_skips = 0
     if callable(get_order_source):
-        for oid in {str(o) for o in order_ids if str(o).strip()}:
+        for oid in sorted(requested_order_ids):
+            if time.monotonic() >= account_deadline:
+                point_read_deadline_skips += 1
+                orders[oid] = _CapturedVenueReadFailure(
+                    IncompleteAccountTruthError(
+                        "INCOMPLETE_ACCOUNT_TRUTH: point-order snapshot deadline exhausted"
+                    )
+                )
+                continue
             try:
-                orders[oid] = get_order_source(oid)
+                if derive_orders_from_account_truth:
+                    orders[oid] = get_order_source(
+                        oid,
+                        deadline_monotonic=account_deadline,
+                    )
+                else:
+                    orders[oid] = get_order_source(oid)
+            except VenueOrderNotFound:
+                orders[oid] = None
             except VenueResponseShapeError as exc:
                 logger.warning("venue_sync_contract: get_order(%s) failed during snapshot", oid, exc_info=True)
-                # The pinned CLOB SDK returns an exact empty object when a
-                # previously known order has been purged. Preserve every other
-                # shape failure as unknown; only this observed get_order shape
-                # is normalized to the wrapper's documented NOT_FOUND value.
-                orders[oid] = (
-                    None
-                    if exc.endpoint == "get_order" and exc.raw == {}
-                    else _CapturedVenueReadFailure(exc)
-                )
+                orders[oid] = _CapturedVenueReadFailure(exc)
             except Exception as exc:  # noqa: BLE001 — preserve timeout/auth/read failure.
                 logger.warning("venue_sync_contract: get_order(%s) failed during snapshot", oid, exc_info=True)
                 orders[oid] = _CapturedVenueReadFailure(exc)
+    if point_read_deadline_skips:
+        logger.warning(
+            "venue_sync_contract: skipped %d point-order reads after shared snapshot deadline",
+            point_read_deadline_skips,
+        )
 
     idempotency: dict = {}
     finder = next(
@@ -559,6 +636,9 @@ def capture_venue_read_snapshot(
     )
     if callable(finder):
         for key in {str(k) for k in idempotency_keys if str(k).strip()}:
+            if deadline_monotonic is not None and time.monotonic() >= deadline_monotonic:
+                idempotency[key] = None
+                continue
             try:
                 idempotency[key] = finder(key)
             except Exception:  # noqa: BLE001
@@ -574,9 +654,27 @@ def capture_venue_read_snapshot(
         None,
     )
     if callable(market_getter):
+        try:
+            market_getter_accepts_timeout = (
+                "timeout" in inspect.signature(market_getter).parameters
+            )
+        except (TypeError, ValueError):
+            market_getter_accepts_timeout = False
         for cid in {str(c) for c in condition_ids if str(c).strip()}:
+            if deadline_monotonic is not None and time.monotonic() >= deadline_monotonic:
+                market_info[cid] = None
+                continue
             try:
-                market_info[cid] = market_getter(cid)
+                remaining = (
+                    max(0.01, min(2.0, deadline_monotonic - time.monotonic()))
+                    if deadline_monotonic is not None
+                    else None
+                )
+                market_info[cid] = (
+                    market_getter(cid, timeout=remaining)
+                    if remaining is not None and market_getter_accepts_timeout
+                    else market_getter(cid)
+                )
             except Exception:  # noqa: BLE001
                 market_info[cid] = None
 

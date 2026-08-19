@@ -1,6 +1,6 @@
 # Created: 2026-03-30
-# Last reused/audited: 2026-07-15
-# Lifecycle: created=2026-03-30; last_reviewed=2026-07-15; last_reused=2026-07-15
+# Last reused/audited: 2026-08-10
+# Lifecycle: created=2026-03-30; last_reviewed=2026-08-10; last_reused=2026-08-10
 # Purpose: Protect DB schema bootstrap contracts, daily revision-history DDL, and fact-smoke authority labels.
 # Reuse: Audit touched schema assertions and high-sensitivity skip metadata before closeout.
 # Authority basis: P2 4.4.A2 daily observation revision-history schema packet; Wave16 object-meaning fact-smoke authority repair; PR90 latest-event env authority review fix; 2026-05-16 live-continuous Phase B event-status boundary; 2026-07-09 portfolio-loader event-spine read indexes.
@@ -1978,6 +1978,63 @@ def test_portfolio_loader_open_only_retains_transition_hints(tmp_path):
     assert view["open_positions_only"] is True
     assert [row["position_id"] for row in view["positions"]] == ["pending-exit-position"]
     assert view["positions"][0]["exit_state"] == "retry_pending"
+
+
+def test_transitional_hints_ignore_dense_monitor_history_with_bounded_work(tmp_path):
+    from src.state.db import _query_transitional_position_hints, init_schema_trade_only
+
+    conn = get_connection(tmp_path / "bounded-transition-hints.db")
+    init_schema_trade_only(conn)
+    position_id = "dense-monitor-history"
+    _insert_current_position_for_fill_authority_view_test(
+        conn,
+        position_id=position_id,
+        phase="pending_exit",
+    )
+    _insert_status_position_event_for_view_test(
+        conn,
+        position_id=position_id,
+        event_type="EXIT_ORDER_REJECTED",
+        status="retry_pending",
+        occurred_at="2026-04-01T00:05:00+00:00",
+    )
+    conn.executemany(
+        """
+        INSERT INTO position_events (
+            event_id, position_id, event_version, sequence_no, event_type, occurred_at,
+            phase_before, phase_after, strategy_key, decision_id, snapshot_id, order_id,
+            command_id, caused_by, idempotency_key, venue_status, source_module, env, payload_json
+        ) VALUES (?, ?, 1, ?, 'MONITOR_REFRESHED', ?, 'pending_exit', 'pending_exit',
+                  'center_buy', NULL, 'snap-fill', NULL, NULL, 'test', ?, NULL,
+                  'tests', 'test', '{}')
+        """,
+        (
+            (
+                f"{position_id}:monitor:{sequence_no}",
+                position_id,
+                sequence_no,
+                f"2026-04-01T00:{sequence_no // 60:02d}:{sequence_no % 60:02d}+00:00",
+                f"{position_id}:monitor:{sequence_no}",
+            )
+            for sequence_no in range(2, 3002)
+        ),
+    )
+    conn.commit()
+
+    progress_calls = 0
+
+    def interrupt_unbounded_scan() -> int:
+        nonlocal progress_calls
+        progress_calls += 1
+        return int(progress_calls > 500)
+
+    conn.set_progress_handler(interrupt_unbounded_scan, 100)
+    hints = _query_transitional_position_hints(conn, [position_id])
+    conn.set_progress_handler(None, 0)
+    conn.close()
+
+    assert hints[position_id]["exit_state"] == "retry_pending"
+    assert progress_calls <= 500
 
 
 def test_portfolio_loader_open_only_filters_target_families_in_sql(tmp_path):
@@ -4042,6 +4099,242 @@ def test_query_authoritative_settlement_rows_prefers_position_events(tmp_path):
     assert rows[0]["pnl"] == pytest.approx(15.0)
     assert rows[0]["winning_bin"] == "39-40°F"
     assert rows[0]["exit_reason"] == "SETTLEMENT"
+
+
+def test_authoritative_settlement_read_model_labels_buy_no_by_held_cashflow(
+    tmp_path,
+):
+    from src.engine.lifecycle_events import build_settlement_canonical_write
+    from src.state.db import append_many_and_project, query_authoritative_settlement_rows
+    from src.state.portfolio import Position
+
+    db_path = tmp_path / "test.db"
+    conn = get_connection(db_path)
+    init_schema(conn)
+    pos = Position(
+        trade_id="buy-no-canonical-win",
+        market_id="m-buy-no-canonical-win",
+        city="Kuala Lumpur",
+        cluster="southeast-asia",
+        target_date="2026-08-15",
+        bin_label="33°C",
+        direction="buy_no",
+        env="test",
+        unit="C",
+        size_usd=2.60,
+        shares=5.0,
+        cost_basis_usd=2.60,
+        entry_price=0.52,
+        p_posterior=0.70,
+        decision_snapshot_id="snap-buy-no-canonical-win",
+        strategy="center_buy",
+        edge_source="center_buy",
+        exit_price=1.0,
+        pnl=4.01,
+        exit_reason="SETTLEMENT",
+        last_exit_at="2026-08-15T16:45:53Z",
+        state="settled",
+    )
+
+    events, projection = build_settlement_canonical_write(
+        pos,
+        winning_bin="32°C",
+        won=False,
+        outcome=1,
+        sequence_no=1,
+        phase_before="pending_exit",
+        settlement_authority="VERIFIED",
+        settlement_truth_source="world.settlements",
+        settlement_market_slug="kuala-lumpur-high-2026-08-15",
+        settlement_temperature_metric="high",
+        settlement_source="WU",
+        settlement_value=32.0,
+    )
+    append_many_and_project(conn, events, projection)
+    row = query_authoritative_settlement_rows(conn, limit=1, env=pos.env)[0]
+    conn.close()
+
+    assert row["won"] is False
+    assert row["market_bin_won"] is False
+    assert row["position_won"] is True
+    assert row["held_side_result"] == "win"
+    assert row["economic_result"] == "profit"
+    assert row["realized_pnl_usd"] == pytest.approx(4.01)
+    assert row["historical_shares"] == pytest.approx(5.0)
+    assert row["historical_cost_basis_usd"] == pytest.approx(2.60)
+
+
+def test_settlement_read_model_keeps_held_result_distinct_from_economics():
+    from src.state.db import _normalize_position_settlement_event
+
+    row = _normalize_position_settlement_event({
+        "runtime_trade_id": "held-win-economic-loss",
+        "direction": "buy_no",
+        "details": {"outcome": 1, "pnl": -0.01},
+    })
+
+    assert row is not None
+    assert row["position_won"] is True
+    assert row["held_side_result"] == "win"
+    assert row["economic_result"] == "loss"
+
+
+def test_settlement_read_model_uses_entry_fills_before_residual_cost(tmp_path):
+    from src.engine.lifecycle_events import build_settlement_canonical_write
+    from src.state.db import (
+        append_many_and_project,
+        log_execution_fact,
+        query_authoritative_settlement_rows,
+    )
+    from src.state.portfolio import Position
+
+    db_path = tmp_path / "test.db"
+    conn = get_connection(db_path)
+    init_schema(conn)
+    _create_execution_fact_table(conn)
+    pos = Position(
+        trade_id="partial-exit-settlement",
+        market_id="m-partial-exit-settlement",
+        city="Atlanta",
+        cluster="us-southeast",
+        target_date="2026-08-14",
+        bin_label="94-95°F",
+        direction="buy_no",
+        env="test",
+        unit="F",
+        size_usd=0.0036,
+        shares=0.006427,
+        cost_basis_usd=0.0036,
+        entry_price=0.56,
+        p_posterior=0.82,
+        decision_snapshot_id="snap-partial-exit-settlement",
+        strategy="center_buy",
+        edge_source="center_buy",
+        exit_price=0.0,
+        pnl=-3.360599,
+        exit_reason="SETTLEMENT",
+        last_exit_at="2026-08-15T05:33:52Z",
+        state="settled",
+    )
+    log_execution_fact(
+        conn,
+        intent_id=f"{pos.trade_id}:entry",
+        position_id=pos.trade_id,
+        command_id="entry-command",
+        order_role="entry",
+        filled_at="2026-08-13T22:30:02Z",
+        fill_price=0.56,
+        shares=11.196427,
+        venue_status="MATCHED",
+        terminal_exec_status="filled",
+    )
+    log_execution_fact(
+        conn,
+        intent_id=f"{pos.trade_id}:entry:entry-command",
+        position_id=pos.trade_id,
+        command_id="entry-command",
+        order_role="entry",
+        filled_at="2026-08-13T22:30:02Z",
+        fill_price=0.56,
+        shares=11.196427,
+        venue_status="MATCHED",
+        terminal_exec_status="filled",
+    )
+    events, projection = build_settlement_canonical_write(
+        pos,
+        winning_bin="94-95°F",
+        won=True,
+        outcome=0,
+        sequence_no=1,
+        phase_before="pending_exit",
+        settlement_authority="VENUE_RESOLVED",
+        settlement_truth_source="trades.payout_observations",
+        settlement_market_slug="atlanta-high-2026-08-14",
+        settlement_temperature_metric="high",
+        settlement_source="polymarket_chain_rpc_finalized_v1",
+        settlement_value=None,
+    )
+    append_many_and_project(conn, events, projection)
+
+    row = query_authoritative_settlement_rows(conn, limit=1, env=pos.env)[0]
+    conn.close()
+
+    assert row["historical_shares"] == pytest.approx(11.196427)
+    assert row["historical_cost_basis_usd"] == pytest.approx(6.26999912)
+    assert row["entry_economics_source"] == "execution_fact"
+    assert row["realized_pnl_usd"] == pytest.approx(-3.360599)
+    assert row["realized_pnl_usd"] > -0.95 * row["historical_cost_basis_usd"]
+
+
+def test_settlement_read_model_rejects_uncommanded_fill_as_original_capital(tmp_path):
+    from src.engine.lifecycle_events import build_settlement_canonical_write
+    from src.state.db import (
+        append_many_and_project,
+        log_execution_fact,
+        query_authoritative_settlement_rows,
+    )
+    from src.state.portfolio import Position
+
+    conn = get_connection(tmp_path / "test.db")
+    init_schema(conn)
+    _create_execution_fact_table(conn)
+    pos = Position(
+        trade_id="uncommanded-entry-fill",
+        market_id="m-uncommanded-entry-fill",
+        city="Atlanta",
+        cluster="us-southeast",
+        target_date="2026-08-14",
+        bin_label="94-95°F",
+        direction="buy_no",
+        env="test",
+        unit="F",
+        size_usd=0.50,
+        shares=1.0,
+        cost_basis_usd=0.50,
+        entry_price=0.50,
+        p_posterior=0.82,
+        decision_snapshot_id="snap-uncommanded-entry-fill",
+        strategy="center_buy",
+        edge_source="center_buy",
+        exit_price=0.0,
+        pnl=-0.50,
+        exit_reason="SETTLEMENT",
+        last_exit_at="2026-08-15T05:33:52Z",
+        state="settled",
+    )
+    log_execution_fact(
+        conn,
+        intent_id=f"{pos.trade_id}:entry",
+        position_id=pos.trade_id,
+        order_role="entry",
+        filled_at="2026-08-13T22:30:02Z",
+        fill_price=0.56,
+        shares=11.196427,
+        venue_status="MATCHED",
+        terminal_exec_status="filled",
+    )
+    events, projection = build_settlement_canonical_write(
+        pos,
+        winning_bin="94-95°F",
+        won=True,
+        outcome=0,
+        sequence_no=1,
+        phase_before="pending_exit",
+        settlement_authority="VENUE_RESOLVED",
+        settlement_truth_source="trades.payout_observations",
+        settlement_market_slug="atlanta-high-2026-08-14",
+        settlement_temperature_metric="high",
+        settlement_source="polymarket_chain_rpc_finalized_v1",
+        settlement_value=None,
+    )
+    append_many_and_project(conn, events, projection)
+
+    row = query_authoritative_settlement_rows(conn, limit=1, env=pos.env)[0]
+    conn.close()
+
+    assert row["historical_shares"] == pytest.approx(1.0)
+    assert row["historical_cost_basis_usd"] == pytest.approx(0.50)
+    assert row["entry_economics_source"] == "position_current_projection"
 
 
 def test_query_authoritative_settlement_rows_ignores_decision_log_records(tmp_path):

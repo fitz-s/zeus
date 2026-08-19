@@ -213,3 +213,33 @@ def test_already_attributed_position_skipped(tmp_path):
     ).fetchone()
     assert row[0] == "cert-live"
     assert row[1] == "LIVE_DECISION"
+
+
+def test_exit_attribution_does_not_hide_missing_entry_attribution(tmp_path):
+    """Settlement grades the ENTRY decision, so an EXIT row is not coverage."""
+    conn = _make_trade_conn(tmp_path)
+    _seed_position(conn, position_id="pos-7")
+    _seed_entry_command(conn, position_id="pos-7", command_id="cmd-entry-7")
+    _attach_world(conn, tmp_path, audit_rows=[
+        {"audit_id": "aud-7", "execution_command_id": "cmd-entry-7",
+         "expected_edge_source_certificate_hash": "cert-entry-7"},
+    ])
+
+    from src.state.venue_command_repo import record_position_decision_attribution
+
+    record_position_decision_attribution(
+        conn, position_id="pos-7", command_id="cmd-exit-7",
+        decision_certificate_hash="cert-entry-7", intent_kind="EXIT",
+        created_at="2026-06-01T01:00:00Z",
+    )
+    conn.commit()
+
+    stats = run_backfill(conn, apply=True)
+    assert stats["considered"] == 1
+    assert stats["attributed"] == 1
+    rows = conn.execute(
+        "SELECT intent_kind, decision_certificate_hash "
+        "FROM position_decision_attribution WHERE position_id = 'pos-7' "
+        "ORDER BY intent_kind"
+    ).fetchall()
+    assert rows == [("ENTRY", "cert-entry-7"), ("EXIT", "cert-entry-7")]

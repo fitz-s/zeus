@@ -24,12 +24,17 @@ USAGE
 from __future__ import annotations
 
 import argparse
+import os
 import sqlite3
 import sys
 import textwrap
 from datetime import datetime, timezone
 
-STATE = "/Users/leofitz/zeus/state"
+# ZEUS_MAIN_TREE overrides; default is ~/zeus, the operator's standard layout.
+# expanduser() so ZEUS_MAIN_TREE=~/zeus (the shell does NOT expand '~' inside
+# os.environ.get) resolves correctly instead of leaving a literal '~' segment.
+_MAIN_TREE = os.path.expanduser(os.environ.get("ZEUS_MAIN_TREE") or "~/zeus")
+STATE = os.path.join(_MAIN_TREE, "state")
 DBS = [
     ("zeus-world.db", f"{STATE}/zeus-world.db"),
     ("zeus_trades.db", f"{STATE}/zeus_trades.db"),

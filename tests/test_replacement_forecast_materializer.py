@@ -1,6 +1,6 @@
 # Created: 2026-06-06
-# Last reused/audited: 2026-07-29
-# Lifecycle: created=2026-06-06; last_reviewed=2026-07-29; last_reused=2026-07-29
+# Last reused/audited: 2026-08-03
+# Lifecycle: created=2026-06-06; last_reviewed=2026-08-03; last_reused=2026-08-03
 # Purpose: Protect DB materialization for Open-Meteo ECMWF IFS 9km + Bayes-fusion replacement live layer.
 # Reuse: Run before changing replacement forecast live/experiment write path.
 # Authority basis: Operator-directed replacement forecast simple-switch readiness.
@@ -12,7 +12,8 @@ import json
 import sqlite3
 import subprocess
 import sys
-from contextlib import contextmanager
+import time
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -34,6 +35,7 @@ from src.data.replacement_forecast_materializer import (
     STALE_DAY0_ENQUEUE_OWNER,
     _QLCB_BASIS,
     _ensure_forecast_posteriors_runtime_layer,
+    _ensure_replacement_frontier_indexes,
     _ensure_replacement_identity_columns,
     _replacement_is_live_layer,
     materialize_replacement_forecast_live,
@@ -563,7 +565,17 @@ def test_stronger_absorbing_frontier_after_prepare_invalidates_fast_owner(
     likelihood_bound["value"] = 19.0
 
     conn.execute("BEGIN IMMEDIATE")
-    result = materializer_mod.write_prepared_replacement_forecast_live(conn, prepared)
+    with pytest.raises(
+        materializer_mod.PreparedReplacementForecastSnapshotStale
+    ):
+        materializer_mod.write_prepared_replacement_forecast_live(conn, prepared)
+    conn.rollback()
+
+    refreshed = _prepare_for_final_write(conn, prepared.request)
+    conn.execute("BEGIN IMMEDIATE")
+    result = materializer_mod.write_prepared_replacement_forecast_live(
+        conn, refreshed
+    )
     conn.commit()
 
     assert result.status == "BLOCKED"
@@ -1186,8 +1198,8 @@ def test_materializer_day0_observed_extreme_conditions_q_and_bounds(monkeypatch:
     assert provenance["day0_conditioning"]["observed_extreme_c"] == 26.0
 
 
-def test_materializer_write_keeps_high_physical_frontier_on_same_cycle(monkeypatch: pytest.MonkeyPatch) -> None:
-    """AWC HIGH31 remains absorbing when an older WU HIGH30 re-materializes the same cycle."""
+def test_materializer_write_replaces_retracted_same_source_high(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A newer snapshot may retract its own HIGH without erasing independent evidence."""
     conn = _conn()
     _install_live_fusion(monkeypatch)
     awc = _request(
@@ -1211,10 +1223,22 @@ def test_materializer_write_keeps_high_physical_frontier_on_same_cycle(monkeypat
 
     # The old WU worker computed from an earlier read snapshot. A delayed AWC
     # writer commits the stronger, still-causal HIGH31 before that worker owns
-    # the writer lock; write_prepared must re-reduce and recompute rather than
-    # commit its stale HIGH30 payload.
+    # the writer lock. The writer rejects the stale payload; recomputation must
+    # happen after its caller releases the lock.
     assert materialize_replacement_forecast_live(conn, awc).ok is True
-    result = materializer_mod.write_prepared_replacement_forecast_live(conn, prepared)
+    with pytest.raises(
+        materializer_mod.PreparedReplacementForecastSnapshotStale
+    ):
+        materializer_mod.write_prepared_replacement_forecast_live(conn, prepared)
+    refreshed = materializer_mod.prepare_replacement_forecast_live(
+        conn, prepared.request
+    )
+    assert isinstance(
+        refreshed, materializer_mod.PreparedReplacementForecastMaterialization
+    )
+    result = materializer_mod.write_prepared_replacement_forecast_live(
+        conn, refreshed
+    )
 
     assert result.ok is True
     provenance = json.loads(
@@ -1263,12 +1287,45 @@ def test_materializer_write_keeps_high_physical_frontier_on_same_cycle(monkeypat
             (same_source_regression.posterior_id,),
         ).fetchone()["provenance_json"]
     )
-    assert regression_provenance["day0_conditioning"]["observed_extreme_c"] == 31.0
-    assert regression_provenance["day0_conditioning"]["observation_time"] == _dt(18, 5).isoformat()
+    assert regression_provenance["day0_conditioning"]["observed_extreme_c"] == 30.0
+    assert regression_provenance["day0_conditioning"]["observation_time"] == _dt(18, 10).isoformat()
 
 
-def test_materializer_readonly_keeps_low_physical_frontier_on_same_cycle(monkeypatch: pytest.MonkeyPatch) -> None:
-    """AWC LOW19 remains absorbing when a causal readonly WU LOW20 request arrives."""
+def test_wu_newer_snapshot_retracts_stale_source_frontier(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Shenzhen antibody: WU 37 -> 36 must not leave the posterior pinned at 37."""
+    conn = _conn()
+    _install_live_fusion(monkeypatch)
+    first = _request(
+        computed_at=_dt(18),
+        expires_at=datetime(2026, 6, 7, 2, tzinfo=UTC),
+        day0_observed_extreme_c=37.0,
+        day0_observed_extreme_source="wu_icao_history",
+        day0_observed_extreme_observation_time=_dt(17, 55).isoformat(),
+        day0_observed_extreme_sample_count=22,
+    )
+    assert materialize_replacement_forecast_live(conn, first).ok is True
+
+    revised = materializer_mod._request_with_day0_physical_frontier(
+        conn,
+        replace(
+            first,
+            computed_at=_dt(18, 20),
+            day0_observed_extreme_c=36.0,
+            day0_observed_extreme_observation_time=_dt(18, 10).isoformat(),
+            day0_observed_extreme_sample_count=24,
+        ),
+        metric="high",
+    )
+
+    assert isinstance(revised, ReplacementForecastMaterializeRequest)
+    assert revised.day0_observed_extreme_c == 36.0
+    assert revised.day0_observed_extreme_observation_time == _dt(18, 10).isoformat()
+
+
+def test_materializer_readonly_replaces_retracted_same_source_low(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A newer snapshot may retract its own LOW without reopening other sources."""
     conn = _conn()
     _install_live_fusion(monkeypatch)
     awc = replace(
@@ -1300,9 +1357,18 @@ def test_materializer_readonly_keeps_low_physical_frontier_on_same_cycle(monkeyp
     )
     assert materialize_replacement_forecast_live(conn, awc).ok is True
 
+    with pytest.raises(
+        materializer_mod.PreparedReplacementForecastSnapshotStale
+    ):
+        materializer_mod.write_prepared_replacement_forecast_live(conn, prepared)
+    refreshed = materializer_mod.prepare_replacement_forecast_live(
+        conn, prepared.request
+    )
+    assert isinstance(
+        refreshed, materializer_mod.PreparedReplacementForecastMaterialization
+    )
     write_result = materializer_mod.write_prepared_replacement_forecast_live(
-        conn,
-        prepared,
+        conn, refreshed
     )
     assert write_result.ok is True
     write_provenance = json.loads(
@@ -1311,9 +1377,9 @@ def test_materializer_readonly_keeps_low_physical_frontier_on_same_cycle(monkeyp
             (write_result.posterior_id,),
         ).fetchone()["provenance_json"]
     )
-    assert write_provenance["day0_conditioning"]["observed_extreme_c"] == 19.0
+    assert write_provenance["day0_conditioning"]["observed_extreme_c"] == 20.0
     assert write_provenance["day0_conditioning"]["observation_time"] == _dt(
-        17, 55
+        18, 5
     ).isoformat()
 
     old_wu = replace(
@@ -2099,6 +2165,32 @@ def test_materialize_script_template_requires_precision_metadata() -> None:
     assert template["precision_metadata_json"] == "openmeteo_precision_metadata.json"
 
 
+def test_materialize_script_attaches_world_observations_read_only(
+    tmp_path, monkeypatch
+) -> None:
+    import scripts.materialize_replacement_forecast_live as cli
+    import src.state.db as state_db
+
+    forecasts_path = tmp_path / "forecasts.db"
+    world_path = tmp_path / "world.db"
+    world = sqlite3.connect(world_path)
+    world.execute("CREATE TABLE observation_prints (value_native REAL NOT NULL)")
+    world.execute("INSERT INTO observation_prints VALUES (8.0)")
+    world.commit()
+    world.close()
+    conn = sqlite3.connect(forecasts_path)
+    monkeypatch.setattr(state_db, "ZEUS_WORLD_DB_PATH", world_path)
+
+    cli._attach_world_read_only(conn)
+
+    assert conn.execute(
+        "SELECT value_native FROM world.observation_prints"
+    ).fetchone()[0] == 8.0
+    with pytest.raises(sqlite3.OperationalError, match="readonly"):
+        conn.execute("INSERT INTO world.observation_prints VALUES (9.0)")
+    conn.close()
+
+
 def test_materialize_script_batch_reuses_connection_and_wakes_each_commit(
     tmp_path, monkeypatch, capsys
 ) -> None:
@@ -2107,6 +2199,7 @@ def test_materialize_script_batch_reuses_connection_and_wakes_each_commit(
 
     inputs = [tmp_path / "a.json", tmp_path / "b.json"]
     calls = []
+    lock_held = False
 
     class _Connection:
         closed = False
@@ -2115,29 +2208,45 @@ def test_materialize_script_batch_reuses_connection_and_wakes_each_commit(
             self.closed = True
 
     conn = _Connection()
-    @contextmanager
-    def _connection_with_world(**_kwargs):
-        try:
-            yield conn
-        finally:
-            conn.close()
-
     monkeypatch.setattr(
         state_db,
-        "get_forecasts_connection_with_world",
-        _connection_with_world,
+        "get_forecasts_connection",
+        lambda **_kwargs: conn,
     )
-    monkeypatch.setattr(
-        cli,
-        "_prepare_live_schema_and_manifest",
-        lambda *args, **kwargs: cli._DurablePreparationReceipt(
+    monkeypatch.setattr(cli, "_attach_world_read_only", lambda _conn: None)
+
+    @contextmanager
+    def _writer_lock():
+        nonlocal lock_held
+        assert lock_held is False
+        lock_held = True
+        try:
+            yield
+        finally:
+            lock_held = False
+
+    monkeypatch.setattr(cli, "_forecast_writer_lock", _writer_lock)
+
+    def _prepare(*_args, **_kwargs):
+        assert lock_held is False
+        with _kwargs["writer_lock"]():
+            assert lock_held is True
+        return cli._DurablePreparationReceipt(
             schema_ready=True,
             anchor_artifact_id=None,
             manifest_committed=False,
-        ),
+        )
+
+    monkeypatch.setattr(
+        cli,
+        "_prepare_live_schema_and_manifest",
+        _prepare,
     )
 
     def _run_one(input_json, **kwargs):
+        assert lock_held is False
+        with kwargs["writer_lock"]():
+            assert lock_held is True
         calls.append((input_json, kwargs))
         return 0, json.dumps(
             {
@@ -2188,18 +2297,18 @@ def test_materialize_script_batch_prepares_schema_before_first_input_error(
             return None
 
     conn = _Connection()
-    @contextmanager
-    def _connection_with_world(**_kwargs):
-        try:
-            yield conn
-        finally:
-            conn.close()
-
     monkeypatch.setattr(
         state_db,
-        "get_forecasts_connection_with_world",
-        _connection_with_world,
+        "get_forecasts_connection",
+        lambda **_kwargs: conn,
     )
+    monkeypatch.setattr(cli, "_attach_world_read_only", lambda _conn: None)
+
+    @contextmanager
+    def _writer_lock():
+        yield
+
+    monkeypatch.setattr(cli, "_forecast_writer_lock", _writer_lock)
 
     def _prepare(*args, **kwargs):
         preparations.append(kwargs)
@@ -2237,6 +2346,40 @@ def test_materialize_script_batch_prepares_schema_before_first_input_error(
     assert [envelope["returncode"] for envelope in envelopes] == [2, 0]
 
 
+def test_materialize_manifest_persistence_does_not_verify_files_under_lock(
+    monkeypatch,
+) -> None:
+    import scripts.materialize_replacement_forecast_live as cli
+
+    conn = sqlite3.connect(":memory:")
+    calls = []
+
+    def _write_manifest(_conn, manifest, **kwargs):
+        calls.append((manifest, kwargs, _conn.in_transaction))
+        return 17
+
+    manifest = object()
+    monkeypatch.setattr(cli, "write_manifest_to_db", _write_manifest)
+    receipt = cli._prepare_live_schema_and_manifest(
+        conn,
+        init_schema=False,
+        schema_ready=True,
+        openmeteo_manifest=manifest,
+        anchor_artifact_id=None,
+    )
+    conn.close()
+
+    assert calls == [
+        (
+            manifest,
+            {"root": cli.ROOT, "verify_artifact": False},
+            True,
+        )
+    ]
+    assert receipt.anchor_artifact_id == 17
+    assert receipt.manifest_committed is True
+
+
 def test_materialize_script_publishes_family_wake_after_commit(monkeypatch) -> None:
     import scripts.materialize_replacement_forecast_live as cli
     from src.runtime import reactor_wake
@@ -2266,7 +2409,7 @@ def test_materialize_script_publishes_family_wake_after_commit(monkeypatch) -> N
     ]
 
 
-def test_materialize_script_computes_before_acquiring_writer_lock(
+def test_materialize_script_initial_compute_precedes_writer_lock(
     tmp_path, monkeypatch
 ) -> None:
     import scripts.materialize_replacement_forecast_live as cli
@@ -2279,37 +2422,264 @@ def test_materialize_script_computes_before_acquiring_writer_lock(
     trace: list[str] = []
     conn.set_trace_callback(trace.append)
     prepared = object()
+    prepare_calls = 0
+    witness_lock_states = []
 
+    lock_held = False
+
+    @contextmanager
+    def writer_lock():
+        nonlocal lock_held
+        assert lock_held is False
+        lock_held = True
+        try:
+            yield
+        finally:
+            lock_held = False
+
+    def prepare(_conn, _request):
+        nonlocal prepare_calls
+        assert lock_held is False
+        prepare_calls += 1
+        return prepared
+
+    def witness(_conn, value):
+        assert value is prepared
+        witness_lock_states.append(lock_held)
+        return "stable-target"
+
+    monkeypatch.setattr(cli, "prepare_replacement_forecast_live", prepare)
+    monkeypatch.setattr(cli, "_target_dependency_witness", witness)
     monkeypatch.setattr(
         cli,
-        "prepare_replacement_forecast_live",
-        lambda _conn, _request: prepared,
+        "_revalidate_target_dependency_witness",
+        lambda conn, value, _baseline: witness(conn, value),
     )
     monkeypatch.setattr(
         cli,
         "write_prepared_replacement_forecast_live",
-        lambda _conn, value: materializer_mod.ReplacementForecastMaterializeResult(
-            status="READY",
-            reason_codes=(),
-            posterior_id=1,
-            anchor_id=1,
-            readiness_id="ready-1",
-        )
-        if value is prepared
-        else pytest.fail("unexpected prepared value"),
+        lambda _conn, value: (
+            materializer_mod.ReplacementForecastMaterializeResult(
+                status="READY",
+                reason_codes=(),
+                posterior_id=1,
+                anchor_id=1,
+                readiness_id="ready-1",
+            )
+            if lock_held and value is prepared
+            else pytest.fail("write occurred without the writer lock")
+        ),
     )
 
-    result = cli._commit_from_read_snapshot(conn, SimpleNamespace(
-        city="London",
-        target_date=date(2026, 7, 19),
-        temperature_metric="high",
-    ))
+    result = cli._commit_from_read_snapshot(
+        conn,
+        SimpleNamespace(
+            city="London",
+            target_date=date(2026, 7, 19),
+            temperature_metric="high",
+        ),
+        writer_lock=writer_lock,
+    )
     conn.close()
 
     statements = [statement.upper() for statement in trace]
     assert result.ok is True
+    assert prepare_calls == 1
+    assert witness_lock_states == [False, True]
     assert statements.index("BEGIN") < statements.index("ROLLBACK")
     assert statements.index("ROLLBACK") < statements.index("BEGIN IMMEDIATE")
+
+
+def test_materialize_script_releases_live_flock_while_sqlite_writer_is_busy(
+    tmp_path, monkeypatch
+) -> None:
+    import scripts.materialize_replacement_forecast_live as cli
+
+    db_path = tmp_path / "forecasts.db"
+    reader = sqlite3.connect(db_path)
+    holder = sqlite3.connect(db_path)
+    reader.execute("PRAGMA journal_mode=WAL")
+    reader.execute("CREATE TABLE frontier (value INTEGER NOT NULL)")
+    reader.commit()
+    reader.execute("PRAGMA busy_timeout = 4321")
+    holder.execute("BEGIN IMMEDIATE")
+    prepared = object()
+    lock_held = False
+    lock_durations: list[float] = []
+
+    monkeypatch.setattr(cli, "_IMMEDIATE_BUSY_TIMEOUT_MS", 1)
+    monkeypatch.setattr(cli, "_IMMEDIATE_RETRY_LIMIT", 3)
+    monkeypatch.setattr(cli, "_IMMEDIATE_RETRY_DELAY_SECONDS", 0.0)
+    monkeypatch.setattr(cli, "prepare_replacement_forecast_live", lambda *_args: prepared)
+    monkeypatch.setattr(cli, "_target_dependency_witness", lambda *_args: "stable")
+    monkeypatch.setattr(
+        cli,
+        "_revalidate_target_dependency_witness",
+        lambda *_args: "stable",
+    )
+    monkeypatch.setattr(
+        cli,
+        "write_prepared_replacement_forecast_live",
+        lambda *_args: _ready_materialization_result(),
+    )
+
+    @contextmanager
+    def writer_lock():
+        nonlocal lock_held
+        assert lock_held is False
+        lock_held = True
+        started = time.monotonic()
+        try:
+            yield
+        finally:
+            lock_durations.append(time.monotonic() - started)
+            lock_held = False
+            if len(lock_durations) == 1:
+                holder.rollback()
+
+    result = cli._commit_from_read_snapshot(
+        reader,
+        SimpleNamespace(
+            city="London",
+            target_date=date(2026, 7, 19),
+            temperature_metric="high",
+        ),
+        writer_lock=writer_lock,
+    )
+
+    assert result.ok is True
+    assert len(lock_durations) == 2
+    assert lock_durations[0] < 0.1
+    assert reader.execute("PRAGMA busy_timeout").fetchone()[0] == 4321
+    reader.close()
+    holder.close()
+
+
+def test_materialize_schema_prelude_releases_live_flock_on_sqlite_contention(
+    tmp_path, monkeypatch
+) -> None:
+    import scripts.materialize_replacement_forecast_live as cli
+
+    db_path = tmp_path / "forecasts.db"
+    reader = sqlite3.connect(db_path)
+    holder = sqlite3.connect(db_path)
+    reader.execute("PRAGMA journal_mode=WAL")
+    reader.commit()
+    reader.execute("PRAGMA busy_timeout = 7654")
+    holder.execute("BEGIN IMMEDIATE")
+    lock_durations: list[float] = []
+    manifest = object()
+
+    monkeypatch.setattr(cli, "_IMMEDIATE_BUSY_TIMEOUT_MS", 1)
+    monkeypatch.setattr(cli, "_IMMEDIATE_RETRY_LIMIT", 3)
+    monkeypatch.setattr(cli, "_IMMEDIATE_RETRY_DELAY_SECONDS", 0.0)
+    monkeypatch.setattr(cli, "write_manifest_to_db", lambda *_args, **_kwargs: 17)
+
+    @contextmanager
+    def writer_lock():
+        started = time.monotonic()
+        try:
+            yield
+        finally:
+            lock_durations.append(time.monotonic() - started)
+            if len(lock_durations) == 1:
+                holder.rollback()
+
+    receipt = cli._prepare_live_schema_and_manifest(
+        reader,
+        init_schema=False,
+        schema_ready=True,
+        openmeteo_manifest=manifest,
+        anchor_artifact_id=None,
+        writer_lock=writer_lock,
+    )
+
+    assert receipt.anchor_artifact_id == 17
+    assert len(lock_durations) == 2
+    assert lock_durations[0] < 0.1
+    assert reader.execute("PRAGMA busy_timeout").fetchone()[0] == 7654
+    reader.close()
+    holder.close()
+
+
+def test_materialize_writer_contention_exhaustion_is_retryable(
+    tmp_path, monkeypatch
+) -> None:
+    import scripts.materialize_replacement_forecast_live as cli
+
+    db_path = tmp_path / "forecasts.db"
+    reader = sqlite3.connect(db_path)
+    holder = sqlite3.connect(db_path)
+    reader.execute("PRAGMA journal_mode=WAL")
+    reader.commit()
+    reader.execute("PRAGMA busy_timeout = 9876")
+    holder.execute("BEGIN IMMEDIATE")
+    lock_calls = 0
+
+    monkeypatch.setattr(cli, "_IMMEDIATE_BUSY_TIMEOUT_MS", 1)
+    monkeypatch.setattr(cli, "_IMMEDIATE_RETRY_LIMIT", 2)
+    monkeypatch.setattr(cli, "_IMMEDIATE_RETRY_DELAY_SECONDS", 0.0)
+
+    @contextmanager
+    def writer_lock():
+        nonlocal lock_calls
+        lock_calls += 1
+        yield
+
+    with pytest.raises(
+        cli.ReplacementForecastWriteDeferred,
+        match="^REPLACEMENT_FORECAST_WRITE_DEFERRED$",
+    ) as raised:
+        with cli._immediate_writer_transaction(reader, writer_lock):
+            pytest.fail("busy SQLite writer must prevent transaction entry")
+
+    response = cli._error_response(raised.value)
+    assert lock_calls == 2
+    assert reader.in_transaction is False
+    assert reader.execute("PRAGMA busy_timeout").fetchone()[0] == 9876
+    assert response["reason_codes"] == ["REPLACEMENT_FORECAST_WRITE_DEFERRED"]
+    holder.rollback()
+    reader.close()
+    holder.close()
+
+
+def test_materialize_transaction_body_busy_is_retryable() -> None:
+    import scripts.materialize_replacement_forecast_live as cli
+
+    conn = sqlite3.connect(":memory:")
+    conn.execute("PRAGMA busy_timeout = 2468")
+
+    with pytest.raises(
+        cli.ReplacementForecastWriteDeferred,
+        match="^REPLACEMENT_FORECAST_WRITE_DEFERRED$",
+    ):
+        with cli._immediate_writer_transaction(conn, nullcontext):
+            raise sqlite3.OperationalError("database is locked during commit")
+
+    assert conn.in_transaction is False
+    assert conn.execute("PRAGMA busy_timeout").fetchone()[0] == 2468
+    conn.close()
+
+
+def test_materialize_transaction_body_blocking_error_is_not_lock_contention() -> None:
+    import scripts.materialize_replacement_forecast_live as cli
+
+    conn = sqlite3.connect(":memory:")
+    lock_calls = 0
+
+    @contextmanager
+    def writer_lock():
+        nonlocal lock_calls
+        lock_calls += 1
+        yield
+
+    with pytest.raises(BlockingIOError, match="permanent body error"):
+        with cli._immediate_writer_transaction(conn, writer_lock):
+            raise BlockingIOError("permanent body error")
+
+    assert lock_calls == 1
+    assert conn.in_transaction is False
+    conn.close()
 
 
 def test_materialize_script_recomputes_when_snapshot_changes(
@@ -2323,19 +2693,30 @@ def test_materialize_script_recomputes_when_snapshot_changes(
     reader.execute("PRAGMA journal_mode=WAL")
     reader.execute("CREATE TABLE frontier (value INTEGER NOT NULL)")
     reader.commit()
-    prepared_values: list[int] = []
+    prepare_calls = []
     written_values: list[int] = []
+    changed = False
 
-    def _prepare(conn, _request):
-        value = int(conn.execute("SELECT COUNT(*) FROM frontier").fetchone()[0])
-        prepared_values.append(value)
-        if value == 0:
+    def _prepare(_conn, _request):
+        prepare_calls.append(True)
+        return object()
+
+    def _witness(conn, _prepared):
+        return int(conn.execute("SELECT COUNT(*) FROM frontier").fetchone()[0])
+
+    @contextmanager
+    def _writer_lock():
+        nonlocal changed
+        if not changed:
             writer.execute("INSERT INTO frontier (value) VALUES (1)")
             writer.commit()
-        return value
+            changed = True
+        yield
 
-    def _write(_conn, value):
-        written_values.append(value)
+    def _write(conn, _value):
+        written_values.append(
+            int(conn.execute("SELECT COUNT(*) FROM frontier").fetchone()[0])
+        )
         return materializer_mod.ReplacementForecastMaterializeResult(
             status="READY",
             reason_codes=(),
@@ -2345,19 +2726,1378 @@ def test_materialize_script_recomputes_when_snapshot_changes(
         )
 
     monkeypatch.setattr(cli, "prepare_replacement_forecast_live", _prepare)
+    monkeypatch.setattr(cli, "_target_dependency_witness", _witness)
+    monkeypatch.setattr(
+        cli,
+        "_revalidate_target_dependency_witness",
+        lambda conn, value, _baseline: _witness(conn, value),
+    )
     monkeypatch.setattr(cli, "write_prepared_replacement_forecast_live", _write)
 
     result = cli._commit_from_read_snapshot(reader, SimpleNamespace(
         city="London",
         target_date=date(2026, 7, 19),
         temperature_metric="high",
-    ))
+    ), writer_lock=_writer_lock)
     reader.close()
     writer.close()
 
     assert result.ok is True
-    assert prepared_values == [0, 1]
+    assert len(prepare_calls) == 2
     assert written_values == [1]
+
+
+def _prepared_target_frontier(marker: object):
+    request = _request(anchor_artifact_id=17)
+    return materializer_mod.PreparedReplacementForecastMaterialization(
+        request=request,
+        metric="high",
+        day0_ledger_frontier_identity=None,
+        posterior=SimpleNamespace(
+            live_eligible=True,
+            dependency_payload={
+                "baseline_b0": request.baseline_source_run_id,
+                "openmeteo_ifs9_anchor": request.openmeteo_source_run_id,
+                "current_ensemble_snapshot": marker,
+            },
+            dependency_hash=f"dependency-{marker}",
+            source_cycle_time=request.source_cycle_time.isoformat(),
+            available_at=request.openmeteo_source_available_at.isoformat(),
+            posterior_config_hash="posterior-config",
+            provenance_payload={
+                "bayes_precision_fusion": {
+                    "raw_model_forecast_ids": [marker],
+                    "current_value_serving": {
+                        "ecmwf_ifs9": {"raw_model_forecast_id": marker}
+                    },
+                    "current_evidence_shape": {
+                        "snapshot_id": marker,
+                        "shape_hash": f"shape-{marker}",
+                    },
+                }
+            },
+        ),
+    )
+
+
+@pytest.mark.parametrize(
+    "fusion",
+    (
+        None,
+        {},
+        {"current_value_serving": {}},
+        {"current_value_serving": {"ecmwf_ifs9": {}}},
+        {"current_value_serving": {"ecmwf_ifs9": {"raw_model_forecast_id": "bad"}}},
+        {"current_value_serving": {"ecmwf_ifs9": {"raw_model_forecast_id": 1.5}}},
+        {"current_value_serving": {"ecmwf_ifs9": {"raw_model_forecast_id": True}}},
+    ),
+)
+def test_target_witness_allows_live_ineligible_missing_serving_provenance(
+    fusion,
+) -> None:
+    import scripts.materialize_replacement_forecast_live as cli
+
+    conn = sqlite3.connect(":memory:")
+    _create_target_frontier_tables(conn)
+    prepared = _prepared_target_frontier(101)
+    prepared.posterior.live_eligible = False
+    prepared.posterior.provenance_payload = (
+        {} if fusion is None else {"bayes_precision_fusion": fusion}
+    )
+
+    witness = cli._target_dependency_witness(conn, prepared)
+    conn.close()
+
+    assert witness.prepared_provider_row_ids == ()
+    assert witness.prepared_snapshot_id is None
+
+
+@pytest.mark.parametrize(
+    "fusion",
+    (
+        None,
+        {},
+        {"current_value_serving": {}},
+        {"current_value_serving": {"ecmwf_ifs9": {}}},
+        {"current_value_serving": {"ecmwf_ifs9": {"raw_model_forecast_id": "bad"}}},
+        {"current_value_serving": {"ecmwf_ifs9": {"raw_model_forecast_id": 1.5}}},
+        {"current_value_serving": {"ecmwf_ifs9": {"raw_model_forecast_id": True}}},
+    ),
+)
+def test_target_witness_rejects_live_eligible_missing_serving_provenance(
+    fusion,
+) -> None:
+    import scripts.materialize_replacement_forecast_live as cli
+
+    conn = sqlite3.connect(":memory:")
+    _create_target_frontier_tables(conn)
+    prepared = _prepared_target_frontier(101)
+    prepared.posterior.provenance_payload = (
+        {} if fusion is None else {"bayes_precision_fusion": fusion}
+    )
+
+    with pytest.raises(
+        cli._TargetDependencyWitnessUnavailable,
+        match="current value serving witness unavailable",
+    ):
+        cli._target_dependency_witness(conn, prepared)
+    conn.close()
+
+
+def test_commit_returns_typed_blocked_for_ineligible_missing_serving(
+    monkeypatch,
+) -> None:
+    import scripts.materialize_replacement_forecast_live as cli
+
+    conn = sqlite3.connect(":memory:")
+    _create_target_frontier_tables(conn)
+    prepared = _prepared_target_frontier(101)
+    prepared.posterior.live_eligible = False
+    prepared.posterior.provenance_payload = {}
+    blocked = materializer_mod.ReplacementForecastMaterializeResult(
+        status="BLOCKED",
+        reason_codes=("PREDICTIVE_SIGMA:MISSING",),
+        posterior_id=None,
+        anchor_id=17,
+        readiness_id=None,
+    )
+    monkeypatch.setattr(
+        cli, "prepare_replacement_forecast_live", lambda *_args: prepared
+    )
+    monkeypatch.setattr(
+        cli, "write_prepared_replacement_forecast_live", lambda *_args: blocked
+    )
+
+    result = cli._commit_from_read_snapshot(
+        conn, prepared.request, writer_lock=nullcontext
+    )
+    conn.close()
+
+    assert result == blocked
+
+
+def _ready_materialization_result():
+    return materializer_mod.ReplacementForecastMaterializeResult(
+        status="READY",
+        reason_codes=(),
+        posterior_id=1,
+        anchor_id=1,
+        readiness_id="ready-1",
+    )
+
+
+def _blocked_materialization_result():
+    return materializer_mod.ReplacementForecastMaterializeResult(
+        status="BLOCKED",
+        reason_codes=("TARGET_DEPENDENCY_UNAVAILABLE",),
+        posterior_id=None,
+        anchor_id=None,
+        readiness_id=None,
+    )
+
+
+def _create_target_frontier_tables(conn: sqlite3.Connection) -> None:
+    conn.executescript(
+        """
+        CREATE TABLE source_run (
+            source_run_id TEXT PRIMARY KEY,
+            source_id TEXT, track TEXT, source_cycle_time TEXT,
+            source_available_at TEXT, fetch_finished_at TEXT,
+            expected_count INTEGER, observed_count INTEGER,
+            completeness_status TEXT, raw_payload_hash TEXT,
+            manifest_hash TEXT, status TEXT, reason_code TEXT
+        );
+        CREATE TABLE raw_forecast_artifacts (
+            artifact_id INTEGER PRIMARY KEY,
+            source_id TEXT, product_id TEXT, data_version TEXT,
+            source_cycle_time TEXT, source_available_at TEXT, captured_at TEXT,
+            sha256 TEXT, byte_size INTEGER
+        );
+        CREATE TABLE raw_model_forecasts (
+            raw_model_forecast_id INTEGER PRIMARY KEY,
+            model TEXT, city TEXT, target_date TEXT, metric TEXT,
+            source_cycle_time TEXT, source_available_at TEXT, captured_at TEXT,
+            lead_days INTEGER, forecast_value_c REAL, endpoint TEXT
+        );
+        CREATE TABLE ensemble_snapshots (
+            snapshot_id INTEGER PRIMARY KEY,
+            city TEXT, target_date TEXT, temperature_metric TEXT,
+            source_id TEXT, model_version TEXT, authority TEXT,
+            causality_status TEXT, boundary_ambiguous INTEGER,
+            forecast_window_attribution_status TEXT,
+            contributes_to_target_extrema INTEGER,
+            source_cycle_time TEXT, issue_time TEXT,
+            source_available_at TEXT, available_at TEXT,
+            members_json TEXT, members_unit TEXT
+        );
+        CREATE TABLE unrelated_writer (value INTEGER);
+        INSERT INTO source_run VALUES (
+            'b0-run', 'ecmwf_open_data', 'mx2t6_high',
+            '2026-06-06T00:00:00+00:00', '2026-06-06T02:00:00+00:00',
+            '2026-06-06T02:00:00+00:00', 51, 51, 'COMPLETE',
+            'b0-raw', 'b0-manifest', 'SUCCESS', NULL
+        );
+        INSERT INTO source_run VALUES (
+            'om9-run', 'openmeteo', 'ifs9_high',
+            '2026-06-06T00:00:00+00:00', '2026-06-06T03:00:00+00:00',
+            '2026-06-06T03:00:00+00:00', 1, 1, 'COMPLETE',
+            'om9-raw', 'om9-manifest', 'SUCCESS', NULL
+        );
+        INSERT INTO raw_forecast_artifacts VALUES (
+            17, 'openmeteo', 'ifs9', 'anchor-v1',
+            '2026-06-06T00:00:00+00:00', '2026-06-06T03:00:00+00:00',
+            '2026-06-06T03:00:00+00:00', 'anchor-sha-a', 10
+        );
+        INSERT INTO raw_model_forecasts VALUES (
+            101, 'ecmwf_ifs9', 'Shanghai', '2026-06-07', 'high',
+            '2026-06-06T00:00:00+00:00', '2026-06-06T03:00:00+00:00',
+            '2026-06-06T03:00:00+00:00', 1, 27.0, 'single_runs'
+        );
+        INSERT INTO ensemble_snapshots VALUES (
+            101, 'Shanghai', '2026-06-07', 'high',
+            'ecmwf_open_data', 'ecmwf_ens', 'VERIFIED', 'OK', 0,
+            'FULLY_INSIDE_TARGET_LOCAL_DAY', 1,
+            '2026-06-06T00:00:00+00:00', '2026-06-06T00:00:00+00:00',
+            '2026-06-06T03:00:00+00:00', '2026-06-06T03:00:00+00:00',
+            '[20.0,21.0]', 'degC'
+        );
+        """
+    )
+
+
+def test_target_dependency_witness_is_bounded_to_exact_target_rows() -> None:
+    import scripts.materialize_replacement_forecast_live as cli
+
+    conn = sqlite3.connect(":memory:")
+    _create_target_frontier_tables(conn)
+    prepared = _prepared_target_frontier(101)
+
+    baseline = cli._target_dependency_witness(conn, prepared)
+    assert baseline.prepared_snapshot_id == 101
+    assert baseline.prepared_shape_id == "shape-101"
+    conn.execute("INSERT INTO unrelated_writer VALUES (1)")
+    assert cli._target_dependency_witness(conn, prepared) == baseline
+
+    conn.execute(
+        "UPDATE raw_forecast_artifacts SET sha256 = 'anchor-sha-b' WHERE artifact_id = 17"
+    )
+    assert cli._target_dependency_witness(conn, prepared) != baseline
+    conn.execute(
+        "UPDATE raw_forecast_artifacts SET sha256 = 'anchor-sha-a' WHERE artifact_id = 17"
+    )
+    conn.execute("INSERT INTO unrelated_writer VALUES (2)")
+    assert cli._revalidate_target_dependency_witness(
+        conn, prepared, baseline
+    ) == baseline
+
+    conn.execute(
+        """
+        INSERT INTO raw_model_forecasts VALUES (
+            102, 'ecmwf_ifs9', 'Shanghai', '2026-06-07', 'high',
+            '2026-06-06T01:00:00+00:00', '2026-06-06T03:30:00+00:00',
+            '2026-06-06T03:30:00+00:00', 1, 26.0, 'single_runs'
+        )
+        """
+    )
+    changed_provider = cli._revalidate_target_dependency_witness(
+        conn, prepared, baseline
+    )
+    assert changed_provider != baseline
+    assert changed_provider.provider_family_latest_id == 102
+    conn.execute("DELETE FROM raw_model_forecasts WHERE raw_model_forecast_id = 102")
+
+    conn.execute(
+        """
+        INSERT INTO ensemble_snapshots VALUES (
+            102, 'Shanghai', '2026-06-07', 'high',
+            'ecmwf_open_data', 'ecmwf_ens', 'VERIFIED', 'OK', 0,
+            'FULLY_INSIDE_TARGET_LOCAL_DAY', 1,
+            '2026-06-06T00:00:00+00:00', '2026-06-06T00:00:00+00:00',
+            '2026-06-06T03:30:00+00:00', '2026-06-06T03:30:00+00:00',
+            '[19.0,22.0]', 'degC'
+        )
+        """
+    )
+    with pytest.raises(cli._TargetDependencyWitnessUnavailable):
+        cli._revalidate_target_dependency_witness(conn, prepared, baseline)
+    conn.close()
+
+
+def test_materialize_script_ignores_unrelated_data_version_changes(
+    tmp_path, monkeypatch
+) -> None:
+    import scripts.materialize_replacement_forecast_live as cli
+
+    db_path = tmp_path / "forecasts.db"
+    reader = sqlite3.connect(db_path)
+    writer = sqlite3.connect(db_path)
+    reader.execute("PRAGMA journal_mode=WAL")
+    _create_target_frontier_tables(reader)
+    reader.commit()
+    prepared = _prepared_target_frontier(101)
+    prepare_calls = []
+    written = []
+    initial_data_version = int(reader.execute("PRAGMA data_version").fetchone()[0])
+    lock_entries = 0
+
+    @contextmanager
+    def writer_lock():
+        nonlocal lock_entries
+        lock_entries += 1
+        if lock_entries == 1:
+            writer.execute("INSERT INTO unrelated_writer (value) VALUES (1)")
+            writer.commit()
+        yield
+
+    def _prepare(_conn, _request):
+        prepare_calls.append(True)
+        return prepared
+
+    monkeypatch.setattr(cli, "prepare_replacement_forecast_live", _prepare)
+    monkeypatch.setattr(
+        cli,
+        "write_prepared_replacement_forecast_live",
+        lambda _conn, value: written.append(value) or _ready_materialization_result(),
+    )
+
+    result = cli._commit_from_read_snapshot(
+        reader, prepared.request, writer_lock=writer_lock
+    )
+    current_data_version = int(reader.execute("PRAGMA data_version").fetchone()[0])
+    reader.close()
+    writer.close()
+
+    assert result.ok is True
+    assert current_data_version > initial_data_version
+    assert len(prepare_calls) == 1
+    assert lock_entries == 1
+    assert written == [prepared]
+
+
+@pytest.mark.parametrize(
+    "kind",
+    ("source_run_available_at", "source_run_disappears"),
+)
+def test_materialize_script_refuses_changed_or_missing_target_source_run(
+    monkeypatch, kind: str
+) -> None:
+    import scripts.materialize_replacement_forecast_live as cli
+
+    conn = sqlite3.connect(":memory:")
+    prepared = _prepared_target_frontier(101)
+    prepare_results = iter((prepared, _blocked_materialization_result()))
+    baseline_witness = ("present", "fetch-finished-a")
+    changed_witness = (
+        "missing" if kind == "source_run_disappears" else "present",
+        None
+        if kind == "source_run_disappears"
+        else "fetch-finished-b",
+    )
+    prepare_calls = []
+    writes = []
+
+    def _prepare(*_args):
+        prepare_calls.append(True)
+        return next(prepare_results)
+
+    monkeypatch.setattr(cli, "prepare_replacement_forecast_live", _prepare)
+    monkeypatch.setattr(
+        cli, "_target_dependency_witness", lambda *_args: baseline_witness
+    )
+    monkeypatch.setattr(
+        cli,
+        "_revalidate_target_dependency_witness",
+        lambda *_args: changed_witness,
+    )
+    monkeypatch.setattr(
+        cli,
+        "write_prepared_replacement_forecast_live",
+        lambda *_args: writes.append(True) or _ready_materialization_result(),
+    )
+
+    result = cli._commit_from_read_snapshot(
+        conn, prepared.request, writer_lock=nullcontext
+    )
+    conn.close()
+
+    assert result.status == "BLOCKED"
+    assert len(prepare_calls) == 2
+    assert writes == []
+
+
+def test_source_run_witness_distinguishes_missing_from_present_empty() -> None:
+    import scripts.materialize_replacement_forecast_live as cli
+
+    conn = sqlite3.connect(":memory:")
+    conn.execute(
+        "CREATE TABLE source_run (source_run_id TEXT PRIMARY KEY, fetch_finished_at TEXT)"
+    )
+    columns = cli._table_columns(conn, "source_run")
+    missing_rows = cli._exact_rows_witness(
+        conn,
+        table="source_run",
+        pk="source_run_id",
+        ids=("run-1",),
+        columns=columns,
+    )
+    conn.execute(
+        "INSERT INTO source_run (source_run_id, fetch_finished_at) VALUES (?, NULL)",
+        ("run-1",),
+    )
+    present_empty_rows = cli._exact_rows_witness(
+        conn,
+        table="source_run",
+        pk="source_run_id",
+        ids=("run-1",),
+        columns=columns,
+    )
+    conn.execute(
+        "UPDATE source_run SET fetch_finished_at = ? WHERE source_run_id = ?",
+        ("2026-08-03T01:00:00+00:00", "run-1"),
+    )
+    present_rows = cli._exact_rows_witness(
+        conn,
+        table="source_run",
+        pk="source_run_id",
+        ids=("run-1",),
+        columns=columns,
+    )
+    requested = (("run-1", "request-available"),)
+    missing = cli._source_run_states(missing_rows, requested=requested)[0]
+    present_empty = cli._source_run_states(
+        present_empty_rows, requested=requested
+    )[0]
+    present = cli._source_run_states(present_rows, requested=requested)[0]
+    conn.close()
+
+    assert missing.state == "missing"
+    assert present_empty.state == "present_empty"
+    assert present.state == "present"
+    assert present.fetch_finished_at == "2026-08-03T01:00:00+00:00"
+
+
+def test_target_witness_detects_same_fetch_time_source_run_replacement() -> None:
+    import scripts.materialize_replacement_forecast_live as cli
+
+    conn = sqlite3.connect(":memory:")
+    _create_target_frontier_tables(conn)
+    prepared = _prepared_target_frontier(101)
+    baseline = cli._target_dependency_witness(conn, prepared)
+    conn.execute(
+        """
+        UPDATE source_run
+           SET observed_count = 50,
+               completeness_status = 'PARTIAL',
+               raw_payload_hash = 'b0-replaced',
+               status = 'PARTIAL',
+               reason_code = 'ONE_MEMBER_MISSING'
+         WHERE source_run_id = 'b0-run'
+        """
+    )
+
+    changed = cli._revalidate_target_dependency_witness(
+        conn, prepared, baseline
+    )
+    conn.close()
+
+    assert changed != baseline
+    assert changed.source_run_states[0].fetch_finished_at == (
+        baseline.source_run_states[0].fetch_finished_at
+    )
+
+
+@pytest.mark.parametrize(
+    "delete_sql,raises",
+    (
+        ("DELETE FROM source_run WHERE source_run_id = 'b0-run'", False),
+        ("DELETE FROM raw_forecast_artifacts WHERE artifact_id = 17", True),
+        ("DELETE FROM raw_model_forecasts WHERE raw_model_forecast_id = 101", True),
+        ("DELETE FROM ensemble_snapshots WHERE snapshot_id = 101", True),
+    ),
+)
+def test_target_witness_refuses_disappeared_exact_dependency(
+    delete_sql: str, raises: bool
+) -> None:
+    import scripts.materialize_replacement_forecast_live as cli
+
+    conn = sqlite3.connect(":memory:")
+    _create_target_frontier_tables(conn)
+    prepared = _prepared_target_frontier(101)
+    baseline = cli._target_dependency_witness(conn, prepared)
+    conn.execute(delete_sql)
+
+    if raises:
+        with pytest.raises(cli._TargetDependencyWitnessUnavailable):
+            cli._revalidate_target_dependency_witness(conn, prepared, baseline)
+    else:
+        changed = cli._revalidate_target_dependency_witness(
+            conn, prepared, baseline
+        )
+        assert changed != baseline
+        assert changed.source_run_states[0].state == "missing"
+    conn.close()
+
+
+def test_shared_frontier_helpers_match_materializer_selectors() -> None:
+    from src.data.replacement_current_value_serving import (
+        current_value_serving_schema,
+        read_current_instrument_frontier_identity,
+        read_current_instrument_values,
+    )
+    from src.data.replacement_forecast_materializer import (
+        read_current_evidence_snapshot_id,
+        read_current_evidence_snapshot_identity,
+    )
+
+    conn = sqlite3.connect(":memory:")
+    _create_target_frontier_tables(conn)
+    prepared = _prepared_target_frontier(101)
+    request = prepared.request
+    served = read_current_instrument_values(
+        conn,
+        city=request.city,
+        metric=prepared.metric,
+        target_date=request.target_date.isoformat(),
+        source_cycle_time_iso=request.source_cycle_time.isoformat(),
+        decision_time_iso=request.computed_at.isoformat(),
+        include_station_sources=True,
+    )
+    bounded = read_current_instrument_frontier_identity(
+        conn,
+        city=request.city,
+        metric=prepared.metric,
+        target_date=request.target_date.isoformat(),
+        decision_time_iso=request.computed_at.isoformat(),
+        models=tuple(served),
+        schema=current_value_serving_schema(conn),
+    )
+    snapshot = read_current_evidence_snapshot_identity(
+        conn, request, metric=prepared.metric
+    )
+    snapshot_id = read_current_evidence_snapshot_id(
+        conn, request, metric=prepared.metric
+    )
+    conn.close()
+
+    assert bounded == tuple(
+        sorted((model, value.raw_model_forecast_id) for model, value in served.items())
+    )
+    assert snapshot is not None
+    assert snapshot_id == snapshot.snapshot_id == 101
+
+
+def test_new_target_family_provider_changes_final_witness() -> None:
+    """A newly eligible provider must invalidate the prepared family frontier."""
+    import scripts.materialize_replacement_forecast_live as cli
+
+    conn = sqlite3.connect(":memory:")
+    _create_target_frontier_tables(conn)
+    prepared = _prepared_target_frontier(101)
+    baseline = cli._target_dependency_witness(conn, prepared)
+    conn.execute(
+        """
+        INSERT INTO raw_model_forecasts VALUES (
+            104, 'gfs', 'Shanghai', '2026-06-07', 'high',
+            '2026-06-06T01:00:00+00:00', '2026-06-06T03:30:00+00:00',
+            '2026-06-06T03:30:00+00:00', 1, 26.0, 'single_runs'
+        )
+        """
+    )
+
+    current = cli._revalidate_target_dependency_witness(conn, prepared, baseline)
+    refreshed = cli._target_dependency_witness(conn, prepared)
+    conn.close()
+
+    assert current != baseline
+    assert current.provider_family_latest_id == 104
+    assert ("gfs", 104) in refreshed.provider_frontier
+    assert "gfs" in refreshed.provider_models
+
+
+def test_final_lock_uses_real_writer_without_revalidation_or_unbounded_reads(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The final lock may run bounded witnesses and the real target writer only."""
+    import scripts.materialize_replacement_forecast_live as cli
+
+    conn = _conn()
+    _install_live_fusion(monkeypatch)
+    prepared = _prepare_for_final_write(conn, _request())
+    locked_sql: list[str] = []
+
+    @contextmanager
+    def writer_lock():
+        conn.set_trace_callback(locked_sql.append)
+        try:
+            yield
+        finally:
+            conn.set_trace_callback(None)
+
+    witness = object()
+    monkeypatch.setattr(cli, "prepare_replacement_forecast_live", lambda *_args: prepared)
+    monkeypatch.setattr(cli, "_target_dependency_witness", lambda *_args: witness)
+    monkeypatch.setattr(cli, "_revalidate_target_dependency_witness", lambda *_args: witness)
+    monkeypatch.setattr(
+        materializer_mod,
+        "_validated_replacement_forecast_request",
+        lambda *_args: pytest.fail("final writer must reuse the prepared validation"),
+    )
+
+    result = cli._commit_from_read_snapshot(
+        conn, prepared.request, writer_lock=writer_lock
+    )
+    conn.close()
+
+    assert result.ok is True
+    assert not any("PRAGMA" in sql.upper() for sql in locked_sql)
+    assert not any(
+        "FORECAST_POSTERIORS" in sql.upper()
+        and sql.lstrip().upper().startswith("SELECT")
+        and "LIMIT" not in sql.upper()
+        for sql in locked_sql
+    )
+
+
+def test_final_ens_frontier_preserves_production_casefold_fallback() -> None:
+    from src.data.replacement_forecast_materializer import (
+        read_current_evidence_snapshot_id,
+        read_current_evidence_snapshot_identity,
+    )
+
+    conn = sqlite3.connect(":memory:")
+    _create_target_frontier_tables(conn)
+    prepared = _prepared_target_frontier(101)
+    request = replace(prepared.request, city="shanghai")
+
+    production = read_current_evidence_snapshot_identity(
+        conn, request, metric=prepared.metric
+    )
+    assert production is not None
+    traced: list[str] = []
+    conn.set_trace_callback(traced.append)
+    final_id = read_current_evidence_snapshot_id(
+        conn,
+        request,
+        metric=prepared.metric,
+    )
+    conn.set_trace_callback(None)
+    conn.close()
+
+    assert production.snapshot_id == 101
+    assert production.city == "Shanghai"
+    assert final_id == production.snapshot_id
+    final_sql = [
+        sql
+        for sql in traced
+        if sql.lstrip().upper().startswith("SELECT")
+        and "FROM ENSEMBLE_SNAPSHOTS" in sql.upper()
+    ]
+    assert final_sql
+    assert len(final_sql) == 2
+    assert "CITY = 'SHANGHAI'" in final_sql[0].upper()
+    assert "LOWER(CITY) = LOWER('SHANGHAI')" in final_sql[1].upper()
+
+
+def test_final_ens_frontier_detects_absent_to_present() -> None:
+    """A prepared missing ENS identity must not become a permanent final gate."""
+    import scripts.materialize_replacement_forecast_live as cli
+
+    conn = sqlite3.connect(":memory:")
+    _create_target_frontier_tables(conn)
+    conn.execute("DELETE FROM ensemble_snapshots")
+    prepared = _prepared_target_frontier(101)
+    prepared.posterior.provenance_payload["bayes_precision_fusion"][
+        "current_evidence_shape"
+    ] = {"snapshot_id": None, "shape_hash": None}
+    baseline = cli._target_dependency_witness(conn, prepared)
+    assert baseline.ensemble_identity is None
+    conn.execute(
+        """
+        INSERT INTO ensemble_snapshots VALUES (
+            102, 'Shanghai', '2026-06-07', 'high',
+            'ecmwf_open_data', 'ecmwf_ens', 'VERIFIED', 'OK', 0,
+            'FULLY_INSIDE_TARGET_LOCAL_DAY', 1,
+            '2026-06-06T00:00:00+00:00', '2026-06-06T00:00:00+00:00',
+            '2026-06-06T03:30:00+00:00', '2026-06-06T03:30:00+00:00',
+            '[19.0,22.0]', 'degC'
+        )
+        """
+    )
+
+    current = cli._revalidate_target_dependency_witness(conn, prepared, baseline)
+    conn.close()
+
+    assert current != baseline
+    assert current.ensemble_frontier_id == 102
+
+
+def test_final_ens_frontier_exact_city_update_supersedes_casefold() -> None:
+    """Final selection must preserve production exact-first semantics after UPDATE."""
+    import scripts.materialize_replacement_forecast_live as cli
+
+    conn = sqlite3.connect(":memory:")
+    _create_target_frontier_tables(conn)
+    conn.execute("UPDATE raw_model_forecasts SET city = 'shanghai'")
+    prepared = _prepared_target_frontier(101)
+    prepared = replace(prepared, request=replace(prepared.request, city="shanghai"))
+    conn.execute(
+        """
+        INSERT INTO ensemble_snapshots VALUES (
+            102, 'shanghai', '2026-06-07', 'high',
+            'ecmwf_open_data', 'ecmwf_ens', 'UNVERIFIED', 'OK', 0,
+            'FULLY_INSIDE_TARGET_LOCAL_DAY', 1,
+            '2026-06-06T00:00:00+00:00', '2026-06-06T00:00:00+00:00',
+            '2026-06-06T03:30:00+00:00', '2026-06-06T03:30:00+00:00',
+            '[19.0,22.0]', 'degC'
+        )
+        """
+    )
+    baseline = cli._target_dependency_witness(conn, prepared)
+    assert baseline.ensemble_identity is not None
+    assert baseline.ensemble_identity.city == "Shanghai"
+    conn.execute(
+        "UPDATE ensemble_snapshots SET authority = 'VERIFIED' WHERE snapshot_id = 102"
+    )
+
+    with pytest.raises(cli._TargetDependencyWitnessUnavailable):
+        cli._revalidate_target_dependency_witness(conn, prepared, baseline)
+    current_id = materializer_mod.read_current_evidence_snapshot_id(
+        conn, prepared.request, metric=prepared.metric
+    )
+    conn.close()
+
+    assert current_id == 102
+
+
+def test_final_ens_selector_has_indexed_logarithmic_work() -> None:
+    """Canonical exact/folded target selectors must not scan their target range."""
+    from src.data.replacement_forecast_materializer import (
+        _ensure_replacement_frontier_indexes,
+        read_current_evidence_snapshot_id,
+    )
+
+    samples: list[tuple[int, int, int]] = []
+    captured_plans: list[tuple[str, ...]] = []
+    for row_count in (10, 1_000, 10_000):
+        conn = sqlite3.connect(":memory:")
+        _create_target_frontier_tables(conn)
+        _ensure_replacement_frontier_indexes(conn)
+        conn.execute("DELETE FROM ensemble_snapshots")
+        conn.executemany(
+            """
+            INSERT INTO ensemble_snapshots VALUES (
+                ?, 'Shanghai', '2026-06-07', 'high',
+                'ecmwf_open_data', 'ecmwf_ens', 'VERIFIED', 'OK', 0,
+                'FULLY_INSIDE_TARGET_LOCAL_DAY', 1,
+                '2026-06-06T00:00:00+00:00', '2026-06-06T00:00:00+00:00',
+                '2026-06-06T03:00:00+00:00', '2026-06-06T03:00:00+00:00',
+                '[20.0,21.0]', 'degC'
+            )
+            """,
+            ((snapshot_id,) for snapshot_id in range(1, row_count + 1)),
+        )
+        request = _prepared_target_frontier(row_count).request
+
+        def measured(city: str) -> tuple[int | None, int, list[str]]:
+            steps = 0
+            traced: list[str] = []
+
+            def count_step() -> int:
+                nonlocal steps
+                steps += 1
+                return 0
+
+            conn.set_trace_callback(traced.append)
+            conn.set_progress_handler(count_step, 1)
+            try:
+                selected = read_current_evidence_snapshot_id(
+                    conn, replace(request, city=city), metric="high"
+                )
+            finally:
+                conn.set_progress_handler(None, 0)
+                conn.set_trace_callback(None)
+            return selected, steps, traced
+
+        exact_id, exact_steps, exact_sql = measured("Shanghai")
+        folded_id, folded_steps, folded_sql = measured("shanghai")
+        assert exact_id == folded_id == row_count
+        samples.append((row_count, exact_steps, folded_steps))
+        if row_count == 10_000:
+            selector_sql = [
+                sql
+                for sql in (*exact_sql, *folded_sql)
+                if sql.lstrip().upper().startswith("SELECT")
+                and "FROM ENSEMBLE_SNAPSHOTS" in sql.upper()
+            ]
+            captured_plans = [
+                tuple(
+                    str(row[3])
+                    for row in conn.execute("EXPLAIN QUERY PLAN " + sql)
+                )
+                for sql in selector_sql
+            ]
+        conn.close()
+
+    assert captured_plans
+    plan_text = "\n".join(detail for plan in captured_plans for detail in plan).upper()
+    assert "IDX_ENSEMBLE_SNAPSHOTS_REPLACEMENT_EXACT_FRONTIER" in plan_text
+    assert "IDX_ENSEMBLE_SNAPSHOTS_REPLACEMENT_CASEFOLD_FRONTIER" in plan_text
+    assert "USE TEMP B-TREE" not in plan_text
+    assert not any(
+        detail.upper().startswith("SCAN ")
+        for plan in captured_plans
+        for detail in plan
+    )
+    assert samples[-1][1] < samples[0][1] * 2
+    assert samples[-1][2] < samples[0][2] * 2
+
+
+def test_provider_frontier_skips_invalid_rows_like_production_selector() -> None:
+    from src.data.replacement_current_value_serving import (
+        current_value_serving_schema,
+        read_current_instrument_frontier_identity,
+        read_current_instrument_values,
+    )
+
+    conn = sqlite3.connect(":memory:")
+    _create_target_frontier_tables(conn)
+    conn.executemany(
+        """
+        INSERT INTO raw_model_forecasts VALUES (
+            ?, 'ecmwf_ifs9', 'Shanghai', '2026-06-07', 'high',
+            ?, '2026-06-06T03:30:00+00:00', '2026-06-06T03:30:00+00:00',
+            ?, ?, 'single_runs'
+        )
+        """,
+        (
+            (102, "2026-06-06T01:00:00+00:00", 1, float("inf"),),
+            (103, "2026-06-06T02:00:00+00:00", "bad-lead", 28.0),
+        ),
+    )
+    served = read_current_instrument_values(
+        conn,
+        city="Shanghai",
+        metric="high",
+        target_date="2026-06-07",
+        source_cycle_time_iso="2026-06-06T00:00:00+00:00",
+        decision_time_iso="2026-06-06T04:00:00+00:00",
+        include_station_sources=True,
+    )
+    frontier = read_current_instrument_frontier_identity(
+        conn,
+        city="Shanghai",
+        metric="high",
+        target_date="2026-06-07",
+        decision_time_iso="2026-06-06T04:00:00+00:00",
+        models=("ecmwf_ifs9",),
+        schema=current_value_serving_schema(conn),
+    )
+    conn.close()
+
+    assert served["ecmwf_ifs9"].raw_model_forecast_id == 101
+    assert frontier == (("ecmwf_ifs9", 101),)
+
+
+def test_day0_final_writer_uses_frozen_frontier_without_likelihood_recompute(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The real final writer compares Day0 identity without rebuilding fast likelihood."""
+    conn = _conn()
+    _install_live_fusion(monkeypatch)
+    absorbing = _request(
+        computed_at=_dt(18),
+        expires_at=datetime(2026, 6, 7, 2, tzinfo=UTC),
+        day0_observed_extreme_c=30.0,
+        day0_observed_extreme_source="wu_icao_history",
+        day0_observed_extreme_observation_time=_dt(17, 55).isoformat(),
+    )
+    assert materialize_replacement_forecast_live(conn, absorbing).ok is True
+    conn.commit()
+    provisional = replace(
+        absorbing,
+        computed_at=_dt(18, 10),
+        day0_observed_extreme_c=31.0,
+        day0_observed_extreme_source="wu_api+same_station_fast_tail",
+        day0_observed_extreme_observation_time=_dt(18, 5).isoformat(),
+    )
+    likelihood = SimpleNamespace(
+        residual_weights_c=((0.0, 1.0),),
+        unknown_weight=0.0,
+        settlement_extreme_c=30.0,
+        identity_hash="4" * 64,
+        as_payload=lambda: {
+            "identity_hash": "4" * 64,
+            "settlement_extreme_c": 30.0,
+        },
+    )
+    monkeypatch.setattr(
+        "src.data.day0_fast_obs.build_fast_station_residual_likelihood",
+        lambda *_args, **_kwargs: likelihood,
+    )
+    prepared = _prepare_for_final_write(conn, provisional)
+    monkeypatch.setattr(
+        "src.data.day0_fast_obs.build_fast_station_residual_likelihood",
+        lambda *_args, **_kwargs: pytest.fail(
+            "final writer must not rebuild Day0 likelihood"
+        ),
+    )
+    locked_sql: list[str] = []
+    conn.set_trace_callback(locked_sql.append)
+    conn.execute("BEGIN IMMEDIATE")
+    result = materializer_mod.write_prepared_replacement_forecast_live(conn, prepared)
+    conn.commit()
+    conn.set_trace_callback(None)
+    conn.close()
+
+    assert result.ok is True
+    final_selects = [
+        sql for sql in locked_sql if sql.lstrip().upper().startswith("SELECT")
+    ]
+    assert not any("OBSERVATION_PRINTS" in sql.upper() for sql in locked_sql)
+    assert not any(
+        "SELECT PROVENANCE_JSON, COMPUTED_AT" in sql.upper()
+        and "FROM FORECAST_POSTERIORS" in sql.upper()
+        for sql in final_selects
+    )
+
+
+def test_day0_ledger_frontier_allows_65_rows_and_retries_on_append(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Append-only Day0 history has no row-count ratchet; a real append stales prepare."""
+    conn = _conn()
+    _install_live_fusion(monkeypatch)
+    request = _request(
+        computed_at=_dt(18, 10),
+        expires_at=datetime(2026, 6, 7, 2, tzinfo=UTC),
+        day0_observed_extreme_c=30.0,
+        day0_observed_extreme_source="wu_icao_history",
+        day0_observed_extreme_observation_time=_dt(18, 5).isoformat(),
+    )
+    conditioning = json.dumps(
+        {
+            "day0_conditioning": {
+                "active": True,
+                "metric": "high",
+                "observed_extreme_c": 30.0,
+                "source": "wu_icao_history",
+                "observation_time": _dt(16).isoformat(),
+            }
+        }
+    )
+    rows = [
+        (
+            materializer_mod.SOURCE_ID,
+            materializer_mod.PRODUCT_ID,
+            f"history-{index}",
+            request.city,
+            request.target_date.isoformat(),
+            "high",
+            request.source_cycle_time.isoformat(),
+            request.openmeteo_source_available_at.isoformat(),
+            _dt(17, index % 60).isoformat(),
+            "{}",
+            "history",
+            conditioning,
+        )
+        for index in range(65)
+    ]
+    conn.executemany(
+        """
+        INSERT INTO forecast_posteriors (
+            source_id, product_id, data_version, city, target_date,
+            temperature_metric, source_cycle_time, source_available_at,
+            computed_at, q_json, posterior_method, provenance_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        rows,
+    )
+    conn.commit()
+    prepared = _prepare_for_final_write(conn, request)
+
+    conn.execute("BEGIN IMMEDIATE")
+    first = materializer_mod.write_prepared_replacement_forecast_live(conn, prepared)
+    conn.commit()
+    assert first.ok is True
+
+    stale = _prepare_for_final_write(conn, replace(request, computed_at=_dt(18, 20)))
+    conn.execute(
+        """
+        INSERT INTO forecast_posteriors (
+            source_id, product_id, data_version, city, target_date,
+            temperature_metric, source_cycle_time, source_available_at,
+            computed_at, q_json, posterior_method, provenance_json
+        ) VALUES (?, ?, 'append', ?, ?, 'high', ?, ?, ?, '{}', 'history', ?)
+        """,
+        (
+            materializer_mod.SOURCE_ID,
+            materializer_mod.PRODUCT_ID,
+            request.city,
+            request.target_date.isoformat(),
+            request.source_cycle_time.isoformat(),
+            request.openmeteo_source_available_at.isoformat(),
+            _dt(18, 15).isoformat(),
+            conditioning,
+        ),
+    )
+    conn.commit()
+    conn.execute("BEGIN IMMEDIATE")
+    with pytest.raises(materializer_mod.PreparedReplacementForecastSnapshotStale):
+        materializer_mod.write_prepared_replacement_forecast_live(conn, stale)
+    conn.rollback()
+    refreshed = _prepare_for_final_write(
+        conn, replace(request, computed_at=_dt(18, 20))
+    )
+    latest_id = conn.execute(
+        "SELECT MAX(posterior_id) FROM forecast_posteriors"
+    ).fetchone()[0]
+    changed_conditioning = json.loads(conditioning)
+    changed_conditioning["day0_conditioning"]["observed_extreme_c"] = 31.0
+    conn.execute(
+        "UPDATE forecast_posteriors SET provenance_json = ? WHERE posterior_id = ?",
+        (json.dumps(changed_conditioning), latest_id),
+    )
+    conn.commit()
+    conn.execute("BEGIN IMMEDIATE")
+    with pytest.raises(materializer_mod.PreparedReplacementForecastSnapshotStale):
+        materializer_mod.write_prepared_replacement_forecast_live(conn, refreshed)
+    conn.rollback()
+    conn.close()
+
+
+def test_final_frontier_queries_use_exact_target_indexes_without_temp_sort() -> None:
+    from src.data.replacement_current_value_serving import (
+        current_value_serving_schema,
+        read_current_instrument_family_latest_id,
+        read_current_instrument_frontier_identity,
+    )
+    from src.data.replacement_forecast_materializer import (
+        read_current_evidence_snapshot_id,
+        read_current_evidence_snapshot_identity,
+    )
+
+    conn = _conn()
+    _ensure_replacement_identity_columns(conn)
+    _ensure_replacement_frontier_indexes(conn)
+    prepared = _prepared_target_frontier(101)
+    request = prepared.request
+    conn.execute(
+        """
+        INSERT INTO raw_model_forecasts (
+            raw_model_forecast_id, model, city, target_date, metric,
+            source_cycle_time, source_available_at, captured_at, lead_days,
+            forecast_value_c, endpoint
+        ) VALUES (101, 'ecmwf_ifs9', 'Shanghai', '2026-06-07', 'high',
+                  '2026-06-06T00:00:00+00:00', '2026-06-06T03:00:00+00:00',
+                  '2026-06-06T03:00:00+00:00', 1, 27.0, 'single_runs')
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO ensemble_snapshots (
+            snapshot_id, city, target_date, temperature_metric, physical_quantity,
+            observation_field, issue_time, available_at, fetch_time, lead_hours,
+            members_json, model_version, dataset_id, source_id, source_cycle_time,
+            source_available_at, forecast_window_attribution_status,
+            contributes_to_target_extrema, causality_status, boundary_ambiguous,
+            members_unit
+        ) VALUES (101, 'Shanghai', '2026-06-07', 'high', 'temperature_max',
+                  'high_temp', '2026-06-06T00:00:00+00:00',
+                  '2026-06-06T03:00:00+00:00', '2026-06-06T03:00:00+00:00',
+                  24, '[20.0,21.0]', 'ecmwf_ens', 'ens', 'ecmwf_open_data',
+                  '2026-06-06T00:00:00+00:00', '2026-06-06T03:00:00+00:00',
+                  'FULLY_INSIDE_TARGET_LOCAL_DAY', 1, 'OK', 0, 'degC')
+        """
+    )
+    traced: list[str] = []
+    conn.set_trace_callback(traced.append)
+    read_current_instrument_frontier_identity(
+        conn,
+        city=request.city,
+        metric="high",
+        target_date=request.target_date.isoformat(),
+        decision_time_iso=request.computed_at.isoformat(),
+        models=("ecmwf_ifs9",),
+        schema=current_value_serving_schema(conn),
+    )
+    read_current_instrument_family_latest_id(
+        conn,
+        city=request.city,
+        metric="high",
+        target_date=request.target_date.isoformat(),
+    )
+    materializer_mod._day0_ledger_frontier_identity(conn, request, metric="high")
+    identity = read_current_evidence_snapshot_identity(conn, request, metric="high")
+    assert identity is not None
+    read_current_evidence_snapshot_id(conn, request, metric="high")
+    conn.set_trace_callback(None)
+    frontier_sql = [
+        sql
+        for sql in traced
+        if sql.lstrip().upper().startswith("SELECT")
+        and (
+            "FROM RAW_MODEL_FORECASTS" in sql.upper()
+            or "FROM FORECAST_POSTERIORS" in sql.upper()
+            or (
+                "FROM ENSEMBLE_SNAPSHOTS" in sql.upper()
+                and "ORDER BY COALESCE" not in sql.upper()
+            )
+        )
+    ]
+    plans = [
+        tuple(str(row[3]) for row in conn.execute("EXPLAIN QUERY PLAN " + sql))
+        for sql in frontier_sql
+    ]
+    conn.close()
+
+    assert plans
+    assert all(
+        not any("USE TEMP B-TREE" in detail.upper() for detail in plan)
+        for plan in plans
+    )
+    assert any(
+        any("IDX_RAW_MODEL_FORECASTS_TARGET_MODEL_FRONTIER" in detail.upper() for detail in plan)
+        for plan in plans
+    )
+    assert any(
+        any("IDX_FORECAST_POSTERIORS_SOURCE_FAMILY_FRONTIER" in detail.upper() for detail in plan)
+        for plan in plans
+    )
+    assert all(
+        not any(detail.upper().startswith("SCAN ") for detail in plan)
+        for plan in plans
+    )
+
+
+def test_final_provider_witness_query_count_is_fixed_with_many_invalid_rows() -> None:
+    import scripts.materialize_replacement_forecast_live as cli
+
+    conn = sqlite3.connect(":memory:")
+    _create_target_frontier_tables(conn)
+    conn.executescript(
+        """
+        CREATE INDEX idx_raw_model_forecasts_target_model_frontier
+            ON raw_model_forecasts(
+                city, target_date, metric, model,
+                datetime(source_cycle_time) DESC,
+                CASE endpoint WHEN 'single_runs' THEN 0 ELSE 1 END,
+                lead_days, captured_at DESC, raw_model_forecast_id DESC
+            );
+        CREATE INDEX idx_raw_model_forecasts_target_frontier
+            ON raw_model_forecasts(
+                city, target_date, metric, raw_model_forecast_id DESC
+            );
+        """
+    )
+    conn.executemany(
+        """
+        INSERT INTO raw_model_forecasts VALUES (
+            ?, 'ecmwf_ifs9', 'Shanghai', '2026-06-07', 'high',
+            '2026-06-06T02:00:00+00:00', '2026-06-06T03:30:00+00:00',
+            '2026-06-06T03:30:00+00:00', 'bad-lead', NULL, 'single_runs'
+        )
+        """,
+        ((1000 + index,) for index in range(1000)),
+    )
+    prepared = _prepared_target_frontier(101)
+    baseline = cli._target_dependency_witness(conn, prepared)
+    traced: list[str] = []
+    conn.set_trace_callback(traced.append)
+    current = cli._revalidate_target_dependency_witness(conn, prepared, baseline)
+    conn.set_trace_callback(None)
+
+    provider_selects = [
+        sql
+        for sql in traced
+        if sql.lstrip().upper().startswith("SELECT")
+        and "FROM RAW_MODEL_FORECASTS" in sql.upper()
+    ]
+    assert current == baseline
+    assert len(provider_selects) == 2
+    assert all("OFFSET" not in sql.upper() for sql in provider_selects)
+    assert any("ORDER BY RAW_MODEL_FORECAST_ID DESC" in sql.upper() for sql in provider_selects)
+    assert any("RAW_MODEL_FORECAST_ID IN" in sql.upper() for sql in provider_selects)
+    conn.execute(
+        """
+        INSERT INTO raw_model_forecasts VALUES (
+            3000, 'new_invalid', 'Shanghai', '2026-06-07', 'high',
+            '2026-06-06T02:00:00+00:00', '2026-06-06T03:30:00+00:00',
+            '2026-06-06T03:30:00+00:00', 'bad-lead', NULL, 'single_runs'
+        )
+        """
+    )
+    assert cli._revalidate_target_dependency_witness(
+        conn, prepared, baseline
+    ) != baseline
+    conn.close()
+
+
+def test_source_clock_production_selector_preserves_520_valid_rows() -> None:
+    from src.data.replacement_current_value_serving import read_current_instrument_values
+
+    conn = _conn()
+    conn.executemany(
+        """
+        INSERT INTO raw_model_forecasts (
+            model, city, target_date, metric, source_cycle_time,
+            source_available_at, captured_at, lead_days, forecast_value_c, endpoint
+        ) VALUES (?, 'Shanghai', '2026-06-07', 'high',
+                  '2026-06-06T00:00:00+00:00', '2026-06-06T03:00:00+00:00',
+                  '2026-06-06T03:00:00+00:00', 1, 27.0, 'single_runs')
+        """,
+        ((f"provider_{index:03d}",) for index in range(520)),
+    )
+    served = read_current_instrument_values(
+        conn,
+        city="Shanghai",
+        metric="high",
+        target_date="2026-06-07",
+        source_cycle_time_iso="2026-06-06T00:00:00+00:00",
+        decision_time_iso="2026-06-06T04:00:00+00:00",
+        include_station_sources=True,
+    )
+    conn.close()
+
+    assert len(served) == 520
+
+
+def test_final_lock_reads_only_exact_ids_and_bounded_frontiers(
+    monkeypatch,
+) -> None:
+    import scripts.materialize_replacement_forecast_live as cli
+
+    conn = sqlite3.connect(":memory:")
+    _create_target_frontier_tables(conn)
+    prepared = _prepared_target_frontier(101)
+    lock_held = False
+    locked_sql: list[str] = []
+
+    @contextmanager
+    def writer_lock():
+        nonlocal lock_held
+        lock_held = True
+        conn.set_trace_callback(locked_sql.append)
+        try:
+            yield
+        finally:
+            conn.set_trace_callback(None)
+            lock_held = False
+
+    def _prepare(*_args):
+        assert lock_held is False
+        return prepared
+
+    def _write(*_args):
+        assert lock_held is True
+        return _ready_materialization_result()
+
+    monkeypatch.setattr(cli, "prepare_replacement_forecast_live", _prepare)
+    monkeypatch.setattr(cli, "write_prepared_replacement_forecast_live", _write)
+    result = cli._commit_from_read_snapshot(
+        conn, prepared.request, writer_lock=writer_lock
+    )
+    conn.close()
+
+    selects = [sql for sql in locked_sql if sql.lstrip().upper().startswith("SELECT")]
+    assert result.ok is True
+    assert selects
+    assert not any("PRAGMA" in sql.upper() for sql in locked_sql)
+    assert any("SOURCE_RUN_ID IN" in sql.upper() for sql in selects)
+    assert any("ARTIFACT_ID IN" in sql.upper() for sql in selects)
+    assert any("RAW_MODEL_FORECAST_ID IN" in sql.upper() for sql in selects)
+    assert any("SNAPSHOT_ID IN" in sql.upper() for sql in selects)
+    frontier_selects = [
+        sql
+        for sql in selects
+        if "ORDER BY RAW_MODEL_FORECAST_ID DESC" in sql.upper()
+        or "SNAPSHOT_ID >" in sql.upper()
+    ]
+    assert frontier_selects
+    assert all("LIMIT" in sql.upper() for sql in frontier_selects)
+    assert not any("OFFSET" in sql.upper() for sql in selects)
+
+
+def test_exact_target_supersession_retries_before_commit(monkeypatch) -> None:
+    import scripts.materialize_replacement_forecast_live as cli
+
+    conn = sqlite3.connect(":memory:")
+    _create_target_frontier_tables(conn)
+    prepared = _prepared_target_frontier(101)
+    prepare_results = iter((prepared, _blocked_materialization_result()))
+    prepare_calls = 0
+    writes = []
+
+    def _prepare(*_args):
+        nonlocal prepare_calls
+        prepare_calls += 1
+        return next(prepare_results)
+
+    @contextmanager
+    def writer_lock():
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO raw_model_forecasts VALUES (
+                102, 'ecmwf_ifs9', 'Shanghai', '2026-06-07', 'high',
+                '2026-06-06T01:00:00+00:00', '2026-06-06T03:30:00+00:00',
+                '2026-06-06T03:30:00+00:00', 1, 26.0, 'single_runs'
+            )
+            """
+        )
+        conn.commit()
+        yield
+
+    monkeypatch.setattr(cli, "prepare_replacement_forecast_live", _prepare)
+    monkeypatch.setattr(
+        cli,
+        "write_prepared_replacement_forecast_live",
+        lambda *_args: writes.append(True) or _ready_materialization_result(),
+    )
+    result = cli._commit_from_read_snapshot(
+        conn, prepared.request, writer_lock=writer_lock
+    )
+    conn.close()
+
+    assert result.status == "BLOCKED"
+    assert prepare_calls == 2
+    assert writes == []
+
+
+def test_materialize_script_refuses_changed_anchor_or_provider_frontier(
+    monkeypatch,
+) -> None:
+    import scripts.materialize_replacement_forecast_live as cli
+
+    conn = sqlite3.connect(":memory:")
+    original = _prepared_target_frontier(101)
+    prepare_results = iter((original, _blocked_materialization_result()))
+    baseline_witness = "provider-row-101"
+    writes = []
+    monkeypatch.setattr(
+        cli, "prepare_replacement_forecast_live", lambda *_args: next(prepare_results)
+    )
+    monkeypatch.setattr(
+        cli,
+        "_target_dependency_witness",
+        lambda *_args: baseline_witness,
+    )
+    monkeypatch.setattr(
+        cli,
+        "_revalidate_target_dependency_witness",
+        lambda *_args: "provider-row-102",
+    )
+    monkeypatch.setattr(
+        cli,
+        "write_prepared_replacement_forecast_live",
+        lambda *_args: writes.append(True) or _ready_materialization_result(),
+    )
+
+    result = cli._commit_from_read_snapshot(
+        conn, original.request, writer_lock=nullcontext
+    )
+    conn.close()
+
+    assert result.status == "BLOCKED"
+    assert writes == []
 
 
 def test_materialize_script_snapshot_retry_exhaustion_never_computes_under_writer_lock(
@@ -2366,16 +4106,27 @@ def test_materialize_script_snapshot_retry_exhaustion_never_computes_under_write
     import scripts.materialize_replacement_forecast_live as cli
 
     conn = sqlite3.connect(":memory:")
-    versions = iter(range(cli._SNAPSHOT_RETRY_LIMIT * 2))
     prepare_calls = []
+    witness_calls = []
     write_calls = []
-    monkeypatch.setattr(cli, "_data_version", lambda _conn: next(versions))
 
     def _prepare(_conn, _request):
         prepare_calls.append(True)
         return object()
 
+    def _witness(*_args):
+        value = len(witness_calls) * 2
+        witness_calls.append(value)
+        return value
+
+    def _revalidate(*_args):
+        value = len(witness_calls) * 2 + 1
+        witness_calls.append(value)
+        return value
+
     monkeypatch.setattr(cli, "prepare_replacement_forecast_live", _prepare)
+    monkeypatch.setattr(cli, "_target_dependency_witness", _witness)
+    monkeypatch.setattr(cli, "_revalidate_target_dependency_witness", _revalidate)
     monkeypatch.setattr(
         cli,
         "write_prepared_replacement_forecast_live",
@@ -2393,11 +4144,253 @@ def test_materialize_script_snapshot_retry_exhaustion_never_computes_under_write
                 target_date=date(2026, 7, 19),
                 temperature_metric="high",
             ),
+            writer_lock=nullcontext,
         )
     conn.close()
 
     assert len(prepare_calls) == cli._SNAPSHOT_RETRY_LIMIT
+    assert len(witness_calls) == cli._SNAPSHOT_RETRY_LIMIT * 2
     assert write_calls == []
+
+
+def test_materialize_script_retries_changed_frontier_before_writer(
+    monkeypatch,
+) -> None:
+    import scripts.materialize_replacement_forecast_live as cli
+
+    conn = sqlite3.connect(":memory:")
+    prepared = [object(), object()]
+    witness_values = iter(("before", "stable"))
+    revalidated_values = iter(("after", "stable"))
+    prepare_calls = []
+    witness_lock_states = []
+    write_calls = []
+    lock_held = False
+
+    @contextmanager
+    def writer_lock():
+        nonlocal lock_held
+        assert lock_held is False
+        lock_held = True
+        try:
+            yield
+        finally:
+            lock_held = False
+
+    def _prepare(_conn, _request):
+        assert lock_held is False
+        value = prepared[len(prepare_calls)]
+        prepare_calls.append(value)
+        return value
+
+    def _witness(_conn, _prepared):
+        witness_lock_states.append(lock_held)
+        return next(witness_values)
+
+    def _revalidate(_conn, _prepared, _baseline):
+        witness_lock_states.append(lock_held)
+        return next(revalidated_values)
+
+    def _write(_conn, value):
+        assert lock_held is True
+        assert value is prepared[1]
+        write_calls.append(value)
+        return _ready_materialization_result()
+
+    monkeypatch.setattr(cli, "prepare_replacement_forecast_live", _prepare)
+    monkeypatch.setattr(cli, "_target_dependency_witness", _witness)
+    monkeypatch.setattr(cli, "_revalidate_target_dependency_witness", _revalidate)
+    monkeypatch.setattr(cli, "write_prepared_replacement_forecast_live", _write)
+
+    result = cli._commit_from_read_snapshot(
+        conn,
+        SimpleNamespace(
+            city="London",
+            target_date=date(2026, 7, 19),
+            temperature_metric="high",
+        ),
+        writer_lock=writer_lock,
+    )
+    conn.close()
+
+    assert result.ok is True
+    assert prepare_calls == prepared
+    assert witness_lock_states == [False, True, False, True]
+    assert write_calls == [prepared[1]]
+
+
+def test_prepared_writer_never_revalidates_or_recomputes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    conn = _conn()
+    prepared = materializer_mod.PreparedReplacementForecastMaterialization(
+        request=_request(),
+        metric="high",
+        day0_ledger_frontier_identity=None,
+        posterior=SimpleNamespace(
+            live_eligible=False,
+            replacement_q_mode="BLOCKED",
+            capture_status="MISSING",
+            predictive_sigma_c=None,
+            q_lcb_map=None,
+            q_ucb_map=None,
+        ),
+    )
+    monkeypatch.setattr(
+        materializer_mod,
+        "_validated_replacement_forecast_request",
+        lambda *_args: pytest.fail("prepared writer must reuse prepare validation"),
+    )
+    monkeypatch.setattr(
+        materializer_mod,
+        "_insert_anchor",
+        lambda *_args, **_kwargs: 1,
+    )
+
+    result = materializer_mod.write_prepared_replacement_forecast_live(
+        conn, prepared
+    )
+    conn.close()
+    assert result.status == "BLOCKED"
+
+
+def test_materialize_script_commit_helper_requires_writer_lock() -> None:
+    import scripts.materialize_replacement_forecast_live as cli
+
+    conn = sqlite3.connect(":memory:")
+    with pytest.raises(
+        RuntimeError, match="^REPLACEMENT_FORECAST_WRITER_LOCK_REQUIRED$"
+    ):
+        cli._commit_from_read_snapshot(
+            conn,
+            SimpleNamespace(
+                city="London",
+                target_date=date(2026, 7, 19),
+                temperature_metric="high",
+            ),
+        )
+    conn.close()
+
+
+def test_materialize_script_injected_commit_connection_requires_writer_lock(
+    tmp_path,
+) -> None:
+    import scripts.materialize_replacement_forecast_live as cli
+
+    conn = sqlite3.connect(":memory:")
+    with pytest.raises(
+        RuntimeError, match="^REPLACEMENT_FORECAST_WRITER_LOCK_REQUIRED$"
+    ):
+        cli._materialize(
+            tmp_path / "not-read.json",
+            commit=True,
+            init_schema=False,
+            conn=conn,
+        )
+    conn.close()
+
+
+def test_materialize_cli_bootstraps_hot_indexes_outside_writer_lock(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The reachable commit path must finish index DDL before final flock/txn."""
+    import scripts.materialize_replacement_forecast_live as cli
+
+    payload = {
+        "city": "Shanghai",
+        "city_id": "Shanghai",
+        "city_timezone": "Asia/Shanghai",
+        "target_date": "2026-06-07",
+        "temperature_metric": "high",
+        "source_cycle_time": "2026-06-06T00:00:00+00:00",
+        "computed_at": "2026-06-06T04:00:00+00:00",
+        "expires_at": "2026-06-06T06:00:00+00:00",
+        "baseline_source_run_id": "b0-run",
+        "baseline_data_version": "ecmwf_opendata_mx2t3_local_calendar_day_max",
+        "baseline_source_available_at": "2026-06-06T02:00:00+00:00",
+        "openmeteo_source_run_id": "om9-run",
+        "openmeteo_source_available_at": "2026-06-06T03:00:00+00:00",
+        "openmeteo_payload_json": "anchor.json",
+        "precision_metadata_json": "precision.json",
+        "bins": [{"bin_id": "warm", "lower_c": 20.0, "upper_c": 30.0}],
+    }
+    input_json = tmp_path / "request.json"
+    input_json.write_text(json.dumps(payload), encoding="utf-8")
+    (tmp_path / "anchor.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "precision.json").write_text("{}", encoding="utf-8")
+    conn = sqlite3.connect(":memory:")
+    lock_held = False
+    bootstrap_states: list[tuple[bool, bool]] = []
+    real_bootstrap_indexes = cli._ensure_replacement_frontier_indexes
+
+    @contextmanager
+    def writer_lock():
+        nonlocal lock_held
+        assert lock_held is False
+        lock_held = True
+        try:
+            yield
+        finally:
+            lock_held = False
+
+    def bootstrap_indexes(connection: sqlite3.Connection) -> None:
+        bootstrap_states.append((lock_held, connection.in_transaction))
+        real_bootstrap_indexes(connection)
+
+    def prepare_schema(*_args, **_kwargs):
+        _create_target_frontier_tables(conn)
+        return cli._DurablePreparationReceipt(
+            schema_ready=True,
+            anchor_artifact_id=None,
+            manifest_committed=False,
+        )
+
+    monkeypatch.setattr(
+        cli,
+        "extract_openmeteo_ecmwf_ifs9_localday_anchor",
+        lambda *_args, **_kwargs: _anchor(),
+    )
+    monkeypatch.setattr(cli, "OpenMeteoIfs9PrecisionMetadata", lambda **_kwargs: object())
+    monkeypatch.setattr(
+        cli,
+        "evaluate_openmeteo_ecmwf_ifs9_precision_guard",
+        lambda _metadata: _precision_guard(),
+    )
+    monkeypatch.setattr(cli, "_bins", lambda _payload: _bins())
+    monkeypatch.setattr(cli, "_ensure_replacement_frontier_indexes", bootstrap_indexes)
+    monkeypatch.setattr(
+        cli,
+        "_prepare_live_schema_and_manifest",
+        prepare_schema,
+    )
+    monkeypatch.setattr(
+        cli,
+        "_commit_from_read_snapshot",
+        lambda *_args, **_kwargs: _ready_materialization_result(),
+    )
+
+    returncode, response = cli._materialize(
+        input_json,
+        commit=True,
+        init_schema=True,
+        conn=conn,
+        writer_lock=writer_lock,
+    )
+    index_names = {
+        str(row[0])
+        for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'index'"
+        )
+    }
+    conn.close()
+
+    assert returncode == 0
+    assert response["status"] == "READY"
+    assert bootstrap_states
+    assert all(state == (False, False) for state in bootstrap_states)
+    assert "idx_raw_model_forecasts_target_model_frontier" in index_names
+    assert "idx_ensemble_snapshots_replacement_exact_frontier" in index_names
+    assert "idx_ensemble_snapshots_replacement_casefold_frontier" in index_names
 
 
 def test_materialize_script_dry_run_compute_does_not_hold_writer_lock(
@@ -2512,7 +4505,9 @@ def test_materialize_script_reports_durable_manifest_when_posterior_fails(
     monkeypatch.setattr(
         cli,
         "_commit_from_read_snapshot",
-        lambda *_args: (_ for _ in ()).throw(RuntimeError("posterior failed")),
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("posterior failed")
+        ),
     )
     conn = sqlite3.connect(":memory:")
 
@@ -2521,6 +4516,7 @@ def test_materialize_script_reports_durable_manifest_when_posterior_fails(
         commit=True,
         init_schema=False,
         conn=conn,
+        writer_lock=nullcontext,
     )
     conn.close()
 

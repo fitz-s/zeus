@@ -11,7 +11,7 @@ Restore truthful live entry admission after the global auction reached a real wi
 ## Current truth
 
 - Live PID 98439 is loaded at `16cec04f6`; entries are not paused.
-- Chain-mirror repair succeeded: `6be10bfa-f2f` is canonical `voided/closed_exited`.
+- Chain-mirror repair succeeded: `6be10bf…[redacted]` is canonical `voided/closed_exited`.
 - Reactor reached winner claim, then selected winner identity `e664824…`.
 - Entry authority currently fails on `entry_q_version`, `forecast_event_bridge`, and `pending_exit_release_loop`.
 - A reactor cycle started at 2026-07-10T17:32:26Z and did not return through three following scheduled intervals, which were skipped by `max_instances_reached`.
@@ -28,7 +28,7 @@ Restore truthful live entry admission after the global auction reached a real wi
 
 ## Slice A -- Active ENTRY q_version
 
-- Dry-run found exactly one active missing row: Seoul position `656594aa-af2`, command `d671dcc6142a4152`.
+- Dry-run found exactly one active missing row: Seoul position `656594a…[redacted]`, command `d671dcc6142a4152`.
 - Existing FinalIntentCertificate reconstructs exactly one posterior identity: `5aa5d7d02c36827aa1f6d11fb5da81ad79d02f855f49aab4156e871a3cea5597`.
 - Apply may update only that command's empty `venue_commands.q_version` through the registered repair script.
 - Acceptance: applied_count=1, subsequent dry-run candidate_count=0, no share/phase/state change, no venue action, no backup.
@@ -44,7 +44,7 @@ Restore truthful live entry admission after the global auction reached a real wi
 
 ## Slice B2 -- Released exit projection health
 
-- Canonical sequence for Seoul `656594aa-af2`: `EXIT_ORDER_REJECTED` seq 663 left `pending_exit`; `EXIT_RETRY_RELEASED` seq 666 legally transitioned `pending_exit -> day0_window`; held `MONITOR_REFRESHED` starts at seq 667.
+- Canonical sequence for Seoul `656594a…[redacted]`: `EXIT_ORDER_REJECTED` seq 663 left `pending_exit`; `EXIT_RETRY_RELEASED` seq 666 legally transitioned `pending_exit -> day0_window`; held `MONITOR_REFRESHED` starts at seq 667.
 - Defect: the projection-regression query selects the latest event only from `EXIT_INTENT`, `EXIT_ORDER_REJECTED`, and `EXIT_ORDER_POSTED`. It excludes `EXIT_RETRY_RELEASED`, so every legal held monitor after release is compared against the older rejection and mislabeled as a regression.
 - Minimal repair: make release part of the latest exit-transition ordering and exclude a position when that latest transition is `EXIT_RETRY_RELEASED`. A new exit intent/rejection after release remains blocking because it becomes latest again.
 - Forbidden: change position phase, suppress a genuine held projection after an unreleased exit, weaken any exit submit/runtime gate, or mutate live DB state.
@@ -87,9 +87,43 @@ Restore truthful live entry admission after the global auction reached a real wi
 - Re-sample loaded SHA/PID, open positions, q identity, posterior/FSR identity, reactor completion cadence, and venue command/event counts.
 - Actual order proof requires separate `venue_commands`, submit event, venue ACK/order ID, fill/trade fact, and capital change lines. A candidate or health-clear signal is not an order.
 
+## Slice B88 -- Owned urgent-monitor handoff
+
+- Live evidence: a forecast-targeted monitor lost the single monitor claim and
+  settled its attempt `False`, leaving only the preempt Event. The next periodic
+  invocation treated that ownerless Event as a live urgent owner and returned
+  without running a full-book pass.
+- Invariant: an Event requests preemption from the holder that existed when the
+  request was created; it does not confer ownership after the urgent attempt has
+  ended. A new periodic claimant yields only to a live urgent attempt. Requests
+  created after that claimant acquires the claim remain generation-tracked and
+  may still preempt it.
+- Files: `src/main.py`, `tests/test_run_mode_failure_surfaces.py`, this plan, and
+  existing registry metadata only. No lifecycle, probability, or venue rule changes.
+- Acceptance: claim-busy urgent forecast returns `False` and records a request;
+  after that attempt has ended, the next periodic call runs full-book immediately;
+  a genuinely concurrent urgent attempt can still preempt the current holder.
+
+## Slice B89 -- Reserve replacement HWM before auxiliary monitor work
+
+- Live evidence: current 7-family HWM reads complete in about 0.64s cold and
+  0.01s warm under a 5s deadline, while an already-spent deadline reproduces
+  `sqlite interrupted`. The SQL uses the existing product-cycle index.
+- Root cause: held monitoring performed debt reconstruction and per-position
+  hard-fact classification before freezing the replacement HWM cut, allowing
+  auxiliary O(n) work to spend the primary evidence reserve.
+- Invariant: after the monitor position set is known, freeze one all-family HWM
+  snapshot before auxiliary scans. Hard-fact consumers may ignore the snapshot,
+  but failure remains one batch-wide fail-closed result with no scalar fallback.
+- Files: `src/engine/cycle_runtime.py`, `tests/test_live_safety_invariants.py`,
+  this plan, and existing registry metadata only. No timeout or index change.
+- Acceptance: a debt scan that consumes the remaining claim budget occurs only
+  after HWM prefetch; existing HWM interruption tests retain uniform fail-closed
+  behavior and no scalar fan-out.
+
 ## Slice B69 -- Stable probability-content handoff for held statistical SELL
 
-- Current proof: Seoul position `e582b997-daf` reached held-side q `0` with a
+- Current proof: Seoul position `e582b99…[redacted]` reached held-side q `0` with a
   current executable bid of `0.07` at `2026-07-24T05:36:12Z`. The global
   auction had evaluated the position, but its probability witness identity
   differed from the monitor's immediately rebuilt identity, so the monitor
@@ -130,7 +164,7 @@ Restore truthful live entry admission after the global auction reached a real wi
 
 ## Slice B70 -- Preserve token-typed holdings and sell dominated live legs
 
-- Current proof: Guangzhou position `02a8db2c-c2e` first filled `5.2` NO
+- Current proof: Guangzhou position `02a8db2…[redacted]` first filled `5.2` NO
   shares at `0.34`. A later certified YES BUY for `6.5` shares at `0.88`
   reused that NO position id because the executor's same-token query matched
   either token column of the binary market. The projection now says
@@ -925,7 +959,7 @@ Restore truthful live entry admission after the global auction reached a real wi
 
 ## Slice B59 -- Project authenticated entry fills in the ingest transaction
 
-- Live proof after B58: command `9bd083d376334765` received one authenticated `CONFIRMED` REST trade fact for `47.1` Munich NO shares at `0.06`, but remained `ACKED`; position `1605bc27-b62` remained `pending_entry` with zero shares and zero cost. No duplicate command was persisted. The continuous fill synchronizer had durably observed the fill, while recurring recovery repeatedly deferred its first unrelated `REVIEW_REQUIRED` pass under auction DB contention. More fundamentally, no recovery pass consumes the ordinary `ACKED + CONFIRMED trade fact` shape: matched-order recovery explicitly stays when a positive trade fact already exists, and filled-position repair requires the command to be `FILLED` first.
+- Live proof after B58: command `9bd083d376334765` received one authenticated `CONFIRMED` REST trade fact for `47.1` Munich NO shares at `0.06`, but remained `ACKED`; position `1605bc2…[redacted]` remained `pending_entry` with zero shares and zero cost. No duplicate command was persisted. The continuous fill synchronizer had durably observed the fill, while recurring recovery repeatedly deferred its first unrelated `REVIEW_REQUIRED` pass under auction DB contention. More fundamentally, no recovery pass consumes the ordinary `ACKED + CONFIRMED trade fact` shape: matched-order recovery explicitly stays when a positive trade fact already exists, and filled-position repair requires the command to be `FILLED` first.
 - First-principles invariant: an authenticated fill changes owned terminal wealth at the instant its canonical trade fact commits. The command event and position projection derived from that exact fact must commit in the same transaction; an asynchronous poll is crash recovery, not the normal capital truth path. The reducer must validate exact command/order identity, authenticated source, confirmed state, cumulative size, submitted limit, and legal command grammar before projecting either partial or full exposure.
 - Minimal repair: add one idempotent canonical reducer in command recovery for `ACKED`/`POST_ACKED`/`PARTIAL` BUY entries backed by exact `CONFIRMED` `REST`/`WS_USER` trade facts. The fill synchronizer invokes that reducer for each newly appended local command before advancing its watermark, inside its existing `BEGIN IMMEDIATE`; boot/live recovery invokes the same reducer as a DB-only backstop. Do not duplicate lifecycle grammar in ingest, perform venue I/O, or alter selection/probability/Kelly.
 - Files authorized: `src/execution/command_recovery.py`, `src/ingest/fill_synchronizer.py`, `tests/test_command_recovery.py`, `tests/test_fill_synchronizer.py`, this packet, and its scope sidecar.
@@ -1246,3 +1280,1228 @@ Restore truthful live entry admission after the global auction reached a real wi
   identically on live because they pass `object()` into `EventWriter`; neither
   reaches this cancellation path. Independent review found no P0/P1/P2 and
   returned LAND.
+
+## Slice B73 -- Give durable held-monitor debt the first bounded service turn
+
+- Current proof: the 2026-08-01 21:09:04--21:10:37Z cycle lasted 93.028s;
+  18 held candidates produced only 5 scans while 13 deferred with
+  `cycle_budget_exhausted`/`MONITOR_DEADLINE_EXPIRED`. Sixteen network
+  orderbooks were prefetched before durable monitor progress. The 30s recovery
+  job uses `max_instances=1`, so it repeatedly skipped behind the long pass
+  and overdue debt grew to 15. Existing oldest-first durable reservation is
+  present, but selection/attempt bookkeeping can rotate a position whose
+  canonical `MONITOR_REFRESHED` append never committed. Moscow's separate
+  11:36:41Z--16:52:01Z canonical gap is evidence of the class, not a city rule.
+- First-principles invariant: held-monitor fairness is durable service, not
+  selection. Scope is current held-position monitor debt only. Every bounded
+  recovery pass must begin with the least-recently persisted
+  `MONITOR_REFRESHED` debt and make one finite monitor attempt before optional
+  bulk prefetch or tail work; prefetch consumes the same monotonic budget and
+  cannot starve that first debt. A debt item stays oldest until its canonical
+  timestamp advances or the existing finite deferred/fault evidence is emitted.
+  Urgent wake preemption remains absolute. Reset is a successful canonical
+  `MONITOR_REFRESHED`, which advances that position and transfers ownership to
+  the next oldest debt.
+- Minimal repair: reuse the existing durable timestamp and reservation/tranche
+  machinery to schedule one durable-debt position ahead of optional tail work.
+  The initial local-only book pass no longer marks missing network books as
+  attempted; the oldest network debt gets one singular quote attempt first,
+  and only then may the existing bulk batch prefetch the remaining network
+  positions. Preserve the 75s budget, normal full-book sweep, current
+  probability/quote/exit rules, lifecycle, sizing, price band, venue behavior,
+  and all fail-closed paths. No state or schema is added.
+- Files authorized: `src/engine/cycle_runtime.py`,
+  `tests/test_live_safety_invariants.py`, this plan, and the existing
+  `src/engine/cycle_runtime.py` rationale row in
+  `architecture/source_rationale.yaml`.
+- Forbidden: touch `live`, DBs, processes, tmux, other worktrees, branches, or
+  venue state; commit or deploy; increase `max_instances`, thread count,
+  deadline, or concurrency; run monitor and reactor venue work concurrently;
+  change probability, edge thresholds, lifecycle, sizing, venue, price-band,
+  or fail-closed semantics; create new state/schema or tailor the repair to
+  Moscow.
+- Acceptance: with 18 held positions, 16 mocked slow network books, and a 75s
+  fake clock, the oldest debt receives an actual finite monitor attempt before
+  bulk prefetch can exhaust the budget. Consecutive bounded recovery passes
+  cover all 18 at least once in no more than 4 passes, and a successful newer
+  position cannot overtake an older unserved debt. A canonical append failure
+  leaves that position oldest for retry. Existing normal fast-budget full
+  sweep, zero-budget reservation, deadline-degraded thirds, urgent preemption,
+  probability/edge/exit/lifecycle/sizing/venue/price-band behavior remain
+  unchanged.
+- Verification after tests: test headers and topology were audited first.
+  Focused B73 and affected monitor tests pass `15/15`. The complete
+  `tests/test_live_safety_invariants.py` run passes `250` and has `12` failures
+  in pre-existing fixture/current-contract paths outside B73; plain collection
+  is blocked because this worktree intentionally lacks `config/settings.json`,
+  so the full run used a read-only in-memory redirect to the identical
+  `config/settings.example.json` plus a subprocess-only schema-fingerprint
+  collection bypass. Changed Python compiles; changed-line Ruff reports zero
+  findings (the scoped files retain six unrelated existing findings); the
+  planning-lock/topology check, source-rationale validation, YAML parse, and
+  `git diff --check` pass. No live/DB/process/venue proof is claimed from this
+  worktree-only verification.
+
+### 2026-08-02 Follow-up -- Per-position probability-read deadline isolation
+
+The B73 sweep still created one monotonic deadline at batch start and passed
+that spent instant to every later position. A slow current-Day0 SQLite read
+could therefore make an otherwise admitted sibling immediately stale or
+deferred without receiving its own finite probability-read opportunity.
+
+The correction keeps B73's outer sweep admission deadline and durable
+oldest-debt ordering unchanged. Once a position is admitted, `cycle_runtime`
+derives a fresh finite deadline from that admission instant and the existing
+monitor budget, attaches it only for that position's probability refresh, and
+removes it on return. A stale probability remains fail-closed for that position;
+quote freshness and all economic/venue behavior remain separate.
+
+SCOPE is one admitted held position's current-probability SQLite reads. DRAIN is
+that read's finite SQLite deadline followed by the next eligible position while
+the outer admission budget remains open. RESET is removal of the transient
+position deadline after refresh. No concurrency, thread, scheduler
+`max_instances`, outer-budget extension, q/economics/lifecycle/sizing, venue,
+price-band, or global-entry-pause behavior changes.
+
+The B73 source/test/plan scope remains unchanged. Acceptance adds a sibling
+admitted after a slow first read receiving a new finite deadline, and a stale
+probability read failing closed only for that position while its eligible sibling
+continues. Existing outer admission, oldest-debt/fairness, urgent-preemption,
+and no-concurrency antibodies remain mandatory.
+
+### 2026-08-02 Follow-up -- Terminal FAK partial EXIT collateral drain
+
+Fixed defect shape: a `REVIEW_REQUIRED` FAK `SELL` has exact confirmed terminal
+point-order/trade proof for a partial fill, but its position is already
+`settled` or `economically_closed`. The prior recovery path required an open
+position plus synced chain residual, leaving the active `CTF_SELL` reservation
+debt in place.
+
+SCOPE is one command, venue order, and held token. DRAIN is exact command/order/
+token identity, terminal point-order status, cumulative confirmed trade size,
+zero live remainder, and an active identity-matched `CTF_SELL` reservation.
+RESET is the existing `append_event` terminal-partial transition: convert the
+matched cumulative amount, release the unmatched remainder, and preserve the
+terminal position phase. It emits no exit intent/order, venue call, reauction,
+or second sell. Unknown, mismatched, or nonterminal proof stays
+`REVIEW_REQUIRED` with the reservation active; repeat delivery is a no-op.
+
+The restart preflight reports an exact current-shaped terminal/no-live-remainder
+reservation-debt sample as a scoped blocker. It does not use a global
+reservation count as an entry gate. Authorized slice: `src/execution/command_recovery.py`,
+`scripts/check_live_restart_preflight.py`, focused existing tests, and this plan.
+No live checkout, process, venue, DB, deploy, push, or PR action is in scope.
+
+### 2026-08-02 Follow-up -- Remove held-monitor deadline amplification
+
+Live artifact `291009` ran for 383.536 seconds with a configured 75-second
+held-monitor budget. The batch `/books` read failed after an SSL handshake
+timeout, then the monitor admitted one unbounded singular retry per position;
+each admitted position also replaced the cycle deadline with a fresh
+`monotonic() + 75s` probability deadline. Later monitor and recovery jobs were
+therefore rejected by the same still-held process claim.
+
+The first-principles invariant is one finite tranche, not a sequence of local
+budgets. `monitor_deadline` is the sole admission deadline for optional batch
+book I/O, any singular held quote read, probability SQLite reads, and admission
+of later positions. Every network caller receives only the remaining time as
+its per-phase HTTP timeout ceiling.
+Batch transport failure marks every missing token attempted for that cycle and
+defers those positions; it never opens a second singular fan-out. The next
+cycle installs a fresh prefetch cache and retries from current venue truth.
+
+This hot-fix removes the observed retry/deadline-reset amplification; a sync
+HTTP phase timeout is not a killable total wall-clock deadline. DNS or a stuck
+transport can still outlive the remaining budget. Absolute wall-clock recovery
+therefore remains a separate process-supervisor/backfill requirement and is not
+claimed by this slice.
+
+SCOPE is one full-book or targeted held-monitor invocation. DRAIN is return of
+the bounded batch/position work under the remaining-time transport ceilings,
+followed by the existing next scheduler/recovery tick. RESET is cycle-local: the next
+invocation creates a new deadline and empty attempted-token set. Missing quote
+or probability authority remains DATA_DEGRADED and cannot create a statistical
+EXIT or fresh `MONITOR_REFRESHED`. Deadline expiry revokes new I/O but does not
+revoke an already-preclassified absorbing local hard fact: one dead-bin rescue
+records the direct exit decision without inventing a fresh quote, and venue
+submission still requires current executable truth. The next cycle clears the
+attempt mark and retries; no gap blocks command recovery or settlement.
+
+Authorized files are `src/engine/cycle_runtime.py`,
+`src/engine/monitor_refresh.py`, `src/data/polymarket_client.py`, focused
+existing tests, their existing registry/rationale rows if freshness requires,
+and this plan. Forbidden: extending the 75-second budget, worker threads,
+market orders, weakening the `[0.05, 0.95]` submitted-price band, stale-as-fresh
+q/quotes, duplicate SELL paths, lifecycle changes, DB/schema changes, entry
+pause changes, or city/order-specific handling.
+
+Acceptance: a batch transport failure cannot call singular book readers; two
+missing tokens are typed deferred without resetting or multiplying the
+configured budget. An admitted singular durable-debt read and every probability
+read receive the same absolute deadline, never a refreshed 75 seconds. A
+preclassified local dead-bin fact remains a direct exit decision after deadline
+expiry without starting network I/O; it is not silently converted into HOLD. A
+healthy next cycle clears attempted/deferred state and refreshes all positions.
+Focused batch-failure, shared-deadline, next-cycle recovery, monitor fairness,
+compilation, planning-lock, and diff checks pass before exact-SHA deployment.
+The separate killable-supervisor work remains required before claiming a hard
+240-second monitor guarantee.
+
+### 2026-08-02 Follow-up -- Isolate public held-book I/O behind a hard deadline
+
+The shared-deadline slice removes retry and per-position budget amplification,
+but sync HTTP phase ceilings cannot kill a DNS/TLS/socket operation that outlives
+the cycle. The remaining safe isolation boundary is the public quote read, not
+the whole monitor: killing an entire monitor could interrupt a durable SELL
+between venue side effect and receipt persistence.
+
+Production held-book reads therefore run in a spawned child that receives only
+token IDs and a timeout, opens no DB, and has no command or submission-capable
+parent client. The parent reserves cleanup time inside the read budget, then
+terminates/kills and gives the OS a fixed cleanup tail to reap a wedged reader.
+The child-started network phase is therefore terminable; `process.start()`, IPC
+decode, and the final reap are not claimed as an absolute method-level
+wall-clock bound. Missing, malformed, or
+timed-out output is DATA_DEGRADED for that cycle and is retried from fresh venue
+truth next cycle. Probability SQLite interruption and the existing parent SELL
+command/idempotency lane remain unchanged.
+
+SCOPE is one missing-book batch in one held-monitor invocation. DRAIN is child
+response inside the supplied read budget or forced termination followed by the
+bounded cleanup tail.
+RESET is the next cycle's fresh child and fresh token batch. This makes the
+known public-book hang killable without making a no-loss claim for market gaps,
+no bid, or resolution jumps.
+
+Authorized files are the existing shared-deadline source/test/registry rows and
+this plan. Acceptance: success returns only requested book objects; a hung child
+is terminated and reaped; batch and one-token held reads use this hard boundary;
+no DB/BUY/SELL method is reachable in the worker; batch failure still cannot fan
+out; shared deadline and next-cycle recovery antibodies remain green; planning,
+compile, lint differential, and diff checks pass. Deployment remains exact-SHA
+hot-fix only after independent review.
+
+### 2026-08-04 Follow-up -- Bound held-SELL lineage fences inside monitor time
+
+Current code still allowed a statistical held-SELL completion request to wait
+without limit on the process-local lineage mutex and cross-process
+`flock(LOCK_EX)`. That request runs inside the single held-monitor claim and
+outside the quote/probability deadline, so one stalled publisher could again
+silence the whole held book while the independent recovery lane repeatedly met
+the same occupied claim.
+
+SCOPE is every V4 held-SELL lineage lookup, publication, receipt, completion,
+and acknowledgement fence.
+DRAIN is acquisition of the lineage mutex and every sorted scope flock inside
+one 250ms total deadline, followed by the existing atomic lineage, deterministic
+queue-slot, and fallback writes. RESET is lock release on success or timeout;
+the monitor records the completion request failure and the existing canonical
+SELL debt or wake remains pending for a later fresh cycle. Ordinary non-V4
+reactor wakes never enter this fence.
+
+Authorized files are `src/runtime/reactor_wake.py`,
+`src/events/reactor.py`, the focused existing reactor test and registry rows,
+and this plan. Forbidden: local statistical SELL authority, swallowing or
+acknowledging an unserved debt, weakening V4 ordering, changing q/economics,
+extending the held-monitor budget, changing entry posture, or venue/DB action.
+Acceptance: both mutex and flock contention fail closed within the same finite
+deadline with no descriptor or lock leak; the V4 fallback-ordering race remains
+green; monitor recovery, hard-book deadline, bounded debt fairness, and global
+auction delegation antibodies pass; independent review finds no P0/P1 before
+landing.
+
+### 2026-08-04 Follow-up -- Bound live-health receipt payload reads
+
+The live-health high-YES audit forced a primary-key tail scan over the 162GB
+`decision_log` table to locate a sparse recent global-auction receipt. Because
+the table carries large `artifact_json` overflow payloads, one observability
+cycle occupied its sole executor for tens of minutes and left the composite
+health projection stale.
+
+SCOPE is only the read-only latest global-auction receipt lookup used by
+`high_yes_edge`; trading, auction selection, receipts, and canonical DB writes
+are unchanged. DRAIN uses `idx_decision_log_ts` to select only the latest
+eligible row id inside the lookback, then reads exactly that row's artifact by
+integer primary key. RESET is completion or a typed read failure on each
+60-second health cadence; no long-running cursor or payload scan survives the
+call.
+
+Authorized files are `src/control/live_health.py`, its existing failure-surface
+test and registry row, and this plan. Acceptance: query-plan evidence proves no
+full `decision_log` scan, payload lookup uses the integer primary key, current
+candidate evidence semantics remain green, and a live health cycle completes
+inside one cadence after landing.
+
+### 2026-08-04 Follow-up -- Bound no-information Day0 bundle retries
+
+An incomplete expected-model Day0 bundle cleared the ordinary 30-minute
+refresh throttle and retried every 45 seconds indefinitely. Across the active
+city universe this can spend thousands of provider calls per day without a
+new source run or a valid probability witness, exhausting the quota needed to
+refresh held capital and materialize complete posteriors.
+
+SCOPE is one `(city, local_date)` incomplete-bundle retry identity. DRAIN is a
+complete strict bundle that persists and passes canonical readback; it clears
+both retry deadline and streak. RESET is successful readback or process
+restart. Consecutive incomplete responses back off exponentially from the
+existing fast retry; ordinary/entry-priority work is capped by the normal
+30-minute refresh interval, while held-capital critical work remains capped at
+10 minutes. No partial or stale bundle becomes probability authority.
+
+Authorized files are `src/data/day0_hourly_vectors.py`, its existing remaining-
+day relationship test, the source-clock metadata client/probe, ingest scheduler
+truth propagation, their existing tests, registry timestamps, and this plan. Forbidden: source
+fallback, stale-as-fresh admission, probability changes, entry-pause changes,
+or reducing held-monitor cadence. Acceptance: the first transient retry stays
+fast; repeated no-information responses reach a finite lane-specific cap;
+successful strict persistence clears debt; quota, strict-bundle, and Day0
+remaining-window tests remain green.
+
+The same audit found a wider quota-closure defect: the 15-second source-clock
+poll issued one direct, untracked metadata GET per configured model. Its
+default ten-model fanout can generate 57,600 provider calls per day even though
+the shared tracker reports a lower total. Metadata reads must therefore use the
+shared quota lease and poll each model under an independent no-change backoff.
+An unchanged model backs off from 15 seconds to five minutes; a changed run
+resets the debt to the fast cadence. Provider interval metadata is evidence,
+not a hard skip boundary, so an early or off-cycle publication remains visible.
+A tick that performs no network read is typed as deferred backoff rather than
+provider-confirmed no-change; cached metadata never becomes synthetic freshness.
+If a due network read fails and cache is retained, that typed degraded-cache
+status remains the top-level scheduler result and is classified unhealthy.
+
+SCOPE is one `(metadata_path, model)` source-clock poll identity. DRAIN is a
+provider response declaring a newer run. RESET is that changed response or a
+process restart.
+Acceptance additionally requires that production metadata GETs acquire shared
+quota leases, unchanged polls cannot fan out every 15 seconds, and newly due
+models retain the first 15-second detection attempt.
+
+The run-pinned anchor availability probe is part of the same source-clock
+decision and must not remain an unmetered urllib side channel. Its production
+transport uses the same shared priority quota lease; injected `urlopen` remains
+only a deterministic test seam. HTTP unavailable, terminal, rate-limit, and
+transport outcomes remain fail-closed as `anchor_available=False`, and the
+next poll re-evaluates fresh provider truth under the request ledger.
+
+### 2026-08-11 Follow-up -- Admit global-auction TRADE receipts through the writer turnstile
+
+Live evidence after `094f7c3f9` shows a completed global selection failing at
+`decision_log` persistence with raw `sqlite3.OperationalError: database is
+locked`. The four global-auction receipt INSERT sites use the long-lived TRADE
+connection directly, while canonical monitor writes already register MONITOR
+intent through `WriteCoordinator`; the uncoordinated auction writer can
+therefore collide with or delay the continuous held-capital decision lane.
+
+Every production global-auction receipt write becomes one short STANDARD
+TRADE write unit: construct the receipt outside the lease, acquire the canonical
+TRADE coordinator inside the current `WorkContext` deadline, execute only
+`store_artifact` plus its commit/rollback guard, then release before JIT,
+network, or venue work. A visible MONITOR waiter outranks the auction unit.
+Lease timeout/cancellation raises typed `WorkDeferred`, so scheduler retry is
+distinguishable from economic no-trade and raw SQLite failure.
+
+SCOPE is one selection, carrier-rebound, or winner-preflight receipt. DRAIN is
+its bounded STANDARD lease attempt followed by the existing fresh global work
+cut. RESET is lease release on commit, rollback, or exception; no decision
+state survives as a fake economic rejection. Preflight expiry/revocation still
+rolls back before venue submission.
+
+Authorized files are `src/engine/global_batch_runtime.py`,
+`tests/integration/test_w3_solve_seam_g3.py`, their existing rationale/registry
+rows, and this plan. Forbidden: changing q, Kelly, candidate feasibility,
+entry posture, monitor priority, auction cadence, lifecycle, schema, submitted
+price bounds, or holding a DB lease across selection/network/venue work.
+Acceptance: a held STANDARD auction unit cannot overtake a registered MONITOR;
+lease contention yields `WorkDeferred` rather than raw `OperationalError` or
+economic no-trade; release permits the next current cut to persist; every
+receipt site commits within the lease; preflight revocation remains
+side-effect-free; focused global-auction, coordinator-priority, compilation,
+planning-lock, and diff checks pass before exact-SHA hot-fix deployment.
+
+### 2026-08-11 Follow-up -- Put continuous fill persistence behind the unified TRADE writer
+
+The live lock reconstruction identified one proven long holder: the
+price-channel fill synchronizer opened `BEGIN IMMEDIATE` before replaying and
+projecting the authenticated wallet history, while never acquiring the unified
+TRADE writer lease. Quote projection and monitor/auction writers could therefore
+queue behind an invisible SQLite owner, delaying the fresh book/probability
+decision cycle even though their own coordinator priority was correct.
+
+The live scheduler path must split one cycle into immutable preparation and
+atomic publication. Schema readiness is checked read-only; only a genuinely
+missing cold-start schema receives a short BACKGROUND_RECOVERY TRADE unit, so
+the hot path has no redundant writer admission. Watermark read, authenticated
+`get_trades`, raw parsing, command lookup, and idempotency snapshots run on a
+read-only connection with no writer lease;
+observation/fact append, command projection, and watermark advance then commit
+inside one short unified TRADE transaction. Contention fails the scheduler tick
+closed and retries on the existing cadence; it does not widen SQLite timeout or
+hold a lease across network I/O.
+
+SCOPE is only continuous authenticated fill persistence in the price-channel
+daemon. DRAIN is a bounded RECOVERY_CRITICAL lease attempt and the existing next
+scheduler tick. The recovery waiter observes and remains behind MONITOR intent,
+but unlike disposable BACKGROUND work it waits for a turn within its finite
+deadline so canonical fill truth cannot starve indefinitely. RESET is
+commit/rollback plus coordinator release on every path. No fill fact or
+watermark is published partially.
+
+Authorized files are `src/ingest/fill_synchronizer.py`, its existing test and
+registry rows, and this plan. Forbidden: probability, entry/exit economics,
+lifecycle grammar, schema shape, monitor cadence, auction ordering, wider busy
+timeouts, or venue-side action. Acceptance: venue I/O executes at writer depth
+zero; every production fill DML transaction owns the unified TRADE coordinator;
+fact/projection/watermark atomicity and idempotency remain green; contention is
+typed scheduler failure; focused fill, coordinator, price-channel INV-37,
+compilation, planning-lock, and diff checks pass before exact-SHA hot-fix
+deployment.
+
+The live recovery-priority proof exposed a coordinator race that must close in
+the same slice. A non-monitor can own the exclusive monitor-waiter reservation
+and block on the turnstile/file gate; a MONITOR that publishes intent during
+that wait must still linearize first. Every non-monitor therefore rechecks the
+crash-safe intent during acquisition, then atomically acquires an exclusive
+intent publication barrier after owning the complete DB set. The barrier stays
+held until the public lease object exists. A MONITOR consequently either
+publishes first and makes the non-monitor release the entire DB set, or
+publishes after that lease has linearized; no final-check-to-publication window
+remains.
+
+SCOPE is unified writer acquisition ordering for STANDARD,
+RECOVERY_CRITICAL, and BACKGROUND writers. DRAIN is the existing finite lease
+deadline; RESET is full gate/reservation cleanup before retry. Acceptance adds
+a deterministic blocker -> queued recovery -> later monitor race proving
+acquisition order `monitor, recovery`, the same race after the first gate of a
+multi-DB set, and a monitor attempt paused exactly after the final intent check
+but before lease publication. No test may leak a thread, partial gate, or
+publication barrier.
+
+### Slice B91 — Exact JIT maker curve identity at final submit (2026-08-11)
+
+- Runtime defect: JIT receipt persistence correctly names the full executable
+  ask curve in `global_jit_execution_curve_identity`, while the final maker wall
+  compared that field to the passive proposal curve. Those curves are distinct
+  by construction, so a real rebound maker winner remained unsubmitable even
+  though a synthetic test using the proposal identity passed.
+- Structural repair: final submit now compares the JIT execution field to the
+  current candidate's full `execution_curve_identity`; the nested maker witness
+  continues to bind and validate the passive proposal identity separately.
+- Antibody: the final-wall fixture now mirrors receipt rebinding and asserts
+  that full executable and passive proposal identities are unequal before a
+  valid witnessed maker is admitted.
+
+### Slice B92 — Canonical monitor debt joins urgent targeted work (2026-08-11)
+
+- Live defect: repeated Day0 targeted monitors refreshed five Day0 positions
+  every few seconds while five active positions crossed the 150-second
+  canonical cadence wall and reached roughly 210 seconds without a decision.
+  Recovery detected the debt, but could lose the single-writer claim to the
+  already-running targeted stream, leaving BUY reduce-only and old capital
+  stale at the same time.
+- Structural invariant: a targeted Day0/forecast claim keeps its urgent family
+  but must also absorb every canonically overdue family. If exact family scope
+  cannot be proven it widens to the full held book. Debt appearing after claim
+  acquisition preempts at the next position boundary so the durable wake can
+  retry with the merged scope.
+- Entry admission uses the same identity: known overdue positions block BUY
+  only in their exact weather families while unrelated current alpha continues
+  to compete. Missing/unreadable family identity remains a global fail-closed
+  block; held SELL/HOLD/CASH evaluation is unchanged.
+- SCOPE: current held-monitor claim only. DRAIN: the existing bounded monitor
+  budget writes fresh per-position decisions for urgent plus overdue families;
+  the 30-second recovery remains an independent backstop. RESET: canonical
+  freshness removes families from the merged scope and clears the existing BUY
+  gate. Quote-only staleness retains its separate retry semantics.
+- Forbidden: widening the 150-second threshold, weakening BUY admission,
+  suppressing Day0 wakes, adding a second writer, or treating a timestamp
+  without fresh q/book evidence as coverage.
+
+### Slice B93 — Cache immutable raw-payload coverage proof (2026-08-11)
+
+- Live defect: the held-monitor HWM batch reopened and reparsed the same
+  immutable Open-Meteo payload on every pass. Python file I/O consumed the
+  shared five-second read deadline; the next SQLite progress callback then
+  interrupted the batch and made fresh probability authority unavailable.
+- Structural invariant: payload local-day coverage is verified once per exact
+  file identity `(resolved path, inode, ctime_ns, mtime_ns, size, city timezone,
+  target date)`. `ctime_ns` makes an in-place rewrite invalidate the proof even
+  when a writer preserves both size and mtime.
+  An identity change or a previously missing file appearing forces a fresh
+  content read; no missing, partial, or changed payload is cached as fresh.
+- SCOPE: HWM payload-coverage verification only. DRAIN: the first monitor for
+  each new payload identity performs the existing exact validation; later
+  passes reuse that proof. RESET: file identity change, cache eviction, or
+  process restart. Probability, source-cycle, freshness, and lag law are
+  unchanged.
+
+### Slice B94 — Move Day0 ENTRY cancellation out of the monitor invocation (2026-08-11)
+
+- Live defect: `run_exit_monitor_cycle` released its process-local monitor
+  claim after canonical commit but then performed raw CLOB Day0 ENTRY cleanup
+  before returning. APScheduler still counted the invocation against
+  `max_instances=1`, so later monitor/recovery ticks were skipped. The inline
+  path also called venue cancel before writing durable `CANCEL_REQUESTED`.
+- Structural invariant: held-position monitoring ends after its canonical
+  decision commit and health/status closeout. Day0 dead-bin/anomaly cleanup is
+  a pure per-command classification merged into the existing recurring C3
+  cancel-set; all venue side effects use the existing batch journal and command
+  recovery contract.
+- SCOPE: one canonically open ENTRY `command_id` whose typed token identity is
+  local-Day0 and whose qualified evidence proves `HARD_FACT_BIN_DEAD` or
+  `ORACLE_ANOMALY_PAUSE`. SELL/held-position actions and unrelated entries are
+  excluded. DRAIN: C3 recomputes on its five-minute cadence; after
+  `CANCEL_REQUESTED` commit, the existing 60-second command recovery owns any
+  venue ambiguity. RESET: the command is no longer canonically open, the
+  qualified Day0 predicate no longer selects it, or durable cancel convergence
+  reaches `CANCELLED`.
+- Forbidden: background fire-and-forget threads, direct `cancel_order`, stale
+  flags, family/global entry gates, weakening Day0 evidence, or extending the
+  held-monitor deadline. Acceptance: monitor source contains no ENTRY cleanup
+  call; dead YES/NO-side semantics remain typed; C3 merges Day0 with TTL/q
+  proposals once per command; batch journal/recovery tests and monitor cadence
+  antibodies pass.
+- Test sunset: wallet-only fakes that assert the retired raw `cancel_order`
+  behavior are explicitly skipped. Their production invariants are replaced by
+  BUY-only canonical scan, typed YES/NO classifier, bounded rotation,
+  lane-failure isolation, and durable C3 batch-journal antibodies. The retired
+  fake path must not be revived merely to make those historical assertions run.
+
+### Slice B95 — Exact maker-fill probability simplex (2026-08-11)
+
+- Live defect: the 494-row current BUY maker sample materialized 66 Decimal
+  outcomes whose iterative sum was
+  `0.9999999999999999999999999996`. The strict witness constructor correctly
+  rejected the incomplete distribution, but the uncaught producer error then
+  failed every global auction before BUY/SELL comparison.
+- Structural invariant: empirical fill masses retain their current DKW law,
+  while the final outcome is the exact residual after summing all preceding
+  outcomes in validator order. Every materialized distribution is a finite,
+  non-negative simplex summing exactly to one; witness validation stays strict.
+- SCOPE: current maker-fill outcome materialization only. DRAIN: every auction
+  rebuilds its current candidate-bound witness from the corrected distribution.
+  RESET: a new sample cut recomputes all masses; no persisted gate or override
+  is introduced.
+- Forbidden: tolerance-based acceptance of almost-one probabilities, disabling
+  maker proposals, falling back to historical fill scalars, or bypassing exact
+  current book/candidate/wealth binding. Acceptance: the captured 494-row shape
+  closes exactly and constructs a valid witnessed maker candidate; live global
+  auctions no longer fail at `CurrentMakerFillWitness.__post_init__`.
+
+### Slice B96 — Isolate HWM SQL time from payload validation (2026-08-11)
+
+- Live defect: the held-monitor HWM prefetch installs one absolute SQLite
+  progress deadline across both SQL selection and Python validation of the
+  selected immutable payload files. A cold payload proof can consume that wall
+  time; the next otherwise-small SQL statement is then interrupted, so every
+  held family receives one shared unavailable probability snapshot.
+- Structural invariant: the SQLite progress handler is installed only while an
+  HWM SQL statement is executing and is removed immediately after its rows are
+  materialized. Payload identity/stat/content validation runs outside the SQL
+  cancellation domain while remaining inside the caller's bounded monitor
+  deadline. A deadline crossed by either phase fails closed with typed evidence;
+  it never returns a partial or stale snapshot.
+- Runtime scheduling time is not SQLite execution time. SQLite lock waiting
+  remains bounded by wall-clock `busy_timeout`; VM progress is bounded by the
+  executing thread's CPU clock; the outer monitor wall deadline still bounds
+  their composition. Reactor/GIL preemption therefore cannot turn an indexed
+  millisecond read into a false SQL timeout.
+- SCOPE: the dedicated read-only connection used by held-position replacement
+  HWM prefetch. DRAIN: each bounded SQL statement materializes its causal rows,
+  then exact immutable payload validation completes before the monitor consumes
+  the snapshot. RESET: the progress handler is removed after every statement,
+  the prior `busy_timeout` is restored, the read transaction is rolled
+  back/closed after the frozen cut, and the next monitor pass starts from a new
+  decision time. `sql_timeout_seconds` remains authoritative even when the
+  caller supplies no outer deadline.
+- Forbidden: widening the five-second primary-belief budget, accepting stale
+  cycles, tolerating an interrupted/partial HWM, or keeping a progress handler
+  active across file I/O. Acceptance: a deliberately slow payload proof cannot
+  interrupt a later SQL statement; an actually slow SQL statement still fails
+  closed; focused HWM/monitor tests, compilation, planning-lock, and diff checks
+  pass before exact-SHA hot-fix deployment.
+
+### Slice B97 — Drain bound FAK no-fill EXIT ambiguity (2026-08-11)
+
+- Live defect: a deterministic FAK EXIT persisted its signed venue order id and
+  crossed POST, but the point-order read returned no record. Generic recovery
+  moved `SUBMITTING` to `REVIEW_REQUIRED`; that reason had no drain, so a held
+  position remained `pending_exit` even after complete authenticated open-order
+  and trade reads plus a newer unchanged chain balance proved zero fill.
+- Structural invariant: a bound FAK EXIT is terminal no-fill only when the exact
+  order is absent, complete authenticated open-order/trade enumeration finds no
+  matching side effect, canonical local facts contain no fill, and a chain
+  snapshot newer than the command still equals the pre-exit held shares within
+  venue dust. Recovery then appends the canonical zero-fill order fact, expires
+  the command, releases single-flight ownership, and emits a held-sell reauction
+  obligation for immediate fresh redecision.
+- SCOPE: one `REVIEW_REQUIRED` `EXIT/SELL` command whose latest immutable submit
+  event proves FAK and whose reason is `recovery_order_not_found_at_venue`.
+  DRAIN: command recovery repeats authenticated point/open/trade/chain proof on
+  each live tick, then atomically terminalizes and releases the exact command.
+  RESET: `EXPIRED` plus `EXIT_ORDER_VOIDED` or `EXIT_RETRY_RELEASED` removes the
+  pending-exit owner; any live order, trade, positive fill fact, incomplete read,
+  stale chain cut, or changed chain shares keeps it fail-closed.
+- Forbidden: treating order absence alone as no fill, applying entry semantics
+  to held exits, increasing retry timers, or leaving a manual-review terminal
+  with no executable drain.
+
+### Slice B98 — Keep auxiliary metadata single-flight out of held redecision (2026-08-13)
+
+- Live defect: three held monitors in one second reached current probability
+  work but aborted before canonical q/book redecision because an identical
+  bounded `/markets/{condition}` request was already in flight. Durable monitor
+  recovery then reported three, later six, overdue positions while BUY remained
+  reduce-only.
+- Structural invariant: closed/non-accepting market metadata is auxiliary to a
+  current executable q/book decision. An identical held-risk metadata request
+  already in flight contributes no new close evidence to this position, but
+  cannot revoke its current q/book redecision. Transport, HTTP, embargo, route,
+  lease-loss, and malformed-response failures remain visible and fail closed.
+- SCOPE: one exact `POLYMARKET_REQUEST_IN_FLIGHT` denial from the bounded
+  held-risk market-info call. DRAIN: the existing request owner records its
+  terminal success/failure while this monitor completes current q/book work.
+  RESET: the next monitor retries market metadata after lease release; static
+  market-close evidence remains independently available.
+- Forbidden: broad exception swallowing, cached closed-state inference,
+  widening monitor cadence, changing exit economics, or bypassing global
+  capital comparison. Acceptance: exact in-flight denial returns no new close
+  evidence; ordinary transport failure still raises; prefetched executable book
+  still avoids redundant metadata; focused governor and full live-safety tests,
+  compilation, independent review, and live cadence proof pass before closeout.
+
+### Slice B99 — Isolate admitted belief failure from the held-position tail (2026-08-13)
+
+- Live defect: a 47.759-second held-monitor claim ended after 32.612 seconds.
+  Two admitted positions exhausted their own five-second child deadlines, then
+  `primary_belief_admitted_slice_failed` skipped seven unvisited positions even
+  though the global claim still had time. Three consecutive decisions repeated
+  the same batch-wide deferral, leaving pending-exit and active holdings stale.
+- Structural invariant: one position owns one bounded belief attempt. Its
+  timeout or exception rolls back and defers only that position; remaining
+  positions may consume the unchanged global claim through their own five-second
+  deadlines. Only the global deadline, urgent preemption, or insufficient time
+  for one complete child attempt may stop the tail.
+- SCOPE: one failed or expired held-position probability/metadata child.
+  DRAIN: the same pass continues with independent peers while fair rotation
+  retries the failed position on a later pass. RESET: any later complete child
+  attempt emits its current canonical q/book decision.
+- Forbidden: widening child/global budgets, changing fair rotation, changing
+  target-family scope, suppressing per-position failure telemetry, or treating
+  stale data as current. Acceptance: timeout and exception antibodies prove the
+  failed position remains deferred while admitted and non-admitted peers both
+  refresh, evaluate, and emit canonical decisions before the global deadline.
+
+### Slice B100 — Fence pending-exit SQLite work inside the auxiliary tranche (2026-08-13)
+
+- Live defect: decision 417045 admitted eleven held positions with a 10.379s
+  monitor budget, completed the HWM cut in 0.091s, then spent 62.380s before
+  starting any probability read. The pending-exit preflight received the
+  auxiliary absolute deadline, but its write-boundary commits and the caller's
+  post-preflight commit retained the process default 30-second SQLite busy
+  timeout. Two serial lock waits could therefore consume the primary q reserve
+  and blind every holding despite the logical deadline.
+- Structural invariant: every SQLite scan, mutation, and commit in pending-exit
+  preflight uses the same absolute auxiliary deadline. Lock acquisition is
+  nonblocking inside that tranche, VM work has a progress deadline, and an
+  unavailable commit rolls back and returns typed per-pass deferral. No
+  auxiliary operation may begin or continue after the primary q reserve starts.
+- SCOPE: pending-exit preflight and its immediate monitor write-boundary only.
+  DRAIN: the next recurring monitor retries canonical order/retry truth under a
+  fresh auxiliary tranche. RESET: a bounded successful commit clears the
+  deferral and the normal fill/retry state machine resumes.
+- Forbidden: increasing monitor or SQLite timeouts, skipping canonical writes,
+  interpreting lock failure as venue/order truth, or suppressing primary q/book
+  refresh. Acceptance: deterministic blocked-commit antibodies prove immediate
+  rollback/defer, restored connection settings, no venue read after deferral,
+  and the next unlocked pass reaches primary refresh without serialized
+  30-second lock debt.
+
+### Slice B101 — Preserve independent held q and quote authority (2026-08-18)
+
+- Live defect: Shanghai's final target-day observation produced an exact current
+  held probability of zero, but its dust-sized token had no executable bid.
+  The incomplete-exit recorder revoked both evidence axes, persisting the exact
+  q as stale and preventing truthful whole-book monitor coverage.
+- Structural invariant: probability and executable quote are independent facts.
+  Missing probability revokes only q/edge authority; missing market price or bid
+  revokes only quote/edge authority. Either missing axis still emits the typed
+  non-actionable incomplete-decision receipt and cannot authorize a SELL.
+- SCOPE: one held monitor decision with a typed
+  `INCOMPLETE_EXIT_CONTEXT` field set. DRAIN: the recurring monitor refreshes the
+  missing q or quote axis. RESET: the next complete current q+book snapshot
+  produces an ordinary economic BUY/SELL/HOLD/CASH comparison.
+- Forbidden: stale-as-fresh substitution, treating no bid as an executable zero
+  price, carrying an edge across a missing quote, or weakening global-auction
+  completeness. Acceptance: probability-only and quote-only counterexamples
+  preserve the proven sibling axis, both remain non-actionable, focused live
+  safety tests, planning lock, compilation, and diff checks pass before exact-SHA
+  hot-fix deployment.
+
+### Slice B102 — Recapture held SELL book after slow authority work (2026-08-18)
+
+- Live defect: Dallas and Kuala Lumpur repeatedly held fresh negative edge with
+  executable 0.28–0.67 bids, but exact held-SELL completion attempts expired.
+  Kuala Lumpur later reached two FAK submits whose immutable JIT books contained
+  enough depth; both commands were created about five seconds after those book
+  captures and the venue reported no match. A post-fix Toronto fill reproduced
+  the same snapshot-to-command delay, proving the latency shape remained live.
+- Structural invariant: probability, wealth, inventory, and claim fencing run
+  before the final executable-book read. A preflight book ranks the candidate
+  but cannot authorize a later venue submit. Actuation recaptures the book and
+  may preserve the selected SELL only when the current executable prefix covers
+  the same shares for no less proceeds and no worse limit; otherwise the
+  existing global reauction path owns the changed decision.
+- Maker witness boundary: the final snapshot id/hash and candidate binding are
+  intentionally rebound to the final book. The immutable comparison retains
+  asset epoch, limit, deadline, outcome distribution, model/sample provenance,
+  and validity interval; comparing the old and final book hash would make every
+  normal maker-book update self-veto before submit.
+- SCOPE: one preflighted global held-position SELL actuation. DRAIN: a no-fill,
+  worsened prefix, identity change, or unavailable final book returns typed
+  reauction evidence and the exact durable wake retries it. RESET: a fresh final
+  book with non-worsened economics constructs new immutable submit authority.
+- Forbidden: stop-loss thresholds, stale-book reuse, local statistical SELL
+  authority, weakening the live price band, or submitting after economics
+  worsen. Acceptance: the regression antibody proves an existing preflight
+  handoff cannot suppress a post-probability book recapture, and the fresh book
+  remains bound through the existing snapshot, authority, and executor gates.
+
+### Slice B103 — Fall through a selected crossed JIT book (2026-08-18)
+
+- Live defect: four consecutive current events in decision cut `463209/463210`
+  selected the same token, whose submit-time CLOB book was locked at
+  `best_bid=0.39 / best_ask=0.39`. The JIT gate correctly refused that book,
+  but classified the token-local failure as `BATCH_BLOCKED`, so all four
+  carriers retried with zero submits instead of comparing the remaining global
+  BUY/SELL/HOLD/CASH set.
+- First-principles invariant: a crossed/locked book is never executable submit
+  authority. It invalidates the exact selected token/action, not independently
+  current q, wealth, or other token books in the same frozen epoch.
+- Minimal repair: classify only
+  `EDLI_LIVE_CERTIFICATE_BUILD_FAILED:PRE_SUBMIT_BOOK_AUTHORITY_JIT_CROSSED_BOOK`
+  as `CANDIDATE_BLOCKED`, then use the existing candidate exclusion and
+  same-epoch global re-auction path.
+- SCOPE: the exact selected action key, including execution mode. DRAIN: exclude
+  it without venue I/O and rank the remaining current feasible set. RESET: the
+  next recurring cut fetches a fresh JIT book and may admit the token again.
+- Forbidden: accepting a crossed book, fabricating a spread, modifying q/Kelly/
+  fees/depth/price-band law, broadening unrelated certificate failures, forcing
+  an order, or mutating canonical state.
+- Acceptance: the crossed winner produces no venue call; its exact candidate is
+  excluded; a current sibling/runner-up can be selected and submitted once;
+  unknown or batch-wide authority defects remain fail-closed. Focused global
+  auction tests, compilation, planning lock, and `git diff --check` must pass
+  before exact-SHA hot-fix deployment.
+
+### Slice B104 — Fall through a market-scoped unknown side effect (2026-08-18)
+
+- Live defect: current global cuts repeatedly rank Helsinki market `3655497`
+  first, then pre-submit rejects it with
+  `risk_allocator_pre_submit_blocked: unknown_side_effect_same_market`. The
+  blocker is explicitly market-scoped, but the batch treats its unregistered
+  base reason as a generic transient and requeues the same winner, producing no
+  order despite independent executable candidates in the same complete cut.
+- First-principles invariant: an action blocked by current risk authority is not
+  executable and cannot be the globally best executable order. A market-scoped
+  unknown must keep that market fail-closed without suppressing independent
+  BUY/SELL/HOLD/CASH alternatives.
+- Minimal repair: classify only the exact same-market allocator reason as
+  `CANDIDATE_BLOCKED`, then use the existing exact-candidate exclusion and
+  same-epoch global re-auction path.
+- SCOPE: the exact selected candidate in the affected market. DRAIN: exclude it
+  without venue I/O and rank the remaining current feasible set. RESET: the
+  recurring command reconciler clears the scoped unknown; a later fresh cut may
+  admit the candidate again.
+- Forbidden: clearing or weakening the unknown-side-effect latch, treating an
+  unscoped/systemic unknown as local, reusing stale q/book/wealth, forcing an
+  order, or changing Kelly/cap/price-band law.
+- Acceptance: no venue call occurs for the blocked winner; the exact candidate
+  is excluded; a current sibling can submit once; existing batch-wide and
+  unscoped blockers remain fail-closed. Focused global-auction tests,
+  compilation, planning lock, and `git diff --check` must pass before exact-SHA
+  hot-fix deployment.
+- Verification: scope classification plus maker/taker end-to-end sibling
+  fallthrough coverage passes `64/64`; module/test compilation, changed-surface
+  planning lock, and `git diff --check` pass. Live proof still requires an exact
+  deployed SHA and a post-deploy same-market block followed by a different
+  executable winner or a clean reconciliation of the scoped unknown.
+
+### Slice B105 — Deterministic Day0 monitor continuity across local midnight (2026-08-18)
+
+- Live defect: after Ankara's target-day local midnight, the direct hard-fact
+  overlay no longer applied, while the same canonical Day0 event still produced
+  an exact `day0_deterministic_bin_payoff_v1` family witness. Held monitoring
+  rejected that valid exact authority as unsupported, marked q stale, retained
+  the restart guard, and starved the global capital auction.
+- Structural invariant: an exact condition-bound deterministic witness remains
+  exact across the target-day boundary. The monitor must preserve its witness
+  identity, token/side binding, and 0/1 q; unsupported, probabilistic, missing,
+  or mismatched witnesses remain fail closed.
+- SCOPE: only a held condition covered by the deterministic witness. DRAIN: the
+  recurring monitor materializes its exact held-side q. RESET: a later canonical
+  witness replaces it through the ordinary current-family rebuild.
+- Acceptance: YES and NO sides of an exact-dead YES bin are fresh with q=0/q=1,
+  the deterministic authority remains in the receipt, and exact exit authority
+  survives local midnight without weakening quote, source, or freshness gates.
+### Slice B106 — Normalize rotation cursors across a dynamic target universe (2026-08-18)
+
+- Live defect: the ordinary current-target download lane persisted cursor `85`
+  for source cycle `2026-08-18T12Z`. The current market-derived target universe
+  later shrank below that size within the same cycle, so the reader classified
+  the otherwise valid non-negative cursor as corrupt. Every broad maintenance
+  pass then failed soft before download, while held-only priority lanes continued;
+  Paris LOW consequently retained a posterior from the prior source day.
+- First-principles invariant: a durable rotation cursor is an offset hint into
+  the current ordered universe, not an identity-bound row index. The target set
+  may grow, shrink, or reorder while the source cycle remains fixed, so every
+  valid non-negative cursor is normalized modulo the current non-empty row count.
+  Schema, generation, and canonical cycle validation remain strict. The write CAS
+  binds the exact observed `(stored cycle, generation)` epoch. A mismatched epoch
+  may be superseded only by a strictly newer canonical source cycle, so a new
+  cycle still wins when an older worker populated previously absent state, while
+  an older cycle can never overwrite a newer cycle's state.
+- SCOPE: ordinary current-target rotation for one source cycle. DRAIN: the next
+  maintenance pass reads the existing cursor, normalizes it against the current
+  rows, performs its bounded attempt, and atomically persists the next in-range
+  cursor with an incremented generation. Concurrent same-cycle workers over
+  differently sized universes remain first-writer-wins because row membership is
+  deliberately not cursor identity; the next pass normalizes that valid hint.
+  RESET: a strictly newer source cycle resets cursor zero and may supersede an
+  older observed epoch; an empty universe validates any existing state but
+  performs no write, generation increment, or lock-file creation.
+- Forbidden: deleting or rewriting live state by hand, tolerating malformed or
+  negative cursors, weakening held-family priority, bypassing provider quota or
+  freshness gates, or treating successful rotation as posterior materialization.
+- Acceptance: an oversized same-cycle cursor rotates a smaller row set from its
+  modulo offset and advances through the existing CAS path; malformed state still
+  fails closed; the downloader's existing ETL read/write surface is registered;
+  cycle state advances monotonically under both absent-state race orders; same-
+  cycle workers serialize by generation under both universe-size orders and the
+  next pass normalizes the winning hint; an empty universe is mutation-free;
+  focused download tests, topology/planning gates, compilation, and `git
+  diff --check` pass before a data-ingest-only hot-fix restart.
+
+### Slice B107 — Bound durable live-cap reconstruction by aggregate identity (2026-08-18)
+
+- Live defect: two consecutive post-restart global auctions exhausted their
+  45-second construction deadline in `durable_live_cap:order_evidence`. The
+  canonical 89 GB world DB held 2,089 relevant cap aggregates and 59,427 order
+  events; SQLite chose the event-type index plus a temp sort. The exact read took
+  27.25 seconds without runtime contention and starved the global order path.
+- First-principles invariant: current in-flight capital must remain fail-closed,
+  but its bounded reconstruction must search the exact aggregate identities that
+  own that capital rather than scan unrelated event-type history.
+- Minimal repair: bind the evidence query to the existing canonical
+  `(aggregate_id, event_sequence)` index. No rows, event classes, terminal-state
+  interpretation, exposure amount, or deadline semantics change.
+- SCOPE: only durable live-cap order-evidence lookup during reactor construction.
+  DRAIN: the next cycle reconstructs all unresolved reservations through their
+  aggregate IDs. RESET: resolved/released cap rows leave the candidate set through
+  the existing ledger/reconciliation paths.
+- Acceptance: the production-shape A/B read falls from 27.25 seconds to 0.44
+  seconds; the focused exposure tests preserve all reservations and prove the
+  aggregate index is present in the executed query; compilation, planning lock,
+  and `git diff --check` pass before exact-SHA hot-fix deployment.
+
+### Slice B108 — Rebind a selected BUY from its current global book (2026-08-18)
+
+- Live defect: the current complete auction selected an executable NO BUY at
+  `0.14`, but its older local proof retained an out-of-band `0.96384` quote.
+  Selection explicitly admitted that stale local scalar for current global-book
+  rebinding, then the bind layer rejected the same reason as non-rebindable and
+  batch-blocked every sibling before venue I/O.
+- First-principles invariant: the globally selected action is authorized by its
+  current full CLOB curve, not an obsolete local quote. Only that selected proof
+  may replace the old scalar; the current JIT snapshot, absolute `[0.05, 0.95]`
+  price band, and final SDK boundary remain cumulative requirements.
+- SCOPE: the exact selected global BUY whose local proof reason starts with
+  `LIVE_UNIT_PRICE_OUT_OF_BOUNDS`. DRAIN: bind the selected current global curve,
+  persist its JIT snapshot, and run ordinary pre-submit validation. RESET: every
+  new cut rebuilds the local and global books; a still-out-of-band current quote
+  is rejected by the unchanged price boundaries.
+- Acceptance: an obsolete `0.96384` local quote is cleared only for the selected
+  proof, then a current `0.14` JIT snapshot becomes execution-cost authority;
+  unrelated missing reasons remain fail-closed. Focused global actuation tests,
+  compilation, planning lock, topology freshness, and `git diff --check` pass
+  before exact-SHA hot-fix deployment.
+
+### Slice B109 — Reserve source-clock capture for held families (2026-08-18)
+
+- Live defect: Wellington's current 12Z anchor artifact and matching ENS coverage
+  were present, but its held-family posterior remained on the prior source day.
+  The source-clock downloader sorted held targets first yet submitted that one
+  task together with every broad-universe task. Broad Seoul traffic established
+  the shared quota cooldown before Wellington obtained the simultaneous provider
+  captures required by the live probability authority.
+- First-principles invariant: held-family priority is an execution barrier, not
+  submission order. Each updated provider first receives its bounded held-family
+  micro-batch; only after those requests terminate may the same cycle spend
+  transport capacity on entry-discovery targets. Independent provider requests
+  within the held tranche remain concurrent.
+- SCOPE: source-clock current-value capture for canonical held families only.
+  DRAIN: recurring availability polls retry missing provider rows, publish their
+  commit wake, and then materialize the current posterior. RESET: once every held
+  tranche terminates, broad source fanout resumes in the same bounded call; when
+  there are no held targets, existing independent-source concurrency is unchanged.
+- Forbidden: stale-as-fresh probability, single-source q, weakening sigma/bounds
+  authority, inventing provider data, suppressing broad targets permanently, or
+  increasing provider quota. Acceptance: a deterministic two-source antibody
+  proves both Wellington held requests start before either Seoul broad request;
+  no-held concurrency tests remain green; focused capture tests, compilation,
+  planning lock, and `git diff --check` pass before hot-fix deployment.
+
+### Slice B109.1 — Persist the cumulative-Kelly endowment in each BUY certificate (2026-08-18)
+
+- Live evidence gap: a Warsaw maker increment was selected after an existing
+  32-share holding had already reconciled, and the solver consumed that holding
+  through `CandidatePortfolioEndowment`; however, the immutable execution
+  certificate exposed only the additional 47.25-share order. An operator could
+  not prove from the receipt that sizing used the current holding rather than an
+  empty endowment.
+- First-principles invariant: every incremental BUY certificate must disclose
+  the exact current-token holding, full-Kelly final target, fractional-Kelly
+  final target, and sizing mode that produced the additional order. These values
+  are already part of the selected decision and economic identity; persisting
+  them adds auditability without changing ranking, sizing, price, or venue I/O.
+- SCOPE: future selected global BUY certificates only. DRAIN: each new decision
+  serializes its own four sizing fields. RESET: every fresh auction rebuilds the
+  fields from its current ledger-aligned holdings snapshot.
+- Acceptance: a selected BUY with 32 existing shares persists all three terminal
+  share quantities plus `FRACTIONAL_TARGET`; the fields participate in the
+  current-state identity hash, and focused global-actuation tests, compilation,
+  planning lock, topology freshness, and `git diff --check` pass before exact-SHA
+  hot-fix deployment.
+
+### Slice B110 — Scope canonical held-monitor debt to stale families (2026-08-18)
+
+- Live defect: after a full monitor pass exceeded its bounded deadline, only two
+  held weather families remained canonically overdue, but reactor admission and
+  wake selection promoted that typed family debt into a global defer. The exact
+  family block map was already built yet unreachable, so unrelated fresh
+  families could not compete and no global auction could complete.
+- First-principles invariant: missing current probability/monitor truth blocks
+  BUY authority only in the exact affected weather family. If that family scope
+  is unreadable, all BUYs fail closed; SELL/HOLD/CASH still run. Only transient
+  monitor writer fairness/handoff may preempt reactor admission globally.
+- SCOPE: exact overdue weather families, widened to every BUY family only when
+  canonical scope is unreadable. DRAIN: the independent recovery monitor refreshes
+  overdue holdings while each reactor cut ranks the remaining executable set.
+  RESET: a clean cadence read clears debt; every new cut rebuilds the scope.
+- Mid-cut law: canonical debt first discovered after a cut starts still cancels
+  that replayable cut at the next safe point; the following cut reads and applies
+  the exact family scope. Existing Day0 supersession, submit-time q/book JIT,
+  price band, Kelly, monitor fairness, and exact held-SELL authority are unchanged.
+- Acceptance: canonical debt present at cut start does not globally defer or force
+  exact-only wake selection; its family block reaches the live adapter; periodic
+  fairness debt remains exact-only/preemptive; scope failure blocks every BUY but
+  retains reduce-only evaluation. Focused runtime antibodies, compilation,
+  planning lock, topology freshness, and `git diff --check` must pass before
+  exact-SHA hot-fix deployment.
+### Slice B111 — Full-book success requires complete canonical coverage (2026-08-18)
+
+- Live defect: exit-monitor artifact `463626` admitted 31 held candidates, wrote
+  30 canonical monitor decisions, deferred one position after an orderbook gap,
+  and still returned success. The completion predicate required only one monitor
+  write, so the dispatcher cleared its one-turn urgent-yield guard even though
+  one capital obligation remained unrefreshed.
+- First-principles invariant: a full-book pass succeeds only when every admitted
+  positive-exposure candidate receives a canonical MONITOR_REFRESHED decision or
+  is discharged by an explicit terminal/economic-close transition in that pass.
+  Partial progress remains durable evidence, but cannot erase full-book fairness
+  debt or authorize another urgent yield.
+- SCOPE: completion classification for one periodic full-book monitor pass.
+  DRAIN: the next recurring/recovery pass retries every still-open uncovered
+  candidate under a fresh q/book deadline. RESET: complete canonical coverage or
+  a canonical zero-exposure book returns success and re-enables one-turn urgent
+  preemption.
+- Forbidden: treating a missing orderbook as zero, stale-as-fresh substitution,
+  suppressing urgent Day0 work permanently, changing q/edge/exit thresholds, or
+  counting ambiguous pending-exit skips as completed coverage. Acceptance: the
+  1-of-4 partial counterexample fails, 4-of-4 succeeds, an explicit same-pass
+  chain-missing close discharges its obligation, and canonical-write/preemption
+  failures remain incomplete before focused/broader tests and hot-fix deployment.
+
+### Slice B112 — Unify definitive Day0 ENTRY and HELD probability authority (2026-08-18)
+
+- Live defect: the same Austin current-day WU settlement fact and remaining
+  provider vectors produced NO q `0.4304` for ENTRY but `0.151875` for
+  HELD_MONITOR. The held path treated every authorized current-day observation
+  as a held-only continuity exception, skipped the replacement bundle, invented
+  a different base/content identity, and omitted the source-clock bound.
+- First-principles invariant: a definitive current-day settlement-channel fact
+  uses one replacement probability authority for ENTRY, HELD_MONITOR, and
+  REDUCE_ONLY_EXIT at the same decision-time truth. Held-only continuity exists
+  only for a genuinely provisional observation or post-local incomplete final
+  publication; action role must not create a second q regime.
+- SCOPE: current-day global probability preparation when the authorized Day0
+  fact is definitive. DRAIN: every redecision reads the same current replacement
+  bundle and rebuilds the remaining-day simplex. RESET: genuinely provisional
+  evidence or the typed post-local incomplete state enters the existing scoped
+  continuity path; final daily truth still upgrades to the exact simplex.
+- Files authorized: `src/engine/event_reactor_adapter.py`,
+  `tests/integration/test_w3_solve_seam_g3.py`, `architecture/source_rationale.yaml`,
+  `architecture/test_topology.yaml`, and this packet.
+- Acceptance: the definitive WU fixture produces identical ENTRY/HELD point q,
+  q version, source-truth identity, probability-content identity, base identity,
+  and source-clock bound while reading the replacement bundle for both roles;
+  provisional HKO and post-local incomplete continuity tests still pass. Focused
+  integration tests, compilation, narrow lint, planning/freshness gates, and
+  `git diff --check` pass before exact-SHA hot-fix deployment.
+- Verification: the focused Day0/held slice passes `16/16`; the complete W3
+  integration file passes `488/494` with the same six failures reproduced on
+  unmodified live (three sample-count fixtures, one stale fast-observation
+  fixture, and two post-day capture-cutoff fixtures). Compilation, test-file
+  Ruff, freshness, map maintenance, planning, and `git diff --check` pass. The
+  adapter's ten F821 findings are identical to `HEAD`; the source-rationale YAML
+  parser remains blocked by the same pre-existing line-1285 error on `HEAD` and
+  this slice.
+
+### Slice B112 — Canonical degraded evidence cannot discharge economic redecision (2026-08-18)
+
+- Live defect: post-B111 full-book artifacts durably exposed partial coverage,
+  but a `MONITOR_REFRESHED` row with unavailable current q/book evidence still
+  entered the same canonical-coverage set as an actionable HOLD/SELL decision.
+  The writer proved an attempted read, not a current economic decision, so it
+  could still clear urgent full-book debt.
+- First-principles invariant: monitor event durability and action authority are
+  separate facts. A candidate discharges its pass-local economic obligation only
+  through a current action-authoritative redecision or an explicit terminal /
+  economically-closed transition. DATA_DEGRADED and incomplete exit context stay
+  durable for fairness and diagnosis but remain outstanding monitor debt.
+- SCOPE: completion classification for the exact positions whose current q/book
+  evidence was unavailable in one full-book pass. DRAIN: recurring and recovery
+  monitor passes retry those identities under a fresh source/book deadline.
+  RESET: a later action-authoritative decision or explicit discharge removes the
+  identity from that pass's no-authority set.
+- Forbidden: stale-as-fresh substitution, treating a canonical write as an
+  economic HOLD, changing q/edge/price/Kelly thresholds, or globally blocking
+  unrelated entry families. Acceptance: canonical 4-of-4 with one no-authority
+  identity remains incomplete; batch/singular degraded attempts persist exact
+  identities; complete fresh coverage and explicit discharge remain successful.
+
+### Slice B113 — Spend the held-capital quota reserve on held source capture (2026-08-18)
+
+- Live defect: held-family source-clock targets were ordered ahead of broad
+  discovery, but every BPF request still entered only the ordinary
+  `priority_lane`. Near its daily ceiling the governor could therefore preserve
+  the final held-capital tranche while refusing the exact held refresh it was
+  reserved for; live logs confirmed held capture reservations were labelled
+  `priority`, never `critical`.
+- First-principles invariant: a source-clock chunk containing any canonical held
+  family consumes the `critical_lane`; a chunk containing only discovery targets
+  remains in `priority_lane`. Explicit provider cooldowns and hard caps remain
+  non-bypassable.
+- SCOPE: Open-Meteo quota admission for source-clock BPF chunks containing held
+  families. DRAIN: recurring availability polls retry the critical chunk and
+  publish the normal source-commit wake. RESET: once the held rows land, exact
+  coverage removes them from subsequent chunks and ordinary source-clock quota
+  admission resumes.
+- Acceptance: a deterministic relationship test proves the held Seoul city
+  chunk is downloaded under `critical_lane`, the Paris-only discovery chunk uses
+  `priority_lane`, and a priority-only cooldown defers Paris without suppressing
+  Seoul. Freshness, provider identity, materialization, q, sizing, price, and
+  venue I/O remain unchanged.
+
+### Slice B114 — Preserve Day0 remaining-window probability authority (2026-08-18)
+
+- Live defect: current-cycle global models were present at the provider but every
+  held-family capture was discarded because the parser required samples from the
+  already elapsed local-day prefix. The materializer consequently had no current
+  BPF shape, so held positions produced durable degraded monitor events without
+  current action authority.
+- First-principles invariant: forecast coverage is directional in continuous
+  time. A future local day requires the normal full-day span. On Day0, a current
+  run may omit only a prefix that is already elapsed; it must begin no later than
+  the decision instant and still span the unresolved suffix through the evening.
+  The existing remaining-window center transform and observed-extreme support
+  conditioning then consume that current evidence exactly once.
+- SCOPE: current `single_runs` local-day coverage classification for BPF raw
+  capture. DRAIN: the recurring held-priority source-clock poll retries deferred
+  families and materialization consumes the newly persisted exact-cycle rows.
+  RESET: full-day coverage or an elapsed-prefix-only Day0 slice passes; future,
+  post-day, not-yet-started, and suffix-clipped slices remain fail-closed.
+- Forbidden: disabling local-day coverage, accepting a missing unresolved
+  suffix, substituting stale history, changing source roles, changing q/edge/exit
+  thresholds, or double-applying the Day0 remaining-window correction.
+- Acceptance: deterministic Sao Paulo fixtures prove active-Day0 `[06..23]`
+  passes at 19:30 local, `[06..18]` and `[21..23]` fail, future `[06..23]`
+  fails, and future `[00..23]` remains valid. Focused BPF, materialization/Day0,
+  planning, topology, compilation, and diff checks pass before exact-SHA deploy.
+- Verification: BPF capture, held-priority source-clock coverage, Day0 remaining
+  center, and remaining-day pricing pass `235/235`; bounded-file Ruff,
+  compilation, freshness, map maintenance, planning evidence, and diff checks
+  pass. The broader materializer file has six failures reproduced unchanged on
+  current live (five retired runtime-layer/schema fixtures and one isolated
+  subprocess missing its test world DB). Repo-wide source/test/fatal topology
+  gates remain blocked by the same current-live registry/YAML drift; none is on
+  the changed behavior or newly registered test.
+
+### Slice B115 — Cluster capital-alpha evidence by executable market family (2026-08-18)
+
+- Live defect: the revision-scoped sequential alpha test collapsed every city
+  settling on the same calendar date into one observation. Eighteen current-Day0
+  fills across 13 city-date families were therefore reduced to two samples:
+  the gate reported `market_over_model_evalue=1.318` and remained inconclusive
+  while exact realized capital was down `$65.54` on `$102.09`. Replaying the
+  same frozen q, executable entry prices, and outcomes at the city-date family
+  boundary yields 13 clusters and `market_over_model_evalue=1108.44`.
+- First-principles invariant: sibling bins and HIGH/LOW claims within one city
+  and target date share physical and market-information shocks and contribute
+  only the largest ex-ante claimed edge. Different cities are different binary
+  settlement claims; a shared calendar date is not sufficient identity to erase
+  their immutable decision-time likelihood evidence.
+- SCOPE: revision-scoped admission for `day0_nowcast_entry` and
+  `forecast_qkernel_entry`; any rejected revision gates only its strategy and
+  semantics revision. SELL/HOLD/exit lanes and other strategies remain active.
+  DRAIN: every riskguard tick recomputes the seven-day sequential evidence from
+  authoritative settlements and frozen entry witnesses. RESET: the existing
+  revision-scoped recovery/validation contract expires the durable gate when the
+  rejected revision is no longer licensed or its current evidence no longer
+  requires the gate.
+- Acceptance: same-city same-date HIGH/LOW remains one cluster; same-date NYC
+  and Tel Aviv become two clusters and two 8x market/model likelihood ratios
+  compound to e-value 64. Focused riskguard tests, compilation, registry checks,
+  live-data replay, and exact-SHA runtime confirmation must pass before closeout.
+
+### Slice B116 — Reserve held-capital maintenance time for current BPF shape (2026-08-19)
+
+- Live defect: the 20-second replacement-maintenance parent deadline granted up
+  to 10 seconds to each of the critical and ordinary held-anchor partitions,
+  then broad anchor repair, before attempting BPF capture. With persistent
+  anchor debt the BPF lane deterministically received `0.0` seconds while held
+  positions repeatedly failed with `BAYES_PRECISION_FUSION_CAPTURE_MISSING`.
+- First-principles invariant: current held probability requires both its anchor
+  and current multi-source shape. When held exposure exists and BPF transport is
+  admitted, neither prerequisite may consume the other's entire recurring
+  deadline; lower-priority broad repair uses only the unreserved remainder.
+- SCOPE: wall-clock allocation inside the one-minute replacement maintenance
+  tick. DRAIN: held anchor partitions share the non-reserved half, held-first
+  BPF fanout consumes the preserved half, and committed families trigger the
+  existing targeted materialization reseeds. RESET: no held scopes, provider
+  cooldown, or active no-progress backoff removes the reservation and restores
+  the full budget to existing repair lanes.
+- Forbidden: bypassing provider hard caps/cooldowns, stale-history substitution,
+  changing q/edge/price/Kelly law, weakening anchor requirements, or admitting
+  entries merely because a request was attempted.
+- Acceptance: a deterministic scheduler relationship test consumes both held
+  anchor partitions and proves broad anchor receives only the unreserved budget
+  while BPF still receives a positive 10-second slice. Existing cooldown,
+  no-held, retry/backoff, quota-lane, reseed, compilation, registry, and diff
+  checks pass before exact-SHA hot-fix deployment.
+
+### Slice B117 — Admit current Day0 remaining vectors into BPF capture (2026-08-19)
+
+- Live defect: B114 taught the raw-input parser to accept an elapsed-prefix-only
+  current Day0 vector with complete unresolved-suffix coverage, but both the
+  source-clock and ordinary production fanouts still rejected every source
+  cycle initialized after local 03:xx. Four held Aug-18 families therefore had
+  no current BPF rows and remained action-ineligible despite recurring capture
+  attempts with reserved quota and wall-clock time.
+- First-principles invariant: capture admission and payload validation must name
+  the same time geometry. A current local-day cycle may reach the strict parser
+  when it was initialized no later than the decision instant; the parser alone
+  proves that only elapsed samples are absent and that the unresolved suffix is
+  complete. Future targets still require full-day geometry and past partial
+  days remain inadmissible.
+- SCOPE: target admission in ordinary and source-clock BPF fanouts plus their
+  exact-cycle coverage denominator. DRAIN: recurring source-clock availability
+  polls retry the newly admissible held families and existing source-commit
+  notifications reseed materialization. RESET: a landed exact-cycle row removes
+  its coverage gap; future, past-partial, post-decision, or suffix-incomplete
+  vectors remain excluded or fail closed in the downstream parser.
+- Forbidden: treating admission as probability authority, weakening the B114
+  unresolved-suffix parser, accepting future partial days, substituting stale
+  history, or changing probability, edge, price, sizing, and venue I/O law.
+- Acceptance: timezone-aware geometry proves active Day0 is admitted while past
+  partial and post-decision cycles are not; coverage accounting includes current
+  Day0; source-clock capture attempts the exact held target; B114 parser tests,
+  compilation, changed-surface registries, and diff checks pass before exact-SHA
+  hot-fix deployment and live DB/monitor verification.
+
+### Slice B118 — Keep held families in the BPF target universe (2026-08-19)
+
+- Live defect: after B117 loaded, the 18Z downloader wrote current rows for the
+  Aug-19 market plan, but seven still-open Aug-18 positions were absent from that
+  plan. Both extras coverage and both target fanouts therefore declared the 98
+  new-market scopes complete while the held scopes had no 18Z rows. The existing
+  held-fixpoint override could only intersect held identities with plan-derived
+  missing identities, so it could never recover a held family omitted upstream.
+- First-principles invariant: unresolved capital, not current market discovery,
+  owns the minimum probability-maintenance universe. BPF coverage and source/
+  maintenance fanouts use the union of current market targets and canonical held
+  families; held-only targets retain their exact city/date/metric identity and
+  pass the same decision-window and payload validators as every other target.
+- SCOPE: BPF target enumeration and exact-cycle coverage accounting. DRAIN:
+  recurring held-priority source-clock and maintenance passes capture missing
+  held-only rows, then existing source-commit reseeds materialization. RESET:
+  exact two-family coverage removes a held scope from capture; lifecycle closure
+  removes it from the held union; an elapsed local day makes partial cycles
+  structurally inadmissible rather than stale-as-fresh.
+- Forbidden: fabricating a market row, treating held identity as probability
+  evidence, retaining closed positions, bypassing B114 suffix validation, or
+  changing q, edge, price, sizing, exit, and venue I/O law.
+- Acceptance: coverage includes a held Day0 identity absent from the market plan;
+  ordinary fanout synthesizes its exact download target; source-clock does the
+  same with an empty current-market key set. Direct callers, B114 parser,
+  scheduler, compilation, lint, registries, and diff checks pass before exact-SHA
+  deploy and live 18Z held-row/posterior/monitor proof.
+
+### Slice B119 — Separate conditional Day0 path error from full-day source-clock width (2026-08-19)
+
+- Live defect: the remaining-day operator conditions fresh hourly provider paths
+  on the current temperature, but then floors their future-path noise with the
+  replacement carrier's unconditional full-day extreme `sigma_pred`. Singapore
+  33°C therefore used three current remaining maxima near
+  `32.42/32.43/32.76°C` but widened them by `2.575°C`, assigned only `0.1508`
+  to the exact 33°C bin, and bought NO with `q=0.8492`; 33°C settled YES.
+  The revision has 18 actual candidates across 13 independent city-date
+  clusters, only three wins, and realized capital evidence of approximately
+  `-$65.54` on `$102.09` committed. Reusing the full-day width after current-state
+  conditioning is a category error, not an observation-latency allowance.
+- First-principles invariant: source-clock `sigma_pred` remains the immutable
+  full-day carrier and confidence-bound authority, but it is not a temperature
+  perturbation for the conditional random variable "remaining excursion after
+  the current observation." Remaining-path point q and its bootstrap use the
+  current provider-path distribution plus instrument and observation-latency
+  uncertainty exactly once. The old losing law retains its rejected semantics
+  revision; the changed probability operator receives a new revision and fresh
+  forward attribution.
+- SCOPE: Day0 `remaining_day` point q, bootstrap samples, qkernel spine sigma,
+  and their semantic identity. Forecast/non-Day0 q, persisted source-clock
+  posterior/bounds, deterministic absorbing payoffs, settlement geometry,
+  market prices, Kelly, strategy allocation, SELL/HOLD, and venue I/O are
+  unchanged. DRAIN: every fresh Day0 observation rebuilds the conditional
+  simplex and submit-time JIT reproduces it. RESET: leaving Day0 uses the normal
+  source-clock q; missing remaining vectors, invalid source-clock carrier, or
+  stale observation remains fail-closed.
+- Files authorized: `src/engine/event_reactor_adapter.py`,
+  `src/events/day0_authority.py`, `tests/test_day0_remaining_day_pricing.py`,
+  `tests/integration/test_w3_solve_seam_g3.py`, this packet, and the existing
+  source/test registries. The durable probability-law clarification belongs in
+  `docs/authority/replacement_final_form_2026_06_09.md`.
+- Forbidden: delete or ignore the source-clock authority/bounds, use market price
+  as a probability anchor, fit from post-decision outcomes, relax the rejected
+  old revision, manufacture a confidence cap, or rename the law without changing
+  the operator.
+- Acceptance: a source-clock sigma larger than current instrument/latency noise
+  remains recorded but no longer widens the conditional path; fresh C-unit
+  evidence has zero extra member sigma while stale-observation margin still
+  widens it; invalid bound source-clock sigma still fails closed; point q and
+  bootstrap use the same conditional sigma; the Singapore frozen witness
+  reproduces old NO `0.8492` and demonstrates the changed operator from the same
+  three paths without hindsight input. Focused Day0/qkernel/global-auction tests,
+  semantic-revision identity tests, compilation, changed-surface registries,
+  planning/freshness gates, and `git diff --check` must pass before any hot-fix
+  deployment. Live closeout requires exact-SHA load plus a new decision receipt;
+  profitability remains forward settlement evidence, never inferred from code.
+- Verification: 177 unique focused Day0, qkernel, global-auction, riskguard,
+  command-boundary, family-scope, and materialization tests pass; the complete
+  remaining-day pricing file is `122/122`. Compilation, bounded Ruff, freshness,
+  map-maintenance, planning-evidence, and diff checks pass. An independent
+  verifier found no B119 finding and separately reproduced the source-authority
+  fail-closed path. Its broader hard-fact probe had one environment-only
+  `unable to open database file` failure outside B119. Repo-wide source topology
+  remains blocked by the same malformed current-live YAML scalar at line 1285,
+  and the repo-wide test registry reports the existing unrelated drift; neither
+  touches this changed behavior or its registered antibody.

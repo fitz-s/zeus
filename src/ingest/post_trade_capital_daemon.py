@@ -1,6 +1,6 @@
 # Created: 2026-06-08
 # Last reused or audited: 2026-07-24
-# Authority basis: docs/architecture/system_decomposition_plan.md
+# Authority basis: docs/reference/design_system_decomposition_plan.md
 #   §4.3 (Post-Trade Capital Lifecycle), §6 (P4 row + co-location decision),
 #   §7 (I3 commit-before-HTTP no-back-coupling; I4 ingest->P4),
 #   §8 Step 2 (lift chain-sync READ + redeem/wrap pollers), §9 (regression-unconstructable).
@@ -12,7 +12,7 @@ proceeds, and reconcile chain truth, plus the chain-sync READ phase that the ord
 used to bundle with exit monitoring:
 
   - ``chain_sync_read_cycle``      (chain-truth sync READ phase, 2-min)
-  - ``_harvester_cycle``           (settlement P&L resolver, 1h; on-chain redemption
+  - ``_harvester_cycle``           (settlement P&L resolver, 5-min; on-chain redemption
                                     decoupled entirely 2026-07-25 -- Polymarket settles
                                     win/loss on Zeus's behalf, no redeem-reconciler poller)
   - ``_wrap_intent_creator_cycle`` (5-min)
@@ -370,6 +370,9 @@ def _write_post_trade_capital_heartbeat() -> None:
     except Exception as exc:  # noqa: BLE001
         _heartbeat_fails += 1
         logger.error("post-trade-capital heartbeat write failed (%d): %s", _heartbeat_fails, exc)
+        if _heartbeat_fails >= 3:
+            logger.critical("FATAL: post-trade-capital heartbeat is unwritable; exiting for launchd recovery")
+            os._exit(1)
 
 
 def main() -> None:
@@ -436,8 +439,9 @@ def main() -> None:
     # its own connection lifecycle so there is no shared in-process write lock to contend.
     _scheduler = BlockingScheduler()
 
-    # Cadences are byte-identical to the order daemon's former registrations (src/main.py):
-    #   chain_sync_and_exit_monitor 2-min ; harvester 1h ; wrap_intent_creator 5-min ;
+    # Cadences match the order daemon's former registrations except the harvester, which
+    # runs every five minutes to bound closed-venue settlement delay:
+    #   chain_sync_and_exit_monitor 2-min ; harvester 5-min ; wrap_intent_creator 5-min ;
     #   wrap_submitter 2-min ; wrap_reconciler 2-min. (redeem_submitter and
     #   redeem_reconciler are gone -- on-chain redemption is decoupled entirely,
     #   2026-07-25.) Job ids are byte-identical so scheduler_health keying carries
@@ -450,7 +454,10 @@ def main() -> None:
     )
     _scheduler.add_job(
         _scheduler_job("harvester")(_harvester_cycle),
-        "interval", hours=1, id="harvester",
+        # SCOPE: only positions whose exact condition Gamma reports resolved; no date inference.
+        # DRAIN: each five-minute harvester run invokes the existing condition-scoped resolver.
+        # RESET: the resolver's idempotent VENUE_RESOLVED -> SETTLED transition removes the row.
+        "interval", minutes=5, id="harvester",
         max_instances=1, coalesce=True,
         next_run_time=datetime.now(timezone.utc),
     )

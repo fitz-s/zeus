@@ -1,5 +1,5 @@
 # Created: 2026-05-18
-# Last reused or audited: 2026-05-18
+# Last reused or audited: 2026-08-09
 # Authority basis: docs/operations/TRIVIAL_BATCH_NOTES.md (F89 RETRACT 3213fc2c),
 #   docs/archive/2026-Q2/task_2026-05-16_post_pr126_audit/RUN_15_track3_f91_f86_observability.md §F101
 # Lifecycle: created=2026-05-18; last_reviewed=2026-05-18; last_reused=never
@@ -36,8 +36,8 @@ HEARTBEAT_SCHEMA_REGISTRY: dict[str, dict] = {
     },
     "daemon-heartbeat-ingest.json": {
         "writer": "src/ingest_main.py",
-        "declared_fields": ["daemon", "alive_at", "pid"],
-        "note": "3-field alive signal; different key names than HB-1 (alive_at vs timestamp).",
+        "declared_fields": ["daemon", "alive_at", "pid", "git_head"],
+        "note": "Alive signal plus immutable process code identity for the Day0 source writer.",
     },
     "forecast-live-heartbeat.json": {
         "writer": "src/ingest/forecast_live_daemon.py",

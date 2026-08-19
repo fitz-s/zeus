@@ -26,9 +26,6 @@ from src.types import Bin, SolarDay, DaylightPhase, Day0TemporalContext
 from src.types.metric_identity import MetricIdentity
 
 
-_UNSEEN_PEAK_SIGMA_MULTIPLIER = 3.0
-
-
 def _stable_day0_rng_seed(*, bins: list[Bin], member_values, unit: str, precision: float) -> int:
     """Common-random seed for live Day0 monitor integration.
 
@@ -165,29 +162,13 @@ class Day0Signal:
         self._sigma = day0_post_peak_sigma(
             unit, self._peak_confidence, freshness_factor=self._freshness_factor
         )
-        self._unseen_peak_sigma = self._structural_unseen_peak_sigma()
-
-    def _structural_unseen_peak_sigma(self) -> float:
-        """Extra HIGH uncertainty when the daily peak is not yet reliably behind us.
-
-        The member extrema describe the forecasted remaining hours, but
-        ``post_peak_confidence`` is itself a probability about whether the
-        settlement-defining peak has already occurred.  When that confidence is
-        0.73, treating the current observed high as a 99% settled point bin is
-        incoherent: the missing 27% peak-timing mass must live in the remaining
-        settlement distribution rather than downstream gates.
-        """
-
-        try:
-            if not self._has_temporal_context or float(self.hours_remaining) <= 0.0:
-                return 0.0
-            peak = min(1.0, max(0.0, float(self._peak_confidence)))
-            precision = abs(float(getattr(self, "_precision", 1.0) or 1.0))
-        except (TypeError, ValueError):
-            return 0.0
-        if not math.isfinite(peak) or not math.isfinite(precision) or precision <= 0.0:
-            return 0.0
-        return (1.0 - peak) * _UNSEEN_PEAK_SIGMA_MULTIPLIER * precision
+        # Remaining-hour extrema already encode whether a later peak is possible.
+        # Converting the separate temporal maturity score into symmetric
+        # temperature noise counts that uncertainty twice and disperses mass out
+        # of every point bin, creating systematic anti-modal NO edge.  Keep the
+        # field for receipt compatibility; the only predictive width here is the
+        # instrument/freshness width plus the explicit remaining-path spread.
+        self._unseen_peak_sigma = 0.0
 
     def _settle(self, values) -> np.ndarray:
         """Apply settlement rounding using this market's precision.
@@ -242,8 +223,7 @@ class Day0Signal:
         for _ in range(n_mc):
             # Sample residual ENS member
             remaining = rng.choice(remaining_pool, size=n_members, replace=True)
-            effective_sigma = float(np.hypot(self._sigma, self._unseen_peak_sigma))
-            noised = remaining + rng.normal(0, effective_sigma, n_members)
+            noised = remaining + rng.normal(0, self._sigma, n_members)
             backbone_high = day0_backbone_high(
                 unit=self.unit,
                 observed_high=self.obs_high,

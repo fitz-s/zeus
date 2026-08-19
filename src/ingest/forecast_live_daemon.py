@@ -158,6 +158,13 @@ FORECAST_LIVE_SAFE_CYCLE_POLL_SECONDS = 5 * 60
 FORECAST_LIVE_SOURCE_HEALTH_SECONDS = 10 * 60
 FORECAST_LIVE_SOURCE_HEALTH_SOURCE_IDS = frozenset({"ecmwf_open_data"})
 _CURRENT_SOURCE_CYCLE_STATUSES = frozenset({"SUCCESS"})
+_OPENDATA_WAKE_ACKED_SOURCE_RUN_IDS: set[str] = set()
+_OPENDATA_WAKE_TERMINAL_STATUSES = frozenset(
+    {
+        "CYCLE_ADVANCE_TRIGGER",
+        "OPENDATA_CYCLE_ADVANCE_NO_ELIGIBLE_SCOPES",
+    }
+)
 # Why SUCCESS-only: ECMWF Open Data disseminates a cycle incrementally over ~10h.
 # A PARTIAL journal at T+8h means more steps may still publish; treating it as
 # "already journaled" would lock the daemon out of those later steps and force
@@ -216,6 +223,9 @@ def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
+_heartbeat_fails = 0
+
+
 def _write_forecast_live_heartbeat(
     *,
     heartbeat_path: Path | None = None,
@@ -223,6 +233,7 @@ def _write_forecast_live_heartbeat(
     now_utc: datetime | None = None,
 ) -> None:
     """Write the forecast-live process heartbeat atomically."""
+    global _heartbeat_fails
     from src.config import state_path
 
     now = (now_utc or _utcnow()).astimezone(timezone.utc)
@@ -250,8 +261,13 @@ def _write_forecast_live_heartbeat(
             except OSError:
                 pass
             raise
+        _heartbeat_fails = 0
     except Exception as exc:
-        logger.error("forecast-live heartbeat write failed: %s", exc)
+        _heartbeat_fails += 1
+        logger.error("forecast-live heartbeat write failed (%d): %s", _heartbeat_fails, exc)
+        if _heartbeat_fails >= 3:
+            logger.critical("FATAL: forecast-live heartbeat is unwritable; exiting for launchd recovery")
+            os._exit(1)
 
 
 def _heartbeat_tick() -> None:
@@ -451,6 +467,7 @@ def _forecast_work_identity(track: str, *, now_utc: datetime) -> dict[str, objec
         source_id=SOURCE_ID,
         track=track,
         required_max_step_hours=max(STEP_HOURS),
+        allow_partial=True,
     )
     selected_cycle = metadata.get("selected_cycle_time")
     if not isinstance(selected_cycle, datetime):
@@ -820,6 +837,7 @@ def _run_opendata_track_if_due(
                 "track": track,
                 "source_run_id": current_metadata.get("source_run_id"),
                 "scheduled_for": current_metadata.get("scheduled_for"),
+                "snapshots_inserted": current_metadata.get("rows_written"),
                 "selection": identity.get("metadata"),
                 "journal": current_metadata,
             }
@@ -834,14 +852,110 @@ def _run_opendata_track_if_due(
     )
 
 
+def _enqueue_committed_opendata_cycle_advance_reseeds(
+    conn,
+    result: dict,
+) -> dict[str, object] | None:
+    """Wake exact replacement scopes after a new ENS source run commits.
+
+    Deterministic provider artifacts can arrive before the matching ENS shape.
+    The earlier availability poll cannot materialize that cycle yet, so the ENS
+    commit is the causal edge that must create the cycle-advance debt.
+    """
+    try:
+        snapshots_inserted = int(result.get("snapshots_inserted") or 0)
+    except (TypeError, ValueError):
+        snapshots_inserted = 0
+    source_run_id = str(result.get("source_run_id") or "").strip()
+    if snapshots_inserted <= 0 or not source_run_id:
+        return None
+
+    try:
+        scopes = tuple(
+            (str(row[0]), str(row[1]), str(row[2]))
+            for row in conn.execute(
+                """
+                SELECT city, target_date, temperature_metric
+                  FROM ensemble_snapshots
+                 WHERE source_run_id = ?
+                   AND source_id = 'ecmwf_open_data'
+                   AND model_version = 'ecmwf_ens'
+                   AND authority = 'VERIFIED'
+                   AND causality_status = 'OK'
+                   AND boundary_ambiguous = 0
+                   AND forecast_window_attribution_status = 'FULLY_INSIDE_TARGET_LOCAL_DAY'
+                   AND contributes_to_target_extrema = 1
+                 GROUP BY city, target_date, temperature_metric
+                 ORDER BY target_date, city, temperature_metric
+                """,
+                (source_run_id,),
+            )
+        )
+        if not scopes:
+            return {
+                "status": "OPENDATA_CYCLE_ADVANCE_NO_ELIGIBLE_SCOPES",
+                "source_run_id": source_run_id,
+                "snapshots_inserted": snapshots_inserted,
+            }
+
+        from src.data.replacement_forecast_production import (  # noqa: PLC0415
+            _enqueue_cycle_advance_reseeds_if_needed,
+            _replacement_forecast_live_materialization_queue_config,
+        )
+
+        report = _enqueue_cycle_advance_reseeds_if_needed(
+            _replacement_forecast_live_materialization_queue_config(),
+            scopes=scopes,
+            limit=len(scopes),
+        )
+        logger.info(
+            "forecast-live OpenData committed ENS wake source_run_id=%s scopes=%d report=%s",
+            source_run_id,
+            len(scopes),
+            report,
+        )
+        return report
+    except Exception as exc:  # noqa: BLE001 — committed ingest remains durable; poll retries
+        logger.warning(
+            "forecast-live OpenData committed ENS wake failed source_run_id=%s: %s",
+            source_run_id,
+            exc,
+        )
+        return {
+            "status": "OPENDATA_CYCLE_ADVANCE_TRIGGER_FAILSOFT_SKIPPED",
+            "source_run_id": source_run_id,
+            "error": str(exc),
+        }
+
+
+def _commit_opendata_result_and_wake(conn, result: dict) -> dict:
+    conn.commit()
+    source_run_id = str(result.get("source_run_id") or "").strip()
+    partial_frontier = (
+        str(result.get("source_run_status") or "").upper() == "PARTIAL"
+        or str(result.get("source_run_completeness") or "").upper()
+        == "PARTIAL"
+    )
+    if source_run_id in _OPENDATA_WAKE_ACKED_SOURCE_RUN_IDS and not partial_frontier:
+        return result
+    report = _enqueue_committed_opendata_cycle_advance_reseeds(conn, result)
+    if report is None:
+        return result
+    if (
+        not partial_frontier
+        and str(report.get("status") or "") in _OPENDATA_WAKE_TERMINAL_STATUSES
+    ):
+        _OPENDATA_WAKE_ACKED_SOURCE_RUN_IDS.add(source_run_id)
+    return {**result, "cycle_advance_reseed": report}
+
+
 def _run_journaled_opendata_track(track: str) -> dict:
     from src.state.db import get_forecasts_connection
 
     conn = get_forecasts_connection(write_class="bulk")
     try:
         result = run_opendata_track(track, _job_conn=conn)
-        conn.commit()
-        return result
+        return _commit_opendata_result_and_wake(conn, result)
     except Exception:
         conn.commit()
         raise
@@ -855,8 +969,7 @@ def _run_journaled_opendata_track_if_due(track: str) -> dict:
     conn = get_forecasts_connection(write_class="bulk")
     try:
         result = _run_opendata_track_if_due(track, _job_conn=conn)
-        conn.commit()
-        return result
+        return _commit_opendata_result_and_wake(conn, result)
     except Exception:
         conn.commit()
         raise
@@ -1161,6 +1274,11 @@ def _replacement_forecast_discovery_revision(
                     "SELECT COALESCE(MAX(id), 0) FROM observation_instants"
                 ).fetchone()[0]
             )
+            observation_print_id = int(
+                world.execute(
+                    "SELECT COALESCE(MAX(id), 0) FROM observation_prints"
+                ).fetchone()[0]
+            )
         finally:
             world.close()
     except Exception:  # noqa: BLE001 - unknown revision must run recovery discovery
@@ -1170,7 +1288,7 @@ def _replacement_forecast_discovery_revision(
         second=0,
         microsecond=0,
     ).isoformat()
-    return (*revision, observation_id, hour)
+    return (*revision, observation_id, observation_print_id, hour)
 
 
 def _replacement_forecast_materialize_poll_job() -> None:
@@ -1181,25 +1299,26 @@ def _replacement_forecast_materialize_poll_job() -> None:
     )
 
     cfg = _replacement_forecast_live_materialization_queue_config()
+    batch_limit = max(1, int(cfg["poll_batch_limit"]))
     requests_pending = _replacement_forecast_queue_pending(cfg, "request_dir")
     seeds_pending = _replacement_forecast_queue_pending(cfg, "seed_dir")
     inflight_pending = _replacement_forecast_inflight_pending(cfg)
     if requests_pending:
         _replacement_forecast_materialize_job(
             discover=False,
-            limit=1,
+            limit=batch_limit,
             seed_limit=0,
         )
     elif seeds_pending:
         _replacement_forecast_materialize_job(
             discover=False,
-            limit=1,
-            seed_limit=1,
+            limit=batch_limit,
+            seed_limit=batch_limit,
         )
     elif inflight_pending:
         _replacement_forecast_materialize_job(
             discover=False,
-            limit=1,
+            limit=batch_limit,
             seed_limit=0,
         )
 

@@ -1,7 +1,7 @@
 # Created: 2026-05-20
-# Last reused/audited: 2026-07-27
+# Last reused/audited: 2026-08-12
 # Authority basis: PHASE_2_ULTRAPLAN.md §8.2 + §8.3; finite-evidence probability symmetry packet held/entry single-q law
-# Lifecycle: created=2026-05-20; last_reviewed=2026-07-27; last_reused=2026-07-27
+# Lifecycle: created=2026-05-20; last_reviewed=2026-08-12; last_reused=2026-08-12
 # Purpose: T5 GREEN antibody — _maybe_write_day0_nowcast gate conditions + write_nowcast_run call.
 # Reuse: Run when _maybe_write_day0_nowcast, write_nowcast_run wiring, or day0 gate logic changes.
 """
@@ -32,7 +32,7 @@ import src.engine.monitor_refresh as monitor_refresh_module
 from src.engine.monitor_refresh import _maybe_write_day0_nowcast
 from src.engine.position_belief import ReplacementBelief
 from src.observability.counters import read as read_counter, reset_all as reset_counters
-from src.state.portfolio import Position
+from src.state.portfolio import ExitContext, Position
 
 
 def test_monitor_utc_parser_shares_observation_timestamp_contract() -> None:
@@ -407,7 +407,7 @@ def test_day0_monitor_reads_exact_current_global_probability_witness(
     monkeypatch.setattr(
         state_db,
         "get_forecasts_connection_read_only",
-        lambda: forecasts,
+        lambda **_kwargs: forecasts,
     )
 
     witness = SimpleNamespace(
@@ -445,6 +445,9 @@ def test_day0_monitor_reads_exact_current_global_probability_witness(
                     "observed_extreme_native": 34.0,
                 },
                 "_edli_day0_finite_evidence_member_count": 4,
+                "probability_authority": (
+                    "day0_conditioned_replacement_global_probability_v1"
+                ),
             }
         )
         return SimpleNamespace(probability_witness=witness)
@@ -638,6 +641,9 @@ def test_day0_monitor_reuses_family_snapshot_across_sibling_bins(monkeypatch) ->
         deterministic_condition_ids=frozenset(),
         day0_payload={},
         metric="high",
+        probability_authority=(
+            "day0_conditioned_replacement_global_probability_v1"
+        ),
     )
     builds = []
 
@@ -741,7 +747,7 @@ def test_unobserved_prefix_monitor_uses_predictive_point_not_confidence_sample_m
     assert receipt["remaining_window"] is None
 
 
-def test_current_global_day0_monitor_preserves_exit_maturity_authority() -> None:
+def test_conditioned_replacement_monitor_preserves_q_and_exit_maturity_authority() -> None:
     import numpy as np
 
     condition_id = "0x" + "75" * 32
@@ -756,10 +762,10 @@ def test_current_global_day0_monitor_preserves_exit_maturity_authority() -> None
         ),
         yes_q_samples=np.array([[0.0], [0.2]]),
         yes_point_q=np.array([0.35]),
-        witness_identity="remaining-window-witness",
-        q_version="remaining-window-q",
-        source_truth_identity="remaining-window-truth",
-        band_basis="current_coherent_day0_remaining_model_bootstrap_v3",
+        witness_identity="conditioned-replacement-witness",
+        q_version="conditioned-replacement-q",
+        source_truth_identity="conditioned-replacement-truth",
+        band_basis="current_coherent_day0_conditioned_replacement_simplex_v1",
         band_alpha=0.05,
     )
     maturity_reason = (
@@ -775,6 +781,9 @@ def test_current_global_day0_monitor_preserves_exit_maturity_authority() -> None
             "_edli_day0_exit_authority_reason": maturity_reason,
         },
         metric="high",
+        probability_authority=(
+            "day0_conditioned_replacement_global_probability_v1"
+        ),
     )
     pos = _make_position()
     pos.condition_id = condition_id
@@ -791,6 +800,18 @@ def test_current_global_day0_monitor_preserves_exit_maturity_authority() -> None
 
     assert probability == pytest.approx(0.35)
     assert fresh is True
+    assert refreshed.selected_method == "replacement_posterior"
+    receipt = refreshed._day0_monitor_probability_receipt
+    assert receipt["probability_authority"] == (
+        "day0_conditioned_replacement_global_probability_v1"
+    )
+    assert receipt["remaining_window"] is None
+    assert (
+        "belief_source=replacement_posterior;"
+        "kind=probabilistic_day0_conditioned_replacement;"
+        "metric=high;posterior_mode=model_only_v1"
+        in refreshed.applied_validations
+    )
     assert maturity_reason in refreshed.applied_validations
 
 
@@ -873,6 +894,98 @@ def test_provisional_day0_monitor_uses_revision_aware_remaining_probability() ->
         "day0_absorbing_hard_fact" not in validation
         for validation in refreshed.applied_validations
     )
+
+
+@pytest.mark.parametrize(
+    ("direction", "expected_probability"),
+    (("buy_yes", 0.0), ("buy_no", 1.0)),
+)
+def test_deterministic_day0_monitor_remains_exact_after_hard_fact_overlay_expires(
+    direction: str,
+    expected_probability: float,
+) -> None:
+    """The family witness keeps exact held q across the target-day boundary."""
+    from datetime import timedelta
+
+    from src.solve.solver import (
+        DeterministicBinPayoffWitness,
+        OutcomeTokenBinding,
+        deterministic_bin_payoff_witness_identity,
+    )
+
+    condition_id = "0x" + "76" * 32
+    unknown_condition_id = "0x" + "77" * 32
+    bindings = (
+        OutcomeTokenBinding("28C", condition_id, "yes-28", "no-28"),
+        OutcomeTokenBinding(
+            "29C",
+            unknown_condition_id,
+            "yes-29",
+            "no-29",
+        ),
+    )
+    identity = {
+        "family_key": "Ankara|2026-08-18|high",
+        "bindings": bindings,
+        "exact_yes_payoffs": (("28C", 0),),
+        "q_version": "deterministic-q",
+        "resolution_identity": "resolution",
+        "topology_identity": "topology",
+        "posterior_identity_hash": "posterior",
+        "source_truth_identity": "source-truth",
+        "authority_certificate_hash": "authority-certificate",
+        "band_alpha": 0.05,
+        "band_basis": "day0_deterministic_bin_payoff_v1",
+        "captured_at_utc": datetime(2026, 8, 18, 21, tzinfo=timezone.utc),
+    }
+    witness = DeterministicBinPayoffWitness(
+        **identity,
+        max_age=timedelta(seconds=30),
+        witness_identity=deterministic_bin_payoff_witness_identity(**identity),
+    )
+    snapshot = monitor_refresh_module._CurrentGlobalDay0FamilySnapshot(
+        witness=witness,
+        token_pairs=(
+            (condition_id, "yes-28", "no-28"),
+            (unknown_condition_id, "yes-29", "no-29"),
+        ),
+        deterministic_condition_ids=frozenset({condition_id}),
+        day0_payload={},
+        metric="high",
+        probability_authority="day0_deterministic_bin_payoff_v1",
+    )
+    pos = _make_position()
+    pos.condition_id = condition_id
+    pos.direction = direction
+    pos.token_id = "yes-28"
+    pos.no_token_id = "no-28"
+
+    probability, refreshed, fresh = (
+        monitor_refresh_module._materialize_current_global_day0_probability(
+            pos,
+            snapshot,
+        )
+    )
+
+    assert probability == expected_probability
+    assert fresh is True
+    assert refreshed.selected_method == "day0_absorbing_hard_fact"
+    assert refreshed._day0_zero_probability_exit_authority is True
+    assert (
+        "belief_source=day0_absorbing_hard_fact;"
+        "kind=deterministic_bin_payoff;metric=high;posterior_mode=model_only_v1"
+        in refreshed.applied_validations
+    )
+    receipt = refreshed._day0_monitor_probability_receipt
+    assert receipt["probability_authority"] == "day0_deterministic_bin_payoff_v1"
+    assert receipt["held_side_probability"] == expected_probability
+    assert receipt["band"]["held_side_summary"] == {
+        "count": 400,
+        "min": expected_probability,
+        "q50": expected_probability,
+        "q90": expected_probability,
+        "max": expected_probability,
+    }
 
 
 def test_day0_family_cache_keeps_partial_exact_witness_condition_local() -> None:
@@ -1191,10 +1304,65 @@ def test_current_global_monitor_edge_band_uses_solver_cvar() -> None:
         [0.2, 0.4, 0.6, 0.8],
         alpha=0.25,
         current_p_market=0.1,
+        held_probability_point=0.5,
     )
 
     assert lower == pytest.approx(0.1)
     assert upper == pytest.approx(0.7)
+
+
+@pytest.mark.parametrize(
+    ("samples", "held_probability_point", "current_p_market"),
+    [
+        ([0.0, 0.0, 0.0, 0.0], 0.003, 0.05),
+        ([1.0, 1.0, 1.0, 1.0], 0.99997, 0.999),
+    ],
+)
+def test_current_global_monitor_edge_band_contains_smoothed_authoritative_point(
+    samples,
+    held_probability_point,
+    current_p_market,
+) -> None:
+    lower, upper = monitor_refresh_module._current_global_monitor_edge_band(
+        samples,
+        alpha=0.25,
+        current_p_market=current_p_market,
+        held_probability_point=held_probability_point,
+    )
+
+    held_lower = lower + current_p_market
+    held_upper = upper + current_p_market
+    assert held_lower <= held_probability_point <= held_upper
+
+
+def test_smoothed_tail_point_can_authorize_sell_reversal() -> None:
+    held_probability = 0.003
+    market_price = 0.05
+    lower, upper = monitor_refresh_module._current_global_monitor_edge_band(
+        [0.0, 0.0, 0.0, 0.0],
+        alpha=0.25,
+        current_p_market=market_price,
+        held_probability_point=held_probability,
+    )
+    pos = _make_position()
+    pos.shares = 10.0
+    pos.chain_shares = 10.0
+    pos.chain_state = "synced"
+
+    decision = pos.evaluate_exit(
+        ExitContext(
+            fresh_prob=held_probability,
+            fresh_prob_is_fresh=True,
+            current_market_price=market_price,
+            current_market_price_is_fresh=True,
+            best_bid=market_price,
+            hours_to_settlement=1.0,
+            position_state="day0_window",
+            current_ci=(lower + market_price, upper + market_price),
+        )
+    )
+
+    assert decision.reason == "SELL_REVERSAL"
 
 
 def test_canonical_monitor_sync_restores_exit_confirmation_from_latest_event() -> None:
@@ -1330,6 +1498,81 @@ def test_identified_day0_monitor_fails_closed_without_global_probability(
     )
     assert reseeds == [
         {"city": "Paris", "target_date": "2026-07-14", "metric": "high"}
+    ]
+
+
+def test_pending_exit_after_target_day_keeps_exact_global_probability_authority(
+    monkeypatch,
+) -> None:
+    """Lifecycle transition cannot demote final observation truth to stale forecast."""
+    from src.engine import position_belief
+
+    pos = _make_position()
+    pos.state = "pending_exit"
+    pos.city = "Shanghai"
+    pos.target_date = "2026-08-18"
+    pos.entry_method = "qkernel_spine"
+    pos.condition_id = "0x" + "38" * 32
+    monkeypatch.setattr(
+        monitor_refresh_module,
+        "_day0_absorbing_hard_fact_overlay",
+        lambda **kwargs: None,
+    )
+    monkeypatch.setattr(
+        monitor_refresh_module,
+        "_is_position_target_local_day",
+        lambda *args, **kwargs: False,
+    )
+    monkeypatch.setattr(
+        monitor_refresh_module,
+        "_is_position_after_target_local_day",
+        lambda *args, **kwargs: True,
+    )
+
+    def current_global(position, **kwargs):
+        refreshed = replace(position)
+        refreshed.selected_method = (
+            monitor_refresh_module.SELECTED_METHOD_FINAL_DAILY_OBSERVATION_EXACT
+        )
+        refreshed.applied_validations = [
+            "probability_authority="
+            "final_daily_observation_exact_global_probability_v1"
+        ]
+        monitor_refresh_module._set_monitor_probability_fresh(refreshed, True)
+        return 0.0, refreshed, True
+
+    monkeypatch.setattr(
+        monitor_refresh_module,
+        "_refresh_current_global_day0_probability",
+        current_global,
+    )
+    monkeypatch.setattr(
+        position_belief,
+        "load_replacement_belief",
+        lambda **kwargs: (_ for _ in ()).throw(
+            AssertionError("final observation authority must dominate replacement belief")
+        ),
+    )
+
+    probability, refreshed, fresh = monitor_refresh_module.monitor_probability_refresh(
+        pos,
+        conn=object(),
+        city=SimpleNamespace(
+            name="Shanghai",
+            timezone="Asia/Shanghai",
+            settlement_source_type="wu_icao",
+        ),
+        target_d=date(2026, 8, 18),
+    )
+
+    assert probability == pytest.approx(0.0)
+    assert fresh is True
+    assert (
+        refreshed.selected_method
+        == monitor_refresh_module.SELECTED_METHOD_FINAL_DAILY_OBSERVATION_EXACT
+    )
+    assert refreshed.applied_validations == [
+        "probability_authority=final_daily_observation_exact_global_probability_v1"
     ]
 
 

@@ -45,7 +45,12 @@ from src.contracts.execution_price import (
 from src.contracts.execution_intent import (
     POLYMARKET_MARKETABLE_BUY_MIN_NOTIONAL_USD,
 )
-from src.contracts.venue_submission_envelope import assert_live_order_unit_price
+from src.contracts.venue_submission_envelope import (
+    LIVE_ORDER_MAX_UNIT_PRICE,
+    LIVE_ORDER_MIN_UNIT_PRICE,
+    assert_live_order_unit_price,
+)
+from src.contracts.global_auction_receipt import GlobalSellReceiptClosure
 from src.contracts.position_truth import (
     CURRENT_MONEY_RISK_CHAIN_STATES,
     NO_CURRENT_MONEY_RISK_CHAIN_STATES,
@@ -69,11 +74,16 @@ from src.state.fact_revocation import (
     is_certificate_revoked as _certificate_is_revoked,
 )
 from src.state.lifecycle_manager import LifecyclePhase, TERMINAL_STATES
+from src.venue.response_contracts import is_pre_sdk_no_side_effect_rejection
 
 logger = logging.getLogger(__name__)
 
+_EXIT_PRE_SUBMIT_WRITE_LEASE_DEADLINE_MS = 250
+_EXIT_PRE_SUBMIT_WRITE_LEASE_MAX_HOLD_MS = 500
+
 _LIVE_ENTRY_MIN_EXPECTED_PROFIT_USD = 0.05
 _LIVE_ENTRY_MIN_SUBMIT_EDGE_DENSITY = 0.02
+_ENTRY_INCREMENT_POSITION_SHARE_TOLERANCE = Decimal("0.0001")
 
 
 # Mode-based fill timeout (seconds). Spec §6.4.
@@ -165,6 +175,13 @@ def _risk_allocator_order_type_allows_intent(
         return True
     if selected in resting and intended in immediate:
         return True
+    if selected in immediate and intended in resting:
+        # Exit-only callers use this resolver.  When the absolute actual-fill
+        # band forbids a taker-capable SELL, a passive order is the only legal
+        # reduce-only action.  The cumulative heartbeat gate below still owns
+        # the resting-order lease and rejects GTC/GTD while that lease is not
+        # healthy.
+        return True
     return False
 
 
@@ -216,7 +233,13 @@ def _resolve_exit_order_type(
 
     intended = str(submit_order_type or "").strip().upper()
     if not intended:
-        return _exit_order_type(selected_order_type)
+        # The absolute actual-fill band makes a taker-capable SELL
+        # unrepresentable: its limit is only a floor, so venue price
+        # improvement can exceed the upper bound.  The default exit grammar is
+        # therefore passive GTC.  Heartbeat lease authority remains a
+        # cumulative gate at submit and rejects this order when resting is not
+        # currently safe.
+        return "GTC"
     if intended not in {"FOK", "FAK", "GTC", "GTD"}:
         raise ValueError(f"unsupported_exit_submit_order_type:{intended}")
     exit_selected = _exit_order_type(selected_order_type)
@@ -1198,7 +1221,8 @@ def _entry_increment_fact_backing_component(
         or projected_cost is None
         or aggregate_shares is None
         or aggregate_cost is None
-        or abs(projected_shares - aggregate_shares) > Decimal("0.000000001")
+        or abs(projected_shares - aggregate_shares)
+        > _ENTRY_INCREMENT_POSITION_SHARE_TOLERANCE
     ):
         return _capability_component(
             "entry_increment_fact_backing",
@@ -1209,6 +1233,7 @@ def _entry_increment_fact_backing_component(
             aggregate_shares=str(aggregate_shares or ""),
             aggregate_cost_basis_usd=str(aggregate_cost or ""),
             execution_fact_count=execution_fact_count,
+            share_tolerance=str(_ENTRY_INCREMENT_POSITION_SHARE_TOLERANCE),
         )
     return _capability_component(
         "entry_increment_fact_backing",
@@ -1264,12 +1289,15 @@ def _entry_economics_component(
         if isinstance(actionable_payload, Mapping)
         else None
     )
+    direction = _direction_value(
+        getattr(intent, "direction", "")
+    ).strip().lower()
     current_state_solve = (
         str(getattr(intent, "selection_authority_applied", "") or "").strip()
         == "qkernel_spine"
         and qkernel_global_current_state_rejection_reason(
             economics,
-            direction=str(getattr(intent, "direction", "") or ""),
+            direction=direction,
         )
         is None
         and isinstance(durable_economics, Mapping)
@@ -1353,7 +1381,7 @@ def _entry_economics_component(
     if not strategy_key:
         strategy_key = str(getattr(intent, "strategy_key", "") or "").strip()
     if not direction_for_floor:
-        direction_for_floor = str(getattr(intent, "direction", "") or "").strip().lower()
+        direction_for_floor = direction
     floor_decision = entry_price_floor_decision(
         strategy_key=strategy_key,
         direction=direction_for_floor,
@@ -1462,7 +1490,6 @@ def _entry_economics_component(
                 reason="day0_probability_authority_missing",
                 error=str(exc),
             )
-    direction = str(getattr(intent, "direction", "") or "")
     expected_side = "YES" if direction == "buy_yes" else "NO" if direction == "buy_no" else ""
     econ_side = str(economics.get("side") or "").upper()
     econ_source = str(economics.get("source") or "").strip()
@@ -1706,6 +1733,107 @@ def _entry_economics_component(
         global_limit_bound_authorized=global_limit_bound_authorized,
         day0_observation_authority=(day0_authority_errors == ()),
     )
+
+
+def _entry_strategy_policy_submit_component(
+    conn: sqlite3.Connection,
+    intent: ExecutionIntent,
+    actionable_payload: Mapping[str, Any] | None,
+    *,
+    checked_at: datetime | None = None,
+) -> dict[str, Any]:
+    """Re-read mutable strategy admission inside the command transaction.
+
+    SCOPE: one live ENTRY command for the certificate's exact strategy.
+    DRAIN: every submit attempt opens a fresh attached admission transaction
+    and re-reads both automated and manual policy authorities.
+    RESET: a later attempt proceeds only after the exact strategy is no longer
+    gated or exit-only; held SELL/HOLD/CASH lanes are never consulted here.
+    """
+
+    strategy_key = ""
+    if isinstance(actionable_payload, Mapping):
+        strategy_key = str(actionable_payload.get("strategy_key") or "").strip()
+    if not strategy_key:
+        strategy_key = str(getattr(intent, "strategy_key", "") or "").strip()
+    if not strategy_key:
+        return _capability_component(
+            "strategy_policy_submit",
+            allowed=False,
+            reason="strategy_key_missing",
+        )
+
+    try:
+        risk_actions_ready = conn.execute(
+            "SELECT 1 FROM main.sqlite_master "
+            "WHERE type='table' AND name='risk_actions' LIMIT 1"
+        ).fetchone()
+        manual_authority_ready = conn.execute(
+            "SELECT 1 FROM world.sqlite_master "
+            "WHERE type IN ('table','view') AND name='control_overrides' LIMIT 1"
+        ).fetchone()
+    except sqlite3.Error as exc:
+        return _capability_component(
+            "strategy_policy_submit",
+            allowed=False,
+            reason="authority_read_failed",
+            strategy_key=strategy_key,
+            error=type(exc).__name__,
+        )
+    if risk_actions_ready is None or manual_authority_ready is None:
+        return _capability_component(
+            "strategy_policy_submit",
+            allowed=False,
+            reason="authority_schema_missing",
+            strategy_key=strategy_key,
+            risk_actions_ready=risk_actions_ready is not None,
+            manual_authority_ready=manual_authority_ready is not None,
+        )
+
+    from src.riskguard.policy import resolve_strategy_policy
+
+    try:
+        probability_revision = (
+            str(
+                actionable_payload.get("probability_semantics_revision") or ""
+            ).strip()
+            if isinstance(actionable_payload, Mapping)
+            else ""
+        )
+        policy = resolve_strategy_policy(
+            conn,
+            strategy_key,
+            checked_at or datetime.now(timezone.utc),
+            **(
+                {"probability_semantics_revision": probability_revision}
+                if probability_revision
+                else {}
+            ),
+        )
+    except Exception as exc:  # noqa: BLE001 - authority loss blocks venue submit
+        return _capability_component(
+            "strategy_policy_submit",
+            allowed=False,
+            reason="authority_read_failed",
+            strategy_key=strategy_key,
+            error=type(exc).__name__,
+        )
+    sources = ",".join(str(source) for source in policy.sources)
+    if policy.gated or policy.exit_only:
+        return _capability_component(
+            "strategy_policy_submit",
+            allowed=False,
+            reason="gated" if policy.gated else "exit_only",
+            strategy_key=strategy_key,
+            sources=sources,
+        )
+    return _capability_component(
+        "strategy_policy_submit",
+        strategy_key=strategy_key,
+        sources=sources,
+    )
+
+
 def _entry_actionable_certificate_payload_and_component(
     conn: sqlite3.Connection,
     intent: ExecutionIntent,
@@ -3105,18 +3233,46 @@ def _venue_submit_fill_price(
     response_contract = _first_submit_value(result, "_venue_response_contract")
     if response_contract == "POLYMARKET_CLOB_V2_HUMAN_SUBMIT_AMOUNTS":
         value = _first_submit_value(result, "_v2_fill_price")
-        return str(value) if _positive_decimal_or_none(value) is not None else None
+        return _venue_fill_price_text_or_none(value, side=side)
     making = _positive_decimal_or_none(_first_submit_value(result, "makingAmount", "making_amount"))
     taking = _positive_decimal_or_none(_first_submit_value(result, "takingAmount", "taking_amount"))
     if making is not None and taking is not None:
         if _venue_submit_side(result, side=side) == "SELL":
-            return _decimal_text(taking / making)
-        return _decimal_text(making / taking)
+            return _venue_fill_price_text_or_none(taking / making, side="SELL")
+        return _venue_fill_price_text_or_none(making / taking, side="BUY")
     for key in ("avgPrice", "avg_price", "fillPrice", "fill_price", "price"):
         value = _first_submit_value(result, key)
-        if _positive_decimal_or_none(value) is not None:
-            return str(value)
+        observed = _venue_fill_price_text_or_none(value, side=side)
+        if observed is not None:
+            return observed
     return None
+
+
+def _venue_fill_price_text_or_none(
+    value: object,
+    *,
+    side: str | None = None,
+) -> str | None:
+    price = _positive_decimal_or_none(value)
+    if price is None or price > Decimal("1"):
+        if price is not None:
+            logger.critical("INVALID_VENUE_FILL_PRICE_RECEIPT price=%s", price)
+        return None
+    sell_price_improvement = (
+        str(side or "").upper() == "SELL"
+        and LIVE_ORDER_MAX_UNIT_PRICE < price <= Decimal("1")
+    )
+    try:
+        assert_live_order_unit_price(price)
+    except ValueError:
+        if sell_price_improvement:
+            return _decimal_text(price)
+        logger.critical(
+            "LIVE_FILL_PRICE_OUT_OF_BOUNDS_RECEIPT price=%s; "
+            "preserving realized venue truth",
+            price,
+        )
+    return _decimal_text(price)
 
 
 def _venue_fill_covers_submit(matched_size: str, submitted_size: float | Decimal) -> bool:
@@ -3157,6 +3313,38 @@ def _buy_order_notional_micro(intent: ExecutionIntent, shares: float) -> int:
     return int(notional.to_integral_value(rounding=ROUND_CEILING))
 
 
+def _entry_buy_venue_submit_shares(
+    intent: ExecutionIntent,
+    *,
+    target_shares: float,
+) -> float:
+    """Return the SDK BUY size while preserving the economic share target.
+
+    Polymarket LIMIT BUY signs ``makerAmount = size * limit``.  FAK therefore
+    fixes quote cash, not selected-token shares: submitting the Kelly target as
+    SDK ``size`` spends ``target * limit`` and walks beyond that target whenever
+    the JIT curve's VWAP is better than the limit.  Recapture binds
+    ``target_size_usd`` to the venue-legal JIT sweep cash for the target.  Divide
+    that cash by the unchanged limit only at the wire boundary; all Kelly,
+    exposure, and expected-utility checks continue to use ``target_shares``.
+    """
+
+    target = Decimal(str(target_shares))
+    limit = Decimal(str(intent.limit_price))
+    if target <= 0 or limit <= 0:
+        raise ValueError("entry BUY target shares and limit must be positive")
+    if str(getattr(intent, "submit_order_type", "") or "").upper() != "FAK":
+        return float(target)
+    cash = Decimal(str(intent.target_size_usd))
+    wire = cash / limit
+    if cash <= 0 or wire <= 0 or wire > target:
+        raise ValueError(
+            "FAK fixed-cash binding is outside the economic share target: "
+            f"cash={cash} wire_size={wire} target_shares={target} limit={limit}"
+        )
+    return float(wire)
+
+
 def _assert_collateral_allows_buy(
     intent: ExecutionIntent,
     *,
@@ -3167,7 +3355,11 @@ def _assert_collateral_allows_buy(
     from src.state.collateral_ledger import CollateralLedger, assert_buy_preflight
 
     if conn is not None:
-        CollateralLedger(conn).buy_preflight(intent, spend_micro=spend_micro)
+        CollateralLedger.buy_preflight_in_transaction(
+            conn,
+            intent,
+            spend_micro=spend_micro,
+        )
     else:
         assert_buy_preflight(intent, spend_micro=spend_micro)
     return _capability_component("collateral_ledger", collateral="pUSD", spend_micro=spend_micro or 0)
@@ -3189,16 +3381,30 @@ def _refresh_exit_collateral_snapshot_for_submit(
     *,
     token_id: str | None = None,
     shares: float | None = None,
-) -> dict:
-    """Refresh CTF truth before preflight; periodic pUSD snapshots omit it."""
-    from src.execution.collateral import refresh_collateral_snapshot_for_submit
+) -> object:
+    """Fetch CTF truth before the writer lease; persistence follows under lease."""
+    from src.execution.collateral import prepare_collateral_snapshot_for_submit
 
-    return refresh_collateral_snapshot_for_submit(
+    return prepare_collateral_snapshot_for_submit(
         conn,
         action="exit_submit",
-        reuse_fresh_snapshot=False,
         token_id=token_id,
+        shares=shares,
     )
+
+
+def _persist_exit_collateral_snapshot_for_submit(conn: sqlite3.Connection, prepared: object) -> dict:
+    """Persist the prepared exit snapshot only while holding the TRADE writer lease."""
+    from src.execution.collateral import (
+        PreparedCollateralSnapshot,
+        persist_prepared_collateral_snapshot_for_submit,
+    )
+
+    if isinstance(prepared, PreparedCollateralSnapshot):
+        return persist_prepared_collateral_snapshot_for_submit(conn, prepared)
+    # Existing direct unit tests replace the fetch seam with its old capability
+    # component. Keep that seam while production uses PreparedCollateralSnapshot.
+    return prepared if isinstance(prepared, dict) else _capability_component("collateral_snapshot_refresh")
 
 
 def _assert_collateral_allows_sell(
@@ -3211,7 +3417,7 @@ def _assert_collateral_allows_sell(
     from src.state.collateral_ledger import CollateralLedger, assert_sell_preflight
 
     if conn is not None:
-        CollateralLedger(conn).sell_preflight(token_id=token_id, size=shares)
+        CollateralLedger.sell_preflight_in_transaction(conn, token_id=token_id, size=shares)
     else:
         assert_sell_preflight(token_id, shares)
     return _capability_component("collateral_ledger", collateral="CTF", token_id=token_id, shares=shares)
@@ -3455,16 +3661,20 @@ def _entry_q_version_from_authority(
     context_q_version = _nonempty_q_identity(
         getattr(context, "posterior_identity_hash", None)
     )
-    if context_q_version:
-        return context_q_version
     if (
         context is not None
         and hasattr(context, "is_day0_observation_context")
         and context.is_day0_observation_context()
     ):
-        day0_q_version = str(getattr(context, "raw_payload_hash", "") or "").strip()
+        from src.events.day0_authority import bind_day0_probability_semantics
+
+        day0_q_version = context_q_version or str(
+            getattr(context, "raw_payload_hash", "") or ""
+        ).strip()
         if day0_q_version:
-            return day0_q_version
+            return bind_day0_probability_semantics(day0_q_version)
+    if context_q_version:
+        return context_q_version
     forecast_context_q_version = _forecast_entry_raw_hash_q_version_from_context(
         context
     )
@@ -4000,10 +4210,81 @@ def _reserve_collateral_for_buy(
 def _reserve_collateral_for_sell(
     command_id: str, token_id: str, shares: float, conn: sqlite3.Connection
 ) -> None:
-    """Reserve CTF inventory on the same connection as the venue command row."""
+    """Reserve CTF inventory without DDL on the command transaction."""
     from src.state.collateral_ledger import CollateralLedger
 
-    CollateralLedger(conn).reserve_tokens_for_sell(command_id, token_id, shares)
+    CollateralLedger.reserve_tokens_for_sell_in_transaction(conn, command_id, token_id, shares)
+
+
+def _canonical_trade_write_lease(
+    conn,
+    *,
+    owner: str,
+    deadline_ms: int,
+    max_hold_ms: int,
+    priority=None,
+):
+    """Serialize canonical live-trade writes without imposing the live lease on test DBs."""
+
+    from contextlib import nullcontext
+    from pathlib import Path
+
+    from src.state.db import _zeus_trade_db_path
+
+    try:
+        main_path = next(
+            (
+                Path(str(row[2])).resolve(strict=False)
+                for row in conn.execute("PRAGMA database_list").fetchall()
+                if str(row[1]) == "main" and str(row[2])
+            ),
+            None,
+        )
+    except Exception as exc:
+        raise RuntimeError(
+            "canonical TRADE DB identity unavailable for writer lease"
+        ) from exc
+    if main_path != _zeus_trade_db_path().resolve(strict=False):
+        return nullcontext()
+
+    from src.state.db_writer_lock import WriteClass
+    from src.state.write_coordinator import DBIdentity, default_runtime_write_coordinator
+
+    lease_kwargs = {
+        "owner": owner,
+        "write_class": WriteClass.LIVE,
+        "deadline_ms": deadline_ms,
+        "max_hold_ms": max_hold_ms,
+    }
+    if priority is not None:
+        lease_kwargs["priority"] = priority
+    return default_runtime_write_coordinator().lease(
+        (DBIdentity.TRADE,),
+        **lease_kwargs,
+    )
+
+
+def _trade_writer_lease_required(conn: sqlite3.Connection) -> bool:
+    """Whether this connection is the canonical TRADE DB and enters the lease."""
+
+    try:
+        from pathlib import Path
+
+        from src.state.db import _zeus_trade_db_path
+
+        main_path = next(
+            (
+                Path(str(row[2])).resolve(strict=False)
+                for row in conn.execute("PRAGMA database_list").fetchall()
+                if str(row[1]) == "main" and str(row[2])
+            ),
+            None,
+        )
+        return main_path == _zeus_trade_db_path().resolve(strict=False)
+    except Exception as exc:
+        raise RuntimeError(
+            "canonical TRADE DB identity unavailable for writer admission"
+        ) from exc
 
 
 def _open_entry_risk_reservation(
@@ -4280,7 +4561,7 @@ def _build_pre_submit_envelope(
     if normalized_intent_kind == "CANCEL":
         envelope.assert_live_market_bound()
     elif normalized_intent_kind in {"ENTRY", "EXIT", "DERISK"}:
-        envelope.assert_live_submit_bound()
+        envelope.assert_live_fill_price_bound()
     else:
         raise ValueError(
             f"intent_kind={intent_kind!r} has no submission-envelope price classification"
@@ -4766,6 +5047,9 @@ def _mark_post_submit_persistence_failure(
     detail: str,
     idempotency_key: str,
     order_role: str,
+    terminal_rejection_code: str | None = None,
+    terminal_rejection_detail: str | None = None,
+    terminal_rejection_status: str | None = None,
 ) -> str | None:
     """Persist REVIEW_REQUIRED after SDK success but ACK facts failed.
 
@@ -4787,6 +5071,21 @@ def _mark_post_submit_persistence_failure(
             order_id,
             rollback_exc,
         )
+    typed_pre_sdk_rejection = bool(
+        not order_id
+        and is_pre_sdk_no_side_effect_rejection(terminal_rejection_code)
+    )
+    terminal_rejection_witness = (
+        {
+            "schema_version": 1,
+            "error_code": str(terminal_rejection_code),
+            "error_message": str(terminal_rejection_detail or ""),
+            "result_status": str(terminal_rejection_status or ""),
+            "pre_sdk_no_side_effect": typed_pre_sdk_rejection,
+        }
+        if terminal_rejection_code
+        else None
+    )
     try:
         append_event(
             conn,
@@ -4798,9 +5097,15 @@ def _mark_post_submit_persistence_failure(
                 "detail": detail,
                 "venue_order_id": order_id or "",
                 "idempotency_key": idempotency_key,
-                "side_effect_boundary_crossed": True,
+                "side_effect_boundary_crossed": not typed_pre_sdk_rejection,
+                "sdk_submit_attempted": not typed_pre_sdk_rejection,
                 "sdk_submit_returned_order_id": bool(order_id),
                 "requires_recovery": True,
+                **(
+                    {"terminal_rejection_witness": terminal_rejection_witness}
+                    if terminal_rejection_witness
+                    else {}
+                ),
             },
         )
         conn.commit()
@@ -4886,7 +5191,240 @@ class ExitOrderIntent:
     executable_snapshot_min_tick_size: Decimal | str | None = None
     executable_snapshot_min_order_size: Decimal | str | None = None
     executable_snapshot_neg_risk: bool | None = None
+    marketable_sell_execution_authority: object | None = None
+    global_sell_execution_authority: object | None = None
+    marketable_sell_certificate: Mapping[str, object] | None = None
+    marketable_sell_certificate_identity: str = ""
     execution_authority_deadline_utc: str = ""
+    global_sell_receipt_closure: GlobalSellReceiptClosure | None = None
+
+
+def marketable_sell_certificate_identity(
+    certificate: Mapping[str, object],
+) -> str:
+    """Hash the complete immutable authority material passed to the SDK boundary."""
+
+    return hashlib.sha256(
+        canonical_json(dict(certificate)).encode("utf-8")
+    ).hexdigest()
+
+
+def _marketable_sell_certificate_error(
+    conn: sqlite3.Connection,
+    intent: ExitOrderIntent,
+    *,
+    limit_price: float,
+    shares: float,
+) -> str | None:
+    """Rebind a FAK SELL to its typed global-auction and JIT book proof.
+
+    ``GlobalSellExecutionAuthority`` is the immutable economic authority.  The
+    mapping certificate is an audit projection of that same object, not a
+    second authority: requiring both let an omitted projection veto a valid
+    reduce-only exit.  When supplied it remains hash- and field-checked.
+    """
+
+    from src.execution.exit_lifecycle import (
+        _global_sell_execution_authority_shape_error,
+    )
+
+    authority = intent.marketable_sell_execution_authority
+    authority_error = _global_sell_execution_authority_shape_error(authority)
+    if authority_error is not None:
+        return authority_error.replace("global_sell_", "marketable_sell_", 1)
+    candidate = authority.jit_candidate
+    decision = authority.actuation.decision
+    if (
+        str(candidate.position_id) != intent.trade_id
+        or str(candidate.token_id) != intent.token_id
+        or str(candidate.execution_mode) != "TAKER_LIMIT"
+    ):
+        return "marketable_sell_execution_authority_binding_mismatch"
+    try:
+        authority_limit = authority.limit_price()
+        authority_shares = Decimal(str(decision.shares))
+    except (InvalidOperation, TypeError, ValueError):
+        return "marketable_sell_execution_authority_economics_invalid"
+    if (
+        authority_limit != Decimal(str(limit_price))
+        or authority_shares != Decimal(str(shares))
+    ):
+        return "marketable_sell_execution_authority_economics_mismatch"
+
+    certificate = intent.marketable_sell_certificate
+    identity = str(intent.marketable_sell_certificate_identity or "").strip()
+    if certificate is not None:
+        if not isinstance(certificate, Mapping):
+            return "marketable_sell_certificate_invalid"
+        if len(identity) != 64:
+            return "marketable_sell_certificate_identity_invalid"
+        try:
+            int(identity, 16)
+        except ValueError:
+            return "marketable_sell_certificate_identity_invalid"
+        if identity != marketable_sell_certificate_identity(certificate):
+            return "marketable_sell_certificate_identity_mismatch"
+
+        required_text = {
+            "action": "SELL",
+            "position_id": intent.trade_id,
+            "condition_id": str(candidate.condition_id),
+            "token_id": intent.token_id,
+            "execution_mode": "TAKER_LIMIT",
+            "submit_order_type": "FAK",
+        }
+        if any(
+            str(certificate.get(field) or "") != expected
+            for field, expected in required_text.items()
+        ):
+            return "marketable_sell_certificate_binding_mismatch"
+        for field in (
+            "candidate_id",
+            "execution_authority_identity",
+            "jit_book_hash",
+            "jit_curve_identity",
+            "probability_witness_identity",
+            "book_snapshot_id",
+        ):
+            if not str(certificate.get(field) or "").strip():
+                return f"marketable_sell_certificate_missing:{field}"
+        authority_identity = str(
+            certificate.get("execution_authority_identity") or ""
+        ).strip()
+        if (
+            len(authority_identity) != 64
+            or authority_identity != authority.authority_identity
+            or str(certificate.get("book_snapshot_id") or "")
+            != str(candidate.book_snapshot_id)
+            or str(certificate.get("jit_book_hash") or "")
+            != str(candidate.executable_sell_curve.book_hash)
+            or str(certificate.get("jit_curve_identity") or "")
+            != str(candidate.execution_curve_identity)
+        ):
+            return "marketable_sell_execution_authority_identity_invalid"
+        try:
+            int(authority_identity, 16)
+            certified_limit = Decimal(str(certificate.get("exact_limit_price")))
+            certified_shares = Decimal(str(certificate.get("selected_shares")))
+        except (InvalidOperation, TypeError, ValueError):
+            return "marketable_sell_certificate_economics_invalid"
+        if (
+            certified_limit != Decimal(str(limit_price))
+            or certified_shares != Decimal(str(shares))
+        ):
+            return "marketable_sell_certificate_economics_mismatch"
+
+    from src.state.snapshot_repo import get_snapshot
+
+    snapshot = get_snapshot(conn, str(intent.executable_snapshot_id or ""))
+    if snapshot is None:
+        return "marketable_sell_certificate_snapshot_missing"
+    snapshot_bid = Decimal(str(snapshot.orderbook_top_bid))
+    if (
+        str(snapshot.selected_outcome_token_id) != intent.token_id
+        or str(snapshot.condition_id)
+        != str(candidate.condition_id)
+        or str(snapshot.raw_orderbook_hash)
+        != str(candidate.executable_sell_curve.book_hash)
+        or snapshot_bid != Decimal(str(intent.best_bid))
+    ):
+        return "marketable_sell_certificate_snapshot_superseded"
+    if not LIVE_ORDER_MIN_UNIT_PRICE <= snapshot_bid <= LIVE_ORDER_MAX_UNIT_PRICE:
+        # INV-47 SCOPE: only this token's certified taker SELL is rejected.
+        # DRAIN: global redecision consumes a fresh executable snapshot.
+        # RESET: no latch is stored; a fresh in-band snapshot bid passes.
+        return "marketable_sell_snapshot_bid_out_of_bounds"
+    return None
+
+
+def _global_sell_receipt_closure_error(
+    intent: ExitOrderIntent,
+    *,
+    order_type: str,
+) -> str | None:
+    """Require exact typed receipt closure for every marked global SELL.
+
+    The explicit ``global_sell_execution_authority`` marker is the canonical
+    maker/taker marker.  ``marketable_sell_execution_authority`` remains a
+    compatibility marker for existing FAK callers.  Once either marker is
+    present, this check is deliberately before envelope construction and
+    command/event persistence; a closure is not an optional audit projection.
+    """
+
+    explicit = intent.global_sell_execution_authority
+    compatible = intent.marketable_sell_execution_authority
+    authority = explicit if explicit is not None else compatible
+    closure = intent.global_sell_receipt_closure
+
+    if authority is None:
+        if closure is not None:
+            return "global_sell_execution_authority_required"
+        return None
+    if closure is None:
+        # INV-47 SCOPE: this marked token's SELL attempt only.
+        # DRAIN: global redecision emits a new authority + typed closure.
+        # RESET: no latch is persisted; an exact closure passes this gate.
+        return "global_sell_receipt_closure_required"
+
+    from src.execution.exit_lifecycle import (
+        _global_sell_execution_authority_shape_error,
+    )
+
+    authority_error = _global_sell_execution_authority_shape_error(authority)
+    if authority_error is not None:
+        return authority_error
+    if compatible is not None and explicit is not None:
+        compatible_error = _global_sell_execution_authority_shape_error(compatible)
+        if compatible_error is not None:
+            return compatible_error
+        if str(getattr(compatible, "authority_identity", "")) != str(
+            getattr(authority, "authority_identity", "")
+        ):
+            return "global_sell_execution_authority_binding_mismatch"
+    if type(closure) is not GlobalSellReceiptClosure:
+        return "global_sell_receipt_closure_invalid"
+    try:
+        closure.__post_init__()
+        authority.__post_init__()
+        actuation = authority.actuation
+        candidate = actuation.decision.candidate
+        closure.receipt_ref.assert_matches_actuation(
+            winner_event_id=actuation.winner_event_id,
+            winner_candidate_id=candidate.candidate_id,
+            winner_actuation_identity=actuation.actuation_identity,
+            selection_epoch_identity=actuation.selection_epoch_identity,
+        )
+    except (AttributeError, TypeError, ValueError):
+        return "global_sell_receipt_closure_invalid"
+
+    expected_order_type = {
+        "TAKER_LIMIT": "FAK",
+        "MAKER_REST": {"GTC", "GTD"},
+    }.get(str(getattr(candidate, "execution_mode", "") or ""))
+    if expected_order_type is None:
+        return "global_sell_receipt_closure_invalid"
+    valid_order_type = (
+        order_type == expected_order_type
+        if isinstance(expected_order_type, str)
+        else order_type in expected_order_type
+    )
+    if not valid_order_type:
+        return "global_sell_receipt_closure_execution_mode_mismatch"
+    if (
+        closure.position_id != str(intent.trade_id)
+        or closure.token_id != str(intent.token_id)
+        or closure.condition_id != str(getattr(candidate, "condition_id", "") or "")
+        or closure.action != "SELL"
+        or closure.execution_mode != str(getattr(candidate, "execution_mode", "") or "")
+        or closure.winner_event_id != str(getattr(actuation, "winner_event_id", "") or "")
+        or closure.winner_candidate_id != str(getattr(candidate, "candidate_id", "") or "")
+        or closure.winner_actuation_identity
+        != str(getattr(actuation, "actuation_identity", "") or "")
+        or closure.selection_epoch_identity
+        != str(getattr(actuation, "selection_epoch_identity", "") or "")
+    ):
+        return "global_sell_receipt_closure_identity_mismatch"
+    return None
 
 
 def _orderresult_from_existing(
@@ -5466,7 +6004,11 @@ def _recapture_fresh_entry_snapshot_if_needed(
     if fresh is None:
         from types import SimpleNamespace
         from src.data.market_scanner import capture_executable_market_snapshot
-        from src.data.polymarket_client import PolymarketClient
+        from src.data.polymarket_client import (
+            PRESUBMIT_JIT_CLOB_HTTP_LIMITS,
+            PolymarketClient,
+        )
+        from src.data.polymarket_request_governor import RequestPriority
         from src.engine.cycle_runtime import _market_dict_from_snapshot
 
         decision = SimpleNamespace(
@@ -5478,7 +6020,10 @@ def _recapture_fresh_entry_snapshot_if_needed(
             edge=SimpleNamespace(direction=final_intent.direction),
         )
         captured_at = datetime.now(timezone.utc)
-        with PolymarketClient() as clob:
+        with PolymarketClient(
+            public_http_limits=PRESUBMIT_JIT_CLOB_HTTP_LIMITS,
+            public_request_priority=RequestPriority.SUBMIT_JIT,
+        ) as clob:
             fields = capture_executable_market_snapshot(
                 conn,
                 market=_market_dict_from_snapshot(snapshot),
@@ -5623,6 +6168,46 @@ def _recapture_fresh_entry_snapshot_if_needed(
                 f"depth_status={sweep.depth_status} average_price={sweep.average_price} "
                 f"filled_shares={getattr(sweep, 'filled_shares', None)}"
             )
+        if fak_prefix_authorized:
+            from src.contracts.execution_intent import (
+                quantize_submit_shares_for_venue_at_most,
+            )
+
+            gross_notional = Decimal(
+                str(getattr(sweep, "gross_notional", "0") or "0")
+            )
+            if gross_notional <= 0:
+                raise ValueError(
+                    "recaptured FAK sweep lacks positive gross notional"
+                )
+            raw_wire_size = gross_notional / Decimal(str(fresh_limit_price))
+            wire_size = quantize_submit_shares_for_venue_at_most(
+                final_intent.direction,
+                raw_wire_size,
+                final_limit_price=Decimal(str(fresh_limit_price)),
+                order_type="FAK",
+                tick_size=Decimal(str(fresh.min_tick_size)),
+            )
+            wire_cash = wire_size * Decimal(str(fresh_limit_price))
+            if wire_size < Decimal(str(fresh.min_order_size)):
+                raise ValueError(
+                    "recaptured FAK fixed-cash size is below fresh min order: "
+                    f"wire_size={wire_size} min_order_size={fresh.min_order_size}"
+                )
+            if wire_cash < MIN_MARKETABLE_BUY_NOTIONAL_USD:
+                raise ValueError(
+                    "recaptured FAK fixed cash is below venue minimum: "
+                    f"cash={wire_cash} min_notional={MIN_MARKETABLE_BUY_NOTIONAL_USD}"
+                )
+            if wire_cash > gross_notional:
+                raise ValueError(
+                    "recaptured FAK fixed cash exceeds JIT target sweep: "
+                    f"cash={wire_cash} sweep={gross_notional}"
+                )
+            legacy_intent = replace(
+                legacy_intent,
+                target_size_usd=float(wire_cash),
+            )
     return replace(
         legacy_intent,
         limit_price=fresh_limit_price,
@@ -5732,7 +6317,7 @@ def execute_final_intent(
         )
     except _PreVenueSubmitError:
         raise
-    except (ValueError, TypeError) as exc:
+    except Exception as exc:  # noqa: BLE001 - this entire span precedes venue I/O
         raise _PreVenueSubmitError(str(exc)) from exc
     trade_id = str(uuid.uuid4())[:12]
     if not legacy_intent.token_id:
@@ -5798,7 +6383,12 @@ def create_exit_order_intent(
     executable_snapshot_min_tick_size: Decimal | str | None = None,
     executable_snapshot_min_order_size: Decimal | str | None = None,
     executable_snapshot_neg_risk: bool | None = None,
+    marketable_sell_certificate: Mapping[str, object] | None = None,
+    marketable_sell_certificate_identity: str = "",
+    marketable_sell_execution_authority: object | None = None,
+    global_sell_execution_authority: object | None = None,
     execution_authority_deadline_utc: str = "",
+    global_sell_receipt_closure: GlobalSellReceiptClosure | None = None,
 ) -> ExitOrderIntent:
     """Build the explicit executor contract for a live sell/exit order."""
 
@@ -5817,7 +6407,16 @@ def create_exit_order_intent(
         executable_snapshot_min_tick_size=executable_snapshot_min_tick_size,
         executable_snapshot_min_order_size=executable_snapshot_min_order_size,
         executable_snapshot_neg_risk=executable_snapshot_neg_risk,
+        marketable_sell_certificate=(
+            dict(marketable_sell_certificate)
+            if marketable_sell_certificate is not None
+            else None
+        ),
+        marketable_sell_certificate_identity=marketable_sell_certificate_identity,
+        marketable_sell_execution_authority=marketable_sell_execution_authority,
+        global_sell_execution_authority=global_sell_execution_authority,
         execution_authority_deadline_utc=execution_authority_deadline_utc,
+        global_sell_receipt_closure=global_sell_receipt_closure,
     )
 
 
@@ -5940,23 +6539,15 @@ def execute_exit_order(
         else base_price
     )
 
-    if intent.exact_limit_price is None and best_bid is not None and best_bid < base_price:
-        # Slice P3.3b (PR #19 phase 4 closeout, 2026-04-26): typed
-        # anticipated-slippage at the price-planning seam. Pre-fix used
-        # raw `slippage = current_price - best_bid` + raw `slippage /
-        # current_price <= 0.03` arithmetic — both unit-ambiguous and
-        # invisible to the type system. Now wraps in SlippageBps which
-        # enforces non-negative magnitude + direction semantics. The
-        # `.fraction` accessor (200 bps == 0.02 fraction) makes the
-        # 3% threshold compare cleanly against a typed value.
-        if current_price > 0:
-            slip_bps = abs(current_price - best_bid) / current_price * 10_000.0
-            slippage = SlippageBps(
-                value_bps=slip_bps,
-                direction="adverse",  # sell crossing down to bid receives adverse
-            )
-            if slippage.fraction <= 0.03:
-                limit_price = best_bid
+    if intent.exact_limit_price is None and best_bid is not None:
+        # A post-only SELL must be strictly above the current best bid.  Keep
+        # the economic reservation when it is higher; otherwise quote the
+        # nearest passive tick.  The absolute band check below rejects the
+        # edge case where no legal passive price exists above the bid.
+        limit_price = max(
+            base_price,
+            float(Decimal(str(best_bid)) + effective_min_tick_size),
+        )
 
     # T5.b 2026-04-23 (also closes T5.a-LOW follow-up): exit-path NaN/
     # ±inf guard. Pre-T5.b the `max(0.01, min(0.99, limit_price))`
@@ -5973,6 +6564,31 @@ def execute_exit_order(
             intent_id=intent.intent_id,
             idempotency_key=intent.idempotency_key,
         )
+    if best_bid is not None:
+        try:
+            executable_bid = Decimal(str(best_bid))
+        except (InvalidOperation, TypeError, ValueError):
+            executable_bid = Decimal("NaN")
+        if (
+            not executable_bid.is_finite()
+            or not LIVE_ORDER_MIN_UNIT_PRICE
+            <= executable_bid
+            <= LIVE_ORDER_MAX_UNIT_PRICE
+        ):
+            # INV-47 SCOPE: only this token's SELL submission is rejected.
+            # DRAIN: the next monitor/JIT pass supplies a fresh best bid.
+            # RESET: no latch is stored; a fresh in-band bid passes.
+            return OrderResult(
+                trade_id=intent.trade_id,
+                status="rejected",
+                reason=(
+                    "live_order_executable_price_out_of_bounds:"
+                    f" best_bid={best_bid}"
+                ),
+                order_role="exit",
+                intent_id=intent.intent_id,
+                idempotency_key=intent.idempotency_key,
+            )
     try:
         aligned_limit_price = _align_sell_limit_price_to_tick(
             limit_price,
@@ -6096,9 +6712,8 @@ def execute_exit_order(
                 intent_id=intent.intent_id,
                 idempotency_key=idem.value,
             )
-        # Exit is IOC, never all-or-nothing: coerce a TAKER FOK selection to FAK
-        # so a thin/dying book realizes a partial exit instead of killing the
-        # whole sell (live 2026-06-24: Houston FOK rejects, market 0.356->0.076).
+        # The submitted floor and the executable counterparty bid are both
+        # action authority.  Neither may leave the absolute live band.
         selected_order_type = _select_risk_allocator_order_type(conn, intent.executable_snapshot_id)
         try:
             order_type = _resolve_exit_order_type(
@@ -6110,6 +6725,87 @@ def execute_exit_order(
                 trade_id=intent.trade_id,
                 status="rejected",
                 reason=str(exc),
+                submitted_price=limit_price,
+                shares=shares,
+                order_role="exit",
+                intent_id=intent.intent_id,
+                idempotency_key=idem.value,
+            )
+        marketable_sell = order_type == "FAK"
+        global_receipt_closure_error = _global_sell_receipt_closure_error(
+            intent,
+            order_type=order_type,
+        )
+        if global_receipt_closure_error is not None:
+            # This is intentionally before any envelope, command, event, or
+            # SDK work.  The repository repeats the receipt/artifact check in
+            # its SAVEPOINT as the second, durable boundary.
+            return OrderResult(
+                trade_id=intent.trade_id,
+                status="rejected",
+                reason=global_receipt_closure_error,
+                submitted_price=limit_price,
+                shares=shares,
+                order_role="exit",
+                intent_id=intent.intent_id,
+                idempotency_key=idem.value,
+            )
+        if (
+            order_type in {"GTC", "GTD"}
+            and best_bid is not None
+            and Decimal(str(best_bid)) >= Decimal(str(limit_price))
+        ):
+            return OrderResult(
+                trade_id=intent.trade_id,
+                status="rejected",
+                reason=(
+                    "marketable_sell_order_type_required:"
+                    f"order_type={order_type}:best_bid={best_bid}:limit={limit_price}"
+                ),
+                submitted_price=limit_price,
+                shares=shares,
+                order_role="exit",
+                intent_id=intent.intent_id,
+                idempotency_key=idem.value,
+            )
+        marketable_certificate_error = (
+            _marketable_sell_certificate_error(
+                conn,
+                intent,
+                limit_price=limit_price,
+                shares=shares,
+            )
+            if marketable_sell
+            else None
+        )
+        if marketable_sell and (
+            intent.exact_limit_price is None
+            or best_bid is None
+            or Decimal(str(best_bid)) < Decimal(str(limit_price))
+            or marketable_certificate_error is not None
+        ):
+            # INV-47 SCOPE: only this token's uncertified taker SELL is rejected.
+            # DRAIN: global redecision may emit a fresh certified marketable SELL.
+            # RESET: no latch is stored; an exact certificate passes this gate.
+            return OrderResult(
+                trade_id=intent.trade_id,
+                status="rejected",
+                reason=(
+                    "marketable_sell_authority_required:"
+                    f"order_type={order_type}:best_bid={best_bid}:limit={limit_price}:"
+                    f"certificate={marketable_certificate_error or 'book_not_marketable'}"
+                ),
+                submitted_price=limit_price,
+                shares=shares,
+                order_role="exit",
+                intent_id=intent.intent_id,
+                idempotency_key=idem.value,
+            )
+        if order_type not in {"GTC", "GTD", "FAK"}:
+            return OrderResult(
+                trade_id=intent.trade_id,
+                status="rejected",
+                reason=f"unsupported_exit_submit_order_type:{order_type}",
                 submitted_price=limit_price,
                 shares=shares,
                 order_role="exit",
@@ -6242,116 +6938,231 @@ def execute_exit_order(
                 idempotency_key=idem.value,
             )
 
-        collateral_refresh_component = _refresh_exit_collateral_snapshot_for_submit(
+        if _trade_writer_lease_required(conn) and conn.in_transaction:
+            logger.warning(
+                "execute_exit_order: caller transaction is active before TRADE lease "
+                "(command_id=%s trade_id=%s); refusing pre-venue write without rollback",
+                command_id,
+                intent.trade_id,
+            )
+            return OrderResult(
+                trade_id=intent.trade_id,
+                status="rejected",
+                reason=(
+                    "pre_submit_db_locked_transient: database is locked "
+                    "(caller transaction active before writer lease)"
+                ),
+                submitted_price=limit_price,
+                shares=shares,
+                order_role="exit",
+                intent_id=intent.intent_id,
+                idempotency_key=idem.value,
+            )
+
+        prepared_collateral_snapshot = _refresh_exit_collateral_snapshot_for_submit(
             conn,
             token_id=intent.token_id,
             shares=shares,
         )
-        collateral_component = _assert_collateral_allows_sell(intent.token_id, shares, conn=conn)
+        if _trade_writer_lease_required(conn) and conn.in_transaction:
+            logger.warning(
+                "execute_exit_order: collateral fetch left caller transaction active before "
+                "TRADE lease (command_id=%s trade_id=%s); refusing pre-venue write without rollback",
+                command_id,
+                intent.trade_id,
+            )
+            return OrderResult(
+                trade_id=intent.trade_id,
+                status="rejected",
+                reason=(
+                    "pre_submit_db_locked_transient: database is locked "
+                    "(caller transaction active before writer lease)"
+                ),
+                submitted_price=limit_price,
+                shares=shares,
+                order_role="exit",
+                intent_id=intent.intent_id,
+                idempotency_key=idem.value,
+            )
+        from src.state.write_coordinator import WriteLeaseTimeout
 
         try:
-            pre_submit_envelope = _build_pre_submit_envelope(
+            with _canonical_trade_write_lease(
                 conn,
-                command_id=command_id,
-                snapshot_id=intent.executable_snapshot_id,
-                token_id=intent.token_id,
-                side="SELL",
-                price=limit_price,
-                size=shares,
-                order_type=order_type,
-                post_only=False,
-                captured_at=now_str,
-            )
-            envelope_id = _persist_prebuilt_submit_envelope(
-                conn,
-                pre_submit_envelope,
-                command_id=command_id,
-            )
-            insert_command(
-                conn,
-                command_id=command_id,
-                snapshot_id=intent.executable_snapshot_id,
-                envelope_id=envelope_id,
-                position_id=intent.trade_id,
-                decision_id=effective_decision_id,
-                idempotency_key=idem.value,
-                intent_kind=IntentKind.EXIT.value,
-                market_id=market_id_for_cmd,
-                token_id=intent.token_id,
-                side="SELL",
-                size=shares,
-                price=limit_price,
-                created_at=now_str,
-                q_version=q_version or None,
-                snapshot_checked_at=now_str,
-                expected_min_tick_size=intent.executable_snapshot_min_tick_size,
-                expected_min_order_size=intent.executable_snapshot_min_order_size,
-                expected_neg_risk=intent.executable_snapshot_neg_risk,
-            )
-            if not ExitMutex(conn).acquire(intent.trade_id, intent.token_id, command_id):
+                owner="exit_pre_submit_persist",
+                deadline_ms=_EXIT_PRE_SUBMIT_WRITE_LEASE_DEADLINE_MS,
+                max_hold_ms=_EXIT_PRE_SUBMIT_WRITE_LEASE_MAX_HOLD_MS,
+            ):
+                from src.execution.exit_safety import (
+                    global_sell_reauction_publish_claim_blocks_exit_command,
+                )
+
+                if global_sell_reauction_publish_claim_blocks_exit_command(
+                    conn,
+                    intent.trade_id,
+                ):
+                    return OrderResult(
+                        trade_id=intent.trade_id,
+                        status="rejected",
+                        reason="global_sell_reauction_publish_claim_owned",
+                        submitted_price=limit_price,
+                        shares=shares,
+                        order_role="exit",
+                        intent_id=intent.intent_id,
+                        idempotency_key=idem.value,
+                    )
+                if _trade_writer_lease_required(conn):
+                    from src.execution.collateral import initialize_collateral_schema_for_submit
+
+                    initialize_collateral_schema_for_submit(conn)
+                collateral_refresh_component = _persist_exit_collateral_snapshot_for_submit(
+                    conn,
+                    prepared_collateral_snapshot,
+                )
+                collateral_component = _assert_collateral_allows_sell(
+                    intent.token_id,
+                    shares,
+                    conn=conn,
+                )
+                pre_submit_envelope = _build_pre_submit_envelope(
+                    conn,
+                    command_id=command_id,
+                    snapshot_id=intent.executable_snapshot_id,
+                    token_id=intent.token_id,
+                    side="SELL",
+                    price=limit_price,
+                    size=shares,
+                    order_type=order_type,
+                    post_only=order_type in {"GTC", "GTD"},
+                    captured_at=now_str,
+                    intent_kind=IntentKind.EXIT.value,
+                )
+                if intent.global_sell_receipt_closure is not None:
+                    # The closure must be validated in insert_command's own
+                    # SAVEPOINT before either the envelope or command exists.
+                    # Keep the exact in-memory envelope and deterministic id
+                    # together so a failed receipt check leaves zero rows.
+                    envelope_id = f"pre-submit:{command_id}"
+                    submission_envelope = pre_submit_envelope
+                else:
+                    envelope_id = _persist_prebuilt_submit_envelope(
+                        conn,
+                        pre_submit_envelope,
+                        command_id=command_id,
+                    )
+                    submission_envelope = None
+                insert_command(
+                    conn,
+                    command_id=command_id,
+                    snapshot_id=intent.executable_snapshot_id,
+                    envelope_id=envelope_id,
+                    submission_envelope=submission_envelope,
+                    position_id=intent.trade_id,
+                    decision_id=effective_decision_id,
+                    idempotency_key=idem.value,
+                    intent_kind=IntentKind.EXIT.value,
+                    market_id=market_id_for_cmd,
+                    token_id=intent.token_id,
+                    side="SELL",
+                    size=shares,
+                    price=limit_price,
+                    created_at=now_str,
+                    q_version=q_version or None,
+                    snapshot_checked_at=now_str,
+                    expected_min_tick_size=intent.executable_snapshot_min_tick_size,
+                    expected_min_order_size=intent.executable_snapshot_min_order_size,
+                    expected_neg_risk=intent.executable_snapshot_neg_risk,
+                    global_sell_receipt_closure=intent.global_sell_receipt_closure,
+                )
+                if not ExitMutex(conn).acquire(intent.trade_id, intent.token_id, command_id):
+                    append_event(
+                        conn,
+                        command_id=command_id,
+                        event_type="REVIEW_REQUIRED",
+                        occurred_at=now_str,
+                        payload={"reason": "exit_mutex_held"},
+                    )
+                    conn.commit()
+                    return OrderResult(
+                        trade_id=intent.trade_id,
+                        status="rejected",
+                        reason="exit_mutex_held",
+                        submitted_price=limit_price,
+                        shares=shares,
+                        order_role="exit",
+                        intent_id=intent.intent_id,
+                        idempotency_key=idem.value,
+                        command_state="REVIEW_REQUIRED",
+                    )
                 append_event(
                     conn,
                     command_id=command_id,
-                    event_type="REVIEW_REQUIRED",
+                    event_type="SUBMIT_REQUESTED",
                     occurred_at=now_str,
-                    payload={"reason": "exit_mutex_held"},
+                    payload={
+                        "order_type": order_type,
+                        "execution_capability": _build_execution_capability(
+                            action="EXIT",
+                            command_id=command_id,
+                            intent_kind=IntentKind.EXIT.value,
+                            order_type=order_type,
+                            venue_order_type=order_type,
+                            risk_allocator_selected_order_type=selected_order_type,
+                            token_id=intent.token_id,
+                            snapshot_id=intent.executable_snapshot_id,
+                            freshness_time=now_str,
+                            components=[
+                                cutover_component,
+                                _component_from_result(
+                                    "risk_allocator",
+                                    risk_allocator_decision,
+                                    reduce_only=True,
+                                ),
+                                _capability_component(
+                                    "order_type_selection",
+                                    order_type=order_type,
+                                    selected_order_type=selected_order_type,
+                                ),
+                                heartbeat_component,
+                                ws_gap_component,
+                                collateral_refresh_component,
+                                collateral_component,
+                                _capability_component("replacement_sell_guard"),
+                                _exit_decision_source_component(),
+                                exit_snapshot_identity_component,
+                                _capability_component("executable_snapshot_gate"),
+                            ],
+                        ),
+                    },
                 )
+                _reserve_collateral_for_sell(command_id, intent.token_id, shares, conn)
                 conn.commit()
-                return OrderResult(
-                    trade_id=intent.trade_id,
-                    status="rejected",
-                    reason="exit_mutex_held",
-                    submitted_price=limit_price,
-                    shares=shares,
-                    order_role="exit",
-                    intent_id=intent.intent_id,
-                    idempotency_key=idem.value,
-                    command_state="REVIEW_REQUIRED",
-                )
-            append_event(
-                conn,
-                command_id=command_id,
-                event_type="SUBMIT_REQUESTED",
-                occurred_at=now_str,
-                payload={
-                    "order_type": order_type,
-                    "execution_capability": _build_execution_capability(
-                        action="EXIT",
-                        command_id=command_id,
-                        intent_kind=IntentKind.EXIT.value,
-                        order_type=order_type,
-                        venue_order_type=order_type,
-                        risk_allocator_selected_order_type=selected_order_type,
-                        token_id=intent.token_id,
-                        snapshot_id=intent.executable_snapshot_id,
-                        freshness_time=now_str,
-                        components=[
-                            cutover_component,
-                            _component_from_result(
-                                "risk_allocator",
-                                risk_allocator_decision,
-                                reduce_only=True,
-                            ),
-                            _capability_component(
-                                "order_type_selection",
-                                order_type=order_type,
-                                selected_order_type=selected_order_type,
-                            ),
-                            heartbeat_component,
-                            ws_gap_component,
-                            collateral_refresh_component,
-                            collateral_component,
-                            _capability_component("replacement_sell_guard"),
-                            _exit_decision_source_component(),
-                            exit_snapshot_identity_component,
-                            _capability_component("executable_snapshot_gate"),
-                        ],
-                    ),
-                },
+        except WriteLeaseTimeout as exc:
+            logger.warning(
+                "execute_exit_order: pre-venue TRADE lease timed out (command_id=%s "
+                "trade_id=%s) — no order placed; transient reject, retry next cycle: %s",
+                command_id,
+                intent.trade_id,
+                exc,
             )
-            _reserve_collateral_for_sell(command_id, intent.token_id, shares, conn)
-            conn.commit()
+            return OrderResult(
+                trade_id=intent.trade_id,
+                status="rejected",
+                reason=(
+                    "pre_submit_db_locked_transient: database is locked "
+                    f"(writer lease timeout: {exc})"
+                ),
+                submitted_price=limit_price,
+                shares=shares,
+                order_role="exit",
+                intent_id=intent.intent_id,
+                idempotency_key=idem.value,
+            )
         except MarketSnapshotError as exc:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
             return OrderResult(
                 trade_id=intent.trade_id,
                 status="rejected",
@@ -6378,47 +7189,17 @@ def execute_exit_order(
                 idempotency_key=idem.value,
             )
         except CollateralInsufficient as exc:
-            rej_time = datetime.now(timezone.utc).isoformat()
-            if _venue_command_exists(conn, command_id):
-                try:
-                    append_event(
-                        conn,
-                        command_id=command_id,
-                        event_type="SUBMIT_REJECTED",
-                        occurred_at=rej_time,
-                        payload={
-                            "reason": "pre_submit_collateral_reservation_failed",
-                            "detail": str(exc),
-                            "exception_type": type(exc).__name__,
-                            "side_effect_boundary_crossed": False,
-                            "sdk_submit_attempted": False,
-                        },
-                    )
-                    if _own_conn:
-                        conn.commit()
-                except Exception as inner:
-                    logger.error(
-                        "execute_exit_order: SUBMIT_REJECTED append_event failed after "
-                        "pre-submit collateral reservation failure (command_id=%s "
-                        "trade_id=%s): inner=%s original=%s",
-                        command_id,
-                        intent.trade_id,
-                        inner,
-                        exc,
-                    )
-            else:
-                try:
-                    conn.rollback()
-                except Exception:
-                    pass
-                logger.warning(
-                    "execute_exit_order: pre-command collateral rejection "
-                    "(command_id=%s trade_id=%s) — no venue command/event to append; "
-                    "no order placed: %s",
-                    command_id,
-                    intent.trade_id,
-                    exc,
-                )
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            logger.warning(
+                "execute_exit_order: pre-venue collateral rejection rolled back "
+                "(command_id=%s trade_id=%s); no order placed: %s",
+                command_id,
+                intent.trade_id,
+                exc,
+            )
             return OrderResult(
                 trade_id=intent.trade_id,
                 status="rejected",
@@ -6438,6 +7219,10 @@ def execute_exit_order(
                 "execute_exit_order: idempotency key collision (race) for trade_id=%s idem=%s: %s",
                 intent.trade_id, idem.value, exc,
             )
+            try:
+                conn.rollback()
+            except Exception:
+                pass
             existing_row = find_command_by_idempotency_key(conn, idem.value)
             if existing_row is not None:
                 exit_existing_mismatch = _exit_existing_command_mismatch_reason(
@@ -6492,6 +7277,10 @@ def execute_exit_order(
             # uncommitted persist and return a CLEAN transient rejection so the candidate
             # re-attempts next cycle. Non-lock OperationalError re-raises (unchanged).
             if "database is locked" not in str(exc).lower():
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
                 raise
             try:
                 conn.rollback()
@@ -6512,6 +7301,15 @@ def execute_exit_order(
                 intent_id=intent.intent_id,
                 idempotency_key=idem.value,
             )
+        except BaseException:
+            # The coordinator lease serializes writers but does not own the
+            # caller's SQLite transaction. Never release the file lease while
+            # an unexpected pre-venue failure still holds a write transaction.
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            raise
 
         logger.info(
             "SELL ORDER: token=%s...%s @ %.3f limit, %.2f shares (mid=%.3f, bid=%s)",
@@ -6780,6 +7578,27 @@ def execute_exit_order(
                 or result.get("reason")
                 or "submit_rejected"
             )
+            fak_terminal_no_fill = bool(
+                order_type == "FAK"
+                and str(rejection_reason) == "venue_fak_no_match_400"
+                and order_id
+            )
+            fak_terminal_no_fill_proof = (
+                {
+                    "proof_class": "deterministic_venue_fak_no_match_400",
+                    "terminal_no_fill": True,
+                    "exposure_created": False,
+                    "venue_order_id": order_id,
+                    "required_predicates": {
+                        "structured_v2_fak_no_match": True,
+                        "final_envelope_command_matches": True,
+                        "final_envelope_is_fak": True,
+                        "deterministic_order_id_matches": True,
+                    },
+                }
+                if fak_terminal_no_fill
+                else {}
+            )
             try:
                 append_event(
                     conn,
@@ -6789,6 +7608,7 @@ def execute_exit_order(
                     payload={
                         "reason": str(rejection_reason),
                         "detail": result.get("errorMessage") or result.get("error_message") or "",
+                        **fak_terminal_no_fill_proof,
                         **final_envelope_payload,
                     },
                 )
@@ -6808,6 +7628,13 @@ def execute_exit_order(
                     detail=str(inner),
                     idempotency_key=idem.value,
                     order_role="exit",
+                    terminal_rejection_code=str(rejection_reason),
+                    terminal_rejection_detail=(
+                        result.get("errorMessage")
+                        or result.get("error_message")
+                        or ""
+                    ),
+                    terminal_rejection_status=str(result.get("status") or ""),
                 )
                 return _with_venue_boundary(OrderResult(
                     trade_id=intent.trade_id,
@@ -6916,6 +7743,11 @@ def execute_exit_order(
                 if _venue_fill_covers_submit(matched_size, shares)
                 else "PARTIAL_FILL_OBSERVED"
             )
+        fill_price_floor_breach = bool(
+            fill_event_type
+            and fill_price is not None
+            and Decimal(str(fill_price)) < Decimal(str(limit_price))
+        )
 
         # SUBMIT_ACKED — order placed successfully
         # C-DBLOCK-UNKNOWN (2026-06-16): symmetric with the entry path. The venue side
@@ -7025,6 +7857,22 @@ def execute_exit_order(
                             **final_envelope_payload,
                         },
                     )
+                if fill_price_floor_breach:
+                    append_event(
+                        conn,
+                        command_id=command_id,
+                        event_type="REVIEW_REQUIRED",
+                        occurred_at=ack_time,
+                        payload={
+                            "reason": "sell_fill_price_below_submitted_floor",
+                            "venue_order_id": order_id,
+                            "trade_id": fill_trade_id,
+                            "filled_size": matched_size,
+                            "fill_price": fill_price,
+                            "submitted_limit_price": str(limit_price),
+                            **final_envelope_payload,
+                        },
+                    )
             # PR 6 (2026-05-19): persist submit intent + venue ack timing to settlement_commands.
             # Best-effort: do not fail the order on UPDATE error (column may not exist on older DBs).
             try:
@@ -7077,12 +7925,16 @@ def execute_exit_order(
         result_obj = OrderResult(
             trade_id=intent.trade_id,
             status=(
-                "filled"
+                "unknown_side_effect"
+                if fill_price_floor_breach
+                else "filled"
                 if fill_event_type == "FILL_CONFIRMED"
                 else ("partial" if fill_event_type == "PARTIAL_FILL_OBSERVED" else "pending")
             ),
             reason=(
-                "sell order filled"
+                "sell_fill_price_below_submitted_floor"
+                if fill_price_floor_breach
+                else "sell order filled"
                 if fill_event_type == "FILL_CONFIRMED"
                 else (
                     "sell order partially filled"
@@ -7148,7 +8000,13 @@ def _live_order(
     _gate_runtime_check("on_chain_mutation")
     from src.data.polymarket_client import PolymarketClient, V2PreflightError
     from src.execution.command_bus import IdempotencyKey, IntentKind
-    from src.state.venue_command_repo import append_order_fact, append_trade_fact, insert_command, append_event
+    from src.state.venue_command_repo import (
+        append_event,
+        append_order_fact,
+        append_trade_fact,
+        begin_fresh_entry_admission,
+        insert_command,
+    )
     from src.contracts.executable_market_snapshot import MarketSnapshotError
     from src.state.collateral_ledger import CollateralInsufficient
 
@@ -7209,7 +8067,22 @@ def _live_order(
             order_role="entry",
             command_state="REJECTED",
         )
-    required_pusd_micro = _buy_order_notional_micro(intent, shares)
+    try:
+        venue_submit_shares = _entry_buy_venue_submit_shares(
+            intent,
+            target_shares=shares,
+        )
+    except ValueError as exc:
+        return OrderResult(
+            trade_id=trade_id,
+            status="rejected",
+            reason=f"fak_fixed_cash_binding:{exc}",
+            submitted_price=intent.limit_price,
+            shares=shares,
+            order_role="entry",
+            command_state="REJECTED",
+        )
+    required_pusd_micro = _buy_order_notional_micro(intent, venue_submit_shares)
 
     # -----------------------------------------------------------------------
     # Phase 2: build — pure, no I/O (INV-30)
@@ -7221,7 +8094,7 @@ def _live_order(
         token_id=intent.token_id,
         side="BUY",
         price=intent.limit_price,
-        size=shares,
+        size=venue_submit_shares,
         intent_kind=IntentKind.ENTRY,
     )
     command_id = uuid.uuid4().hex[:16]
@@ -7404,7 +8277,7 @@ def _live_order(
         )
         amount_precision_error = _venue_submit_amount_precision_rejection_reason(
             intent,
-            shares=shares,
+            shares=venue_submit_shares,
             order_type=effective_order_type,
         )
         if amount_precision_error is not None:
@@ -7473,7 +8346,7 @@ def _live_order(
             token_id=intent.token_id,
             side="BUY",
             price=intent.limit_price,
-            size=shares,
+            size=venue_submit_shares,
             exclude_idempotency_key=idem.value,
         )
         if economic_unknown_row is not None:
@@ -7740,6 +8613,50 @@ def _live_order(
             )
 
         try:
+            # The fresh owner-local certificate check above proves the commit
+            # exists without disturbing the reactor's caller transaction.
+            # Restart the sanctioned attached admission now so the closure
+            # read and every admission write share a post-commit snapshot.
+            begin_fresh_entry_admission(conn)
+            strategy_policy_submit_component = (
+                _entry_strategy_policy_submit_component(
+                    conn,
+                    intent,
+                    actionable_payload,
+                )
+            )
+            if not strategy_policy_submit_component.get("allowed"):
+                reason = str(
+                    strategy_policy_submit_component.get("reason")
+                    or "strategy_policy_submit_blocked"
+                )
+                strategy_policy_details = (
+                    strategy_policy_submit_component.get("details") or {}
+                )
+                sources = str(strategy_policy_details.get("sources") or "")
+                conn.rollback()
+                logger.warning(
+                    "_live_order: fresh strategy policy blocked command "
+                    "persistence for trade_id=%s token=%s reason=%s sources=%s",
+                    trade_id,
+                    intent.token_id,
+                    reason,
+                    sources,
+                )
+                return OrderResult(
+                    trade_id=trade_id,
+                    status="rejected",
+                    reason=(
+                        f"strategy_policy_pre_submit:{reason}"
+                        + (f":sources={sources}" if sources else "")
+                    ),
+                    submitted_price=intent.limit_price,
+                    shares=shares,
+                    order_role="entry",
+                    idempotency_key=idem.value,
+                    command_id=command_id,
+                    command_state="REJECTED",
+                )
             collateral_component = _assert_collateral_allows_buy(
                 intent,
                 spend_micro=required_pusd_micro,
@@ -7756,28 +8673,16 @@ def _live_order(
                 token_id=intent.token_id,
                 side="BUY",
                 price=intent.limit_price,
-                size=shares,
+                size=venue_submit_shares,
                 order_type=effective_order_type,
                 post_only=submit_post_only,
                 captured_at=now_str,
             )
-            # Admission is one durable fact: envelope + command journal +
-            # collateral/risk reservations. Ledger preflight above may run
-            # executescript(), whose SQLite contract commits any open
-            # transaction. Acquire the writer only after that schema/read
-            # phase and before the first admission write. The reservation
-            # helper below performs CAS DML without another schema touch.
-            if not conn.in_transaction:
-                conn.execute("BEGIN IMMEDIATE")
             try:
-                # The envelope insert acquires SQLite's single-writer lock.  The
+                # The fresh admission holds SQLite's single-writer lock. The
                 # exact position generation and wealth endowment are re-read
-                # after that boundary and remain stable through command insert.
-                envelope_id = _persist_prebuilt_submit_envelope(
-                    conn,
-                    pre_submit_envelope,
-                    command_id=command_id,
-                )
+                # after that boundary and remain stable through the repo's
+                # atomic envelope+certificate+command write.
                 if increment_position_id:
                     locked_duplicate = _entry_duplicate_same_token_component(
                         conn,
@@ -7862,7 +8767,8 @@ def _live_order(
                 conn,
                 command_id=command_id,
                 snapshot_id=intent.executable_snapshot_id,
-                envelope_id=envelope_id,
+                envelope_id=f"pre-submit:{command_id}",
+                submission_envelope=pre_submit_envelope,
                 position_id=increment_position_id or trade_id,
                 decision_id=effective_decision_id,
                 idempotency_key=idem.value,
@@ -7870,7 +8776,7 @@ def _live_order(
                 market_id=intent.market_id,
                 token_id=intent.token_id,
                 side="BUY",
-                size=shares,
+                size=venue_submit_shares,
                 price=intent.limit_price,
                 created_at=now_str,
                 q_version=entry_q_version,
@@ -7925,6 +8831,7 @@ def _live_order(
                             ws_gap_component,
                             collateral_refresh_component,
                             collateral_component,
+                            strategy_policy_submit_component,
                             entries_pause_component,
                             cooldown_component,
                             duplicate_same_token_component,
@@ -8243,10 +9150,11 @@ def _live_order(
             )
 
         logger.info(
-            "LIVE ORDER: %s token=%s...%s @ %.3f limit, %.2f shares, timeout=%ds",
+            "LIVE ORDER: %s token=%s...%s @ %.3f limit, target=%.2f shares, "
+            "wire_size=%.4f, timeout=%ds",
             intent.direction.value,
             intent.token_id[:8], intent.token_id[-4:],
-            intent.limit_price, shares, timeout,
+            intent.limit_price, shares, venue_submit_shares, timeout,
         )
         if pre_submit_envelope is not None and hasattr(client, "bind_submission_envelope"):
             client.bind_submission_envelope(pre_submit_envelope)
@@ -8264,7 +9172,7 @@ def _live_order(
             result = client.place_limit_order(
                 token_id=intent.token_id,
                 price=intent.limit_price,
-                size=shares,
+                size=venue_submit_shares,
                 side="BUY",  # Always BUY
                 order_type=effective_order_type,
             )
@@ -8501,6 +9409,13 @@ def _live_order(
                     detail=str(inner),
                     idempotency_key=idem.value,
                     order_role="entry",
+                    terminal_rejection_code=str(rejection_reason),
+                    terminal_rejection_detail=(
+                        result.get("errorMessage")
+                        or result.get("error_message")
+                        or ""
+                    ),
+                    terminal_rejection_status=str(result.get("status") or ""),
                 )
                 return OrderResult(
                     trade_id=trade_id,
@@ -8593,12 +9508,12 @@ def _live_order(
         order_fact_state = _venue_submit_order_fact_state(
             result,
             matched_size=matched_size,
-            submitted_size=shares,
+            submitted_size=venue_submit_shares,
             side="BUY",
         )
         remaining_size = _venue_submit_remaining_size(
             result,
-            shares,
+            venue_submit_shares,
             matched_size=matched_size,
             side="BUY",
         )
@@ -8639,7 +9554,7 @@ def _live_order(
                             matched_size = point_matched
                             remaining_size = _venue_submit_remaining_size(
                                 fill_evidence,
-                                shares,
+                                venue_submit_shares,
                                 matched_size=matched_size,
                                 side="BUY",
                             )
@@ -8654,14 +9569,14 @@ def _live_order(
             order_fact_state = _venue_submit_order_fact_state(
                 fill_evidence,
                 matched_size=matched_size,
-                submitted_size=shares,
+                submitted_size=venue_submit_shares,
                 side="BUY",
             )
             fill_trade_id = next(iter(trade_ids), None)
             if fill_trade_id:
                 fill_event_type = (
                     "FILL_CONFIRMED"
-                    if _venue_fill_covers_submit(matched_size, shares)
+                    if _venue_fill_covers_submit(matched_size, venue_submit_shares)
                     else "PARTIAL_FILL_OBSERVED"
                 )
             if fill_event_type and fill_price is None:
@@ -8975,7 +9890,7 @@ def _live_order(
                 direction="BUY",
                 market=intent.market_id,
                 price=intent.limit_price,
-                size_usd=float(shares * intent.limit_price),
+                size_usd=required_pusd_micro / 1_000_000.0,
                 strategy="live_order",
                 edge=float(intent.decision_edge),
                 mode=get_mode(),

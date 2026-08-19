@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-# Lifecycle: created=2026-06-12; last_reviewed=2026-07-23; last_reused=2026-07-23
+# Lifecycle: created=2026-06-12; last_reviewed=2026-08-06; last_reused=2026-08-06
 # Purpose: make live daemon restarts SAFE — refuse `launchctl kickstart` while the LIVE
 #   checkout's runtime surface is uncommitted/unpushed, and require live restart preflight
 #   before booting the trading daemon.
 # Reuse: read-mostly (git status/rev-parse + launchctl list + preflight checks); the only
 #   state change is kickstart after the gates pass.
-# Last reused/audited: 2026-07-23
+# Last reused/audited: 2026-08-06
 # Authority basis: operator big-direction 2026-06-12 ("大方向现在也只是添加几个文件现在做") +
 #   incident: a `launchctl kickstart` booted a concurrent agent's mid-edit working tree
 #   into live money.
@@ -51,9 +51,11 @@ from __future__ import annotations
 import argparse
 import fcntl
 import json
+import math
 import os
 import plistlib
 import sqlite3
+import stat
 import subprocess
 import sys
 import textwrap
@@ -70,7 +72,11 @@ from src.ops.edli_queue import (
     EDLI_REACTOR_PROCESSING_LEASE_SECONDS,
     collect_edli_queue_evidence,
 )
-from src.ops.monitor_cadence import collect_monitor_cadence_evidence
+from src.ops.monitor_cadence import (
+    collect_monitor_cadence_evidence,
+    monitor_cadence_blocking_evidence,
+)
+from src.state.db import query_control_override_state
 from src.control.runtime_code_plane import is_runtime_code_path
 
 LIVE_TRADING_PLIST = (
@@ -181,6 +187,7 @@ LIVE_RUNTIME_FRESH_VERIFY_CLOCK_TOLERANCE_SECONDS = float(
     os.environ.get("ZEUS_DEPLOY_LIVE_RUNTIME_FRESH_CLOCK_TOLERANCE_SECONDS", "5")
 )
 PREREQUISITE_CODE_HEARTBEATS = {
+    DAEMONS["data-ingest"]: ("daemon-heartbeat-ingest.json", ("alive_at",)),
     DAEMONS["forecast-live"]: ("forecast-live-heartbeat.json", ("written_at", "timestamp")),
     DAEMONS["substrate-observer"]: ("daemon-heartbeat-substrate-observer.json", ("alive_at",)),
     DAEMONS["price-channel-ingest"]: ("daemon-heartbeat-price-channel-ingest.json", ("alive_at",)),
@@ -527,14 +534,18 @@ def _wait_for_post_start_monitor_cadence(
     launched_after: datetime,
     timeout_seconds: float = LIVE_MONITOR_CADENCE_VERIFY_TIMEOUT_SECONDS,
 ) -> tuple[bool, str]:
-    """Wait until held-position monitoring proves it ran after this boot.
+    """Wait until every held position has a fresh decision after this boot.
 
     Chain reconciliation can refresh ``position_current.updated_at`` without any
-    exit/hold decision.  The post-start recovery proof is one runtime coverage
-    tranche of fresh canonical decisions after the launch floor.  Full-book
-    coverage remains the recurring monitor's SLA; making deployment wait for all
-    three tranches lets targeted wake work turn a healthy restart into a permanent
-    operator pause.
+    exit/hold decision.  The deployment gate and the restart-guard reset must use
+    the same full-book proof; accepting one coverage tranche here would leave the
+    global entry pause selected when the reset immediately checks every position.
+
+    SCOPE: this deploy invocation's entry pause, across canonical open exposure.
+    DRAIN: recurring held monitoring emits fresh ``MONITOR_REFRESHED`` evidence
+    for every open position within the configured three-cycle contract.
+    RESET: zero stale/missing and zero future monitor events after the launch
+    floor; any newly opened or stale position restores the wait.
     """
 
     trade_db = Path(_require_live_repo()) / "state" / "zeus_trades.db"
@@ -562,13 +573,25 @@ def _wait_for_post_start_monitor_cadence(
                     conn,
                     now=datetime.now(timezone.utc),
                     min_occurred_at=launched_floor,
+                    monitor_refreshed_only=True,
+                    require_fresh_inputs=True,
                     sample_limit=5,
                 )
                 conn.close()
+                non_monitor_chain_risk_count = int(
+                    cadence.get("non_monitor_chain_risk_position_count") or 0
+                )
                 open_count = int(cadence["open_position_count"])
-                if open_count == 0:
+                if non_monitor_chain_risk_count:
+                    last_detail = (
+                        f"open_positions={open_count} "
+                        "non_monitor_chain_risk_position_count="
+                        f"{non_monitor_chain_risk_count} "
+                        f"sample={cadence.get('non_monitor_chain_risk_positions', [])}"
+                    )
+                elif open_count == 0:
                     return True, "post-start monitor cadence skipped: no open positions"
-                if cadence["future_monitor_event_count"]:
+                elif cadence["future_monitor_event_count"]:
                     last_detail = (
                         f"open_positions={open_count} "
                         f"future_monitor_events={cadence['future_monitor_event_count']} "
@@ -576,36 +599,79 @@ def _wait_for_post_start_monitor_cadence(
                     )
                 else:
                     fresh_count = int(cadence["fresh_position_count"])
-                    required_count = min(
-                        open_count,
-                        max(
-                            2,
-                            (
-                                open_count
-                                + LIVE_MONITOR_FULL_COVERAGE_CYCLES
-                                - 1
-                            )
-                            // LIVE_MONITOR_FULL_COVERAGE_CYCLES,
-                        ),
+                    cadence_groups = monitor_cadence_blocking_evidence(cadence)
+                    blocking_count = int(
+                        cadence_groups["blocking_stale_position_count"]
                     )
-                    stale_or_missing = list(cadence["stale_or_missing_positions"])
-                    if fresh_count >= required_count:
+                    quote_only_count = int(
+                        cadence_groups["quote_only_stale_position_count"]
+                    )
+                    stale_or_missing = list(
+                        cadence_groups["blocking_stale_positions"]
+                    )
+                    held_position_ids = tuple(
+                        str(value or "").strip()
+                        for value in cadence.get("monitored_position_ids", ())
+                    )
+                    identity_complete = (
+                        len(held_position_ids) == open_count
+                        and all(held_position_ids)
+                        and len(set(held_position_ids)) == len(held_position_ids)
+                    )
+                    auction_receipt = (
+                        _latest_complete_global_auction_receipt(
+                            trade_db,
+                            launched_floor=launched_floor,
+                            require_held_coverage_count=open_count,
+                            require_held_position_ids=held_position_ids,
+                        )
+                        if identity_complete
+                        and blocking_count == 0
+                        and quote_only_count > 0
+                        else None
+                    )
+                    if identity_complete and blocking_count == 0 and (
+                        quote_only_count == 0 or auction_receipt is not None
+                    ):
+                        auction_detail = ""
+                        if auction_receipt is not None:
+                            receipt_id, candidate_count, scope_count = auction_receipt
+                            auction_detail = (
+                                f" quote_only_positions={quote_only_count} "
+                                f"held_auction_receipt={receipt_id} "
+                                f"candidates={candidate_count} "
+                                f"scope_families={scope_count}"
+                            )
                         return (
                             True,
                             "post-start monitor cadence verified: "
-                            f"progress_positions={fresh_count} "
-                            f"required_progress={required_count} "
-                            f"open_positions={open_count} "
-                            f"remaining_for_continuous_coverage="
-                            f"{max(0, open_count - fresh_count)}",
+                            f"fresh_positions={fresh_count} "
+                            f"open_positions={open_count} full_book=true"
+                            f"{auction_detail}",
                         )
+                    if blocking_count == 0 and quote_only_count > 0:
+                        last_detail = (
+                            f"open_positions={open_count} "
+                            f"fresh_positions={fresh_count} "
+                            f"quote_only_positions={quote_only_count} "
+                            "complete_post_start_held_auction_receipt=missing "
+                            f"launched_floor={launched_floor.isoformat()}"
+                        )
+                        if time.monotonic() >= deadline:
+                            return (
+                                False,
+                                "post-start monitor cadence did not verify after restart: "
+                                + last_detail,
+                            )
+                        time.sleep(LIVE_RUNTIME_FRESH_VERIFY_POLL_SECONDS)
+                        continue
                     sample = ", ".join(
                         f"{item['position_id']} last_monitor_refreshed_at={item['last_monitor_refreshed_at']}"
                         for item in stale_or_missing[:5]
                     )
                     last_detail = (
                         f"open_positions={open_count} "
-                        f"stale_or_missing_positions={cadence['stale_or_missing_position_count']} "
+                        f"stale_or_missing_positions={blocking_count} "
                         f"sample={sample or '<empty>'} "
                         f"launched_floor={launched_floor.isoformat()}"
                     )
@@ -623,9 +689,17 @@ def _wait_for_post_start_monitor_cadence(
 def _wait_for_post_start_edli_queue_progress(
     *,
     launched_after: datetime,
+    post_start_freshness_verified: bool,
     timeout_seconds: float = LIVE_EDLI_QUEUE_VERIFY_TIMEOUT_SECONDS,
 ) -> tuple[bool, str]:
-    """Wait until the EDLI reactor proves it can move claimable queue work."""
+    """Wait for EDLI queue progress, or prove paused entry work is intentionally parked.
+
+    SCOPE: only an EDLI entry backlog while the durable global entries gate is
+    active. DRAIN: resume entries, or let the reactor claim/terminalize work.
+    RESET: a canonical held exposure, non-terminal SELL command, held-SELL
+    global-auction debt, stale claim, unreadable pause state, or missing
+    post-start freshness proof immediately restores the ordinary progress gate.
+    """
 
     state_dir = Path(_require_live_repo()) / "state"
     world_db = state_dir / "zeus-world.db"
@@ -678,6 +752,16 @@ def _wait_for_post_start_edli_queue_progress(
                         f"scope_families={scope_count} "
                         f"claimable_pending={claimable_pending_count}",
                     )
+                if claimable_work_count > 0:
+                    parked_ok, parked_detail = _paused_entry_backlog_is_expected_parked(
+                        world_db=world_db,
+                        trade_db=trade_db,
+                        state_dir=state_dir,
+                        queue=queue,
+                        post_start_freshness_verified=post_start_freshness_verified,
+                    )
+                    if parked_ok:
+                        return True, parked_detail
                 if claimable_work_count == 0:
                     if progressed_count > 0:
                         return (
@@ -704,6 +788,8 @@ def _wait_for_post_start_edli_queue_progress(
                     f"progressed_after_launch={progressed_count} "
                     f"launched_floor={launched_floor.isoformat()}"
                 )
+                if claimable_work_count > 0:
+                    last_detail += f" expected_parked={parked_detail}"
         except Exception as exc:  # noqa: BLE001
             last_detail = f"EDLI queue read failed: {type(exc).__name__}: {exc}"
 
@@ -716,51 +802,348 @@ def _wait_for_post_start_edli_queue_progress(
         time.sleep(LIVE_RUNTIME_FRESH_VERIFY_POLL_SECONDS)
 
 
+def _paused_entry_backlog_is_expected_parked(
+    *,
+    world_db: Path,
+    trade_db: Path,
+    state_dir: Path,
+    queue: dict[str, object],
+    post_start_freshness_verified: bool,
+) -> tuple[bool, str]:
+    """Return whether a claimable EDLI entry backlog is safe to leave parked.
+
+    This is deliberately an acceptance exception, not a queue mutation or an
+    event-type filter. Every authority input is canonical: the WORLD durable
+    pause projection, TRADE position/command projections, and the durable
+    held-SELL wake queue. Any unreadable required surface raises so the caller
+    remains fail-closed rather than treating it as empty debt.
+    """
+
+    stale_processing_count = int(queue.get("stale_processing_count") or 0)
+    if stale_processing_count:
+        return False, f"stale_processing={stale_processing_count}"
+    if not post_start_freshness_verified:
+        return False, "post_start_freshness=unverified"
+
+    pause = _durable_entries_pause_state(world_db)
+    pause_status = str(pause.get("status") or "unknown")
+    if pause_status != "ok":
+        raise RuntimeError(f"EDLI_EXPECTED_PARKED_PAUSE_UNREADABLE:{pause_status}")
+    if not bool(pause.get("entries_paused")):
+        return False, "durable_entries_paused=false"
+
+    unresolved_position_count = _canonical_unresolved_position_count(trade_db)
+    if unresolved_position_count:
+        return False, f"canonical_unresolved_positions={unresolved_position_count}"
+
+    nonterminal_sell_count = _nonterminal_sell_command_count(trade_db)
+    if nonterminal_sell_count:
+        return False, f"nonterminal_sell_commands={nonterminal_sell_count}"
+
+    held_sell_debt_count = _held_sell_global_auction_debt_count(state_dir)
+    if held_sell_debt_count:
+        return False, f"held_sell_global_auction_debt={held_sell_debt_count}"
+
+    return (
+        True,
+        "post-start EDLI queue expected parked: "
+        "durable_entries_paused=true monitor_fresh_inputs=verified "
+        "canonical_unresolved_positions=0 "
+        "nonterminal_sell_commands=0 held_sell_global_auction_debt=0 "
+        "stale_processing=0 post_start_freshness=verified "
+        f"claimable_pending={int(queue.get('claimable_pending_count') or 0)}",
+    )
+
+
+def _canonical_unresolved_position_count(trade_db: Path) -> int:
+    """Count malformed or unresolved canonical positions, not healthy exposure."""
+
+    from src.contracts.position_truth import (
+        CURRENT_MONEY_RISK_CHAIN_STATES,
+        NO_CURRENT_MONEY_RISK_CHAIN_STATES,
+    )
+
+    if not trade_db.exists():
+        raise RuntimeError("EDLI_EXPECTED_PARKED_TRADE_DB_MISSING")
+    try:
+        conn = sqlite3.connect(f"file:{trade_db}?mode=ro", uri=True, timeout=2.0)
+        columns = _sqlite_table_columns(conn, "position_current")
+        required = {"phase", "chain_state", "shares", "chain_shares"}
+        if not required.issubset(columns):
+            raise RuntimeError("EDLI_EXPECTED_PARKED_POSITION_PROJECTION_UNREADABLE")
+        governed_phases = (
+            "pending_entry",
+            "active",
+            "day0_window",
+            "pending_exit",
+            "economically_closed",
+            "settled",
+            "voided",
+            "admin_closed",
+        )
+        rows = conn.execute(
+            """
+            SELECT phase, chain_state, shares, chain_shares
+              FROM position_current
+            """
+        ).fetchall()
+
+        def finite_nonnegative(value: object) -> float | None:
+            try:
+                parsed = float(value) if value is not None else None
+            except (TypeError, ValueError):
+                return None
+            if parsed is None or not math.isfinite(parsed) or parsed < 0.0:
+                return None
+            return parsed
+
+        open_phases = {"active", "day0_window", "pending_exit"}
+        no_risk_states = set(NO_CURRENT_MONEY_RISK_CHAIN_STATES)
+        current_risk_states = set(CURRENT_MONEY_RISK_CHAIN_STATES)
+        unresolved = 0
+        for phase_raw, chain_state_raw, shares_raw, chain_shares_raw in rows:
+            phase = str(phase_raw or "").strip().lower()
+            chain_state = str(chain_state_raw or "").strip().lower()
+            shares = finite_nonnegative(shares_raw)
+            chain_shares = finite_nonnegative(chain_shares_raw)
+            shares_invalid = shares_raw is not None and shares is None
+            chain_shares_invalid = chain_shares_raw is not None and chain_shares is None
+            positive_exposure = any(
+                value is not None and value > 0.000001
+                for value in (shares, chain_shares)
+            )
+
+            if phase not in governed_phases:
+                unresolved += 1
+                continue
+            if phase in open_phases:
+                # Open exposure is allowed only when both local and chain
+                # quantities are finite/positive and the chain still owns
+                # money risk.  A zero-share open phase is not a healthy held
+                # position and cannot satisfy restart monitor proof.
+                if (
+                    shares is None
+                    or chain_shares is None
+                    or shares <= 0.000001
+                    or chain_shares <= 0.000001
+                ):
+                    unresolved += 1
+                elif chain_state not in current_risk_states:
+                    unresolved += 1
+                continue
+            if phase == "pending_entry":
+                # An entry projection must still be empty and explicitly
+                # classified as carrying no current chain money risk.  NULL
+                # quantities are the canonical unfilled projection shape and
+                # therefore mean no proved exposure here, not malformed risk.
+                if (
+                    shares_invalid
+                    or chain_shares_invalid
+                    or positive_exposure
+                    or chain_state not in no_risk_states
+                ):
+                    unresolved += 1
+                continue
+
+            # Settled/economically-closed/history rows legitimately retain
+            # their last shares and chain snapshot; those are attribution
+            # facts, not monitor obligations.  A voided position is the one
+            # terminal phase that can still contradict venue truth, so only
+            # positive current-risk chain exposure there blocks recovery.
+            if (
+                phase == "voided"
+                and chain_state in current_risk_states
+                and (
+                    chain_shares_invalid
+                    or (chain_shares is not None and chain_shares > 0.000001)
+                )
+            ):
+                unresolved += 1
+        return unresolved
+    except sqlite3.Error as exc:
+        raise RuntimeError("EDLI_EXPECTED_PARKED_POSITION_PROJECTION_UNREADABLE") from exc
+    finally:
+        try:
+            conn.close()
+        except UnboundLocalError:
+            pass
+
+
+def _durable_entries_pause_state(world_db: Path) -> dict[str, object]:
+    """Read the current WORLD pause authority from a separate read-only handle."""
+
+    try:
+        conn = sqlite3.connect(f"file:{world_db}?mode=ro", uri=True, timeout=2.0)
+        conn.row_factory = sqlite3.Row
+        required_columns = {
+            "override_id", "target_type", "target_key", "action_type", "value",
+            "issued_by", "issued_at", "effective_until", "reason", "precedence",
+        }
+        try:
+            columns = _sqlite_table_columns(conn, "control_overrides")
+        except RuntimeError as exc:
+            raise RuntimeError(
+                "EDLI_EXPECTED_PARKED_PAUSE_UNREADABLE:missing_table"
+            ) from exc
+        if not required_columns.issubset(columns):
+            raise RuntimeError(
+                "EDLI_EXPECTED_PARKED_PAUSE_UNREADABLE:projection_columns"
+            )
+        return dict(query_control_override_state(conn))
+    except sqlite3.Error as exc:
+        raise RuntimeError("EDLI_EXPECTED_PARKED_PAUSE_UNREADABLE:sqlite_error") from exc
+    finally:
+        try:
+            conn.close()
+        except UnboundLocalError:
+            pass
+
+
+def _nonterminal_sell_command_count(trade_db: Path) -> int:
+    """Count canonical SELL commands still able to require venue recovery."""
+
+    from src.execution.command_bus import TERMINAL_STATES
+
+    try:
+        conn = sqlite3.connect(f"file:{trade_db}?mode=ro", uri=True, timeout=2.0)
+        columns = _sqlite_table_columns(conn, "venue_commands")
+        if not {"side", "state"}.issubset(columns):
+            raise RuntimeError("EDLI_EXPECTED_PARKED_COMMAND_PROJECTION_UNREADABLE")
+        terminal_states = sorted(
+            {state.value for state in TERMINAL_STATES} | {"CANCELED", "FAILED"}
+        )
+        placeholders = ", ".join("?" for _ in terminal_states)
+        row = conn.execute(
+            f"""
+            SELECT COUNT(*)
+              FROM venue_commands
+             WHERE UPPER(COALESCE(side, '')) = 'SELL'
+               AND UPPER(COALESCE(state, '')) NOT IN ({placeholders})
+            """,
+            tuple(terminal_states),
+        ).fetchone()
+        return int(row[0] or 0)
+    except sqlite3.Error as exc:
+        raise RuntimeError("EDLI_EXPECTED_PARKED_COMMAND_PROJECTION_UNREADABLE") from exc
+    finally:
+        try:
+            conn.close()
+        except UnboundLocalError:
+            pass
+
+
+def _held_sell_global_auction_debt_count(state_dir: Path) -> int:
+    """Return exact held-SELL debt using the reactor's public queue semantics."""
+
+    from src.runtime.reactor_wake import (
+        GLOBAL_AUCTION_COMPLETION_WAKE_REASON,
+        REACTOR_WAKE_FILENAME,
+        REACTOR_WAKE_QUEUE_SUFFIX,
+        _read_reactor_wake_path,
+    )
+
+    wake_path = state_dir / REACTOR_WAKE_FILENAME
+    queue_dir = wake_path.with_name(f"{wake_path.name}{REACTOR_WAKE_QUEUE_SUFFIX}")
+    wakes = _strict_reactor_wake_snapshot(
+        wake_path=wake_path,
+        queue_dir=queue_dir,
+        read_wake=_read_reactor_wake_path,
+    )
+    return len(
+        {
+            wake.wake_id
+            for wake in wakes
+            if (
+                wake.reason == GLOBAL_AUCTION_COMPLETION_WAKE_REASON
+                and wake.held_sell_reauction_requests
+            )
+        }
+    )
+
+
+def _strict_reactor_wake_snapshot(
+    *,
+    wake_path: Path,
+    queue_dir: Path,
+    read_wake,
+):
+    """Read each present wake file once; missing surfaces are a valid empty queue."""
+
+    def validate(wake_file: Path):
+        try:
+            if not stat.S_ISREG(wake_file.stat().st_mode):
+                raise RuntimeError("EDLI_EXPECTED_PARKED_WAKE_SURFACE_INVALID")
+            # Public snapshots intentionally suppress parse failures.  Reuse the
+            # reactor's strict parser so acceptance cannot turn corruption into zero debt.
+            wake = read_wake(wake_file, fail_on_error=True)
+        except OSError as exc:
+            raise RuntimeError("EDLI_EXPECTED_PARKED_WAKE_SURFACE_UNREADABLE") from exc
+        except ValueError as exc:
+            raise RuntimeError("EDLI_EXPECTED_PARKED_WAKE_SURFACE_INVALID") from exc
+        if wake is None:
+            raise RuntimeError("EDLI_EXPECTED_PARKED_WAKE_SURFACE_UNREADABLE")
+        return wake
+
+    wakes = []
+    try:
+        wake_path.stat()
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        raise RuntimeError("EDLI_EXPECTED_PARKED_WAKE_SURFACE_UNREADABLE") from exc
+    else:
+        wakes.append(validate(wake_path))
+
+    try:
+        if not stat.S_ISDIR(queue_dir.stat().st_mode):
+            raise RuntimeError("EDLI_EXPECTED_PARKED_WAKE_SURFACE_INVALID")
+        queue_files = tuple(
+            path for path in queue_dir.iterdir() if path.suffix == ".json"
+        )
+    except FileNotFoundError:
+        return tuple(wakes)
+    except OSError as exc:
+        raise RuntimeError("EDLI_EXPECTED_PARKED_WAKE_SURFACE_UNREADABLE") from exc
+    for queue_file in queue_files:
+        wakes.append(validate(queue_file))
+    return tuple(wakes)
+
+
+def _sqlite_table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
+    rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+    columns = {str(row[1]) for row in rows}
+    if not columns:
+        raise RuntimeError(f"EDLI_EXPECTED_PARKED_TABLE_MISSING:{table}")
+    return columns
+
+
 def _latest_complete_global_auction_receipt(
     trade_db: Path,
     *,
     launched_floor: datetime,
+    require_held_coverage_count: int = 0,
+    require_held_position_ids: tuple[str, ...] = (),
 ) -> tuple[int, int, int] | None:
     """Return a post-launch complete auction as direct reactor progress proof."""
 
     if not trade_db.exists():
         return None
     try:
+        from src.ops.monitor_cadence import latest_complete_global_auction_receipt
+
         conn = sqlite3.connect(f"file:{trade_db}?mode=ro", uri=True, timeout=2.0)
         conn.row_factory = sqlite3.Row
-        rows = conn.execute(
-            """
-            SELECT id, started_at, completed_at, artifact_json
-              FROM decision_log
-             WHERE mode = 'global_single_order_auction'
-             ORDER BY id DESC
-             LIMIT 8
-            """
-        ).fetchall()
-        conn.close()
+        try:
+            return latest_complete_global_auction_receipt(
+                conn,
+                completed_not_before=launched_floor,
+                require_held_coverage_count=require_held_coverage_count,
+                require_held_position_ids=require_held_position_ids,
+            )
+        finally:
+            conn.close()
     except Exception:
         return None
-    for row in rows:
-        try:
-            artifact = json.loads(row["artifact_json"] or "{}")
-            summary = artifact.get("summary") or {}
-            completed_at = _parse_iso_utc(
-                artifact.get("completed_at") or row["completed_at"] or row["started_at"]
-            )
-            candidate_count = int(summary.get("candidate_evaluation_count") or 0)
-            scope_count = int(summary.get("full_scope_family_count") or 0)
-        except (TypeError, ValueError, json.JSONDecodeError):
-            continue
-        if (
-            completed_at is not None
-            and completed_at >= launched_floor
-            and summary.get("candidate_coverage_complete") is True
-            and summary.get("scope_family_coverage_complete") is True
-            and candidate_count > 0
-            and scope_count > 0
-        ):
-            return int(row["id"]), candidate_count, scope_count
-    return None
 
 
 def _stop_label(label: str) -> tuple[bool, str]:
@@ -775,8 +1158,63 @@ def _stop_label(label: str) -> tuple[bool, str]:
         timeout=20.0,
     )
     if stop.returncode == 0:
+        if not _wait_for_launchctl_unloaded(label):
+            return False, f"FAILED stop {label}: service still loaded after bootout"
         return True, f"stopped {label}"
     return False, f"FAILED stop {label}: rc={stop.returncode} {stop.stderr.strip()}"
+
+
+def _run_restart_recovery_with_quiesced_prerequisites(
+    labels: list[str],
+    prerequisite_labels: list[str],
+    *,
+    expected_sha: str,
+) -> tuple[bool, str]:
+    """Give canonical restart recovery an exclusive writer interval.
+
+    Live prerequisites are recurring DB writers.  Merely stopping the order
+    daemon leaves recovery racing those sidecars for SQLite's single writer.
+    Quiesce the already-verified prerequisites, run recovery, then restore and
+    re-verify every sidecar before returning.  Restoration is unconditional:
+    recovery failure keeps trading stopped, not the source/data mesh.
+    """
+
+    details: list[str] = []
+    quiesced: list[str] = []
+    quiesce_ok = True
+    for label in prerequisite_labels:
+        ok, detail = _stop_label(label)
+        details.append(detail)
+        if ok:
+            quiesced.append(label)
+        else:
+            quiesce_ok = False
+            break
+
+    if quiesce_ok:
+        recovery_ok, recovery_detail = _run_restart_recovery_if_needed(labels)
+    else:
+        recovery_ok = False
+        recovery_detail = "live restart recovery not run: prerequisite quiesce failed"
+    details.append(recovery_detail)
+
+    restore_started_at = datetime.now(timezone.utc)
+    restore_ok = True
+    for label in quiesced:
+        ok, detail = _launch_or_restart_label(label)
+        details.append(detail)
+        if not ok:
+            restore_ok = False
+    if restore_ok:
+        identity_ok, identity_detail = _wait_for_prerequisite_code_identity(
+            quiesced,
+            expected_sha=expected_sha,
+            launched_after=restore_started_at,
+        )
+        details.append(identity_detail)
+        restore_ok = identity_ok
+
+    return recovery_ok and restore_ok, "\n".join(details)
 
 
 def _runtime_status_summary() -> dict:
@@ -1010,33 +1448,62 @@ def _ensure_restart_world_schemas(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
-def _ensure_restart_trade_schemas(conn: sqlite3.Connection) -> None:
-    """Install trade bootstrap plus guarded schema expansions while all daemons are stopped."""
+def _assert_restart_trade_schema_ready(conn: sqlite3.Connection) -> None:
+    """Fail closed on restart unless trade schema metadata is already complete."""
 
-    from src.state.db import init_schema_trade_only
-    from src.state.ledger import ensure_token_suppression_reason_schema
+    if conn.in_transaction:
+        raise RuntimeError("restart trade schema assertion requires no open transaction")
+    from src.execution.settlement_commands import assert_settlement_schema_ready
+    from src.state.table_registry import DBIdentity, assert_db_matches_registry
 
-    # B071 may already expose token_suppression as a VIEW. Upgrade its history
-    # CHECK before the general initializer sees that alias shape.
-    conn.execute("BEGIN IMMEDIATE")
-    try:
-        ensure_token_suppression_reason_schema(conn)
-    except Exception:
-        conn.rollback()
-        raise
-    conn.commit()
+    assert_db_matches_registry(conn, DBIdentity.TRADE)
+    assert_settlement_schema_ready(conn)
 
-    init_schema_trade_only(conn)
+    def _object(name: str, kind: str) -> str:
+        row = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type = ? AND name = ?",
+            (kind, name),
+        ).fetchone()
+        return str(row[0] or "") if row else ""
 
-    # Fresh DBs create the new shape during bootstrap; legacy DBs arrive here
-    # already upgraded. Keep the postcondition explicit and fail before start.
-    conn.execute("BEGIN IMMEDIATE")
-    try:
-        ensure_token_suppression_reason_schema(conn)
-    except Exception:
-        conn.rollback()
-        raise
-    conn.commit()
+    history_sql = _object("token_suppression_history", "table")
+    if "chain_only_auto_resolved_match" not in history_sql:
+        raise RuntimeError("restart trade schema missing token suppression history reason")
+    history_columns = {
+        row[1]
+        for row in conn.execute("PRAGMA table_info(token_suppression_history)")
+    }
+    required_history_columns = {
+        "history_id", "token_id", "suppression_reason", "operation", "recorded_at"
+    }
+    if not required_history_columns.issubset(history_columns):
+        raise RuntimeError("restart trade schema token suppression history shape is incomplete")
+
+    token_table_sql = _object("token_suppression", "table")
+    token_view_sql = _object("token_suppression", "view")
+    current_view_sql = _object("token_suppression_current", "view")
+    if token_table_sql:
+        token_sql = token_table_sql
+    elif token_view_sql and current_view_sql:
+        if (
+            "token_suppression_current" not in token_view_sql
+            or "token_suppression_history" not in current_view_sql
+        ):
+            raise RuntimeError("restart trade schema token suppression view lineage is invalid")
+        token_sql = token_view_sql + current_view_sql
+    else:
+        raise RuntimeError("restart trade schema token suppression table/view shape is invalid")
+    if token_table_sql and "chain_only_auto_resolved_match" not in token_sql:
+        raise RuntimeError("restart trade schema missing token suppression reason")
+
+    migration = conn.execute(
+        "SELECT 1 FROM _migrations_applied WHERE name = ?",
+        ("202607_cas_reservation_ledger",),
+    ).fetchone()
+    if migration is None:
+        raise RuntimeError("restart trade schema migration ledger is incomplete")
+    if conn.in_transaction:
+        raise RuntimeError("restart trade schema assertion opened a transaction")
 
 
 def _run_restart_recovery_if_needed(labels: list[str]) -> tuple[bool, str]:
@@ -1051,15 +1518,21 @@ def _run_restart_recovery_if_needed(labels: list[str]) -> tuple[bool, str]:
     code = textwrap.dedent(
         """
         import json
+        import sqlite3
+        import time
         from scripts.migrations import apply_migrations
         from scripts.deploy_live import (
-            _ensure_restart_trade_schemas,
+            _assert_restart_trade_schema_ready,
             _ensure_restart_world_schemas,
         )
         from src.state.db import (
             get_trade_connection,
             get_world_connection,
+            get_world_connection_read_only,
             get_world_connection_with_trades_required,
+        )
+        from src.state.schema.opportunity_event_processing_schema import (
+            assert_active_projection_ready,
         )
         applied = {}
 
@@ -1071,20 +1544,63 @@ def _run_restart_recovery_if_needed(labels: list[str]) -> tuple[bool, str]:
                 target='202607_drop_world_collateral_unsettled_ghost',
                 db_identity='world',
             )
+            applied['world_active_redecision_projection'] = apply_migrations(
+                world_conn,
+                target='202608_edli_active_redecision_projection',
+                db_identity='world',
+            )
+            applied['world_active_redecision_backfill_notnull'] = apply_migrations(
+                world_conn,
+                target='202608_edli_active_redecision_projection_receipt_notnull',
+                db_identity='world',
+            )
             world_conn.commit()
         finally:
             world_conn.close()
 
+        # The projection reader is never allowed to start on merely-created
+        # objects: prove the migration committed its complete active-set receipt
+        # from a read-only connection before any daemon is bootstrapped.
+        world_ro = get_world_connection_read_only()
+        try:
+            backfill_columns = {
+                str(row[1]): int(row[3])
+                for row in world_ro.execute(
+                    "PRAGMA table_info(opportunity_event_processing_type_backfill)"
+                )
+            }
+            if backfill_columns.get('consumer_name') != 1:
+                raise RuntimeError('EDLI_BACKFILL_RECEIPT_CONSUMER_NOTNULL_REQUIRED')
+            seeded_active_count, seed_high_water_rowid = assert_active_projection_ready(
+                world_ro,
+                consumer_name='edli_reactor_v1',
+            )
+            receipt = world_ro.execute(
+                "SELECT completed_at "
+                "FROM opportunity_event_processing_type_backfill "
+                "WHERE consumer_name = 'edli_reactor_v1'"
+            ).fetchone()
+            if receipt is None:
+                raise RuntimeError('EDLI_ACTIVE_REDECISION_PROJECTION_UNSEEDED')
+            applied['world_active_redecision_projection_receipt'] = {
+                'seeded_active_count': seeded_active_count,
+                'seed_high_water_rowid': seed_high_water_rowid,
+                'completed_at': str(receipt[0]),
+            }
+            applied['world_active_redecision_backfill_notnull_receipt'] = {
+                'consumer_name_notnull': True,
+            }
+        finally:
+            world_ro.close()
+
         trade_conn = get_trade_connection(write_class='live')
         try:
-            _ensure_restart_trade_schemas(trade_conn)
             applied['trade'] = apply_migrations(
                 trade_conn,
                 target='202607_cas_reservation_ledger',
                 db_identity='trade',
             )
-            _ensure_restart_trade_schemas(trade_conn)
-            trade_conn.commit()
+            _assert_restart_trade_schema_ready(trade_conn)
         finally:
             trade_conn.close()
 
@@ -1093,17 +1609,54 @@ def _run_restart_recovery_if_needed(labels: list[str]) -> tuple[bool, str]:
             append_confirmed_trade_facts_to_edli,
             append_rest_filled_orphan_trade_facts_to_edli,
         )
+        from src.ingest.price_channel_ingest import (
+            _edli_trade_fact_bridge_candidates_read_only,
+        )
 
-        summary = reconcile_unresolved_commands(scope='restart_preflight')
+        recovery_deadline_monotonic = time.monotonic() + 60.0
+        summary = reconcile_unresolved_commands(
+            scope='restart_preflight',
+            deadline_monotonic=recovery_deadline_monotonic,
+        )
+        (
+            confirmed_candidates,
+            rest_orphan_candidates,
+            absorbed_fill_aggregate_ids,
+        ) = _edli_trade_fact_bridge_candidates_read_only()
         bridge_conn = get_world_connection_with_trades_required(write_class='live')
         try:
-            summary['confirmed_fill_bridge_appended'] = append_confirmed_trade_facts_to_edli(
-                bridge_conn
+            bridge_deadline_monotonic = time.monotonic() + 15.0
+            bridge_conn.execute('PRAGMA busy_timeout = 0')
+            bridge_conn.set_progress_handler(
+                lambda: int(time.monotonic() >= bridge_deadline_monotonic),
+                1000,
             )
-            summary['rest_fill_orphan_bridge_appended'] = (
-                append_rest_filled_orphan_trade_facts_to_edli(bridge_conn)
-            )
-            bridge_conn.commit()
+            try:
+                summary['confirmed_fill_bridge_appended'] = append_confirmed_trade_facts_to_edli(
+                    bridge_conn,
+                    candidates=confirmed_candidates,
+                    absorbed_fill_aggregate_ids=absorbed_fill_aggregate_ids,
+                )
+                summary['rest_fill_orphan_bridge_appended'] = (
+                    append_rest_filled_orphan_trade_facts_to_edli(
+                        bridge_conn,
+                        candidates=rest_orphan_candidates,
+                        absorbed_fill_aggregate_ids=(),
+                    )
+                )
+                bridge_conn.commit()
+            except sqlite3.OperationalError as exc:
+                message = str(exc).lower()
+                if not (
+                    time.monotonic() >= bridge_deadline_monotonic
+                    or 'locked' in message
+                    or 'busy' in message
+                    or 'interrupted' in message
+                ):
+                    raise
+                bridge_conn.rollback()
+                summary['edli_trade_fact_bridge_deferred'] = True
+                summary['edli_trade_fact_bridge_deferred_reason'] = 'db_budget_or_contention'
         finally:
             bridge_conn.close()
         summary['schema_migrations_applied'] = applied
@@ -1122,18 +1675,24 @@ def _run_restart_recovery_if_needed(labels: list[str]) -> tuple[bool, str]:
         )
     except Exception as exc:  # noqa: BLE001
         return False, f"live restart recovery could not run: {exc}"
-    output = (res.stdout or res.stderr or "").strip()
-    tail = "\n".join(output.splitlines()[-40:]) if output else "<no output>"
+    stdout = (res.stdout or "").strip()
+    stderr = (res.stderr or "").strip()
+    diagnostic = "\n".join(part for part in (stderr, stdout) if part)
+    tail = "\n".join(diagnostic.splitlines()[-80:]) if diagnostic else "<no output>"
     if res.returncode != 0:
         return False, f"live restart recovery failed rc={res.returncode}:\n{tail}"
     try:
-        summary = json.loads(output.splitlines()[-1])
+        summary = json.loads(stdout.splitlines()[-1])
     except Exception:
         summary = {}
     return True, f"live restart recovery passed: {json.dumps(summary, sort_keys=True)}"
 
 
-def _pause_entries_for_live_restart_if_needed(labels: list[str]) -> tuple[bool, str]:
+def _pause_entries_for_live_restart_if_needed(
+    labels: list[str],
+    *,
+    expected_sha: str | None = None,
+) -> tuple[bool, str]:
     """Durably pause entries before a live-trading restart can boot new code.
 
     Restarting ``src.main`` creates a short window where deployment-freshness
@@ -1149,42 +1708,29 @@ def _pause_entries_for_live_restart_if_needed(labels: list[str]) -> tuple[bool, 
     py = os.path.join(live_repo, ".venv", "bin", "python")
     if not os.path.exists(py):
         py = sys.executable
+    expected_literal = json.dumps(str(expected_sha or head_sha(short=False)))
     code = textwrap.dedent(
-        """
-        from datetime import datetime, timezone
-        from src.control.control_plane import pause_entries
-        from src.state.db import get_world_connection
+        f"""
+        from src.control.control_plane import arm_deploy_live_restart_guard
 
-        now = datetime.now(timezone.utc).isoformat()
-        conn = get_world_connection()
-        try:
-            row = conn.execute(
-                '''
-                SELECT reason, issued_by, issued_at
-                  FROM control_overrides
-                 WHERE target_type = 'global'
-                   AND target_key = 'entries'
-                   AND action_type = 'gate'
-                   AND lower(COALESCE(value, '')) IN ('1', 'true', 'yes', 'on')
-                   AND issued_by IN ('control_plane', 'operator')
-                   AND effective_until IS NULL
-                   AND issued_at <= ?
-                 ORDER BY precedence DESC, issued_at DESC, override_id DESC
-                 LIMIT 1
-                ''',
-                (now,),
-            ).fetchone()
-        finally:
-            conn.close()
-
-        if row is not None:
+        # Existing operator/risk/source pauses remain selected and untouched.
+        # The guard is indefinite (effective_until=None), never a TTL.
+        result = arm_deploy_live_restart_guard(expected_sha={expected_literal})
+        if result.get('status') == 'preserved':
             print(
                 'entries pause guard preserved: '
-                f"issued_by={row[1]} reason={row[0]}"
+                f"issued_by={{result.get('issued_by')}} "
+                f"reason={{result.get('reason')}}"
+            )
+        elif result.get('status') == 'armed':
+            witness = result.get('witness') or {{}}
+            print(
+                'entries pause guard armed: '
+                f"expected_sha={{witness.get('expected_sha')}} "
+                f"issued_at={{witness.get('issued_at')}}"
             )
         else:
-            pause_entries('deploy_live_restart_guard', issued_by='control_plane', effective_until=None)
-            print('entries pause guard armed')
+            raise RuntimeError(f"restart guard arm refused: {{result}}")
         """
     ).strip()
     try:
@@ -1209,6 +1755,7 @@ def _pause_entries_with_stuck_live_recovery(
     labels: list[str],
     *,
     live_was_loaded: bool,
+    expected_sha: str | None = None,
 ) -> tuple[bool, str]:
     """Arm the restart guard after stopping requested daemons that hold the writer.
 
@@ -1219,7 +1766,13 @@ def _pause_entries_with_stuck_live_recovery(
     Other pause failures remain fail-closed, with every stopped label left down.
     """
 
-    ok, detail = _pause_entries_for_live_restart_if_needed(labels)
+    if expected_sha is None:
+        ok, detail = _pause_entries_for_live_restart_if_needed(labels)
+    else:
+        ok, detail = _pause_entries_for_live_restart_if_needed(
+            labels,
+            expected_sha=expected_sha,
+        )
     writer_stuck = "timed out after" in detail or "database is locked" in detail
     if ok or not writer_stuck:
         return ok, detail
@@ -1233,7 +1786,13 @@ def _pause_entries_with_stuck_live_recovery(
         if not _wait_for_launchctl_unloaded(label):
             stop_details.append(f"FAILED unload wait {label}")
             return False, f"{detail}\n" + "; ".join(stop_details)
-    retry_ok, retry_detail = _pause_entries_for_live_restart_if_needed(labels)
+    if expected_sha is None:
+        retry_ok, retry_detail = _pause_entries_for_live_restart_if_needed(labels)
+    else:
+        retry_ok, retry_detail = _pause_entries_for_live_restart_if_needed(
+            labels,
+            expected_sha=expected_sha,
+        )
     prior_state = "loaded" if live_was_loaded else "already absent"
     return (
         retry_ok,
@@ -1246,7 +1805,7 @@ def _pause_entries_with_stuck_live_recovery(
 def _resume_entries_after_verified_live_restart_if_needed(
     labels: list[str],
 ) -> tuple[bool, str]:
-    """Clear only this deploy's guard after every post-start proof is green."""
+    """CAS-reset only this invocation's guard after sync post-start proofs."""
 
     if LIVE_TRADING_LABEL not in labels:
         return True, "entry resume not required for this daemon"
@@ -1256,45 +1815,17 @@ def _resume_entries_after_verified_live_restart_if_needed(
         py = sys.executable
     code = textwrap.dedent(
         """
-        from datetime import datetime, timezone
-        from src.control.control_plane import resume_entries
-        from src.state.db import get_world_connection
+        from src.control.control_plane import recover_deploy_live_restart_guard
 
-        now = datetime.now(timezone.utc).isoformat()
-        conn = get_world_connection()
-        try:
-            row = conn.execute(
-                '''
-                SELECT reason, issued_by
-                  FROM control_overrides
-                 WHERE target_type = 'global'
-                   AND target_key = 'entries'
-                   AND action_type = 'gate'
-                   AND lower(COALESCE(value, '')) IN ('1', 'true', 'yes', 'on')
-                   AND issued_by IN ('control_plane', 'operator')
-                   AND (effective_until IS NULL OR effective_until > ?)
-                   AND issued_at <= ?
-                 ORDER BY precedence DESC, issued_at DESC, override_id DESC
-                 LIMIT 1
-                ''',
-                (now, now),
-            ).fetchone()
-        finally:
-            conn.close()
-
-        if row is None:
-            print('entries pause guard already clear')
-        elif row[0] == 'deploy_live_restart_guard' and row[1] == 'control_plane':
-            resume_entries(
-                'deploy_live_restart_guard_verified_runtime_queue_monitor',
-                issued_by='control_plane',
-            )
-            print('deploy live restart guard cleared')
+        result = recover_deploy_live_restart_guard()
+        status = result.get('status')
+        if status == 'reset':
+            print('deploy live restart guard cleared by shared proof-driven CAS reset')
+        elif status == 'noop':
+            print(f"entries pause guard preserved after deploy: {result.get('reason')}")
         else:
-            print(
-                'entries pause guard preserved after deploy: '
-                f"issued_by={row[1]} reason={row[0]}"
-            )
+            print(f"deploy live restart guard retained: {result}")
+            raise SystemExit(1)
         """
     ).strip()
     try:
@@ -1400,6 +1931,54 @@ def cmd_restart(args: argparse.Namespace) -> int:
         return 1
 
 
+def _restore_paused_live_monitoring_after_failed_restart(
+    *,
+    post_live_labels: list[str],
+    expected_sha: str,
+) -> tuple[bool, str]:
+    """Restore held-capital monitoring without clearing the restart pause.
+
+    Recovery and preflight failures must block new entries, but they must not
+    strand already-held capital without ``src.main`` or its independent
+    launchd watchdog.  Start both services, then prove the loaded process and
+    held-position monitor advance.  The durable deploy guard remains armed;
+    only the fully verified success path may clear it.
+    """
+
+    details: list[str] = []
+    launched_after = datetime.now(timezone.utc)
+    live_ok, live_detail = _launch_or_restart_label(LIVE_TRADING_LABEL)
+    details.append(live_detail)
+
+    watchdog_ok = True
+    for label in post_live_labels:
+        ok, detail = _launch_or_restart_label(label)
+        details.append(detail)
+        watchdog_ok = watchdog_ok and ok
+
+    runtime_ok = False
+    monitor_ok = False
+    if live_ok:
+        runtime_ok, runtime_detail = _wait_for_live_runtime_fresh(
+            expected_sha=expected_sha,
+            launched_after=launched_after,
+        )
+        details.append(runtime_detail)
+        if runtime_ok:
+            monitor_ok, monitor_detail = _wait_for_post_start_monitor_cadence(
+                launched_after=launched_after,
+            )
+            details.append(monitor_detail)
+
+    restored = live_ok and watchdog_ok and runtime_ok and monitor_ok
+    posture = (
+        "paused live monitoring restored"
+        if restored
+        else "paused live monitoring restoration incomplete"
+    )
+    return restored, f"{posture}; deploy entry guard remains armed:\n" + "\n".join(details)
+
+
 def _cmd_restart_locked(args: argparse.Namespace) -> int:
     target = args.daemon
     labels = _restart_labels_for_target(target)
@@ -1436,10 +2015,12 @@ def _cmd_restart_locked(args: argparse.Namespace) -> int:
         if includes_live_trading
         else False
     )
+    expected_live_sha = head_sha(short=False) if includes_live_trading else ""
 
     pause_ok, pause_detail = _pause_entries_with_stuck_live_recovery(
         labels,
         live_was_loaded=live_was_loaded_before,
+        expected_sha=expected_live_sha,
     )
     if not pause_ok:
         print("REFUSING to restart — live entry pause guard is not armed:")
@@ -1447,7 +2028,6 @@ def _cmd_restart_locked(args: argparse.Namespace) -> int:
         return 1
     print(pause_detail)
 
-    expected_live_sha = ""
     launched_after: datetime | None = None
     non_live_labels = [label for label in labels if label != LIVE_TRADING_LABEL]
     # The venue-heartbeat service owns the heartbeat supervisor, which repairs an
@@ -1461,31 +2041,6 @@ def _cmd_restart_locked(args: argparse.Namespace) -> int:
     preflight_prerequisite_labels = [
         label for label in non_live_labels if label not in post_live_labels
     ]
-    if includes_live_trading:
-        expected_live_sha = head_sha(short=False)
-        ok, detail = _stop_label(LIVE_TRADING_LABEL)
-        if ok:
-            print(detail)
-        else:
-            print(detail, file=sys.stderr)
-            return 1
-        for label in non_live_labels:
-            ok, detail = _stop_label(label)
-            if ok:
-                print(detail)
-            else:
-                print(detail, file=sys.stderr)
-                return 1
-
-    recovery_ok, recovery_detail = _run_restart_recovery_if_needed(labels)
-    if not recovery_ok:
-        print("REFUSING to restart — live restart recovery is not green:")
-        print(recovery_detail)
-        if includes_live_trading:
-            print("live-trading left stopped; fix restart recovery blockers before starting it.", file=sys.stderr)
-        return 1
-    print(recovery_detail)
-
     prerequisite_launch_started_at = datetime.now(timezone.utc)
     for label in preflight_prerequisite_labels:
         ok, detail = _launch_or_restart_label(label)
@@ -1512,18 +2067,73 @@ def _cmd_restart_locked(args: argparse.Namespace) -> int:
             print("REFUSING to restart — live prerequisite code identity is not ready:")
             print(prerequisite_detail)
             print(
-                "live-trading left stopped; fix prerequisite daemon startup before starting it.",
+                "live-trading left running with entries paused; fix prerequisite daemon startup before retrying.",
                 file=sys.stderr,
             )
             return 1
         print(prerequisite_detail)
+
+        # Keep the currently loaded order daemon monitoring held capital while
+        # new-code prerequisites become ready.  Stopping it before sidecar
+        # reload/identity waits created multi-minute MONITOR_REFRESHED blackouts
+        # during which Day0 evidence and executable bids could both move.  The
+        # process-absent window starts only after every prerequisite is ready.
+        ok, detail = _stop_label(LIVE_TRADING_LABEL)
+        if ok:
+            print(detail)
+        else:
+            print(detail, file=sys.stderr)
+            return 1
+        for label in post_live_labels:
+            ok, detail = _stop_label(label)
+            if ok:
+                print(detail)
+            else:
+                print(detail, file=sys.stderr)
+                return 1
+
+    if includes_live_trading:
+        recovery_ok, recovery_detail = (
+            _run_restart_recovery_with_quiesced_prerequisites(
+                labels,
+                preflight_prerequisite_labels,
+                expected_sha=expected_live_sha,
+            )
+        )
+    else:
+        recovery_ok, recovery_detail = _run_restart_recovery_if_needed(labels)
+    if not recovery_ok:
+        print("REFUSING to restart — live restart recovery is not green:")
+        print(recovery_detail)
+        if includes_live_trading:
+            restored, restore_detail = _restore_paused_live_monitoring_after_failed_restart(
+                post_live_labels=post_live_labels,
+                expected_sha=expected_live_sha,
+            )
+            print(restore_detail, file=sys.stderr)
+            if not restored:
+                print(
+                    "held-capital monitoring restoration failed; entry pause remains armed",
+                    file=sys.stderr,
+                )
+        return 1
+    print(recovery_detail)
 
     preflight_ok, preflight_detail = _run_restart_preflight_if_needed(labels)
     if not preflight_ok:
         print("REFUSING to restart — live restart preflight is not green:")
         print(preflight_detail)
         if includes_live_trading:
-            print("live-trading left stopped; fix preflight blockers before starting it.", file=sys.stderr)
+            restored, restore_detail = _restore_paused_live_monitoring_after_failed_restart(
+                post_live_labels=post_live_labels,
+                expected_sha=expected_live_sha,
+            )
+            print(restore_detail, file=sys.stderr)
+            if not restored:
+                print(
+                    "held-capital monitoring restoration failed; entry pause remains armed",
+                    file=sys.stderr,
+                )
         return 1
     print(preflight_detail)
 
@@ -1568,6 +2178,7 @@ def _cmd_restart_locked(args: argparse.Namespace) -> int:
                 else:
                     queue_ok, queue_detail = _wait_for_post_start_edli_queue_progress(
                         launched_after=launched_after,
+                        post_start_freshness_verified=(runtime_ok and monitor_ok),
                     )
                     print(queue_detail)
                     if not queue_ok:
@@ -1582,6 +2193,11 @@ def _cmd_restart_locked(args: argparse.Namespace) -> int:
         else:
             rc_all = 1
             print(detail, file=sys.stderr)
+            _, restore_detail = _restore_paused_live_monitoring_after_failed_restart(
+                post_live_labels=post_live_labels,
+                expected_sha=expected_live_sha,
+            )
+            print(restore_detail, file=sys.stderr)
     return rc_all
 
 

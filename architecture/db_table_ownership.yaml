@@ -1053,6 +1053,44 @@ tables:
     notes: >
       EDLI v1 mutable per-consumer processing state for immutable opportunity_events.
 
+  - name: opportunity_event_processing_type_projection
+    db: world
+    schema_class: world_class
+    schema_version_owner: SCHEMA_VERSION
+    created_by: scripts/migrations/202608_edli_active_redecision_projection.py
+    pk_col: "[consumer_name, event_id]"
+    required_columns:
+      - {name: consumer_name, type: TEXT, nullable: false}
+      - {name: event_id, type: TEXT, nullable: false}
+      - {name: event_type, type: TEXT, nullable: false}
+      - {name: processing_status, type: TEXT, nullable: false}
+      - {name: updated_at, type: TEXT, nullable: false}
+    notes: >
+      Active-only mutable projection of immutable opportunity_events.event_type
+      onto pending/processing consumer rows. Insert/update triggers maintain it
+      atomically with processing mutations; terminal rows are removed without
+      changing append-only opportunity_events retention.
+
+  - name: opportunity_event_processing_type_backfill
+    db: world
+    schema_class: world_class
+    schema_version_owner: SCHEMA_VERSION
+    created_by: scripts/migrations/202608_edli_active_redecision_projection_receipt_notnull.py
+    pk_col: consumer_name
+    required_columns:
+      - {name: consumer_name, type: TEXT, nullable: false}
+      - {name: next_rowid, type: INTEGER, nullable: false}
+      - {name: seeded_active_count, type: INTEGER, nullable: true}
+      - {name: seed_high_water_rowid, type: INTEGER, nullable: true}
+    notes: >
+      Per-consumer active-set seed receipt. The 202608 follow-up rebuild makes
+      its TEXT primary key explicitly NOT NULL for SQLite registry parity.
+      completed_at, seeded_active_count,
+      and seed_high_water_rowid become authoritative only after one bounded,
+      indexed migration seed commits; next_rowid is retained compatibility data,
+      never a reader cursor. It never authorizes deletion or mutation of
+      append-only opportunity_events.
+
   - name: event_dead_letters
     db: world
     schema_class: world_class
@@ -1588,7 +1626,7 @@ tables:
       - {name: schema_version, type: INTEGER, nullable: false}
     notes: >
       Exit-timing grade ledger (2026-06-22, lifecycle design consult
-      REQ-20260622-060011 + operator "sell before market notice and gain is ALSO a
+      external consult, 2026-06-22 + operator "sell before market notice and gain is ALSO a
       good trade"). One row per CLOSED (exited) position. The ORTHOGONAL second
       attribution axis to settlement_attribution (entry skill): it grades the EXIT
       decision by exit_alpha_usd = net_exit_proceeds - would_have_settled_value, so
@@ -1623,7 +1661,7 @@ tables:
       - {name: schema_version, type: INTEGER, nullable: false}
     notes: >
       Family-rebalance lifecycle LEASE (2026-06-22, lifecycle design consult
-      REQ-20260622-060011 — D1 fill-up / D2 shift-bin). One ACTIVE row per
+      external consult, 2026-06-22 — D1 fill-up / D2 shift-bin). One ACTIVE row per
       (env,city,target_date,metric) family while a re-decide-held-exposure operation
       is in flight; the partial UNIQUE index uq_family_rebalance_active over the
       non-terminal statuses is THE concurrency guard against the duplicate-EDLI /
@@ -2566,9 +2604,9 @@ tables:
     db: trade
     schema_class: trade_class
     schema_version_owner: null
-    created_by: init_schema_pre_pr_s4b
-    pk_col: null
-    notes: Ghost on zeus_trades.db from pre-PR-S4b init_schema(trade_conn). Drop after 2026-08-09.
+    created_by: init_schema_trade_only
+    pk_col: id
+    notes: Canonical append-only decision and cycle receipt journal. Schema-21 global-auction winners bind this exact retained row and its content hashes into ActionableTradeCertificate; command persistence and settlement attribution re-read it, so these referenced rows are durable execution evidence and must not be inferred or dropped.
 
   # 2026-06-18 live boot recovery: additional residual world-class ghosts observed
   # on state/zeus_trades.db after the registry boot assertion was re-enabled. These

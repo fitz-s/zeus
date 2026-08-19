@@ -1,10 +1,12 @@
 # Created: 2026-04-27
-# Lifecycle: created=2026-04-27; last_reviewed=2026-05-15; last_reused=2026-05-15
+# Last reused/audited: 2026-08-10
+# Lifecycle: created=2026-04-27; last_reviewed=2026-08-10; last_reused=2026-08-10
 # Purpose: R3 M2 unknown-side-effect semantics for post-POST submit uncertainty.
 # Reuse: Run when executor submit exception handling, venue command recovery,
 #        or idempotency/economic-intent duplicate blocking changes.
 # Authority basis: docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/M2.yaml
 #                  + docs/archive/2026-Q2/task_2026-05-15_live_order_e2e_goal/LIVE_ORDER_E2E_GOAL_PLAN.md
+#                  + 2026-08-10 current WORLD/FORECAST certificate fixtures and final bounded-submit boundary.
 """M2: post-side-effect submit uncertainty must not become semantic rejection."""
 
 from __future__ import annotations
@@ -110,9 +112,23 @@ def _insert_actionable_certificate(conn: sqlite3.Connection, *, token_id: str, p
     payload_json = json.dumps(_actionable_payload(token_id=token_id, price=price), sort_keys=True)
     payload_hash = hashlib.sha256(payload_json.encode()).hexdigest()
     certificate_hash = hashlib.sha256(f"actionable:{token_id}:{price}".encode()).hexdigest()
-    conn.execute(
-        """
-        INSERT OR REPLACE INTO decision_certificates (
+    values = (
+        f"cert-{certificate_hash[:12]}",
+        f"actionable:{token_id}:{price}",
+        NOW.isoformat(),
+        NOW.isoformat(),
+        NOW.isoformat(),
+        NOW.isoformat(),
+        NOW.isoformat(),
+        NOW.isoformat(),
+        NOW.isoformat(),
+        payload_json,
+        payload_hash,
+        certificate_hash,
+        NOW.isoformat(),
+    )
+    certificate_sql = """
+        INSERT OR REPLACE INTO {table_ref} (
             certificate_id, certificate_type, schema_version, canonicalization_version,
             semantic_key, claim_type, mode, decision_time, source_available_at,
             agent_received_at, persisted_at, max_parent_source_available_at,
@@ -123,32 +139,79 @@ def _insert_actionable_certificate(conn: sqlite3.Connection, *, token_id: str, p
         ) VALUES (?, 'ActionableTradeCertificate', 1, 'test', ?, 'actionable_trade',
             'LIVE', ?, ?, ?, ?, ?, ?, ?, 'test-authority', 'test', 'test-algo',
             'test', NULL, NULL, ?, ?, ?, 'VERIFIED', ?)
-        """,
-        (
-            f"cert-{certificate_hash[:12]}",
-            f"actionable:{token_id}:{price}",
-            NOW.isoformat(),
-            NOW.isoformat(),
-            NOW.isoformat(),
-            NOW.isoformat(),
-            NOW.isoformat(),
-            NOW.isoformat(),
-            NOW.isoformat(),
-            payload_json,
-            payload_hash,
-            certificate_hash,
-            NOW.isoformat(),
-        ),
-    )
+        """
+    attached = {
+        str(row[1]).strip()
+        for row in conn.execute("PRAGMA database_list").fetchall()
+        if len(row) > 1
+    }
+    # Keep the fixture's legacy main-row witness for pre-submit certificate
+    # checks, and mirror it into the sanctioned attached WORLD ledger used by
+    # live ENTRY closure. Both rows are the same certificate identity.
+    table_refs = ["decision_certificates"]
+    if "world" in attached:
+        table_refs.append("world.decision_certificates")
+    for table_ref in table_refs:
+        conn.execute(certificate_sql.format(table_ref=table_ref), values)
     return certificate_hash
 
 
 @pytest.fixture
-def conn(monkeypatch):
+def conn(monkeypatch, tmp_path):
     """In-memory trades DB with live-money gates neutralized for unit tests."""
-    from src.state.db import init_schema, init_schema_trade_only
+    from src.state.db import init_schema, init_schema_forecasts, init_schema_trade_only
     from src.state.collateral_ledger import init_collateral_schema
     from src.state.collateral_ledger import CollateralLedger, CollateralSnapshot
+
+    # ENTRY admission resolves the current weather family from the canonical
+    # forecasts DB, independently of the trade connection. Keep that authority
+    # surface real in this fixture: use an isolated on-disk DB under tmp_path,
+    # initialize the production forecasts schema, and seed the matching market
+    # identity. This lets each test reach its intended pre/post-network seam
+    # without mocking or weakening the family-identity gate.
+    forecasts_db_path = tmp_path / "zeus-forecasts.db"
+    world_db_path = tmp_path / "zeus-world.db"
+    monkeypatch.setattr("src.state.db.ZEUS_FORECASTS_DB_PATH", forecasts_db_path)
+    monkeypatch.setattr(
+        "src.state.db.ZEUS_WORLD_DB_PATH",
+        tmp_path / "world-schema-source-does-not-exist.db",
+    )
+    forecasts_conn = sqlite3.connect(forecasts_db_path)
+    try:
+        init_schema_forecasts(forecasts_conn)
+        forecasts_conn.execute(
+            """
+            INSERT INTO market_events (
+                market_slug, city, target_date, temperature_metric,
+                condition_id, token_id, range_label, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "weather-m2",
+                "Karachi",
+                "2026-05-17",
+                "high",
+                "condition-m2",
+                "tok-m2",
+                "test market",
+                NOW.isoformat(),
+            ),
+        )
+        forecasts_conn.commit()
+    finally:
+        forecasts_conn.close()
+
+    # ENTRY admission and certificate closure require the sanctioned attached
+    # WORLD authority. Build that canonical surface in the same isolated temp
+    # root and attach it to the in-memory trade handle below.
+    world_conn = sqlite3.connect(world_db_path)
+    try:
+        from src.state.db import init_schema_world_only
+
+        init_schema_world_only(world_conn)
+    finally:
+        world_conn.close()
+    monkeypatch.setattr("src.state.db.ZEUS_WORLD_DB_PATH", world_db_path)
 
     c = sqlite3.connect(":memory:")
     c.row_factory = sqlite3.Row
@@ -156,6 +219,7 @@ def conn(monkeypatch):
     init_schema(c)
     init_schema_trade_only(c)
     init_collateral_schema(c)
+    c.execute("ATTACH DATABASE ? AS world", (str(world_db_path),))
     monkeypatch.setattr("src.control.cutover_guard.assert_submit_allowed", lambda *args, **kwargs: None)
     monkeypatch.setattr("src.control.heartbeat_supervisor.assert_heartbeat_allows_order_type", lambda *args, **kwargs: None)
     monkeypatch.setattr("src.state.collateral_ledger.assert_buy_preflight", lambda *args, **kwargs: None)
@@ -410,7 +474,7 @@ def _insert_unknown_side_effect(
             price=Decimal(str(price)),
             size=Decimal(str(size)),
             order_type="GTC",
-            post_only=False,
+            post_only=True,
             tick_size=Decimal("0.01"),
             min_order_size=Decimal("0.01"),
             neg_risk=False,
@@ -444,7 +508,12 @@ def _insert_unknown_side_effect(
         position_id="trade-m2",
         decision_id="decision-m2",
         idempotency_key=idem,
-        intent_kind="ENTRY",
+        # Seed the legacy post-submit state through the current command-repo
+        # admission seam, then restore the historical ENTRY identity used by
+        # this recovery fixture. ENTRY admission itself now requires the full
+        # live certificate/world closure, which this in-memory recovery test
+        # intentionally does not model.
+        intent_kind="EXIT",
         market_id="condition-m2",
         token_id=token_id,
         side="BUY",
@@ -453,6 +522,10 @@ def _insert_unknown_side_effect(
         created_at=created.isoformat(),
         q_version="test-q-version",
         snapshot_checked_at=created.isoformat(),
+    )
+    conn.execute(
+        "UPDATE venue_commands SET intent_kind = 'ENTRY' WHERE command_id = ?",
+        (command_id,),
     )
     append_event(
         conn,
@@ -1248,15 +1321,29 @@ def test_review_required_pre_sdk_no_side_effect_can_be_cleared(conn):
     )
     _insert_pre_sdk_decision_log(conn)
 
-    payload = clear_review_required_no_venue_side_effect(
-        conn,
-        "cmd-m2-clear",
-        source_commit="test-commit",
-        source_function="_live_order",
-        source_reason="pre_submit_collateral_reservation_failed",
-        reviewed_by="pytest",
-        occurred_at=NOW.isoformat(),
-    )
+    statements: list[str] = []
+    conn.set_trace_callback(statements.append)
+
+    try:
+        payload = clear_review_required_no_venue_side_effect(
+            conn,
+            "cmd-m2-clear",
+            source_commit="test-commit",
+            source_function="_live_order",
+            source_reason="pre_submit_collateral_reservation_failed",
+            reviewed_by="pytest",
+            occurred_at=NOW.isoformat(),
+        )
+    finally:
+        conn.set_trace_callback(None)
+
+    decision_queries = [
+        statement
+        for statement in statements
+        if "FROM decision_log" in statement
+    ]
+    assert any("INDEXED BY idx_decision_log_ts" in query for query in decision_queries)
+    assert all("artifact_json LIKE" not in query for query in decision_queries)
 
     cmd = conn.execute(
         "SELECT * FROM venue_commands WHERE command_id = ?",
@@ -1287,6 +1374,36 @@ def test_review_required_pre_sdk_no_side_effect_can_be_cleared(conn):
         price=0.55,
         size=18.19,
     ) is None
+
+
+def test_review_required_pre_sdk_clearance_rejects_noncausal_decision_log(conn):
+    from src.execution.command_recovery import clear_review_required_no_venue_side_effect
+
+    _insert_unknown_side_effect(
+        conn,
+        command_id="cmd-m2-stale-proof",
+        token_id="tok-m2-stale-proof",
+        idem="8" * 32,
+        final_event="REVIEW_REQUIRED",
+        final_event_payload={"reason": "recovery_no_venue_order_id"},
+    )
+    _insert_pre_sdk_decision_log(conn)
+    conn.execute(
+        "UPDATE decision_log SET timestamp = ?",
+        ((NOW - timedelta(days=1)).isoformat(),),
+    )
+    conn.commit()
+
+    with pytest.raises(ValueError, match="decision_log .*collateral proof"):
+        clear_review_required_no_venue_side_effect(
+            conn,
+            "cmd-m2-stale-proof",
+            source_commit="test-commit",
+            source_function="_live_order",
+            source_reason="pre_submit_collateral_reservation_failed",
+            reviewed_by="pytest",
+            occurred_at=NOW.isoformat(),
+        )
 
 
 def test_review_required_confirmed_entry_exposure_does_not_hold_global_reduce_only(conn):
@@ -2316,3 +2433,73 @@ def test_unknown_without_idempotency_lookup_does_not_release_when_venue_reads_ma
     event_types = [row["event_type"] for row in events]
     assert "PARTIAL_FILL_OBSERVED" not in event_types
     assert "SUBMIT_REJECTED" not in event_types
+
+
+@pytest.mark.parametrize(
+    "matching_method, matching_payload",
+    [
+        (
+            "get_open_orders",
+            {
+                "id": "open-order-match",
+                "asset_id": "tok-m2",
+                "price": "0.55",
+                "size": "18.19",
+                "side": "BUY",
+                "status": "LIVE",
+            },
+        ),
+        (
+            "get_trades",
+            {
+                "id": "trade-match-after-idempotency-miss",
+                "asset_id": "tok-m2",
+                "price": "0.55",
+                "size": "18.19",
+                "side": "BUY",
+                "match_time": str((NOW + timedelta(seconds=1)).timestamp()),
+            },
+        ),
+        ("incomplete_reads", None),
+    ],
+)
+def test_idempotency_miss_still_requires_complete_reads_before_release(
+    conn,
+    matching_method,
+    matching_payload,
+):
+    from src.execution.command_recovery import reconcile_unresolved_commands
+
+    old = NOW - timedelta(minutes=30)
+    _insert_unknown_side_effect(conn, idem="7" * 32, created_at=old)
+
+    class IdempotencyMissWithMatchingExposureClient:
+        venue_reads_are_complete = matching_method != "incomplete_reads"
+
+        def find_order_by_idempotency_key(self, _idempotency_key):
+            return None
+
+        def get_open_orders(self):
+            return [matching_payload] if matching_method == "get_open_orders" else []
+
+        def get_trades(self):
+            return [matching_payload] if matching_method == "get_trades" else []
+
+    summary = reconcile_unresolved_commands(
+        conn,
+        IdempotencyMissWithMatchingExposureClient(),
+    )
+
+    cmd = _command(conn)
+    event_types = _events(conn, cmd["command_id"])
+    assert "SUBMIT_REJECTED" not in event_types
+    if matching_method == "get_open_orders":
+        assert summary["advanced"] == 1
+        assert summary["errors"] == 0
+        assert cmd["state"] == "ACKED"
+        assert "SUBMIT_ACKED" in event_types
+    else:
+        assert summary["advanced"] == 0
+        assert summary["errors"] == 1
+        assert cmd["state"] == "SUBMIT_UNKNOWN_SIDE_EFFECT"
+        assert "PARTIAL_FILL_OBSERVED" not in event_types

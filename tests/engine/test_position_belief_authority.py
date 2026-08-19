@@ -1,4 +1,4 @@
-# Lifecycle: created=2026-06-12; last_reviewed=2026-07-28; last_reused=2026-07-28
+# Lifecycle: created=2026-06-12; last_reviewed=2026-08-12; last_reused=2026-08-12
 # Purpose: Prove held-position probability authority, freshness, and compact decision lineage.
 # Reuse: pytest tests/engine/test_position_belief_authority.py
 # Authority basis: settlement-losses incident 2026-06-12 (Karachi position:
@@ -10,6 +10,8 @@
 #   (BELIEF_AUTHORITY_FAULT) + reseed, never substitute the legacy ENS belief.
 #   2026-07-27 update: fixed-action held probability is the persisted q_json
 #   point; confidence-sample means must not create a second exit probability.
+#   2026-08-12 update: held redecision consumes the shared cycle-frozen raw-input
+#   HWM cut; a private per-position artifact scan may not exhaust monitor cadence.
 """ANTIBODY: held-position belief comes from the SAME authority entry used.
 
 The disease: entry decisions read ``forecast_posteriors`` (replacement chain)
@@ -32,6 +34,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import time
 from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
@@ -44,16 +47,61 @@ from src.engine.position_belief import (
     POSTERIOR_PREDICTIVE_MEAN,
     SELECTED_METHOD_REPLACEMENT_POSTERIOR,
     ReplacementBelief,
+    _latest_live_input_cycle,
+    _observed_running_extreme_native,
+    held_side_bounds,
     load_replacement_belief,
 )
 from src.data.replacement_forecast_cycle_policy import (
     CURRENT_EVIDENCE_SEMANTICS_REVISION,
+    STALE_ENSEMBLE_ABSOLUTE_DISAGREEMENT_SEMANTICS_REVISION,
 )
 from src.types.metric_identity import MetricIdentity
 
 NOW = datetime(2026, 6, 12, 12, 0, 0, tzinfo=timezone.utc)
 BIN = "Will the highest temperature in Karachi be 37°C on June 12?"
 OTHER_BIN = "Will the highest temperature in Karachi be 38°C on June 12?"
+
+
+def test_live_input_cycle_uses_shared_frozen_hwm_authority(monkeypatch):
+    """Held belief must not revive its former private raw-artifact scan."""
+    import src.data.replacement_input_hwm as hwm
+
+    seen: list[tuple[str, str, str, str]] = []
+    model_cycle = NOW - timedelta(hours=12)
+    artifact_cycle = NOW - timedelta(hours=6)
+
+    def model_reader(_conn, *, city, target_date, metric, decision_time):
+        seen.append(("model", city, str(target_date), metric))
+        assert decision_time == NOW
+        return model_cycle
+
+    def artifact_reader(_conn, *, city, target_date, metric, decision_time):
+        seen.append(("artifact", city, str(target_date), metric))
+        assert decision_time == NOW
+        return artifact_cycle
+
+    monkeypatch.setattr(hwm, "latest_raw_model_input_cycle", model_reader)
+    monkeypatch.setattr(hwm, "latest_raw_artifact_input_cycle", artifact_reader)
+
+    conn = sqlite3.connect(":memory:")
+    try:
+        cycle, basis = _latest_live_input_cycle(
+            conn,
+            city="Karachi",
+            target_date="2026-06-12",
+            temperature_metric="high",
+            now=NOW,
+        )
+    finally:
+        conn.close()
+
+    assert cycle == artifact_cycle
+    assert basis == "source_cycle_time_raw_forecast_artifacts_lag"
+    assert seen == [
+        ("model", "Karachi", "2026-06-12", "high"),
+        ("artifact", "Karachi", "2026-06-12", "high"),
+    ]
 
 
 @pytest.fixture
@@ -109,10 +157,22 @@ def _insert(db_path, *, posterior_id, computed_at, q, city="Karachi",
             runtime_layer="live", source_id=LIVE_REPLACEMENT_POSTERIOR_SOURCE_ID,
             posterior_method="openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor",
             semantics_revision=CURRENT_EVIDENCE_SEMANTICS_REVISION,
+            shape_lag_hours=0.0, stale_shape_reused=False,
+            translation_applied=False,
+            shape_source_cycle_time=None,
             q_lcb=None, q_ucb=None, q_samples=None,
             q_samples_basis="global_simplex_current_finite_moment_evidence_v3"):
     if q_samples is None:
         q_samples = {key: [value, value] for key, value in q.items()}
+    if shape_source_cycle_time is not None:
+        shape_cycle = shape_source_cycle_time
+    else:
+        try:
+            shape_cycle = datetime.fromisoformat(
+                str(source_cycle_time or computed_at).replace("Z", "+00:00")
+            ) - timedelta(hours=shape_lag_hours)
+        except ValueError:
+            shape_cycle = NOW
     conn = sqlite3.connect(db_path)
     conn.execute(
         "INSERT INTO forecast_posteriors VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
@@ -134,6 +194,10 @@ def _insert(db_path, *, posterior_id, computed_at, q, city="Karachi",
                     "bayes_precision_fusion": {
                         "current_evidence_shape": {
                             "semantics_revision": semantics_revision,
+                            "shape_lag_hours": shape_lag_hours,
+                            "source_cycle_time": shape_cycle.isoformat(),
+                            "stale_shape_reused": stale_shape_reused,
+                            "translation_applied": translation_applied,
                         }
                     },
                     "q_bootstrap_samples_basis": q_samples_basis,
@@ -144,6 +208,100 @@ def _insert(db_path, *, posterior_id, computed_at, q, city="Karachi",
     )
     conn.commit()
     conn.close()
+
+
+def test_stale_absolute_disagreement_remains_held_monitor_authority(forecasts_db):
+    _insert(
+        forecasts_db,
+        posterior_id="stale-shape-held-monitor",
+        computed_at=(NOW - timedelta(hours=1)).isoformat(),
+        source_cycle_time=(NOW - timedelta(hours=12)).isoformat(),
+        q={BIN: 0.242, OTHER_BIN: 0.758},
+        semantics_revision=(
+            STALE_ENSEMBLE_ABSOLUTE_DISAGREEMENT_SEMANTICS_REVISION
+        ),
+        shape_lag_hours=6.0,
+        stale_shape_reused=True,
+        translation_applied=False,
+    )
+
+    belief = load_replacement_belief(
+        city="Karachi",
+        target_date="2026-06-12",
+        temperature_metric="high",
+        bin_label=BIN,
+        direction="buy_yes",
+        db_path=forecasts_db,
+        now=NOW,
+    )
+
+    assert belief is not None
+    assert belief.held_side_prob == pytest.approx(0.242)
+
+
+@pytest.mark.parametrize("provenance_json", (None, "{}", "[]", "{malformed"))
+def test_missing_or_malformed_shape_provenance_has_no_held_authority(
+    forecasts_db,
+    provenance_json,
+):
+    _insert(
+        forecasts_db,
+        posterior_id="missing-shape-held-authority",
+        computed_at=(NOW - timedelta(hours=1)).isoformat(),
+        source_cycle_time=(NOW - timedelta(hours=12)).isoformat(),
+        q={BIN: 0.242, OTHER_BIN: 0.758},
+    )
+    conn = sqlite3.connect(forecasts_db)
+    conn.execute(
+        "UPDATE forecast_posteriors SET provenance_json = ?",
+        (provenance_json,),
+    )
+    conn.commit()
+    conn.close()
+
+    belief = load_replacement_belief(
+        city="Karachi",
+        target_date="2026-06-12",
+        temperature_metric="high",
+        bin_label=BIN,
+        direction="buy_yes",
+        db_path=forecasts_db,
+        now=NOW,
+    )
+
+    assert belief is None
+
+
+@pytest.mark.parametrize(
+    "shape_cycle_time",
+    (NOW - timedelta(hours=31), NOW + timedelta(minutes=1)),
+)
+def test_selected_ensemble_cycle_outside_bound_has_no_held_authority(
+    forecasts_db,
+    shape_cycle_time,
+):
+    _insert(
+        forecasts_db,
+        posterior_id="selected-ensemble-outside-bound",
+        computed_at=(NOW - timedelta(hours=1)).isoformat(),
+        source_cycle_time=(NOW - timedelta(hours=12)).isoformat(),
+        q={BIN: 0.242, OTHER_BIN: 0.758},
+        shape_source_cycle_time=shape_cycle_time,
+    )
+
+    belief = load_replacement_belief(
+        city="Karachi",
+        target_date="2026-06-12",
+        temperature_metric="high",
+        bin_label=BIN,
+        direction="buy_yes",
+        db_path=forecasts_db,
+        now=NOW,
+    )
+
+    assert belief is not None
+    assert belief.fresh is False
+    assert belief.freshness_basis == "selected_ensemble_cycle_time"
 
 
 def _insert_raw(db_path, *, source_cycle_time, city="Karachi",
@@ -205,7 +363,224 @@ def _load(db_path, *, direction="buy_no", bin_label=BIN, now=NOW, **kw):
     )
 
 
+class TestHeldSideBounds:
+    """``held_side_bounds`` is the single blessed complement site (K1 authority)
+    both ``load_replacement_belief`` and monitor_refresh's read-through
+    recompute now call. Pin it against the two call sites' pre-extraction
+    inline formulas so the numeric behavior is provably unchanged."""
+
+    def test_buy_yes_passes_bounds_through_unchanged(self):
+        lcb, ucb = held_side_bounds(0.2, 0.7, "buy_yes")
+        assert (lcb, ucb) == (0.2, 0.7)
+
+    def test_buy_no_crosses_bounds_with_order_reversal(self):
+        q_yes_lcb, q_yes_ucb = 0.2, 0.7
+        lcb, ucb = held_side_bounds(q_yes_lcb, q_yes_ucb, "buy_no")
+        # Pre-extraction inline formula from both call sites:
+        #   held_lcb = 1.0 - q_yes_ucb; held_ucb = 1.0 - q_yes_lcb
+        assert (lcb, ucb) == (1.0 - q_yes_ucb, 1.0 - q_yes_lcb)
+
+    def test_accepts_direction_enum_like_object_via_value_attribute(self):
+        class _Direction:
+            value = "buy_no"
+
+        lcb, ucb = held_side_bounds(0.2, 0.7, _Direction())
+        assert (lcb, ucb) == (1.0 - 0.7, 1.0 - 0.2)
+
+    def test_rejects_unrecognized_direction(self):
+        with pytest.raises(ValueError):
+            held_side_bounds(0.2, 0.7, "buy_maybe")
+
+
 class TestLoadReplacementBelief:
+    def test_future_local_day_bypasses_impossible_observed_floor_read(
+        self, forecasts_db, monkeypatch
+    ):
+        """Pre-Day0 belief serving must not spend its deadline on the world DB."""
+        import src.engine.position_belief as pb
+
+        future_target = "2026-06-13"
+        future_bin = "Will the highest temperature in Karachi be 37°C on June 13?"
+        _insert(
+            forecasts_db,
+            posterior_id="future-local-day-no-floor",
+            computed_at=(NOW - timedelta(minutes=5)).isoformat(),
+            q={future_bin: 0.24},
+            source_cycle_time=(NOW - timedelta(hours=1)).isoformat(),
+            target_date=future_target,
+        )
+
+        def impossible_floor_read(**_kwargs):
+            raise AssertionError("future local day cannot have an observed extreme")
+
+        monkeypatch.setattr(
+            pb,
+            "_observed_running_extreme_native",
+            impossible_floor_read,
+        )
+
+        belief = load_replacement_belief(
+            city="Karachi",
+            target_date=future_target,
+            temperature_metric="high",
+            bin_label=future_bin,
+            direction="buy_yes",
+            db_path=forecasts_db,
+            now=NOW,
+        )
+
+        assert belief is not None
+        assert belief.held_side_prob == pytest.approx(0.24)
+
+    def test_held_floor_uses_corrected_same_clock_publication(self, tmp_path):
+        from src.state.schema.observation_prints_schema import append_print, ensure_table
+
+        world_db = tmp_path / "zeus-world.db"
+        conn = sqlite3.connect(world_db)
+        ensure_table(conn)
+        append_print(
+            conn,
+            city="Shenzhen",
+            station_id="ZGSZ",
+            source_channel="wu_icao_history",
+            publish_ts_utc="2026-08-09T08:00:00+00:00",
+            value_native=37.0,
+            unit="C",
+            fetched_at_utc="2026-08-09T08:50:52+00:00",
+        )
+        append_print(
+            conn,
+            city="Shenzhen",
+            station_id="ZGSZ",
+            source_channel="wu_icao_history",
+            publish_ts_utc="2026-08-09T08:00:00+00:00",
+            value_native=36.0,
+            unit="C",
+            fetched_at_utc="2026-08-09T10:18:22+00:00",
+        )
+        conn.commit()
+        conn.close()
+
+        observed = _observed_running_extreme_native(
+            city="Shenzhen",
+            target_date="2026-08-09",
+            metric="high",
+            now=datetime(2026, 8, 9, 10, 20, tzinfo=timezone.utc),
+            world_db_path=str(world_db),
+        )
+
+        assert observed == pytest.approx(36.0)
+
+    def test_monitor_deadline_bounds_forecast_db_lock_wait(self, forecasts_db):
+        """An EXCLUSIVE writer cannot retain the held monitor past its deadline."""
+        _insert(
+            forecasts_db,
+            posterior_id="deadline-locked-forecast",
+            computed_at=(NOW - timedelta(minutes=5)).isoformat(),
+            q={BIN: 0.24},
+            source_cycle_time=(NOW - timedelta(hours=1)).isoformat(),
+        )
+        locker = sqlite3.connect(forecasts_db)
+        locker.execute("PRAGMA journal_mode=DELETE")
+        locker.execute("BEGIN EXCLUSIVE")
+        try:
+            started = time.monotonic()
+            belief = _load(
+                forecasts_db,
+                deadline_monotonic=started + 0.10,
+            )
+            elapsed = time.monotonic() - started
+        finally:
+            locker.rollback()
+            locker.close()
+
+        assert belief is None
+        assert elapsed < 0.18
+
+    def test_monitor_deadline_bounds_world_observed_floor_lock_wait(
+        self, forecasts_db, tmp_path
+    ):
+        """The post-forecast world-floor read shares the same monitor deadline."""
+        _insert(
+            forecasts_db,
+            posterior_id="deadline-locked-world",
+            computed_at=(NOW - timedelta(minutes=5)).isoformat(),
+            q={BIN: 0.24},
+            source_cycle_time=(NOW - timedelta(hours=1)).isoformat(),
+        )
+        world_db = tmp_path / "zeus-world.db"
+        setup = sqlite3.connect(world_db)
+        setup.execute(
+            """
+            CREATE TABLE observation_instants (
+                city TEXT, target_date TEXT, local_timestamp TEXT,
+                utc_timestamp TEXT, running_max REAL, running_min REAL,
+                causality_status TEXT, authority TEXT, source_role TEXT,
+                training_allowed INTEGER, source TEXT
+            )
+            """
+        )
+        setup.commit()
+        setup.close()
+        locker = sqlite3.connect(world_db)
+        locker.execute("PRAGMA journal_mode=DELETE")
+        locker.execute("BEGIN EXCLUSIVE")
+        try:
+            started = time.monotonic()
+            belief = _load(
+                forecasts_db,
+                world_db_path=str(world_db),
+                deadline_monotonic=started + 0.10,
+            )
+            elapsed = time.monotonic() - started
+        finally:
+            locker.rollback()
+            locker.close()
+
+        assert belief is None
+        assert elapsed < 0.18
+
+    def test_monitor_deadline_interrupts_primary_belief_sql(
+        self, forecasts_db, monkeypatch, caplog
+    ):
+        """A fresh-authority lookup cannot retain every later held position."""
+        import src.engine.position_belief as pb
+
+        _insert(
+            forecasts_db,
+            posterior_id="deadline-primary",
+            computed_at=(NOW - timedelta(minutes=5)).isoformat(),
+            q={BIN: 0.24},
+            q_lcb={BIN: 0.18},
+            q_ucb={BIN: 0.31},
+            source_cycle_time=(NOW - timedelta(hours=1)).isoformat(),
+        )
+
+        def unbounded_latest_cycle(conn, **_kwargs):
+            conn.execute(
+                """
+                WITH RECURSIVE spin(value) AS (
+                    SELECT 1
+                    UNION ALL
+                    SELECT value + 1 FROM spin
+                )
+                SELECT SUM(value) FROM spin
+                """
+            ).fetchone()
+            raise AssertionError("monitor deadline failed to interrupt belief SQL")
+
+        monkeypatch.setattr(pb, "_latest_live_input_cycle", unbounded_latest_cycle)
+        caplog.set_level("WARNING", logger=pb.__name__)
+        started = time.monotonic()
+        belief = _load(
+            forecasts_db,
+            deadline_monotonic=started + 0.02,
+        )
+
+        assert belief is None
+        assert time.monotonic() - started < 1.0
+        assert "interrupted" in caplog.text
+
     def test_old_current_evidence_semantics_is_not_belief_authority(self, forecasts_db):
         _insert(
             forecasts_db,
@@ -535,6 +910,10 @@ class TestLoadReplacementBelief:
                             "used_models": ["icon_global"],
                             "current_evidence_shape": {
                                 "semantics_revision": CURRENT_EVIDENCE_SEMANTICS_REVISION,
+                                "shape_lag_hours": 0.0,
+                                "source_cycle_time": posterior_cycle.isoformat(),
+                                "stale_shape_reused": False,
+                                "translation_applied": False,
                             },
                         },
                         "q_bootstrap_samples_basis":
@@ -618,7 +997,7 @@ class TestLoadReplacementBelief:
         assert belief.raw_cycle_lag_hours is None
 
     def test_partial_newer_used_model_does_not_stale_rich_posterior(self, forecasts_db):
-        """One early provider cannot invalidate the last complete source-clock carrier."""
+        """Incomplete rich provenance fails closed instead of guessing consumption."""
         posterior_cycle = NOW - timedelta(hours=12)
         _insert(
             forecasts_db,
@@ -642,6 +1021,10 @@ class TestLoadReplacementBelief:
                             },
                             "current_evidence_shape": {
                                 "semantics_revision": CURRENT_EVIDENCE_SEMANTICS_REVISION,
+                                "shape_lag_hours": 0.0,
+                                "source_cycle_time": posterior_cycle.isoformat(),
+                                "stale_shape_reused": False,
+                                "translation_applied": False,
                             },
                         },
                         "q_bootstrap_samples_basis":
@@ -676,9 +1059,127 @@ class TestLoadReplacementBelief:
         belief = _load(forecasts_db)
 
         assert belief is not None
-        assert belief.fresh is True
-        assert belief.freshness_basis == "source_cycle_time"
-        assert belief.raw_input_lag_reason is None
+        assert belief.fresh is False
+        assert belief.raw_input_lag_reason is not None
+        assert "current_value_serving_provenance_unverifiable" in (
+            belief.raw_input_lag_reason
+        )
+
+    @pytest.mark.parametrize("supersede_ecmwf", (False, True))
+    def test_vector_clock_uses_exact_consumed_provider_rows(
+        self, forecasts_db, supersede_ecmwf
+    ):
+        """Provider clocks may exceed the ENS carrier only when exact rows agree."""
+        carrier_cycle = NOW - timedelta(hours=12)
+        provider_cycle = NOW - timedelta(hours=6)
+        computed_at = NOW - timedelta(hours=1)
+        conn = sqlite3.connect(forecasts_db)
+        for ddl in (
+            "ALTER TABLE raw_model_forecasts ADD COLUMN raw_model_forecast_id INTEGER",
+            "ALTER TABLE raw_model_forecasts ADD COLUMN model TEXT",
+            "ALTER TABLE raw_model_forecasts ADD COLUMN forecast_value_c REAL",
+            "ALTER TABLE raw_model_forecasts ADD COLUMN lead_days INTEGER",
+        ):
+            conn.execute(ddl)
+        rows = (
+            (101, "ecmwf_ifs", provider_cycle, computed_at - timedelta(minutes=10), 37.2),
+            (102, "icon_eu", provider_cycle, computed_at - timedelta(minutes=20), 37.6),
+        )
+        for raw_id, model, cycle, captured_at, value in rows:
+            conn.execute(
+                """
+                INSERT INTO raw_model_forecasts (
+                    city, target_date, metric, source_cycle_time, endpoint,
+                    coverage_status, captured_at, source_available_at,
+                    raw_model_forecast_id, model, forecast_value_c, lead_days
+                ) VALUES (?, ?, ?, ?, 'single_runs', 'COVERED', ?, ?, ?, ?, ?, 1)
+                """,
+                (
+                    "Karachi", "2026-06-12", "high", cycle.isoformat(),
+                    captured_at.isoformat(), captured_at.isoformat(), raw_id,
+                    model, value,
+                ),
+            )
+        if supersede_ecmwf:
+            newer_cycle = NOW - timedelta(hours=3)
+            for raw_id, model, value in (
+                (103, "ecmwf_ifs", 38.1),
+                (104, "icon_eu", 38.0),
+            ):
+                conn.execute(
+                    """
+                    INSERT INTO raw_model_forecasts (
+                        city, target_date, metric, source_cycle_time, endpoint,
+                        coverage_status, captured_at, source_available_at,
+                        raw_model_forecast_id, model, forecast_value_c, lead_days
+                    ) VALUES (?, ?, ?, ?, 'single_runs', 'COVERED', ?, ?, ?, ?, ?, 1)
+                    """,
+                    (
+                        "Karachi", "2026-06-12", "high", newer_cycle.isoformat(),
+                        (NOW - timedelta(minutes=20)).isoformat(),
+                        (NOW - timedelta(minutes=20)).isoformat(), raw_id,
+                        model, value,
+                    ),
+                )
+        conn.commit()
+        conn.close()
+
+        _insert(
+            forecasts_db,
+            posterior_id="vector-clock",
+            computed_at=computed_at.isoformat(),
+            source_cycle_time=carrier_cycle.isoformat(),
+            q={BIN: 0.242},
+            shape_source_cycle_time=carrier_cycle,
+        )
+        conn = sqlite3.connect(forecasts_db)
+        conn.execute(
+            "UPDATE forecast_posteriors SET provenance_json = ? WHERE posterior_id = ?",
+            (
+                json.dumps(
+                    {
+                        "bayes_precision_fusion": {
+                            "used_models": ["ecmwf_ifs", "icon_eu"],
+                            "current_value_serving": {
+                                model: {
+                                    "raw_model_forecast_id": raw_id,
+                                    "served_cycle": cycle.isoformat(),
+                                    "captured_at": captured_at.isoformat(),
+                                    "served_via": "single_runs",
+                                }
+                                for raw_id, model, cycle, captured_at, _value in rows
+                            },
+                            "current_evidence_shape": {
+                                "semantics_revision": CURRENT_EVIDENCE_SEMANTICS_REVISION,
+                                "shape_lag_hours": 0.0,
+                                "source_cycle_time": carrier_cycle.isoformat(),
+                                "stale_shape_reused": False,
+                                "translation_applied": False,
+                            },
+                        },
+                        "q_bootstrap_samples_basis":
+                            "global_simplex_current_finite_moment_evidence_v3",
+                        "q_bootstrap_samples_by_bin": {BIN: [0.242, 0.242]},
+                    }
+                ),
+                "vector-clock",
+            ),
+        )
+        conn.commit()
+        conn.close()
+
+        belief = _load(forecasts_db)
+
+        assert belief is not None
+        assert belief.latest_raw_cycle_time is not None
+        assert belief.raw_cycle_lag_hours is not None
+        assert belief.fresh is (not supersede_ecmwf)
+        if supersede_ecmwf:
+            assert belief.raw_input_lag_reason is not None
+            assert "used_raw_model_forecasts_superseded" in belief.raw_input_lag_reason
+        else:
+            assert belief.raw_input_lag_reason is None
+            assert belief.freshness_basis == "source_cycle_time"
 
     def test_newer_raw_artifact_cycle_marks_posterior_stale_before_raw_model_rows(self, forecasts_db):
         """Anchor artifacts are upstream live inputs; monitor freshness cannot

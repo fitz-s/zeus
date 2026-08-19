@@ -1,4 +1,5 @@
 # Created: 2026-07-03
+# Last reused/audited: 2026-08-11
 # Authority basis: docs/rebuild/schema_packets/w1_2_order_state_extension_schema_packet_2026-07-02.md
 #   (SCH-W1.2-ORDER-STATE) + docs/operations/current/plans/order_engine_rebuild_execution_plan_2026-07-02.md
 #   W4 row (C3 staleness path, same packet: DELETE maker_rest_escalation).
@@ -11,10 +12,12 @@ import json
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+from types import SimpleNamespace
 
 import pytest
 
 from src.execution.staleness_cancel import (
+    _merge_cancel_proposals,
     classify_cancel_set,
     find_open_entry_rests,
     read_current_family_q_versions,
@@ -38,6 +41,7 @@ def _entry(command_id: str, *, q_version, age_minutes: float, family=FAMILY) -> 
         "created_at": (NOW - timedelta(minutes=age_minutes)).isoformat(),
         "q_version": q_version,
         "fact_state": "LIVE",
+        "command_side": "BUY",
         "matched_size": "0",
         "min_order_size": "5",
     }
@@ -129,7 +133,7 @@ class TestQVersionStaleCancel:
             (DEADLINE_MIN + 5, "q-old"),
         ],
     )
-    def test_sub_min_partial_fill_is_not_cancelled_by_staleness_or_ttl(
+    def test_sub_min_partial_remainder_is_cancelled_and_redecided(
         self, age_minutes, current_q
     ):
         entry = _entry("c1", q_version="q-old", age_minutes=age_minutes)
@@ -140,7 +144,13 @@ class TestQVersionStaleCancel:
             [entry], {"c1": FAMILY}, {FAMILY: current_q}, now=NOW, deadline_minutes=DEADLINE_MIN
         )
 
-        assert cancel_set == []
+        assert len(cancel_set) == 1
+        expected_reason = (
+            "Q_VERSION_STALE"
+            if current_q == "q-new"
+            else "REST_DEADLINE_EXCEEDED"
+        )
+        assert cancel_set[0]["cancel_reason"] == expected_reason
 
     def test_partial_fill_at_or_above_minimum_still_cancels_when_stale(self):
         entry = _entry("c1", q_version="q-old", age_minutes=5.0)
@@ -1095,6 +1105,413 @@ def conn_state(conn: sqlite3.Connection, command_id: str) -> str:
     return conn.execute(
         "SELECT state FROM venue_commands WHERE command_id = ?", (command_id,)
     ).fetchone()[0]
+
+
+def test_day0_classifier_selects_only_dead_local_day_entry(monkeypatch):
+    from src.execution import day0_hard_fact_exit
+
+    day0_hard_fact_exit._reset_wu_memo_for_tests()
+    identities = {
+        "dead": {
+            "city": "Miami",
+            "target_date": "2026-07-03",
+            "metric": "high",
+            "range_low": 25.0,
+            "range_high": 25.0,
+            "direction": "buy_yes",
+        },
+        "winner": {
+            "city": "Miami",
+            "target_date": "2026-07-03",
+            "metric": "high",
+            "range_low": 25.0,
+            "range_high": 25.0,
+            "direction": "buy_no",
+        },
+        "tomorrow": {
+            "city": "Miami",
+            "target_date": "2026-07-04",
+            "metric": "high",
+            "range_low": 25.0,
+            "range_high": 25.0,
+            "direction": "buy_yes",
+        },
+    }
+    monkeypatch.setattr(
+        day0_hard_fact_exit,
+        "_resolve_order_bin_identity",
+        lambda _conn, token_id, **_kwargs: identities[token_id],
+    )
+    monkeypatch.setattr(
+        day0_hard_fact_exit,
+        "_wu_hard_fact_evidence",
+        lambda **_kwargs: SimpleNamespace(rounded_extreme=26.0),
+    )
+    entries = [
+        {
+            "command_id": key,
+            "token_id": key,
+            "command_side": "BUY",
+            "created_at": NOW.isoformat(),
+        }
+        for key in identities
+    ]
+
+    proposals = day0_hard_fact_exit.classify_day0_dead_bin_entry_cancels(
+        entries,
+        trade_conn=object(),
+        forecasts_conn=object(),
+        cities_by_name={"Miami": SimpleNamespace(timezone="UTC")},
+        now=NOW,
+    )
+
+    assert [proposal["command_id"] for proposal in proposals] == ["dead"]
+    assert proposals[0]["cancel_reason"] == "HARD_FACT_BIN_DEAD"
+
+
+def test_day0_classifier_rejects_entry_sell(monkeypatch):
+    from src.execution import day0_hard_fact_exit
+
+    monkeypatch.setattr(
+        day0_hard_fact_exit,
+        "_resolve_order_bin_identity",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("SELL must be rejected before identity resolution")
+        ),
+    )
+
+    proposals = day0_hard_fact_exit.classify_day0_dead_bin_entry_cancels(
+        [
+            {
+                "command_id": "sell-entry",
+                "token_id": "token",
+                "command_side": "SELL",
+            }
+        ],
+        trade_conn=object(),
+        forecasts_conn=object(),
+        cities_by_name={},
+        now=NOW,
+    )
+
+    assert proposals == []
+
+
+def test_day0_classifier_warns_on_unresolved_canonical_identity(monkeypatch, caplog):
+    from src.execution import day0_hard_fact_exit
+
+    monkeypatch.setattr(
+        day0_hard_fact_exit,
+        "_resolve_order_bin_identity",
+        lambda *_args, **_kwargs: None,
+    )
+    caplog.set_level("WARNING", logger="src.execution.day0_hard_fact_exit")
+
+    proposals = day0_hard_fact_exit.classify_day0_dead_bin_entry_cancels(
+        [
+            {"command_id": "missing-token", "command_side": "BUY"},
+            {
+                "command_id": "unresolved-token",
+                "token_id": "token",
+                "command_side": "BUY",
+            },
+        ],
+        trade_conn=object(),
+        forecasts_conn=object(),
+        cities_by_name={},
+        now=NOW,
+    )
+
+    assert proposals == []
+    assert "missing canonical identity" in caplog.text
+    assert "unresolved token identity" in caplog.text
+
+
+def test_open_entry_scan_excludes_entry_sell() -> None:
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        """
+        CREATE TABLE venue_commands (
+            command_id TEXT, venue_order_id TEXT, token_id TEXT, market_id TEXT,
+            created_at TEXT, q_version TEXT, intent_kind TEXT, side TEXT,
+            state TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE venue_order_facts (
+            venue_order_id TEXT, state TEXT, matched_size TEXT,
+            local_sequence INTEGER
+        )
+        """
+    )
+    for command_id, side in (("buy", "BUY"), ("sell", "SELL")):
+        conn.execute(
+            "INSERT INTO venue_commands VALUES (?,?,?,?,?,?,?,?,?)",
+            (
+                command_id,
+                f"order-{command_id}",
+                f"token-{command_id}",
+                "market",
+                NOW.isoformat(),
+                "q-current",
+                "ENTRY",
+                side,
+                "ACKED",
+            ),
+        )
+        conn.execute(
+            "INSERT INTO venue_order_facts VALUES (?,?,?,?)",
+            (f"order-{command_id}", "LIVE", "0", 1),
+        )
+
+    entries = find_open_entry_rests(conn)
+
+    assert [(entry["command_id"], entry["command_side"]) for entry in entries] == [
+        ("buy", "BUY")
+    ]
+
+
+def test_day0_identity_joins_trade_token_to_forecast_bin() -> None:
+    from src.execution.day0_hard_fact_exit import _resolve_order_bin_identity
+
+    trade_conn = sqlite3.connect(":memory:")
+    trade_conn.execute(
+        """
+        CREATE TABLE executable_market_snapshots (
+            condition_id TEXT, yes_token_id TEXT, no_token_id TEXT,
+            captured_at TEXT
+        )
+        """
+    )
+    trade_conn.execute(
+        "INSERT INTO executable_market_snapshots VALUES (?,?,?,?)",
+        ("condition", "yes-token", "no-token", NOW.isoformat()),
+    )
+    forecasts_conn = sqlite3.connect(":memory:")
+    forecasts_conn.execute(
+        """
+        CREATE TABLE market_events (
+            city TEXT, target_date TEXT, range_low REAL, range_high REAL,
+            temperature_metric TEXT, condition_id TEXT, token_id TEXT
+        )
+        """
+    )
+    forecasts_conn.execute(
+        "INSERT INTO market_events VALUES (?,?,?,?,?,?,?)",
+        ("Miami", "2026-07-03", 30.0, None, "high", "condition", "yes-token"),
+    )
+
+    identity = _resolve_order_bin_identity(
+        trade_conn,
+        "no-token",
+        market_conn=forecasts_conn,
+    )
+
+    assert identity == {
+        "city": "Miami",
+        "target_date": "2026-07-03",
+        "range_low": 30.0,
+        "range_high": None,
+        "metric": "high",
+        "condition_id": "condition",
+        "direction": "buy_no",
+    }
+
+
+def test_c3_day0_cancel_uses_batch_journal_and_confirms_family(monkeypatch):
+    from src.execution import day0_hard_fact_exit
+    from src.execution import staleness_cancel
+
+    trade_conn = _trade_db()
+    forecasts_conn = _forecasts_db()
+    created_at = (NOW - timedelta(minutes=1)).isoformat()
+    trade_conn.execute(
+        """
+        INSERT INTO venue_commands (
+            command_id, snapshot_id, envelope_id, position_id, decision_id,
+            idempotency_key, intent_kind, market_id, token_id, side, size,
+            price, venue_order_id, state, created_at, updated_at, q_version
+        ) VALUES (?, ?, ?, ?, ?, ?, 'ENTRY', ?, ?, 'BUY', 10, 0.5, ?,
+                  'ACKED', ?, ?, ?)
+        """,
+        (
+            "c-day0",
+            "snap-day0",
+            "env-day0",
+            "pos-day0",
+            "decision-day0",
+            "c-day0".ljust(32, "0")[:32],
+            "cond-day0",
+            "tok-day0",
+            "v-day0",
+            created_at,
+            created_at,
+            "q-current",
+        ),
+    )
+    trade_conn.execute(
+        """
+        INSERT INTO venue_order_facts (
+            venue_order_id, command_id, state, remaining_size, matched_size,
+            source, observed_at, local_sequence, raw_payload_hash
+        ) VALUES ('v-day0', 'c-day0', 'LIVE', '10', '0', 'REST', ?, 0, ?)
+        """,
+        (created_at, "f" * 64),
+    )
+    trade_conn.commit()
+    entry = {
+        "command_id": "c-day0",
+        "venue_order_id": "v-day0",
+        "token_id": "tok-day0",
+        "market_id": "cond-day0",
+        "created_at": created_at,
+        "q_version": "q-current",
+        "fact_state": "LIVE",
+        "command_side": "BUY",
+        "matched_size": "0",
+    }
+    monkeypatch.setattr(staleness_cancel, "find_open_entry_rests", lambda _conn: [entry])
+    monkeypatch.setattr(
+        staleness_cancel,
+        "resolve_order_families",
+        lambda *_args: {"c-day0": FAMILY},
+    )
+    monkeypatch.setattr(
+        day0_hard_fact_exit,
+        "classify_day0_dead_bin_entry_cancels",
+        lambda entries, **_kwargs: [
+            {
+                **entries[0],
+                "family": FAMILY,
+                "cancel_reason": "HARD_FACT_BIN_DEAD",
+                "cancel_action": "CANCEL_REPLACE",
+                "cancel_detail": {"trigger": "day0_dead_bin_cancel"},
+            }
+        ],
+    )
+    client = _FakeGatewayClient(
+        cancel_responses=[[{"canceled": True, "orderID": "v-day0"}]]
+    )
+
+    result = run_c3_staleness_cancel_cycle(
+        trade_conn,
+        trade_conn,
+        forecasts_conn,
+        client,
+        now=NOW,
+    )
+
+    assert result["day0_cancel_set_size"] == 1
+    assert result["cancel_set_size"] == 1
+    assert result["confirmed_families"] == {FAMILY}
+    assert conn_state(trade_conn, "c-day0") == "CANCELLED"
+    assert client.cancel_calls == [["v-day0"]]
+
+
+def test_c3_merge_preserves_every_lane_reason_and_family() -> None:
+    families = {"c1": None}
+
+    merged = _merge_cancel_proposals(
+        (
+            (
+                "ttl",
+                [
+                    {
+                        "command_id": "c1",
+                        "cancel_reason": "REST_DEADLINE_EXCEEDED",
+                        "cancel_detail": {"ttl": True},
+                    }
+                ],
+            ),
+            (
+                "q_version",
+                [
+                    {
+                        "command_id": "c1",
+                        "cancel_reason": "Q_VERSION_STALE",
+                        "cancel_detail": {"stale": True},
+                    }
+                ],
+            ),
+            (
+                "day0",
+                [
+                    {
+                        "command_id": "c1",
+                        "family": FAMILY,
+                        "cancel_reason": "HARD_FACT_BIN_DEAD",
+                        "cancel_detail": {"dead": True},
+                    }
+                ],
+            ),
+        ),
+        families,
+    )
+
+    assert len(merged) == 1
+    assert merged[0]["cancel_reason"] == (
+        "HARD_FACT_BIN_DEAD+Q_VERSION_STALE+REST_DEADLINE_EXCEEDED"
+    )
+    assert merged[0]["cancel_detail_by_lane"] == {
+        "ttl": {"ttl": True},
+        "q_version": {"stale": True},
+        "day0": {"dead": True},
+    }
+    assert families["c1"] == FAMILY
+
+
+def test_day0_classification_failure_does_not_suppress_ttl(monkeypatch) -> None:
+    from src import config
+    from src.execution import batch_order_submission
+    from src.execution import day0_hard_fact_exit
+    from src.execution import staleness_cancel
+    from src.state import venue_command_repo
+
+    entry = _entry(
+        "c1",
+        q_version="q-current",
+        age_minutes=DEADLINE_MIN + 1,
+    )
+    monkeypatch.setattr(staleness_cancel, "find_open_entry_rests", lambda _conn: [entry])
+    monkeypatch.setattr(
+        staleness_cancel,
+        "resolve_order_families",
+        lambda *_args: {"c1": FAMILY},
+    )
+    monkeypatch.setattr(config, "runtime_cities_by_name", lambda: {})
+    monkeypatch.setattr(
+        day0_hard_fact_exit,
+        "classify_day0_dead_bin_entry_cancels",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("day0 unavailable")),
+    )
+    submitted: list[list[str]] = []
+
+    def _cancel_batch(_conn, _client, command_ids, **_kwargs):
+        submitted.append(list(command_ids))
+        return [SimpleNamespace(command_id="c1", status="acked")]
+
+    monkeypatch.setattr(batch_order_submission, "cancel_commands_batch", _cancel_batch)
+    monkeypatch.setattr(
+        venue_command_repo,
+        "get_command",
+        lambda _conn, _command_id: {"state": "CANCELLED"},
+    )
+
+    result = run_c3_staleness_cancel_cycle(
+        object(),
+        object(),
+        object(),
+        object(),
+        now=NOW,
+    )
+
+    assert submitted == [["c1"]]
+    assert result["cancel_set_size"] == 1
+    assert result["day0_cancel_set_size"] == 0
+    assert result["confirmed_families"] == {FAMILY}
 
 
 # ---------------------------------------------------------------------------

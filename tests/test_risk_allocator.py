@@ -46,6 +46,7 @@ from src.risk_allocator import (
     count_open_reconcile_findings,
     count_unknown_side_effects,
     current_global_entry_capacity_usd,
+    global_actuation_authority_lease,
     load_cap_policy,
     load_position_lots,
     refresh_global_allocator,
@@ -53,7 +54,10 @@ from src.risk_allocator import (
     snapshot_global_auction_capital_authority,
     summary as risk_allocator_summary,
 )
-from src.risk_allocator.governor import _load_current_position_authority_costs
+from src.risk_allocator.governor import (
+    _load_current_position_authority_costs,
+    _load_legacy_position_lot_rows,
+)
 from src.riskguard.risk_level import RiskLevel
 from src.types import Bin, BinEdge
 
@@ -393,6 +397,32 @@ def test_submit_reader_waits_for_one_coherent_allocator_governor_publication():
     assert isinstance(result[0], governor_module.AllocationDecision)
     assert result[0].allowed
     assert seen_states == ["new-pair"]
+
+
+def test_actuation_lease_blocks_concurrent_revocation_through_submit():
+    """A refresh wake cannot clear authority between refresh and side effect."""
+
+    configured = threading.Event()
+    revoke_done = threading.Event()
+
+    def revoke_authority() -> None:
+        configured.wait(timeout=1)
+        configure_global_allocator(None, None)
+        revoke_done.set()
+
+    thread = threading.Thread(target=revoke_authority)
+    try:
+        with global_actuation_authority_lease():
+            configure_global_allocator(RiskAllocator(), _state())
+            thread.start()
+            configured.set()
+            assert not revoke_done.wait(timeout=0.05)
+            assert assert_global_submit_allows(reduce_only=True).allowed
+        assert revoke_done.wait(timeout=1)
+        thread.join(timeout=1)
+        assert risk_allocator_summary()["configured"] is False
+    finally:
+        clear_global_allocator()
 
 
 def test_submit_rechecks_current_pair_after_auction_authority_was_captured():
@@ -1458,6 +1488,83 @@ def test_allocator_uses_current_uuid_position_without_double_counting_legacy_lot
         3_400_000,
         8_600_000,
     )
+
+
+def test_legacy_lot_read_is_bounded_by_active_state_and_latest_identity():
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(
+        """
+        CREATE TABLE venue_commands (
+          command_id TEXT PRIMARY KEY,
+          position_id TEXT,
+          market_id TEXT,
+          token_id TEXT,
+          decision_id TEXT
+        );
+        CREATE TABLE venue_command_events (
+          command_id TEXT,
+          sequence_no INTEGER,
+          event_type TEXT,
+          payload_json TEXT
+        );
+        CREATE TABLE position_lots (
+          lot_id INTEGER PRIMARY KEY AUTOINCREMENT,
+          position_id INTEGER,
+          state TEXT,
+          shares INTEGER,
+          entry_price_avg TEXT,
+          source_command_id TEXT,
+          source TEXT,
+          raw_payload_json TEXT,
+          local_sequence INTEGER,
+          UNIQUE (position_id, local_sequence)
+        );
+        CREATE INDEX idx_position_lots_state
+          ON position_lots (state, position_id);
+        INSERT INTO venue_commands VALUES
+          ('closed-cmd', 'closed-runtime', 'closed-market', 'closed-token', 'closed-decision'),
+          ('open-cmd', 'open-runtime', 'open-market', 'open-token', 'open-decision');
+        INSERT INTO position_lots
+          (position_id, state, shares, entry_price_avg, source_command_id,
+           source, raw_payload_json, local_sequence)
+        VALUES
+          (1, 'CONFIRMED_EXPOSURE', 10, '0.5', 'closed-cmd', 'CHAIN', '{}', 1),
+          (1, 'SETTLED', 10, '0.5', 'closed-cmd', 'CHAIN', '{}', 2),
+          (2, 'CONFIRMED_EXPOSURE', 7, '0.4', 'open-cmd', 'CHAIN', '{}', 1);
+        """
+    )
+    conn.executemany(
+        """
+        INSERT INTO position_lots
+          (position_id, state, shares, entry_price_avg, source_command_id,
+           source, raw_payload_json, local_sequence)
+        VALUES (?, 'SETTLED', 1, '0.1', NULL, 'CHAIN', '{}', 1)
+        """,
+        ((position_id,) for position_id in range(10_000, 15_000)),
+    )
+    traced: list[str] = []
+    conn.set_trace_callback(traced.append)
+
+    rows = _load_legacy_position_lot_rows(conn)
+
+    conn.set_trace_callback(None)
+    assert [row["runtime_position_id"] for row in rows] == ["open-runtime"]
+    lot_query = next(
+        statement
+        for statement in traced
+        if "FROM position_lots lot INDEXED BY idx_position_lots_state" in statement
+    )
+    assert "GROUP BY position_id" not in lot_query
+    assert "NOT EXISTS" in lot_query
+
+    rows_with_long_history = _load_legacy_position_lot_rows(
+        conn,
+        covered_position_ids={f"terminal-{index}" for index in range(40_000)},
+    )
+    assert [row["runtime_position_id"] for row in rows_with_long_history] == [
+        "open-runtime"
+    ]
 
 
 def test_current_position_authority_costs_exclude_historical_positions():

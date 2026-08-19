@@ -50,7 +50,8 @@ authoritative machine registry is `architecture/test_topology.yaml`.
 | `test_dynamic_sql_baseline.py` | Pytest wrapper for check_dynamic_sql.py; security antibody for f-string SQL interpolations (created 2026-05-01) |
 | `test_edge_observation.py` | Cross-module antibody: alpha-decay tracker per strategy_key per R3 §1 #2 EDGE_OBSERVATION packet (created 2026-04-28) |
 | `test_edge_observation_weekly.py` | End-to-end runner antibody for edge observation batch-3 weekly dispatch (created 2026-04-28) |
-| `test_forecast_live_daemon.py` | Relationship antibody: forecast-live daemon owns only OpenData forecast jobs and shares the OpenData lock with legacy ingest during rollout (created 2026-05-14) |
+| `test_evaluate_current_regime_capital_advantage.py` | Exact current-revision proof receipt, causal settlement, independent family-day, delta-log-wealth LCB, and live-capital admission antibodies (created 2026-08-12) |
+| `test_forecast_live_daemon.py` | Held-SELL reactor-wake antibodies: phase-specific Chain-first terminal proof, settlement-only SELL completion, V1/V2/V3 receipt identity, and bounded fair queue drain (recreated 2026-07-30 after single-live test excision) |
 | `test_finite_evidence_probability_symmetry.py` | INV-06/INV-41 source-clock current-evidence YES/NO ambiguity-band symmetry and Day0 dominance (created 2026-07-11) |
 | `test_harvester_split_independence.py` | Antibody #12: structural boundary between ingest-side settlement harvester and trading lane (created 2026-04-30) |
 | `test_heartbeat_dual_coverage.py` | Antibody #15: heartbeat sensor must monitor BOTH daemon heartbeat files (two-system independence; created 2026-04-30) |
@@ -62,7 +63,7 @@ authoritative machine registry is `architecture/test_topology.yaml`.
 | `test_learning_loop_observation_weekly.py` | End-to-end runner antibody for learning loop batch-3 weekly dispatch (created 2026-04-29) |
 | `test_loop_guard.py` | 24/7 improvement-loop guard antibodies: allowlist enforce/restore, circuit breaker, HALT, flock single-flight, interval gate, query escrow, commit-auto pathspec discipline (created 2026-07-08) |
 | `test_main_module_scope.py` | Antibody #8: Phase 3 module-scope enforcement for src.main (two-system independence; created 2026-04-30) |
-| `test_no_edge_rule1_guard.py` | Stop-hook advisory guard antibody: Chinese/paraphrased no-edge conclusions trigger RULE 1 while real evidence-backed edge conclusions pass (created 2026-07-08) |
+| `test_unsupported_edge_claim_guard.py` | Stop-hook advisory guard antibody: unsupported positive edge/deploy claims trigger the guard, null results and evidence-backed claims pass, meta-discussion of the guard itself is exempt (created 2026-07-08, rewritten 2026-07-28 when the guard was inverted) |
 | `test_no_raw_world_attach.py` | Antibody #13: no raw ATTACH DATABASE or get_trade_connection_with_world in trading-lane source modules (created 2026-04-30) |
 | `test_no_synthetic_provenance_marker.py` | Relapse antibody: blocks re-introduction of synthetic provenance markers per critic findings #6A/E (created 2026-04-28) |
 | `test_observations_k1_migration.py` | Antibody for Invariant C: observations schema migrated to K1 dual-atom shape (created 2026-05-01) |

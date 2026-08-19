@@ -1,13 +1,13 @@
-# Lifecycle: created=2026-05-24; last_reviewed=2026-06-08; last_reused=2026-06-08
+# Lifecycle: created=2026-05-24; last_reviewed=2026-08-04; last_reused=2026-08-04
 # Purpose: Tests that the job registry mirrors the scheduler + efficiency audit flags.
 # Reuse: Inspect docs/operations/current/plans/data_temporal_kernel/PLAN.md + the target module before relying on it.
 # Created: 2026-05-24
-# Last reused or audited: 2026-06-08 (system_decomposition_plan §8 Step 4: WU daily dedup —
+# Last reused or audited: 2026-08-04 (single-live scheduler semantics audit; WU daily dedup —
 #   flipped test_no_duplicate_live_source_owners_after_registry_activation to assert the WU
 #   active-duplicate is now RESOLVED, gone from both the live detection map and the known-open list)
 # Authority basis: docs/operations/current/plans/data_temporal_kernel/PLAN.md (PR3);
 #   operator spec §"Job registry" + §4 (ownership map);
-#   docs/architecture/system_decomposition_plan.md §8 Step 4.
+#   docs/reference/design_system_decomposition_plan.md §8 Step 4.
 """Relationship tests for the job registry + inventory/audit CLIs (PR3, advisory).
 
 Key antibody: the registry must MIRROR the scheduler — a scheduled add_job id that is not
@@ -71,12 +71,21 @@ def test_src_main_partition_requires_every_scheduled_job_classified() -> None:
         _scheduled_ids_in,
         _src_main_partition_violations,
     )
+    from src.data.source_job_registry import JOB_REGISTRY
 
     assert _src_main_partition_violations() == []
     # the partition is total over src/main's statically-resolvable scheduled ids:
     scheduled = _scheduled_ids_in((_SRC_MAIN_FILE,))
     known = _SRC_MAIN_DATA_COLLECTION_JOB_IDS | _SRC_MAIN_NON_COLLECTION_JOB_IDS
     assert scheduled <= known, f"unclassified src/main jobs: {sorted(scheduled - known)}"
+    assert not (_SRC_MAIN_DATA_COLLECTION_JOB_IDS & _SRC_MAIN_NON_COLLECTION_JOB_IDS)
+    assert not (_SRC_MAIN_NON_COLLECTION_JOB_IDS & set(JOB_REGISTRY))
+    assert "edli_day0_hourly_refresh" in _SRC_MAIN_DATA_COLLECTION_JOB_IDS
+    assert JOB_REGISTRY["edli_day0_hourly_refresh"].writes_db is True
+    assert JOB_REGISTRY["edli_day0_hourly_refresh"].family == "forecast"
+    assert JOB_REGISTRY["edli_day0_hourly_refresh"].all_source_ids == (
+        "openmeteo_forecast_api",
+    )
     # execution/control ops that stay in src.main are explicitly NON-collection:
     assert {"exit_monitor", "deployment_freshness"} <= _SRC_MAIN_NON_COLLECTION_JOB_IDS
     assert "redeem_submitter" not in _SRC_MAIN_NON_COLLECTION_JOB_IDS
@@ -140,17 +149,18 @@ def test_dict_unpacked_forecast_live_ids_are_extracted() -> None:
     )
 
 
-def test_audit_flags_fast_executor_db_writer() -> None:
-    """The efficiency audit must surface the UMA listener (DB write on the file-only fast
-    executor) — the audit-confirmed structural fault."""
+def test_retired_uma_writer_is_absent_from_registry_and_audit() -> None:
+    """The retired alternate UMA writer must not return through registry or audit drift."""
     from scripts.data_collection_efficiency_audit import run_audit
-    from src.data.source_job_registry import fast_executor_db_writers
+    from src.data.source_job_registry import JOB_REGISTRY, fast_executor_db_writers
 
     writers = {j.job_id for j in fast_executor_db_writers()}
-    assert "ingest_uma_resolution_listener" in writers
+    assert "ingest_uma_resolution_listener" not in JOB_REGISTRY
+    assert "ingest_uma_resolution_listener" not in writers
+    assert "ingest_harvester_truth_writer" in JOB_REGISTRY
 
     faults = run_audit()
-    assert any("fast_executor_db_writer" in f and "uma_resolution_listener" in f for f in faults)
+    assert not any("uma_resolution_listener" in f for f in faults)
 
 
 def test_file_only_fast_jobs_not_flagged_as_db_writers() -> None:

@@ -13,6 +13,10 @@ Phase 5B (B078 / SD-1): enforces the dual-track ingest boundary laws:
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
+import json
+import math
+import os
 from typing import Literal
 
 from src.contracts.ensemble_snapshot_provenance import (
@@ -126,6 +130,333 @@ class SnapshotIngestDecision:
     causality_status: str
 
 
+@dataclass(frozen=True, slots=True)
+class BoundaryAmbiguityDecision:
+    snapshot_ambiguous: bool
+    ambiguous_member_count: int
+    majority_threshold: int
+    member_ambiguous: tuple[bool, ...] | None
+    member_invalid: tuple[bool, ...] | None
+    member_ids: tuple[int, ...] | None
+    member_reasons: tuple[str, ...] | None
+
+
+LOW_BOUNDARY_SEMANTICS_REVISION = "low_boundary_strict_majority_v1"
+
+
+def _ambiguity_majority_threshold() -> int:
+    raw = os.environ.get("AMBIGUITY_MAJORITY_THRESHOLD", "").strip()
+    if raw:
+        try:
+            threshold = int(raw)
+        except ValueError:
+            threshold = 26
+        if 1 <= threshold <= 51:
+            return threshold
+    return 26
+
+
+def boundary_ambiguity_decision(payload: dict) -> BoundaryAmbiguityDecision:
+    """Interpret LOW boundary evidence once for every ingest consumer.
+
+    Detailed per-member minima outrank producer booleans. A boundary bucket is
+    ambiguous only when it is strictly colder than the fully-inside minimum;
+    ties add no information. Payloads without detailed minima retain the
+    declared count, and only legacy payloads without either form fall back to
+    the producer's snapshot flag.
+    """
+
+    threshold = _ambiguity_majority_threshold()
+    boundary_policy = (
+        payload.get("boundary_policy")
+        if isinstance(payload.get("boundary_policy"), dict)
+        else {}
+    )
+    raw_snapshot_ambiguous = bool(
+        boundary_policy.get(
+            "boundary_ambiguous",
+            payload.get("boundary_ambiguous", False),
+        )
+    )
+    members = payload.get("members")
+    detailed = (
+        isinstance(members, list)
+        and len(members) == 51
+        and any(
+            isinstance(member, dict)
+            and (
+                "inner_min_native_unit" in member
+                or "boundary_min_native_unit" in member
+            )
+            for member in members
+        )
+    )
+    member_ambiguous: list[bool] = []
+    member_invalid: list[bool] = []
+    member_ids: list[int] = []
+    member_reasons: list[str] = []
+    if detailed:
+        boundary_window_declared = bool(
+            payload.get("selected_step_ranges_boundary")
+        ) or any(
+            isinstance(member, dict)
+            and member.get("boundary_min_native_unit") is not None
+            for member in members
+        )
+        for index, member in enumerate(members):
+            member_id = index
+            if isinstance(member, dict):
+                try:
+                    member_id = int(member.get("member", index))
+                except (TypeError, ValueError):
+                    member_id = index
+            member_ids.append(member_id)
+
+            if not isinstance(member, dict):
+                member_ambiguous.append(False)
+                member_invalid.append(True)
+                member_reasons.append("invalid_member_record")
+                continue
+            if "inner_min_native_unit" not in member:
+                member_ambiguous.append(False)
+                member_invalid.append(True)
+                member_reasons.append("invalid_missing_inner_min")
+                continue
+            inner_raw = member.get("inner_min_native_unit")
+            try:
+                inner = float(inner_raw)
+            except (TypeError, ValueError):
+                inner = math.nan
+            if not math.isfinite(inner):
+                member_ambiguous.append(False)
+                member_invalid.append(True)
+                member_reasons.append("invalid_nonfinite_inner_min")
+                continue
+            if "boundary_min_native_unit" not in member:
+                member_ambiguous.append(False)
+                member_invalid.append(True)
+                member_reasons.append("invalid_missing_boundary_min")
+                continue
+            boundary_raw = member.get("boundary_min_native_unit")
+            if boundary_raw is None:
+                member_ambiguous.append(False)
+                member_invalid.append(boundary_window_declared)
+                member_reasons.append(
+                    "invalid_missing_boundary_extrema"
+                    if boundary_window_declared
+                    else "accepted_no_boundary_window"
+                )
+                continue
+            try:
+                boundary = float(boundary_raw)
+            except (TypeError, ValueError):
+                boundary = math.nan
+            if not math.isfinite(boundary):
+                member_ambiguous.append(False)
+                member_invalid.append(True)
+                member_reasons.append("invalid_nonfinite_boundary_min")
+                continue
+            ambiguous = boundary < inner
+            member_ambiguous.append(ambiguous)
+            member_invalid.append(False)
+            if ambiguous:
+                member_reasons.append("quarantined_boundary_strictly_lower")
+            elif boundary == inner:
+                member_reasons.append("accepted_boundary_tie")
+            else:
+                member_reasons.append("accepted_boundary_not_lower")
+
+    if detailed:
+        count = sum(member_ambiguous)
+        member_decisions: tuple[bool, ...] | None = tuple(member_ambiguous)
+        invalid_decisions: tuple[bool, ...] | None = tuple(member_invalid)
+        ids: tuple[int, ...] | None = tuple(member_ids)
+        reasons: tuple[str, ...] | None = tuple(member_reasons)
+    else:
+        member_decisions = None
+        invalid_decisions = None
+        ids = None
+        reasons = None
+        try:
+            count = int(boundary_policy["ambiguous_member_count"])
+        except (KeyError, TypeError, ValueError):
+            return BoundaryAmbiguityDecision(
+                snapshot_ambiguous=raw_snapshot_ambiguous,
+                ambiguous_member_count=0,
+                majority_threshold=threshold,
+                member_ambiguous=None,
+                member_invalid=None,
+                member_ids=None,
+                member_reasons=None,
+            )
+        if not 0 <= count <= 51:
+            return BoundaryAmbiguityDecision(
+                snapshot_ambiguous=True,
+                ambiguous_member_count=count,
+                majority_threshold=threshold,
+                member_ambiguous=None,
+                member_invalid=None,
+                member_ids=None,
+                member_reasons=None,
+            )
+
+    return BoundaryAmbiguityDecision(
+        snapshot_ambiguous=count >= threshold,
+        ambiguous_member_count=count,
+        majority_threshold=threshold,
+        member_ambiguous=member_decisions,
+        member_invalid=invalid_decisions,
+        member_ids=ids,
+        member_reasons=reasons,
+    )
+
+
+def _raw_boundary_evidence_sha256(payload: dict) -> str:
+    boundary_policy = (
+        payload.get("boundary_policy")
+        if isinstance(payload.get("boundary_policy"), dict)
+        else {}
+    )
+    members = payload.get("members")
+    member_evidence = []
+    if isinstance(members, list):
+        for index, member in enumerate(members):
+            if not isinstance(member, dict):
+                member_evidence.append({"index": index, "raw_member": member})
+                continue
+            member_evidence.append(
+                {
+                    "index": index,
+                    "member": member.get("member"),
+                    "value_native_unit": member.get("value_native_unit"),
+                    "inner_min_native_unit": member.get("inner_min_native_unit"),
+                    "boundary_min_native_unit": member.get("boundary_min_native_unit"),
+                    "boundary_ambiguous": member.get("boundary_ambiguous"),
+                }
+            )
+    evidence = {
+        "boundary_ambiguous": payload.get("boundary_ambiguous"),
+        "boundary_policy": boundary_policy,
+        "members": member_evidence,
+    }
+    encoded = json.dumps(
+        evidence,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=repr,
+    )
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def normalize_low_boundary_evidence(payload: dict) -> dict:
+    """Return a copy whose LOW boundary fields follow the canonical decision."""
+
+    normalized = dict(payload)
+    if str(normalized.get("temperature_metric") or "").lower() != "low":
+        return normalized
+
+    raw_boundary_policy = (
+        dict(normalized["boundary_policy"])
+        if isinstance(normalized.get("boundary_policy"), dict)
+        else {}
+    )
+    raw_snapshot_ambiguous = bool(
+        raw_boundary_policy.get(
+            "boundary_ambiguous",
+            normalized.get("boundary_ambiguous", False),
+        )
+    )
+    raw_ambiguous_member_count = raw_boundary_policy.get(
+        "ambiguous_member_count"
+    )
+    raw_evidence_sha256 = _raw_boundary_evidence_sha256(normalized)
+    decision = boundary_ambiguity_decision(normalized)
+    boundary_policy = (
+        dict(normalized["boundary_policy"])
+        if isinstance(normalized.get("boundary_policy"), dict)
+        else {}
+    )
+    boundary_policy["boundary_ambiguous"] = decision.snapshot_ambiguous
+    boundary_policy["ambiguous_member_count"] = decision.ambiguous_member_count
+    normalized["boundary_policy"] = boundary_policy
+    normalized["boundary_ambiguous"] = decision.snapshot_ambiguous
+
+    if decision.member_ambiguous is not None:
+        assert decision.member_invalid is not None
+        assert decision.member_ids is not None
+        assert decision.member_reasons is not None
+        members: list[dict] = []
+        invalid_member_ids: list[int] = []
+        member_decisions: list[dict[str, object]] = []
+        for raw_member, member_id, ambiguous, invalid, reason in zip(
+            normalized.get("members", []),
+            decision.member_ids,
+            decision.member_ambiguous,
+            decision.member_invalid,
+            decision.member_reasons,
+            strict=True,
+        ):
+            member = (
+                dict(raw_member)
+                if isinstance(raw_member, dict)
+                else {"member": member_id}
+            )
+            member["boundary_ambiguous"] = ambiguous
+            if invalid:
+                member["value_native_unit"] = None
+                invalid_member_ids.append(member_id)
+                member_decision = "invalid"
+            elif ambiguous:
+                member["value_native_unit"] = None
+                member_decision = "quarantined"
+            else:
+                member["value_native_unit"] = float(
+                    member["inner_min_native_unit"]
+                )
+                member_decision = "accepted"
+            member_decisions.append(
+                {
+                    "member": member_id,
+                    "decision": member_decision,
+                    "reason": reason,
+                }
+            )
+            members.append(member)
+        normalized["members"] = members
+        missing_members = (
+            list(normalized["missing_members"])
+            if isinstance(normalized.get("missing_members"), list)
+            else []
+        )
+        normalized["missing_members"] = list(
+            dict.fromkeys([*missing_members, *invalid_member_ids])
+        )
+    else:
+        invalid_member_ids = []
+        member_decisions = []
+
+    quarantined_member_ids = [
+        int(item["member"])
+        for item in member_decisions
+        if item["decision"] == "quarantined"
+    ]
+    normalized["boundary_normalization"] = {
+        "semantics_revision": LOW_BOUNDARY_SEMANTICS_REVISION,
+        "artifact_manifest_sha256": normalized.get("manifest_sha256"),
+        "raw_evidence_sha256": raw_evidence_sha256,
+        "raw_boundary_ambiguous": raw_snapshot_ambiguous,
+        "raw_ambiguous_member_count": raw_ambiguous_member_count,
+        "canonical_boundary_ambiguous": decision.snapshot_ambiguous,
+        "canonical_ambiguous_member_count": decision.ambiguous_member_count,
+        "majority_threshold": decision.majority_threshold,
+        "quarantined_member_ids": quarantined_member_ids,
+        "invalid_member_ids": invalid_member_ids,
+        "member_decisions": member_decisions,
+    }
+
+    return normalized
+
+
 def validate_snapshot_contract(payload: dict) -> SnapshotIngestDecision:
     data_version = payload.get("data_version")
     spec: MetricIdentity | None = _ALLOWED_DATA_VERSIONS.get(data_version)
@@ -152,23 +483,8 @@ def validate_snapshot_contract(payload: dict) -> SnapshotIngestDecision:
         return SnapshotIngestDecision(False, "MISSING_CAUSALITY_FIELD", False, "UNKNOWN")
 
     causality_status = causality_field.get("status", "UNKNOWN") if isinstance(causality_field, dict) else "UNKNOWN"
-    boundary_policy = payload.get("boundary_policy", {}) if isinstance(payload.get("boundary_policy"), dict) else {}
-    boundary_ambiguous = bool(boundary_policy.get("boundary_ambiguous", False))
-    # 2026-05-19: majority-threshold re-evaluation. The per-snapshot boundary_ambiguous
-    # flag in the payload was computed with the ANY-member rule (old Bug A). Re-derive
-    # from ambiguous_member_count when available so Law 1 honours the new majority rule.
-    # If ambiguous_member_count is absent (legacy rows), fall back to the stored flag.
-    _ambig_count = boundary_policy.get("ambiguous_member_count")
-    if _ambig_count is not None:
-        try:
-            _ambig_int = int(_ambig_count)
-            # Majority threshold: 26/51 ≈ 51%. Operator-tunable env var mirrors extractor.
-            import os as _os
-            _threshold_raw = _os.environ.get("AMBIGUITY_MAJORITY_THRESHOLD", "")
-            _threshold = int(_threshold_raw) if _threshold_raw.strip() else 26
-            boundary_ambiguous = _ambig_int >= _threshold
-        except (ValueError, TypeError):
-            pass  # keep flag value from payload
+    boundary_decision = boundary_ambiguity_decision(payload)
+    boundary_ambiguous = boundary_decision.snapshot_ambiguous
     issue_time = payload.get("issue_time_utc")
 
     training_allowed = True
@@ -186,6 +502,15 @@ def validate_snapshot_contract(payload: dict) -> SnapshotIngestDecision:
         training_allowed = False
         if causality_status == "OK":
             causality_status = "REJECTED_BOUNDARY_AMBIGUOUS"
+
+    if (
+        spec.temperature_metric == "low"
+        and boundary_decision.member_invalid is not None
+        and any(boundary_decision.member_invalid)
+    ):
+        training_allowed = False
+        if causality_status == "OK":
+            causality_status = "UNKNOWN"
 
     # Law 2 (low only): day-already-started snapshots must not enter calibration training.
     if spec.temperature_metric == "low" and causality_status == "N/A_CAUSAL_DAY_ALREADY_STARTED":

@@ -61,6 +61,42 @@ _prev_orderbook_hash_by_market: dict[str, tuple[str, float]] = {}
 _discovery_captures_since_keyframe: dict[str, int] = {}
 
 GAMMA_BASE = "https://gamma-api.polymarket.com"
+_ORIGINAL_HTTPX_GET = httpx.get
+_GAMMA_HTTP_CLIENT: httpx.Client | None = None
+_GAMMA_HTTP_CLIENT_LOCK = threading.Lock()
+
+
+def _gamma_http_client() -> httpx.Client:
+    """Reuse Gamma TLS across recurring scans instead of handshaking per slug."""
+
+    global _GAMMA_HTTP_CLIENT
+    client = _GAMMA_HTTP_CLIENT
+    if client is None:
+        with _GAMMA_HTTP_CLIENT_LOCK:
+            client = _GAMMA_HTTP_CLIENT
+            if client is None:
+                client = httpx.Client(
+                    limits=httpx.Limits(
+                        max_keepalive_connections=8,
+                        max_connections=16,
+                        keepalive_expiry=90.0,
+                    )
+                )
+                _GAMMA_HTTP_CLIENT = client
+    return client
+
+
+def _gamma_transport_get(
+    url: str,
+    *,
+    params: dict | None,
+    timeout: float,
+) -> httpx.Response:
+    # Existing callers/tests may deliberately replace the module-level httpx.get
+    # transport. Preserve that injection seam; normal runtime uses the pooled client.
+    if httpx.get is not _ORIGINAL_HTTPX_GET:
+        return httpx.get(url, params=params, timeout=timeout)
+    return _gamma_http_client().get(url, params=params, timeout=timeout)
 
 
 def _capture_policy_trigger(
@@ -70,12 +106,15 @@ def _capture_policy_trigger(
     condition_id: str,
     selected_token: str,
 ) -> str | None:
-    """Route ordinary discovery to compact storage with periodic full keyframes."""
+    """Route discovery by evidence value, independent of executable TTL."""
 
     identity = f"{condition_id}|{selected_token}"
     if requested_trigger != "DISCOVERY_SWEEP":
         return requested_trigger
 
+    # This query answers whether the replay keyframe lineage exists, not whether
+    # it is executable now. Ordinary discovery rows are compact and cannot feed
+    # money-path readers; priority/JIT paths independently force a fresh full row.
     try:
         has_full = conn.execute(
             """
@@ -83,6 +122,15 @@ def _capture_policy_trigger(
               FROM executable_market_snapshot_latest
              WHERE condition_id = ?
                AND selected_outcome_token_id = ?
+               AND NOT EXISTS (
+                    SELECT 1
+                      FROM executable_market_snapshot_invalidations inv
+                     WHERE inv.invalidated_at >= executable_market_snapshot_latest.captured_at
+                       AND (
+                            inv.condition_id = executable_market_snapshot_latest.condition_id
+                            OR inv.token_id = executable_market_snapshot_latest.selected_outcome_token_id
+                       )
+               )
              LIMIT 1
             """,
             (condition_id, selected_token),
@@ -153,41 +201,8 @@ def _snapshot_capture_busy_timeout_ms(
     remaining_candidates: int | None = None,
     priority_candidate: bool = False,
 ) -> int:
-    """Return the per-row SQLite wait budget for background substrate capture.
+    """Return the established foreground per-row SQLite wait budget."""
 
-    Fitz #5 lock-CATEGORY kill (2026-06-08): this is the load-bearing budget that
-    decides whether a contended snapshot insert WAITS out a transient trade-DB
-    write lock or fails fast as "database is locked".  The trade DB
-    (executable_market_snapshots, db=trade) is written concurrently IN-PROCESS by
-    the executor submit path, the exit lifecycle, and the CollateralLedger
-    heartbeat — each on an independent connection, so the in-process write mutex
-    does not serialize them.  A WAL write lock therefore changes hands constantly.
-
-    The prior design clamped this to min(250 ms, remaining_per_cycle_ms).  Live
-    (zeus-live.err 2026-06-08 09:27:50) showed that under contention every insert
-    fail-fasted inside 250 ms → inserted=0 → executable_substrate_coverage=NONE →
-    the armed daemon had zero executable candidates and could not trade.  Worse,
-    as the per-cycle budget shrank the clamp collapsed toward a few milliseconds,
-    failing the LATE-cycle inserts the warmer most needs.
-
-    Fix: a DURABLE FLOOR (``ZEUS_SNAPSHOT_CAPTURE_BUSY_TIMEOUT_FLOOR_MS``,
-    default 1000 ms) that the shrinking per-cycle budget can NEVER pull below, so
-    a lock held briefly (<1 s) by another in-process writer is WAITED out instead
-    of raising.  The wait is still bounded by ``ZEUS_SNAPSHOT_CAPTURE_BUSY_TIMEOUT_MS``
-    (default 2000 ms) so one busy wait cannot consume the whole multi-row capture
-    window — the original budget-protection intent is preserved, just floored
-    above the fail-fast threshold.  The wall-clock per-cycle deadline (checked at
-    the top of the capture loop) remains the true outer bound on the cycle.
-    """
-
-    # 2026-06-16: the 1000ms floor / 2000ms ceiling was too short to win the zeus_trades.db
-    # WAL write lock under transient concurrent-writer contention (reactor claim/exit/poller
-    # commits). An external BEGIN IMMEDIATE probe acquired the lock in 0.91s, yet capture
-    # (floored at 1000ms under per-cycle budget pressure) gave up after ~1s -> inserted=0 ->
-    # fresh_executable_city_count=0 -> the spine starved of priceable families. Raise the
-    # floor to 4000ms (the durable minimum WAIT a contended insert gets regardless of the
-    # shrinking per-cycle budget) and the ceiling to 8000ms so a brief writer hold is WAITED
-    # out, not fail-fasted. Still bounded by the wall-clock per-cycle deadline.
     configured = int(os.environ.get("ZEUS_SNAPSHOT_CAPTURE_BUSY_TIMEOUT_MS", "8000"))
     floor_ms = int(os.environ.get("ZEUS_SNAPSHOT_CAPTURE_BUSY_TIMEOUT_FLOOR_MS", "4000"))
     progress_floor_ms = int(
@@ -196,9 +211,6 @@ def _snapshot_capture_busy_timeout_ms(
     priority_floor_candidate_cap = int(
         os.environ.get("ZEUS_SNAPSHOT_CAPTURE_PRIORITY_FLOOR_MAX_CANDIDATES", "32")
     )
-    # The per-cycle remaining budget may TIGHTEN the wait toward the configured
-    # ceiling, but it must never drop the wait below the durable floor: a contended
-    # insert that waits only a few ms is the exact failure that starved coverage.
     remaining_ms = int(max(1.0, remaining_seconds * 1000.0))
     if remaining_candidates is not None and remaining_candidates > 1:
         priority_floor_scope = bool(
@@ -218,33 +230,31 @@ def _snapshot_capture_busy_timeout_ms(
         split_priority_scope = False
         split_batch_scope = False
     if priority_floor_scope:
-        # Live money-path scoped refreshes must wait out normal WAL contention even
-        # late in the cycle. Splitting a 2-row priority refresh down to 150ms after
-        # Gamma/CLOB prefetch consumed the reserve reproduced coverage=NONE.
         share_ms = max(floor_ms, remaining_ms // max(1, remaining_candidates or 1))
         return max(1, min(configured, share_ms))
     if split_priority_scope or split_batch_scope:
-        # Live 2026-06-25: the batch warmer had 46 selected candidates and one
-        # locked insert consumed the 8s per-row ceiling, producing
-        # attempted=1 inserted=0 coverage=NONE. Batch substrate refresh is a
-        # coverage producer, not a single critical recapture; no one condition may
-        # spend the whole capture reserve. Split the remaining wall-clock budget
-        # across the remaining selected candidates while preserving a small
-        # non-zero wait so transient locks can still clear. Large priority batches
-        # are still batches: a broad redecision confirmation scope must make
-        # progress across families instead of letting the first locked row consume
-        # the whole tick.
-        #
-        # Live 2026-06-26: money-path confirmation refreshes commonly carry a
-        # family-sized priority scope (roughly 17-21 YES/NO orderbook rows). The
-        # old cap of 4 misclassified those scoped recaptures as broad batches,
-        # split the wait budget down to a few hundred ms, then failed every
-        # contended write with "database is locked". Keep the durable floor for
-        # normal priority scopes and split only oversized priority batches.
         share_ms = max(progress_floor_ms, remaining_ms // max(1, remaining_candidates))
         return max(1, min(configured, share_ms))
     capped = min(configured, max(floor_ms, remaining_ms))
     return max(floor_ms, capped)
+
+
+def _background_snapshot_capture_busy_timeout_ms() -> int:
+    """Fixed fast-yield wait reserved for broad, retried substrate capture."""
+
+    return 25
+
+
+def _cooperative_snapshot_busy_timeout_ms(
+    planned_timeout_ms: int,
+    cooperative_limit_ms: int | None,
+) -> int:
+    """Cap replayable writer waiting without changing foreground JIT behavior."""
+
+    planned = max(1, int(planned_timeout_ms))
+    if cooperative_limit_ms is None:
+        return planned
+    return min(planned, max(1, int(cooperative_limit_ms)))
 
 
 def _snapshot_capture_sqlite_lock_retries() -> int:
@@ -363,18 +373,9 @@ def _priority_direct_clob_prefetch_condition_limit() -> int:
 
 
 def _feasibility_prefetch_busy_timeout_ms() -> int:
-    """Bound local price-witness reads so they cannot starve snapshot writes."""
+    """Keep background candidate quote reads on the fast-yield boundary."""
 
-    try:
-        configured = int(
-            os.environ.get(
-                "ZEUS_MARKET_DISCOVERY_FEASIBILITY_PREFETCH_BUSY_TIMEOUT_MS",
-                "50",
-            )
-        )
-    except ValueError:
-        configured = 50
-    return max(1, configured)
+    return 25
 
 
 def _is_sqlite_locked_error(exc: BaseException) -> bool:
@@ -1056,7 +1057,7 @@ def _gamma_get(path: str, *, params: dict | None = None, timeout: float = 15.0, 
         try:
             url = f"{GAMMA_BASE}{path}"
             resp = polymarket_request_governor.request(
-                lambda: httpx.get(url, params=params, timeout=timeout),
+                lambda: _gamma_transport_get(url, params=params, timeout=timeout),
                 "GET",
                 url,
                 params=params,
@@ -3304,13 +3305,13 @@ def capture_executable_market_snapshot(
                 clob, selected_token, gamma_market_raw, outcome, raw_clob_market
             )
 
-    # Validate the caller's boundary timestamp, but do not use it as the
-    # executable snapshot's authority time.  The fresh orderbook authority is
-    # only known after all CLOB reads above have returned; stamping at call
-    # entry can make a slow-but-current snapshot self-expire before immediate
-    # repricing.
-    _utc_datetime(captured_at, field_name="captured_at")
-    captured = datetime.now(timezone.utc)
+    # Use the request boundary as the conservative causal timestamp. A broad
+    # request that started first may finish after a newer exact refresh; stamping
+    # completion time would let that older observation replace the exact latest
+    # projection. Slow reads may therefore expire earlier, which is fail-closed.
+    captured = _utc_datetime(captured_at, field_name="captured_at")
+    if captured > datetime.now(timezone.utc):
+        raise ExecutableSnapshotCaptureError("captured_at cannot be in the future")
     # PR 2: cache spread computation to avoid calling _compute_spread twice.
     _spread_usd = _compute_spread(raw_orderbook, top_bid, top_ask)
     snapshot = ExecutableMarketSnapshot(
@@ -3666,13 +3667,24 @@ def read_persisted_weather_markets(
     max_age_seconds = max(1.0, float(max_age_seconds))
     cutoff = now - timedelta(seconds=max_age_seconds)
 
-    snapshot_rows = conn.execute(
-        """
-        SELECT *
-          FROM executable_market_snapshots
-         ORDER BY captured_at DESC
-        """
-    ).fetchall()
+    try:
+        # The latest mirror bounds this hot read to one immutable evidence row
+        # per condition/selected side.  Never fall back to the append log here:
+        # it is unbounded history and can hold a WAL reader across the monitor
+        # or auction cycle.
+        snapshot_rows = conn.execute(
+            """
+            SELECT s.*
+              FROM executable_market_snapshot_latest AS latest
+              JOIN executable_market_snapshots AS s
+                ON s.snapshot_id = latest.snapshot_id
+               AND s.condition_id = latest.condition_id
+               AND s.selected_outcome_token_id = latest.selected_outcome_token_id
+            """
+        ).fetchall()
+    except Exception as exc:  # noqa: BLE001 - live read must fail closed
+        logger.warning("persisted latest executable snapshot read failed: %s", exc)
+        return MarketSnapshot(events=[], authority="NEVER_FETCHED")
     if not snapshot_rows:
         return MarketSnapshot(events=[], authority="NEVER_FETCHED")
 
@@ -4903,10 +4915,14 @@ def refresh_executable_market_substrate_snapshots(
     budget_seconds: float | None = None,
     capture_reserve_seconds: float | None = None,
     priority_condition_ids: set[str] | frozenset[str] | tuple[str, ...] | list[str] | None = None,
+    priority_write_condition_ids: set[str] | frozenset[str] | tuple[str, ...] | list[str] | None = None,
     force_refresh_condition_ids: set[str] | frozenset[str] | tuple[str, ...] | list[str] | None = None,
     priority_token_ids: set[str] | frozenset[str] | tuple[str, ...] | list[str] | None = None,
     force_refresh_token_ids: set[str] | frozenset[str] | tuple[str, ...] | list[str] | None = None,
     snapshot_write_context_factory: Callable[[], contextlib.AbstractContextManager[object]] | None = None,
+    background_snapshot_write_context_factory: Callable[[], contextlib.AbstractContextManager[object]] | None = None,
+    background_fast_yield: bool = False,
+    cooperative_write_busy_timeout_ms: int | None = None,
 ) -> dict[str, Any]:
     """Capture fresh executable snapshots for the live reader substrate.
 
@@ -4930,6 +4946,13 @@ def refresh_executable_market_substrate_snapshots(
         for condition_id in (priority_condition_ids or ())
         if str(condition_id or "").strip()
     }
+    priority_write_conditions = {
+        str(condition_id or "").strip()
+        for condition_id in (priority_write_condition_ids or ())
+        if str(condition_id or "").strip()
+    }
+    if not priority_write_conditions.issubset(priority_conditions):
+        raise ValueError("priority snapshot writes require exact priority scope")
     forced_conditions = {
         str(condition_id or "").strip()
         for condition_id in (force_refresh_condition_ids or ())
@@ -4956,7 +4979,7 @@ def refresh_executable_market_substrate_snapshots(
         condition_id = str(raw_condition_id or "").strip()
         if condition_id and condition_id not in priority_condition_rank:
             priority_condition_rank[condition_id] = len(priority_condition_rank)
-    attempted = inserted = skipped = failed = 0
+    attempted = inserted = compact_inserted = skipped = failed = 0
     # cap_truncated counts outcomes dropped by per-city cap or budget (true
     # truncation).  skipped counts all filtered-out outcomes (missing cid,
     # non-executable, expired, duplicate sides, missing no_token) — the two
@@ -5439,6 +5462,12 @@ def refresh_executable_market_substrate_snapshots(
         selected_token = _selected_token_for_direction(outcome, direction)
         prefetched_book = prefetched_books.get(selected_token) if selected_token else None
         priority_candidate = str(condition_id or "").strip() in priority_conditions
+        priority_write_candidate = (
+            str(condition_id or "").strip() in priority_write_conditions
+        )
+        background_capture = bool(
+            background_fast_yield and not priority_write_candidate
+        )
         priority_candidate_serviced = (
             str(condition_id or "").strip() in priority_direct_clob_service_conditions
         )
@@ -5470,16 +5499,33 @@ def refresh_executable_market_substrate_snapshots(
                     batch_orderbook_supported=batch_orderbook_supported,
                     prefetched_books=prefetched_books,
                 )
-                effective_lock_retry_count = _snapshot_capture_effective_lock_retries(
-                    configured_retries=lock_retry_count,
-                    remaining_candidates=remaining_candidates,
+                cooperative_busy_ms = (
+                    None
+                    if cooperative_write_busy_timeout_ms is None
+                    else max(1, int(cooperative_write_busy_timeout_ms))
                 )
-                _set_busy_timeout_ms(
-                    conn,
-                    _snapshot_capture_busy_timeout_ms(
+                effective_lock_retry_count = (
+                    0
+                    if background_capture or cooperative_busy_ms is not None
+                    else _snapshot_capture_effective_lock_retries(
+                        configured_retries=lock_retry_count,
+                        remaining_candidates=remaining_candidates,
+                    )
+                )
+                busy_timeout_ms = (
+                    _background_snapshot_capture_busy_timeout_ms()
+                    if background_capture
+                    else _snapshot_capture_busy_timeout_ms(
                         remaining_seconds,
                         remaining_candidates=remaining_candidates,
                         priority_candidate=priority_candidate,
+                    )
+                )
+                _set_busy_timeout_ms(
+                    conn,
+                    _cooperative_snapshot_busy_timeout_ms(
+                        busy_timeout_ms,
+                        cooperative_busy_ms,
                     ),
                 )
                 try:
@@ -5502,7 +5548,7 @@ def refresh_executable_market_substrate_snapshots(
                         str(condition_id or "").strip() in priority_conditions
                         or str(selected_token or "").strip() in priority_tokens
                     )
-                    capture_executable_market_snapshot(
+                    capture_result = capture_executable_market_snapshot(
                         conn,
                         market=market,
                         decision=decision,
@@ -5517,8 +5563,21 @@ def refresh_executable_market_substrate_snapshots(
                         # bin including illiquid (no-ask) tail bins so the FDR full-family
                         # proof can be assembled.  Illiquid bins are persisted non-tradeable.
                         tolerate_missing_book=True,
-                        persist_context_factory=snapshot_write_context_factory,
-                        commit_after_persist=snapshot_write_context_factory is not None,
+                        persist_context_factory=(
+                            background_snapshot_write_context_factory
+                            if background_capture
+                            and background_snapshot_write_context_factory is not None
+                            else snapshot_write_context_factory
+                        ),
+                        commit_after_persist=(
+                            (
+                                background_snapshot_write_context_factory
+                                if background_capture
+                                and background_snapshot_write_context_factory is not None
+                                else snapshot_write_context_factory
+                            )
+                            is not None
+                        ),
                         capture_trigger="PRIORITY_MARKER" if is_priority_capture else "DISCOVERY_SWEEP",
                     )
                     # EDLI live-probe WAL-lock fix (2026-05-31): COMMIT-PER-ITEM.
@@ -5539,10 +5598,21 @@ def refresh_executable_market_substrate_snapshots(
                     # per row releases the trade-DB WAL write lock and preserves the
                     # caller-managed single-connection transaction contract (no new connection,
                     # no cross-DB independent write).
-                    if snapshot_write_context_factory is None:
+                    if (
+                        (
+                            background_snapshot_write_context_factory
+                            if background_capture
+                            and background_snapshot_write_context_factory is not None
+                            else snapshot_write_context_factory
+                        )
+                        is None
+                    ):
                         conn.commit()
-                    inserted += 1
-                    inserted_cities.add(_snapshot_refresh_city_key(market))
+                    if capture_result.get("snapshot_persistence_tier") == "full":
+                        inserted += 1
+                        inserted_cities.add(_snapshot_refresh_city_key(market))
+                    else:
+                        compact_inserted += 1
                     break
                 except Exception as exc:
                     # Roll back this row's partial write unit so a failed capture never leaves
@@ -5594,6 +5664,7 @@ def refresh_executable_market_substrate_snapshots(
         "executable_substrate_coverage_status": coverage_status,
         "attempted": attempted,
         "inserted": inserted,
+        "compact_inserted": compact_inserted,
         "skipped": skipped,
         "failed": failed,
         "truncated": int(truncated),
@@ -5969,7 +6040,15 @@ def _book_row_price_size(row: Any, side: str) -> tuple[Decimal, Decimal]:
         raise ExecutableSnapshotCaptureError(f"CLOB orderbook {side} row is not decimal") from exc
     if not price.is_finite() or not size.is_finite():
         raise ExecutableSnapshotCaptureError(f"CLOB orderbook {side} row is not finite")
-    if price <= 0 or price >= 1:
+    if side == "bids":
+        price_in_domain = Decimal("0") < price <= Decimal("1")
+    elif side == "asks":
+        price_in_domain = Decimal("0") < price < Decimal("1")
+    else:
+        raise ExecutableSnapshotCaptureError(
+            f"unsupported CLOB orderbook side {side!r}"
+        )
+    if not price_in_domain:
         raise ExecutableSnapshotCaptureError(f"CLOB orderbook {side} price is out of bounds")
     if size <= 0:
         raise ExecutableSnapshotCaptureError(f"CLOB orderbook {side} size must be positive")

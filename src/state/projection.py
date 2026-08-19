@@ -371,6 +371,12 @@ _MONITOR_REFRESH_PRESERVED_COLUMNS = frozenset(
         "chain_cost_basis_usd",
         "chain_seen_at",
         "chain_absence_at",
+        # Fill/correction writers own open-position realized economics.  A
+        # generic MONITOR_REFRESHED contributes no execution fact and retains
+        # the current values; a canonical partial-fill repair may carry a new
+        # non-NULL cumulative PnL through this event shape.
+        "realized_pnl_usd",
+        "exit_price",
     }
 )
 _MONITOR_SNAPSHOT_COLUMNS = frozenset(
@@ -450,7 +456,6 @@ def _preserve_existing_pending_exit_authority(
     current = {column: row[index] for index, column in enumerate(selected)}
     if (
         str(current.get("phase") or "") == LifecyclePhase.PENDING_EXIT.value
-        and str(projection.get("phase") or "") != LifecyclePhase.PENDING_EXIT.value
         and str(current.get("order_status") or "")
         in _MONITOR_REFRESH_PROTECTED_PENDING_EXIT_STATUSES
     ):
@@ -459,6 +464,37 @@ def _preserve_existing_pending_exit_authority(
             merged[column] = current[column]
         return merged
     return projection
+
+
+def _preserve_existing_partial_exit_realized_pnl(
+    conn: sqlite3.Connection,
+    projection: dict,
+    *,
+    table_name: str = "position_current",
+) -> dict:
+    """Never let an open monitor/restart projection erase booked partial PnL.
+
+    ``build_position_current_projection`` intentionally emits NULL for open
+    positions.  A partial EXIT is open exposure with already-realized money,
+    so the canonical partial-fill writer supplies a non-NULL cumulative value;
+    all later generic projections preserve it until settlement supplies the
+    final cumulative result.
+    """
+
+    if projection.get("realized_pnl_usd") is not None:
+        return projection
+    position_id = str(projection.get("position_id") or "")
+    if not position_id or "realized_pnl_usd" not in table_columns(conn, table_name):
+        return projection
+    row = conn.execute(
+        f"SELECT realized_pnl_usd FROM {table_name} WHERE position_id = ?",
+        (position_id,),
+    ).fetchone()
+    if row is None or row[0] is None:
+        return projection
+    merged = dict(projection)
+    merged["realized_pnl_usd"] = row[0]
+    return merged
 
 
 def _preserve_existing_monitor_refresh_authority(
@@ -496,10 +532,11 @@ def _preserve_existing_monitor_refresh_authority(
     merged = dict(projection)
     current = {column: row[index] for index, column in enumerate(selected)}
     for column in preserved:
+        if column == "realized_pnl_usd" and projection.get(column) is not None:
+            continue
         merged[column] = current[column]
     if (
         str(current.get("phase") or "") == LifecyclePhase.PENDING_EXIT.value
-        and str(projection.get("phase") or "") != LifecyclePhase.PENDING_EXIT.value
         and str(current.get("order_status") or "")
         in _MONITOR_REFRESH_PROTECTED_PENDING_EXIT_STATUSES
     ):
@@ -664,6 +701,9 @@ def upsert_position_current(
     *,
     table_name: str = "position_current",
 ) -> None:
+    projection = _preserve_existing_partial_exit_realized_pnl(
+        conn, projection, table_name=table_name
+    )
     projection = _preserve_existing_monitor_refresh_authority(
         conn, projection, table_name=table_name
     )

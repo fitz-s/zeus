@@ -1,7 +1,7 @@
 # Created: 2026-04-17
-# Last reused or audited: 2026-07-28
+# Last reused or audited: 2026-08-11
 # Authority basis: AGENTS.md money path; S1 market source-proof persistence via market_topology_state.
-# Lifecycle: created=2026-04-17; last_reviewed=2026-07-28; last_reused=2026-07-28
+# Lifecycle: created=2026-04-17; last_reviewed=2026-08-11; last_reused=2026-08-11
 # Purpose: Lock market_scanner provenance, source-contract drift behavior, and Venus diagnostic authority labels.
 # Reuse: Inspect src/data/market_scanner.py and scripts/watch_source_contract.py before relying on these assertions.
 # Authority basis: audit bug B017 (STILL_OPEN P1 SD-H), Fitz methodology constraint #4 "Data Provenance > Code Correctness"; Wave16 object-meaning diagnostic authority repair.
@@ -320,7 +320,68 @@ def _insert_persisted_reader_snapshot(
         """,
         (active, orderbook_top_ask, market_end_at, market_end_at, market_end_at),
     )
+    _mirror_snapshot_to_latest(conn, "snap-mid")
     conn.commit()
+
+
+def _mirror_snapshot_to_latest(conn: sqlite3.Connection, snapshot_id: str) -> None:
+    conn.execute(
+        """
+        INSERT INTO executable_market_snapshot_latest (
+            condition_id, selected_outcome_token_id, snapshot_id,
+            gamma_market_id, event_id, event_slug, question_id,
+            yes_token_id, no_token_id, outcome_label, active, closed,
+            accepting_orders, orderbook_top_bid, orderbook_top_ask,
+            tradeability_status_json, captured_at, freshness_deadline
+        )
+        SELECT condition_id, selected_outcome_token_id, snapshot_id,
+               gamma_market_id, event_id, event_slug, question_id,
+               yes_token_id, no_token_id, outcome_label, active, closed,
+               accepting_orders, orderbook_top_bid, orderbook_top_ask,
+               tradeability_status_json, captured_at, freshness_deadline
+          FROM executable_market_snapshots
+         WHERE snapshot_id = ?
+        """,
+        (snapshot_id,),
+    )
+
+
+def _insert_old_persisted_snapshot_history(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        WITH RECURSIVE history(n) AS (
+            SELECT 1
+            UNION ALL
+            SELECT n + 1 FROM history WHERE n < 64
+        )
+        INSERT INTO executable_market_snapshots (
+            snapshot_id, gamma_market_id, event_id, event_slug, condition_id,
+            question_id, yes_token_id, no_token_id, selected_outcome_token_id,
+            outcome_label, enable_orderbook, active, closed, accepting_orders,
+            min_tick_size, min_order_size, fee_details_json, token_map_json,
+            neg_risk, orderbook_top_bid, orderbook_top_ask,
+            orderbook_depth_json, market_start_at, market_end_at,
+            market_close_at, sports_start_at, raw_gamma_payload_hash,
+            raw_clob_market_info_hash, raw_orderbook_hash, authority_tier,
+            captured_at, freshness_deadline
+        )
+        SELECT 'history-' || history.n, s.gamma_market_id, s.event_id,
+               s.event_slug, s.condition_id, s.question_id, s.yes_token_id,
+               s.no_token_id, s.selected_outcome_token_id, s.outcome_label,
+               s.enable_orderbook, s.active, s.closed, s.accepting_orders,
+               s.min_tick_size, s.min_order_size, s.fee_details_json,
+               s.token_map_json, s.neg_risk, s.orderbook_top_bid,
+               s.orderbook_top_ask, s.orderbook_depth_json, s.market_start_at,
+               s.market_end_at, s.market_close_at, s.sports_start_at,
+               s.raw_gamma_payload_hash, s.raw_clob_market_info_hash,
+               s.raw_orderbook_hash, s.authority_tier,
+               '2026-05-19T10:00:00+00:00',
+               '2026-05-19T10:15:00+00:00'
+          FROM executable_market_snapshots AS s
+          CROSS JOIN history
+         WHERE s.snapshot_id = 'snap-mid'
+        """
+    )
 
 
 def _make_forward_substrate_db(tmp_path: Path, request: pytest.FixtureRequest) -> "tuple[str, sqlite3.Connection]":
@@ -482,6 +543,7 @@ def test_snapshot_refresh_stops_when_budget_is_exhausted(monkeypatch):
     def fake_capture(conn, *, market, decision, clob, captured_at, scan_authority, execution_side, **kwargs):
         captured.append(decision.tokens["market_id"])
         clock["now"] += 2.0
+        return {"snapshot_persistence_tier": "full"}
 
     monkeypatch.setattr(ms.time, "monotonic", lambda: clock["now"])
     monkeypatch.setattr(ms, "capture_executable_market_snapshot", fake_capture)
@@ -3757,6 +3819,67 @@ class TestForwardMarketSubstrateProducer:
             ("highest-temperature-in-opening-on-may-22-2026", "opening-0")
         ]
 
+    def test_persisted_reader_bounds_read_to_latest_projection(self):
+        conn = _make_persisted_substrate_conn()
+        for condition_id, label, low, high, token in (
+            ("cond-low", "35°F or lower", None, 35.0, "yes-low"),
+            ("cond-mid", "36-37°F", 36.0, 37.0, "yes-mid"),
+            ("cond-high", "38°F or higher", 38.0, None, "yes-high"),
+        ):
+            conn.execute(
+                """
+                INSERT INTO market_events (
+                    market_slug, city, target_date, temperature_metric,
+                    condition_id, token_id, range_label, range_low,
+                    range_high, recorded_at
+                ) VALUES (?, 'Chicago', '2026-04-30', 'low', ?, ?, ?, ?, ?,
+                    '2026-05-20T09:59:00+00:00')
+                """,
+                (
+                    "lowest-temperature-in-chicago-on-april-30-2026",
+                    condition_id,
+                    token,
+                    label,
+                    low,
+                    high,
+                ),
+            )
+        _insert_persisted_reader_snapshot(conn)
+        _insert_old_persisted_snapshot_history(conn)
+        conn.commit()
+
+        statements: list[str] = []
+        conn.set_trace_callback(statements.append)
+        snapshot = ms.read_persisted_weather_markets(
+            conn,
+            now_utc=datetime(2026, 5, 20, 10, 5, tzinfo=timezone.utc),
+            max_age_seconds=900,
+        )
+        conn.set_trace_callback(None)
+
+        assert snapshot.authority == "VERIFIED"
+        assert snapshot.events[0]["outcomes"][1]["executable_snapshot_id"] == "snap-mid"
+        assert any("FROM executable_market_snapshot_latest" in sql for sql in statements)
+        assert not any(
+            re.search(r"FROM executable_market_snapshots\s+ORDER BY captured_at DESC", sql, re.I)
+            for sql in statements
+        )
+
+    def test_persisted_reader_does_not_fallback_when_latest_projection_is_unavailable(self):
+        conn = _make_persisted_substrate_conn()
+        _insert_persisted_reader_snapshot(conn)
+        conn.execute("DROP TABLE executable_market_snapshot_latest")
+        conn.commit()
+
+        snapshot = ms.read_persisted_weather_markets(
+            conn,
+            now_utc=datetime(2026, 5, 20, 10, 5, tzinfo=timezone.utc),
+            max_age_seconds=900,
+        )
+
+        assert snapshot.authority == "NEVER_FETCHED"
+        assert snapshot.events == []
+
     def test_persisted_reader_reconstructs_full_support_from_snapshot_and_market_events(self):
         conn = _make_persisted_substrate_conn()
         for condition_id, label, low, high, token in (
@@ -3974,6 +4097,7 @@ class TestForwardMarketSubstrateProducer:
             )
             """
         )
+        _mirror_snapshot_to_latest(conn, "snap-mid-no")
         conn.commit()
 
         snapshot = ms.read_persisted_weather_markets(
@@ -4067,6 +4191,7 @@ class TestForwardMarketSubstrateProducer:
             )
             """
         )
+        _mirror_snapshot_to_latest(conn, "snap-mid-no-only")
         conn.commit()
 
         snapshot = ms.read_persisted_weather_markets(

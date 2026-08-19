@@ -55,10 +55,12 @@ _bind_canonical_main_module(__name__, sys.modules[__name__])
 # Live-hang telemetry (2026-05-31): SIGUSR1 dumps ALL thread stacks to stderr
 # (logs/zeus-live.err) so a frozen reactor cycle (indefinite _PyMutex/lock
 # deadlock — same class as the 5h market-channel hang) can be pinned WITHOUT
-# root-level py-spy. faulthandler.enable() also dumps on fatal signals. Additive.
+# root-level py-spy. The diagnostic must remain stack-only: chaining SIGUSR1 to
+# its default handler terminates the live process after it writes the dump.
+# faulthandler.enable() also dumps on fatal signals. Additive.
 faulthandler.enable()
 try:
-    faulthandler.register(signal.SIGUSR1, all_threads=True, chain=True)
+    faulthandler.register(signal.SIGUSR1, all_threads=True, chain=False)
 except (AttributeError, ValueError, OSError):
     pass
 
@@ -91,33 +93,97 @@ _held_position_monitor_active = threading.Event()
 _held_position_monitor_claim = threading.Lock()
 _held_position_monitor_handoff_pending = threading.Event()
 _periodic_held_position_monitor_handoff_pending = threading.Event()
+_periodic_held_position_monitor_fairness_debt = threading.Event()
+_held_position_monitor_canonical_debt = threading.Event()
+_held_position_monitor_recovery_requested = threading.Event()
+_held_position_monitor_recovery_worker_lock = threading.Lock()
+_held_position_monitor_recovery_worker: threading.Thread | None = None
+_held_position_monitor_canonical_recheck_lock = threading.Lock()
+_held_position_monitor_canonical_last_check = 0.0
+_HELD_POSITION_MONITOR_CANONICAL_RECHECK_SECONDS = 1.0
 _held_position_monitor_bootstrap_complete = threading.Event()
+_capital_recovery_handoff_pending = threading.Event()
+_edli_boot_fill_bridge_recovery_complete = threading.Event()
+_edli_boot_fill_bridge_recovery_thread: threading.Thread | None = None
+_EDLI_BOOT_FILL_BRIDGE_RETRY_SECONDS = 30.0
 _held_position_monitor_bootstrap_check_lock = threading.Lock()
 _held_position_monitor_bootstrap_last_check = 0.0
 _day0_urgent_wake_pending = threading.Event()
 _day0_held_monitor_preempt_requested = threading.Event()
-_periodic_exit_monitor_day0_yielded = threading.Event()
+_forecast_held_monitor_preempt_requested = threading.Event()
+_periodic_exit_monitor_urgent_yielded = threading.Event()
+_held_monitor_preempt_generation_lock = threading.Lock()
+_held_monitor_preempt_generation = 0
 _day0_exit_monitor_attempts_lock = threading.Lock()
 _day0_exit_monitor_attempts: dict[str, bool | None] = {}
 _forecast_exit_monitor_attempts_lock = threading.Lock()
 _forecast_exit_monitor_attempts: dict[str, bool | None] = {}
 _edli_reactor_wake_thread: threading.Thread | None = None
 _edli_last_reactor_wake_id: str | None = None
+_COLLATERAL_AUTHORITY_WAKE_RETRY_SECONDS = 5.0
+_COLLATERAL_AUTHORITY_WAKE_BATCH_LIMIT = 100
+_edli_collateral_authority_wake_backoff_until: dict[str, float] = {}
+_edli_last_collateral_authority_captured_at: datetime | None = None
+_edli_collateral_authority_lock = threading.RLock()
+
+
+@dataclass
+class _OneTurnWakeExclusion:
+    wake_ids: frozenset[str] = frozenset()
+
+    def arm(self, wake_id: str) -> None:
+        self.arm_many((wake_id,))
+
+    def arm_many(self, wake_ids: Iterable[str]) -> None:
+        self.wake_ids = frozenset(
+            clean_id
+            for raw_wake_id in wake_ids
+            if (clean_id := str(raw_wake_id or "").strip())
+        )
+
+    def consume(self) -> frozenset[str]:
+        wake_ids = self.wake_ids
+        self.wake_ids = frozenset()
+        return wake_ids
+
+    def reset(self) -> None:
+        self.wake_ids = frozenset()
+
+
+_edli_global_completion_yield = _OneTurnWakeExclusion()
+_edli_day0_post_monitor_yield = _OneTurnWakeExclusion()
+_edli_paused_forecast_post_monitor_yield = _OneTurnWakeExclusion()
+_edli_terminal_day0_cleanup_yield = threading.Event()
 _HELD_POSITION_MONITOR_DEFER_JOBS = frozenset(
     {
         "edli_event_reactor",
+        "live_health_composite",
         "market_discovery",
     }
 )
-# Bootstrap protects the new-entry decision lane. Recovery, held-q refresh,
-# cancels, health, settlement, and passive checkpoints are prerequisites or
-# independent drains; starving them cannot establish held-position coverage.
+# Bootstrap gives held-capital monitoring first access to cold DB pages. Health
+# yields only while its last verified cut retains ample freshness budget; the
+# cycle-level backstop bypasses this defer before observability can go stale.
+# Recovery, held-q refresh, cancels, settlement, and passive checkpoints remain
+# prerequisites or independent drains whose starvation cannot establish held
+# coverage.
 _HELD_POSITION_MONITOR_BOOTSTRAP_DEFER_JOBS = _HELD_POSITION_MONITOR_DEFER_JOBS
 _market_discovery_last_completed_monotonic: float | None = None
 OPENING_HUNT_FIRST_DELAY_SECONDS = 30.0
 _EDLI_COMMAND_RECOVERY_INTERVAL_SECONDS = 60.0
+_EDLI_COMMAND_RECOVERY_FIRST_DELAY_SECONDS = 43.0
+_EDLI_COMMAND_RECOVERY_FULL_CADENCE_SECONDS = 300.0
+_CAPITAL_RECOVERY_REACTOR_DRAIN_SECONDS = 15.0
+_EDLI_COMMAND_RECOVERY_LAST_FULL_BUCKET: int | None = None
 HELD_POSITION_MONITOR_FIRST_DELAY_SECONDS = 5.0
 HELD_POSITION_MONITOR_BOOTSTRAP_CHECK_SECONDS = 5.0
+# The normal full-book monitor runs every 120s.  A separate 30s poll reconstructs
+# overdue work from canonical per-position MONITOR_REFRESHED events after one
+# missed tick plus 30s scheduling tolerance.  It does not create another
+# monitor writer: _exit_monitor_cycle retains the process-wide claim.
+HELD_POSITION_MONITOR_RECOVERY_INTERVAL_SECONDS = 30.0
+HELD_POSITION_MONITOR_RECOVERY_MAX_AGE_SECONDS = 150.0
+HELD_POSITION_MONITOR_RECOVERY_RETRY_SECONDS = 1.0
 # Fitz #5 scheduler-liveness (2026-06-08): the EDLI market-substrate warm cycle's
 # APScheduler interval. The refresh wall-clock budget
 # (ZEUS_REACTOR_REFRESH_BUDGET_SECONDS in src.data.substrate_observer) MUST be
@@ -210,13 +276,19 @@ def _utc_run_time_after(seconds: float) -> datetime:
 
 
 def _promote_held_position_monitor_bootstrap_from_canonical_progress() -> bool:
-    """Release bootstrap after one post-boot full-book coverage tranche."""
+    """Release entry work after every held position has a post-boot decision attempt.
+
+    Bootstrap proves monitor continuity, not probability/quote authority. A
+    current ``MONITOR_REFRESHED`` carrying typed DATA_DEGRADED evidence counts
+    as an attempted decision; the separate entry-authority gate below keeps
+    that exact family fail-closed until its inputs recover. Requiring fresh
+    inputs here conflates those debts and turns one provider gap into a global
+    reactor/recovery storm.
+    """
 
     global _held_position_monitor_bootstrap_last_check
     if _held_position_monitor_bootstrap_complete.is_set():
         return True
-    if not _held_position_monitor_active.is_set():
-        return False
     now_monotonic = time.monotonic()
     if (
         now_monotonic - _held_position_monitor_bootstrap_last_check
@@ -236,7 +308,13 @@ def _promote_held_position_monitor_bootstrap_from_canonical_progress() -> bool:
         boot_at = _BOOT_STATE.get("ts")
         if not isinstance(boot_at, datetime):
             return False
+        # SCOPE: this process's initial entry-reactor and market-discovery
+        # admission only. DRAIN: each bounded cadence read requires strict
+        # post-boot canonical evidence for the current open held positions.
+        # RESET: completion releases the bootstrap defer for this process;
+        # process restart initializes the completion Event clear and re-proves it.
         from src.ops.monitor_cadence import collect_monitor_cadence_evidence
+        from src.ops.monitor_cadence import monitor_cadence_blocking_evidence
         from src.state.db import get_trade_connection_read_only
 
         conn = get_trade_connection_read_only()
@@ -244,7 +322,10 @@ def _promote_held_position_monitor_bootstrap_from_canonical_progress() -> bool:
             evidence = collect_monitor_cadence_evidence(
                 conn,
                 now=datetime.now(timezone.utc),
-                min_occurred_at=boot_at - timedelta(seconds=5),
+                min_occurred_at=boot_at,
+                strict_future=True,
+                monitor_refreshed_only=True,
+                require_fresh_inputs=False,
                 sample_limit=0,
             )
         finally:
@@ -252,17 +333,30 @@ def _promote_held_position_monitor_bootstrap_from_canonical_progress() -> bool:
         if int(evidence.get("future_monitor_event_count") or 0) > 0:
             return False
         open_count = int(evidence.get("open_position_count") or 0)
-        required = min(open_count, max(2, (open_count + 2) // 3))
         fresh = int(evidence.get("fresh_position_count") or 0)
-        if fresh < required:
+        settlement_recoverable = int(
+            evidence.get("settlement_recoverable_position_count") or 0
+        )
+        stale = int(evidence.get("stale_or_missing_position_count") or 0)
+        cadence_groups = monitor_cadence_blocking_evidence(evidence)
+        blocking_stale = int(cadence_groups["blocking_stale_position_count"])
+        quote_only_stale = int(
+            cadence_groups["quote_only_stale_position_count"]
+        )
+        required = open_count
+        covered = fresh + settlement_recoverable + quote_only_stale
+        if blocking_stale > 0 or covered < required:
             return False
         _held_position_monitor_bootstrap_complete.set()
         logger.info(
             "held-position monitor bootstrap coverage verified: "
-            "progress_positions=%d required_progress=%d open_positions=%d",
-            fresh,
+            "progress_positions=%d required_progress=%d open_positions=%d "
+            "strict_stale=%d blocking_stale=%d",
+            covered,
             required,
             open_count,
+            stale,
+            blocking_stale,
         )
         return True
     except Exception as exc:  # noqa: BLE001 - bootstrap remains fail-closed.
@@ -273,6 +367,222 @@ def _promote_held_position_monitor_bootstrap_from_canonical_progress() -> bool:
         return False
     finally:
         _held_position_monitor_bootstrap_check_lock.release()
+
+
+def _held_position_monitor_entry_block_reason() -> str | None:
+    """Return why current held-capital redecision truth cannot admit a BUY."""
+
+    # SCOPE: BUY/new-entry authority only; held SELL, monitoring, command
+    # recovery, and settlement continue. DRAIN: the 30-second durable monitor
+    # recovery re-evaluates every current positive exposure and appends fresh
+    # canonical MONITOR_REFRESHED evidence. RESET: zero overdue/future current
+    # exposures automatically removes this reason on the next reactor cycle.
+    from src.ops.monitor_cadence import (
+        collect_monitor_cadence_evidence,
+        monitor_cadence_blocking_evidence,
+    )
+    from src.state.db import get_trade_connection_read_only
+
+    conn = None
+    try:
+        conn = get_trade_connection_read_only()
+        evidence = collect_monitor_cadence_evidence(
+            conn,
+            now=datetime.now(timezone.utc),
+            max_age_seconds=HELD_POSITION_MONITOR_RECOVERY_MAX_AGE_SECONDS,
+            monitor_refreshed_only=True,
+            require_fresh_inputs=True,
+            sample_limit=0,
+        )
+    except Exception as exc:  # noqa: BLE001 - missing authority fails closed.
+        logger.warning(
+            "held-position monitor entry authority unavailable: %s",
+            exc,
+            exc_info=True,
+        )
+        return "held_position_monitor_cadence_unavailable"
+    finally:
+        if conn is not None:
+            conn.close()
+
+    if int(evidence.get("future_monitor_event_count") or 0) > 0:
+        return "held_position_monitor_future_evidence"
+    cadence_groups = monitor_cadence_blocking_evidence(evidence)
+    if int(cadence_groups["blocking_stale_position_count"]) > 0:
+        return "held_position_monitor_cadence_overdue"
+    return None
+
+
+def _held_position_monitor_debt_pending() -> bool:
+    """Recheck canonical monitor cadence inside long-running reactor cuts.
+
+    Probability/quote authority is an entry-family concern handled by
+    ``_held_position_monitor_entry_block_reason``. Only a missing/old monitor
+    attempt may claim the global monitor writer and preempt the reactor.
+    """
+
+    global _held_position_monitor_canonical_last_check
+
+    if _held_position_monitor_canonical_debt.is_set():
+        return True
+    now = time.monotonic()
+    if (
+        now - _held_position_monitor_canonical_last_check
+        < _HELD_POSITION_MONITOR_CANONICAL_RECHECK_SECONDS
+    ):
+        return False
+    if not _held_position_monitor_canonical_recheck_lock.acquire(blocking=False):
+        return _held_position_monitor_canonical_debt.is_set()
+    try:
+        now = time.monotonic()
+        if (
+            now - _held_position_monitor_canonical_last_check
+            < _HELD_POSITION_MONITOR_CANONICAL_RECHECK_SECONDS
+        ):
+            return _held_position_monitor_canonical_debt.is_set()
+        _held_position_monitor_canonical_last_check = now
+        try:
+            evidence = _held_position_monitor_recovery_evidence()
+            overdue_count, future_count, _groups = (
+                _held_position_monitor_recovery_counts(evidence)
+            )
+        except Exception as exc:  # noqa: BLE001 - unknown cadence stays debt.
+            overdue_count = 1
+            future_count = 0
+            logger.warning(
+                "held-position monitor cadence authority unavailable: %s",
+                exc,
+                exc_info=True,
+            )
+        if overdue_count > 0 or future_count > 0:
+            # SCOPE: only the current/new reactor auction. DRAIN: its
+            # cooperative callback yields, then monitor recovery refreshes the
+            # canonical held book. RESET: recovery clears the debt after full
+            # current coverage; queued auction facts remain durable.
+            _held_position_monitor_canonical_debt.set()
+            logger.warning(
+                "reactor yielded to canonical held-position monitor cadence "
+                "debt (overdue=%d future=%d)",
+                overdue_count,
+                future_count,
+            )
+        return _held_position_monitor_canonical_debt.is_set()
+    finally:
+        _held_position_monitor_canonical_recheck_lock.release()
+
+
+def _canonical_overdue_monitor_families(
+    *,
+    require_fresh_inputs: bool = True,
+) -> frozenset[tuple[str, str, str]] | None:
+    """Return every family whose current exposure lacks fresh monitor truth.
+
+    ``None`` means the exact family scope could not be proven, so a targeted
+    monitor must widen to the full held book. Quote-only staleness remains out
+    of this set because it has its own retry semantics and is not canonical
+    cadence debt.
+    """
+
+    from src.ops.monitor_cadence import (
+        collect_monitor_cadence_evidence,
+        count_current_monitor_obligations,
+        monitor_cadence_blocking_evidence,
+    )
+    from src.state.db import get_trade_connection_read_only
+
+    conn = None
+    try:
+        now = datetime.now(timezone.utc)
+        conn = get_trade_connection_read_only()
+        obligation_count = count_current_monitor_obligations(conn, now=now)
+        evidence = collect_monitor_cadence_evidence(
+            conn,
+            now=now,
+            max_age_seconds=HELD_POSITION_MONITOR_RECOVERY_MAX_AGE_SECONDS,
+            monitor_refreshed_only=True,
+            require_fresh_inputs=require_fresh_inputs,
+            sample_limit=max(1, obligation_count),
+        )
+        blocking = monitor_cadence_blocking_evidence(evidence)
+        stale = list(blocking["blocking_stale_positions"])
+        future = list(evidence.get("future_monitor_events") or ())
+        expected = int(blocking["blocking_stale_position_count"]) + int(
+            evidence.get("future_monitor_event_count") or 0
+        )
+        position_ids = tuple(
+            dict.fromkeys(
+                str(item.get("position_id") or "").strip()
+                for item in (*stale, *future)
+                if str(item.get("position_id") or "").strip()
+            )
+        )
+        if expected == 0:
+            return frozenset()
+        if len(position_ids) != expected:
+            return None
+        placeholders = ",".join("?" for _ in position_ids)
+        rows = conn.execute(
+            f"""
+            SELECT position_id, city, target_date, temperature_metric
+              FROM position_current
+             WHERE position_id IN ({placeholders})
+            """,
+            position_ids,
+        ).fetchall()
+        if len(rows) != len(position_ids):
+            return None
+        families: set[tuple[str, str, str]] = set()
+        for row in rows:
+            family = (
+                str(row["city"] or "").strip(),
+                str(row["target_date"] or "").strip()[:10],
+                str(row["temperature_metric"] or "").strip().lower(),
+            )
+            if not family[0] or not family[1] or family[2] not in {"high", "low"}:
+                return None
+            families.add(family)
+        return frozenset(families)
+    except Exception as exc:  # noqa: BLE001 - unknown scope widens fail-closed.
+        logger.warning(
+            "canonical overdue monitor family scope unavailable; using full book: %s",
+            exc,
+            exc_info=True,
+        )
+        return None
+    finally:
+        if conn is not None:
+            conn.close()
+
+
+def _canonical_monitor_entry_block_scope(
+    reason: str,
+) -> tuple[str | None, dict[str, str]]:
+    """Narrow canonical cadence debt to its exact weather families."""
+
+    from src.events.candidate_binding import weather_family_id
+
+    families = _canonical_overdue_monitor_families()
+    if families is None:
+        return reason, {}
+    return None, {
+        weather_family_id(city=city, target_date=target_date, metric=metric): reason
+        for city, target_date, metric in families
+    }
+
+
+def _exact_held_sell_completion_pending() -> bool:
+    """Fail closed unless durable reduce-only auction debt is exactly readable."""
+
+    from src.runtime.reactor_wake import exact_held_sell_completion_wake_ids
+
+    try:
+        return bool(exact_held_sell_completion_wake_ids(fail_on_error=True))
+    except (OSError, ValueError):
+        logger.warning(
+            "exact held-SELL completion debt unreadable; retaining monitor priority",
+            exc_info=True,
+        )
+        return False
 
 
 def _defer_for_held_position_monitor(job_name: str) -> bool:
@@ -286,27 +596,136 @@ def _defer_for_held_position_monitor(job_name: str) -> bool:
     if job_name not in _HELD_POSITION_MONITOR_BOOTSTRAP_DEFER_JOBS:
         return False
 
+    exact_held_sell_pending = bool(
+        job_name == "edli_event_reactor"
+        and _periodic_held_position_monitor_fairness_debt.is_set()
+        and _exact_held_sell_completion_pending()
+    )
+
+    if (
+        job_name == "edli_event_reactor"
+        and _held_position_monitor_canonical_debt.is_set()
+    ):
+        monitor_block_reason = _held_position_monitor_entry_block_reason()
+        if monitor_block_reason is not None:
+            # SCOPE: canonical stale evidence blocks BUY only in the exact
+            # overdue weather families (or every BUY family when that scope is
+            # unreadable); _edli_event_reactor_cycle supplies those blocks and
+            # retains SELL/HOLD/CASH. It is not monitor-writer ownership and
+            # cannot suppress unrelated fresh families. DRAIN: the dedicated
+            # monitor recovery cadence refreshes the overdue families while
+            # the reactor compares the remaining executable set. RESET: a
+            # canonical clean read clears this event; every new cut rebuilds
+            # the family scope. Transient fairness/handoff debt below remains
+            # the only admission-level monitor preemption.
+            if exact_held_sell_pending:
+                logger.info(
+                    "edli_event_reactor retaining exact held-SELL completion "
+                    "while canonical monitor debt remains (%s)",
+                    monitor_block_reason,
+                )
+            else:
+                logger.warning(
+                    "edli_event_reactor retaining scoped auction while canonical "
+                    "held-position monitor debt remains (%s)",
+                    monitor_block_reason,
+                )
+        else:
+            _held_position_monitor_canonical_debt.clear()
+
+    # SCOPE: a timed-out periodic full-book monitor blocks only EDLI reactor
+    # admission. DRAIN: the next periodic full-book monitor that successfully
+    # acquires the reactor handoff clears the debt before scanning positions.
+    # RESET: process restart, or that successful handoff; incomplete per-position
+    # evidence stays fail-closed for that position but cannot freeze unrelated
+    # entry families after the concurrency debt has already been paid.
+    if (
+        job_name == "edli_event_reactor"
+        and _periodic_held_position_monitor_fairness_debt.is_set()
+        and not exact_held_sell_pending
+    ):
+        logger.warning(
+            "edli_event_reactor deferred: periodic full-book monitor fairness debt"
+        )
+        return True
+
     # SCOPE: all monitor kinds may defer reactor admission before it owns the
-    # active lock. Only the separate typed periodic signal may cancel an
-    # in-flight global auction. DRAIN: the claimed monitor gets the handoff or
-    # its bounded wait expires. RESET: _exit_monitor_cycle's finally block
-    # clears both the generic and periodic handoff events on every return path.
+    # active lock. Periodic fairness debt and canonical cadence debt may cancel
+    # an in-flight replayable auction at its next safe point. DRAIN: the claimed
+    # monitor gets the handoff or its bounded wait expires. RESET:
+    # _exit_monitor_cycle's finally block clears the handoff events, while full
+    # canonical coverage clears cadence debt.
     if (
         job_name in _HELD_POSITION_MONITOR_DEFER_JOBS
         and _held_position_monitor_handoff_pending.is_set()
     ):
         logger.info("%s deferred: held-position monitor reactor handoff pending", job_name)
         return True
+
+    # SCOPE: only admission of a new EDLI reactor auction, and only while an
+    # exact capital-blocking cancel recovery tick is active. Held monitoring,
+    # exits, collateral refresh, and already-running work remain unaffected.
+    # DRAIN: the bounded live_tick recovery either applies current venue truth
+    # or yields to the higher-priority monitor writer. RESET: the recovery
+    # cycle's finally block clears this event on every return/exception; a
+    # process restart also initializes it clear.
+    if (
+        job_name == "edli_event_reactor"
+        and _capital_recovery_handoff_pending.is_set()
+    ):
+        logger.info("edli_event_reactor deferred: capital recovery handoff pending")
+        return True
     if (
         not _held_position_monitor_bootstrap_complete.is_set()
         and not _promote_held_position_monitor_bootstrap_from_canonical_progress()
     ):
+        if job_name == "edli_event_reactor":
+            # SCOPE: BUY authority only until current-process held coverage is
+            # proven. The wrapper supplies a bootstrap entry block, while an
+            # actual monitor handoff above still preempts reactor admission.
+            # DRAIN: the first canonical post-boot monitor coverage completes
+            # bootstrap. RESET: process restart clears the completion event.
+            logger.info(
+                "edli_event_reactor retaining reduce-only auction while first "
+                "held-position monitor coverage is incomplete"
+            )
+            return False
         logger.info(
             "%s deferred: first held-position monitor coverage tranche has not completed",
             job_name,
         )
         return True
     return False
+
+
+def _current_periodic_monitor_obligation_count() -> int | None:
+    """Return canonical positive exposure currently owned by the monitor lane."""
+
+    from src.ops.monitor_cadence import count_current_monitor_obligations
+    from src.state.db import get_trade_connection_read_only
+
+    conn = None
+    try:
+        conn = get_trade_connection_read_only()
+        return count_current_monitor_obligations(
+            conn,
+            now=datetime.now(timezone.utc),
+        )
+    except Exception as exc:  # noqa: BLE001 - unknown exposure stays fail-closed.
+        logger.warning(
+            "periodic exit_monitor obligation read failed closed: %s",
+            exc,
+        )
+        return None
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception as exc:  # noqa: BLE001 - read result remains authoritative.
+                logger.warning(
+                    "periodic exit_monitor obligation connection close failed: %s",
+                    exc,
+                )
 
 
 def _harvester_should_register() -> bool:
@@ -441,6 +860,41 @@ def _replacement_qkernel_live_probability_authority_enabled(cfg: dict) -> bool:
     return True
 
 
+GOVERNED_KELLY_MULTIPLIER = 1.0 / 8.0
+
+
+def assert_kelly_multiplier_matches_governed_fraction(cfg: dict) -> None:
+    """Fail closed unless live sizing uses the operator-governed 1/8 Kelly.
+
+    SCOPE: process-wide daemon boot; a mismatched Kelly config prevents entry,
+    monitoring, and exit jobs from starting until the operator restores it.
+    DRAIN: restore ``sizing.kelly_multiplier`` to 0.125 in the active
+    operator config, then restart so every in-memory settings object reloads.
+    RESET: this guard is recomputed on every boot and clears only on an exact
+    finite match; there is no strategy, side, or runtime override.
+    """
+    sizing = cfg.get("sizing") or {}
+    raw_mult = sizing.get("kelly_multiplier")
+    if raw_mult is None:
+        raise RuntimeError(
+            "KELLY_MULT_GOVERNANCE_MISMATCH: missing "
+            "sizing.kelly_multiplier; required=0.125 (1/8)"
+        )
+    if isinstance(raw_mult, bool) or not isinstance(raw_mult, (int, float)):
+        raise RuntimeError(
+            "KELLY_MULT_GOVERNANCE_MISMATCH: "
+            f"sizing.kelly_multiplier must be a JSON number, got "
+            f"{type(raw_mult).__name__}; required=0.125 (1/8)"
+        )
+    kelly_mult = float(raw_mult)
+    if not math.isfinite(kelly_mult) or kelly_mult != GOVERNED_KELLY_MULTIPLIER:
+        raise RuntimeError(
+            "KELLY_MULT_GOVERNANCE_MISMATCH: "
+            f"sizing.kelly_multiplier={kelly_mult!r}; "
+            f"required={GOVERNED_KELLY_MULTIPLIER} (1/8)"
+        )
+
+
 def assert_kelly_multiplier_within_correlated_ceiling(cfg: dict) -> None:
     """Fail-closed guard: sizing.kelly_multiplier must not exceed
     sizing.max_correlated_pct (the over-size door / iron rule 5 = ruin).
@@ -454,8 +908,8 @@ def assert_kelly_multiplier_within_correlated_ceiling(cfg: dict) -> None:
     and ``f*·m ≤ kelly_multiplier``. So ``f*·m / f_cap_corr ≤ 1`` — and Σ stays
     under the ceiling — ONLY while ``kelly_multiplier ≤ max_correlated_pct``.
     These are TWO INDEPENDENT config knobs (sizing.kelly_multiplier vs
-    sizing.max_correlated_pct), equal at 0.25 today only by coincidence — the
-    SAME coincidence that masked the original bug. A legal operator value of
+    sizing.max_correlated_pct), historically equal at 0.25 only by coincidence
+    — the SAME coincidence that masked the original bug. A value of
     e.g. 0.5 silently breaches the ceiling (3 same-cycle same-city bets summed
     to $51 > $42.50 at B=170 in the critic repro, a 20% over-size) even with the
     INV-K3 single cap intact. ``_runtime_kelly_multiplier`` only rejects ≤ 0, so
@@ -511,7 +965,9 @@ def _run_boot_guards(raw_cfg: dict) -> list:
     Guards included (same set the real boot path runs, in the same order):
       1. assert_calibration_pin_shape_is_dict  — model_keys must be dict/absent
       2. assert_frozen_as_of_not_stale         — WARN>10d, FATAL>21d
-      3. assert_kelly_multiplier_within_correlated_ceiling
+      3. assert_kelly_multiplier_matches_governed_fraction
+                                               — kelly_multiplier == 1/8
+      4. assert_kelly_multiplier_within_correlated_ceiling
                                                — kelly_multiplier ≤ max_correlated_pct
                                                  (over-size door / iron rule 5)
 
@@ -543,7 +999,20 @@ def _run_boot_guards(raw_cfg: dict) -> list:
     except Exception as exc:  # pragma: no cover
         results.append(("frozen_as_of_staleness", False, f"unexpected: {exc}"))
 
-    # Guard 3: kelly_multiplier ≤ max_correlated_pct (over-size door / iron rule 5)
+    # Guard 3: exact operator-governed live Kelly fraction.
+    try:
+        assert_kelly_multiplier_matches_governed_fraction(raw_cfg)
+        results.append((
+            "kelly_mult_governed_fraction",
+            True,
+            "kelly_multiplier == 0.125 (1/8) — governed fraction intact",
+        ))
+    except (RuntimeError, TypeError, ValueError) as exc:
+        results.append(("kelly_mult_governed_fraction", False, str(exc)))
+    except Exception as exc:  # pragma: no cover
+        results.append(("kelly_mult_governed_fraction", False, f"unexpected: {exc}"))
+
+    # Guard 4: kelly_multiplier ≤ max_correlated_pct (over-size door / iron rule 5)
     try:
         assert_kelly_multiplier_within_correlated_ceiling(raw_cfg)
         results.append((
@@ -907,6 +1376,15 @@ def _edli_live_entry_readiness_block(
     # return values fresh from current DB rows on every call, so once DRAIN
     # clears the underlying row the gate reads false on its very next
     # invocation -- no separate reset action exists or is needed.
+    # SCOPE: BUY admission only. Scheduler startup, held monitoring, SELL,
+    # command recovery, and settlement remain live while the historical bridge
+    # debt is checked. DRAIN: the single boot recovery thread proves there is no
+    # orphan or materializes every bounded candidate, retrying after transient
+    # failures. RESET: that thread sets the process-local completion event only
+    # after a successful canonical recovery pass; restart initializes it clear.
+    if not _edli_boot_fill_bridge_recovery_complete.is_set():
+        return "entry_readiness:EDLI_BOOT_FILL_BRIDGE_RECOVERY_PENDING", {}
+
     try:
         _require_stage_file_paths(edli_cfg)
         state_section = _settings_section("state", {})
@@ -1084,34 +1562,33 @@ def _edli_stage_latest_submit_plan_family_ids(
 ) -> dict[str, str]:
     """Resolve aggregate_id -> family_id via each aggregate's latest SubmitPlanBuilt.
 
-    Reuses the latest-payload-per-aggregate join shape from
-    ``edli_trade_fact_bridge._consume_absorbed_confirmed_fills`` (a window
-    function over ``edli_live_order_events`` partitioned by aggregate_id,
-    filtered to ``event_type = 'SubmitPlanBuilt'``). An aggregate_id absent
-    from the returned mapping (no persisted plan, invalid JSON, or a missing
-    ``family_id`` field) is UNRESOLVED -- callers must fail closed for it
-    rather than silently dropping it from any block.
+    Each caller supplies the current, bounded set of blocked aggregate
+    identities. Resolve them one identity at a time through the aggregate
+    sequence index: the append-only event log must not be scanned by
+    ``event_type`` before the reactor can begin its cycle. An aggregate_id
+    absent from the returned mapping (no persisted plan, invalid JSON, or a
+    missing ``family_id`` field) is UNRESOLVED -- callers must fail closed for
+    it rather than silently dropping it from any block.
     """
     if not aggregate_ids:
         return {}
-    placeholders = ",".join("?" for _ in aggregate_ids)
     try:
-        rows = conn.execute(
-            f"""
-            SELECT aggregate_id, payload_json
-              FROM (
-                    SELECT aggregate_id, payload_json,
-                           ROW_NUMBER() OVER (
-                               PARTITION BY aggregate_id ORDER BY event_sequence DESC
-                           ) AS rank
-                      FROM edli_live_order_events
-                     WHERE event_type = 'SubmitPlanBuilt'
-                       AND aggregate_id IN ({placeholders})
-                   )
-             WHERE rank = 1
-            """,
-            tuple(aggregate_ids),
-        ).fetchall()
+        rows = []
+        for aggregate_id in dict.fromkeys(aggregate_ids):
+            row = conn.execute(
+                """
+                SELECT aggregate_id, payload_json
+                  FROM edli_live_order_events
+                       INDEXED BY idx_edli_live_order_events_aggregate
+                 WHERE aggregate_id = ?
+                   AND event_type = 'SubmitPlanBuilt'
+                 ORDER BY event_sequence DESC
+                 LIMIT 1
+                """,
+                (aggregate_id,),
+            ).fetchone()
+            if row is not None:
+                rows.append(row)
     except Exception as exc:
         raise RuntimeError(
             f"EDLI_STAGE_FAMILY_RESOLUTION_QUERY_FAILED:{type(exc).__name__}"
@@ -1505,6 +1982,7 @@ def _assert_cascade_liveness_contract(scheduler) -> None:
 
 
 _heartbeat_fails = 0
+_BOOT_HEARTBEAT_INTERVAL_SECONDS = 30.0
 
 def _write_heartbeat() -> None:
     """Write the coarse process heartbeat without consulting runtime state."""
@@ -1541,13 +2019,52 @@ def _write_heartbeat() -> None:
             os._exit(1)
 
 
+def _start_boot_process_heartbeat(
+    *,
+    interval_seconds: float = _BOOT_HEARTBEAT_INTERVAL_SECONDS,
+) -> tuple[threading.Event, threading.Thread]:
+    """Keep process liveness current until APScheduler owns the heartbeat."""
+
+    stop = threading.Event()
+    _write_heartbeat()
+
+    def _pulse() -> None:
+        while not stop.wait(interval_seconds):
+            _write_heartbeat()
+
+    thread = threading.Thread(
+        target=_pulse,
+        name="zeus-boot-process-heartbeat",
+        daemon=True,
+    )
+    thread.start()
+    return stop, thread
+
+
+def _stop_boot_process_heartbeat(
+    stop: threading.Event,
+    thread: threading.Thread,
+) -> None:
+    """Handoff the process pulse to the scheduler without a stale window."""
+
+    stop.set()
+    thread.join()
+    _write_heartbeat()
+
+
 @_scheduler_job("live_health_composite")
 def _live_health_composite_cycle() -> None:
     """Refresh composite live-health without blocking the heartbeat pulse."""
 
-    if _defer_for_held_position_monitor("live_health_composite"):
+    refresh_can_defer = _status_summary_refresh_can_defer()
+    if refresh_can_defer and _defer_for_held_position_monitor(
+        "live_health_composite"
+    ):
         return
-    if _defer_for_active_entry_reactor("live_health_composite"):
+    if (
+        refresh_can_defer
+        and _defer_for_active_entry_reactor("live_health_composite")
+    ):
         return
 
     from src.control.live_health import compute_composite_live_health
@@ -1555,6 +2072,33 @@ def _live_health_composite_cycle() -> None:
 
     write_cycle_pulse({"mode": "heartbeat_pulse", "heartbeat": True})
     compute_composite_live_health()
+
+
+def _status_summary_refresh_can_defer() -> bool:
+    """Yield only while both observability cuts have ample freshness budget."""
+
+    try:
+        from src.config import state_path
+        from src.control.live_health import STATUS_FRESH_BUDGET_SECONDS
+
+        cuts = (
+            ("status_summary.json", "timestamp"),
+            ("live_health_composite.json", "computed_at"),
+        )
+        now = datetime.now(timezone.utc)
+        for filename, field in cuts:
+            payload = json.loads(state_path(filename).read_text())
+            stamp = datetime.fromisoformat(
+                str(payload.get(field)).replace("Z", "+00:00")
+            )
+            if stamp.tzinfo is None or stamp.utcoffset() is None:
+                return False
+            age_seconds = (now - stamp.astimezone(timezone.utc)).total_seconds()
+            if age_seconds >= STATUS_FRESH_BUDGET_SECONDS / 2.0:
+                return False
+        return True
+    except Exception:
+        return False
 
 
 _venue_heartbeat_supervisor = None
@@ -1769,18 +2313,6 @@ def _run_ws_gap_reconcile_if_required(
         summary = ws_guard.summary()
     if not bool(summary.get("m5_reconcile_required", False)):
         return {"status": "not_required"}
-    if (
-        summary.get("subscription_state") == "DISCONNECTED"
-        and summary.get("gap_reason") == "not_configured"
-    ):
-        return {
-            "status": "deferred_ws_not_ready",
-            "reason": "ws_not_configured",
-            "subscription_state": summary.get("subscription_state"),
-            "gap_reason": summary.get("gap_reason"),
-            "m5_reconcile_required": True,
-        }
-
     owns_connection = conn_factory is None
     conn = None
     try:
@@ -1843,7 +2375,9 @@ def _refresh_reconcile_findings_if_required(
 
     if adapter is None:
         return {"status": "adapter_unavailable"}
-    if _cycle_lock.locked() or _edli_reactor_active():
+    if _cycle_lock.locked():
+        return {"status": "deferred_cycle_running"}
+    if _edli_reactor_active() and not _unresolved_reconcile_findings_exist():
         return {"status": "deferred_cycle_running"}
     owns_connection = conn_factory is None
     conn = None
@@ -1890,10 +2424,43 @@ def _refresh_reconcile_findings_if_required(
             conn.close()
 
 
+def _unresolved_reconcile_findings_exist(*, conn_factory=None) -> bool:
+    """Return whether venue maintenance has canonical reconcile debt to drain."""
+
+    # SCOPE: only unresolved exchange-reconcile findings bypass reactor/backlog
+    # scheduling preference. DRAIN: the existing venue-maintenance singleton runs
+    # refresh_unresolved_reconcile_findings. RESET: resolved_at removes the row from
+    # this exact predicate. Read failure preserves the ordinary defer behavior.
+    owns_connection = conn_factory is None
+    conn = None
+    try:
+        from src.state.db import get_trade_connection_read_only
+
+        conn = (conn_factory or get_trade_connection_read_only)()
+        row = conn.execute(
+            """
+            SELECT EXISTS(
+                SELECT 1
+                  FROM exchange_reconcile_findings
+                 WHERE resolved_at IS NULL
+            ) AS present
+            """
+        ).fetchone()
+        return bool(row["present"] if hasattr(row, "keys") else row[0])
+    except Exception as exc:
+        logger.warning("Reconcile finding drain probe failed closed: %s", exc)
+        return False
+    finally:
+        if owns_connection and conn is not None:
+            conn.close()
+
+
 def _run_venue_background_maintenance_once(adapter=None) -> dict:
     """Run venue read-side maintenance outside the heartbeat critical path."""
 
-    if _cycle_lock.locked() or _edli_reactor_active():
+    if _cycle_lock.locked():
+        return {"status": "deferred_cycle_running"}
+    if _edli_reactor_active() and not _unresolved_reconcile_findings_exist():
         return {"status": "deferred_cycle_running"}
     active_adapter = adapter or _venue_heartbeat_adapter
     if active_adapter is None:
@@ -1917,7 +2484,25 @@ def _start_venue_background_maintenance_async(adapter=None) -> str:
     """Start slow venue maintenance without delaying the next heartbeat tick."""
 
     global _last_venue_background_maintenance_attempt_at
-    if _cycle_lock.locked() or _edli_reactor_active():
+    if _cycle_lock.locked():
+        return "deferred_cycle_running"
+    if (
+        isinstance(_BOOT_STATE.get("ts"), datetime)
+        and not _held_position_monitor_bootstrap_complete.is_set()
+    ):
+        # SCOPE: only slow venue reconciliation launched by the order daemon
+        # during this process's cold-start coverage tranche. The external
+        # heartbeat owner and every fail-closed submit latch remain active.
+        # DRAIN: the first full held-position monitor runs after five seconds;
+        # the recurring heartbeat tick retries this maintenance independently.
+        # RESET: canonical post-boot MONITOR_REFRESHED coverage sets the
+        # bootstrap event; process restart creates a fresh obligation.
+        return "deferred_held_position_monitor_bootstrap"
+    reactor_active = _edli_reactor_active()
+    reconcile_drain_required = (
+        reactor_active and _unresolved_reconcile_findings_exist()
+    )
+    if reactor_active and not reconcile_drain_required:
         return "deferred_cycle_running"
     active_adapter = adapter or _venue_heartbeat_adapter
     if active_adapter is None:
@@ -1926,15 +2511,19 @@ def _start_venue_background_maintenance_async(adapter=None) -> str:
     m5_reconcile_required = _ws_gap_m5_reconcile_required()
     if (
         not m5_reconcile_required
-        and
-        _last_venue_background_maintenance_attempt_at is not None
+        and not reconcile_drain_required
+        and _last_venue_background_maintenance_attempt_at is not None
         and (now - _last_venue_background_maintenance_attempt_at).total_seconds()
         < VENUE_BACKGROUND_MAINTENANCE_SECONDS
     ):
         return "throttled"
     if _edli_reactor_pending_backlog_exists() and not m5_reconcile_required:
-        _last_venue_background_maintenance_attempt_at = now
-        return "deferred_edli_pending_backlog"
+        reconcile_drain_required = (
+            reconcile_drain_required or _unresolved_reconcile_findings_exist()
+        )
+        if not reconcile_drain_required:
+            _last_venue_background_maintenance_attempt_at = now
+            return "deferred_edli_pending_backlog"
     if not _venue_background_maintenance_lock.acquire(blocking=False):
         return "already_running"
     _last_venue_background_maintenance_attempt_at = now
@@ -1955,9 +2544,12 @@ def _start_venue_background_maintenance_async(adapter=None) -> str:
 
 
 def _start_venue_background_maintenance_after_reactor_if_required() -> str:
-    """Deterministically retry M5 venue maintenance after the reactor releases."""
+    """Start required M5/finding maintenance from a recurring control tick."""
 
-    if not _ws_gap_m5_reconcile_required():
+    if (
+        not _ws_gap_m5_reconcile_required()
+        and not _unresolved_reconcile_findings_exist()
+    ):
         return "not_required"
     try:
         adapter = _ensure_venue_read_side_adapter()
@@ -2205,6 +2797,7 @@ def _start_venue_heartbeat_loop_if_needed() -> None:
     global _venue_heartbeat_thread
     if _external_venue_heartbeat_enabled():
         _configure_external_venue_heartbeat_supervisor_if_needed()
+        _start_venue_background_maintenance_after_reactor_if_required()
         return
     if _venue_heartbeat_thread is not None and _venue_heartbeat_thread.is_alive():
         return
@@ -2673,6 +3266,7 @@ _DEPLOYMENT_FRESHNESS_LEGACY_PAUSE_REASONS = frozenset(
     {"deployment_freshness_4h_divergence"}
 )
 _LIVE_SIDECAR_BOOT_HEARTBEATS = (
+    ("data-ingest", "daemon-heartbeat-ingest.json", 180.0),
     ("forecast-live", "forecast-live-heartbeat.json", 120.0),
     ("substrate-observer", "daemon-heartbeat-substrate-observer.json", 180.0),
     ("price-channel-ingest", "daemon-heartbeat-price-channel-ingest.json", 180.0),
@@ -3422,12 +4016,9 @@ def _startup_wallet_check(clob=None, bankroll_record=_WALLET_RECORD_UNSET):
                 balance, rec.source, rec.cached,
             )
 
-    # Install the process-wide collateral ledger singleton with a ledger-owned
-    # persistent conn so downstream executor / riskguard preflight callers do
-    # not race against transient conn close. Failures here are non-fatal at
-    # boot — preflight will surface `collateral_ledger_unconfigured` if the
-    # singleton is missing, which is already the existing fail-closed code
-    # path for any operator misconfiguration.
+    # Install a path-backed reader of the schema initialized by daemon
+    # pre-flight/migrations. This boot path consumes sidecar snapshots; it must
+    # not acquire the canonical writer merely to repeat idempotent DDL.
     try:
         from src.state.collateral_ledger import (
             CollateralLedger,
@@ -3435,7 +4026,10 @@ def _startup_wallet_check(clob=None, bankroll_record=_WALLET_RECORD_UNSET):
         )
         from src.state.db import _zeus_trade_db_path
 
-        ledger = CollateralLedger(db_path=_zeus_trade_db_path())
+        ledger = CollateralLedger(
+            db_path=_zeus_trade_db_path(),
+            initialize_schema=False,
+        )
         configure_global_ledger(ledger)
         logger.info(
             "CollateralLedger global singleton installed (db=%s)",
@@ -3664,7 +4258,62 @@ def _assert_live_safe_strategies_or_exit(*, refresh_state: bool = True) -> None:
     assert_live_safe_strategies_under_live_mode(enabled_strategies)
 
 
-def _edli_refresh_global_allocator(conn, *, portfolio_snapshot=None) -> dict:
+def _edli_refresh_global_allocator(
+    conn,
+    *,
+    portfolio_snapshot=None,
+    bankroll_record=None,
+) -> dict:
+    """Publish allocator state through one monotonic collateral identity fence."""
+
+    global _edli_last_collateral_authority_captured_at
+
+    with _edli_collateral_authority_lock:
+        record = bankroll_record or bankroll_provider.cached()
+        record_at = None
+        if record is not None:
+            try:
+                record_at = datetime.fromisoformat(
+                    str(record.fetched_at).replace("Z", "+00:00")
+                )
+                if record_at.tzinfo is None:
+                    record_at = record_at.replace(tzinfo=timezone.utc)
+                record_at = record_at.astimezone(timezone.utc)
+            except (AttributeError, TypeError, ValueError):
+                from src.risk_allocator import configure_global_allocator
+
+                configure_global_allocator(None, None)
+                return {
+                    "configured": False,
+                    "fail_closed": True,
+                    "error": "bankroll_record_captured_at_invalid",
+                    "entry": {
+                        "allow_submit": False,
+                        "reason": "allocator_not_configured",
+                    },
+                }
+        if (
+            record_at is not None
+            and _edli_last_collateral_authority_captured_at is not None
+            and record_at < _edli_last_collateral_authority_captured_at
+        ):
+            return {"configured": None, "superseded": True}
+        result = _edli_refresh_global_allocator_unfenced(
+            conn,
+            portfolio_snapshot=portfolio_snapshot,
+            bankroll_record=record,
+        )
+        if result.get("configured") and record_at is not None:
+            _edli_last_collateral_authority_captured_at = record_at
+        return result
+
+
+def _edli_refresh_global_allocator_unfenced(
+    conn,
+    *,
+    portfolio_snapshot=None,
+    bankroll_record=None,
+) -> dict:
     """Configure the process-wide risk allocator/governor for the EDLI live path.
 
     ROOT (see /tmp/edli_submit_gate_trace.md): the live ``_live_order`` submit path
@@ -3713,8 +4362,18 @@ def _edli_refresh_global_allocator(conn, *, portfolio_snapshot=None) -> dict:
         # On-chain wallet is the only bankroll truth. cached() never re-fetches; the
         # EDLI cycle warms it via current(max_age_seconds=0.0) at cycle start. None →
         # wallet unreachable / cache cold → drawdown untrustworthy → fail closed.
-        _bk = bankroll_provider.cached()
+        # An identity-bound collateral wake passes the exact BankrollOfRecord it
+        # validated.  Ordinary cycles retain the canonical cache read.  Never
+        # re-read the cache between wake identity verification and allocator
+        # publication: a concurrent warm could otherwise swap the bankroll.
+        _bk = bankroll_record if bankroll_record is not None else bankroll_provider.cached()
         if _bk is None:
+            # A prior cycle may have configured the process singleton.  Missing
+            # current wallet truth must revoke that authority rather than leave
+            # stale entry/exit actuation state looking executable.
+            from src.risk_allocator import configure_global_allocator
+
+            configure_global_allocator(None, None)
             logger.error(
                 "EDLI live-path allocator refresh: on-chain bankroll cache is None "
                 "(wallet unreachable) — drawdown untrustworthy; FAIL-CLOSED, blocking "
@@ -3819,6 +4478,28 @@ from src.data.replacement_forecast_production import (  # noqa: E402
 # registers them.
 
 
+def _consume_live_control_commands() -> str | None:
+    """Drain operator commands or establish a durable entry-only block."""
+
+    try:
+        from src.control.control_plane import process_commands
+
+        process_commands(refresh_when_empty=False)
+        return None
+    except Exception:
+        # SCOPE: every BUY-capable live lane; monitor, exit, command recovery,
+        # and settlement continue. DRAIN: the 1-second listener and canonical
+        # reactor retry the durable queue. RESET: a repaired queue drains and
+        # the bounded auto-pause expires or an explicit resume clears it.
+        from src.control.control_plane import pause_entries
+
+        pause_entries("control_plane_command_drain_failed")
+        logger.exception(
+            "Live control command drain failed; blocking new entries"
+        )
+        return "control_plane_command_drain_failed"
+
+
 @_scheduler_job("edli_event_reactor")
 def _edli_event_reactor_cycle(
     *,
@@ -3827,6 +4508,8 @@ def _edli_event_reactor_cycle(
     producer_wake_published_at: str | None = None,
     producer_wake_event_ids: tuple[str, ...] = (),
     producer_wake_families: tuple[tuple[str, str, str], ...] = (),
+    producer_held_sell_reauction_requests: tuple[object, ...] = (),
+    allow_paused_forecast_snapshot_completion: bool = False,
 ) -> bool:
     """Scheduler hook -- body owned by src.events.reactor (R4-b3 reactor+prune
     cluster extraction, 2026-07-08) as ``run_edli_event_reactor_cycle``. See
@@ -3839,13 +4522,42 @@ def _edli_event_reactor_cycle(
     object itself into the extracted cycle, which owns its own
     acquire/release lifecycle exactly as it did inline.
     """
+    control_drain_block_reason = _consume_live_control_commands()
+
     from src.events.reactor import run_edli_event_reactor_cycle
 
     _start_edli_reactor_wake_listener()
     _global_block_reason, _family_block_reasons = _edli_live_entry_readiness_block(
         _settings_section("edli", {})
     )
-    return run_edli_event_reactor_cycle(
+    canonical_monitor_entry_block = _held_position_monitor_entry_block_reason()
+    canonical_monitor_debt_at_start = canonical_monitor_entry_block is not None
+    if canonical_monitor_entry_block is None:
+        _held_position_monitor_canonical_debt.clear()
+        monitor_entry_block = None
+    else:
+        _held_position_monitor_canonical_debt.set()
+        monitor_entry_block, monitor_family_blocks = (
+            _canonical_monitor_entry_block_scope(canonical_monitor_entry_block)
+        )
+        _family_block_reasons.update(monitor_family_blocks)
+    if (
+        monitor_entry_block is None
+        and not _held_position_monitor_bootstrap_complete.is_set()
+    ):
+        monitor_entry_block = "held_position_monitor_bootstrap_incomplete"
+    if _global_block_reason is None and monitor_entry_block is not None:
+        _global_block_reason = monitor_entry_block
+    if allow_paused_forecast_snapshot_completion:
+        # SCOPE: this already-selected targeted forecast cycle only; freeze its
+        # BUY/submit lane as no-submit even if the durable pause is cleared
+        # after selection. DRAIN: the immutable snapshot and bounded no-submit
+        # receipt may complete, while newer wakes stay durable for the next
+        # cycle. RESET: the next cycle re-qualifies from durable control state.
+        _global_block_reason = "paused_forecast_snapshot_completion"
+    if control_drain_block_reason is not None:
+        _global_block_reason = control_drain_block_reason
+    result = run_edli_event_reactor_cycle(
         active_lock=_edli_reactor_active_lock,
         live_entry_block_reason=_global_block_reason,
         live_entry_family_block_reasons=_family_block_reasons,
@@ -3854,23 +4566,86 @@ def _edli_event_reactor_cycle(
         producer_wake_published_at=producer_wake_published_at,
         producer_wake_event_ids=producer_wake_event_ids,
         producer_wake_families=producer_wake_families,
-        urgent_day0_pending=_unowned_day0_urgent_wake_pending,
+        producer_held_sell_reauction_requests=(
+            producer_held_sell_reauction_requests
+        ),
+        allow_paused_forecast_snapshot_completion=(
+            allow_paused_forecast_snapshot_completion
+        ),
+        # Capital recovery is durable and independently re-queries current
+        # truth.  Reuse the reactor's cooperative SQLite/safe-point preemption
+        # seam so it releases the active fence after its current bounded unit
+        # instead of running lower-value discovery ahead of exact cancel debt.
+        urgent_day0_pending=lambda: (
+            _unowned_day0_urgent_wake_pending()
+            or _capital_recovery_handoff_pending.is_set()
+        ),
         held_position_monitor_pending=(
-            _periodic_held_position_monitor_handoff_pending.is_set
+            lambda: (
+                _periodic_held_position_monitor_handoff_pending.is_set()
+                or (
+                    not canonical_monitor_debt_at_start
+                    and monitor_entry_block is None
+                    and _held_position_monitor_debt_pending()
+                )
+            )
+        ),
+        held_position_monitor_debt_pending=(
+            # Debt already present at admission is carried by the exact family
+            # BUY block. Debt that first appears after admission cancels this
+            # replayable cut so the next cut can rebuild that scope.
+            lambda: (
+                _periodic_held_position_monitor_fairness_debt.is_set()
+                or (
+                    not canonical_monitor_debt_at_start
+                    and _held_position_monitor_debt_pending()
+                )
+            )
         ),
     )
+    # Recovery is deliberately after the reactor invocation: this cycle keeps
+    # its already-selected pause, while the next cycle reads fresh control state.
+    try:
+        from src.control.control_plane import recover_deploy_live_restart_guard
+
+        recovery = recover_deploy_live_restart_guard()
+        if recovery.get("status") not in {"noop", "reset"}:
+            logger.warning("deploy live restart guard retained: %s", recovery)
+    except Exception:  # noqa: BLE001
+        logger.warning(
+            "deploy live restart guard recovery unavailable",
+            exc_info=True,
+        )
+    return result
 
 
 def _edli_initialize_reactor_wake_cursor() -> None:
-    global _edli_last_reactor_wake_id
+    global _edli_last_collateral_authority_captured_at, _edli_last_reactor_wake_id
 
     _edli_last_reactor_wake_id = None
+    _edli_global_completion_yield.reset()
+    _edli_day0_post_monitor_yield.reset()
+    _edli_paused_forecast_post_monitor_yield.reset()
+    _edli_terminal_day0_cleanup_yield.clear()
+    _edli_collateral_authority_wake_backoff_until.clear()
+    _edli_last_collateral_authority_captured_at = None
     _day0_urgent_wake_pending.clear()
     _day0_held_monitor_preempt_requested.clear()
+    _forecast_held_monitor_preempt_requested.clear()
+    with _day0_exit_monitor_attempts_lock:
+        completed_wake_ids = tuple(
+            wake_id
+            for wake_id, result in _day0_exit_monitor_attempts.items()
+            if result is True
+        )
+        for wake_id in completed_wake_ids:
+            _day0_exit_monitor_attempts.pop(wake_id, None)
 
 
 def _day0_wake_target_families(
     event_ids: tuple[str, ...],
+    *,
+    expected_event_type: str | None = "DAY0_EXTREME_UPDATED",
 ) -> frozenset[tuple[str, str, str]] | None:
     clean_event_ids = tuple(
         dict.fromkeys(
@@ -3916,7 +4691,10 @@ def _day0_wake_target_families(
     families: set[tuple[str, str, str]] = set()
     try:
         for _event_id, event_type, payload_json in rows:
-            if str(event_type or "") != "DAY0_EXTREME_UPDATED":
+            if (
+                expected_event_type is not None
+                and str(event_type or "") != expected_event_type
+            ):
                 return None
             payload = json.loads(str(payload_json or ""))
             city = str(payload.get("city") or "").strip()
@@ -3934,6 +4712,14 @@ def _day0_wake_target_families(
         )
         return None
     return frozenset(families) or None
+
+
+def _price_wake_target_families(
+    event_ids: tuple[str, ...],
+) -> frozenset[tuple[str, str, str]] | None:
+    """Resolve price-channel redecision events to their held-monitor families."""
+
+    return _day0_wake_target_families(event_ids, expected_event_type=None)
 
 
 def _day0_wake_requires_exit_monitor(
@@ -4034,7 +4820,12 @@ def _pending_held_day0_wake_families(
         for queued in reversed(reactor_wakes_since(None)):
             if queued.reason != "day0_extreme_event_committed":
                 continue
-            for raw_city, raw_target_date, raw_metric in queued.forecast_families:
+            queued_families = tuple(queued.forecast_families) or tuple(
+                _day0_wake_target_families(tuple(queued.event_ids)) or ()
+            )
+            if not queued_families:
+                return None
+            for raw_city, raw_target_date, raw_metric in queued_families:
                 key = (
                     str(raw_city or "").strip().casefold(),
                     str(raw_target_date or "").strip()[:10],
@@ -4062,6 +4853,8 @@ class _ReactorWakeEventState:
     finished: bool
     terminal: bool = False
     in_flight: bool = False
+    all_terminal: bool = False
+    all_missing: bool = False
 
 
 def _reactor_wake_event_state(
@@ -4111,6 +4904,7 @@ def _reactor_wake_event_state(
     ready = False
     deferred = False
     terminal = False
+    all_terminal = bool(rows)
     in_flight = False
     missing = 0
     for _event_id, status, claimed_at in rows:
@@ -4125,10 +4919,12 @@ def _reactor_wake_event_state(
         status = str(status)
         if status == "processing":
             in_flight = True
+            all_terminal = False
             continue
         if status != "pending":
             terminal = True
             continue
+        all_terminal = False
         if claimed_at in {None, ""}:
             ready = True
             continue
@@ -4154,6 +4950,8 @@ def _reactor_wake_event_state(
         finished=not ready and not in_flight and (deferred or bool(rows)),
         terminal=terminal,
         in_flight=in_flight,
+        all_terminal=all_terminal,
+        all_missing=bool(rows) and missing == len(rows),
     )
 
 
@@ -4176,6 +4974,104 @@ def _reactor_wake_events_ready(
     ).ready
 
 
+def _terminal_day0_cleanup_eligible(queued: object) -> bool:
+    """Prove one Day0 hint has no remaining event or capital obligation."""
+
+    if (
+        str(getattr(queued, "reason", "") or "")
+        != "day0_extreme_event_committed"
+        or getattr(queued, "held_sell_reauction_requests", ())
+    ):
+        return False
+    event_ids = tuple(getattr(queued, "event_ids", ()) or ())
+    if not event_ids:
+        return False
+    event_state = _reactor_wake_event_state(event_ids)
+    if not event_state.finished or not event_state.all_terminal:
+        return False
+    declared_families = tuple(getattr(queued, "forecast_families", ()) or ())
+    declared_scope = None
+    if declared_families:
+        try:
+            declared_scope = frozenset(
+                (
+                    str(city).strip(),
+                    date.fromisoformat(str(target_date).strip()[:10]).isoformat(),
+                    str(metric).strip().lower(),
+                )
+                for city, target_date, metric in declared_families
+            )
+        except (TypeError, ValueError):
+            return False
+        if any(not city or metric not in {"high", "low"} for city, _date, metric in declared_scope):
+            return False
+    family_scope = _day0_wake_target_families(event_ids)
+    if family_scope is None:
+        if not event_state.all_missing or not declared_scope:
+            return False
+        family_scope = declared_scope
+    elif declared_scope is not None:
+        if declared_scope != family_scope:
+            return False
+    return not _day0_wake_requires_exit_monitor(family_scope)
+
+
+def _terminal_day0_cleanup_wakes(
+    selected: object,
+    *,
+    max_wakes: int = 100,
+) -> tuple[object, ...] | None:
+    """Collect only Day0 hints whose money-path obligations are already over.
+
+    SCOPE: exact Day0 queue files whose canonical event IDs are all terminal or
+    missing non-authoritative hints, whose family scope is valid, and whose
+    families have no open/resting exposure. DRAIN: one successful bounded ACK
+    retires at most ``max_wakes`` immutable hints after the selected wake has
+    completed its monitor-before-ACK path. RESET: pending/in-flight/deferred
+    events, unreadable probes, held-family debt, exposure, or ACK failure leave
+    their exact files queued for ordinary priority service.
+    """
+
+    from src.runtime.reactor_wake import reactor_wakes_for_reason
+
+    if (
+        str(getattr(selected, "reason", "") or "")
+        != "day0_extreme_event_committed"
+    ):
+        return None
+    pending_held_families = _pending_held_day0_wake_families()
+    if pending_held_families is None or pending_held_families:
+        return None
+
+    limit = min(100, max(1, int(max_wakes)))
+    try:
+        candidates = (selected,) + tuple(
+            queued
+            for queued in reactor_wakes_for_reason(
+                "day0_extreme_event_committed",
+                max_wakes=limit,
+                fail_on_error=True,
+            )
+            if getattr(queued, "wake_id", None)
+            != getattr(selected, "wake_id", None)
+        )
+    except (OSError, ValueError):
+        logger.warning(
+            "terminal Day0 cleanup queue probe failed; retaining selected-only debt",
+            exc_info=True,
+        )
+        return None
+    cleanup: list[object] = []
+    for queued in candidates:
+        if len(cleanup) >= limit:
+            break
+        if _terminal_day0_cleanup_eligible(queued):
+            cleanup.append(queued)
+    if not cleanup or cleanup[0].wake_id != getattr(selected, "wake_id", None):
+        return None
+    return tuple(cleanup)
+
+
 def _day0_exit_monitor_attempt_state(wake_id: str) -> tuple[bool, bool | None]:
     with _day0_exit_monitor_attempts_lock:
         return wake_id in _day0_exit_monitor_attempts, _day0_exit_monitor_attempts.get(
@@ -4190,12 +5086,62 @@ def _day0_exit_monitor_priority_pending() -> bool:
         return any(result is None for result in _day0_exit_monitor_attempts.values())
 
 
-def _periodic_exit_monitor_should_yield(day0_pending: bool) -> bool:
-    """Give Day0 one periodic turn without starving the full-book monitor."""
+def _forecast_exit_monitor_priority_pending() -> bool:
+    """Return whether an urgent forecast held-family monitor is pending."""
 
-    if not day0_pending or _periodic_exit_monitor_day0_yielded.is_set():
+    with _forecast_exit_monitor_attempts_lock:
+        return any(result is None for result in _forecast_exit_monitor_attempts.values())
+
+
+def _urgent_held_monitor_preemption_pending() -> bool:
+    """Return all urgent held-family priority and claim-preempt signals."""
+
+    return (
+        _day0_exit_monitor_priority_pending()
+        or _day0_held_monitor_preempt_requested.is_set()
+        or _forecast_exit_monitor_priority_pending()
+        or _forecast_held_monitor_preempt_requested.is_set()
+    )
+
+
+def _urgent_held_monitor_owner_pending() -> bool:
+    """Return whether an urgent attempt still owns the requested handoff."""
+
+    return (
+        _day0_exit_monitor_priority_pending()
+        or _forecast_exit_monitor_priority_pending()
+    )
+
+
+def _held_monitor_preempt_generation_now() -> int:
+    with _held_monitor_preempt_generation_lock:
+        return _held_monitor_preempt_generation
+
+
+def _record_held_monitor_preempt_request() -> None:
+    global _held_monitor_preempt_generation
+
+    with _held_monitor_preempt_generation_lock:
+        _held_monitor_preempt_generation += 1
+
+
+def _acquire_held_monitor_claim(*, periodic_full_book: bool) -> tuple[bool, int]:
+    """Acquire the claim and linearize a periodic preempt baseline."""
+
+    if not periodic_full_book:
+        return _held_position_monitor_claim.acquire(blocking=False), -1
+    with _held_monitor_preempt_generation_lock:
+        acquired = _held_position_monitor_claim.acquire(blocking=False)
+        generation = _held_monitor_preempt_generation if acquired else -1
+    return acquired, generation
+
+
+def _periodic_exit_monitor_should_yield(urgent_pending: bool) -> bool:
+    """Give one urgent held-family monitor turn without starving full-book work."""
+
+    if not urgent_pending or _periodic_exit_monitor_urgent_yielded.is_set():
         return False
-    _periodic_exit_monitor_day0_yielded.set()
+    _periodic_exit_monitor_urgent_yielded.set()
     return True
 
 
@@ -4203,6 +5149,23 @@ def _complete_day0_exit_monitor_attempt(wake_id: str, *, succeeded: bool) -> Non
     with _day0_exit_monitor_attempts_lock:
         if wake_id in _day0_exit_monitor_attempts:
             _day0_exit_monitor_attempts[wake_id] = bool(succeeded)
+
+
+def _record_day0_no_monitor_completion(wake_id: str) -> bool:
+    """Own one selected Day0 wake whose exact probes require no monitor."""
+
+    # SCOPE: this exact selected Day0 wake_id only. DRAIN: its existing reactor
+    # work completes or stays durable without re-preempting itself; a different
+    # Day0 identity still preempts. RESET: Day0 ack uses the existing forget
+    # path, and listener restart removes completed True markers.
+    clean_wake_id = str(wake_id or "").strip()
+    if not clean_wake_id:
+        return False
+    with _day0_exit_monitor_attempts_lock:
+        if clean_wake_id in _day0_exit_monitor_attempts:
+            return _day0_exit_monitor_attempts[clean_wake_id] is True
+        _day0_exit_monitor_attempts[clean_wake_id] = True
+    return True
 
 
 def _forget_day0_exit_monitor_attempt(wake_id: str) -> None:
@@ -4396,9 +5359,170 @@ def _forecast_wake_held_families(
     )
 
 
+def _position_fill_wake_held_families(
+    event_ids: tuple[str, ...],
+) -> frozenset[tuple[str, str, str]] | None:
+    """Resolve a fill wake to current held families, or fail closed.
+
+    SCOPE: exact wake event IDs -> exact position_fill_position_ids -> current
+    position family. DRAIN: a successful canonical trade read returns the
+    current positive open families; an empty result proves every referenced
+    position is terminal or absent. RESET:
+    successful wake acknowledgement; any uncertainty returns ``None`` so the
+    full-book monitor owns the retry.
+    """
+
+    clean_event_ids = tuple(
+        dict.fromkeys(
+            event_id
+            for raw_event_id in event_ids
+            if (event_id := str(raw_event_id or "").strip())
+        )
+    )
+    if not clean_event_ids:
+        return None
+
+    world_conn = None
+    try:
+        placeholders = ",".join("?" for _ in clean_event_ids)
+        world_conn = get_world_connection_read_only()
+        event_rows = world_conn.execute(
+            f"""
+            SELECT event_id, event_type, payload_json
+              FROM opportunity_events
+             WHERE event_id IN ({placeholders})
+            """,
+            clean_event_ids,
+        ).fetchall()
+    except Exception:  # noqa: BLE001 - uncertain provenance requires full-book retry
+        logger.warning(
+            "position-fill wake scope unavailable; using full exit monitor",
+            exc_info=True,
+        )
+        return None
+    finally:
+        if world_conn is not None:
+            try:
+                world_conn.close()
+            except Exception:  # noqa: BLE001 - close failure leaves scope uncertain
+                logger.warning(
+                    "position-fill wake world connection close failed",
+                    exc_info=True,
+                )
+
+    if len(event_rows) != len(clean_event_ids) or {
+        str(row[0] or "").strip() for row in event_rows
+    } != set(clean_event_ids):
+        logger.warning(
+            "position-fill wake event identity incomplete; using full exit monitor"
+        )
+        return None
+
+    position_ids: set[str] = set()
+    try:
+        for _event_id, event_type, payload_json in event_rows:
+            if str(event_type or "").strip() != "EDLI_REDECISION_PENDING":
+                return None
+            payload = json.loads(str(payload_json or ""))
+            if payload.get("redecision_origin") != "position_fill":
+                return None
+            raw_position_ids = payload.get("position_fill_position_ids")
+            if not isinstance(raw_position_ids, (list, tuple)) or not raw_position_ids:
+                return None
+            for raw_position_id in raw_position_ids:
+                if not isinstance(raw_position_id, str) or not raw_position_id.strip():
+                    return None
+                position_ids.add(raw_position_id.strip())
+    except (AttributeError, TypeError, ValueError, json.JSONDecodeError):
+        logger.warning(
+            "position-fill wake payload identity invalid; using full exit monitor",
+            exc_info=True,
+        )
+        return None
+    if not position_ids:
+        return None
+
+    trade_conn = None
+    try:
+        from src.state.db import get_trade_connection_read_only
+
+        trade_conn = get_trade_connection_read_only()
+        placeholders = ",".join("?" for _ in position_ids)
+        rows = trade_conn.execute(
+            f"""
+            SELECT position_id, phase, shares, cost_basis_usd,
+                   city, target_date, temperature_metric
+              FROM position_current
+             WHERE position_id IN ({placeholders})
+            """,
+            tuple(sorted(position_ids)),
+        ).fetchall()
+    except Exception:  # noqa: BLE001 - uncertain canonical truth requires full-book retry
+        logger.warning(
+            "position-fill wake trade scope unavailable; using full exit monitor",
+            exc_info=True,
+        )
+        return None
+    finally:
+        if trade_conn is not None:
+            try:
+                trade_conn.close()
+            except Exception:  # noqa: BLE001 - close failure leaves scope uncertain
+                logger.warning(
+                    "position-fill wake trade connection close failed",
+                    exc_info=True,
+                )
+
+    open_phases = {"active", "day0_window", "pending_exit"}
+    terminal_phases = {
+        "economically_closed",
+        "settled",
+        "voided",
+        "admin_closed",
+    }
+    families: set[tuple[str, str, str]] = set()
+    observed_position_ids: set[str] = set()
+    for row in rows:
+        position_id = str(row[0] or "").strip()
+        if position_id not in position_ids:
+            return None
+        observed_position_ids.add(position_id)
+        phase = str(row[1] or "").strip()
+        if phase in terminal_phases:
+            continue
+        if phase not in open_phases:
+            return None
+        try:
+            shares = float(row[2])
+            cost_basis_usd = float(row[3])
+        except (TypeError, ValueError):
+            return None
+        if not math.isfinite(shares) or not math.isfinite(cost_basis_usd):
+            return None
+        if shares <= 0 or cost_basis_usd <= 0:
+            return None
+        city = str(row[4] or "").strip()
+        try:
+            target_date = date.fromisoformat(
+                str(row[5] or "").strip()[:10]
+            ).isoformat()
+        except (TypeError, ValueError):
+            return None
+        metric = str(row[6] or "").strip().lower()
+        if not city or not target_date or metric not in {"high", "low"}:
+            return None
+        families.add((city, target_date, metric))
+    if observed_position_ids != position_ids:
+        logger.warning(
+            "position-fill wake position identity incomplete; using full exit monitor"
+        )
+        return None
+    return frozenset(families)
+
+
 def _dispatch_forecast_exit_monitor(
     wake_ids: tuple[str, ...],
-    target_families: frozenset[tuple[str, str, str]],
+    target_families: frozenset[tuple[str, str, str]] | None,
 ) -> bool:
     """Run held-family belief re-decision independently of entry event admission."""
 
@@ -4519,6 +5643,672 @@ def _acknowledge_edli_reactor_wake_batch(
     return True
 
 
+def _terminal_held_sell_reauction_receipts(
+    requests: tuple[object, ...],
+    *,
+    trade_connection: sqlite3.Connection | None = None,
+) -> tuple[object, ...]:
+    """Read one canonical snapshot and prove exact SELL obligations done or stale.
+
+    SCOPE: one held SELL request_id whose canonical phase-specific chain proof
+    shows either exact zero tradeable shares, settlement ending only its SELL
+    obligation, or a later absorbing Day0 structural win superseding one exact
+    V4 attempt after all prior SELL commands are terminal. Missing or ambiguous
+    rows prove nothing. DRAIN: one read-only snapshot feeds idempotent receipts
+    before exact per-wake ack; incomplete requests continue through the normal
+    exact cut. RESET: a new material/generation/attempt identity or later monitor
+    verdict is a new obligation/evidence state and cannot reuse a prior receipt.
+    """
+
+    from src.execution.exit_safety import can_submit_replacement_sell
+    from src.runtime.reactor_wake import (
+        HELD_SELL_REAUCTION_V4,
+        POSITION_NO_LONGER_EXPOSED,
+        SUPERSEDED_BY_DAY0_HARD_FACT_STRUCTURAL_WIN,
+        HeldSellReauctionReceipt,
+        held_sell_no_longer_exposed_reason,
+    )
+    from src.state.db import get_trade_connection_read_only
+
+    by_position: dict[str, list[object]] = {}
+    for request in requests:
+        position_id = str(getattr(request, "position_id", "") or "").strip()
+        if position_id:
+            by_position.setdefault(position_id, []).append(request)
+    if not by_position:
+        return ()
+
+    trade_ro = trade_connection
+    owns_trade_connection = trade_connection is None
+    structural_proof_enabled = False
+    proof_by_position: dict[str, tuple[object, ...]] = {}
+    event_by_position: dict[tuple[str, str], tuple[object, ...]] = {}
+    replacement_allowed: dict[tuple[str, str], bool] = {}
+    try:
+        if trade_ro is None:
+            trade_ro = get_trade_connection_read_only()
+            trade_ro.execute("BEGIN")
+        columns = {
+            str(row[1])
+            for row in trade_ro.execute("PRAGMA table_info(position_current)").fetchall()
+        }
+        required = {
+            "position_id",
+            "phase",
+            "chain_state",
+            "chain_shares",
+            "settled_at",
+        }
+        if not required.issubset(columns):
+            logger.warning(
+                "held SELL terminal receipt deferred: canonical position_current "
+                "does not expose required proof columns"
+            )
+            return ()
+        structural_columns = {
+            "direction",
+            "token_id",
+            "no_token_id",
+            "city",
+            "target_date",
+            "temperature_metric",
+            "bin_label",
+            "condition_id",
+        }
+        tables = {
+            str(row[0])
+            for row in trade_ro.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            ).fetchall()
+        }
+        structural_proof_enabled = (
+            structural_columns.issubset(columns)
+            and {"position_events", "venue_commands"}.issubset(tables)
+        )
+        placeholders = ",".join("?" for _ in by_position)
+        structural_select = (
+            "direction, token_id, no_token_id, city, target_date, "
+            "temperature_metric, bin_label, condition_id"
+            if structural_proof_enabled
+            else "NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL"
+        )
+        rows = trade_ro.execute(
+            f"""
+            SELECT position_id, phase, chain_state, chain_shares, settled_at,
+                   {structural_select}
+              FROM position_current
+             WHERE position_id IN ({placeholders})
+            """,
+            tuple(by_position),
+        ).fetchall()
+        proof_by_position = {
+            str(row[0] or "").strip(): tuple(row[1:]) for row in rows
+        }
+        if structural_proof_enabled:
+            event_rows = trade_ro.execute(
+                f"""
+                SELECT event_id, position_id, sequence_no, event_type,
+                       occurred_at, payload_json
+                  FROM position_events AS current_event
+                 WHERE position_id IN ({placeholders})
+                   AND event_type IN ('EXIT_RETRY_RELEASED', 'MONITOR_REFRESHED')
+                   AND sequence_no = (
+                       SELECT MAX(latest_event.sequence_no)
+                         FROM position_events AS latest_event
+                        WHERE latest_event.position_id = current_event.position_id
+                          AND latest_event.event_type = current_event.event_type
+                   )
+                """,
+                tuple(by_position),
+            ).fetchall()
+            event_by_position = {
+                (str(row[1] or "").strip(), str(row[3] or "").strip()): (
+                    str(row[0] or "").strip(),
+                    row[2],
+                    str(row[4] or "").strip(),
+                    str(row[5] or ""),
+                )
+                for row in event_rows
+            }
+            for position_id, position_requests in by_position.items():
+                for request in position_requests:
+                    if (
+                        int(getattr(request, "schema_version", 1) or 1)
+                        != HELD_SELL_REAUCTION_V4
+                    ):
+                        continue
+                    held_token_id = str(
+                        getattr(request, "held_token_id", "") or ""
+                    ).strip()
+                    if not held_token_id:
+                        continue
+                    try:
+                        allowed, block_reason = can_submit_replacement_sell(
+                            trade_ro,
+                            position_id,
+                            held_token_id,
+                        )
+                    except Exception:  # noqa: BLE001 - command ambiguity retains debt
+                        allowed, block_reason = False, "command_truth_read_failed"
+                    replacement_allowed[(position_id, held_token_id)] = bool(
+                        allowed and block_reason is None
+                    )
+    except Exception:  # noqa: BLE001 - truth-read failure must retain the wake
+        logger.warning(
+            "held SELL terminal receipt deferred: canonical trade read failed",
+            exc_info=True,
+        )
+        return ()
+    finally:
+        if owns_trade_connection and trade_ro is not None:
+            try:
+                trade_ro.close()
+            except Exception:  # noqa: BLE001 - read-only close cannot prove completion
+                pass
+    receipts: list[HeldSellReauctionReceipt] = []
+    for position_id, position_requests in by_position.items():
+        proof = proof_by_position.get(position_id)
+        if proof is None:
+            continue
+        (
+            raw_lifecycle_phase,
+            raw_chain_state,
+            raw_chain_shares,
+            raw_settled_at,
+            raw_direction,
+            raw_token_id,
+            raw_no_token_id,
+            raw_city,
+            raw_target_date,
+            raw_metric,
+            raw_bin_label,
+            raw_condition_id,
+        ) = proof
+        lifecycle_phase = str(raw_lifecycle_phase or "").strip()
+        chain_state = str(raw_chain_state or "").strip()
+        settled_at = str(raw_settled_at or "").strip()
+        try:
+            chain_shares = float(raw_chain_shares)
+        except (TypeError, ValueError):
+            logger.warning(
+                "held SELL terminal receipt deferred: invalid canonical chain_shares "
+                "position_id=%s",
+                position_id,
+            )
+            continue
+        reason = held_sell_no_longer_exposed_reason(
+            lifecycle_phase=lifecycle_phase,
+            chain_state=chain_state,
+            chain_shares=chain_shares,
+            settled_at=settled_at,
+        )
+        if reason is not None:
+            for request in position_requests:
+                receipts.append(
+                    HeldSellReauctionReceipt(
+                        request_id=str(getattr(request, "request_id", "") or ""),
+                        material_identity=str(
+                            getattr(request, "material_identity", "") or ""
+                        ),
+                        generation=str(getattr(request, "generation", "") or ""),
+                        schema_version=int(
+                            getattr(request, "schema_version", 1) or 1
+                        ),
+                        scope_identity=str(
+                            getattr(request, "scope_identity", "") or ""
+                        ),
+                        book_state=str(
+                            getattr(request, "book_state", "EXECUTABLE")
+                            or "EXECUTABLE"
+                        ),
+                        attempt_identity=str(
+                            getattr(request, "attempt_identity", "") or ""
+                        ),
+                        status=POSITION_NO_LONGER_EXPOSED,
+                        reason=reason,
+                        lifecycle_phase=lifecycle_phase,
+                        chain_state=chain_state,
+                        chain_shares=chain_shares,
+                        settled_at=settled_at,
+                    )
+                )
+            continue
+        if not structural_proof_enabled:
+            continue
+
+        direction = str(raw_direction or "").strip()
+        token_id = str(raw_token_id or "").strip()
+        no_token_id = str(raw_no_token_id or "").strip()
+        city = str(raw_city or "").strip()
+        target_date = str(raw_target_date or "").strip()[:10]
+        metric = str(raw_metric or "").strip().lower()
+        bin_label = str(raw_bin_label or "").strip()
+        condition_id = str(raw_condition_id or "").strip()
+        held_token = no_token_id if direction == "buy_no" else token_id
+        current_family = (city, target_date, metric)
+        debt_event = event_by_position.get(
+            (position_id, "EXIT_RETRY_RELEASED")
+        )
+        monitor_event = event_by_position.get(
+            (position_id, "MONITOR_REFRESHED")
+        )
+        if (
+            lifecycle_phase != "day0_window"
+            or chain_state != "synced"
+            or not math.isfinite(chain_shares)
+            or chain_shares <= 0.0
+            or direction not in {"buy_yes", "buy_no"}
+            or not all((*current_family, held_token, bin_label, condition_id))
+            or debt_event is None
+            or monitor_event is None
+        ):
+            continue
+
+        debt_event_id, raw_debt_sequence, _debt_occurred_at, raw_debt_payload = (
+            debt_event
+        )
+        monitor_event_id, raw_monitor_sequence, monitor_occurred_at, raw_monitor_payload = (
+            monitor_event
+        )
+        try:
+            debt_sequence = int(raw_debt_sequence)
+            monitor_sequence = int(raw_monitor_sequence)
+            debt_payload = json.loads(raw_debt_payload)
+            monitor_payload = json.loads(raw_monitor_payload)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        if not isinstance(debt_payload, dict) or not isinstance(monitor_payload, dict):
+            continue
+        obligation = debt_payload.get("held_sell_reauction_obligation")
+        if not isinstance(obligation, dict):
+            continue
+        validations = monitor_payload.get("applied_validations")
+        probability = monitor_payload.get("last_monitor_prob")
+        if isinstance(probability, bool):
+            continue
+        try:
+            probability = float(probability)
+        except (TypeError, ValueError):
+            continue
+        if (
+            monitor_sequence <= debt_sequence
+            or monitor_event_id
+            != f"{position_id}:monitor_refreshed:{monitor_sequence}"
+            or debt_payload.get("release_reason")
+            != "GLOBAL_SELL_SNAPSHOT_REAUCTION_REQUIRED"
+            or debt_payload.get("status") != "durable_wake_reserved"
+            or obligation.get("schema_version") != HELD_SELL_REAUCTION_V4
+            or obligation.get("state") != "ARMED"
+            or monitor_payload.get("city") != city
+            or str(monitor_payload.get("target_date") or "")[:10]
+            != target_date
+            or monitor_payload.get("direction") != direction
+            or monitor_payload.get("bin_label") != bin_label
+            or monitor_payload.get("condition_id") != condition_id
+            or not math.isfinite(probability)
+            or probability != 1.0
+            or monitor_payload.get("last_monitor_prob_is_fresh") is not True
+            or monitor_payload.get("selected_method")
+            != "day0_absorbing_hard_fact"
+            or monitor_payload.get("exit_decision_selected_method")
+            != "day0_absorbing_hard_fact"
+            or monitor_payload.get("exit_decision_should_exit") is not False
+            or monitor_payload.get("exit_decision_trigger")
+            != "DAY0_HARD_FACT_STRUCTURAL_WIN_HOLD"
+            or not isinstance(validations, list)
+            or "day0_absorbing_hard_fact" not in validations
+            or "day0_hard_fact_structural_win_hold" not in validations
+        ):
+            continue
+        for request in position_requests:
+            if int(getattr(request, "schema_version", 1) or 1) != HELD_SELL_REAUCTION_V4:
+                continue
+            request_id = str(getattr(request, "request_id", "") or "").strip()
+            material_identity = str(
+                getattr(request, "material_identity", "") or ""
+            ).strip()
+            scope_identity = str(
+                getattr(request, "scope_identity", "") or ""
+            ).strip()
+            generation = str(getattr(request, "generation", "") or "").strip()
+            attempt_identity = str(
+                getattr(request, "attempt_identity", "") or ""
+            ).strip()
+            request_token = str(
+                getattr(request, "held_token_id", "") or ""
+            ).strip()
+            request_family = tuple(
+                str(value or "").strip()
+                for value in tuple(getattr(request, "family", ()) or ())
+            )
+            if (
+                not all(
+                    (
+                        request_id,
+                        material_identity,
+                        scope_identity,
+                        generation,
+                        attempt_identity,
+                        request_token,
+                    )
+                )
+                or request_token != held_token
+                or request_family != current_family
+                or not replacement_allowed.get((position_id, request_token), False)
+                or any(
+                    str(obligation.get(key) or "").strip() != expected
+                    for key, expected in (
+                        ("request_id", request_id),
+                        ("material_identity", material_identity),
+                        ("scope_identity", scope_identity),
+                        ("generation", generation),
+                        ("attempt_identity", attempt_identity),
+                        ("position_id", position_id),
+                        ("held_token_id", request_token),
+                    )
+                )
+            ):
+                continue
+            receipts.append(
+                HeldSellReauctionReceipt(
+                    request_id=request_id,
+                    material_identity=material_identity,
+                    generation=generation,
+                    schema_version=HELD_SELL_REAUCTION_V4,
+                    scope_identity=scope_identity,
+                    book_state=str(
+                        getattr(request, "book_state", "EXECUTABLE")
+                        or "EXECUTABLE"
+                    ),
+                    attempt_identity=attempt_identity,
+                    status=SUPERSEDED_BY_DAY0_HARD_FACT_STRUCTURAL_WIN,
+                    reason=SUPERSEDED_BY_DAY0_HARD_FACT_STRUCTURAL_WIN,
+                    position_id=position_id,
+                    held_token_id=request_token,
+                    debt_event_id=str(debt_event_id),
+                    debt_sequence_no=debt_sequence,
+                    monitor_event_id=monitor_event_id,
+                    monitor_sequence_no=monitor_sequence,
+                    monitor_occurred_at=monitor_occurred_at,
+                    monitor_payload_sha256=hashlib.sha256(
+                        raw_monitor_payload.encode("utf-8")
+                    ).hexdigest(),
+                    monitor_probability=probability,
+                    monitor_probability_is_fresh=True,
+                    monitor_selected_method="day0_absorbing_hard_fact",
+                    monitor_should_exit=False,
+                    monitor_trigger="DAY0_HARD_FACT_STRUCTURAL_WIN_HOLD",
+                )
+            )
+    return tuple(receipts)
+
+
+def _atomically_ack_structural_win_wakes(
+    wakes: tuple[object, ...],
+    *,
+    wake_path: Path | None = None,
+    coordinator: object | None = None,
+) -> tuple[tuple[object, ...], bool]:
+    """Revalidate and ack V4 structural-win debt under one trade writer lock.
+
+    SCOPE: exact global-completion wakes containing a V4 supersession candidate.
+    DRAIN: a recovery-critical single-trade-DB transaction fences command/event
+    writers while current receipts are rebuilt, persisted, matched byte-for-byte,
+    and exact wake files are acknowledged. RESET: any newer command, monitor,
+    attempt, or lineage mismatch produces no ack and the durable wake retries.
+    """
+
+    from src.runtime.reactor_wake import (
+        GLOBAL_AUCTION_COMPLETION_WAKE_REASON,
+        SUPERSEDED_BY_DAY0_HARD_FACT_STRUCTURAL_WIN,
+        _read_held_sell_reauction_receipt,
+        acknowledge_reactor_wakes,
+        held_sell_reauction_requests_completed,
+        persist_held_sell_reauction_receipts,
+    )
+    from src.state.write_coordinator import (
+        DBIdentity,
+        WritePriority,
+        default_runtime_write_coordinator,
+    )
+
+    exact_wakes = tuple(
+        wake
+        for wake in wakes
+        if str(getattr(wake, "reason", "") or "")
+        == GLOBAL_AUCTION_COMPLETION_WAKE_REASON
+        and not tuple(getattr(wake, "event_ids", ()) or ())
+        and tuple(getattr(wake, "held_sell_reauction_requests", ()) or ())
+    )
+    if not exact_wakes:
+        return (), True
+    runtime_coordinator = coordinator or default_runtime_write_coordinator()
+    try:
+        with runtime_coordinator.transaction(
+            (DBIdentity.TRADE,),
+            owner="held_sell_structural_win_ack",
+            priority=WritePriority.RECOVERY_CRITICAL,
+            deadline_ms=1_000,
+            max_hold_ms=1_000,
+        ) as transaction:
+            requests = tuple(
+                dict.fromkeys(
+                    request
+                    for wake in exact_wakes
+                    for request in tuple(
+                        getattr(wake, "held_sell_reauction_requests", ()) or ()
+                    )
+                )
+            )
+            current_receipts = _terminal_held_sell_reauction_receipts(
+                requests,
+                trade_connection=transaction.connection,
+            )
+            structural_receipts = tuple(
+                receipt
+                for receipt in current_receipts
+                if getattr(receipt, "status", "")
+                == SUPERSEDED_BY_DAY0_HARD_FACT_STRUCTURAL_WIN
+            )
+            if not structural_receipts:
+                transaction.connection.rollback()
+                return (), True
+            if not persist_held_sell_reauction_receipts(
+                structural_receipts,
+                path=wake_path,
+            ):
+                transaction.connection.rollback()
+                return (), True
+            current_by_attempt = {
+                (
+                    str(getattr(receipt, "request_id", "") or ""),
+                    str(getattr(receipt, "attempt_identity", "") or ""),
+                ): receipt
+                for receipt in structural_receipts
+            }
+            completed: list[object] = []
+            for wake in exact_wakes:
+                saw_current_supersession = False
+                wake_completed = True
+                for request in tuple(
+                    getattr(wake, "held_sell_reauction_requests", ()) or ()
+                ):
+                    if held_sell_reauction_requests_completed(
+                        (request,),
+                        path=wake_path,
+                    ):
+                        continue
+                    candidate = current_by_attempt.get(
+                        (
+                            str(getattr(request, "request_id", "") or ""),
+                            str(getattr(request, "attempt_identity", "") or ""),
+                        )
+                    )
+                    if candidate is None:
+                        wake_completed = False
+                        break
+                    persisted = _read_held_sell_reauction_receipt(
+                        str(getattr(request, "request_id", "") or ""),
+                        path=wake_path,
+                        attempt_identity=str(
+                            getattr(request, "attempt_identity", "") or ""
+                        ),
+                    )
+                    if (
+                        persisted != candidate
+                        or not held_sell_reauction_requests_completed(
+                            (request,),
+                            path=wake_path,
+                            allow_structural_win_supersession=True,
+                        )
+                    ):
+                        wake_completed = False
+                        break
+                    saw_current_supersession = True
+                if wake_completed and saw_current_supersession:
+                    completed.append(wake)
+            completed_wakes = tuple(completed)
+            if not completed_wakes or not acknowledge_reactor_wakes(
+                completed_wakes,
+                path=wake_path,
+            ):
+                transaction.connection.rollback()
+                return (), True
+            transaction.connection.rollback()
+            return completed_wakes, False
+    except Exception:  # noqa: BLE001 - any fence failure retains durable debt
+        logger.warning(
+            "held SELL structural-win atomic completion deferred",
+            exc_info=True,
+        )
+        return (), True
+
+
+def _yield_incomplete_global_completion_once(
+    wake: object,
+    pending_requests: tuple[object, ...],
+    *,
+    wake_ids: Iterable[str] = (),
+) -> None:
+    """Yield one selection turn after an incomplete held SELL exact cut.
+
+    SCOPE: the current snapshot of global-completion wake_ids carrying exact
+    requests; their durable files, priority, and bytes are untouched. DRAIN:
+    the next non-deferred listener poll consumes the snapshot before selection,
+    allowing one other queued reason or one empty turn. RESET: consumption
+    restores every still-pending exact wake on the following turn, and listener
+    initialization/restart clears process state.
+    """
+
+    from src.runtime.reactor_wake import (
+        GLOBAL_AUCTION_COMPLETION_WAKE_REASON,
+        exact_held_sell_completion_wake_ids,
+    )
+
+    # SCOPE: only an incomplete exact held-SELL debt whose monitor snapshot had
+    # a legally executable bid. DRAIN: repeated reduce-only global cuts answer
+    # it with ACTUATED, CAPITAL_REJECTED, or a fresh NO_EXECUTABLE_BOOK receipt.
+    # RESET: once every pending request is non-executable/terminal, the existing
+    # one-turn fairness yield resumes. Letting ordinary auction work consume a
+    # disappearing executable window is not fairness; it is capital starvation.
+    executable_debt = any(
+        int(getattr(request, "schema_version", 1) or 1) >= 4
+        and str(getattr(request, "book_state", "") or "").upper() == "EXECUTABLE"
+        and (bid := getattr(request, "held_best_bid", None)) is not None
+        and math.isfinite(float(bid))
+        and float(bid) >= 0.05
+        for request in pending_requests
+    )
+    if executable_debt:
+        logger.info(
+            "exact held SELL debt retained without ordinary-turn yield: "
+            "current request had executable >=5c bid"
+        )
+        return
+
+    if (
+        str(getattr(wake, "reason", "") or "")
+        == GLOBAL_AUCTION_COMPLETION_WAKE_REASON
+        and pending_requests
+    ):
+        snapshot_ids = set(wake_ids)
+        snapshot_ids.add(str(getattr(wake, "wake_id", "") or ""))
+        try:
+            snapshot_ids.update(exact_held_sell_completion_wake_ids())
+        except Exception:  # noqa: BLE001 - retain exact debt on a read failure
+            logger.warning(
+                "exact held SELL fairness snapshot failed; retaining current "
+                "incomplete completion wake(s)",
+                exc_info=True,
+            )
+        _edli_global_completion_yield.arm_many(
+            snapshot_ids
+        )
+
+
+def _yield_incomplete_day0_after_monitor_once(
+    wake: object,
+    *,
+    monitor_succeeded: bool,
+) -> None:
+    """Let one queued capital obligation run after a Day0 monitor succeeds.
+
+    SCOPE: only the selected Day0 wake_id after its held-position monitor has
+    completed; the durable wake and its entry/event work remain unchanged.
+    DRAIN: the next listener poll excludes that wake for one selection turn,
+    allowing exact held SELL debt to own a reduce-only auction cut. RESET: the
+    exclusion is consumed once, then the Day0 wake immediately regains normal
+    priority; listener initialization/restart also clears process state.
+    """
+
+    if (
+        str(getattr(wake, "reason", "") or "")
+        == "day0_extreme_event_committed"
+        and monitor_succeeded
+    ):
+        wake_id = str(getattr(wake, "wake_id", "") or "")
+        _edli_day0_post_monitor_yield.arm(wake_id)
+        _edli_paused_forecast_post_monitor_yield.arm(wake_id)
+
+
+def _paused_forecast_carrier_priority_allowed(
+    *,
+    exposure_priority_served: bool = False,
+) -> bool:
+    """Prove a paused no-submit carrier turn cannot defer open exposure."""
+
+    # SCOPE: one wake selection may advance a forecast carrier only while the
+    # durable global entry pause is active and canonical monitor exposure is either
+    # empty or has completed the selected Day0 monitor turn; it never resumes entries
+    # or permits BUY submission. DRAIN: exact held-SELL and fill retain strict
+    # priority; nonempty exposure gets its Day0 monitor first, then the one-turn yield
+    # advances a selected forecast through the no-submit carrier path before ack.
+    # RESET: pause clear/unreadable control, unknown exposure, failed selection, or
+    # consumption of the one-turn yield restores ordinary Day0-first priority.
+    # ChainOnly/foreign inventory remains owned by chain-mirror.
+    try:
+        from src.control.control_plane import _refresh_entries_pause_from_durable_state
+
+        pause_state = _refresh_entries_pause_from_durable_state()
+        if not (
+            pause_state.get("status") == "ok"
+            and pause_state.get("entries_paused") is True
+        ):
+            return False
+        exposure_count = _current_periodic_monitor_obligation_count()
+        if exposure_count is None:
+            return False
+        return exposure_count == 0 or (
+            exposure_count > 0 and exposure_priority_served
+        )
+    except Exception:
+        logger.warning(
+            "paused forecast carrier authority unavailable; retaining Day0 priority",
+            exc_info=True,
+        )
+        return False
+
+
 def _edli_reactor_wake_poll_once() -> bool:
     """Run the canonical reactor once for a new durable-producer wake hint."""
 
@@ -4528,16 +6318,143 @@ def _edli_reactor_wake_poll_once() -> bool:
         return False
 
     from src.runtime.reactor_wake import (
+        GLOBAL_AUCTION_COMPLETION_WAKE_REASON,
+        SUPERSEDED_BY_DAY0_HARD_FACT_STRUCTURAL_WIN,
+        acknowledge_reactor_wakes,
         coalescible_reactor_wakes,
+        exact_held_sell_completion_wake_ids,
+        held_sell_reauction_requests_completed,
+        persist_held_sell_reauction_receipts,
         read_reactor_wake,
     )
 
-    excluded_wake_ids = _exit_monitor_excluded_wake_ids()
-    wake = (
-        read_reactor_wake(exclude_wake_ids=excluded_wake_ids)
-        if excluded_wake_ids
-        else read_reactor_wake()
+    reactor_blocked_by_monitor_fairness = (
+        _periodic_held_position_monitor_fairness_debt.is_set()
     )
+    exact_held_sell_wake_ids: frozenset[str] = frozenset()
+    if reactor_blocked_by_monitor_fairness:
+        try:
+            exact_held_sell_wake_ids = frozenset(
+                exact_held_sell_completion_wake_ids(fail_on_error=True)
+            )
+        except (OSError, ValueError):
+            logger.warning(
+                "exact held-SELL completion selection unreadable; retaining wake debt",
+                exc_info=True,
+            )
+            return False
+        if not exact_held_sell_wake_ids:
+            return False
+
+    excluded_wake_ids = frozenset(
+        _exit_monitor_excluded_wake_ids()
+        | _collateral_authority_wake_backoff_ids()
+    ) - exact_held_sell_wake_ids
+    global_yield_ids = (
+        _edli_global_completion_yield.consume() - exact_held_sell_wake_ids
+    )
+    day0_post_monitor_yield_ids = _edli_day0_post_monitor_yield.consume()
+    paused_forecast_post_monitor_yield_ids = (
+        _edli_paused_forecast_post_monitor_yield.consume()
+    )
+    terminal_day0_cleanup_yield = _edli_terminal_day0_cleanup_yield.is_set()
+    _edli_terminal_day0_cleanup_yield.clear()
+    paused_forecast_carrier_priority_allowed = (
+        _paused_forecast_carrier_priority_allowed(
+            exposure_priority_served=bool(
+                paused_forecast_post_monitor_yield_ids
+            ),
+        )
+    )
+    if paused_forecast_carrier_priority_allowed:
+        excluded_wake_ids = frozenset(
+            excluded_wake_ids | paused_forecast_post_monitor_yield_ids
+        )
+    try:
+        if day0_post_monitor_yield_ids:
+            excluded_wake_ids = frozenset(
+                excluded_wake_ids | day0_post_monitor_yield_ids
+            )
+            prefer_forecast_carrier_progress = paused_forecast_carrier_priority_allowed
+            wake = read_reactor_wake(
+                exclude_wake_ids=excluded_wake_ids,
+                prefer_exact_held_sell=True,
+                prefer_forecast_carrier_progress=prefer_forecast_carrier_progress,
+                fail_on_error=True,
+            )
+        else:
+            prefer_forecast_carrier_progress = paused_forecast_carrier_priority_allowed
+            wake = (
+                read_reactor_wake(
+                    exclude_wake_ids=excluded_wake_ids,
+                    prefer_exact_held_sell=reactor_blocked_by_monitor_fairness,
+                    prefer_forecast_carrier_progress=prefer_forecast_carrier_progress,
+                    fail_on_error=(
+                        prefer_forecast_carrier_progress
+                        or reactor_blocked_by_monitor_fairness
+                    ),
+                )
+                if excluded_wake_ids
+                else read_reactor_wake(
+                    prefer_exact_held_sell=reactor_blocked_by_monitor_fairness,
+                    prefer_forecast_carrier_progress=prefer_forecast_carrier_progress,
+                    fail_on_error=(
+                        prefer_forecast_carrier_progress
+                        or reactor_blocked_by_monitor_fairness
+                    ),
+                )
+            )
+        if wake is not None and wake.wake_id in global_yield_ids:
+            excluded_wake_ids = frozenset(excluded_wake_ids | global_yield_ids)
+            wake = read_reactor_wake(
+                exclude_wake_ids=excluded_wake_ids,
+                prefer_exact_held_sell=reactor_blocked_by_monitor_fairness,
+                prefer_forecast_carrier_progress=prefer_forecast_carrier_progress,
+                fail_on_error=(
+                    prefer_forecast_carrier_progress
+                    or reactor_blocked_by_monitor_fairness
+                ),
+            )
+        if (
+            terminal_day0_cleanup_yield
+            and wake is not None
+            and wake.reason == "day0_extreme_event_committed"
+            and _pending_held_day0_wake_families() == frozenset()
+            and _terminal_day0_cleanup_eligible(wake)
+        ):
+            wake = read_reactor_wake(
+                exclude_wake_ids=excluded_wake_ids,
+                prefer_material_progress=True,
+                fail_on_error=True,
+            )
+        if (
+            wake is not None
+            and wake.reason == "day0_extreme_event_committed"
+            and exact_held_sell_completion_wake_ids(fail_on_error=True)
+        ):
+            # INV-47 SCOPE: only this selected Day0 wake yields one next turn.
+            # DRAIN: the immediately following poll prefers exact held-SELL
+            # debt even when this Day0 wake remains unacknowledged or its
+            # monitor/cycle fails. RESET: consume() clears the process-local
+            # preference after one selection; empty exact debt never arms it.
+            _edli_day0_post_monitor_yield.arm(wake.wake_id)
+    except (OSError, ValueError):
+        logger.warning(
+            "paused forecast carrier selection unavailable; retaining wake debt",
+            exc_info=True,
+        )
+        return False
+    if (
+        reactor_blocked_by_monitor_fairness
+        and (
+            wake is None
+            or wake.wake_id not in exact_held_sell_wake_ids
+        )
+    ):
+        # The exact snapshot that licensed the monitor-debt bypass changed
+        # before selection. Never spend that authority on an ordinary entry or
+        # replay wake; the next poll re-reads the durable debt.
+        return False
     if wake is None or wake.wake_id == _edli_last_reactor_wake_id:
         return False
     wakes = tuple(
@@ -4559,6 +6476,98 @@ def _edli_reactor_wake_poll_once() -> bool:
     if completed_forecast_wakes:
         wakes = completed_forecast_wakes
         wake = wakes[0]
+    held_sell_reauction_requests = tuple(
+        dict.fromkeys(
+            request
+            for queued in wakes
+            for request in queued.held_sell_reauction_requests
+        )
+    )
+    terminal_receipts = _terminal_held_sell_reauction_receipts(
+        held_sell_reauction_requests
+    )
+    ordinary_terminal_receipts = tuple(
+        receipt
+        for receipt in terminal_receipts
+        if getattr(receipt, "status", "")
+        != SUPERSEDED_BY_DAY0_HARD_FACT_STRUCTURAL_WIN
+    )
+    if ordinary_terminal_receipts and not persist_held_sell_reauction_receipts(
+        ordinary_terminal_receipts
+    ):
+        logger.warning(
+            "held SELL terminal receipts could not persist; wake remains pending"
+        )
+    structural_candidate_present = len(ordinary_terminal_receipts) != len(
+        terminal_receipts
+    )
+    structural_completed_wakes: tuple[object, ...] = ()
+    structural_finalization_failed = False
+    if structural_candidate_present:
+        (
+            structural_completed_wakes,
+            structural_finalization_failed,
+        ) = _atomically_ack_structural_win_wakes(wakes)
+    if structural_finalization_failed:
+        return False
+    if structural_completed_wakes:
+        completed_ids = {
+            str(getattr(queued, "wake_id", "") or "")
+            for queued in structural_completed_wakes
+        }
+        wakes = tuple(
+            queued
+            for queued in wakes
+            if str(getattr(queued, "wake_id", "") or "") not in completed_ids
+        )
+        logger.info(
+            "EDLI reactor atomically retired %d structural-win held SELL wakes",
+            len(structural_completed_wakes),
+        )
+        if not wakes:
+            _edli_last_reactor_wake_id = wake.wake_id
+            return True
+        wake = wakes[0]
+        held_sell_reauction_requests = tuple(
+            dict.fromkeys(
+                request
+                for queued in wakes
+                for request in queued.held_sell_reauction_requests
+            )
+        )
+    durably_completed_wakes = tuple(
+        queued
+        for queued in wakes
+        if queued.reason == GLOBAL_AUCTION_COMPLETION_WAKE_REASON
+        and not queued.event_ids
+        and queued.held_sell_reauction_requests
+        and held_sell_reauction_requests_completed(
+            queued.held_sell_reauction_requests
+        )
+    )
+    if durably_completed_wakes:
+        if len(durably_completed_wakes) == len(wakes):
+            return _acknowledge_edli_reactor_wake_batch(
+                wake,
+                wakes,
+                day0_wake=False,
+            )
+        # Acknowledge only immutable queue files whose own request set has
+        # durable completion. An older active/mixed wake remains byte-for-byte
+        # pending while later terminal-only wakes make bounded queue progress.
+        if not acknowledge_reactor_wakes(durably_completed_wakes):
+            return False
+        completed_ids = {queued.wake_id for queued in durably_completed_wakes}
+        wakes = tuple(
+            queued for queued in wakes if queued.wake_id not in completed_ids
+        )
+        logger.info(
+            "EDLI reactor retired %d independently completed held SELL wakes",
+            len(durably_completed_wakes),
+        )
+        if not wakes:
+            return True
+        wake = wakes[0]
     wake_event_ids = tuple(
         dict.fromkeys(event_id for queued in wakes for event_id in queued.event_ids)
     )
@@ -4567,16 +6576,57 @@ def _edli_reactor_wake_poll_once() -> bool:
             family for queued in wakes for family in queued.forecast_families
         )
     )
+    held_sell_reauction_requests = tuple(
+        dict.fromkeys(
+            request
+            for queued in wakes
+            for request in queued.held_sell_reauction_requests
+        )
+    )
+    pending_held_sell_reauction_requests = tuple(
+        request
+        for request in held_sell_reauction_requests
+        if not held_sell_reauction_requests_completed((request,))
+    )
+    allow_paused_forecast_snapshot_completion = (
+        paused_forecast_carrier_priority_allowed
+        and wake.reason == "forecast_posterior_advanced"
+        and bool(wake_families)
+        and not wake_event_ids
+        and not held_sell_reauction_requests
+        and all(
+            queued.reason == "forecast_posterior_advanced"
+            and not queued.event_ids
+            and not queued.held_sell_reauction_requests
+            for queued in wakes
+        )
+    )
     day0_wake = wake.reason == "day0_extreme_event_committed"
     forecast_wake = wake.reason == "forecast_posterior_advanced"
+    price_wake = wake.reason == "market_price_advanced"
     substrate_refresh_wake = wake.reason == "money_path_substrate_refreshed"
+    position_fill_wake = wake.reason == "position_fill_projected"
     wake_event_state = None
+    position_fill_monitor_families: frozenset[tuple[str, str, str]] | None = frozenset()
+    position_fill_monitor_required = False
+    if position_fill_wake:
+        position_fill_monitor_families = _position_fill_wake_held_families(
+            wake_event_ids
+        )
+        position_fill_monitor_required = (
+            position_fill_monitor_families is None
+            or bool(position_fill_monitor_families)
+        )
     if wake_event_ids:
         wake_event_state = _reactor_wake_event_state(wake_event_ids)
         # Entry-event completion does not satisfy the same fact's held-position
         # redecision. A finished Day0 wake must reach the monitor-before-ack path.
         finished_day0_monitor = day0_wake and wake_event_state.finished
-        if wake_event_state.finished and not finished_day0_monitor:
+        if (
+            wake_event_state.finished
+            and not finished_day0_monitor
+            and not position_fill_monitor_required
+        ):
             if not _acknowledge_edli_reactor_wake_batch(
                 wake,
                 wakes,
@@ -4593,8 +6643,29 @@ def _edli_reactor_wake_poll_once() -> bool:
                 len(wake_event_ids),
             )
             return True
-        if not wake_event_state.ready and not finished_day0_monitor:
+        if (
+            not wake_event_state.ready
+            and not finished_day0_monitor
+            and not position_fill_monitor_required
+        ):
             return False
+    if (
+        held_sell_reauction_requests
+        and not pending_held_sell_reauction_requests
+        and not wake_event_ids
+        and all(
+            queued.reason == GLOBAL_AUCTION_COMPLETION_WAKE_REASON for queued in wakes
+        )
+    ):
+        if not held_sell_reauction_requests_completed(
+            held_sell_reauction_requests
+        ):
+            return False
+        return _acknowledge_edli_reactor_wake_batch(
+            wake,
+            wakes,
+            day0_wake=False,
+        )
     day0_target_families = None
     day0_requires_exit_monitor = False
     day0_monitor_succeeded = True
@@ -4611,6 +6682,13 @@ def _edli_reactor_wake_poll_once() -> bool:
             _held_position_monitor_active.is_set()
             or _held_position_monitor_claim.locked()
         ):
+            # SCOPE: this selected Day0 wake only, for one queue turn while a
+            # different monitor already owns the single-writer claim. DRAIN:
+            # the next poll excludes this durable wake once so an exact SELL
+            # completion or independent material wake can run concurrently
+            # with monitor network I/O. RESET: consume() clears the exclusion;
+            # the Day0 wake is never acknowledged and regains normal priority.
+            _edli_day0_post_monitor_yield.arm(wake.wake_id)
             return False
         day0_requires_exit_monitor = _day0_wake_requires_exit_monitor(
             day0_target_families
@@ -4630,6 +6708,10 @@ def _edli_reactor_wake_poll_once() -> bool:
                     "entry-only selected wake",
                     len(pending_held_families),
                 )
+            else:
+                day0_requires_exit_monitor = not (
+                    _record_day0_no_monitor_completion(wake.wake_id)
+                )
         if day0_requires_exit_monitor:
             started, result = _day0_exit_monitor_attempt_state(wake.wake_id)
             if not started:
@@ -4638,9 +6720,12 @@ def _edli_reactor_wake_poll_once() -> bool:
             day0_monitor_succeeded = result is True
             if not day0_monitor_succeeded:
                 return False
+    monitor_wake_families = wake_families
+    if price_wake and not monitor_wake_families:
+        monitor_wake_families = tuple(_price_wake_target_families(wake_event_ids) or ())
     forecast_monitor_families = (
-        _forecast_wake_held_families(wake_families)
-        if forecast_wake and wake_families
+        _forecast_wake_held_families(monitor_wake_families)
+        if (forecast_wake or price_wake) and monitor_wake_families
         else frozenset()
     )
     if forecast_monitor_families:
@@ -4649,6 +6734,16 @@ def _edli_reactor_wake_poll_once() -> bool:
             _dispatch_forecast_exit_monitor(
                 tuple(queued.wake_id for queued in wakes),
                 forecast_monitor_families,
+            )
+        _started, result = _forecast_exit_monitor_attempt_state(wake.wake_id)
+        if result is not True:
+            return False
+    if position_fill_monitor_required:
+        started, result = _forecast_exit_monitor_attempt_state(wake.wake_id)
+        if not started:
+            _dispatch_forecast_exit_monitor(
+                tuple(queued.wake_id for queued in wakes),
+                position_fill_monitor_families,
             )
         _started, result = _forecast_exit_monitor_attempt_state(wake.wake_id)
         if result is not True:
@@ -4678,12 +6773,23 @@ def _edli_reactor_wake_poll_once() -> bool:
         if wake_event_state is not None and wake_event_state.finished:
             if not day0_monitor_succeeded:
                 return False
+            if wake_event_state.all_terminal and not day0_requires_exit_monitor:
+                cleanup_wakes = _terminal_day0_cleanup_wakes(wake)
+                if cleanup_wakes is None:
+                    return False
+                wakes = cleanup_wakes
+            _yield_incomplete_day0_after_monitor_once(
+                wake,
+                monitor_succeeded=True,
+            )
             if not _acknowledge_edli_reactor_wake_batch(
                 wake,
                 wakes,
                 day0_wake=True,
             ):
                 return False
+            if len(wakes) > 1:
+                _edli_terminal_day0_cleanup_yield.set()
             logger.info(
                 "Day0 monitor completed after terminal reactor event: "
                 "wake id=%s batch=%d events=%d families=%d",
@@ -4694,21 +6800,57 @@ def _edli_reactor_wake_poll_once() -> bool:
             )
             return True
     if not substrate_refresh_wake:
+        reactor_kwargs = {
+            "producer_wake_reason": wake.reason,
+            "producer_wake_ids": tuple(queued.wake_id for queued in wakes),
+            "producer_wake_published_at": wake.published_at,
+            "producer_wake_event_ids": wake_event_ids,
+            "producer_wake_families": wake_families,
+        }
+        if pending_held_sell_reauction_requests:
+            reactor_kwargs["producer_held_sell_reauction_requests"] = (
+                pending_held_sell_reauction_requests
+            )
+        reactor_kwargs["allow_paused_forecast_snapshot_completion"] = (
+            allow_paused_forecast_snapshot_completion
+        )
         ran = _edli_event_reactor_cycle(
-            producer_wake_reason=wake.reason,
-            producer_wake_ids=tuple(queued.wake_id for queued in wakes),
-            producer_wake_published_at=wake.published_at,
-            producer_wake_event_ids=wake_event_ids,
-            producer_wake_families=wake_families,
+            **reactor_kwargs,
         )
     if ran is not True:
+        _yield_incomplete_global_completion_once(
+            wake,
+            pending_held_sell_reauction_requests,
+            wake_ids=(queued.wake_id for queued in wakes),
+        )
+        _yield_incomplete_day0_after_monitor_once(
+            wake,
+            monitor_succeeded=day0_monitor_succeeded,
+        )
         return False
     if wake_event_ids and not _reactor_wake_events_finished(wake_event_ids):
+        _yield_incomplete_day0_after_monitor_once(
+            wake,
+            monitor_succeeded=day0_monitor_succeeded,
+        )
+        return False
+    if held_sell_reauction_requests and not held_sell_reauction_requests_completed(
+        held_sell_reauction_requests
+    ):
+        _yield_incomplete_global_completion_once(
+            wake,
+            pending_held_sell_reauction_requests,
+            wake_ids=(queued.wake_id for queued in wakes),
+        )
         return False
     if day0_wake and day0_requires_exit_monitor:
         _started, result = _day0_exit_monitor_attempt_state(wake.wake_id)
         if result is not True:
             return False
+    _yield_incomplete_day0_after_monitor_once(
+        wake,
+        monitor_succeeded=day0_monitor_succeeded,
+    )
     if not _acknowledge_edli_reactor_wake_batch(
         wake,
         wakes,
@@ -4738,6 +6880,101 @@ def _dispatch_edli_redecision_screen_from_wake() -> None:
     ).start()
 
 
+def _collateral_authority_wake_backoff_ids() -> frozenset[str]:
+    """Return collateral wakes temporarily yielded to ordinary queue work."""
+
+    now = time.monotonic()
+    expired = tuple(
+        wake_id
+        for wake_id, retry_at in _edli_collateral_authority_wake_backoff_until.items()
+        if retry_at <= now
+    )
+    for wake_id in expired:
+        _edli_collateral_authority_wake_backoff_until.pop(wake_id, None)
+    return frozenset(_edli_collateral_authority_wake_backoff_until)
+
+
+def _service_pending_collateral_authority_wake() -> bool | None:
+    """Refresh only allocator authority for a durable collateral wake.
+
+    SCOPE: process-wide actuation authority only; this does not run the event
+    reactor, create an entry intent, or contact the venue. DRAIN: the listener
+    selects the newest exact collateral identity independently of alpha-wake
+    priority, then acknowledges every superseded collateral hint in that drain;
+    an ack failure gets a five-second bounded retry while ordinary wakes continue.
+    RESET: exact ack consumes only collateral wakes; a later successful snapshot
+    publishes a new wake.
+    """
+    global _edli_last_collateral_authority_captured_at
+
+    from src.runtime.reactor_wake import (
+        COLLATERAL_AUTHORITY_REFRESHED_WAKE_REASON,
+        reactor_wakes_for_reason,
+    )
+
+    try:
+        wakes = reactor_wakes_for_reason(
+            COLLATERAL_AUTHORITY_REFRESHED_WAKE_REASON,
+            exclude_wake_ids=_collateral_authority_wake_backoff_ids(),
+            max_wakes=_COLLATERAL_AUTHORITY_WAKE_BATCH_LIMIT,
+        )
+    except (OSError, ValueError):
+        logger.warning("collateral authority wake selection failed; retaining wake debt", exc_info=True)
+        return None
+    if not wakes:
+        return None
+    latest = wakes[0]
+    latest_at = None
+    try:
+        latest_at = datetime.fromisoformat(latest.published_at.replace("Z", "+00:00"))
+        if latest_at.tzinfo is None:
+            latest_at = latest_at.replace(tzinfo=timezone.utc)
+        latest_at = latest_at.astimezone(timezone.utc)
+    except (AttributeError, TypeError, ValueError):
+        pass
+    with _edli_collateral_authority_lock:
+        superseded = (
+            latest_at is not None
+            and _edli_last_collateral_authority_captured_at is not None
+            and latest_at <= _edli_last_collateral_authority_captured_at
+        )
+        if superseded:
+            authority_refresh = {"configured": None, "superseded": True}
+        else:
+            authority_refresh = _refresh_global_execution_authority_after_collateral_publish(
+                captured_at=latest.published_at,
+            )
+            if authority_refresh.get("configured") and latest_at is not None:
+                if (
+                    _edli_last_collateral_authority_captured_at is None
+                    or latest_at > _edli_last_collateral_authority_captured_at
+                ):
+                    _edli_last_collateral_authority_captured_at = latest_at
+    acknowledged = _acknowledge_edli_reactor_wake_batch(
+        latest,
+        wakes,
+        day0_wake=False,
+    )
+    if acknowledged:
+        if not authority_refresh.get("configured") and not superseded:
+            logger.warning(
+                "collateral authority wake failed closed and was acknowledged; "
+                "the 60-second canonical warm remains the recovery backstop: %s",
+                authority_refresh.get("error"),
+            )
+        return True
+    retry_at = time.monotonic() + _COLLATERAL_AUTHORITY_WAKE_RETRY_SECONDS
+    for queued in wakes:
+        _edli_collateral_authority_wake_backoff_until[queued.wake_id] = retry_at
+    logger.warning(
+        "collateral authority wake acknowledgement failed; yielding %d wake(s) "
+        "for %.1fs so ordinary queue work can continue",
+        len(wakes),
+        _COLLATERAL_AUTHORITY_WAKE_RETRY_SECONDS,
+    )
+    return None
+
+
 def _run_edli_reactor_wake_listener(
     *,
     stop_event: threading.Event,
@@ -4763,7 +7000,10 @@ def _run_edli_reactor_wake_listener(
                     if stop_event.wait(fallback_seconds):
                         break
             try:
-                _edli_reactor_wake_poll_once()
+                _consume_live_control_commands()
+                collateral_serviced = _service_pending_collateral_authority_wake()
+                if collateral_serviced is None:
+                    _edli_reactor_wake_poll_once()
             except Exception:
                 logger.exception("EDLI reactor wake listener poll failed")
 
@@ -4788,10 +7028,161 @@ def _start_edli_reactor_wake_listener() -> None:
 def _edli_bankroll_warm_cycle() -> None:
     """Scheduler hook — body owned by src.runtime.bankroll_provider (R4-b
     extraction, 2026-07-08). See that module's ``run_warm_cycle`` docstring
-    for the structural fix this job implements (#45 follow-up)."""
+    for the structural fix this job implements (#45 follow-up).
+
+    The same fixed-cadence tick also refreshes process-wide execution
+    authority. A durable BUY pause may park every reactor wake, and an empty
+    held book intentionally skips the heavier monitor handoff; neither state
+    may leave the allocator/governor pair cold for a future reduce-only SELL.
+    """
     from src.runtime.bankroll_provider import run_warm_cycle
 
-    run_warm_cycle()
+    if not run_warm_cycle():
+        result = _refresh_global_execution_authority()
+        if not result.get("configured") and not result.get("superseded"):
+            logger.error(
+                "global execution-authority refresh revoked: current collateral "
+                "snapshot unavailable"
+            )
+        return
+    _refresh_global_execution_authority()
+
+
+def _refresh_global_execution_authority_after_collateral_publish(
+    *,
+    captured_at: str,
+) -> dict:
+    """Restore actuation only from the exact canonical snapshot that woke us.
+
+    SCOPE: process-wide allocator/governor actuation authority only; this helper
+    neither creates an entry intent nor reaches the venue. DRAIN: a durable
+    collateral-publish wake retries this exact snapshot identity, while the
+    60-second warm job remains a recovery backstop. RESET: only a fresh
+    canonical snapshot whose ``captured_at`` equals the wake can configure the
+    coherent allocator/governor pair; missing, stale, degraded, malformed, or
+    mismatched truth explicitly revokes it.
+    """
+    from src.risk_allocator import configure_global_allocator
+    from src.runtime.bankroll_provider import warm_from_collateral_snapshot
+
+    def _fail_closed(reason: str) -> dict:
+        configure_global_allocator(None, None)
+        logger.error(
+            "global execution-authority collateral-publish refresh revoked: %s",
+            reason,
+        )
+        return {
+            "configured": False,
+            "fail_closed": True,
+            "error": reason,
+            "entry": {
+                "allow_submit": False,
+                "reason": "allocator_not_configured",
+            },
+        }
+
+    try:
+        expected = datetime.fromisoformat(str(captured_at).replace("Z", "+00:00"))
+        if expected.tzinfo is None:
+            expected = expected.replace(tzinfo=timezone.utc)
+        expected = expected.astimezone(timezone.utc)
+    except (TypeError, ValueError):
+        return _fail_closed("collateral_snapshot_captured_at_invalid")
+
+    try:
+        warm = warm_from_collateral_snapshot()
+    except Exception as exc:  # noqa: BLE001 - missing truth is an authority revoke
+        return _fail_closed(f"collateral_snapshot_warm_failed:{type(exc).__name__}")
+    if warm is None:
+        return _fail_closed("collateral_snapshot_unavailable")
+    try:
+        actual = datetime.fromisoformat(str(warm.fetched_at).replace("Z", "+00:00"))
+        if actual.tzinfo is None:
+            actual = actual.replace(tzinfo=timezone.utc)
+        actual = actual.astimezone(timezone.utc)
+    except (TypeError, ValueError):
+        return _fail_closed("collateral_snapshot_warm_captured_at_invalid")
+    if actual < expected:
+        return _fail_closed("collateral_snapshot_identity_mismatch")
+    result = _refresh_global_execution_authority(bankroll_record=warm)
+    if actual > expected:
+        result = {**result, "superseded_wake": True}
+    return result
+
+
+def _refresh_global_execution_authority(*, bankroll_record=None) -> dict:
+    """Refresh real allocator truth without claiming work or touching venue.
+
+    SCOPE: process-wide allocation/actuation authority only; this helper cannot
+    create an intent, persist a command, or contact the venue. DRAIN: the
+    60-second bankroll-warm cadence retries from a fresh collateral snapshot and
+    canonical open portfolio. RESET: the next successful tick configures the
+    coherent allocator/governor pair; unavailable truth explicitly revokes it.
+    """
+    global _edli_last_collateral_authority_captured_at
+
+    from src.risk_allocator import configure_global_allocator
+    from src.runtime import bankroll_provider
+    from src.state.db import get_trade_connection_read_only
+    from src.state.portfolio import load_runtime_open_portfolio
+
+    with _edli_collateral_authority_lock:
+        trade_conn = None
+        try:
+            record = bankroll_record or bankroll_provider.cached()
+            record_at = None
+            if record is not None:
+                record_at = datetime.fromisoformat(
+                    str(record.fetched_at).replace("Z", "+00:00")
+                )
+                if record_at.tzinfo is None:
+                    record_at = record_at.replace(tzinfo=timezone.utc)
+                record_at = record_at.astimezone(timezone.utc)
+            if (
+                record_at is not None
+                and _edli_last_collateral_authority_captured_at is not None
+                and record_at < _edli_last_collateral_authority_captured_at
+            ):
+                return {"configured": None, "superseded": True}
+            trade_conn = get_trade_connection_read_only()
+            portfolio = load_runtime_open_portfolio(trade_conn)
+            refresh_kwargs = {"portfolio_snapshot": portfolio}
+            if record is not None:
+                refresh_kwargs["bankroll_record"] = record
+            result = _edli_refresh_global_allocator(trade_conn, **refresh_kwargs)
+            if result.get("configured") and record_at is not None:
+                _edli_last_collateral_authority_captured_at = record_at
+            elif not result.get("configured"):
+                logger.error(
+                    "global execution-authority refresh unavailable: %s",
+                    result,
+                )
+            return result
+        except Exception as exc:  # noqa: BLE001 - capability must fail closed
+            configure_global_allocator(None, None)
+            logger.error(
+                "global execution-authority refresh failed closed: %r",
+                exc,
+                exc_info=True,
+            )
+            return {
+                "configured": False,
+                "fail_closed": True,
+                "error": str(exc),
+                "entry": {
+                    "allow_submit": False,
+                    "reason": "allocator_not_configured",
+                },
+            }
+        finally:
+            if trade_conn is not None:
+                try:
+                    trade_conn.close()
+                except Exception:  # noqa: BLE001 - authority result remains explicit
+                    logger.warning(
+                        "global execution-authority read close failed",
+                        exc_info=True,
+                    )
 
 
 def _command_recovery_summary_mutated_allocator_inputs(summary: object) -> bool:
@@ -4829,28 +7220,211 @@ def _edli_command_recovery_cycle() -> None:
     unchanged (venue lookup per in-flight command; REVIEW_REQUIRED handoff for
     ack-lost rows without an order id).
     """
+    _consume_live_control_commands()
     edli_cfg = _settings_section("edli", {})
     if get_mode() != "live":
         return
     if _defer_for_held_position_monitor("edli_command_recovery"):
         return
-    from src.execution.command_recovery import reconcile_unresolved_commands
-    from src.state.db import get_trade_connection_with_world_required
+    from src.execution.command_recovery import (
+        capital_blocking_command_scope,
+        capital_blocking_command_count,
+        reconcile_unresolved_commands,
+        scheduled_recovery_budget_seconds,
+    )
+    from src.state.db import get_trade_connection_read_only
 
-    summary = reconcile_unresolved_commands(scope="live_tick")
-    if summary.get("scanned"):
-        logger.info("edli_command_recovery: %s", summary)
-    if _command_recovery_summary_mutated_allocator_inputs(summary):
-        trade_conn = get_trade_connection_with_world_required(write_class=None)
+    invocation_deadline = (
+        _time.monotonic() + scheduled_recovery_budget_seconds()
+    )
+    capital_blockers = 0
+    capital_scope = None
+    try:
+        trade_conn = get_trade_connection_read_only()
         try:
-            allocator_refresh = _edli_refresh_global_allocator(trade_conn)
+            capital_blockers = capital_blocking_command_count(trade_conn)
+            if capital_blockers > 0:
+                capital_scope = capital_blocking_command_scope(trade_conn)
         finally:
             trade_conn.close()
+    except Exception as exc:  # noqa: BLE001 - recovery still runs fail-closed.
+        logger.warning(
+            "edli_command_recovery: capital blocker read unavailable; "
+            "continuing without reactor handoff: %r",
+            exc,
+        )
+    global_capital_handoff = capital_blockers > 0
+    if capital_scope is not None:
+        try:
+            from src.risk_allocator import load_cap_policy
+
+            global_capital_handoff = (
+                capital_scope.total_count != capital_blockers
+                or capital_scope.requires_global_handoff(
+                    systemic_market_count_limit=(
+                        load_cap_policy().systemic_market_count_limit
+                    )
+                )
+            )
+        except Exception as exc:  # noqa: BLE001 - scope ambiguity stays global.
+            logger.warning(
+                "edli_command_recovery: capital scope classification failed; "
+                "retaining global reactor handoff: %r",
+                exc,
+            )
+    if not global_capital_handoff and (
+        _held_position_monitor_active.is_set()
+        or _held_position_monitor_canonical_debt.is_set()
+    ):
+        # SCOPE: a recovery tick with no systemic or unscopeable capital
+        # ambiguity. Exact single-market debt is already isolated from every
+        # other family and may wait for current held-capital truth.
+        # DRAIN: the active/overdue held monitor gets uncontended trade-DB I/O
+        # and writes current MONITOR_REFRESHED evidence. RESET: its completion
+        # clears the active claim and canonical fresh coverage clears the debt;
+        # the next 60-second recovery tick resumes. Systemic, unscopeable, or
+        # incomplete confirmed-fill projection debt retains recovery priority.
         logger.info(
-            "edli_command_recovery: refreshed allocator after recovery mutation: %s",
+            "edli_command_recovery deferred: held-position monitor owns "
+            "current-capital I/O priority"
+        )
+        return
+    if global_capital_handoff:
+        _capital_recovery_handoff_pending.set()
+        logger.info(
+            "edli_command_recovery: reserving reactor handoff for %d "
+            "capital-blocking venue side effects",
+            capital_blockers,
+        )
+    elif capital_blockers:
+        logger.info(
+            "edli_command_recovery: scoped capital recovery remains concurrent "
+            "with global auction blockers=%d markets=%s",
+            capital_blockers,
+            list(capital_scope.scoped_markets) if capital_scope is not None else [],
+        )
+    reactor_fence_acquired = False
+    try:
+        if global_capital_handoff:
+            drain_budget = min(
+                _CAPITAL_RECOVERY_REACTOR_DRAIN_SECONDS,
+                max(0.0, invocation_deadline - _time.monotonic()),
+            )
+            reactor_idle = _edli_reactor_active_lock.acquire(
+                timeout=drain_budget,
+            )
+            if not reactor_idle:
+                logger.warning(
+                    "edli_command_recovery: active reactor did not drain within "
+                    "%.1fs; capital recovery will retry next cadence",
+                    drain_budget,
+                )
+                return
+            reactor_fence_acquired = True
+        summary = reconcile_unresolved_commands(
+            scope="live_tick",
+            deadline_monotonic=invocation_deadline,
+        )
+    finally:
+        if reactor_fence_acquired:
+            _edli_reactor_active_lock.release()
+        _capital_recovery_handoff_pending.clear()
+    _consume_edli_command_recovery_summary(
+        summary,
+        log_context="edli_command_recovery.live_tick",
+    )
+    full_bucket = _edli_command_recovery_full_bucket()
+    global _EDLI_COMMAND_RECOVERY_LAST_FULL_BUCKET
+    if full_bucket == _EDLI_COMMAND_RECOVERY_LAST_FULL_BUCKET:
+        return
+    if _time.monotonic() >= invocation_deadline:
+        logger.info(
+            "edli_command_recovery: shared invocation deadline exhausted after "
+            "live_tick; full sweep will retry next cadence"
+        )
+        return
+    full_summary = reconcile_unresolved_commands(
+        scope="full",
+        deadline_monotonic=invocation_deadline,
+    )
+    follow_through_ok = _consume_edli_command_recovery_summary(
+        full_summary,
+        log_context="edli_command_recovery.full",
+    )
+    if (
+        int(full_summary.get("errors", 0) or 0) == 0
+        and not full_summary.get("db_lock_deferred")
+        and not full_summary.get("db_budget_deferred")
+        and not full_summary.get("full_point_read_timed_out")
+        and follow_through_ok
+    ):
+        _EDLI_COMMAND_RECOVERY_LAST_FULL_BUCKET = full_bucket
+
+
+def _edli_command_recovery_full_bucket(
+    now: datetime | None = None,
+) -> int:
+    """Return the crash-stable bucket owning one bounded account-wide sweep."""
+
+    observed = now or datetime.now(timezone.utc)
+    if observed.tzinfo is None:
+        raise ValueError("EDLI_COMMAND_RECOVERY_FULL_BUCKET_NAIVE")
+    return int(
+        observed.astimezone(timezone.utc).timestamp()
+        // _EDLI_COMMAND_RECOVERY_FULL_CADENCE_SECONDS
+    )
+
+
+def _consume_edli_command_recovery_summary(
+    summary: dict,
+    *,
+    log_context: str,
+) -> bool:
+    """Apply allocator and redecision follow-through for one recovery scope."""
+
+    from src.state.db import get_trade_connection_read_only
+    from src.state.portfolio import load_runtime_open_portfolio
+
+    if summary.get("scanned"):
+        logger.info("%s: %s", log_context, summary)
+    deadline = _time.monotonic() + 5.0
+    if _command_recovery_summary_mutated_allocator_inputs(summary):
+        try:
+            trade_conn = get_trade_connection_read_only()
+            try:
+                trade_conn.set_progress_handler(
+                    lambda: int(_time.monotonic() >= deadline),
+                    1_000,
+                )
+                portfolio_snapshot = load_runtime_open_portfolio(trade_conn)
+                allocator_refresh = _edli_refresh_global_allocator(
+                    trade_conn,
+                    portfolio_snapshot=portfolio_snapshot,
+                )
+            finally:
+                trade_conn.close()
+        except Exception as exc:  # noqa: BLE001 - next minute owns continuation.
+            logger.warning(
+                "%s: allocator follow-through failed; full bucket remains retryable: %r",
+                log_context,
+                exc,
+            )
+            return False
+        logger.info(
+            "%s: refreshed allocator after recovery mutation: %s",
+            log_context,
             allocator_refresh,
         )
-    _emit_command_recovery_redecision_continuations(summary, log_context="edli_command_recovery")
+        if (
+            isinstance(allocator_refresh, dict)
+            and allocator_refresh.get("configured") is False
+        ):
+            return False
+    return _emit_command_recovery_redecision_continuations(
+        summary,
+        log_context=log_context,
+        deadline_monotonic=deadline,
+    )
 
 
 _CHAIN_MIRROR_RECONCILE_CADENCE_SECONDS = 600  # matches the "interval" job's minutes=10
@@ -5211,7 +7785,8 @@ def _emit_live_redecision_events_for_families(
     decision_time: datetime,
     received_at: str,
     origin: str,
-) -> int:
+    return_deferred: bool = False,
+) -> int | None:
     """Emit standard live redecision rows for already-live order management work."""
 
     if not families:
@@ -5243,7 +7818,7 @@ def _emit_live_redecision_events_for_families(
                 len(families),
                 emit_lock_timeout_s,
             )
-            return 0
+            return None if return_deferred else 0
         trig = ForecastSnapshotReadyTrigger(
             EventWriter(world),
             live_eligibility_reader=executable_forecast_live_eligible_reader(forecasts_ro),
@@ -5280,7 +7855,8 @@ def _emit_terminal_no_fill_redecision_continuations(
     *,
     decision_time: datetime,
     received_at: str,
-) -> int:
+    return_deferred: bool = False,
+) -> int | None:
     """Emit standard continuous redecision rows after no-fill terminal recovery."""
 
     return _emit_live_redecision_events_for_families(
@@ -5288,6 +7864,7 @@ def _emit_terminal_no_fill_redecision_continuations(
         decision_time=decision_time,
         received_at=received_at,
         origin="terminal_no_fill",
+        return_deferred=return_deferred,
     )
 
 
@@ -5328,9 +7905,10 @@ def _emit_command_recovery_redecision_continuations(
     summary: object,
     *,
     log_context: str,
-) -> None:
+    deadline_monotonic: float | None = None,
+) -> bool:
     if not isinstance(summary, dict):
-        return
+        return True
     try:
         from datetime import datetime, timezone
         from src.state.db import get_forecasts_connection_read_only, get_trade_connection_read_only
@@ -5338,6 +7916,12 @@ def _emit_command_recovery_redecision_continuations(
         trade_ro = get_trade_connection_read_only()
         forecasts_ro = get_forecasts_connection_read_only()
         try:
+            if deadline_monotonic is not None:
+                for conn in (trade_ro, forecasts_ro):
+                    conn.set_progress_handler(
+                        lambda: int(_time.monotonic() >= deadline_monotonic),
+                        1_000,
+                    )
             families = _terminal_no_fill_continuation_families(
                 summary,
                 trade_ro,
@@ -5359,7 +7943,10 @@ def _emit_command_recovery_redecision_continuations(
                 families,
                 decision_time=now,
                 received_at=now.isoformat(),
+                return_deferred=True,
             )
+            if emitted is None:
+                return False
             logger.info(
                 "%s: terminal no-fill/pre-submit continuation "
                 "families=%d acted_state_cleared=%d events_emitted=%d",
@@ -5368,6 +7955,7 @@ def _emit_command_recovery_redecision_continuations(
                 cleared,
                 emitted,
             )
+        return True
     except Exception as exc:  # noqa: BLE001
         logger.warning(
             "%s: terminal no-fill/pre-submit continuation emit failed "
@@ -5375,6 +7963,7 @@ def _emit_command_recovery_redecision_continuations(
             log_context,
             exc,
         )
+        return False
 
 
 def _emit_rest_pull_redecisions(
@@ -5604,10 +8193,12 @@ def _edli_continuous_redecision_screen_cycle() -> None:
     function itself: it is a plain mutable dict (no lock lifecycle), still
     mutated directly by the command-recovery cluster here in main.py.
     """
+    _consume_live_control_commands()
     if _defer_for_held_position_monitor("edli_continuous_redecision_screen"):
         return
-    if _defer_for_active_entry_reactor("edli_redecision_screen"):
-        return
+    # A submitted maker rest is an existing venue obligation, not background
+    # discovery work.  It must keep re-deciding while new-entry computation is
+    # active; the screen's own lock and short DB transactions bound contention.
 
     from src.events.reactor import run_edli_continuous_redecision_screen_cycle
 
@@ -6244,27 +8835,26 @@ def _edli_day0_hourly_refresh_cycle() -> None:
     See that function's docstring for the vector-refresh lane it runs.
 
     The reactor and redecision locks are dispatcher-owned scheduling primitives.
-    The first full held-position pass reads the already-persisted current evidence
-    without competing with this background scan. After bootstrap, fresh vectors
-    resume and their durable wake triggers targeted re-monitoring.
+    This background producer observes those lanes to reduce its work, but never
+    owns their locks: an escaped provider timeout must not pin held-position
+    redecision. Fresh vectors persist independently and their durable wake
+    triggers targeted re-monitoring.
     """
+    _consume_live_control_commands()
     if _defer_for_held_position_monitor("edli_day0_hourly_refresh"):
         return
 
     from src.events.reactor import run_edli_day0_hourly_refresh_cycle
 
-    trading_lane_active = _edli_redecision_screen_lock.locked()
-    if trading_lane_active or not _edli_reactor_active_lock.acquire(blocking=False):
-        run_edli_day0_hourly_refresh_cycle(trading_lane_active=True)
-        return
-    try:
-        # Recheck after admission so a redecision claim cannot race the first
-        # check while this background job acquires the shared lane.
-        run_edli_day0_hourly_refresh_cycle(
-            trading_lane_active=_edli_redecision_screen_lock.locked(),
-        )
-    finally:
-        _edli_reactor_active_lock.release()
+    trading_lane_active = (
+        _edli_redecision_screen_lock.locked()
+        or _edli_reactor_active_lock.locked()
+        or _held_position_monitor_active.is_set()
+        or _held_position_monitor_canonical_debt.is_set()
+    )
+    run_edli_day0_hourly_refresh_cycle(
+        trading_lane_active=trading_lane_active,
+    )
 
 
 
@@ -6515,7 +9105,7 @@ def _resolve_edli_user_channel_aggregate_id(conn, message: dict) -> str:
 
 
 
-def _edli_boot_fill_bridge_recovery() -> None:
+def _edli_boot_fill_bridge_recovery() -> bool:
     """MF-1: heal orphaned EDLI confirmed fills AT BOOT, before any new trading.
 
     The durable scan also runs every reconcile cycle, but running it once at boot
@@ -6536,7 +9126,28 @@ def _edli_boot_fill_bridge_recovery() -> None:
         bridge_conn = None
         bridged = 0
         try:
-            from src.ingest.price_channel_ingest import _edli_durable_fill_bridge_scan
+            from src.ingest.price_channel_ingest import (
+                _edli_durable_fill_bridge_scan,
+                _edli_durable_fill_bridge_work_exists_read_only,
+            )
+
+            try:
+                bridge_work_exists = (
+                    _edli_durable_fill_bridge_work_exists_read_only()
+                )
+            except Exception as exc:  # noqa: BLE001
+                bridge_work_exists = True
+                logger.warning(
+                    "EDLI boot fill-bridge read-only admission failed; "
+                    "falling back to canonical recovery: %s",
+                    exc,
+                    exc_info=True,
+                )
+            if not bridge_work_exists:
+                logger.info(
+                    "EDLI boot fill-bridge recovery: no orphaned confirmed fills"
+                )
+                return True
 
             bridge_conn = get_trade_connection_with_world_required(write_class="live")
             bridged = _edli_durable_fill_bridge_scan(bridge_conn, now=now)
@@ -6555,6 +9166,7 @@ def _edli_boot_fill_bridge_recovery() -> None:
             )
         else:
             logger.info("EDLI boot fill-bridge recovery: no orphaned confirmed fills")
+        return True
     except Exception as exc:  # noqa: BLE001
         # Boot recovery is best-effort: the per-cycle durable scan is the safety
         # net, so a boot-time hiccup must never block the daemon from starting.
@@ -6564,6 +9176,44 @@ def _edli_boot_fill_bridge_recovery() -> None:
             exc,
             exc_info=True,
         )
+        return False
+
+
+def _start_edli_boot_fill_bridge_recovery() -> threading.Thread | None:
+    """Drain historical fill-bridge debt without delaying monitor startup."""
+
+    global _edli_boot_fill_bridge_recovery_thread
+    if _edli_boot_fill_bridge_recovery_complete.is_set():
+        return None
+    if (
+        _edli_boot_fill_bridge_recovery_thread is not None
+        and _edli_boot_fill_bridge_recovery_thread.is_alive()
+    ):
+        return _edli_boot_fill_bridge_recovery_thread
+
+    def _run() -> None:
+        while not _edli_boot_fill_bridge_recovery_complete.is_set():
+            if _edli_boot_fill_bridge_recovery():
+                _edli_boot_fill_bridge_recovery_complete.set()
+                logger.info(
+                    "EDLI boot fill-bridge recovery complete; BUY admission may resume"
+                )
+                return
+            logger.warning(
+                "EDLI boot fill-bridge recovery incomplete; retrying in %.1fs",
+                _EDLI_BOOT_FILL_BRIDGE_RETRY_SECONDS,
+            )
+            _edli_boot_fill_bridge_recovery_complete.wait(
+                _EDLI_BOOT_FILL_BRIDGE_RETRY_SECONDS
+            )
+
+    _edli_boot_fill_bridge_recovery_thread = threading.Thread(
+        target=_run,
+        name="edli-boot-fill-bridge-recovery",
+        daemon=True,
+    )
+    _edli_boot_fill_bridge_recovery_thread.start()
+    return _edli_boot_fill_bridge_recovery_thread
 
 
 def _edli_boot_settlement_redeem_recovery() -> None:
@@ -6591,8 +9241,8 @@ def _edli_boot_settlement_redeem_recovery() -> None:
         )
 
 
-# FIX 2c (2026-06-20): monitor-cadence watchdog. exit_monitor runs on a 2-min
-# interval (see scheduler.add_job(..., minutes=2, id="exit_monitor")) and is the
+# FIX 2c (2026-06-20): monitor-cadence watchdog. exit_monitor runs on the
+# prospective held-monitor interval registered below and is the
 # sole writer of MONITOR_REFRESHED. The live book observed whole-book silences of
 # 8.8h and 11.8h (2026-06-18/19) during which belief AND the live bid collapsed
 # unobserved, killing the only realized reversal exit. The multi-hour cause is a
@@ -6600,7 +9250,7 @@ def _edli_boot_settlement_redeem_recovery() -> None:
 # code. What code CAN do is flag the gap on the first cycle after recovery: if
 # the newest MONITOR_REFRESHED is older than ~2× the interval, the cadence broke.
 # This is detection only; it does not (and must not) re-drive the schedule.
-# R4-b (2026-07-08): _EXIT_MONITOR_INTERVAL_SECONDS, _MONITOR_CADENCE_GAP_FACTOR,
+# R4-b (2026-07-08): held-monitor cadence watchdog constants,
 # _check_monitor_cadence_watchdog moved to src.execution.exit_lifecycle
 # (single caller was _exit_monitor_cycle, also moved there).
 
@@ -6611,6 +9261,7 @@ def _exit_monitor_cycle(
     target_families: frozenset[tuple[str, str, str]] | None = None,
     urgent_day0: bool = False,
     urgent_forecast: bool = False,
+    recovery_full_book: bool = False,
 ) -> bool:
     """Scheduler hook — body owned by src.execution.exit_lifecycle (R4-b
     extraction, 2026-07-08) as ``run_exit_monitor_cycle``. See that function's
@@ -6621,31 +9272,158 @@ def _exit_monitor_cycle(
     monitor acquires and releases the reactor boundary; network work does not
     hold that gate. The dispatcher owns both signals.
     """
-    from src.execution.exit_lifecycle import run_exit_monitor_cycle
+    from src.engine.cycle_runtime import _held_position_monitor_budget_seconds
+    from src.execution.exit_lifecycle import (
+        held_monitor_pre_artifact_reserve_seconds,
+        run_exit_monitor_cycle,
+    )
+    from src.riskguard.risk_level import RiskLevel
+    from src.riskguard.riskguard import get_current_level
 
     urgent_fact = urgent_day0 or urgent_forecast
-    if urgent_forecast and _day0_exit_monitor_priority_pending():
+    absorbed_overdue_families: frozenset[tuple[str, str, str]] = frozenset()
+    debt_scope_is_full_book = False
+    if (
+        target_families is not None
+        and _held_position_monitor_canonical_debt.is_set()
+    ):
+        overdue_families = _canonical_overdue_monitor_families(
+            require_fresh_inputs=False,
+        )
+        if overdue_families is None:
+            # SCOPE: this targeted held-monitor attempt only. DRAIN: one
+            # bounded full-book pass reconstructs exact canonical coverage.
+            # RESET: a later exact read returns a finite family set (possibly
+            # empty), restoring ordinary targeted work.
+            target_families = None
+            debt_scope_is_full_book = True
+        elif overdue_families:
+            # A rapid stream of Day0/forecast wakes must not repeatedly refresh
+            # only its own families while older capital crosses the cadence
+            # wall. One claim evaluates both the urgent fact and every overdue
+            # family; this preserves urgent latency without starving the book.
+            target_families = frozenset((*target_families, *overdue_families))
+            absorbed_overdue_families = overdue_families
+
+    def _unabsorbed_canonical_monitor_debt_pending() -> bool:
+        """Preempt only for debt outside this claim's admitted scope."""
+
+        if not _held_position_monitor_debt_pending():
+            return False
+        if debt_scope_is_full_book:
+            return False
+        current_overdue = _canonical_overdue_monitor_families(
+            require_fresh_inputs=False,
+        )
+        return current_overdue is None or not current_overdue.issubset(
+            absorbed_overdue_families
+        )
+
+    periodic_full_book = target_families is None and not urgent_fact
+    recovery_full_book = bool(recovery_full_book and periodic_full_book)
+    if urgent_forecast and (
+        _day0_exit_monitor_priority_pending()
+        or _day0_held_monitor_preempt_requested.is_set()
+    ):
         logger.info("forecast exit monitor yielded to pending Day0 urgent wake")
         return False
-    if not urgent_fact and _periodic_exit_monitor_should_yield(
-        _day0_exit_monitor_priority_pending()
-    ):
-        logger.info("periodic exit_monitor yielded to urgent Day0 held-family monitor")
-        return True
-    if not _held_position_monitor_claim.acquire(blocking=False):
+    if not urgent_fact:
+        urgent_signal_pending = _urgent_held_monitor_preemption_pending()
+        if urgent_signal_pending and _current_periodic_monitor_obligation_count() == 0:
+            # SCOPE: the current full-book pass has no positive exposure to
+            # monitor. DRAIN: the canonical zero-set removes the writer
+            # obligation immediately. RESET: a later positive exposure is
+            # re-read by the next periodic pass.
+            _periodic_held_position_monitor_fairness_debt.clear()
+            _day0_held_monitor_preempt_requested.clear()
+            _forecast_held_monitor_preempt_requested.clear()
+            _held_position_monitor_bootstrap_complete.set()
+            logger.info(
+                "periodic exit_monitor completed without claim: "
+                "canonical monitored exposure is empty"
+            )
+            return True
+        # A preempt Event survives the failed claim attempt that created it.
+        # It is a request to the holder that owned the claim at that instant,
+        # not proof that an urgent owner still exists.  A later periodic pass
+        # must therefore yield only to a live attempt; otherwise it immediately
+        # becomes the full-book successor instead of creating an ownerless gap.
+        if _periodic_exit_monitor_should_yield(
+            _urgent_held_monitor_owner_pending()
+        ):
+            logger.info("periodic exit_monitor yielded to urgent held-family monitor")
+            return True
+    monitor_claim_acquired, preempt_generation_at_claim = (
+        _acquire_held_monitor_claim(periodic_full_book=periodic_full_book)
+    )
+    if not monitor_claim_acquired:
         if urgent_day0:
             # The wake was classified as held-family work, but another monitor
             # owns the single writer lane. Keep a stable signal after the
             # attempt flips None -> False so the current periodic holder cannot
             # miss the urgent handoff race.
             _day0_held_monitor_preempt_requested.set()
+            _record_held_monitor_preempt_request()
+        elif urgent_forecast:
+            # SCOPE: the currently queued held-family forecast wake. DRAIN: the
+            # current periodic monitor cooperatively preempts at its next
+            # position boundary. RESET: this urgent monitor acquires the claim,
+            # or a completed full-book pass proves its current coverage.
+            _forecast_held_monitor_preempt_requested.set()
+            _record_held_monitor_preempt_request()
         logger.warning("exit_monitor skipped: previous monitor cycle is still running")
         return False
+
+    # The deadline belongs to the single-writer monitor claim, not merely to
+    # the later network phase. Reactor handoff and all pre-monitor preparation
+    # consume the same finite budget so a stalled handoff cannot shift the
+    # probability/exit work beyond its advertised cadence.
+    monitor_deadline_monotonic = (
+        time.monotonic() + _held_position_monitor_budget_seconds()
+    )
+    def _periodic_preemption_requested_since_claim() -> bool:
+        return _urgent_held_monitor_owner_pending() or (
+            _held_monitor_preempt_generation_now() > preempt_generation_at_claim
+        )
 
     if urgent_day0:
         # Owning the claim satisfies any earlier request for the current holder
         # to yield. A newer urgent wake has its own revision/claim attempt.
         _day0_held_monitor_preempt_requested.clear()
+    elif urgent_forecast:
+        _forecast_held_monitor_preempt_requested.clear()
+
+    monitor_claim_released = False
+
+    def _release_monitor_claim() -> None:
+        nonlocal monitor_claim_released
+        if monitor_claim_released:
+            return
+        monitor_claim_released = True
+        if not urgent_fact:
+            _day0_held_monitor_preempt_requested.clear()
+            _periodic_held_position_monitor_handoff_pending.clear()
+        _held_position_monitor_handoff_pending.clear()
+        _held_position_monitor_active.clear()
+        _held_position_monitor_claim.release()
+
+    if periodic_full_book:
+        obligation_count = _current_periodic_monitor_obligation_count()
+        if obligation_count == 0:
+            # SCOPE: fairness debt exists only for current positive exposure
+            # owned by the held-position monitor. DRAIN: a canonical zero-set
+            # proves there is no monitor writer obligation, so no reactor
+            # handoff is required. RESET: any later positive exposure is
+            # re-read on the next periodic pass and regains normal handoff law.
+            _periodic_held_position_monitor_fairness_debt.clear()
+            _forecast_held_monitor_preempt_requested.clear()
+            _held_position_monitor_bootstrap_complete.set()
+            _release_monitor_claim()
+            logger.info(
+                "periodic exit_monitor completed without reactor handoff: "
+                "canonical monitored exposure is empty"
+            )
+            return True
 
     # Claim exit priority before waiting. New reactor ticks defer only through
     # the handoff; monitor network work does not stop unrelated decisions.
@@ -6654,31 +9432,75 @@ def _exit_monitor_cycle(
         _periodic_held_position_monitor_handoff_pending.set()
     _held_position_monitor_active.set()
     try:
-        handoff_timeout = (
+        # Recovery repeats every 30s; a full normal handoff wait would occupy
+        # its entire slot and make max_instances=1 skip the next repair tick.
+        configured_handoff_timeout = (
             _URGENT_EXIT_MONITOR_REACTOR_HANDOFF_SECONDS
-            if urgent_fact
+            if urgent_fact or recovery_full_book
             else _EXIT_MONITOR_REACTOR_HANDOFF_SECONDS
         )
+        risk_level_at_claim = get_current_level()
+        handoff_reserve_seconds = (
+            0.0
+            if risk_level_at_claim is RiskLevel.RED
+            else held_monitor_pre_artifact_reserve_seconds()
+        )
+        handoff_timeout = min(
+            configured_handoff_timeout,
+            max(
+                0.0,
+                monitor_deadline_monotonic
+                - time.monotonic()
+                - handoff_reserve_seconds,
+            ),
+        )
+        handoff_started_monotonic = time.monotonic()
         reactor_idle = _edli_reactor_active_lock.acquire(timeout=handoff_timeout)
+        handoff_elapsed_seconds = max(
+            0.0,
+            time.monotonic() - handoff_started_monotonic,
+        )
         if not reactor_idle:
+            if periodic_full_book:
+                current_obligation_count = (
+                    _current_periodic_monitor_obligation_count()
+                )
+                if current_obligation_count == 0:
+                    _periodic_held_position_monitor_fairness_debt.clear()
+                    _held_position_monitor_bootstrap_complete.set()
+                    logger.info(
+                        "periodic exit_monitor completed after handoff timeout: "
+                        "canonical monitored exposure became empty"
+                    )
+                    return True
+                _periodic_held_position_monitor_fairness_debt.set()
             logger.warning(
                 "exit_monitor deferred: active EDLI reactor did not finish within %.1fs",
                 handoff_timeout,
             )
             return False
         _edli_reactor_active_lock.release()
+        if periodic_full_book:
+            # Fairness debt buys the monitor one reactor-free handoff, not a
+            # globally exclusive full-book scan. Once the handoff succeeds the
+            # concurrency obligation is satisfied even if a later position is
+            # missing fresh belief authority and the scan returns incomplete.
+            _periodic_held_position_monitor_fairness_debt.clear()
         _held_position_monitor_handoff_pending.clear()
-        if urgent_forecast and _day0_exit_monitor_priority_pending():
+        if urgent_forecast and (
+            _day0_exit_monitor_priority_pending()
+            or _day0_held_monitor_preempt_requested.is_set()
+        ):
             logger.info(
                 "exit_monitor yielded after reactor handoff to urgent Day0 held-family monitor"
             )
             return False
         if not urgent_fact and _periodic_exit_monitor_should_yield(
-            _day0_exit_monitor_priority_pending()
+            _periodic_preemption_requested_since_claim()
         ):
             logger.info(
                 "periodic exit_monitor yielded after reactor handoff to urgent "
-                "Day0 held-family monitor"
+                "held-family monitor"
             )
             return True
         should_preempt_for_urgent_day0 = None
@@ -6686,7 +9508,10 @@ def _exit_monitor_cycle(
             from src.runtime.reactor_wake import read_reactor_wake
 
             def _day0_wake_pending() -> bool:
-                if _day0_urgent_wake_pending.is_set():
+                if (
+                    _day0_urgent_wake_pending.is_set()
+                    or _unabsorbed_canonical_monitor_debt_pending()
+                ):
                     return True
                 queued = read_reactor_wake()
                 return (
@@ -6700,21 +9525,29 @@ def _exit_monitor_cycle(
             # in-flight urgent batch on every newer observation creates a
             # livelock when observations arrive faster than the batch can scan:
             # the tail positions never receive a MONITOR_REFRESHED decision.
-            should_preempt_for_urgent_day0 = lambda: False
+            should_preempt_for_urgent_day0 = (
+                _unabsorbed_canonical_monitor_debt_pending
+            )
         else:
             # One urgent held-family attempt may preempt a periodic pass. The
             # next pass ignores the same continuous pressure and completes the
-            # full book, whose own ordering still evaluates urgent Day0 first.
+            # full book. Day0 remains highest priority; forecast debt uses the
+            # same one-turn fairness gate and cannot interrupt urgent forecast.
             should_preempt_for_urgent_day0 = lambda: (
                 _periodic_exit_monitor_should_yield(
-                    _day0_exit_monitor_priority_pending()
-                    or _day0_held_monitor_preempt_requested.is_set()
+                    _periodic_preemption_requested_since_claim()
                 )
             )
         monitor_succeeded = run_exit_monitor_cycle(
             held_position_monitor_active=_held_position_monitor_active,
-            mark_held_position_monitor_complete=_held_position_monitor_active.clear,
+            # The callback fires immediately after the core artifact and
+            # canonical position decisions commit.  Releasing the outer claim
+            # here keeps status/cleanup housekeeping from blocking durable
+            # cadence recovery or a newer held-family redecision.
+            mark_held_position_monitor_complete=_release_monitor_claim,
             monitor_claimed=True,
+            monitor_deadline_monotonic=monitor_deadline_monotonic,
+            monitor_handoff_elapsed_seconds=handoff_elapsed_seconds,
             target_families=target_families,
             should_preempt_for_urgent_day0=should_preempt_for_urgent_day0,
         )
@@ -6726,15 +9559,177 @@ def _exit_monitor_cycle(
             # is the only bootstrap completion authority. A cycle may return
             # without a Python exception while every position was deferred for
             # missing executable books; that is not coverage.
-            _periodic_exit_monitor_day0_yielded.clear()
+            _periodic_exit_monitor_urgent_yielded.clear()
+            _forecast_held_monitor_preempt_requested.clear()
         return True
     finally:
-        if not urgent_fact:
-            _day0_held_monitor_preempt_requested.clear()
-            _periodic_held_position_monitor_handoff_pending.clear()
-        _held_position_monitor_handoff_pending.clear()
-        _held_position_monitor_active.clear()
-        _held_position_monitor_claim.release()
+        _release_monitor_claim()
+
+
+def _held_position_monitor_recovery_evidence() -> dict[str, Any]:
+    """Read durable monitor-cadence debt from canonical trade state.
+
+    A recent typed DATA_DEGRADED decision is current cadence evidence even
+    though it cannot authorize a trade. Source repair and family entry gates
+    retain that separate authority debt without monopolizing this writer.
+    """
+
+    from src.ops.monitor_cadence import (
+        collect_monitor_cadence_evidence,
+    )
+    from src.state.db import get_trade_connection_read_only
+
+    conn = get_trade_connection_read_only()
+    try:
+        return collect_monitor_cadence_evidence(
+            conn,
+            now=datetime.now(timezone.utc),
+            max_age_seconds=HELD_POSITION_MONITOR_RECOVERY_MAX_AGE_SECONDS,
+            monitor_refreshed_only=True,
+            require_fresh_inputs=False,
+            sample_limit=5,
+        )
+    finally:
+        conn.close()
+
+
+def _held_position_monitor_recovery_counts(
+    evidence: dict[str, Any],
+) -> tuple[int, int, dict[str, Any]]:
+    from src.ops.monitor_cadence import monitor_cadence_blocking_evidence
+
+    groups = monitor_cadence_blocking_evidence(evidence)
+    return (
+        int(groups["blocking_stale_position_count"]),
+        int(evidence.get("future_monitor_event_count") or 0),
+        groups,
+    )
+
+
+def _held_position_monitor_recovery_worker_main() -> None:
+    """Continuously drain canonical monitor debt through the sole writer lane."""
+
+    global _held_position_monitor_recovery_worker
+
+    current_worker = threading.current_thread()
+    try:
+        while True:
+            try:
+                evidence = _held_position_monitor_recovery_evidence()
+                overdue_count, future_count, groups = (
+                    _held_position_monitor_recovery_counts(evidence)
+                )
+            except Exception as exc:  # noqa: BLE001 - canonical read must retry.
+                _held_position_monitor_canonical_debt.set()
+                logger.error(
+                    "held-position monitor recovery evidence unavailable; retrying: %s",
+                    exc,
+                    exc_info=True,
+                )
+                time.sleep(HELD_POSITION_MONITOR_RECOVERY_RETRY_SECONDS)
+                continue
+
+            if overdue_count <= 0 and future_count <= 0:
+                with _held_position_monitor_recovery_worker_lock:
+                    if _held_position_monitor_recovery_requested.is_set():
+                        _held_position_monitor_recovery_requested.clear()
+                        continue
+                    _periodic_held_position_monitor_fairness_debt.clear()
+                    _held_position_monitor_canonical_debt.clear()
+                    if _held_position_monitor_recovery_worker is current_worker:
+                        _held_position_monitor_recovery_worker = None
+                    return
+
+            _held_position_monitor_canonical_debt.set()
+            logger.warning(
+                "held-position monitor recovery debt: overdue=%d future=%d sample=%s",
+                overdue_count,
+                future_count,
+                groups["blocking_stale_positions"]
+                or evidence.get("future_monitor_events")
+                or [],
+            )
+            try:
+                _exit_monitor_cycle(recovery_full_book=True)
+            except Exception as exc:  # noqa: BLE001 - durable debt must survive.
+                logger.error(
+                    "held-position monitor recovery attempt failed; retrying: %s",
+                    exc,
+                    exc_info=True,
+                )
+
+            # Do not return the debt to APScheduler.  A failed handoff, stale
+            # probability, missing executable book, or canonical write race is
+            # re-read and retried by this same single owner until DB evidence
+            # proves the obligation drained.
+            time.sleep(HELD_POSITION_MONITOR_RECOVERY_RETRY_SECONDS)
+    finally:
+        with _held_position_monitor_recovery_worker_lock:
+            if _held_position_monitor_recovery_worker is current_worker:
+                _held_position_monitor_recovery_worker = None
+
+
+def _ensure_held_position_monitor_recovery_worker() -> threading.Thread:
+    """Start exactly one durable monitor-debt worker without blocking its detector."""
+
+    global _held_position_monitor_recovery_worker
+
+    with _held_position_monitor_recovery_worker_lock:
+        worker = _held_position_monitor_recovery_worker
+        if worker is not None and worker.is_alive():
+            _held_position_monitor_recovery_requested.set()
+            return worker
+        _held_position_monitor_recovery_requested.clear()
+        worker = threading.Thread(
+            target=_held_position_monitor_recovery_worker_main,
+            name="held-position-monitor-recovery",
+            daemon=True,
+        )
+        _held_position_monitor_recovery_worker = worker
+        worker.start()
+        return worker
+
+
+@_scheduler_job("exit_monitor_recovery")
+def _durable_held_position_monitor_recovery_cycle() -> bool:
+    """Detect canonical monitor debt and dispatch its non-overlapping worker."""
+
+    try:
+        overdue = _held_position_monitor_recovery_evidence()
+        overdue_count, future_count, overdue_groups = (
+            _held_position_monitor_recovery_counts(overdue)
+        )
+    except Exception as exc:  # noqa: BLE001 - dispatch must survive DB pressure.
+        _held_position_monitor_canonical_debt.set()
+        _ensure_held_position_monitor_recovery_worker()
+        raise RuntimeError(
+            f"HELD_POSITION_MONITOR_RECOVERY_EVIDENCE_UNAVAILABLE:{exc}"
+        ) from exc
+    if overdue_count <= 0 and future_count <= 0:
+        _held_position_monitor_canonical_debt.clear()
+        return True
+
+    _held_position_monitor_canonical_debt.set()
+
+    # SCOPE: only current positive-exposure positions whose canonical monitor
+    # evidence is stale, missing, or invalid. DRAIN: this fast detector starts
+    # one process-local worker; that worker immediately re-drives the existing
+    # full-book single-writer lane after every incomplete attempt instead of
+    # occupying and losing later scheduler ticks. RESET: every current position
+    # receives a fresh canonical MONITOR_REFRESHED event with fresh probability
+    # and held-side CLOB, or its lifecycle/exposure leaves the monitored set.
+    # Because every attempt rebuilds the predicate from the trade DB, restart
+    # cannot erase the obligation and stale evidence can never clear it.
+    logger.warning(
+        "held-position monitor recovery dispatched: overdue=%d future=%d sample=%s",
+        overdue_count,
+        future_count,
+        overdue_groups["blocking_stale_positions"]
+        or overdue.get("future_monitor_events")
+        or [],
+    )
+    _ensure_held_position_monitor_recovery_worker()
+    return True
 
 
 def main():
@@ -6826,6 +9821,15 @@ def main():
     # Persist the identity once so receipts and deployment observability can name
     # the exact running process without treating later worktree drift as authority.
     _write_loaded_sha_state(_boot.get("sha"))
+
+    # The launchd watchdog evaluates process liveness independently from
+    # scheduler readiness. Canonical DB boot checks can legitimately take
+    # longer than its stale threshold, so publish the same coarse PID-bound
+    # process heartbeat throughout boot. Scheduler health remains a separate
+    # proof surface and takes ownership only after every job is registered.
+    _boot_heartbeat_stop, _boot_heartbeat_thread = (
+        _start_boot_process_heartbeat()
+    )
 
     _startup_required_sidecar_head_check(boot_sha=_boot.get("sha"))
 
@@ -7005,13 +10009,15 @@ def main():
     # current() acquisition.
     _startup_wallet_check(bankroll_record=_warm_rec)
 
-    # MF-1: durable self-healing capital spine — AT BOOT, before any new trading,
+    # MF-1: durable self-healing capital spine — start the recovery at boot,
     # bridge any EDLI confirmed fill that was orphaned (no position_current) by a
     # prior daemon death / swallowed bridge exception. Closes the restart-specific
     # orphan window immediately so stuck capital is visible to chain-reconcile /
-    # exit / harvester / redeem before the first entry wave. Fail-open (never
-    # blocks boot); the per-cycle durable scan is the continuous safety net.
-    _edli_boot_fill_bridge_recovery()
+    # exit / harvester / redeem before the first entry wave. The recovery drains
+    # asynchronously so scheduler/monitor/SELL startup is never coupled to an
+    # unbounded historical scan; BUY remains fail-closed in the cycle-local
+    # entry-readiness gate until the recovery pass succeeds.
+    _start_edli_boot_fill_bridge_recovery()
 
     # 守護 (2026-06-03): queue a non-blocking recovery pass for VERIFIED settlement
     # truth already on disk for FILLED positions still sitting phase=active.
@@ -7042,6 +10048,7 @@ def main():
         scheduler_kwargs["executors"] = {
             "default": _APThreadPoolExecutor(20),
             "reactor": _APThreadPoolExecutor(2),
+            "monitor_recovery": _APThreadPoolExecutor(1),
             "observability": _APThreadPoolExecutor(1),
             "heartbeat": _APThreadPoolExecutor(2),
         }
@@ -7167,7 +10174,12 @@ def main():
             "interval",
             seconds=_EDLI_COMMAND_RECOVERY_INTERVAL_SECONDS,
             id="edli_command_recovery",
-            next_run_time=_utc_run_time_after(OPENING_HUNT_FIRST_DELAY_SECONDS + 60.0),
+            # Phase recovery after the 30s monitor-recovery slot. Starting it
+            # five seconds before that higher-priority writer made the venue
+            # snapshot and DB apply collide on every minute boundary.
+            next_run_time=_utc_run_time_after(
+                _EDLI_COMMAND_RECOVERY_FIRST_DELAY_SECONDS
+            ),
             max_instances=1,
             coalesce=True,
         )
@@ -7234,11 +10246,24 @@ def main():
     scheduler.add_job(
         _exit_monitor_cycle,
         "interval",
-        minutes=2,
+        seconds=HELD_POSITION_MONITOR_RECOVERY_INTERVAL_SECONDS,
         id="exit_monitor",
         next_run_time=_utc_run_time_after(HELD_POSITION_MONITOR_FIRST_DELAY_SECONDS),
         max_instances=1,
         coalesce=True,
+    )
+    scheduler.add_job(
+        _durable_held_position_monitor_recovery_cycle,
+        "interval",
+        seconds=HELD_POSITION_MONITOR_RECOVERY_INTERVAL_SECONDS,
+        id="exit_monitor_recovery",
+        next_run_time=_utc_run_time_after(
+            HELD_POSITION_MONITOR_FIRST_DELAY_SECONDS
+            + HELD_POSITION_MONITOR_RECOVERY_INTERVAL_SECONDS
+        ),
+        max_instances=1,
+        coalesce=True,
+        executor="monitor_recovery",
     )
     scheduler.add_job(
         _write_heartbeat,
@@ -7381,6 +10406,10 @@ def main():
 
     jobs = [j.id for j in scheduler.get_jobs()]
     logger.info("Scheduler ready. %d jobs: %s", len(jobs), jobs)
+    _stop_boot_process_heartbeat(
+        _boot_heartbeat_stop,
+        _boot_heartbeat_thread,
+    )
 
     try:
         scheduler.start()

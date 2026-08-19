@@ -1,7 +1,8 @@
 # Created: 2026-06-12
-# Last reused or audited: 2026-06-12
+# Last reused or audited: 2026-08-09
 # Authority basis: operator skill-vs-luck law 2026-06-12 ("wu预测92不是结算在92就算赢了
-#   说明这是一单完全运气获胜跟我们的系统无关 ... 昨天3单全部刚好踩在结算哪一个温度上").
+#   说明这是一单完全运气获胜跟我们的系统无关 ... 昨天3单全部刚好踩在结算哪一个温度上")
+#   plus exact schema-21 receipt -> certificate -> position settlement closure.
 #   Relationship tests written BEFORE implementation per methodology (relationship
 #   tests → implementation → function tests). Each test asserts a CROSS-MODULE
 #   invariant: the grade that flows out of grade_position when our position +
@@ -32,20 +33,30 @@ F3  end-to-end DB grade over a synthetic FILLED position with a VERIFIED
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 from datetime import datetime, timezone
+from types import SimpleNamespace
+from typing import Optional
 
 import pytest
 
+from src.contracts.global_auction_receipt import (
+    GlobalAuctionReceiptRef,
+    GlobalSellReceiptClosure,
+    global_auction_artifact_summary_hash,
+    global_auction_execution_binding_hash,
+)
+from src.decision_kernel.canonicalization import stable_hash
 from src.state.db import init_schema, init_schema_forecasts
 from src.analysis.settlement_skill_attribution import (
+    audit_global_sell_receipts,
     grade_position,
     compute_skill_win_rate,
     persist_grade,
     run_settlement_skill_attribution,
     load_settled_positions,
-    SUPPORT_BOUNDARY,
     LARGE_FACTOR,
     DEFAULT_FRESHNESS_BUDGET_HOURS,
 )
@@ -448,12 +459,18 @@ def test_F3_end_to_end_db_grade(tmp_path, monkeypatch) -> None:
     # W3: the REAL ledger row — a buy_no position on cond-1 in position_current.
     tconn.execute(
         """INSERT INTO position_current
-           (position_id, phase, strategy_key, condition_id, direction, entry_price,
-            shares, cost_basis_usd, city, target_date, temperature_metric, updated_at)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
-        ("pos-1", "settled", "center_buy", "cond-1", "buy_no", 0.35, 10.0, 3.5,
-         "Denver", "2026-06-12", "high", "2026-06-11T12:00:00Z"),
+           (position_id, phase, strategy_key, condition_id, direction,
+            token_id, no_token_id, entry_price, shares, cost_basis_usd, city,
+            target_date, temperature_metric, updated_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        ("pos-1", "settled", "center_buy", "cond-1", "buy_no", "tok-1", "tok-1",
+         0.35, 10.0, 3.5, "Denver", "2026-06-12", "high", "2026-06-11T12:00:00Z"),
     )
+    _seed_attribution_row(
+        tconn, position_id="pos-1", resolution="ATTRIBUTED",
+        decision_certificate_hash="f3" + "0" * 62,
+    )
+    receipt_ref = _seed_global_auction_receipt(tconn)
     tconn.commit()
     tconn.close()
 
@@ -465,6 +482,7 @@ def test_F3_end_to_end_db_grade(tmp_path, monkeypatch) -> None:
     _seed_belief_certificate(
         wconn, certificate_hash=f3_cert_hash, condition_id="cond-1",
         token_id="tok-1", q_live=0.72, q_lcb_5pct=0.60,
+        payload_extra=_global_receipt_certificate_payload(receipt_ref),
     )
     # An audit fill on the same market — fees/avg_fill_price/filled_size feed
     # world_grade_pnl_usd (LX-E: an ancillary dollar figure, not the certificate
@@ -701,7 +719,9 @@ def _seed_belief_certificate(
     token_id: str,
     q_live: float,
     q_lcb_5pct: float,
+    direction: str = "buy_no",
     verifier_status: str = "VERIFIED",
+    payload_extra: Optional[dict] = None,
 ) -> None:
     """Seed an ActionableTradeCertificate carrying the immutable decision-time q.
 
@@ -709,12 +729,21 @@ def _seed_belief_certificate(
     against a live cert 2026-06-21). The grader resolves this off the audit row's
     expected_edge_source_certificate_hash.
     """
-    payload = json.dumps({
+    certificate_payload = {
         "condition_id": condition_id,
         "token_id": token_id,
+        "direction": direction,
         "q_live": q_live,
         "q_lcb_5pct": q_lcb_5pct,
-    })
+    }
+    certificate_payload.update(payload_extra or {})
+    payload = json.dumps(certificate_payload)
+    try:
+        payload_hash = stable_hash(certificate_payload)
+    except (TypeError, ValueError):
+        # Deliberately malformed JSON-number fixtures must still reach the
+        # resolver; production canonicalization rejects these values.
+        payload_hash = "f" * 64
     wconn.execute(
         """INSERT INTO decision_certificates
            (certificate_id, certificate_type, schema_version,
@@ -726,7 +755,7 @@ def _seed_belief_certificate(
         (f"cert-{certificate_hash[:8]}", "ActionableTradeCertificate", 1,
          "v1", f"sk-{certificate_hash[:8]}", "actionable_trade", "LIVE",
          "2026-06-21T00:00:00Z", "auth", "1", "algo", "1", payload,
-         f"ph-{certificate_hash[:8]}", certificate_hash, verifier_status,
+         payload_hash, certificate_hash, verifier_status,
          "2026-06-21T00:00:00Z"),
     )
 
@@ -797,16 +826,30 @@ def _seed_q_position(
     direction: str,
     city: str,
     target_date: str,
+    decision_certificate_hash: Optional[str] = None,
+    token_id: Optional[str] = None,
+    no_token_id: Optional[str] = None,
 ) -> None:
     """Seed a settled trades.position_current row (the ledger the grader reads)."""
     tconn.execute(
         """INSERT INTO position_current
-           (position_id, phase, strategy_key, condition_id, direction, entry_price,
-            shares, cost_basis_usd, city, target_date, temperature_metric, updated_at)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
-        (position_id, "settled", "center_buy", condition_id, direction, 0.30, 10.0,
-         3.0, city, target_date, "high", "2026-06-21T06:00:00Z"),
+           (position_id, phase, strategy_key, condition_id, direction,
+            token_id, no_token_id, entry_price, shares, cost_basis_usd, city,
+            target_date, temperature_metric, updated_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (position_id, "settled", "center_buy", condition_id, direction,
+         token_id or "tok-" + position_id,
+         no_token_id or token_id or "tok-" + position_id,
+         0.30, 10.0, 3.0, city,
+         target_date, "high", "2026-06-21T06:00:00Z"),
     )
+    if decision_certificate_hash is not None:
+        _seed_attribution_row(
+            tconn,
+            position_id=position_id,
+            resolution="ATTRIBUTED",
+            decision_certificate_hash=decision_certificate_hash,
+        )
 
 
 def test_Q1_grader_populates_q_from_resolvable_certificate(tmp_path) -> None:
@@ -832,9 +875,11 @@ def test_Q1_grader_populates_q_from_resolvable_certificate(tmp_path) -> None:
     fconn.commit(); fconn.close()
 
     cert_hash = "a" * 64
+    receipt_ref = _seed_global_auction_receipt(tconn)
     _seed_belief_certificate(
         wconn, certificate_hash=cert_hash, condition_id="condQ1", token_id="tokQ1",
         q_live=0.80, q_lcb_5pct=0.70,
+        payload_extra=_global_receipt_certificate_payload(receipt_ref),
     )
     _seed_audit_bridge_row(
         wconn, audit_id="audQ1", condition_id="condQ1", direction="buy_no",
@@ -844,6 +889,8 @@ def test_Q1_grader_populates_q_from_resolvable_certificate(tmp_path) -> None:
     _seed_q_position(
         tconn, position_id="posQ1", condition_id="condQ1", direction="buy_no",
         city="Phoenix", target_date="2026-06-20",
+        decision_certificate_hash=cert_hash,
+        no_token_id="tokQ1",
     )
     tconn.commit(); tconn.close()
     wconn.execute("ATTACH DATABASE ? AS forecasts", (fcst_path,))
@@ -989,6 +1036,854 @@ def _seed_attribution_row(
     )
 
 
+def _seed_global_auction_receipt(
+    tconn: sqlite3.Connection,
+) -> GlobalAuctionReceiptRef:
+    from src.state.decision_chain import CycleArtifact, store_artifact
+
+    summary = {
+        "schema_version": 21,
+        "selection_epoch_identity": "epoch-settlement",
+        "selection_cut_at_utc": "2026-06-21T05:59:59+00:00",
+        "decision_at_utc": "2026-06-21T06:00:00+00:00",
+        "full_scope_identity": "scope-settlement",
+        "book_epoch_identity": "book-settlement",
+        "wealth_witness_identity": "wealth-settlement",
+        "wealth_economic_identity": "wealth-economic-settlement",
+        "winner_event_id": "event-settlement",
+        "winner_candidate_id": "candidate-settlement",
+        "winner_actuation_identity": "actuation-settlement",
+        "payload_identity": "1" * 64,
+        "decision_payload_identity": "2" * 64,
+        "audit_context_sha256": "3" * 64,
+        "book_native_side_states_sha256": "4" * 64,
+        "candidate_evaluations_sha256": "5" * 64,
+        "buy_minimum_marketable_repairs_sha256": "6" * 64,
+        "holding_auction_coverage_sha256": "7" * 64,
+    }
+    summary["execution_binding_hash"] = (
+        global_auction_execution_binding_hash(summary)
+    )
+    # Independent copy of the production writer's receipt hash: the writer
+    # hashes the complete receipt after binding, before adding receipt_hash.
+    receipt_hash_input = json.dumps(
+        summary,
+        default=str,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    summary["receipt_hash"] = hashlib.sha256(receipt_hash_input).hexdigest()
+    independent_receipt_hash = hashlib.sha256(
+        json.dumps(
+            {key: value for key, value in summary.items() if key != "receipt_hash"},
+            default=str,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    assert summary["receipt_hash"] == independent_receipt_hash
+    mutated_summary = dict(summary)
+    mutated_summary["winner_candidate_id"] = "candidate-settlement-mutated"
+    mutated_summary["execution_binding_hash"] = (
+        global_auction_execution_binding_hash(mutated_summary)
+    )
+    mutated_hash = hashlib.sha256(
+        json.dumps(
+            {key: value for key, value in mutated_summary.items() if key != "receipt_hash"},
+            default=str,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    assert mutated_hash != independent_receipt_hash
+    summary["artifact_summary_hash"] = global_auction_artifact_summary_hash(
+        summary
+    )
+    mode = "global_single_order_auction"
+    row_id = store_artifact(
+        tconn,
+        CycleArtifact(
+            mode=mode,
+            started_at="2026-06-21T05:59:59+00:00",
+            completed_at="2026-06-21T06:00:00+00:00",
+            skipped_reason="",
+            summary=summary,
+        ),
+    )
+    assert row_id is not None
+    return GlobalAuctionReceiptRef(
+        decision_log_id=row_id,
+        decision_log_mode=mode,
+        receipt_hash=str(summary["receipt_hash"]),
+        execution_binding_hash=str(summary["execution_binding_hash"]),
+        artifact_summary_hash=str(summary["artifact_summary_hash"]),
+        schema_version=21,
+        winner_event_id="event-settlement",
+        winner_candidate_id="candidate-settlement",
+        winner_actuation_identity="actuation-settlement",
+        selection_epoch_identity="epoch-settlement",
+    )
+
+
+def _seed_global_sell_command(
+    tconn: sqlite3.Connection,
+    receipt_ref: GlobalAuctionReceiptRef,
+    *,
+    position_id: str = "position-global-sell",
+    condition_id: str = "condition-global-sell",
+    token_id: str = "token-global-sell",
+    command_id: str = "command-global-sell",
+    execution_mode: str = "TAKER_LIMIT",
+    payload: object = ...,
+) -> GlobalSellReceiptClosure:
+    """Seed the exact persisted command/event/envelope audit relationship."""
+
+    closure = GlobalSellReceiptClosure(
+        receipt_ref=receipt_ref,
+        position_id=position_id,
+        condition_id=condition_id,
+        token_id=token_id,
+        action="SELL",
+        execution_mode=execution_mode,
+        winner_event_id=receipt_ref.winner_event_id,
+        winner_candidate_id=receipt_ref.winner_candidate_id,
+        winner_actuation_identity=receipt_ref.winner_actuation_identity,
+        selection_epoch_identity=receipt_ref.selection_epoch_identity,
+    )
+    envelope_id = f"envelope-{command_id}"
+    order_type = "FAK" if execution_mode == "TAKER_LIMIT" else "GTC"
+    post_only = 0 if execution_mode == "TAKER_LIMIT" else 1
+    tconn.execute(
+        """
+        INSERT INTO venue_submission_envelopes (
+            envelope_id, schema_version, sdk_package, sdk_version, host,
+            chain_id, funder_address, condition_id, question_id, yes_token_id,
+            no_token_id, selected_outcome_token_id, outcome_label, side, price,
+            size, order_type, post_only, tick_size, min_order_size, neg_risk,
+            fee_details_json, canonical_pre_sign_payload_hash, raw_request_hash,
+            trade_ids_json, transaction_hashes_json, captured_at
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        """,
+        (
+            envelope_id, 1, "test-sdk", "1", "test-host", 137,
+            "0xfunder", condition_id, f"question-{condition_id}",
+            f"yes-{condition_id}", f"no-{condition_id}", token_id, "NO",
+            "SELL", "0.50", "1.0", order_type, post_only, "0.01", "1.0",
+            0, "{}", "1" * 64, "2" * 64, "[]", "[]",
+            "2026-06-21T06:00:00+00:00",
+        ),
+    )
+    tconn.execute(
+        """
+        INSERT INTO venue_commands (
+            command_id, snapshot_id, envelope_id, position_id, decision_id,
+            idempotency_key, intent_kind, market_id, token_id, side, size,
+            price, state, created_at, updated_at
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        """,
+        (
+            command_id, f"snapshot-{command_id}", envelope_id, position_id,
+            f"decision-{command_id}", f"idempotency-{command_id}", "EXIT",
+            condition_id, token_id, "SELL", 1.0, 0.5, "INTENT_CREATED",
+            "2026-06-21T06:00:00+00:00", "2026-06-21T06:00:00+00:00",
+        ),
+    )
+    event_payload = (
+        {"global_sell_receipt_closure": closure.as_payload()}
+        if payload is ...
+        else payload
+    )
+    tconn.execute(
+        """
+        INSERT INTO venue_command_events (
+            event_id, command_id, sequence_no, event_type, occurred_at,
+            payload_json, state_after
+        ) VALUES (?,?,?,?,?,?,?)
+        """,
+        (
+            f"event-{command_id}", command_id, 1, "INTENT_CREATED",
+            "2026-06-21T06:00:00+00:00",
+            (
+                None
+                if event_payload is None
+                else json.dumps(event_payload, sort_keys=True, separators=(",", ":"))
+            ),
+            "INTENT_CREATED",
+        ),
+    )
+    return closure
+
+
+
+
+def _global_receipt_certificate_payload(ref: GlobalAuctionReceiptRef) -> dict:
+    receipt_payload = ref.as_payload()
+    return {
+        "global_auction_receipt": receipt_payload,
+        "qkernel_execution_economics": {
+            "global_actuation_identity": ref.winner_actuation_identity,
+            "global_winner_event_id": ref.winner_event_id,
+            "global_candidate_id": ref.winner_candidate_id,
+            "global_selection_epoch_identity": ref.selection_epoch_identity,
+            "global_auction_receipt": receipt_payload,
+        },
+    }
+
+
+def test_q_certificate_sqlite_read_errors_fail_closed() -> None:
+    from src.analysis.settlement_skill_attribution import (
+        _position_decision_attribution_row,
+        _resolve_cert_hash_for_position,
+        _resolve_decision_q_from_certificate,
+    )
+
+    class BrokenConnection:
+        def execute(self, *_args, **_kwargs):
+            raise sqlite3.OperationalError("synthetic read failure")
+
+    conn = BrokenConnection()
+    assert _position_decision_attribution_row(conn, "position") is None
+    assert _resolve_cert_hash_for_position(conn, "position", "condition", "buy_no") is None
+    assert _resolve_decision_q_from_certificate(
+        conn,
+        "a" * 64,
+        condition_id="condition",
+        direction="buy_no",
+        held_token_id="token",
+    ) is None
+
+    malformed = sqlite3.connect(":memory:")
+    malformed.execute(
+        "CREATE TABLE decision_certificates ("
+        "certificate_hash TEXT, certificate_type TEXT, mode TEXT, "
+        "verifier_status TEXT, payload_hash TEXT)"
+    )
+    assert _resolve_decision_q_from_certificate(
+        malformed,
+        "a" * 64,
+        condition_id="condition",
+        direction="buy_no",
+        held_token_id="token",
+    ) is None
+    malformed.close()
+
+
+def test_ordinary_entry_certificate_resolves_and_grades_without_trades_receipt(
+    tmp_path,
+) -> None:
+    """An exact ordinary ENTRY certificate is q authority without schema-21."""
+    from src.analysis.settlement_skill_attribution import (
+        _resolve_decision_q_from_certificate,
+    )
+
+    world = sqlite3.connect(tmp_path / "world.db")
+    init_schema(world)
+    forecasts = sqlite3.connect(tmp_path / "forecasts.db")
+    init_schema_forecasts(forecasts)
+    trades = sqlite3.connect(tmp_path / "trades.db")
+    init_schema(trades)
+    _seed_q_market_and_settlement(
+        forecasts,
+        condition_id="condition-ordinary-entry",
+        city="Phoenix",
+        target_date="2026-06-20",
+        range_low=90.0,
+        range_high=91.0,
+        settlement_value=87.0,
+    )
+    certificate_hash = "o" * 64
+    _seed_q_position(
+        trades,
+        position_id="position-ordinary-entry",
+        condition_id="condition-ordinary-entry",
+        direction="buy_no",
+        city="Phoenix",
+        target_date="2026-06-20",
+        decision_certificate_hash=certificate_hash,
+        no_token_id="token-ordinary-entry",
+    )
+    _seed_belief_certificate(
+        world,
+        certificate_hash=certificate_hash,
+        condition_id="condition-ordinary-entry",
+        token_id="token-ordinary-entry",
+        q_live=0.80,
+        q_lcb_5pct=0.70,
+    )
+    world.commit()
+    forecasts.commit()
+    trades.commit()
+    world.execute("ATTACH DATABASE ? AS forecasts", (str(tmp_path / "forecasts.db"),))
+    world.execute("ATTACH DATABASE ? AS trades", (str(tmp_path / "trades.db"),))
+
+    # Resolve directly from the certificate with no global receipt declaration.
+    world.execute("DETACH DATABASE trades")
+    resolved = _resolve_decision_q_from_certificate(
+        world,
+        certificate_hash,
+        condition_id="condition-ordinary-entry",
+        direction="buy_no",
+        held_token_id="token-ordinary-entry",
+    )
+    assert resolved is not None
+    assert resolved["q_live"] == pytest.approx(0.80)
+    assert resolved["q_lcb_5pct"] == pytest.approx(0.70)
+
+    # Reattach only for the position loader; grading remains ordinary and exact.
+    world.execute("ATTACH DATABASE ? AS trades", (str(tmp_path / "trades.db"),))
+    grades = load_settled_positions(world)
+    assert len(grades) == 1
+    assert grades[0].category == "SKILL_WIN"
+    assert grades[0].q_live == pytest.approx(0.80)
+    world.close()
+    forecasts.close()
+    trades.close()
+
+
+def test_production_actionable_payload_none_receipt_resolves_as_ordinary_entry(
+    tmp_path,
+) -> None:
+    """The real adapter serializes an explicit None receipt for ordinary ENTRY."""
+
+    from src.analysis.settlement_skill_attribution import (
+        _resolve_decision_q_from_certificate,
+    )
+    from src.engine.event_reactor_adapter import _actionable_payload_from_receipt
+    from src.events.reactor import EventSubmissionReceipt
+
+    receipt = EventSubmissionReceipt(
+        submitted=False,
+        event_id="ordinary-adapter-event",
+        causal_snapshot_id="ordinary-adapter-snapshot",
+        condition_id="condition-adapter-ordinary",
+        token_id="token-adapter-ordinary",
+        direction="buy_no",
+        q_live=0.80,
+        q_lcb_5pct=0.70,
+        qkernel_execution_economics=None,
+    )
+    payload = _actionable_payload_from_receipt(
+        receipt,
+        SimpleNamespace(
+            payload={"usage_id": "ordinary-usage", "reserved_notional_usd": "1"}
+        ),
+    )
+    assert "global_auction_receipt" in payload
+    assert payload["global_auction_receipt"] is None
+
+    world = sqlite3.connect(tmp_path / "world.db")
+    init_schema(world)
+    certificate_hash = "o" * 64
+    _seed_belief_certificate(
+        world,
+        certificate_hash=certificate_hash,
+        condition_id="condition-adapter-ordinary",
+        token_id="token-adapter-ordinary",
+        direction="buy_no",
+        q_live=0.80,
+        q_lcb_5pct=0.70,
+        payload_extra=payload,
+    )
+    resolved = _resolve_decision_q_from_certificate(
+        world,
+        certificate_hash,
+        condition_id="condition-adapter-ordinary",
+        direction="buy_no",
+        held_token_id="token-adapter-ordinary",
+    )
+    assert resolved is not None
+    assert resolved["q_live"] == pytest.approx(0.80)
+    assert resolved["q_lcb_5pct"] == pytest.approx(0.70)
+    world.close()
+
+
+@pytest.mark.parametrize(
+    "missing_fields",
+    (
+        ("top", "nested"),
+        ("marker", "nested"),
+        ("marker", "top"),
+        ("marker",),
+        ("top",),
+        ("nested",),
+    ),
+)
+def test_partial_global_declaration_never_downgrades_to_ordinary(
+    tmp_path, missing_fields: tuple[str, ...],
+) -> None:
+    """Any global marker/reference presence requires all three exact fields."""
+    from src.analysis.settlement_skill_attribution import (
+        _resolve_decision_q_from_certificate,
+    )
+
+    world = sqlite3.connect(tmp_path / "world.db")
+    init_schema(world)
+    receipt_db = sqlite3.connect(tmp_path / "receipt.db")
+    init_schema(receipt_db)
+    receipt_ref = _seed_global_auction_receipt(receipt_db)
+    payload_extra = _global_receipt_certificate_payload(receipt_ref)
+    if "marker" in missing_fields:
+        payload_extra["qkernel_execution_economics"].pop(
+            "global_actuation_identity", None
+        )
+    if "top" in missing_fields:
+        payload_extra.pop("global_auction_receipt", None)
+    if "nested" in missing_fields:
+        payload_extra["qkernel_execution_economics"].pop(
+            "global_auction_receipt", None
+        )
+    certificate_hash = "p" * 64
+    _seed_belief_certificate(
+        world,
+        certificate_hash=certificate_hash,
+        condition_id="condition-partial-global",
+        token_id="token-partial-global",
+        q_live=0.80,
+        q_lcb_5pct=0.70,
+        payload_extra=payload_extra,
+    )
+    world.commit()
+    receipt_db.commit()
+    assert _resolve_decision_q_from_certificate(
+        world,
+        certificate_hash,
+        condition_id="condition-partial-global",
+        direction="buy_no",
+        held_token_id="token-partial-global",
+    ) is None
+    world.close()
+    receipt_db.close()
+
+
+@pytest.mark.parametrize("wrong_field", ("condition_id", "direction", "token_id"))
+def test_q_certificate_identity_mismatch_is_unattributable(
+    tmp_path, wrong_field: str,
+) -> None:
+    from src.analysis.settlement_skill_attribution import (
+        _resolve_decision_q_from_certificate,
+    )
+
+    world = sqlite3.connect(tmp_path / "world.db")
+    init_schema(world)
+    trades = sqlite3.connect(tmp_path / "trades.db")
+    init_schema(trades)
+    receipt_ref = _seed_global_auction_receipt(trades)
+    cert_hash = "c" * 64
+    _seed_belief_certificate(
+        world,
+        certificate_hash=cert_hash,
+        condition_id="condition-exact",
+        token_id="token-exact",
+        direction="buy_no",
+        q_live=0.8,
+        q_lcb_5pct=0.7,
+        payload_extra=_global_receipt_certificate_payload(receipt_ref),
+    )
+    world.execute("ATTACH DATABASE ? AS trades", (str(tmp_path / "trades.db"),))
+    world.commit()
+    expected = {
+        "condition_id": "condition-exact",
+        "direction": "buy_no",
+        "held_token_id": "token-exact",
+    }
+    expected_field = (
+        "condition_id"
+        if wrong_field == "condition_id"
+        else "direction"
+        if wrong_field == "direction"
+        else "held_token_id"
+    )
+    expected[expected_field] = "wrong"
+    assert _resolve_decision_q_from_certificate(
+        world,
+        cert_hash,
+        **expected,
+    ) is None
+    world.close()
+    trades.close()
+
+
+@pytest.mark.parametrize(
+    ("q_live", "q_lcb_5pct"),
+    (
+        (float("nan"), 0.5),
+        (float("inf"), 0.5),
+        (2.0, 0.5),
+        (-0.01, 0.5),
+        (0.6, float("nan")),
+        (0.6, float("inf")),
+        (0.6, 0.7),
+    ),
+)
+def test_q_certificate_probability_bounds_are_unattributable(
+    tmp_path, q_live: float, q_lcb_5pct: float,
+) -> None:
+    from src.analysis.settlement_skill_attribution import (
+        _resolve_decision_q_from_certificate,
+    )
+
+    world = sqlite3.connect(tmp_path / "world.db")
+    init_schema(world)
+    trades = sqlite3.connect(tmp_path / "trades.db")
+    init_schema(trades)
+    receipt_ref = _seed_global_auction_receipt(trades)
+    cert_hash = "b" * 64
+    _seed_belief_certificate(
+        world,
+        certificate_hash=cert_hash,
+        condition_id="condition-bounds",
+        token_id="token-bounds",
+        direction="buy_no",
+        q_live=q_live,
+        q_lcb_5pct=q_lcb_5pct,
+        payload_extra=_global_receipt_certificate_payload(receipt_ref),
+    )
+    world.execute("ATTACH DATABASE ? AS trades", (str(tmp_path / "trades.db"),))
+    world.commit()
+    assert _resolve_decision_q_from_certificate(
+        world,
+        cert_hash,
+        condition_id="condition-bounds",
+        direction="buy_no",
+        held_token_id="token-bounds",
+    ) is None
+    world.close()
+    trades.close()
+
+
+@pytest.mark.parametrize(
+    "fault",
+    (
+        None,
+        "missing_ref",
+        "deleted",
+        "mutated",
+        "missing_binding_field",
+        "nonbinding_mutation",
+    ),
+)
+def test_global_receipt_is_revalidated_through_position_settlement_chain(
+    tmp_path,
+    fault,
+) -> None:
+    world_path = str(tmp_path / f"world-{fault}.db")
+    forecasts_path = str(tmp_path / f"forecasts-{fault}.db")
+    trades_path = str(tmp_path / f"trades-{fault}.db")
+    world = sqlite3.connect(world_path)
+    init_schema(world)
+    forecasts = sqlite3.connect(forecasts_path)
+    init_schema_forecasts(forecasts)
+    trades = sqlite3.connect(trades_path)
+    init_schema(trades)
+    _seed_q_market_and_settlement(
+        forecasts,
+        condition_id="condition-global-grade",
+        city="Phoenix",
+        target_date="2026-06-20",
+        range_low=90.0,
+        range_high=91.0,
+        settlement_value=87.0,
+    )
+    forecasts.commit()
+    forecasts.close()
+    certificate_hash = "9" * 64
+    _seed_q_position(
+        trades,
+        position_id="position-global-grade",
+        condition_id="condition-global-grade",
+        direction="buy_no",
+        city="Phoenix",
+        target_date="2026-06-20",
+        decision_certificate_hash=certificate_hash,
+        no_token_id="token-global-grade",
+    )
+    receipt_ref = _seed_global_auction_receipt(trades)
+    certificate_payload = _global_receipt_certificate_payload(receipt_ref)
+    if fault == "missing_ref":
+        certificate_payload.pop("global_auction_receipt")
+    elif fault == "deleted":
+        trades.execute(
+            "DELETE FROM decision_log WHERE id = ?",
+            (receipt_ref.decision_log_id,),
+        )
+    elif fault in {"mutated", "missing_binding_field", "nonbinding_mutation"}:
+        row = trades.execute(
+            "SELECT artifact_json FROM decision_log WHERE id = ?",
+            (receipt_ref.decision_log_id,),
+        ).fetchone()
+        artifact = json.loads(row[0])
+        if fault == "mutated":
+            artifact["summary"]["winner_candidate_id"] = "mutated-candidate"
+        elif fault == "missing_binding_field":
+            artifact["summary"].pop("wealth_economic_identity")
+            artifact["summary"]["execution_binding_hash"] = "f" * 64
+        else:
+            artifact["summary"]["no_trade_reason"] = "forged-reason"
+        trades.execute(
+            "UPDATE decision_log SET artifact_json = ? WHERE id = ?",
+            (json.dumps(artifact), receipt_ref.decision_log_id),
+        )
+    trades.commit()
+    trades.close()
+    _seed_belief_certificate(
+        world,
+        certificate_hash=certificate_hash,
+        condition_id="condition-global-grade",
+        token_id="token-global-grade",
+        q_live=0.80,
+        q_lcb_5pct=0.70,
+        payload_extra=certificate_payload,
+    )
+    world.commit()
+    world.execute("ATTACH DATABASE ? AS forecasts", (forecasts_path,))
+    world.execute("ATTACH DATABASE ? AS trades", (trades_path,))
+
+    grades = load_settled_positions(world)
+
+    assert len(grades) == 1
+    if fault is None:
+        assert grades[0].q_live == pytest.approx(0.80)
+        assert grades[0].category == "SKILL_WIN"
+    else:
+        assert grades[0].q_live is None
+        assert grades[0].category == "UNATTRIBUTABLE_Q_MISSING"
+    world.close()
+
+
+@pytest.mark.parametrize(
+    ("fault", "expected_status"),
+    (
+        (None, "VALID"),
+        ("ordinary_exit", "NOT_GLOBAL_SELL"),
+        ("missing_event", "INVALID"),
+        ("malformed_event", "INVALID"),
+        ("extra_event_field", "INVALID"),
+        ("deleted_receipt", "INVALID"),
+        ("mutated_receipt", "INVALID"),
+        ("wrong_position", "INVALID"),
+        ("wrong_token", "INVALID"),
+        ("wrong_condition", "INVALID"),
+        ("wrong_mode", "INVALID"),
+    ),
+)
+def test_global_sell_command_audit_is_exact_and_fail_closed(
+    tmp_path,
+    fault: Optional[str],
+    expected_status: str,
+) -> None:
+    trades_path = tmp_path / f"trades-global-sell-{fault}.db"
+    trades = sqlite3.connect(trades_path)
+    init_schema(trades)
+    receipt_ref = _seed_global_auction_receipt(trades)
+    closure = _seed_global_sell_command(
+        trades,
+        receipt_ref,
+        payload=None if fault == "ordinary_exit" else ...,
+    )
+    if fault == "missing_event":
+        trades.execute(
+            "DELETE FROM venue_command_events WHERE command_id = ?",
+            ("command-global-sell",),
+        )
+    elif fault == "malformed_event":
+        trades.execute(
+            "UPDATE venue_command_events SET payload_json = '{' WHERE command_id = ?",
+            ("command-global-sell",),
+        )
+    elif fault in {
+        "extra_event_field",
+        "wrong_position",
+        "wrong_token",
+        "wrong_condition",
+        "wrong_mode",
+    }:
+        closure_payload = closure.as_payload()
+        if fault == "wrong_position":
+            closure_payload["position_id"] = "wrong-position"
+        elif fault == "wrong_token":
+            closure_payload["token_id"] = "wrong-token"
+        elif fault == "wrong_condition":
+            closure_payload["condition_id"] = "wrong-condition"
+        elif fault == "wrong_mode":
+            closure_payload["execution_mode"] = "MAKER_REST"
+        event_payload = {"global_sell_receipt_closure": closure_payload}
+        if fault == "extra_event_field":
+            event_payload["unexpected"] = True
+        trades.execute(
+            "UPDATE venue_command_events SET payload_json = ? WHERE command_id = ?",
+            (
+                json.dumps(event_payload, sort_keys=True, separators=(",", ":")),
+                "command-global-sell",
+            ),
+        )
+    elif fault == "deleted_receipt":
+        trades.execute(
+            "DELETE FROM decision_log WHERE id = ?",
+            (receipt_ref.decision_log_id,),
+        )
+    elif fault == "mutated_receipt":
+        row = trades.execute(
+            "SELECT artifact_json FROM decision_log WHERE id = ?",
+            (receipt_ref.decision_log_id,),
+        ).fetchone()
+        artifact = json.loads(row[0])
+        artifact["summary"]["no_trade_reason"] = "mutated-after-command"
+        trades.execute(
+            "UPDATE decision_log SET artifact_json = ? WHERE id = ?",
+            (json.dumps(artifact), receipt_ref.decision_log_id),
+        )
+    trades.commit()
+    trades.close()
+
+    world = sqlite3.connect(tmp_path / f"world-global-sell-{fault}.db")
+    world.execute("ATTACH DATABASE ? AS trades", (str(trades_path),))
+    changes_before = world.total_changes
+    audits = audit_global_sell_receipts(world, "position-global-sell")
+
+    assert world.total_changes == changes_before
+    assert len(audits) == 1
+    assert audits[0].status == expected_status
+    assert audits[0].command_id == "command-global-sell"
+    if expected_status == "VALID":
+        assert audits[0].receipt_ref == receipt_ref
+        assert audits[0].reason == "GLOBAL_SELL_RECEIPT_EXACT"
+    elif expected_status == "INVALID":
+        assert audits[0].reason.startswith("GLOBAL_")
+    else:
+        assert audits[0].receipt_ref is None
+    world.close()
+
+
+def test_global_sell_command_audit_sqlite_error_is_explicit() -> None:
+    world = sqlite3.connect(":memory:")
+    audits = audit_global_sell_receipts(world, "position-global-sell")
+    assert len(audits) == 1
+    assert audits[0].status == "INVALID"
+    assert audits[0].command_id is None
+    assert audits[0].reason == "GLOBAL_SELL_RECEIPT_AUDIT_COMMAND_READ_ERROR"
+    world.close()
+
+
+def test_global_sell_receipt_aggregate_propagates_per_command_read_error(
+    tmp_path,
+) -> None:
+    from src.analysis.settlement_skill_attribution import (
+        _audit_settled_global_sell_receipts,
+    )
+
+    trades_path = tmp_path / "trades-global-sell-read-error.db"
+    trades = sqlite3.connect(trades_path)
+    init_schema(trades)
+    _seed_q_position(
+        trades,
+        position_id="position-global-sell",
+        condition_id="condition-global-sell",
+        direction="buy_no",
+        city="Phoenix",
+        target_date="2026-06-20",
+        no_token_id="token-global-sell",
+    )
+    receipt_ref = _seed_global_auction_receipt(trades)
+    _seed_global_sell_command(trades, receipt_ref)
+    trades.execute("DROP TABLE venue_command_events")
+    trades.commit()
+    trades.close()
+    world = sqlite3.connect(":memory:")
+    world.execute("ATTACH DATABASE ? AS trades", (str(trades_path),))
+
+    stats = _audit_settled_global_sell_receipts(world)
+
+    assert stats["commands"] == 1
+    assert stats["invalid"] == 1
+    assert stats["scan_error"] == "GLOBAL_SELL_RECEIPT_AUDIT_READ_ERROR"
+    assert stats["invalid_details"][0]["reason"] == (
+        "GLOBAL_SELL_RECEIPT_AUDIT_SQLITE_ERROR"
+    )
+    world.close()
+
+
+def test_invalid_global_sell_receipt_is_reported_without_relabeling_entry_q(
+    tmp_path,
+) -> None:
+    world_path = tmp_path / "world-global-sell-orthogonal.db"
+    forecasts_path = tmp_path / "forecasts-global-sell-orthogonal.db"
+    trades_path = tmp_path / "trades-global-sell-orthogonal.db"
+    world = sqlite3.connect(world_path)
+    init_schema(world)
+    forecasts = sqlite3.connect(forecasts_path)
+    init_schema_forecasts(forecasts)
+    _seed_q_market_and_settlement(
+        forecasts,
+        condition_id="condition-global-sell-orthogonal",
+        city="Phoenix",
+        target_date="2026-06-20",
+        range_low=90.0,
+        range_high=91.0,
+        settlement_value=87.0,
+    )
+    forecasts.commit()
+    forecasts.close()
+    trades = sqlite3.connect(trades_path)
+    init_schema(trades)
+    certificate_hash = "8" * 64
+    _seed_q_position(
+        trades,
+        position_id="position-global-sell-orthogonal",
+        condition_id="condition-global-sell-orthogonal",
+        direction="buy_no",
+        city="Phoenix",
+        target_date="2026-06-20",
+        decision_certificate_hash=certificate_hash,
+        no_token_id="token-global-sell-orthogonal",
+    )
+    entry_receipt_ref = _seed_global_auction_receipt(trades)
+    exit_receipt_ref = _seed_global_auction_receipt(trades)
+    _seed_global_sell_command(
+        trades,
+        exit_receipt_ref,
+        position_id="position-global-sell-orthogonal",
+        condition_id="condition-global-sell-orthogonal",
+        token_id="token-global-sell-orthogonal",
+    )
+    exit_row = trades.execute(
+        "SELECT artifact_json FROM decision_log WHERE id = ?",
+        (exit_receipt_ref.decision_log_id,),
+    ).fetchone()
+    exit_artifact = json.loads(exit_row[0])
+    exit_artifact["summary"]["no_trade_reason"] = "exit-only-mutation"
+    trades.execute(
+        "UPDATE decision_log SET artifact_json = ? WHERE id = ?",
+        (json.dumps(exit_artifact), exit_receipt_ref.decision_log_id),
+    )
+    trades.commit()
+    trades.close()
+    _seed_belief_certificate(
+        world,
+        certificate_hash=certificate_hash,
+        condition_id="condition-global-sell-orthogonal",
+        token_id="token-global-sell-orthogonal",
+        q_live=0.80,
+        q_lcb_5pct=0.70,
+        payload_extra=_global_receipt_certificate_payload(entry_receipt_ref),
+    )
+    world.commit()
+    world.execute("ATTACH DATABASE ? AS forecasts", (str(forecasts_path),))
+    world.execute("ATTACH DATABASE ? AS trades", (str(trades_path),))
+
+    stats = run_settlement_skill_attribution(world_conn=world, only_new=True)
+    grade = world.execute(
+        "SELECT category, q_live FROM settlement_attribution WHERE position_id = ?",
+        ("position-global-sell-orthogonal",),
+    ).fetchone()
+
+    assert tuple(grade) == ("SKILL_WIN", pytest.approx(0.80))
+    assert stats["global_sell_receipt_audit"]["commands"] == 1
+    assert stats["global_sell_receipt_audit"]["valid"] == 0
+    assert stats["global_sell_receipt_audit"]["invalid"] == 1
+    assert stats["global_sell_receipt_audit"]["scan_error"] is None
+    world.close()
+
+
 def test_LXE_multiple_entry_certificates_are_explicitly_unattributable(tmp_path) -> None:
     from src.analysis.settlement_skill_attribution import (
         _position_decision_attribution_row,
@@ -1058,15 +1953,18 @@ def test_LXE_attribution_table_row_takes_precedence_over_legacy_bridge(tmp_path)
 
     # position_decision_attribution resolves a DIFFERENT cert (the real, exact link).
     exact_hash = "c" * 64
+    receipt_ref = _seed_global_auction_receipt(tconn)
     _seed_belief_certificate(
         wconn, certificate_hash=exact_hash, condition_id="condLXE1", token_id="tokLXE1",
-        q_live=0.80, q_lcb_5pct=0.70,  # supports WINNING the NO (q>0.5)
+        q_live=0.80, q_lcb_5pct=0.70,
+        payload_extra=_global_receipt_certificate_payload(receipt_ref),
     )
     wconn.commit()
 
     _seed_q_position(
         tconn, position_id="posLXE1", condition_id="condLXE1", direction="buy_no",
         city="Miami", target_date="2026-06-20",
+        no_token_id="tokLXE1",
     )
     _seed_attribution_row(
         tconn, position_id="posLXE1", resolution="ATTRIBUTED",
@@ -1134,10 +2032,8 @@ def test_LXE_explicit_unattributable_row_skips_grading_without_legacy_fallback(t
     wconn.close()
 
 
-def test_LXE_no_attribution_row_falls_back_to_legacy_bridge(tmp_path) -> None:
-    """A position with NO position_decision_attribution row at all (predates the
-    table + backfill) falls back to the legacy (condition_id, direction) bridge —
-    identical behavior to pre-LX-E."""
+def test_LXE_no_attribution_row_rejects_legacy_bridge(tmp_path) -> None:
+    """A missing exact ENTRY attribution row never consults the legacy bridge."""
     world_path = str(tmp_path / "world.db")
     fcst_path = str(tmp_path / "fcst.db")
     trades_path = str(tmp_path / "trades.db")
@@ -1172,8 +2068,8 @@ def test_LXE_no_attribution_row_falls_back_to_legacy_bridge(tmp_path) -> None:
 
     grades = load_settled_positions(wconn)
     assert len(grades) == 1
-    assert grades[0].q_live == pytest.approx(0.80, abs=1e-9)
-    assert grades[0].category == "SKILL_WIN", grades[0].rationale
+    assert grades[0].q_live is None
+    assert grades[0].category == "UNATTRIBUTABLE_Q_MISSING", grades[0].rationale
 
 
 # ---------------------------------------------------------------------------
@@ -1205,18 +2101,23 @@ def _seed_posterior(fconn, *, posterior_id, city, target_date, computed_at, q_js
 
 
 def _seed_cert_with_posterior(wconn, *, certificate_hash, condition_id, token_id,
-                              q_live, q_lcb_5pct, posterior_id) -> None:
+                              q_live, q_lcb_5pct, posterior_id,
+                              direction: str = "buy_no",
+                              payload_extra: Optional[dict] = None) -> None:
     """An ActionableTradeCertificate carrying BOTH the immutable q and the
     posterior_id the decision actually consumed (the real live payload shape —
     verified against zeus-world.db 2026-07-26: 378/433 VERIFIED ATCs carry a
     posterior_id and every one of them joins forecast_posteriors)."""
-    payload = json.dumps({
+    payload_obj = {
         "condition_id": condition_id,
         "token_id": token_id,
+        "direction": direction,
         "q_live": q_live,
         "q_lcb_5pct": q_lcb_5pct,
         "posterior_id": posterior_id,
-    })
+    }
+    payload_obj.update(payload_extra or {})
+    payload = json.dumps(payload_obj)
     wconn.execute(
         """INSERT INTO decision_certificates
            (certificate_id, certificate_type, schema_version,
@@ -1228,7 +2129,7 @@ def _seed_cert_with_posterior(wconn, *, certificate_hash, condition_id, token_id
         (f"cert-{certificate_hash[:8]}", "ActionableTradeCertificate", 1,
          "v1", f"sk-{certificate_hash[:8]}", "actionable_trade", "LIVE",
          "2026-06-21T00:00:00Z", "auth", "1", "algo", "1", payload,
-         f"ph-{certificate_hash[:8]}", certificate_hash, "VERIFIED",
+         stable_hash(payload_obj), certificate_hash, "VERIFIED",
          "2026-06-21T00:00:00Z"),
     )
 
@@ -1246,6 +2147,7 @@ def _build_stale_fixture(tmp_path, *, name, posteriors, consumed_posterior_id,
     wconn = sqlite3.connect(world_path); init_schema(wconn)
     fconn = sqlite3.connect(fcst_path); init_schema_forecasts(fconn)
     tconn = sqlite3.connect(trades_path); init_schema(tconn)
+    receipt_ref = _seed_global_auction_receipt(tconn)
 
     cid = f"cond{name}"
     _seed_q_market_and_settlement(
@@ -1264,6 +2166,7 @@ def _build_stale_fixture(tmp_path, *, name, posteriors, consumed_posterior_id,
     _seed_cert_with_posterior(
         wconn, certificate_hash=cert_hash, condition_id=cid, token_id=f"tok{name}",
         q_live=0.80, q_lcb_5pct=0.70, posterior_id=pid_on_cert,
+        payload_extra=_global_receipt_certificate_payload(receipt_ref),
     )
     _seed_audit_bridge_row(
         wconn, audit_id=f"aud{name}", condition_id=cid, direction="buy_no",
@@ -1273,11 +2176,13 @@ def _build_stale_fixture(tmp_path, *, name, posteriors, consumed_posterior_id,
 
     tconn.execute(
         """INSERT INTO position_current
-           (position_id, phase, strategy_key, condition_id, direction, entry_price,
-            shares, cost_basis_usd, city, target_date, temperature_metric, updated_at)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
-        (f"pos{name}", "settled", "center_buy", cid, "buy_no", 0.30, 10.0, 3.0,
-         "Tucson", "2026-06-20", "high", "2026-06-25T00:00:00Z"),
+           (position_id, phase, strategy_key, condition_id, direction,
+            token_id, no_token_id, entry_price, shares, cost_basis_usd, city,
+            target_date, temperature_metric, updated_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (f"pos{name}", "settled", "center_buy", cid, "buy_no",
+         f"tok{name}", f"tok{name}", 0.30, 10.0, 3.0, "Tucson", "2026-06-20",
+         "high", "2026-06-25T00:00:00Z"),
     )
     tconn.execute(
         """INSERT INTO position_events
@@ -1286,6 +2191,10 @@ def _build_stale_fixture(tmp_path, *, name, posteriors, consumed_posterior_id,
            VALUES (?,?,?,?,?,?,?,?,?,?)""",
         (f"ev{name}", f"pos{name}", 1, 1, "POSITION_OPEN_INTENT", entry_at,
          "center_buy", "test", "test", "{}"),
+    )
+    _seed_attribution_row(
+        tconn, position_id=f"pos{name}", resolution="ATTRIBUTED",
+        decision_certificate_hash=cert_hash,
     )
     tconn.commit(); tconn.close()
 

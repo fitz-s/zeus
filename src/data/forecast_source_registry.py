@@ -24,6 +24,7 @@ from src.data.ecmwf_open_data_ingest import ECMWFOpenDataIngest
 ForecastSourceTier = Literal["primary", "secondary"]
 ForecastSourceKind = Literal[
     "forecast_table",
+    "archive_ensemble",
     "live_ensemble",
     "scheduled_collector",
     "deterministic_anchor",
@@ -232,14 +233,19 @@ SOURCES: dict[str, ForecastSourceSpec] = {
     "tigge": ForecastSourceSpec(
         source_id="tigge",
         tier="primary",
-        kind="live_ensemble",
+        kind="archive_ensemble",
         ingest_class=TIGGEIngest,
         requires_api_key=True,
         requires_operator_decision=True,
         operator_decision_artifact=_TIGGE_OPERATOR_ARTIFACT,
         env_flag_name="ZEUS_TIGGE_INGEST_ENABLED",
         enabled_by_default=False,
-        allowed_roles=("entry_primary", "monitor_fallback", "historical_evidence"),
+        # Standard TIGGE/ECDS access is an archive with a 48-hour delay after
+        # forecast initialization.  A fresh local ingest timestamp cannot turn
+        # delayed source evidence into decision-time evidence.  Any separately
+        # entitled real-time ECMWF carrier must have its own source identity and
+        # availability contract instead of inheriting this archive identity.
+        allowed_roles=("historical_evidence",),
         degradation_level="OK",
     ),
     # Phase 3 (2026-05-04): ECMWF Open Data promoted to

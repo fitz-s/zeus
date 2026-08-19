@@ -1,9 +1,10 @@
 # Created: 2026-06-10
-# Last reused or audited: 2026-06-17
+# Last reused or audited: 2026-08-12
 # Authority basis: qkernel forecast authority replacement for the old Milan direction-law
 # antibody. Replays the incident family through _generate_candidate_proofs (the live proof
 # seam), asserts the old rounded-mu direction veto no longer fires, and pins that legacy
-# scalar selection is not a sufficient live forecast authority.
+# scalar selection is not a sufficient live forecast authority. Above-band executable
+# quotes fail before candidate score, prefilter, or Kelly authority.
 """Milan-incident replay: proof generation no longer uses rounded-mu direction vetoes.
 
 Relationship under test: posterior provenance (anchor_value_c /
@@ -92,8 +93,13 @@ def _family():
         )
         for condition_id, low, high, label, _q, _lcb, _ya, _na in INCIDENT_BINS
     )
-    return types.SimpleNamespace(candidates=candidates, city="Milan",
-                                 target_date="2026-06-11", metric="high")
+    return types.SimpleNamespace(
+        candidates=candidates,
+        city="Milan",
+        target_date="2026-06-11",
+        metric="high",
+        family_id="Milan|2026-06-11|high",
+    )
 
 
 def _incident_probability_mock(*, with_fusion_center: bool):
@@ -138,8 +144,8 @@ def _run(with_fusion_center: bool = True):
     return {(p.candidate.condition_id, p.direction): p for p in proofs}
 
 
-def test_day0_absorbing_no_at_999_reaches_current_economics():
-    """A 0.999 quote is not a semantic veto; current economics owns selection."""
+def test_day0_absorbing_no_at_999_is_not_a_trade_candidate():
+    """A hard-fact winner still cannot create an above-band BUY action."""
 
     candidate = MarketTopologyCandidate(
         city="Shanghai",
@@ -155,6 +161,7 @@ def test_day0_absorbing_no_at_999_reaches_current_economics():
         city="Shanghai",
         target_date="2026-06-18",
         metric="low",
+        family_id="Shanghai|2026-06-18|low",
     )
     lcb = QlcbByDirection()
     lcb[("cond-25", "buy_yes")] = QlcbProvenance(
@@ -195,22 +202,23 @@ def test_day0_absorbing_no_at_999_reaches_current_economics():
     by_side = {(p.candidate.condition_id, p.direction): p for p in proofs}
     no_proof = by_side[("cond-25", "buy_no")]
     assert no_proof.q_lcb_5pct == 1.0
-    assert no_proof.execution_price is not None
-    assert float(no_proof.execution_price.value) == 0.999
-    assert no_proof.missing_reason is None
-    assert no_proof.trade_score > 0.0
-    assert no_proof.passed_prefilter is True
+    assert no_proof.execution_price is None
+    assert "outside absolute inclusive" in str(no_proof.missing_reason)
+    assert no_proof.trade_score == 0.0
+    assert no_proof.passed_prefilter is False
 
 
-def test_incident_24c_buy_yes_is_not_killed_by_legacy_direction_law():
-    """The old modal-bin direction law must not reject the 24C buy_yes proof."""
+def test_incident_tail_no_buys_are_blocked_by_price_band_not_direction_law():
+    """The 99-cent NO quotes fail on price, never a modal-bin heuristic."""
     proofs = _run()
-    p = proofs[("cond-24", "buy_yes")]
-    assert p.missing_reason is None
-    assert p.passed_prefilter is True
-    # The #2-ranked incident candidate (23C) is likewise left to qkernel economics.
-    p23 = proofs[("cond-23", "buy_yes")]
-    assert p23.missing_reason is None
+    p = proofs[("cond-24", "buy_no")]
+    assert "outside absolute inclusive" in str(p.missing_reason)
+    assert "DIRECTION_LAW" not in str(p.missing_reason)
+    assert p.passed_prefilter is False
+    assert p.trade_score == 0.0
+    p23 = proofs[("cond-23", "buy_no")]
+    assert "outside absolute inclusive" in str(p23.missing_reason)
+    assert "DIRECTION_LAW" not in str(p23.missing_reason)
 
 
 def test_forecast_adjacent_yes_is_not_direction_law_rejected():
@@ -235,11 +243,12 @@ def test_buy_no_bins_are_not_rejected_by_legacy_direction_law():
     )
 
 
-def test_legacy_fallback_q_mean_does_not_create_direction_veto():
-    """Rows without fusion provenance do not revive the old rounded-mu veto."""
+def test_legacy_fallback_q_mean_still_obeys_absolute_price_band():
+    """Missing fusion provenance cannot bypass the absolute action band."""
     proofs = _run(with_fusion_center=False)
-    p = proofs[("cond-24", "buy_yes")]
-    assert p.missing_reason is None
+    p = proofs[("cond-24", "buy_no")]
+    assert "outside absolute inclusive" in str(p.missing_reason)
+    assert "DIRECTION_LAW" not in str(p.missing_reason)
 
 
 def test_family_center_provenance_order():
@@ -268,16 +277,15 @@ def test_family_center_provenance_order():
 # Selector hardening: gate-rejected proofs are unrankable, not merely
 # unsubmittable — and the verbatim incident family therefore NO-TRADES.
 # ---------------------------------------------------------------------------
-def test_incident_family_shows_legacy_selector_is_not_forecast_authority():
-    """The old scalar selector can still choose the incident leg, so it is not live authority."""
-    from src.engine.event_reactor_adapter import _selected_candidate_proof
+def test_incident_family_preserves_in_band_quote_but_not_tail_action_authority():
+    proofs = _run()
+    rejected = proofs[("cond-24", "buy_no")]
+    observed = proofs[("cond-25", "buy_no")]
 
-    proofs = tuple(_run().values())
-    selected = _selected_candidate_proof({"family_id": "milan-incident"}, proofs)
-    assert selected is not None
-    assert selected.candidate.condition_id == "cond-24"
-    assert selected.direction == "buy_yes"
-    assert selected.selection_authority_applied is None
+    assert rejected.execution_price is None
+    assert rejected.missing_reason.startswith("LIVE_UNIT_PRICE_OUT_OF_BOUNDS:")
+    assert observed.execution_price is not None
+    assert float(observed.execution_price.value) == 0.856
 
 
 def test_legacy_selector_would_starve_sibling_without_qkernel_authority():
@@ -317,8 +325,13 @@ def test_legacy_selector_would_starve_sibling_without_qkernel_authority():
         )
         for cid, low in (("cond-24", 24.0), ("cond-26", 26.0))
     )
-    family = _types.SimpleNamespace(candidates=candidates, city="Milan",
-                                    target_date="2026-06-11", metric="high")
+    family = _types.SimpleNamespace(
+        candidates=candidates,
+        city="Milan",
+        target_date="2026-06-11",
+        metric="high",
+        family_id="Milan|2026-06-11|high",
+    )
     lcb = QlcbByDirection()
     # 24C: corrupt high q_lcb that dominates the legacy selector.
     lcb[("cond-24", "buy_yes")] = QlcbProvenance(q_lcb=0.30, calibration_source="FORECAST_BOOTSTRAP")

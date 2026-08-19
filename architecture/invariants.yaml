@@ -481,15 +481,19 @@ invariants:
       reconciliation) trust the same definitions. Catching drift at test time
       prevents the kind of silent translation loss flagged in Fitz Constraint #2.
     amendment:
-      id: R3-M1-INV-29-2026-04-27
+      id: GLOBAL-CAPITAL-NC18-CREATION-EVENTS-2026-08-10
       status: incorporated
-      receipt: docs/operations/task_2026-04-26_ultimate_plan/r3/operator_decisions/inv_29_amendment_2026-04-27.md
+      receipt: docs/operations/current/finite_evidence_probability_symmetry/PLAN.md
+      supersedes_id: R3-M1-INV-29-2026-04-27
+      supersedes_receipt: docs/operations/task_2026-04-26_ultimate_plan/r3/operator_decisions/inv_29_amendment_2026-04-27.md
       scope: >
-        Approves only the M1 grammar-additive command-side states/events that
-        were implemented and reviewed at COMPLETE_AT_GATE. It does not authorize
-        M2 unknown-side-effect runtime resolution, order/trade fact grammar
-        collapse, RESTING/MATCHED/MINED/CONFIRMED in CommandState, live venue
-        submission, or CLOB v2 cutover.
+        Preserves the incorporated M1 command grammar and later proof-backed
+        REVIEW_REQUIRED clearance events, then adds only two creation-only
+        reconciliation facts: VENUE_ORDER_ADOPTED and
+        EXTERNAL_OPERATOR_CLOSE_ABSORBED. They may be written only by typed
+        venue_command_repo creation helpers and are not normal transitions.
+        This does not authorize order/trade facts as CommandState values,
+        fabricated SUBMIT history, or a live venue side effect.
       command_state_values:
         - INTENT_CREATED
         - SNAPSHOT_BOUND
@@ -528,6 +532,11 @@ invariants:
         - CANCEL_REPLACE_BLOCKED
         - EXPIRED
         - REVIEW_REQUIRED
+        - REVIEW_CLEARED_NO_VENUE_SIDE_EFFECT
+        - REVIEW_CLEARED_NO_VENUE_EXPOSURE
+        - REVIEW_CLEARED_VENUE_ORDER_LIVE
+        - VENUE_ORDER_ADOPTED
+        - EXTERNAL_OPERATOR_CLOSE_ABSORBED
     enforced_by:
       tests:
         - tests/test_command_bus_types.py::TestVenueCommandFrozen::test_venuecommand_is_frozen
@@ -911,17 +920,15 @@ invariants:
     zones: [K2_runtime]
     statement: >
       A reservation-bearing venue command reaches a terminal CommandState ONLY
-      through venue_command_repo.append_event's dispatch
-      (venue_command_repo.py:1179-1200) — the sole seam where collateral
-      release/convert fires (convert_reservation_on_fill for fill-class
-      terminals, release_reservation_for_command_state for the remaining
-      zero-fill terminals). The SOLE carve-out is the synthetic
-      external-close direct write at exchange_reconcile.py
-      _book_external_operator_close_exit_fact, guarded by a write-gate
-      assertion that no live reservation exists for that command_id before
-      the direct terminal INSERT — an externally-closed foreign order was
-      never reserve-backed by Zeus, so the assertion firing is a real
-      incident. The A4 orphan sweep (exchange_reconcile.py
+      through venue_command_repo.append_event's dispatch — the sole seam where
+      collateral release/convert fires. Recovered foreign orders and
+      operator-confirmed external closes are never Zeus submissions and are
+      created only through repo-owned typed adoption/absorption helpers. Those
+      helpers atomically write the command, a creation-only event, and the
+      authenticated order/trade fact without fabricated SUBMIT history. The
+      external-close caller must first prove that the deterministic foreign
+      command has no live reservation; the repo helper contains no alternate
+      release path. The A4 orphan sweep (exchange_reconcile.py
       check_collateral_identity) independently detects the residue class —
       a live reservation attached to a terminal command — as defense in
       depth if a future terminalization path bypasses both.
@@ -929,9 +936,10 @@ invariants:
       SCH-W1.1-CAS-LEDGER closes the live cross-connection check-then-insert
       collateral TOCTOU and moves reservation settlement to convert-on-fill.
       That guarantee only holds if collateral release/convert is centralized
-      at one seam; a second terminalization path that sets a command
-      terminal without going through append_event would silently leave a
-      reservation live forever (locked spendable) or double-release it.
+      at one seam. Typed creation of a proven non-reservation foreign command
+      is not terminalization of an existing Zeus command; any other path that
+      sets an existing command terminal would silently leave a reservation
+      live forever (locked spendable) or double-release it.
     enforced_by:
       tests:
         - tests/test_exchange_reconcile.py::test_external_operator_close_carve_out_guard_raises_on_live_reservation
@@ -950,9 +958,11 @@ invariants:
     statement: >
       Every live BUY or SELL venue submission, including entry, reduce-only
       exit, single-order, and batch paths, must have a finite unit price inside
-      inclusive [0.05, 0.95]. Anything below 0.05 or above 0.95 is rejected at
-      order-creating command persistence, the canonical envelope, and an independent
-      final SDK boundary. CANCEL remains able to remove previously resting tail-priced
+      inclusive [0.05, 0.95]. The current executable quote used to authorize the
+      action is subject to the same band; an in-band submitted floor may not make
+      an out-of-band counterparty bid eligible. Anything below 0.05 or above 0.95
+      is rejected at order-creating command persistence, the canonical envelope,
+      and an independent final SDK boundary. CANCEL remains able to remove previously resting tail-priced
       orders because cancellation creates no trade. This band applies symmetrically to
       BUY and SELL; current snapshot tick alignment/range, minimum size, identity,
       tradeability, fee/depth, and economic authorization remain cumulative
@@ -970,8 +980,13 @@ invariants:
         - tests/test_v2_adapter.py::test_adapter_sdk_boundary_rejects_even_if_envelope_guard_is_bypassed
         - tests/test_v2_adapter.py::TestSubmitBatch::test_out_of_band_price_rejects_entire_batch_before_sdk_contact
         - tests/test_v2_adapter.py::TestSubmitBatch::test_sdk_boundary_rejects_batch_even_if_envelope_guard_is_bypassed
+        - tests/engine/test_milan_incident_direction_law.py::test_day0_absorbing_no_at_999_is_not_a_trade_candidate
+        - tests/solve/test_solver_properties.py::test_global_single_order_sell_holds_above_submit_band
+        - tests/integration/test_w3_solve_seam_g3.py::test_global_sell_high_bid_blocks_selected_taker_at_jit
+        - tests/test_executor.py::TestExecutor::test_certified_high_bid_exit_rejects_before_command_persistence
         - tests/test_executor.py::TestExecutor::test_execute_exit_order_rejects_out_of_band_price_before_persistence
-        - tests/test_venue_command_repo.py::TestAbsoluteLivePriceBand
+        - tests/test_venue_command_repo.py::TestAbsoluteLivePriceBand::test_out_of_band_command_is_rejected_before_persistence
+        - tests/test_venue_command_repo.py::TestAbsoluteLivePriceBand::test_out_of_band_trade_fact_persists_as_observed_truth
         - tests/test_riskguard_red_durable_cmd.py::test_red_cancel_preserves_tail_order_cancellability
         - tests/test_check_live_restart_preflight.py::test_absolute_live_unit_price_band_restart_check_blocks_guard_removal
         - tests/test_check_live_restart_preflight.py::test_absolute_live_unit_price_band_restart_check_blocks_envelope_wiring_removal

@@ -33,6 +33,7 @@ import json
 import logging
 import os
 import signal
+import subprocess
 import sys
 import threading
 import time
@@ -51,6 +52,8 @@ FORECAST_LIVE_OWNER_ENV = "ZEUS_FORECAST_LIVE_OWNER"
 REPLACEMENT_AVAILABILITY_POLL_SECONDS_ENV = "ZEUS_REPLACEMENT_AVAILABILITY_POLL_SECONDS"
 REPLACEMENT_SOURCE_CLOCK_DOWNLOAD_BUDGET_SECONDS_ENV = "ZEUS_REPLACEMENT_SOURCE_CLOCK_DOWNLOAD_BUDGET_SECONDS"
 REPLACEMENT_CURRENT_TARGET_POLL_TIMEOUT_SECONDS_ENV = "ZEUS_REPLACEMENT_CURRENT_TARGET_POLL_TIMEOUT_SECONDS"
+REPLACEMENT_BPF_NO_PROGRESS_RETRY_BASE_SECONDS = 300.0
+REPLACEMENT_BPF_NO_PROGRESS_RETRY_MAX_SECONDS = 3600.0
 DAY0_METAR_POLL_SECONDS_ENV = "ZEUS_DAY0_METAR_POLL_SECONDS"
 DAY0_METAR_WRITE_BUDGET_MS_ENV = "ZEUS_DAY0_METAR_WRITE_BUDGET_MS"
 DAY0_HKO_POLL_SECONDS_ENV = "ZEUS_DAY0_HKO_POLL_SECONDS"
@@ -74,12 +77,31 @@ _DAY0_METAR_RETRY_LOCK = threading.Lock()
 _DAY0_METAR_RETRY_FAILURES = 0
 _DAY0_METAR_RETRY_NOT_BEFORE_MONOTONIC = 0.0
 _REPLACEMENT_MAINTENANCE_NEXT_MONOTONIC = 0.0
+_REPLACEMENT_BPF_NO_PROGRESS_FAILURES = 0
+_REPLACEMENT_BPF_NO_PROGRESS_RETRY_NOT_BEFORE_MONOTONIC = 0.0
 
 # SIGTERM-unif (WAVE-4): captured at module load so the forensic elapsed
 # computed in _graceful_shutdown matches what src/main.py and
 # src/riskguard/riskguard.py emit. See WAVE3_BATCH_C_PER_FINDING_ACCOUNTING.md
 # carry-forward #5.
 _PROCESS_START = time.monotonic()
+
+
+def _git_head_at_boot() -> str:
+    """Immutable checkout identity for the process serving Day0 source truth."""
+
+    try:
+        return subprocess.check_output(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=Path(__file__).resolve().parents[1],
+            text=True,
+            stderr=subprocess.DEVNULL,
+        ).strip()
+    except Exception:
+        return ""
+
+
+_PROCESS_GIT_HEAD = _git_head_at_boot()
 
 
 def _forecast_live_owner() -> str:
@@ -234,6 +256,46 @@ def _day0_priority_scopes() -> frozenset[tuple[str, str]]:
         for (city, target_date, _metric), priority in priorities.items()
         if priority == 0
     )
+
+
+def _held_day0_current_target_scopes(
+    scopes: tuple[tuple[str, str, str], ...],
+) -> tuple[tuple[str, str, str], ...]:
+    """Exact current-target scopes allowed to borrow the held Day0 reserve."""
+
+    try:
+        from src.data.replacement_forecast_seed_discovery import (
+            held_position_family_priorities,
+        )
+
+        priorities = held_position_family_priorities()
+    except Exception as exc:  # noqa: BLE001 - unreadable capital truth stays ordinary
+        logger.warning(
+            "HELD_DAY0_CURRENT_TARGET_SCOPE_READ_FAILED exc=%s: %s",
+            type(exc).__name__,
+            exc,
+        )
+        return ()
+    return tuple(scope for scope in scopes if priorities.get(scope) == 0)
+
+
+def _all_held_current_target_scopes() -> tuple[tuple[str, str, str], ...]:
+    """Every canonical open-exposure family, in deterministic order."""
+
+    try:
+        from src.data.replacement_forecast_seed_discovery import (
+            held_position_family_priorities,
+        )
+
+        priorities = held_position_family_priorities()
+    except Exception as exc:  # noqa: BLE001 - missing proof cannot widen quota scope
+        logger.warning(
+            "HELD_CURRENT_TARGET_UNIVERSE_READ_FAILED exc=%s: %s",
+            type(exc).__name__,
+            exc,
+        )
+        return ()
+    return tuple(sorted(priorities))
 
 
 def _day0_family_admission_for_scopes(
@@ -862,6 +924,9 @@ def _replacement_current_target_poll_timeout_seconds(poll_seconds: int | None = 
     return max(1.0, min(requested, 60.0))
 
 
+_REPLACEMENT_HELD_PROBABILITY_REPAIR_RESERVE_SECONDS = 8.0
+
+
 def _replacement_maintenance_due(*, now_monotonic: float | None = None) -> bool:
     global _REPLACEMENT_MAINTENANCE_NEXT_MONOTONIC
     now = time.monotonic() if now_monotonic is None else float(now_monotonic)
@@ -885,6 +950,62 @@ def _defer_replacement_maintenance(
         _REPLACEMENT_MAINTENANCE_NEXT_MONOTONIC,
         now + max(0.0, float(seconds)),
     )
+
+
+def _replacement_bpf_no_progress_retry_after_seconds(
+    *,
+    now_monotonic: float | None = None,
+) -> int:
+    """Return the ordinary-maintenance BPF retry debt, if any."""
+
+    now = time.monotonic() if now_monotonic is None else float(now_monotonic)
+    remaining = _REPLACEMENT_BPF_NO_PROGRESS_RETRY_NOT_BEFORE_MONOTONIC - now
+    return max(0, int(remaining + 0.999))
+
+
+def _record_replacement_bpf_maintenance_progress(
+    report: object,
+    *,
+    now_monotonic: float | None = None,
+) -> None:
+    """Back off only a completed ordinary BPF pass that made no progress.
+
+    SCOPE: the unchanged-cycle maintenance BPF extras fan-out only; source-clock,
+    current-target, held-position, Day0, and reseed lanes never consult this debt.
+    DRAIN: a bounded monotonic timer retries the same incomplete cycle.
+    RESET: any non-transport result or positive durable write clears the streak;
+    a process restart also retries immediately instead of persisting a ratchet.
+    """
+
+    global _REPLACEMENT_BPF_NO_PROGRESS_FAILURES
+    global _REPLACEMENT_BPF_NO_PROGRESS_RETRY_NOT_BEFORE_MONOTONIC
+
+    status = str(report.get("status") or "") if isinstance(report, dict) else ""
+    written = int(report.get("written_row_count") or 0) if isinstance(report, dict) else 0
+    if (
+        status == "BAYES_PRECISION_FUSION_EXTRA_TRANSPORT_RETRYABLE"
+        and written == 0
+    ):
+        _REPLACEMENT_BPF_NO_PROGRESS_FAILURES += 1
+        delay = min(
+            REPLACEMENT_BPF_NO_PROGRESS_RETRY_MAX_SECONDS,
+            REPLACEMENT_BPF_NO_PROGRESS_RETRY_BASE_SECONDS
+            * (2 ** min(_REPLACEMENT_BPF_NO_PROGRESS_FAILURES - 1, 4)),
+        )
+        now = time.monotonic() if now_monotonic is None else float(now_monotonic)
+        _REPLACEMENT_BPF_NO_PROGRESS_RETRY_NOT_BEFORE_MONOTONIC = now + delay
+        return
+    if status:
+        _reset_replacement_bpf_no_progress_backoff()
+
+
+def _reset_replacement_bpf_no_progress_backoff() -> None:
+    """Clear ordinary-cycle debt when progress or a new source cycle supersedes it."""
+
+    global _REPLACEMENT_BPF_NO_PROGRESS_FAILURES
+    global _REPLACEMENT_BPF_NO_PROGRESS_RETRY_NOT_BEFORE_MONOTONIC
+    _REPLACEMENT_BPF_NO_PROGRESS_FAILURES = 0
+    _REPLACEMENT_BPF_NO_PROGRESS_RETRY_NOT_BEFORE_MONOTONIC = 0.0
 
 
 def _compact_replacement_current_target_report(download_report):
@@ -991,6 +1112,7 @@ _TRUTHFUL_FAIL_STATUSES = frozenset({
     "source_clock_bpf_scoped_cycle_unresolved_partial",
     "source_clock_bpf_scoped_capture_failsoft_skipped",
     "source_clock_bpf_scoped_run_identity_mismatch",
+    "source_clock_model_updates_degraded_cache",
 })
 
 
@@ -1167,6 +1289,7 @@ def _write_ingest_heartbeat() -> None:
             "daemon": "data-ingest",
             "alive_at": datetime.now(timezone.utc).isoformat(),
             "pid": os.getpid(),
+            "git_head": _PROCESS_GIT_HEAD,
         }
         tmp = Path(str(path) + ".tmp")
         tmp.write_text(json.dumps(payload))
@@ -2379,6 +2502,7 @@ def _harvester_truth_writer_tick():
 
 _REPLACEMENT_MAINTENANCE_CURRENT_TARGET_OK_STATUSES = frozenset(
     {
+        "CURRENT_TARGET_CRITICAL_SCOPES_ALREADY_COVERED",
         "CURRENT_TARGET_SCOPED_DOWNLOAD_NO_TARGETS",
         "CURRENT_TARGETS_ALREADY_COVERED",
         "CURRENT_TARGETS_HAVE_RAW_MANIFESTS",
@@ -2405,11 +2529,16 @@ _REPLACEMENT_MAINTENANCE_EXTRAS_RETRYABLE_STATUSES = frozenset(
     {
         "BAYES_PRECISION_FUSION_EXTRA_CAPTURE_FAILSOFT_SKIPPED",
         "BAYES_PRECISION_FUSION_EXTRA_CYCLE_PROBE_UNRESOLVED_SKIP",
+        "BAYES_PRECISION_FUSION_EXTRA_NO_PROGRESS_BACKOFF_SKIPPED",
         "BAYES_PRECISION_FUSION_EXTRA_QUOTA_COOLDOWN_SKIPPED",
         "BAYES_PRECISION_FUSION_EXTRA_TIMEBOXED_INCOMPLETE",
         "BAYES_PRECISION_FUSION_EXTRA_TRANSPORT_RETRYABLE",
     }
 )
+_REPLACEMENT_RESEED_SUCCESS_STATUS = {
+    "fusion_upgrade": "FUSION_UPGRADE_TRIGGER",
+    "cycle_advance": "CYCLE_ADVANCE_TRIGGER",
+}
 
 
 def _replacement_maintenance_lane_error(
@@ -2434,6 +2563,17 @@ def _replacement_maintenance_lane_error(
     return f"{lane}:UNRECOGNIZED_STATUS:{status or 'MISSING'}"
 
 
+def _replacement_reseed_error(prefix: str, report: object) -> str | None:
+    """Require the trigger's sole success receipt; absence remains retryable debt."""
+    expected = _REPLACEMENT_RESEED_SUCCESS_STATUS[prefix]
+    if not isinstance(report, dict):
+        return f"{prefix}:RESEED_CONFIGURATION_UNAVAILABLE"
+    status = str(report.get("status") or "")
+    if status == expected:
+        return None
+    return f"{prefix}:{status or 'RESEED_STATUS_MISSING'}"
+
+
 @_scheduler_job("ingest_replacement_maintenance")
 def _replacement_maintenance_tick():
     """Repair unchanged replacement targets without blocking the source clock."""
@@ -2450,13 +2590,121 @@ def _replacement_maintenance_tick():
 
     cfg = _replacement_forecast_live_materialization_queue_config()
     cooldown_seconds = bayes_precision_fusion_quota_cooldown_seconds()
-    if not _replacement_maintenance_due():
-        return {"status": "REPLACEMENT_MAINTENANCE_NOT_DUE"}
-
+    held_scopes = _all_held_current_target_scopes()
     timeout_s = _replacement_current_target_poll_timeout_seconds(
         _replacement_availability_poll_seconds()
     )
-    if cooldown_seconds > 0:
+    broad_due = _replacement_maintenance_due()
+    bpf_retry_after = (
+        _replacement_bpf_no_progress_retry_after_seconds()
+        if broad_due and cooldown_seconds <= 0
+        else 0
+    )
+    # SCOPE: one due maintenance tick with canonical held exposure and an
+    # available BPF transport. DRAIN: reserve part of the existing parent
+    # deadline for the BPF extras downloader, whose first batch is the held
+    # families missing current q. RESET: every tick recomputes exposure,
+    # cooldown, and backoff; no held debt or unavailable BPF returns the full
+    # parent budget to anchor repair.
+    bpf_repair_reserve_s = (
+        min(
+            _REPLACEMENT_HELD_PROBABILITY_REPAIR_RESERVE_SECONDS,
+            timeout_s / 2.0,
+        )
+        if held_scopes and broad_due and cooldown_seconds <= 0 and bpf_retry_after <= 0
+        else 0.0
+    )
+    deadline_monotonic = time.monotonic() + timeout_s
+
+    def _remaining_budget() -> float:
+        return max(0.0, deadline_monotonic - time.monotonic())
+
+    held_report = None
+    held_ordinary_report = None
+    held_reseed_scope_set: set[tuple[str, str, str]] = set()
+    if held_scopes:
+        # SCOPE: exact canonical open-exposure families only.
+        # DRAIN: each maintenance tick repairs their current anchor and enqueues
+        # targeted materialization below, even without a new source-clock edge.
+        # RESET: current materializable anchor coverage plus current reseed markers.
+        critical_scopes = _held_day0_current_target_scopes(held_scopes)
+        critical_set = set(critical_scopes)
+        ordinary_scopes = tuple(
+            scope for scope in held_scopes if scope not in critical_set
+        )
+        partition_count = int(bool(critical_scopes)) + int(bool(ordinary_scopes))
+        held_budget_s = max(0.0, timeout_s - bpf_repair_reserve_s)
+        held_lane_budget = min(
+            10.0,
+            held_budget_s / max(1, partition_count),
+        )
+        partition_reports: list[tuple[str, tuple[tuple[str, str, str], ...], object]] = []
+        for lane, scopes, quota_critical in (
+            ("critical", critical_scopes, True),
+            ("ordinary", ordinary_scopes, False),
+        ):
+            if not scopes:
+                continue
+            kwargs: dict[str, object] = {
+                "max_wall_clock_seconds": held_lane_budget,
+                "required_scopes": scopes,
+            }
+            if quota_critical:
+                kwargs["quota_critical"] = True
+            try:
+                partition_report = (
+                    _download_replacement_forecast_current_targets_if_needed(
+                        cfg,
+                        **kwargs,
+                    )
+                )
+            except TimeoutError as exc:
+                partition_report = {
+                    "status": "CURRENT_TARGET_DOWNLOAD_TIMEOUT",
+                    "timeout_seconds": timeout_s,
+                    "error": str(exc)[:240],
+                }
+            except Exception as exc:  # noqa: BLE001 - partitions remain independent
+                logger.warning(
+                    "replacement maintenance held-anchor %s repair failed: %s",
+                    lane,
+                    exc,
+                    exc_info=True,
+                )
+                partition_report = {
+                    "status": "CURRENT_TARGET_DOWNLOAD_FAILSOFT",
+                    "error": f"{type(exc).__name__}: {str(exc)[:220]}",
+                }
+            partition_reports.append((lane, scopes, partition_report))
+            partition_status = (
+                str(partition_report.get("status") or "")
+                if isinstance(partition_report, dict)
+                else ""
+            )
+            if partition_status in {
+                "CURRENT_TARGET_CRITICAL_SCOPES_ALREADY_COVERED",
+                "CURRENT_TARGETS_ALREADY_COVERED",
+                "CURRENT_TARGETS_HAVE_RAW_MANIFESTS",
+            } or (
+                isinstance(partition_report, dict)
+                and int(partition_report.get("written_manifest_count") or 0) > 0
+            ):
+                held_reseed_scope_set.update(scopes)
+        for lane, _scopes, partition_report in partition_reports:
+            if lane == "critical":
+                held_report = partition_report
+            else:
+                held_ordinary_report = partition_report
+
+    held_reseed_scopes = tuple(sorted(held_reseed_scope_set))
+
+    if not broad_due and held_report is None and held_ordinary_report is None:
+        return {"status": "REPLACEMENT_MAINTENANCE_NOT_DUE"}
+
+    if not broad_due:
+        download_report = None
+        extras_report = None
+    elif cooldown_seconds > 0:
         _defer_replacement_maintenance(float(cooldown_seconds))
         download_report = None
         extras_report = {
@@ -2465,9 +2713,13 @@ def _replacement_maintenance_tick():
         }
     else:
         try:
+            broad_current_budget = max(
+                0.0,
+                _remaining_budget() - bpf_repair_reserve_s,
+            )
             download_report = _download_replacement_forecast_current_targets_if_needed(
                 cfg,
-                max_wall_clock_seconds=timeout_s,
+                max_wall_clock_seconds=broad_current_budget,
             )
         except TimeoutError as exc:
             download_report = {
@@ -2486,23 +2738,39 @@ def _replacement_maintenance_tick():
                 "error": f"{type(exc).__name__}: {str(exc)[:220]}",
             }
 
-        try:
-            extras_report = (
-                _download_bayes_precision_fusion_extra_raw_inputs_if_needed(
-                    cfg,
-                    max_wall_clock_seconds=timeout_s,
-                )
-            )
-        except Exception as exc:  # noqa: BLE001 - reseeds remain independent
-            logger.warning(
-                "replacement maintenance BPF-extra repair failed: %s",
-                exc,
-                exc_info=True,
-            )
+        if bpf_retry_after > 0:
             extras_report = {
-                "status": "BAYES_PRECISION_FUSION_EXTRA_CAPTURE_FAILSOFT_SKIPPED",
-                "error": f"{type(exc).__name__}: {str(exc)[:220]}",
+                "status": "BAYES_PRECISION_FUSION_EXTRA_NO_PROGRESS_BACKOFF_SKIPPED",
+                "retry_after_seconds": bpf_retry_after,
             }
+        else:
+            remaining = _remaining_budget()
+            if remaining <= 0.0:
+                extras_report = {
+                    "status": "BAYES_PRECISION_FUSION_EXTRA_TIMEBOXED_INCOMPLETE",
+                    "timeboxed_incomplete": True,
+                    "attempted_target_group_count": 0,
+                    "max_wall_clock_seconds": 0.0,
+                }
+            else:
+                try:
+                    extras_report = (
+                        _download_bayes_precision_fusion_extra_raw_inputs_if_needed(
+                            cfg,
+                            max_wall_clock_seconds=remaining,
+                        )
+                    )
+                except Exception as exc:  # noqa: BLE001 - reseeds remain independent
+                    logger.warning(
+                        "replacement maintenance BPF-extra repair failed: %s",
+                        exc,
+                        exc_info=True,
+                    )
+                    extras_report = {
+                        "status": "BAYES_PRECISION_FUSION_EXTRA_CAPTURE_FAILSOFT_SKIPPED",
+                        "error": f"{type(exc).__name__}: {str(exc)[:220]}",
+                    }
+            _record_replacement_bpf_maintenance_progress(extras_report)
 
     report: dict[str, object] = {
         "status": "REPLACEMENT_MAINTENANCE_COMPLETED",
@@ -2510,6 +2778,14 @@ def _replacement_maintenance_tick():
             download_report
         ),
     }
+    if held_report is not None:
+        report["held_current_target_download"] = (
+            _compact_replacement_current_target_report(held_report)
+        )
+    if held_ordinary_report is not None:
+        report["held_ordinary_current_target_download"] = (
+            _compact_replacement_current_target_report(held_ordinary_report)
+        )
     if extras_report is not None:
         report["bayes_precision_fusion_extra_status"] = extras_report.get("status")
         report["bayes_precision_fusion_extra_rows_written"] = extras_report.get(
@@ -2517,9 +2793,83 @@ def _replacement_maintenance_tick():
         )
     if cooldown_seconds > 0:
         report["cooldown_seconds"] = cooldown_seconds
+    committed_scopes = tuple(
+        sorted(
+            {
+                tuple(str(part) for part in scope)
+                for scope in (
+                    *held_reseed_scopes,
+                    *(
+                        extras_report.get("committed_families") or ()
+                        if isinstance(extras_report, dict)
+                        else ()
+                    ),
+                )
+                if isinstance(scope, (tuple, list)) and len(scope) == 3
+            }
+        )
+    )
+    committed_reseed_errors: list[str] = []
+    committed_reseed_report_count = 0
+    if committed_scopes:
+        report["committed_family_count"] = len(committed_scopes)
+        # A timebox limits transport work, not the reaction to rows already
+        # committed. SCOPE: only committed (city, date, metric) families.
+        # DRAIN: enqueue their fusion/cycle materialization seeds immediately.
+        # RESET: each trigger's durable raw-revision marker becomes current.
+        for prefix, reseed in (
+            ("fusion_upgrade", _enqueue_fusion_upgrade_reseeds_if_needed),
+            ("cycle_advance", _enqueue_cycle_advance_reseeds_if_needed),
+        ):
+            try:
+                reseed_report = reseed(
+                    cfg,
+                    scopes=committed_scopes,
+                    limit=len(committed_scopes),
+                )
+            except Exception as exc:  # noqa: BLE001 - isolate the two drains
+                committed_reseed_errors.append(
+                    f"committed_{prefix}:{type(exc).__name__}: {str(exc)[:180]}"
+                )
+                logger.warning(
+                    "replacement maintenance committed %s failed: %s",
+                    prefix,
+                    exc,
+                )
+                continue
+            if reseed_report is None:
+                reseed_error = _replacement_reseed_error(prefix, reseed_report)
+                committed_reseed_errors.append(f"committed_{reseed_error}")
+                continue
+            reseed_status = str(reseed_report.get("status") or "")
+            report[f"committed_{prefix}_status"] = reseed_status
+            report[f"committed_{prefix}_seeds_enqueued"] = reseed_report.get(
+                "seeds_enqueued"
+            )
+            reseed_error = _replacement_reseed_error(prefix, reseed_report)
+            if reseed_error is not None:
+                committed_reseed_errors.append(f"committed_{reseed_error}")
+                continue
+            committed_reseed_report_count += 1
     maintenance_errors = [
         error
         for error in (
+            _replacement_maintenance_lane_error(
+                "held_current_target",
+                held_report,
+                ok_statuses=_REPLACEMENT_MAINTENANCE_CURRENT_TARGET_OK_STATUSES,
+                retryable_statuses=(
+                    _REPLACEMENT_MAINTENANCE_CURRENT_TARGET_RETRYABLE_STATUSES
+                ),
+            ),
+            _replacement_maintenance_lane_error(
+                "held_ordinary_current_target",
+                held_ordinary_report,
+                ok_statuses=_REPLACEMENT_MAINTENANCE_CURRENT_TARGET_OK_STATUSES,
+                retryable_statuses=(
+                    _REPLACEMENT_MAINTENANCE_CURRENT_TARGET_RETRYABLE_STATUSES
+                ),
+            ),
             _replacement_maintenance_lane_error(
                 "current_target",
                 download_report,
@@ -2539,21 +2889,55 @@ def _replacement_maintenance_tick():
         )
         if error is not None
     ]
-    for prefix, reseed in (
-        ("fusion_upgrade", _enqueue_fusion_upgrade_reseeds_if_needed),
-        ("cycle_advance", _enqueue_cycle_advance_reseeds_if_needed),
-    ):
-        try:
-            reseed_report = reseed(cfg)
-        except Exception as exc:  # noqa: BLE001 - isolate independent repair lanes
-            maintenance_errors.append(
-                f"{prefix}:{type(exc).__name__}: {str(exc)[:180]}"
-            )
-            logger.warning("replacement maintenance %s failed: %s", prefix, exc)
-            continue
-        if reseed_report is not None:
-            report[f"{prefix}_status"] = reseed_report.get("status")
-            report[f"{prefix}_seeds_enqueued"] = reseed_report.get("seeds_enqueued")
+    maintenance_errors.extend(committed_reseed_errors)
+    download_timeboxed = any(
+        isinstance(lane_report, dict)
+        and bool(lane_report.get("timeboxed_incomplete"))
+        for lane_report in (
+            held_report,
+            held_ordinary_report,
+            download_report,
+            extras_report,
+        )
+    )
+    if not broad_due:
+        report["broad_maintenance_status"] = "REPLACEMENT_MAINTENANCE_NOT_DUE"
+        report["reseed_maintenance_status"] = (
+            "REPLACEMENT_MAINTENANCE_HELD_RESEEDS_PUBLISHED"
+            if committed_reseed_report_count == 2
+            else "REPLACEMENT_MAINTENANCE_BROAD_NOT_DUE"
+        )
+    elif download_timeboxed or _remaining_budget() <= 0.0:
+        report["reseed_maintenance_status"] = (
+            "REPLACEMENT_MAINTENANCE_COMMITTED_RESEEDS_PUBLISHED"
+            if committed_reseed_report_count == 2
+            else "REPLACEMENT_MAINTENANCE_RESEEDS_DEFERRED_DEADLINE"
+        )
+    else:
+        for prefix, reseed in (
+            ("fusion_upgrade", _enqueue_fusion_upgrade_reseeds_if_needed),
+            ("cycle_advance", _enqueue_cycle_advance_reseeds_if_needed),
+        ):
+            if _remaining_budget() <= 0.0:
+                report["reseed_maintenance_status"] = (
+                    "REPLACEMENT_MAINTENANCE_RESEEDS_DEFERRED_DEADLINE"
+                )
+                break
+            try:
+                reseed_report = reseed(cfg)
+            except Exception as exc:  # noqa: BLE001 - isolate independent repair lanes
+                maintenance_errors.append(
+                    f"{prefix}:{type(exc).__name__}: {str(exc)[:180]}"
+                )
+                logger.warning("replacement maintenance %s failed: %s", prefix, exc)
+                continue
+            reseed_error = _replacement_reseed_error(prefix, reseed_report)
+            if reseed_report is not None:
+                reseed_status = str(reseed_report.get("status") or "")
+                report[f"{prefix}_status"] = reseed_status
+                report[f"{prefix}_seeds_enqueued"] = reseed_report.get("seeds_enqueued")
+            if reseed_error is not None:
+                maintenance_errors.append(reseed_error)
     if maintenance_errors:
         report["status"] = "REPLACEMENT_MAINTENANCE_PARTIAL"
         report["retryable"] = True
@@ -2582,9 +2966,6 @@ def _replacement_availability_poll_tick():
         _ingest_station_forecasts_if_due,
         _replacement_forecast_live_materialization_queue_config,
     )
-    from src.data.bayes_precision_fusion_download import (  # noqa: PLC0415
-        bayes_precision_fusion_quota_cooldown_seconds,
-    )
     from src.data.source_clock_update_probe import (  # noqa: PLC0415
         advance_source_clock_cursor,
         probe_openmeteo_source_clock_updates,
@@ -2592,19 +2973,6 @@ def _replacement_availability_poll_tick():
     )
 
     cfg = _replacement_forecast_live_materialization_queue_config()
-    cooldown_seconds = bayes_precision_fusion_quota_cooldown_seconds()
-    if cooldown_seconds > 0:
-        # No source-clock payload can land during provider cooldown. Re-probing
-        # the unchanged metadata cursor only rediscovers the same blocked work.
-        _defer_replacement_maintenance(float(cooldown_seconds))
-        report = {
-            "status": "SOURCE_CLOCK_BPF_SCOPED_QUOTA_COOLDOWN_SKIPPED",
-            "cooldown_seconds": cooldown_seconds,
-            "reseed_maintenance_status": "RESEED_MAINTENANCE_NOT_DUE",
-        }
-        logger.info("replacement source-clock quota cooldown: %s", report)
-        return report
-
     # Station-calibrated official forecasts (CWA township / HKO fnd) ingest on THIS lane — re-homed
     # 2026-07-20 after the 2026-06-11 download-lane migration orphaned the call (it lived only in the
     # descheduled forecast-live _replacement_forecast_download_cycle, so cwa_township/hko_fnd went dark
@@ -2628,6 +2996,7 @@ def _replacement_availability_poll_tick():
         manifest_snapshot = None
         if scopes is not None:
             manifest_snapshot = prepared_manifest_snapshot or {}
+        reseed_errors = list(report.get("reseed_errors") or ())
         upgrade_report = (
             _enqueue_fusion_upgrade_reseeds_if_needed(
                 cfg,
@@ -2644,7 +3013,16 @@ def _replacement_availability_poll_tick():
         if upgrade_report is not None:
             report["fusion_upgrade_status"] = upgrade_report.get("status")
             report["fusion_upgrade_seeds_enqueued"] = upgrade_report.get("seeds_enqueued")
+        upgrade_error = _replacement_reseed_error(
+            "fusion_upgrade",
+            upgrade_report,
+        )
+        if upgrade_error is not None:
+            reseed_errors.append(upgrade_error)
         if not include_cycle_advance:
+            if reseed_errors:
+                report["reseed_errors"] = tuple(dict.fromkeys(reseed_errors))
+                report["retryable"] = True
             return report
         cycle_advance_report = (
             _enqueue_cycle_advance_reseeds_if_needed(cfg)
@@ -2680,6 +3058,15 @@ def _replacement_availability_poll_tick():
                         "enqueued",
                     )
                 }
+        cycle_error = _replacement_reseed_error(
+            "cycle_advance",
+            cycle_advance_report,
+        )
+        if cycle_error is not None:
+            reseed_errors.append(cycle_error)
+        if reseed_errors:
+            report["reseed_errors"] = tuple(dict.fromkeys(reseed_errors))
+            report["retryable"] = True
         return report
 
     _station_reseed_report: dict[str, object] | None = None
@@ -2720,6 +3107,7 @@ def _replacement_availability_poll_tick():
         *,
         max_wall_clock_seconds: float | None = None,
         required_scopes: tuple[tuple[str, str, str], ...] | None = None,
+        quota_critical: bool = False,
     ):
         current_target_timeout = (
             _replacement_current_target_poll_timeout_seconds(
@@ -2734,6 +3122,8 @@ def _replacement_availability_poll_tick():
             }
             if required_scopes is not None:
                 kwargs["required_scopes"] = required_scopes
+            if quota_critical:
+                kwargs["quota_critical"] = True
             return _download_replacement_forecast_current_targets_if_needed(
                 cfg,
                 **kwargs,
@@ -2757,14 +3147,21 @@ def _replacement_availability_poll_tick():
                 "error": f"{type(exc).__name__}: {str(exc)[:220]}",
             }
 
-    # The public source clock owns this latency path. Generic target repair may
-    # consume most of the poll cadence, so it must never delay detecting a new run.
+    # The public source clock owns this latency path. Its metadata requests are
+    # unmetered by provider contract, so metered download cooldown must never
+    # suppress the probe. The scoped downloader below still fails closed on its
+    # own quota gate and preserves the cursor until raw inputs commit.
     source_clock_report = probe_openmeteo_source_clock_updates(advance_cursor=False)
     source_clock_payload = source_clock_report.as_dict()
     if not source_clock_report.updated_sources:
+        source_clock_status = str(source_clock_payload.get("status") or "")
         report: dict[str, object] = {
-            "status": "SOURCE_CLOCK_POLL_CURRENT",
-            "source_clock_status": source_clock_payload.get("status"),
+            "status": (
+                "SOURCE_CLOCK_MODEL_UPDATES_DEGRADED_CACHE"
+                if source_clock_status == "SOURCE_CLOCK_MODEL_UPDATES_DEGRADED_CACHE"
+                else "SOURCE_CLOCK_POLL_CURRENT"
+            ),
+            "source_clock_status": source_clock_status,
             "source_clock_updated_sources": source_clock_payload.get("updated_sources", []),
             "source_clock_affected_cities": source_clock_payload.get("affected_cities", []),
             "source_clock_error": source_clock_payload.get("error"),
@@ -2774,13 +3171,64 @@ def _replacement_availability_poll_tick():
         report["maintenance_status"] = "REPLACEMENT_MAINTENANCE_DECOUPLED"
         logger.info("replacement source-clock poll current: %s", report)
         return report
+    # RESET: a provider-proved source-clock transition supersedes any ordinary
+    # unchanged-cycle no-progress debt. The scoped source-clock capture below
+    # already bypasses that debt; clearing it also makes the next maintenance
+    # tick immediately eligible to heal residual scopes for the new cycle.
+    _reset_replacement_bpf_no_progress_backoff()
     logger.info("replacement source-clock update detected; running download path: %s", source_clock_payload)
     source_clock_anchor_report = None
+    source_clock_held_anchor_report = None
     anchor_reseed_published = False
     if "ecmwf_ifs" in source_clock_report.updated_sources:
         # The current provider center is the first q input and already has a
         # run-authoritative live-API ladder. Capture it before waiting for the
         # slower Single Runs archive used by the multimodel BPF inputs.
+        held_anchor_scopes = _held_day0_current_target_scopes(
+            _all_held_current_target_scopes()
+        )
+        if held_anchor_scopes:
+            source_clock_held_anchor_report = _download_current_targets(
+                max_wall_clock_seconds=min(
+                    10.0,
+                    _replacement_current_target_poll_timeout_seconds(
+                        _replacement_availability_poll_seconds()
+                    ),
+                ),
+                required_scopes=held_anchor_scopes,
+                quota_critical=True,
+            )
+            held_anchor_status = (
+                str(source_clock_held_anchor_report.get("status") or "")
+                if isinstance(source_clock_held_anchor_report, dict)
+                else ""
+            )
+            if isinstance(source_clock_held_anchor_report, dict) and (
+                int(source_clock_held_anchor_report.get("written_manifest_count") or 0)
+                > 0
+                or held_anchor_status
+                == "CURRENT_TARGET_CRITICAL_SCOPES_ALREADY_COVERED"
+            ):
+                held_manifests = tuple(
+                    str(path)
+                    for path in (
+                        source_clock_held_anchor_report.get("written_manifests") or ()
+                    )
+                    if str(path).strip()
+                )
+                _attach_reseed_reports(
+                    source_clock_held_anchor_report,
+                    scopes=held_anchor_scopes,
+                    changed_sources=("ecmwf_ifs",),
+                    prepared_manifest_snapshot=(
+                        {"manifest_paths": held_manifests}
+                        if held_manifests
+                        else {}
+                    ),
+                )
+                anchor_reseed_published = not bool(
+                    source_clock_held_anchor_report.get("reseed_errors")
+                )
         source_clock_anchor_report = _download_current_targets(
             max_wall_clock_seconds=min(
                 10.0,
@@ -2794,7 +3242,9 @@ def _replacement_availability_poll_tick():
             and int(source_clock_anchor_report.get("written_manifest_count") or 0) > 0
         ):
             _attach_reseed_reports(source_clock_anchor_report)
-            anchor_reseed_published = True
+            anchor_reseed_published = not bool(
+                source_clock_anchor_report.get("reseed_errors")
+            )
     notified_source_scopes: set[tuple[str, str, str, str]] = set()
     anchor_scopes_attempted: set[tuple[str, str, str]] = set()
     fallback_reseed_published = False
@@ -2877,30 +3327,65 @@ def _replacement_availability_poll_tick():
         if scopes:
             manifest_snapshot = None
             if anchor_scopes:
-                anchor_report = _download_replacement_forecast_current_targets_if_needed(
-                    cfg,
-                    max_wall_clock_seconds=min(
-                        10.0,
-                        _replacement_current_target_poll_timeout_seconds(
-                            _replacement_availability_poll_seconds()
-                        ),
-                    ),
-                    required_scopes=anchor_scopes,
+                critical_anchor_scopes = _held_day0_current_target_scopes(anchor_scopes)
+                critical_set = set(critical_anchor_scopes)
+                ordinary_anchor_scopes = tuple(
+                    scope for scope in anchor_scopes if scope not in critical_set
                 )
-                if isinstance(anchor_report, dict):
-                    report["anchor_scope_status"] = anchor_report.get("status")
-                    report["anchor_scope_manifest_count"] = anchor_report.get(
-                        "written_manifest_count"
+                anchor_deadline = time.monotonic() + min(
+                    10.0,
+                    _replacement_current_target_poll_timeout_seconds(
+                        _replacement_availability_poll_seconds()
+                    ),
+                )
+                anchor_reports: list[dict[str, object]] = []
+                written_manifests: list[str] = []
+                for partition, quota_critical in (
+                    (critical_anchor_scopes, True),
+                    (ordinary_anchor_scopes, False),
+                ):
+                    if not partition:
+                        continue
+                    remaining = max(0.0, anchor_deadline - time.monotonic())
+                    if remaining <= 0.0:
+                        break
+                    anchor_kwargs: dict[str, object] = {
+                        "max_wall_clock_seconds": remaining,
+                        "required_scopes": partition,
+                    }
+                    if quota_critical:
+                        anchor_kwargs["quota_critical"] = True
+                    anchor_report = _download_replacement_forecast_current_targets_if_needed(
+                        cfg,
+                        **anchor_kwargs,
                     )
-                    written_manifests = tuple(
+                    if not isinstance(anchor_report, dict):
+                        continue
+                    anchor_reports.append(anchor_report)
+                    written_manifests.extend(
                         str(path)
                         for path in (anchor_report.get("written_manifests") or ())
                         if str(path).strip()
                     )
-                    if written_manifests:
-                        manifest_snapshot = {
-                            "manifest_paths": written_manifests,
-                        }
+                if anchor_reports:
+                    statuses = tuple(
+                        str(anchor_report.get("status") or "")
+                        for anchor_report in anchor_reports
+                    )
+                    report["anchor_scope_status"] = (
+                        statuses[0]
+                        if len(statuses) == 1
+                        else "CURRENT_TARGET_PARTITIONED_DOWNLOAD"
+                    )
+                    report["anchor_scope_statuses"] = statuses
+                    report["anchor_scope_manifest_count"] = sum(
+                        int(anchor_report.get("written_manifest_count") or 0)
+                        for anchor_report in anchor_reports
+                    )
+                if written_manifests:
+                    manifest_snapshot = {
+                        "manifest_paths": tuple(dict.fromkeys(written_manifests)),
+                    }
             _attach_reseed_reports(
                 report,
                 scopes=scopes,
@@ -2909,6 +3394,11 @@ def _replacement_availability_poll_tick():
             )
         else:
             _attach_reseed_reports(report)
+        if report.get("reseed_errors"):
+            raise RuntimeError(
+                "source commit reseed unproven: "
+                + ",".join(str(error) for error in report["reseed_errors"])
+            )
         with publish_state_lock:
             for key in (
                 "anchor_scope_status",
@@ -2955,9 +3445,20 @@ def _replacement_availability_poll_tick():
     )
     if source_clock_anchor_compact is not None:
         report["source_clock_anchor_download"] = source_clock_anchor_compact
+    source_clock_held_anchor_compact = _compact_replacement_current_target_report(
+        source_clock_held_anchor_report
+    )
+    if source_clock_held_anchor_compact is not None:
+        report["source_clock_held_anchor_download"] = source_clock_held_anchor_compact
     # No raw input can land while the provider quota is cooling down. Run one
     # catch-up scan, then suppress identical JSON-heavy reseed scans until the
     # downloader can make progress again.
+    notification_errors = tuple(
+        report.get("source_commit_notification_errors") or ()
+    )
+    pending_notifications = int(
+        report.get("source_commit_notifications_pending") or 0
+    )
     if (
         report.get("status")
         == "SOURCE_CLOCK_BPF_SCOPED_QUOTA_COOLDOWN_SKIPPED"
@@ -2972,12 +3473,6 @@ def _replacement_availability_poll_tick():
             float(report.get("cooldown_seconds") or 0)
         )
     else:
-        notification_errors = tuple(
-            report.get("source_commit_notification_errors") or ()
-        )
-        pending_notifications = int(
-            report.get("source_commit_notifications_pending") or 0
-        )
         if (
             (scoped_reseed_completed or pending_notifications > 0)
             and not notification_errors
@@ -2999,11 +3494,24 @@ def _replacement_availability_poll_tick():
             ):
                 if key in broad_fusion_report:
                     report[f"broad_{key}"] = broad_fusion_report[key]
-            report["reseed_maintenance_status"] = (
-                "SOURCE_COMMIT_RESEEDS_DEFERRED"
-                if pending_notifications > 0
-                else "SOURCE_COMMIT_RESEEDS_PUBLISHED"
-            )
+            broad_errors = tuple(broad_fusion_report.get("reseed_errors") or ())
+            if broad_errors:
+                report["reseed_errors"] = tuple(
+                    dict.fromkeys((*tuple(report.get("reseed_errors") or ()), *broad_errors))
+                )
+                report["retryable"] = True
+            if pending_notifications > 0:
+                report["reseed_maintenance_status"] = (
+                    "SOURCE_COMMIT_RESEEDS_DEFERRED"
+                )
+            elif broad_errors:
+                report["reseed_maintenance_status"] = (
+                    "SOURCE_COMMIT_RESEEDS_RETRYABLE"
+                )
+            else:
+                report["reseed_maintenance_status"] = (
+                    "SOURCE_COMMIT_RESEEDS_PUBLISHED"
+                )
         elif (
             (anchor_reseed_published or pending_notifications > 0)
             and not notification_errors
@@ -3017,9 +3525,29 @@ def _replacement_availability_poll_tick():
             # No committed callback completed, or at least one callback failed.
             # Preserve the broad scan as the authoritative catch-up path.
             report = _attach_reseed_reports(report)
-    cursor_sources = source_clock_scoped_download_cursor_sources(
-        report,
-        source_clock_report=source_clock_report,
+            report["reseed_maintenance_status"] = (
+                "SOURCE_BROAD_RESEEDS_RETRYABLE"
+                if notification_errors or report.get("reseed_errors")
+                else "SOURCE_BROAD_RESEEDS_PUBLISHED"
+            )
+    reseed_publication_proven = (
+        not notification_errors
+        and pending_notifications == 0
+        and not report.get("reseed_errors")
+        and report.get("reseed_maintenance_status")
+        in {
+            "SOURCE_ANCHOR_RESEEDS_PUBLISHED",
+            "SOURCE_BROAD_RESEEDS_PUBLISHED",
+            "SOURCE_COMMIT_RESEEDS_PUBLISHED",
+        }
+    )
+    cursor_sources = (
+        source_clock_scoped_download_cursor_sources(
+            report,
+            source_clock_report=source_clock_report,
+        )
+        if reseed_publication_proven
+        else ()
     )
     advanced_sources = (
         advance_source_clock_cursor(source_clock_report, sources=cursor_sources)

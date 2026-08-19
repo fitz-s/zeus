@@ -1,5 +1,5 @@
 # Created: 2026-04-21
-# Last reused/audited: 2026-07-24
+# Last reused/audited: 2026-07-29
 # Authority basis: Day0 real-time observation; F3 PR 2/3 typed temperature
 #                  boundary per Path A (src/types/temperature.py);
 #                  live_entry_health_repair Slice B66.
@@ -15,6 +15,7 @@ Contract:
   not a rolling 24-hour maximum.
 """
 
+import hashlib
 import logging
 import math
 import sqlite3
@@ -70,6 +71,9 @@ class Day0ObservationContext:
     source_authority: str = ""
     data_version: str = ""
     training_allowed: Optional[bool] = None
+    # SHA-256 of the exact upstream response bytes. Derived extrema are not a
+    # substitute for this identity at hard-fact authorization seams.
+    raw_payload_hash: str = ""
     # M-2/H-3 gap detector attribution (day0_observation_reader). None means the
     # producing path did not run the detector; consumers treating a GAP_SUSPECT
     # status must then fail closed for every metric.
@@ -110,6 +114,7 @@ class Day0ObservationContext:
             "source_authority": self.source_authority,
             "data_version": self.data_version,
             "training_allowed": self.training_allowed,
+            "raw_payload_hash": self.raw_payload_hash,
             "max_gap_minutes": self.max_gap_minutes,
             "gap_suspect_metrics": self.gap_suspect_metrics,
         }
@@ -1045,6 +1050,10 @@ def _fetch_wu_observation(
         if resp.status_code != 200:
             return None
 
+        raw_payload = bytes(resp.content)
+        if not raw_payload:
+            return None
+        raw_payload_hash = hashlib.sha256(raw_payload).hexdigest()
         data = resp.json()
         observations = data["observations"]
         if not observations:
@@ -1120,9 +1129,10 @@ def _fetch_wu_observation(
             ),
             observation_available_at=datetime.now(timezone.utc).isoformat(),
             provider_reported_time=None,  # WU API has no separate reported-at field
+            raw_payload_hash=raw_payload_hash,
         )
 
-    except (httpx.HTTPError, KeyError, ValueError) as e:
+    except (httpx.HTTPError, KeyError, TypeError, ValueError) as e:
         logger.warning("WU observation fetch failed for %s (%s): %s", city.name, type(e).__name__, e)
         return None
 

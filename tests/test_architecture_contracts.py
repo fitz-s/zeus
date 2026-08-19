@@ -1,9 +1,9 @@
 # Created: 2026-04-02
-# Last reused/audited: 2026-05-22
-# Lifecycle: created=2026-04-02; last_reviewed=2026-05-22; last_reused=2026-05-22
+# Last reused/audited: 2026-08-09
+# Lifecycle: created=2026-04-02; last_reviewed=2026-08-09; last_reused=2026-08-09
 # Purpose: Protect architecture/schema contracts and high-sensitivity DB bootstrap invariants.
 # Reuse: Audit touched assertions against architecture manifests and scoped AGENTS before extending.
-# Authority basis: midstream verdict v2 2026-04-23 (docs/to-do-list/zeus_midstream_fix_plan_2026-04-23.md T1.a midstream guardian panel); Wave26 canonical position event env authority
+# Authority basis: midstream verdict v2 2026-04-23; Wave26 canonical position event env authority; docs/operations/current/finite_evidence_probability_symmetry/PLAN.md
 from __future__ import annotations
 
 import json
@@ -632,10 +632,11 @@ def _create_execution_fact_table(conn):
     conn.commit()
 
 
-def _create_outcome_fact_table(conn):
+def _create_outcome_fact_table(conn, *, schema=""):
+    target = f"{schema}.outcome_fact" if schema else "outcome_fact"
     conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS outcome_fact (
+        f"""
+        CREATE TABLE IF NOT EXISTS {target} (
             position_id TEXT PRIMARY KEY,
             strategy_key TEXT CHECK (strategy_key IN (
                 'settlement_capture',
@@ -661,12 +662,11 @@ def _create_outcome_fact_table(conn):
 
 
 def test_canonical_transaction_boundary_helper_is_atomic(tmp_path):
-    from src.state.db import append_many_and_project
+    from src.state.db import append_many_and_project, apply_architecture_kernel_schema
 
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
-    sql = (ROOT / "architecture/2026_04_02_architecture_kernel.sql").read_text()
-    conn.executescript(sql)
+    apply_architecture_kernel_schema(conn)
 
     event = _canonical_event()
     projection = _canonical_projection()
@@ -697,12 +697,11 @@ def test_canonical_transaction_boundary_helper_is_atomic(tmp_path):
 
 
 def test_canonical_transaction_boundary_helper_rejects_mismatched_payloads():
-    from src.state.db import append_many_and_project
+    from src.state.db import append_many_and_project, apply_architecture_kernel_schema
 
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
-    sql = (ROOT / "architecture/2026_04_02_architecture_kernel.sql").read_text()
-    conn.executescript(sql)
+    apply_architecture_kernel_schema(conn)
 
     bad_event = _canonical_event()
     bad_projection = _canonical_projection()
@@ -721,12 +720,11 @@ def test_canonical_transaction_boundary_helper_rejects_mismatched_payloads():
 
 
 def test_append_many_and_project_is_atomic():
-    from src.state.db import append_many_and_project
+    from src.state.db import append_many_and_project, apply_architecture_kernel_schema
 
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
-    sql = (ROOT / "architecture/2026_04_02_architecture_kernel.sql").read_text()
-    conn.executescript(sql)
+    apply_architecture_kernel_schema(conn)
 
     event1 = _canonical_event()
     event2 = dict(_canonical_event())
@@ -963,12 +961,11 @@ def test_apply_architecture_kernel_schema_has_no_runtime_callers_outside_db_or_t
 
 
 def test_transaction_boundary_helper_rejects_incomplete_projection_payload():
-    from src.state.db import append_many_and_project
+    from src.state.db import append_many_and_project, apply_architecture_kernel_schema
 
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
-    sql = (ROOT / "architecture/2026_04_02_architecture_kernel.sql").read_text()
-    conn.executescript(sql)
+    apply_architecture_kernel_schema(conn)
 
     projection = _canonical_projection()
     projection.pop("updated_at")
@@ -1231,14 +1228,47 @@ def _runtime_position(
     )
 
 
-def _install_minimal_venue_commands_lookup_table(conn: sqlite3.Connection) -> None:
-    """Install the columns chain reconciliation probes in canonical-kernel fixtures."""
-    conn.execute(
+def _install_current_venue_fact_fixture(conn: sqlite3.Connection) -> None:
+    """Install the command/fill identity read by pending-entry reconciliation.
+
+    The architecture kernel intentionally owns neither trade commands nor their
+    append-only venue observations. This fixture mirrors the current fields
+    consumed by ``canonical_trade_fact_cte`` so it cannot pass with a
+    pre-identity ``venue_trade_facts`` shape.
+    """
+    conn.executescript(
         """
         CREATE TABLE IF NOT EXISTS venue_commands (
-            venue_order_id TEXT,
-            intent_kind TEXT
-        )
+            command_id TEXT PRIMARY KEY,
+            position_id TEXT NOT NULL,
+            intent_kind TEXT NOT NULL,
+            side TEXT NOT NULL,
+            token_id TEXT NOT NULL,
+            size TEXT NOT NULL,
+            state TEXT NOT NULL,
+            venue_order_id TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS venue_trade_facts (
+            trade_fact_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            trade_id TEXT NOT NULL,
+            venue_order_id TEXT NOT NULL,
+            command_id TEXT NOT NULL,
+            state TEXT NOT NULL,
+            filled_size TEXT NOT NULL,
+            fill_price TEXT NOT NULL,
+            fee_paid_micro INTEGER,
+            tx_hash TEXT,
+            block_number INTEGER,
+            confirmation_count INTEGER DEFAULT 0,
+            source TEXT NOT NULL,
+            observed_at TEXT NOT NULL,
+            venue_timestamp TEXT,
+            ingested_at TEXT NOT NULL,
+            local_sequence INTEGER NOT NULL,
+            raw_payload_hash TEXT NOT NULL,
+            raw_payload_json TEXT,
+            UNIQUE (trade_id, local_sequence)
+        );
         """
     )
 
@@ -2028,7 +2058,7 @@ def test_reconciliation_rescue_builder_emits_chain_synced_event_and_projection_t
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     apply_architecture_kernel_schema(conn)
-    _install_minimal_venue_commands_lookup_table(conn)
+    _install_current_venue_fact_fixture(conn)
 
     pending_pos = _runtime_position(state="pending_tracked", chain_state="local_only")
     pending_pos.entry_order_id = "ord-1"
@@ -2119,7 +2149,13 @@ def test_reconciliation_rescue_builder_preserves_legacy_rescue_provenance_fields
         "applied_validations": ["spread_ok", "kelly_ok"],
         "entry_fill_verified": True,
         "shares": 20.0,
+        "shares_submitted": 0.0,
+        "shares_filled": 0.0,
+        "shares_remaining": 0.0,
         "cost_basis_usd": 10.0,
+        "filled_cost_basis_usd": 0.0,
+        "entry_price_avg_fill": 0.0,
+        "entry_economics_authority": "legacy_unknown",
         "size_usd": 10.0,
         "condition_id": "cond-1",
         "rescue_condition_id": "cond-1",
@@ -2381,6 +2417,54 @@ def test_log_settlement_event_degrades_cleanly_on_canonical_bootstrap_db():
     conn.close()
 
 
+def test_log_settlement_event_routes_outcome_fact_to_attached_trade_owner(tmp_path):
+    from src.state.db import log_outcome_fact, log_settlement_event
+
+    forecasts_db = tmp_path / "zeus-forecasts.db"
+    trades_db = tmp_path / "zeus_trades.db"
+    conn = sqlite3.connect(forecasts_db)
+    conn.row_factory = sqlite3.Row
+    assert log_outcome_fact(
+        conn,
+        position_id="owner-unavailable",
+        outcome=0,
+    ) == {"status": "skipped_missing_owner", "table": "outcome_fact"}
+    conn.execute("ATTACH DATABASE ? AS trades", (str(trades_db),))
+    _create_outcome_fact_table(conn, schema="trades")
+
+    pos = _runtime_position(state="settled", chain_state="synced")
+    pos.last_exit_at = "2026-07-24T16:31:24Z"
+    pos.pnl = -49.0
+    conn.execute("SAVEPOINT settlement_cycle")
+    log_settlement_event(conn, pos, winning_bin="28°C", won=False, outcome=0)
+    conn.execute("ROLLBACK TO settlement_cycle")
+    conn.execute("RELEASE settlement_cycle")
+    assert conn.execute(
+        "SELECT 1 FROM trades.outcome_fact WHERE position_id = 'rt-pos-1'"
+    ).fetchone() is None
+
+    log_settlement_event(conn, pos, winning_bin="28°C", won=False, outcome=0)
+
+    assert conn.execute(
+        "SELECT 1 FROM main.sqlite_master WHERE name = 'outcome_fact'"
+    ).fetchone() is None
+    outcome_row = conn.execute(
+        """
+        SELECT position_id, strategy_key, settled_at, pnl, outcome
+        FROM trades.outcome_fact
+        WHERE position_id = 'rt-pos-1'
+        """
+    ).fetchone()
+    assert dict(outcome_row) == {
+        "position_id": "rt-pos-1",
+        "strategy_key": "center_buy",
+        "settled_at": "2026-07-24T16:31:24Z",
+        "pnl": -49.0,
+        "outcome": 0,
+    }
+    conn.close()
+
+
 def test_log_settlement_event_still_fails_loudly_on_malformed_legacy_position_events_schema():
     from src.state.db import log_settlement_event
 
@@ -2542,7 +2626,7 @@ def test_reconciliation_pending_fill_path_writes_canonical_rows_when_prior_histo
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     apply_architecture_kernel_schema(conn)
-    _install_minimal_venue_commands_lookup_table(conn)
+    _install_current_venue_fact_fixture(conn)
 
     pending_pos = _runtime_position(state="pending_tracked", chain_state="local_only")
     pending_pos.entry_order_id = "ord-1"
@@ -2561,19 +2645,27 @@ def test_reconciliation_pending_fill_path_writes_canonical_rows_when_prior_histo
     # trade fact. This test asserts the trade-verified path, so it must provide
     # the fill fact the discriminator (_pending_entry_has_linked_fill_fact) reads
     # from venue_trade_facts — without it the rescue is balance-only.
-    conn.executescript(
+    conn.execute(
         """
-        CREATE TABLE IF NOT EXISTS venue_trade_facts (
-            venue_order_id TEXT, state TEXT, source TEXT,
-            filled_size REAL, fill_price REAL,
-            observed_at TEXT, local_sequence INTEGER
-        );
+        INSERT INTO venue_commands (
+            command_id, position_id, intent_kind, side, token_id, size,
+            state, venue_order_id
+        ) VALUES ('cmd-1', 'rt-pos-1', 'ENTRY', 'BUY', 'tok-1', '20',
+                  'FILLED', 'ord-1')
         """
     )
     conn.execute(
-        "INSERT INTO venue_trade_facts (venue_order_id, state, source, filled_size, "
-        "fill_price, observed_at, local_sequence) VALUES "
-        "('ord-1', 'CONFIRMED', 'REST', 20.0, 0.5, '2026-04-03T00:00:00Z', 1)"
+        """
+        INSERT INTO venue_trade_facts (
+            trade_id, venue_order_id, command_id, state, filled_size,
+            fill_price, source, observed_at, venue_timestamp, ingested_at,
+            local_sequence, raw_payload_hash, raw_payload_json
+        ) VALUES (
+            'trade-1', 'ord-1', 'cmd-1', 'CONFIRMED', '20', '0.5', 'REST',
+            '2026-04-03T00:00:00Z', '2026-04-03T00:00:00Z',
+            '2026-04-03T00:00:01Z', 1, 'fill-hash-1', '{}'
+        )
+        """
     )
 
     portfolio = PortfolioState(positions=[pending_pos])
@@ -2649,7 +2741,7 @@ def test_reconciliation_pending_fill_dual_write_failure_after_legacy_steps_is_ex
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     apply_architecture_kernel_schema(conn)
-    _install_minimal_venue_commands_lookup_table(conn)
+    _install_current_venue_fact_fixture(conn)
 
     pending_pos = _runtime_position(state="pending_tracked", chain_state="local_only")
     pending_pos.entry_order_id = "ord-1"
@@ -2835,9 +2927,9 @@ def test_reconciliation_size_correction_path_writes_canonical_rows_when_prior_hi
     chain_positions = [
         ChainPosition(
             token_id="tok-1",
-            size=22.0,
+            size=18.0,
             avg_price=0.44,
-            cost=11.0,
+            cost=9.0,
             condition_id="cond-1",
         )
     ]
@@ -2859,11 +2951,11 @@ def test_reconciliation_size_correction_path_writes_canonical_rows_when_prior_hi
     ]
     assert dict(projection_row) == {
         "phase": "active",
-        "shares": 22.0,
-        "cost_basis_usd": 11.0,
-        "size_usd": 11.0,
+        "shares": 18.0,
+        "cost_basis_usd": 9.0,
+        "size_usd": 9.0,
     }
-    assert portfolio.positions[0].shares == 22.0
+    assert portfolio.positions[0].shares == 18.0
     conn.close()
 
 
@@ -3018,11 +3110,8 @@ def test_reconciliation_restores_synced_state_when_chain_economics_already_match
     conn.close()
 
 
-def test_reconciliation_size_correction_path_preserves_legacy_behavior_on_legacy_db():
-    """P0b (2026-07-04): a size mismatch with no pre-existing position_current
-    row (legacy/pre-canonical position) is no longer quarantined — chain size
-    is truth, applied in-memory, with no durable row to correct yet (see
-    docs/rebuild/chain_mirror_state_model_2026-07-04.md §5 follow-up)."""
+def test_reconciliation_wallet_residual_does_not_expand_legacy_owned_position():
+    """Wallet-token aggregate excess is not authority to enlarge a Zeus slice."""
     from src.state.chain_reconciliation import ChainPosition, reconcile
     from src.state.db import init_schema, query_position_events
     from src.state.portfolio import PortfolioState
@@ -3047,21 +3136,15 @@ def test_reconciliation_size_correction_path_preserves_legacy_behavior_on_legacy
     stats = reconcile(portfolio, chain_positions, conn=conn)
 
     assert stats["updated"] == 0
-    assert stats["skipped_size_correction_missing_canonical_baseline"] == 1
-    assert portfolio.positions[0].shares == 22.0
+    assert stats["unattributed_chain_residual"] == 1
+    assert portfolio.positions[0].shares == 20.0
     assert getattr(portfolio.positions[0].state, "value", portfolio.positions[0].state) == "entered"
     assert query_position_events(conn, "rt-pos-1") == []
     conn.close()
 
 
-def test_reconciliation_size_correction_no_baseline_persists_durable_review():
-    """P0b (2026-07-04): an unresolved size mismatch with NO canonical baseline
-    at all (no position_current row yet for this position_id) is no longer
-    quarantined nor tagged size_mismatch_unresolved — that invented durable
-    state is retired. Chain size is truth in-memory
-    (corrected.shares == chain.size); there is no durable row to correct, so
-    the chain-mirror-shaped writer legitimately no-ops (returns False) and no
-    event is persisted for a row that was never canonically created."""
+def test_reconciliation_wallet_residual_does_not_create_canonical_position():
+    """Unattributed wallet inventory does not fabricate a Zeus lifecycle row."""
     from src.state.chain_reconciliation import ChainPosition, reconcile
     from src.state.db import apply_architecture_kernel_schema
     from src.state.portfolio import PortfolioState
@@ -3085,10 +3168,10 @@ def test_reconciliation_size_correction_no_baseline_persists_durable_review():
 
     stats = reconcile(portfolio, chain_positions, conn=conn)
 
-    # Size correction itself still skipped (no canonical baseline to correct).
+    # Excess wallet inventory is external/unattributed, not a local correction.
     assert stats["updated"] == 0
-    assert stats["skipped_size_correction_missing_canonical_baseline"] == 1
-    assert portfolio.positions[0].shares == 22.0
+    assert stats["unattributed_chain_residual"] == 1
+    assert portfolio.positions[0].shares == 20.0
     event_types = [
         r[0] for r in conn.execute(
             "SELECT event_type FROM position_events WHERE position_id='rt-pos-1'"
@@ -3136,9 +3219,9 @@ def test_reconciliation_size_correction_hybrid_drift_fails_before_new_canonical_
     chain_positions = [
         ChainPosition(
             token_id="tok-1",
-            size=22.0,
+            size=18.0,
             avg_price=0.44,
-            cost=11.0,
+            cost=9.0,
             condition_id="cond-1",
         )
     ]
@@ -3190,9 +3273,9 @@ def test_reconciliation_size_correction_failure_is_explicit_before_in_memory_mut
     chain_positions = [
         ChainPosition(
             token_id="tok-1",
-            size=22.0,
+            size=18.0,
             avg_price=0.44,
-            cost=11.0,
+            cost=9.0,
             condition_id="cond-1",
         )
     ]

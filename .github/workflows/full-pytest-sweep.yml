@@ -7,7 +7,7 @@ name: full-pytest-sweep
 # Purpose: cross-PR interaction anti-regression gate. Per-PR curated CI is a
 # statement about each PR's own correctness — never about post-merge combined
 # state. This gate closes that blind spot by running the full test suite on
-# every PR-open/sync and every push to main.
+# every PR-open/sync and every push to live (the default branch).
 #
 # Failure taxonomy (8 universal categories this gate catches):
 #   1. Schema/registry drift (new migration, NOT NULL, enum extended)
@@ -28,10 +28,10 @@ name: full-pytest-sweep
 
 on:
   pull_request:
-    branches: [main]
+    branches: [live]
     types: [opened, synchronize, reopened, ready_for_review]
   push:
-    branches: [main]
+    branches: [live]
   workflow_dispatch:
   schedule:
     - cron: "13 7 * * *"  # daily at 07:13 UTC — avoids :00 pile-up

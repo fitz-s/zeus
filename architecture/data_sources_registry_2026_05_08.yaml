@@ -68,17 +68,18 @@ sources:
         # "Forecast Day 0 06:40... Forecast Day 15 07:40... Derived products Step 0 to 240 07:41... Step 246 to 360 08:01"
         description: >
           00/12 UTC cycles: first products at cycle_time + 6h40m; full
-          step 0–360 complete by cycle_time + 8h01m. Zeus uses
-          safe_fetch default_lag_minutes=485 (8h05m) per
-          config/source_release_calendar.yaml — verified empirically
-          to avoid requesting before the full batch is available.
-          Single-batch dissemination: all steps arrive together, not
-          step-by-step. Catch-up before T+7h40m returns 404 universally.
+          upstream horizon complete by cycle_time + 8h01m. Zeus polls from
+          min_partial_lag_minutes=400, ingests the observed 3..144h frontier,
+          and authorizes only target windows whose exact required steps and
+          members are complete. Full-run collection retains the conservative
+          safe_fetch default_lag_minutes=485 (8h05m). Primary S3 object metadata
+          for 2026-08-14..16 showed Zeus step 72 near T+7h42m and step 144 near
+          T+7h45m; publication is incremental, not a single atomic batch.
         safe_fetch_lag_minutes_default: 485  # [VERIFIED] config/source_release_calendar.yaml:9
         safe_fetch_lag_minutes_min_partial: 400  # [VERIFIED] config/source_release_calendar.yaml:10
         max_source_lag_seconds: 108000  # 30h [VERIFIED] config/source_release_calendar.yaml:12
       cycle_specific_notes:
-        "00_12": "full_horizon cycles — max step 360h, live_max_step_hours=282 [VERIFIED]"
+        "00_12": "full source cycles; Zeus live fetch and coverage ceiling is 144h [VERIFIED]"
         "06_18": "short horizon only — max step 144h, live_authorization=false beyond 144h [VERIFIED]"
 
     what_is_published:
@@ -107,14 +108,14 @@ sources:
         description: >
           [VERIFIED] ECMWF set-iii page: "hourly until step 90, then 3-hourly
           from 93 to 144, then 6-hourly thereafter."
-          Zeus requests: 3h stride 3–144h, 6h stride 150–282h.
-        zeus_step_list: "3,6,...,144 (3h stride) then 150,156,...,282 (6h stride)"
+          Zeus requests only the 3h stride 3–144h live window.
+        zeus_step_list: "3,6,...,144 (3h stride)"
         zeus_step_list_code: "src/data/ecmwf_open_data.py:102-105 STEP_HOURS"
 
     scope_and_range:
-      step_grid_zeus: "0 to 144 by 3h; 150 to 282 by 6h (00/12 cycles, live path)"  # [VERIFIED] ecmwf_open_data.py:102-105
-      max_horizon_used_by_zeus: "282h"  # [VERIFIED] RUN.md fix/#134 2026-05-08; source_release_calendar.yaml live_max_step_hours=282
-      max_horizon_rationale: "D+10 + buffer for UTC+12 cities (max required step ≈ 252h for D+10)"
+      step_grid_zeus: "3 to 144 by 3h (all cycles, live path)"  # [VERIFIED] ecmwf_open_data.py STEP_HOURS
+      max_horizon_used_by_zeus: "144h"  # [VERIFIED] source_release_calendar.yaml live_max_step_hours
+      max_horizon_rationale: "Polymarket weather market 5-day cap; over-horizon local-day windows fail closed"
       spatial_extent: "Global"
       downsample_policy: >
         Live 0.25° must be downsampled to 0.5° before Zeus calibration/extraction.
@@ -136,6 +137,10 @@ sources:
         - "extract subprocess: '51 source data/scripts/extract_open_ens_localday.py' [VERIFIED ecmwf_open_data.py:81]"
         - "ingest: scripts/ingest_grib_to_snapshots.py::ingest_track() [VERIFIED ecmwf_open_data.py:23]"
         - "release calendar: config/source_release_calendar.yaml entries ecmwf_open_data_mx2t6_high / ecmwf_open_data_mn2t6_low [VERIFIED]"
+      partial_live_policy: >
+        TARGET_WINDOW_COMPLETE_REQUIRED: a PARTIAL source run never grants
+        run-wide live authority; exact source_run_coverage may become
+        LIVE_ELIGIBLE only when all target-window steps and 51 members exist.
       target_table: "ensemble_snapshots (per-cycle, per-member, per-step, per-city, per-local-date)"
       data_version_pattern:
         HIGH: "ecmwf_opendata_mx2t6_local_calendar_day_max_v1"  # [VERIFIED] ecmwf_open_data.py:28-29; contracts/ensemble_snapshot_provenance.py

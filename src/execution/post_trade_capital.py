@@ -1,6 +1,6 @@
 # Created: 2026-06-08
 # Last reused or audited: 2026-06-08
-# Authority basis: docs/architecture/system_decomposition_plan.md
+# Authority basis: docs/reference/design_system_decomposition_plan.md
 #   §4.3 (Post-Trade Capital Lifecycle), §6 (P4 row + co-location decision),
 #   §7 (I3 P4->riskguard/P1 commit-before-HTTP no-back-coupling; I4 ingest->P4),
 #   §8 Step 2 (split chain-sync READ from exit-SUBMIT), §9 (regression-unconstructable).
@@ -244,7 +244,13 @@ def collateral_snapshot_refresh_cycle() -> None:
     from src.state.collateral_ledger import CollateralLedger
     from src.state.db import _zeus_trade_db_path
 
-    ledger = CollateralLedger(db_path=_zeus_trade_db_path())
+    # Daemon pre-flight/migrations own schema readiness. Re-running idempotent
+    # DDL on every 30-second refresh still needs the global SQLite writer and
+    # can starve the very snapshot append this job exists to publish.
+    ledger = CollateralLedger(
+        db_path=_zeus_trade_db_path(),
+        initialize_schema=False,
+    )
     deadline_seconds = _post_trade_collateral_deadline_seconds()
 
     def _read():
@@ -282,6 +288,27 @@ def collateral_snapshot_refresh_cycle() -> None:
         snapshot.available_pusd_micro,
         len(snapshot.ctf_token_balances),
     )
+    # This is a delivery hint, never collateral authority.  The order daemon
+    # reloads the same durable ``captured_at`` snapshot before restoring its
+    # process-local allocator. CHAIN/VENUE are accepted by bankroll_provider;
+    # DEGRADED wakes immediately revoke authority and are then acknowledged.
+    if snapshot.authority_tier in {"CHAIN", "VENUE", "DEGRADED"}:
+        try:
+            from src.runtime.reactor_wake import (
+                COLLATERAL_AUTHORITY_REFRESHED_WAKE_REASON,
+                publish_reactor_wake,
+            )
+
+            publish_reactor_wake(
+                source="post_trade_capital",
+                reason=COLLATERAL_AUTHORITY_REFRESHED_WAKE_REASON,
+                published_at=snapshot.captured_at,
+            )
+        except Exception:  # noqa: BLE001 - the periodic warm remains a recovery backstop
+            logger.exception(
+                "collateral_snapshot_refresh: canonical snapshot committed but allocator "
+                "refresh wake publish failed"
+            )
     if wallet_address:
         try:
             _upsert_pusd_wallet_balance_head(snapshot, wallet_address)

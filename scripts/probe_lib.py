@@ -29,10 +29,15 @@ LAWS this module encodes (use it instead of re-deriving them per probe):
 
 from __future__ import annotations
 
+import os
 import sqlite3
 from datetime import datetime, timedelta, timezone
 
-ZEUS = "/Users/leofitz/zeus/state"
+# ZEUS_MAIN_TREE overrides; default is ~/zeus, the operator's standard layout.
+# expanduser() so ZEUS_MAIN_TREE=~/zeus (the shell does NOT expand '~' inside
+# os.environ.get) resolves correctly instead of leaving a literal '~' segment.
+_MAIN_TREE = os.path.expanduser(os.environ.get("ZEUS_MAIN_TREE") or "~/zeus")
+ZEUS = os.path.join(_MAIN_TREE, "state")
 WORLD = f"{ZEUS}/zeus-world.db"
 TRADES = f"{ZEUS}/zeus_trades.db"
 FORECASTS = f"{ZEUS}/zeus-forecasts.db"

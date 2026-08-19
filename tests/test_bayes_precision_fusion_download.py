@@ -1,5 +1,5 @@
 # Created: 2026-06-08
-# Lifecycle: created=2026-06-08; last_reviewed=2026-07-28; last_reused=2026-07-28
+# Lifecycle: created=2026-06-08; last_reviewed=2026-08-18; last_reused=2026-08-18
 # Purpose: Regression tests for BPF raw forecast download and persistence semantics.
 # Reuse: Run when changing Bayes precision fusion raw-input capture or scheduler health.
 # Authority basis: BAYES_PRECISION_FUSION_SPEC.md §6 F1 (raw capture: previous_runs + single_runs ->
@@ -23,6 +23,7 @@ import time
 from datetime import UTC, date, datetime
 from pathlib import Path
 
+import httpx
 import pytest
 
 from src.state.schema.v2_schema import ensure_replacement_forecast_live_schema
@@ -233,6 +234,41 @@ def test_source_clock_fetch_uses_remaining_deadline_without_retries(monkeypatch)
     assert 0.0 < float(captured["timeout"]) <= 0.2
 
 
+def test_openmeteo_default_transport_reuses_one_bounded_client(
+    monkeypatch, tmp_path
+) -> None:
+    import src.data.openmeteo_client as client
+
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+    calls: list[tuple[str, dict[str, object]]] = []
+
+    class _Client:
+        def get(self, url, *, params, timeout):
+            calls.append((str(url), dict(params)))
+            return httpx.Response(
+                200,
+                json={"ok": True},
+                request=httpx.Request("GET", url, params=params),
+            )
+
+    shared = _Client()
+    monkeypatch.setattr(client, "_SHARED_HTTP_CLIENT", shared)
+    tracker = client.OpenMeteoQuotaTracker(
+        state_path=tmp_path / "openmeteo-quota.json"
+    )
+
+    for latitude in (1.0, 2.0):
+        assert client.fetch(
+            "https://api.open-meteo.com/v1/forecast",
+            {"latitude": latitude, "longitude": 3.0},
+            max_retries=1,
+            quota=tracker,
+        ) == {"ok": True}
+
+    assert len(calls) == 2
+    assert tracker.calls_today() == 2
+
+
 def test_source_clock_fetch_batches_multiple_locations_into_one_request(monkeypatch) -> None:
     import src.data.bayes_precision_fusion_download as dl
     import src.data.openmeteo_client as client
@@ -279,6 +315,244 @@ def test_source_clock_fetch_batches_multiple_locations_into_one_request(monkeypa
         {date(2026, 6, 9): {"ecmwf_ifs": (22.0, 19.0)}},
         {date(2026, 6, 9): {"ecmwf_ifs": (32.0, 29.0)}},
     ]
+
+
+@pytest.mark.parametrize(
+    ("target_date", "decision_at", "first_hour", "last_hour", "expected"),
+    (
+        # Sao Paulo 19:30 local: the 06:00 prefix gap is already elapsed and
+        # the current run still covers the unresolved evening.
+        (date(2026, 8, 18), datetime(2026, 8, 18, 22, 30, tzinfo=UTC), 6, 23, True),
+        # A clipped suffix can omit the unresolved peak and remains forbidden.
+        (date(2026, 8, 18), datetime(2026, 8, 18, 22, 30, tzinfo=UTC), 6, 18, False),
+        # A run that starts after the decision does not cover the current-to-end window.
+        (date(2026, 8, 18), datetime(2026, 8, 18, 22, 30, tzinfo=UTC), 21, 23, False),
+        # The nominal evening threshold is not enough when it is already behind the decision.
+        (date(2026, 8, 18), datetime(2026, 8, 19, 1, 30, tzinfo=UTC), 6, 20, False),
+        # Missing-prefix relaxation is Day0-only; future days still need full coverage.
+        (date(2026, 8, 19), datetime(2026, 8, 18, 22, 30, tzinfo=UTC), 6, 23, False),
+        (date(2026, 8, 19), datetime(2026, 8, 18, 22, 30, tzinfo=UTC), 0, 23, True),
+    ),
+)
+def test_single_runs_partial_day_requires_elapsed_prefix_and_remaining_coverage(
+    target_date: date,
+    decision_at: datetime,
+    first_hour: int,
+    last_hour: int,
+    expected: bool,
+) -> None:
+    from src.data.bayes_precision_fusion_download import (
+        _parse_batched_single_runs_payload,
+    )
+
+    hours = list(range(first_hour, last_hour + 1))
+    payload = {
+        "hourly": {
+            "time": [f"{target_date.isoformat()}T{hour:02d}:00" for hour in hours],
+            "temperature_2m": [float(hour) for hour in hours],
+        },
+        "hourly_units": {"temperature_2m": "C"},
+    }
+    parsed = _parse_batched_single_runs_payload(
+        payload,
+        ["ecmwf_ifs"],
+        target_date,
+        "America/Sao_Paulo",
+        decision_at=decision_at,
+    )
+
+    assert ("ecmwf_ifs" in parsed) is expected
+    if expected:
+        assert parsed["ecmwf_ifs"] == (float(last_hour), float(first_hour))
+
+
+def test_source_clock_fetch_isolates_location_response_failure(monkeypatch) -> None:
+    import src.data.bayes_precision_fusion_download as dl
+    import src.data.openmeteo_client as client
+
+    calls: list[int] = []
+
+    def _payload(base: float) -> dict[str, object]:
+        return {
+            "hourly": {
+                "time": [
+                    "2026-06-09T00:00",
+                    "2026-06-09T03:00",
+                    "2026-06-09T12:00",
+                    "2026-06-09T21:00",
+                ],
+                "temperature_2m": [base - 1.0, base, base + 2.0, base + 1.0],
+            },
+            "hourly_units": {"temperature_2m": "°C"},
+        }
+
+    def _fetch(_url, params, **_kwargs):
+        location_count = len(str(params["latitude"]).split(","))
+        calls.append(location_count)
+        if location_count == 4:
+            raise RuntimeError("Open-Meteo multi-location response count mismatch")
+        bases = [float(value) for value in str(params["latitude"]).split(",")]
+        return [_payload(base) for base in bases]
+
+    monkeypatch.setattr(client, "fetch", _fetch)
+    got = dl._default_live_fetch_locations_batched(
+        models=["ecmwf_ifs"],
+        locations=[
+            (20.0, 1.0, "UTC", (date(2026, 6, 9),)),
+            (30.0, 2.0, "UTC", (date(2026, 6, 9),)),
+            (40.0, 3.0, "UTC", (date(2026, 6, 9),)),
+            (50.0, 4.0, "UTC", (date(2026, 6, 9),)),
+        ],
+        run=datetime(2026, 6, 8, 0, tzinfo=UTC),
+        forecast_hours=120,
+        deadline_monotonic=time.monotonic() + 1.0,
+    )
+
+    assert calls == [4, 2, 2]
+    assert [
+        result[date(2026, 6, 9)]["ecmwf_ifs"] for result in got
+    ] == [
+        (22.0, 19.0),
+        (32.0, 29.0),
+        (42.0, 39.0),
+        (52.0, 49.0),
+    ]
+
+
+@pytest.mark.parametrize(
+    "error",
+    (
+        httpx.ConnectError("DNS lookup failed"),
+        httpx.ConnectTimeout("TLS handshake timed out"),
+        httpx.ReadTimeout("read timed out"),
+        OSError(8, "nodename nor servname provided, or not known"),
+        TimeoutError("request timed out"),
+    ),
+)
+def test_source_clock_fetch_does_not_split_global_transport_failure(
+    monkeypatch,
+    error: Exception,
+) -> None:
+    import src.data.bayes_precision_fusion_download as dl
+    import src.data.openmeteo_client as client
+
+    calls: list[int] = []
+
+    def _fetch(_url, params, **_kwargs):
+        calls.append(len(str(params["latitude"]).split(",")))
+        raise error
+
+    monkeypatch.setattr(client, "fetch", _fetch)
+    target_date = date(2026, 6, 9)
+    got = dl._default_live_fetch_locations_batched(
+        models=["ecmwf_ifs"],
+        locations=[
+            (float(index), float(index), "UTC", (target_date,))
+            for index in range(25)
+        ],
+        run=datetime(2026, 6, 8, 0, tzinfo=UTC),
+        forecast_hours=120,
+        deadline_monotonic=time.monotonic() + 1.0,
+    )
+
+    assert calls == [25]
+    assert all(
+        dl._BATCH_TRANSPORT_ERROR_KEY in result[target_date]
+        for result in got
+    )
+
+
+def test_source_clock_fetch_does_not_split_quota_failure(monkeypatch) -> None:
+    import src.data.bayes_precision_fusion_download as dl
+    import src.data.openmeteo_client as client
+
+    calls: list[int] = []
+
+    def _fetch(_url, params, **_kwargs):
+        calls.append(len(str(params["latitude"]).split(",")))
+        raise RuntimeError("Open-Meteo quota exhausted (570 calls today)")
+
+    monkeypatch.setattr(client, "fetch", _fetch)
+    got = dl._default_live_fetch_locations_batched(
+        models=["ecmwf_ifs"],
+        locations=[
+            (20.0, 1.0, "UTC", (date(2026, 6, 9),)),
+            (30.0, 2.0, "UTC", (date(2026, 6, 9),)),
+            (40.0, 3.0, "UTC", (date(2026, 6, 9),)),
+            (50.0, 4.0, "UTC", (date(2026, 6, 9),)),
+        ],
+        run=datetime(2026, 6, 8, 0, tzinfo=UTC),
+        forecast_hours=120,
+        deadline_monotonic=time.monotonic() + 1.0,
+    )
+
+    assert calls == [4]
+    assert all(
+        dl._BATCH_TRANSPORT_ERROR_KEY in result[date(2026, 6, 9)]
+        for result in got
+    )
+
+
+def test_source_clock_fetch_does_not_split_typed_http_outcome(monkeypatch) -> None:
+    import src.data.bayes_precision_fusion_download as dl
+    import src.data.openmeteo_client as client
+
+    calls: list[int] = []
+    error = RuntimeError("synthetic typed retryable response")
+    error.outcome = client.OpenMeteoHTTPOutcome(
+        status_code=503,
+        retry_class=client.OpenMeteoRetryClass.RETRYABLE,
+        retry_after_seconds=None,
+        reason="http_503",
+        body_sha256="synthetic",
+    )
+
+    def _fetch(_url, params, **_kwargs):
+        calls.append(len(str(params["latitude"]).split(",")))
+        raise error
+
+    monkeypatch.setattr(client, "fetch", _fetch)
+    got = dl._default_live_fetch_locations_batched(
+        models=["ecmwf_ifs"],
+        locations=[
+            (20.0, 1.0, "UTC", (date(2026, 6, 9),)),
+            (30.0, 2.0, "UTC", (date(2026, 6, 9),)),
+        ],
+        run=datetime(2026, 6, 8, 0, tzinfo=UTC),
+        forecast_hours=120,
+        deadline_monotonic=time.monotonic() + 1.0,
+    )
+
+    assert calls == [2]
+    assert all(
+        result[date(2026, 6, 9)][dl._BATCH_TRANSPORT_ERROR_KEY][1]
+        == error.outcome.persisted()
+        for result in got
+    )
+
+
+def test_source_clock_fetch_does_not_split_expired_deadline(monkeypatch) -> None:
+    import src.data.bayes_precision_fusion_download as dl
+    import src.data.openmeteo_client as client
+
+    calls: list[object] = []
+    monkeypatch.setattr(client, "fetch", lambda *_args, **_kwargs: calls.append(object()))
+    got = dl._default_live_fetch_locations_batched(
+        models=["ecmwf_ifs"],
+        locations=[
+            (20.0, 1.0, "UTC", (date(2026, 6, 9),)),
+            (30.0, 2.0, "UTC", (date(2026, 6, 9),)),
+        ],
+        run=datetime(2026, 6, 8, 0, tzinfo=UTC),
+        forecast_hours=120,
+        deadline_monotonic=time.monotonic() - 0.01,
+    )
+
+    assert calls == []
+    assert all(
+        dl._BATCH_TRANSPORT_ERROR_KEY in result[date(2026, 6, 9)]
+        for result in got
+    )
 
 
 def test_nbm_hourly_run_falls_back_to_atomic_meta_stamped_standard_api(
@@ -347,6 +621,115 @@ def test_nbm_hourly_run_falls_back_to_atomic_meta_stamped_standard_api(
     ]
     assert stamp.run == run
     assert stamp.modification_time == modified
+
+
+def test_single_runs_quota_uses_atomic_meta_stamped_standard_api_for_same_model(
+    monkeypatch,
+) -> None:
+    import src.data.bayes_precision_fusion_download as dl
+    import src.data.openmeteo_client as client
+    import src.data.openmeteo_model_updates as metadata
+
+    model = "ecmwf_ifs"
+    run = datetime(2026, 8, 18, 6, tzinfo=UTC)
+    available = datetime(2026, 8, 18, 13, 1, 20, tzinfo=UTC)
+    modified = datetime(2026, 8, 18, 12, 31, 9, tzinfo=UTC)
+    update = metadata.OpenMeteoModelUpdate(
+        model=model,
+        last_run_initialisation_time=run,
+        last_run_availability_time=available,
+        last_run_modification_time=modified,
+    )
+    fetches: list[tuple[str, dict[str, object]]] = []
+    monkeypatch.setattr(metadata, "fetch_model_updates", lambda *_args, **_kwargs: (update,))
+
+    def _fetch(url, params, **_kwargs):
+        fetches.append((url, params))
+        if "single-runs" in url:
+            raise RuntimeError("429 Too Many Requests")
+        return {
+            "hourly": {
+                "time": ["2026-08-19T00:00", "2026-08-19T12:00", "2026-08-19T21:00"],
+                "temperature_2m": [20.0, 31.0, 24.0],
+            }
+        }
+
+    monkeypatch.setattr(client, "fetch", _fetch)
+    got = dl._default_live_fetch_locations_batched(
+        models=[model],
+        locations=[(32.0853, 34.7818, "Asia/Jerusalem", (date(2026, 8, 19),))],
+        run=run,
+        source_available_at=available,
+        forecast_hours=120,
+    )
+
+    result = got[0][date(2026, 8, 19)]
+    assert result[model] == (31.0, 20.0)
+    assert result[dl._BATCH_TRANSPORT_PROVENANCE_KEY][model].run == run
+    assert len(fetches) == 2
+    assert "single-runs" in fetches[0][0]
+    assert fetches[1][0].endswith("/v1/forecast")
+    assert fetches[1][1]["models"] == dl.OPENMETEO_MODEL_IDS.get(model, model)
+    assert "run" not in fetches[1][1]
+
+
+def test_single_runs_quota_rejects_standard_payload_when_frozen_run_mismatches(
+    monkeypatch,
+) -> None:
+    import src.data.bayes_precision_fusion_download as dl
+    import src.data.openmeteo_client as client
+    import src.data.openmeteo_model_updates as metadata
+
+    model = "icon_global"
+    frozen_run = datetime(2026, 8, 18, 6, tzinfo=UTC)
+    available = datetime(2026, 8, 18, 15, 44, 39, tzinfo=UTC)
+    update = metadata.OpenMeteoModelUpdate(
+        model=model,
+        last_run_initialisation_time=datetime(2026, 8, 18, 12, tzinfo=UTC),
+        last_run_availability_time=available,
+        last_run_modification_time=datetime(2026, 8, 18, 15, 30, tzinfo=UTC),
+    )
+    monkeypatch.setattr(metadata, "fetch_model_updates", lambda *_args, **_kwargs: (update,))
+
+    def _fetch(url, _params, **_kwargs):
+        if "single-runs" in url:
+            raise RuntimeError("429 Too Many Requests")
+        raise AssertionError("mismatched metadata must reject before standard fetch")
+
+    monkeypatch.setattr(client, "fetch", _fetch)
+    got = dl._default_live_fetch_locations_batched(
+        models=[model],
+        locations=[(32.0853, 34.7818, "Asia/Jerusalem", (date(2026, 8, 19),))],
+        run=frozen_run,
+        source_available_at=available,
+        forecast_hours=120,
+    )
+
+    result = got[0][date(2026, 8, 19)]
+    assert model not in result
+    assert "provider metadata no longer matches frozen run" in result[
+        dl._BATCH_TRANSPORT_ERROR_KEY
+    ][0]
+
+
+def test_bpf_preflight_waits_only_when_both_current_transports_are_blocked(
+    monkeypatch,
+) -> None:
+    import src.data.bayes_precision_fusion_download as dl
+
+    waits = {
+        "single-runs-api.open-meteo.com/v1/forecast": 300,
+        "api.open-meteo.com/v1/forecast": 0,
+    }
+    monkeypatch.setattr(
+        dl._BPF_OPENMETEO_QUOTA_TRACKER,
+        "retry_after_seconds",
+        lambda endpoint: waits[endpoint],
+    )
+
+    assert dl.bayes_precision_fusion_quota_cooldown_seconds() == 0
+    waits["api.open-meteo.com/v1/forecast"] = 40
+    assert dl.bayes_precision_fusion_quota_cooldown_seconds() == 40
 
 
 def test_nbm_standard_fallback_discards_payload_when_metadata_changes(
@@ -1277,7 +1660,12 @@ def test_bpf_batched_fetch_uses_injected_quota_tracker(monkeypatch) -> None:
 
     tracker = OpenMeteoQuotaTracker()
     monkeypatch.setattr(dl, "_BPF_OPENMETEO_QUOTA_TRACKER", tracker)
-    monkeypatch.setattr(om.httpx, "get", lambda *_args, **_kwargs: _Resp())
+
+    class _Client:
+        def get(self, *_args, **_kwargs):
+            return _Resp()
+
+    monkeypatch.setattr(om, "_SHARED_HTTP_CLIENT", _Client())
 
     got = dl._default_previous_runs_fetch_batched(
         models=["icon_global"],
@@ -1319,7 +1707,10 @@ def test_default_previous_runs_batched_uses_comma_model_param(monkeypatch) -> No
         captured["models"] = params["models"]
         return _Resp()
 
-    monkeypatch.setattr(om.httpx, "get", _fake_get)
+    class _Client:
+        get = staticmethod(_fake_get)
+
+    monkeypatch.setattr(om, "_SHARED_HTTP_CLIENT", _Client())
 
     got = dl._default_previous_runs_fetch_batched(
         models=["icon_global", ANCHOR_MODEL],

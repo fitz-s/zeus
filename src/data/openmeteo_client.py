@@ -6,12 +6,14 @@ hourly_instants_append, solar_append, and forecasts_append.
 
 from __future__ import annotations
 
+import atexit
 import hashlib
 import json
 import logging
+import math
 import time
 from dataclasses import asdict, dataclass
-from datetime import datetime
+from datetime import date, datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from enum import Enum
 from typing import Mapping
@@ -19,7 +21,13 @@ from urllib.parse import urlsplit
 
 import httpx
 
-from src.data.openmeteo_quota import OpenMeteoQuotaTracker, quota_tracker
+from src.data.openmeteo_quota import (
+    DAILY_HARD_CAP,
+    MAINTENANCE_DAILY_LIMIT,
+    PRIORITY_DAILY_LIMIT,
+    OpenMeteoQuotaTracker,
+    quota_tracker,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +46,22 @@ DEFAULT_TIMEOUT = 30.0
 DEFAULT_MAX_RETRIES = 3
 DEFAULT_BACKOFF_SEC = 2.0
 DEFAULT_429_FALLBACK_WAIT = 15.0
+SINGLE_RUNS_OUTCOME_CLASSIFIER_REVISION = "provider_reason_v2"
+
+# Top-level ``httpx.get`` creates and tears down a connection pool for every
+# request. Open-Meteo is a recurring multi-lane source, so that shape pays a
+# fresh TCP/TLS handshake on every city/source-clock pass. One bounded client
+# per daemon keeps transport reuse below the quota/request-lease authority: the
+# caller still acquires and settles one canonical lease for every HTTP attempt.
+_SHARED_HTTP_CLIENT = httpx.Client(
+    http2=False,
+    limits=httpx.Limits(
+        max_connections=16,
+        max_keepalive_connections=8,
+        keepalive_expiry=60.0,
+    ),
+)
+atexit.register(_SHARED_HTTP_CLIENT.close)
 
 
 class OpenMeteoRetryClass(str, Enum):
@@ -105,16 +129,162 @@ class OpenMeteoRequestSuppressed(RuntimeError):
         self.outcome = outcome
 
 
-def request_identity(url: str, params: dict) -> str:
-    """Return a stable identity for the exact executable HTTP request."""
+class OpenMeteoPreflightDenialReason(str, Enum):
+    """Typed reason for a request rejected before any HTTP attempt."""
 
+    RESERVE_PROTECTED = "RESERVE_PROTECTED"
+    GLOBAL_COOLDOWN = "GLOBAL_COOLDOWN"
+    PRIORITY_DAILY_LIMIT = "PRIORITY_DAILY_LIMIT"
+    CRITICAL_HARD_DAILY_LIMIT = "CRITICAL_HARD_DAILY_LIMIT"
+    DAILY_LIMIT = "DAILY_LIMIT"
+    HOURLY_LIMIT = "HOURLY_LIMIT"
+    MINUTE_LIMIT = "MINUTE_LIMIT"
+    REQUEST_EMBARGO = "REQUEST_EMBARGO"
+    REQUEST_IN_FLIGHT = "REQUEST_IN_FLIGHT"
+    REQUEST_STATE_CAPACITY = "REQUEST_STATE_CAPACITY"
+    REQUEST_TERMINAL = "REQUEST_TERMINAL"
+    SHARED_QUOTA_UNAVAILABLE = "SHARED_QUOTA_UNAVAILABLE"
+    UNKNOWN = "UNKNOWN"
+
+
+class OpenMeteoLocalPreflightQuotaDenied(RuntimeError):
+    """A local quota/request lease was denied before provider I/O."""
+
+    def __init__(
+        self,
+        reason: OpenMeteoPreflightDenialReason,
+        *,
+        detail: str | None,
+    ) -> None:
+        self.reason = reason
+        self.detail = detail
+        if reason in {
+            OpenMeteoPreflightDenialReason.REQUEST_EMBARGO,
+            OpenMeteoPreflightDenialReason.REQUEST_IN_FLIGHT,
+        }:
+            message = f"Open-Meteo request embargoed ({detail or reason.value})"
+        else:
+            message = (
+                "Open-Meteo quota exhausted "
+                f"(preflight_reason={reason.value}; detail={detail or 'missing'})"
+            )
+        super().__init__(message)
+
+
+def _quota_limit_detail(detail: str) -> tuple[str, int] | None:
+    label, separator, counts = detail.partition("=")
+    if not separator or label not in {"day_limit", "hour_limit", "minute_limit"}:
+        return None
+    _, slash, limit = counts.partition("/")
+    if not slash:
+        return None
+    try:
+        return label, int(limit)
+    except ValueError:
+        return None
+
+
+def _preflight_denial_reason(detail: str | None) -> OpenMeteoPreflightDenialReason:
+    """Type the quota authority's structured denial detail exactly once."""
+
+    if not detail:
+        return OpenMeteoPreflightDenialReason.UNKNOWN
+    if detail.startswith("request_retry_until="):
+        return OpenMeteoPreflightDenialReason.REQUEST_EMBARGO
+    if detail.startswith("request_in_flight_until="):
+        return OpenMeteoPreflightDenialReason.REQUEST_IN_FLIGHT
+    if detail.startswith("request_state_capacity="):
+        return OpenMeteoPreflightDenialReason.REQUEST_STATE_CAPACITY
+    if detail.startswith("request_terminal="):
+        return OpenMeteoPreflightDenialReason.REQUEST_TERMINAL
+    if detail == "shared_quota_unavailable":
+        return OpenMeteoPreflightDenialReason.SHARED_QUOTA_UNAVAILABLE
+    if detail.startswith("cooldown_until="):
+        return OpenMeteoPreflightDenialReason.GLOBAL_COOLDOWN
+    limit_detail = _quota_limit_detail(detail)
+    if limit_detail is None:
+        return OpenMeteoPreflightDenialReason.UNKNOWN
+    label, limit = limit_detail
+    if label == "hour_limit":
+        return OpenMeteoPreflightDenialReason.HOURLY_LIMIT
+    if label == "minute_limit":
+        return OpenMeteoPreflightDenialReason.MINUTE_LIMIT
+    if limit == MAINTENANCE_DAILY_LIMIT:
+        return OpenMeteoPreflightDenialReason.RESERVE_PROTECTED
+    if limit == PRIORITY_DAILY_LIMIT:
+        return OpenMeteoPreflightDenialReason.PRIORITY_DAILY_LIMIT
+    if limit == DAILY_HARD_CAP:
+        return OpenMeteoPreflightDenialReason.CRITICAL_HARD_DAILY_LIMIT
+    return OpenMeteoPreflightDenialReason.DAILY_LIMIT
+
+
+def request_identity(
+    url: str,
+    params: dict,
+    *,
+    conditional_status_codes: frozenset[int] = frozenset(),
+) -> str:
+    """Return a stable identity for the executable request and its terminality law."""
+
+    identity: dict[str, object] = {"url": url, "params": params}
+    if urlsplit(url).netloc == "single-runs-api.open-meteo.com":
+        # SCOPE: exact Single Runs request identities classified under the old law.
+        # DRAIN: the next scheduled poll retries once under this revision-keyed identity.
+        # RESET: success or bounded conditional retry replaces that identity's attempt state.
+        identity["outcome_classifier_revision"] = SINGLE_RUNS_OUTCOME_CLASSIFIER_REVISION
+    if conditional_status_codes:
+        identity["conditional_status_codes"] = sorted(conditional_status_codes)
     payload = json.dumps(
-        {"url": url, "params": params},
+        identity,
         default=str,
         sort_keys=True,
         separators=(",", ":"),
     ).encode("utf-8")
     return hashlib.sha256(payload).hexdigest()
+
+
+def _parameter_count(value: object) -> int:
+    if value is None:
+        return 0
+    if isinstance(value, str):
+        return len([item for item in value.split(",") if item.strip()])
+    if isinstance(value, (list, tuple)):
+        return len(value)
+    return 1
+
+
+def _provider_quota_cost(params: Mapping[str, object]) -> int:
+    """Conservatively meter Open-Meteo's documented weighted API-call units."""
+
+    locations = max(
+        1,
+        _parameter_count(params.get("latitude")),
+        _parameter_count(params.get("longitude")),
+    )
+    variables = max(
+        1,
+        sum(
+            _parameter_count(params.get(key))
+            for key in ("hourly", "daily", "current", "minutely_15")
+        ),
+    )
+    hours = max(
+        float(params.get("forecast_hours") or 0),
+        24.0 * float(params.get("forecast_days") or 0),
+    ) + max(
+        float(params.get("past_hours") or 0),
+        24.0 * float(params.get("past_days") or 0),
+    )
+    explicit_days = 0
+    try:
+        start = date.fromisoformat(str(params.get("start_date")))
+        end = date.fromisoformat(str(params.get("end_date")))
+        explicit_days = max(0, (end - start).days + 1)
+    except ValueError:
+        pass
+    days = max(1.0, hours / 24.0, float(explicit_days))
+    weighted = locations * max(1.0, variables / 10.0) * max(1.0, days / 14.0)
+    return max(1, math.ceil(weighted))
 
 
 def _endpoint_for_url(url: str) -> str:
@@ -146,17 +316,47 @@ def _provider_reason(response: httpx.Response) -> str | None:
         return None
     if not isinstance(payload, dict):
         return None
-    reason = str(payload.get("reason") or "").strip().lower()
-    return reason if reason in {"run_not_published", "availability"} else None
+    reason = " ".join(str(payload.get("reason") or "").strip().lower().split())
+    if reason in {"run_not_published", "availability"}:
+        return reason
+    if reason.startswith("the requested model run is not available"):
+        return "run_not_published"
+    for window in ("daily", "hourly", "minutely"):
+        if reason.startswith(f"{window} api request limit exceeded"):
+            return f"{window}_api_request_limit_exceeded"
+    return None
 
 
-def _http_outcome(response: httpx.Response) -> OpenMeteoHTTPOutcome:
+def _rate_limit_wait(outcome: OpenMeteoHTTPOutcome, attempt: int) -> float:
+    if outcome.retry_after_seconds:
+        return outcome.retry_after_seconds
+    now = datetime.now(timezone.utc)
+    if outcome.reason == "daily_api_request_limit_exceeded":
+        boundary = datetime.combine(
+            now.date() + timedelta(days=1), datetime.min.time(), tzinfo=timezone.utc
+        )
+    elif outcome.reason == "hourly_api_request_limit_exceeded":
+        boundary = now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
+    elif outcome.reason == "minutely_api_request_limit_exceeded":
+        boundary = now.replace(second=0, microsecond=0) + timedelta(minutes=1)
+    else:
+        return DEFAULT_429_FALLBACK_WAIT * (attempt + 1)
+    return max(1.0, (boundary - now).total_seconds() + 1.0)
+
+
+def _http_outcome(
+    response: httpx.Response,
+    *,
+    conditional_status_codes: frozenset[int] = frozenset(),
+) -> OpenMeteoHTTPOutcome:
     status_code = int(response.status_code)
     retry_after = _retry_after_seconds(response.headers.get("Retry-After"))
     provider_reason = _provider_reason(response)
     if status_code == 429:
         retry_class = OpenMeteoRetryClass.RATE_LIMITED
-    elif status_code == 400 and provider_reason is not None:
+    elif status_code in conditional_status_codes or (
+        status_code == 400 and provider_reason is not None
+    ):
         retry_class = OpenMeteoRetryClass.CONDITIONAL
     elif status_code in {408, 425} or status_code >= 500:
         retry_class = OpenMeteoRetryClass.RETRYABLE
@@ -192,6 +392,8 @@ def fetch(
     fast_fail_429: bool = False,
     quota: OpenMeteoQuotaTracker | None = None,
     client: httpx.Client | None = None,
+    count_toward_quota: bool = True,
+    conditional_status_codes: frozenset[int] = frozenset(),
 ) -> dict:
     """GET an Open-Meteo endpoint with retries, 429 handling, and quota tracking.
 
@@ -199,14 +401,19 @@ def fetch(
 
     Raises:
         httpx.HTTPError: after all retries exhausted on transport errors.
-        RuntimeError: if quota is exhausted.
+        OpenMeteoLocalPreflightQuotaDenied: if no request lease is granted.
 
     ``fast_fail_429`` is for callers with an independent transport fallback. They still mark
     the quota cooldown, but they receive the 429 immediately instead of sleeping inside this
     shared client and blocking the fallback ladder.
     """
     tracker = quota or quota_tracker
-    request_id = request_identity(url, params)
+    request_id = request_identity(
+        url,
+        params,
+        conditional_status_codes=conditional_status_codes,
+    )
+    quota_cost = _provider_quota_cost(params) if count_toward_quota else 1
     endpoint = _endpoint_for_url(url)
     job = endpoint_label or endpoint
     last_exc: Exception | None = None
@@ -216,6 +423,8 @@ def fetch(
             endpoint=endpoint,
             job=job,
             lease_seconds=max(float(timeout) + 5.0, DEFAULT_TIMEOUT),
+            count_toward_quota=count_toward_quota,
+            quota_cost=quota_cost,
         )
         if not allowed:
             if reason and reason.startswith("request_terminal="):
@@ -224,25 +433,23 @@ def fetch(
                     raise OpenMeteoRequestSuppressed(
                         OpenMeteoHTTPOutcome.from_persisted(persisted)
                     )
-            if reason and reason.startswith(
-                ("request_retry_until=", "request_in_flight_until=")
-            ):
-                raise RuntimeError(f"Open-Meteo request embargoed ({reason})")
-            raise RuntimeError(
-                f"Open-Meteo quota exhausted ({tracker.calls_today()} calls today)"
+            raise OpenMeteoLocalPreflightQuotaDenied(
+                _preflight_denial_reason(reason),
+                detail=reason,
             )
         try:
-            get = client.get if client is not None else httpx.get
+            get = client.get if client is not None else _SHARED_HTTP_CLIENT.get
             resp = get(url, params=params, timeout=timeout)
 
             if resp.status_code >= 400:
-                outcome = _http_outcome(resp)
+                outcome = _http_outcome(
+                    resp,
+                    conditional_status_codes=conditional_status_codes,
+                )
                 error = OpenMeteoHTTPStatusError(resp, outcome)
                 if outcome.retry_class is OpenMeteoRetryClass.RATE_LIMITED:
-                    wait = outcome.retry_after_seconds or 0.0
-                    if wait <= 0.0:
-                        wait = DEFAULT_429_FALLBACK_WAIT * (attempt + 1)
-                    tracker.note_rate_limited(int(wait))
+                    wait = _rate_limit_wait(outcome, attempt)
+                    tracker.note_rate_limited(int(wait), endpoint=endpoint)
                     tracker.record_request_retry(
                         request_id,
                         endpoint=endpoint,

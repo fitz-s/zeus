@@ -684,7 +684,12 @@ def _row_to_belief(row: sqlite3.Row) -> CachedBelief | None:
     )
 
 
-def latest_cached_belief(conn: sqlite3.Connection, *, family_id: str) -> CachedBelief | None:
+def latest_cached_belief(
+    conn: sqlite3.Connection,
+    *,
+    family_id: str,
+    at_or_before: str | datetime | None = None,
+) -> CachedBelief | None:
     cols = "decision_id, recorded_at, city, target_date, bin_labels_json, p_posterior_json"
     if _has_condition_ids_column(conn):
         cols += ", condition_ids_json"
@@ -702,6 +707,18 @@ def latest_cached_belief(conn: sqlite3.Connection, *, family_id: str) -> CachedB
     ).fetchall()
     if not rows:
         return None
+    if at_or_before is not None:
+        cutoff = _decision_time_utc(at_or_before)
+        if cutoff is None:
+            return None
+        rows = [
+            row
+            for row in rows
+            if (recorded := _decision_time_utc(str(row["recorded_at"] or ""))) is not None
+            and recorded <= cutoff
+        ]
+        if not rows:
+            return None
     latest = max(rows, key=lambda row: str(row["recorded_at"] or ""))
     return _row_to_belief(latest)
 
@@ -803,12 +820,19 @@ def _all_latest_beliefs(
     if requested_families is None:
         rows = conn.execute(
             f"""
-            SELECT {cols}
-              FROM probability_trace_fact
-             WHERE decision_id >= ?
-               AND decision_id < ?
-             ORDER BY recorded_at DESC, trace_id DESC
-             LIMIT ?
+            WITH latest_trace AS MATERIALIZED (
+                SELECT trace_id, recorded_at
+                  FROM probability_trace_fact
+                 WHERE decision_id >= ?
+                   AND decision_id < ?
+                 ORDER BY recorded_at DESC, trace_id DESC
+                 LIMIT ?
+            )
+            SELECT {', '.join(f'p.{column.strip()}' for column in cols.split(','))}
+              FROM latest_trace latest
+              JOIN probability_trace_fact p
+                ON p.trace_id = latest.trace_id
+             ORDER BY latest.recorded_at DESC, latest.trace_id DESC
             """,
             (_BELIEF_PREFIX, _prefix_upper_bound(_BELIEF_PREFIX), scan_limit),
         ).fetchall()
@@ -1516,6 +1540,40 @@ def screen_reprice(
             action="CANCEL_REPLACE", reason="BELIEF_WORSENING", detail=delta,
         )
     return None
+
+
+def _current_rest_mean_edge(
+    rest: OpenRest,
+    *,
+    belief: CachedBelief | None,
+    tick_size: object = None,
+) -> float | None:
+    """Current posterior-mean edge if this resting ENTRY filled at its limit now."""
+
+    if belief is None:
+        return None
+    try:
+        idx = belief.bin_labels.index(rest.bin_label)
+        yes_post = float(belief.p_posterior_vec[idx])
+    except (ValueError, IndexError, TypeError):
+        return None
+    if not math.isfinite(yes_post) or not (0.0 <= yes_post <= 1.0):
+        return None
+    if rest.side == "buy_yes":
+        current_q = yes_post
+    elif rest.side == "buy_no":
+        current_q = one_minus(yes_post)
+    else:
+        return None
+    try:
+        limit_price = float(rest.limit_price)
+    except (TypeError, ValueError):
+        return None
+    edge = current_q - _entry_screen_c95_cost(
+        limit_price,
+        tick_size=tick_size,
+    )
+    return edge if math.isfinite(edge) else None
 
 
 def _held_side_q_lcb(belief: CachedBelief, *, bin_label: str, side: str) -> float | None:
@@ -2661,6 +2719,36 @@ def screen_resting_orders(
             resting_posterior=rest.resting_posterior,
             resting_snapshot_id=rest.resting_snapshot_id,
         )
+        if decision is None:
+            # A resting ENTRY is still an unexecuted capital decision.  It must
+            # remain positive-EV under the latest causal probability, not merely
+            # survive until a maker-age or book-drift threshold.  This check is
+            # deliberately independent of the historical belief-delta identity:
+            # older rows bound the CLOB executable snapshot to
+            # ``resting_snapshot_id`` and could therefore compare latest q to
+            # itself, making a probability reversal invisible.  The current
+            # fill economics are sufficient cancellation authority.
+            current_quote = _fresh_quote_or_none(
+                ask_by_cid.get((rest.condition_id, rest.side)),
+                screen_time,
+            ) or _fresh_quote_or_none(
+                bid_by_cid.get((rest.condition_id, rest.side)),
+                screen_time,
+            )
+            current_edge = _current_rest_mean_edge(
+                rest,
+                belief=belief,
+                tick_size=current_quote.tick_size if current_quote is not None else TICK_SIZE,
+            )
+            if current_edge is not None and current_edge <= _EPS:
+                decision = RepriceDecision(
+                    family_id=rest.family_id,
+                    bin_label=rest.bin_label,
+                    side=rest.side,
+                    action="CANCEL_REPLACE",
+                    reason="CURRENT_MEAN_EDGE_NON_POSITIVE",
+                    detail=current_edge,
+                )
         if decision is None:
             # 2) Moved-book pull: our limit is at least one full tick behind the live best bid for our side.
             bid = bid_by_cid.get((rest.condition_id, rest.side))

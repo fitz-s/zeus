@@ -6,10 +6,17 @@ Narrow-by-intent: each command does exactly one thing.
 
 import json
 import logging
+import os
 import sys
+import tempfile
+import threading
 import traceback as _traceback
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
-from typing import Iterable
+from dataclasses import dataclass
+from typing import Iterable, Mapping
+
+import fcntl
 
 from src.architecture.decorators import capability, protects
 from src.config import state_path
@@ -19,7 +26,9 @@ from src.state.db import (
     DEFAULT_CONTROL_OVERRIDE_PRECEDENCE,
     expire_control_override,
     get_trade_connection,
+    get_trade_connection_read_only,
     get_world_connection,
+    get_world_connection_read_only,
     get_world_connection_with_trades_required,
     query_control_override_state,
     upsert_control_override,
@@ -102,12 +111,42 @@ def assert_live_safe_strategies_under_live_mode(enabled: Iterable[str]) -> None:
         )
 
 _control_state: dict = {}
+_control_thread_lock = threading.RLock()
+_control_lock_depth = threading.local()
+
+
+@contextmanager
+def _control_payload_transaction():
+    """Serialize control-queue mutations across threads and processes."""
+
+    with _control_thread_lock:
+        depth = int(getattr(_control_lock_depth, "value", 0) or 0)
+        if depth:
+            _control_lock_depth.value = depth + 1
+            try:
+                yield
+            finally:
+                _control_lock_depth.value = depth
+            return
+
+        parent = os.path.dirname(str(CONTROL_PATH)) or "."
+        lock_path = f"{CONTROL_PATH}.lock"
+        os.makedirs(parent, exist_ok=True)
+        with open(lock_path, "a+") as lock_file:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+            _control_lock_depth.value = 1
+            try:
+                yield
+            finally:
+                _control_lock_depth.value = 0
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
 
 def _load_control_payload() -> dict:
     try:
         with open(CONTROL_PATH) as f:
             data = json.load(f)
+            _set_state("control_plane_fault", False)
             return data if isinstance(data, dict) else {}
     except json.JSONDecodeError as e:
         logger.error("control_plane.json corrupted (JSONDecodeError)")
@@ -118,9 +157,32 @@ def _load_control_payload() -> dict:
 
 
 
-def _write_control_payload(commands: list[dict], acks: list[dict]) -> None:
-    with open(CONTROL_PATH, "w") as f:
-        json.dump({"commands": commands, "acks": acks[-20:]}, f, indent=2)
+def _write_control_payload(
+    commands: list[dict],
+    acks: list[dict],
+    *,
+    payload_updates: dict | None = None,
+) -> None:
+    with _control_payload_transaction():
+        payload = _load_control_payload()
+        if payload_updates:
+            payload.update(payload_updates)
+        payload["commands"] = commands
+        payload["acks"] = acks[-20:]
+        parent = os.path.dirname(str(CONTROL_PATH)) or "."
+        os.makedirs(parent, exist_ok=True)
+        fd, tmp_path = tempfile.mkstemp(prefix=".control_plane.", suffix=".tmp", dir=parent)
+        try:
+            with os.fdopen(fd, "w") as f:
+                json.dump(payload, f, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp_path, CONTROL_PATH)
+        finally:
+            try:
+                os.unlink(tmp_path)
+            except FileNotFoundError:
+                pass
 
 
 
@@ -147,6 +209,11 @@ def _refresh_entries_pause_from_durable_state() -> dict:
     try:
         conn = get_world_connection()
         durable_state = query_control_override_state(conn)
+        if durable_state.get("status") != "ok":
+            raise RuntimeError(
+                "entries pause durable authority unavailable: "
+                f"{durable_state.get('status') or 'unknown'}"
+            )
     except Exception as exc:
         logger.error("entries pause durable-state query failed: %s", exc, exc_info=True)
         durable_state = {
@@ -211,6 +278,28 @@ def alert_auto_pause(reason_code: str) -> None:
 
 AUTO_PAUSE_OVERRIDE_ID = "control_plane:global:entries_paused"
 
+DEPLOY_LIVE_RESTART_GUARD_REASON = "deploy_live_restart_guard"
+DEPLOY_LIVE_RESTART_GUARD_ISSUER = "control_plane"
+_DEPLOY_LIVE_RESTART_GUARD_MAX_MONITOR_AGE_SECONDS = 150.0
+# SCOPE: global entries gate for one fixed control identity. DRAIN: the
+# post-issued reactor monitor/queue proof. RESET: exact SHA+issued_at CAS only.
+
+
+@dataclass(frozen=True)
+class DeployLiveRestartGuardWitness:
+    """Exact invocation identity carried by the fixed control override row."""
+
+    override_id: str
+    expected_sha: str
+    issued_at: str
+
+    def as_dict(self) -> dict[str, str]:
+        return {
+            "override_id": self.override_id,
+            "expected_sha": self.expected_sha,
+            "issued_at": self.issued_at,
+        }
+
 
 def _has_active_auto_pause_override(
     conn,
@@ -260,6 +349,403 @@ def _has_active_auto_pause_override(
     return str(effective_until) > now_iso
 
 
+def _normalise_restart_guard_sha(expected_sha: object) -> str:
+    value = str(expected_sha or "").strip().lower()
+    if len(value) < 40 or len(value) > 64 or any(
+        character not in "0123456789abcdef" for character in value
+    ):
+        raise ValueError("deploy restart guard requires a full hexadecimal git SHA")
+    return value
+
+
+def _restart_guard_value(expected_sha: str) -> str:
+    return json.dumps({"paused": True, "expected_sha": expected_sha}, sort_keys=True)
+
+
+def _restart_guard_witness_from_row(row) -> DeployLiveRestartGuardWitness | None:
+    if row is None:
+        return None
+    if (
+        str(row["override_id"] or "") != AUTO_PAUSE_OVERRIDE_ID
+        or str(row["target_type"] or "") != "global"
+        or str(row["target_key"] or "") != "entries"
+        or str(row["action_type"] or "") != "gate"
+        or str(row["reason"] or "") != DEPLOY_LIVE_RESTART_GUARD_REASON
+        or str(row["issued_by"] or "") != DEPLOY_LIVE_RESTART_GUARD_ISSUER
+        or row["effective_until"] is not None
+    ):
+        return None
+    try:
+        payload = json.loads(str(row["value"] or ""))
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(payload, dict) or payload.get("paused") is not True:
+        return None
+    try:
+        expected_sha = _normalise_restart_guard_sha(payload.get("expected_sha"))
+    except ValueError:
+        return None
+    issued_at = str(row["issued_at"] or "")
+    if not issued_at:
+        return None
+    return DeployLiveRestartGuardWitness(
+        override_id=AUTO_PAUSE_OVERRIDE_ID,
+        expected_sha=expected_sha,
+        issued_at=issued_at,
+    )
+
+
+def _active_entries_pause_row(conn, *, now_iso: str):
+    row = conn.execute(
+        """
+        SELECT override_id, target_type, target_key, action_type, value,
+               issued_by, issued_at, effective_until, reason, precedence
+          FROM control_overrides
+         WHERE override_id = ? AND issued_at <= ?
+        """,
+        (AUTO_PAUSE_OVERRIDE_ID, now_iso),
+    ).fetchone()
+    if row is None or row["effective_until"] is not None and row["effective_until"] <= now_iso:
+        return None
+    raw_value = str(row["value"] or "").strip().lower()
+    if raw_value in {"0", "false", "no", "off", "disabled"}:
+        return None
+    if raw_value not in {"1", "true", "yes", "on", "enabled"}:
+        try:
+            payload = json.loads(raw_value)
+        except ValueError:
+            return None
+        if not isinstance(payload, dict) or payload.get("paused") is not True:
+            return None
+    return row
+
+
+def arm_deploy_live_restart_guard(
+    expected_sha: str,
+    *,
+    issued_at: str | None = None,
+) -> dict[str, object]:
+    """Append one invocation witness to the existing global control row."""
+
+    expected = _normalise_restart_guard_sha(expected_sha)
+    issued = str(issued_at or datetime.now(timezone.utc).isoformat()).strip()
+    if not issued:
+        raise ValueError("deploy restart guard requires issued_at")
+    conn = get_world_connection()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        current = _active_entries_pause_row(conn, now_iso=issued)
+        if current is not None and _restart_guard_witness_from_row(current) is None:
+            conn.rollback()
+            return {
+                "status": "preserved",
+                "reason": str(current["reason"] or ""),
+                "issued_by": str(current["issued_by"] or ""),
+                "witness": None,
+            }
+        upsert_control_override(
+            conn,
+            override_id=AUTO_PAUSE_OVERRIDE_ID,
+            target_type="global",
+            target_key="entries",
+            action_type="gate",
+            value=_restart_guard_value(expected),
+            issued_by=DEPLOY_LIVE_RESTART_GUARD_ISSUER,
+            issued_at=issued,
+            reason=DEPLOY_LIVE_RESTART_GUARD_REASON,
+            effective_until=None,
+            precedence=DEFAULT_CONTROL_OVERRIDE_PRECEDENCE,
+        )
+        conn.commit()
+    except Exception:
+        if conn.in_transaction:
+            conn.rollback()
+        raise
+    finally:
+        conn.close()
+    witness = DeployLiveRestartGuardWitness(AUTO_PAUSE_OVERRIDE_ID, expected, issued)
+    return {"status": "armed", "witness": witness.as_dict()}
+
+
+def get_active_deploy_live_restart_guard(
+    *,
+    now: datetime | None = None,
+) -> DeployLiveRestartGuardWitness | None:
+    """Return the selected active guard, never an unselected historical row."""
+
+    now_iso = (now or datetime.now(timezone.utc)).astimezone(timezone.utc).isoformat()
+    conn = get_world_connection_read_only()
+    try:
+        return _restart_guard_witness_from_row(_active_entries_pause_row(conn, now_iso=now_iso))
+    finally:
+        conn.close()
+
+
+def _coerce_restart_guard_witness(value) -> DeployLiveRestartGuardWitness:
+    if isinstance(value, DeployLiveRestartGuardWitness):
+        witness = value
+    elif isinstance(value, dict):
+        witness = DeployLiveRestartGuardWitness(
+            override_id=str(value.get("override_id") or ""),
+            expected_sha=str(value.get("expected_sha") or "").strip().lower(),
+            issued_at=str(value.get("issued_at") or ""),
+        )
+    else:
+        raise TypeError("deploy restart guard witness must be a dataclass or mapping")
+    expected = _normalise_restart_guard_sha(witness.expected_sha)
+    if witness.expected_sha != expected:
+        raise ValueError("deploy restart guard witness SHA is not canonical")
+    if witness.override_id != AUTO_PAUSE_OVERRIDE_ID:
+        raise ValueError("deploy restart guard witness identity mismatch")
+    if not witness.issued_at:
+        raise ValueError("deploy restart guard witness issued_at is missing")
+    return witness
+
+
+def _read_loaded_identity() -> tuple[str, datetime | None]:
+    try:
+        with open(state_path("loaded_sha.json"), encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except Exception:
+        return "", None
+    if not isinstance(payload, dict):
+        return "", None
+    loaded_sha = str(
+        payload.get("loaded_sha")
+        or payload.get("boot_sha")
+        or payload.get("current_sha")
+        or ""
+    ).strip().lower()
+    try:
+        loaded_at = datetime.fromisoformat(
+            str(payload.get("generated_at") or "").replace("Z", "+00:00")
+        ).astimezone(timezone.utc)
+    except (TypeError, ValueError):
+        loaded_at = None
+    return loaded_sha, loaded_at
+
+
+def _read_loaded_sha() -> str:
+    return _read_loaded_identity()[0]
+
+
+def _restart_guard_queue_evidence(conn, *, issued_at: str, now: datetime) -> dict[str, bool]:
+    """Read reactor claimability plus bounded stale/progress probes; never aggregate history."""
+
+    from src.events.event_store import EventStore
+
+    stale = conn.execute(
+        """
+        SELECT 1
+          FROM opportunity_event_processing
+               INDEXED BY idx_opportunity_event_processing_stale_claim
+         WHERE consumer_name = ?
+           AND processing_status = 'processing'
+           AND claimed_at IS NOT NULL
+           AND claimed_at <= ?
+           AND COALESCE(last_error, '') <> 'GLOBAL_WINNER_SUBMIT_FENCED'
+         LIMIT 1
+        """,
+        ("edli_reactor_v1", (now - timedelta(seconds=300.0)).isoformat()),
+    ).fetchone() is not None
+
+    # SCOPE: report only event rows the reactor could claim after the deploy
+    # guard resets. DRAIN: the guard itself pauses those entry claims, so
+    # claimable unowned work is telemetry, not reset debt; only stale in-flight
+    # ownership must drain. RESET: the post-reactor proof combines this bounded
+    # stale check with loaded-SHA and complete fresh-monitor evidence, then the
+    # existing witness-bound CAS expires exactly this invocation's guard.
+    # Reuse the reactor's read-floor so historical rows outside its expiry,
+    # selection-window, and per-city timeliness predicates remain invisible.
+    claimable_pending = bool(
+        EventStore(conn, consumer_name="edli_reactor_v1").fetch_pending(
+            decision_time=now.isoformat(),
+            limit=1,
+        )
+    )
+
+    progress = False
+    for status, timestamp_column in (
+        ("processing", "claimed_at"),
+        ("processed", "processed_at"),
+        ("failed", "processed_at"),
+        ("dead_letter", "processed_at"),
+        ("expired", "processed_at"),
+    ):
+        progress = conn.execute(
+            f"""
+            SELECT 1
+              FROM opportunity_event_processing
+                   INDEXED BY idx_opportunity_event_processing_status
+             WHERE consumer_name = ?
+               AND processing_status = ?
+               AND updated_at >= ?
+               AND updated_at <= ?
+               AND {timestamp_column} IS NOT NULL
+               AND {timestamp_column} >= ?
+               AND {timestamp_column} <= ?
+             LIMIT 1
+            """,
+            (
+                "edli_reactor_v1",
+                status,
+                issued_at,
+                now.isoformat(),
+                issued_at,
+                now.isoformat(),
+            ),
+        ).fetchone() is not None
+        if progress:
+            break
+    return {
+        "stale_processing": stale,
+        "claimable_pending": claimable_pending,
+        "post_issued_progress": progress,
+        "green": not stale,
+    }
+
+
+def prove_deploy_live_restart_guard(
+    witness,
+    *,
+    now: datetime | None = None,
+) -> dict[str, object]:
+    """Evaluate loaded SHA plus post-issued monitor and queue evidence."""
+
+    witness = _coerce_restart_guard_witness(witness)
+    now_utc = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    try:
+        issued_dt = datetime.fromisoformat(witness.issued_at).astimezone(timezone.utc)
+        loaded_sha, loaded_at = _read_loaded_identity()
+        runtime_green = loaded_sha == witness.expected_sha and loaded_at is not None
+        proof_floor = max(issued_dt, loaded_at) if loaded_at is not None else issued_dt
+
+        from src.ops.monitor_cadence import (
+            collect_monitor_restart_proof,
+        )
+
+        trade_conn = get_trade_connection_read_only()
+        try:
+            monitor = collect_monitor_restart_proof(
+                trade_conn,
+                now=now_utc,
+                completed_not_before=proof_floor,
+                max_age_seconds=_DEPLOY_LIVE_RESTART_GUARD_MAX_MONITOR_AGE_SECONDS,
+                sample_limit=5,
+            )
+        finally:
+            trade_conn.close()
+
+        world_conn = get_world_connection_read_only()
+        try:
+            queue = _restart_guard_queue_evidence(
+                world_conn,
+                issued_at=issued_dt.isoformat(),
+                now=now_utc,
+            )
+        finally:
+            world_conn.close()
+        monitor_green = bool(monitor.get("green"))
+        queue_green = bool(queue.get("green"))
+        green = (
+            runtime_green
+            and monitor_green
+            and queue_green
+        )
+        return {
+            "green": green,
+            "witness": witness.as_dict(),
+            "runtime": {
+                "loaded_sha": loaded_sha,
+                "loaded_at": loaded_at.isoformat() if loaded_at is not None else None,
+                "expected_sha": witness.expected_sha,
+                "proof_floor": proof_floor.isoformat(),
+                "green": runtime_green,
+            },
+            "monitor": {
+                **monitor,
+                "green": monitor_green,
+            },
+            "queue": {**queue, "green": queue_green},
+        }
+    except Exception as exc:
+        return {
+            "green": False,
+            "witness": witness.as_dict(),
+            "reason": f"DEPLOY_RESTART_GUARD_PROOF_UNAVAILABLE:{type(exc).__name__}:{exc}",
+        }
+
+
+def reset_deploy_live_restart_guard(
+    witness,
+    *,
+    proof: dict[str, object],
+    retired_at: str | None = None,
+) -> dict[str, object]:
+    """CAS-retire exactly the selected guard after a green proof."""
+
+    witness = _coerce_restart_guard_witness(witness)
+    if proof.get("green") is not True or proof.get("witness") != witness.as_dict():
+        return {"status": "refused", "reason": "restart_guard_proof_not_green"}
+    retired = str(retired_at or datetime.now(timezone.utc).isoformat())
+    conn = get_world_connection()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        row = _active_entries_pause_row(conn, now_iso=retired)
+        current = _restart_guard_witness_from_row(row)
+        if current != witness:
+            conn.rollback()
+            return {"status": "noop", "reason": "restart_guard_invocation_mismatch"}
+        fresh_proof = prove_deploy_live_restart_guard(witness)
+        if (
+            fresh_proof.get("green") is not True
+            or fresh_proof.get("witness") != witness.as_dict()
+            or fresh_proof.get("monitor", {}).get("monitor_scope_identity")
+            != proof.get("monitor", {}).get("monitor_scope_identity")
+        ):
+            conn.rollback()
+            return {
+                "status": "refused",
+                "reason": "restart_guard_proof_superseded",
+            }
+        result = expire_control_override(
+            conn,
+            override_id=witness.override_id,
+            expired_at=retired,
+            expected_issued_at=witness.issued_at,
+            expected_reason=DEPLOY_LIVE_RESTART_GUARD_REASON,
+            expected_issued_by=DEPLOY_LIVE_RESTART_GUARD_ISSUER,
+        )
+        if int(result.get("expired_count") or 0) != 1:
+            conn.rollback()
+            return {"status": "noop", "reason": "restart_guard_already_retired"}
+        conn.commit()
+    except Exception:
+        if conn.in_transaction:
+            conn.rollback()
+        raise
+    finally:
+        conn.close()
+    logger.warning(
+        "DEPLOY_LIVE_RESTART_GUARD_RESET expected_sha=%s issued_at=%s",
+        witness.expected_sha,
+        witness.issued_at,
+    )
+    return {"status": "reset", "witness": witness.as_dict()}
+
+
+def recover_deploy_live_restart_guard() -> dict[str, object]:
+    """Prove and CAS-reset the selected guard after one reactor invocation."""
+
+    witness = get_active_deploy_live_restart_guard()
+    if witness is None:
+        return {"status": "noop", "reason": "restart_guard_not_selected"}
+    proof = prove_deploy_live_restart_guard(witness)
+    result = reset_deploy_live_restart_guard(witness, proof=proof)
+    result["proof"] = proof
+    return result
+
+
 def _has_active_control_plane_override(conn, *, now_iso: str) -> bool:
     """Return True iff an indefinite operator/control_plane row is active.
 
@@ -292,8 +778,14 @@ def _has_active_control_plane_override(conn, *, now_iso: str) -> bool:
         return False
     if str(issued_by or "") not in {"control_plane", "operator"}:
         return False
-    if str(value or "").strip().lower() not in {"true", "1", "yes"}:
-        return False
+    raw_value = str(value or "").strip().lower()
+    if raw_value not in {"true", "1", "yes", "on", "enabled"}:
+        try:
+            payload = json.loads(raw_value)
+        except ValueError:
+            return False
+        if not isinstance(payload, dict) or payload.get("paused") is not True:
+            return False
     return effective_until is None
 
 
@@ -391,34 +883,104 @@ def pause_entries(
             pass
 
 
-def resume_entries(reason: str, *, issued_by: str = "control_plane") -> None:
-    """Operator-callable resume. Clears the entries_paused override regardless
-    of who issued it. Mirrors the _apply_command("resume", ...) path.
-    """
+def resume_entries(
+    reason: str,
+    *,
+    issued_by: str = "control_plane",
+    expected_override_issued_at: str | None = None,
+    expected_override_reason: str | None = None,
+    expected_override_issued_by: str | None = None,
+) -> None:
+    """CAS-resume the exact entry pause observed by an operator caller."""
     if issued_by not in {"control_plane", "operator"}:
         raise ValueError(
             f"resume_entries requires issued_by in {{control_plane, operator}}, got {issued_by!r}"
         )
+    expected_issued_at = str(expected_override_issued_at or "").strip()
+    expected_reason = str(expected_override_reason or "").strip()
+    expected_issued_by = str(expected_override_issued_by or "").strip()
     now_iso = datetime.now(timezone.utc).isoformat()
+    conn = None
     try:
+        # SCOPE: one selected entries-pause generation. DRAIN: an operator
+        # re-reads its issued_at and retries explicitly. RESET: only that exact
+        # generation may expire; a newer pause remains selected.
         conn = get_world_connection()
-        expire_control_override(
+        conn.execute("BEGIN IMMEDIATE")
+        current = _active_entries_pause_row(conn, now_iso=now_iso)
+        current_issued_at = (
+            str(current["issued_at"] or "") if current is not None else ""
+        )
+        current_issued_by = (
+            str(current["issued_by"] or "") if current is not None else ""
+        )
+        current_reason = str(current["reason"] or "") if current is not None else ""
+        if not expected_issued_at:
+            if current_issued_by != "system_auto_pause":
+                conn.rollback()
+                raise ValueError(
+                    "resume_entries requires expected_override_issued_at, "
+                    "expected_override_reason, and expected_override_issued_by "
+                    "for an operator/control-plane pause"
+                )
+            expected_issued_at = current_issued_at
+            expected_reason = current_reason
+            expected_issued_by = current_issued_by
+        elif current_issued_by == "system_auto_pause":
+            expected_reason = expected_reason or current_reason
+            expected_issued_by = expected_issued_by or current_issued_by
+        elif not expected_reason or not expected_issued_by:
+            conn.rollback()
+            raise ValueError(
+                "resume_entries requires expected_override_issued_at, "
+                "expected_override_reason, and expected_override_issued_by "
+                "for an operator/control-plane pause"
+            )
+        if (
+            current_issued_at != expected_issued_at
+            or current_reason != expected_reason
+            or current_issued_by != expected_issued_by
+        ):
+            conn.rollback()
+            raise ValueError(
+                "resume_entries override changed: "
+                f"expected={(expected_issued_at, expected_reason, expected_issued_by)!r} "
+                f"current={(current_issued_at, current_reason, current_issued_by)!r}"
+            )
+        pause_result = expire_control_override(
             conn,
             override_id=AUTO_PAUSE_OVERRIDE_ID,
             expired_at=now_iso,
+            expected_issued_at=expected_issued_at,
+            expected_reason=expected_reason,
+            expected_issued_by=expected_issued_by,
         )
+        if int(pause_result.get("expired_count") or 0) != 1:
+            conn.rollback()
+            raise ValueError(
+                "resume_entries override changed during exact-generation expiry"
+            )
         expire_control_override(
             conn,
             override_id="control_plane:global:edge_threshold_multiplier",
             expired_at=now_iso,
         )
         conn.commit()
-        conn.close()
         logger.warning("ENTRIES_RESUMED reason=%s issued_by=%s", reason, issued_by)
+    except ValueError:
+        logger.warning(
+            "ENTRIES_RESUME_CAS_REFUSED reason=%s issued_by=%s",
+            reason,
+            issued_by,
+        )
+        raise
     except Exception as exc:
         logger.error("Failed to persist resume to DB: %s", exc, exc_info=True)
         _control_state["control_db_fault"] = True
         raise
+    finally:
+        if conn is not None:
+            conn.close()
     # Refresh in-memory state from DB so downstream callers see the cleared pause
     refresh_control_state()
 
@@ -444,14 +1006,17 @@ def retire_entries_pause_for_reasons(
     expired = False
     try:
         conn.execute("BEGIN IMMEDIATE")
-        state = query_control_override_state(conn, now=now_iso)
-        if not state.get("entries_paused") or state.get("entries_pause_reason") not in retired:
+        row = _active_entries_pause_row(conn, now_iso=now_iso)
+        if row is None or str(row["reason"] or "") not in retired:
             conn.rollback()
             return False
         result = expire_control_override(
             conn,
             override_id=AUTO_PAUSE_OVERRIDE_ID,
             expired_at=now_iso,
+            expected_issued_at=str(row["issued_at"] or ""),
+            expected_reason=str(row["reason"] or ""),
+            expected_issued_by=str(row["issued_by"] or ""),
         )
         expired = int(result.get("expired_count") or 0) == 1
         conn.commit()
@@ -570,6 +1135,15 @@ def refresh_control_state() -> None:
     finally:
         if conn is not None:
             conn.close()
+    if durable_state.get("status") != "ok":
+        durable_state = {
+            "status": "query_error",
+            "entries_paused": True,
+            "entries_pause_source": "control_db_query_error",
+            "entries_pause_reason": "entries_pause_durable_state_unavailable",
+            "edge_threshold_multiplier": float(TIGHTENED_EDGE_THRESHOLD_MULTIPLIER),
+            "strategy_gates": {},
+        }
     if durable_state.get("status") in {"ok", "query_error"}:
         entries_paused = bool(durable_state.get("entries_paused", False))
         edge_threshold_multiplier = float(
@@ -620,6 +1194,58 @@ def _acknowledge_command(name: str, cmd: dict, *, status: str, reason: str = "")
     return ack
 
 
+def _lower_precedence_override_reason(
+    conn,
+    *,
+    override_id: str,
+    requested_precedence: int,
+    now_iso: str,
+    protect_equal: bool = False,
+    expected_override_issued_at: str = "",
+) -> str:
+    """Return an audit reason when a live override outranks this command.
+
+    Equal-precedence commands that weaken a gate use an issued-at compare-and-set.
+    This prevents a delayed command from undoing a newer live-money containment
+    row while preserving an explicit, current operator release path.
+    """
+
+    if conn is None:
+        return ""
+    row = conn.execute(
+        """
+        SELECT precedence, issued_at
+          FROM control_overrides
+         WHERE override_id = ?
+           AND issued_at <= ?
+           AND (effective_until IS NULL OR effective_until > ?)
+        """,
+        (override_id, now_iso, now_iso),
+    ).fetchone()
+    if row is None:
+        return ""
+    current_precedence = int(row["precedence"] or 0)
+    current_issued_at = str(row["issued_at"] or "")
+    if requested_precedence > current_precedence:
+        return ""
+    if requested_precedence == current_precedence:
+        if not protect_equal or expected_override_issued_at == current_issued_at:
+            return ""
+        reason = (
+            "ignored_equal_precedence_without_cas:"
+            f"override_id={override_id}:precedence={current_precedence}:"
+            f"current_issued_at={current_issued_at}"
+        )
+    else:
+        reason = (
+            "ignored_lower_precedence:"
+            f"override_id={override_id}:requested={requested_precedence}:"
+            f"current={current_precedence}"
+        )
+    logger.warning("CONTROL_PRECEDENCE_PRESERVED %s", reason)
+    return reason
+
+
 
 def _apply_command(name: str, cmd: dict) -> tuple[bool, str]:
     conn = None
@@ -634,6 +1260,14 @@ def _apply_command(name: str, cmd: dict) -> tuple[bool, str]:
         conn = None
     try:
         if name == "pause_entries":
+            precedence_reason = _lower_precedence_override_reason(
+                conn,
+                override_id="control_plane:global:entries_paused",
+                requested_precedence=precedence,
+                now_iso=issued_at,
+            )
+            if precedence_reason:
+                return True, precedence_reason
             result = upsert_control_override(
                 conn,
                 override_id="control_plane:global:entries_paused",
@@ -647,19 +1281,49 @@ def _apply_command(name: str, cmd: dict) -> tuple[bool, str]:
                 effective_until=effective_until,
                 precedence=precedence,
             )
-            return result["status"] in {"written", "skipped_missing_table"}, "" if result["status"] != "skipped_missing_table" else "missing_control_overrides_table"
+            status = str(result.get("status") or "unknown")
+            return status == "written", "" if status == "written" else status
         if name == "resume":
-            expire_control_override(
+            if conn is None:
+                return False, "skipped_no_connection"
+            conn.execute("BEGIN IMMEDIATE")
+            precedence_reason = _lower_precedence_override_reason(
                 conn,
-                override_id="control_plane:global:entries_paused",
-                expired_at=issued_at,
+                override_id=AUTO_PAUSE_OVERRIDE_ID,
+                requested_precedence=precedence,
+                now_iso=issued_at,
+                protect_equal=True,
+                expected_override_issued_at=str(cmd.get("expected_override_issued_at") or ""),
             )
-            expire_control_override(
+            if precedence_reason:
+                return True, precedence_reason
+            pause_row = _active_entries_pause_row(conn, now_iso=issued_at)
+            if pause_row is None:
+                pause_result = {"status": "noop", "expired_count": 0}
+            else:
+                pause_result = expire_control_override(
+                    conn,
+                    override_id=AUTO_PAUSE_OVERRIDE_ID,
+                    expired_at=issued_at,
+                    expected_issued_at=str(cmd.get("expected_override_issued_at") or ""),
+                    expected_reason=str(pause_row["reason"] or ""),
+                    expected_issued_by=str(pause_row["issued_by"] or ""),
+                )
+                pause_status = str(pause_result.get("status") or "unknown")
+                if pause_status not in {"expired", "noop"}:
+                    conn.rollback()
+                    return False, pause_status
+            edge_result = expire_control_override(
                 conn,
                 override_id="control_plane:global:edge_threshold_multiplier",
                 expired_at=issued_at,
             )
-            return True, ""
+            statuses = {
+                str(pause_result.get("status") or "unknown"),
+                str(edge_result.get("status") or "unknown"),
+            }
+            ok = statuses <= {"expired", "noop"}
+            return ok, "" if ok else "+".join(sorted(statuses))
         if name == "tighten_risk":
             result = upsert_control_override(
                 conn,
@@ -674,7 +1338,8 @@ def _apply_command(name: str, cmd: dict) -> tuple[bool, str]:
                 effective_until=effective_until,
                 precedence=precedence,
             )
-            return result["status"] in {"written", "skipped_missing_table"}, "" if result["status"] != "skipped_missing_table" else "missing_control_overrides_table"
+            status = str(result.get("status") or "unknown")
+            return status == "written", "" if status == "written" else status
         if name == "request_status":
             # Single-writer principle: status_summary.json is written ONLY by the
             # live-trading daemon (write_status / write_cycle_pulse in src/main.py).
@@ -697,6 +1362,17 @@ def _apply_command(name: str, cmd: dict) -> tuple[bool, str]:
                 return False, "missing_strategy"
             if not isinstance(enabled, bool):
                 return False, "missing_enabled_bool"
+            override_id = f"control_plane:strategy:{strategy}:gate"
+            precedence_reason = _lower_precedence_override_reason(
+                conn,
+                override_id=override_id,
+                requested_precedence=precedence,
+                now_iso=issued_at,
+                protect_equal=enabled,
+                expected_override_issued_at=str(cmd.get("expected_override_issued_at") or ""),
+            )
+            if precedence_reason:
+                return True, precedence_reason
             decision = GateDecision(
                 enabled=enabled,
                 reason_code=ReasonCode(cmd.get("reason_code", "unspecified")),
@@ -709,7 +1385,7 @@ def _apply_command(name: str, cmd: dict) -> tuple[bool, str]:
             _control_state["strategy_gates"] = gates
             result = upsert_control_override(
                 conn,
-                override_id=f"control_plane:strategy:{strategy}:gate",
+                override_id=override_id,
                 target_type="strategy",
                 target_key=strategy,
                 action_type="gate",
@@ -720,7 +1396,8 @@ def _apply_command(name: str, cmd: dict) -> tuple[bool, str]:
                 effective_until=effective_until,
                 precedence=precedence,
             )
-            return result["status"] in {"written", "skipped_missing_table"}, "" if result["status"] != "skipped_missing_table" else "missing_control_overrides_table"
+            status = str(result.get("status") or "unknown")
+            return status == "written", "" if status == "written" else status
         if name == "resolve_review_item":
             work_id = _extract_review_work_id(cmd)
             resolver_identity = str(cmd.get("resolver_identity") or issued_by)
@@ -781,34 +1458,46 @@ def _apply_command(name: str, cmd: dict) -> tuple[bool, str]:
 
 
 
-def process_commands() -> list[str]:
-    data = _load_control_payload()
-    commands = data.get("commands", [])
-    acks = data.get("acks", [])
-    if not commands:
-        refresh_control_state()
-        return []
+def process_commands(*, refresh_when_empty: bool = True) -> list[str]:
+    with _control_payload_transaction():
+        data = _load_control_payload()
+        commands = data.get("commands", [])
+        acks = data.get("acks", [])
+        if not commands:
+            if refresh_when_empty:
+                refresh_control_state()
+            return []
 
-    if _control_state.get("control_plane_fault"):
-        logger.error("Control plane fault detected. Halting command processing.")
-        return []
+        if _control_state.get("control_plane_fault"):
+            logger.error("Control plane fault detected. Halting command processing.")
+            return []
 
-    processed = []
-    for cmd in commands:
-        name = cmd.get("command")
-        if name not in COMMANDS:
-            logger.warning("Unknown control command: %s", name)
-            acks.append(_acknowledge_command(str(name or ""), cmd, status="rejected", reason="unknown_command"))
-            continue
+        processed = []
+        retry_commands: list[dict] = []
+        rejected_commands: list[str] = []
+        for cmd in commands:
+            name = cmd.get("command")
+            if name not in COMMANDS:
+                logger.warning("Unknown control command: %s", name)
+                acks.append(_acknowledge_command(str(name or ""), cmd, status="rejected", reason="unknown_command"))
+                continue
 
-        logger.info("CONTROL: executing %s", name)
-        ok, reason = _apply_command(name, cmd)
-        acks.append(_acknowledge_command(name, cmd, status="executed" if ok else "rejected", reason=reason))
-        if ok:
-            processed.append(name)
+            logger.info("CONTROL: executing %s", name)
+            ok, reason = _apply_command(name, cmd)
+            acks.append(_acknowledge_command(name, cmd, status="executed" if ok else "rejected", reason=reason))
+            if ok:
+                processed.append(name)
+            else:
+                retry_commands.append(cmd)
+                rejected_commands.append(f"{name}:{reason or 'rejected'}")
 
-    _write_control_payload([], acks)
+        _write_control_payload(retry_commands, acks)
     refresh_control_state()
+    if rejected_commands:
+        raise RuntimeError(
+            "control command application rejected; retry retained: "
+            + ",".join(rejected_commands)
+        )
     return processed
 
 
@@ -818,15 +1507,16 @@ def enqueue_commands(new_commands: list[dict]) -> int:
     """Append commands to the durable control queue without duplicating identical payloads."""
     if not new_commands:
         return 0
-    data = _load_control_payload()
-    commands = list(data.get("commands", []))
-    acks = list(data.get("acks", []))
-    added = 0
-    for cmd in new_commands:
-        if cmd not in commands:
-            commands.append(cmd)
-            added += 1
-    _write_control_payload(commands, acks)
+    with _control_payload_transaction():
+        data = _load_control_payload()
+        commands = list(data.get("commands", []))
+        acks = list(data.get("acks", []))
+        added = 0
+        for cmd in new_commands:
+            if cmd not in commands:
+                commands.append(cmd)
+                added += 1
+        _write_control_payload(commands, acks)
     return added
 
 
@@ -913,17 +1603,19 @@ def recommended_commands_from_status(
 
 
 def enqueue_command(command: dict) -> None:
-    data = _load_control_payload()
-    commands = data.get("commands", [])
-    commands.append(command)
-    _write_control_payload(commands, data.get("acks", []))
+    with _control_payload_transaction():
+        data = _load_control_payload()
+        commands = data.get("commands", [])
+        commands.append(command)
+        _write_control_payload(commands, data.get("acks", []))
     refresh_control_state()
 
 
 
 def write_commands(commands: list[dict], *, acks: list[dict] | None = None) -> None:
-    data = _load_control_payload()
-    _write_control_payload(commands, data.get("acks", []) if acks is None else acks)
+    with _control_payload_transaction():
+        data = _load_control_payload()
+        _write_control_payload(commands, data.get("acks", []) if acks is None else acks)
     refresh_control_state()
 
 
@@ -966,27 +1658,18 @@ def set_pause_source(source_id: str, paused: bool) -> None:
     The ingest daemon reads this on each tick via read_ingest_control_state()
     and skips ticks for a paused source until cleared.
     """
-    import json
-    import os
-
-    path = CONTROL_PATH
-    try:
-        with open(path) as f:
-            data = json.load(f)
-    except (FileNotFoundError, OSError, json.JSONDecodeError):
-        data = {}
-
-    paused_sources = data.get(_PAUSE_SOURCE_KEY) or {}
-    if paused:
-        paused_sources[source_id] = True
-    else:
-        paused_sources.pop(source_id, None)
-
-    data[_PAUSE_SOURCE_KEY] = paused_sources
-    tmp = str(path) + ".tmp"
-    with open(tmp, "w") as f:
-        json.dump(data, f, indent=2)
-    os.replace(tmp, path)
+    with _control_payload_transaction():
+        data = _load_control_payload()
+        paused_sources = data.get(_PAUSE_SOURCE_KEY) or {}
+        if paused:
+            paused_sources[source_id] = True
+        else:
+            paused_sources.pop(source_id, None)
+        _write_control_payload(
+            data.get("commands", []),
+            data.get("acks", []),
+            payload_updates={_PAUSE_SOURCE_KEY: paused_sources},
+        )
     logger.info("set_pause_source: source_id=%s paused=%s", source_id, paused)
 
 
