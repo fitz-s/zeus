@@ -1646,6 +1646,111 @@ def test_replacement_maintenance_uses_one_parent_deadline(monkeypatch) -> None:
     assert result["committed_family_count"] == 2
 
 
+def test_replacement_maintenance_reserves_held_probability_repair_budget(
+    monkeypatch,
+) -> None:
+    """Stalled anchor partitions cannot consume the held-q repair budget."""
+    import src.data.replacement_forecast_production as prod
+    import src.ingest_main as ingest_main
+
+    day0_scope = ("Mexico City", "2026-08-18", "high")
+    future_scope = ("Busan", "2026-08-19", "high")
+    now = [100.0]
+    monkeypatch.setattr(ingest_main.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(
+        ingest_main,
+        "_replacement_current_target_poll_timeout_seconds",
+        lambda _poll_seconds: 20.0,
+    )
+    monkeypatch.setattr(
+        ingest_main,
+        "_REPLACEMENT_MAINTENANCE_NEXT_MONOTONIC",
+        0.0,
+    )
+    monkeypatch.setattr(
+        ingest_main,
+        "_REPLACEMENT_BPF_NO_PROGRESS_RETRY_NOT_BEFORE_MONOTONIC",
+        0.0,
+    )
+    monkeypatch.setattr(
+        ingest_main,
+        "_all_held_current_target_scopes",
+        lambda: (day0_scope, future_scope),
+    )
+    monkeypatch.setattr(
+        ingest_main,
+        "_held_day0_current_target_scopes",
+        lambda scopes: tuple(scope for scope in scopes if scope == day0_scope),
+    )
+    monkeypatch.setattr(
+        "src.data.bayes_precision_fusion_download."
+        "bayes_precision_fusion_quota_cooldown_seconds",
+        lambda: 0,
+    )
+    monkeypatch.setattr(
+        prod,
+        "_replacement_forecast_live_materialization_queue_config",
+        lambda: {"download_current_targets_enabled": True},
+    )
+    budgets: list[tuple[str, float]] = []
+
+    def _anchors(_cfg, *, max_wall_clock_seconds, **_kwargs):
+        budgets.append(("anchor", max_wall_clock_seconds))
+        now[0] += max_wall_clock_seconds
+        return {
+            "status": "CURRENT_TARGET_RAW_INPUTS_TIMEBOXED_INCOMPLETE",
+            "timeboxed_incomplete": True,
+            "unattempted_target_count": 1,
+        }
+
+    def _extras(_cfg, *, max_wall_clock_seconds):
+        budgets.append(("bpf", max_wall_clock_seconds))
+        return {
+            "status": "BAYES_PRECISION_FUSION_EXTRA_RAW_INPUTS_DOWNLOADED",
+            "written_row_count": 2,
+        }
+
+    monkeypatch.setattr(
+        prod,
+        "_download_replacement_forecast_current_targets_if_needed",
+        _anchors,
+    )
+    monkeypatch.setattr(
+        prod,
+        "_download_bayes_precision_fusion_extra_raw_inputs_if_needed",
+        _extras,
+    )
+    monkeypatch.setattr(
+        prod,
+        "_enqueue_fusion_upgrade_reseeds_if_needed",
+        lambda *_args, **_kwargs: {
+            "status": "FUSION_UPGRADE_TRIGGER",
+            "seeds_enqueued": 0,
+        },
+    )
+    monkeypatch.setattr(
+        prod,
+        "_enqueue_cycle_advance_reseeds_if_needed",
+        lambda *_args, **_kwargs: {
+            "status": "CYCLE_ADVANCE_TRIGGER",
+            "seeds_enqueued": 0,
+        },
+    )
+
+    result = ingest_main._replacement_maintenance_tick.__wrapped__()
+
+    assert budgets == [
+        ("anchor", 6.0),
+        ("anchor", 6.0),
+        ("anchor", 0.0),
+        ("bpf", pytest.approx(8.0)),
+    ]
+    assert result["bayes_precision_fusion_extra_status"] == (
+        "BAYES_PRECISION_FUSION_EXTRA_RAW_INPUTS_DOWNLOADED"
+    )
+    assert result["bayes_precision_fusion_extra_rows_written"] == 2
+
+
 def test_replacement_maintenance_does_not_publish_failsoft_committed_reseed(
     monkeypatch,
 ) -> None:

@@ -924,6 +924,9 @@ def _replacement_current_target_poll_timeout_seconds(poll_seconds: int | None = 
     return max(1.0, min(requested, 60.0))
 
 
+_REPLACEMENT_HELD_PROBABILITY_REPAIR_RESERVE_SECONDS = 8.0
+
+
 def _replacement_maintenance_due(*, now_monotonic: float | None = None) -> bool:
     global _REPLACEMENT_MAINTENANCE_NEXT_MONOTONIC
     now = time.monotonic() if now_monotonic is None else float(now_monotonic)
@@ -2591,6 +2594,26 @@ def _replacement_maintenance_tick():
     timeout_s = _replacement_current_target_poll_timeout_seconds(
         _replacement_availability_poll_seconds()
     )
+    broad_due = _replacement_maintenance_due()
+    bpf_retry_after = (
+        _replacement_bpf_no_progress_retry_after_seconds()
+        if broad_due and cooldown_seconds <= 0
+        else 0
+    )
+    # SCOPE: one due maintenance tick with canonical held exposure and an
+    # available BPF transport. DRAIN: reserve part of the existing parent
+    # deadline for the BPF extras downloader, whose first batch is the held
+    # families missing current q. RESET: every tick recomputes exposure,
+    # cooldown, and backoff; no held debt or unavailable BPF returns the full
+    # parent budget to anchor repair.
+    bpf_repair_reserve_s = (
+        min(
+            _REPLACEMENT_HELD_PROBABILITY_REPAIR_RESERVE_SECONDS,
+            timeout_s / 2.0,
+        )
+        if held_scopes and broad_due and cooldown_seconds <= 0 and bpf_retry_after <= 0
+        else 0.0
+    )
     deadline_monotonic = time.monotonic() + timeout_s
 
     def _remaining_budget() -> float:
@@ -2610,9 +2633,10 @@ def _replacement_maintenance_tick():
             scope for scope in held_scopes if scope not in critical_set
         )
         partition_count = int(bool(critical_scopes)) + int(bool(ordinary_scopes))
+        held_budget_s = max(0.0, timeout_s - bpf_repair_reserve_s)
         held_lane_budget = min(
             10.0,
-            timeout_s / max(1, partition_count),
+            held_budget_s / max(1, partition_count),
         )
         partition_reports: list[tuple[str, tuple[tuple[str, str, str], ...], object]] = []
         for lane, scopes, quota_critical in (
@@ -2674,7 +2698,6 @@ def _replacement_maintenance_tick():
 
     held_reseed_scopes = tuple(sorted(held_reseed_scope_set))
 
-    broad_due = _replacement_maintenance_due()
     if not broad_due and held_report is None and held_ordinary_report is None:
         return {"status": "REPLACEMENT_MAINTENANCE_NOT_DUE"}
 
@@ -2690,9 +2713,13 @@ def _replacement_maintenance_tick():
         }
     else:
         try:
+            broad_current_budget = max(
+                0.0,
+                _remaining_budget() - bpf_repair_reserve_s,
+            )
             download_report = _download_replacement_forecast_current_targets_if_needed(
                 cfg,
-                max_wall_clock_seconds=_remaining_budget(),
+                max_wall_clock_seconds=broad_current_budget,
             )
         except TimeoutError as exc:
             download_report = {
@@ -2711,7 +2738,6 @@ def _replacement_maintenance_tick():
                 "error": f"{type(exc).__name__}: {str(exc)[:220]}",
             }
 
-        bpf_retry_after = _replacement_bpf_no_progress_retry_after_seconds()
         if bpf_retry_after > 0:
             extras_report = {
                 "status": "BAYES_PRECISION_FUSION_EXTRA_NO_PROGRESS_BACKOFF_SKIPPED",
