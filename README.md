@@ -1,9 +1,13 @@
 # Zeus
 
-Weather-derivatives trading engine for Polymarket daily-temperature markets, across 54
-cities. It ingests weather forecasts, calibrates them into a settlement probability for
-every bin of every market, trades the bins it prices differently from the book, manages the
-orders through to settlement, and feeds graded outcomes back into calibration.
+Weather-derivatives trading engine for Polymarket daily-temperature markets. It ingests
+weather forecasts, calibrates them into a settlement probability for every bin of every
+market, trades the bins it prices differently from the book, manages the orders through to
+settlement, and feeds graded outcomes back into calibration.
+
+A settlement is one integer, published once, after the market has closed — no partial
+credit, no second attempt. The market pays for understanding the world and understanding
+the rules; the rules are readable, and most participants don't read them.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/architecture-dark.svg">
@@ -146,21 +150,36 @@ separate daemons per feed.
 
 Surviving bins are ranked by return per dollar at risk, ties broken on lower-quantile
 log-growth. The selected bin is sized by fractional Kelly, `f* = (q − price)/(1 − price)`,
-reduced by a multiplicative cascade — strategy multiplier, observation coverage, confidence
-width, lead time, portfolio heat, and a two-rail data-density discount (a hard stop below
-0.35 coverage past the window mid-point, a continuous discount otherwise). A NaN or missing
-input sizes to zero.
+under one global fraction — the per-strategy and per-city multipliers that once scaled it
+were deleted when the uncertainty they hedged was carried into the robust lower bound
+itself, so each uncertainty is counted exactly once; a strategy key now only grants or
+denies permission to trade. What still reduces the fraction: portfolio heat (until joint
+sizing replaces it), and a two-rail data-density discount — an absolute hard stop on
+indefensible station coverage, and a relative rail floored at a low percentile of the
+city's own coverage history rather than a rolling mean, because a slowly dying station
+drags a rolling baseline down with it and never trips the alarm. A NaN or missing input
+sizes to zero.
+
+Exits never read entry price. Under log-utility, two positions with identical current
+wealth, holdings, posterior, and time-to-resolution take the same optimal action regardless
+of what was paid — cost basis is sunk, and a stop-loss keyed to it triggers on luck, not on
+state. Settled losses are not re-vetoed by a drawdown window either: the loss is already in
+the bankroll the next sizing call reads.
 
 ## Execution
 
 Orders are limit orders. Entries rest as a maker (good-till-cancel, post-only) and escalate
 to a taker cross (fill-or-kill or fill-and-kill) only if the edge holds past a deadline. Each
-order carries an idempotency key and its intent is written before the venue is contacted.
-Fills are verified against the venue each cycle; an order is entered only on a confirmed
-trade fact, and partial fills track their remainder. Exits run a separate state machine, and
-an exit's fill-or-kill is coerced to fill-and-kill so a thin book does not reject it whole.
-An hourly sweep reconciles local intent against venue and chain facts. Settlement is read
-from the market feed; redemption of winning tokens is recorded for accounting.
+order carries an idempotency key and its intent is written before the venue is contacted. A
+submission that times out is neither retried nor assumed failed — a blind retry
+double-submits if the first request landed; assuming failure silently drops a position that
+is already live — it holds an explicit unknown state until the venue is re-queried. Order
+state is reduced across venue read sources by strength of evidence, not recency, so a
+confirmed fill can never be overwritten by a staler, weaker read arriving later. Partial
+fills track their remainder. Exits run a separate state machine, and an exit's fill-or-kill
+is coerced to fill-and-kill so a thin book does not reject it whole. An hourly sweep
+reconciles local intent against venue and chain facts. Settlement is read from the market
+feed; redemption of winning tokens is recorded for accounting.
 
 ## Worked example
 
@@ -196,6 +215,11 @@ When a market resolves, the position is graded into one of six outcomes — fore
 win, lucky win, foreseeable loss, miscalibration loss, stale-data decision, unattributable —
 and only the skill outcomes feed calibration. The probability a position was sized on is
 frozen at decision time, and calibration consumes only outcomes that have already settled.
+The grading is held to the same bar: one staleness check, plausible on its face, was
+convicted by its own audit — every position it flagged as decided-on-stale-data had its
+"fresher" forecast computed only *after* the decision, median 27 hours. Hindsight,
+systematized. Superseded grades are archived, never overwritten, so a fix can be verified
+against the exact corpus it corrects.
 
 The sample this produces is a few hundred settled positions — enough to ask whether the stated
 probability matches the settled frequency, not enough to support a return figure. `python3
@@ -209,12 +233,14 @@ informativeness and cut by lead time, side, strategy, and the six-class attribut
 | Strategy | Edge source | Fades |
 |----------|-------------|:-----:|
 | Settlement Capture | the daily extreme is observed once the peak has passed | slowest |
+| Day-0 Nowcast Entry | the running extreme conditions the distribution intraday | slow |
+| Forecast Q-Kernel Entry | the full posterior against the book, any bin that clears the edge gate | fast |
 | Center Bin Buy | the model prices the most-likely bin against the market | fast |
 | Imminent Open Capture | re-opened or next-day markets within hours of settlement | fast |
 | Opening Inertia | first-liquidity anchoring on a freshly opened market | fastest |
 
-Each is tracked on its own settled record. Further strategies (shoulder-bin sell, center-bin
-sell, tail-capture) are registered but not live.
+Each is tracked on its own settled record. Ten further registered strategies (shoulder and
+center sells, tail capture, maker provision, cross-market hedges) are blocked from live.
 
 ## Scope and honest limits
 
