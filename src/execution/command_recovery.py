@@ -16085,6 +16085,9 @@ def _point_order_terminal_for_partial_remainder(client, venue_order_id: str) -> 
             raise
         return True, "NOT_FOUND", None
     if raw is None:
+        absence_proof = getattr(client, "authenticated_point_order_absent", None)
+        if callable(absence_proof) and absence_proof(venue_order_id):
+            return True, "NOT_FOUND", None
         return False, "UNAVAILABLE", None
     status = _order_status(raw)
     if status in _TERMINAL_NO_FILL_VENUE_STATUSES:

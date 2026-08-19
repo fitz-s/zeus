@@ -328,6 +328,8 @@ def test_capture_snapshot_preserves_authenticated_point_absence():
     snapshot = vsc.capture_venue_read_snapshot(Client(), order_ids=["order-1"])
 
     assert snapshot.get_order("order-1") is None
+    assert snapshot.authenticated_point_order_absent("order-1") is True
+    assert snapshot.authenticated_point_order_absent("another-order") is False
 
 
 def test_complete_account_snapshot_also_captures_authenticated_point_order_reads():
@@ -357,6 +359,7 @@ def test_complete_account_snapshot_also_captures_authenticated_point_order_reads
 
     assert snapshot.get_order("order-live") == open_order
     assert snapshot.get_order("order-absent") is None
+    assert snapshot.authenticated_point_order_absent("order-absent") is False
 
 
 def test_point_order_snapshot_stops_network_reads_after_shared_deadline():

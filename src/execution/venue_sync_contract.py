@@ -443,9 +443,24 @@ class VenueReadSnapshot:
         {"get_open_orders", "get_trades", "get_order", "find_order_by_idempotency_key", "get_clob_market_info"}
     )
 
-    def __init__(self, *, live_client, orders, open_orders, trades, idempotency, market_info):
+    def __init__(
+        self,
+        *,
+        live_client,
+        orders,
+        open_orders,
+        trades,
+        idempotency,
+        market_info,
+        authenticated_absent_order_ids=(),
+    ):
         object.__setattr__(self, "_live_client", live_client)
         object.__setattr__(self, "_orders", dict(orders))
+        object.__setattr__(
+            self,
+            "_authenticated_absent_order_ids",
+            frozenset(str(order_id) for order_id in authenticated_absent_order_ids),
+        )
         object.__setattr__(self, "_open_orders", list(open_orders) if open_orders is not None else None)
         object.__setattr__(self, "_trades", list(trades) if trades is not None else None)
         object.__setattr__(self, "_idempotency", dict(idempotency))
@@ -472,6 +487,11 @@ class VenueReadSnapshot:
                 f"get_order({key!r}) failed during venue snapshot: {value.error}"
             ) from value.error
         return value
+
+    def authenticated_point_order_absent(self, order_id) -> bool:
+        """Whether NETWORK captured a typed authenticated not-found response."""
+
+        return str(order_id) in self._authenticated_absent_order_ids
 
     def find_order_by_idempotency_key(self, key):
         k = str(key)
@@ -583,6 +603,7 @@ def capture_venue_read_snapshot(
     trades = list(account_truth.trades)
 
     orders: dict = {}
+    authenticated_absent_order_ids: set[str] = set()
     requested_order_ids = {str(o) for o in order_ids if str(o).strip()}
     get_order_source = next(
         (
@@ -613,6 +634,7 @@ def capture_venue_read_snapshot(
                     orders[oid] = get_order_source(oid)
             except VenueOrderNotFound:
                 orders[oid] = None
+                authenticated_absent_order_ids.add(oid)
             except VenueResponseShapeError as exc:
                 logger.warning("venue_sync_contract: get_order(%s) failed during snapshot", oid, exc_info=True)
                 orders[oid] = _CapturedVenueReadFailure(exc)
@@ -685,4 +707,5 @@ def capture_venue_read_snapshot(
         trades=trades,
         idempotency=idempotency,
         market_info=market_info,
+        authenticated_absent_order_ids=authenticated_absent_order_ids,
     )

@@ -2061,7 +2061,7 @@ files:
   src/execution/venue_sync_contract.py:
     zone: K2_runtime
     authority_role: venue_recovery_snapshot_boundary
-    why: Separates command recovery into DB snapshot, connection-free venue I/O, and short apply phases. Account absence is authoritative only after one complete adapter-owned orders-plus-trades snapshot finishes inside its shared monotonic deadline; adapter failure, pagination ambiguity, or timeout aborts before any apply mutation.
+    why: Separates command recovery into DB snapshot, connection-free venue I/O, and short apply phases. Account absence is authoritative only after one complete adapter-owned orders-plus-trades snapshot finishes inside its shared monotonic deadline; adapter failure, pagination ambiguity, or timeout aborts before any apply mutation. Typed authenticated point-order absence remains distinguishable from an untyped None response across the NETWORK-to-APPLY boundary.
     downstream:
     - src/execution/command_recovery.py
   src/execution/executor.py:

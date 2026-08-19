@@ -30585,6 +30585,17 @@ class TestRecoveryResolutionTable:
                 ],
             }
         ]
+        from src.execution.venue_sync_contract import VenueReadSnapshot
+
+        snapshot = VenueReadSnapshot(
+            live_client=mock_client,
+            orders={order_id: None},
+            open_orders=[],
+            trades=mock_client.get_trades.return_value,
+            idempotency={},
+            market_info={},
+            authenticated_absent_order_ids={order_id},
+        )
 
         candidates = command_recovery._partial_remainder_candidates(
             conn,
@@ -30594,7 +30605,7 @@ class TestRecoveryResolutionTable:
 
         summary = command_recovery.reconcile_partial_remainders(
             conn,
-            mock_client,
+            snapshot,
             terminal_exit_only=True,
         )
 
