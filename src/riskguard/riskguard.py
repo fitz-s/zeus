@@ -6,7 +6,7 @@ and emits durable risk actions into zeus.db when the canonical table exists.
 Graduated response: GREEN → YELLOW → ORANGE → RED.
 
 # Created: (pre-audit)
-# Last reused or audited: 2026-08-18
+# Last reused or audited: 2026-08-19
 # Authority basis: connection-leak audit 2026-05-10 — 51 open zeus-world.db-wal
 #   handles observed on PID 18538. Root cause: tick() and tick_with_portfolio()
 #   opened zeus_conn / risk_conn without try/finally, so any exception in the
@@ -14,6 +14,9 @@ Graduated response: GREEN → YELLOW → ORANGE → RED.
 #   try/finally to guarantee conn.close() on every exit path.
 #   2026-05-17 live lock remediation: trade/world metric lock loss degrades to
 #   a fresh DATA_DEGRADED risk_state row, not stale RED force-exit.
+#   2026-08-19 Day0 revision admission: an established Day0 strategy whose
+#   current probability semantics lacks causal capital proof is revision-gated
+#   before BUY while its no-money shadow continues to drain evidence.
 #   2026-06-08 thepath/audit-realign iron #4/#6 fix: (1) init_risk_db re-applies
 #   busy_timeout after executescript (Fitz #5 strip-trap); (2) lock-attestation
 #   FAILS CONSERVATIVE — max(previous_level, DATA_DEGRADED), never re-stamps a
@@ -5662,13 +5665,18 @@ def _tick_once() -> RiskLevel:
                 required_evalue=market_relative_alpha_evalue,
             )
         )
-        (
-            day0_market_relative_alpha_gate_reason,
-            day0_market_relative_alpha_gate_revisions,
-        ) = _market_relative_alpha_rejection_gate_reason(
-            day0_probability_semantics_binding,
-            day0_market_relative_alpha_evidence,
-            required_evalue=market_relative_alpha_evalue,
+        day0_market_relative_alpha_gate_reason = (
+            _market_relative_alpha_gate_reason(
+                day0_probability_semantics_binding,
+                day0_market_relative_alpha_evidence,
+                required_evalue=market_relative_alpha_evalue,
+            )
+        )
+        day0_market_relative_alpha_gate_revisions = (
+            _market_relative_alpha_unproven_revisions(
+                day0_probability_semantics_binding,
+                day0_market_relative_alpha_evidence,
+            )
         )
         day0_market_relative_alpha_gate_required = (
             day0_market_relative_alpha_gate_reason is not None
@@ -5821,11 +5829,14 @@ def _tick_once() -> RiskLevel:
         recommended_control_reasons: dict[str, list[str]] = {}
         recommended_strategy_gate_reasons: dict[str, list[str]] = {}
         recommended_strategy_gate_scopes: dict[str, set[str]] = {}
-        # Current q/book/wealth economics are the decision authority. Walk-forward
-        # market-relative evidence remains revision-bound, but missing or
-        # inconclusive history cannot create an absorbing no-entry state: doing
-        # so prevents the fills that can ever settle that evidence. Only direct
-        # rejection of the same executable capital law emits an alpha gate.
+        # Current q/book/wealth economics are the decision authority. Qkernel
+        # revisions retain rejection-only gating because their ordinary live
+        # cohort already supplies a causal settlement drain. A new Day0
+        # probability semantics revision has a different contract: it must earn
+        # admission from the no-money global-auction shadow before risking
+        # capital. The shadow continues while gated and later verified
+        # settlements reset the exact revision-scoped gate. Held monitoring and
+        # exits are outside this entry-only policy.
         probability_semantics_level = RiskLevel.GREEN
         if probability_semantics_binding.get("status") == "unavailable":
             probability_semantics_level = RiskLevel.DATA_DEGRADED
@@ -6351,7 +6362,7 @@ def _tick_once() -> RiskLevel:
                     day0_market_relative_alpha_evidence
                 ),
                 "day0_market_relative_alpha_admission_role": (
-                    "revision_scoped_rejection_gate"
+                    "revision_scoped_pretrade_proof_gate"
                 ),
                 "day0_market_relative_alpha_gate_reason": (
                     day0_market_relative_alpha_gate_reason
