@@ -34102,6 +34102,14 @@ def _global_day0_probability_authority_payload(
             ),
             ("process_sigma_native", "_edli_day0_process_sigma_native"),
             ("process_sigma_basis", "_edli_day0_process_sigma_basis"),
+            (
+                "remaining_path_center_sigma_native",
+                "_edli_day0_remaining_path_center_sigma_native",
+            ),
+            (
+                "unresolved_path_sigma_native",
+                "_edli_day0_unresolved_path_sigma_native",
+            ),
             ("exit_authority_status", "_edli_day0_exit_authority_status"),
             ("exit_authority_reason", "_edli_day0_exit_authority_reason"),
             ("bound_classification", "_edli_day0_bound_classification"),
@@ -36315,6 +36323,12 @@ def _prepare_current_global_probability_family(
             "process_sigma_basis": payload.get(
                 "_edli_day0_process_sigma_basis"
             ),
+            "remaining_path_center_sigma_native": payload.get(
+                "_edli_day0_remaining_path_center_sigma_native"
+            ),
+            "unresolved_path_sigma_native": payload.get(
+                "_edli_day0_unresolved_path_sigma_native"
+            ),
             "source_clock_predictive_sigma_native": payload.get(
                 "_edli_day0_source_clock_predictive_sigma_native"
             ),
@@ -38438,19 +38452,20 @@ def _day0_process_sigma_native(
     family,
     unit: str,
     decision_time: "datetime | None",
+    members_native: object | None = None,
 ) -> float | None:
     """Day0 observation/process width in the settlement native unit.
 
     Day0 remaining-day q is conditioned on a fixed observed running boundary.
     This width belongs to the still-unobserved conditional trajectory:
     instrument noise plus publication-latency uncertainty are applied before the
-    physical max/min with that boundary.  Peak timing and provider disagreement
-    are already represented by the explicit remaining-hour trajectories.  The
-    replacement carrier's ``sigma_pred`` describes the unconditional full-day
-    extreme and remains confidence/source authority; injecting it again as
-    conditional path noise would double-count a different random variable and
-    systematically manufacture anti-modal NO probability.  The helper is shared
-    by point q and q_lcb bootstrap.
+    physical max/min with that boundary.  The explicit remaining-hour provider
+    trajectories already carry their center disagreement, but not their common
+    forecast error.  Decompose the source-clock total predictive variance by
+    subtracting the variance of those current trajectory centers; the unresolved
+    variance remains conditional path error.  This avoids both deleting forecast
+    error and counting provider disagreement twice.  The helper is shared by
+    point q and q_lcb bootstrap.
     """
     try:
         from src.signal.forecast_uncertainty import sigma_instrument
@@ -38478,11 +38493,33 @@ def _day0_process_sigma_native(
             return None
         if not (source_clock_sigma > 0.0 and np.isfinite(source_clock_sigma)):
             return None
+        try:
+            centers = np.asarray(members_native, dtype=np.float64).ravel()
+        except (TypeError, ValueError):
+            return None
+        if not centers.size or not np.isfinite(centers).all():
+            return None
+        path_center_sigma = float(np.std(centers, ddof=0))
+        unresolved_variance = max(
+            source_clock_sigma**2 - path_center_sigma**2,
+            0.0,
+        )
+        sigma = max(sigma, float(np.sqrt(unresolved_variance)))
+        payload["_edli_day0_remaining_path_center_sigma_native"] = (
+            path_center_sigma
+        )
+        payload["_edli_day0_unresolved_path_sigma_native"] = float(
+            np.sqrt(unresolved_variance)
+        )
+        payload["_edli_day0_process_sigma_basis"] = (
+            "source_clock_total_variance_minus_remaining_path_spread_v1"
+        )
+    else:
+        payload["_edli_day0_process_sigma_basis"] = (
+            "conditional_remaining_path_instrument_plus_observation_latency_v2"
+        )
     if not (sigma > 0.0 and np.isfinite(sigma)):
         return None
-    payload["_edli_day0_process_sigma_basis"] = (
-        "conditional_remaining_path_instrument_plus_observation_latency_v2"
-    )
     payload["_edli_day0_process_sigma_native"] = sigma
     return sigma
 
@@ -38493,6 +38530,7 @@ def _day0_extra_member_sigma_native(
     family,
     unit: str,
     decision_time: "datetime | None",
+    members_native: object | None = None,
 ) -> float:
     """Extra member-space sigma for Day0 point q integration.
 
@@ -38508,6 +38546,7 @@ def _day0_extra_member_sigma_native(
         family=family,
         unit=unit,
         decision_time=decision_time,
+        members_native=members_native,
     )
     if sigma is None:
         if "_edli_day0_source_clock_predictive_sigma_native" in payload:
@@ -38745,7 +38784,11 @@ def _make_day0_bootstrap_sampler(
             boundary_survival_probability = 0.0
         mask = _day0_absorbing_mask(payload=payload, family=family)
         sigma = _day0_process_sigma_native(
-            payload=payload, family=family, unit=unit, decision_time=decision_time
+            payload=payload,
+            family=family,
+            unit=unit,
+            decision_time=decision_time,
+            members_native=members,
         )
         if sigma is None:
             raise ValueError("day0 bootstrap sigma invalid")
@@ -39056,6 +39099,7 @@ def _market_analysis_from_event_snapshot(
                 family=family,
                 unit=unit,
                 decision_time=day0_probability_time,
+                members_native=members,
             )
             if day0_extra_member_sigma > 0.0:
                 payload["_edli_day0_extra_member_sigma_native"] = float(day0_extra_member_sigma)
@@ -39204,6 +39248,7 @@ def _market_analysis_from_event_snapshot(
                 family=family,
                 unit=unit,
                 decision_time=day0_probability_time,
+                members_native=members,
             )
             if _process_sigma is not None:
                 _spine_sigma = float(

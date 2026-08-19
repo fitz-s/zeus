@@ -986,9 +986,10 @@ class TestRemainingDayMembers:
             "ecmwf_ifs",
         ]
 
-    def test_source_clock_predictive_sigma_is_not_conditional_path_noise(self):
+    def test_source_clock_total_variance_subtracts_current_path_spread(self):
         import src.engine.event_reactor_adapter as era
 
+        members = np.asarray([10.0, 11.0, 12.0])
         payload = {
             "metric": "high",
             "observation_time": "2026-06-10T14:55:00+00:00",
@@ -1001,107 +1002,67 @@ class TestRemainingDayMembers:
             family=family,
             unit="C",
             decision_time=datetime(2026, 6, 10, 15, 0, tzinfo=UTC),
+            members_native=members,
         )
 
-        assert sigma == pytest.approx(0.28)
+        path_sigma = float(np.std(members, ddof=0))
+        unresolved_sigma = float(np.sqrt(1.4**2 - path_sigma**2))
+        assert sigma == pytest.approx(unresolved_sigma)
         assert payload["_edli_day0_process_sigma_basis"] == (
-            "conditional_remaining_path_instrument_plus_observation_latency_v2"
+            "source_clock_total_variance_minus_remaining_path_spread_v1"
         )
-        assert era._day0_extra_member_sigma_native(
+        assert payload["_edli_day0_remaining_path_center_sigma_native"] == (
+            pytest.approx(path_sigma)
+        )
+        assert payload["_edli_day0_unresolved_path_sigma_native"] == (
+            pytest.approx(unresolved_sigma)
+        )
+        extra = era._day0_extra_member_sigma_native(
             payload=payload,
             family=family,
             unit="C",
             decision_time=datetime(2026, 6, 10, 15, 0, tzinfo=UTC),
-        ) == 0.0
-
-        stale_payload = dict(payload)
-        stale_payload.pop("_edli_day0_process_sigma_native")
-        stale_payload.pop("_edli_day0_process_sigma_basis")
-        stale_extra = era._day0_extra_member_sigma_native(
-            payload=stale_payload,
-            family=family,
-            unit="C",
-            decision_time=datetime(2026, 6, 10, 17, 0, tzinfo=UTC),
+            members_native=members,
         )
-        assert 0.0 < stale_extra < 1.4
+        assert extra == pytest.approx(np.sqrt(unresolved_sigma**2 - 0.28**2))
 
-    def test_singapore_frozen_paths_do_not_reuse_full_day_sigma(
-        self,
-        monkeypatch,
-    ):
-        """The changed law uses only inputs frozen before the losing fill."""
-
+    def test_source_clock_total_variance_is_not_counted_twice(self):
         import src.engine.event_reactor_adapter as era
-        from src.contracts.settlement_semantics import SettlementSemantics
 
-        monkeypatch.setattr("src.config.ensemble_n_mc", lambda: 5000)
-        city = SimpleNamespace(
-            name="Singapore",
-            settlement_source_type="wu_icao",
-            settlement_unit="C",
-            wu_station="WSSS",
-        )
-        bins = [
-            Bin(low=35.0, high=35.0, unit="C", label="35C"),
-            Bin(low=None, high=28.0, unit="C", label="28C or below"),
-            Bin(low=36.0, high=36.0, unit="C", label="36C"),
-            Bin(low=32.0, high=32.0, unit="C", label="32C"),
-            Bin(low=37.0, high=37.0, unit="C", label="37C"),
-            Bin(low=38.0, high=None, unit="C", label="38C or higher"),
-            Bin(low=31.0, high=31.0, unit="C", label="31C"),
-            Bin(low=33.0, high=33.0, unit="C", label="33C"),
-            Bin(low=29.0, high=29.0, unit="C", label="29C"),
-            Bin(low=34.0, high=34.0, unit="C", label="34C"),
-            Bin(low=30.0, high=30.0, unit="C", label="30C"),
-        ]
-        members = np.asarray(
-            [32.43149622898139, 32.420572502832, 32.76006549252497]
-        )
+        members = np.asarray([9.0, 10.0, 11.0])
         payload = {
-            "city": "Singapore",
             "metric": "high",
-            "rounded_value": 31,
-            "high_so_far": 31.0,
-            "evidence_finality": "MONOTONE_SETTLEMENT_BOUND",
-            "observation_time": "2026-08-18T03:30:00+00:00",
-            "_edli_day0_source_clock_predictive_sigma_native": (
-                2.5754064459731634
-            ),
+            "observation_time": "2026-06-10T14:55:00+00:00",
+            "_edli_day0_source_clock_predictive_sigma_native": 1.4,
         }
-        decision_time = datetime(2026, 8, 18, 3, 43, 40, tzinfo=UTC)
-        family = SimpleNamespace(city="Singapore")
-        conditional_extra = era._day0_extra_member_sigma_native(
+        sigma = era._day0_process_sigma_native(
             payload=payload,
-            family=family,
+            family=SimpleNamespace(city="Paris"),
             unit="C",
-            decision_time=decision_time,
+            decision_time=datetime(2026, 6, 10, 15, 0, tzinfo=UTC),
+            members_native=members,
         )
-        changed = era._day0_remaining_p_raw_vector(
-            members,
-            city=city,
-            settlement_semantics=SettlementSemantics.for_city(city),
-            bins=bins,
-            payload=dict(payload),
-            extra_member_sigma=conditional_extra,
-        )
+        explicit_path_variance = float(np.var(members, ddof=0))
+        assert sigma is not None
+        assert sigma**2 + explicit_path_variance == pytest.approx(1.4**2)
 
-        full_day_extra = float(np.sqrt(2.5754064459731634**2 - 0.28**2))
-        old = era._day0_remaining_p_raw_vector(
-            members,
-            city=city,
-            settlement_semantics=SettlementSemantics.for_city(city),
-            bins=bins,
-            payload=dict(payload),
-            extra_member_sigma=full_day_extra,
-        )
+    def test_source_clock_sigma_requires_current_path_centers(self):
+        import src.engine.event_reactor_adapter as era
 
-        exact_33_index = 7
-        assert conditional_extra == 0.0
-        # The historical receipt reported 0.8492; deterministic replay uses a
-        # bounded Monte Carlo draw, so retain the economic witness with a tight
-        # sampling tolerance rather than pretending the draw itself is truth.
-        assert 1.0 - old[exact_33_index] == pytest.approx(0.8492, abs=0.005)
-        assert 1.0 - changed[exact_33_index] == pytest.approx(0.4686, abs=0.001)
+        with pytest.raises(
+            ValueError,
+            match="DAY0_SOURCE_CLOCK_PREDICTIVE_SIGMA_INVALID",
+        ):
+            era._day0_extra_member_sigma_native(
+                payload={
+                    "metric": "high",
+                    "observation_time": "2026-06-10T14:55:00+00:00",
+                    "_edli_day0_source_clock_predictive_sigma_native": 1.4,
+                },
+                family=SimpleNamespace(city="Paris"),
+                unit="C",
+                decision_time=datetime(2026, 6, 10, 15, 0, tzinfo=UTC),
+            )
 
     def test_invalid_bound_source_clock_sigma_fails_closed(self):
         import src.engine.event_reactor_adapter as era
@@ -2311,8 +2272,10 @@ class TestRemainingDayMembers:
                 ),
                 "_edli_day0_process_sigma_native": 0.28,
                 "_edli_day0_process_sigma_basis": (
-                    "conditional_remaining_path_instrument_plus_observation_latency_v2"
+                    "source_clock_total_variance_minus_remaining_path_spread_v1"
                 ),
+                "_edli_day0_remaining_path_center_sigma_native": 1.166190,
+                "_edli_day0_unresolved_path_sigma_native": 0.285657,
             }
         )
 
@@ -2335,6 +2298,8 @@ class TestRemainingDayMembers:
         ]
         assert authority["source_clock_predictive_sigma_native"] == 1.2
         assert authority["process_sigma_native"] == 0.28
+        assert authority["remaining_path_center_sigma_native"] == 1.166190
+        assert authority["unresolved_path_sigma_native"] == 0.285657
 
     def test_f_city_members_are_converted_at_the_seam(self, monkeypatch):
         vectors = [_vector(model="ncep_nbm_conus", temps=[25.0] * 24)]

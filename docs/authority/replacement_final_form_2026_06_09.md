@@ -170,18 +170,23 @@ the source-clock full-day extreme:
 provider_path_s = remaining_extreme(
     condition(hourly_path_s, current_temperature, observation_time)
 )
-future_s        = provider_path_s + instrument_error + observation_latency_error
+path_spread²    = Var_s(provider_path_s)
+unresolved²     = max(sigma_pred² - path_spread², 0)
+path_error²     = max(unresolved², instrument_latency_floor²)
+future_s        = provider_path_s + Normal(0, path_error)
 final_s         = extreme(observed_running_boundary, future_s)
 ```
 
 The provider-path distribution carries current provider disagreement and the
-explicit remaining diurnal shape. Instrument and observation-latency errors are
-applied once before the physical max/min. The source-clock `sigma_pred` remains
-mandatory immutable carrier and confidence-bound evidence, but it describes the
-unconditional full-day extreme and must not be injected again as symmetric
-temperature noise on the conditional remaining paths. Doing so mixes two random
-variables, double-counts uncertainty, and mechanically depresses every exact-bin
-YES probability into anti-modal NO probability.
+explicit remaining diurnal shape. It does not carry the error shared by all
+deterministic provider paths. The current provider-path center variance is
+therefore removed from the source-clock total predictive variance; only the
+unresolved remainder is applied as conditional path error. Instrument and
+observation-latency uncertainty is an irreducible floor. This decomposition
+prevents both failure modes: deleting common forecast error makes exact-bin q
+overconfident, while injecting the full `sigma_pred` into every path counts
+provider disagreement twice. The error is applied once before the physical
+max/min.
 
 The source-clock posterior, finite-member/moment band, topology, and causal
 identity remain bound into the Day0 witness and are reproduced at submit. A
