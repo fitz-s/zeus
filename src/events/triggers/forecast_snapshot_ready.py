@@ -937,9 +937,13 @@ class ForecastSnapshotReadyTrigger:
                    )
             ),
             """
+            # Keep the bounded current-market family set as the outer loop.
+            # With an ordinary JOIN SQLite may reverse this into every strategy
+            # readiness row x a scan of market_families; CROSS JOIN makes each
+            # family an indexed readiness point probe without changing rows.
             _ranked_readiness_from_sql = f"""
                   FROM market_families AS mf
-                  JOIN readiness_state AS rs
+                  CROSS JOIN readiness_state AS rs
                     ON rs.strategy_key = '{REPLACEMENT_STRATEGY_KEY}'
                    AND rs.city = mf.city
                    AND rs.target_local_date = mf.target_date

@@ -1,4 +1,4 @@
-# Lifecycle: created=2026-05-24; last_reviewed=2026-07-16; last_reused=2026-07-16
+# Lifecycle: created=2026-05-24; last_reviewed=2026-08-19; last_reused=2026-08-19
 # Purpose: Prove FSR emits only complete, current, authority-bound forecast carriers.
 # Reuse: Re-audit replacement readiness binding and event clocks before trigger changes.
 # Authority basis: EDLI v1 implementation prompt §8 ForecastSnapshotReadyTrigger contract.
@@ -780,6 +780,7 @@ def test_unrestricted_redecision_drives_readiness_from_current_market_families(
         if "market_families AS" in sql and "ranked_ready AS" in sql
     )
     assert "FROM market_families AS mf" in current_scope_sql
+    assert "CROSS JOIN readiness_state AS rs" in current_scope_sql
     assert "FROM forecast_posteriors AS current_fp" in current_scope_sql
     assert (
         "current_fp.product_id = 'openmeteo_ecmwf_ifs9_bayes_fusion_v1'"
@@ -810,6 +811,14 @@ def test_unrestricted_redecision_drives_readiness_from_current_market_families(
         "idx_market_events_city_date_metric" in detail
         and "city=?" in detail
         and "target_date=?" in detail
+        and "temperature_metric=?" in detail
+        for detail in details
+    )
+    assert any(
+        "idx_readiness_state_strategy_family_latest" in detail
+        and "strategy_key=?" in detail
+        and "city=?" in detail
+        and "target_local_date=?" in detail
         and "temperature_metric=?" in detail
         for detail in details
     )

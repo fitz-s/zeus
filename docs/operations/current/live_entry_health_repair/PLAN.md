@@ -2580,3 +2580,35 @@ publication barrier.
   recovery tests, compilation, registry/planning checks, and `git diff --check`
   must pass before hot-fix deployment. Runtime verification separately checks
   exact loaded SHA and current CLOB order/trade absence.
+
+### Slice B122 — Keep global scope on indexed family point probes (2026-08-19)
+
+- Live defect: after storage risk reset to GREEN, every full global auction from
+  20:11 through 20:27 failed its 45-second work cut in
+  `scope:forecast:sql_interrupt`. The identical current-scope query ranged from
+  4.6 to 43 seconds under live ingest load; book capture and solve were not the
+  bottleneck. Query-plan evidence showed SQLite choosing `readiness_state` as
+  the outer loop and scanning the bounded `market_families` CTE for each row.
+- First-principles invariant: every auction must finish the complete current
+  BUY/SELL/HOLD/CASH comparison before no-order can be authoritative. The
+  already-bounded current-market family set is the outer loop; each family
+  point-probes the existing strategy/family readiness index. Join order is an
+  execution-shape contract only and must not alter scope rows, posterior
+  identity, probability, price, sizing, ranking, or venue I/O.
+- SCOPE: unrestricted replacement-carrier current-scope SQL inside
+  `ForecastSnapshotReadyTrigger`. DRAIN: the next reactor retry completes a
+  fresh full-scope auction and durably records its receipt. RESET: every call
+  rebuilds the bounded market-family CTE from current decision-time rows; an
+  absent current readiness or market still fails closed exactly as before.
+- Files authorized: `src/events/triggers/forecast_snapshot_ready.py`,
+  `tests/events/test_forecast_snapshot_ready.py`, this plan, and the existing
+  test topology registry. Forbidden: extending the 45-second authority window,
+  caching stale scope, dropping families, changing risk gates, or bypassing
+  current probability/book refresh.
+- Acceptance: the frozen query plan contains `CROSS JOIN readiness_state` and
+  probes `idx_readiness_state_strategy_family_latest` on strategy, city, target,
+  and metric; the same live read returns the same row count in under the work
+  cut; the full forecast-trigger test file, compilation, registry/planning
+  checks, and diff checks pass. Runtime closeout requires exact loaded SHA plus
+  a post-load full-scope decision receipt; any order still requires positive
+  posterior-mean expected log growth and all submit-time truth gates.
