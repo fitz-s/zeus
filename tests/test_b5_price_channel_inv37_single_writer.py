@@ -710,7 +710,7 @@ def test_price_channel_writer_roles_reach_coordinator_priority(monkeypatch):
 
     with lane._edli_price_channel_trade_write_gate(
         owner="price_channel_held_quote_refresh",
-        priority="background_recovery",
+        priority="monitor",
     ):
         pass
     with lane._edli_price_channel_trade_write_gate(
@@ -724,7 +724,7 @@ def test_price_channel_writer_roles_reach_coordinator_priority(monkeypatch):
         pass
 
     assert observed == [
-        ("price_channel_held_quote_refresh", "background_recovery"),
+        ("price_channel_held_quote_refresh", "monitor"),
         ("price_channel_market_quote", "background_recovery"),
         (
             "price_channel_snapshot_invalidate",
@@ -733,7 +733,8 @@ def test_price_channel_writer_roles_reach_coordinator_priority(monkeypatch):
     ]
 
     lane_source = _PRICE_CHANNEL_MODULE.read_text(encoding="utf-8")
-    assert 'owner="price_channel_held_quote_refresh",\n                    priority="background_recovery"' in lane_source
+    assert 'owner="price_channel_held_quote_refresh",\n                    priority="monitor"' in lane_source
+    assert 'owner="price_channel_global_exit_audit",\n                priority="monitor"' in lane_source
     assert 'owner="price_channel_candidate_quote_refresh",\n                    priority="background_recovery"' in lane_source
     assert 'owner="price_channel_market_quote",\n                        priority="background_recovery"' in lane_source
 
@@ -1008,16 +1009,24 @@ def test_held_refresh_uses_fair_deadline_bounded_trade_gate():
         and isinstance(sub.func, ast.Name)
         and sub.func.id == "_edli_price_channel_trade_write_gate"
     ]
-    assert len(calls) == 1
-    keywords = {keyword.arg: keyword.value for keyword in calls[0].keywords}
-    assert isinstance(keywords["deadline_ms"], ast.Name)
-    assert (
-        keywords["deadline_ms"].id
-        == "PRICE_CHANNEL_HELD_QUOTE_DB_WRITE_LEASE_DEADLINE_MS"
-    )
-    assert isinstance(keywords["deadline_monotonic"], ast.Name)
-    assert keywords["deadline_monotonic"].id == "deadline"
-    assert isinstance(keywords["on_enter"], ast.Lambda)
+    assert len(calls) == 2
+    for call in calls:
+        keywords = {keyword.arg: keyword.value for keyword in call.keywords}
+        assert isinstance(keywords["owner"], ast.Constant)
+        assert keywords["owner"].value in {
+            "price_channel_held_quote_refresh",
+            "price_channel_global_exit_audit",
+        }
+        assert isinstance(keywords["priority"], ast.Constant)
+        assert keywords["priority"].value == "monitor"
+        assert isinstance(keywords["deadline_ms"], ast.Name)
+        assert (
+            keywords["deadline_ms"].id
+            == "PRICE_CHANNEL_HELD_QUOTE_DB_WRITE_LEASE_DEADLINE_MS"
+        )
+        assert isinstance(keywords["deadline_monotonic"], ast.Name)
+        assert keywords["deadline_monotonic"].id == "deadline"
+        assert isinstance(keywords["on_enter"], ast.Lambda)
 
 
 def test_forever_ingestor_uses_owner_connections_not_attached_connection():

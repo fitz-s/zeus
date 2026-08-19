@@ -3461,7 +3461,7 @@ def _edli_refresh_held_position_quote_evidence(
                 received_at=datetime.now(timezone.utc).isoformat(),
                 write_gate=_edli_price_channel_trade_write_gate(
                     owner="price_channel_held_quote_refresh",
-                    priority="background_recovery",
+                    priority="monitor",
                     deadline_ms=(
                         PRICE_CHANNEL_HELD_QUOTE_DB_WRITE_LEASE_DEADLINE_MS
                     ),
@@ -3481,7 +3481,7 @@ def _edli_refresh_held_position_quote_evidence(
         if exit_audit_token_ids.intersection(token_metadata):
             with _edli_price_channel_trade_write_gate(
                 owner="price_channel_global_exit_audit",
-                priority="background_recovery",
+                priority="monitor",
                 deadline_ms=PRICE_CHANNEL_HELD_QUOTE_DB_WRITE_LEASE_DEADLINE_MS,
                 deadline_monotonic=deadline,
                 on_enter=lambda: _bound_held_quote_sqlite_wait(
