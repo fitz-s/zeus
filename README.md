@@ -7,7 +7,7 @@ settlement, and feeds graded outcomes back into calibration.
 
 A settlement is one integer, published once, after the market has closed — no partial
 credit, no second attempt. The market pays for understanding the world and understanding
-the rules; the rules are readable, and most participants don't read them.
+the rules.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/architecture-dark.svg">
@@ -42,13 +42,15 @@ written, rather than as `Φ((X+0.5−μ)/σ) − Φ((X−0.5−μ)/σ)`, is a sy
 participant who skips this step carries on every trade.
 [→ Integrate](#forecast-to-probability)
 
-**Multiple-comparisons control is applied across every bin tested, not the survivors.**
-A cycle prices every bin of every market in 54 cities. Applying Benjamini–Hochberg only to
-candidates that already passed earlier filters would be selecting on the outcome. It runs
-across the full set tested that cycle. Above it sits a selection calibrator: each candidate
-is keyed by `(side, lead, bin class, probability bucket)` and its admission probability is
-replaced by a Wilson lower bound on how often that cell has historically settled in its
-favour, over at least 30 settled samples.
+**Multiple-comparisons control runs over every bin tested, not the survivors.**
+Applying Benjamini–Hochberg only to candidates that already passed earlier filters would be
+selecting on the outcome, so within each market it runs across every bin tested — the
+untested are excluded from the denominator, and a missing p-value is a hard error, not a
+skip. Above it sits a selection calibrator: each candidate is keyed by `(side, lead, bin
+class, probability bucket)` and its admission probability is replaced by a Wilson lower
+bound on how often that cell has historically settled in its favour — thin cells fall back
+to a pooled bound over the nearest cells that clear 30 settled samples, borrowed evidence
+rather than none.
 [→ Probability to edge](#probability-to-edge)
 
 **Only skill outcomes are allowed to train the model.**
@@ -138,13 +140,15 @@ separate daemons per feed.
 
 2. **Selection calibrator.** Each candidate is keyed by `(side, lead, bin class, probability
    bucket)` and its admission probability is replaced by a Wilson lower bound on how often
-   that cell has settled in its favour, over at least 30 settled samples.
+   that cell has settled in its favour; a cell under 30 settled samples borrows a pooled
+   bound from the nearest cells that clear it, rather than trading unbounded or not at all.
 
 3. **Edge.** `edge = q − price − cost`, where cost is the all-in entry cost including the
    Polymarket taker fee `rate·p·(1−p)`.
 
-4. **False-discovery control.** Benjamini–Hochberg is applied across every bin tested in the
-   cycle, not only those that passed earlier filters.
+4. **False-discovery control.** Benjamini–Hochberg is applied within each market across
+   every bin tested, not only those that passed earlier filters; a hypothesis missing its
+   p-value is a hard error, so it can never silently run on survivors.
 
 ## Sizing
 
