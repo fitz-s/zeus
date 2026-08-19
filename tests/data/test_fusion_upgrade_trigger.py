@@ -444,6 +444,57 @@ def test_scoped_reseed_uses_db_family_manifests_without_global_tree_scan(
     assert observed["manifests"] is family_manifests
 
 
+def test_upgrade_seed_baseline_lookup_obeys_manifest_and_decision_clocks(
+    tmp_path: Path,
+) -> None:
+    """Fusion upgrades must satisfy the current causal baseline lookup API."""
+    cycle = datetime(2026, 7, 24, 12, 0, tzinfo=UTC)
+    computed_at = datetime(2026, 7, 24, 13, 0, tzinfo=UTC)
+    manifest = SimpleNamespace(
+        source_cycle_time=cycle,
+        artifact_path=tmp_path / "anchor.json",
+    )
+    observed: dict[str, object] = {}
+
+    def _coverage(_conn, **kwargs):
+        observed.update(kwargs)
+        return {"coverage": True}
+
+    output = tmp_path / "staging" / "seed.json"
+    built = trigger._build_and_write_upgrade_seed(
+        _conn(),
+        city="Seoul",
+        target_date="2026-07-25",
+        metric="high",
+        manifests=(manifest,),
+        raw_dir=tmp_path,
+        seed_path=tmp_path / "seeds",
+        seed_file=output,
+        computed_at=computed_at,
+        build_seed=lambda **_kwargs: SimpleNamespace(ok=True, seed={}),
+        latest_baseline_coverage=_coverage,
+        market_bins=lambda *_args, **_kwargs: (object(),),
+        write_seed=lambda path, _payload: (
+            path.parent.mkdir(parents=True, exist_ok=True),
+            path.write_text("{}\n", encoding="utf-8"),
+        ),
+        latest_manifest=lambda *_args, **_kwargs: manifest,
+        manifest_path_value=lambda *_args, **_kwargs: tmp_path / "input.json",
+        manifest_base_dir=lambda *_args, **_kwargs: tmp_path,
+        resolve_path=lambda path, **_kwargs: path,
+        expected_identity=lambda _metric: {
+            "openmeteo_ifs9_anchor": SimpleNamespace(
+                source_id="anchor",
+                data_version="v1",
+            )
+        },
+    )
+
+    assert built == output
+    assert observed["not_after_source_cycle_time"] == cycle
+    assert observed["as_of_time"] == computed_at
+
+
 def test_unchanged_or_unrelated_raw_revision_is_noop() -> None:
     conn = _conn()
     cyc = "2026-06-12T06:00:00+00:00"
