@@ -9768,6 +9768,22 @@ def execute_monitoring_phase(
                     )
                     portfolio_dirty = True
                     continue
+                if posterior_support_zero_direct_sell:
+                    # MONITOR_REFRESHED advances ``last_monitor_at`` before the
+                    # side effect.  Rebind the immutable direct-SELL proof to
+                    # that canonical observation; the pre-write proof otherwise
+                    # fails its exact submit-time identity check despite no
+                    # probability, support, holding, or book change.
+                    from src.execution.exit_lifecycle import (
+                        BranchwiseDominantSellAuthority,
+                    )
+
+                    branchwise_sell_authority = (
+                        BranchwiseDominantSellAuthority.from_current(
+                            pos,
+                            replace(exit_context, exit_reason=exit_reason),
+                        )
+                    )
                 exit_intent = build_exit_intent(
                     pos,
                     replace(exit_context, exit_reason=exit_reason),

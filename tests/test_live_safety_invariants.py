@@ -6767,7 +6767,11 @@ def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_
         position.last_monitor_market_price_is_fresh = True
         position.last_monitor_best_bid = 0.49
         position.last_monitor_best_ask = 0.50
-        position.last_monitor_at = "2026-07-14T18:00:00+00:00"
+        position.last_monitor_at = (
+            "2026-07-14T17:59:59+00:00"
+            if posterior_support_zero
+            else "2026-07-14T18:00:00+00:00"
+        )
         setattr(
             position,
             monitor_refresh._HELD_MONITOR_MIN_ORDER_SIZE_ATTR,
@@ -7245,6 +7249,10 @@ def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_
                 pos.applied_validations
             )
             assert execute_authorities[0] is not None
+            assert execute_authorities[0].probability_observed_at == (
+                "2026-07-14T18:00:00+00:00"
+            )
+            assert execute_authorities[0].probability_observed_at == pos.last_monitor_at
         else:
             assert execute_authorities == [None]
         assert execute_calls == [pos]
