@@ -2612,3 +2612,25 @@ publication barrier.
   checks, and diff checks pass. Runtime closeout requires exact loaded SHA plus
   a post-load full-scope decision receipt; any order still requires positive
   posterior-mean expected log growth and all submit-time truth gates.
+
+### Slice B123 — Remove posterior-history scan from current family scope (2026-08-19)
+
+- Residual defect: B122 removed the reversed readiness/family nested scan and a
+  standalone live-DB read fell to 1.493 seconds, but the first loaded auction's
+  shared-connection scope still took 27.516 seconds under live writers and a
+  following cut again expired in `scope:forecast:sql_interrupt`. One successful
+  receipt is not robust time-sensitive coverage.
+- First-principles invariant: a family without strategy readiness cannot emit a
+  probability-authorized event. Build the bounded current family frontier from
+  strategy `readiness_state`, not the much larger append-only posterior history;
+  then preserve the exact readiness dependency's `posterior_id` rejoin and all
+  live-layer/product/source/data-version/time checks before emission.
+- SCOPE: unrestricted market-family CTE only. DRAIN and RESET are B122's next
+  fresh retry/current-row rebuild. Forbidden: using readiness as probability,
+  skipping the exact posterior rejoin, accepting BLOCKED readiness, widening
+  dates, extending deadline, or changing candidate economics and execution.
+- Acceptance: the query plan has no current-posterior frontier scan, still uses
+  indexed readiness and market family probes, produces the same frozen event
+  set, and completes repeated live shared-connection scope cuts with adequate
+  margin. The restart guard remains active until a post-load receipt and fresh
+  monitor proof both pass; only then may its witness-bound CAS release entries.

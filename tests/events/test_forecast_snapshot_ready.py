@@ -781,19 +781,23 @@ def test_unrestricted_redecision_drives_readiness_from_current_market_families(
     )
     assert "FROM market_families AS mf" in current_scope_sql
     assert "CROSS JOIN readiness_state AS rs" in current_scope_sql
-    assert "FROM forecast_posteriors AS current_fp" in current_scope_sql
+    assert "FROM readiness_state AS current_rs" in current_scope_sql
     assert (
-        "current_fp.product_id = 'openmeteo_ecmwf_ifs9_bayes_fusion_v1'"
+        "current_rs.strategy_key = 'openmeteo_ecmwf_ifs9_bayes_fusion'"
         in current_scope_sql
     )
-    assert "current_fp.runtime_layer = 'live'" in current_scope_sql
-    assert "current_fp.training_allowed = 0" in current_scope_sql
-    assert "current_fp.target_date >= '2026-05-23'" in current_scope_sql
-    assert "FROM market_events AS m" in current_scope_sql
-    assert "m.city = current_fp.city" in current_scope_sql
-    assert "m.target_date = current_fp.target_date" in current_scope_sql
+    assert "current_rs.scope_type = 'strategy'" in current_scope_sql
     assert (
-        "m.temperature_metric = current_fp.temperature_metric"
+        "current_rs.source_id = 'openmeteo_ecmwf_ifs9_bayes_fusion'"
+        in current_scope_sql
+    )
+    assert "current_rs.target_local_date >= '2026-05-23'" in current_scope_sql
+    assert "FROM forecast_posteriors AS current_fp" not in current_scope_sql
+    assert "FROM market_events AS m" in current_scope_sql
+    assert "m.city = current_rs.city" in current_scope_sql
+    assert "m.target_date = current_rs.target_local_date" in current_scope_sql
+    assert (
+        "m.temperature_metric = current_rs.temperature_metric"
         in current_scope_sql
     )
     assert (
@@ -820,6 +824,11 @@ def test_unrestricted_redecision_drives_readiness_from_current_market_families(
         and "city=?" in detail
         and "target_local_date=?" in detail
         and "temperature_metric=?" in detail
+        for detail in details
+    )
+    assert not any(
+        "SCAN current_fp" in detail
+        or "idx_forecast_posteriors_runtime_layer_target" in detail
         for detail in details
     )
     assert not any(
