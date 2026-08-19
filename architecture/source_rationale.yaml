@@ -2107,6 +2107,23 @@ files:
     - src/execution/harvester.py
     - src/state/db.py
     - future T1 fake venue parity
+  src/execution/day0_hard_fact_exit.py:
+    zone: K2_runtime
+    authority_role: day0_absorbing_payoff_and_exit_authority
+    why: >-
+      Converts only source-complete monotone Day0 boundaries into exact held
+      payoff facts. WU evidence remains authoritative at face value; a
+      same-station AviationWeather METAR may join it only when immutable raw
+      observation_prints, causal publication/fetch clocks, the empirical
+      per-city divergence margin, settlement rounding, and an independently
+      live-authorized DAY0_EXTREME_UPDATED event reproduce the same running
+      extreme. A scalar memo or intraday containment never creates a hard fact.
+    hazards:
+    - SOURCE_TRUTH_PLANE_COLLAPSE
+    downstream:
+    - src/engine/cycle_runtime.py
+    - src/engine/monitor_refresh.py
+    - src/execution/venue_cancel_journal.py
   src/execution/exit_lifecycle.py:
     zone: K2_runtime
     authority_role: exit_lifecycle_runtime

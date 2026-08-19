@@ -28,12 +28,12 @@ Verdicts (both directions, both metrics):
     (not a hard fact for either side: a max can still leave upward / min downward;
      that is estimator territory and stays behind the maturity gate)
 
-Held-position hard-fact authority combines current WU observations and durable
-WU rows monotonically, but only when each selected fact binds the configured
-station, source clocks, raw/settlement-rounded value, and source-payload
-identity.  The same-station fast-tail scalar remains available to its legacy
-non-hard-fact consumers; it cannot manufacture that provenance for an
-absorbing held-side probability or exit.
+Held-position hard-fact authority combines current WU observations, durable WU
+rows, and a durable same-station METAR publication monotonically.  The METAR
+lane is admissible only when its raw publication ledger, source clocks,
+configured station, empirical WU divergence margin, and live-authority Day0
+event reproduce one exact running extreme.  A bare fast-tail scalar still has
+no absorbing held-side probability or exit authority.
   An ACTIVE oracle-anomaly pause for the family disables the lane entirely
   (a suspect truth source must not drive an irreversible exit).
 
@@ -1071,6 +1071,278 @@ def _durable_observation_instants_extremes(
     return summary.high, summary.low, summary.source
 
 
+def _durable_fast_tail_hard_fact_evidence(
+    *,
+    city: Any,
+    target_date: str,
+    metric: str,
+    now: datetime,
+    world_conn: Any,
+) -> HardFactEvidence | None:
+    """Reproduce one authorized same-station METAR monotone-bound event.
+
+    ``observation_prints`` supplies the immutable raw publication and clocks;
+    ``DAY0_EXTREME_UPDATED`` supplies the already-gated city/date/metric/unit
+    interpretation.  Neither surface is sufficient alone.  The existing
+    per-city divergence margin is replayed over the raw reports, so this path
+    cannot turn an unmeasured station or an unbound scalar memo into an exit.
+    """
+
+    if world_conn is None or metric not in {"high", "low"}:
+        return None
+    if (
+        str(getattr(city, "settlement_source_type", "") or "").strip().lower()
+        != "wu_icao"
+    ):
+        return None
+    city_name = str(getattr(city, "name", "") or "").strip()
+    station = str(getattr(city, "wu_station", "") or "").strip().upper()
+    unit = str(getattr(city, "settlement_unit", "") or "").strip().upper()
+    if not city_name or not station or unit not in {"C", "F"}:
+        return None
+
+    try:
+        from src.contracts.settlement_semantics import SettlementSemantics
+        from src.data.day0_fast_obs import (
+            FAST_OBS_SOURCE_ID,
+            MetarReport,
+            fast_obs_source_for_city,
+            metar_observation_time_from_raw,
+            running_extremes_for_local_day,
+        )
+
+        source = fast_obs_source_for_city(city)
+        if source is None or source.source_id != FAST_OBS_SOURCE_ID:
+            return None
+        margin = _metar_kill_margin_units(city_name, unit)
+        if margin is None or not math.isfinite(float(margin)) or margin < 0.0:
+            return None
+        target = date.fromisoformat(str(target_date)[:10])
+        zone = ZoneInfo(str(getattr(city, "timezone", "") or ""))
+        day_start = datetime.combine(target, datetime.min.time(), tzinfo=zone).astimezone(UTC)
+        day_end = datetime.combine(
+            target + timedelta(days=1), datetime.min.time(), tzinfo=zone
+        ).astimezone(UTC)
+    except Exception:
+        return None
+
+    print_rows = None
+    for table_ref in ("world.observation_prints", "observation_prints"):
+        try:
+            print_rows = world_conn.execute(
+                f"""
+                SELECT publish_ts_utc, value_native, unit, station_id,
+                       raw_report, fetched_at_utc
+                  FROM {table_ref}
+                 WHERE city = ?
+                   AND upper(station_id) = ?
+                   AND source_channel = ?
+                   AND publish_ts_utc >= ?
+                   AND publish_ts_utc < ?
+                   AND publish_ts_utc <= ?
+                   AND fetched_at_utc <= ?
+                 ORDER BY publish_ts_utc, id
+                """,
+                (
+                    city_name,
+                    station,
+                    source.source_id,
+                    day_start.isoformat(),
+                    day_end.isoformat(),
+                    now.astimezone(UTC).isoformat(),
+                    now.astimezone(UTC).isoformat(),
+                ),
+            ).fetchall()
+            break
+        except Exception:  # noqa: BLE001 - absent attachment/schema fails closed
+            print_rows = None
+    if not print_rows:
+        return None
+
+    reports = []
+    contributor_digests: list[str] = []
+    for row in print_rows:
+        try:
+            publish_raw = row["publish_ts_utc"] if hasattr(row, "keys") else row[0]
+            value_raw = row["value_native"] if hasattr(row, "keys") else row[1]
+            row_unit = row["unit"] if hasattr(row, "keys") else row[2]
+            row_station = row["station_id"] if hasattr(row, "keys") else row[3]
+            raw_report = row["raw_report"] if hasattr(row, "keys") else row[4]
+            fetched_raw = row["fetched_at_utc"] if hasattr(row, "keys") else row[5]
+            published = _aware_datetime(publish_raw)
+            fetched = _aware_datetime(fetched_raw)
+            if (
+                published is None
+                or fetched is None
+                or published > now
+                or fetched > now
+                or str(row_station or "").strip().upper() != station
+                or str(row_unit or "").strip().upper() != "C"
+            ):
+                continue
+            raw_report = str(raw_report or "").strip()
+            observed = metar_observation_time_from_raw(
+                raw_report, published_at=published
+            )
+            if observed is None or observed > published or observed > now:
+                continue
+            reports.append(
+                MetarReport(
+                    station_id=station,
+                    obs_time=observed.astimezone(UTC),
+                    receipt_time=published.astimezone(UTC),
+                    temp_c=float(value_raw),
+                    metar_type="METAR",
+                    raw=raw_report,
+                )
+            )
+            contributor_digests.append(
+                hashlib.sha256(
+                    json.dumps(
+                        {
+                            "fetched_at": fetched.astimezone(UTC).isoformat(),
+                            "published_at": published.astimezone(UTC).isoformat(),
+                            "raw_report": raw_report,
+                            "station_id": station,
+                            "value_c": float(value_raw),
+                        },
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ).encode("utf-8")
+                ).hexdigest()
+            )
+        except Exception:  # noqa: BLE001 - one malformed print proves nothing
+            continue
+    if not reports:
+        return None
+
+    try:
+        extremes = running_extremes_for_local_day(
+            reports,
+            city=city,
+            target_date=target,
+            as_of=now,
+            margin_units=float(margin),
+        )
+        replayed_raw = (
+            extremes.high_so_far if metric == "high" else extremes.low_so_far
+        )
+        if replayed_raw is None or extremes.last_obs_time is None:
+            return None
+        replayed_rounded = float(
+            SettlementSemantics.for_city(city).round_single(float(replayed_raw))
+        )
+    except Exception:
+        return None
+
+    event_row = None
+    for table_ref in ("world.opportunity_events", "opportunity_events"):
+        try:
+            event_row = world_conn.execute(
+                f"""
+                SELECT event_id, payload_json, observed_at, available_at,
+                       received_at
+                  FROM {table_ref}
+                 WHERE event_type = 'DAY0_EXTREME_UPDATED'
+                   AND json_extract(payload_json, '$.city') = ?
+                   AND json_extract(payload_json, '$.target_date') = ?
+                   AND json_extract(payload_json, '$.metric') = ?
+                   AND json_extract(payload_json, '$.settlement_source') = ?
+                   AND json_extract(payload_json, '$.station_id') = ?
+                   AND json_extract(payload_json, '$.live_authority_status') = 'live'
+                   AND available_at <= ?
+                   AND received_at <= ?
+                 ORDER BY available_at DESC, received_at DESC
+                 LIMIT 1
+                """,
+                (
+                    city_name,
+                    target.isoformat(),
+                    metric,
+                    source.source_id,
+                    station,
+                    now.astimezone(UTC).isoformat(),
+                    now.astimezone(UTC).isoformat(),
+                ),
+            ).fetchone()
+            break
+        except Exception:  # noqa: BLE001 - absent attachment/schema fails closed
+            event_row = None
+    if event_row is None:
+        return None
+    try:
+        event_id = str(event_row["event_id"] if hasattr(event_row, "keys") else event_row[0])
+        payload = json.loads(
+            str(event_row["payload_json"] if hasattr(event_row, "keys") else event_row[1])
+        )
+        observed_at = str(payload.get("observation_time") or "")
+        issued_at = str(payload.get("observation_available_at") or "")
+        row_observed_at = str(
+            event_row["observed_at"] if hasattr(event_row, "keys") else event_row[2]
+        )
+        row_available_at = str(
+            event_row["available_at"] if hasattr(event_row, "keys") else event_row[3]
+        )
+        row_received_at = str(
+            event_row["received_at"] if hasattr(event_row, "keys") else event_row[4]
+        )
+        if (
+            payload.get("settlement_source") != source.source_id
+            or payload.get("settlement_source_type") != "wu_icao"
+            or str(payload.get("station_id") or "").strip().upper() != station
+            or payload.get("source_authorized_status") != "AUTHORIZED"
+            or payload.get("source_match_status") != "MATCH"
+            or payload.get("station_match_status") != "MATCH"
+            or payload.get("local_date_status") != "MATCH"
+            or payload.get("dst_status") != "UNAMBIGUOUS"
+            or payload.get("metric_match_status") != "MATCH"
+            or payload.get("rounding_status") != "MATCH"
+            or payload.get("live_authority_status") != "live"
+            or payload.get("evidence_finality") != "MONOTONE_SETTLEMENT_BOUND"
+            or abs(float(payload.get("metar_margin_units_applied")) - float(margin)) > 1e-9
+            or abs(float(payload.get("raw_value")) - float(replayed_raw)) > 1e-9
+            or abs(float(payload.get("rounded_value")) - replayed_rounded) > 1e-9
+            or not _timestamps_are_ordered(observed_at, issued_at)
+            or _aware_datetime(observed_at) != _aware_datetime(row_observed_at)
+            or _aware_datetime(issued_at) != _aware_datetime(row_available_at)
+            or not _timestamps_are_ordered(row_available_at, row_received_at)
+            or _aware_datetime(row_received_at) > now
+            or _aware_datetime(issued_at) > now
+        ):
+            return None
+    except Exception:
+        return None
+
+    contributors = tuple(dict.fromkeys(contributor_digests))
+    payload_identity = hashlib.sha256(
+        json.dumps(
+            {
+                "event_id": event_id,
+                "margin_units": float(margin),
+                "metric": metric,
+                "publication_payloads": contributors,
+                "rounded_extreme": replayed_rounded,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    return HardFactEvidence(
+        source=f"{source.source_id}:durable_monotone_bound",
+        station_id=station,
+        observed_at=observed_at,
+        issued_at=issued_at,
+        raw_extreme=float(replayed_raw),
+        rounded_extreme=replayed_rounded,
+        payload_identity=payload_identity,
+        source_identity=f"{source.source_id}:{station}:margin={float(margin):g}",
+        # ``payload_identity`` commits the complete canonical contributor set;
+        # retain that fixed-size root rather than copying a whole target day's
+        # report hashes into every monitor event.
+        contributor_payload_identities=(payload_identity,),
+    )
+
+
 def _combined_wu_hard_fact_evidence(
     evidence: Collection[HardFactEvidence], *, metric: str, city: Any
 ) -> HardFactEvidence | None:
@@ -1128,12 +1400,7 @@ def _wu_hard_fact_evidence(
     world_conn: Any,
     durable_only: bool,
 ) -> HardFactEvidence | None:
-    """Return the only evidence class that may drive held Day0 hard facts.
-
-    The same-station fast-tail scalar remains available to its existing
-    non-hard-fact consumers, but it cannot manufacture the WU observation
-    clock and payload identity required for a held-position absorbing q.
-    """
+    """Return the typed evidence classes that may drive held Day0 hard facts."""
 
     candidates: list[HardFactEvidence] = []
     if not durable_only:
@@ -1158,6 +1425,15 @@ def _wu_hard_fact_evidence(
         )
         if durable_evidence is not None:
             candidates.append(durable_evidence)
+    fast = _durable_fast_tail_hard_fact_evidence(
+        city=city,
+        target_date=target_date,
+        metric=metric,
+        now=now,
+        world_conn=world_conn,
+    )
+    if fast is not None:
+        candidates.append(fast)
     return _combined_wu_hard_fact_evidence(candidates, metric=metric, city=city)
 
 

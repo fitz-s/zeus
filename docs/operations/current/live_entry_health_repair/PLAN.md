@@ -2505,3 +2505,47 @@ publication barrier.
   remains blocked by the same malformed current-live YAML scalar at line 1285,
   and the repo-wide test registry reports the existing unrelated drift; neither
   touches this changed behavior or its registered antibody.
+
+### Slice B120 — Durable same-station fast observation closes an absorbing dead bin (2026-08-19)
+
+- Forward defect: Seoul HIGH 28°C YES filled at 02:25 UTC. RKSI then published
+  29°C at 02:30; Zeus durably received the raw METAR and a priority-60
+  `DAY0_EXTREME_UPDATED` at 02:34:24, but held hard-fact evaluation admitted
+  only the slower WU row imported at 02:35:46. The position did not record its
+  exact-zero decision until 02:38:26, when no executable bid remained. This
+  order is a genuine current-revision forward loss, not historical garbage or
+  proof of capital gain.
+- First-principles invariant: an intraday observation is not final settlement
+  truth, but a qualified same-station running HIGH above a finite bin (or LOW
+  below it) is a monotone physical proof that the bin cannot recover. It may
+  authorize only that absorbing payoff. A bare scalar, an unmeasured station,
+  missing raw report, absent publication/fetch clock, future row, wrong local
+  date/metric/unit/station, non-live event, or replay that disagrees with the
+  frozen per-city WU/METAR margin proves nothing.
+- Executable proof requires both immutable surfaces: `observation_prints`
+  replays the exact raw AviationWeather METAR sequence at the decision cutoff,
+  plausibility rule, settlement unit, and empirical divergence margin;
+  `DAY0_EXTREME_UPDATED` must independently reproduce the same extreme after
+  its source/station/local-date/DST/metric/rounding/live-authority gates. The
+  fixed-size evidence identity hashes the complete publication set and event.
+- SCOPE: Day0 WU-ICAO held positions and resting/submit rechecks for one exact
+  city/date/metric whose finite-bin/absorbing-shoulder payoff is already fixed
+  by the monotone boundary. DRAIN: the next targeted or periodic held monitor
+  consumes the durable evidence without network I/O. RESET: later source facts
+  combine monotonically; missing or mismatched proof abstains and ordinary
+  statistical redecision continues. Final settlement, lifecycle closure,
+  probability modeling, Kelly, market-price input, and venue order grammar are
+  unchanged.
+- Files authorized: `src/execution/day0_hard_fact_exit.py`,
+  `tests/test_day0_hard_fact_exit.py`, this plan, and their existing source/test
+  registries. Forbidden: use the event payload without its raw ledger, use the
+  ledger without the live-authority event, infer probability from the CLOB,
+  bypass the empirical margin, or label an intraday finite-bin containment as
+  a winner.
+- Acceptance: the frozen Seoul cutoff at 02:34:30 returns `EXIT_DEAD_BIN` at
+  29°C before the 02:35:46 WU import; a station-mismatched event returns no
+  verdict; existing WU, HKO-abstention, boundary, margin, plausibility,
+  direction, and structural-win contracts remain green. Focused tests,
+  compilation, registries, planning gate, and diff checks must pass before a
+  hot-fix deployment. Runtime closeout requires exact loaded SHA plus a new
+  fast-event monitor receipt; it does not claim realized profitability.

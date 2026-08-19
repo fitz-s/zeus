@@ -1,5 +1,5 @@
 # Created: 2026-06-10
-# Last reused or audited: 2026-08-11
+# Last reused or audited: 2026-08-19
 # Authority basis: alpha-clock realignment plus adversarial review MUST-FIX
 #   #1 (hard-fact bin-death exit lane, buy_yes kill + buy_no symmetric lane),
 #   #3-wiring (resting-order cancel), #4 (METAR plausibility bound), #5 (day0
@@ -40,13 +40,6 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-_RETIRED_RAW_CANCEL_TEST = pytest.mark.skip(
-    reason=(
-        "B94 retired wallet-scan/raw-cancel behavior; production replacement "
-        "is covered by journal-backed C3 tests"
-    )
-)
-
 from src.execution.day0_hard_fact_exit import (
     HardFactEvidence,
     HardFactVerdict,
@@ -66,6 +59,13 @@ from src.data.day0_oracle_anomaly import (
     _reset_registry_for_tests,
     flag_day0_oracle_anomaly,
     metar_held_counts,
+)
+
+_RETIRED_RAW_CANCEL_TEST = pytest.mark.skip(
+    reason=(
+        "B94 retired wallet-scan/raw-cancel behavior; production replacement "
+        "is covered by journal-backed C3 tests"
+    )
 )
 
 UTC = timezone.utc
@@ -138,6 +138,13 @@ def _paris():
     return SimpleNamespace(
         name="Paris", timezone="Europe/Paris", settlement_unit="C",
         wu_station="LFPB", settlement_source_type="wu_icao",
+    )
+
+
+def _seoul():
+    return SimpleNamespace(
+        name="Seoul", timezone="Asia/Seoul", settlement_unit="C",
+        wu_station="RKSI", settlement_source_type="wu_icao",
     )
 
 
@@ -756,6 +763,147 @@ class TestVerdictMatrix:
 # ===========================================================================
 
 class TestSourceDiscipline:
+    @staticmethod
+    def _seoul_fast_hard_fact_conn(*, station: str = "RKSI"):
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        conn.executescript(
+            """
+            CREATE TABLE observation_prints (
+                id INTEGER PRIMARY KEY,
+                city TEXT NOT NULL,
+                station_id TEXT NOT NULL,
+                source_channel TEXT NOT NULL,
+                publish_ts_utc TEXT NOT NULL,
+                value_native REAL NOT NULL,
+                unit TEXT NOT NULL,
+                fetched_at_utc TEXT NOT NULL,
+                raw_report TEXT NOT NULL
+            );
+            CREATE TABLE opportunity_events (
+                event_id TEXT PRIMARY KEY,
+                event_type TEXT NOT NULL,
+                observed_at TEXT NOT NULL,
+                available_at TEXT NOT NULL,
+                received_at TEXT NOT NULL,
+                payload_json TEXT NOT NULL
+            );
+            """
+        )
+        conn.executemany(
+            "INSERT INTO observation_prints VALUES (?,?,?,?,?,?,?,?,?)",
+            (
+                (
+                    1, "Seoul", "RKSI", "aviationweather_metar",
+                    "2026-08-19T02:04:27+00:00", 28.0, "C",
+                    "2026-08-19T02:04:36.132652+00:00",
+                    "METAR RKSI 190200Z 28005KT 9999 FEW020 28/24 Q1004",
+                ),
+                (
+                    2, "Seoul", "RKSI", "aviationweather_metar",
+                    "2026-08-19T02:34:24+00:00", 29.0, "C",
+                    "2026-08-19T02:34:29.695596+00:00",
+                    "METAR RKSI 190230Z 28005KT 9999 FEW020 29/24 Q1004",
+                ),
+            ),
+        )
+        payload = {
+            "city": "Seoul",
+            "target_date": "2026-08-19",
+            "metric": "high",
+            "settlement_source": "aviationweather_metar",
+            "settlement_source_type": "wu_icao",
+            "station_id": station,
+            "observation_time": "2026-08-19T02:30:00+00:00",
+            "observation_available_at": "2026-08-19T02:34:24+00:00",
+            "raw_value": 29.0,
+            "rounded_value": 29,
+            "high_so_far": 29.0,
+            "low_so_far": 26.0,
+            "metar_margin_units_applied": 0.0,
+            "source_authorized_status": "AUTHORIZED",
+            "source_match_status": "MATCH",
+            "station_match_status": "MATCH",
+            "local_date_status": "MATCH",
+            "dst_status": "UNAMBIGUOUS",
+            "metric_match_status": "MATCH",
+            "rounding_status": "MATCH",
+            "live_authority_status": "live",
+            "evidence_finality": "MONOTONE_SETTLEMENT_BOUND",
+        }
+        conn.execute(
+            "INSERT INTO opportunity_events VALUES (?,?,?,?,?,?)",
+            (
+                "edli_evt_" + "8" * 64,
+                "DAY0_EXTREME_UPDATED",
+                "2026-08-19T02:30:00+00:00",
+                "2026-08-19T02:34:24+00:00",
+                "2026-08-19T02:34:24.249291+00:00",
+                json.dumps(payload, sort_keys=True),
+            ),
+        )
+        future_payload = dict(payload, raw_value=30.0, rounded_value=30)
+        conn.execute(
+            "INSERT INTO opportunity_events VALUES (?,?,?,?,?,?)",
+            (
+                "edli_evt_" + "9" * 64,
+                "DAY0_EXTREME_UPDATED",
+                "2026-08-19T02:30:00+00:00",
+                "2026-08-19T02:34:24+00:00",
+                "2026-08-19T02:48:01.164597+00:00",
+                json.dumps(future_payload, sort_keys=True),
+            ),
+        )
+        return conn
+
+    def test_seoul_durable_fast_event_kills_dead_bin_before_wu_catches_up(self):
+        """Forward specimen: RKSI published 29C four minutes before WU ingest.
+
+        Raw report + exact clocks + the live-authority event + the empirical
+        zero margin are jointly sufficient for the monotone fact that a 28C
+        HIGH YES bin is dead. A same-clock future-received event is excluded;
+        no WU row or network fetch is borrowed.
+        """
+
+        conn = self._seoul_fast_hard_fact_conn()
+        verdict = evaluate_hard_fact_exit(
+            position=_position(
+                trade_id="58448a4b-383",
+                city="Seoul",
+                target_date="2026-08-19",
+                bin_label="28°C on August 19?",
+                direction="buy_yes",
+                temperature_metric="high",
+            ),
+            city=_seoul(),
+            now=datetime(2026, 8, 19, 2, 34, 30, tzinfo=UTC),
+            world_conn=conn,
+            durable_only=True,
+        )
+
+        assert verdict is not None
+        assert verdict.action == "EXIT_DEAD_BIN"
+        assert verdict.rounded_extreme == pytest.approx(29.0)
+        assert "aviationweather_metar:durable_monotone_bound" in verdict.source
+        assert verdict.evidence is not None
+        assert verdict.evidence.is_complete_for(_seoul())
+
+    def test_fast_scalar_or_unbound_event_cannot_authorize_hard_fact(self):
+        conn = self._seoul_fast_hard_fact_conn(station="NOT_RKSI")
+        verdict = evaluate_hard_fact_exit(
+            position=_position(
+                city="Seoul",
+                target_date="2026-08-19",
+                bin_label="28°C on August 19?",
+            ),
+            city=_seoul(),
+            now=datetime(2026, 8, 19, 2, 34, 30, tzinfo=UTC),
+            world_conn=conn,
+            durable_only=True,
+        )
+
+        assert verdict is None
+
     def test_hko_provisional_current_extrema_abstain_from_hard_fact(self, monkeypatch):
         monkeypatch.setattr(
             "src.execution.day0_hard_fact_exit._hko_rounded_extremes",
