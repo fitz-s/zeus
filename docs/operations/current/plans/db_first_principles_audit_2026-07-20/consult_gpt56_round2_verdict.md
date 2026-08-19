@@ -1,4 +1,4 @@
-(Round-2 verdict, conversation 6a5f1dda-2670-83ea-83af-d7ab39cffb8d, delivered 2026-07-21 via operator paste.
+(Round-2 verdict, [external consult thread], delivered 2026-07-21 via operator paste.
 Full text preserved by operator in the ChatGPT thread; key rulings absorbed into REDESIGN_v2.md §0-§7.
 Headline rulings: single money-hot.db not three; five data classes not three tiers; calibration_pairs is a
 learning mart not spine; E1/E4 = versioned certificate-protocol migration (freeze v1 preimage first, never

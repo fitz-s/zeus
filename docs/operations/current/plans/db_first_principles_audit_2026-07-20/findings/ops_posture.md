@@ -73,11 +73,11 @@ matching row** in `zeus-forecasts.db.settlement_outcomes` on
 
 | position_id | city | target_date | metric | settled_at |
 |---|---|---|---|---|
-| 20d1b043-254 | Tokyo | 2026-07-20 | high | 2026-07-20T17:36:43Z |
-| 32be639c-c22 | Ankara | 2026-07-20 | high | 2026-07-21T00:41:42Z |
-| 384f1dd8-5c1 | Hong Kong | 2026-07-13 | high | 2026-07-15T00:20:24Z |
-| 3983413f-a62 | Hong Kong | 2026-07-13 | high | 2026-07-15T00:20:24Z |
-| 83ede0f8-d31 | Paris | 2026-07-02 | low | 2026-07-15T00:20:24Z |
+| 20d1b04…[redacted] | Tokyo | 2026-07-20 | high | 2026-07-20T17:36:43Z |
+| 32be639…[redacted] | Ankara | 2026-07-20 | high | 2026-07-21T00:41:42Z |
+| 384f1dd…[redacted] | Hong Kong | 2026-07-13 | high | 2026-07-15T00:20:24Z |
+| 3983413…[redacted] | Hong Kong | 2026-07-13 | high | 2026-07-15T00:20:24Z |
+| 83ede0f…[redacted] | Paris | 2026-07-02 | low | 2026-07-15T00:20:24Z |
 
 Verified with direct lookups (`SELECT ... FROM settlement_outcomes WHERE
 city=? AND target_date=?`) for all 5 sampled — each returns **zero rows**.

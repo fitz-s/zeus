@@ -33,16 +33,16 @@ Every helper's own docstring already concedes the hazard: *"In WAL mode, ATTACHe
 ### Evidence chain (read-only probes, EQP-verified, bounded)
 
 **(a) Positions settled in trades, absent in forecasts.** For the two named-stale keys:
-- `zeus_trades.db.position_current`: HK `2026-07-13` high (`384f1dd8-5c1`, `3983413f-a62`) and Paris `2026-07-02` low (`83ede0f8-d31`) are `phase='settled'`, `chain_state='synced'`, `exit_reason='SETTLEMENT'`, `settlement_price≈0`.
+- `zeus_trades.db.position_current`: HK `2026-07-13` high (`384f1dd…[redacted]`, `3983413…[redacted]`) and Paris `2026-07-02` low (`83ede0f…[redacted]`) are `phase='settled'`, `chain_state='synced'`, `exit_reason='SETTLEMENT'`, `settlement_price≈0`.
 - `zeus-forecasts.db.settlement_outcomes` **and** `settlements`: **zero rows** for `(Hong Kong,2026-07-13)` and `(Paris,2026-07-02)` (both EQP-indexed lookups, empty result).
 
 **(b) The settling writer stamped an authority that only one trades-only path produces.** The `phase_after='settled'` events in `position_events`:
 ```
-384f1dd8-5c1  SETTLED  src.execution.harvester  caused_by=harvester_settlement  settlement_authority="VENUE_RESOLVED"
-3983413f-a62  SETTLED  …                          settlement_authority="VENUE_RESOLVED"
-83ede0f8-d31  SETTLED  …                          settlement_authority="VENUE_RESOLVED"
+384f1dd…[redacted]  SETTLED  src.execution.harvester  caused_by=harvester_settlement  settlement_authority="VENUE_RESOLVED"
+3983413…[redacted]  SETTLED  …                          settlement_authority="VENUE_RESOLVED"
+83ede0f…[redacted]  SETTLED  …                          settlement_authority="VENUE_RESOLVED"
 ```
-Plus Tokyo `20d1b043-254` and Ankara `32be639c-c22` (the other two W13 samples): both `VENUE_RESOLVED`. **5/5 sampled missing-settlement positions are VENUE_RESOLVED.**
+Plus Tokyo `20d1b04…[redacted]` and Ankara `32be639…[redacted]` (the other two W13 samples): both `VENUE_RESOLVED`. **5/5 sampled missing-settlement positions are VENUE_RESOLVED.**
 
 **(c) `"VENUE_RESOLVED"` as a settlement authority is produced at exactly one site:** `harvester_pnl_resolver.py:238` (`_read_venue_resolved_settlement_rows`). That module's header states its design invariant verbatim: *"Does NOT write to settlements, settlement_outcomes, market_events, or any forecast table"* (`:12`), and *"Venue payout and physical-observation quality are separate facts… it cannot keep a position open after Gamma publishes an unambiguous binary payout"* (`:113-117`). Its terminal commit is `trade_conn.commit()` — **single file** (`:403`).
 
