@@ -283,20 +283,24 @@ Depending on how much time you have:
 | 2 min | this page, [Three things worth a minute](#three-things-worth-a-minute) |
 | 10 min | [`AGENTS.md`](AGENTS.md) — root operating law: what governs a change to this repository |
 | 10 min | [`REVIEW.md`](REVIEW.md) — review doctrine: what a change is checked against before it lands |
+| 10 min | [`AI_ASSISTANCE.md`](AI_ASSISTANCE.md) — what the AI agents did, what they broke, and the control-layer failures still open |
 | 15 min | [`docs/reference/theory_map.md`](docs/reference/theory_map.md) — index of the derivations behind each step above |
 | 15 min | [`loop/README.md`](loop/README.md) — the unattended improvement loop that proposes and reviews changes against this system |
 | 30 min | [`src/forecast/`](src/forecast) and [`src/calibration/`](src/calibration) — the statistics, end to end |
 | 30 min | [`src/execution/exit_lifecycle.py`](src/execution/exit_lifecycle.py) — the exit state machine, which is where the real difficulty lives |
-| 45 min | [`architecture/`](architecture) — machine-readable invariants and the AST rules that enforce them in CI |
+| 45 min | [`architecture/`](architecture) — machine-readable invariants, each carrying the incidents that justified it |
 | — | [`docs/reference/glossary.md`](docs/reference/glossary.md) for terms |
 
 ## Engineering
 
 Solo-built. Roughly 590 source modules against 1,400 test modules. Architecture invariants
-are expressed as machine-readable manifests and enforced by AST rules and an import-linter
-contract in CI, alongside a money-path release gate that blocks changes to order-submitting
-code without the corresponding safety tests. Runtime state is SQLite; deployment is a set of
-launchd daemons designed for continuous operation.
+are expressed as machine-readable manifests: every fail-closed gate must declare, adjacent
+to its condition, what trips it, what drains it, and what resets it — enforced by a test
+that locates each enrolled gate through a must-be-unique source anchor and fails loud when
+the gate is renamed, moved, or stripped of a declaration, because a comparison with no path
+back to false is a ratchet, not a gate. A money-path CI gate runs the safety tests for
+order-submitting code and fails closed on unregistered money-path objects. Runtime state is
+SQLite; deployment is a set of launchd daemons designed for continuous operation.
 
 Three paths worth reading closely, each for a different reason:
 
