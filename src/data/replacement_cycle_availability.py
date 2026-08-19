@@ -105,6 +105,7 @@ def probe_openmeteo_single_run_available(
                     max_retries=1,
                     endpoint_label="source_clock_anchor_availability",
                     fast_fail_429=True,
+                    conditional_status_codes=frozenset({400}),
                 )
             return True
         except Exception as exc:  # noqa: BLE001 — next poll retries fresh provider truth.

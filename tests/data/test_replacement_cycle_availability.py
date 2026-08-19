@@ -212,6 +212,7 @@ class TestProbeResolvedSelection:
         assert calls[0][1] == {}
         assert calls[0][2]["endpoint_label"] == "source_clock_anchor_availability"
         assert calls[0][2]["fast_fail_429"] is True
+        assert calls[0][2]["conditional_status_codes"] == frozenset({400})
         assert calls[0][3] is True
 
     def test_malformed_meta_falls_through_to_bucket(self, monkeypatch):

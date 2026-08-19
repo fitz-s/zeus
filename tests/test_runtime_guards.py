@@ -12878,6 +12878,52 @@ def test_openmeteo_single_runs_classifier_revision_drains_old_terminal_state(
     ) is None
 
 
+def test_openmeteo_caller_conditional_status_is_retryable_and_identity_scoped(
+    monkeypatch, tmp_path
+):
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+    monkeypatch.setattr(openmeteo_quota.random, "uniform", lambda _low, _high: 0.0)
+    monkeypatch.setattr(
+        openmeteo_client.time,
+        "sleep",
+        lambda _seconds: threading.Event().wait(0.002),
+    )
+    tracker = OpenMeteoQuotaTracker(state_path=tmp_path / "openmeteo_quota.json")
+    url = "https://single-runs-api.open-meteo.com/v1/forecast"
+    params = {"latitude": 2, "longitude": 1, "run": "2026-08-19T00:00"}
+    calls = {"count": 0}
+
+    class _Transient400Client:
+        def get(self, *_args, **_kwargs):
+            calls["count"] += 1
+            request = httpx.Request("GET", url)
+            return httpx.Response(400, json={"reason": "transient probe miss"}, request=request)
+
+    with pytest.raises(openmeteo_client.OpenMeteoHTTPStatusError) as raised:
+        openmeteo_client.fetch(
+            url,
+            params,
+            max_retries=2,
+            backoff_sec=0,
+            quota=tracker,
+            client=_Transient400Client(),
+            conditional_status_codes=frozenset({400}),
+        )
+    assert calls["count"] == 2
+    assert raised.value.outcome.retry_class is openmeteo_client.OpenMeteoRetryClass.CONDITIONAL
+    policy_id = openmeteo_client.request_identity(
+        url,
+        params,
+        conditional_status_codes=frozenset({400}),
+    )
+    assert policy_id != openmeteo_client.request_identity(url, params)
+    request_state = json.loads(
+        (tmp_path / "openmeteo_quota.json").read_text(encoding="utf-8")
+    )["requests"][policy_id]
+    assert request_state["outcome"] == "transport_error"
+    assert request_state["http_outcome"]["retry_class"] == "conditional"
+
+
 def test_openmeteo_5xx_retries_with_a_bounded_attempt_count(monkeypatch, tmp_path):
     monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
     monkeypatch.setattr(openmeteo_quota.random, "uniform", lambda _low, _high: 0.0)

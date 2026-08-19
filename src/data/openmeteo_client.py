@@ -218,7 +218,12 @@ def _preflight_denial_reason(detail: str | None) -> OpenMeteoPreflightDenialReas
     return OpenMeteoPreflightDenialReason.DAILY_LIMIT
 
 
-def request_identity(url: str, params: dict) -> str:
+def request_identity(
+    url: str,
+    params: dict,
+    *,
+    conditional_status_codes: frozenset[int] = frozenset(),
+) -> str:
     """Return a stable identity for the executable request and its terminality law."""
 
     identity: dict[str, object] = {"url": url, "params": params}
@@ -227,6 +232,8 @@ def request_identity(url: str, params: dict) -> str:
         # DRAIN: the next scheduled poll retries once under this revision-keyed identity.
         # RESET: success or bounded conditional retry replaces that identity's attempt state.
         identity["outcome_classifier_revision"] = SINGLE_RUNS_OUTCOME_CLASSIFIER_REVISION
+    if conditional_status_codes:
+        identity["conditional_status_codes"] = sorted(conditional_status_codes)
     payload = json.dumps(
         identity,
         default=str,
@@ -337,13 +344,19 @@ def _rate_limit_wait(outcome: OpenMeteoHTTPOutcome, attempt: int) -> float:
     return max(1.0, (boundary - now).total_seconds() + 1.0)
 
 
-def _http_outcome(response: httpx.Response) -> OpenMeteoHTTPOutcome:
+def _http_outcome(
+    response: httpx.Response,
+    *,
+    conditional_status_codes: frozenset[int] = frozenset(),
+) -> OpenMeteoHTTPOutcome:
     status_code = int(response.status_code)
     retry_after = _retry_after_seconds(response.headers.get("Retry-After"))
     provider_reason = _provider_reason(response)
     if status_code == 429:
         retry_class = OpenMeteoRetryClass.RATE_LIMITED
-    elif status_code == 400 and provider_reason is not None:
+    elif status_code in conditional_status_codes or (
+        status_code == 400 and provider_reason is not None
+    ):
         retry_class = OpenMeteoRetryClass.CONDITIONAL
     elif status_code in {408, 425} or status_code >= 500:
         retry_class = OpenMeteoRetryClass.RETRYABLE
@@ -380,6 +393,7 @@ def fetch(
     quota: OpenMeteoQuotaTracker | None = None,
     client: httpx.Client | None = None,
     count_toward_quota: bool = True,
+    conditional_status_codes: frozenset[int] = frozenset(),
 ) -> dict:
     """GET an Open-Meteo endpoint with retries, 429 handling, and quota tracking.
 
@@ -394,7 +408,11 @@ def fetch(
     shared client and blocking the fallback ladder.
     """
     tracker = quota or quota_tracker
-    request_id = request_identity(url, params)
+    request_id = request_identity(
+        url,
+        params,
+        conditional_status_codes=conditional_status_codes,
+    )
     quota_cost = _provider_quota_cost(params) if count_toward_quota else 1
     endpoint = _endpoint_for_url(url)
     job = endpoint_label or endpoint
@@ -424,7 +442,10 @@ def fetch(
             resp = get(url, params=params, timeout=timeout)
 
             if resp.status_code >= 400:
-                outcome = _http_outcome(resp)
+                outcome = _http_outcome(
+                    resp,
+                    conditional_status_codes=conditional_status_codes,
+                )
                 error = OpenMeteoHTTPStatusError(resp, outcome)
                 if outcome.retry_class is OpenMeteoRetryClass.RATE_LIMITED:
                     wait = _rate_limit_wait(outcome, attempt)
