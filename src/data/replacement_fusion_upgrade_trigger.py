@@ -989,6 +989,7 @@ def enqueue_fusion_upgrade_reseeds(
         write_seed,
     )
     from src.data.replacement_forecast_seed_discovery import (  # noqa: PLC0415
+        _day0_observed_extreme_seed_payload,
         _latest_manifest,
         _load_manifests,
         _manifest_base_dir,
@@ -1013,6 +1014,8 @@ def enqueue_fusion_upgrade_reseeds(
         "scopes_checked": 0,
         "upgrades_detected": 0,
         "input_revisions_detected": 0,
+        "day0_conditioned_upgrades": 0,
+        "day0_skipped": 0,
         "seeds_enqueued": 0,
         "already_enqueued": 0,
         "manifest_missing": 0,
@@ -1103,13 +1106,27 @@ def enqueue_fusion_upgrade_reseeds(
         ):
             if enqueued >= max(1, int(limit)):
                 break
-            # DAY0 GUARD (live-run finding 2026-06-11): a started local day's scope needs the
-            # observed-extreme path, not a plain re-materialization — the seed discovery's
-            # can_seed excludes these and the upgrade re-seed must too (same plan flag, same
-            # reason). Without it the first live enqueue burned 18 budget slots on day0 scopes.
+            day0_payload: dict[str, object] = {}
+            # A Day0 input revision still changes q, but its re-materialization must
+            # preserve the canonical observed-extreme conditioning.  Skipping Day0
+            # here leaves REPLACEMENT_RAW_INPUT_HWM with no RESET: cycle-advance
+            # correctly sees the same carrier cycle while fusion owns the changed
+            # raw-row identity.  Build the fusion seed with the same canonical Day0
+            # payload used by cycle-advance instead of emitting a plain seed.
             if day0_required:
-                report["day0_skipped"] = int(report.get("day0_skipped", 0)) + 1  # type: ignore[arg-type]
-                continue
+                payload = _day0_observed_extreme_seed_payload(
+                    city=city,
+                    target_date=target_date,
+                    metric=metric,
+                    computed_at=now,
+                )
+                if payload is None:
+                    report["day0_skipped"] = int(report["day0_skipped"]) + 1
+                    continue
+                day0_payload = payload
+                report["day0_conditioned_upgrades"] = (
+                    int(report["day0_conditioned_upgrades"]) + 1
+                )
             report["scopes_checked"] = int(report["scopes_checked"]) + 1
             try:
                 verdict = scope_capture_offers_larger_provider_set(
@@ -1222,6 +1239,7 @@ def enqueue_fusion_upgrade_reseeds(
                     manifest_base_dir=_manifest_base_dir,
                     resolve_path=_resolve_path,
                     expected_identity=expected_replacement_dependency_identity_by_role,
+                    day0_payload=day0_payload,
                 )
             except Exception as exc:  # noqa: BLE001 — per-scope fail-soft
                 report["seed_build_failed"] = int(
@@ -1402,6 +1420,7 @@ def _build_and_write_upgrade_seed(
     manifest_base_dir,
     resolve_path,
     expected_identity,
+    day0_payload: Mapping[str, object] | None = None,
 ) -> Path | None:
     """Build one re-materialization seed for a scope using the existing seed-builder pieces and
     atomically write it into private staging. Returns the staging Path, or None when the required
@@ -1442,6 +1461,7 @@ def _build_and_write_upgrade_seed(
         precision_metadata_json=resolve_path(precision_metadata, base_dir=openmeteo_base_dir),
         computed_at=computed_at,
         base_dir=seed_path,
+        **dict(day0_payload or {}),
     )
     if not seed_result.ok or seed_result.seed is None:
         return None

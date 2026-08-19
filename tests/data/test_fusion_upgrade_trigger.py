@@ -344,6 +344,61 @@ def test_post_carrier_provider_run_enqueues_same_carrier_refresh(
     assert report["enqueued"][0]["source_cycle_time"] == carrier
 
 
+def test_day0_input_revision_enqueues_observation_conditioned_seed(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Same-cycle late inputs must have a RESET without dropping Day0 truth."""
+    db, kwargs = _revision_upgrade_kwargs(tmp_path)
+    kwargs.update(
+        computed_at=datetime(2026, 7, 25, 12, 0, tzinfo=UTC),
+        scopes=[("Seoul", "2026-07-25", "high")],
+    )
+    day0_payload = {
+        "day0_observed_extreme_c": 31.0,
+        "day0_observed_extreme_source": "wu_icao_history",
+        "day0_observed_extreme_observation_time": "2026-07-25T11:00:00+00:00",
+        "day0_observed_extreme_sample_count": 12,
+        "day0_observed_extreme_unit": "C",
+    }
+    from src.data import replacement_forecast_current_target_plan as target_plan
+    from src.data import replacement_forecast_seed_discovery as discovery
+
+    monkeypatch.setattr(
+        target_plan,
+        "_day0_observed_extreme_required",
+        lambda **_kwargs: True,
+    )
+    monkeypatch.setattr(
+        discovery,
+        "_day0_observed_extreme_seed_payload",
+        lambda **_kwargs: dict(day0_payload),
+    )
+    monkeypatch.setattr(
+        trigger,
+        "scope_capture_offers_larger_provider_set",
+        lambda *_args, **_kwargs: _revision_upgrade_verdict(),
+    )
+    observed: dict[str, object] = {}
+
+    def _build(_conn, **build_kwargs):
+        observed.update(build_kwargs.get("day0_payload") or {})
+        path = Path(build_kwargs["seed_file"])
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("{}\n", encoding="utf-8")
+        return path
+
+    monkeypatch.setattr(trigger, "_build_and_write_upgrade_seed", _build)
+
+    report = trigger.enqueue_fusion_upgrade_reseeds(**kwargs)
+
+    assert report["input_revisions_detected"] == 1
+    assert report["day0_conditioned_upgrades"] == 1
+    assert report["day0_skipped"] == 0
+    assert report["seeds_enqueued"] == 1
+    assert observed == day0_payload
+
+
 def test_unchanged_or_unrelated_raw_revision_is_noop() -> None:
     conn = _conn()
     cyc = "2026-06-12T06:00:00+00:00"
