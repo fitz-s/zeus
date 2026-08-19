@@ -2418,3 +2418,31 @@ publication barrier.
   Day0; source-clock capture attempts the exact held target; B114 parser tests,
   compilation, changed-surface registries, and diff checks pass before exact-SHA
   hot-fix deployment and live DB/monitor verification.
+
+### Slice B118 — Keep held families in the BPF target universe (2026-08-19)
+
+- Live defect: after B117 loaded, the 18Z downloader wrote current rows for the
+  Aug-19 market plan, but seven still-open Aug-18 positions were absent from that
+  plan. Both extras coverage and both target fanouts therefore declared the 98
+  new-market scopes complete while the held scopes had no 18Z rows. The existing
+  held-fixpoint override could only intersect held identities with plan-derived
+  missing identities, so it could never recover a held family omitted upstream.
+- First-principles invariant: unresolved capital, not current market discovery,
+  owns the minimum probability-maintenance universe. BPF coverage and source/
+  maintenance fanouts use the union of current market targets and canonical held
+  families; held-only targets retain their exact city/date/metric identity and
+  pass the same decision-window and payload validators as every other target.
+- SCOPE: BPF target enumeration and exact-cycle coverage accounting. DRAIN:
+  recurring held-priority source-clock and maintenance passes capture missing
+  held-only rows, then existing source-commit reseeds materialization. RESET:
+  exact two-family coverage removes a held scope from capture; lifecycle closure
+  removes it from the held union; an elapsed local day makes partial cycles
+  structurally inadmissible rather than stale-as-fresh.
+- Forbidden: fabricating a market row, treating held identity as probability
+  evidence, retaining closed positions, bypassing B114 suffix validation, or
+  changing q, edge, price, sizing, exit, and venue I/O law.
+- Acceptance: coverage includes a held Day0 identity absent from the market plan;
+  ordinary fanout synthesizes its exact download target; source-clock does the
+  same with an empty current-market key set. Direct callers, B114 parser,
+  scheduler, compilation, lint, registries, and diff checks pass before exact-SHA
+  deploy and live 18Z held-row/posterior/monitor proof.

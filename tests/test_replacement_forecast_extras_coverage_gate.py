@@ -168,6 +168,47 @@ def test_extras_coverage_includes_current_day0_remaining_window(
     }
 
 
+def test_extras_coverage_includes_held_day0_missing_from_market_plan(
+    tmp_path, monkeypatch
+) -> None:
+    import src.data.replacement_forecast_current_target_plan as target_plan
+    import src.data.replacement_forecast_seed_discovery as seed_discovery
+
+    cycle = datetime(2026, 7, 18, 0, tzinfo=UTC)
+    decision_time = datetime(2026, 7, 18, 6, tzinfo=UTC)
+    db = _make_forecast_db(tmp_path)
+    monkeypatch.setattr(
+        target_plan,
+        "build_replacement_forecast_current_target_plan",
+        lambda _db: _Plan(
+            rows=(
+                _PlanRow(
+                    city="Tokyo",
+                    target_date="2026-07-19",
+                    temperature_metric="high",
+                ),
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        seed_discovery,
+        "held_position_family_priorities",
+        lambda: {("Manila", "2026-07-18", "high"): 0},
+    )
+
+    missing, planned = prod._extras_coverage_missing(
+        {"forecast_db": db},
+        cycle,
+        decision_time=decision_time,
+    )
+
+    assert planned == 2
+    assert missing == {
+        ("Manila", "high", "2026-07-18"),
+        ("Tokyo", "high", "2026-07-19"),
+    }
+
+
 def test_source_clock_attempts_current_day0_remaining_window(
     tmp_path, monkeypatch
 ) -> None:
@@ -209,13 +250,13 @@ def test_source_clock_attempts_current_day0_remaining_window(
     monkeypatch.setattr(
         target_plan,
         "replacement_forecast_current_target_keys",
-        lambda _path: (
-            target_plan.ReplacementForecastTargetKey(
-                "Manila", "2026-07-18", "high"
-            ),
-        ),
+        lambda _path: (),
     )
-    monkeypatch.setattr(seed_discovery, "held_position_family_priorities", lambda: {})
+    monkeypatch.setattr(
+        seed_discovery,
+        "held_position_family_priorities",
+        lambda: {("Manila", "2026-07-18", "high"): 0},
+    )
     monkeypatch.setattr(
         city_weights,
         "affected_cities_for_source_updates",

@@ -949,6 +949,7 @@ def _download_bayes_precision_fusion_extra_raw_inputs_if_needed(
 
         from src.config import cities_by_name  # noqa: PLC0415
         from src.data.replacement_forecast_current_target_plan import (  # noqa: PLC0415
+            ReplacementForecastTargetKey,
             build_replacement_forecast_current_target_plan,
         )
         from src.data.bayes_precision_fusion_download import (  # noqa: PLC0415
@@ -1004,9 +1005,24 @@ def _download_bayes_precision_fusion_extra_raw_inputs_if_needed(
             held_priority = held_position_family_priorities()
         except Exception:
             held_priority = {}
+        capture_rows: list[object] = list(plan.rows)
+        planned_scopes = {
+            (row.city, row.target_date, row.temperature_metric)
+            for row in capture_rows
+        }
+        for city, target_date, metric in held_priority:
+            if (city, target_date, metric) in planned_scopes:
+                continue
+            capture_rows.append(
+                ReplacementForecastTargetKey(
+                    city=city,
+                    target_date=target_date,
+                    temperature_metric=metric,
+                )
+            )
         admitted_rows = [
             row
-            for row in plan.rows
+            for row in capture_rows
             if (
                 missing_scopes is None
                 or (row.city, row.temperature_metric, row.target_date) in missing_scopes
@@ -1206,6 +1222,7 @@ def _download_bayes_precision_fusion_source_clock_raw_inputs_if_needed(
         )
         from src.data.openmeteo_model_updates import read_model_updates_jsonl  # noqa: PLC0415
         from src.data.replacement_forecast_current_target_plan import (  # noqa: PLC0415
+            ReplacementForecastTargetKey,
             replacement_forecast_current_target_keys,
         )
         from src.data.replacement_forecast_seed_discovery import (  # noqa: PLC0415
@@ -1323,6 +1340,20 @@ def _download_bayes_precision_fusion_source_clock_raw_inputs_if_needed(
         all_target_keys = tuple(
             replacement_forecast_current_target_keys(Path(str(forecast_db)))
         )
+        planned_scopes = {
+            (row.city, row.target_date, row.temperature_metric)
+            for row in all_target_keys
+        }
+        held_target_keys = tuple(
+            ReplacementForecastTargetKey(
+                city=city,
+                target_date=target_date,
+                temperature_metric=metric,
+            )
+            for city, target_date, metric in held_priority
+            if (city, target_date, metric) not in planned_scopes
+        )
+        all_target_keys = (*all_target_keys, *held_target_keys)
         reported_affected = set(affected_cities)
         target_keys_by_source: dict[str, list[object]] = {}
         for source in resolved_sources:
@@ -2146,9 +2177,8 @@ def _extras_coverage_missing(
     ``planned_count`` is the size of the plan. Returns ``None`` on any probe error
     (caller fails-open = re-run).
 
-    THE DENOMINATOR is the SAME plan the fan-out builds its download targets from
-    (``build_replacement_forecast_current_target_plan`` — see
-    _download_bayes_precision_fusion_extra_raw_inputs_if_needed:284,312). A scope is "covered"
+    THE DENOMINATOR is the current-market plan plus canonical held-position
+    families, the same union both fan-outs build their download targets from. A scope is "covered"
     iff it has >=2 distinct provider families in ``single_runs`` rows at the exact
     (city, metric, target_date, source_cycle_time) key the materializer's q-path reads
     (replacement_current_value_serving.read_current_instrument_values) — so completeness here
@@ -2166,19 +2196,30 @@ def _extras_coverage_missing(
         from src.data.replacement_forecast_current_target_plan import (  # noqa: PLC0415
             build_replacement_forecast_current_target_plan,
         )
+        from src.data.replacement_forecast_seed_discovery import (  # noqa: PLC0415
+            held_position_family_priorities,
+        )
         from src.state.db import _connect  # noqa: PLC0415
 
         plan = build_replacement_forecast_current_target_plan(Path(str(forecast_db)))
         from src.config import cities_by_name  # noqa: PLC0415
 
-        need = {
+        capture_scopes = {
             (row.city, row.temperature_metric, row.target_date)
             for row in plan.rows
+        }
+        capture_scopes.update(
+            (city, metric, target_date)
+            for city, target_date, metric in held_position_family_priorities()
+        )
+        need = {
+            (city, metric, target_date)
+            for city, metric, target_date in capture_scopes
             if (
-                (city_cfg := cities_by_name.get(row.city)) is None
+                (city_cfg := cities_by_name.get(city)) is None
                 or _source_cycle_can_cover_local_decision_window(
                     cycle=cycle,
-                    target_date=row.target_date,
+                    target_date=target_date,
                     timezone_name=str(city_cfg.timezone),
                     decision_time=decision_time,
                 )

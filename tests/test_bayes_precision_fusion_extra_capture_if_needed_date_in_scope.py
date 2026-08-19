@@ -233,7 +233,6 @@ def test_full_fanout_admits_current_day0_and_prioritizes_held_gap(
         + timedelta(days=1)
     )
     rows = [
-        _row(city="Tokyo", target_date=tokyo_day0.isoformat(), covered=False),
         _row(city="Amsterdam", target_date=amsterdam_day1.isoformat(), covered=True),
         _row(city="Tokyo", target_date=tokyo_day1.isoformat(), covered=False),
     ]
@@ -258,7 +257,10 @@ def test_full_fanout_admits_current_day0_and_prioritizes_held_gap(
     monkeypatch.setattr(
         seed_discovery,
         "held_position_family_priorities",
-        lambda: {("Tokyo", tokyo_day1.isoformat(), "high"): 0},
+        lambda: {
+            ("Tokyo", tokyo_day0.isoformat(), "high"): 0,
+            ("Tokyo", tokyo_day1.isoformat(), "high"): 1,
+        },
     )
 
     report = production._download_bayes_precision_fusion_extra_raw_inputs_if_needed(
@@ -270,8 +272,8 @@ def test_full_fanout_admits_current_day0_and_prioritizes_held_gap(
     assert [
         (target.city, target.target_date) for target in calls[0]["targets"]
     ] == [
-        ("Tokyo", tokyo_day1.isoformat()),
         ("Tokyo", tokyo_day0.isoformat()),
+        ("Tokyo", tokyo_day1.isoformat()),
         ("Amsterdam", amsterdam_day1.isoformat()),
     ]
 
