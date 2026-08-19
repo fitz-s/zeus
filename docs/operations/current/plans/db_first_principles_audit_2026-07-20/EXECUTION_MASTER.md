@@ -1,6 +1,6 @@
 # DB 跃迁 — 执行控制器(四象限重分类 + 修正流 + 派发矩阵)
 
-2026-07-21 · Opus max · 输入:census 799/799、consult 两轮(6a5f1dda…)、REDESIGN_v2、G1/G2 闭环。
+2026-07-21 · Opus max · 输入:census 799/799、consult 两轮([external consult thread])、REDESIGN_v2、G1/G2 闭环。
 **铁律**:live checkout 零接触;所有产物走 linked worktree(`db-impl-2026-07-21`);任何对 live DB 的**运行**(迁移/回填)是操作员逐步确认门,本控制器只授权 worktree 内**编写 + 读态探针**。
 
 ---
@@ -83,7 +83,7 @@ W0 钱路修复 ──▶ W1 生存+写控 ──▶ W2 契约先于移动 ─�
 | D | 跨文件原子性清单 + outbox 契约(G8) | **opus** | 设计 | atomicity_outbox_contract | money-hot + 16 缺失结算 |
 | E | capture policy spec(最大杠杆) | sonnet | 设计 | capture_policy_spec | W2/W3 |
 | — | **W0 spec**(本控制器作者写) | 本线程 opus | 设计 | W0_SPEC.md | consult 攻击 |
-| — | **consult**(攻击 W0 spec) | GPT-5.6 | 外部对撞 | followup 6a5f1dda | W0 落地前最后一道 |
+| — | **consult**(攻击 W0 spec) | GPT-5.6 | 外部对撞 | [external consult thread] | W0 落地前最后一道 |
 
 **验收(验收 = 每件独立复核)**:
 - W0_SPEC → consult 对撞(危险的活库迁移,落地前必过)。

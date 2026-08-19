@@ -109,7 +109,7 @@ event-path detection ≪ scan floor; no orphaned GTC (TTL ownership handover pro
 
 ## Agent strategy — orchestration classification (BINDING; operator-directed 2026-07-02)
 
-**Execution base:** worktree `/Users/leofitz/zeus-worktrees/rebuild-w0`, branch
+**Execution base:** worktree `<local>/zeus-worktrees/rebuild-w0`, branch
 `rebuild/w0-instrumentation`, cut from HEAD `0380fe3f` (main checkout's dirty hotfix tree stays
 untouched there — P0.1 attribution deferred, NOT abandoned). Per-packet implementer branches cut
 from this base; main thread merges serially onto the wave branch (registry YAML appends are the
@@ -137,7 +137,7 @@ settlement cycle) shows unexplained deltas.
 ## NEXT ACTION (updated 2026-07-02, execution running)
 IN FLIGHT: Phase A locate briefs DONE (wf_883d26c1-637, 6/6; extracted to scratchpad briefs/).
 W0.1/W0.2/W0.3 implementers running on branches rebuild/w0.{1,2,3}-* (worktrees
-/Users/leofitz/zeus-worktrees/w0-{1,2,3}); fork drafting the two W1 K0 schema packets into
+<local>/zeus-worktrees/w0-{1,2,3}); fork drafting the two W1 K0 schema packets into
 rebuild-w0/docs/rebuild/schema_packets/ (uncommitted, for main-thread review).
 KEY PHASE-A FINDING (raises W0.1 stakes): hook_factory live q-serving path
 (replacement_forecast_hook_factory.py:545-556 → event_reactor_adapter.py:2924) has NO raw-input
@@ -391,13 +391,13 @@ coherence lockstep [shim emits allows=True, guard retires at flag-ON]; legacy ma
 threaded [would break G3 OFF byte-identity; new solver budget-aware by construction + CAS rail]).
 REGISTRY DEBT: skeleton landed unregistered — assigned as first item of the math-core packet.
 BRANCH PUSHED to public origin (repo is PUBLIC — github.com/fitz-s/zeus) for consult link
-delivery. CHATGPT-CONSULT IN FLIGHT (REQ-20260702-212900-e935c9, Pro Extended, conversation
-6a471ed8…, answer → /tmp/cgc/answer_REQ-20260702-212900-e935c9.txt; detached waiter armed).
+delivery. CHATGPT-CONSULT IN FLIGHT (external consult, 2026-07-02, Pro Extended, conversation
+[external consult thread], answer → [consult answer artifact]; detached waiter armed).
 Infra note for future consults: HTTP_PROXY=127.0.0.1:20128 intercepts loopback — ALWAYS export
 NO_PROXY=127.0.0.1,localhost before cdp_launch.sh/cdp_consult.py (launcher's liveness curl is
 fooled by the proxy's 404 page otherwise).
 CONSULT VERDICT (Pro Extended, deep review): NO-GO on current interfaces — six blockers, ALL
-ACCEPTED with rulings (answer: /tmp/cgc/answer_REQ-20260702-212900-e935c9.txt): ① JOINT ATOM
+ACCEPTED with rulings (answer: [consult answer artifact]): ① JOINT ATOM
 AXIS — JointOutcomeScenarioSet(atoms, q_draws, weights, semantics enum) + WealthStateByAtom incl.
 reservations/resting/unsettled/ledger-snapshot-id (concatenated marginal bins cannot express a
 joint distribution; C4 swap would force solver rewrite); ② index-paired product measure invalid
@@ -569,9 +569,9 @@ one-owner). - W4.4 DONE + MERGED → 46211c52e, pushed. Disposition table clean 
   MERGED → fba4cee21, pushed.
 ══ W4 WAVE CLOSED 2026-07-03 ══ — ALL FIVE WAVES (W0-W4) COMPLETE on rebuild/w0-instrumentation
 @ fba4cee21 (local + origin). W5 deletions remain post-promotion per DAG.
-══ ENDGAME E1 RUNNING ══ — full-branch consult review submitted (REQ-20260703-020827-28de42,
-Pro Extended, conversation 6a475ff6…, compare 0380fe3f...fba4cee21 = the whole rebuild diff;
-answer → /tmp/cgc/answer_REQ-20260703-020827-28de42.txt). Task bars: cross-packet seams
+══ ENDGAME E1 RUNNING ══ — full-branch consult review submitted (external consult, 2026-07-03,
+Pro Extended, [external consult thread], compare 0380fe3f...fba4cee21 = the whole rebuild diff;
+answer → [consult answer artifact]). Task bars: cross-packet seams
 (ledger↔batch↔cancel composition; shim state under event cadence + reactor threading;
 SOURCE_RUN_ARRIVED replay drive; OFF-path identity survivability after W4.2/W4.4 legacy-behavior
 deletions), deletion completeness (runbooks/monitoring grep), pre-existing-ledger triage,
@@ -621,12 +621,12 @@ _replacement_is_live_layer admits only FUSED_NORMAL+certified basis — never li
 drift + NC-18 exchange_reconcile guard). MERGED: integration @ 1fc6cd687 (pushed); post-merge
 suites show only the 2 enumerated pre-existing reds. All wave worktrees removed; only
 rebuild-w0 remains (+3 foreign /private/tmp/zeus-pr421-* left untouched).
-E1 CONSULT FOLLOW-UP SUBMITTED (same thread 6a475ff6-8de8-83ea-a35c-1b4c02e1948b,
-rid REQ-20260703-033058-75c6ab): asks re-verdict on merge-to-main + OFF-deploy readiness of
+E1 CONSULT FOLLOW-UP SUBMITTED (same thread [external consult thread],
+rid external consult, 2026-07-03): asks re-verdict on merge-to-main + OFF-deploy readiness of
 1fc6cd687, verification of BLOCKER fix as landed, disposition re-check, and whether the 49
 enumerated pre-existing reds block OFF-deploy. Detached waiter running; answer lands at
-/tmp/cgc_answer_REQ-20260703-033058-75c6ab.txt.
-[2026-07-03 09:05] CONSULT ROUND-2 VERDICT (answer: /tmp/cgc_answer_REQ-20260703-033058-75c6ab.txt):
+[consult answer artifact].
+[2026-07-03 09:05] CONSULT ROUND-2 VERDICT (answer: [consult answer artifact]):
 E1 BLOCKER + glue gap + city-starvation all CONFIRMED FIXED. Still NOT merge/deploy-ready — new
 findings: [BLOCKER] confirmed_families lacks family-level suppression (staleness_cancel.py:~386 —
 family with acked + REVIEW_REQUIRED cancels in same cycle still emitted → redecision against
@@ -651,7 +651,7 @@ degrade maps affected_cities→None so q-stale pass cannot fire). Seam test rest
 (original seam test alone stays green under old bug — disclosed, verified). Verifier 5/5
 (206/0 sweep claim reproduced exactly by orchestrator — verifier had used the round-1 file set).
 Double mutation probes re-run independently. w4-2b worktree removed post-merge.
-CONSULT ROUND-3 CONFIRMATION SUBMITTED (rid REQ-20260703-040020-bc7d32, detached waiter):
+CONSULT ROUND-3 CONFIRMATION SUBMITTED (rid external consult, 2026-07-03, detached waiter):
 final go/no-go on 0afe42f52 for merge-to-main + OFF-deploy.
 [2026-07-03 10:00] ROUND-3 VERDICT: GO (confidence 0.86, remaining blocker set: none) —
 merge-to-main ready + OFF-deploy ready under recorded quiet-window procedure. One LOW closed:
@@ -714,7 +714,7 @@ E2. MERGE TO MAIN:
      (NC-18 guard — acceptable ONLY as the documented direct-write carve-out for synthetic
      external closes, W1.1 live-reservation guard + orphan sweep green; re-verify at E2).
      Full node-id list to be committed alongside the E2 merge record.
-   - git checkout main (main worktree /Users/leofitz/zeus — FIRST resolve the parked dirty
+   - git checkout main (main worktree <local>/zeus — FIRST resolve the parked dirty
      hotfix tree there: P0.1 attribution debt, commit or stash-record it) → merge wave branch
      (--no-ff, milestone message) → full sanity → push origin main.
 E3. DEPLOY (gates decide, quiet window):

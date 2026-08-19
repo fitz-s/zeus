@@ -1626,7 +1626,7 @@ tables:
       - {name: schema_version, type: INTEGER, nullable: false}
     notes: >
       Exit-timing grade ledger (2026-06-22, lifecycle design consult
-      REQ-20260622-060011 + operator "sell before market notice and gain is ALSO a
+      external consult, 2026-06-22 + operator "sell before market notice and gain is ALSO a
       good trade"). One row per CLOSED (exited) position. The ORTHOGONAL second
       attribution axis to settlement_attribution (entry skill): it grades the EXIT
       decision by exit_alpha_usd = net_exit_proceeds - would_have_settled_value, so
@@ -1661,7 +1661,7 @@ tables:
       - {name: schema_version, type: INTEGER, nullable: false}
     notes: >
       Family-rebalance lifecycle LEASE (2026-06-22, lifecycle design consult
-      REQ-20260622-060011 — D1 fill-up / D2 shift-bin). One ACTIVE row per
+      external consult, 2026-06-22 — D1 fill-up / D2 shift-bin). One ACTIVE row per
       (env,city,target_date,metric) family while a re-decide-held-exposure operation
       is in flight; the partial UNIQUE index uq_family_rebalance_active over the
       non-terminal statuses is THE concurrency guard against the duplicate-EDLI /
