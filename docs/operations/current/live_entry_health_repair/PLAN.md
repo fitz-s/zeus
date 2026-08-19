@@ -2363,3 +2363,29 @@ publication barrier.
   and Tel Aviv become two clusters and two 8x market/model likelihood ratios
   compound to e-value 64. Focused riskguard tests, compilation, registry checks,
   live-data replay, and exact-SHA runtime confirmation must pass before closeout.
+
+### Slice B116 — Reserve held-capital maintenance time for current BPF shape (2026-08-19)
+
+- Live defect: the 20-second replacement-maintenance parent deadline granted up
+  to 10 seconds to each of the critical and ordinary held-anchor partitions,
+  then broad anchor repair, before attempting BPF capture. With persistent
+  anchor debt the BPF lane deterministically received `0.0` seconds while held
+  positions repeatedly failed with `BAYES_PRECISION_FUSION_CAPTURE_MISSING`.
+- First-principles invariant: current held probability requires both its anchor
+  and current multi-source shape. When held exposure exists and BPF transport is
+  admitted, neither prerequisite may consume the other's entire recurring
+  deadline; lower-priority broad repair uses only the unreserved remainder.
+- SCOPE: wall-clock allocation inside the one-minute replacement maintenance
+  tick. DRAIN: held anchor partitions share the non-reserved half, held-first
+  BPF fanout consumes the preserved half, and committed families trigger the
+  existing targeted materialization reseeds. RESET: no held scopes, provider
+  cooldown, or active no-progress backoff removes the reservation and restores
+  the full budget to existing repair lanes.
+- Forbidden: bypassing provider hard caps/cooldowns, stale-history substitution,
+  changing q/edge/price/Kelly law, weakening anchor requirements, or admitting
+  entries merely because a request was attempted.
+- Acceptance: a deterministic scheduler relationship test consumes both held
+  anchor partitions and proves broad anchor receives only the unreserved budget
+  while BPF still receives a positive 10-second slice. Existing cooldown,
+  no-held, retry/backoff, quota-lane, reseed, compilation, registry, and diff
+  checks pass before exact-SHA hot-fix deployment.
