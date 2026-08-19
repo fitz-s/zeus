@@ -566,7 +566,15 @@ def _upgrade_day0_seed_has_current_enqueue_ownership(
     seed: Mapping[str, object],
 ) -> _Day0EnqueueOwnershipCheck:
     """Classify Day0 marker ownership without consuming a seed on read uncertainty."""
-    if not seed.get("upgrade_trigger") or seed.get("day0_observed_extreme_observation_time") is None:
+    # Day0 conditioning is probability truth, not an enqueue-owner type.  Only
+    # cycle-advance publishers opt into the cycle_advance_enqueues fence.  A
+    # fusion/input-revision seed carries the same canonical Day0 observation
+    # but is owned by fusion_upgrade_enqueues; forcing it through the cycle
+    # fence consumes a valid seed as STALE before it can repair the posterior.
+    if (
+        seed.get("cycle_advance_enqueue_owner") is not True
+        or seed.get("day0_observed_extreme_observation_time") is None
+    ):
         return _Day0EnqueueOwnershipCheck(_Day0EnqueueOwnership.CURRENT)
     from src.data.replacement_cycle_advance_trigger import (  # noqa: PLC0415
         _day0_conditioning_identity,

@@ -1326,6 +1326,7 @@ def test_queue_quarantines_preexisting_stale_day0_upgrade_seed(tmp_path, monkeyp
                 "precision_metadata_json": "precision.json",
                 "bins": [{"bin_id": "warm"}],
                 "upgrade_trigger": "day0_observation_advanced",
+                "cycle_advance_enqueue_owner": True,
                 "day0_observed_extreme_source": "late_alternate_source",
                 "day0_observed_extreme_observation_time": "2026-07-19T05:00:00.132000+00:00",
                 "day0_observed_extreme_c": 20.5,
@@ -1416,6 +1417,7 @@ def test_current_day0_owner_uses_latest_enqueue_not_consumed_source_cycle(
             "temperature_metric": "high",
             "source_cycle_time": consumed_cycle,
             "upgrade_trigger": "day0_observation_advanced",
+            "cycle_advance_enqueue_owner": True,
             **new_identity,
         },
     )
@@ -1423,6 +1425,30 @@ def test_current_day0_owner_uses_latest_enqueue_not_consumed_source_cycle(
     assert ownership.ownership is materialization_queue._Day0EnqueueOwnership.CURRENT
     assert ownership.witness is not None
     assert ownership.witness["target_cycle_time"] == "2026-07-19T12:00:00+00:00"
+
+
+def test_day0_fusion_revision_uses_its_own_owner_not_cycle_advance_marker(
+    tmp_path,
+) -> None:
+    """Conditioned fusion seeds must not be rejected by another lane's fence."""
+    ownership = materialization_queue._upgrade_day0_seed_has_current_enqueue_ownership(
+        forecast_db=tmp_path / "missing.db",
+        seed_file=tmp_path / "fusion.json",
+        seed={
+            "city": "Los Angeles",
+            "target_date": "2026-08-18",
+            "temperature_metric": "high",
+            "source_cycle_time": "2026-08-18T18:00:00+00:00",
+            "upgrade_trigger": "instrument_set_expansion",
+            "day0_observed_extreme_source": "wu_icao_history",
+            "day0_observed_extreme_observation_time": "2026-08-19T00:53:00+00:00",
+            "day0_observed_extreme_c": 27.22222222222222,
+            "day0_observed_extreme_unit": "F",
+        },
+    )
+
+    assert ownership.ownership is materialization_queue._Day0EnqueueOwnership.CURRENT
+    assert ownership.witness is None
 
 
 def test_queue_defers_current_day0_upgrade_seed_when_marker_read_is_transient(
@@ -1454,6 +1480,7 @@ def test_queue_defers_current_day0_upgrade_seed_when_marker_read_is_transient(
                 "precision_metadata_json": "precision.json",
                 "bins": [{"bin_id": "warm"}],
                 "upgrade_trigger": "day0_observation_advanced",
+                "cycle_advance_enqueue_owner": True,
                 **identity,
             }
         ),
@@ -1591,6 +1618,7 @@ def test_queue_revalidates_day0_owner_immediately_before_request_publish(
                 "precision_metadata_json": "precision.json",
                 "bins": [{"bin_id": "warm"}],
                 "upgrade_trigger": "day0_observation_advanced",
+                "cycle_advance_enqueue_owner": True,
                 **owner_a,
             }
         ),
@@ -1691,6 +1719,7 @@ def test_queue_defers_legacy_null_day0_identity_without_stale_receipt(tmp_path, 
                 "precision_metadata_json": "precision.json",
                 "bins": [{"bin_id": "warm"}],
                 "upgrade_trigger": "day0_observation_advanced",
+                "cycle_advance_enqueue_owner": True,
                 **identity,
             }
         ),
@@ -1770,6 +1799,7 @@ def test_queue_scans_past_indeterminate_day0_prefix_without_starving_current_see
                     "precision_metadata_json": "precision.json",
                     "bins": [{"bin_id": "warm"}],
                     "upgrade_trigger": "day0_observation_advanced",
+                    "cycle_advance_enqueue_owner": True,
                     **identity,
                 }
             ),
@@ -1901,6 +1931,7 @@ def test_queue_rotates_bounded_indeterminate_inspections_across_reload(
                     "precision_metadata_json": "precision.json",
                     "bins": [{"bin_id": "warm"}],
                     "upgrade_trigger": "day0_observation_advanced",
+                    "cycle_advance_enqueue_owner": True,
                     **identity,
                 }
             ),
