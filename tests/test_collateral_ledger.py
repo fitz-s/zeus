@@ -690,7 +690,15 @@ def test_buy_preflight_in_transaction_is_read_only_and_preserves_caller_transact
             spend_micro=1_000_000,
         ) is True
         assert conn.in_transaction is True
-        assert not any("COMMIT" in statement.upper() for statement in statements)
+        # Statement-shape check, not substring: 09cd39d72 (2026-08-11) added a
+        # SQL comment mentioning "commit interleaving" to the snapshot-scan
+        # query, which a naive `"COMMIT" in statement.upper()` substring test
+        # false-positives on. Match COMMIT the same way CREATE/DROP/ALTER are
+        # matched below -- by statement start, not by word anywhere in the text.
+        assert not any(
+            statement.lstrip().upper().startswith("COMMIT")
+            for statement in statements
+        )
         assert not any(
             statement.lstrip().upper().startswith(("CREATE ", "DROP ", "ALTER "))
             for statement in statements
@@ -1174,6 +1182,10 @@ def test_executor_buy_preflight_blocks_before_command_persistence(conn, monkeypa
     configure_global_ledger(ledger)
     monkeypatch.setattr("src.control.cutover_guard.assert_submit_allowed", lambda *args, **kwargs: None)
     monkeypatch.setattr("src.control.heartbeat_supervisor.assert_heartbeat_allows_order_type", lambda *args, **kwargs: None)
+    # cd3dc2f62 (2026-08-11) added a submit-time strategy-policy recheck;
+    # collateral preflight is the subject under test here, not that gate.
+    monkeypatch.setattr("src.riskguard.policy.is_entries_paused", lambda: False)
+    monkeypatch.setattr("src.riskguard.policy.get_edge_threshold_multiplier", lambda: 1.0)
     monkeypatch.setattr(
         "src.execution.executor._entry_taker_quality_component",
         # Not the subject under test (collateral preflight is); same idiom as
@@ -1182,7 +1194,7 @@ def test_executor_buy_preflight_blocks_before_command_persistence(conn, monkeypa
     )
     monkeypatch.setattr(
         "src.execution.executor._entry_actionable_certificate_payload_and_component",
-        lambda *args, **kwargs: ({"component": "entry_actionable_certificate", "allowed": True, "reason": "allowed"}, None),
+        lambda *args, **kwargs: ({"component": "entry_actionable_certificate", "allowed": True, "reason": "allowed"}, {"strategy_key": "center_buy"}),
     )
     monkeypatch.setattr(
         "src.execution.executor._entry_economics_component",
@@ -1255,6 +1267,10 @@ def test_executor_buy_preflight_uses_quantized_submitted_notional(conn, monkeypa
     configure_global_ledger(ledger)
     monkeypatch.setattr("src.control.cutover_guard.assert_submit_allowed", lambda *args, **kwargs: None)
     monkeypatch.setattr("src.control.heartbeat_supervisor.assert_heartbeat_allows_order_type", lambda *args, **kwargs: None)
+    # cd3dc2f62 (2026-08-11) added a submit-time strategy-policy recheck;
+    # collateral preflight is the subject under test here, not that gate.
+    monkeypatch.setattr("src.riskguard.policy.is_entries_paused", lambda: False)
+    monkeypatch.setattr("src.riskguard.policy.get_edge_threshold_multiplier", lambda: 1.0)
     monkeypatch.setattr(
         "src.execution.executor._entry_taker_quality_component",
         # Not the subject under test (collateral preflight is); same idiom as
@@ -1263,7 +1279,7 @@ def test_executor_buy_preflight_uses_quantized_submitted_notional(conn, monkeypa
     )
     monkeypatch.setattr(
         "src.execution.executor._entry_actionable_certificate_payload_and_component",
-        lambda *args, **kwargs: ({"component": "entry_actionable_certificate", "allowed": True, "reason": "allowed"}, None),
+        lambda *args, **kwargs: ({"component": "entry_actionable_certificate", "allowed": True, "reason": "allowed"}, {"strategy_key": "center_buy"}),
     )
     monkeypatch.setattr(
         "src.execution.executor._entry_economics_component",
@@ -1432,6 +1448,10 @@ def test_executor_ack_reserves_pusd_until_terminal_release(conn, monkeypatch):
     configure_global_ledger(ledger)
     monkeypatch.setattr("src.control.cutover_guard.assert_submit_allowed", lambda *args, **kwargs: None)
     monkeypatch.setattr("src.control.heartbeat_supervisor.assert_heartbeat_allows_order_type", lambda *args, **kwargs: None)
+    # cd3dc2f62 (2026-08-11) added a submit-time strategy-policy recheck;
+    # collateral preflight is the subject under test here, not that gate.
+    monkeypatch.setattr("src.riskguard.policy.is_entries_paused", lambda: False)
+    monkeypatch.setattr("src.riskguard.policy.get_edge_threshold_multiplier", lambda: 1.0)
     monkeypatch.setattr(
         "src.execution.executor._entry_taker_quality_component",
         # Not the subject under test (collateral preflight is); same idiom as
@@ -1440,7 +1460,7 @@ def test_executor_ack_reserves_pusd_until_terminal_release(conn, monkeypatch):
     )
     monkeypatch.setattr(
         "src.execution.executor._entry_actionable_certificate_payload_and_component",
-        lambda *args, **kwargs: ({"component": "entry_actionable_certificate", "allowed": True, "reason": "allowed"}, None),
+        lambda *args, **kwargs: ({"component": "entry_actionable_certificate", "allowed": True, "reason": "allowed"}, {"strategy_key": "center_buy"}),
     )
     monkeypatch.setattr(
         "src.execution.executor._entry_economics_component",
@@ -1512,6 +1532,10 @@ def test_executor_buy_reserves_quantized_submitted_notional(conn, monkeypatch):
     configure_global_ledger(ledger)
     monkeypatch.setattr("src.control.cutover_guard.assert_submit_allowed", lambda *args, **kwargs: None)
     monkeypatch.setattr("src.control.heartbeat_supervisor.assert_heartbeat_allows_order_type", lambda *args, **kwargs: None)
+    # cd3dc2f62 (2026-08-11) added a submit-time strategy-policy recheck;
+    # collateral preflight is the subject under test here, not that gate.
+    monkeypatch.setattr("src.riskguard.policy.is_entries_paused", lambda: False)
+    monkeypatch.setattr("src.riskguard.policy.get_edge_threshold_multiplier", lambda: 1.0)
     monkeypatch.setattr(
         "src.execution.executor._entry_taker_quality_component",
         # Not the subject under test (collateral preflight is); same idiom as
@@ -1520,7 +1544,7 @@ def test_executor_buy_reserves_quantized_submitted_notional(conn, monkeypatch):
     )
     monkeypatch.setattr(
         "src.execution.executor._entry_actionable_certificate_payload_and_component",
-        lambda *args, **kwargs: ({"component": "entry_actionable_certificate", "allowed": True, "reason": "allowed"}, None),
+        lambda *args, **kwargs: ({"component": "entry_actionable_certificate", "allowed": True, "reason": "allowed"}, {"strategy_key": "center_buy"}),
     )
     monkeypatch.setattr(
         "src.execution.executor._entry_economics_component",
@@ -1593,6 +1617,10 @@ def test_executor_buy_rejection_release_requires_successful_terminal_append(conn
     configure_global_ledger(ledger)
     monkeypatch.setattr("src.control.cutover_guard.assert_submit_allowed", lambda *args, **kwargs: None)
     monkeypatch.setattr("src.control.heartbeat_supervisor.assert_heartbeat_allows_order_type", lambda *args, **kwargs: None)
+    # cd3dc2f62 (2026-08-11) added a submit-time strategy-policy recheck;
+    # collateral preflight is the subject under test here, not that gate.
+    monkeypatch.setattr("src.riskguard.policy.is_entries_paused", lambda: False)
+    monkeypatch.setattr("src.riskguard.policy.get_edge_threshold_multiplier", lambda: 1.0)
     monkeypatch.setattr(
         "src.execution.executor._entry_taker_quality_component",
         # Not the subject under test (collateral preflight is); same idiom as
@@ -1601,7 +1629,7 @@ def test_executor_buy_rejection_release_requires_successful_terminal_append(conn
     )
     monkeypatch.setattr(
         "src.execution.executor._entry_actionable_certificate_payload_and_component",
-        lambda *args, **kwargs: ({"component": "entry_actionable_certificate", "allowed": True, "reason": "allowed"}, None),
+        lambda *args, **kwargs: ({"component": "entry_actionable_certificate", "allowed": True, "reason": "allowed"}, {"strategy_key": "center_buy"}),
     )
     monkeypatch.setattr(
         "src.execution.executor._entry_economics_component",
