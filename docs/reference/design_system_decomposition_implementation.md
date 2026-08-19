@@ -7,7 +7,7 @@ Authority basis: docs/reference/design_system_decomposition_plan.md (the spec 鈥
   搂8 migration steps, 搂9 regression-unconstructable proof). This report records WHAT was
   implemented against that plan and the verification evidence; the plan remains the law.
 
-Worktree: <local>/zeus-decomp 路 branch refactor/system-decomposition 路 HEAD 5626c18b38
+Worktree: `<local>/zeus-decomp` 路 branch refactor/system-decomposition 路 HEAD 5626c18b38
 Verification harness:
 `cd <local>/zeus-decomp && PYTHONSAFEPATH=1 PYTHONPATH=<local>/zeus-decomp <local>/zeus/.venv/bin/python -m pytest <files> -q`
 

@@ -137,7 +137,7 @@ settlement cycle) shows unexplained deltas.
 ## NEXT ACTION (updated 2026-07-02, execution running)
 IN FLIGHT: Phase A locate briefs DONE (wf_883d26c1-637, 6/6; extracted to scratchpad briefs/).
 W0.1/W0.2/W0.3 implementers running on branches rebuild/w0.{1,2,3}-* (worktrees
-<local>/zeus-worktrees/w0-{1,2,3}); fork drafting the two W1 K0 schema packets into
+`<local>/zeus-worktrees/w0-{1,2,3}`); fork drafting the two W1 K0 schema packets into
 rebuild-w0/docs/rebuild/schema_packets/ (uncommitted, for main-thread review).
 KEY PHASE-A FINDING (raises W0.1 stakes): hook_factory live q-serving path
 (replacement_forecast_hook_factory.py:545-556 → event_reactor_adapter.py:2924) has NO raw-input
@@ -714,7 +714,7 @@ E2. MERGE TO MAIN:
      (NC-18 guard — acceptable ONLY as the documented direct-write carve-out for synthetic
      external closes, W1.1 live-reservation guard + orphan sweep green; re-verify at E2).
      Full node-id list to be committed alongside the E2 merge record.
-   - git checkout main (main worktree <local>/zeus — FIRST resolve the parked dirty
+   - git checkout main (main worktree `<local>/zeus` — FIRST resolve the parked dirty
      hotfix tree there: P0.1 attribution debt, commit or stash-record it) → merge wave branch
      (--no-ff, milestone message) → full sanity → push origin main.
 E3. DEPLOY (gates decide, quiet window):
