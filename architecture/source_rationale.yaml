@@ -589,14 +589,14 @@ files:
     zone: K0_frozen_kernel
     authority_role: entry_exposure_obligation_contract
     why: >-
-     "Quarantine excision foundation (2026-07-11, docs/rebuild/quarantine_excision_2026-07-11.md
+     Quarantine excision foundation (2026-07-11, docs/rebuild/quarantine_excision_2026-07-11.md
      BLOCKER-1): the conservative-bound (or unbounded) leg of the three-way per-command exposure law
      (authoritative settled economics | bounded EntryExposureObligation | unbounded -> DATA_DEGRADED
      via a ReviewWorkItem). shares x $1 long-only-CTF worst-case bound documented prominently;
      storage is a SIBLING trade-DB table to review_work_items, not a shared row shape (see
      src/state/schema/entry_exposure_obligations_schema.py docstring). Foundation only — not
      consumed by any runtime seam in this packet; T2 wires
-     total_open_obligation_usd/has_unbounded_obligation into exposure/heat accounting."
+     total_open_obligation_usd/has_unbounded_obligation into exposure/heat accounting.
     downstream:
     - src/state/entry_exposure_obligation.py
     - src/state/schema/entry_exposure_obligations_schema.py
@@ -731,7 +731,7 @@ files:
     zone: K0_frozen_kernel
     authority_role: chain_observation_envelope_contract
     why: >-
-     "Quarantine excision T4 (2026-07-11, docs/rebuild/quarantine_excision_2026-07-11.md Consult
+     Quarantine excision T4 (2026-07-11, docs/rebuild/quarantine_excision_2026-07-11.md Consult
      adjudication BLOCKER-3): the observation-quality contract a chain observation must satisfy
      before it may cast a confirmed-absence vote — account_scope, fetched_at, complete (positive
      evidence of a full unfiltered read, never assumed True), post_command_watermark, source. A
@@ -739,14 +739,14 @@ files:
      no representation for presence, only for a candidate absence vote. Minimal shape buildable from
      what src.state.chain_reconciliation actually persists onto Position today
      (last_chain_absence_observed_at / chain_verified_at) — no new chain-read plumbing. Consumed by
-     src.execution.fill_tracker's ambiguous-timeout gate (_confirmed_absent_or_defer)."
+     src.execution.fill_tracker's ambiguous-timeout gate (_confirmed_absent_or_defer).
     downstream:
     - src/execution/fill_tracker.py
   src/contracts/review_work_item.py:
     zone: K0_frozen_kernel
     authority_role: review_work_item_contract
     why: >-
-     "Quarantine excision foundation (2026-07-11, docs/rebuild/quarantine_excision_2026-07-11.md
+     Quarantine excision foundation (2026-07-11, docs/rebuild/quarantine_excision_2026-07-11.md
      Consult adjudication): the owner-local ReviewWorkItem protocol contract replacing scattered
      quarantine-state mechanisms — frozen dataclass, extensible ReviewReasonCode vocabulary (not
      DB-CHECK-constrained, see src/state/schema/review_work_items_schema.py docstring), closed
@@ -756,7 +756,7 @@ files:
      src/state/review_work_items.py converts 1:1). T4 (2026-07-11) added TIMEOUT_ABSENCE_UNCONFIRMED
      (ambiguous pending-entry timeout awaiting chain confirmation; family-blocking).
      RECOVERED_EXIT_DUST_REMAINDER is deliberately position+command scoped and non-family-blocking:
-     it preserves an authenticated residual without inventing economic closure."
+     it preserves an authenticated residual without inventing economic closure.
     downstream:
     - src/state/review_work_items.py
     - src/state/schema/review_work_items_schema.py
@@ -1365,7 +1365,7 @@ files:
     zone: K2_runtime
     authority_role: input_to_posterior_latency_metric
     why: >-
-     "W0.2 (2026-07-02, order-engine rebuild architecture doc §1 A2 'THE metric') — measure-only
+     W0.2 (2026-07-02, order-engine rebuild architecture doc §1 A2 'THE metric') — measure-only
      input->q_version wall-clock latency, TWO variants. No new table: computes/reads both from
      columns forecast_posteriors already persists (source_cycle_time, source_available_at,
      computed_at, family_id). latency_from_issue_seconds = computed_at - source_cycle_time
@@ -1375,7 +1375,7 @@ files:
      emit_materialization_latency() is called from replacement_forecast_materializer.py's
      _insert_posterior on the fresh-INSERT success path only (not the IntegrityError dedup branch)
      to log both per materialization event; LATENCY_QUERY/fetch_recent_latencies are the read side
-     for a dashboard. No gate, no enforcement — measurement only."
+     for a dashboard. No gate, no enforcement — measurement only.
     downstream:
     - src/data/replacement_forecast_materializer.py
   src/data/openmeteo_model_updates.py:
@@ -1848,7 +1848,7 @@ files:
     zone: K2_runtime
     authority_role: runtime_helper
     why: >-
-     "Extracted heavy helpers from cycle_runner; supports orchestration without becoming authority.
+     Extracted heavy helpers from cycle_runner; supports orchestration without becoming authority.
      R3 A2 threads candidate event/date/cluster allocation metadata into ExecutionIntent for live
      cap enforcement. Monitor receipts consume the same fresh position-stamped probability and edge
      as exit evaluation, including lossless reconstruction of exit-specific validation subsets
@@ -1861,7 +1861,7 @@ files:
      cannot consume the full auxiliary tranche. Deadline expiry revokes new I/O, not a preclassified
      local absorbing hard fact: one dead-bin rescue explicitly disables quote refresh and retry
      preflight while recording its direct exit/retry decision, then the next cycle retries
-     executable truth."
+     executable truth.
   src/engine/discovery_mode.py:
     zone: K2_runtime
     authority_role: mode_enum
@@ -2250,7 +2250,7 @@ files:
     zone: K2_runtime
     authority_role: fill_tracking
     why: >-
-     "Tracks fills/timeouts for execution learning and lifecycle updates. T4 (quarantine excision,
+     Tracks fills/timeouts for execution learning and lifecycle updates. T4 (quarantine excision,
      docs/rebuild/quarantine_excision_2026-07-11.md, 2026-07-11): retired all 8 lifecycle-scar mints
      (_mark_entry_quarantined and its callers) — venue-truth gaps (missing fill economics/authority)
      and local ledger/canonical/void write failures now stay pending_tracked with an open
@@ -2262,7 +2262,7 @@ files:
      src.contracts.chain_observation_envelope.ChainObservationEnvelope qualifies as a fresh,
      post-command, complete absence observation — otherwise it defers to
      src.state.chain_mirror_reconciler's own two-consecutive-absence protocol rather than inferring
-     absence itself."
+     absence itself.
     downstream:
     - src/engine/cycle_runtime.py
   src/execution/harvester.py:
@@ -2287,17 +2287,17 @@ files:
     zone: K2_runtime
     authority_role: self_trade_guard_predicate
     why: >-
-     "SCH-W2.2-SELF-TRADE (arch doc line 53, BUILD, nothing existed). Pure check_self_trade
-     predicate blocking a proposed Zeus order from crossing Zeus's OWN open resting order on the
-     same token_id (BUY at price >= own resting SELL, or SELL at price <= own resting BUY);
-     INDETERMINATE (fail-closed) when the own-open-orders set is unavailable. Scoped per-token_id,
-     not per-family, to avoid double-blocking legitimate opposite-token hedges already governed by
+     SCH-W2.2-SELF-TRADE (arch doc line 53, BUILD, nothing existed). Pure check_self_trade predicate
+     blocking a proposed Zeus order from crossing Zeus's OWN open resting order on the same token_id
+     (BUY at price >= own resting SELL, or SELL at price <= own resting BUY); INDETERMINATE
+     (fail-closed) when the own-open-orders set is unavailable. Scoped per-token_id, not per-family,
+     to avoid double-blocking legitimate opposite-token hedges already governed by
      src/strategy/family_exclusive_dedup.py. Shared-wallet-safe by construction: venue_order_facts
      only ever contains Zeus-originated orders (foreign-key to venue_commands, written exclusively
      by src/state/venue_command_repo.py insert_command), so the operator's independently-placed
      orders are invisible to this query and can never be blocked. No venue-side self-trade
      prevention exists in the installed Polymarket SDK, so this is the primary defense, not
-     defense-in-depth. Nothing consumes this yet; W3's solve wires it at envelope build."
+     defense-in-depth. Nothing consumes this yet; W3's solve wires it at envelope build.
     downstream: []  # not yet wired; W3 consumes (envelope build)
   src/execution/batch_order_submission.py:
     zone: K2_runtime
@@ -2347,10 +2347,10 @@ files:
     zone: K3_extension
     authority_role: day0_high_nowcast_signal
     why: >-
-     "T2 Day0Nowcast: HIGH floor semantics mirror class. Horizon guard raises NotApplicableHorizon
+     T2 Day0Nowcast: HIGH floor semantics mirror class. Horizon guard raises NotApplicableHorizon
      when hours_remaining > 6 or < 0. settlement_samples() uses max instead of min (floor not
      ceiling). Does NOT subclass Day0HighSignal (parallel-structure invariant). Caller-site nowcast
-     invocation pattern (Option c); router stays pure."
+     invocation pattern (Option c); router stays pure.
     downstream:
     - src/engine/evaluator.py
     - src/engine/monitor_refresh.py
@@ -2438,11 +2438,11 @@ files:
     zone: K3_extension
     authority_role: day0_horizon_platt_calibration
     why: >-
-     "T2 Day0Nowcast: HorizonPlattFit dataclass
+     T2 Day0Nowcast: HorizonPlattFit dataclass
      (alpha/beta/gamma_morning/gamma_afternoon/gamma_post_peak/delta/epsilon) +
      fit_day0_horizon_platt() fitter via scipy L-BFGS-B. One-hot daypart encoding
      (pre_sunrise=reference). fit_run_id=uuid4, fit_artifact_id=hpf_v1. Training data from
-     calibration_pairs_v2."
+     calibration_pairs_v2.
     downstream:
     - src/signal/day0_high_nowcast_signal.py
     - src/state/day0_nowcast_store.py
@@ -2950,10 +2950,10 @@ files:
     zone: K2_runtime
     authority_role: day0_nowcast_persistence
     why: >-
-     "T2 Day0Nowcast writer/reader for day0_nowcast_runs + day0_horizon_platt_fits on
+     T2 Day0Nowcast writer/reader for day0_nowcast_runs + day0_horizon_platt_fits on
      zeus-forecasts.db. Single-DB forecast write (INV-37 trivially honored — no ATTACH). writer-side
      nei_v1_ hash (Option β pattern). Live writes under db_writer_lock(LIVE). NOT_DAEMON_WIRED:
-     caller-site wiring (evaluator.py + monitor_refresh.py) is a separate operator-controlled step."
+     caller-site wiring (evaluator.py + monitor_refresh.py) is a separate operator-controlled step.
     write_routes:
     - calibration_persistence_write
     downstream:
@@ -2993,12 +2993,12 @@ files:
     zone: K2_runtime
     authority_role: review_work_items_schema_owner
     why: >-
-     "Quarantine excision foundation (2026-07-11): DDL owner for review_work_items, callable against
+     Quarantine excision foundation (2026-07-11): DDL owner for review_work_items, callable against
      ANY owning-DB conn (trade first via init_schema_trade_only; forecasts/world instantiate the
      identical shape later against their own connections). Partial unique index on (owner_table,
      subject_id, reason_code, authority_revision) WHERE status='OPEN' is the idempotent-open
      guarantee; reason_code deliberately has no CHECK (extensible vocabulary, avoids SQLite's
-     cannot-ALTER-CHECK rebuild churn)."
+     cannot-ALTER-CHECK rebuild churn).
     downstream:
     - src/state/db.py
     - src/state/review_work_items.py
@@ -3006,9 +3006,9 @@ files:
     zone: K2_runtime
     authority_role: entry_exposure_obligations_schema_owner
     why: >-
-     "Quarantine excision foundation (2026-07-11, BLOCKER-1): DDL owner for
+     Quarantine excision foundation (2026-07-11, BLOCKER-1): DDL owner for
      entry_exposure_obligations, SIBLING to review_work_items on the trade DB (see module docstring
-     for the shape-separation rationale vs. co-locating in review_work_items)."
+     for the shape-separation rationale vs. co-locating in review_work_items).
     downstream:
     - src/state/db.py
     - src/state/entry_exposure_obligation.py
@@ -3023,19 +3023,19 @@ files:
     zone: K2_runtime
     authority_role: no_trade_events_schema_owner
     why: >-
-     "Phase 2 T2 (PHASE_2_ULTRAPLAN.md v3.1 §5.2): DDL owner for no_trade_events table (world DB).
+     Phase 2 T2 (PHASE_2_ULTRAPLAN.md v3.1 §5.2): DDL owner for no_trade_events table (world DB).
      SCHEMA_VERSION 14→18. _rebuild_stale_no_trade_events_table handles in-place CHECK expansion
      across version bumps. Phase 3 T2: extended CHECK to include 6 SHOULDER_* NoTradeReason members
-     + schema_version IN (14,15,16,17,18)."
+     + schema_version IN (14,15,16,17,18).
     downstream:
     - src/state/db.py
   src/state/schema/shoulder_exposure_ledger_schema.py:
     zone: K2_runtime
     authority_role: shoulder_exposure_ledger_schema_owner
     why: >-
-     "Phase 3 T3 (2026-05-21): DDL owner for shoulder_exposure_ledger table (world DB).
+     Phase 3 T3 (2026-05-21): DDL owner for shoulder_exposure_ledger table (world DB).
      SCHEMA_VERSION 19. Append-only log of shoulder exposure entries for cross-city cluster cap
-     enforcement per dossier §7.5. CHECK (18, 19). Production wiring via db.py init_schema."
+     enforcement per dossier §7.5. CHECK (18, 19). Production wiring via db.py init_schema.
     downstream:
     - src/state/db.py
     - src/state/shoulder_exposure_ledger.py
@@ -3043,10 +3043,10 @@ files:
     zone: K2_runtime
     authority_role: shoulder_exposure_ledger_writer_reader
     why: >-
-     "Phase 3 T3 (2026-05-21): Writer/reader for shoulder_exposure_ledger world DB table.
+     Phase 3 T3 (2026-05-21): Writer/reader for shoulder_exposure_ledger world DB table.
      write_shoulder_exposure_entry (append-only), read_cluster_exposure (SUM by cluster+side),
      read_distinct_cities_in_cluster (Gate 1 cross-city check), read_total_exposure_usd (readiness
-     report). INV-37: all functions require caller-supplied conn."
+     report). INV-37: all functions require caller-supplied conn.
     write_routes:
     - shoulder_exposure_ledger
     downstream:
@@ -3055,7 +3055,7 @@ files:
     zone: K2_runtime
     authority_role: review_work_items_writer_reader
     why: >-
-     "Quarantine excision foundation (2026-07-11): writer/reader for review_work_items.
+     Quarantine excision foundation (2026-07-11): writer/reader for review_work_items.
      open_work_item (idempotent via the partial unique index), resolve_work_item (CAS on
      authority_revision), resolve_all_open_for_subject (T4, 2026-07-11: CAS-resolves every OPEN item
      for one subject regardless of reason_code — each row resolved with its own live
@@ -3066,7 +3066,7 @@ files:
      caller-supplied portfolio; a prefilter, never an enforcement authority per the adjudication).
      INV-37: all functions require caller-supplied conn. T4 (2026-07-11) is the first fill_tracker
      consumer — open_work_item/resolve_all_open_for_subject on its
-     venue-truth-gap/local-write-failure/ambiguous-timeout seams."
+     venue-truth-gap/local-write-failure/ambiguous-timeout seams.
     write_routes:
     - review_work_items
     downstream:
@@ -3075,7 +3075,7 @@ files:
     zone: K2_runtime
     authority_role: entry_exposure_obligation_writer_reader
     why: >-
-     "Quarantine excision foundation (2026-07-11, BLOCKER-1): writer/reader for
+     Quarantine excision foundation (2026-07-11, BLOCKER-1): writer/reader for
      entry_exposure_obligations. open_entry_exposure_obligation (upsert-open keyed by command_id — a
      live fact, not an append log; meant to be called atomically on a command's failure path),
      resolve_entry_exposure_obligation, total_open_obligation_usd (SUM of bounded OPEN shares x $1),
@@ -3083,7 +3083,7 @@ files:
      functions require caller-supplied conn. T4 (2026-07-11): fill_tracker's fill-confirmation and
      confirmed-void success paths both call resolve_entry_exposure_obligation directly (same
      primitive src.execution.executor._release_entry_risk_reservation wraps) once a command's true
-     fate is settled truth."
+     fate is settled truth.
     write_routes:
     - entry_exposure_obligations
     downstream:
@@ -3092,11 +3092,11 @@ files:
     zone: K2_runtime
     authority_role: shoulder_cluster_cap_gate
     why: >-
-     "Phase 3 T3 (2026-05-21): check_shoulder_cluster_cap(cluster, side, proposed_notional, conn,
+     Phase 3 T3 (2026-05-21): check_shoulder_cluster_cap(cluster, side, proposed_notional, conn,
      proposing_city) -> tuple[bool, str]. Two-gate: Gate 1 cross-city presence (different city in
      same cluster+side → REFUSE), Gate 2 $ hard cap (SHOULDER_CLUSTER_HARD_CAP_USD=2000). Empty
      cluster (UNKNOWN regime) always allows. INV-37; fires BEFORE phase_aware_kelly_multiplier
-     (Invariant 4)."
+     (Invariant 4).
     write_routes: []
     downstream:
     - src/engine/evaluator.py
@@ -3104,10 +3104,10 @@ files:
     zone: K1_contracts
     authority_role: no_trade_reason_enum
     why: >-
-     "Phase 2 T2 (PHASE_2_ULTRAPLAN.md v3.1 §5.2, sha 00c2399742): StrEnum (66 members) covering all
+     Phase 2 T2 (PHASE_2_ULTRAPLAN.md v3.1 §5.2, sha 00c2399742): StrEnum (66 members) covering all
      69 rejection_reasons=[...] callsites in evaluator.py. Two-tier model: reason=CATEGORY (enum
      CHECK), reason_detail=free-form detail. UNCATEGORIZED is the §13 fallback. Production wiring
-     complete (T2 production pass)."
+     complete (T2 production pass).
     write_routes: []
     downstream:
     - src/state/no_trade_events.py
@@ -3115,14 +3115,14 @@ files:
     zone: K2_runtime
     authority_role: no_trade_event_instrumentation
     why: >-
-     "Phase 2 T2 (PHASE_2_ULTRAPLAN.md v3.1 §5.2, sha 00c2399742): writer/reader for no_trade_events
+     Phase 2 T2 (PHASE_2_ULTRAPLAN.md v3.1 §5.2, sha 00c2399742): writer/reader for no_trade_events
      table (world DB). INV-37 honored — write_no_trade_event(natural_key: DecisionNaturalKey,
      reason: NoTradeReason, reason_detail: Optional[str], observed_at: str, *, conn:
      sqlite3.Connection) requires caller-provided conn (no auto-open on write path). Reader
      read_no_trade_events_by_market auto-opens if conn=None. PK=(market_slug, temperature_metric,
      target_date, observation_time, decision_seq) — FK-like joinable with decision_events.
      decision_seq derived via allocate_decision_seq (UNION of both tables under db_writer_lock) to
-     prevent cross-table collision. Production pass complete (SCHEMA_VERSION 14→15)."
+     prevent cross-table collision. Production pass complete (SCHEMA_VERSION 14→15).
     write_routes: []
     downstream:
     - src/state/db.py
@@ -3130,11 +3130,11 @@ files:
     zone: K2_runtime
     authority_role: evidence_tier_assignment_reducer
     why: >-
-     "2026-05-21 evidence-tier governance follow-up: validated writer and deterministic
-     current-state reducer for evidence_tier_assignments. Static strategy_profile registry is
-     baseline; DB operator_override outranks tribunal rows, then migration rows. Used by
+     2026-05-21 evidence-tier governance follow-up: validated writer and deterministic current-state
+     reducer for evidence_tier_assignments. Static strategy_profile registry is baseline; DB
+     operator_override outranks tribunal rows, then migration rows. Used by
      live_allowed_keys(conn=...) so tribunal/operator evidence-tier assignments can affect runtime
-     strategy eligibility without becoming free-form SQL."
+     strategy eligibility without becoming free-form SQL.
     write_routes: []
     downstream:
     - src/strategy/strategy_profile.py
@@ -3142,10 +3142,10 @@ files:
     zone: K2_runtime
     authority_role: decision_event_instrumentation
     why: >-
-     "T1 Path D natural-key writer/reader for decision_events table. Single-DB world write (INV-37
+     T1 Path D natural-key writer/reader for decision_events table. Single-DB world write (INV-37
      trivially honored — no ATTACH). writer-side deid_v1_ hash (Option β). Live writes under
      db_writer_lock(LIVE); backfill under db_writer_lock(BULK). NOT_DAEMON_WIRED: daemon wiring
-     deferred to Phase 2 activation commit."
+     deferred to Phase 2 activation commit.
     write_routes:
     - settlement_write
     downstream:
@@ -3293,7 +3293,7 @@ files:
     zone: K2_runtime
     authority_role: derived_attribution_drift_projection
     why: >-
-     "K1-compliant read-only attribution-drift detector per position. Re-applies the entry-time
+     K1-compliant read-only attribution-drift detector per position. Re-applies the entry-time
      _strategy_key_for dispatch rule (src/engine/evaluator.py L420-441) on persisted row attributes
      and flags label/semantics mismatch. ATTRIBUTION_DRIFT packet BATCH 1 per round3_verdict.md §1
      #2 + ULTIMATE_PLAN.md L305-308 (no detector existed for silent attribution drift). Reuses
@@ -3303,7 +3303,7 @@ files:
      cannot be applied (insufficient_signal); bin.is_shoulder inferred heuristically from persisted
      bin_label string (per AGENTS.md L66 antibody, classifier conservatively returns unknown rather
      than guess). Recall-limited but precision-favored — every drift it reports is a real
-     label/semantics mismatch on at least one of clauses 3-5."
+     label/semantics mismatch on at least one of clauses 3-5.
     hazards:
     - DERIVED_ONLY
     downstream: []
@@ -3311,7 +3311,7 @@ files:
     zone: K2_runtime
     authority_role: derived_reaction_latency_projection
     why: >-
-     "K1-compliant read-only reaction-latency projection per strategy_key. Joins token_price_log
+     K1-compliant read-only reaction-latency projection per strategy_key. Joins token_price_log
      (price ticks with source_timestamp + Zeus persist timestamp) → position_current (token_id →
      strategy_key attribution); computes per-tick latency = (zeus_timestamp - source_timestamp)
      clipped to [0, ∞); aggregates p50/p95 + n_signals + n_with_action + sample_quality per
@@ -3322,7 +3322,7 @@ files:
      token_price_log); ws_share/poll_share NOT in return shape — future
      WS_PROVENANCE_INSTRUMENTATION packet (PATH C deferred per dispatch NOT-IN-SCOPE on src/venue/
      writer changes) would unlock those fields. Negative latencies clipped to 0 ms (clock-skew
-     defense). Imports consolidated to top per Tier 2 Phase 4 LOW-CAVEAT-EO-2-1."
+     defense). Imports consolidated to top per Tier 2 Phase 4 LOW-CAVEAT-EO-2-1.
     hazards:
     - DERIVED_ONLY
     downstream:
@@ -3331,7 +3331,7 @@ files:
     zone: K2_runtime
     authority_role: derived_calibration_parameter_projection
     why: >-
-     "K1-compliant read-only Platt parameter projection per bucket_key. Reads
+     K1-compliant read-only Platt parameter projection per bucket_key. Reads
      list_active_platt_models_v2 + list_active_platt_models_legacy from src/calibration/store.py
      (BATCH 1 read-side additions; pure SELECT; is_active=1 + authority='VERIFIED' filter at
      source). Returns per-bucket snapshot with param_A/B/C, n_samples, brier_insample, fitted_at,
@@ -3348,7 +3348,7 @@ files:
      src/calibration/drift.py with HL χ² FORECAST-CALIBRATION drift — parametrically different from
      BATCH 2 detect_parameter_drift (PARAMETER-TRAJECTORY drift over consecutive refits). Both
      legacy + v2 surfaces visible with explicit source tag (mirrors manager.py L42-62 v2-then-legacy
-     fallback dedup). Imports consolidated to top per Tier 2 Phase 4 LOW-CAVEAT-EO-2-1."
+     fallback dedup). Imports consolidated to top per Tier 2 Phase 4 LOW-CAVEAT-EO-2-1.
     hazards:
     - DERIVED_ONLY
     downstream:
@@ -3357,7 +3357,7 @@ files:
     zone: K2_runtime
     authority_role: derived_learning_loop_state_projection
     why: >-
-     "K1-compliant read-only settlement→pair→retrain pipeline state projection per bucket_key. Reads
+     K1-compliant read-only settlement→pair→retrain pipeline state projection per bucket_key. Reads
      list_active_platt_models_v2 + list_active_platt_models_legacy + list_recent_retrain_versions
      (LEARNING_LOOP BATCH 1 read-side addition to retrain_trigger.py) + retrain_trigger.status()
      (process-level env+filesystem) + get_pairs_count + get_decision_group_count from
@@ -3375,7 +3375,7 @@ files:
      retrain_trigger.py:242-264 schema and IS append-only (autoincrement version_id, promoted_at +
      retired_at lifecycle, INSERT on every retrain attempt, UPDATE only sets retired_at).
      LOW-CITATION-CALIBRATION-3-1 cycle-29 sustained discipline lesson reinforced. Imports
-     consolidated to top per LOW-CAVEAT-EO-2-1."
+     consolidated to top per LOW-CAVEAT-EO-2-1.
     hazards:
     - DERIVED_ONLY
     downstream:
