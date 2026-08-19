@@ -1,8 +1,8 @@
-# Lifecycle: created=2026-06-08; last_reviewed=2026-08-05; last_reused=2026-08-05
+# Lifecycle: created=2026-06-08; last_reviewed=2026-08-19; last_reused=2026-08-19
 # Purpose: Relationship regression test for BAYES_PRECISION_FUSION extra-model capture wiring in src/main.py; guards against bare `date` NameError (BLOCKER 9) and verifies capture is gated by the edli flag.
 # Reuse: Run with pytest; update if the BAYES_PRECISION_FUSION extra-capture wiring or flag gate in src/main.py changes.
 # Created: 2026-06-08
-# Last reused or audited: 2026-08-05
+# Last reused or audited: 2026-08-19
 # Authority basis: PR#400 review (src/main.py:4909 bare `date` NameError swallowed by
 #   fail-soft); CONTINUITY_AND_WIRING.md §4 step 2 + BAYES_PRECISION_FUSION_SPEC.md §6 F1 (BAYES_PRECISION_FUSION multi-model
 #   SHADOW capture gated by edli.replacement_0_1_bayes_precision_fusion_capture_enabled).
@@ -42,6 +42,7 @@ import subprocess
 import sys
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -217,17 +218,24 @@ def test_covered_rows_still_reach_the_downloader(monkeypatch, tmp_path) -> None:
     )
 
 
-def test_full_fanout_skips_structurally_partial_day0_and_prioritizes_serviceable_gap(
+def test_full_fanout_admits_current_day0_and_prioritizes_held_gap(
     monkeypatch,
     tmp_path,
 ) -> None:
     import src.data.replacement_forecast_seed_discovery as seed_discovery
 
-    cycle = datetime(2026, 8, 5, 0, tzinfo=timezone.utc)
+    decision_time = datetime.now(timezone.utc)
+    cycle = decision_time - timedelta(minutes=1)
+    tokyo_day0 = decision_time.astimezone(ZoneInfo("Asia/Tokyo")).date()
+    tokyo_day1 = tokyo_day0 + timedelta(days=1)
+    amsterdam_day1 = (
+        decision_time.astimezone(ZoneInfo("Europe/Amsterdam")).date()
+        + timedelta(days=1)
+    )
     rows = [
-        _row(city="Tokyo", target_date="2026-08-05", covered=False),
-        _row(city="Amsterdam", target_date="2026-08-06", covered=True),
-        _row(city="Tokyo", target_date="2026-08-06", covered=False),
+        _row(city="Tokyo", target_date=tokyo_day0.isoformat(), covered=False),
+        _row(city="Amsterdam", target_date=amsterdam_day1.isoformat(), covered=True),
+        _row(city="Tokyo", target_date=tokyo_day1.isoformat(), covered=False),
     ]
     cfg_dict, calls = _wire(monkeypatch, rows=rows, state_root=tmp_path)
     monkeypatch.setattr(
@@ -238,11 +246,11 @@ def test_full_fanout_skips_structurally_partial_day0_and_prioritizes_serviceable
     monkeypatch.setattr(
         production,
         "_extras_coverage_missing",
-        lambda _cfg, _cycle: (
+        lambda _cfg, _cycle, *, decision_time=None: (
             {
-                ("Tokyo", "high", "2026-08-05"),
-                ("Amsterdam", "high", "2026-08-06"),
-                ("Tokyo", "high", "2026-08-06"),
+                ("Tokyo", "high", tokyo_day0.isoformat()),
+                ("Amsterdam", "high", amsterdam_day1.isoformat()),
+                ("Tokyo", "high", tokyo_day1.isoformat()),
             },
             3,
         ),
@@ -250,7 +258,7 @@ def test_full_fanout_skips_structurally_partial_day0_and_prioritizes_serviceable
     monkeypatch.setattr(
         seed_discovery,
         "held_position_family_priorities",
-        lambda: {("Tokyo", "2026-08-06", "high"): 0},
+        lambda: {("Tokyo", tokyo_day1.isoformat(), "high"): 0},
     )
 
     report = production._download_bayes_precision_fusion_extra_raw_inputs_if_needed(
@@ -262,8 +270,9 @@ def test_full_fanout_skips_structurally_partial_day0_and_prioritizes_serviceable
     assert [
         (target.city, target.target_date) for target in calls[0]["targets"]
     ] == [
-        ("Tokyo", "2026-08-06"),
-        ("Amsterdam", "2026-08-06"),
+        ("Tokyo", tokyo_day1.isoformat()),
+        ("Tokyo", tokyo_day0.isoformat()),
+        ("Amsterdam", amsterdam_day1.isoformat()),
     ]
 
 

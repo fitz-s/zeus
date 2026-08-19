@@ -1,6 +1,6 @@
 # Created: 2026-06-16
-# Last reused or audited: 2026-08-18
-# Lifecycle: created=2026-06-16; last_reviewed=2026-08-18; last_reused=2026-08-18
+# Last reused or audited: 2026-08-19
+# Lifecycle: created=2026-06-16; last_reviewed=2026-08-19; last_reused=2026-08-19
 # Authority basis: docs/evidence/timing_audit/capture_reactor_stall_rootcause_2026-06-16.md
 #   (PRIMARY/CODE fix) + docs/evidence/timing_audit/impl_flat_threshold_capture_fix_2026-06-16.md.
 #   BAYES_PRECISION_FUSION_SPEC §6 F1 (the q-path consumes the persisted single_runs capture).
@@ -94,42 +94,55 @@ def _insert_single_runs(db: Path, *, city: str, metric: str, target_date: str, m
         conn.close()
 
 
-def test_source_cycle_full_local_day_geometry_is_timezone_aware() -> None:
+def test_source_cycle_local_decision_window_is_timezone_aware() -> None:
     cycle = datetime(2026, 7, 18, 0, 0, tzinfo=UTC)
+    decision_time = datetime(2026, 7, 18, 12, 0, tzinfo=UTC)
 
-    assert prod._source_cycle_can_cover_full_local_day(
+    assert prod._source_cycle_can_cover_local_decision_window(
         cycle=cycle,
         target_date="2026-07-18",
         timezone_name="Europe/Paris",
+        decision_time=decision_time,
     )
-    assert prod._source_cycle_can_cover_full_local_day(
+    assert prod._source_cycle_can_cover_local_decision_window(
         cycle=cycle,
         target_date="2026-07-18",
         timezone_name="America/New_York",
+        decision_time=decision_time,
     )
-    assert not prod._source_cycle_can_cover_full_local_day(
+    assert prod._source_cycle_can_cover_local_decision_window(
         cycle=cycle,
         target_date="2026-07-18",
         timezone_name="Asia/Manila",
+        decision_time=decision_time,
     )
-    assert not prod._source_cycle_can_cover_full_local_day(
+    assert not prod._source_cycle_can_cover_local_decision_window(
         cycle=cycle,
         target_date="2026-07-18",
         timezone_name="Pacific/Auckland",
+        decision_time=decision_time,
     )
-    assert prod._source_cycle_can_cover_full_local_day(
+    assert prod._source_cycle_can_cover_local_decision_window(
         cycle=cycle,
         target_date="2026-07-19",
         timezone_name="Asia/Manila",
+        decision_time=decision_time,
+    )
+    assert not prod._source_cycle_can_cover_local_decision_window(
+        cycle=datetime(2026, 7, 18, 18, 0, tzinfo=UTC),
+        target_date="2026-07-18",
+        timezone_name="America/New_York",
+        decision_time=decision_time,
     )
 
 
-def test_extras_coverage_excludes_structurally_partial_day0(
+def test_extras_coverage_includes_current_day0_remaining_window(
     tmp_path, monkeypatch
 ) -> None:
     import src.data.replacement_forecast_current_target_plan as target_plan
 
     cycle = datetime(2026, 8, 5, 0, tzinfo=UTC)
+    decision_time = datetime(2026, 8, 5, 6, tzinfo=UTC)
     db = _make_forecast_db(tmp_path)
     monkeypatch.setattr(
         target_plan,
@@ -145,13 +158,17 @@ def test_extras_coverage_excludes_structurally_partial_day0(
     missing, planned = prod._extras_coverage_missing(
         {"forecast_db": db},
         cycle,
+        decision_time=decision_time,
     )
 
-    assert planned == 1
-    assert missing == {("Tokyo", "high", "2026-08-06")}
+    assert planned == 2
+    assert missing == {
+        ("Tokyo", "high", "2026-08-05"),
+        ("Tokyo", "high", "2026-08-06"),
+    }
 
 
-def test_source_clock_does_not_retry_structurally_partial_day0(
+def test_source_clock_attempts_current_day0_remaining_window(
     tmp_path, monkeypatch
 ) -> None:
     import src.data.bayes_precision_fusion_download as dl
@@ -204,25 +221,39 @@ def test_source_clock_does_not_retry_structurally_partial_day0(
         "affected_cities_for_source_updates",
         lambda _sources: {"Manila"},
     )
+    captured: list[object] = []
+
+    def _download(**kwargs):
+        captured.extend(kwargs["targets"])
+        return {
+            "status": "BAYES_PRECISION_FUSION_EXTRA_RAW_INPUTS_DOWNLOADED",
+            "written_row_count": 1,
+        }
+
     monkeypatch.setattr(
         dl,
         "download_bayes_precision_fusion_extra_raw_inputs",
-        lambda **_kwargs: (_ for _ in ()).throw(
-            AssertionError("partial Day0 must not consume source-clock quota")
-        ),
+        _download,
     )
 
     report = prod._download_bayes_precision_fusion_source_clock_raw_inputs_if_needed(
         {"forecast_db": str(_make_forecast_db(tmp_path))},
         source_clock_report=_Report(),
         max_wall_clock_seconds=1.0,
+        decision_time=datetime(2026, 7, 18, 6, tzinfo=UTC),
     )
 
-    assert report["status"] == "SOURCE_CLOCK_BPF_SCOPED_NO_TARGETS"
+    assert report["status"] == (
+        "SOURCE_CLOCK_SCOPED_BAYES_PRECISION_FUSION_EXTRA_RAW_INPUTS_DOWNLOADED"
+    )
     assert report["missing_target_count"] == 1
-    assert report["actionable_missing_target_count"] == 0
-    assert report["structurally_unservable_target_count"] == 1
-    assert report["structurally_unservable_by_source"] == {"ecmwf_ifs": 1}
+    assert report["actionable_missing_target_count"] == 1
+    assert report["structurally_unservable_target_count"] == 0
+    assert report["structurally_unservable_by_source"] == {"ecmwf_ifs": 0}
+    assert [
+        (target.city, target.target_date, target.metric)
+        for target in captured
+    ] == [("Manila", "2026-07-18", "high")]
 
 
 # Near-day (lead=0) scope: target_date == cycle date. Six cities -> a "full" near-day leg.

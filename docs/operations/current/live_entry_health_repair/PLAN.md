@@ -2389,3 +2389,32 @@ publication barrier.
   while BPF still receives a positive 10-second slice. Existing cooldown,
   no-held, retry/backoff, quota-lane, reseed, compilation, registry, and diff
   checks pass before exact-SHA hot-fix deployment.
+
+### Slice B117 — Admit current Day0 remaining vectors into BPF capture (2026-08-19)
+
+- Live defect: B114 taught the raw-input parser to accept an elapsed-prefix-only
+  current Day0 vector with complete unresolved-suffix coverage, but both the
+  source-clock and ordinary production fanouts still rejected every source
+  cycle initialized after local 03:xx. Four held Aug-18 families therefore had
+  no current BPF rows and remained action-ineligible despite recurring capture
+  attempts with reserved quota and wall-clock time.
+- First-principles invariant: capture admission and payload validation must name
+  the same time geometry. A current local-day cycle may reach the strict parser
+  when it was initialized no later than the decision instant; the parser alone
+  proves that only elapsed samples are absent and that the unresolved suffix is
+  complete. Future targets still require full-day geometry and past partial
+  days remain inadmissible.
+- SCOPE: target admission in ordinary and source-clock BPF fanouts plus their
+  exact-cycle coverage denominator. DRAIN: recurring source-clock availability
+  polls retry the newly admissible held families and existing source-commit
+  notifications reseed materialization. RESET: a landed exact-cycle row removes
+  its coverage gap; future, past-partial, post-decision, or suffix-incomplete
+  vectors remain excluded or fail closed in the downstream parser.
+- Forbidden: treating admission as probability authority, weakening the B114
+  unresolved-suffix parser, accepting future partial days, substituting stale
+  history, or changing probability, edge, price, sizing, and venue I/O law.
+- Acceptance: timezone-aware geometry proves active Day0 is admitted while past
+  partial and post-decision cycles are not; coverage accounting includes current
+  Day0; source-clock capture attempts the exact held target; B114 parser tests,
+  compilation, changed-surface registries, and diff checks pass before exact-SHA
+  hot-fix deployment and live DB/monitor verification.

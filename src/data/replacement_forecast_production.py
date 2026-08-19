@@ -458,29 +458,38 @@ def _source_transport_error_is_nonretryable(
     return True
 
 
-def _source_cycle_can_cover_full_local_day(
+def _source_cycle_can_cover_local_decision_window(
     *,
     cycle: datetime,
     target_date: str,
     timezone_name: str,
+    decision_time: datetime | None = None,
 ) -> bool:
-    """Whether a run can geometrically contain the target's whole local day.
+    """Whether a run can contain the full day or the unresolved Day0 suffix.
 
-    The full-day raw-input parser requires a sample no later than local 03:xx.
-    A run initialized after that boundary cannot ever satisfy the contract, so
-    retrying it on every source-clock poll only consumes provider quota.  Day0
-    remaining-day probability is a separate observed-so-far + future-vector
-    carrier and does not depend on pretending this partial day is complete.
+    Future targets still require a run initialized before their local day. A
+    current local-day run may start after 03:xx because the downstream parser
+    separately requires an elapsed-prefix-only gap plus complete coverage from
+    decision time through the unresolved evening. Past partial days remain
+    inadmissible; malformed geometry stays fail-open only to that stricter
+    downstream payload validator.
     """
 
     try:
         target = date.fromisoformat(str(target_date))
-        local_cycle = cycle.astimezone(ZoneInfo(str(timezone_name)))
+        zone = ZoneInfo(str(timezone_name))
+        decision = decision_time or datetime.now(timezone.utc)
+        if cycle.utcoffset() is None or decision.utcoffset() is None:
+            return True
+        local_cycle = cycle.astimezone(zone)
+        local_decision = decision.astimezone(zone)
     except (TypeError, ValueError, KeyError):
         return True
     if local_cycle.date() != target:
         return local_cycle.date() < target
-    return local_cycle.hour <= 3
+    if local_cycle.hour <= 3:
+        return True
+    return local_decision.date() == target and cycle <= decision
 
 
 def _settings_section(name: str, default=None):
@@ -976,12 +985,16 @@ def _download_bayes_precision_fusion_extra_raw_inputs_if_needed(
         # cycle-aware, so it cannot decide capture admission. Exact-cycle provider-family
         # coverage below can: it keeps a currently covered market in the fanout when the new
         # cycle is absent, and removes it once the live q-path's two-family minimum has landed.
-        # A source cycle that starts after local 03:xx can never pass the full-day parser for
-        # that target date. Day0 remaining-day probability is owned by the observation carrier;
-        # repeatedly sending that structurally partial day through this full-day fanout only
-        # burns quota and delays serviceable current-market gaps.
+        # Future targets still need full local-day coverage. Active Day0 targets may use
+        # an elapsed-prefix-only vector, but the downstream parser must prove that it spans
+        # decision time through the unresolved evening before any row becomes authority.
         plan = build_replacement_forecast_current_target_plan(Path(str(forecast_db)))
-        coverage = _extras_coverage_missing(cfg, cycle)
+        decision_time = datetime.now(timezone.utc)
+        coverage = _extras_coverage_missing(
+            cfg,
+            cycle,
+            decision_time=decision_time,
+        )
         missing_scopes = None if coverage is None else coverage[0]
         try:
             from src.data.replacement_forecast_seed_discovery import (  # noqa: PLC0415
@@ -1000,10 +1013,11 @@ def _download_bayes_precision_fusion_extra_raw_inputs_if_needed(
             )
             and (
                 (city_cfg := cities_by_name.get(row.city)) is None
-                or _source_cycle_can_cover_full_local_day(
+                or _source_cycle_can_cover_local_decision_window(
                     cycle=cycle,
                     target_date=row.target_date,
                     timezone_name=str(city_cfg.timezone),
+                    decision_time=decision_time,
                 )
             )
         ]
@@ -1167,6 +1181,7 @@ def _download_bayes_precision_fusion_source_clock_raw_inputs_if_needed(
     source_clock_report: object,
     max_wall_clock_seconds: float | None = None,
     on_source_commit: Callable[[str, Mapping[str, object]], None] | None = None,
+    decision_time: datetime | None = None,
 ) -> dict[str, object] | None:
     """Fast source-clock current capture for only updated sources and affected cities.
 
@@ -1242,7 +1257,7 @@ def _download_bayes_precision_fusion_source_clock_raw_inputs_if_needed(
                     "cooldown_seconds": held_cooldown_seconds,
                 }
 
-        now = datetime.now(timezone.utc)
+        now = decision_time or datetime.now(timezone.utc)
         source_cycles: dict[str, datetime] = {}
         source_availabilities: dict[str, datetime] = {}
         frozen_runs = payload.get("source_runs")
@@ -1380,10 +1395,11 @@ def _download_bayes_precision_fusion_source_clock_raw_inputs_if_needed(
             unservable = 0
             for row in rows:
                 city_cfg = cities_by_name.get(row.city)
-                if city_cfg is None or _source_cycle_can_cover_full_local_day(
+                if city_cfg is None or _source_cycle_can_cover_local_decision_window(
                     cycle=cycle,
                     target_date=row.target_date,
                     timezone_name=str(city_cfg.timezone),
+                    decision_time=now,
                 ):
                     coverable.append(row)
                 else:
@@ -2118,7 +2134,10 @@ _EXTRAS_FIXPOINT_HEALTH_JOB = "bayes_precision_fusion_capture"
 
 
 def _extras_coverage_missing(
-    cfg: dict[str, object], cycle: datetime
+    cfg: dict[str, object],
+    cycle: datetime,
+    *,
+    decision_time: datetime | None = None,
 ) -> tuple[set[tuple[str, str, str]], int] | None:
     """Per-(city, metric, target_date) coverage gap for ``cycle``'s BPF single_runs capture.
 
@@ -2157,10 +2176,11 @@ def _extras_coverage_missing(
             for row in plan.rows
             if (
                 (city_cfg := cities_by_name.get(row.city)) is None
-                or _source_cycle_can_cover_full_local_day(
+                or _source_cycle_can_cover_local_decision_window(
                     cycle=cycle,
                     target_date=row.target_date,
                     timezone_name=str(city_cfg.timezone),
+                    decision_time=decision_time,
                 )
             )
         }
