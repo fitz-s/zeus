@@ -495,6 +495,68 @@ def test_upgrade_seed_baseline_lookup_obeys_manifest_and_decision_clocks(
     assert observed["as_of_time"] == computed_at
 
 
+def test_consumed_failed_publication_reclaims_same_transition_marker(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A vanished seed with an unchanged posterior must have a retry RESET."""
+    _db, kwargs = _revision_upgrade_kwargs(tmp_path)
+    monkeypatch.setattr(
+        trigger,
+        "scope_capture_offers_larger_provider_set",
+        lambda *_args, **_kwargs: _revision_upgrade_verdict(),
+    )
+
+    def _build(_conn, **build_kwargs):
+        path = Path(build_kwargs["seed_file"])
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("{}\n", encoding="utf-8")
+        return path
+
+    monkeypatch.setattr(trigger, "_build_and_write_upgrade_seed", _build)
+    first = trigger.enqueue_fusion_upgrade_reseeds(**kwargs)
+    first_seed = Path(first["enqueued"][0]["seed_file"])
+    first_seed.unlink()
+
+    retried = trigger.enqueue_fusion_upgrade_reseeds(**kwargs)
+
+    assert retried["seeds_enqueued"] == 1
+    assert retried["already_enqueued"] == 0
+    assert Path(retried["enqueued"][0]["seed_file"]).is_file()
+
+
+def test_active_exact_request_keeps_transition_fenced(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A claimed publication is not republished while exact queue work exists."""
+    _db, kwargs = _revision_upgrade_kwargs(tmp_path)
+    monkeypatch.setattr(
+        trigger,
+        "scope_capture_offers_larger_provider_set",
+        lambda *_args, **_kwargs: _revision_upgrade_verdict(),
+    )
+
+    def _build(_conn, **build_kwargs):
+        path = Path(build_kwargs["seed_file"])
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("{}\n", encoding="utf-8")
+        return path
+
+    monkeypatch.setattr(trigger, "_build_and_write_upgrade_seed", _build)
+    first = trigger.enqueue_fusion_upgrade_reseeds(**kwargs)
+    first_seed = Path(first["enqueued"][0]["seed_file"])
+    request = first_seed.parent.parent / "requests" / first_seed.name
+    request.parent.mkdir(parents=True, exist_ok=True)
+    first_seed.replace(request)
+
+    duplicate = trigger.enqueue_fusion_upgrade_reseeds(**kwargs)
+
+    assert duplicate["seeds_enqueued"] == 0
+    assert duplicate["already_enqueued"] == 1
+    assert request.is_file()
+
+
 def test_unchanged_or_unrelated_raw_revision_is_noop() -> None:
     conn = _conn()
     cyc = "2026-06-12T06:00:00+00:00"

@@ -346,7 +346,52 @@ def _ensure_directory_entry_durable(
         parent = child
 
 
-def _move_request(path: Path, destination_dir: Path) -> Path:
+def _seed_terminal_receipt_index_path(seed_path: Path) -> Path | None:
+    if seed_path.parent.name != "seeds":
+        return None
+    digest = hashlib.sha256(seed_path.name.encode("utf-8")).hexdigest()
+    return seed_path.parent.parent / "seed_receipts" / digest[:2] / f"{digest}.json"
+
+
+def _write_seed_terminal_receipts(
+    seed_path: Path,
+    moved_path: Path,
+    payload: Mapping[str, object],
+) -> None:
+    receipt_payload = dict(payload)
+    index_payload = {
+        **receipt_payload,
+        "seed_file": str(seed_path),
+        "moved_file": str(moved_path),
+    }
+    moved_receipt = moved_path.with_suffix(moved_path.suffix + ".receipt.json")
+    index_path = _seed_terminal_receipt_index_path(seed_path)
+    if index_path is None:
+        raise ValueError(f"terminal seed receipt requires a seeds path: {seed_path}")
+    _ensure_directory_entry_durable(
+        index_path.parent,
+        durable_ancestor=seed_path.parent.parent,
+    )
+    for target, body in (
+        (moved_receipt, receipt_payload),
+        (index_path, index_payload),
+    ):
+        temporary = target.with_name(f".{target.name}.{os.getpid()}.tmp")
+        with temporary.open("w", encoding="utf-8") as handle:
+            json.dump(body, handle, sort_keys=True, indent=2)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, target)
+        _fsync_directory(target.parent)
+
+
+def _move_request(
+    path: Path,
+    destination_dir: Path,
+    *,
+    terminal_receipt: Mapping[str, object] | None = None,
+) -> Path:
     source_dir = path.parent.absolute()
     destination_dir = destination_dir.absolute()
     common_ancestor = Path(
@@ -363,6 +408,13 @@ def _move_request(path: Path, destination_dir: Path) -> Path:
         except FileExistsError:
             continue
         break
+    if terminal_receipt is not None:
+        try:
+            _write_seed_terminal_receipts(path, target, terminal_receipt)
+        except Exception:
+            target.unlink(missing_ok=True)
+            _fsync_directory(destination_dir)
+            raise
     # The destination receipt must be durable before the queue name disappears.
     # A PUBLISH_PENDING owner may observe that disappearance and complete its
     # SQLite marker immediately; hardlink-first makes every such observation
@@ -1887,7 +1939,9 @@ def _prepare_seed_requests(
             # it would make every upgrade seed die as SKIPPED_ALREADY_COVERED and the PARTIAL
             # fusion could never heal. The upgrade seed's idempotency authority is the
             # fusion_upgrade_enqueues marker (at most one enqueue per (scope, cycle,
-            # capturable-family-superset) transition), NOT coverage — so this bypass cannot loop.
+            # capturable-family-superset) transition). A consumed failure can
+            # atomically reclaim that marker, while this terminal unchanged-input
+            # receipt remains a no-retry witness — so this bypass cannot loop.
             if _seed_source_cycle_regresses_current_posterior(
                 forecast_db=forecast_db, seed=seed
             ):
@@ -1945,16 +1999,17 @@ def _prepare_seed_requests(
                 # a durable hardlink witness even when latest/ already points
                 # at a newer cycle; unlinking the public queue path could leave
                 # staging at nlink=1 and make crash recovery republish it.
-                moved = _move_request(seed_json, processed_path)
-                _write_sidecar(
-                    moved,
-                    {
-                        "status": "SKIPPED_UNCHANGED_BLOCKED_INPUT",
-                        "reason_codes": [_UNCHANGED_BLOCKED_SEED_SKIP_REASON],
-                        "request_written": False,
-                        "attempt_fingerprint": _fingerprint,
-                        "blocked_attempt_marker": str(marker_path),
-                    },
+                terminal_receipt = {
+                    "status": "SKIPPED_UNCHANGED_BLOCKED_INPUT",
+                    "reason_codes": [_UNCHANGED_BLOCKED_SEED_SKIP_REASON],
+                    "request_written": False,
+                    "attempt_fingerprint": _fingerprint,
+                    "blocked_attempt_marker": str(marker_path),
+                }
+                moved = _move_request(
+                    seed_json,
+                    processed_path,
+                    terminal_receipt=terminal_receipt,
                 )
                 _publish_latest_seed(moved, seed)
                 processed.append(str(moved))

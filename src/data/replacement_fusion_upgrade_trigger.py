@@ -28,8 +28,9 @@ finalizes ownership before an atomic hardlink publish into the SAME seed_dir the
 cycle already drains — no new daemon or parallel materialization path. The marker is UNIQUE on
 (city, target_date, metric, source_cycle_time, capturable_family_set): family growth uses the
 canonical family set as its transition key; exact input revisions suffix that key with the
-changed source raw-row ids. A scope is re-enqueued AT MOST ONCE per exact transition while a new
-raw row remains eligible to trigger one new materialization.
+changed source raw-row ids. A transition has at most one active publication. If that publication
+is consumed without converging the posterior and has no terminal no-retry receipt, the same marker
+is atomically reclaimed so a failed consumer cannot turn idempotency into permanent starvation.
 """
 from __future__ import annotations
 
@@ -749,6 +750,31 @@ def _reserve_enqueues(
     stale_before = reserved_at - _RESERVATION_TTL
     reservation = _publication_value(_RESERVATION_PREFIX, publication)
     reserved: list[str] = []
+    observed_before_lock: dict[str, sqlite3.Row | None] = {
+        transition_key: conn.execute(
+            """
+            SELECT enqueued_at, seed_file
+            FROM fusion_upgrade_enqueues
+            WHERE city = ? AND target_date = ? AND metric = ?
+              AND source_cycle_time = ? AND capturable_family_set = ?
+            LIMIT 1
+            """,
+            (city, target_date, metric, source_cycle_iso, transition_key),
+        ).fetchone()
+        for transition_key in transition_keys
+    }
+    reclaimable_markers: dict[str, str] = {}
+    for transition_key, row in observed_before_lock.items():
+        if row is None:
+            continue
+        marker_value = str(row["seed_file"] or "")
+        if marker_value.startswith(
+            (_PUBLISH_PENDING_PREFIX, _RESERVATION_PREFIX)
+        ):
+            continue
+        queue_state = _finalized_seed_has_active_queue_work(marker_value)
+        if queue_state is False:
+            reclaimable_markers[transition_key] = marker_value
     try:
         conn.execute("BEGIN IMMEDIATE")
         existing: dict[str, sqlite3.Row | None] = {
@@ -764,7 +790,7 @@ def _reserve_enqueues(
             ).fetchone()
             for transition_key in transition_keys
         }
-        for row in existing.values():
+        for transition_key, row in existing.items():
             if row is None:
                 continue
             marker_value = str(row["seed_file"] or "")
@@ -785,6 +811,13 @@ def _reserve_enqueues(
                 conn.rollback()
                 return reservation, ()
             if foreign is None:
+                # SCOPE: this exact scope/cycle/transition publication.
+                # DRAIN: the queue consumes public/request/inflight work, or
+                # records a terminal receipt for the exact seed.
+                # RESET: an absent exact queue/terminal witness while the caller's
+                # comparison still proves the posterior stale permits reclaim.
+                # Queue inspection happens before the DB writer lock; the exact
+                # marker match below is the compare-and-swap fence.
                 continue
             try:
                 marker_time = datetime.fromisoformat(
@@ -828,6 +861,29 @@ def _reserve_enqueues(
                 prefix=_RESERVATION_PREFIX,
             )
             if foreign is None:
+                if reclaimable_markers.get(transition_key) == marker_value:
+                    updated = conn.execute(
+                        """
+                        UPDATE fusion_upgrade_enqueues
+                        SET enqueued_at = ?, served_family_set = ?, seed_file = ?
+                        WHERE city = ? AND target_date = ? AND metric = ?
+                          AND source_cycle_time = ? AND capturable_family_set = ?
+                          AND seed_file = ?
+                        """,
+                        (
+                            reserved_at.isoformat(),
+                            served_family_key,
+                            reservation,
+                            city,
+                            target_date,
+                            metric,
+                            source_cycle_iso,
+                            transition_key,
+                            marker_value,
+                        ),
+                    ).rowcount
+                    if updated:
+                        reserved.append(transition_key)
                 continue
             updated = conn.execute(
                 """
@@ -856,6 +912,74 @@ def _reserve_enqueues(
         conn.rollback()
         raise
     return reservation, tuple(reserved)
+
+
+def _finalized_seed_has_active_queue_work(seed_file: str) -> bool | None:
+    """Return True/False for exact queue work; None when fencing is uncertain."""
+    marker = str(seed_file or "").strip()
+    if not marker:
+        return None
+    path = Path(marker)
+    if path.parent.name != "seeds":
+        return None
+    queue_root = path.parent.parent
+    try:
+        from src.data.replacement_forecast_live_materialization_queue import (  # noqa: PLC0415
+            _queue_lock,
+            _seed_terminal_receipt_index_path,
+        )
+
+        with _queue_lock(queue_root / ".materialization_queue.lock") as acquired:
+            if not acquired:
+                return None
+            if path.is_file() or (queue_root / "requests" / path.name).is_file():
+                return True
+            inflight = queue_root / "inflight"
+            try:
+                batches = tuple(inflight.iterdir())
+            except FileNotFoundError:
+                batches = ()
+            for batch in batches:
+                if batch.is_dir() and (batch / path.name).is_file():
+                    return True
+            indexed_receipt = _seed_terminal_receipt_index_path(path)
+            if indexed_receipt is not None and indexed_receipt.is_file():
+                try:
+                    indexed = json.loads(
+                        indexed_receipt.read_text(encoding="utf-8")
+                    )
+                except (OSError, TypeError, ValueError, json.JSONDecodeError):
+                    return None
+                if str(indexed.get("seed_file") or "") != marker:
+                    return None
+                if str(indexed.get("status") or "") in {
+                    "SKIPPED_UNCHANGED_BLOCKED_INPUT",
+                    "SKIPPED_ALREADY_COVERED",
+                    "SKIPPED_SOURCE_CYCLE_REGRESSION",
+                }:
+                    return True
+            processed = queue_root / "seed_processed" / path.name
+            receipt = processed.with_suffix(processed.suffix + ".receipt.json")
+            if processed.exists():
+                if not receipt.is_file():
+                    return None
+                try:
+                    status = str(
+                        json.loads(receipt.read_text(encoding="utf-8")).get(
+                            "status", ""
+                        )
+                    )
+                except (OSError, TypeError, ValueError, json.JSONDecodeError):
+                    return None
+                if status in {
+                    "SKIPPED_UNCHANGED_BLOCKED_INPUT",
+                    "SKIPPED_ALREADY_COVERED",
+                    "SKIPPED_SOURCE_CYCLE_REGRESSION",
+                }:
+                    return True
+            return False
+    except OSError:
+        return None
 
 
 def _release_enqueue_reservations(
