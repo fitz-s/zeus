@@ -2,7 +2,7 @@
 
 **Recommended repo path:** `docs/reference/modules/analysis.md`
 **Current code path:** `src/analysis`
-**Authority status:** Dense reference for an intentionally thin/placeholder module. This book exists mainly to prevent accidental promotion of ad hoc analytics into authority.
+**Authority status:** Reference for a derived-only zone. The module is no longer thin — eleven modules live here, including the six-class post-settlement grader (`settlement_skill_attribution.py`) that the calibration report and every skill claim rest on. This book exists to prevent accidental promotion of that analytics into decision authority: the zone reads truth and writes reports, never the reverse.
 
 ## 1. Module purpose
 Document that `src/analysis` is currently minimal and must not become an ungoverned catch-all.
@@ -23,7 +23,7 @@ The main rule is containment: keep analysis derived, explicit, and demotable unl
 
 ## 6. Read/write surfaces and canonical truth
 ### Canonical truth surfaces
-- `src/analysis/AGENTS.md` current placeholder status
+- `src/analysis/AGENTS.md` zone rules (derived-only: reads truth, writes reports)
 - `docs/authority/zeus_current_delivery.md` authority hygiene and packet doctrine
 
 ### Non-authority surfaces
