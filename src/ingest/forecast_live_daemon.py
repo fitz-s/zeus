@@ -1292,14 +1292,25 @@ def _replacement_forecast_discovery_revision(
 
 
 def _replacement_forecast_materialize_poll_job() -> None:
-    """Drain only source-committed work; global discovery has its own lane."""
+    """Drain one preemptible worker tranche; discovery has its own lane."""
 
     from src.data.replacement_forecast_production import (
         _replacement_forecast_live_materialization_queue_config,
     )
+    from src.data.replacement_forecast_live_materialization_queue import (
+        DEFAULT_MATERIALIZATION_MAX_WORKERS,
+    )
 
     cfg = _replacement_forecast_live_materialization_queue_config()
-    batch_limit = max(1, int(cfg["poll_batch_limit"]))
+    # One queue claim is one uninterruptible scheduler instance.  Claiming more
+    # requests than the inner worker count serializes them behind one stale
+    # priority snapshot, so a newly arrived held-capital refresh cannot preempt
+    # until the whole tranche finishes.  Re-rank current exposure after every
+    # actually concurrent tranche instead.
+    batch_limit = min(
+        max(1, int(cfg["poll_batch_limit"])),
+        max(1, int(DEFAULT_MATERIALIZATION_MAX_WORKERS)),
+    )
     requests_pending = _replacement_forecast_queue_pending(cfg, "request_dir")
     seeds_pending = _replacement_forecast_queue_pending(cfg, "seed_dir")
     inflight_pending = _replacement_forecast_inflight_pending(cfg)
