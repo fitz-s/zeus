@@ -814,41 +814,68 @@ def _bind_live_curve_to_global_revision(
         row = dict(raw)
         position_id = str(row.get("position_id") or "").strip()
         commands = conn.execute(
-            "SELECT DISTINCT decision_id FROM venue_commands "
+            "SELECT DISTINCT command_id,decision_id FROM venue_commands "
             "WHERE position_id=? AND intent_kind='ENTRY' ORDER BY decision_id",
             (position_id,),
         ).fetchall()
         try:
             if not commands:
                 raise ValueError("entry command missing")
-            receipts = {
-                _command_global_receipt(
+            command_receipts = [
+                (
+                    str(command[0] or ""),
+                    str(command[1] or ""),
+                    _command_global_receipt(
                     conn,
-                    execution_command_id=str(command[0] or ""),
-                    events_conn=events_conn,
+                        execution_command_id=str(command[1] or ""),
+                        events_conn=events_conn,
+                    ),
                 )
                 for command in commands
-            }
-            if len(
-                {receipt.selection_epoch_identity for receipt in receipts}
-            ) != 1:
-                raise ValueError("entry commands span selection epochs")
+            ]
         except ValueError as exc:
             reason = str(exc)
             unbound_reasons[reason] = unbound_reasons.get(reason, 0) + 1
             continue
-        receipt = min(receipts, key=lambda item: item.decision_log_id)
+        receipts = [item[2] for item in command_receipts]
+        first_receipt = min(receipts, key=lambda item: item.decision_log_id)
+        epoch_identities = sorted(
+            {receipt.selection_epoch_identity for receipt in receipts}
+        )
+        bindings = [
+            {
+                "venue_command_id": command_id,
+                "execution_command_id": execution_command_id,
+                "global_auction_decision_log_id": receipt.decision_log_id,
+                "global_auction_receipt_hash": receipt.receipt_hash,
+                "global_selection_epoch_identity": (
+                    receipt.selection_epoch_identity
+                ),
+            }
+            for command_id, execution_command_id, receipt in command_receipts
+        ]
         exact_rows.append(
             {
                 **row,
                 "global_selection_revision": (
                     CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION
                 ),
-                "global_auction_decision_log_id": receipt.decision_log_id,
-                "global_auction_receipt_hash": receipt.receipt_hash,
-                "global_selection_epoch_identity": (
-                    receipt.selection_epoch_identity
+                "global_auction_decision_log_id": (
+                    first_receipt.decision_log_id
                 ),
+                "global_auction_receipt_hash": (
+                    first_receipt.receipt_hash
+                    if len(bindings) == 1
+                    else None
+                ),
+                "global_selection_epoch_identity": (
+                    epoch_identities[0]
+                    if len(epoch_identities) == 1
+                    else None
+                ),
+                "global_auction_receipt_count": len(bindings),
+                "global_selection_epoch_identities": epoch_identities,
+                "global_auction_receipts": bindings,
             }
         )
     net_pnl = sum(

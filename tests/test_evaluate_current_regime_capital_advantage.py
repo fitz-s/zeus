@@ -1,5 +1,5 @@
 # Created: 2026-08-12
-# Last reused/audited: 2026-08-19
+# Last reused/audited: 2026-08-20
 # Authority: current-regime capital proof must fail closed before entry reopens.
 
 from __future__ import annotations
@@ -618,7 +618,7 @@ def test_live_curve_requires_exact_schema_22_edli_receipt_binding():
     events_conn = sqlite3.connect(":memory:")
     events_conn.row_factory = sqlite3.Row
     conn.executescript(
-        "CREATE TABLE venue_commands (position_id TEXT,intent_kind TEXT,decision_id TEXT);"
+        "CREATE TABLE venue_commands (command_id TEXT,position_id TEXT,intent_kind TEXT,decision_id TEXT);"
         "CREATE TABLE decision_log (id INTEGER PRIMARY KEY,mode TEXT,artifact_json TEXT);"
     )
     events_conn.execute(
@@ -657,7 +657,10 @@ def test_live_curve_requires_exact_schema_22_edli_receipt_binding():
         winner_actuation_identity=summary["winner_actuation_identity"],
         selection_epoch_identity=summary["selection_epoch_identity"],
     )
-    conn.execute("INSERT INTO venue_commands VALUES ('position-1','ENTRY','cmd-1')")
+    conn.execute(
+        "INSERT INTO venue_commands VALUES "
+        "('venue-cmd-1','position-1','ENTRY','cmd-1')"
+    )
     events_conn.execute(
         "INSERT INTO edli_live_order_events VALUES ('aggregate-1','ExecutionCommandCreated',?)",
         (json.dumps({"execution_command_id": "cmd-1"}),),
@@ -684,6 +687,106 @@ def test_live_curve_requires_exact_schema_22_edli_receipt_binding():
     assert bound["realized_position_count"] == 1
     assert bound["net_realized_pnl_usd"] == 1.0
     assert bound["curve"][0]["global_auction_decision_log_id"] == 1
+
+
+def test_live_curve_binds_every_increment_across_selection_epochs():
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    events_conn = sqlite3.connect(":memory:")
+    events_conn.row_factory = sqlite3.Row
+    conn.executescript(
+        "CREATE TABLE venue_commands (command_id TEXT,position_id TEXT,"
+        "intent_kind TEXT,decision_id TEXT);"
+        "CREATE TABLE decision_log (id INTEGER PRIMARY KEY,mode TEXT,artifact_json TEXT);"
+    )
+    events_conn.execute(
+        "CREATE TABLE edli_live_order_events "
+        "(aggregate_id TEXT,event_type TEXT,payload_json TEXT)"
+    )
+    epoch_ids = []
+    for index in (1, 2):
+        summary = _proof_summary(
+            city="Chicago",
+            target_date="2026-08-13",
+            condition_id=f"condition-{index}",
+        )
+        summary.update(
+            winner_event_id=f"event-{index}",
+            winner_candidate_id=f"candidate-{index}",
+            winner_actuation_identity=f"actuation-{index}",
+            selection_epoch_identity=f"epoch-{index}",
+        )
+        summary["execution_binding_hash"] = global_auction_execution_binding_hash(
+            summary
+        )
+        summary["artifact_summary_hash"] = global_auction_artifact_summary_hash(
+            summary
+        )
+        conn.execute(
+            "INSERT INTO decision_log VALUES (?,?,?)",
+            (
+                index,
+                "global_single_order_auction",
+                json.dumps({"summary": summary}),
+            ),
+        )
+        receipt = GlobalAuctionReceiptRef(
+            decision_log_id=index,
+            decision_log_mode="global_single_order_auction",
+            receipt_hash=summary["receipt_hash"],
+            execution_binding_hash=summary["execution_binding_hash"],
+            artifact_summary_hash=summary["artifact_summary_hash"],
+            schema_version=22,
+            winner_event_id=summary["winner_event_id"],
+            winner_candidate_id=summary["winner_candidate_id"],
+            winner_actuation_identity=summary["winner_actuation_identity"],
+            selection_epoch_identity=summary["selection_epoch_identity"],
+        )
+        conn.execute(
+            "INSERT INTO venue_commands VALUES (?,?,?,?)",
+            (f"venue-cmd-{index}", "position-1", "ENTRY", f"cmd-{index}"),
+        )
+        events_conn.execute(
+            "INSERT INTO edli_live_order_events VALUES (?,?,?)",
+            (
+                f"aggregate-{index}",
+                "ExecutionCommandCreated",
+                json.dumps({"execution_command_id": f"cmd-{index}"}),
+            ),
+        )
+        events_conn.execute(
+            "INSERT INTO edli_live_order_events VALUES (?,?,?)",
+            (
+                f"aggregate-{index}",
+                "PreSubmitRevalidated",
+                json.dumps({"global_auction_receipt": receipt.as_payload()}),
+            ),
+        )
+        epoch_ids.append(summary["selection_epoch_identity"])
+
+    bound = evaluator._bind_live_curve_to_global_revision(
+        conn,
+        {
+            "curve": [
+                {
+                    "position_id": "position-1",
+                    "capital_committed_usd": 4.0,
+                    "net_realized_pnl_usd": 1.0,
+                }
+            ]
+        },
+        events_conn=events_conn,
+    )
+
+    assert bound["realized_position_count"] == 1
+    row = bound["curve"][0]
+    assert row["global_auction_receipt_count"] == 2
+    assert row["global_selection_epoch_identity"] is None
+    assert row["global_selection_epoch_identities"] == epoch_ids
+    assert {
+        binding["venue_command_id"]
+        for binding in row["global_auction_receipts"]
+    } == {"venue-cmd-1", "venue-cmd-2"}
 
 
 def test_exact_global_exit_is_ungraded_until_settlement_then_compared_with_hold():
