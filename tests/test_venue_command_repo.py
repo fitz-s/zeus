@@ -1,6 +1,6 @@
 # Created: 2026-04-26
-# Last reused/audited: 2026-08-10
-# Lifecycle: created=2026-04-26; last_reviewed=2026-08-10; last_reused=2026-08-10
+# Last reused/audited: 2026-08-20
+# Lifecycle: created=2026-04-26; last_reviewed=2026-08-20; last_reused=2026-08-20
 # Purpose: Lock venue command journal invariants, transitions, recovery, and U1 snapshot gate.
 # Reuse: Run when venue_command_repo, command schema, or executable snapshot gate changes.
 # Authority basis: command-bus INV-28/NC-18 plus schema-21 global receipt closure;
@@ -2096,6 +2096,47 @@ class TestAppendEventStateTransitionIsGrammarChecked:
                      occurred_at="2026-04-26T00:02:00Z")
         assert get_command(conn, "cmd-001")["state"] == "UNKNOWN"
 
+    @pytest.mark.parametrize(
+        ("event_type", "expected_state"),
+        [
+            ("PARTIAL_FILL_OBSERVED", "PARTIAL"),
+            ("FILL_CONFIRMED", "FILLED"),
+        ],
+    )
+    @pytest.mark.parametrize("submit_state", ["SUBMITTING", "POSTING"])
+    def test_side_effect_crossed_submit_accepts_stronger_venue_fill_evidence(
+        self, conn, event_type, expected_state, submit_state
+    ):
+        from src.state.venue_command_repo import append_event, get_command
+
+        _insert(conn)
+        if submit_state == "SUBMITTING":
+            append_event(
+                conn,
+                command_id="cmd-001",
+                event_type="SUBMIT_REQUESTED",
+                occurred_at="2026-04-26T00:01:00Z",
+                payload=_valid_execution_capability_payload(),
+            )
+        else:
+            for event in ("SNAPSHOT_BOUND", "SIGNED_PERSISTED", "POSTING"):
+                append_event(
+                    conn,
+                    command_id="cmd-001",
+                    event_type=event,
+                    occurred_at="2026-04-26T00:01:00Z",
+                )
+        assert get_command(conn, "cmd-001")["state"] == submit_state
+        append_event(
+            conn,
+            command_id="cmd-001",
+            event_type=event_type,
+            occurred_at="2026-04-26T00:02:00Z",
+            payload={"source": "WS_USER", "venue_order_id": "ord-001"},
+        )
+
+        assert get_command(conn, "cmd-001")["state"] == expected_state
+
     def test_acked_to_partial(self, conn):
         from src.state.venue_command_repo import append_event, get_command
         _insert(conn)
@@ -2215,13 +2256,11 @@ class TestAppendEventStateTransitionIsGrammarChecked:
         ("INTENT_CREATED", "CANCEL_ACKED", []),
         ("INTENT_CREATED", "EXPIRED", []),
         ("INTENT_CREATED", "PARTIAL_FILL_OBSERVED", []),
-        # From SUBMITTING: SUBMIT_ACKED, SUBMIT_REJECTED, SUBMIT_UNKNOWN,
-        # CANCEL_REQUESTED, REVIEW_REQUIRED, EXPIRED are legal; others illegal.
+        # From SUBMITTING: submit outcomes, authenticated fill evidence,
+        # cancel/review/expiry are legal; unrelated events remain illegal.
         # NOTE: SUBMITTING->EXPIRED was legalized by bb74e650c
         # ("restore redecision freshness flow") and is no longer illegal.
         ("SUBMITTING", "INTENT_CREATED", ["SUBMIT_REQUESTED"]),
-        ("SUBMITTING", "FILL_CONFIRMED", ["SUBMIT_REQUESTED"]),
-        ("SUBMITTING", "PARTIAL_FILL_OBSERVED", ["SUBMIT_REQUESTED"]),
         ("SUBMITTING", "CANCEL_ACKED", ["SUBMIT_REQUESTED"]),
         # From ACKED: fill/cancel/expire/review legal; submit events illegal
         ("ACKED", "SUBMIT_REQUESTED", ["SUBMIT_REQUESTED", "SUBMIT_ACKED"]),

@@ -117,6 +117,8 @@ _TRANSITIONS: dict[tuple[str, str], str] = {
     ("POSTING", "SUBMIT_UNKNOWN"):             "UNKNOWN",
     ("POSTING", "SUBMIT_TIMEOUT_UNKNOWN"):     "SUBMIT_UNKNOWN_SIDE_EFFECT",
     ("POSTING", "CLOSED_MARKET_UNKNOWN"):      "SUBMIT_UNKNOWN_SIDE_EFFECT",
+    ("POSTING", "PARTIAL_FILL_OBSERVED"):       "PARTIAL",
+    ("POSTING", "FILL_CONFIRMED"):              "FILLED",
     ("POSTING", "CANCEL_REQUESTED"):           "CANCEL_PENDING",
     ("POSTING", "REVIEW_REQUIRED"):            "REVIEW_REQUIRED",
     ("POST_ACKED", "SUBMIT_ACKED"):            "ACKED",
@@ -132,6 +134,11 @@ _TRANSITIONS: dict[tuple[str, str], str] = {
     ("SUBMITTING", "SUBMIT_UNKNOWN"):         "UNKNOWN",
     ("SUBMITTING", "SUBMIT_TIMEOUT_UNKNOWN"): "SUBMIT_UNKNOWN_SIDE_EFFECT",
     ("SUBMITTING", "CLOSED_MARKET_UNKNOWN"):  "SUBMIT_UNKNOWN_SIDE_EFFECT",
+    # A venue fill is stronger evidence than the submit ACK that may have been
+    # lost when the process crossed the SDK side-effect boundary.  Preserve
+    # the observed fill instead of stranding the command in SUBMITTING.
+    ("SUBMITTING", "PARTIAL_FILL_OBSERVED"):   "PARTIAL",
+    ("SUBMITTING", "FILL_CONFIRMED"):          "FILLED",
     ("SUBMITTING", "CANCEL_REQUESTED"):       "CANCEL_PENDING",
     ("SUBMITTING", "EXPIRED"):                "EXPIRED",
     ("SUBMITTING", "REVIEW_REQUIRED"):        "REVIEW_REQUIRED",
