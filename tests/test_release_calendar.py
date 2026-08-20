@@ -1,7 +1,7 @@
 # Created: 2026-05-02
-# Last reused/audited: 2026-05-19
-# Authority basis: docs/operations/task_2026-05-02_data_daemon_readiness/PLAN.md PR45b + PLAN_v4 cycle-profile contract.
-# Lifecycle: created=2026-05-02; last_reviewed=2026-05-19; last_reused=2026-05-19
+# Last reused/audited: 2026-08-19
+# Authority basis: docs/operations/task_2026-05-02_data_daemon_readiness/PLAN.md PR45b + live_entry_health_repair B125.
+# Lifecycle: created=2026-05-02; last_reviewed=2026-08-19; last_reused=2026-08-19
 # Purpose: Verify release calendar schedule and boundary conditions
 # Reuse: standalone pytest; no shared fixtures
 
@@ -53,23 +53,24 @@ def test_calendar_rejects_unknown_partial_policy(tmp_path) -> None:
 
 
 def test_cycle_profiles_exist_for_00_12_full_and_06_18_short() -> None:
-    entry = get_entry("ecmwf_open_data", "mx2t6_high")
-    assert entry is not None
+    for track in ("mx2t6_high", "mn2t6_low"):
+        entry = get_entry("ecmwf_open_data", track)
+        assert entry is not None
 
-    full_profile = cycle_profile_for_hour(entry, 0)
-    short_profile = cycle_profile_for_hour(entry, 6)
+        full_profile = cycle_profile_for_hour(entry, 0)
+        short_profile = cycle_profile_for_hour(entry, 6)
 
-    assert full_profile is not None
-    assert full_profile.cycle_hours_utc == (0, 12)
-    assert full_profile.horizon_profile == "full"
-    assert full_profile.live_max_step_hours == 144
-    assert full_profile.live_authorization is True
+        assert full_profile is not None
+        assert full_profile.cycle_hours_utc == (0, 12)
+        assert full_profile.horizon_profile == "full"
+        assert full_profile.live_max_step_hours == 144
+        assert full_profile.live_authorization is True
 
-    assert short_profile is not None
-    assert short_profile.cycle_hours_utc == (6, 18)
-    assert short_profile.horizon_profile == "short"
-    assert short_profile.live_max_step_hours == 144
-    assert short_profile.live_authorization is False
+        assert short_profile is not None
+        assert short_profile.cycle_hours_utc == (6, 18)
+        assert short_profile.horizon_profile == "short"
+        assert short_profile.live_max_step_hours == 144
+        assert short_profile.live_authorization is True
 
 
 def test_full_horizon_selection_requires_00_or_12_cycle() -> None:
@@ -142,7 +143,7 @@ def test_required_target_horizon_is_input_to_safe_fetch() -> None:
     assert metadata["live_max_step_hours"] == 144
 
 
-def test_short_horizon_can_fetch_but_not_live_full_horizon() -> None:
+def test_short_horizon_is_live_for_complete_zeus_target_horizon() -> None:
     entry = get_entry("ecmwf_open_data", "mx2t6_high")
     assert entry is not None
     profile = cycle_profile_for_hour(entry, 6)
@@ -158,9 +159,23 @@ def test_short_horizon_can_fetch_but_not_live_full_horizon() -> None:
 
     assert decision is FetchDecision.FETCH_ALLOWED
     assert metadata["horizon_profile"] == "short"
-    assert metadata["live_authorization"] is False
-    assert metadata["profile_live_authorization"] is False
-    assert profile.live_authorization is False
+    assert metadata["live_authorization"] is True
+    assert metadata["profile_live_authorization"] is True
+    assert profile.live_authorization is True
+
+
+def test_latest_safe_18z_cycle_covers_complete_live_horizon() -> None:
+    decision, metadata = select_source_run_for_target_horizon(
+        now_utc=_utc(23),
+        source_id="ecmwf_open_data",
+        track="mx2t6_high",
+        required_max_step_hours=144,
+    )
+
+    assert decision is FetchDecision.FETCH_ALLOWED
+    assert metadata["selected_cycle_time"] == _utc(18)
+    assert metadata["horizon_profile"] == "short"
+    assert metadata["live_authorization"] is True
 
 
 def test_safe_fetch_allows_after_default_lag() -> None:

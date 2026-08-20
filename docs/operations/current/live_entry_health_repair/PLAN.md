@@ -2658,3 +2658,40 @@ publication barrier.
   requires a post-load batch with at least one current posterior commit or a
   truthful per-request authority block, followed by fresh held-position monitor
   evidence under the exact loaded SHA.
+
+### Slice B125 — Admit same-cycle 06Z/18Z ENS through the complete live horizon (2026-08-19)
+
+- Live defect: after the provider carrier advanced to 18Z, every held statistical
+  posterior still used the 12Z ENS shape (`shape_lag_hours=6`) and correctly lost
+  live authority. The canonical source DB contained successful 00Z/12Z ENS runs
+  only because `source_release_calendar.yaml` marked the 06Z/18Z profile
+  non-live, even though both that profile and the executable OpenData fetch grid
+  end at 144h. The result was a self-created probability blackout, not missing
+  ECMWF data.
+- External truth: ECMWF's current Open Data specification publishes ENS direct
+  model output for all 00/06/12/18 UTC runs; 06/18 provide steps 0..144h by 3h.
+  Zeus fetches 3..144h and the live weather universe is capped at five days, so
+  the upstream "short" profile covers the complete executable target horizon.
+- First-principles invariant: same-cycle current ENS is strictly better source
+  truth than either a stale cross-cycle shape or no probability. Cycle-profile
+  authorization is target-horizon specific: a profile is live when it covers
+  every required step for the exact executable universe, not when it carries an
+  upstream `full` name or an unused >144h tail.
+- SCOPE: ECMWF OpenData HIGH/LOW 06Z/18Z fetch-plan admission through 144h only.
+  DRAIN: the five-minute safe-cycle poll fetches the newest released cycle,
+  commits its target-specific snapshots, and wakes the existing materializer.
+  RESET: each poll re-evaluates source release time and required max step; any
+  cycle not released or any target beyond 144h still fails closed. Same-cycle
+  shape semantics, current q bounds, pricing, ranking, Kelly, and venue I/O are
+  unchanged.
+- Files authorized: `config/source_release_calendar.yaml`,
+  `tests/test_release_calendar.py`,
+  `tests/test_opendata_release_calendar_selection.py`, and this plan. Forbidden:
+  admit a step above 144h, relabel stale 00/12 members as current, translate
+  members, lower release lag, or bypass target-window completeness.
+- Acceptance: the release-calendar tests prove 18Z becomes the latest safe cycle
+  for a 144h target while 145h remains blocked, both HIGH and LOW short profiles
+  are live, and the ordinary 00/12 behavior remains unchanged. Runtime closeout
+  requires a successful 18Z ENS `source_run`, target snapshots, a same-cycle v4
+  posterior, fresh held-position monitor evidence, and exact loaded SHA before
+  any new entry can resume.
