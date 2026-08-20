@@ -4195,6 +4195,7 @@ def _latest_unprojected_filled_entry_candidates(conn: sqlite3.Connection) -> lis
         "venue_trade_facts",
         "position_current",
         "position_events",
+        "execution_fact",
         "venue_submission_envelopes",
         "executable_market_snapshots",
     }
@@ -4334,6 +4335,31 @@ def _latest_unprojected_filled_entry_candidates(conn: sqlite3.Connection) -> lis
                         - COALESCE(flow.exit_filled_size, 0)
                     )
                 ) <= 0.000001
+                AND NOT (
+                    COALESCE(flow.exit_filled_size, 0) <= 0.000001
+                    AND EXISTS (
+                        SELECT 1
+                          FROM execution_fact exact_entry
+                         WHERE exact_entry.position_id = cmd.position_id
+                           AND exact_entry.command_id = cmd.command_id
+                           AND exact_entry.order_role = 'entry'
+                           AND exact_entry.voided_at IS NULL
+                           AND lower(COALESCE(
+                                   exact_entry.terminal_exec_status, ''
+                               )) IN ('filled', 'partial')
+                           AND ABS(
+                               CAST(exact_entry.shares AS REAL)
+                               - CAST(entry_fill.filled_size AS REAL)
+                           ) <= 0.000001
+                           AND ABS(
+                               COALESCE(pc.cost_basis_usd, 0)
+                               - (
+                                   CAST(exact_entry.shares AS REAL)
+                                   * CAST(exact_entry.fill_price AS REAL)
+                               )
+                           ) > 0.000001
+                    )
+                )
            )
            AND (
                 pc.position_id IS NULL
@@ -4382,6 +4408,41 @@ def _latest_unprojected_filled_entry_candidates(conn: sqlite3.Connection) -> lis
                                 OR lower(COALESCE(pe.order_id, '')) =
                                    lower(cmd.venue_order_id)
                            )
+                    )
+                )
+                OR (
+                    -- A rounded venue trade fact may have already projected
+                    -- the right quantity at the wrong cash cost. Re-open the
+                    -- command only when its exact execution fact proves the
+                    -- same shares and a different acquisition notional.
+                    cmd.state IN ('FILLED', 'PARTIAL', 'CANCELLED', 'REVIEW_REQUIRED')
+                    AND entry_fill.has_confirmed_fill = 1
+                    AND pc.phase IN ('active', 'day0_window', 'pending_exit')
+                    AND lower(COALESCE(pc.order_id, '')) = lower(cmd.venue_order_id)
+                    AND ABS(
+                        COALESCE(pc.shares, 0) - entry_fill.filled_size
+                    ) <= 0.000001
+                    AND EXISTS (
+                        SELECT 1
+                          FROM execution_fact exact_entry
+                         WHERE exact_entry.position_id = cmd.position_id
+                           AND exact_entry.command_id = cmd.command_id
+                           AND exact_entry.order_role = 'entry'
+                           AND exact_entry.voided_at IS NULL
+                           AND lower(COALESCE(
+                                   exact_entry.terminal_exec_status, ''
+                               )) IN ('filled', 'partial')
+                           AND ABS(
+                               CAST(exact_entry.shares AS REAL)
+                               - CAST(entry_fill.filled_size AS REAL)
+                           ) <= 0.000001
+                           AND ABS(
+                               COALESCE(pc.cost_basis_usd, 0)
+                               - (
+                                   CAST(exact_entry.shares AS REAL)
+                                   * CAST(exact_entry.fill_price AS REAL)
+                               )
+                           ) > 0.000001
                     )
                 )
                 OR (
@@ -5973,6 +6034,21 @@ def _append_filled_entry_projection_repair(
 
     projected_phase = str(candidate.get("projected_phase") or "")
     if projected_phase in {"active", "day0_window", "pending_exit"}:
+        envelope_economics = _entry_submission_envelope_fill_economics(
+            conn,
+            candidate={
+                **candidate,
+                "filled_size": candidate.get("fill_filled_size"),
+                "order_fact_matched_size": candidate.get("fill_filled_size"),
+            },
+        )
+        if envelope_economics is not None:
+            candidate = {
+                **candidate,
+                "fill_filled_size": envelope_economics[0],
+                "fill_price": envelope_economics[1],
+                "entry_fill_economics_authority": "final_submission_envelope",
+            }
         command_id = str(candidate.get("command_id") or "")
         position_id = str(candidate.get("position_id") or "")
         venue_order_id = str(candidate.get("venue_order_id") or "")
@@ -6224,6 +6300,9 @@ def _append_filled_entry_projection_repair(
                 and (
                     before_shares is None
                     or abs(before_shares - expected_position_shares) > 0.000001
+                    or before_cost is None
+                    or expected_position_cost is None
+                    or abs(before_cost - expected_position_cost) > 0.000001
                 )
             )
         )
@@ -12136,7 +12215,16 @@ def _terminal_partial_exit_projection_candidates(
             and canonical_total == command_size
             and _command_bound_full_exit_intent(conn, command)
         ):
-            continue
+            recovered_holding = _post_exit_residual_holding_from_command_flow(
+                conn,
+                command=command,
+                command_filled=canonical_total,
+            )
+            if recovered_holding is None:
+                continue
+            command["post_exit_recovered_holding_shares"] = str(
+                recovered_holding
+            )
         if (
             status_cursor == (canonical_total, canonical_notional)
             and str(command.get("position_phase") or "") != "pending_exit"
@@ -12235,7 +12323,15 @@ def _repair_terminal_partial_exit_projection(
     if close_position:
         holding_shares = intended_shares
         if filled >= holding_shares:
-            return False
+            holding_shares = _positive_decimal_or_none(
+                command.get("post_exit_recovered_holding_shares")
+            ) or _post_exit_residual_holding_from_command_flow(
+                conn,
+                command=command,
+                command_filled=filled,
+            )
+            if holding_shares is None or filled >= holding_shares:
+                return False
     else:
         certificate = intent.get("exit_intent_capital_certificate")
         holding_shares = (
@@ -12290,6 +12386,100 @@ def _repair_terminal_partial_exit_projection(
     return applied > 0 or (
         phase_after is not None and str(phase_after[0] or "") != "pending_exit"
     )
+
+
+def _post_exit_residual_holding_from_command_flow(
+    conn: sqlite3.Connection,
+    *,
+    command: Mapping[str, object],
+    command_filled: Decimal,
+) -> Decimal | None:
+    """Recover the pre-SELL holding when a late ENTRY fact exposed a stale prefix."""
+
+    position_id = str(command.get("position_id") or "").strip()
+    command_id = str(command.get("command_id") or "").strip()
+    if not position_id or not command_id or command_filled <= 0:
+        return None
+    sql = (
+        "WITH "
+        + _canonical_trade_fact_cte()
+        + ",\n"
+        + _economic_trade_fact_cte()
+        + """,
+        command_exit AS (
+            SELECT MAX(COALESCE(NULLIF(fact.venue_timestamp, ''), fact.observed_at))
+                       AS execution_ts
+              FROM economic_trade_fact fact
+             WHERE fact.command_id = ?
+               AND fact.state IN ('MATCHED', 'MINED', 'CONFIRMED')
+               AND CAST(COALESCE(fact.filled_size, '0') AS REAL) > 0
+        )
+        SELECT SUM(
+                   CASE WHEN cmd.intent_kind = 'ENTRY' AND cmd.side = 'BUY'
+                        THEN CAST(fact.filled_size AS REAL) ELSE 0.0 END
+               ) AS entry_filled_size,
+               SUM(
+                   CASE WHEN cmd.intent_kind = 'EXIT' AND cmd.side = 'SELL'
+                        THEN CAST(fact.filled_size AS REAL) ELSE 0.0 END
+               ) AS exit_filled_size
+          FROM economic_trade_fact fact
+          JOIN venue_commands cmd
+            ON cmd.command_id = fact.command_id
+           AND cmd.venue_order_id = fact.venue_order_id
+          CROSS JOIN command_exit boundary
+         WHERE cmd.position_id = ?
+           AND boundary.execution_ts IS NOT NULL
+           AND datetime(COALESCE(NULLIF(fact.venue_timestamp, ''), fact.observed_at))
+               <= datetime(boundary.execution_ts)
+           AND fact.state IN ('MATCHED', 'MINED', 'CONFIRMED')
+           AND CAST(COALESCE(fact.filled_size, '0') AS REAL) > 0
+        """
+    )
+    flow = conn.execute(sql, (command_id, position_id)).fetchone()
+    if flow is None:
+        return None
+    entry_filled = _positive_decimal_or_none(flow["entry_filled_size"])
+    exit_filled = _positive_decimal_or_none(flow["exit_filled_size"])
+    if entry_filled is None or exit_filled is None:
+        return None
+    expected_residual = entry_filled - exit_filled
+    if expected_residual <= 0:
+        return None
+    position = conn.execute(
+        """
+        SELECT phase, shares, cost_basis_usd, chain_state, chain_shares,
+               chain_cost_basis_usd
+          FROM position_current
+         WHERE position_id = ?
+         LIMIT 1
+        """,
+        (position_id,),
+    ).fetchone()
+    if position is None or str(position["phase"] or "") not in {
+        "active",
+        "day0_window",
+        "pending_exit",
+    }:
+        return None
+    local_shares = _positive_decimal_or_none(position["shares"])
+    chain_shares = _positive_decimal_or_none(position["chain_shares"])
+    local_cost = _positive_decimal_or_none(position["cost_basis_usd"])
+    chain_cost = _positive_decimal_or_none(position["chain_cost_basis_usd"])
+    tolerance = Decimal("0.000001")
+    if not (
+        str(position["chain_state"] or "") == "synced"
+        and local_shares is not None
+        and chain_shares is not None
+        and local_cost is not None
+        and chain_cost is not None
+        and abs(local_shares - expected_residual) <= tolerance
+        and abs(chain_shares - expected_residual) <= tolerance
+        and abs(local_cost - chain_cost)
+        <= _ENTRY_AGGREGATE_ABSORPTION_TOLERANCE
+    ):
+        return None
+    recovered_holding = expected_residual + command_filled
+    return recovered_holding if recovered_holding > command_filled else None
 
 
 def _command_bound_full_exit_intent(

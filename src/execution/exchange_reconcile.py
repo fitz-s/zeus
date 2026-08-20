@@ -5539,6 +5539,10 @@ def _ensure_entry_fill_position_event(
         command_id=str(command.get("command_id") or ""),
         fallback_filled_size=filled_size,
         fallback_fill_price=fill_price,
+        fallback_is_final_submission_envelope=(
+            str(command.get("entry_fill_economics_authority") or "")
+            == "final_submission_envelope"
+        ),
     )
     if fill_economics is None:
         return
@@ -6003,6 +6007,7 @@ def _entry_fill_economics_for_command(
     command_id: str,
     fallback_filled_size: str,
     fallback_fill_price: str,
+    fallback_is_final_submission_envelope: bool = False,
 ) -> tuple[Decimal, Decimal, Decimal] | None:
     """Aggregate latest authoritative trade facts for an entry command."""
 
@@ -6053,6 +6058,18 @@ def _entry_fill_economics_for_command(
         cost_basis += filled * price
     fallback_shares = _positive_decimal_or_none(fallback_filled_size)
     fallback_price = _positive_decimal_or_none(fallback_fill_price)
+    if (
+        fallback_is_final_submission_envelope
+        and fallback_shares is not None
+        and fallback_price is not None
+        and shares > Decimal("0")
+        and abs(fallback_shares - shares) <= Decimal("0.000001")
+    ):
+        return (
+            fallback_shares,
+            fallback_price,
+            fallback_shares * fallback_price,
+        )
     if shares > Decimal("0") and cost_basis > Decimal("0"):
         if (
             fallback_shares is not None

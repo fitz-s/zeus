@@ -16431,6 +16431,15 @@ class TestRecoveryResolutionTable:
             side="SELL",
             size=19.0,
             price=0.13,
+            created_at="2026-04-26T00:08:30Z",
+        )
+        _seed_full_exit_intent(
+            conn,
+            position_id="pos-001",
+            shares=19.0,
+            occurred_at="2026-04-26T00:08:00Z",
+            order_id="ord-exit",
+            command_id="cmd-exit",
         )
         _advance_to_acked(conn, command_id="cmd-exit", venue_order_id="ord-exit")
         append_event(
@@ -16501,6 +16510,40 @@ class TestRecoveryResolutionTable:
             "WHERE command_id = 'cmd-entry-partial'"
         ).fetchone()
         assert obligation["status"] == "RESOLVED"
+
+        from src.execution.command_recovery import (
+            reconcile_exit_lifecycle_alignment_repairs,
+        )
+
+        exit_result = reconcile_exit_lifecycle_alignment_repairs(conn)
+        assert exit_result["advanced"] == 1
+        after_exit_repair = conn.execute(
+            "SELECT phase, shares, cost_basis_usd, chain_shares "
+            "FROM position_current WHERE position_id = 'pos-001'"
+        ).fetchone()
+        assert dict(after_exit_repair) == {
+            "phase": "active",
+            "shares": 16.0,
+            "cost_basis_usd": 1.44,
+            "chain_shares": 16.0,
+        }
+        exit_execution = conn.execute(
+            "SELECT command_id, shares, fill_price, terminal_exec_status "
+            "FROM execution_fact WHERE position_id = 'pos-001' "
+            "AND order_role = 'exit'"
+        ).fetchone()
+        assert dict(exit_execution) == {
+            "command_id": "cmd-exit",
+            "shares": 19.0,
+            "fill_price": pytest.approx(0.13),
+            "terminal_exec_status": "FILLED",
+        }
+        reduction = conn.execute(
+            "SELECT json_extract(payload_json, '$.semantic_event') "
+            "FROM position_events WHERE position_id = 'pos-001' "
+            "AND caused_by = 'partial_exit_fill'"
+        ).fetchone()
+        assert reduction[0] == "CAPITAL_REDUCTION_FILLED"
 
     def test_cancelled_partial_fill_promotes_zero_projection_and_closes_remainder(
         self,
@@ -24751,6 +24794,122 @@ class TestRecoveryResolutionTable:
         assert aggregate["shares_filled"] == pytest.approx(35.306664)
         assert aggregate["filled_cost_basis_usd"] == pytest.approx(26.279998)
         assert reconcile_filled_entry_execution_fact_repairs(conn) == {
+            "scanned": 0,
+            "advanced": 0,
+            "stayed": 0,
+            "errors": 0,
+        }
+
+    def test_filled_entry_projection_reprices_rounded_cost_from_exact_fok_envelope(
+        self,
+        conn,
+    ):
+        from src.execution.command_recovery import (
+            reconcile_filled_entry_projection_repairs,
+        )
+        from src.state.db import log_execution_fact
+        from src.state.venue_command_repo import append_event
+
+        _insert(conn, size=21.0, price=0.10)
+        _advance_to_acked(conn, venue_order_id="ord-exact-cost")
+        _seed_pending_entry_projection(conn)
+        _append_test_filled_entry_projection(
+            conn,
+            position_id="pos-001",
+            command_id="cmd-001",
+            shares=21.5,
+            cost_basis_usd=2.15,
+            size_usd=2.15,
+            entry_price=0.10,
+            order_id="ord-exact-cost",
+        )
+        conn.execute(
+            """
+            UPDATE position_current
+               SET chain_state = 'synced', chain_shares = 21.5,
+                   chain_cost_basis_usd = 2.0999, chain_avg_price = 0.0976
+             WHERE position_id = 'pos-001'
+            """
+        )
+        _append_trade_fact(
+            conn,
+            order_id="ord-exact-cost",
+            trade_id="trade-rounded-cost",
+            state="CONFIRMED",
+            filled_size="21.5",
+            fill_price="0.10",
+        )
+        exact_price = Decimal("2.10") / Decimal("21.5")
+        log_execution_fact(
+            conn,
+            intent_id="pos-001:entry",
+            position_id="pos-001",
+            decision_id="dec-001",
+            command_id="cmd-001",
+            order_role="entry",
+            posted_at="2026-04-26T00:00:00Z",
+            filled_at="2026-04-26T00:06:00Z",
+            submitted_price=0.10,
+            fill_price=float(exact_price),
+            shares=21.5,
+            venue_status="FILLED",
+            terminal_exec_status="filled",
+        )
+        envelope_id = _ensure_envelope(
+            conn,
+            token_id="tok-001",
+            envelope_id="env-exact-cost",
+            order_type="FOK",
+            price=0.10,
+            size=21.0,
+            order_id="ord-exact-cost",
+            raw_response_json=json.dumps(
+                {
+                    "success": True,
+                    "status": "matched",
+                    "orderID": "ord-exact-cost",
+                    "makingAmount": "2.10",
+                    "takingAmount": "21.5",
+                }
+            ),
+        )
+        append_event(
+            conn,
+            command_id="cmd-001",
+            event_type="FILL_CONFIRMED",
+            occurred_at="2026-04-26T00:06:00Z",
+            payload={
+                "venue_order_id": "ord-exact-cost",
+                "filled_size": "21.5",
+                "fill_price": str(exact_price),
+                "final_submission_envelope_id": envelope_id,
+                "final_submission_envelope_command_id": "cmd-001",
+            },
+        )
+
+        summary = reconcile_filled_entry_projection_repairs(conn)
+
+        assert summary == {"scanned": 1, "advanced": 1, "stayed": 0, "errors": 0}
+        current = conn.execute(
+            """
+            SELECT shares, entry_price, cost_basis_usd, size_usd,
+                   chain_state, chain_shares, chain_avg_price,
+                   chain_cost_basis_usd
+              FROM position_current
+             WHERE position_id = 'pos-001'
+            """
+        ).fetchone()
+        assert dict(current) == {
+            "shares": 21.5,
+            "entry_price": pytest.approx(float(exact_price)),
+            "cost_basis_usd": pytest.approx(2.10),
+            "size_usd": pytest.approx(2.10),
+            "chain_state": "synced",
+            "chain_shares": 21.5,
+            "chain_avg_price": pytest.approx(0.0976),
+            "chain_cost_basis_usd": pytest.approx(2.0999),
+        }
+        assert reconcile_filled_entry_projection_repairs(conn) == {
             "scanned": 0,
             "advanced": 0,
             "stayed": 0,
