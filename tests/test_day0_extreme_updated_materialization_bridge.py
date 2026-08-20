@@ -1,5 +1,8 @@
 # Created: 2026-07-19
-# Last reused/audited: 2026-07-30
+# Last reused/audited: 2026-08-19
+# Lifecycle: created=2026-07-19; last_reviewed=2026-08-19; last_reused=2026-08-19
+# Purpose: Prove Day0 reseed ownership and single-writer materialization ordering.
+# Reuse: Run after changing Day0 enqueue, replacement queue claims, or writer concurrency.
 # Authority basis: operator directive 2026-07-19 (Day0 is a zero-sum race against the market
 #   book) + docs/evidence/upstream_physical_2026_07_17/day0_latency_chain_measurement.md (the
 #   measured bottleneck is the ~40-min SCHEDULED posterior recompute cadence, HOP 2b p50 39.9 min
@@ -267,7 +270,7 @@ def _multiprocess_forecast_materialization_owner(
     exact_retry_started,
     release,
 ) -> None:
-    """Drain only inside the forecast-live owner under its existing four-worker cap."""
+    """Drain only inside the forecast-live owner under its single-writer cap."""
 
     exact_path = Path(seed_file)
 
@@ -497,7 +500,8 @@ def test_day0_extreme_bridge_enqueues_exactly_one_seed_and_dedups_same_observati
 def test_day0_ingest_process_only_publishes_seed_for_bounded_forecast_owner(
     tmp_path,
 ) -> None:
-    """Two live owners still expose only forecast-live's four materialization workers."""
+    """Two live owners still expose only forecast-live's single DB writer."""
+    assert materialization_queue.DEFAULT_MATERIALIZATION_MAX_WORKERS == 1
     _prepare_forecast_db(tmp_path)
     cfg = _queue_config(tmp_path)
     ctx = multiprocessing.get_context("spawn")

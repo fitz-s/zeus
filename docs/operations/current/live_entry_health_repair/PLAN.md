@@ -2634,3 +2634,27 @@ publication barrier.
   set, and completes repeated live shared-connection scope cuts with adequate
   margin. The restart guard remains active until a post-load receipt and fresh
   monitor proof both pass; only then may its witness-bound CAS release entries.
+
+### Slice B124 — Serialize the replacement posterior SQLite writer (2026-08-19)
+
+- Live evidence: after the current-evidence revision advanced, the materializer
+  ran eight current requests in two four-process waves against the same 66 GB
+  `zeus-forecasts.db`. Every subprocess exhausted the 240 second deadline; the
+  batch took about 8.5 minutes and committed zero posteriors, leaving six of
+  seven held positions without current probability authority.
+- First-principles invariant: SQLite has one writer. Parallel commit subprocesses
+  cannot add write throughput; they multiply cold-page reads and lock contention.
+  Preserve one queue owner, claim-time held-family priority, batch ordering, and
+  the existing timeout, but execute exactly one materialization subprocess at a
+  time.
+- SCOPE: replacement live materialization subprocess concurrency only. DRAIN:
+  the active subprocess reaches success, typed blocked authority, or its existing
+  timeout before the next request starts. RESET: the next one-second poll claims
+  remaining durable work. No probability math, source selection, queue priority,
+  or fail-closed admission rule changes.
+- Acceptance: the relationship test fixes the writer cap at one and proves a
+  second exact Day0 request stays retryable until the first writer releases;
+  focused queue/Day0 tests, compile, lint, and diff checks pass. Runtime proof
+  requires a post-load batch with at least one current posterior commit or a
+  truthful per-request authority block, followed by fresh held-position monitor
+  evidence under the exact loaded SHA.
