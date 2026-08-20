@@ -3868,6 +3868,8 @@ test_metadata:
       Current-regime capital evaluator fails closed on placeholder DBs,
       incomplete or tampered exact-revision proof receipts, non-causal or
       unverified settlements, duplicate family-days, non-positive delta-log-
-      wealth lower bounds, and non-positive exact-revision live net PnL.
+      wealth lower bounds, and non-positive exact-revision live net PnL; live
+      EDLI receipt binding reads the current WORLD ledger, never the retired
+      TRADE mirror.
     created: 2026-08-12
     last_reused_or_audited: 2026-08-12

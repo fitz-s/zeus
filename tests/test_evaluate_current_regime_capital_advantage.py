@@ -615,10 +615,15 @@ def test_counterfactual_evidence_counts_only_first_receipt_per_target_date():
 def test_live_curve_requires_exact_schema_22_edli_receipt_binding():
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
+    events_conn = sqlite3.connect(":memory:")
+    events_conn.row_factory = sqlite3.Row
     conn.executescript(
         "CREATE TABLE venue_commands (position_id TEXT,intent_kind TEXT,decision_id TEXT);"
-        "CREATE TABLE edli_live_order_events (aggregate_id TEXT,event_type TEXT,payload_json TEXT);"
         "CREATE TABLE decision_log (id INTEGER PRIMARY KEY,mode TEXT,artifact_json TEXT);"
+    )
+    events_conn.execute(
+        "CREATE TABLE edli_live_order_events "
+        "(aggregate_id TEXT,event_type TEXT,payload_json TEXT)"
     )
     summary = _proof_summary(
         city="Chicago",
@@ -653,11 +658,11 @@ def test_live_curve_requires_exact_schema_22_edli_receipt_binding():
         selection_epoch_identity=summary["selection_epoch_identity"],
     )
     conn.execute("INSERT INTO venue_commands VALUES ('position-1','ENTRY','cmd-1')")
-    conn.execute(
+    events_conn.execute(
         "INSERT INTO edli_live_order_events VALUES ('aggregate-1','ExecutionCommandCreated',?)",
         (json.dumps({"execution_command_id": "cmd-1"}),),
     )
-    conn.execute(
+    events_conn.execute(
         "INSERT INTO edli_live_order_events VALUES ('aggregate-1','PreSubmitRevalidated',?)",
         (json.dumps({"global_auction_receipt": receipt.as_payload()}),),
     )
@@ -672,6 +677,7 @@ def test_live_curve_requires_exact_schema_22_edli_receipt_binding():
                 }
             ]
         },
+        events_conn=events_conn,
     )
 
     assert bound["selection_revision_bound"] is True

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Lifecycle: created=2026-08-12; last_reviewed=2026-08-19; last_reused=2026-08-19
+# Lifecycle: created=2026-08-12; last_reviewed=2026-08-20; last_reused=2026-08-20
 # Purpose: Grade exact current selection/probability revisions on causal capital outcomes.
 # Reuse: Run read-only against canonical WORLD/FORECAST/TRADES DBs; output is evidence, not authority.
 """Fail-closed evaluator for current-regime capital advantage.
@@ -47,6 +47,7 @@ from src.riskguard import riskguard as rg  # noqa: E402
 from src.state.db import (  # noqa: E402
     get_forecasts_connection_read_only,
     get_trade_connection_read_only,
+    get_world_connection_read_only,
 )
 from src.types.market import Bin  # noqa: E402
 from src.data.replacement_forecast_cycle_policy import (  # noqa: E402
@@ -767,8 +768,10 @@ def _command_global_receipt(
     conn: sqlite3.Connection,
     *,
     execution_command_id: str,
+    events_conn: sqlite3.Connection | None = None,
 ) -> GlobalAuctionReceiptRef:
-    rows = conn.execute(
+    event_source = events_conn or conn
+    rows = event_source.execute(
         "SELECT pre.payload_json FROM edli_live_order_events AS cmd "
         "JOIN edli_live_order_events AS pre "
         "ON pre.aggregate_id=cmd.aggregate_id "
@@ -802,6 +805,8 @@ def _command_global_receipt(
 def _bind_live_curve_to_global_revision(
     conn: sqlite3.Connection,
     curve: Mapping[str, object],
+    *,
+    events_conn: sqlite3.Connection | None = None,
 ) -> dict[str, object]:
     exact_rows: list[dict[str, object]] = []
     unbound_reasons: dict[str, int] = {}
@@ -820,6 +825,7 @@ def _bind_live_curve_to_global_revision(
                 _command_global_receipt(
                     conn,
                     execution_command_id=str(command[0] or ""),
+                    events_conn=events_conn,
                 )
                 for command in commands
             }
@@ -1457,6 +1463,11 @@ def evaluate(
         frozenset({"settlement_outcomes", "market_events"}),
         connection_factory=get_forecasts_connection_read_only,
     )
+    world = _read_only(
+        world_path,
+        frozenset({"edli_live_order_events"}),
+        connection_factory=get_world_connection_read_only,
+    )
 
     try:
         receipt = _latest_proof_receipt_coverage(trades)
@@ -1483,7 +1494,11 @@ def evaluate(
         }
         live_curves = {
             strategy: (
-                _bind_live_curve_to_global_revision(trades, curve)
+                _bind_live_curve_to_global_revision(
+                    trades,
+                    curve,
+                    events_conn=world,
+                )
                 if curve.get("status") != "capital_truth_degraded"
                 else {**curve, "selection_revision_bound": False}
             )
@@ -1501,6 +1516,7 @@ def evaluate(
             as_of=as_of,
         )
     finally:
+        world.close()
         forecasts.close()
         trades.close()
     verdict, failures = _build_verdict(
