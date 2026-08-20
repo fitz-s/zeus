@@ -28,12 +28,11 @@ Verdicts (both directions, both metrics):
     (not a hard fact for either side: a max can still leave upward / min downward;
      that is estimator territory and stays behind the maturity gate)
 
-Held-position hard-fact authority combines current WU observations, durable WU
-rows, and a durable same-station METAR publication monotonically.  The METAR
-lane is admissible only when its raw publication ledger, source clocks,
-configured station, empirical WU divergence margin, and live-authority Day0
-event reproduce one exact running extreme.  A bare fast-tail scalar still has
-no absorbing held-side probability or exit authority.
+WU-settled contracts do not enter this exact lane from current WU hourly rows
+or same-station METAR publications: the venue resolves a revisable Daily
+Observations product, so those feeds remain statistical evidence. A bare
+fast-tail scalar likewise has no absorbing held-side probability or exit
+authority.
   An ACTIVE oracle-anomaly pause for the family disables the lane entirely
   (a suspect truth source must not drive an irreversible exit).
 
@@ -292,20 +291,22 @@ def _final_complete_hourly_observation_extreme(
 ) -> FinalDailyObservation | None:
     """Promote a complete settlement-family timeline after day advancement.
 
-    WU and NOAA/Ogimet have no separate daily-final row in the canonical
-    observation plane. The first causal observation of the following local day
-    proves that the source has advanced past the target day; exact hourly
-    coverage proves that no target-day interval was silently omitted. Both
-    facts are required.
+    NOAA/Ogimet has no separate daily-final row in the canonical observation
+    plane. The first causal observation of the following local day proves that
+    the source has advanced past the target day; exact hourly coverage proves
+    that no target-day interval was silently omitted. Both facts are required.
+
+    WU is deliberately excluded. Polymarket settles the WU Daily Observations
+    web product, while ``wu_icao_history`` is a distinct hourly API product.
+    Complete hourly coverage therefore proves neither the value nor the
+    revision state of the settlement product.
     """
 
     source_type = str(
         getattr(city, "settlement_source_type", "") or "wu_icao"
     ).strip().lower()
     station = str(getattr(city, "wu_station", "") or "").strip().upper()
-    if source_type == "wu_icao":
-        hourly_source = "wu_icao_history"
-    elif source_type == "noaa" and station:
+    if source_type == "noaa" and station:
         hourly_source = f"ogimet_metar_{station.lower()}"
     else:
         return None
@@ -1588,6 +1589,17 @@ def evaluate_hard_fact_exit(
         metric = str(getattr(position, "temperature_metric", "") or "high")
         if not target_date or direction not in {"buy_yes", "buy_no"}:
             return None
+        # WU-settled markets resolve from a revisable Daily Observations
+        # product. Neither the hourly WU API nor a same-station METAR print is
+        # settlement finality for that product; both stay in the statistical
+        # redecision lane.
+        if (
+            str(getattr(city, "settlement_source_type", "") or "")
+            .strip()
+            .lower()
+            == "wu_icao"
+        ):
+            return None
 
         from src.data.day0_oracle_anomaly import is_day0_family_paused
 
@@ -1614,6 +1626,15 @@ def evaluate_hard_fact_exit(
             durable_only=durable_only,
         )
         if evidence is None:
+            return None
+        from src.events.day0_authority import (
+            DAY0_ABSORBING_FINALITIES,
+            day0_evidence_finality,
+        )
+
+        if day0_evidence_finality(
+            {"settlement_source": evidence.source}
+        ) not in DAY0_ABSORBING_FINALITIES:
             return None
         verdict = hard_fact_bin_verdict(
             metric=metric, direction=direction,

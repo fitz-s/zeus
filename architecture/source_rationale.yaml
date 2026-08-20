@@ -363,6 +363,15 @@ files:
     - src/events/reactor.py
     - src/engine/event_reactor_adapter.py
     - src/engine/monitor_refresh.py
+  src/data/day0_observation_reader.py:
+    zone: K2_runtime
+    authority_role: day0_current_observation_and_revision_likelihood_reader
+    why: Reads source-typed current-day extrema without mixing provider roles. WU changed-payload observation_revisions provide a causal, conservative Jeffreys estimate that the current hourly boundary survives through the remaining source updates; this uncertainty stays inside q and prevents a revisable WU print from becoming exact payoff authority.
+    hazards:
+    - SOURCE_TRUTH_PLANE_COLLAPSE
+    downstream:
+    - src/engine/event_reactor_adapter.py
+    - src/engine/monitor_refresh.py
   src/data/replacement_current_value_serving.py:
     zone: K2_runtime
     authority_role: replacement_current_value_serving_selector
@@ -375,7 +384,7 @@ files:
   src/data/replacement_forecast_materializer.py:
     zone: K2_runtime
     authority_role: replacement_forecast_posterior_writer
-    why: Writes forecast_posteriors rows with content-addressed identity (posterior_identity_hash/dependency_hash/posterior_config_hash over dependency_hash, q, q_lcb, q_ucb, source_cycle_time) so a later read can prove which raw inputs a served posterior was built from. The source-clock live route binds the latest causal target-specific VERIFIED ECMWF ENS snapshot plus simultaneous provider values into a decision-time current-evidence shape; absolute ENS-member displacement from the served provider center remains an explicit uncertainty component because those same members remain absolute settlement-bin evidence. A qualified same-station fast Day0 witness updates the current physical boundary through its station-local residual distribution, while WU remains the only hard support bound; during the target day the action simplex is still rebuilt from the shrinking remaining-weather interval, and only after that local interval ends may the residual-conditioned final-value carrier serve reduce-only redecision pending settlement publication. Its semantics revisions, snapshot or residual identity, and shape hash enter config/dependency identity; missing or revision-mismatched current shape fails closed instead of falling back to historical residual/floor/mixture probability. On a UNIQUE(posterior_identity_hash) conflict, re-selects the existing row instead of duplicating it.
+    why: Writes forecast_posteriors rows with content-addressed identity (posterior_identity_hash/dependency_hash/posterior_config_hash over dependency_hash, q, q_lcb, q_ucb, source_cycle_time) so a later read can prove which raw inputs a served posterior was built from. The source-clock live route binds the latest causal target-specific VERIFIED ECMWF ENS snapshot plus simultaneous provider values into a decision-time current-evidence shape; absolute ENS-member displacement from the served provider center remains an explicit uncertainty component because those same members remain absolute settlement-bin evidence. A qualified same-station fast Day0 witness updates the current physical boundary through its station-local residual distribution, while revisable WU current evidence remains a statistical conditioning boundary rather than exact support; during the target day the action simplex is rebuilt from the shrinking remaining-weather interval and source-revision likelihood. Its semantics revisions, snapshot or residual identity, and shape hash enter config/dependency identity; missing or revision-mismatched current shape fails closed instead of falling back to historical residual/floor/mixture probability. On a UNIQUE(posterior_identity_hash) conflict, re-selects the existing row instead of duplicating it.
     hazards:
     - SOURCE_TRUTH_PLANE_COLLAPSE
     downstream:
@@ -1510,7 +1519,9 @@ files:
     authority_role: observation_instants_v2_typed_writer
     why: Typed writer enforcing plan v3 antibodies A1 (non-default authority/data_version/provenance_json), A2 (per-city expected
       source), A6 (HK must route hko_hourly_accumulator, never VHHH), and possession causality (imported_at cannot precede
-      the observation bucket or raw source print) before every observation_instants INSERT.
+      the observation bucket or raw source print) before every observation_instants INSERT. A causally newer same-hour WU
+      payload supersedes the current row in either direction while the displaced view remains immutable in observation_revisions;
+      append-only-extremum assumptions cannot preserve a provider value after WU has corrected it.
   src/data/meteostat_bulk_client.py:
     zone: K2_runtime
     authority_role: meteostat_bulk_boundary
@@ -1928,7 +1939,7 @@ files:
   src/events/day0_authority.py:
     zone: K2_runtime
     authority_role: day0_probability_semantics_and_hard_fact_contract
-    why: Owns Day0 live-authority validation, q-source/mode grammar, and revision-stamped q-version identity so changed conditional probability laws cannot pool with old realized capital evidence.
+    why: Owns Day0 live-authority validation, q-source/mode grammar, and revision-stamped q-version identity so changed conditional probability laws cannot pool with old realized capital evidence. WU current/hourly carriers are provisional because the venue settles a revisable Daily Observations product; their empirical revision-survival likelihood stays inside q and can never create exact bin payoffs.
     downstream:
     - src/engine/event_reactor_adapter.py
     - src/riskguard/riskguard.py
@@ -2128,12 +2139,12 @@ files:
     authority_role: day0_absorbing_payoff_and_exit_authority
     why: >-
       Converts only source-complete monotone Day0 boundaries into exact held
-      payoff facts. WU evidence remains authoritative at face value; a
-      same-station AviationWeather METAR may join it only when immutable raw
-      observation_prints, causal publication/fetch clocks, the empirical
-      per-city divergence margin, settlement rounding, and an independently
-      live-authorized DAY0_EXTREME_UPDATED event reproduce the same running
-      extreme. A scalar memo or intraday containment never creates a hard fact.
+      payoff facts. WU intraday and completed-hourly evidence remains
+      statistical because provider revisions and the separate Daily
+      Observations settlement product prevent pathwise finality; same-station
+      AviationWeather METAR remains statistical for the same WU-settled
+      contract even when its raw publication and causal clocks are complete.
+      A scalar memo or intraday containment never creates a hard fact.
     hazards:
     - SOURCE_TRUTH_PLANE_COLLAPSE
     downstream:

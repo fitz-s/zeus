@@ -53,6 +53,7 @@ the settlement-metric-aware verdict for the live entry/monitor lanes.
 """
 from __future__ import annotations
 
+import json
 import math
 import sqlite3
 import statistics
@@ -582,6 +583,122 @@ def hko_provisional_revision_likelihood(
         "retraction_count": retraction_count,
         "median_update_seconds": cadence_seconds,
         "projected_remaining_updates": remaining_updates,
+        "boundary_survival_probability": survival_probability,
+    }
+
+
+def wu_provisional_revision_likelihood(
+    conn: sqlite3.Connection,
+    *,
+    city: str,
+    timezone_name: str,
+    target_date: str,
+    temperature_metric: str,
+    decision_time: datetime,
+) -> dict[str, object]:
+    """Estimate survival of a current WU hourly boundary through day end.
+
+    ``observation_revisions`` is the immutable causal record of later WU
+    payloads for one source-hour.  Retractions are common and therefore must
+    remain inside q instead of being erased by an absorbing max/min mask.  The
+    denominator intentionally contains only changed-payload transitions; this
+    overstates revision risk relative to unchanged polls and is conservative
+    for new capital.
+    """
+
+    metric = str(temperature_metric).strip().lower()
+    if metric not in {"high", "low"}:
+        raise ValueError("WU_PROVISIONAL_REVISION_METRIC_INVALID")
+    target = date.fromisoformat(str(target_date))
+    lookback_start = target - timedelta(days=7)
+    decision_utc = decision_time.astimezone(timezone.utc)
+    rows = None
+    for table_ref in (
+        "world.observation_revisions",
+        "observation_revisions",
+        "forecasts.observation_revisions",
+    ):
+        try:
+            rows = conn.execute(
+                f"""
+                SELECT target_date, existing_row_json, incoming_row_json,
+                       recorded_at
+                  FROM {table_ref}
+                 WHERE table_name = 'observation_instants'
+                   AND city = ?
+                   AND source = 'wu_icao_history'
+                   AND target_date BETWEEN ? AND ?
+                   AND datetime(recorded_at) <= datetime(?)
+                 ORDER BY recorded_at, id
+                """,
+                (
+                    str(city),
+                    lookback_start.isoformat(),
+                    target.isoformat(),
+                    decision_utc.isoformat(),
+                ),
+            ).fetchall()
+            break
+        except sqlite3.Error:
+            rows = None
+    if not rows:
+        raise ValueError("WU_PROVISIONAL_REVISION_HISTORY_INSUFFICIENT")
+
+    transition_count = 0
+    retraction_count = 0
+    for row in rows:
+        try:
+            existing = json.loads(row[1])
+            incoming = json.loads(row[2])
+            existing_value = float(
+                existing["running_max" if metric == "high" else "running_min"]
+            )
+            incoming_value = float(
+                incoming["running_max" if metric == "high" else "running_min"]
+            )
+        except (KeyError, TypeError, ValueError):
+            continue
+        if not math.isfinite(existing_value) or not math.isfinite(incoming_value):
+            continue
+        transition_count += 1
+        if (metric == "high" and incoming_value < existing_value - 1e-9) or (
+            metric == "low" and incoming_value > existing_value + 1e-9
+        ):
+            retraction_count += 1
+    if transition_count <= 0:
+        raise ValueError("WU_PROVISIONAL_REVISION_HISTORY_INSUFFICIENT")
+
+    try:
+        target_end = datetime.combine(
+            target + timedelta(days=1),
+            datetime.min.time(),
+            tzinfo=ZoneInfo(str(timezone_name)),
+        ).astimezone(timezone.utc)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("WU_PROVISIONAL_REVISION_TIMEZONE_INVALID") from exc
+    remaining_hours = max(
+        0.0, (target_end - decision_utc).total_seconds() / 3600.0
+    )
+    remaining_updates = max(1, int(math.ceil(remaining_hours)))
+    alpha = float(retraction_count) + 0.5
+    beta = float(transition_count - retraction_count) + 0.5
+    log_survival = (
+        math.lgamma(beta + remaining_updates)
+        - math.lgamma(beta)
+        + math.lgamma(alpha + beta)
+        - math.lgamma(alpha + beta + remaining_updates)
+    )
+    survival_probability = float(math.exp(log_survival))
+    if not 0.0 < survival_probability < 1.0:
+        raise ValueError("WU_PROVISIONAL_REVISION_LIKELIHOOD_INVALID")
+    return {
+        "semantics": "wu_changed_payload_retraction_beta_jeffreys_v1",
+        "lookback_start": lookback_start.isoformat(),
+        "lookback_end": target.isoformat(),
+        "transition_count": transition_count,
+        "retraction_count": retraction_count,
+        "projected_remaining_updates": remaining_updates,
+        "denominator_basis": "changed_payload_transitions_conservative",
         "boundary_survival_probability": survival_probability,
     }
 

@@ -1,5 +1,5 @@
 # Created: 2026-06-10
-# Last reused or audited: 2026-08-19
+# Last reused or audited: 2026-08-20
 # Authority basis: alpha-clock realignment plus adversarial review MUST-FIX
 #   #1 (hard-fact bin-death exit lane, buy_yes kill + buy_no symmetric lane),
 #   #3-wiring (resting-order cancel), #4 (METAR plausibility bound), #5 (day0
@@ -46,6 +46,7 @@ from src.execution.day0_hard_fact_exit import (
     _final_daily_observation_extreme,
     _hko_rounded_extremes,
     _reset_wu_memo_for_tests,
+    _wu_hard_fact_evidence,
     _wu_rounded_extremes,
     cancel_day0_dead_bin_resting_entries,
     day0_entry_bin_still_alive,
@@ -485,7 +486,7 @@ def test_post_local_day_future_final_row_is_not_decision_time_authority():
     assert final is None
 
 
-def test_post_local_day_complete_wu_hours_and_following_day_are_final():
+def test_post_local_day_complete_wu_hours_are_not_daily_observations_final():
     conn = _final_wu_hourly_observation_conn()
     conn.execute("ATTACH DATABASE ':memory:' AS world")
     conn.execute(
@@ -502,11 +503,7 @@ def test_post_local_day_complete_wu_hours_and_following_day_are_final():
         conn=conn,
     )
 
-    assert final is not None
-    assert final.raw_extreme == pytest.approx(35.4)
-    assert final.settled_extreme == 35.0
-    assert final.source == "wu_icao_history:following_day_observed"
-    assert final.station_id == "LFPB"
+    assert final is None
 
 
 @pytest.mark.parametrize(
@@ -545,7 +542,7 @@ def test_post_local_day_complete_noaa_hours_are_final(
     ("2026-03-29", "2026-10-25"),
     ids=("dst-23-hours", "dst-25-hours"),
 )
-def test_post_local_day_complete_hourly_dst_day_is_final(target_date):
+def test_post_local_day_complete_wu_dst_hours_are_not_final(target_date):
     conn = _final_wu_hourly_observation_conn(
         city="Paris",
         timezone_name="Europe/Paris",
@@ -567,8 +564,7 @@ def test_post_local_day_complete_hourly_dst_day_is_final(target_date):
         conn=conn,
     )
 
-    assert final is not None
-    assert final.source == "wu_icao_history:following_day_observed"
+    assert final is None
 
 
 @pytest.mark.parametrize(
@@ -856,14 +852,8 @@ class TestSourceDiscipline:
         )
         return conn
 
-    def test_seoul_durable_fast_event_kills_dead_bin_before_wu_catches_up(self):
-        """Forward specimen: RKSI published 29C four minutes before WU ingest.
-
-        Raw report + exact clocks + the live-authority event + the empirical
-        zero margin are jointly sufficient for the monotone fact that a 28C
-        HIGH YES bin is dead. A same-clock future-received event is excluded;
-        no WU row or network fetch is borrowed.
-        """
+    def test_seoul_fast_event_is_statistical_not_wu_settlement_finality(self):
+        """A fast same-station print cannot create exact WU payoff authority."""
 
         conn = self._seoul_fast_hard_fact_conn()
         verdict = evaluate_hard_fact_exit(
@@ -881,12 +871,7 @@ class TestSourceDiscipline:
             durable_only=True,
         )
 
-        assert verdict is not None
-        assert verdict.action == "EXIT_DEAD_BIN"
-        assert verdict.rounded_extreme == pytest.approx(29.0)
-        assert "aviationweather_metar:durable_monotone_bound" in verdict.source
-        assert verdict.evidence is not None
-        assert verdict.evidence.is_complete_for(_seoul())
+        assert verdict is None
 
     def test_fast_scalar_or_unbound_event_cannot_authorize_hard_fact(self):
         conn = self._seoul_fast_hard_fact_conn(station="NOT_RKSI")
@@ -1239,10 +1224,8 @@ class TestSourceDiscipline:
         _add_generated_payload_provenance(conn)
         return conn
 
-    def test_durable_observation_instants_low_structural_win_drives_hold(self, monkeypatch):
-        """Paris regression: verified WU-hourly rows showed low 18C before the
-        monitor tried to sell a 19C buy_no. The durable rows must be a hard fact
-        source even when WU live API / METAR memo are cold."""
+    def test_durable_wu_hourly_low_is_provisional_not_structural_hold(self, monkeypatch):
+        """WU hourly values can retract and therefore cannot force q=1 hold."""
         monkeypatch.setattr(
             "src.execution.day0_hard_fact_exit._wu_rounded_extremes",
             lambda city, target_date, now: (_ for _ in ()).throw(AssertionError("WU API must not be called")),
@@ -1283,13 +1266,7 @@ class TestSourceDiscipline:
             now=datetime(2026, 6, 20, 4, 2, 40, tzinfo=UTC),
             world_conn=conn,
         )
-        assert verdict is not None
-        assert verdict.action == "HOLD_STRUCTURAL_WIN"
-        assert verdict.rounded_extreme == pytest.approx(18.0)
-        assert verdict.source == "wu_icao_history"
-        belief = hard_fact_monitor_belief(verdict=verdict, direction="buy_no")
-        assert belief is not None
-        assert belief.held_side_prob == pytest.approx(1.0)
+        assert verdict is None
 
     def test_durable_fractional_extreme_is_settlement_rounded_before_verdict(self, monkeypatch):
         """M-8 (audit 2026-07-18): a sub-degree durable running extreme must pass
@@ -1314,13 +1291,13 @@ class TestSourceDiscipline:
         )
         # 26.4 rounds to 26 -> extreme INSIDE the held bin -> not a hard fact
         assert verdict is None
-        # but a genuinely-beyond fractional value still kills: 26.6 -> 27 > 26
+        # A later WU 26.6 print is still provisional, not an exact kill.
         conn.execute("UPDATE observation_instants SET running_max = 26.6")
         verdict = evaluate_hard_fact_exit(
             position=_position(bin_label="26°C on June 10?"),
             city=_tokyo(), now=NOW, world_conn=conn,
         )
-        assert verdict is not None and verdict.action == "EXIT_DEAD_BIN"
+        assert verdict is None
 
     def test_durable_observation_instants_respects_local_date_and_now_floor(self, monkeypatch):
         """The durable lane must not repeat the UTC-date floor bug: target_date is
@@ -2803,8 +2780,8 @@ class TestTupleConnectionTopology:
         assert _resolve_order_bin_identity(conn, "tok-dead-yes") is None
 
 
-def test_station_bound_durable_wu_evidence_structurally_wins_shenzhen_shape(monkeypatch):
-    """A WU record proves a generic 28C NO win only when it names ZGSZ."""
+def test_station_bound_durable_wu_evidence_does_not_force_shenzhen_hold(monkeypatch):
+    """A same-station WU hourly row is valid evidence but not finality."""
     _set_metar_memo(monkeypatch, None)
     verdict = evaluate_hard_fact_exit(
         position=_position(
@@ -2815,14 +2792,7 @@ def test_station_bound_durable_wu_evidence_structurally_wins_shenzhen_shape(monk
         world_conn=_hard_fact_observation_conn(station_id="ZGSZ"),
     )
 
-    assert verdict is not None
-    assert verdict.action == "HOLD_STRUCTURAL_WIN"
-    assert verdict.rounded_extreme == pytest.approx(29.0)
-    assert verdict.evidence is not None
-    assert verdict.evidence.station_id == "ZGSZ"
-    assert verdict.evidence.raw_extreme == pytest.approx(28.6)
-    assert verdict.evidence.rounded_extreme == pytest.approx(29.0)
-    assert verdict.evidence.is_complete_for(_shenzhen())
+    assert verdict is None
 
 
 @pytest.mark.parametrize(
@@ -2958,7 +2928,7 @@ def test_direct_wu_missing_raw_payload_hash_never_authorizes_hard_fact(monkeypat
     assert verdict is None
 
 
-def test_direct_and_durable_combine_preserves_authentic_payload_identities(monkeypatch):
+def test_direct_and_durable_evidence_preserves_authentic_payload_identities(monkeypatch):
     direct_hash = "b" * 64
     monkeypatch.setattr(
         "src.execution.day0_hard_fact_exit._wu_rounded_extremes",
@@ -2978,26 +2948,23 @@ def test_direct_and_durable_combine_preserves_authentic_payload_identities(monke
         ),
     )
 
-    verdict = evaluate_hard_fact_exit(
-        position=_position(
-            city="Shenzhen", target_date="2026-06-10",
-            bin_label="28°C on June 10?", direction="buy_no",
-            temperature_metric="high",
-        ),
+    evidence = _wu_hard_fact_evidence(
         city=_shenzhen(),
+        target_date="2026-06-10",
+        metric="high",
         now=NOW,
         world_conn=_hard_fact_observation_conn(station_id="ZGSZ"),
+        durable_only=False,
     )
 
-    assert verdict is not None
-    assert verdict.evidence is not None
-    assert verdict.evidence.payload_identity == direct_hash
-    assert verdict.evidence.contributor_payload_identities == (
+    assert evidence is not None
+    assert evidence.payload_identity == direct_hash
+    assert evidence.contributor_payload_identities == (
         direct_hash,
         RAW_PAYLOAD_HASH,
     )
-    assert verdict.evidence.source_identity.startswith("wu-hard-fact:")
-    assert verdict.evidence.is_complete_for(_shenzhen())
+    assert evidence.source_identity.startswith("wu-hard-fact:")
+    assert evidence.is_complete_for(_shenzhen())
 
 
 def test_station_mismatch_is_not_hard_fact_authority(monkeypatch):

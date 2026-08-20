@@ -35189,14 +35189,10 @@ def _prepare_current_global_probability_family(
             )
             if (
                 provisional_day0_observation
-                and entry_authority
-            ):
-                raise ValueError(
-                    "GLOBAL_DAY0_PROVISIONAL_OBSERVATION_NOT_ENTRY_AUTHORITY"
-                )
-            if (
-                provisional_day0_observation
                 and not allow_provisional_day0_replacement
+                and str(
+                    (provisional_day0_fact or {}).get("observation_source") or ""
+                ).strip().lower().startswith("hko_hourly_accumulator")
             ):
                 raise ValueError(
                     "GLOBAL_DAY0_PROVISIONAL_OBSERVATION_NOT_EXECUTION_AUTHORITY"
@@ -35606,21 +35602,36 @@ def _prepare_current_global_probability_family(
         payload.update(current_day0_payload)
         if day0_payload_out is not None:
             day0_payload_out.update(current_day0_payload)
-        if (
-            provisional_day0_observation
-            and fast_residual_conditioning is None
-        ):
+        if provisional_day0_observation:
             from src.data.day0_observation_reader import (
                 hko_provisional_revision_likelihood,
+                wu_provisional_revision_likelihood,
             )
 
             try:
-                revision_likelihood = hko_provisional_revision_likelihood(
-                    day0_observation_conn,
-                    target_date=str(family.target_date),
-                    temperature_metric=str(family.metric),
-                    decision_time=decision_time,
-                )
+                provisional_source = str(
+                    current_day0_payload.get("settlement_source") or ""
+                ).strip().lower()
+                if provisional_source.startswith("hko_hourly_accumulator"):
+                    revision_likelihood = hko_provisional_revision_likelihood(
+                        day0_observation_conn,
+                        target_date=str(family.target_date),
+                        temperature_metric=str(family.metric),
+                        decision_time=decision_time,
+                    )
+                elif provisional_source.startswith("wu"):
+                    revision_likelihood = wu_provisional_revision_likelihood(
+                        day0_observation_conn,
+                        city=str(family.city),
+                        timezone_name=str(city.timezone),
+                        target_date=str(family.target_date),
+                        temperature_metric=str(family.metric),
+                        decision_time=decision_time,
+                    )
+                else:
+                    raise ValueError(
+                        "PROVISIONAL_SOURCE_REVISION_MODEL_UNAVAILABLE"
+                    )
             except ValueError as exc:
                 if str(exc) == "HKO_PROVISIONAL_ROLLOVER_UNCONFIRMED":
                     # SCOPE: this HKO family only. DRAIN: a changed official

@@ -1,5 +1,5 @@
 # Created: 2026-07-03
-# Last reused/audited: 2026-08-19
+# Last reused/audited: 2026-08-20
 # Authority basis: current global auction, posterior-mean Fractional Kelly,
 #                  Day0 global-cut routing, and auditable SELL holding bindings
 """Current global auction, q-kernel, and live actuation integration contracts."""
@@ -7623,14 +7623,15 @@ def test_current_day0_global_probability_uses_current_remaining_day_simplex(
                 {"bin_id": key, "lower_c": lower, "upper_c": upper}
                 for key, lower, upper in posterior_bins
             ],
-            "day0_conditioning": {
-                "active": True,
-                "metric": "high",
-                "source": "wu_icao_history",
-                "observation_time": "2026-07-11T17:00:00+00:00",
-                "observed_extreme_c": (69.0 - 32.0) * 5.0 / 9.0,
-                "unit": "F",
-            },
+                "day0_provisional_observation": {
+                    "active": True,
+                    "metric": "high",
+                    "source": "wu_icao_history",
+                    "observation_time": "2026-07-11T17:00:00+00:00",
+                    "observed_extreme_c": (69.0 - 32.0) * 5.0 / 9.0,
+                    "unit": "F",
+                    "support_truncation": False,
+                },
         },
         source_cycle_time="2026-07-11T00:00:00+00:00",
         source_available_at="2026-07-11T06:00:00+00:00",
@@ -7710,6 +7711,16 @@ def test_current_day0_global_probability_uses_current_remaining_day_simplex(
         era,
         "_global_day0_execution_payload",
         current_observation_payload,
+    )
+    monkeypatch.setattr(
+        "src.data.day0_observation_reader.wu_provisional_revision_likelihood",
+        lambda *args, **kwargs: {
+            "semantics": "wu_changed_payload_retraction_beta_jeffreys_v1",
+            "transition_count": 20,
+            "retraction_count": 2,
+            "projected_remaining_updates": 6,
+            "boundary_survival_probability": 0.6,
+        },
     )
 
     remaining_day_calls = 0
@@ -7822,16 +7833,12 @@ def test_current_day0_global_probability_uses_current_remaining_day_simplex(
         row[:4]: row[4]
         for row in prepared.candidate_payoff_q_lcb_caps
     }
-    bin_by_condition = {
-        binding.condition_id: binding.bin_id
-        for binding in witness.bindings
-    }
-    assert caps[
-        (witness.family_key, "c2", bin_by_condition["c2"], "YES")
-    ] == pytest.approx(0.3)
-    assert caps[
-        (witness.family_key, "c1", bin_by_condition["c1"], "NO")
-    ] == pytest.approx(0.4)
+    # Provisional WU rows carry a revision mixture; they cannot create exact
+    # deterministic payoff caps for any bin or side.
+    assert caps == {}
+    assert day0_payload[
+        "_edli_day0_provisional_boundary_survival_probability"
+    ] == pytest.approx(0.6)
     assert witness.yes_point_q.tolist() == pytest.approx([0.0, 0.2, 0.8])
     assert day0_payload["_edli_day0_source_clock_bound_posterior_identity"]
 
@@ -7850,23 +7857,16 @@ def test_current_day0_global_probability_uses_current_remaining_day_simplex(
         probability_use=era._CurrentProbabilityUse.HELD_MONITOR,
     )
     held_witness = held.probability_witness
-    assert replacement_bound_reads == 2
+    assert replacement_bound_reads == 1
     assert held_witness.yes_point_q.tolist() == pytest.approx(
         witness.yes_point_q.tolist()
     )
-    assert held_witness.q_version == witness.q_version
-    assert held_witness.source_truth_identity == witness.source_truth_identity
-    assert (
-        held_witness.probability_content_identity
-        == witness.probability_content_identity
+    assert held_payload["_edli_day0_redecision_authority_scope"] == (
+        "held_exposure_current_day0_only_v1"
     )
-    assert held_payload["_edli_global_day0_binding"][
-        "probability_base_identity"
-    ] == binding["probability_base_identity"]
     assert held_payload[
-        "_edli_day0_source_clock_bound_posterior_identity"
-    ] == day0_payload["_edli_day0_source_clock_bound_posterior_identity"]
-    assert "_edli_day0_redecision_authority_scope" not in held_payload
+        "_edli_day0_provisional_boundary_survival_probability"
+    ] == pytest.approx(0.6)
 
     capture_time["value"] = "2026-07-11T17:31:00+00:00"
     recaptured_payload: dict[str, object] = {}

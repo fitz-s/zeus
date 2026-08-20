@@ -34,7 +34,7 @@ DAY0_REMAINING_DAY_GLOBAL_AUTHORITY = "day0_remaining_day_global_probability_v1"
 # authorized a fill.  Increment this when the Day0 probability construction
 # changes; the value is stamped into every live ENTRY q_version.
 DAY0_PROBABILITY_SEMANTICS_REVISION = (
-    "day0_source_clock_total_variance_minus_path_spread_v4"
+    "day0_source_clock_total_variance_minus_path_spread_v5"
 )
 _DAY0_SEMANTIC_Q_VERSION_PREFIX = "day0-semrev:"
 DAY0_DETERMINISTIC_BIN_PAYOFF_Q_SOURCE = "day0_deterministic_bin_payoff"
@@ -123,6 +123,19 @@ def day0_evidence_finality(payload: Mapping[str, object]) -> str:
     # contaminated payload. HKO explicitly revises intraday snapshots.
     if source.startswith("hko_hourly_accumulator"):
         return DAY0_PROVISIONAL_CURRENT_SNAPSHOT
+    # WU weather markets resolve from the web product's Daily Observations
+    # table.  The same-station historical hourly API is a different product
+    # and its current-day values may be revised before venue resolution.  A
+    # Shenzhen 2026-08-20 receipt observed 31C here while Polymarket resolved
+    # the WU Daily Observations contract to 30C.  Therefore no WU intraday or
+    # completed-hourly carrier is a pathwise settlement bound.  It remains
+    # statistical evidence, never exact q=0/1 authority.
+    if (
+        source == "wu"
+        or source.startswith("wu_")
+        or source.startswith("observation_prints:wu")
+    ):
+        return DAY0_PROVISIONAL_CURRENT_SNAPSHOT
     # This composite names WU settlement truth plus a noisy same-station fast
     # print. The broad ``wu_*`` rule below must not turn that statistical
     # residual likelihood into a deterministic settlement boundary.
@@ -131,11 +144,9 @@ def day0_evidence_finality(payload: Mapping[str, object]) -> str:
     if source == "hko_daily_api" or source.startswith("hko_daily_api_"):
         return DAY0_FINAL_DAILY_SETTLEMENT
     monotone_source = (
-        source == "wu"
-        or source.startswith("wu_")
-        or source.startswith("ogimet_metar_")
-        or source in {"aviationweather_metar", "same_station_fast_tail"}
-        or source.startswith("observation_prints:wu")
+        source.startswith("ogimet_metar_")
+        or source.startswith("aviationweather_metar")
+        or source.startswith("same_station_fast_tail")
         or source.startswith("observation_prints:ogimet_metar_")
         or source.startswith("observation_prints:aviationweather_metar")
     )

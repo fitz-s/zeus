@@ -1,6 +1,6 @@
 # Created: 2026-06-10
-# Last reused or audited: 2026-08-19
-# Lifecycle: created=2026-06-10; last_reviewed=2026-08-19; last_reused=2026-08-19
+# Last reused or audited: 2026-08-20
+# Lifecycle: created=2026-06-10; last_reviewed=2026-08-20; last_reused=2026-08-20
 # Purpose: Protect causal Day0 remaining-window probability construction.
 # Reuse: Run before changing Day0 hourly members, state diagnostics, or bootstrap pricing.
 # Authority basis: operator green-light 2026-06-10 item B (remaining-day
@@ -60,6 +60,102 @@ UTC = timezone.utc
 # retention test still pins a target-day `now` so its 9-day-old "ancient" row is
 # correctly pruned and the fresh row is kept.
 PRUNE_NOW = datetime(2026, 6, 10, 12, 0, tzinfo=UTC)
+
+
+def test_wu_revision_history_keeps_current_boundary_inside_probability():
+    from src.data.day0_observation_reader import (
+        wu_provisional_revision_likelihood,
+    )
+
+    conn = sqlite3.connect(":memory:")
+    conn.execute(
+        "CREATE TABLE observation_revisions ("
+        "id INTEGER PRIMARY KEY, table_name TEXT, city TEXT, target_date TEXT, "
+        "source TEXT, existing_row_json TEXT, incoming_row_json TEXT, "
+        "recorded_at TEXT)"
+    )
+    rows = []
+    for index, (existing, incoming) in enumerate(
+        ((31.0, 29.0), (29.0, 30.0), (30.0, 30.0)), start=1
+    ):
+        rows.append(
+            (
+                index,
+                "observation_instants",
+                "Shenzhen",
+                "2026-08-20",
+                "wu_icao_history",
+                json.dumps({"running_max": existing, "running_min": 27.0}),
+                json.dumps({"running_max": incoming, "running_min": 27.0}),
+                f"2026-08-20T0{index + 4}:00:00+00:00",
+            )
+        )
+    conn.executemany(
+        "INSERT INTO observation_revisions VALUES (?,?,?,?,?,?,?,?)", rows
+    )
+
+    likelihood = wu_provisional_revision_likelihood(
+        conn,
+        city="Shenzhen",
+        timezone_name="Asia/Shanghai",
+        target_date="2026-08-20",
+        temperature_metric="high",
+        decision_time=datetime(2026, 8, 20, 7, 30, tzinfo=UTC),
+    )
+
+    assert likelihood["transition_count"] == 3
+    assert likelihood["retraction_count"] == 1
+    assert likelihood["projected_remaining_updates"] == 9
+    assert 0.0 < likelihood["boundary_survival_probability"] < 1.0
+
+
+def test_shenzhen_wu_31c_revision_risk_cannot_mint_exact_30c_no(monkeypatch):
+    """The observed Shenzhen incident shape must remain statistical.
+
+    A provisional 31C boundary above the 30C bin survives with the empirical
+    changed-payload probability; it cannot produce the historical q(NO)=1.
+    """
+
+    import src.engine.event_reactor_adapter as era
+    from src.contracts.settlement_semantics import SettlementSemantics
+
+    city = SimpleNamespace(
+        name="Shenzhen",
+        timezone="Asia/Shanghai",
+        settlement_unit="C",
+        settlement_source_type="wu_icao",
+        wu_station="ZGSZ",
+    )
+    monkeypatch.setattr(
+        "src.signal.ensemble_signal.sigma_instrument_for_city",
+        lambda _city: SimpleNamespace(value=0.0),
+    )
+    payload = {
+        "metric": "high",
+        "rounded_value": 31.0,
+        "settlement_source": "wu_icao_history",
+        "_edli_day0_probability_boundary_native": 31.0,
+        "_edli_day0_provisional_boundary_survival_probability": (
+            0.002502053660875787
+        ),
+    }
+
+    yes_q = era._day0_remaining_p_raw_vector(
+        np.asarray([30.0, 30.0], dtype=float),
+        city=city,
+        settlement_semantics=SettlementSemantics.for_city(city),
+        bins=[
+            Bin(None, 29, "C", "29C or below"),
+            Bin(30, 30, "C", "30C"),
+            Bin(31, None, "C", "31C or above"),
+        ],
+        payload=payload,
+        extra_member_sigma=0.0,
+    )
+
+    assert yes_q[1] > 0.98
+    assert 0.0 < yes_q[2] < 0.02
+    assert 1.0 - yes_q[1] < 0.02
 
 
 def test_target_day_hour_grid_reuses_immutable_calendar_geometry():
@@ -1356,7 +1452,7 @@ class TestRemainingDayMembers:
         payload = {
             "metric": "high",
             "rounded_value": 25.0,
-            "settlement_source": "wu_api",
+            "settlement_source": "aviationweather_metar",
         }
         members = era._day0_remaining_day_members(
             payload=payload, family=self._family(), unit="C",
@@ -1417,7 +1513,7 @@ class TestRemainingDayMembers:
             "rounded_value": settlement_boundary,
             "high_so_far": settlement_boundary if metric == "high" else None,
             "low_so_far": settlement_boundary if metric == "low" else None,
-            "settlement_source": "wu_api",
+            "settlement_source": "aviationweather_metar",
             "_edli_day0_probability_boundary_native": physical_boundary,
         }
         family = SimpleNamespace(
@@ -1503,7 +1599,7 @@ class TestRemainingDayMembers:
             payload={
                 "metric": "high",
                 "rounded_value": 25.0,
-                "settlement_source": "wu_api",
+                "settlement_source": "aviationweather_metar",
             },
             family=self._family(),
             unit="C",
@@ -1709,7 +1805,7 @@ class TestRemainingDayMembers:
             "metric": "high",
             "rounded_value": 25.0,
             "observation_time": "2026-06-10T21:20:00+00:00",
-            "settlement_source": "wu_api",
+            "settlement_source": "aviationweather_metar",
         }
 
         members = era._day0_remaining_day_members(
@@ -1781,7 +1877,7 @@ class TestRemainingDayMembers:
         payload = {
             "metric": "high",
             "rounded_value": 70,
-            "settlement_source": "wu_icao_history",
+            "settlement_source": "aviationweather_metar",
             "_edli_day0_peak_set_probability": 0.9079,
             "_edli_day0_peak_set_sample_count": 70,
             "_edli_day0_peak_set_probability_basis": (
@@ -1805,7 +1901,7 @@ class TestRemainingDayMembers:
             payload={
                 "metric": "high",
                 "rounded_value": 70,
-                "settlement_source": "wu_icao_history",
+                "settlement_source": "aviationweather_metar",
             },
             extra_member_sigma=0.0,
         )
@@ -1881,6 +1977,7 @@ class TestRemainingDayMembers:
             "rounded_value": 30,
             "high_so_far": 30.0,
             "settlement_source": "wu_icao_history",
+            "_edli_day0_provisional_boundary_survival_probability": 0.999,
             "_edli_day0_probability_boundary_native": 31.0,
             "_edli_day0_peak_set_probability": 0.95,
             "_edli_day0_peak_set_sample_count": 70,
@@ -2122,7 +2219,7 @@ class TestRemainingDayMembers:
             payload={
                 "metric": "high",
                 "rounded_value": 25.0,
-                "settlement_source": "wu_api",
+                "settlement_source": "aviationweather_metar",
             },
             family=self._family(),
             unit="C", decision_time=datetime(2026, 6, 10, 15, 0, tzinfo=UTC),
@@ -2165,7 +2262,7 @@ class TestRemainingDayMembers:
             "metric": "high",
             "rounded_value": 24.0,
             "observation_time": "2026-06-10T13:00:00+00:00",
-            "settlement_source": "wu_api",
+            "settlement_source": "aviationweather_metar",
         }
 
         members = era._day0_remaining_day_members(
