@@ -6716,6 +6716,7 @@ def _apply_exit_fill_projection_and_execution_fact(
             shares=_float_or_none(shares),
             venue_status="FILLED",
             terminal_exec_status="filled",
+            clear_voided_at=True,
             decision_law_id="predicted_bin_ev_v1",
         )
         conn.execute(f"RELEASE SAVEPOINT {sp_name}")

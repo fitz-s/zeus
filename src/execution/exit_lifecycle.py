@@ -7868,6 +7868,7 @@ def _log_partial_exit_execution_fact(
         shares=float(Decimal(str(filled_shares))),
         venue_status=status or "PARTIAL",
         terminal_exec_status=status or "PARTIAL",
+        clear_voided_at=True,
         command_id=_exit_command_id_for_order(conn, position, order_id),
         decision_law_id="predicted_bin_ev_v1",
     )

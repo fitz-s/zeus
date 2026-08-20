@@ -10357,6 +10357,7 @@ def log_execution_fact(
     venue_status: str | None = None,
     terminal_exec_status: str | None = None,
     clear_fill_fields: bool = False,
+    clear_voided_at: bool = False,
     posterior_id: int | None = None,
     decision_law_id: str | None = None,
 ) -> dict:
@@ -10392,7 +10393,11 @@ def log_execution_fact(
     ).fetchone()
 
     stored_posted_at = posted_at or (current["posted_at"] if current else None)
-    stored_voided_at = voided_at or (current["voided_at"] if current else None)
+    stored_voided_at = (
+        None
+        if clear_voided_at
+        else voided_at or (current["voided_at"] if current else None)
+    )
     stored_submitted_price = submitted_price if submitted_price is not None else (current["submitted_price"] if current else None)
     stored_venue_status = venue_status if venue_status not in (None, "") else (current["venue_status"] if current else None)
     stored_terminal_status = terminal_exec_status if terminal_exec_status not in (None, "") else (current["terminal_exec_status"] if current else None)
@@ -10809,6 +10814,7 @@ def log_execution_report(conn: sqlite3.Connection, pos, result, *, decision_id: 
         venue_status=str(getattr(result, "venue_status", "") or getattr(pos, "order_status", "") or status or "") or None,
         terminal_exec_status=terminal_exec_status,
         clear_fill_fields=clear_fill_fields,
+        clear_voided_at=fill_has_finality,
         decision_law_id="predicted_bin_ev_v1",
     )
 
@@ -14330,6 +14336,7 @@ def log_exit_lifecycle_event(
             venue_status=str(payload.get("status") or status or "") or None,
             terminal_exec_status=terminal_exec_status,
             clear_fill_fields=not exit_has_fill_finality,
+            clear_voided_at=exit_has_fill_finality,
             decision_law_id="predicted_bin_ev_v1",
         )
 

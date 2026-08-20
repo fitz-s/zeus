@@ -10507,6 +10507,7 @@ def _append_exit_filled_projection(
         shares=_float_or_none(filled_size),
         venue_status="FILLED",
         terminal_exec_status="filled",
+        clear_voided_at=True,
         decision_law_id="predicted_bin_ev_v1",
     )
     conn.execute(

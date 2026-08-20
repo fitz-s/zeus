@@ -16511,6 +16511,19 @@ class TestRecoveryResolutionTable:
         ).fetchone()
         assert obligation["status"] == "RESOLVED"
 
+        log_execution_fact(
+            conn,
+            intent_id="pos-001:exit",
+            position_id="pos-001",
+            command_id="cmd-exit",
+            order_role="exit",
+            posted_at="2026-04-26T00:08:30Z",
+            voided_at="2026-04-26T00:10:00Z",
+            venue_status="RETRY_PENDING",
+            terminal_exec_status="retry_pending",
+            clear_fill_fields=True,
+        )
+
         from src.execution.command_recovery import (
             reconcile_exit_lifecycle_alignment_repairs,
         )
@@ -16528,7 +16541,7 @@ class TestRecoveryResolutionTable:
             "chain_shares": 16.0,
         }
         exit_execution = conn.execute(
-            "SELECT command_id, shares, fill_price, terminal_exec_status "
+            "SELECT command_id, shares, fill_price, terminal_exec_status, voided_at "
             "FROM execution_fact WHERE position_id = 'pos-001' "
             "AND order_role = 'exit'"
         ).fetchone()
@@ -16537,6 +16550,7 @@ class TestRecoveryResolutionTable:
             "shares": 19.0,
             "fill_price": pytest.approx(0.13),
             "terminal_exec_status": "FILLED",
+            "voided_at": None,
         }
         reduction = conn.execute(
             "SELECT json_extract(payload_json, '$.semantic_event') "
