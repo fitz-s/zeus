@@ -136,7 +136,7 @@ def test_relationship_test_paths_exist(surfaces: dict) -> None:
 
 def test_surface_ids_lower_snake_case(surfaces: dict) -> None:
     """Surface ids are lower_snake_case: letters/digits/underscores, no hyphens.
-    (Renamed from ``test_surface_ids_kebab_or_snake_case`` per Copilot finding
+    (Renamed from ``test_surface_ids_kebab_or_snake_case`` per review finding
     on PR #343 — name implied either was permitted, regex enforced snake only.)
     """
     import re

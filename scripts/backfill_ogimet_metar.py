@@ -557,7 +557,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     run_id = f"ogimet_backfill_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
 
     _lock_path = Path(args.db) if args.db else ZEUS_WORLD_DB_PATH
-    # Always hold the writer lock across init_schema — Codex P2 fix (PR #91 follow-up):
+    # Always hold the writer lock across init_schema — review P2 fix (PR #91 follow-up):
     # dry-run still calls init_schema(conn) which runs CREATE TABLE / migration DDL,
     # so skipping the lock in dry-run allows concurrent writers to race schema changes.
     lock_ctx = db_writer_lock(_lock_path, WriteClass.BULK)
@@ -569,7 +569,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             conn.row_factory = sqlite3.Row
         try:
             # init_schema inside try/finally so conn is always closed on error
-            # (PR #86 Copilot fix: previously init_schema ran before the try).
+            # (PR #86 review fix: previously init_schema ran before the try).
             init_schema(conn)
             print(f"=== Ogimet backfill run_id={run_id} ===")
             print(f"range: {start} .. {end}  dry_run={args.dry_run}")

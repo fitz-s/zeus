@@ -499,7 +499,7 @@ class TestGateRuntimeSettlementFreezeBlocksLiveEntry:
     """Test: ZEUS_SETTLEMENT_FREEZE=1 blocks live_venue_submit (execute_intent / execute_final_intent paths).
 
     Per capabilities.yaml live_venue_submit.blocked_when: [settlement_window_freeze_active]
-    and ULTIMATE_DESIGN §5 Gate 5 (line 181).  PR #71 Codex P1 fix.
+    and ULTIMATE_DESIGN §5 Gate 5 (line 181).  PR #71 review P1 fix.
     """
 
     def test_settlement_freeze_blocks_live_venue_submit(

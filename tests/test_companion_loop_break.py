@@ -372,11 +372,11 @@ def test_companion_loop_break_default_batch_cap() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Test 10: F2 — batch-cap is a hard gate (PR #72 critic-opus round-3)
+# Test 10: F2 — batch-cap is a hard gate (PR #72 review round-3)
 # ---------------------------------------------------------------------------
 
 def test_batch_cap_actually_gates_admission_not_just_advisory() -> None:
-    """F2 (PR #72 critic-opus round-3): batch_cap must GATE admission, not just advise.
+    """F2 (PR #72 review round-3): batch_cap must GATE admission, not just advise.
 
     101 files: 51 valid pairs (each scripts/diag_N.py + script_manifest companion)
     + 50 unpaired stubs. With batch_cap=50, only the first 50 valid pairs are

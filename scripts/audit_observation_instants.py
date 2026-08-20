@@ -70,7 +70,7 @@ from src.data.tier_resolver import (  # noqa: E402
     allowed_sources_for_city,
     tier_for_city,
 )
-# db_writer_lock removed: this script is read-only (PR #86 Copilot fix)
+# db_writer_lock removed: this script is read-only (PR #86 review fix)
 
 DEFAULT_DB_PATH = _REPO_ROOT / "state" / "zeus-world.db"
 DEFAULT_GAPS_ALLOWLIST_PATH = (

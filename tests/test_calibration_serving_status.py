@@ -513,7 +513,7 @@ def test_table_ref_falls_back_to_world_when_forecasts_unattached(tmp_path) -> No
 
 
 def test_both_observability_sensors_share_canonical_schema_preference() -> None:
-    """Antibody (PR #210 Copilot review): calibration_serving_status and
+    """Antibody (PR #210 review): calibration_serving_status and
     status_summary must reference the SAME schema preference object — keeping
     two independent maps in sync is brittle and would re-introduce the
     2026-05-19 K1-ghost false-BLOCKED outage if one drifted.

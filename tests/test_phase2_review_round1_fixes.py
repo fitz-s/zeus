@@ -10,7 +10,7 @@
 Covers:
   * Copilot #4 + #5 — horizon_profile must be derived from cycle when
     ens_result producers don't populate it.
-  * Codex P1 #7 — issue_time may be a datetime on the registered-ingest
+  * review P1 #7 — issue_time may be a datetime on the registered-ingest
     path, not just a str; phase-2 cycle extraction must handle both.
 
 Both fixes live in
@@ -27,7 +27,7 @@ from src.calibration.forecast_calibration_domain import (
 )
 
 
-# ---- Copilot reviews #4 + #5 + Codex P1 #7 — phase2 keys derivation -------
+# ---- Copilot reviews #4 + #5 + review P1 #7 — phase2 keys derivation -------
 
 
 def test_derive_phase2_keys_from_str_issue_time_full_horizon():
@@ -52,7 +52,7 @@ def test_derive_phase2_keys_from_str_issue_time_short_horizon():
 
 
 def test_derive_phase2_keys_from_datetime_issue_time():
-    """Codex P1 #7 — registered-ingest path puts datetime in issue_time.
+    """review P1 #7 — registered-ingest path puts datetime in issue_time.
 
     Pre-fix: only str was handled, datetime silently → cycle=None →
     schema-default 00z bucket (silent misroute for 12z runs).
@@ -63,7 +63,7 @@ def test_derive_phase2_keys_from_datetime_issue_time():
     }
     cycle, sid, horizon = derive_phase2_keys_from_ens_result(ens)
     assert cycle == "12", (
-        "Codex P1 #7 regression: datetime issue_time must produce cycle='12'"
+        "review P1 #7 regression: datetime issue_time must produce cycle='12'"
     )
     assert horizon == "full"
 
@@ -95,7 +95,7 @@ def test_derive_phase2_keys_returns_none_for_malformed():
 def test_evaluator_imports_derive_phase2_keys_from_ens_result():
     """Both evaluator and monitor_refresh must delegate to the shared helper.
 
-    Structural assertion locks Copilot #4/#5 + Codex P1 #7 — if a future
+    Structural assertion locks Copilot #4/#5 + review P1 #7 — if a future
     refactor re-inlines the issue_time parsing without datetime support,
     this test fails.
     """

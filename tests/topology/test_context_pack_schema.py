@@ -136,7 +136,7 @@ def test_active_invariants_source_enum_lists_canonical_sources(schema: dict) -> 
     enum must permit all three plus `custom`.
 
     (Earlier version of this test was based on a false-negative existence
-    check; corrected per Copilot finding on PR #343.)
+    check; corrected per finding on PR #343.)
     """
     schema_text = SCHEMA_PATH.read_text()
     # Strip line-comments before scanning to avoid matching documentation.

@@ -1346,7 +1346,7 @@ def _write_snapshot_pairs_v2(
         data_version,
     )
 
-    # Phase 2.6 (2026-05-04, critic-opus BLOCKER 2): derive cycle / source_id
+    # Phase 2.6 (2026-05-04, review BLOCKER 2): derive cycle / source_id
     # / horizon_profile from the snapshot row so rebuilt rows land in the
     # correct stratified Platt bucket. Without these args, add_calibration_pair_v2
     # falls into its schema-default branch ('00','tigge_mars','full'), silently
@@ -2295,7 +2295,7 @@ def main() -> int:
     conn.execute("PRAGMA busy_timeout = 600000")
     conn.execute("PRAGMA journal_mode=WAL")
     # NOTE: init_schema + apply_canonical_schema moved inside bulk_lock_with_chunker
-    # (F26 cleanup Codex finding): these DDL calls contain DROP TABLE IF EXISTS
+    # (F26 cleanup review finding): these DDL calls contain DROP TABLE IF EXISTS
     # and CREATE TABLE IF NOT EXISTS writes that must be inside the writer-lock
     # to prevent contention with live writers.
 

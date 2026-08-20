@@ -1,6 +1,6 @@
 # Created: 2026-05-22
 # Last reused or audited: 2026-05-22
-# Authority basis: §4 of Copilot-review-system design
+# Authority basis: §4 of the auto-review-system design
 """check_review_instruction_coverage — verify instruction file applyTo globs resolve.
 
 Rules:

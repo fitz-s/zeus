@@ -3,7 +3,7 @@
 #   — row preservation, CHECK acceptance of new state, FK validity post-rebuild,
 #   re-run idempotency, FK violation triggers ROLLBACK, dry-run no-modify,
 #   user_version-only path for DBs without settlement_commands (PR #126
-#   review-fix from Codex P1 #2).
+#   review-fix from review P1 #2).
 # Reuse: Run on every PR touching the migration script or SCHEMA_VERSION
 #   bump logic. Authority basis: SCAFFOLD_F14_F16.md §K.8 v5 (tests a-f + g/h).
 
@@ -224,7 +224,7 @@ def test_skip_missing_db(tmp_path: Path) -> None:
 
 
 def test_g_user_version_only_for_world_or_forecasts_db(tmp_path: Path) -> None:
-    """PR #126 review-fix (Codex P1 #2): a DB without settlement_commands
+    """PR #126 review-fix (review P1 #2): a DB without settlement_commands
     (i.e. world.db or forecasts.db) gets user_version bumped, not rebuild.
     """
     db = tmp_path / "world.db"

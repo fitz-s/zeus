@@ -119,7 +119,7 @@ def _known_tables(ownership_doc: dict) -> set[str]:
     Only collects names that appear in a DB-owner scope. The previous
     implementation walked the whole document and treated any `name:` or
     `id:` string as a table — that incorrectly captured `name: applied_at`
-    inside `required_columns` entries (Copilot finding on PR #345),
+    inside `required_columns` entries (finding on PR #345),
     which let real new tables sneak past as already-known.
 
     Recognized shapes:

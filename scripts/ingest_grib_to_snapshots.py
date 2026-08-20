@@ -946,7 +946,7 @@ def ingest_json_file(
     payload_manifest_sha = str(payload.get("manifest_sha256", ""))
     drift_replace = False
     # ZEUS_INGEST_FORCE_REPLACE must be read before the existence check so it
-    # can bypass the skipped_exists short-circuit (PR #85 Copilot: env-var was
+    # can bypass the skipped_exists short-circuit (PR #85 review: env-var was
     # evaluated after the early return, making it a no-op in the common case).
     import os as _os
     force_replace_env = _os.environ.get("ZEUS_INGEST_FORCE_REPLACE", "") == "1"
@@ -1010,7 +1010,7 @@ def ingest_json_file(
     step_horizon_hours = payload.get("step_horizon_hours")
     step_horizon_hours = float(step_horizon_hours) if step_horizon_hours is not None else None
 
-    # 2026-05-07 Codex P2 fix: persist the physical_quantity reported by the
+    # 2026-05-07 review P2 fix: persist the physical_quantity reported by the
     # contract-validated payload, not the legacy ``metric.physical_quantity``
     # constant. Open Data post-cutover (mx2t3/mn2t3) writes a different
     # physical string than the TIGGE-archive 6h derived quantity; stamping the

@@ -323,7 +323,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         return 2
 
     # Skip writer lock in dry-run: no DB writes occur, so holding an exclusive
-    # flock would unnecessarily block other bulk writers (PR #86 Copilot fix).
+    # flock would unnecessarily block other bulk writers (PR #86 review fix).
     lock_ctx = db_writer_lock(args.db, WriteClass.BULK) if not args.dry_run else nullcontext()
     with lock_ctx:
         conn = sqlite3.connect(str(args.db))
