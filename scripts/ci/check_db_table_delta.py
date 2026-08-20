@@ -82,6 +82,10 @@ _SQL_RESERVED = frozenset({
     "for", "as", "from", "where", "select", "if", "not", "exists",
     "when", "and", "or", "join", "on", "into", "values",
     "ddl", "sql",
+    # Prose words that follow "CREATE TABLE" when a comment discusses the
+    # statement rather than issuing one: "...a single CREATE TABLE statement
+    # instead". No real table is ever named these.
+    "statement", "statements", "call", "calls", "syntax",
 })
 
 # Known non-canonical sidecar/scratch tables created in a SEPARATE sidecar FILE
