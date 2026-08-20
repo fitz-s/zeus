@@ -25,7 +25,7 @@ The output is a single `q` per (city, date, metric, bin). There is no multi-regi
 fallback and no parallel complement on the live path.
 
 **Authoritative source:** [`docs/authority/replacement_final_form_2026_06_09.md`](../authority/replacement_final_form_2026_06_09.md), amended by the RAW law below  
-**Implementation:** `src/forecast/bayes_precision_fusion.py` → `src/forecast/emos.py`  
+**Implementation:** `src/forecast/bayes_precision_fusion.py` → `src/calibration/emos.py`  
 **Related invariant:** INV (see `architecture/invariants.yaml` for probability-chain entries)
 
 ---
