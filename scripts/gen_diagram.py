@@ -1,7 +1,12 @@
 # Generates the Zeus architecture diagram (light + dark) as SVG.
 # Design intent: the hero is the CLOSED LOOP, not the pipeline. A reader who
 # looks for 5 seconds should see that settlement feeds back into calibration
-# through a filter — that is what makes this a system rather than a script.
+# against frozen decisions — that is what makes this a system rather than a
+# script. The copy below is the diagram's single source of truth; the committed
+# docs/architecture-*.svg files are byte-derived from render() and regression-
+# tested against it, so the showcase layer cannot drift from this file.
+
+import os
 
 THEMES = {
  "light": dict(bg="#FFFFFF", panel="#F6F7F9", stroke="#D2D6DC", text="#111418",
@@ -36,10 +41,11 @@ def arrow(x1, y1, x2, y2, t, dashed=False):
     return (f'<line x1="{x1}" y1="{y1}" x2="{x2}" y2="{y2}" stroke="{t["edge"]}" '
             f'stroke-width="1.4"{d} marker-end="url(#ah)"/>')
 
-def build(theme):
+def render(theme):
     t = THEMES[theme]
     o = [f'<svg xmlns="http://www.w3.org/2000/svg" width="{W}" height="{H}" viewBox="0 0 {W} {H}" role="img" '
-         f'aria-label="Zeus architecture: forecast to probability to edge to size to execution to settlement, with a filtered feedback loop into calibration">',
+         f'aria-label="Zeus architecture: forecast to probability to edge to size to execution to settlement, '
+         f'with settled outcomes graded against frozen decisions and fed back into calibration">',
          f'<defs><marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">'
          f'<path d="M 0 0 L 10 5 L 0 10 z" fill="{t["edge"]}"/></marker></defs>',
          f'<rect width="{W}" height="{H}" fill="{t["bg"]}"/>']
@@ -60,10 +66,10 @@ def build(theme):
     px, py, pw, ph, gap = 276, 100, 216, 124, 22
     o.append(f'<text x="{px}" y="{py-8}" font-family="{FS}" font-size="10.5" font-weight="650" letter-spacing="1.1" fill="{t["muted"]}">DECIDE</text>')
     stages = [
-      ("1  FORECAST", ["empirical-Bayes de-bias", "inverse-variance fusion", "Ledoit–Wolf shrinkage", "station localization"]),
-      ("2  PROBABILITY", ["integrate over the", "PREIMAGE of each city's", "rounding rule", "condition on observed"]),
-      ("3  EDGE", ["bootstrap lower bound", "Wilson selection calib.", "cost incl. taker fee", "Benjamini–Hochberg FDR"]),
-      ("4  SIZE", ["fractional Kelly", "multiplicative damping", "coverage · width · lead", "missing input → zero"]),
+      ("1  FORECAST", ["walk-forward de-bias", "history sets trust + width", "date-aligned covariance", "station/grid localization"]),
+      ("2  PROBABILITY", ["integrate the PREIMAGE", "of each rounding rule", "condition on observed", "freeze one coherent q"]),
+      ("3  EDGE", ["Wilson selection bound", "finite-evidence band", "all-in executable cost", "Benjamini–Hochberg FDR"]),
+      ("4  SIZE", ["outcome-contingent wealth", "robust log-wealth argmax", "existing exposure included", "missing authority → zero"]),
     ]
     for i,(ti,ls) in enumerate(stages):
         x = px + i*(pw+gap)
@@ -75,21 +81,21 @@ def build(theme):
     ay = py + ph + 66
     o.append(f'<text x="{px}" y="{ay-8}" font-family="{FS}" font-size="10.5" font-weight="650" letter-spacing="1.1" fill="{t["muted"]}">ACT</text>')
     o.append(box(px, ay, 336, 100, "5  EXECUTE", [
-        "post-only maker rest → fill-or-kill taker cross on deadline",
+        "post-only maker rest → taker cross on deadline",
         "idempotency-keyed intent written BEFORE the venue is called",
-        "separate exit state machine · hourly chain reconciliation"], t))
+        "fresh submit-time redecision · per-cycle chain reconciliation"], t))
     o.append(box(px+336+30, ay, 336, 100, "6  SETTLE & ATTRIBUTE", [
         "forecast-earned win · lucky win · foreseeable loss",
         "miscalibration loss · stale-data decision · unattributable",
-        "the probability sized on is frozen at decision time"], t, accent=True))
+        "graded against the probability frozen at decision time"], t, accent=True))
     o.append(arrow(px+336+3, ay+50, px+336+27, ay+50, t))
     o.append(f'<line x1="{px+2*(pw+gap)+pw/2}" y1="{py+ph}" x2="{px+2*(pw+gap)+pw/2}" y2="{ay-14}" stroke="{t["edge"]}" stroke-width="1.4" marker-end="url(#ah)"/>')
 
     # --- feedback ----------------------------------------------------------
     gx, gy = 986, ay - 8
     o.append(box(gx, py, 214, ph, "CALIBRATION", [
-        "per-source settled", "residuals · selection", "cells · sigma floors",
-        "", "consumes ONLY settled", "outcomes"], t))
+        "walk-forward settled", "residuals · selection cells", "",
+        "reliability measured on", "ALL eligible frozen", "decisions"], t))
 
     fy = ay + 132
     x_from = px+336+30+336/2
@@ -97,9 +103,9 @@ def build(theme):
              f'fill="none" stroke="{t["gate"]}" stroke-width="1.6" marker-end="url(#ah)"/>')
     o.append(f'<rect x="{gx+107-150}" y="{fy-17}" width="300" height="34" rx="17" fill="{t["gate_soft"]}" stroke="{t["gate"]}" stroke-width="1.25"/>')
     o.append(f'<text x="{gx+107}" y="{fy+4.5}" text-anchor="middle" font-family="{FS}" font-size="12" font-weight="650" fill="{t["gate"]}">'
-             f'gate: skill outcomes only</text>')
+             f'attribution explains — it does not filter</text>')
     o.append(f'<text x="{x_from+16}" y="{fy-12}" font-family="{FS}" font-size="11.5" fill="{t["muted"]}">'
-             f'luck is graded out before it can train the model</text>')
+             f'outcomes update the next decision, never the record of the last one</text>')
 
     o.append(f'<line x1="{gx-3}" y1="{py+ph/2}" x2="{px+3*(pw+gap)+pw+3}" y2="{py+ph/2}" stroke="{t["edge"]}" stroke-width="1.4" marker-end="url(#ah)" transform="translate(0,0)"/>')
     o.append(f'<text x="{40}" y="{H-24}" font-family="{FM}" font-size="10.5" fill="{t["muted"]}">'
@@ -107,6 +113,26 @@ def build(theme):
     o.append('</svg>')
     return "".join(o)
 
-for name in THEMES:
-    open(f"architecture-{name}.svg","w").write(build(name))
-print("ok")
+
+def main():
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    docs = os.path.join(root, "docs")
+    # Render and validate BOTH themes before replacing either committed file, so
+    # a failed generation can never leave one theme updated and the other stale.
+    rendered = {}
+    for name in THEMES:
+        svg = render(name)
+        if not (svg.startswith("<svg") and svg.endswith("</svg>")):
+            raise SystemExit(f"gen_diagram: invalid render for theme {name!r}")
+        rendered[name] = svg
+    for name, svg in rendered.items():
+        final = os.path.join(docs, f"architecture-{name}.svg")
+        tmp = final + ".tmp"
+        with open(tmp, "w") as fh:
+            fh.write(svg)
+        os.replace(tmp, final)
+    print("ok")
+
+
+if __name__ == "__main__":
+    main()
