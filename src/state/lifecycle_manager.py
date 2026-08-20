@@ -309,7 +309,7 @@ def enter_pending_exit_runtime_state(
     # `illegal lifecycle phase fold: 'economically_closed' -> 'pending_exit'`,
     # killing live-trade pipeline for 30+ minutes post-daemon-restart.
     #
-    # Per Copilot review (PR #216): derive the terminal set from
+    # Per review (PR #216): derive the terminal set from
     # `is_terminal_state` (sourced from LEGAL_LIFECYCLE_FOLDS) so future
     # fold-table edits cannot silently miss new terminal phases. ECONOMICALLY_CLOSED
     # is NOT terminal (folds to {ECONOMICALLY_CLOSED, SETTLED, VOIDED}), so it

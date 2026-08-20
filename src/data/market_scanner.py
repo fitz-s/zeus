@@ -1725,7 +1725,7 @@ def _clob_market_is_live(condition_id: str) -> bool | None:
         )
     except (httpx.RequestError, RequestAdmissionDenied) as exc:
         # Memoize failure so subsequent same-tick calls short-circuit instead of
-        # incurring serial timeouts. Bot review P1 (Codex + Copilot 2026-05-19):
+        # incurring serial timeouts. Bot review P1 (review + PR review 2026-05-19):
         # _event_has_active_children runs up to 10 pages × 50 events per tag;
         # uncached failure path stalls scanning for minutes during a CLOB outage.
         _CLOB_ARCHIVED_CACHE[condition_id] = None
@@ -6269,7 +6269,7 @@ def _parse_temp_range(question: str) -> tuple[Optional[float], Optional[float]]:
 # within-system serialization. Do NOT use this for free-form Polymarket market
 # questions — those need the tolerant `_parse_temp_range` above.
 #
-# Motivation (NH-E1 / closure-banner rule 15): P-E's critic-opus discovered
+# Motivation (NH-E1 / closure-banner rule 15): P-E's review discovered
 # that `re.search` on unanchored patterns silently accepts near-canonical but
 # semantically-broken labels (e.g. "17°Cfoo" parses as 17.0 point bin, leaking
 # trailing garbage into settlement authority).

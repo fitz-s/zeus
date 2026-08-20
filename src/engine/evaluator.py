@@ -362,7 +362,7 @@ class MarketCandidate:
     # cycle_runtime. Storing the enum (not the str) keeps downstream
     # dispatch type-safe; cycle_runtime serializes to .value for SQL.
     market_phase: Optional["MarketPhase"] = None
-    # PR #56 review (Copilot + Codex P1, 2026-05-04): full provenance
+    # PR #56 review (P1, 2026-05-04): full provenance
     # of how ``market_phase`` was determined. Pre-fix the evaluator
     # hardcoded ``_phase_source="verified_gamma"`` whenever
     # ``market_phase`` was non-None, silently dropping the actual
@@ -4224,7 +4224,7 @@ def evaluate_candidate(
     # MetricIdentity (normalized at L662 via _normalize_temperature_metric);
     # pull the string attribute for the kwarg.
     #
-    # Phase 2 (2026-05-04, may4math.md F1 + critic-opus BLOCKER 3): derive
+    # Phase 2 (2026-05-04, may4math.md F1 + review BLOCKER 3): derive
     # cycle/source_id/horizon_profile from forecast provenance (ens_result)
     # for cycle-stratified Platt bucket selection. None defaults preserve
     # legacy behavior — load_platt_model hits schema-default bucket
@@ -4272,7 +4272,7 @@ def evaluate_candidate(
                 rejection_reason_enum=NoTradeReason.UNKNOWN_FORECAST_SOURCE_FAMILY,
                 rejection_reason_detail=_unknown_src_family_detail,
             )]
-        # Phase 2.6 (2026-05-04, critic-opus MAJOR 8): cross-field consistency.
+        # Phase 2.6 (2026-05-04, review MAJOR 8): cross-field consistency.
         # If ens_result carries BOTH source_id and data_version, their
         # source_family must agree. A misconfigured ingest writer that set
         # source_id='ecmwf_open_data' but data_version='tigge_*' would
@@ -4327,7 +4327,7 @@ def evaluate_candidate(
                     rejection_reason_enum=NoTradeReason.FORECAST_PROVENANCE_INCONSISTENT,
                     rejection_reason_detail=_prov_inconsistent_detail,
                 )]
-    # Copilot review #4 + Codex P1 #7 (2026-05-04): use shared helper that
+    # PR review finding #4 + P1 #7 (2026-05-04): use shared helper that
     # handles datetime issue_time AND derives horizon_profile from cycle when
     # ens_result producers don't populate it. Pre-fix this block silently
     # left horizon_profile=None (axis dead) and stripped 12z datetime
@@ -5724,7 +5724,7 @@ def evaluate_candidate(
             _phase_value = (
                 candidate.market_phase.value if candidate.market_phase is not None else None
             )
-            # PR #56 review (Copilot + Codex P1, 2026-05-04): read the
+            # PR #56 review (P1, 2026-05-04): read the
             # real MarketPhaseEvidence.phase_source stamped onto the
             # candidate by cycle_runtime instead of hardcoding
             # ``verified_gamma``. Pre-fix the resolver never saw

@@ -522,7 +522,7 @@ class PolymarketUserChannelIngestor:
             async with connect(self.endpoint) as ws:
                 self._connection_started_at = _utcnow()
                 await ws.send(json.dumps(self.subscription_message()))
-                # Codex P1 follow-up to PR #37: do NOT call
+                # review P1 follow-up to PR #37: do NOT call
                 # _record_subscribed_message() here. ws.send() is outbound
                 # only; auth could still fail asynchronously, in which case
                 # the inbound auth-failure message arrives shortly after.
@@ -803,7 +803,7 @@ class PolymarketUserChannelIngestor:
             return None
         # Inbound non-auth-failure message: auth proven; record SUBSCRIBED and
         # try to clear the M5 reconcile latch when local side-effect surface is
-        # empty. Bare record_message would skip the auto-clear path. (Codex P1
+        # empty. Bare record_message would skip the auto-clear path. (review P1
         # follow-up to PR #37: ws.send() in start() no longer pre-clears, so
         # the first inbound message is now the only place the latch can
         # transition from True -> False after a genuine reconnect.)
