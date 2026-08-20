@@ -28,6 +28,9 @@ class Domain(Enum):
     TRADE = "trade"            # state/zeus_trades.db
     RISK_STATE = "risk_state"  # state/risk_state.db
     BACKTEST = "backtest"      # state/zeus_backtest.db (derived; never runtime authority)
+    # book_snapshot_persistence DB split (2026-08-19): family-book decision-
+    # time evidence, split off zeus_trades.db onto its own file.
+    FAMILY_BOOK_EVIDENCE = "family_book_evidence"  # state/zeus-family-book-evidence.db
 
 
 # Tables whose data-grounded owner DIFFERS from the current registry (the in-place migration worklist).
@@ -107,11 +110,14 @@ CANONICAL_OWNER: dict[str, Domain] = {
     'execution_feasibility_latest': Domain.TRADE,
     'exit_mutex_holdings': Domain.TRADE,
     'exit_timing_attribution': Domain.WORLD,
-    # book_snapshot_persistence (2026-07-29): decision-time family book
-    # manifest + observation history, executable-market substrate
-    # co-located with executable_market_snapshots.
-    'family_book_observations': Domain.TRADE,
-    'family_book_states': Domain.TRADE,
+    # book_snapshot_persistence (2026-07-29, split onto its own DB 2026-08-19):
+    # decision-time family book manifest + observation history. Originally
+    # trade-class, co-located with executable_market_snapshots; moved to its
+    # own physical file (state/zeus-family-book-evidence.db) so an optional,
+    # evidence-only writer can never open a second connection to the
+    # live-money trade DB at all.
+    'family_book_observations': Domain.FAMILY_BOOK_EVIDENCE,
+    'family_book_states': Domain.FAMILY_BOOK_EVIDENCE,
     'family_rebalance_intents': Domain.WORLD,
     # LX-T4 (3b08139f1) continuous fill synchronizer cursor state.
     'fill_sync_watermarks': Domain.TRADE,

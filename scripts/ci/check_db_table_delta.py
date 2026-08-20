@@ -89,7 +89,20 @@ _SQL_RESERVED = frozenset({
 # _migrations_applied = the per-DB migration ledger. NARROWED (consult re-review
 # 2026-07-22) from a blanket leading-underscore skip so a future _-named table
 # created against a CANONICAL connection is NOT silently exempted.
-_KNOWN_SIDECAR_TABLES = frozenset({"_capsule_meta", "_migrations_applied"})
+# family_book_telemetry_outbox / family_book_telemetry_meta (book_snapshot_
+# persistence): live ONLY in the family-book telemetry writer's PRIVATE spool
+# file (family_book_telemetry_spool.db, src/events/family_book_telemetry_writer.py),
+# never any canonical DB -- the whole point of the round-5 bounded-outbox
+# redesign was to keep this transport buffer OFF the canonical tables it
+# feeds (family_book_states/family_book_observations, which DO have real
+# registry entries on family_book_evidence). A registry entry for these two
+# would be a category error: they are not a DB-ownership surface.
+_KNOWN_SIDECAR_TABLES = frozenset({
+    "_capsule_meta",
+    "_migrations_applied",
+    "family_book_telemetry_outbox",
+    "family_book_telemetry_meta",
+})
 
 
 def _changed_files_from_git(base: str, head: str) -> list[str]:

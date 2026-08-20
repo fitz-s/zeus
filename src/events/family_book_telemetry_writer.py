@@ -95,11 +95,15 @@ _READY_TIMEOUT_DEFAULT = 5.0
 # SQLite enforces on the spool file itself: past it the engine returns
 # SQLITE_FULL to this module's own writes, so a bug in the soft gate (or a
 # burst that outruns it) still cannot eat the disk the live-money DB needs.
-# Pages are 4 KiB by default -> 262144 pages ~= 1 GiB, deliberately well above
+# The physical ceiling is denominated in BYTES and converted to
+# PRAGMA max_page_count using the connection's ACTUAL page_size at open time
+# (src.state.db.page_count_ceiling_for_byte_budget) -- never an assumed
+# 4 KiB, which would silently change the real ceiling if the spool file's
+# page size ever differs from that assumption. 1 GiB, deliberately well above
 # the 500 MB admission threshold so the soft gate is what normally binds and
 # the hard ceiling is a backstop, not a routine limit.
 _SPOOL_PENDING_BUDGET_BYTES_DEFAULT = 500_000_000  # admission threshold
-_SPOOL_MAX_PAGE_COUNT_DEFAULT = 262_144  # physical file ceiling (~1 GiB @ 4 KiB pages)
+_SPOOL_MAX_BYTES_DEFAULT = 1_073_741_824  # physical file ceiling (~1 GiB, real page_size)
 _INGEST_BATCH_SIZE_DEFAULT = 500
 _INGEST_BYTE_BUDGET_DEFAULT = 5_000_000  # 5 MB canonical transaction cap
 # SQLite's multi-connection WAL-reset fix landed in 3.51.3 (and backports
@@ -127,6 +131,14 @@ _CNT_INGEST_DISABLED = "family_book_telemetry_ingest_disabled_total"
 _CNT_INGESTED_STATES = "family_book_telemetry_ingested_states_total"
 _CNT_INGESTED_OBSERVATIONS = "family_book_telemetry_ingested_observations_total"
 _CNT_INGESTED_BATCHES = "family_book_telemetry_ingested_batches_total"
+# Distinct from the generic _CNT_INGEST_FAILURES: this fires specifically
+# when the evidence DB's OWN physical growth ceiling
+# (src.state.db.init_schema_family_book_evidence's max_page_count) is what
+# refused the write -- a logged, counted, TYPED refusal (never a silent
+# drop) so the operator can tell "our own ceiling bound growth as designed"
+# apart from an unrelated real disk-full condition, both of which SQLite
+# reports as the same "database or disk is full" error text.
+_CNT_INGEST_EVIDENCE_DB_CEILING_HIT = "family_book_telemetry_evidence_db_ceiling_hit_total"
 
 
 def _telemetry_enabled() -> bool:
@@ -174,7 +186,42 @@ _capture_terminally_disabled = False
 _last_state_by_family: dict[str, tuple[str, datetime]] = {}
 _last_log_monotonic = 0.0
 _spool_pending_budget_bytes = _SPOOL_PENDING_BUDGET_BYTES_DEFAULT
-_spool_max_page_count = _SPOOL_MAX_PAGE_COUNT_DEFAULT
+_spool_max_bytes = _SPOOL_MAX_BYTES_DEFAULT
+
+
+def _assert_path_is_not_canonical(path: Path) -> None:
+    """LOW (centralized): the spool must never alias ANY canonical DB file --
+    world, forecasts, trade, or the family-book evidence DB -- not just the
+    trade DB. ``resolve()`` equality catches symbolic-construction bugs (a
+    typo'd ``.with_name`` producing a canonical name); it does NOT catch
+    filesystem aliasing -- a symlink or hardlink under a different name
+    pointing at the same inode. ``os.path.samefile`` compares device+inode
+    and catches that too, for every canonical path that actually exists on
+    disk (a not-yet-created canonical DB cannot be aliased)."""
+    import os as _os
+
+    from src.state.db import (
+        ZEUS_FAMILY_BOOK_EVIDENCE_DB_PATH,
+        ZEUS_FORECASTS_DB_PATH,
+        ZEUS_WORLD_DB_PATH,
+        _zeus_trade_db_path,
+    )
+
+    canonical_paths = (
+        ZEUS_WORLD_DB_PATH,
+        ZEUS_FORECASTS_DB_PATH,
+        ZEUS_FAMILY_BOOK_EVIDENCE_DB_PATH,
+        _zeus_trade_db_path(),
+    )
+    for canonical in canonical_paths:
+        assert path.resolve() != canonical.resolve(), (
+            f"family_book_telemetry spool path must never equal a canonical DB path: {canonical}"
+        )
+        if path.exists() and canonical.exists() and _os.path.samefile(path, canonical):
+            raise AssertionError(
+                f"family_book_telemetry spool path aliases canonical DB path "
+                f"{canonical} via a filesystem link (symlink/hardlink)"
+            )
 
 
 def _default_spool_conn_factory() -> sqlite3.Connection:
@@ -182,15 +229,12 @@ def _default_spool_conn_factory() -> sqlite3.Connection:
     ``tests/events/test_family_book_telemetry_writer.py``'s AST antibody --
     round-4 MEDIUM: the SQLITE_CONNECT_ALLOWLIST exemption is file-scoped,
     so this test compensates at function granularity). Opens a PRIVATE
-    file the primary trade_conn NEVER touches -- asserted, not just
-    documented."""
+    file no canonical connection NEVER touches -- asserted, not just
+    documented (see _assert_path_is_not_canonical)."""
     from src.state.db import _zeus_trade_db_path
 
-    trade_db_path = _zeus_trade_db_path()
-    spool_path = trade_db_path.with_name("family_book_telemetry_spool.db")
-    assert spool_path.resolve() != trade_db_path.resolve(), (
-        "family_book_telemetry spool path must never equal the trade DB path"
-    )
+    spool_path = _zeus_trade_db_path().with_name("family_book_telemetry_spool.db")
+    _assert_path_is_not_canonical(spool_path)
     conn = sqlite3.connect(str(spool_path), timeout=5.0)
     conn.execute("PRAGMA journal_mode=WAL")
     return conn
@@ -199,10 +243,15 @@ def _default_spool_conn_factory() -> sqlite3.Connection:
 def _open_spool(factory: Callable[[], sqlite3.Connection]) -> sqlite3.Connection:
     """Open a spool connection with its schema and PHYSICAL ceilings armed.
     Every spool open in this module goes through here, so no path can acquire
-    an unbounded spool file (round-6 Z2)."""
+    an unbounded spool file (round-6 Z2). The byte budget is converted to
+    ``max_page_count`` using THIS connection's actual ``page_size`` -- never
+    an assumed 4 KiB -- via ``src.state.db.page_count_ceiling_for_byte_budget``."""
     conn = factory()
     try:
-        _ensure_outbox_table(conn, max_page_count=_spool_max_page_count)
+        from src.state.db import page_count_ceiling_for_byte_budget
+
+        max_pages = page_count_ceiling_for_byte_budget(conn, _spool_max_bytes)
+        _ensure_outbox_table(conn, max_page_count=max_pages)
     except BaseException:
         conn.close()
         raise
@@ -211,10 +260,15 @@ def _open_spool(factory: Callable[[], sqlite3.Connection]) -> sqlite3.Connection
 
 def _default_readonly_canonical_conn_factory() -> sqlite3.Connection:
     """Best-effort READ-ONLY canonical connection for cache bootstrap only
-    (Y2: no DDL, no write_class, mode=ro+query_only -- never a writer)."""
-    from src.state.db import get_trade_connection_read_only
+    (Y2: no DDL, no write_class, mode=ro+query_only -- never a writer).
 
-    return get_trade_connection_read_only()
+    DB split (2026-08-19): family_book_states/family_book_observations moved
+    off zeus_trades.db onto their own file, state/zeus-family-book-evidence.db
+    -- this seed read (and canonical delivery, run_bounded_ingest's caller in
+    src/main.py) now targets THAT DB, never the trade DB."""
+    from src.state.db import get_family_book_evidence_connection_read_only
+
+    return get_family_book_evidence_connection_read_only()
 
 
 _spool_conn_factory: Callable[[], sqlite3.Connection] = _default_spool_conn_factory
@@ -415,12 +469,23 @@ def _worker_loop() -> None:
     # first observation of each family STATE_CHANGE even if the content is
     # unchanged -- a real, bounded analysis caveat the operator can only account
     # for if it is reported rather than folded into a single ready=True.
+    #
+    # HIGH-2 fix: cache_seeded must reflect whether the canonical READ actually
+    # completed, not merely whether _bootstrap_last_state_cache raised.
+    # _bootstrap_last_state_cache used to swallow its own canonical-read
+    # failure internally (a bare `except Exception: return`) and return
+    # normally either way -- so this try/except never fired and cache_seeded
+    # stayed True even when the canonical seed read never happened.
+    # _bootstrap_last_state_cache now raises CanonicalSeedUnavailableError
+    # for every outcome EXCEPT a positively-identified read (rows fetched) or
+    # a positively-identified fresh-empty-schema (no such table -- there is
+    # nothing to seed, so that case IS fully seeded).
     cache_seeded = True
     try:
         _bootstrap_last_state_cache(conn)
-    except Exception:
+    except CanonicalSeedUnavailableError as exc:
         cache_seeded = False
-        logger.warning("family_book_telemetry: cache bootstrap failed", exc_info=True)
+        logger.warning("family_book_telemetry: cache bootstrap seed unavailable: %s", exc)
 
     _last_readiness = ReadinessResult(ready=True, cache_seeded=cache_seeded)
     _ready_event.set()
@@ -453,32 +518,56 @@ def _worker_loop() -> None:
         conn.close()
 
 
+class CanonicalSeedUnavailableError(RuntimeError):
+    """Raised by ``_bootstrap_last_state_cache`` when the durable canonical
+    seed read did NOT positively complete: the canonical connection could not
+    be opened, or the read failed for a reason other than a genuinely fresh,
+    table-free schema. Callers must treat this as cache_seeded=False --
+    swallowing it and reporting seeded=True regardless (the prior HIGH-2
+    defect) mislabels the first observation of every family STATE_CHANGE
+    without the operator ever finding out the seed never ran."""
+
+
 def _bootstrap_last_state_cache(spool_conn: sqlite3.Connection) -> None:
     """Y4: seed from max(canonical durable, PENDING spool) per family -- a
     spool write that crashed before canonical ingestion must still be
     respected, or a restart mislabels unchanged content STATE_CHANGE.
 
-    Canonical read is READ-ONLY/best-effort (Y2: never a writer, never DDL --
-    assumes the normal trade schema bootstrap already created the tables).
+    Canonical read never writes or issues DDL (Y2). HIGH-2: whether it
+    actually COMPLETED is load-bearing for cache_seeded, so this function
+    raises ``CanonicalSeedUnavailableError`` instead of swallowing that
+    outcome. Only a positively-completed read (rows fetched, however many)
+    or a positively-identified fresh-empty-schema ("no such table" -- there
+    is nothing to seed, so that case IS fully seeded) return normally.
     """
-    for family_id, (state_id, decision_time_iso) in _outbox_latest_per_family(spool_conn).items():
-        _merge_cache_candidate(family_id, state_id, decision_time_iso)
+    try:
+        for family_id, (state_id, decision_time_iso) in _outbox_latest_per_family(spool_conn).items():
+            _merge_cache_candidate(family_id, state_id, decision_time_iso)
+    except Exception:
+        # Best-effort auxiliary seed source. The spool connection was already
+        # proven open and schema-armed by _open_spool, so a failure here is
+        # unexpected -- but it must not block the canonical seed attempt
+        # below, and it is not itself a canonical-seed-unavailable outcome.
+        logger.warning("family_book_telemetry: spool-side seed read failed", exc_info=True)
 
     try:
         conn = _readonly_canonical_conn_factory()
-    except Exception:
-        return  # canonical unreachable -- spool-only seed still applied above
+    except Exception as exc:
+        raise CanonicalSeedUnavailableError(f"canonical connection open failed: {exc!r}") from exc
     try:
-        rows = conn.execute(
-            """
-            SELECT family_id, state_id, MAX(decision_time) AS decision_time
-            FROM family_book_observations GROUP BY family_id
-            """
-        ).fetchall()
+        try:
+            rows = conn.execute(
+                """
+                SELECT family_id, state_id, MAX(decision_time) AS decision_time
+                FROM family_book_observations GROUP BY family_id
+                """
+            ).fetchall()
+        except sqlite3.OperationalError as exc:
+            if "no such table" in str(exc).lower():
+                return  # positively-identified fresh empty schema -- nothing to seed, fully seeded
+            raise CanonicalSeedUnavailableError(f"canonical seed read failed: {exc!r}") from exc
         for family_id, state_id, decision_time_iso in rows:
             _merge_cache_candidate(family_id, state_id, decision_time_iso)
-    except sqlite3.OperationalError:
-        pass  # table not yet created on a fresh canonical DB -- not an error here
     finally:
         conn.close()
 
@@ -764,6 +853,17 @@ def run_bounded_ingest(
             except Exception:
                 pass
             _cnt_inc(_CNT_INGEST_FAILURES)
+            if "database or disk is full" in str(exc).lower():
+                # The evidence DB's own max_page_count ceiling (or a genuine
+                # disk-full condition) refused this write. Either way this
+                # must be OBSERVABLE, not merely a generic ingest failure --
+                # retention is an open operator decision (see PLAN.md) and
+                # this counter is the signal that the ceiling was reached.
+                _cnt_inc(_CNT_INGEST_EVIDENCE_DB_CEILING_HIT)
+                logger.warning(
+                    "family_book_telemetry: evidence DB write refused (physical "
+                    "ceiling or disk full): %r", exc,
+                )
             _rate_limited_warning("family_book_telemetry: canonical ingest failed", )
             return IngestOutcome(len(batch), 0, 0, failed=True, reason=repr(exc))
 

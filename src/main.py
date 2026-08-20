@@ -79,8 +79,10 @@ from src.runtime import bankroll_provider
 from src.state.db import (
     init_schema,
     init_schema_trade_only,
+    init_schema_family_book_evidence,
     get_world_connection,
     get_trade_connection,
+    get_family_book_evidence_connection,
     get_world_connection_read_only,
 )
 from src.state.portfolio import load_portfolio
@@ -8325,32 +8327,33 @@ _forecasts_wal_checkpoint_cycle = _make_wal_checkpoint_cycle("forecasts", defer_
 def _family_book_telemetry_ingest_cycle() -> None:
     """book_snapshot_persistence: canonical delivery of the family-book
     telemetry outbox runs HERE, on an ordinary scheduler job with its own
-    short-lived ``write_class="live"`` trade connection -- the SAME pattern
-    the other periodic trade-DB writers in this daemon already use
-    (``_c3_staleness_cancel_cycle``, ``_run_ws_gap_reconcile_if_required``,
-    ``_refresh_reconcile_findings_if_required``).
+    short-lived ``write_class="live"`` connection to the family-book EVIDENCE
+    DB (state/zeus-family-book-evidence.db) -- a physically separate file
+    from zeus_trades.db (DB split, 2026-08-19).
 
-    Round-6 Z1 -- why a separate connection rather than the reactor's own.
-    The review asked for delivery to execute on the reactor's ``trade_conn``
-    at a post-commit seam, to guarantee telemetry never contends with the
-    money path. The concern is right; that particular remedy is not available
-    here. The reactor's connection is
-    ``get_trade_connection_with_world_required(write_class=None)`` with world
-    and forecasts ATTACHed (src/events/reactor.py), and the cycle commits
-    money-path truth on it mid-cycle. Executing telemetry INSERTs on that
-    connection would place optional writes inside the money path's transaction
-    scope: a telemetry failure would have to roll back, and a rollback there
-    discards whatever reactor work shares the transaction. That is precisely
-    the transaction-poisoning class review X1 established must not exist.
+    What actually makes this safe against the money path: the DB BOUNDARY,
+    not the guard below. family_book_states/family_book_observations used to
+    be trade-class tables, so this job's connection and the reactor's live
+    money-path connection both opened the SAME file (zeus_trades.db) and
+    contended for its single SQLite writer lock -- the guard below (yield
+    while a cycle is active) was the ONLY thing standing between an optional
+    write and the money path. After the split, this job's connection targets
+    a DIFFERENT file entirely; there is no shared writer lock left to contend
+    for, so an evidence write is now STRUCTURALLY incapable of blocking or
+    being blocked by a money-path write, independent of timing or guard
+    correctness. See ``tests/events/test_family_book_telemetry_writer.py``
+    ``TestMoneyPathYield`` for the deterministic proof (holding a write
+    transaction open on the trade DB does not delay evidence delivery at
+    all).
 
-    So we take the repo's OWN idiom for optional work that must not compete
-    with the money path -- yield, rather than share a transaction. The two
-    guards below are the same pair used by ``_run_ws_gap_reconcile_if_required``
-    and ``_run_venue_background_maintenance_once``: skip the tick entirely
-    while a decision cycle or reactor cycle is in flight. Combined with the
-    spool-only pending precheck (no canonical connection is opened at all when
-    there is nothing to deliver, the common case), telemetry touches the trade
-    DB only when it has work AND the money path is idle.
+    The guard below is kept anyway, as a COURTESY, not a safety requirement:
+    it still avoids doing optional I/O -- however cheap and non-contending --
+    while the daemon is mid-decision-cycle, matching the same idiom every
+    other periodic optional job in this daemon uses
+    (``_run_ws_gap_reconcile_if_required``, ``_run_venue_background_maintenance_once``).
+    Combined with the spool-only pending precheck (no canonical connection is
+    opened at all when there is nothing to deliver, the common case),
+    evidence delivery touches its DB only when it has work.
 
     One bounded batch per tick; @_scheduler_job never re-raises, so an ordinary
     SQLite/I/O failure degrades to the next tick, never to a daemon crash.
@@ -8360,11 +8363,11 @@ def _family_book_telemetry_ingest_cycle() -> None:
     if _cycle_lock.locked() or _edli_reactor_active():
         return
     # Idle-tick fast path: decided against the PRIVATE spool, so an empty
-    # outbox never opens the live-money DB at all.
+    # outbox never opens the evidence DB at all.
     if not outbox_has_pending():
         return
 
-    conn = get_trade_connection(write_class="live")
+    conn = get_family_book_evidence_connection(write_class="live")
     try:
         outcome = run_bounded_ingest(conn)
         if outcome.failed or outcome.ack_failed:
@@ -9873,6 +9876,16 @@ def main():
     init_schema_trade_only(trade_conn)
     trade_conn.close()
 
+    # book_snapshot_persistence DB split (2026-08-19): family-book evidence
+    # (family_book_states/family_book_observations) lives on its OWN file,
+    # never zeus_trades.db -- its schema must be ready before the capture
+    # worker's read-only cache-seed bootstrap or the ingest scheduler job
+    # (_family_book_telemetry_ingest_cycle) ever touch it, same as trade
+    # above.
+    fb_evidence_conn = get_family_book_evidence_connection(write_class="live")
+    init_schema_family_book_evidence(fb_evidence_conn)
+    fb_evidence_conn.close()
+
     # F109 boot-time consolidation (2026-05-17 MAJ-1).
     # Must run BEFORE any strategy gate or wallet check that reads position_current.
     # Voids oldest duplicate open-phase rows so the migration pre-flight passes.
@@ -9900,6 +9913,12 @@ def main():
             logger.info("assert_db_matches_registry: trade DB table-set matches registry")
         finally:
             _trade_conn_reg.close()
+        _fb_evidence_conn_reg = get_family_book_evidence_connection()
+        try:
+            assert_db_matches_registry(_fb_evidence_conn_reg, DBIdentity.FAMILY_BOOK_EVIDENCE)
+            logger.info("assert_db_matches_registry: family-book evidence DB table-set matches registry")
+        finally:
+            _fb_evidence_conn_reg.close()
     conn.close()
 
     # T5 MIGRATION (docs/rebuild/quarantine_excision_2026-07-11.md, deliverable
@@ -10331,12 +10350,13 @@ def main():
         id="forecasts_wal_checkpoint", next_run_time=_utc_run_time_after(150.0),
         max_instances=1, coalesce=True,
     )
-    # book_snapshot_persistence round-5 fix Y3/Y5: bounded family-book
-    # telemetry outbox -> canonical delivery, on the daemon's own
-    # write_class="live" connection (see _family_book_telemetry_ingest_cycle
-    # above) -- registered only if the capture-side worker actually started
-    # (readiness handshake below); an unstarted/failed worker means an empty
-    # or absent spool, so scheduling ingest would be pure overhead.
+    # book_snapshot_persistence round-5 fix Y3/Y5 (DB split 2026-08-19): bounded
+    # family-book telemetry outbox -> canonical delivery, on the daemon's own
+    # write_class="live" connection to the family-book EVIDENCE DB (see
+    # _family_book_telemetry_ingest_cycle above) -- registered only if the
+    # capture-side worker actually started (readiness handshake below); an
+    # unstarted/failed worker means an empty or absent spool, so scheduling
+    # ingest would be pure overhead.
     if _family_book_telemetry_ready:
         scheduler.add_job(
             _family_book_telemetry_ingest_cycle, "interval", seconds=30,

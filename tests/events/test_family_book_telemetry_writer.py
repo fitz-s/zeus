@@ -18,6 +18,7 @@ from __future__ import annotations
 import ast
 import inspect
 import json
+import os
 import sqlite3
 import threading
 import time
@@ -826,6 +827,65 @@ class TestWorkerLiveness:
         assert writer.drain(timeout=3.0)
         assert writer.counter("family_book_telemetry_sampled_out_total") == 1
 
+    # -----------------------------------------------------------------------
+    # HIGH-2: cache_seeded must reflect whether the canonical seed read
+    # actually completed, never merely whether _bootstrap_last_state_cache
+    # happened to raise. The prior implementation swallowed a canonical-open
+    # failure INSIDE the function (bare except/return), so the outer
+    # try/except in _worker_loop never fired and cache_seeded stayed True
+    # unconditionally -- these three tests are the antibody.
+    # -----------------------------------------------------------------------
+
+    def test_cache_seeded_true_on_a_genuinely_fresh_empty_canonical_schema(self, tmp_path):
+        """Table absent (fresh DB) is a POSITIVELY-IDENTIFIED empty schema --
+        there is nothing to seed, so this legitimately counts as seeded."""
+        spool_path = tmp_path / "spool.db"
+        empty_path = tmp_path / "empty.db"
+        sqlite3.connect(str(empty_path)).close()  # file exists, no tables at all
+
+        readiness = writer.start_worker(
+            spool_conn_factory=lambda: sqlite3.connect(str(spool_path)),
+            readonly_canonical_conn_factory=lambda: sqlite3.connect(f"file:{empty_path}?mode=ro", uri=True),
+        )
+        assert readiness.ready
+        assert readiness.cache_seeded is True
+
+    def test_cache_seeded_false_when_canonical_connection_cannot_open(self, tmp_path):
+        """A canonical connection that fails to open must NOT be reported as
+        seeded -- the seed read never even started."""
+        spool_path = tmp_path / "spool.db"
+
+        def _boom():
+            raise sqlite3.OperationalError("simulated canonical connect failure")
+
+        readiness = writer.start_worker(
+            spool_conn_factory=lambda: sqlite3.connect(str(spool_path)),
+            readonly_canonical_conn_factory=_boom,
+        )
+        assert readiness.ready  # capture still starts -- seeding is a separate fact
+        assert readiness.cache_seeded is False
+
+    def test_cache_seeded_false_when_canonical_read_fails_for_a_reason_other_than_missing_table(self, tmp_path):
+        """THE antibody for the HIGH-2 defect: a canonical error that is NOT
+        the fresh-empty-schema case (e.g. a genuine read failure against an
+        existing, non-empty schema) must surface as cache_seeded=False, never
+        be silently swallowed and reported as seeded regardless."""
+        spool_path = tmp_path / "spool.db"
+
+        class _BoomingConn:
+            def execute(self, *a, **kw):
+                raise sqlite3.OperationalError("simulated disk I/O error")
+
+            def close(self):
+                pass
+
+        readiness = writer.start_worker(
+            spool_conn_factory=lambda: sqlite3.connect(str(spool_path)),
+            readonly_canonical_conn_factory=lambda: _BoomingConn(),
+        )
+        assert readiness.ready
+        assert readiness.cache_seeded is False
+
 
 # ---------------------------------------------------------------------------
 # SQLite multi-connection WAL-reset-fix version guard.
@@ -918,6 +978,48 @@ class TestSingleConnectAntibody:
         assert spool_path.resolve() != (tmp_path / "zeus_trades.db").resolve()
         assert spool_path.name == "family_book_telemetry_spool.db"
 
+    def test_spool_factory_checks_every_canonical_db_not_just_trade(self, tmp_path, monkeypatch):
+        """LOW fix: canonical-path rejection is centralized and checks
+        world/forecasts/trade AND the family-book evidence DB -- not trade
+        alone."""
+        from src.state import db as db_module
+
+        monkeypatch.setattr(db_module, "_zeus_trade_db_path", lambda: tmp_path / "zeus_trades.db")
+        # Alias the WORLD path directly onto the spool's own computed name --
+        # the trade-only check would never catch this.
+        spool_name = "family_book_telemetry_spool.db"
+        monkeypatch.setattr(db_module, "ZEUS_WORLD_DB_PATH", tmp_path / spool_name)
+        with pytest.raises(AssertionError):
+            writer._default_spool_conn_factory()
+
+    def test_spool_factory_refuses_when_spool_path_is_a_symlink_to_a_canonical_db(self, tmp_path, monkeypatch):
+        from src.state import db as db_module
+
+        trade_path = tmp_path / "zeus_trades.db"
+        trade_path.touch()
+        monkeypatch.setattr(db_module, "_zeus_trade_db_path", lambda: trade_path)
+        spool_path = trade_path.with_name("family_book_telemetry_spool.db")
+        spool_path.symlink_to(trade_path)
+        try:
+            with pytest.raises(AssertionError):
+                writer._default_spool_conn_factory()
+        finally:
+            spool_path.unlink(missing_ok=True)
+
+    def test_spool_factory_refuses_when_spool_path_is_a_hardlink_to_a_canonical_db(self, tmp_path, monkeypatch):
+        from src.state import db as db_module
+
+        trade_path = tmp_path / "zeus_trades.db"
+        trade_path.touch()
+        monkeypatch.setattr(db_module, "_zeus_trade_db_path", lambda: trade_path)
+        spool_path = trade_path.with_name("family_book_telemetry_spool.db")
+        os.link(trade_path, spool_path)
+        try:
+            with pytest.raises(AssertionError):
+                writer._default_spool_conn_factory()
+        finally:
+            spool_path.unlink(missing_ok=True)
+
 
 # ---------------------------------------------------------------------------
 # Round-6 (Z1/Z2) validation: the optional plane must never compete with the
@@ -972,10 +1074,10 @@ class TestMoneyPathYield:
 
         def _tripwire(**kw):
             opened.append(1)
-            raise AssertionError("opened trade DB while the money path was active")
+            raise AssertionError("opened the evidence DB while the money path was active")
 
         monkeypatch.setattr(main_module, "_edli_reactor_active", lambda: True)
-        monkeypatch.setattr(main_module, "get_trade_connection", _tripwire)
+        monkeypatch.setattr(main_module, "get_family_book_evidence_connection", _tripwire)
         main_module._family_book_telemetry_ingest_cycle()
         assert opened == []
 
@@ -999,6 +1101,57 @@ class TestMoneyPathYield:
         )
         assert outcome.disabled is True
         assert outcome.batch_rows == 0
+
+    def test_evidence_delivery_cannot_contend_with_a_held_trade_db_write(self, tmp_path):
+        """DB-split determinism: with the physical boundary in place, holding
+        a write transaction open on the TRADE DB must have ZERO effect on
+        evidence delivery -- not "usually fast", but PROVABLY independent,
+        because run_bounded_ingest's canonical_conn now points at a
+        DIFFERENT file than any money-path writer ever opens. This is the
+        strong, simple assertion the DB boundary (as opposed to the yield
+        guard alone) makes possible: no amount of held-lock time on the
+        trade DB can delay this call, because SQLite's WAL writer lock is
+        per-FILE, and the two files no longer overlap.
+        """
+        spool_path = _start(tmp_path)
+        trade_path = tmp_path / "trade.db"       # the money-path DB
+        evidence_path = tmp_path / "evidence.db"  # what run_bounded_ingest now targets
+        _bootstrap_canonical(evidence_path)  # creates family_book_states/observations there
+
+        case = _case()
+        space = _outcome_space(case)
+        _enqueue(_decision(case, space, _family_book(case, space)), _family(case),
+                 _proofs_for(space), datetime(2026, 6, 14, 12, 0, tzinfo=UTC))
+        assert writer.drain(timeout=3.0)
+
+        # Hold an exclusive write transaction open on the TRADE DB, the way
+        # a live decision cycle would. If evidence delivery still shared this
+        # file (the pre-split design), this write lock would make the
+        # canonical connection below wait up to its busy_timeout.
+        locker = sqlite3.connect(str(trade_path))
+        locker.execute("CREATE TABLE t (x)")
+        locker.execute("BEGIN IMMEDIATE")
+        locker.execute("INSERT INTO t VALUES (1)")
+        try:
+            evidence_conn = sqlite3.connect(str(evidence_path), timeout=0.001)
+            try:
+                start = time.monotonic()
+                outcome = writer.run_bounded_ingest(
+                    evidence_conn, spool_conn_factory=lambda: sqlite3.connect(str(spool_path))
+                )
+                elapsed = time.monotonic() - start
+            finally:
+                evidence_conn.close()
+        finally:
+            locker.rollback()
+            locker.close()
+
+        assert outcome.failed is False, outcome.reason
+        assert outcome.ingested_observations == 1
+        # A near-zero-timeout connection to a file the trade-DB lock never
+        # touches must not have waited at all -- structurally impossible to
+        # contend, not merely fast this run.
+        assert elapsed < 0.5, f"evidence delivery took {elapsed:.3f}s -- suggests it still shares a lock with the trade DB"
 
 
 class TestSpoolHardBounds:
@@ -1048,6 +1201,55 @@ class TestSpoolHardBounds:
                 conn.commit()
         conn.close()
 
+    def test_pinned_reader_checkpoint_starvation_still_converges_at_the_ceiling(self, tmp_path):
+        """A long-lived reader holding a WAL snapshot prevents a PASSIVE
+        checkpoint from draining frames back into the main file -- growth
+        must still CONVERGE at the physical ceiling rather than run away
+        while the reader is pinned (measured behavior documented in
+        PLAN.md "Measured: what max_page_count actually bounds under WAL",
+        turned into a regression proof here)."""
+        from src.state.schema import family_book_telemetry_outbox_schema as sch
+
+        spool_path = tmp_path / "spool.db"
+        conn = sqlite3.connect(str(spool_path))
+        conn.execute("PRAGMA journal_mode=WAL")
+        sch.ensure_table(conn, max_page_count=256)  # deliberately tiny, pathological ceiling
+
+        # Pin a reader: hold a read transaction open across every write below,
+        # so PASSIVE checkpoints below cannot drain the WAL floor.
+        reader = sqlite3.connect(str(spool_path))
+        reader.execute("BEGIN")
+        reader.execute("SELECT COUNT(*) FROM family_book_telemetry_outbox").fetchone()
+
+        row = {c: 0 for c in sch._COLUMNS}
+        row.update({"canonical_payload": "x" * 5000, "source_manifest_json": "y" * 5000})
+        try:
+            with pytest.raises(sqlite3.OperationalError, match="full"):
+                for _ in range(500):
+                    sch.insert_outbox_row(conn, row)
+                    conn.commit()
+                    conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
+
+            wal_path = Path(str(spool_path) + "-wal")
+            size_at_wall = wal_path.stat().st_size if wal_path.exists() else 0
+
+            # Hammer further writes past the wall -- footprint must CONVERGE,
+            # not keep growing, because this module's own writes now fail.
+            for _ in range(50):
+                try:
+                    sch.insert_outbox_row(conn, row)
+                    conn.commit()
+                except sqlite3.OperationalError:
+                    conn.rollback()
+            size_after_more = wal_path.stat().st_size if wal_path.exists() else 0
+            assert size_after_more == size_at_wall, (
+                "WAL grew further after the physical ceiling was hit while a reader "
+                "pinned the checkpoint floor -- the ceiling did not bound total footprint"
+            )
+        finally:
+            reader.close()
+            conn.close()
+
     def test_unreadable_budget_fails_closed_and_drops_capture(self, tmp_path):
         """An unknown backlog must NOT admit a write (fail closed).
 
@@ -1079,6 +1281,45 @@ class TestSpoolHardBounds:
             assert check.execute("SELECT COUNT(*) FROM family_book_telemetry_outbox").fetchone()[0] == 0
         finally:
             check.close()
+
+    def test_bump_meta_raises_instead_of_silently_clamping_an_underflow(self, tmp_path):
+        """A delta that would drive a counter negative means the metadata has
+        already drifted from the outbox rows it summarizes -- must raise, not
+        silently clamp to zero and hide the drift."""
+        from src.state.schema import family_book_telemetry_outbox_schema as sch
+
+        conn = sqlite3.connect(str(tmp_path / "spool.db"))
+        sch.ensure_table(conn)
+        row = {c: 0 for c in sch._COLUMNS}
+        row.update({"canonical_payload": "x" * 10, "source_manifest_json": "y" * 10})
+        sch.insert_outbox_row(conn, row)
+        conn.commit()
+        assert sch.pending_budget(conn) == (1, 20)
+
+        # delete_up_to computes freed count/bytes from the actual matching
+        # rows, so to force an underflow we bump the meta table directly by
+        # more than what is really pending.
+        with pytest.raises(sch.OutboxMetaInvariantError):
+            sch._bump_meta(conn, d_count=-5, d_bytes=0)
+        conn.close()
+
+    def test_pending_budget_fails_closed_on_a_partial_counter_pair(self, tmp_path):
+        """_bump_meta always writes pending_count and pending_bytes together
+        in the same transaction -- a partial pair can only mean corruption.
+        Treating it as zero would silently admit writes against an unknown
+        backlog, exactly what fail-closed exists to prevent."""
+        from src.state.schema import family_book_telemetry_outbox_schema as sch
+
+        conn = sqlite3.connect(str(tmp_path / "spool.db"))
+        sch.ensure_table(conn)
+        # Simulate corruption directly: only one of the two keys present.
+        conn.execute(
+            "INSERT INTO family_book_telemetry_meta (k, v) VALUES ('pending_count', 3)"
+        )
+        conn.commit()
+        with pytest.raises(sch.OutboxMetaInvariantError):
+            sch.pending_budget(conn)
+        conn.close()
 
 
 class TestAckFailureReplay:

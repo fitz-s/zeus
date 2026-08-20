@@ -39,6 +39,18 @@ import sqlite3
 
 SCHEMA_VERSION = 1
 
+
+class OutboxMetaInvariantError(RuntimeError):
+    """family_book_telemetry_meta's paired pending counters have drifted from
+    the outbox rows they summarize -- a partial key pair (one of
+    pending_count/pending_bytes present without the other; _bump_meta always
+    writes both in the same transaction, so this can only mean corruption) or
+    a delta that would drive a counter negative (a double-delete or mismatched
+    accounting, not a legitimate zero). Both must fail closed: silently
+    clamping to zero (or treating an absent key as "definitely no backlog")
+    would hide the drift from the capture-path admission check that depends
+    on these counters being trustworthy."""
+
 CREATE_META_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS family_book_telemetry_meta (
     k TEXT PRIMARY KEY,
@@ -155,12 +167,28 @@ def _bump_meta(conn: sqlite3.Connection, *, d_count: int, d_bytes: int) -> None:
     row they count. That removes any need for a startup backfill pass -- and
     with it the open-time ``commit()`` such a pass would require, which would
     write to the spool before the caller's own transaction discipline applies.
+
+    Raises OutboxMetaInvariantError instead of clamping a would-be-negative
+    result to zero (round-review fix): a delta that drives a counter below
+    zero means the metadata has already drifted from the outbox rows it
+    describes, and a silent clamp would hide exactly that drift from the
+    admission check that trusts these counters.
     """
     for key, delta in ((_META_PENDING_COUNT, d_count), (_META_PENDING_BYTES, d_bytes)):
+        row = conn.execute(
+            "SELECT v FROM family_book_telemetry_meta WHERE k = ?", (key,)
+        ).fetchone()
+        current = int(row[0]) if row is not None else 0
+        new_value = current + delta
+        if new_value < 0:
+            raise OutboxMetaInvariantError(
+                f"family_book_telemetry_meta counter '{key}' would underflow: "
+                f"current={current} delta={delta} -> {new_value}"
+            )
         conn.execute(
-            "INSERT INTO family_book_telemetry_meta (k, v) VALUES (?, MAX(0, ?)) "
-            "ON CONFLICT(k) DO UPDATE SET v = MAX(0, v + ?)",
-            (key, delta, delta),
+            "INSERT INTO family_book_telemetry_meta (k, v) VALUES (?, ?) "
+            "ON CONFLICT(k) DO UPDATE SET v = ?",
+            (key, new_value, new_value),
         )
 
 
@@ -211,15 +239,32 @@ def pending_budget(conn: sqlite3.Connection) -> tuple[int, int]:
     """O(1) ``(pending_count, pending_bytes)`` for the capture-path admission
     check -- two primary-key lookups, cost independent of backlog size.
     Raises if the metadata table cannot be READ -- the caller must then fail
-    closed rather than admit writes with an unknown backlog (round-6 Z2). An
-    ABSENT key is not unknown: the counters are created by the first row they
-    count, so no key means no row was ever inserted, i.e. zero pending."""
+    closed rather than admit writes with an unknown backlog (round-6 Z2). BOTH
+    keys absent is not unknown: the counters are created together by the
+    first row they count (_bump_meta writes both in the same transaction), so
+    no keys means no row was ever inserted, i.e. zero pending.
+
+    A PARTIAL pair -- exactly one of the two keys present -- is a different
+    case: _bump_meta can never produce that outcome in normal operation, so
+    it means the metadata has drifted from the outbox rows it is meant to
+    summarize. Treating that as "zero" would silently admit writes against an
+    unknown backlog, exactly what the fail-closed contract exists to prevent
+    -- raise instead."""
     rows = dict(
         conn.execute(
             "SELECT k, v FROM family_book_telemetry_meta WHERE k IN (?, ?)",
             (_META_PENDING_COUNT, _META_PENDING_BYTES),
         ).fetchall()
     )
+    has_count = _META_PENDING_COUNT in rows
+    has_bytes = _META_PENDING_BYTES in rows
+    if has_count != has_bytes:
+        raise OutboxMetaInvariantError(
+            f"family_book_telemetry_meta has a partial counter pair "
+            f"(pending_count present={has_count}, pending_bytes present={has_bytes}) -- "
+            "these keys are always written together by _bump_meta; a partial "
+            "pair means corruption, not zero backlog."
+        )
     return int(rows.get(_META_PENDING_COUNT, 0)), int(rows.get(_META_PENDING_BYTES, 0))
 
 

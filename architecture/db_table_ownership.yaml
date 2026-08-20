@@ -2765,13 +2765,19 @@ tables:
       matching invalidation until a newer snapshot is captured.
 
   - name: family_book_states
-    db: trade
-    schema_class: trade_class
+    db: family_book_evidence
+    schema_class: family_book_evidence_class
     schema_version_owner: SCHEMA_VERSION
-    created_by: "db.py:init_schema_trade_only + src.state.schema.family_book_states_schema.ensure_table"
+    created_by: "db.py:init_schema_family_book_evidence + src.state.schema.family_book_states_schema.ensure_table"
     pk_col: state_id
     required_columns:
-      - {name: state_id, type: TEXT, nullable: false}
+      # nullable:true is correct SQLite semantics, not a data promise: a
+      # TEXT PRIMARY KEY (unlike an INTEGER PRIMARY KEY rowid alias) does NOT
+      # get an implicit NOT NULL from SQLite (PRAGMA table_info reports
+      # notnull=0) -- verified directly, not assumed. The application always
+      # populates it (insert_state's positional INSERT has no way to omit
+      # it); this column just declares what SQLite itself enforces.
+      - {name: state_id, type: TEXT, nullable: true}
       - {name: family_id, type: TEXT, nullable: false}
       - {name: content_hash, type: TEXT, nullable: false}
       - {name: hash_version, type: INTEGER, nullable: false}
@@ -2802,17 +2808,28 @@ tables:
       NOT NULL/PK violations as fake dedup hits). Writer:
       src/events/family_book_telemetry_writer.py (off the live decision
       thread -- see family_book_observations below). Reader: the
-      center-evidence campaign (not yet wired). See
-      docs/operations/current/book_snapshot_persistence/PLAN.md.
+      center-evidence campaign (not yet wired). DB SPLIT (2026-08-19): moved
+      off zeus_trades.db onto its own physical file,
+      state/zeus-family-book-evidence.db (init_schema_family_book_evidence),
+      so an optional evidence-only writer can never open a second connection
+      to the live-money trade DB at all -- the money-path-contention class is
+      closed at the DB boundary rather than only by the cooperative yield
+      guard around the daemon's ingest job. Growth ceiling: real byte budget
+      converted to PRAGMA max_page_count via the connection's actual
+      page_size (src.state.db.page_count_ceiling_for_byte_budget). Retention
+      beyond that ceiling is an OPEN operator decision -- see PLAN.md
+      "Retention". See docs/operations/current/book_snapshot_persistence/PLAN.md.
 
   - name: family_book_observations
-    db: trade
-    schema_class: trade_class
+    db: family_book_evidence
+    schema_class: family_book_evidence_class
     schema_version_owner: SCHEMA_VERSION
-    created_by: "db.py:init_schema_trade_only + src.state.schema.family_book_observations_schema.ensure_table"
+    created_by: "db.py:init_schema_family_book_evidence + src.state.schema.family_book_observations_schema.ensure_table"
     pk_col: observation_id
     required_columns:
-      - {name: observation_id, type: TEXT, nullable: false}
+      # nullable:true is correct SQLite semantics (see family_book_states'
+      # state_id above -- a TEXT PRIMARY KEY has no implicit NOT NULL).
+      - {name: observation_id, type: TEXT, nullable: true}
       - {name: family_id, type: TEXT, nullable: false}
       - {name: city, type: TEXT, nullable: false}
       - {name: target_date, type: TEXT, nullable: false}
@@ -2865,13 +2882,16 @@ tables:
       same cycle can silently remove it from the evidence population.
       Writer path is nonblocking from the live decision thread: the decision
       thread only does a bounded queue.put_nowait of an immutable envelope
-      (family_book_telemetry_writer.enqueue_family_book_observation); all
-      manifest-building/hashing/JSON/SQLite happen on a separate owner-local
-      writer thread against its own get_trade_connection(busy_timeout_ms=250)
-      connection (short budget so it yields to live writers -- Connection
-      PRAGMA only, INV-37/transaction semantics unchanged, per
-      src/state/db.py _connect's sanctioned "optional derived publication"
-      carve-out). See docs/operations/current/book_snapshot_persistence/PLAN.md.
+      (family_book_telemetry_writer.enqueue_family_book_observation); the
+      worker thread writes to a PRIVATE spool file
+      (family_book_telemetry_spool.db), never this DB directly. Canonical
+      delivery is a separate daemon scheduler job
+      (src/main.py _family_book_telemetry_ingest_cycle) on its own
+      get_family_book_evidence_connection(write_class="live") connection --
+      DB SPLIT (2026-08-19): moved off zeus_trades.db onto its own physical
+      file so this optional writer can never open a second connection to the
+      live-money trade DB at all. See
+      docs/operations/current/book_snapshot_persistence/PLAN.md.
 
   - name: book_hash_transitions
     db: trade
