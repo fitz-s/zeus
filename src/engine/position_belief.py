@@ -59,8 +59,13 @@ from typing import Mapping
 from zoneinfo import ZoneInfo
 
 from src.data.replacement_forecast_readiness import (
+    HIGH_DATA_VERSION,
     LIVE_RUNTIME_LAYER,
+    LOW_DATA_VERSION,
+    PRODUCT_ID as LIVE_REPLACEMENT_POSTERIOR_PRODUCT_ID,
+    READY_STATUS as LIVE_REPLACEMENT_READY_STATUS,
     SOURCE_ID as LIVE_REPLACEMENT_POSTERIOR_SOURCE_ID,
+    STRATEGY_KEY as LIVE_REPLACEMENT_STRATEGY_KEY,
 )
 from src.data.replacement_forecast_cycle_policy import (
     CURRENT_EVIDENCE_SEMANTICS_REVISION,
@@ -197,6 +202,147 @@ def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
         return {str(row[1]) for row in conn.execute(f"PRAGMA table_info({table})")}
     except sqlite3.Error:
         return set()
+
+
+def _certified_replacement_posterior_row(
+    conn: sqlite3.Connection,
+    *,
+    city: str,
+    target_date: str,
+    temperature_metric: str,
+    decision_time: datetime,
+    posterior_columns: set[str],
+) -> sqlite3.Row | None:
+    """Point-read the exact posterior bound by current live readiness.
+
+    ``forecast_posteriors`` is append-only. Selecting a family row and sorting
+    its large JSON payloads makes monitor latency grow with history and can also
+    let an uncertified append race ahead of entry's certificate. Current live
+    schemas bind one immutable ``posterior_id`` in readiness; that pointer is
+    both the probability authority and the bounded read plan.
+    """
+
+    required_posterior_columns = {
+        "posterior_id",
+        "product_id",
+        "data_version",
+        "training_allowed",
+        "source_available_at",
+    }
+    if not required_posterior_columns.issubset(posterior_columns):
+        logger.warning(
+            "position_belief: certified posterior schema incomplete; no held authority"
+        )
+        return None
+
+    metric = str(temperature_metric or "").strip().lower()
+    if metric not in {"high", "low"}:
+        return None
+    data_version = HIGH_DATA_VERSION if metric == "high" else LOW_DATA_VERSION
+    decision_utc = (
+        decision_time.replace(tzinfo=timezone.utc)
+        if decision_time.tzinfo is None
+        else decision_time.astimezone(timezone.utc)
+    )
+    decision_iso = decision_utc.isoformat()
+    readiness = conn.execute(
+        """
+        SELECT status, expires_at, dependency_json
+          FROM readiness_state
+         WHERE scope_type = 'strategy'
+           AND strategy_key = ?
+           AND source_id = ?
+           AND data_version = ?
+           AND city = ?
+           AND target_local_date = ?
+           AND temperature_metric = ?
+           AND computed_at <= ?
+         ORDER BY computed_at DESC, readiness_id DESC
+         LIMIT 1
+        """,
+        (
+            LIVE_REPLACEMENT_STRATEGY_KEY,
+            LIVE_REPLACEMENT_POSTERIOR_SOURCE_ID,
+            data_version,
+            city,
+            target_date,
+            metric,
+            decision_iso,
+        ),
+    ).fetchone()
+    if readiness is None or str(readiness["status"] or "") != LIVE_REPLACEMENT_READY_STATUS:
+        return None
+    expires_at = _parse_computed_at(readiness["expires_at"])
+    if expires_at is None or expires_at <= decision_utc:
+        return None
+    try:
+        payload = json.loads(str(readiness["dependency_json"] or "{}"))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None
+    dependencies = payload.get("dependencies") if isinstance(payload, Mapping) else None
+    if not isinstance(dependencies, list):
+        return None
+    matches = [
+        item
+        for item in dependencies
+        if isinstance(item, Mapping)
+        and item.get("role") == "soft_anchor_posterior"
+    ]
+    if len(matches) != 1:
+        return None
+    dependency = matches[0]
+    if (
+        dependency.get("source_id") != LIVE_REPLACEMENT_POSTERIOR_SOURCE_ID
+        or dependency.get("product_id") != LIVE_REPLACEMENT_POSTERIOR_PRODUCT_ID
+        or dependency.get("data_version") != data_version
+        or dependency.get("status") != LIVE_REPLACEMENT_READY_STATUS
+    ):
+        return None
+    available_at = _parse_computed_at(dependency.get("source_available_at"))
+    posterior_id = dependency.get("posterior_id")
+    if (
+        available_at is None
+        or available_at > decision_utc
+        or type(posterior_id) is not int
+        or posterior_id <= 0
+    ):
+        return None
+
+    return conn.execute(
+        f"""
+        SELECT posterior_id, computed_at, q_json, q_lcb_json, q_ucb_json,
+               {('source_cycle_time' if 'source_cycle_time' in posterior_columns else 'NULL AS source_cycle_time')},
+               runtime_layer,
+               {('source_id' if 'source_id' in posterior_columns else 'NULL AS source_id')},
+               {('posterior_method' if 'posterior_method' in posterior_columns else 'NULL AS posterior_method')},
+               {('provenance_json' if 'provenance_json' in posterior_columns else 'NULL AS provenance_json')}
+          FROM forecast_posteriors
+         WHERE posterior_id = ?
+           AND city = ?
+           AND target_date = ?
+           AND temperature_metric = ?
+           AND source_id = ?
+           AND product_id = ?
+           AND data_version = ?
+           AND training_allowed = 0
+           AND runtime_layer = ?
+           AND computed_at <= ?
+           AND (source_available_at IS NULL OR source_available_at <= ?)
+         LIMIT 1
+        """,
+        (
+            posterior_id,
+            city,
+            target_date,
+            metric,
+            LIVE_REPLACEMENT_POSTERIOR_SOURCE_ID,
+            LIVE_REPLACEMENT_POSTERIOR_PRODUCT_ID,
+            data_version,
+            LIVE_RUNTIME_LAYER,
+            decision_iso,
+            decision_iso,
+        ),
+    ).fetchone()
 
 
 def _parse_computed_at(raw: object) -> datetime | None:
@@ -704,20 +850,40 @@ def load_replacement_belief(
         authority_sql = ""
         if authority_predicates:
             authority_sql = " AND " + " AND ".join(authority_predicates)
-        row = conn.execute(
-            f"""
-            SELECT posterior_id, computed_at, q_json, q_lcb_json, q_ucb_json,
-                   {source_cycle_expr}, runtime_layer,
-                   {source_id_expr}, {posterior_method_expr}, {provenance_expr}
-            FROM forecast_posteriors
-            WHERE city = ? AND target_date = ? AND temperature_metric = ?
-              AND runtime_layer = ?
-              {authority_sql}
-            ORDER BY datetime(computed_at) DESC, posterior_id DESC
-            LIMIT 1
-            """,
-            tuple([*authority_params[:3], LIVE_RUNTIME_LAYER, *authority_params[3:]]),
+        readiness_exists = conn.execute(
+            """
+            SELECT 1
+              FROM sqlite_master
+             WHERE type = 'table' AND name = 'readiness_state'
+             LIMIT 1
+            """
         ).fetchone()
+        if readiness_exists is not None:
+            row = _certified_replacement_posterior_row(
+                conn,
+                city=city,
+                target_date=target_date,
+                temperature_metric=temperature_metric,
+                decision_time=now_dt,
+                posterior_columns=columns,
+            )
+        else:
+            # Narrow historical/unit fixtures predate readiness binding. The
+            # canonical live schema always takes the exact-certificate branch.
+            row = conn.execute(
+                f"""
+                SELECT posterior_id, computed_at, q_json, q_lcb_json, q_ucb_json,
+                       {source_cycle_expr}, runtime_layer,
+                       {source_id_expr}, {posterior_method_expr}, {provenance_expr}
+                FROM forecast_posteriors
+                WHERE city = ? AND target_date = ? AND temperature_metric = ?
+                  AND runtime_layer = ?
+                  {authority_sql}
+                ORDER BY datetime(computed_at) DESC, posterior_id DESC
+                LIMIT 1
+                """,
+                tuple([*authority_params[:3], LIVE_RUNTIME_LAYER, *authority_params[3:]]),
+            ).fetchone()
         if row is not None:
             latest_raw_cycle_time, latest_raw_cycle_basis = _latest_live_input_cycle(
                 conn,
