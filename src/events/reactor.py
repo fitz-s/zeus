@@ -7822,22 +7822,36 @@ def run_edli_event_reactor_cycle(
     paused_forecast_held_auction = False
 
     def _yield_for_held_position_monitor(stage: str) -> bool:
+        unresolved_monitor_handoff = _held_position_monitor_preemption_pending(
+            None,
+            held_position_monitor_debt_pending,
+        )
+        monitor_pressure = unresolved_monitor_handoff or (
+            _held_position_monitor_preemption_pending(
+                held_position_monitor_pending,
+                None,
+            )
+        )
         if (
-            held_sell_completion_cycle
-            or paused_forecast_held_auction
+            paused_forecast_held_auction
             or committed_day0_wake
-            or _GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.is_set()
+            or (
+                (
+                    held_sell_completion_cycle
+                    or _GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.is_set()
+                )
+                and not unresolved_monitor_handoff
+            )
         ):
             # SCOPE: only the already-reserved fairness completion cut. DRAIN:
-            # the existing bounded cancellation probe may still yield once to
-            # current monitor debt, otherwise one terminal global cut runs.
-            # RESET: _settle_global_auction_monitor_fairness clears the token
-            # only after that cut reaches a non-cancelled terminal result.
+            # one terminal global cut runs while its upstream held-capital
+            # monitor truth remains current. Unresolved monitor debt overrides
+            # an exact/completion reservation for one handoff: otherwise the
+            # reactor holds the lock while the monitor waits for that same lock.
+            # RESET: fresh canonical monitor evidence clears the debt and the
+            # durable completion token/request still owns the next auction.
             return False
-        if not _held_position_monitor_preemption_pending(
-            held_position_monitor_pending,
-            held_position_monitor_debt_pending,
-        ):
+        if not monitor_pressure:
             return False
         # SCOPE: only this replayable global-auction cycle. DRAIN: the monitor
         # receives this handoff, while the durable completion wake and in-process

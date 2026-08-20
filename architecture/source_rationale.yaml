@@ -1978,7 +1978,11 @@ files:
       disappearing before publish. V4 reservation reuses one stable
       position/family/held-token/SELL generation and request through an O(1)
       per-debt lineage lookup; changing q/book publishes a new attempt witness
-      without scanning or freezing the global wake queue.
+      without scanning or freezing the global wake queue. Exact held-SELL and
+      generic completion reservations retain durable auction ownership, but an
+      unresolved canonical monitor handoff debt takes one upstream refresh turn
+      before the reactor reacquires that reservation, preventing the two lanes
+      from waiting on the same reactor lock indefinitely.
     downstream:
     - src/engine/event_reactor_adapter.py
     - src/engine/global_batch_runtime.py

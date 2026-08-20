@@ -5872,8 +5872,14 @@ def test_monitor_debt_yields_before_runtime_setup_and_releases_reactor_lock(
         reactor_module._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.clear()
 
 
-def test_reserved_monitor_completion_reaches_runtime_setup_under_monitor_pressure(
+@pytest.mark.parametrize(
+    ("completion_due", "exact_held_completion"),
+    ((True, False), (False, True)),
+)
+def test_reserved_or_exact_completion_yields_for_unresolved_monitor_debt(
     monkeypatch,
+    completion_due,
+    exact_held_completion,
 ):
     import src.events.reactor as reactor_module
     import src.main as main
@@ -5881,35 +5887,49 @@ def test_reserved_monitor_completion_reaches_runtime_setup_under_monitor_pressur
     from src.riskguard import riskguard
     from src.riskguard.risk_level import RiskLevel
 
-    class RuntimeSetupReached(RuntimeError):
-        pass
-
     monkeypatch.setattr(main, "_settings_section", lambda *_args, **_kwargs: {})
-    monkeypatch.setattr(main, "_defer_for_held_position_monitor", lambda _job: True)
+    monkeypatch.setattr(main, "_defer_for_held_position_monitor", lambda _job: False)
     monkeypatch.setattr(riskguard, "get_current_level", lambda: RiskLevel.GREEN)
     monkeypatch.setattr(
         reactor_module,
         "_durable_exact_held_sell_completion_pending",
-        lambda: False,
+        lambda: exact_held_completion,
     )
     monkeypatch.setattr(
         reactor_module,
-        "_paused_entry_wake_should_park",
-        lambda **_kwargs: False,
+        "_durable_exact_held_sell_completion_requests",
+        lambda: (),
     )
     monkeypatch.setattr(
         db,
         "get_world_connection",
-        lambda: (_ for _ in ()).throw(RuntimeSetupReached()),
+        lambda: pytest.fail("monitor debt must yield before runtime DB setup"),
+    )
+    reservations: list[tuple[str, str]] = []
+
+    def reserve_completion(**kwargs):
+        reservations.append((kwargs["reason"], kwargs["position_id"]))
+        reactor_module._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.set()
+        return True
+
+    monkeypatch.setattr(
+        reactor_module,
+        "request_global_auction_completion",
+        reserve_completion,
     )
 
-    reactor_module._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.set()
+    reactor_module._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.clear()
+    if completion_due:
+        reactor_module._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.set()
+    lock = threading.Lock()
     try:
-        with pytest.raises(RuntimeSetupReached):
-            reactor_module.run_edli_event_reactor_cycle(
-                active_lock=threading.Lock(),
-                held_position_monitor_debt_pending=lambda: True,
-            )
+        assert reactor_module.run_edli_event_reactor_cycle(
+            active_lock=lock,
+            held_position_monitor_debt_pending=lambda: True,
+        ) is False
+        assert reservations == [("periodic_monitor_preemption", "")]
+        assert reactor_module._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.is_set()
+        assert not lock.locked()
     finally:
         reactor_module._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.clear()
 
