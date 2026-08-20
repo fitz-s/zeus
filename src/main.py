@@ -79,8 +79,10 @@ from src.runtime import bankroll_provider
 from src.state.db import (
     init_schema,
     init_schema_trade_only,
+    init_schema_family_book_evidence,
     get_world_connection,
     get_trade_connection,
+    get_family_book_evidence_connection,
     get_world_connection_read_only,
 )
 from src.state.portfolio import load_portfolio
@@ -8321,6 +8323,59 @@ _trades_wal_checkpoint_cycle = _make_wal_checkpoint_cycle("trades", defer_for_mo
 _forecasts_wal_checkpoint_cycle = _make_wal_checkpoint_cycle("forecasts", defer_for_monitor=False)
 
 
+@_scheduler_job("family_book_telemetry_ingest")
+def _family_book_telemetry_ingest_cycle() -> None:
+    """book_snapshot_persistence: canonical delivery of the family-book
+    telemetry outbox runs HERE, on an ordinary scheduler job with its own
+    short-lived ``write_class="live"`` connection to the family-book EVIDENCE
+    DB (state/zeus-family-book-evidence.db) -- a physically separate file
+    from zeus_trades.db (DB split, 2026-08-19).
+
+    What actually makes this safe against the money path: the DB BOUNDARY,
+    not the guard below. family_book_states/family_book_observations used to
+    be trade-class tables, so this job's connection and the reactor's live
+    money-path connection both opened the SAME file (zeus_trades.db) and
+    contended for its single SQLite writer lock -- the guard below (yield
+    while a cycle is active) was the ONLY thing standing between an optional
+    write and the money path. After the split, this job's connection targets
+    a DIFFERENT file entirely; there is no shared writer lock left to contend
+    for, so an evidence write is now STRUCTURALLY incapable of blocking or
+    being blocked by a money-path write, independent of timing or guard
+    correctness. See ``tests/events/test_family_book_telemetry_writer.py``
+    ``TestMoneyPathYield`` for the deterministic proof (holding a write
+    transaction open on the trade DB does not delay evidence delivery at
+    all).
+
+    The guard below is kept anyway, as a COURTESY, not a safety requirement:
+    it still avoids doing optional I/O -- however cheap and non-contending --
+    while the daemon is mid-decision-cycle, matching the same idiom every
+    other periodic optional job in this daemon uses
+    (``_run_ws_gap_reconcile_if_required``, ``_run_venue_background_maintenance_once``).
+    Combined with the spool-only pending precheck (no canonical connection is
+    opened at all when there is nothing to deliver, the common case),
+    evidence delivery touches its DB only when it has work.
+
+    One bounded batch per tick; @_scheduler_job never re-raises, so an ordinary
+    SQLite/I/O failure degrades to the next tick, never to a daemon crash.
+    """
+    from src.events.family_book_telemetry_writer import outbox_has_pending, run_bounded_ingest
+
+    if _cycle_lock.locked() or _edli_reactor_active():
+        return
+    # Idle-tick fast path: decided against the PRIVATE spool, so an empty
+    # outbox never opens the evidence DB at all.
+    if not outbox_has_pending():
+        return
+
+    conn = get_family_book_evidence_connection(write_class="live")
+    try:
+        outcome = run_bounded_ingest(conn)
+        if outcome.failed or outcome.ack_failed:
+            logger.warning("family_book_telemetry_ingest: %s", outcome.reason)
+    finally:
+        conn.close()
+
+
 def _edli_bounded_positive_int(config: dict, key: str, *, default: int, maximum: int) -> int:
     try:
         value = int(config.get(key, default))
@@ -9821,6 +9876,16 @@ def main():
     init_schema_trade_only(trade_conn)
     trade_conn.close()
 
+    # book_snapshot_persistence DB split (2026-08-19): family-book evidence
+    # (family_book_states/family_book_observations) lives on its OWN file,
+    # never zeus_trades.db -- its schema must be ready before the capture
+    # worker's read-only cache-seed bootstrap or the ingest scheduler job
+    # (_family_book_telemetry_ingest_cycle) ever touch it, same as trade
+    # above.
+    fb_evidence_conn = get_family_book_evidence_connection(write_class="live")
+    init_schema_family_book_evidence(fb_evidence_conn)
+    fb_evidence_conn.close()
+
     # F109 boot-time consolidation (2026-05-17 MAJ-1).
     # Must run BEFORE any strategy gate or wallet check that reads position_current.
     # Voids oldest duplicate open-phase rows so the migration pre-flight passes.
@@ -9848,6 +9913,12 @@ def main():
             logger.info("assert_db_matches_registry: trade DB table-set matches registry")
         finally:
             _trade_conn_reg.close()
+        _fb_evidence_conn_reg = get_family_book_evidence_connection()
+        try:
+            assert_db_matches_registry(_fb_evidence_conn_reg, DBIdentity.FAMILY_BOOK_EVIDENCE)
+            logger.info("assert_db_matches_registry: family-book evidence DB table-set matches registry")
+        finally:
+            _fb_evidence_conn_reg.close()
     conn.close()
 
     # T5 MIGRATION (docs/rebuild/quarantine_excision_2026-07-11.md, deliverable
@@ -10150,6 +10221,43 @@ def main():
             coalesce=True,
         )
 
+    # book_snapshot_persistence round-5 fix Y5: start the family-book
+    # telemetry CAPTURE-side worker BEFORE reactor activation (the reactor's
+    # decision hook enqueues into it every cycle), with a blocking
+    # ready/failed handshake -- readiness = sqlite version ok + spool opened
+    # + schema ok + cache seeded + thread alive. On failure, capture is
+    # disabled TERMINALLY inside start_worker() itself (a typed counter
+    # fires; the decision thread never retries); the daemon boot itself
+    # never fails on this -- telemetry is evidence-only, never decision
+    # authority. ZEUS_FAMILY_BOOK_TELEMETRY_ENABLED=0 skips starting the
+    # worker (and, below, registering the ingest job) entirely -- the
+    # emergency guard stops BOTH capture and canonical draining, not merely
+    # new enqueues (run_bounded_ingest also re-checks the same switch on
+    # every tick, so flipping it off mid-run stops delivery immediately too).
+    _family_book_telemetry_ready = False
+    if os.environ.get("ZEUS_FAMILY_BOOK_TELEMETRY_ENABLED", "1") in ("1", "true", "True"):
+        from src.events.family_book_telemetry_writer import start_worker as _start_family_book_telemetry_worker
+
+        _fbt_readiness = _start_family_book_telemetry_worker()
+        _family_book_telemetry_ready = _fbt_readiness.ready
+        if not _fbt_readiness.ready:
+            logger.warning(
+                "family_book_telemetry: capture disabled (startup failed: %s)",
+                _fbt_readiness.reason,
+            )
+        elif not _fbt_readiness.cache_seeded:
+            # Ready, but the first observation per family this run will read as
+            # STATE_CHANGE regardless of content. Said out loud so the analysis
+            # can account for it rather than silently mis-reading the sample.
+            logger.warning(
+                "family_book_telemetry: capture worker ready, last-state cache NOT seeded "
+                "(first observation per family will label STATE_CHANGE)"
+            )
+        else:
+            logger.info("family_book_telemetry: capture worker ready")
+    else:
+        logger.info("family_book_telemetry: disabled via ZEUS_FAMILY_BOOK_TELEMETRY_ENABLED")
+
     _register_edli_live_jobs()
     # Exit-lifecycle monitoring stays in the order daemon. Chain-sync READ,
     # market/user channel ingest, substrate capture, and post-trade capital
@@ -10242,6 +10350,19 @@ def main():
         id="forecasts_wal_checkpoint", next_run_time=_utc_run_time_after(150.0),
         max_instances=1, coalesce=True,
     )
+    # book_snapshot_persistence round-5 fix Y3/Y5 (DB split 2026-08-19): bounded
+    # family-book telemetry outbox -> canonical delivery, on the daemon's own
+    # write_class="live" connection to the family-book EVIDENCE DB (see
+    # _family_book_telemetry_ingest_cycle above) -- registered only if the
+    # capture-side worker actually started (readiness handshake below); an
+    # unstarted/failed worker means an empty or absent spool, so scheduling
+    # ingest would be pure overhead.
+    if _family_book_telemetry_ready:
+        scheduler.add_job(
+            _family_book_telemetry_ingest_cycle, "interval", seconds=30,
+            id="family_book_telemetry_ingest", next_run_time=_utc_run_time_after(30.0),
+            max_instances=1, coalesce=True,
+        )
     from src.control.heartbeat_supervisor import heartbeat_cadence_seconds_from_env
     scheduler.add_job(
         _start_venue_heartbeat_loop_if_needed,
@@ -10315,6 +10436,21 @@ def main():
     except (KeyboardInterrupt, SystemExit):
         logger.info("Zeus shutting down")
         scheduler.shutdown(wait=True)  # U7: wait=True so inflight cycles commit before exit
+    finally:
+        # Round-6: try/finally, not an except-only arm. Any other exit path out
+        # of scheduler.start() (an unexpected raise) previously left the capture
+        # thread running against an otherwise-dead daemon.
+        if _family_book_telemetry_ready:
+            from src.events.family_book_telemetry_writer import (
+                drain as _drain_family_book_telemetry,
+                shutdown as _shutdown_family_book_telemetry_worker,
+            )
+
+            # Bounded drain first: envelopes already enqueued get spooled (and
+            # so survive to the next daemon's ingest) instead of dying in the
+            # in-memory queue. Bounded, because shutdown must not hang on it.
+            _drain_family_book_telemetry(timeout=2.0)
+            _shutdown_family_book_telemetry_worker()
 
 
 if __name__ == "__main__":

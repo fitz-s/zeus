@@ -2764,6 +2764,135 @@ tables:
       price readers and submit gates fail closed on rows captured before a
       matching invalidation until a newer snapshot is captured.
 
+  - name: family_book_states
+    db: family_book_evidence
+    schema_class: family_book_evidence_class
+    schema_version_owner: SCHEMA_VERSION
+    created_by: "db.py:init_schema_family_book_evidence + src.state.schema.family_book_states_schema.ensure_table"
+    pk_col: state_id
+    required_columns:
+      # nullable:true is correct SQLite semantics, not a data promise: a
+      # TEXT PRIMARY KEY (unlike an INTEGER PRIMARY KEY rowid alias) does NOT
+      # get an implicit NOT NULL from SQLite (PRAGMA table_info reports
+      # notnull=0) -- verified directly, not assumed. The application always
+      # populates it (insert_state's positional INSERT has no way to omit
+      # it); this column just declares what SQLite itself enforces.
+      - {name: state_id, type: TEXT, nullable: true}
+      - {name: family_id, type: TEXT, nullable: false}
+      - {name: content_hash, type: TEXT, nullable: false}
+      - {name: hash_version, type: INTEGER, nullable: false}
+      - {name: topology_hash, type: TEXT, nullable: false}
+      - {name: complete_book, type: INTEGER, nullable: false}
+      - {name: canonical_payload, type: TEXT, nullable: false}
+      - {name: payload_schema_version, type: INTEGER, nullable: false}
+      - {name: first_seen_decision_time, type: TEXT, nullable: false}
+      - {name: schema_version, type: INTEGER, nullable: false}
+    notes: >
+      EVIDENCE ONLY -- never decision authority. Immutable, content-addressed
+      MANIFEST (bin_id -> referenced executable_market_snapshots row identity
+      + hash + execution metadata) of a decided FamilyBook
+      (src/execution/family_book.py), NOT a duplicated ladder: that table is
+      already immutable/append-only and excluded from the repo's one
+      archival/delete tool (scripts/ops/archive_pre_epoch_trades.py
+      EXCLUDED_TABLES). Superseded 2026-07-29 the prior family_book_snapshots
+      design after a deep-review NO-GO: FamilyBook.book_hash
+      (compute_book_hash) hashes captured_at_utc, and the live bridge sets
+      captured_at_utc=decision_time (qkernel_spine_bridge.py:1787), so it can
+      never dedup a live rebuild -- content_hash here is a SEPARATE,
+      versioned (hash_version), timestamp-free hash over exactly
+      canonical_payload's content-identity fields (excludes the per-bin
+      executable_snapshot_id/source_captured_at, which change every capture
+      even when content is unchanged). Dedup: UNIQUE(family_id,
+      content_hash) via targeted ON CONFLICT DO NOTHING (never a
+      statement-wide INSERT OR IGNORE, which would swallow unrelated
+      NOT NULL/PK violations as fake dedup hits). Writer:
+      src/events/family_book_telemetry_writer.py (off the live decision
+      thread -- see family_book_observations below). Reader: the
+      center-evidence campaign (not yet wired). DB SPLIT (2026-08-19): moved
+      off zeus_trades.db onto its own physical file,
+      state/zeus-family-book-evidence.db (init_schema_family_book_evidence),
+      so an optional evidence-only writer can never open a second connection
+      to the live-money trade DB at all -- the money-path-contention class is
+      closed at the DB boundary rather than only by the cooperative yield
+      guard around the daemon's ingest job. Growth ceiling: real byte budget
+      converted to PRAGMA max_page_count via the connection's actual
+      page_size (src.state.db.page_count_ceiling_for_byte_budget). Retention
+      beyond that ceiling is an OPEN operator decision -- see PLAN.md
+      "Retention". See docs/operations/current/book_snapshot_persistence/PLAN.md.
+
+  - name: family_book_observations
+    db: family_book_evidence
+    schema_class: family_book_evidence_class
+    schema_version_owner: SCHEMA_VERSION
+    created_by: "db.py:init_schema_family_book_evidence + src.state.schema.family_book_observations_schema.ensure_table"
+    pk_col: observation_id
+    required_columns:
+      # nullable:true is correct SQLite semantics (see family_book_states'
+      # state_id above -- a TEXT PRIMARY KEY has no implicit NOT NULL).
+      - {name: observation_id, type: TEXT, nullable: true}
+      - {name: family_id, type: TEXT, nullable: false}
+      - {name: city, type: TEXT, nullable: false}
+      - {name: target_date, type: TEXT, nullable: false}
+      - {name: temperature_metric, type: TEXT, nullable: false}
+      - {name: decision_id, type: TEXT, nullable: false}
+      - {name: receipt_hash, type: TEXT, nullable: false}
+      - {name: state_id, type: TEXT, nullable: false}
+      - {name: decision_time, type: TEXT, nullable: false}
+      - {name: causal_snapshot_id, type: TEXT, nullable: true}
+      - {name: predictive_identity_hash, type: TEXT, nullable: true}
+      - {name: our_mu_native, type: REAL, nullable: true}
+      - {name: our_sigma_native, type: REAL, nullable: true}
+      - {name: measurement_unit, type: TEXT, nullable: false}
+      - {name: model_q_json, type: TEXT, nullable: true}
+      - {name: model_q_identity_hash, type: TEXT, nullable: true}
+      - {name: market_q_json, type: TEXT, nullable: true}
+      - {name: market_q_basis, type: TEXT, nullable: true}
+      - {name: market_q_depth_score, type: REAL, nullable: true}
+      - {name: market_q_spread_score, type: REAL, nullable: true}
+      - {name: market_q_projection_error, type: REAL, nullable: true}
+      - {name: market_q_book_hash, type: TEXT, nullable: true}
+      - {name: market_center_native, type: REAL, nullable: true}
+      - {name: market_center_status, type: TEXT, nullable: false}
+      - {name: market_center_version, type: TEXT, nullable: false}
+      - {name: complete_book, type: INTEGER, nullable: false}
+      - {name: sampling_reason, type: TEXT, nullable: false}
+      - {name: sampling_policy_version, type: INTEGER, nullable: false}
+      - {name: capture_seam, type: TEXT, nullable: false}
+      - {name: schema_version, type: INTEGER, nullable: false}
+    notes: >
+      EVIDENCE ONLY -- never decision authority. Append-only, SAMPLED
+      decision time series referencing an immutable family_book_states row
+      (state_id) rather than duplicating its content. The evidence authority
+      is the ordered model/market q vectors (model_q_json/market_q_json,
+      keyed by bin_id) and market_implied_q's quality fields
+      (market_q_depth_score/spread_score/projection_error/basis), NOT the
+      demoted market_center_native scalar diagnostic (market_center_version
+      "market_center_native_v1"; market_center_status is
+      OK/INCOMPLETE_BOOK/INSUFFICIENT_COVERAGE -- NULL/non-OK unless every
+      EXECUTABLE bin has a two-sided quote, since a subset-quoted "complete"
+      book is not an identified family-wide expectation). Sampling policy v1
+      (sampling_reason STATE_CHANGE/HEARTBEAT/PRE_VETO_SELECTED,
+      sampling_policy_version) is the ACTUAL row-volume control -- see
+      src/events/family_book_telemetry_writer.py; family_book_states'
+      content-hash dedup controls STATE row volume only, this policy
+      controls OBSERVATION row volume. capture_seam='DECISION_PRODUCTION'
+      records that capture happens the moment FamilyDecisionEngine.decide()
+      produces a decision inside the reactor's actionability retry loop
+      (src/engine/event_reactor_adapter.py), BEFORE any later veto in the
+      same cycle can silently remove it from the evidence population.
+      Writer path is nonblocking from the live decision thread: the decision
+      thread only does a bounded queue.put_nowait of an immutable envelope
+      (family_book_telemetry_writer.enqueue_family_book_observation); the
+      worker thread writes to a PRIVATE spool file
+      (family_book_telemetry_spool.db), never this DB directly. Canonical
+      delivery is a separate daemon scheduler job
+      (src/main.py _family_book_telemetry_ingest_cycle) on its own
+      get_family_book_evidence_connection(write_class="live") connection --
+      DB SPLIT (2026-08-19): moved off zeus_trades.db onto its own physical
+      file so this optional writer can never open a second connection to the
+      live-money trade DB at all. See
+      docs/operations/current/book_snapshot_persistence/PLAN.md.
+
   - name: book_hash_transitions
     db: trade
     schema_class: trade_class

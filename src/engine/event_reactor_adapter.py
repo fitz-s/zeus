@@ -269,6 +269,7 @@ from src.events.candidate_binding import MarketTopologyCandidate, weather_family
 from src.events.candidate_evaluation import CandidateEvaluation
 from src.events.decision_engine import EventBoundDecisionEngine, EventBoundDecisionRequest
 from src.events.event_store import EventStore, GLOBAL_WINNER_SUBMIT_FENCED
+from src.events.family_book_telemetry_writer import enqueue_family_book_observation
 from src.events.forecast_completeness import ForecastCompletenessStatus
 from src.events.live_order_aggregate import LiveOrderAggregateError, LiveOrderAggregateLedger
 from src.events.money_path_adapters import evaluate_fdr_full_family, evaluate_kelly, evaluate_riskguard
@@ -17435,6 +17436,22 @@ def _build_event_bound_no_submit_receipt_core(
                 _spine_fact_decision = _spine_result.decision
                 _spine_candidate_economics_by_key = qkernel_candidate_economics_by_bin_side(
                     _spine_result.decision
+                )
+                # book_snapshot_persistence (2026-07-29, redesigned post deep-review
+                # NO-GO): capture at the decision-PRODUCTION seam, not after this
+                # retry loop exits -- a later actionability veto in THIS SAME cycle
+                # (near-day0 / rest-then-cross / fill-up exclusion, below) resets
+                # _spine_fact_decision to None, which would silently drop a decision
+                # that existed here from the evidence population. Nonblocking: this
+                # only enqueues an envelope (queue.put_nowait); all serialization and
+                # SQLite I/O happen off this thread (family_book_telemetry_writer).
+                enqueue_family_book_observation(
+                    decision=_spine_result.decision,
+                    family=family,
+                    active_proofs=_active_spine_entry_proofs,
+                    candidate_bin_id=_candidate_bin_id,
+                    decision_time=decision_time,
+                    causal_snapshot_id=event.causal_snapshot_id,
                 )
                 if (
                     global_actuation is not None

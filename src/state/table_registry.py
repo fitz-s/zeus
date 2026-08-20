@@ -33,10 +33,10 @@ import yaml
 # Enums
 # ---------------------------------------------------------------------------
 
-VALID_DB_VALUES = frozenset({"world", "forecasts", "trade", "risk_state", "backtest"})
+VALID_DB_VALUES = frozenset({"world", "forecasts", "trade", "risk_state", "backtest", "family_book_evidence"})
 VALID_SCHEMA_CLASS_VALUES = frozenset({
     "forecast_class", "world_class", "trade_class", "risk_class",
-    "backtest_class", "legacy_archived", "archive",
+    "backtest_class", "legacy_archived", "archive", "family_book_evidence_class",
 })
 
 
@@ -46,6 +46,10 @@ class DBIdentity(str, Enum):
     TRADE = "trade"
     RISK_STATE = "risk_state"
     BACKTEST = "backtest"
+    # book_snapshot_persistence DB split (2026-08-19): family-book decision-
+    # time evidence (family_book_states/family_book_observations), split off
+    # zeus_trades.db onto its own file, state/zeus-family-book-evidence.db.
+    FAMILY_BOOK_EVIDENCE = "family_book_evidence"
 
 
 class SchemaClass(str, Enum):
@@ -56,6 +60,9 @@ class SchemaClass(str, Enum):
     BACKTEST_CLASS = "backtest_class"
     LEGACY_ARCHIVED = "legacy_archived"
     ARCHIVE = "archive"  # F5: legacy export; table exists but no live writes
+    # book_snapshot_persistence DB split (2026-08-19): family-book decision-
+    # time evidence, its own physical file.
+    FAMILY_BOOK_EVIDENCE_CLASS = "family_book_evidence_class"
 
 
 _NON_OWNING_SCHEMA_CLASSES = frozenset({
