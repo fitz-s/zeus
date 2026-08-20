@@ -19697,10 +19697,14 @@ def _normalize_event_bound_executor_submit_result(
     reconciliation_followup_required = bool(result.reconciliation_followup_required)
     side_effect_known = bool(result.side_effect_known)
 
-    if status in {"SUBMITTED", "REJECTED", "TIMEOUT_UNKNOWN", "POST_SUBMIT_UNKNOWN"}:
+    if status in {"SUBMITTED", "TIMEOUT_UNKNOWN", "POST_SUBMIT_UNKNOWN"}:
         venue_call_started = True
-    if status in {"SUBMITTED", "REJECTED"}:
+    if status == "SUBMITTED":
         venue_ack_received = True
+        side_effect_known = True
+    if status == "REJECTED":
+        if venue_ack_received:
+            venue_call_started = True
         side_effect_known = True
     if status in {"TIMEOUT_UNKNOWN", "POST_SUBMIT_UNKNOWN"}:
         reconciliation_followup_required = True
@@ -23474,7 +23478,7 @@ def _append_submit_terminal_aggregate_event(
         )
         return event.event_hash
     if submit_result.status in {"REJECTED", "PRE_SUBMIT_ERROR"}:
-        is_pre_submit_rejection = submit_result.status == "PRE_SUBMIT_ERROR"
+        is_pre_submit_rejection = not submit_result.venue_call_started
         event = LiveOrderAggregateLedger(conn, initialize_schema=False).append_event(
             aggregate_id=aggregate_id,
             event_type="SubmitRejected",

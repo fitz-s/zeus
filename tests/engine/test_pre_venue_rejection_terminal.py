@@ -1,5 +1,5 @@
 # Created: 2026-06-01
-# Last reused or audited: 2026-07-27
+# Last reused or audited: 2026-08-20
 # Authority basis: EDLI live-order aggregate event-sourcing law
 #   (src/events/live_order_aggregate.py), executor pre-venue depth validation
 #   (src/execution/executor.py:1773), live-cap ledger (src/events/live_cap.py),
@@ -188,6 +188,7 @@ def test_command_built_before_certificate_persist_failure_requires_terminalizati
         "entry_economics:non_positive_edge",
         "invalid_submit_amount_precision:rounded_to_zero",
         "decision_source_integrity:source_run_after_decision_time",
+        "global_increment_binding:wealth_economic_identity_superseded",
         "SUBMIT_ABORTED_PRICE_MOVED",
     ],
 )
@@ -217,6 +218,120 @@ def test_executor_designed_pre_submit_rejections_do_not_count_as_venue_rejects(r
     assert result.venue_ack_received is False
     assert result.side_effect_known is True
     assert result.reconciliation_followup_required is False
+
+
+def test_explicit_pre_venue_rejection_facts_override_generic_rejected_status():
+    """The executor's direct boundary facts outrank the generic outcome label."""
+
+    def _executor_submit(intent, conn=None, decision_id="", snapshot_conn=None):
+        return SimpleNamespace(
+            status="rejected",
+            reason="global_increment_binding:wealth_economic_identity_superseded",
+            command_state="REJECTED",
+            order_id=None,
+            external_order_id=None,
+            venue_call_started=False,
+            venue_ack_received=False,
+        )
+
+    result = submit_event_bound_final_intent_via_existing_executor(
+        final_intent_cert=_FINAL,
+        execution_command_cert=_COMMAND,
+        conn=None,  # type: ignore[arg-type]
+        decision_time=_now(),
+        executor_submit=_executor_submit,
+    )
+
+    assert result.status == "PRE_SUBMIT_ERROR"
+    assert result.venue_call_started is False
+    assert result.venue_ack_received is False
+    assert result.side_effect_known is True
+    assert result.raw_response["venue_call_started"] is False
+    assert result.raw_response["venue_ack_received"] is False
+    normalized = era._normalize_event_bound_executor_submit_result(result)
+    assert normalized == result
+
+
+@pytest.mark.parametrize("ack_received", (False, True))
+def test_explicit_venue_rejection_preserves_exact_call_and_ack(ack_received):
+    """A deterministic post-call reject keeps the exact executor call/ACK tuple."""
+
+    def _executor_submit(intent, conn=None, decision_id="", snapshot_conn=None):
+        return SimpleNamespace(
+            status="rejected",
+            reason="venue_rejected_400",
+            command_state="REJECTED",
+            order_id=None,
+            external_order_id=None,
+            venue_call_started=True,
+            venue_ack_received=ack_received,
+        )
+
+    result = submit_event_bound_final_intent_via_existing_executor(
+        final_intent_cert=_FINAL,
+        execution_command_cert=_COMMAND,
+        conn=None,  # type: ignore[arg-type]
+        decision_time=_now(),
+        executor_submit=_executor_submit,
+    )
+
+    assert result.status == "REJECTED"
+    assert result.venue_call_started is True
+    assert result.venue_ack_received is ack_received
+    assert result.side_effect_known is True
+    assert result.raw_response["venue_call_started"] is True
+    assert result.raw_response["venue_ack_received"] is ack_received
+    normalized = era._normalize_event_bound_executor_submit_result(result)
+    assert normalized == result
+
+
+def test_submit_rejected_payload_classifies_pre_submit_from_boundary_fact(monkeypatch):
+    """Terminal aggregate payload must not derive pre-submit truth from status alone."""
+
+    captured = {}
+
+    class _Ledger:
+        def __init__(self, conn, *, initialize_schema=False):
+            pass
+
+        def append_event(self, **kwargs):
+            captured.update(kwargs)
+            return SimpleNamespace(event_hash="event:hash")
+
+    monkeypatch.setattr(era, "LiveOrderAggregateLedger", _Ledger)
+    command = _Cert(
+        {
+            "aggregate_id": "agg-1",
+            "event_id": "evt-1",
+            "final_intent_id": "fin-1",
+            "execution_command_id": "cmd-1",
+        }
+    )
+    receipt = _Cert({}, certificate_hash="receipt:hash")
+    result = EventBoundExecutorSubmitResult(
+        status="REJECTED",
+        reason_code="global_increment_binding:wealth_economic_identity_superseded",
+        venue_call_started=False,
+        venue_ack_received=False,
+        side_effect_known=True,
+    )
+    result = era._normalize_event_bound_executor_submit_result(result)
+    assert result.status == "REJECTED"
+    assert result.venue_call_started is False
+    assert result.venue_ack_received is False
+
+    era._append_submit_terminal_aggregate_event(
+        object(),
+        command,
+        receipt,
+        submit_result=result,
+        decision_time=_now(),
+    )
+
+    assert captured["event_type"] == "SubmitRejected"
+    assert captured["payload"]["venue_call_started"] is False
+    assert captured["payload"]["venue_ack_received"] is False
+    assert captured["payload"]["pre_submit_rejection"] is True
 
 
 def test_executor_partial_fill_is_submitted_side_effect_with_ack():

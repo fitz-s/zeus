@@ -416,33 +416,54 @@ def _final_execution_intent_from_payload(final_payload: dict):
 def _executor_order_result_to_submit_result(result, *, started_at: str) -> EventBoundExecutorSubmitResult:
     status = str(getattr(result, "status", "") or "").lower()
     result_reason = str(getattr(result, "reason", None) or "")
+    has_venue_boundary_facts = hasattr(result, "venue_call_started") or hasattr(
+        result, "venue_ack_received"
+    )
+    venue_call_started = bool(getattr(result, "venue_call_started", False))
+    venue_ack_received = bool(getattr(result, "venue_ack_received", False))
+    if venue_ack_received:
+        venue_call_started = True
     raw_response = {
         "status": getattr(result, "status", None),
         "reason": getattr(result, "reason", None),
         "command_state": getattr(result, "command_state", None),
         "order_id": getattr(result, "order_id", None),
         "external_order_id": getattr(result, "external_order_id", None),
+        "venue_call_started": venue_call_started,
+        "venue_ack_received": venue_ack_received,
     }
     if status in {"pending", "partial", "filled"}:
         receipt_status = "SUBMITTED"
         reason = "OK"
         reconcile = False
+        venue_call_started = True
+        venue_ack_received = True
     elif status in {"rejected", "cancelled"}:
         reason = result_reason or "EXECUTOR_REJECTED"
-        receipt_status = (
-            "PRE_SUBMIT_ERROR"
-            if _executor_rejection_is_pre_submit(reason)
-            else "REJECTED"
-        )
+        if has_venue_boundary_facts:
+            receipt_status = "REJECTED" if venue_call_started else "PRE_SUBMIT_ERROR"
+        else:
+            receipt_status = (
+                "PRE_SUBMIT_ERROR"
+                if _executor_rejection_is_pre_submit(reason)
+                else "REJECTED"
+            )
+            venue_call_started = receipt_status == "REJECTED"
+            venue_ack_received = receipt_status == "REJECTED"
         reconcile = False
     elif status == "unknown_side_effect":
         receipt_status = "POST_SUBMIT_UNKNOWN"
         reason = str(getattr(result, "reason", None) or "EXECUTOR_UNKNOWN_SIDE_EFFECT")
         reconcile = True
+        venue_call_started = True
     else:
         receipt_status = "PRE_SUBMIT_ERROR"
         reason = str(getattr(result, "reason", None) or f"EXECUTOR_STATUS_UNSUPPORTED:{status}")
         reconcile = False
+        venue_call_started = False
+        venue_ack_received = False
+    raw_response["venue_call_started"] = venue_call_started
+    raw_response["venue_ack_received"] = venue_ack_received
     return EventBoundExecutorSubmitResult(
         status=receipt_status,  # type: ignore[arg-type]
         reason_code=reason,
@@ -451,8 +472,8 @@ def _executor_order_result_to_submit_result(result, *, started_at: str) -> Event
         submit_finished_at=getattr(result, "venue_ack_time", None) or datetime.now(timezone.utc).isoformat(),
         raw_response=raw_response,
         reconciliation_followup_required=reconcile,
-        venue_call_started=receipt_status in {"SUBMITTED", "REJECTED", "TIMEOUT_UNKNOWN", "POST_SUBMIT_UNKNOWN"},
-        venue_ack_received=receipt_status in {"SUBMITTED", "REJECTED"},
+        venue_call_started=venue_call_started,
+        venue_ack_received=venue_ack_received,
         side_effect_known=receipt_status in {"SUBMITTED", "REJECTED", "PRE_SUBMIT_ERROR"},
     )
 
@@ -485,6 +506,7 @@ def _executor_rejection_is_pre_submit(reason: str) -> bool:
             "entry_economics:",
             "invalid_submit_amount_precision:",
             "decision_source_integrity:",
+            "global_increment_binding:",
             "SUBMIT_ABORTED_PRICE_MOVED",
         )
     )

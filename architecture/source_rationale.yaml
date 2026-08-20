@@ -1874,6 +1874,12 @@ files:
     downstream:
     - src/events/reactor.py
     - src/engine/event_bound_final_intent.py
+  src/engine/event_bound_final_intent.py:
+    zone: K2_runtime
+    authority_role: executor_submit_result_bridge
+    why: Translates the sanctioned executor result into EDLI receipt facts. Explicit executor venue-call and ACK fields outrank generic outcome labels, so a local rejection cannot fabricate venue evidence while a real post-call rejection preserves its exact boundary tuple.
+    downstream:
+    - src/engine/event_reactor_adapter.py
   src/engine/global_single_order_auction.py:
     zone: K2_K3_coordination
     authority_role: global_single_order_auction_coordinator

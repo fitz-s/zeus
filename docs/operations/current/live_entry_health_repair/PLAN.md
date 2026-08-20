@@ -2861,3 +2861,39 @@ publication barrier.
   exact loaded SHA, terminal disposition of the stuck carrier, and a later fresh
   carrier reaching a truthful submit/no-submit result without duplicate venue
   submission.
+
+### Slice B132 — Preserve executor venue-boundary facts in EDLI receipts (2026-08-20)
+
+- Live defect: Seattle's submit-time
+  `global_increment_binding:wealth_economic_identity_superseded` rejection
+  occurred before command persistence or any venue call, yet EDLI recorded
+  `VenueSubmitAttempted` and serialized `venue_call_started=true` plus
+  `venue_ack_received=true`. The executor already returned explicit boundary
+  facts, but the event-bound bridge and adapter re-derived both booleans from
+  the generic `REJECTED` status and overwrote the direct evidence.
+- First-principles invariant: venue contact and ACK are independent facts, not
+  implications of an outcome label. Executor-provided boundary facts outrank
+  status-string inference. A local rejection is terminal with known zero side
+  effect and no attempt event; a real venue rejection preserves its exact
+  call/ACK tuple; an unknown post-call result remains reconcile-required.
+- SCOPE: the submit-result translation, normalization, and terminal aggregate
+  payload for one already-built EDLI command. DRAIN: every returned result still
+  appends exactly one terminal event and releases or transitions its existing
+  live-cap reservation. RESET: the terminal event closes the aggregate; a fresh
+  event may re-auction and must cross the unchanged global-winner and executor
+  fences before any venue I/O.
+- Files authorized: `src/engine/event_bound_final_intent.py`,
+  `src/engine/event_reactor_adapter.py`,
+  `tests/engine/test_pre_venue_rejection_terminal.py`,
+  `architecture/source_rationale.yaml`, `architecture/test_topology.yaml`, and
+  this plan. Forbidden: inferring venue contact from `REJECTED`, suppressing a
+  genuine venue attempt/ACK, changing global ranking, q, Kelly, price, size,
+  cap law, order identity, or replaying a prior command.
+- Acceptance: exact antibodies prove the Seattle local rejection becomes
+  `PRE_SUBMIT_ERROR` with `false/false`, no attempt implication, and
+  `pre_submit_rejection=true`; a genuine venue rejection remains `REJECTED`
+  with its explicit call/ACK facts; submitted and unknown outcomes retain their
+  existing semantics. Focused tests, compilation, lint baseline, topology and
+  registry checks, and `git diff --check` must pass. Runtime closeout requires
+  the exact loaded SHA and future receipts/aggregate events to agree with the
+  canonical executor command and venue evidence.
