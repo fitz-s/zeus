@@ -171,6 +171,10 @@ _TRANSITIONS: dict[tuple[str, str], str] = {
     ("SUBMIT_UNKNOWN_SIDE_EFFECT", "REVIEW_REQUIRED"):       "REVIEW_REQUIRED",
 
     # from PARTIAL
+    # User-channel fill evidence can beat the synchronous SDK return back to
+    # this process.  A later submit ACK binds its order identity but cannot
+    # downgrade the already-observed exposure.
+    ("PARTIAL", "SUBMIT_ACKED"):              "PARTIAL",
     ("PARTIAL", "PARTIAL_FILL_OBSERVED"):     "PARTIAL",
     ("PARTIAL", "FILL_CONFIRMED"):            "FILLED",
     ("PARTIAL", "CANCEL_REQUESTED"):          "CANCEL_PENDING",
@@ -178,6 +182,7 @@ _TRANSITIONS: dict[tuple[str, str], str] = {
     ("PARTIAL", "REVIEW_REQUIRED"):           "REVIEW_REQUIRED",
 
     # from FILLED
+    ("FILLED", "SUBMIT_ACKED"):               "FILLED",
     ("FILLED", "PARTIAL_FILL_OBSERVED"):      "PARTIAL",
     ("FILLED", "REVIEW_REQUIRED"):            "REVIEW_REQUIRED",
 

@@ -2137,6 +2137,53 @@ class TestAppendEventStateTransitionIsGrammarChecked:
 
         assert get_command(conn, "cmd-001")["state"] == expected_state
 
+    @pytest.mark.parametrize(
+        ("fill_event", "fill_state"),
+        [
+            ("PARTIAL_FILL_OBSERVED", "PARTIAL"),
+            ("FILL_CONFIRMED", "FILLED"),
+        ],
+    )
+    def test_submit_ack_after_fill_preserves_stronger_fill_state(
+        self, conn, fill_event, fill_state
+    ):
+        from src.state.venue_command_repo import append_event, get_command
+
+        _insert(conn)
+        append_event(
+            conn,
+            command_id="cmd-001",
+            event_type="SUBMIT_REQUESTED",
+            occurred_at="2026-04-26T00:01:00Z",
+            payload=_valid_execution_capability_payload(),
+        )
+        append_event(
+            conn,
+            command_id="cmd-001",
+            event_type=fill_event,
+            occurred_at="2026-04-26T00:02:00Z",
+            payload={"source": "WS_USER", "trade_fact_id": 4154},
+        )
+        append_event(
+            conn,
+            command_id="cmd-001",
+            event_type="SUBMIT_ACKED",
+            occurred_at="2026-04-26T00:03:00Z",
+            payload={"venue_order_id": "ord-late-ack"},
+        )
+
+        command = get_command(conn, "cmd-001")
+        assert command["state"] == fill_state
+        assert command["venue_order_id"] == "ord-late-ack"
+        assert [
+            row[0]
+            for row in conn.execute(
+                "SELECT event_type FROM venue_command_events "
+                "WHERE command_id = ? ORDER BY sequence_no",
+                ("cmd-001",),
+            ).fetchall()
+        ] == ["INTENT_CREATED", "SUBMIT_REQUESTED", fill_event, "SUBMIT_ACKED"]
+
     def test_acked_to_partial(self, conn):
         from src.state.venue_command_repo import append_event, get_command
         _insert(conn)
@@ -2268,7 +2315,8 @@ class TestAppendEventStateTransitionIsGrammarChecked:
         ("ACKED", "SUBMIT_REJECTED", ["SUBMIT_REQUESTED", "SUBMIT_ACKED"]),
         ("ACKED", "SUBMIT_UNKNOWN", ["SUBMIT_REQUESTED", "SUBMIT_ACKED"]),
         ("ACKED", "CANCEL_ACKED", ["SUBMIT_REQUESTED", "SUBMIT_ACKED"]),
-        # From FILLED: only REVIEW_REQUIRED legal
+        # From FILLED: late submit ACK preserves fill truth; unrelated submit,
+        # cancel, and duplicate full-fill events remain illegal.
         ("FILLED", "SUBMIT_REQUESTED",
          ["SUBMIT_REQUESTED", "SUBMIT_ACKED", "FILL_CONFIRMED"]),
         ("FILLED", "CANCEL_REQUESTED",

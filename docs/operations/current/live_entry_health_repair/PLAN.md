@@ -2792,3 +2792,37 @@ publication barrier.
   closeout requires exact loaded SHA plus a later positive global candidate that
   either persists a command before venue contact or produces a truthful
   non-lock rejection from a freshly rebuilt cut.
+
+### Slice B130 — Preserve fill truth when WS beats the submit ACK (2026-08-20)
+
+- Live defect: a complete 121-family global cut selected a 44.8-share FOK BUY
+  at 10¢ with posterior-mean q=0.309946898 and expected EV +$9.661817. The
+  authenticated user channel persisted its 44.8-share MATCHED trade before
+  `place_limit_order` returned to the executor, moving the command from
+  `SUBMITTING` to `PARTIAL`. The following `SUBMIT_ACKED` append was rejected
+  as an illegal `PARTIAL -> SUBMIT_ACKED` transition, producing
+  `POST_SUBMIT_UNKNOWN/REVIEW_REQUIRED` despite a venue order id and later
+  CONFIRMED transaction fact.
+- First-principles invariant: authenticated fill evidence is stronger than and
+  causally independent of the synchronous submit ACK. A late ACK must still be
+  journaled and bind the venue order identity, but it must never downgrade or
+  invalidate already-observed `PARTIAL` or `FILLED` exposure.
+- SCOPE: venue-command grammar for `SUBMIT_ACKED` arriving after an authenticated
+  partial/full fill only. DRAIN: the same executor call appends the late ACK and
+  continues normally; existing recovery consumes any already-stranded
+  `REVIEW_REQUIRED` command from authenticated trade facts. RESET: the command
+  remains `PARTIAL`/`FILLED` and ordinary fill, reconciliation, and terminal
+  recovery cadence owns all later transitions. Probability, ranking, Kelly,
+  price, sizing, venue submission, and fill authentication are unchanged.
+- Files authorized: `src/state/venue_command_repo.py`,
+  `tests/test_venue_command_repo.py`, `architecture/source_rationale.yaml`,
+  `architecture/test_topology.yaml`, and this plan. Forbidden: accepting an ACK
+  without a prior submit side-effect state, treating an ACK as fill proof,
+  weakening authenticated fill validation, or replaying the venue submission.
+- Acceptance: deterministic grammar tests reproduce both
+  `SUBMITTING -> PARTIAL/FILLED -> SUBMIT_ACKED` orderings, prove the ACK event
+  and venue id persist, and prove the final state remains the stronger fill
+  state. Focused journal/executor/recovery tests, compilation, lint baseline,
+  registry checks, and diff checks pass. Runtime closeout requires exact loaded
+  SHA and either a naturally reordered fill/ACK that converges without review,
+  or recovery of the already-confirmed live command with no duplicate submit.
