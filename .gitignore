@@ -299,5 +299,10 @@ evidence/topology_v_next_shadow/archive/*.jsonl.gz
 /-
 /=
 /:memory:.cutover-lease
+# Working evidence and rebuild specs: local-only by design. ~300 `Authority
+# basis:` comments across src/ cite paths under these two roots, so those
+# citations do not resolve in a clone -- they name the local record a change
+# was derived from, not a published document. See CONTRIBUTING.md
+# "Unresolvable authority citations".
 /docs/evidence/
 /docs/rebuild/
