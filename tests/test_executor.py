@@ -1,8 +1,8 @@
-# Lifecycle: created=2026-04-27; last_reviewed=2026-08-17; last_reused=2026-08-17
+# Lifecycle: created=2026-04-27; last_reviewed=2026-08-20; last_reused=2026-08-20
 # Purpose: Regression coverage for executor and portfolio mechanics under R3 cutover preflight opt-outs.
 # Reuse: Run when executor order submission or portfolio save/load mechanics change.
 # Created: 2026-04-27
-# Last reused/audited: 2026-08-17
+# Last reused/audited: 2026-08-20
 # Authority basis: docs/archive/2026-Q2/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md; R3 Z1 cutover guard audit.
 #                  + docs/operations/task_2026-05-21_live_side_effect_risk_boundaries/task.md P0-1 side-effect boundary fault injection.
 #                  + docs/operations/task_2026-05-21_live_side_effect_risk_boundaries/task.md P2-1 required live ATTACH seam.
@@ -1033,6 +1033,7 @@ class TestExecutor:
     @pytest.mark.parametrize(
         ("failure_site", "failure_kind"),
         (
+            ("src.execution.executor._canonical_trade_write_lease", "lease"),
             ("src.state.venue_command_repo.append_event", "locked"),
             (
                 "src.state.venue_command_repo._assert_entry_certificate_closure",
@@ -1052,9 +1053,12 @@ class TestExecutor:
         failure_kind,
     ):
         """Every pre-venue failure must release the writer and erase admission."""
+        from contextlib import contextmanager
+
         from src.engine.event_bound_final_intent import PreVenueSubmitError
         from src.state.collateral_ledger import CollateralInsufficient, CollateralLedger
         from src.state.schema.entry_exposure_obligations_schema import ensure_table
+        from src.state.write_coordinator import WriteLeaseTimeout
 
         CollateralLedger(_TEST_CONN)
         ensure_table(_TEST_CONN)
@@ -1096,6 +1100,7 @@ class TestExecutor:
             ("_entry_same_token_cooldown_component", "entry_same_token_cooldown"),
             ("_entry_decision_source_component", "decision_source_integrity"),
             ("_entry_replacement_input_hwm_component", "replacement_input_hwm"),
+            ("_entry_strategy_policy_submit_component", "strategy_policy_submit"),
             ("_corrected_entry_identity_component", "corrected_execution_identity"),
             ("_assert_heartbeat_allows_submit", "heartbeat_supervisor"),
             ("_assert_ws_gap_allows_submit", "ws_gap_guard"),
@@ -1150,6 +1155,7 @@ class TestExecutor:
             lambda *args, **kwargs: None,
         )
         failure = {
+            "lease": WriteLeaseTimeout("entry writer wait"),
             "locked": sqlite3.OperationalError("database is locked"),
             "closure": ValueError("certificate closure failed"),
             "collateral": CollateralInsufficient("collateral changed"),
@@ -1158,6 +1164,36 @@ class TestExecutor:
             "unexpected": RuntimeError("unexpected admission failure"),
             "risk_reservation": RuntimeError("risk reservation failure"),
         }[failure_kind]
+
+        writer_scope_trace = []
+        if failure_kind == "locked":
+            test_lease = object()
+
+            @contextmanager
+            def coordinated_entry_writer(*args, **kwargs):
+                writer_scope_trace.append("lease_enter")
+                try:
+                    yield test_lease
+                finally:
+                    writer_scope_trace.append("lease_exit")
+
+            @contextmanager
+            def bounded_entry_writer(conn, lease, *, max_hold_ms):
+                assert lease is test_lease
+                writer_scope_trace.append("bounded_enter")
+                try:
+                    yield
+                finally:
+                    writer_scope_trace.append("bounded_exit")
+
+            monkeypatch.setattr(
+                "src.execution.executor._canonical_trade_write_lease",
+                coordinated_entry_writer,
+            )
+            monkeypatch.setattr(
+                "src.state.write_coordinator.bounded_sqlite_write",
+                bounded_entry_writer,
+            )
 
         if failure_kind == "risk_reservation":
             def reserve_collateral(command_id, _intent, conn, *, spend_micro):
@@ -1225,6 +1261,17 @@ class TestExecutor:
             if failure_kind == "locked":
                 assert result.reason == (
                     "pre_submit_db_locked_transient: database is locked"
+                )
+                assert writer_scope_trace == [
+                    "lease_enter",
+                    "bounded_enter",
+                    "bounded_exit",
+                    "lease_exit",
+                ]
+            elif failure_kind == "lease":
+                assert result.reason == (
+                    "pre_submit_db_locked_transient: database is locked "
+                    "(writer lease timeout: entry writer wait)"
                 )
 
         assert _TEST_CONN.in_transaction is False

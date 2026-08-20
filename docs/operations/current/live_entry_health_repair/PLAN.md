@@ -2755,3 +2755,40 @@ publication barrier.
   tests, compilation, source lint, and diff checks pass. Runtime closeout
   requires exact loaded SHA plus a post-load construction/auction cut that no
   longer expires behind duplicate wake parsing.
+
+### Slice B128 — Serialize ENTRY admission on the canonical TRADE writer lease (2026-08-20)
+
+- Live defect: after B127 restored complete global auctions, Seattle 80–81°F
+  YES at 17–18¢ passed one 1,882-candidate global comparison and a `STABLE`
+  submit-time preflight. Its immutable live-order aggregate then recorded
+  `SubmitRejected` before any venue call with
+  `EXECUTOR_PRE_VENUE_REJECTED:database is locked`; the live-cap reservation
+  released correctly, but a positive executable order was missed. EXIT already
+  entered the canonical TRADE writer coordinator; ENTRY began `BEGIN IMMEDIATE`
+  without that lease and could collide with monitor/recovery writers.
+- First-principles invariant: command, submission envelope, collateral
+  reservation, and unresolved exposure remain one atomic pre-venue admission,
+  but a current globally selected ENTRY must join the same bounded TRADE writer
+  serialization as every participating live writer. It may wait only inside the
+  short submit-time authority budget; a raw/legacy writer collision remains a
+  clean no-side-effect transient rejection and is re-decided from fresh truth.
+- SCOPE: canonical live ENTRY pre-submit admission only. DRAIN: the coordinator
+  admits the writer after any incumbent short transaction, then the existing
+  fresh attached snapshot and atomic admission commit complete. RESET: the
+  lease releases on every success, rejection, exception, or timeout; a timeout
+  rolls back and the reactor requeues the candidate for a new current cut.
+  Probability, ranking, Kelly, order type, quote/JIT gates, venue I/O, and EXIT
+  semantics are unchanged.
+- Files authorized: `src/execution/executor.py`, `tests/test_executor.py`,
+  `architecture/source_rationale.yaml`, `architecture/test_topology.yaml`, and
+  this plan. Forbidden: extending book/probability freshness, submitting after
+  a lease timeout, holding the lease across SDK I/O, weakening monitor priority,
+  or classifying a pre-venue lock as an unknown side effect.
+- Acceptance: a deterministic executor antibody proves the ENTRY path enters
+  the canonical writer lease and maps lease timeout to the existing clean
+  `pre_submit_db_locked_transient` result with no command/envelope/reservation,
+  no client construction, and no venue call. Focused executor and coordinator
+  tests, compilation, lint, registry checks, and diff checks pass. Runtime
+  closeout requires exact loaded SHA plus a later positive global candidate that
+  either persists a command before venue contact or produces a truthful
+  non-lock rejection from a freshly rebuilt cut.

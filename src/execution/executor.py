@@ -18,6 +18,7 @@ import os
 import sqlite3
 import time
 import uuid
+from contextlib import ExitStack
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation, ROUND_CEILING, ROUND_FLOOR
@@ -80,6 +81,8 @@ logger = logging.getLogger(__name__)
 
 _EXIT_PRE_SUBMIT_WRITE_LEASE_DEADLINE_MS = 250
 _EXIT_PRE_SUBMIT_WRITE_LEASE_MAX_HOLD_MS = 500
+_ENTRY_PRE_SUBMIT_WRITE_LEASE_DEADLINE_MS = 250
+_ENTRY_PRE_SUBMIT_WRITE_LEASE_MAX_HOLD_MS = 500
 
 _LIVE_ENTRY_MIN_EXPECTED_PROFIT_USD = 0.05
 _LIVE_ENTRY_MIN_SUBMIT_EDGE_DENSITY = 0.02
@@ -8612,7 +8615,31 @@ def _live_order(
                 idempotency_key=idem.value,
             )
 
+        from src.state.write_coordinator import (
+            WriteLeaseTimeout,
+            WritePriority,
+            bounded_sqlite_write,
+        )
+
+        entry_write_stack = ExitStack()
         try:
+            write_lease = entry_write_stack.enter_context(
+                _canonical_trade_write_lease(
+                    conn,
+                    owner="entry_pre_submit_persist",
+                    deadline_ms=_ENTRY_PRE_SUBMIT_WRITE_LEASE_DEADLINE_MS,
+                    max_hold_ms=_ENTRY_PRE_SUBMIT_WRITE_LEASE_MAX_HOLD_MS,
+                    priority=WritePriority.STANDARD,
+                )
+            )
+            if write_lease is not None:
+                entry_write_stack.enter_context(
+                    bounded_sqlite_write(
+                        conn,
+                        write_lease,
+                        max_hold_ms=_ENTRY_PRE_SUBMIT_WRITE_LEASE_MAX_HOLD_MS,
+                    )
+                )
             # The fresh owner-local certificate check above proves the commit
             # exists without disturbing the reactor's caller transaction.
             # Restart the sanctioned attached admission now so the closure
@@ -8918,6 +8945,31 @@ def _live_order(
                 command_id=command_id,
                 command_state="REJECTED",
             )
+        except WriteLeaseTimeout as exc:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            logger.warning(
+                "_live_order: pre-venue TRADE lease deferred (command_id=%s "
+                "trade_id=%s) — no order placed; transient reject, retry next "
+                "current cut: %s",
+                command_id,
+                trade_id,
+                exc,
+            )
+            return OrderResult(
+                trade_id=trade_id,
+                status="rejected",
+                reason=(
+                    "pre_submit_db_locked_transient: database is locked "
+                    f"(writer lease timeout: {exc})"
+                ),
+                submitted_price=intent.limit_price,
+                shares=shares,
+                order_role="entry",
+                idempotency_key=idem.value,
+            )
         except sqlite3.IntegrityError as exc:
             # Race-condition safety belt: another process inserted between our
             # lookup and our INSERT. Existing command is the canonical record.
@@ -9018,6 +9070,8 @@ def _live_order(
             raise PreVenueSubmitError(
                 f"pre_submit_admission_failed:{type(exc).__name__}: {exc}"
             ) from exc
+        finally:
+            entry_write_stack.close()
 
         # -----------------------------------------------------------------------
         # Phase 4: V2 endpoint-identity preflight (INV-25 / K5)
