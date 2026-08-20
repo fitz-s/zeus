@@ -1082,7 +1082,11 @@ class ForecastSnapshotReadyTrigger:
                 ) AS carrier_expected,
                 NULL AS snapshot_members_json
               FROM ready_posterior AS rs
-              JOIN forecast_posteriors AS fp
+              -- The dependency carries the exact certified posterior_id. Keep
+              -- readiness outermost so SQLite must point-probe that immutable
+              -- row; an ordinary JOIN may reverse into a per-family scan of
+              -- the append-only posterior history and consume the auction cut.
+              CROSS JOIN forecast_posteriors AS fp
                 ON fp.posterior_id = json_extract(
                     rs.dependency,
                     '$.posterior_id'

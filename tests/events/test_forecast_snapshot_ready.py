@@ -807,6 +807,7 @@ def test_unrestricted_redecision_drives_readiness_from_current_market_families(
     assert "rs.city = mf.city" in current_scope_sql
     assert "rs.target_local_date = mf.target_date" in current_scope_sql
     assert "rs.temperature_metric = mf.temperature_metric" in current_scope_sql
+    assert "CROSS JOIN forecast_posteriors AS fp" in current_scope_sql
     plan = forecasts_conn.execute(
         "EXPLAIN QUERY PLAN " + current_scope_sql
     ).fetchall()
@@ -833,6 +834,14 @@ def test_unrestricted_redecision_drives_readiness_from_current_market_families(
     )
     assert not any(
         detail == "SCAN m" or detail.startswith("SCAN market_events")
+        for detail in details
+    )
+    assert any(
+        "SEARCH fp USING INTEGER PRIMARY KEY" in detail
+        for detail in details
+    )
+    assert not any(
+        "idx_forecast_posteriors_target" in detail
         for detail in details
     )
 

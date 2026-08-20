@@ -2695,3 +2695,35 @@ publication barrier.
   requires a successful 18Z ENS `source_run`, target snapshots, a same-cycle v4
   posterior, fresh held-position monitor evidence, and exact loaded SHA before
   any new entry can resume.
+
+### Slice B126 — Point-probe the readiness-bound posterior in global scope (2026-08-19)
+
+- Live defect: after B125 restored 18Z same-cycle q for all seven held families,
+  three consecutive global auctions still consumed 30–39 seconds in forecast
+  scope. One completed all 83-family book capture and winner computation but
+  crossed the 45-second cut immediately before receipt persistence; therefore
+  no order/no-order outcome was authoritative.
+- Query proof: the readiness dependency already contains the exact immutable
+  `posterior_id`, but SQLite reversed the ordinary join and searched
+  `forecast_posteriors` through `idx_forecast_posteriors_target`, scanning
+  append-only family history. The identical live count took about 26 seconds.
+  Forcing readiness as the outer loop with `CROSS JOIN` made SQLite use the
+  integer primary-key point probe and returned the same bound rows in about
+  0.05 seconds.
+- First-principles invariant: an exact certified identity is a point lookup,
+  never a history search. The query must still revalidate product, runtime
+  layer, training flag, source/data version, family identity, decision clocks,
+  and market existence after the lookup; join order changes execution shape,
+  not the feasible set or economics.
+- SCOPE: unrestricted replacement-carrier current-scope posterior rejoin only.
+  DRAIN: the next requeued money-path event completes the full global auction
+  under its unchanged 45-second cut. RESET: every auction rebuilds readiness,
+  exact posterior, market, and book truth at its own decision time. No cache,
+  family omission, deadline extension, probability, sizing, ranking, or venue
+  behavior changes.
+- Files authorized: `src/events/triggers/forecast_snapshot_ready.py`,
+  `tests/events/test_forecast_snapshot_ready.py`, and this plan.
+- Acceptance: the relationship test requires a primary-key posterior search and
+  rejects the family-history index; focused trigger tests preserve the emitted
+  family set. Live closeout requires an exact-SHA full-auction receipt followed
+  by its actual BUY/SELL/HOLD/CASH result and any resulting command evidence.
