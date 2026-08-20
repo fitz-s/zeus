@@ -517,20 +517,64 @@ def build_report(rows: list[Row], *, generated_at: str) -> str:
     lucky_win_c = next(c for c in by_category if c.group == "LUCKY_WIN")
     unattrib_c = next(c for c in by_category if c.group == "UNATTRIBUTABLE_Q_MISSING")
 
+    data_through = settled_dates[-1] if settled_dates else "n/a"
+    unattrib_pre = next(c for c in by_category if c.group == "UNATTRIBUTABLE_Q_MISSING")
+
     out: list[str] = []
-    out.append("# Zeus settled-position calibration report")
+    out.append("# Zeus calibration: frozen decisions versus settlement")
     out.append("")
-    out.append(f"Generated: `{generated_at}`")
-    out.append("Generator: `python3 scripts/generate_calibration_report.py`")
+    out.append("## Read this first")
+    out.append("")
+    if decomp is None:
+        out.append(
+            "**Current verdict: unavailable.** No settled positions carry enough resolvable "
+            "frozen decision-probability evidence to compute the pooled decomposition."
+        )
+    elif decomp.brier_skill_score < 0:
+        out.append(
+            f"**Current verdict: adverse.** Across **{decomp.n}** settled positions with a "
+            f"resolvable frozen decision probability, the Brier skill score against the "
+            f"observed-base-rate forecast is **{decomp.brier_skill_score:+.3f}**. Because it is "
+            f"negative, these probabilities performed worse in this sample than always "
+            f"predicting the **{_fmt(decomp.base_rate)}** base rate."
+        )
+    elif decomp.brier_skill_score > 0:
+        out.append(
+            f"**Current verdict: positive against the base-rate benchmark in this sample, not "
+            f"evidence of alpha.** Across **{decomp.n}** settled positions with a resolvable "
+            f"frozen decision probability, the Brier skill score against the observed-base-rate "
+            f"forecast is **{decomp.brier_skill_score:+.3f}**."
+        )
+    else:
+        out.append(
+            f"**Current verdict: no measured skill over the base-rate benchmark in this "
+            f"sample.** Across **{decomp.n}** settled positions with a resolvable frozen "
+            f"decision probability, the Brier skill score is **0.000**."
+        )
     out.append("")
     out.append(
-        "> **What this is.** A reliability diagram — the system's stated win probability "
-        "(`q_live`, frozen at decision time on an immutable `ActionableTradeCertificate`) "
-        "against the settled frequency it actually produced. **What this is not: a return "
-        "figure.** See the closing section for why."
+        f"The score uses the probability recorded before the outcome and a verified "
+        f"settlement; missing probabilities are not imputed. **{n_q}/{n_total}** settled "
+        f"positions are scoreable. **{n_total - n_q}** are excluded for missing "
+        f"decision-probability evidence, including **{unattrib_pre.n_total}** classified "
+        f"`UNATTRIBUTABLE_Q_MISSING`; that coverage gap is itself an adverse data-quality "
+        f"result."
     )
     out.append("")
-    out.append("## Provenance — settled-only, no contamination path")
+    out.append(f"**Supports:** calibration of the displayed sample, subject to the shown "
+                f"intervals and the **n ≥ {MIN_N}** cell floor.")
+    out.append("")
+    out.append("**Does not support:** durable alpha, strategy returns, or firm conclusions "
+                "for thin cells.")
+    out.append("")
+    out.append(f"**Data through:** `{data_through}` · **Generated:** `{generated_at}`")
+    out.append("")
+    out.append("Measurement unit: frozen decision probability × verified settlement outcome.")
+    out.append("")
+    out.append("<details>")
+    out.append("<summary>Generation and provenance</summary>")
+    out.append("")
+    out.append("Generator: `python3 scripts/generate_calibration_report.py`")
     out.append("")
     out.append(
         f"Every row in this report comes from `settlement_attribution` "
@@ -555,6 +599,8 @@ def build_report(rows: list[Row], *, generated_at: str) -> str:
         f'("Statistical conclusions require min_n=30 per cell before a status can move off '
         f'\'open\'"). Every table below flags cells under that floor rather than hiding them.'
     )
+    out.append("")
+    out.append("</details>")
     out.append("")
     out.append("## Reliability diagram")
     out.append("")
@@ -632,15 +678,17 @@ def build_report(rows: list[Row], *, generated_at: str) -> str:
     out.append("## Cut: by attribution class — the interesting one")
     out.append("")
     out.append(
-        "The six-class post-settlement grader (`settlement_skill_attribution.py`) separates "
-        "forecast-earned wins from lucky ones specifically so only skill outcomes feed "
-        "calibration. Four of the six categories are outcome-degenerate BY CONSTRUCTION "
+        "The six-class post-settlement grader (`settlement_skill_attribution.py`) explains "
+        "why a trade won or lost; it does not filter this reliability sample, which includes "
+        "every causally eligible decision with a frozen `q_live` joined to a verified "
+        "settlement. Four of the six categories are outcome-degenerate BY CONSTRUCTION "
         "(`SKILL_WIN`/`LUCKY_WIN` are defined as `won=1`, `SKILL_LOSS`/`MISCALIBRATED_LOSS` as "
         "`won=0`) — a within-category \"win rate\" for those four is the category's own "
-        "definition restated, not a calibration statement. What IS comparable across them is "
-        "the predicted probability itself: a forecast-earned win should carry a HIGH predicted "
-        "probability; a lucky win, by the taxonomy's own definition, is one the fresh evidence "
-        "disagreed with."
+        "definition restated, not a calibration statement. The useful cross-class evidence is "
+        "the decision-time probability itself, certificate coverage, and sample size: a "
+        "forecast-earned win should carry a HIGH predicted probability; a lucky win, by the "
+        "taxonomy's own definition, is one the fresh evidence disagreed with. Any separate "
+        "model-update or promotion gate is outside this report."
     )
     out.append("")
     out.append(_cut_table(by_category, "attribution class"))
@@ -681,16 +729,16 @@ def build_report(rows: list[Row], *, generated_at: str) -> str:
                 f"in their own columns.")
     out.append(f"- **Supports:** a calibration read on the pooled reliability curve and decomposition "
                 f"above (n={n_q}), and on any cut cell not flagged thin (n≥{MIN_N}).")
-    out.append(f"- **Does not support:** a return/PnL claim of any kind — see the capital-scale note "
+    out.append(f"- **Does not support:** a return/PnL claim of any kind — see the return-scope note "
                 f"below; a `LUCKY_WIN` calibration comparison (n={lucky_win_c.n_total}, 0 resolvable); "
                 f"a firm read on any cell flagged thin above; a claim that `UNATTRIBUTABLE_Q_MISSING` "
                 f"positions were miscalibrated (their `q_live` is unknown, not zero or bad).")
     out.append(
-        f"- **Capital scale** (stated once, here, nowhere else in this report): the settled "
-        f"sample's total cost basis is a low four-figure dollar amount — far too small for the "
-        f"standard error on any realized-return figure to be distinguishable from zero. This "
-        f"report accordingly makes no return claim; capital-scale detail lives in the repo's "
-        f"operational accounting, not here."
+        f"- **Return scope:** this report does not reconstruct a clean strategy return series. "
+        f"The account contains unrelated inventory, the sample is modest and dependent, and "
+        f"this pipeline grades probabilities rather than time-weighted or capital-weighted "
+        f"returns. The low four-figure deployment scale is disclosed as operating scope, not "
+        f"as a statistical reason that return uncertainty is large."
     )
     out.append("")
     return "\n".join(out) + "\n"
@@ -727,10 +775,20 @@ def main(argv: Optional[list[str]] = None) -> int:
         sys.stdout.write(report)
         return 0
 
-    with open(REPORT_OUT, "w") as fh:
-        fh.write(report)
-    with open(SVG_OUT, "w") as fh:
-        fh.write(svg)
+    # Render both artifacts to temp files and validate before replacing either;
+    # the SVG is replaced first and the Markdown last, so the landing document is
+    # the publication marker and never points at a partially written chart.
+    if not report.startswith("# Zeus calibration"):
+        sys.stderr.write("generate_calibration_report: report failed validation — nothing written\n")
+        return 1
+    if not svg.lstrip().startswith("<svg"):
+        sys.stderr.write("generate_calibration_report: SVG failed validation — nothing written\n")
+        return 1
+    for tmp, content in ((SVG_OUT + ".tmp", svg), (REPORT_OUT + ".tmp", report)):
+        with open(tmp, "w") as fh:
+            fh.write(content)
+    os.replace(SVG_OUT + ".tmp", SVG_OUT)
+    os.replace(REPORT_OUT + ".tmp", REPORT_OUT)
     sys.stdout.write(f"wrote {REPORT_OUT} ({len(report)} bytes) and {SVG_OUT} ({len(svg)} bytes)\n")
     return 0
 

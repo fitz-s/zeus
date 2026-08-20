@@ -334,7 +334,83 @@ def test_build_report_states_capital_scale_exactly_once(tmp_path):
         conn.close()
 
     report = build_report(rows, generated_at="2026-07-29T00:00:00+00:00")
-    assert report.count("Capital scale") == 1
+    assert report.count("Return scope") == 1
     assert "n = 2/3" in report  # 2 of 3 settled rows carry a resolvable q_live
-    # No dollar-figure PnL claim anywhere — capital scale is stated in words only.
-    assert "$" not in report
+    # Capital scale is disclosed as operating scope only — never as a statistical
+    # argument about return standard errors, and never as a dollar-figure PnL claim.
+    assert "operating scope" in report
+    assert "distinguishable from zero" not in report
+
+
+# ---------------------------------------------------------------------------
+# Read-this-first verdict block (landing-page contract)
+# ---------------------------------------------------------------------------
+
+class TestReadThisFirst:
+    def _adverse_rows(self):
+        # Predictions anti-correlated with outcomes -> Brier > uncertainty -> BSS < 0.
+        return [_row(0.9, 0) for _ in range(6)] + [_row(0.1, 1) for _ in range(6)]
+
+    def _positive_rows(self):
+        return [_row(0.9, 1) for _ in range(8)] + [_row(0.1, 0) for _ in range(8)]
+
+    def _zero_rows(self):
+        # q equals the realized base rate exactly -> Brier == uncertainty -> BSS == 0.
+        return [_row(0.5, 1) for _ in range(5)] + [_row(0.5, 0) for _ in range(5)]
+
+    def test_adverse_verdict_branch(self):
+        report = build_report(self._adverse_rows(), generated_at="G")
+        assert "**Current verdict: adverse.**" in report
+        assert "worse in this sample than always predicting" in report
+
+    def test_positive_verdict_never_becomes_alpha(self):
+        report = build_report(self._positive_rows(), generated_at="G")
+        assert "not evidence of alpha" in report
+        assert "**Current verdict: positive" in report
+
+    def test_zero_skill_verdict(self):
+        report = build_report(self._zero_rows(), generated_at="G")
+        assert "no measured skill over the base-rate benchmark" in report
+
+    def test_unavailable_verdict_when_no_scoreable_rows(self):
+        rows = [_row(None, 1, category="UNATTRIBUTABLE_Q_MISSING") for _ in range(3)]
+        report = build_report(rows, generated_at="G")
+        assert "**Current verdict: unavailable.**" in report
+
+    def test_verdict_precedes_provenance_and_diagram(self):
+        report = build_report(self._adverse_rows(), generated_at="G")
+        first = report.index("## Read this first")
+        assert first < report.index("Generation and provenance")
+        assert first < report.index("Reliability diagram")
+
+    def test_provenance_is_collapsed_with_visible_measurement_unit(self):
+        report = build_report(self._adverse_rows(), generated_at="G")
+        assert "<details>" in report and "</details>" in report
+        unit = report.index("Measurement unit: frozen decision probability")
+        assert unit < report.index("<details>")
+
+    def test_outcome_filtered_sampling_claim_absent(self):
+        report = build_report(self._adverse_rows(), generated_at="G")
+        assert "only skill outcomes feed" not in report
+        assert "does not filter this reliability sample" in report
+
+    def test_scoreable_counts_agree_between_verdict_and_body(self):
+        rows = self._adverse_rows() + [_row(None, 0, category="UNATTRIBUTABLE_Q_MISSING")]
+        report = build_report(rows, generated_at="G")
+        assert "**12/13** settled positions are scoreable" in report
+        assert "n = 12/13" in report
+
+    def test_missing_probabilities_excluded_never_zeroed(self):
+        rows = self._positive_rows() + [_row(None, 0, category="UNATTRIBUTABLE_Q_MISSING")]
+        report = build_report(rows, generated_at="G")
+        assert "missing probabilities are not imputed" in report
+        assert "Across **16** settled positions" in report  # None-q row not scored
+
+    def test_data_through_is_settlement_time_not_generation_time(self):
+        report = build_report(self._adverse_rows(), generated_at="2026-08-20T00:00:00+00:00")
+        assert "**Data through:** `2026-07-01T00:00:00+00:00`" in report
+        assert "**Generated:** `2026-08-20T00:00:00+00:00`" in report
+
+    def test_no_dollar_figure_anywhere(self):
+        report = build_report(self._adverse_rows(), generated_at="G")
+        assert "$" not in report
