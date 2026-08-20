@@ -14528,25 +14528,15 @@ def _global_preflight_entry_jit_receipt(
             and expected_terminal.win_probability_mean == 1.0
             and expected_terminal.loss_probability_mean == 0.0
         )
-        statistical_settlement_hold = (
-            execution_mode == "TAKER_LIMIT"
-            and not settlement_locked_exact_payoff
-            and str(getattr(decision, "capital_action_mode", "") or "")
-            == "SETTLEMENT_LOCKED_BUY"
-            and isinstance(expected_terminal, ExpectedBuyTerminalWealthCertificate)
-        )
         liquidation_capacity = current_precliff_liquidation_capacity(
             current_candidate.native_bid_levels
         )
         if (
             not (
-                statistical_settlement_hold
-                or (
-                    execution_mode == "TAKER_LIMIT"
-                    and settlement_locked_exact_payoff
-                    and typed_exact_payoff_binding
-                    and exact_payoff_decision
-                )
+                execution_mode == "TAKER_LIMIT"
+                and settlement_locked_exact_payoff
+                and typed_exact_payoff_binding
+                and exact_payoff_decision
             )
             and liquidation_capacity + Decimal("1e-9") < shares
         ):
