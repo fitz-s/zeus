@@ -1183,6 +1183,35 @@ Two options, and what each costs:
    manual intervention to clear.
 
 This PR implements the ceiling and makes reaching it explicit and
-observable, per instruction, and stops there. **The operator should rule on
-which of the two options above applies**, and if (2), scope the retention
-window as a separate follow-up.
+observable, per instruction, and stops there.
+
+#### Ruling (2026-08-20): option 1 — stay strictly append-only
+
+Nothing further to build. The ceiling plus the typed, counted, logged
+refusal is the retention policy.
+
+Three reasons, in the order that decided it:
+
+1. **It is already implemented and reversible.** Option 1 ships today;
+   option 2 can still be built later if the measured row rate justifies it.
+   The reverse is not true — a reaper that has already deleted rows cannot
+   un-delete them, so choosing 2 first forecloses 1 while choosing 1 first
+   forecloses nothing.
+2. **Option 2 relaxes the invariant this design leaned on.** Append-only is
+   what keeps `content_hash` / `state_id` referential integrity trivial: an
+   observation always points at a state row that still exists. A reaper
+   either breaks that or needs cascade logic that reintroduces exactly the
+   complexity the content-addressed manifest was chosen to avoid.
+3. **A silently-thinned history is the worse failure for this table's
+   purpose.** This store exists to feed the center-evidence campaign —
+   market-implied center versus our mu, over time. Research provenance with
+   a hole in it is not obviously wrong when you read it, which is precisely
+   what makes it dangerous; a hard stop is loudly wrong and cannot be
+   mistaken for complete data.
+
+The hard stop is a real cost and is accepted knowingly: at sustained
+full-churn capture the 20 GiB default is reachable in roughly a month, at
+which point capture halts until an operator archives or raises
+`ZEUS_FAMILY_BOOK_EVIDENCE_MAX_BYTES`. That is bounded, observable, and
+recoverable. Revisit only when the measured row rate — not the hard-max
+estimate — shows the ceiling being approached in normal operation.
