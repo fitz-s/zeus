@@ -18,12 +18,13 @@
 (src/events/family_book_manifest.py, no reference to FamilyDecision/family/
 proofs), then ``queue.put_nowait``. The worker thread drains that queue into
 a PRIVATE spool file (``family_book_telemetry_spool.db``) -- own file, own
-WAL, zero contention with the trade DB by construction, since nothing else
-ever opens it. Writes land in a bounded, DELETABLE outbox table
+WAL, zero contention with ANY canonical DB by construction, since nothing
+else ever opens it. Writes land in a bounded, DELETABLE outbox table
 (``family_book_telemetry_outbox_schema.py`` -- the fix for round-4's
-"unbounded mirror" finding). The worker thread NEVER opens the canonical
-trade DB for writing (round-4's "second uncoordinated writer" finding); its
-only canonical touch is a one-shot READ-ONLY cache seed at startup.
+"unbounded mirror" finding). The worker thread NEVER opens a canonical DB
+for writing (round-4's "second uncoordinated writer" finding); its only
+canonical touch is a one-shot READ-ONLY cache seed at startup, against the
+family-book EVIDENCE DB (DB split 2026-08-19; see below).
 
 **Delivery (``run_bounded_ingest``, called by the DAEMON, not this module's
 worker thread)**: a small, pure function that reads ONE bounded batch from
@@ -31,10 +32,14 @@ the outbox (row/byte budget), inserts it into the canonical
 family_book_states/family_book_observations tables in one transaction
 (targeted upserts, idempotent), commits, and ONLY THEN deletes that batch
 from the outbox in a separate transaction. The daemon runs this on its own
-``get_trade_connection(write_class="live")`` connection via an ordinary
+``get_family_book_evidence_connection(write_class="live")`` connection
+(DB split 2026-08-19 -- previously ``get_trade_connection``; these tables
+moved off ``zeus_trades.db`` onto their own file,
+``state/zeus-family-book-evidence.db``, so this optional writer can never
+open a second connection to the live-money trade DB at all) via an ordinary
 APScheduler job (src/main.py) -- the SAME pattern every other periodic
-trade-DB touch in this daemon already uses, not a novel standalone-writer
-class requiring new arbitration machinery.
+daemon touch-point already uses, not a novel standalone-writer class
+requiring new arbitration machinery.
 """
 
 from __future__ import annotations
@@ -742,17 +747,17 @@ def _sampling_decision(
 
 # ---------------------------------------------------------------------------
 # Delivery: run_bounded_ingest -- called by the DAEMON's own scheduler job
-# (src/main.py, get_trade_connection(write_class="live")), NEVER by this
-# module's worker thread. Pure with respect to connection lifecycle: the
-# caller owns and closes both connections.
+# (src/main.py, get_family_book_evidence_connection(write_class="live")),
+# NEVER by this module's worker thread. Pure with respect to connection
+# lifecycle: the caller owns and closes both connections.
 # ---------------------------------------------------------------------------
 
 def outbox_has_pending(spool_conn_factory: Optional[Callable[[], sqlite3.Connection]] = None) -> bool:
     """Round-6 Z1: is there anything at all to deliver? Answered against the
-    PRIVATE spool only, so the caller can skip opening a canonical trade
-    connection entirely on an idle tick -- which is the overwhelmingly common
-    case. Unreadable spool reads as "nothing pending": the optional plane
-    yields rather than reaching for the live-money DB on a guess."""
+    PRIVATE spool only, so the caller can skip opening a canonical connection
+    entirely on an idle tick -- which is the overwhelmingly common case.
+    Unreadable spool reads as "nothing pending": the optional plane yields
+    rather than reaching for a canonical DB on a guess."""
     factory = spool_conn_factory or _spool_conn_factory
     try:
         conn = _open_spool(factory)
@@ -791,8 +796,9 @@ def run_bounded_ingest(
     DDL boundary: this function issues DDL against the SPOOL only (via
     ``_open_spool``, which owns schema + physical ceilings for every spool
     open in this module). It issues NO DDL against ``canonical_conn`` -- the
-    trade schema bootstrap owns those tables, and a delivery pass must never
-    mutate schema on a connection it does not own.
+    evidence-DB schema bootstrap (``init_schema_family_book_evidence``) owns
+    those tables, and a delivery pass must never mutate schema on a
+    connection it does not own.
     """
     if not _telemetry_enabled():
         _cnt_inc(_CNT_INGEST_DISABLED)
@@ -824,8 +830,8 @@ def run_bounded_ingest(
             batch.append(r)
             running_bytes += row_bytes
 
-        # Y2: NO DDL against canonical here, ever -- init_schema_trade_only
-        # (the normal trade schema bootstrap) already created
+        # Y2: NO DDL against canonical here, ever -- init_schema_family_book_evidence
+        # (the evidence-DB schema bootstrap) already created
         # family_book_states/family_book_observations before the daemon's
         # scheduler starts running jobs. If they are somehow still absent,
         # the INSERT calls below fail closed (caught, typed counter,
