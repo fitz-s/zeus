@@ -1014,3 +1014,175 @@ So the guarantee is: bounded, and self-limiting at the wall — not "≤1 GiB
 exactly". In practice the 500 MB soft admission gate binds first and the file
 ceiling is never approached; the ceiling exists so that a bug in the soft gate
 still terminates in a failed telemetry write rather than a full disk.
+
+---
+
+## 2026-08-19 DB split — family-book evidence gets its own physical file
+
+Round-6 (Z1) accepted that telemetry delivery must never compete with the
+money path, and closed that gap by *yielding*: the daemon's ingest job
+checks `_cycle_lock`/`_edli_reactor_active` before opening a canonical
+connection to `zeus_trades.db`. That is correct as far as it goes, but it is
+still a **cooperative** guarantee — it depends on every future touch-point
+continuing to check the guard correctly. This revision removes the
+dependency: `family_book_states`/`family_book_observations` move off
+`zeus_trades.db` onto a new physical file,
+`state/zeus-family-book-evidence.db` (`get_family_book_evidence_connection`,
+`init_schema_family_book_evidence`, `src/state/db.py`). After the split,
+evidence writes and money-path writes never share a file's WAL writer lock,
+full stop — a telemetry write is now structurally incapable of contending
+with, or being contended by, the reactor's trade-DB transaction, independent
+of timing or whether the yield guard is ever reached. The guard is kept
+anyway as a courtesy (see `_family_book_telemetry_ingest_cycle`'s docstring
+in `src/main.py`), but the DB boundary — not the guard — is what now makes
+this safe. `tests/events/test_family_book_telemetry_writer.py`
+`test_evidence_delivery_cannot_contend_with_a_held_trade_db_write` is the
+deterministic proof: holding an exclusive write transaction open on the
+trade DB has zero measurable effect on evidence delivery, because
+`run_bounded_ingest`'s canonical connection now points at a different file.
+
+Registry: `family_book_states`/`family_book_observations` are now
+`family_book_evidence_class` on the new `DBIdentity.FAMILY_BOOK_EVIDENCE` /
+`Domain.FAMILY_BOOK_EVIDENCE` (`architecture/db_table_ownership.yaml`,
+`src/state/table_registry.py`, `src/state/domains.py`), boot-asserted the
+same way world/trade already are
+(`assert_db_matches_registry(DBIdentity.FAMILY_BOOK_EVIDENCE)`, `src/main.py`).
+The private transport outbox (`family_book_telemetry_outbox`/
+`family_book_telemetry_meta`) still lives only in the separate spool file
+and is registered as a non-canonical sidecar in
+`scripts/ci/check_db_table_delta.py`'s `_KNOWN_SIDECAR_TABLES` — unchanged
+in kind, just accompanied now by the canonical DB's own real identity.
+
+### Folded-in must-fix findings from the split review
+
+- **Growth ceiling, real byte budget.** Both the evidence DB
+  (`init_schema_family_book_evidence`) and the private spool
+  (`_open_spool`) now convert a byte budget to `PRAGMA max_page_count` via
+  `src.state.db.page_count_ceiling_for_byte_budget`, which reads the
+  connection's ACTUAL `page_size` rather than assuming 4 KiB. The evidence
+  DB's ceiling is armed *before* any table DDL runs (`PRAGMA max_page_count`
+  refuses to go below the current page count once the schema already
+  exists, so ordering is load-bearing, not cosmetic — see
+  `tests/state/test_table_registry_coherence.py`
+  `test_family_book_evidence_db_has_a_real_growth_ceiling_end_to_end`).
+  Hitting the ceiling surfaces through the existing `run_bounded_ingest`
+  failure path (typed `IngestOutcome(failed=True)`, counted, logged) plus a
+  DEDICATED counter (`family_book_telemetry_evidence_db_ceiling_hit_total`)
+  so an operator can tell "our own ceiling did its job" apart from a
+  genuine disk-full condition, both of which SQLite reports with the same
+  error text.
+- **Outbox meta counters fail closed, not silently.** Two invariants that
+  used to be silently masked now raise `OutboxMetaInvariantError`
+  (`family_book_telemetry_outbox_schema.py`): a delta that would drive
+  `pending_count`/`pending_bytes` negative (previously clamped to zero via
+  `MAX(0, ...)`), and a partial counter pair — exactly one of the two keys
+  present, which `_bump_meta` can never produce in normal operation and so
+  can only mean corruption (previously an absent key read as "definitely
+  zero pending," even when its sibling key proved rows existed).
+- **`_bootstrap_last_state_cache` no longer swallows its own failure.**
+  HIGH-2: the function used to catch its OWN canonical-connection-open
+  failure internally (`except Exception: return`) and return normally
+  either way, so the caller's `try/except` around it never fired and
+  `cache_seeded` stayed `True` unconditionally — even when the canonical
+  seed read never ran at all. It now raises a typed
+  `CanonicalSeedUnavailableError` for every outcome except a positively
+  completed read (rows fetched, however many) or a positively-identified
+  fresh-empty-schema ("no such table" — there is nothing to seed, so that
+  case legitimately counts as seeded). `cache_seeded=True` can now only
+  ship when the seed read actually completed.
+- **Canonical-path rejection, centralized.** The spool's own path-safety
+  check used to compare only against the trade DB, and only by `resolve()`
+  string equality. `_assert_path_is_not_canonical`
+  (`family_book_telemetry_writer.py`) now checks world/forecasts/trade AND
+  the evidence DB, and additionally uses `os.path.samefile()` when both
+  paths exist on disk — catching a symlink or hardlink alias that
+  `resolve()` equality alone would miss (regression tests:
+  `test_spool_factory_refuses_when_spool_path_is_a_symlink_to_a_canonical_db`,
+  `..._hardlink_...`).
+
+### Rollback
+
+Because the evidence tables now live on their own file rather than being
+interleaved into `zeus_trades.db`'s DDL, rollback is simple: an older binary
+that does not know about `state/zeus-family-book-evidence.db` simply never
+opens it. It has no code path that references the file, so it ignores it
+entirely — no migration to reverse, no column to drop, no shared-file DDL to
+undo. Concretely, rolling back this commit:
+
+1. Redeploy the prior binary. `_family_book_telemetry_ingest_cycle` and the
+   writer's read-only bootstrap revert to their old `get_trade_connection`/
+   `get_trade_connection_read_only` call sites, which is consistent with the
+   evidence tables having previously lived on `zeus_trades.db` at THAT
+   binary's schema version.
+2. `state/zeus-family-book-evidence.db` is simply left on disk, unopened and
+   inert, until either (a) the split is rolled forward again, or (b) an
+   operator explicitly deletes it (it holds no data the trade DB depends on
+   — evidence-only, never decision authority).
+3. The prior binary's `init_schema_trade_only` still creates
+   `family_book_states`/`family_book_observations` on `zeus_trades.db` as
+   before (this commit does not touch that binary's code, only this
+   branch's). Any evidence captured AFTER the split and BEFORE a rollback
+   lives on the new file and is NOT visible to the rolled-back binary — a
+   real, bounded data-continuity gap for the rollback window, disclosed
+   here rather than assumed away. Evidence-only, never decision authority,
+   so this has no effect on trading correctness; it only means the
+   center-evidence campaign has a gap for observations captured during that
+   window until the new file is re-attached to a binary that reads it again.
+4. No forward-migration script is needed either way: both schemas
+   (`family_book_states_schema.py`/`family_book_observations_schema.py`)
+   are byte-identical regardless of which physical file hosts them, so
+   moving the split forward or backward again never requires a DDL
+   migration, only a binary swap.
+
+### Retention — OPEN operator decision, not resolved here
+
+Both tables are structurally append-only (`BEFORE UPDATE`/`BEFORE DELETE`
+triggers `RAISE(ABORT, ...)`, matching `observation_prints_schema.py`'s
+precedent), and this revision adds a hard physical ceiling
+(`ZEUS_FAMILY_BOOK_EVIDENCE_MAX_BYTES`, default 20 GiB, real-page-size-based
+— see above) on top of that. The combination means: the store fills, and
+then — correctly, per the append-only design — refuses new evidence rather
+than silently dropping it (typed `IngestOutcome.failed`, counted, logged;
+never a silent drop, per this round's explicit instruction). But nothing in
+this design *drains* the store once it nears the ceiling. That is a real
+operational question this PR does not have standing to answer on its own
+authority: relaxing the append-only triggers is a decision about what
+"evidence" means for this table, and belongs to whoever owns that
+definition, not to whoever happened to build the storage layer under it.
+
+Two options, and what each costs:
+
+1. **Stay strictly append-only; accept a hard stop.** Nothing changes
+   beyond what is already implemented. At current unmeasured-but-bounded
+   row rates (see "Row-rate math" above — baseline ~2,448 rows/day, hard-max
+   ~146,880 rows/day across both tables), the default 20 GiB ceiling is
+   generous enough that reaching it is not an imminent concern, but it is
+   not "never" either: at the hard-max content-JSON estimate
+   (~0.78 GB/day for the state table alone) the ceiling is reachable within
+   roughly a month of sustained full-churn capture. Cost: eventually, and
+   without further intervention, new evidence capture stops entirely (typed,
+   observable, never silent) until an operator manually archives/expands.
+   Benefit: the evidence history is permanently complete and auditable —
+   correct for research provenance (the center-evidence campaign this table
+   exists to feed), where a silently-thinned history would be a worse
+   failure than a bounded hard stop.
+2. **Bounded FIFO reaper by age or size.** Add a periodic job (the same
+   `_scheduler_job` idiom every other periodic daemon touch-point already
+   uses) that deletes the oldest rows past an age or total-size threshold,
+   the way `scripts/ops/archive_pre_epoch_trades.py` already does for other
+   trade-DB tables (though that script explicitly EXCLUDES
+   `executable_market_snapshots`, the precedent this design followed for
+   "why append-only" in the first place — see STEP 0 above). Cost: requires
+   relaxing (or narrowly carving an exception into) the append-only
+   triggers, which is exactly the invariant this design leaned on to keep
+   `content_hash`/`state_id` referential integrity simple; a reaper also
+   needs its own retention window decision (how far back is "recent enough"
+   for the center-evidence campaign to still be useful) that has not been
+   scoped. Benefit: the store never hard-stops, and disk footprint stays
+   bounded by policy rather than by a physical wall that, once hit, requires
+   manual intervention to clear.
+
+This PR implements the ceiling and makes reaching it explicit and
+observable, per instruction, and stops there. **The operator should rule on
+which of the two options above applies**, and if (2), scope the retention
+window as a separate follow-up.
