@@ -36,21 +36,21 @@ Out of scope: execution (order placement), lifecycle (position states), risk man
 
 ## 0.1 Replacement-forecast chain math (STRATEGY OF RECORD, 2026-06-09)
 
-Authority `docs/authority/replacement_final_form_2026_06_09.md`. The live q replaces 51-ENS member-counting + Platt with multi-model walk-forward de-bias → Bayesian precision fusion → settlement-preimage bin integration. The integer-settlement preimage rule (§1.2) is unchanged; only the distribution feeding it changed. Constants below are read from `src/forecast/bayes_precision_fusion.py` (cite symbols, not line numbers).
+Authority `docs/authority/replacement_final_form_2026_06_09.md`, amended by the RAW no-de-bias law of 2026-06-18 (§0.1a). The live q replaces 51-ENS member-counting + Platt with a RAW multi-model center → Bayesian precision fusion → settlement-preimage bin integration. The integer-settlement preimage rule (§1.2) is unchanged; only the distribution feeding it changed. Constants below are read from `src/forecast/bayes_precision_fusion.py` (cite symbols, not line numbers).
 
-### 0.1a Walk-forward empirical-Bayes de-bias — `bayes_precision_fusion.eb_bias`
+### 0.1a RAW center — no de-bias shift (2026-06-18, supersedes EB de-bias)
 
-Per source `s`, over residuals `r = (x_s − Y)` on train dates strictly before the target (walk-forward, no leakage):
+The consumed instrument center is the RAW model value `z = x`, **not** the EB-corrected `z = x − b̂`. `src/data/bayes_precision_fusion_capture.py::_raw_instrument` implements this and deletes its `parent_bias` argument at the top of the body; `eb_bias` is deliberately never imported, has no live caller, and `tests/test_raw_unify_forecast_posteriors.py` asserts it stays that way.
 
-```
-b̂_s = λ·r̄ + (1 − λ)·parent ,   λ = n / (n + κ) ,   κ = 8.0
-```
+The reason is a two-center split, not a preference: `FamilyBook` ENTRY belief was already RAW, while EXIT (`position_belief`) and MONITOR (`monitor_refresh`) read the materialized `forecast_posteriors`, which was EB-corrected. One belief was pricing entries and a different one was pricing exits on the same position. Making the materialized center RAW collapses them into one belief rather than adding a parallel product.
 
-`κ = 8` ⇒ ~50% trust in the local mean at `n = 8`. Thin source (small `n`) shrinks toward the structural parent (anchor) prior; large `n` trusts the local mean. `parent` is the ECMWF-IFS structural anchor bias.
+Walk-forward residual history is **retained and still consumed** — for width and provenance only: the residual std feeds anchor `τ0`, the cross-source disagreement variance, and predictive `σ_resid`; `n_train` still drives low-`n` width inflation. It never shifts the center.
+
+The superseded EB form (`b̂_s = λ·r̄ + (1 − λ)·parent`, `λ = n/(n + κ)`, `κ = 8.0`) survives as offline baseline math only. It is not an activation-pending branch and has no runtime flag.
 
 ### 0.1b T2 Bayesian precision fusion — `bayes_precision_fusion.bayes_fuse` / `fuse_bayes_precision_posterior`
 
-Fuse bias-corrected non-anchor instruments `z` (precision `Σ⁻¹`) with the anchor prior `N(μ0, τ0²)`:
+Fuse the RAW non-anchor instruments `z` (§0.1a; precision `Σ⁻¹`) with the anchor prior `N(μ0, τ0²)`:
 
 ```
 V*  = (τ0⁻² + 1ᵀ Σ⁻¹ 1)⁻¹
@@ -219,13 +219,23 @@ One row per (city, target_date, issue_time, lead_hours):
 
 ---
 
-## 3. Settlement data (Y side) — WU / HKO
+## 3. Settlement data (Y side) — WU / NOAA / HKO
 
 ### 3.1 Source
 
-- **45 cities**: Weather Underground historical daily highs (backfill: WU ICAO historical API; live: WU timeseries API).
-- **Hong Kong**: Hong Kong Observatory (HKO).
-- No other source is permitted as settlement truth.
+Settlement truth is per-city and read from `config/cities.json` (`settlement_source_type`,
+defaulting to `wu_icao`). The current 54-city book splits:
+
+- **50 cities — Weather Underground** daily highs (backfill: WU ICAO historical API; live: WU timeseries API).
+- **3 cities — NOAA** `weather.gov` timeseries (Istanbul, Moscow, Tel Aviv).
+- **1 city — Hong Kong Observatory** (HKO).
+
+`cwa_station` (Taiwan CWA) is a defined type with no current member — Taipei moved to WU.
+
+The venue owns this mapping, not us: Polymarket can move a city's source, station, or unit at
+any time, and has (Tel Aviv WU→NOAA, Taipei CWA→WU, London unit °F→°C). The single source of
+truth is the market description of each city's most recent active market, which is why
+`config/cities.json` carries a standing monthly re-audit obligation rather than a fixed list.
 
 ### 3.2 Value
 
@@ -541,15 +551,34 @@ For buy_no, replace `P_posterior` with `1 - P_posterior` and `P_market` with `1 
 size = f* · kelly_mult · bankroll
 ```
 
-`kelly_mult ∈ [0.001, 1.0]` from `src/strategy/kelly.py::dynamic_kelly_mult`. Reduces (multiplicatively) based on:
-- Edge CI width (wider → lower)
-- Calibration maturity (fewer decision_groups → lower)
-- Elevated risk state (GREEN → YELLOW → ORANGE → lower)
+`kelly_mult` comes from `src/strategy/kelly.py::dynamic_kelly_mult`, whose `base` is the
+config fraction `sizing.kelly_multiplier` (`config/settings.json`, currently `0.03125`), not
+`1.0`. Three multiplicative haircuts survive the one-law form (ultimate_alpha 2026-07-23):
 
-### 10.3 Floor and ceiling
+- Edge CI width: `×0.7` above `0.10`, a further `×0.5` above `0.15`. On the current-q global
+  solver path the conservative q-band already consumes this width, so `ci_width` arrives as
+  `0` and these stages no-op — the INV-40 single count lives in the q-band there.
+- Lead time: `×0.6` at `≥5` days, `×0.8` at `≥3`. Applies on both paths; lead uncertainty is
+  not consumed by the q-band.
+- Portfolio heat: `×1/(1+heat)`, soft reciprocal attenuation. The named PR-1 survivor, and the
+  only correlation-pressure control until joint sizing replaces it.
 
-- **Floor**: `kelly_mult ≥ 0.001`. Never zero, never NaN. NaN → 0.001. Per INV-05.
-- **Ceiling**: `kelly_mult ≤ 1.0` (full Kelly cap).
+The per-strategy and per-city multiplicative stages are DELETED — the robust `q_lcb` bound
+already carries that uncertainty into the edge. `GLOBAL_KELLY_FRACTION` (`kelly.py`) is an
+identity/permission gate returning `0.0` for an unknown or non-live strategy key and `1.0`
+otherwise; it is not an economic fraction.
+
+### 10.3 Failure posture — fail closed, no fabricated floor
+
+There is no floor and no ceiling clamp. `dynamic_kelly_mult` **raises** rather than
+substituting a value:
+
+- NaN → `ValueError` (`"dynamic_kelly_mult produced NaN"`).
+- `m ≤ 0.0` → `ValueError` (`"refusing to fabricate a floor value"`).
+
+Per INV-05, a collapsed risk input is an authority failure, not a small number: a fabricated
+floor would silently size a position off a computation that had already lost meaning. A
+legitimate `0.0` enters only through the strategy identity gate.
 
 ---
 
@@ -856,9 +885,9 @@ Current code disagrees with this spec at the following points. The data-rebuild 
 
 ---
 
-## 15. Deferred upgrades (future work, not in current scope)
+## 15. Upgrade backlog — check the per-section status line
 
-These concepts come from the prior `02_mathematics_and_statistics_upgrade.md` document and are **not part of current Zeus math**. They are documented here so the current spec cannot be confused with a future upgraded one, and so reviewers know what is intentionally not yet implemented.
+This section came from the prior `02_mathematics_and_statistics_upgrade.md` document as a list of things deliberately not built. Two of them have since landed (§15.3 full tested-family FDR, §15.4 correlation shrinkage) and are marked in place rather than removed, because the reasoning for the upgrade is what made it worth building. **Read the status line on each subsection; the section heading no longer means every item below it is unbuilt.**
 
 > Historical ENS-bias correction is retained here as offline baseline math only; it is not an activation-pending live branch and has no current runtime flag. §15.1 remains deferred and refers to pooling of *Platt* parameters, a different layer.
 
@@ -873,8 +902,8 @@ Advantages: smooth transition between buckets, stable with sparse data. Deferred
 ### 15.2 EMOS-style distributional correction
 Replace mean bias correction with `Y | μ_ens, s_ens ~ N(a + b·μ_ens, c + d·s_ens²)`, then apply WMO rounding to produce bin probabilities. Learns spread-error relationship in addition to mean bias. Deferred.
 
-### 15.3 Full tested-family FDR
-Current §9 treats `H ≈ 220` as the family size. Upgrade: record every tested `(cycle, city, target_date, mode, bin, direction)` in a hypothesis ledger and apply BH to the ledger, not just the pre-filtered edges. Deferred.
+### 15.3 Full tested-family FDR — **LANDED 2026-06-01, no longer deferred**
+BH runs over the full tested family, not the pre-filtered survivors. `scan_full_hypothesis_family` (`src/strategy/market_analysis_family_scan.py`) enumerates every bin×direction hypothesis and `apply_familywise_fdr` (`src/strategy/selection_family.py`) applies BH per `family_id` over all of them. The prior `fdr_filter(edges)` call over the `find_edges()` survivor subset was DELETED as "an inflated-denominator path" (`src/engine/evaluator.py`); a missing family scan now fails closed to zero entries rather than falling back to the subset.
 
 ### 15.4 Correlation matrix via shrinkage
 Layer A: settlement anomaly correlation `a_{c,d} = T_{c,d} - E[T_{c,month(d)}]`.
@@ -898,7 +927,9 @@ where `D` is the diagonal matrix formed from the diagonal entries of the sample 
 
 `δ*` is the analytically optimal convex-combination weight that minimises the expected mean-squared error of the estimator over the class `(1-δ)·S + δ·D, δ ∈ [0,1]`. Implementation MUST clip `δ*` to `[0, 1]` before applying — raw `π / (γ × n)` can exceed 1 on degenerate inputs (e.g. near-diagonal S), which would violate the convex-combination property and produce a non-PSD estimate.
 
-**Verification cohort (back-test design, planned Phase 5 test harness)**: synthetic AR(1) temperature-residual sequences of increasing length `n ∈ {50, 100, 250, 500, 1000}` across `p = 20` city series with known underlying diagonal-dominant true covariance. The fitted `δ*` must converge toward 0 as `n → ∞` (sample covariance becomes reliable) and remain bounded away from 0 for `n < p`. Planned test name: `tests/test_correlation_shrinkage.py::test_intensity_converges_diagonal_target` (does not exist yet; ships with Phase 5 shrinkage estimator).
+**Verification cohort**: synthetic AR(1) temperature-residual sequences of increasing length `n ∈ {50, 100, 250, 500, 1000}` across `p = 20` city series with known underlying diagonal-dominant true covariance. The fitted `δ*` must converge toward 0 as `n → ∞` (sample covariance becomes reliable) and remain bounded away from 0 for `n < p`.
+
+**Status: LANDED.** The estimator is `src/strategy/correlation_shrinkage.py` (consumed by `regime_correlation_store.py` and `solve/scenario_service.py`) and the cohort test is `tests/test_correlation_shrinkage.py::test_intensity_converges_diagonal_target`. Note this is the portfolio *correlation* estimator; the separate Ledoit-Wolf shrink-to-diagonal used inside forecast fusion (§0.1b `shrink_cov`) has been live independently since the replacement chain landed.
 
 ### 15.5 Day0 two-stage residual model
 When a position is in day0 window, the observed running max `R` is a hard floor:
