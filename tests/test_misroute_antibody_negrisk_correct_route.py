@@ -160,7 +160,7 @@ def _karachi_correct_receipt():
         "blockNumber": 87135584,
         "blockHash": "0x7b6ba43c5807e7633f18723b102815cb9ea009f0078650e91e6ae92ac2ef1199",
         "from": "0xB19Ce122089237025aD046a0eA61E66a5Fa4cc8b",
-        "to": "0x6a096d5042cba434521E2cdb95A1fBa789a09b7f",
+        "to": "0x5AFE0000000000000000000000000000000000F1",
         "logs": [
             {
                 # log[0]: Safe ExecutionSuccess
