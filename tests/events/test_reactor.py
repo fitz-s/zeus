@@ -1,6 +1,6 @@
 # Created: 2026-05-24
-# Last reused/audited: 2026-08-13
-# Lifecycle: created=2026-05-24; last_reviewed=2026-08-13; last_reused=2026-08-13
+# Last reused/audited: 2026-08-20
+# Lifecycle: created=2026-05-24; last_reviewed=2026-08-20; last_reused=2026-08-20
 # Authority basis: EDLI v1 implementation prompt §13 event reactor no-bypass contract.
 from __future__ import annotations
 
@@ -5013,6 +5013,74 @@ def test_paused_forecast_selection_scans_large_queue_once(tmp_path, monkeypatch)
         == forecast
     )
     assert calls == 1
+
+
+def test_concurrent_wake_readers_singleflight_one_cold_queue_refresh(
+    tmp_path,
+    monkeypatch,
+):
+    from src.runtime import reactor_wake
+
+    path = tmp_path / "wake.json"
+    queue_dir = reactor_wake._wake_queue_dir(path)
+    queue_dir.mkdir(parents=True)
+    wake_count = 128
+    for index in range(wake_count):
+        wake = reactor_wake.ReactorWake(
+            wake_id=f"wake-{index:04d}",
+            published_at=(
+                datetime(2026, 8, 20, tzinfo=timezone.utc)
+                + timedelta(microseconds=index)
+            ).isoformat(),
+            source="singleflight-antibody",
+            reason="forecast_posterior_advanced",
+        )
+        reactor_wake._atomic_write_wake(
+            queue_dir / f"{index:020d}-{wake.wake_id}.json",
+            wake,
+        )
+
+    with reactor_wake._WAKE_QUEUE_CACHE_LOCK:
+        reactor_wake._WAKE_QUEUE_CACHE.pop(queue_dir, None)
+        reactor_wake._WAKE_QUEUE_REVISIONS.pop(queue_dir, None)
+        reactor_wake._WAKE_QUEUE_REFRESH_LOCKS.pop(queue_dir, None)
+
+    original_read = reactor_wake._read_reactor_wake_path
+    read_count = 0
+    count_lock = threading.Lock()
+
+    def counted_read(*args, **kwargs):
+        nonlocal read_count
+        with count_lock:
+            read_count += 1
+        time.sleep(0.001)
+        return original_read(*args, **kwargs)
+
+    monkeypatch.setattr(reactor_wake, "_read_reactor_wake_path", counted_read)
+    reader_count = 6
+    barrier = threading.Barrier(reader_count)
+    results: list[int] = []
+    errors: list[BaseException] = []
+
+    def read_queue() -> None:
+        try:
+            barrier.wait()
+            results.append(
+                len(reactor_wake._queued_wakes(path, fail_on_error=True))
+            )
+        except BaseException as exc:  # noqa: BLE001 - thread failures re-raised below.
+            errors.append(exc)
+
+    threads = [threading.Thread(target=read_queue) for _ in range(reader_count)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=5.0)
+
+    assert not errors
+    assert all(not thread.is_alive() for thread in threads)
+    assert results == [wake_count] * reader_count
+    assert read_count == wake_count
 
 
 def test_exact_held_sell_debt_preempts_older_generic_completion_marker(tmp_path):

@@ -2727,3 +2727,31 @@ publication barrier.
   rejects the family-history index; focused trigger tests preserve the emitted
   family set. Live closeout requires an exact-SHA full-auction receipt followed
   by its actual BUY/SELL/HOLD/CASH result and any resulting command evidence.
+
+### Slice B127 — Single-flight durable wake-queue cache refresh (2026-08-20)
+
+- Live defect: B126 completed a 1,945-candidate auction and produced a confirmed
+  Busan fill, but later construction cuts repeatedly exhausted 45 seconds before
+  selection. A process sample showed multiple reactor/scheduler threads inside
+  the same 24,506-file wake-directory scan while the queue cache was cold or its
+  revision was advancing; each thread could independently parse the entire
+  96 MB backlog before any one published the shared cache.
+- First-principles invariant: durable wakes remain one complete fail-closed set,
+  but one process performs at most one cache refresh for a queue revision.
+  Concurrent readers wait for that identical refresh and then consume the same
+  snapshot; no wake is dropped, coalesced, acknowledged, reordered, or treated
+  as probability/market/order truth.
+- SCOPE: process-local `_queued_wakes` cache refresh concurrency only. DRAIN:
+  the one refresh reads every immutable queue JSON and publishes its cache;
+  waiting readers then return from that cache. RESET: any durable directory
+  revision still invalidates the cached revision and causes the next reader to
+  refresh. Strict malformed/unreadable behavior remains unchanged.
+- Files authorized: `src/runtime/reactor_wake.py`,
+  `tests/events/test_reactor.py`, and this plan. Forbidden: deleting backlog,
+  weakening `fail_on_error`, skipping exact held-SELL debt, changing wake
+  priority, extending auction deadlines, or altering probability/economics.
+- Acceptance: six simultaneous cold readers over the same queue parse each file
+  exactly once in aggregate and all receive the complete snapshot; strict queue
+  tests, compilation, source lint, and diff checks pass. Runtime closeout
+  requires exact loaded SHA plus a post-load construction/auction cut that no
+  longer expires behind duplicate wake parsing.
