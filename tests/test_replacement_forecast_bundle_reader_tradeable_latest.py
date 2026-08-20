@@ -1,6 +1,7 @@
 # Created: 2026-06-10
-# Last reused/audited: 2026-08-12
-# Authority basis: docs/authority/replacement_final_form_2026_06_09.md
+# Last reused/audited: 2026-08-19
+# Authority basis: docs/authority/replacement_final_form_2026_06_09.md; 2026-08-19
+#   market-relative capital evidence retirement of stale ENS live authority.
 """Relationship tests for readiness-bound replacement posterior selection.
 
 The current readiness dependency is the only posterior identity licensed for a decision.
@@ -345,7 +346,7 @@ def test_missing_current_evidence_shape_is_not_live_readable() -> None:
     assert result.reason_code == "REPLACEMENT_POSTERIOR_READINESS_NOT_LIVE_GRADE"
 
 
-def test_stale_absolute_disagreement_row_retains_entry_authority() -> None:
+def test_stale_absolute_disagreement_row_is_offline_only() -> None:
     conn = _conn()
     posterior_id = _insert_posterior(
         conn,
@@ -369,9 +370,9 @@ def test_stale_absolute_disagreement_row_retains_entry_authority() -> None:
 
     result = _read(conn, readiness, decision_time=_dt(6, 12))
 
-    assert result.ok is True
-    assert result.bundle is not None
-    assert result.bundle.posterior_id == posterior_id
+    assert result.ok is False
+    assert result.reason_code == "REPLACEMENT_POSTERIOR_READINESS_NOT_LIVE_GRADE"
+    assert result.bundle is None
 
 
 def test_stale_shape_selected_ensemble_beyond_outer_bound_is_blocked() -> None:
@@ -400,10 +401,7 @@ def test_stale_shape_selected_ensemble_beyond_outer_bound_is_blocked() -> None:
     result = _read(conn, readiness, decision_time=_dt(6, 12))
 
     assert result.ok is False
-    assert (
-        result.reason_code
-        == "REPLACEMENT_ENSEMBLE_CYCLE_AGE_EXCEEDS_BOUND"
-    )
+    assert result.reason_code == "REPLACEMENT_POSTERIOR_READINESS_NOT_LIVE_GRADE"
 
 
 def test_same_cycle_shape_selected_ensemble_future_or_old_is_blocked() -> None:
@@ -469,7 +467,7 @@ def test_same_cycle_shape_without_selected_ensemble_time_is_blocked() -> None:
     assert result.reason_code == "REPLACEMENT_POSTERIOR_READINESS_NOT_LIVE_GRADE"
 
 
-def test_stale_absolute_disagreement_row_has_held_redecision_authority() -> None:
+def test_stale_absolute_disagreement_row_has_no_held_redecision_authority() -> None:
     conn = _conn()
     posterior_id = _insert_posterior(
         conn,
@@ -498,9 +496,9 @@ def test_stale_absolute_disagreement_row_has_held_redecision_authority() -> None
         authority_purpose=ReplacementForecastAuthorityPurpose.HELD_REDECISION,
     )
 
-    assert result.ok is True
-    assert result.bundle is not None
-    assert result.bundle.posterior_id == posterior_id
+    assert result.ok is False
+    assert result.reason_code == "REPLACEMENT_POSTERIOR_READINESS_NOT_LIVE_GRADE"
+    assert result.bundle is None
 
 
 def test_nonfinite_shape_lag_has_no_held_authority() -> None:

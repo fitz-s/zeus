@@ -1,5 +1,5 @@
 # Created: 2026-08-12
-# Last reused/audited: 2026-08-13
+# Last reused/audited: 2026-08-19
 # Authority: current-regime capital proof must fail closed before entry reopens.
 
 from __future__ import annotations
@@ -407,7 +407,7 @@ def test_proof_sample_uses_verified_settlement_and_after_cost_terminal_wealth():
     )
 
 
-def test_bounded_latest_causal_semantics_is_current_capital_evidence():
+def test_stale_ensemble_semantics_cannot_be_current_capital_evidence():
     forecasts = _settlement_db()
     forecasts.execute(
         "INSERT INTO market_events VALUES (?,?,?,?,?,?)",
@@ -442,16 +442,13 @@ def test_bounded_latest_causal_semantics_is_current_capital_evidence():
         summary
     )
 
-    sample = evaluator._realized_proof_sample(
-        sqlite3.connect(":memory:"),
-        forecasts,
-        decision_log_id=18,
-        summary=summary,
-    )
-
-    assert sample["probability_semantics_revision"] == (
-        evaluator.STALE_ENSEMBLE_ABSOLUTE_DISAGREEMENT_SEMANTICS_REVISION
-    )
+    with pytest.raises(ValueError, match="identity/semantics invalid"):
+        evaluator._realized_proof_sample(
+            sqlite3.connect(":memory:"),
+            forecasts,
+            decision_log_id=18,
+            summary=summary,
+        )
 
 
 def test_maker_counterfactual_without_fill_path_cannot_prove_capital_gain():

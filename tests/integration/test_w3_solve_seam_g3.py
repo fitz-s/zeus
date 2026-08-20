@@ -1,5 +1,5 @@
 # Created: 2026-07-03
-# Last reused/audited: 2026-08-18
+# Last reused/audited: 2026-08-19
 # Authority basis: current global auction, posterior-mean Fractional Kelly,
 #                  Day0 global-cut routing, and auditable SELL holding bindings
 """Current global auction, q-kernel, and live actuation integration contracts."""
@@ -34652,9 +34652,6 @@ def test_alpha_shadow_freezes_exact_global_proof_winner_without_money():
         f"posterior-{family_a}": (
             global_batch_runtime.CURRENT_EVIDENCE_SEMANTICS_REVISION
         ),
-        f"posterior-{family_b}": (
-            global_batch_runtime.STALE_ENSEMBLE_ABSOLUTE_DISAGREEMENT_SEMANTICS_REVISION
-        ),
     }
     qkernel_events = global_batch_runtime._market_relative_alpha_shadow_events(
         selected=SimpleNamespace(
@@ -34739,12 +34736,7 @@ def test_alpha_shadow_freezes_exact_global_proof_winner_without_money():
         },
         strategy_keys=("forecast_qkernel_entry",),
     )
-    assert len(stale_events) == 1
-    assert json.loads(stale_events[0].envelope_json)[
-        "probability_semantics_revision"
-    ] == (
-        global_batch_runtime.STALE_ENSEMBLE_ABSOLUTE_DISAGREEMENT_SEMANTICS_REVISION
-    )
+    assert stale_events == ()
     missing_posterior_witnesses = {
         family_key: SimpleNamespace(
             **{

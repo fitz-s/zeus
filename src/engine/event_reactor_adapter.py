@@ -251,6 +251,7 @@ from src.engine.event_bound_final_intent import (
 from src.data import replacement_input_hwm as _replacement_input_hwm
 from src.data.replacement_forecast_cycle_policy import (
     CURRENT_EVIDENCE_SEMANTICS_REVISION,
+    LIVE_CURRENT_EVIDENCE_SEMANTICS_REVISIONS,
     STALE_ENSEMBLE_ABSOLUTE_DISAGREEMENT_SEMANTICS_REVISION,
     _current_evidence_shape,
     current_evidence_shape_semantics_mismatch,
@@ -7204,11 +7205,9 @@ def _day0_unresolved_entry_probability_rejection_reason(
     from src.events.day0_authority import DAY0_PROBABILITY_SEMANTICS_REVISION
 
     revision = str(probability_semantics_revision or "").strip()
-    if revision in {
-        DAY0_PROBABILITY_SEMANTICS_REVISION,
-        CURRENT_EVIDENCE_SEMANTICS_REVISION,
-        STALE_ENSEMBLE_ABSOLUTE_DISAGREEMENT_SEMANTICS_REVISION,
-    }:
+    if revision == DAY0_PROBABILITY_SEMANTICS_REVISION or (
+        revision in LIVE_CURRENT_EVIDENCE_SEMANTICS_REVISIONS
+    ):
         return None
     return "GLOBAL_DAY0_UNRESOLVED_ENTRY_PROBABILITY_UNCALIBRATED"
 

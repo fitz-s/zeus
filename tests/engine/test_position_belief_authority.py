@@ -1,4 +1,4 @@
-# Lifecycle: created=2026-06-12; last_reviewed=2026-08-12; last_reused=2026-08-12
+# Lifecycle: created=2026-06-12; last_reviewed=2026-08-19; last_reused=2026-08-19
 # Purpose: Prove held-position probability authority, freshness, and compact decision lineage.
 # Reuse: pytest tests/engine/test_position_belief_authority.py
 # Authority basis: settlement-losses incident 2026-06-12 (Karachi position:
@@ -209,7 +209,7 @@ def _insert(db_path, *, posterior_id, computed_at, q, city="Karachi",
     conn.close()
 
 
-def test_stale_absolute_disagreement_remains_held_monitor_authority(forecasts_db):
+def test_stale_absolute_disagreement_is_not_held_monitor_authority(forecasts_db):
     _insert(
         forecasts_db,
         posterior_id="stale-shape-held-monitor",
@@ -234,8 +234,7 @@ def test_stale_absolute_disagreement_remains_held_monitor_authority(forecasts_db
         now=NOW,
     )
 
-    assert belief is not None
-    assert belief.held_side_prob == pytest.approx(0.242)
+    assert belief is None
 
 
 @pytest.mark.parametrize("provenance_json", (None, "{}", "[]", "{malformed"))

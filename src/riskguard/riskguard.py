@@ -45,6 +45,7 @@ from datetime import datetime, timedelta, timezone
 from src.config import settings, get_mode
 from src.data.replacement_forecast_cycle_policy import (
     CURRENT_EVIDENCE_SEMANTICS_REVISION,
+    LIVE_CURRENT_EVIDENCE_SEMANTICS_REVISIONS,
     STALE_ENSEMBLE_ABSOLUTE_DISAGREEMENT_SEMANTICS_REVISION,
     _current_evidence_shape,
     current_evidence_shape_semantics_mismatch,
@@ -2003,10 +2004,7 @@ def _bind_qkernel_probability_semantics(
     """
 
     output = [dict(row) for row in rows]
-    accepted_revisions = {
-        CURRENT_EVIDENCE_SEMANTICS_REVISION,
-        STALE_ENSEMBLE_ABSOLUTE_DISAGREEMENT_SEMANTICS_REVISION,
-    }
+    accepted_revisions = set(LIVE_CURRENT_EVIDENCE_SEMANTICS_REVISIONS)
     qkernel_rows = [
         row
         for row in output
@@ -2598,10 +2596,7 @@ def _settled_market_relative_alpha_shadow_rows(
         expected_revisions = {DAY0_PROBABILITY_SEMANTICS_REVISION}
         expected_source_status = "current_day0_probability_authority"
     elif strategy_key == "forecast_qkernel_entry":
-        expected_revisions = {
-            CURRENT_EVIDENCE_SEMANTICS_REVISION,
-            STALE_ENSEMBLE_ABSOLUTE_DISAGREEMENT_SEMANTICS_REVISION,
-        }
+        expected_revisions = set(LIVE_CURRENT_EVIDENCE_SEMANTICS_REVISIONS)
         expected_source_status = "current_qkernel_probability_authority"
     else:
         raise ValueError("market-relative alpha shadow strategy is not canonical")

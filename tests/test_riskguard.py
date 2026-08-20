@@ -1509,7 +1509,10 @@ class TestMetrics:
 
         by_id = {row["trade_id"]: row for row in bound}
         assert by_id["current"]["probability_semantics_ready"] is True
-        assert by_id["stale"]["probability_semantics_ready"] is True
+        assert by_id["stale"]["probability_semantics_ready"] is False
+        assert by_id["stale"]["probability_semantics_blocked_reason"] == (
+            "superseded_probability_semantics"
+        )
         assert by_id["superseded"]["probability_semantics_blocked_reason"] == (
             "superseded_probability_semantics"
         )
@@ -1527,18 +1530,17 @@ class TestMetrics:
             "status": "ok",
             "licensed_revisions": [
                 riskguard_module.CURRENT_EVIDENCE_SEMANTICS_REVISION,
-                riskguard_module.STALE_ENSEMBLE_ABSOLUTE_DISAGREEMENT_SEMANTICS_REVISION,
             ],
             "strategy_candidate_count": 7,
-            "current_count": 2,
-            "superseded_count": 2,
+            "current_count": 1,
+            "superseded_count": 3,
             "missing_count": 2,
             "mixed_count": 1,
         }
         assert [
             row["trade_id"]
             for row in riskguard_module._riskguard_brier_actuating_rows(bound)
-        ] == ["current", "stale"]
+        ] == ["current"]
 
     def test_qkernel_semantics_lookup_unavailable_fails_closed(self, tmp_path):
         row = {
@@ -6247,17 +6249,19 @@ class TestQkernelMarketRelativeAlphaEvidence:
         conn.close()
 
     @pytest.mark.parametrize(
-        ("revision", "shape_lag_hours", "stale_shape_reused"),
+        ("revision", "shape_lag_hours", "stale_shape_reused", "expected_ready"),
         (
             (
                 riskguard_module.CURRENT_EVIDENCE_SEMANTICS_REVISION,
                 0.0,
                 False,
+                True,
             ),
             (
                 riskguard_module.STALE_ENSEMBLE_ABSOLUTE_DISAGREEMENT_SEMANTICS_REVISION,
                 6.0,
                 True,
+                False,
             ),
         ),
     )
@@ -6267,6 +6271,7 @@ class TestQkernelMarketRelativeAlphaEvidence:
         revision,
         shape_lag_hours,
         stale_shape_reused,
+        expected_ready,
     ):
         from src.state.schema.no_trade_regret_events_schema import ensure_table
         from src.strategy.live_inference.no_trade_regret import (
@@ -6428,6 +6433,15 @@ class TestQkernelMarketRelativeAlphaEvidence:
                 ),
             )
         )
+
+        if not expected_ready:
+            assert rows == []
+            assert status["certificate_ready_count"] == 0
+            assert status["blocked_reasons"] == {
+                "certificate_identity_mismatch": 1
+            }
+            conn.close()
+            return
 
         assert status["status"] == "ok"
         assert status["settlement_ready_count"] == 1

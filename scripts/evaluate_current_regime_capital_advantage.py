@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Lifecycle: created=2026-08-12; last_reviewed=2026-08-13; last_reused=2026-08-13
+# Lifecycle: created=2026-08-12; last_reviewed=2026-08-19; last_reused=2026-08-19
 # Purpose: Grade exact current selection/probability revisions on causal capital outcomes.
 # Reuse: Run read-only against canonical WORLD/FORECAST/TRADES DBs; output is evidence, not authority.
 """Fail-closed evaluator for current-regime capital advantage.
@@ -51,6 +51,7 @@ from src.state.db import (  # noqa: E402
 from src.types.market import Bin  # noqa: E402
 from src.data.replacement_forecast_cycle_policy import (  # noqa: E402
     CURRENT_EVIDENCE_SEMANTICS_REVISION,
+    LIVE_CURRENT_EVIDENCE_SEMANTICS_REVISIONS,
     STALE_ENSEMBLE_ABSOLUTE_DISAGREEMENT_SEMANTICS_REVISION,
 )
 
@@ -66,11 +67,9 @@ GLOBAL_AUCTION_RECEIPT_MODES = (
 PROOF_ROLE = "SIDE_EFFECT_FREE_CAPITAL_COUNTERFACTUAL"
 CONSERVATIVE_ONE_SIDED_T95_DF29 = 1.699
 CURRENT_PROBABILITY_SEMANTICS = frozenset(
-    {
-        DAY0_PROBABILITY_SEMANTICS_REVISION,
-        CURRENT_EVIDENCE_SEMANTICS_REVISION,
-        STALE_ENSEMBLE_ABSOLUTE_DISAGREEMENT_SEMANTICS_REVISION,
-    }
+    {DAY0_PROBABILITY_SEMANTICS_REVISION}
+).union(
+    LIVE_CURRENT_EVIDENCE_SEMANTICS_REVISIONS
 )
 
 
@@ -1540,10 +1539,7 @@ def evaluate(
             "probability_semantics_revisions": {
                 "day0_nowcast_entry": DAY0_PROBABILITY_SEMANTICS_REVISION,
                 "forecast_qkernel_entry": sorted(
-                    {
-                        CURRENT_EVIDENCE_SEMANTICS_REVISION,
-                        STALE_ENSEMBLE_ABSOLUTE_DISAGREEMENT_SEMANTICS_REVISION,
-                    }
+                    LIVE_CURRENT_EVIDENCE_SEMANTICS_REVISIONS
                 ),
             },
         },

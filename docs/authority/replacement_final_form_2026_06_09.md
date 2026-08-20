@@ -101,7 +101,8 @@ deployment-SHA freshness rule.
 The older walk-forward residual width is offline historical evidence only and
 is absent from runtime probability construction.
 
-**2026-07-25 correction — bounded reuse of a stale-but-coherent ENS shape.**
+**2026-07-25 historical correction — bounded reuse of a stale-but-coherent ENS
+shape (superseded for live authority on 2026-08-19).**
 Measured cost of the pre-addendum same-cycle-only rule: new scopes waited a mean
 14.6h (p50 6.8h) for the slow ENS-baseline leg while every other instrument was
 already fresh, costing 0.24–0.41°C of avoidable center error at scope-open
@@ -141,6 +142,33 @@ outer catastrophic-guard on how old the selected ENS cycle may be; this
 addendum does not widen it, and carries no sigma age-inflation term of its own
 (a walk-forward-fitted `γ_g · age/6` term, per the consult's EMOS-like scale, is
 deferred to a separate calibration slice).
+
+**2026-08-19 correction — same-cycle target-specific ENS is required for live
+probability authority.** Seven-day decision-time certificates showed that the
+cross-clock construction above systematically overstated exact-bin `NO`
+probabilities: 13 independent city-date clusters committed $70.91 and realized
+-$38.69, while the executable market beat the model by an e-value of 15,585.68.
+The defect is structural: `μ* - mean(X_old)` mixes forecast evolution with
+uncertainty and is not a sample from the carrier-time settlement distribution.
+Inflating `σ_pred` by that term spreads probability away from central discrete
+bins and manufactures apparent `NO` edge.
+
+Therefore a shaped certificate has live entry, held-position statistical
+redecision, and coverage authority only when all of the following hold:
+
+```
+shape_lag_hours == 0
+stale_shape_reused in {absent, false}
+semantics_revision == CURRENT_EVIDENCE_SEMANTICS_REVISION
+translation_applied == false
+```
+
+`stale_ensemble_absolute_disagreement_v2` remains an immutable offline and
+walk-forward evidence identity. It cannot authorize a live BUY, a statistical
+SELL/HOLD decision, no-money admission evidence, or suppress rematerialization
+of the missing same-cycle shape. Missing same-cycle ENS is DATA_DEGRADED for the
+family and fails closed until the normal materialization loop writes current
+evidence.
 
 ### 1e. q construction — fused-N-direct (commit 8541bc93cd)
 

@@ -1,5 +1,5 @@
 # Created: 2026-06-10
-# Last reused or audited: 2026-06-10
+# Last reused or audited: 2026-08-19
 # Authority basis: operator staleness/cycle-physics directive 2026-06-10. Single source of
 #   truth for (a) the bounded source-cycle staleness horizon shared by the materialization
 #   fail-closed gate AND the live-admission belt-and-suspenders gate, and (b) the model-cycle
@@ -20,7 +20,10 @@ encode the invariant in shared structure, not in N parallel checks):
      ``MAX_CYCLE_AGE`` hours. Expired-but-rematerializable: re-stamping the same cycle is
      allowed ONLY while still within the bound.
 
-  2. CYCLE PHASE — operator policy has promoted all four standard UTC cycles
+  2. LIVE SHAPE AUTHORITY — only a same-cycle target-specific ENS shape may
+     authorize live probability; a bounded stale shape remains offline evidence.
+
+  3. CYCLE PHASE — operator policy has promoted all four standard UTC cycles
      (00Z/06Z/12Z/18Z) to live-eligible replacement cycles. Phase remains provenance only;
      it must not downgrade 06Z/18Z rows or route them into an experiment-only state.
 """
@@ -111,6 +114,15 @@ STALE_ENSEMBLE_ABSOLUTE_DISAGREEMENT_SEMANTICS_REVISION = (
     "stale_ensemble_absolute_disagreement_v2"
 )
 
+# Only a target-specific ENS shape from the carrier cycle is live probability
+# authority.  Stale absolute-member shapes remain persisted for walk-forward
+# diagnosis, but cross-clock disagreement is not a causal sample of the
+# carrier-time settlement distribution and therefore cannot authorize entry,
+# held-position statistical redecision, or coverage.
+LIVE_CURRENT_EVIDENCE_SEMANTICS_REVISIONS = frozenset(
+    {CURRENT_EVIDENCE_SEMANTICS_REVISION}
+)
+
 # Between-provider spread is live-authoritative only when its source clocks prove
 # one simultaneous cohort. This marker is persisted and included in shape identity.
 BETWEEN_COHORT_STATUS_SIMULTANEOUS_PROVEN = "SIMULTANEOUS_PROVEN"
@@ -190,7 +202,7 @@ def current_evidence_shape_semantics_mismatch(provenance: object) -> bool:
 def _current_evidence_shape_has_probability_authority(
     provenance: object,
 ) -> bool:
-    """Validate same-cycle or bounded latest-causal ENS shape authority."""
+    """Validate same-cycle target-specific ENS probability authority."""
 
     shape = _current_evidence_shape(provenance)
     if shape is None:
@@ -205,26 +217,18 @@ def _current_evidence_shape_has_probability_authority(
     ):
         return False
     lag = float(shape_lag_hours)
-    if lag < 0.0 or lag > replacement_source_cycle_max_age_hours():
+    if lag != 0.0:
         return False
     stale_shape_reused = shape.get("stale_shape_reused")
     if stale_shape_reused is not None and not isinstance(
         stale_shape_reused, bool
     ):
         return False
-    stale = lag > 0.0
-    if stale and stale_shape_reused is not True:
+    if stale_shape_reused not in (None, False):
         return False
-    if not stale and stale_shape_reused not in (None, False):
-        return False
-    expected_revision = (
-        STALE_ENSEMBLE_ABSOLUTE_DISAGREEMENT_SEMANTICS_REVISION
-        if stale
-        else CURRENT_EVIDENCE_SEMANTICS_REVISION
-    )
     return (
         str(shape.get("semantics_revision") or "")
-        == expected_revision
+        in LIVE_CURRENT_EVIDENCE_SEMANTICS_REVISIONS
         and shape.get("translation_applied") is False
         and not current_evidence_shape_semantics_mismatch(provenance)
     )
@@ -237,18 +241,18 @@ def current_evidence_shape_has_entry_authority(provenance: object) -> bool:
     # SCOPE: new-entry authority for this one city/date/metric family.
     # DRAIN: the normal target-specific materializer replaces malformed,
     # translated, expired, or semantically mismatched shape provenance.
-    # RESET: a coherent same-cycle or bounded latest-causal raw-member shape
-    # restores the authority ratified in replacement_final_form section 1d.
+    # RESET: a coherent same-cycle target-specific raw-member shape restores
+    # the authority ratified in replacement_final_form section 1d.
     return _current_evidence_shape_has_probability_authority(provenance)
 
 
 def current_evidence_shape_has_held_authority(provenance: object) -> bool:
     """Whether a shape can support reduce-only held-position redecision.
 
-    A bounded latest-causal ENS shape remains probability authority because
-    its untranslated absolute members and explicit disagreement with the
-    current provider center are statistical evidence. The persisted revision
-    and stale flag must agree with the numeric lag exactly.
+    Stale ENS rows remain offline evidence only.  A held position must be
+    re-decided from the same current probability law as a new entry; absence of
+    a same-cycle shape is DATA_DEGRADED, not permission to use cross-clock
+    disagreement as a probability distribution.
     """
 
     return _current_evidence_shape_has_probability_authority(provenance)
@@ -325,26 +329,21 @@ def tradeable_grade_coverage_sql(
         f"substr({ens_cycle_value}, -3, 1) = ':'))"
     )
     max_lag = replacement_source_cycle_max_age_hours()
-    # Same-cycle and bounded latest-causal raw ENS members are both current
-    # evidence under replacement_final_form section 1d. Translated shapes and
-    # lag/flag/revision mismatches remain fail-closed.
+    # Only a same-cycle raw ENS shape is live probability authority.  The
+    # broader source-age bound still proves the selected cycle is causal; it
+    # does not legalize cross-cycle shape reuse.
     fragments.append(
         "AND ("
         f"{translation_type} = 'false' AND "
         f"{lag_type} IN ('integer', 'real') AND "
-        f"{lag_value} >= 0.0 AND {lag_value} <= {max_lag!r} AND "
+        f"{lag_value} = 0.0 AND "
         f"{ens_cycle_type} = 'text' AND {ens_cycle_has_timezone} AND "
         f"julianday({ens_cycle_value}) IS NOT NULL AND "
         f"(julianday('{decision_iso}') - julianday({ens_cycle_value})) * 24.0 "
-        f"BETWEEN 0.0 AND {max_lag!r} AND (("
-        f"{lag_value} = 0.0 AND "
+        f"BETWEEN 0.0 AND {max_lag!r} AND "
         f"({stale_type} IS NULL OR {stale_type} = 'false') AND "
         f"{revision_value} = "
-        f"'{CURRENT_EVIDENCE_SEMANTICS_REVISION}') OR ("
-        f"{lag_value} > 0.0 AND "
-        f"{stale_type} = 'true' AND "
-        f"{revision_value} = "
-        f"'{STALE_ENSEMBLE_ABSOLUTE_DISAGREEMENT_SEMANTICS_REVISION}')))"
+        f"'{CURRENT_EVIDENCE_SEMANTICS_REVISION}')"
     )
     return "\n              ".join(fragments)
 

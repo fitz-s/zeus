@@ -1,6 +1,6 @@
 # Created: 2026-06-06
-# Last reused/audited: 2026-08-03
-# Lifecycle: created=2026-06-06; last_reviewed=2026-08-03; last_reused=2026-08-03
+# Last reused/audited: 2026-08-19
+# Lifecycle: created=2026-06-06; last_reviewed=2026-08-19; last_reused=2026-08-19
 # Purpose: Protect DB materialization for Open-Meteo ECMWF IFS 9km + Bayes-fusion replacement live layer.
 # Reuse: Run before changing replacement forecast live/experiment write path.
 # Authority basis: Operator-directed replacement forecast simple-switch readiness.
@@ -203,7 +203,13 @@ def _bins() -> tuple[_TemperatureBin, ...]:
     )
 
 
-def _install_live_fusion(monkeypatch: pytest.MonkeyPatch, *, complete: bool = True) -> None:
+def _install_live_fusion(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    complete: bool = True,
+    shape_lag_hours: float = 0.0,
+) -> None:
+    members = tuple(25.0 + (index - 25) * 0.02 for index in range(51))
     override = _BayesPrecisionFusionFusionOverride(
         anchor_value_c=25.0,
         anchor_sigma_c=0.35,
@@ -222,6 +228,25 @@ def _install_live_fusion(monkeypatch: pytest.MonkeyPatch, *, complete: bool = Tr
         decorrelated_providers_served=5 if complete else 4,
         decorrelated_providers_expected=5,
         current_value_serving={"ecmwf_ifs9": {"served_via": "single_runs"}},
+        current_evidence_shape={
+            "snapshot_id": 9001,
+            "shape_hash": "test-current-shape",
+            "semantics_revision": (
+                materializer_mod.CURRENT_EVIDENCE_SEMANTICS_REVISION
+                if shape_lag_hours == 0.0
+                else materializer_mod.STALE_ENSEMBLE_ABSOLUTE_DISAGREEMENT_SEMANTICS_REVISION
+            ),
+            "source_cycle_time": (
+                _dt(0) - timedelta(hours=shape_lag_hours)
+            ).isoformat(),
+            "source_available_at": _dt(1).isoformat(),
+            "shape_lag_hours": shape_lag_hours,
+            "stale_shape_reused": shape_lag_hours > 0.0,
+            "translation_applied": False,
+            "member_count": len(members),
+            "between_cohort_status": "SIMULTANEOUS_PROVEN",
+        },
+        current_evidence_members_c=members,
     )
     monkeypatch.setattr(materializer_mod, "_replacement_bayes_precision_fusion_override", lambda *args, **kwargs: override)
 
@@ -1013,6 +1038,20 @@ def test_materializer_writes_certified_bootstrap_bounds(monkeypatch: pytest.Monk
         assert q_lcb[key] <= point <= q_ucb[key]
     assert not any(str(key).startswith(("buy_no:", "no:")) for key in q_lcb)
     assert provenance["q_lcb_json_role"] == "fused_center_bootstrap_lcb"
+
+
+def test_materializer_does_not_publish_stale_ensemble_as_live_probability(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    conn = _conn()
+    _install_live_fusion(monkeypatch, shape_lag_hours=6.0)
+
+    result = materialize_replacement_forecast_live(conn, _request())
+
+    assert result.ok is False
+    assert "CAPTURE:CURRENT_EVIDENCE_NOT_LIVE" in result.reason_codes
+    assert conn.execute("SELECT COUNT(*) FROM forecast_posteriors").fetchone()[0] == 0
+    assert conn.execute("SELECT COUNT(*) FROM readiness_state").fetchone()[0] == 0
 
 
 def test_prepared_materialization_keeps_compute_read_only(
@@ -1894,7 +1933,8 @@ def test_materializer_hko_provisional_observation_does_not_truncate_support(
     q_lcb = json.loads(row["q_lcb_json"])
     provenance = json.loads(row["provenance_json"])
     assert q["cool"] > 0.0
-    assert q_lcb["cool"] > 0.0
+    assert q_lcb["cool"] >= 0.0
+    assert provenance["day0_provisional_observation"]["support_truncation"] is False
     assert provenance["q_shape"] == "fused_normal_direct"
     assert "day0_conditioning" not in provenance
     assert provenance["day0_provisional_observation"] == {
