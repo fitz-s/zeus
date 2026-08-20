@@ -5728,7 +5728,7 @@ def test_global_batch_stops_claiming_when_cycle_is_cancelled():
     ) == 2
 
 
-def test_process_pending_cancellation_includes_monitor_debt_except_exact_completion():
+def test_process_pending_cancellation_includes_monitor_debt_for_protected_completion():
     def any_urgent():
         return False
 
@@ -5766,25 +5766,29 @@ def test_process_pending_cancellation_includes_monitor_debt_except_exact_complet
     assert cancelled() is False
     debt_pending[0] = True
     assert cancelled() is True
-    assert _process_pending_cancelled(
+    exact_cancelled = _process_pending_cancelled(
         committed_day0_wake=False,
         producer_fast_path=False,
         urgent_wake_pending=any_urgent,
         urgent_day0_pending=day0_urgent,
         held_position_monitor_debt_pending=lambda: True,
         exact_held_completion=True,
-    ) is any_urgent
+    )
+    assert exact_cancelled is not None
+    assert exact_cancelled() is True
     assert _held_position_monitor_preemption_pending(
         lambda: False,
         lambda: True,
     ) is True
-    assert _process_pending_cancelled(
+    day0_cancelled = _process_pending_cancelled(
         committed_day0_wake=True,
         producer_fast_path=True,
         urgent_wake_pending=any_urgent,
         urgent_day0_pending=day0_urgent,
         held_position_monitor_debt_pending=lambda: True,
-    ) is None
+    )
+    assert day0_cancelled is not None
+    assert day0_cancelled() is True
 
 
 def test_monitor_debt_preempts_global_batch_and_leaves_queue_retryable():
@@ -6366,7 +6370,7 @@ def test_day0_completed_ownership_marker_clears_on_listener_restart():
         main._day0_exit_monitor_attempts.clear()
 
 
-def test_monitor_preempts_once_then_next_auction_must_complete(monkeypatch):
+def test_monitor_debt_repreempts_reserved_cut_until_monitor_handoff_clears(monkeypatch):
     from types import SimpleNamespace
 
     from src.events import reactor
@@ -6397,9 +6401,19 @@ def test_monitor_preempts_once_then_next_auction_must_complete(monkeypatch):
             )
         )
         assert due_at_start is True
-        assert completion_probe() is False
+        assert completion_probe() is True
+        pending[0] = False
+        assert completion_probe() is True
+        due_after_handoff, post_handoff_probe = (
+            reactor._global_auction_monitor_cancellation_probe(
+                lambda: pending[0],
+                monitor_debt_pending=lambda: pending[0],
+            )
+        )
+        assert due_after_handoff is True
+        assert post_handoff_probe() is False
         reactor._settle_global_auction_monitor_fairness(
-            completion_due_at_start=due_at_start,
+            completion_due_at_start=due_after_handoff,
             result=SimpleNamespace(
                 processed=1,
                 proof_accepted=1,
@@ -6433,7 +6447,7 @@ def test_monitor_does_not_preempt_when_completion_wake_is_not_durable(
     assert cancellation_probe() is False
 
 
-def test_monitor_fairness_debt_does_not_cancel_reserved_completion(
+def test_monitor_fairness_debt_cancels_but_preserves_reserved_completion(
     monkeypatch,
 ):
     from src.events import reactor
@@ -6453,8 +6467,8 @@ def test_monitor_fairness_debt_does_not_cancel_reserved_completion(
             )
         )
         assert due_at_start is True
-        assert cancellation_probe() is False
-        assert cancellation_probe() is False
+        assert cancellation_probe() is True
+        assert cancellation_probe() is True
         assert reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.is_set()
     finally:
         reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.clear()

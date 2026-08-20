@@ -1982,7 +1982,10 @@ files:
       generic completion reservations retain durable auction ownership, but an
       unresolved canonical monitor handoff debt takes one upstream refresh turn
       before the reactor reacquires that reservation, preventing the two lanes
-      from waiting on the same reactor lock indefinitely.
+      from waiting on the same reactor lock indefinitely. That debt remains
+      authoritative when it appears after a protected cut has started: every
+      construct, process, and selection phase yields at its next safe checkpoint
+      while the durable completion token survives for the post-refresh retry.
     downstream:
     - src/engine/event_reactor_adapter.py
     - src/engine/global_batch_runtime.py
