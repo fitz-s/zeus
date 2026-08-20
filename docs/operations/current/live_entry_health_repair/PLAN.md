@@ -2826,3 +2826,38 @@ publication barrier.
   registry checks, and diff checks pass. Runtime closeout requires exact loaded
   SHA and either a naturally reordered fill/ACK that converges without review,
   or recovery of the already-confirmed live command with no duplicate submit.
+
+### Slice B131 — Terminalize stale global-winner carriers at the command fence (2026-08-20)
+
+- Live defect: after B130 changed the current portfolio endowment, repeated
+  complete auctions selected Seattle YES with positive posterior-mean EV. The
+  first immutable winner carrier was rejected at submit-time wealth binding,
+  after its EDLI aggregate had already recorded `ExecutionCommandCreated` and
+  `VenueSubmitAttempted`. The reactor treated both
+  `global_increment_binding:wealth_economic_identity_superseded` and every later
+  `GLOBAL_WINNER_CLAIM_FENCE_LOST` as unknown transient reasons, so the same
+  carrier requeued even though the exactly-once fence correctly forbade it from
+  ever acquiring command ownership again.
+- First-principles invariant: durable command/attempt evidence is never replayed,
+  and obsolete wealth economics are never retried as if current. Terminalize the
+  exact immutable carrier; the next producer/redecision carrier must rebuild the
+  complete q/book/wealth feasible set under a new event identity.
+- SCOPE: runtime disposition of `GLOBAL_WINNER_CLAIM_FENCE_LOST` and
+  `global_increment_binding:*` for one immutable event only. DRAIN: terminal
+  finalization consumes that carrier while normal command recovery owns any
+  durable command/attempt evidence. RESET: a fresh forecast, price, fill, or
+  redecision carrier has a new `event_id`, may replace the old winner pointer,
+  and must acquire the unchanged command fence before actuation.
+- Files authorized: `src/events/reactor.py`, `tests/events/test_reactor.py`,
+  `architecture/source_rationale.yaml`, `architecture/test_topology.yaml`, and
+  this plan. Forbidden: removing the command-event `NOT EXISTS` fence, reviving
+  a terminal event row, reusing an idempotency key/order envelope, treating the
+  stale carrier as a live order, or changing probability/ranking/Kelly/price.
+- Acceptance: classifier antibodies prove both bases are explicit terminal
+  reasons with no unknown-reason fallback; a carrier with durable venue-attempt
+  evidence cannot reclaim/refence, while a fresh carrier can replace it and
+  acquire the unchanged fence. Focused fence/reactor tests, compilation, lint,
+  registry/planning checks, and diff checks must pass. Runtime closeout requires
+  exact loaded SHA, terminal disposition of the stuck carrier, and a later fresh
+  carrier reaching a truthful submit/no-submit result without duplicate venue
+  submission.

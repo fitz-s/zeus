@@ -2974,6 +2974,23 @@ def test_global_not_selected_is_terminal_for_completed_epoch(caplog):
     assert not any("UNKNOWN money-path reason" in row.message for row in caplog.records)
 
 
+@pytest.mark.parametrize(
+    "reason",
+    (
+        "GLOBAL_WINNER_CLAIM_FENCE_LOST:event_id=winner-carrier",
+        "global_increment_binding:wealth_economic_identity_superseded",
+    ),
+)
+def test_stale_global_winner_carrier_is_terminal_for_fresh_reset(caplog, reason):
+    reason_base = reason.partition(":")[0]
+
+    with caplog.at_level(logging.ERROR, logger="zeus.events.reactor"):
+        assert reason_base in TERMINAL_MONEY_PATH_REASONS
+        assert _is_transient_money_path_reason(reason) is False
+
+    assert not any("UNKNOWN money-path reason" in row.message for row in caplog.records)
+
+
 def test_global_no_reduce_only_family_is_terminal_for_completed_cut(caplog):
     reason = "GLOBAL_AUCTION_NO_REDUCE_ONLY_FAMILY"
 
@@ -11084,6 +11101,31 @@ def test_stale_global_target_with_venue_attempt_cannot_reclaim_or_refence(
             (store.consumer_name, target.event_id),
         ).fetchone()
     ) == (first_generation, first_attempt, GLOBAL_WINNER_TARGETED_CLAIM)
+
+    # This immutable carrier is recovery-owned and must terminalize instead of
+    # reacquiring its fence.  A fresh causal carrier is the reset and can own the
+    # next command fence without replaying the old venue-attempt identity.
+    store.mark_processed(target.event_id, processed_at=clock[0])
+    fresh_source = _forecast_event(
+        "attempted-reclaim-fresh-source",
+        target_date="2026-05-25",
+    )
+    fresh = _next_claim_carrier(
+        fresh_source,
+        targeted_at=datetime.fromisoformat(clock[0]),
+        economic_identity="attempted-reclaim-fresh-economics",
+        payload=json.loads(fresh_source.payload_json),
+    )
+    assert fresh.event_id != target.event_id
+    assert store.prioritize_global_winner(fresh)
+    assert store.claim(fresh.event_id, claimed_at=clock[0])
+    fresh_attempt = store.attempt_count(fresh.event_id)
+    _fence_global_target_claim_before_command(
+        conn,
+        fresh,
+        claimed_at=clock[0],
+        attempt_count=fresh_attempt,
+    )
 
 
 def test_fenced_global_target_without_command_requeues_for_retry_and_boot():

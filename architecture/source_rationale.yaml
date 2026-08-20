@@ -1955,7 +1955,10 @@ files:
       winner claim path threads the actual
       retained carrier through claimed-set coverage and actuation; transient
       finalization carries the exact claim generation so a late worker cannot
-      revive a superseded winner pointer. An expired global-auction epoch is an
+      revive a superseded winner pointer. A carrier that loses its command fence
+      or whose submit-time increment wealth identity is superseded terminalizes;
+      only a fresh event identity may reset the full current q/book/wealth
+      comparison, so durable command evidence can never be replayed. An expired global-auction epoch is an
       explicit transient redecision reason, so expiry starts a fresh cut without
       relying on the unknown-reason fallback or replaying stale truth. Qkernel
       MAKER_TAKER_FORBIDDEN after

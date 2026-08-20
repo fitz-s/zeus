@@ -4987,6 +4987,16 @@ _RUNTIME_TERMINAL_MONEY_PATH_REASONS: frozenset[str] = frozenset({
     # forecast, price, or control advancement emits a fresh event and reruns the
     # complete auction under the then-current action set.
     "GLOBAL_AUCTION_NO_REDUCE_ONLY_FAMILY",
+    # SCOPE: one immutable global-winner carrier after its command fence is no
+    # longer acquirable, or after submit-time wealth revalidation supersedes its
+    # selected increment economics.  Requeueing that carrier is impossible once
+    # ExecutionCommandCreated/VenueSubmitAttempted evidence exists and otherwise
+    # repeats an obsolete wealth identity.  DRAIN: terminalize this carrier;
+    # command recovery retains ownership of any durable command/attempt evidence.
+    # RESET: a fresh producer/redecision carrier has a new event_id and competes
+    # in a complete current q/book/wealth auction without weakening the fence.
+    "GLOBAL_WINNER_CLAIM_FENCE_LOST",
+    "global_increment_binding",
 })
 
 
