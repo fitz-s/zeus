@@ -3562,7 +3562,7 @@ def _startup_freshness_check() -> None:
       BOOT_RETRY_MAX_ATTEMPTS, then SystemExit. The boot helper handles retry
       internally and never returns an ABSENT verdict to this caller.
 
-    Codex PR #31 (P1) fix 2026-05-01: previously called
+    review PR #31 (P1) fix 2026-05-01: previously called
     evaluate_freshness_mid_run, which synthesizes ABSENT into a degraded
     all-STALE verdict. That made the `if branch == "ABSENT"` retry path here
     unreachable and silently weakened the boot safety contract — a missing

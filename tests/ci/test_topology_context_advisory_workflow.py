@@ -126,7 +126,7 @@ def test_workflow_uploads_pack_artifact(workflow: dict) -> None:
 
 def test_workflow_in_agents_md_file_registry() -> None:
     """Phase C.1 fix: every workflow in .github/workflows/ must be listed in
-    .github/workflows/AGENTS.md File Registry (Copilot finding on PR #344)."""
+    .github/workflows/AGENTS.md File Registry (finding on PR #344)."""
     agents_md = (REPO_ROOT / ".github" / "workflows" / "AGENTS.md").read_text()
     assert "`topology-context-advisory.yml`" in agents_md, (
         "topology-context-advisory.yml missing from .github/workflows/AGENTS.md File Registry"
@@ -136,7 +136,7 @@ def test_workflow_in_agents_md_file_registry() -> None:
 def test_workflow_artifact_upload_uses_if_always(workflow: dict) -> None:
     """Phase C.1 fix: artifact upload + comment post must use `if: always()` so
     they attempt even if a prior cascade step failed. Without if:always(), the
-    job-level continue-on-error claim was misleading (Copilot finding on PR #344)."""
+    job-level continue-on-error claim was misleading (finding on PR #344)."""
     jobs = workflow["jobs"]
     for job in jobs.values():
         for step in job.get("steps", []):

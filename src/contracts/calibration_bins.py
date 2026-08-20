@@ -105,7 +105,7 @@ _C_PLAUSIBLE_RANGE = (-50.0, 55.0)
 #
 # These tolerances are RELATIVE — `tol = min(cap, max(floor, k * ensemble_spread))`.
 #
-# 2026-05-12 floor revision (post-c8bb645a / post-Codex-P1 #111 empirical review):
+# 2026-05-12 floor revision (post-c8bb645a / P1 #111 empirical review):
 #   The c8bb645a relative-tolerance fix assumed real cold-snap misses
 #   produce WIDE ensemble spread (so `k * spread` dominates the floor).
 #   Production rebuild on 2026-05-12 (PR #111 follow-up) disproved that
@@ -127,7 +127,7 @@ _C_PLAUSIBLE_RANGE = (-50.0, 55.0)
 #   - °F-in-°C city (e.g. 70 °F interpreted as 70 °C vs obs 20 °C): ~50 °C offset
 # So 25 °C / 40 °F floors still catch canonical unit errors with margin.
 #
-# The absolute CAP (Codex P1 #111) closes the wide-spread cross-unit leak:
+# The absolute CAP (P1 #111) closes the wide-spread cross-unit leak:
 # °C members [0,10,20,30,40] in an °F city against obs=75 °F have spread=40
 # and offset=55; without a cap, k*spread=160 would let it through. With
 # cap = 50 °F (28 °C), tol stays bounded and contamination is rejected.
@@ -139,8 +139,8 @@ _C_PLAUSIBLE_RANGE = (-50.0, 55.0)
 # admitting extreme-weather data over false-positive unit rejection.
 _F_VS_OBS_MAX_OFFSET_FLOOR = 40.0       # °F absolute floor (was 18 pre-2026-05-12)
 _C_VS_OBS_MAX_OFFSET_FLOOR = 25.0       # °C absolute floor (was 10 pre-2026-05-12)
-_F_VS_OBS_MAX_OFFSET_CAP = 50.0         # °F absolute upper cap (Codex P1 #111)
-_C_VS_OBS_MAX_OFFSET_CAP = 28.0         # °C absolute upper cap (Codex P1 #111)
+_F_VS_OBS_MAX_OFFSET_CAP = 50.0         # °F absolute upper cap (P1 #111)
+_C_VS_OBS_MAX_OFFSET_CAP = 28.0         # °C absolute upper cap (P1 #111)
 _VS_OBS_SPREAD_MULTIPLIER = 4.0         # tol = min(cap, max(floor, k * (max-min)))
 
 

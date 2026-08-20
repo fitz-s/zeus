@@ -2215,7 +2215,6 @@ cards:
     severity: high
     sources:
       - docs/operations/task_2026-04-16_dual_track_metric_spine/team_lead_handoff.md
-      - ~/.claude/projects/-Users-<username>--openclaw-workspace-venus-zeus/memory/feedback_critic_prompt_adversarial_template.md
     failure_mode: >
       Long multi-phase programs use a single critic across all phases.
       The critic loses adversarial distance as it re-reads a

@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -15,14 +16,24 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 DISPATCH_PATH = REPO_ROOT / ".claude" / "hooks" / "dispatch.py"
 ROUTER_PATH = REPO_ROOT / ".codex" / "hooks" / "zeus-router.mjs"
 # NOT a synthetic identity by design: DISPATCH_PATH is invoked as a subprocess
-# (no monkeypatch reaches it), and .claude/hooks/dispatch.py hardcodes
-# `_MAIN_TREE = Path("/Users/leofitz/zeus").resolve()` with no env-var
-# override. LIVE_ROOT must equal that literal value or every "is this the
-# live checkout?" assertion below silently degrades to always-False and the
-# test stops proving anything. Changing this requires also changing
-# dispatch.py's _MAIN_TREE (out of scope here — that guard belongs to a
-# separate control-plane change).
-LIVE_ROOT = Path("/Users/leofitz/zeus")
+# (no monkeypatch reaches it), so LIVE_ROOT must equal whatever dispatch.py
+# resolves as _MAIN_TREE or every "is this the live checkout?" assertion below
+# silently degrades to always-False and the test stops proving anything.
+# Derived the same way dispatch.py derives it — `--git-common-dir` names the
+# live checkout's .git from inside any worktree — so this test pins the
+# guard's behaviour rather than one machine's install path.
+LIVE_ROOT = Path(
+    os.environ.get("ZEUS_MAIN_TREE")
+    or subprocess.run(
+        ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
+        cwd=str(REPO_ROOT),
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+).resolve()
+if not os.environ.get("ZEUS_MAIN_TREE"):
+    LIVE_ROOT = LIVE_ROOT.parent
 
 
 def _dispatch(payload: dict) -> subprocess.CompletedProcess:

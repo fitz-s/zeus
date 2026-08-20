@@ -255,7 +255,7 @@ def add_calibration_pair(
     # historical rows from snapshot_id linkage; this writer is the new-row
     # path.
     #
-    # Codex P1 #6 collateral (2026-05-04): degrade gracefully when the
+    # review P1 #6 collateral (2026-05-04): degrade gracefully when the
     # calibration_pairs schema lacks the cycle/source_id/horizon_profile
     # columns (test fixtures that build the schema directly).  Pre-fix,
     # passing any non-None stratification kwarg with a pre-migration
@@ -757,7 +757,7 @@ def load_platt_model(
     """
     table = _qualified_calibration_read_table(conn, "platt_models")
 
-    # Codex P1 review #6 (2026-05-04): SELECT includes the bucket identity
+    # review P1 review #6 (2026-05-04): SELECT includes the bucket identity
     # columns (cycle, source_id, horizon_profile, data_version) so callers
     # can construct a ForecastCalibrationDomain from the row that was
     # actually loaded.  The evaluator's calibration-transfer gate uses this
@@ -804,13 +804,13 @@ def load_platt_model(
         ).fetchone()
     elif data_version is not None:
         # Phase 2 (2026-05-04): cycle/source_id/horizon_profile must filter the
-        # SELECT explicitly when the caller has them.  Pre-Copilot-#2-fix the
+        # SELECT explicitly when the caller has them.  Pre-review-#2 fix the
         # SELECT silently omitted those filters when None and picked the
         # newest row by fitted_at, which meant a 12z OpenData call with one
         # of the three keys missing could load the schema-default 00z TIGGE
         # bucket.
         #
-        # Copilot review #2 (2026-05-04): apply explicit policy on missing
+        # PR review finding #2 (2026-05-04): apply explicit policy on missing
         # stratification keys.
         #   * For OpenData data_version (ecmwf_opendata_*), there is NO
         #     legitimate schema default — fail closed (ValueError) so the
@@ -894,7 +894,7 @@ def load_platt_model(
     if row is None:
         return None
 
-    # Codex P1 #6 (2026-05-04): expose the loaded bucket's identity so callers
+    # review P1 #6 (2026-05-04): expose the loaded bucket's identity so callers
     # can construct an exact-match ForecastCalibrationDomain instead of
     # hardcoding (tigge_mars/00/full).  When the stratification columns are
     # absent (pre-migration DB, or test fixture without ALTER), bucket_*
@@ -1045,7 +1045,7 @@ class PlattModelView:
         """Return the canonical PlattModelView dict shape (param_A/B/C keys).
 
         NOT the same as ``load_platt_model``'s raw dict shape (A/B/C keys).
-        PR #65 Copilot follow-up 2026-05-06: docstring previously claimed
+        PR #65 review follow-up 2026-05-06: docstring previously claimed
         compatibility with load_platt_model callers — incorrect; the keys
         differ deliberately. Callers that need the raw dict shape should
         call ``load_platt_model`` directly; callers that have a typed
@@ -1086,7 +1086,7 @@ def get_active_platt_model(
     load_platt_model silently defaults to (cycle=None, source_id=None,
     horizon_profile=None) which resolves to schema defaults (00z TIGGE full) —
     a 12z OpenData call would receive the 00z TIGGE Platt instead of the
-    cycle-matched bucket. Same bug pattern sonnet fixed at manager.py:391-394.
+    cycle-matched bucket. Same bug pattern fixed at manager.py:391-394.
 
     world_conn must already be open — caller manages lifecycle.
     Returns None if no matching active VERIFIED model exists.

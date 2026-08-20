@@ -184,7 +184,7 @@ def _load_fee_rate() -> tuple[float, str]:
 
 def _get_conn(db_path: str | None):
     if db_path:
-        # K5#2 fix (Copilot review of PR #348): force SQLite URI read-only
+        # K5#2 fix (PR #348 review): force SQLite URI read-only
         # mode so the --db-path override matches the script's READ-ONLY
         # contract. A normal sqlite3.connect can take write locks and
         # create WAL sidecars on the operator's live state/zeus_trades.db.

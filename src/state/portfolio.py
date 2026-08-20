@@ -382,7 +382,7 @@ EDLI_DECISION_AUDIT_REQUIRED_FROM = datetime(2026, 6, 7, 3, 0, tzinfo=timezone.u
 #
 # References the FILL_AUTHORITY_* constants by name (not bare string literals)
 # so a future rename produces a NameError at import time, not silent
-# mis-categorization — per Copilot review on PR #347 (2026-05-27).
+# mis-categorization — per review on PR #347 (2026-05-27).
 TRAINING_ELIGIBLE_FILL_AUTHORITIES = frozenset({
     FILL_AUTHORITY_VENUE_CONFIRMED_FULL,
     FILL_AUTHORITY_VENUE_CONFIRMED_PARTIAL,

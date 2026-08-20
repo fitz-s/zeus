@@ -32,7 +32,7 @@ from src.venue.polymarket_v2_adapter import (
 )
 
 _CONDITION_ID = "0x" + "cd" * 32
-_SAFE = "0x6a096d5042cba434521E2cdb95A1fBa789a09b7f"
+_SAFE = "0x5AFE0000000000000000000000000000000000F1"
 
 
 # ---------------------------------------------------------------------------

@@ -213,7 +213,7 @@ def fatal_misreads_for_chains(
     fatal_misreads.yaml itself uses domain task_classes (source_routing,
     settlement_semantics, ...) rather than FC refs, so the join goes
     through our new failure_chains.yaml field (added 2026-05-26 per
-    Copilot finding on PR #343).
+    finding on PR #343).
 
     Misread fields used (per actual fatal_misreads.yaml shape):
       id, false_equivalence, correction, severity
@@ -587,7 +587,7 @@ def assemble_context_packs(
     elif mode == "emit_merged":
         # Stable anchor selection: highest tier rank first, then alphabetical
         # surface_id. Without the secondary sort, equivalent inputs in
-        # different file order could pick different anchors (per Copilot
+        # different file order could pick different anchors (per review
         # finding on PR #343).
         anchor_sid = sorted(
             by_surface.keys(),

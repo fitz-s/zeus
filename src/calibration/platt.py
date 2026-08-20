@@ -224,7 +224,7 @@ class ExtendedPlattCalibrator:
         Spec §3.2: P_cal = sigmoid(A * logit(P_raw) + B * lead_days + C)
 
         Returns: calibrated probability in [0.001, 0.999].
-        Per CLAUDE.md: clamp output outside [0.001, 0.999] + log.
+        Per repo law (AGENTS.md): clamp output outside [0.001, 0.999] + log.
         """
         if not self.fitted:
             raise RuntimeError("Calibrator not fitted. Call fit() first.")

@@ -2,7 +2,7 @@
 # Last reused or audited: 2026-05-29
 # Authority basis: TRIBUNAL Finding 2 (value-derived winning bin)
 #
-# Dynamic SQL safety (PR #87 Copilot reply): all f-string SQL in this module
+# Dynamic SQL safety (PR #87 review reply): all f-string SQL in this module
 # interpolates only module-level table-name constants (sv2_table, cp_table,
 # etc.) resolved from the ReplayContext dataclass, which are themselves derived
 # from compile-time string literals — never from user-controlled input.
@@ -591,7 +591,7 @@ def run_selection_coverage(
     # Use PRAGMA <schema>.table_info(<table>) so the query runs against the
     # correct attached schema (world.*) rather than main — the bare form
     # PRAGMA table_info(settlement_outcomes) silently returns 0 rows when the table
-    # lives under the attached "world" schema (PR #87 Copilot fix).
+    # lives under the attached "world" schema (PR #87 review fix).
     sv2_cols = set()
     try:
         if "." in sv2_table:
@@ -623,7 +623,7 @@ def run_selection_coverage(
 
     # Load all calibration_pairs rows for climatology (no-future-leak enforced per snapshot).
     # Filter by temperature_metric to avoid mixing high/low rows for the same city/date
-    # (PR #87 Codex P2: prior query loaded all metrics, producing wrong climatology p-market).
+    # (PR #87 review P2: prior query loaded all metrics, producing wrong climatology p-market).
     clim_rows: list[dict] = []
     if p_market_source == "climatology":
         raw_clim = conn.execute(
@@ -693,7 +693,7 @@ def run_selection_coverage(
         if snap_id is None:
             # Find latest snapshot available at or before decision time.
             # The available_at <= decision_time guard prevents future leakage
-            # (PR #87 Copilot fix: prior query had no temporal bound).
+            # (PR #87 review fix: prior query had no temporal bound).
             decision_time = f"{target_date}T00:00:00"  # local-day open; conservative bound
             snap_row = conn.execute(
                 f"""

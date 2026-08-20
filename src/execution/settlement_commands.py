@@ -256,7 +256,7 @@ def ensure_settlement_schema_ready(conn: sqlite3.Connection) -> None:
             if "duplicate column" not in str(exc).lower():
                 raise
 
-    # codereview-may19 P1-3 / Codex P1: backfill correction for v12-era rows.
+    # codereview-may19 P1-3 / P1: backfill correction for v12-era rows.
     # The previous ALTER (DEFAULT 'gamma_explicit') stamped legacy rows whose
     # anchor source was never captured with a fabricated authority label.
     # The DEFAULT change above only protects FUTURE rows; existing rows still
