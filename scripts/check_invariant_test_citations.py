@@ -14,7 +14,7 @@ Why this exists
 On 2026-05-01 the multi-lane review found INV-05's cited test
 (`tests/test_architecture_contracts.py::test_risk_actions_exist_in_schema`)
 did not exist anywhere in the repo. Three independent agents (architect /
-critic-opus / test-engineer) flagged it as a P0. The drift was invisible
+critic / test-engineer) flagged it as a P0. The drift was invisible
 to grep-based audits because the YAML cite parses but the resolution step
 (does the test_name actually exist?) was never automated.
 

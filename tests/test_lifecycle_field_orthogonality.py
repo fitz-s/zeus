@@ -189,7 +189,7 @@ class TestLoadBearingNotArchived:
 
         Two cross-system checks:
           1. artifact_authority_status: archival_ok=false AND status=ARCHIVED is contradictory
-             within the same system (the dead branch removed per Copilot Cop1 review).
+             within the same system (the dead branch removed per review Cop1 review).
           2. Cross-registry: artifact with archival_ok=false must not appear in docs_registry
              with lifecycle_state in {archived, historical} — those states imply the doc has
              been retired, contradicting the load-bearing designation.

@@ -238,7 +238,7 @@ class ChainPositionView:
 
 
 _ALLOCATE_DUST = 0.01  # minimum size difference treated as dust, not a gap
-# Copilot review fix (2026-05-31, issue #1): after the chain_shares first-
+# PR review fix (2026-05-31, issue #1): after the chain_shares first-
 # population the old helper returned early when shares were unchanged, leaving
 # chain_seen_at permanently frozen. Re-emit the observation event when the
 # persisted timestamp is older than this threshold to keep classify_chain_state()
@@ -885,7 +885,7 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
         chain_avg_price and chain_cost_basis_usd. A false first element means
         no canonical row exists yet — the position has no projection to update.
 
-        Copilot review fix (2026-05-31, issue #1): include chain_seen_at so the
+        PR review fix (2026-05-31, issue #1): include chain_seen_at so the
         observation helper can decide whether the TIMESTAMP needs refresh
         independently of whether chain_shares changed. Without this the helper
         returned early on shares-unchanged positions and chain_seen_at went
@@ -958,7 +958,7 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
         chain_cost_basis_usd / chain_seen_at onto position_current WITHOUT any
         share mutation or phase transition.
 
-        Timestamp-refresh fix (2026-05-31, Copilot review issue #1): after
+        Timestamp-refresh fix (2026-05-31, review issue #1): after
         first-population, shares are unchanged so the old code returned early
         every cycle — chain_seen_at was frozen at the first-population timestamp
         forever. On daemon restart classify_chain_state() reads chain_seen_at
@@ -2975,7 +2975,7 @@ def check_quarantine_timeouts(portfolio: PortfolioState) -> int:
     now = datetime.now(timezone.utc)
     expired = 0
 
-    # PR #352 (Part-3 audit, Copilot #350 finding): ChainOnlyFact 48h review
+    # PR #352 (Part-3 audit, PR #350 review finding): ChainOnlyFact 48h review
     # escalation consumer. Chain-only inventory is NOT a local Position, so the
     # position "exit evaluation" above does not apply — there is nothing to
     # exit. Instead, its review_state escalates UNRESOLVED -> EXPIRED at the 48h

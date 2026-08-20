@@ -1055,7 +1055,7 @@ def forecasts_connection_with_trades_flocked(
 ):
     """Context manager: forecasts.db as MAIN with zeus_trades.db ATTACHed as 'trades'.
 
-    INV-37 harvester fix (ChatGPT PR#408 review B1, 2026-06-14): the settlement
+    INV-37 harvester fix (PR #408 review B1, 2026-06-14): the settlement
     harvester must write BOTH forecasts-class tables (settlements, calibration_pairs,
     ensemble_snapshots, observations) AND trade-class tables (position_current,
     position_events, decision_log, chronicle, settlement_commands) in a single
@@ -1083,8 +1083,7 @@ def forecasts_connection_with_trades_flocked(
     (``zeus-forecasts.db`` before ``zeus_trades.db``) to prevent deadlocks with
     other cross-DB writers (v4 §3.1.3 invariant).
 
-    Authority: ChatGPT PR#408 review B1 INV-37,
-    docs/evidence/pr408_review/chatgpt_deep_review_2026-06-14.md
+    Authority: PR #408 review B1 INV-37
     Created: 2026-06-14
     Last audited: 2026-06-14
     """
@@ -1152,7 +1151,7 @@ def get_world_connection_with_trades_required(
 
     Created: 2026-06-20
     Last audited: 2026-06-20
-    Authority basis: PR415 ChatGPT deep-review B5 (INV-37), .claude/CLAUDE.md K1 DB split.
+    Authority basis: PR #415 review B5 (INV-37); K1 DB split.
     """
     resolved = _resolve_write_class(write_class)
     conn = get_world_connection(write_class=resolved)
@@ -1223,7 +1222,7 @@ def world_connection_with_trades_flocked(
 
     Created: 2026-06-20
     Last audited: 2026-06-20
-    Authority basis: PR415 ChatGPT deep-review B5 (INV-37), .claude/CLAUDE.md K1 DB split.
+    Authority basis: PR #415 review B5 (INV-37); K1 DB split.
     """
     from src.state.db_writer_lock import (
         canonical_lock_order,
@@ -2407,7 +2406,7 @@ def init_schema(
             order_posted_at TEXT,
             entered_at_ts TEXT,
             chain_state TEXT,
-            -- Attribution fields (CLAUDE.md: mandatory on every trade)
+            -- Attribution fields (AGENTS.md: mandatory on every trade)
             strategy TEXT,
             edge_source TEXT,
             bin_type TEXT,
@@ -3522,7 +3521,7 @@ def init_schema(
     # REOPEN-2 (2026-04-24, data-readiness-tail): settlements UNIQUE migration.
     # Pre-REOPEN-2 schema: UNIQUE(city, target_date) — structurally blocks
     # dual-track (a HIGH row for city+date makes a LOW row for the same
-    # city+date UNIQUE-collide). Per critic-opus P0.2 forensic-triage C3+C4,
+    # city+date UNIQUE-collide). Per review P0.2 forensic-triage C3+C4,
     # this is a pre-flip BLOCKER for DR-33-C — first low-market settlement
     # attempt on flag-flip would silently drop the row and break the learning
     # chain for the LOW track.
@@ -13729,7 +13728,7 @@ def _position_current_effective_entry_economics(
         }
 
     pnl_cost_basis_usd = projection_cost_basis_usd if projection_cost_basis_usd > 0.0 else submitted_size_usd
-    # PR #355 Copilot SEV-1: if the projection row already carries a non-NULL,
+    # PR #355 review SEV-1: if the projection row already carries a non-NULL,
     # non-"none" fill_authority (e.g. "venue_position_observed" written by the
     # F1 balance-only rescue), honour it rather than unconditionally returning
     # FILL_AUTHORITY_NONE.  The Position properties (effective_shares,

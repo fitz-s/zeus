@@ -68,7 +68,7 @@ def _order(order_id: str, market: str, *, size_matched: str = "0") -> dict:
         "side": "SELL",
         "size_matched": size_matched,
         "status": "LIVE",
-        "maker_address": "0x6a096d5042cba434521E2cdb95A1fBa789a09b7f",
+        "maker_address": "0x5AFE0000000000000000000000000000000000F1",
     }
 
 

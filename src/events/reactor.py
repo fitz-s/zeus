@@ -8868,7 +8868,7 @@ def run_edli_event_reactor_cycle(
         # adapter and any legacy adapter do not, so getattr returns [0] for both
         # → live_submit_attempts=0 and live_venue_acks=0 (correct for no-submit
         # cycles).
-        # FAIL-SOFT counter read (Copilot PR#404): honor the FIX-4 closure
+        # FAIL-SOFT counter read (PR review PR#404): honor the FIX-4 closure
         # counter when it has the expected 1-element-list shape; any other
         # shape (legacy adapter, int, empty list, None) reads as 0 instead of
         # crashing the status-pulse write.

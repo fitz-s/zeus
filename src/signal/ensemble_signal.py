@@ -463,7 +463,7 @@ class EnsembleSignal:
         if members_hourly.shape[0] < ensemble_member_count():
             raise ValueError(
                 f"Expected ≥{ensemble_member_count()} ensemble members, got {members_hourly.shape[0]}. "
-                f"Per CLAUDE.md: reject entirely, do not pad."
+                f"Per repo law (AGENTS.md): reject entirely, do not pad."
             )
         if len(times) != members_hourly.shape[1]:
             raise ValueError(

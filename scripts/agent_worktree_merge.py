@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # Created: 2026-06-12
 # Last reused or audited: 2026-07-28
-# Authority basis: AGENTS.md §5 live branch law; Codex worktree lifecycle repair
+# Authority basis: AGENTS.md §5 live branch law; worktree lifecycle repair
 """Retired compatibility entrypoint for the forbidden direct-live merge path.
 
 This file remains so an old worker receives an explicit, safe refusal instead

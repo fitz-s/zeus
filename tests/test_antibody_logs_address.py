@@ -5,7 +5,7 @@
 
 Root cause (Karachi tx 0x0c85d9…, 4th iteration):
   receipt.to is NEVER the adapter in Polymarket relay-style submissions; it's the
-  relay proxy (0x6a096d…).  The Standard CTF adapter address appears in
+  relay proxy (0x5afe…).  The Standard CTF adapter address appears in
   logs[*].address for logs whose topic[0] == PayoutRedemption selector.
   Prior guard (PR #192) checked receipt.to == POLYGON_CTF_ADDRESS — always False.
 
@@ -62,7 +62,7 @@ _PAYOUT_REDEMPTION_TOPIC = (
 )
 
 # Polymarket relay proxy — this is what receipt.to actually shows
-_RELAY_PROXY_ADDRESS = "0x6a096d5042cba434521E2cdb95A1fBa789a09b7f"
+_RELAY_PROXY_ADDRESS = "0x5AFE0000000000000000000000000000000000F1"
 
 
 # ---------------------------------------------------------------------------

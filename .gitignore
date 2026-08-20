@@ -258,6 +258,27 @@ docs/reports/*.md
 !docs/reports/live_prob_p0_edge_bin_sanity_20260523.md
 # Evidence data dumps in operations tasks (market snapshots, settlement/obs corpora).
 docs/operations/**/evidence/*.json
+# Closed-investigation working evidence, untracked 2026-08-19 (bodies stay on disk,
+# full content recoverable from history). These are per-finding working notes from
+# finished audits — the DB first-principles audit (fixes landed via PRs #436/#438/#442)
+# and the SD3 validation sweep. Their summaries stay tracked: the audit's PLAN.md,
+# IMPLEMENTATION_STATUS.md, REDESIGN_v2.md, and EXECUTION_MASTER.md. Anything a
+# migration, test, or manifest cites by path is explicitly re-included below.
+docs/operations/current/plans/db_first_principles_audit_2026-07-20/findings/
+docs/operations/current/plans/db_first_principles_audit_2026-07-20/implementation/
+docs/operations/current/plans/db_first_principles_audit_2026-07-20/REDESIGN.md
+docs/operations/current/plans/db_first_principles_audit_2026-07-20/W0_SPEC.md
+docs/operations/current/plans/db_first_principles_audit_2026-07-20/consult_gpt56_answer.md
+docs/operations/current/plans/db_first_principles_audit_2026-07-20/consult_gpt56_round2_verdict.md
+docs/operations/sd3_validation_evidence/audit_*.md
+!docs/operations/current/plans/db_first_principles_audit_2026-07-20/findings/connections_throughput.md
+!docs/operations/current/plans/db_first_principles_audit_2026-07-20/implementation/W0_RUNBOOK.md
+!docs/operations/current/plans/db_first_principles_audit_2026-07-20/implementation/atomicity_outbox_contract.md
+!docs/operations/current/plans/db_first_principles_audit_2026-07-20/implementation/capture_policy_spec.md
+!docs/operations/current/plans/db_first_principles_audit_2026-07-20/implementation/certificate_e1e4_safety_trace.md
+!docs/operations/current/plans/db_first_principles_audit_2026-07-20/implementation/certificate_v1_freeze.md
+!docs/operations/current/plans/db_first_principles_audit_2026-07-20/implementation/consult_W0_verdict.md
+!docs/operations/current/plans/db_first_principles_audit_2026-07-20/implementation/critic_matrix_review.md
 # P3 topology v_next shadow divergence JSONL — raw per-call records, never committed.
 # Summary JSONs (divergence_summary_*.json) ARE committed; only raw JSONL excluded.
 evidence/topology_v_next_shadow/*.jsonl
@@ -278,5 +299,10 @@ evidence/topology_v_next_shadow/archive/*.jsonl.gz
 /-
 /=
 /:memory:.cutover-lease
+# Working evidence and rebuild specs: local-only by design. ~300 `Authority
+# basis:` comments across src/ cite paths under these two roots, so those
+# citations do not resolve in a clone -- they name the local record a change
+# was derived from, not a published document. See CONTRIBUTING.md
+# "Unresolvable authority citations".
 /docs/evidence/
 /docs/rebuild/

@@ -905,5 +905,5 @@ class TestRWExecutionTruthWarnings:
 # ---------------------------------------------------------------------------
 
 @pytest.mark.skip(reason="R-5 (RED x command-emission) is a P2 slice; P0 keeps the existing local-marking regression guard elsewhere.")
-def test_r5_red_emits_durable_commands_PLACEHOLDER():
+def test_r5_red_emits_durable_commands():
     pass

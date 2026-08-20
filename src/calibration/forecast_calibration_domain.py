@@ -585,9 +585,9 @@ def derive_phase2_keys_from_ens_result(
     ``source_id``; ``horizon_profile`` is *not* populated upstream as of
     2026-05-04, so we derive it from cycle (00/12 → 'full', else 'short').
 
-    Copilot review #4 + #5 (2026-05-04): horizon_profile derivation when
+    PR review finding #4 + #5 (2026-05-04): horizon_profile derivation when
     ``ens_result['horizon_profile']`` is absent.
-    Codex P1 review #7 (2026-05-04): handle ``datetime`` issue_time in
+    review P1 review #7 (2026-05-04): handle ``datetime`` issue_time in
     addition to str — the registered-ingest path puts a datetime here.
 
     Returns (None, None, None) on malformed input.

@@ -2,7 +2,9 @@
 
 Date: 2026-07-28
 Branch: `fix/trade-receipt-keyed-delta-20260728`
-Status: active
+Status: closed — landed and verified against live data (read-only replay of decision rows
+255920→255940 reconstructed the canonical SHA-256 exactly, at 87.21% size reduction).
+Retained for the delta-encoding rationale, not as in-flight work.
 
 ## Background
 

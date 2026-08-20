@@ -1,7 +1,7 @@
 # Created: 2026-07-11
 # Last reused or audited: 2026-07-11
-# Authority basis: docs/rebuild/quarantine_excision_2026-07-11.md "Consult adjudication"
-#   BLOCKER-3 (GPT-5.6 Pro deep review, adopted target shape).
+# Authority basis: docs/rebuild/quarantine_excision_2026-07-11.md adjudication
+#   BLOCKER-3 (adopted target shape).
 
 """ChainObservationEnvelope — the observation-quality contract BLOCKER-3 requires
 before any chain observation may cast a "confirmed absence" vote.

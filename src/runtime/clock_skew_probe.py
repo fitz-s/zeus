@@ -8,7 +8,7 @@ sending a HEAD request to a cheap endpoint and reading the ``Date:`` response
 header. The skew is the difference (local_time - venue_date_header) in
 milliseconds, measured at response receipt.
 
-Threshold semantics (per B4 Wave-B opus critic fix):
+Threshold semantics (per B4 Wave-B review fix):
   - |skew| ≤ 100ms  → healthy, no signal emitted
   - 100ms < |skew| ≤ 200ms → "clock_drift_warning" (non-blocking observability)
   - |skew| > 200ms  → "excessive_clock_drift" (blocking integrity error)

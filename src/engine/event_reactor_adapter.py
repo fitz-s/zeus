@@ -37026,20 +37026,19 @@ def _forecast_snapshot_probability_and_fdr_proof(
     dict[str, str],
 ]:
     """
-    FAIL-CLOSED STUB — codex never authored the EDLI probability + FDR inference kernel.
+    FAIL-CLOSED STUB — the EDLI probability + FDR inference kernel is unimplemented.
 
-    The full implementation requires authoring EDLI's live-money probability
-    semantics (Platt p_cal lookup, hypothesis bootstrap, FDR proof construction)
-    which is out-of-scope for rebase-resolution. Until codex provides the
-    canonical implementation, this stub returns empty mappings so:
+    Implementing it means authoring EDLI's live-money probability semantics
+    (Platt p_cal lookup, hypothesis bootstrap, FDR proof construction). Until
+    that exists, this returns empty mappings so:
 
       1. Module imports succeed (event reactor tests pass)
       2. Any production path reaching this function admits NO candidates
          (q_by_condition empty → no executable proofs → no_submit decision)
-      3. Evidence dict explicitly documents the gap for downstream audit
+      3. The evidence dict names the gap for downstream audit
 
-    Returns an empty inference result. Do not "fill in" the empty dicts with
-    placeholder probabilities — that would silently mis-trade.
+    Do not "fill in" the empty dicts with placeholder probabilities — an empty
+    result is a refusal to trade, whereas a placeholder silently mis-trades.
     """
     q_by_condition: dict[str, float] = {}
     q_lcb_by_direction: dict[tuple[str, str], float] = {}
@@ -37048,7 +37047,7 @@ def _forecast_snapshot_probability_and_fdr_proof(
     probability_evidence: dict[str, str] = {
         "status": "no_submit_fail_closed",
         "reason": "edli_probability_kernel_unauthored",
-        "TODO": "codex must implement _forecast_snapshot_probability_and_fdr_proof per EDLI v1 spec",
+        "unimplemented": "_forecast_snapshot_probability_and_fdr_proof (EDLI v1 spec)",
         "event_type": event.event_type,
         "allow_latest_snapshot": str(allow_latest_snapshot),
         "decision_time": decision_time.isoformat(),

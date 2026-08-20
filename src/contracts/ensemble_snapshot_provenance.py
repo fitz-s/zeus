@@ -86,7 +86,7 @@ _ECMWF_OPENDATA_LOW_DATA_VERSION_LEGACY = "ecmwf_opendata_mn2t6_local_calendar_d
 # mn2t3 construction serves the same local-day settlement object.  They remain
 # LOW_LOCALDAY_MIN metric-family rows, not a third metric axis.
 # Deduplicated: first definition (mn2t6 era) removed; only the current mx2t3/mn2t3
-# names remain (PR #85 Copilot: ECMWF_OPENDATA_LOW_CONTRACT_WINDOW_DATA_VERSION
+# names remain (PR #85 review: ECMWF_OPENDATA_LOW_CONTRACT_WINDOW_DATA_VERSION
 # and TIGGE_LOW_CONTRACT_WINDOW_DATA_VERSION were defined twice).
 TIGGE_LOW_CONTRACT_WINDOW_DATA_VERSION = (
     "tigge_mn2t6_local_calendar_day_min_contract_window"
