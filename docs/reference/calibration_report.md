@@ -2,15 +2,17 @@
 
 ## Read this first
 
-**Current verdict: adverse.** Across **587** settled positions with a resolvable frozen decision probability, the Brier skill score against the observed-base-rate forecast is **-0.155**. Because it is negative, these probabilities performed worse in this sample than always predicting the **49.4%** base rate.
+**Current verdict: adverse.** Across **587** settled positions with a resolvable frozen decision probability, the Brier skill score against a constant predictor equal to this sample's realized **49.4%** win rate is **-0.155**. Because it is negative, these probabilities performed worse in this sample than that constant predictor.
 
 The score uses the probability recorded before the outcome and a verified settlement; missing probabilities are not imputed. **587/902** settled positions are scoreable. **315** are excluded for missing decision-probability evidence, including **263** classified `UNATTRIBUTABLE_Q_MISSING`; that coverage gap is itself an adverse data-quality result.
 
-**Supports:** calibration of the displayed sample, subject to the shown intervals and the **n ≥ 30** cell floor.
+The pool spans every decision-law revision active during the settlement window; it grades the historical corpus as decided, not the current law in isolation.
 
-**Does not support:** durable alpha, strategy returns, or firm conclusions for thin cells.
+**Supports:** a descriptive calibration assessment of the displayed sample, subject to the shown intervals and the **n ≥ 30** cell floor.
 
-**Data through:** `2026-08-20T21:05:00.222329+00:00` · **Generated:** `2026-08-20T22:38:58.041735+00:00`
+**Does not support:** durable alpha, strategy returns, an estimate of the current decision law's calibration in isolation, or firm conclusions for thin cells.
+
+**Data through:** `2026-08-20T21:05:00.222329+00:00` · **Generated:** `2026-08-21T00:36:50.574112+00:00`
 
 Measurement unit: frozen decision probability × verified settlement outcome.
 
@@ -31,7 +33,7 @@ Every row in this report comes from `settlement_attribution` (`src/analysis/sett
 
 ![Reliability diagram](calibration_reliability.svg)
 
-n = 587 settled positions with a resolvable predicted probability. Dot area is proportional to bin count; the vertical bar is the 95% Wilson interval on the observed win rate; a red dot marks a bin under the n<30 floor.
+n = 587 settled positions with a resolvable predicted probability. Dot area is proportional to bin count; the vertical bar is the 95% Wilson interval on the observed win rate; a red dot marks a bin under the n<30 floor. Intervals are position-level and unadjusted for clustering — correlated positions (same market family or date) can make them narrower than their true coverage.
 
 | bin | n | mean predicted | observed win rate | 95% Wilson interval | flag |
 |---|---:|---:|---:|---|---|
@@ -95,7 +97,7 @@ Murphy (1973) two-term decomposition of the Brier score: `Brier = reliability - 
 
 ## Cut: by attribution class — the interesting one
 
-The six-class post-settlement grader (`settlement_skill_attribution.py`) explains why a trade won or lost; it does not filter this reliability sample, which includes every causally eligible decision with a frozen `q_live` joined to a verified settlement. Four of the six categories are outcome-degenerate BY CONSTRUCTION (`SKILL_WIN`/`LUCKY_WIN` are defined as `won=1`, `SKILL_LOSS`/`MISCALIBRATED_LOSS` as `won=0`) — a within-category "win rate" for those four is the category's own definition restated, not a calibration statement. The useful cross-class evidence is the decision-time probability itself, certificate coverage, and sample size: a forecast-earned win should carry a HIGH predicted probability; a lucky win, by the taxonomy's own definition, is one the fresh evidence disagreed with. Any separate model-update or promotion gate is outside this report.
+The six-class post-settlement grader (`settlement_skill_attribution.py`) classifies each outcome relative to the frozen decision-time evidence; it does not filter this reliability sample, which includes every causally eligible decision with a frozen `q_live` joined to a verified settlement. Four of the six categories are outcome-degenerate BY CONSTRUCTION (`SKILL_WIN`/`LUCKY_WIN` are defined as `won=1`, `SKILL_LOSS`/`MISCALIBRATED_LOSS` as `won=0`) — a within-category "win rate" for those four is the category's own definition restated, not a calibration statement. The useful cross-class evidence is the decision-time probability itself, certificate coverage, and sample size: a forecast-earned win should carry a HIGH predicted probability; a lucky win, by the taxonomy's own definition, is one the fresh evidence disagreed with. Any separate model-update or promotion gate is outside this report.
 
 | attribution class | n (settled) | n (predicted-prob resolvable) | mean predicted | observed win rate | 95% Wilson interval | flag |
 |---|---:|---:|---:|---:|---|---|

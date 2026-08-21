@@ -25,14 +25,18 @@ STALE_PHRASES = [
     "hourly chain reconcile",
     "hourly",
     "re-fit per-source bias",
+    "history sets trust + width",   # predictive width is current-cycle evidence, not history
+    "attribution explains",         # attribution classifies; causal "explains" overclaims
 ]
 
 REQUIRED_PHRASES = [
-    "walk-forward de-bias",
+    "walk-forward de-bias trust",
+    "current-cycle evidence width",
+    "posterior-mean action q",
     "robust log-wealth argmax",
-    "frozen at decision time",
+    "frozen-q decisions graded; missing certificates stay counted",
     "ALL eligible frozen",
-    "attribution explains",
+    "attribution classifies",
     "per-cycle chain reconciliation",
 ]
 

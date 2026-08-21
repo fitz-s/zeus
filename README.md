@@ -36,9 +36,9 @@ If you read nothing else, read these. Each is a decision that changes the answer
 detail of the implementation.
 
 **Bins are priced over the preimage of the rounding rule, not the bin's face value.**
-A market settles on an integer temperature that an official provider publishes — a sensor
-reading encoded in a METAR report and rounded to a whole degree. So the rounding rule is
-part of the market. Most cities round half-up; Hong Kong truncates. Pricing bin `X` as
+A market settles on an integer temperature that an official provider publishes — a station
+observation, represented through METAR where applicable, rounded to a whole degree. So the
+rounding rule is part of the market. Most cities round half-up; Hong Kong truncates. Pricing bin `X` as
 written, rather than as `Φ((X+0.5−μ)/σ) − Φ((X−0.5−μ)/σ)`, is a systematic error that every
 participant who skips this step carries on every trade.
 [→ Integrate](#forecast-to-probability)
@@ -48,18 +48,21 @@ A cycle prices every bin of every market in 54 cities. Applying Benjamini–Hoch
 candidates that already passed earlier filters would be selecting on the outcome. It runs
 across the full set tested that cycle. Above it sits a selection calibrator: each candidate
 is keyed by `(side, lead, bin class, probability bucket)` and its admission probability is
-replaced by a Wilson lower bound on how often that cell has historically settled in its
-favour, over at least 30 settled samples.
+replaced by a conservative 95% lower bound on how often that cell has historically settled
+in its favour — an empirical-Bayes beta-binomial bound, cascade-pooled when the cell is
+thin, fail-closed when its evidence is absent or stale.
 [→ Probability to edge](#probability-to-edge)
 
-**The probability a position was sized on is frozen, and every settled outcome is graded
-against it.**
+**The probability a position was sized on is frozen, and settled outcomes are graded
+against that record.**
 When a market resolves, the position is graded into one of six classes — forecast-earned
 win, lucky win, foreseeable loss, miscalibration loss, stale-data decision, unattributable —
-against the probability frozen at decision time, never one reconstructed afterwards.
-Attribution explains why an outcome happened; it does not filter the evidence: reliability
-is measured over every eligible frozen decision, adverse ones included. Learning is strictly
-walk-forward — an outcome may change the next decision, never the record of the last one.
+against the probability frozen at decision time where that certificate exists, never one
+reconstructed afterwards. A missing certificate is counted as unattributable, published as a
+coverage failure, and never imputed. Attribution classifies the outcome relative to the
+frozen evidence; it does not filter the reliability sample, which pools every scoreable
+decision, adverse ones included. Learning is strictly walk-forward — an outcome may change
+the next decision, never the record of the last one.
 [→ State and learning](#state-and-learning)
 
 ---
@@ -78,10 +81,10 @@ The sections below detail one pass of that cycle.
 
 A market is a set of yes/no bins over a city's daily high or low (`50–51°F`, `75°F or
 higher`, `49°F or below`). One bin resolves YES, on the integer temperature an official
-provider publishes for the local date. That integer is a rounded value — a sensor reading
-encoded in a METAR report and rounded to a whole degree — so the rounding rule is part of
-each market: most cities round half-up (the integer is `floor(x + 0.5)`), Hong Kong
-truncates (`floor(x)`). Bins are exact (a value or closed range), open-ceiling, or
+provider publishes for the local date. That integer is a rounded station observation —
+represented through METAR where applicable — so the rounding rule is part of each market:
+most cities round half-up (the integer is `floor(x + 0.5)`), Hong Kong truncates
+(`floor(x)`). Bins are exact (a value or closed range), open-ceiling, or
 open-floor; a city's bins form a complete partition, Fahrenheit bins span two integers and
 Celsius one, and a city's high and low markets are separate objects with separate
 calibration.
@@ -134,23 +137,33 @@ dropped. Ingestion is split across separate daemons per feed.
    shoulders integrate as a single tail.
 
 6. **Condition on the day.** Once part of the day's extreme is already observed, the settled
-   value is `max(observed, remaining)`; the distribution is conditioned on the running
-   extreme, placing remaining mass on the hours still to come.
+   high is `max(observed so far, remaining hours)` and the settled low its mirror under `min`;
+   the distribution is conditioned on the running extreme, placing remaining mass on the hours
+   still to come.
 
 ## Probability to edge
 
-1. **Confidence band.** The traded probability is the posterior mean. Around it sits what
-   current evidence can actually witness: an exact finite-sample bound from how many ensemble
-   members land in the bin's preimage, and a distribution-robust bound from the centre and
-   variance alone. However clean the Normal tail looks, certainty the members cannot support
-   is not available to claim.
+Four distinct objects, and none is allowed to impersonate another: the **posterior mean** is
+the action probability — the number a trade is valued and sized at; the **confidence band**
+says what current evidence can witness around it; the **admission bound** is a separate,
+historical statistic of the engine's own settled record; the **error-control test** governs
+the family of hypotheses. Bounds constrain what a candidate may claim — they never replace
+the action probability.
 
-2. **Selection calibrator.** Each candidate is keyed by `(side, lead, bin class, probability
-   bucket)` and its admission probability is replaced by a Wilson lower bound on how often
-   that cell has settled in its favour, over at least 30 settled samples.
+1. **Confidence band.** Around the posterior mean sits what current evidence can actually
+   witness: an exact finite-sample bound from how many ensemble members land in the bin's
+   preimage, and a distribution-robust bound from the centre and variance alone. However
+   clean the Normal tail looks, certainty the members cannot support is not available to
+   claim.
 
-3. **Edge.** `edge = q − price − cost`, where cost is the all-in entry cost including the
-   Polymarket taker fee `rate·p·(1−p)`.
+2. **Admission bound.** Each candidate is keyed by `(side, lead, bin class, probability
+   bucket)` and admitted at a conservative 95% lower bound on how often that cell has
+   historically settled in its favour — an empirical-Bayes beta-binomial bound over the
+   engine's own settled record, cascade-pooled when the cell is thin, fail-closed when its
+   evidence is absent or stale.
+
+3. **Edge.** A candidate must clear its executable all-in cost — price and the Polymarket
+   taker fee `rate·p·(1−p)` — at its conservative bound, not at its point estimate.
 
 4. **False-discovery control.** Benjamini–Hochberg is applied across every bin tested in the
    cycle, not only those that passed earlier filters.
@@ -159,11 +172,12 @@ dropped. Ingestion is split across separate daemons per feed.
 
 Surviving candidates are not sized in isolation. Each executable route — bin, side, maker or
 taker — is valued as wealth in every joint settlement outcome of its market family, against
-the positions already held; route and stake are chosen together by maximizing robust expected
-log-wealth over those outcomes, with the confidence band capping what any candidate may
-claim. Bins of one market compete for the same capital, so the admission threshold is
-endogenous rather than a per-bin constant. A NaN, a missing input, or a missing authority
-sizes to zero.
+the positions already held; route and stake are chosen together by maximizing the lower-tail
+CVaR of expected log-growth across coherent probability draws — the mean of the worst
+fraction of draws, chosen because it stays concave and solvable to a global optimum where a
+raw quantile does not — with the confidence band capping what any candidate may claim. Bins
+of one market compete for the same capital, so the admission threshold is endogenous rather
+than a per-bin constant. A NaN, a missing input, or a missing authority sizes to zero.
 
 ## Execution
 
@@ -180,16 +194,19 @@ from the market feed; redemption of winning tokens is recorded for accounting.
 
 What the engine believes it holds is a projection over immutable venue facts (orders,
 trades, balances) and local intent. Chain reconciliation distinguishes a complete-empty
-snapshot from a missing or stale one, and surfaces on-chain inventory with no matching intent
-as a reviewable item. State is held in three SQLite databases — world facts, forecasts,
-trades — with cross-database writes done in one transaction via `ATTACH` and a savepoint.
+snapshot from a missing or stale one; on-chain inventory with no matching intent is
+quarantined behind a scoped entry block and a review item — unexplained holdings stop new
+risk in their scope until they are explained. State is held in three SQLite databases —
+world facts, forecasts, trades — with machine-checked ownership; cross-database writes are
+confined to two sanctioned helpers that group them in a single connection's transaction.
 
 When a market resolves, the position is graded into one of six outcomes — forecast-earned
 win, lucky win, foreseeable loss, miscalibration loss, stale-data decision, unattributable —
-against the probability it was sized on, frozen at decision time. Attribution explains the
-outcome; it does not filter the evidence: reliability is measured over every eligible frozen
-decision, and learning is strictly walk-forward — only residuals settled before a decision
-may inform it.
+against the probability it was sized on, frozen at decision time where that certificate
+exists; a missing certificate is counted and published as a coverage failure, never imputed.
+Attribution classifies the outcome relative to the frozen evidence; it does not filter it:
+reliability is measured over every scoreable frozen decision, and learning is strictly
+walk-forward — only residuals settled before a decision may inform it.
 
 The sample this produces is a few hundred settled positions — enough to ask whether the stated
 probability matches the settled frequency, not enough to support a return figure. `python3
@@ -200,7 +217,7 @@ informativeness and cut by lead time, side, strategy, and the six-class attribut
 
 ## Strategies
 
-| Strategy | Edge source | Fades |
+| Strategy | Decision premise | Fades |
 |----------|-------------|:-----:|
 | Settlement Capture | the daily extreme is observed once the peak has passed | slowest |
 | Center Bin Buy | the model prices the most-likely bin against the market | fast |

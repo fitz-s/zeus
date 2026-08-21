@@ -66,9 +66,9 @@ def render(theme):
     px, py, pw, ph, gap = 276, 100, 216, 124, 22
     o.append(f'<text x="{px}" y="{py-8}" font-family="{FS}" font-size="10.5" font-weight="650" letter-spacing="1.1" fill="{t["muted"]}">DECIDE</text>')
     stages = [
-      ("1  FORECAST", ["walk-forward de-bias", "history sets trust + width", "date-aligned covariance", "station/grid localization"]),
+      ("1  FORECAST", ["walk-forward de-bias trust", "current-cycle evidence width", "date-aligned covariance", "station/grid localization"]),
       ("2  PROBABILITY", ["integrate the PREIMAGE", "of each rounding rule", "condition on observed", "freeze one coherent q"]),
-      ("3  EDGE", ["Wilson selection bound", "finite-evidence band", "all-in executable cost", "Benjamini–Hochberg FDR"]),
+      ("3  EDGE", ["posterior-mean action q", "bounds gate admission+size", "all-in executable cost", "Benjamini–Hochberg FDR"]),
       ("4  SIZE", ["outcome-contingent wealth", "robust log-wealth argmax", "existing exposure included", "missing authority → zero"]),
     ]
     for i,(ti,ls) in enumerate(stages):
@@ -87,7 +87,7 @@ def render(theme):
     o.append(box(px+336+30, ay, 336, 100, "6  SETTLE & ATTRIBUTE", [
         "forecast-earned win · lucky win · foreseeable loss",
         "miscalibration loss · stale-data decision · unattributable",
-        "graded against the probability frozen at decision time"], t, accent=True))
+        "frozen-q decisions graded; missing certificates stay counted"], t, accent=True))
     o.append(arrow(px+336+3, ay+50, px+336+27, ay+50, t))
     o.append(f'<line x1="{px+2*(pw+gap)+pw/2}" y1="{py+ph}" x2="{px+2*(pw+gap)+pw/2}" y2="{ay-14}" stroke="{t["edge"]}" stroke-width="1.4" marker-end="url(#ah)"/>')
 
@@ -103,7 +103,7 @@ def render(theme):
              f'fill="none" stroke="{t["gate"]}" stroke-width="1.6" marker-end="url(#ah)"/>')
     o.append(f'<rect x="{gx+107-150}" y="{fy-17}" width="300" height="34" rx="17" fill="{t["gate_soft"]}" stroke="{t["gate"]}" stroke-width="1.25"/>')
     o.append(f'<text x="{gx+107}" y="{fy+4.5}" text-anchor="middle" font-family="{FS}" font-size="12" font-weight="650" fill="{t["gate"]}">'
-             f'attribution explains — it does not filter</text>')
+             f'attribution classifies — it never filters</text>')
     o.append(f'<text x="{x_from+16}" y="{fy-12}" font-family="{FS}" font-size="11.5" fill="{t["muted"]}">'
              f'outcomes update the next decision, never the record of the last one</text>')
 

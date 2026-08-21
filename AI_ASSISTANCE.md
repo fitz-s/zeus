@@ -49,8 +49,9 @@ merged 2026-07-29.
 **The shared-ref boundary (open).** Linked worktrees isolate working files and
 indexes, but they share the repository's ref namespace. A 2026-06-12 incident
 showed worktree agents could reach the main checkout's branch state through
-ordinary git verbs; that was closed with a blocking, no-bypass command guard
-(`maintree_git_state_guard`). A July 2026 incident then showed the guard's
+ordinary git verbs; that was closed with a blocking command guard — no
+operator bypass for the commands it classifies (`maintree_git_state_guard`).
+A July 2026 incident then showed the guard's
 limit: it enumerates commands, and an agent reached the same state through a
 ref-mutation verb the guard did not classify, momentarily retargeting the
 branch used by the production checkout. The exact prior ref was restored and

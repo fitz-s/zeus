@@ -533,17 +533,17 @@ def build_report(rows: list[Row], *, generated_at: str) -> str:
     elif decomp.brier_skill_score < 0:
         out.append(
             f"**Current verdict: adverse.** Across **{decomp.n}** settled positions with a "
-            f"resolvable frozen decision probability, the Brier skill score against the "
-            f"observed-base-rate forecast is **{decomp.brier_skill_score:+.3f}**. Because it is "
-            f"negative, these probabilities performed worse in this sample than always "
-            f"predicting the **{_fmt(decomp.base_rate)}** base rate."
+            f"resolvable frozen decision probability, the Brier skill score against a constant "
+            f"predictor equal to this sample's realized **{_fmt(decomp.base_rate)}** win rate is "
+            f"**{decomp.brier_skill_score:+.3f}**. Because it is negative, these probabilities "
+            f"performed worse in this sample than that constant predictor."
         )
     elif decomp.brier_skill_score > 0:
         out.append(
             f"**Current verdict: positive against the base-rate benchmark in this sample, not "
             f"evidence of alpha.** Across **{decomp.n}** settled positions with a resolvable "
-            f"frozen decision probability, the Brier skill score against the observed-base-rate "
-            f"forecast is **{decomp.brier_skill_score:+.3f}**."
+            f"frozen decision probability, the Brier skill score against a constant predictor "
+            f"equal to this sample's realized base rate is **{decomp.brier_skill_score:+.3f}**."
         )
     else:
         out.append(
@@ -561,11 +561,17 @@ def build_report(rows: list[Row], *, generated_at: str) -> str:
         f"result."
     )
     out.append("")
-    out.append(f"**Supports:** calibration of the displayed sample, subject to the shown "
-                f"intervals and the **n ≥ {MIN_N}** cell floor.")
+    out.append(
+        f"The pool spans every decision-law revision active during the settlement window; it "
+        f"grades the historical corpus as decided, not the current law in isolation."
+    )
     out.append("")
-    out.append("**Does not support:** durable alpha, strategy returns, or firm conclusions "
-                "for thin cells.")
+    out.append(f"**Supports:** a descriptive calibration assessment of the displayed sample, "
+                f"subject to the shown intervals and the **n ≥ {MIN_N}** cell floor.")
+    out.append("")
+    out.append("**Does not support:** durable alpha, strategy returns, an estimate of the "
+                "current decision law's calibration in isolation, or firm conclusions for "
+                "thin cells.")
     out.append("")
     out.append(f"**Data through:** `{data_through}` · **Generated:** `{generated_at}`")
     out.append("")
@@ -608,7 +614,9 @@ def build_report(rows: list[Row], *, generated_at: str) -> str:
     out.append("")
     out.append(f"n = {n_q} settled positions with a resolvable predicted probability. Dot area is "
                 f"proportional to bin count; the vertical bar is the 95% Wilson interval on the "
-                f"observed win rate; a red dot marks a bin under the n<{MIN_N} floor.")
+                f"observed win rate; a red dot marks a bin under the n<{MIN_N} floor. Intervals "
+                f"are position-level and unadjusted for clustering — correlated positions (same "
+                f"market family or date) can make them narrower than their true coverage.")
     out.append("")
     out.append(_bin_table(bins))
     out.append("")
@@ -678,8 +686,9 @@ def build_report(rows: list[Row], *, generated_at: str) -> str:
     out.append("## Cut: by attribution class — the interesting one")
     out.append("")
     out.append(
-        "The six-class post-settlement grader (`settlement_skill_attribution.py`) explains "
-        "why a trade won or lost; it does not filter this reliability sample, which includes "
+        "The six-class post-settlement grader (`settlement_skill_attribution.py`) classifies "
+        "each outcome relative to the frozen decision-time evidence; it does not filter this "
+        "reliability sample, which includes "
         "every causally eligible decision with a frozen `q_live` joined to a verified "
         "settlement. Four of the six categories are outcome-degenerate BY CONSTRUCTION "
         "(`SKILL_WIN`/`LUCKY_WIN` are defined as `won=1`, `SKILL_LOSS`/`MISCALIBRATED_LOSS` as "

@@ -361,7 +361,7 @@ class TestReadThisFirst:
     def test_adverse_verdict_branch(self):
         report = build_report(self._adverse_rows(), generated_at="G")
         assert "**Current verdict: adverse.**" in report
-        assert "worse in this sample than always predicting" in report
+        assert "performed worse in this sample than that constant predictor" in report
 
     def test_positive_verdict_never_becomes_alpha(self):
         report = build_report(self._positive_rows(), generated_at="G")
