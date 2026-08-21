@@ -34949,7 +34949,7 @@ def test_alpha_shadow_freezes_exact_global_proof_winner_without_money():
         event.rejection_reason
         == "MARKET_RELATIVE_ALPHA_SHADOW:forecast_qkernel_entry"
         and event.event_id.startswith(
-            "market-relative-alpha-shadow-v5-global-selection:"
+            "market-relative-alpha-shadow-v6-city-date-cluster:"
         )
         and global_batch_runtime.CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION
         in event.event_id
@@ -35033,6 +35033,39 @@ def test_alpha_shadow_freezes_exact_global_proof_winner_without_money():
 
     conn = sqlite3.connect(":memory:")
     ensure_table(conn)
+    beta_events = global_batch_runtime._day0_market_relative_alpha_shadow_events(
+        selected=SimpleNamespace(
+            decision=SimpleNamespace(candidate_evaluations=evaluations)
+        ),
+        proof_selected=proof_for(evaluations[1]),
+        probability_witnesses={
+            family_a: witness(family_a, 0.90),
+            family_b: witness(family_b, 0.80),
+        },
+        book_epoch=SimpleNamespace(
+            assets=assets,
+            witness_identity="book-epoch-beta",
+        ),
+        family_context_by_key={
+            family_a: {
+                "city": "Alpha",
+                "target_date": "2026-08-11",
+                "metric": "high",
+            },
+            family_b: {
+                "city": "Beta",
+                "target_date": "2026-08-11",
+                "metric": "low",
+            },
+        },
+        selection_epoch_identity="selection-epoch-beta",
+        selection_cut_at_utc=at + _dt.timedelta(seconds=1),
+        decision_at_utc=at + _dt.timedelta(seconds=1),
+    )
+    assert len(beta_events) == 1
+    assert beta_events[0].city == "Beta"
+    assert beta_events[0].target_date == events[0].target_date
+    assert beta_events[0].event_id != events[0].event_id
     first = global_batch_runtime._record_day0_market_relative_alpha_shadows(
         conn, events
     )
@@ -35043,12 +35076,18 @@ def test_alpha_shadow_freezes_exact_global_proof_winner_without_money():
     assert conn.execute(
         "SELECT COUNT(*) FROM no_trade_regret_events"
     ).fetchone()[0] == 1
+    global_batch_runtime._record_day0_market_relative_alpha_shadows(
+        conn, beta_events
+    )
+    assert conn.execute(
+        "SELECT COUNT(*) FROM no_trade_regret_events"
+    ).fetchone()[0] == 2
     global_batch_runtime._record_market_relative_alpha_shadows(
         conn, qkernel_events
     )
     assert conn.execute(
         "SELECT COUNT(*) FROM no_trade_regret_events"
-    ).fetchone()[0] == 2
+    ).fetchone()[0] == 3
 
     exit_at = at + _dt.timedelta(hours=1)
     wealth = SimpleNamespace(
@@ -35189,7 +35228,7 @@ def test_alpha_shadow_freezes_exact_global_proof_winner_without_money():
     assert first_exit == second_exit
     assert conn.execute(
         "SELECT COUNT(*) FROM no_trade_regret_events"
-    ).fetchone()[0] == 3
+    ).fetchone()[0] == 4
     conn.close()
 
 

@@ -5,6 +5,12 @@
 
 ## 现状(forward)
 
+### 2026-08-21 B120 — global proof evidence 按 city-date 原子持久化
+- **实时反例:** current-law side-effect-free auction 在同一 target date 先后选择了独立城市（Aug-21 Lucknow/Tel Aviv；Aug-22 Helsinki/Singapore），但 `NoTradeRegretEvent.event_id` 只绑定 strategy/revision/target_date。唯一约束因此每天只保留一个城市；RiskGuard 后续虽按 `(city,target_date)` 聚类，仍永远收不到同日其余独立城市，令 automated alpha gate 的 forward settlement drain 人为失速。
+- **结构性修复:** entry shadow event revision 升为 city-date-cluster identity；同一城市日期的 sibling bins 与 HIGH/LOW 继续幂等去重，不同城市在同一日期可各自落一份 exact global-winner certificate。exit-shadow reader 同时接受既有 v5 和新 v6 证书；不改 probability、ranking、Kelly、RiskGuard threshold 或 venue actuation。
+- **SCOPE / DRAIN / RESET:** scope 仅是 no-money capital-proof persistence identity。drain 仍由每轮完整 global proof winner 写入及未来 verified settlement/qualified early-exit grading完成；reset 仍由 RiskGuard 当前 revision cohort 达到 model-over-market e-value 与正 hypothetical realized capital proof。任何缺 current q/book/full-fill/positive ΔlogW/EV 的候选不写证书。
+- **验收:** antibody 必须证明同一 target date 的两个不同城市各落一行、同一 city-date 重放仍幂等，并覆盖 v5/v6 exit-reader compatibility；focused integration、RiskGuard settlement joins、compile、diff、planning-lock 通过后才 hot-fix landing。live reload 后以新 v6 canonical rows、城市覆盖与 gate evidence count 验证，不把 shadow EV 冒充真实资本利得。
+
 ### 2026-08-13 B105 — canonical held-monitor debt 由持续 worker 排空
 - **实时反例:** live `6977d34c` 有 26 个 blocking-stale held positions；30 秒 `exit_monitor_recovery` scheduler job 同步运行最长 75 秒的 full-book monitor，`max_instances=1` 因而持续丢 tick。SQLite interruption、reactor handoff 或 preparation deadline 失败后，债务只能再等 scheduler，最老 `MONITOR_REFRESHED` 已超过 25 分钟。entry fail-closed 正确阻止 BUY，但 held redecision 全书失明。
 - **结构性修复:** scheduler job 只读取 canonical cadence evidence 并幂等 dispatch；一个 daemon recovery worker 复用原 process-wide monitor claim，失败后立即从 DB 重建债务并持续重驱。它不增加 writer 并发、不放宽 150 秒、不改变 probability/edge/exit law，也不允许 quote-only 或 stale q/CLOB 清债。

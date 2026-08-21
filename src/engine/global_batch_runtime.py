@@ -4943,8 +4943,12 @@ _DAY0_ALPHA_SHADOW_SELECTION_RULE = _ALPHA_SHADOW_SELECTION_RULE
 _QKERNEL_ALPHA_SHADOW_REASON = (
     "MARKET_RELATIVE_ALPHA_SHADOW:forecast_qkernel_entry"
 )
-_QKERNEL_ALPHA_SHADOW_EVENT_VERSION = (
-    "market-relative-alpha-shadow-v5-global-selection"
+_ALPHA_SHADOW_ENTRY_EVENT_VERSION = (
+    "market-relative-alpha-shadow-v6-city-date-cluster"
+)
+_ALPHA_SHADOW_ENTRY_EVENT_PREFIXES = (
+    "market-relative-alpha-shadow-v5-global-selection:",
+    f"{_ALPHA_SHADOW_ENTRY_EVENT_VERSION}:",
 )
 _QKERNEL_ALPHA_SHADOW_DECISION_LAW = "executable_min_order_capital_gain_v2"
 _QKERNEL_ALPHA_SHADOW_SELECTION_RULE = _ALPHA_SHADOW_SELECTION_RULE
@@ -5189,7 +5193,7 @@ def _market_relative_alpha_shadow_events(
             shadow_reason = _DAY0_ALPHA_SHADOW_REASON
             decision_law = _DAY0_ALPHA_SHADOW_DECISION_LAW
             selection_rule = _DAY0_ALPHA_SHADOW_SELECTION_RULE
-            event_version = "market-relative-alpha-shadow-v5-global-selection"
+            event_version = _ALPHA_SHADOW_ENTRY_EVENT_VERSION
         else:
             revision = str(
                 (qkernel_semantics_by_posterior or {}).get(
@@ -5206,7 +5210,7 @@ def _market_relative_alpha_shadow_events(
             shadow_reason = _QKERNEL_ALPHA_SHADOW_REASON
             decision_law = _QKERNEL_ALPHA_SHADOW_DECISION_LAW
             selection_rule = _QKERNEL_ALPHA_SHADOW_SELECTION_RULE
-            event_version = _QKERNEL_ALPHA_SHADOW_EVENT_VERSION
+            event_version = _ALPHA_SHADOW_ENTRY_EVENT_VERSION
         if (
             not city
             or not target_date
@@ -5292,7 +5296,7 @@ def _market_relative_alpha_shadow_events(
                 event_id=(
                     f"{event_version}:{strategy_key}:"
                     f"{CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION}:"
-                    f"{revision}:{target_date}"
+                    f"{revision}:{city}:{target_date}"
                 ),
                 rejection_stage="RISK_GUARD",
                 rejection_reason=shadow_reason,
@@ -5400,12 +5404,12 @@ def _market_relative_alpha_shadow_exit_events(
             "FROM no_trade_regret_events "
             "WHERE rejection_stage='RISK_GUARD' "
             "AND rejection_reason IN (?,?) "
-            "AND event_id LIKE ? "
+            "AND (event_id LIKE ? OR event_id LIKE ?) "
             "ORDER BY decision_time,regret_event_id",
             (
                 _DAY0_ALPHA_SHADOW_REASON,
                 _QKERNEL_ALPHA_SHADOW_REASON,
-                "market-relative-alpha-shadow-v5-global-selection:%",
+                *(f"{prefix}%" for prefix in _ALPHA_SHADOW_ENTRY_EVENT_PREFIXES),
             ),
         ).fetchall()
     except sqlite3.Error:
