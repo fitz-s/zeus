@@ -1,5 +1,5 @@
 # Created: 2026-05-04
-# Last reused/audited: 2026-08-16
+# Last reused/audited: 2026-08-21
 # Authority basis: IOC forward-port (Fix C: allowed_discovery_modes_inverse) — 2026-05-23
 """Heavy runtime helpers extracted from cycle_runner.
 
@@ -9303,6 +9303,10 @@ def execute_monitoring_phase(
                     )
                 except (InvalidOperation, TypeError, ValueError):
                     held_shares = Decimal("0")
+                sellable_shares = held_shares.quantize(
+                    Decimal("0.01"),
+                    rounding=ROUND_FLOOR,
+                )
                 monitor_min_order = getattr(
                     pos,
                     _HELD_MONITOR_MIN_ORDER_SIZE_ATTR,
@@ -9326,15 +9330,22 @@ def execute_monitoring_phase(
                             else datetime.now(timezone.utc)
                         ),
                     )
-                if (
+                below_share_precision = held_shares > 0 and sellable_shares <= 0
+                below_min_order = (
                     fresh_min_order is not None
                     and held_shares > 0
                     and held_shares < fresh_min_order
-                ):
+                )
+                if below_share_precision or below_min_order:
                     dust_error = (
                         "executable_snapshot_gate: size "
-                        f"{held_shares} is below snapshot min_order_size "
-                        f"{fresh_min_order}"
+                        f"{held_shares} is below sell share precision 0.01"
+                        if below_share_precision
+                        else (
+                            "executable_snapshot_gate: size "
+                            f"{held_shares} is below snapshot min_order_size "
+                            f"{fresh_min_order}"
+                        )
                     )
                     dust_reason = f"{exit_reason} [DUST: {dust_error}]"
                     _mark_exit_dust_hold(

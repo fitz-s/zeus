@@ -1,8 +1,8 @@
 # Created: 2026-03-31
-# Lifecycle: created=2026-03-31; last_reviewed=2026-08-20; last_reused=2026-08-20
+# Lifecycle: created=2026-03-31; last_reviewed=2026-08-21; last_reused=2026-08-21
 # Purpose: Lock live-money safety invariants across fill, exit, chain, and P&L flows.
 # Reuse: Run for execution finality, live exit, chain reconciliation, and safety invariant changes.
-# Last reused/audited: 2026-08-20
+# Last reused/audited: 2026-08-21
 # Authority basis: monitor evidence-axis independence and unavailable-decision hot-fix
 """Live safety invariant tests: relationship tests, not function tests.
 
@@ -6709,6 +6709,7 @@ def test_pending_exit_backoff_exhausted_reenters_redecision_when_still_held(monk
         ("EDGE_REVERSAL", False, True, "blocked", True, False),
         ("SELL_REVERSAL", False, True, "direct", False, True),
         ("EDGE_REVERSAL", False, True, "dust", False, False),
+        ("EDGE_REVERSAL", False, True, "sub_precision", False, False),
     ),
 )
 def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_red(
@@ -6742,10 +6743,22 @@ def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_
         entered_at="2026-07-14T17:00:00+00:00",
         order_posted_at="2026-07-14T16:59:00+00:00",
         fill_authority=FILL_AUTHORITY_VENUE_CONFIRMED_FULL,
-        shares=3.0 if outcome == "dust" else 500.0,
-        shares_filled=3.0 if outcome == "dust" else 500.0,
+        shares=(
+            3.0
+            if outcome == "dust"
+            else 0.002221
+            if outcome == "sub_precision"
+            else 500.0
+        ),
+        shares_filled=(
+            3.0
+            if outcome == "dust"
+            else 0.002221
+            if outcome == "sub_precision"
+            else 500.0
+        ),
         chain_state="synced",
-        chain_shares=500.0,
+        chain_shares=0.002221 if outcome == "sub_precision" else 500.0,
         token_id="paris-yes",
         no_token_id="paris-no",
         condition_id="0x" + "5a" * 32,
@@ -7008,7 +7021,7 @@ def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_
 
     monitor_now = (
         (lambda: datetime.now(timezone.utc))
-        if outcome == "dust"
+        if outcome in {"dust", "sub_precision"}
         else (lambda: datetime(2026, 7, 14, 18, 0, tzinfo=timezone.utc))
     )
 
@@ -7055,7 +7068,7 @@ def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_
         assert conn.execute(
             "SELECT COUNT(*) FROM venue_commands WHERE intent_kind = 'EXIT'"
         ).fetchone()[0] == 0
-    elif outcome == "dust":
+    elif outcome in {"dust", "sub_precision"}:
         assert summary["monitor_statistical_sell_dust_holds"] == 1
         assert summary["exits"] == 0
         assert results[0].should_exit is False
@@ -7064,6 +7077,8 @@ def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_
         assert "fresh_snapshot_sub_minimum_dust_hold" in pos.applied_validations
         assert execute_calls == []
         assert auction_completion_requests == []
+        if outcome == "sub_precision":
+            assert "below sell share precision 0.01" in results[0].exit_reason
     elif outcome in {"blocked", "request_failed"}:
         completion_accepted = request_accepted and not malformed_request
         assert summary.get("monitor_sells_delegated_to_global_auction", 0) == 0
