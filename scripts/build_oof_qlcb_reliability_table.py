@@ -68,9 +68,6 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.calibration.emos import bin_probability_settlement  # settlement-preimage integrator
 from src.contracts.settlement_semantics import settlement_preimage_offsets
-from src.data.replacement_forecast_cycle_policy import (
-    CURRENT_EVIDENCE_SEMANTICS_REVISION,
-)
 from src.forecast.center import raw_second_moment_weights, weighted_huber_location
 from src.forecast.model_selection import select_models
 from src.decision.qlcb_reliability_guard import (  # the LIVE guard cell scheme
@@ -425,7 +422,9 @@ def main() -> int:
             "guard_semantic_version": EXPECTED_GUARD_SEMANTIC_VERSION,
             "center_method_version": EXPECTED_CENTER_METHOD_VERSION,
             "band_semantic_version": EXPECTED_BAND_SEMANTIC_VERSION,
-            "probability_semantics_revision": CURRENT_EVIDENCE_SEMANTICS_REVISION,
+            # This builder reconstructs the legacy raw-diagonal probability
+            # world. It must not claim the source-clock current-evidence
+            # revision merely because the runtime imports that revision.
             "corpus_authority": CORPUS_AUTHORITY,
             "built_at": "2026-06-24",
             "n_predictions": int(ctr["n_predictions"]),
