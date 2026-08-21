@@ -5,6 +5,12 @@
 
 ## 现状(forward)
 
+### 2026-08-21 B125 — newest source cycle 优先并在 subprocess 前二次单调校验
+- **实时反例:** 当天 12Z/06Z ensemble snapshots 到达后，latest auction 仅 `1/221` family eligible，203 个被 raw-input HWM拒绝；其中 111 个 latest=12Z但 posterior仍消费00Z、85 个 latest=06Z但仍消费00Z、7 个 latest=12Z但消费06Z。materializer仍持续 commit且0 failures，证明活跃 writer正在生成过期 cycle q。current requests 同时含 00Z=37、06Z=10、12Z=11；现有排序不区分同 family source cycle，且仅在 seed admission检查 cycle regression，request 等待期间 posterior前进后不会 pre-spawn重检。
+- **结构性修复:** chain-money/never-priced/held/plain authority classes不变；每类拆成 newest queued source cycle 与 older cycle相邻 subtiers，再按 request自身 computed_at FIFO。newest cycle先更新 posterior；任何等待后已落后于该 family current posterior 的 request在 subprocess前写 terminal superseded receipt，不启动 materializer。旧 cycle不能再次占用 writer或成为最新 q。
+- **SCOPE / DRAIN / RESET:** scope 是 exact city/date/metric request及其 queued/current source-cycle order；drain每 poll重算 queued max cycle并在 pre-spawn读取 current posterior，older request终止后自然移出；reset是更新 cycle request到达或 current posterior未前进，此时 request仍正常验证/执行。不改变 HWM、freshness、Day0 owner、probability math或 single-writer count。
+- **验收:** newest-cycle priority与 JIT regression两项抗体、现有 priority/queue/Day0 suites、compile/ruff/diff/planning通过后 landing；live 需看到 source-cycle-regression terminal reason、12Z/06Z q先于00Z backlog、HWM rejection下降，且没有 posterior cycle倒退、failed_count保持0。
+
 ### 2026-08-21 B124 — 同 priority tier 使用 request 自身时间，禁止历史 marker 冒充年龄
 - **实时反例:** B123 把 280 个 requests 暴露给全局排序后，当前 top-40 仍有 31 个是 auction 已 eligible family，仅 4 个 HWM、5 个 identity-missing。全部 request 被分在 tier 1；排序 secondary key 来自 scope/cycle 上任意历史 `cycle_advance_enqueues.enqueued_at`，所以 `computed_at=11:32` 的新 eligible fusion refresh 可继承 `07:45` marker并排在真正 `computed_at=07:50` 的 HWM repair前。最近 30 个成功 materialization 全是已 eligible family，且 successive auction 的坏 family set未变化，证明旧 marker 时间正在误导唯一 writer。
 - **结构性修复:** chain-confirmed exposure / never-priced / held-marker 仍只决定 tier；同 tier secondary key改为每个 request 自身 causal `computed_at`，仅在 payload无合法 computed_at时才回退历史 enqueue time。不同 producer 的新 request不再继承同 scope旧 marker的虚假年龄；真正等待最久的 current repair先用 writer。

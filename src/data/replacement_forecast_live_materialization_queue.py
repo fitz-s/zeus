@@ -1052,6 +1052,8 @@ def _cycle_advance_seed_priority_map(
         return {}
     names_by_scope: dict[tuple[str, str, str, str], set[str]] = {}
     request_time_by_name: dict[str, str] = {}
+    cycle_by_scope: dict[tuple[str, str, str, str], datetime] = {}
+    latest_cycle_by_family: dict[tuple[str, str, str], datetime] = {}
     for path in queue_files:
         payload = (
             payloads[path]
@@ -1072,6 +1074,12 @@ def _cycle_advance_seed_priority_map(
         )
         if all(scope):
             names_by_scope.setdefault(scope, set()).add(path.name)
+            if cycle is not None:
+                cycle_by_scope[scope] = cycle
+                family = scope[:3]
+                latest = latest_cycle_by_family.get(family)
+                if latest is None or cycle > latest:
+                    latest_cycle_by_family[family] = cycle
     if not names_by_scope:
         return {}
     fam_scopes = frozenset(scope[:3] for scope in names_by_scope)
@@ -1137,13 +1145,21 @@ def _cycle_advance_seed_priority_map(
         fam_scope = scope[:3]
         held_marker, enqueued_at = enqueue_priority.get(scope, (False, ""))
         if fam_scope in current_money_risk:
-            tier = -2
+            base_tier = -2
         elif fam_scope in never_priced_scopes:
-            tier = -1
+            base_tier = -1
         elif held_marker:
-            tier = 0
+            base_tier = 0
         else:
-            tier = 1
+            base_tier = 1
+        scope_cycle = cycle_by_scope.get(scope)
+        latest_cycle = latest_cycle_by_family.get(fam_scope)
+        older_queued_cycle = (
+            scope_cycle is not None
+            and latest_cycle is not None
+            and scope_cycle < latest_cycle
+        )
+        tier = base_tier * 2 + int(older_queued_cycle)
         for name in names:
             priority[name] = (tier, request_time_by_name.get(name) or enqueued_at)
     return priority
@@ -2569,6 +2585,7 @@ def _process_claimed_materialization_batch(
     failed: list[str] = []
     unchanged_blocked: list[str] = []
     stale_day0_superseded: list[str] = []
+    source_cycle_regressions: list[str] = []
     write_deferred: list[str] = []
     timed_out_requests: list[str] = []
     pending: list[_PendingMaterialization] = []
@@ -2601,6 +2618,25 @@ def _process_claimed_materialization_batch(
             failed.append(str(moved))
             continue
         request_payload = _load_request_payload_for_coalescing(input_json)
+        if request_payload is not None and _seed_source_cycle_regresses_current_posterior(
+            forecast_db=forecast_db,
+            seed=dict(request_payload),
+        ):
+            receipt = _record_latest_terminal_request(
+                input_json,
+                processed_path=processed_path,
+                request_payload=request_payload,
+                receipt_dir_name="superseded_latest",
+                status="SKIPPED_SOURCE_CYCLE_REGRESSION",
+                reason_codes=("REPLACEMENT_MATERIALIZATION_SOURCE_CYCLE_REGRESSION",),
+                result_evidence={
+                    "request_validated": True,
+                    "subprocess_spawned": False,
+                },
+            )
+            processed.append(str(receipt))
+            source_cycle_regressions.append(str(receipt))
+            continue
         marker_path, attempt_fingerprint, unchanged = (
             _blocked_attempt_state(
                 marker_dir=marker_dir,
@@ -2764,6 +2800,8 @@ def _process_claimed_materialization_batch(
         reasons.append(_UNCHANGED_BLOCKED_SKIP_REASON)
     if stale_day0_superseded:
         reasons.append(_STALE_DAY0_OWNER_SUPERSEDED_REASON)
+    if source_cycle_regressions:
+        reasons.append("REPLACEMENT_MATERIALIZATION_SOURCE_CYCLE_REGRESSION")
     if write_deferred:
         reasons.append(_WRITE_DEFERRED_REASON)
         _LOG.warning(

@@ -961,7 +961,7 @@ def test_cycle_priority_never_priced_family_sorts_ahead_of_held_position(tmp_pat
 
     priority = queue_mod._cycle_advance_seed_priority_map(forecast_db, (paris, tokyo))
 
-    assert priority[tokyo.name][0] == -1
+    assert priority[tokyo.name][0] == -2
     assert priority[paris.name][0] == 0
     assert priority[tokyo.name] < priority[paris.name]
     sort_key_tokyo = queue_mod._cycle_advance_file_sort_key(tokyo, priority)
@@ -1080,8 +1080,8 @@ def test_cycle_priority_current_exposure_overrides_stale_enqueue_marker(tmp_path
         trade_db=trade_db,
     )
 
-    assert priority[singapore.name][0] == -2
-    assert priority[tokyo.name][0] == -1
+    assert priority[singapore.name][0] == -4
+    assert priority[tokyo.name][0] == -2
     assert queue_mod._cycle_advance_file_sort_key(
         singapore, priority
     ) < queue_mod._cycle_advance_file_sort_key(tokyo, priority)
@@ -1091,8 +1091,8 @@ def test_cycle_priority_current_exposure_overrides_stale_enqueue_marker(tmp_path
         (singapore, tokyo),
         trade_db=trade_db,
     )
-    assert without_forecast_db[singapore.name][0] == -2
-    assert without_forecast_db[tokyo.name][0] == 1
+    assert without_forecast_db[singapore.name][0] == -4
+    assert without_forecast_db[tokyo.name][0] == 2
 
 
 def test_cycle_priority_held_position_still_beats_plain_refresh_when_both_priced(
@@ -1203,7 +1203,7 @@ def test_cycle_priority_held_position_still_beats_plain_refresh_when_both_priced
     priority = queue_mod._cycle_advance_seed_priority_map(forecast_db, (paris, seoul))
 
     assert priority[paris.name][0] == 0
-    assert priority[seoul.name][0] == 1
+    assert priority[seoul.name][0] == 2
     assert priority[paris.name] < priority[seoul.name]
 
 
@@ -1298,11 +1298,116 @@ def test_cycle_priority_uses_request_time_not_historical_scope_marker(tmp_path) 
         (eligible, lagged),
     )
 
-    assert priority[eligible.name] == (1, "2026-08-21T11:30:00+00:00")
-    assert priority[lagged.name] == (1, "2026-08-21T07:50:00+00:00")
+    assert priority[eligible.name] == (2, "2026-08-21T11:30:00+00:00")
+    assert priority[lagged.name] == (2, "2026-08-21T07:50:00+00:00")
     assert queue_mod._cycle_advance_file_sort_key(
         lagged, priority
     ) < queue_mod._cycle_advance_file_sort_key(eligible, priority)
+
+
+def test_cycle_priority_selects_newest_queued_source_cycle_within_tier(tmp_path) -> None:
+    """A family's newest queued model cycle must precede its older cycle repair."""
+    import src.data.replacement_forecast_live_materialization_queue as queue_mod
+
+    older = tmp_path / "older.json"
+    newer = tmp_path / "newer.json"
+    for path, cycle, computed_at in (
+        (older, "2026-08-21T00:00:00+00:00", "2026-08-21T07:00:00+00:00"),
+        (newer, "2026-08-21T12:00:00+00:00", "2026-08-21T11:00:00+00:00"),
+    ):
+        path.write_text(
+            json.dumps(
+                {
+                    "city": "Shanghai",
+                    "target_date": "2026-08-22",
+                    "temperature_metric": "high",
+                    "source_cycle_time": cycle,
+                    "computed_at": computed_at,
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    priority = queue_mod._cycle_advance_seed_priority_map(None, (older, newer))
+
+    assert priority[newer.name][0] == 2
+    assert priority[older.name][0] == 3
+    assert queue_mod._cycle_advance_file_sort_key(
+        newer, priority
+    ) < queue_mod._cycle_advance_file_sort_key(older, priority)
+
+
+def test_request_drain_skips_cycle_regression_before_subprocess(tmp_path) -> None:
+    """A request that aged behind the current posterior is terminal before spawn."""
+    import src.data.replacement_forecast_live_materialization_queue as queue_mod
+
+    forecast_db = tmp_path / "forecasts.db"
+    conn = sqlite3.connect(forecast_db)
+    conn.execute(
+        """
+        CREATE TABLE forecast_posteriors (
+            source_id TEXT,
+            city TEXT,
+            target_date TEXT,
+            temperature_metric TEXT,
+            source_cycle_time TEXT,
+            computed_at TEXT
+        )
+        """
+    )
+    conn.execute(
+        "INSERT INTO forecast_posteriors VALUES (?, ?, ?, ?, ?, ?)",
+        (
+            queue_mod.SOURCE_ID,
+            "Shanghai",
+            "2026-08-22",
+            "high",
+            "2026-08-21T12:00:00+00:00",
+            "2026-08-21T13:00:00+00:00",
+        ),
+    )
+    conn.commit()
+    conn.close()
+    request_dir = tmp_path / "requests"
+    request_dir.mkdir()
+    request = {
+        "city": "Shanghai",
+        "target_date": "2026-08-22",
+        "temperature_metric": "high",
+        "source_cycle_time": "2026-08-21T00:00:00+00:00",
+        "computed_at": "2026-08-21T07:00:00+00:00",
+        "baseline_source_run_id": "baseline:0",
+        "openmeteo_source_run_id": "openmeteo:0",
+        "openmeteo_payload_json": "payload.json",
+        "precision_metadata_json": "precision.json",
+        "bins": [{"bin_id": "warm"}],
+    }
+    request_path = request_dir / "old-cycle.json"
+    request_path.write_text(json.dumps(request), encoding="utf-8")
+    spawned: list[list[str]] = []
+
+    def runner(argv):
+        spawned.append(list(argv))
+        return subprocess.CompletedProcess(list(argv), 0, stdout="ok", stderr="")
+
+    report = queue_mod.process_replacement_forecast_live_materialization_queue(
+        request_dir=request_dir,
+        processed_dir=tmp_path / "processed",
+        failed_dir=tmp_path / "failed",
+        forecast_db=forecast_db,
+        seed_limit=0,
+        limit=1,
+        runner=runner,
+    )
+
+    assert spawned == []
+    assert report.failed_count == 0
+    assert report.processed_count == 1
+    assert "REPLACEMENT_MATERIALIZATION_SOURCE_CYCLE_REGRESSION" in report.reason_codes
+    receipt = next((tmp_path / "superseded_latest").glob("*.json"))
+    evidence = json.loads(receipt.read_text(encoding="utf-8"))
+    assert evidence["status"] == "SKIPPED_SOURCE_CYCLE_REGRESSION"
+    assert evidence["result_evidence"]["subprocess_spawned"] is False
 
 
 def test_materialization_queue_timeout_backs_off_without_blocking_other_family(
