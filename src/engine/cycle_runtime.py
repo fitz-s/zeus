@@ -7338,6 +7338,7 @@ def execute_monitoring_phase(
     summary["held_monitor_canonical_position_ids"] = []
     summary["held_monitor_discharged_position_ids"] = []
     summary["held_monitor_no_action_authority_position_ids"] = []
+    summary["held_monitor_non_executable_dust_position_ids"] = []
     if urgent_preemption_requested():
         summary["held_monitor_preempted"] = True
         summary["held_monitor_positions_deferred"] = len(monitor_positions)
@@ -9814,6 +9815,12 @@ def execute_monitoring_phase(
                         "held_monitor_no_action_authority_position_ids",
                         pos,
                     )
+                    if monitoring_non_executable_dust:
+                        _append_held_monitor_coverage_position_id(
+                            summary,
+                            "held_monitor_non_executable_dust_position_ids",
+                            pos,
+                        )
                 _append_held_monitor_coverage_position_id(
                     summary,
                     "held_monitor_canonical_position_ids",

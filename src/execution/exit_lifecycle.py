@@ -12188,7 +12188,24 @@ def _full_book_monitor_completed_canonical_coverage(
         or ()
         if str(value).strip()
     }
-    completed_ids = (canonical_ids - no_action_authority_ids) | discharged_ids
+    non_executable_dust_ids = {
+        str(value).strip()
+        for value in summary.get(
+            "held_monitor_non_executable_dust_position_ids",
+            (),
+        )
+        or ()
+        if str(value).strip()
+    }
+    # A current fresh venue minimum can prove one exact residual impossible to
+    # express as a SELL.  That position keeps its independent health alarm and
+    # recurring monitor, but it cannot make unrelated families inherit an
+    # unresettable full-book debt.  SCOPE: canonical no-action rows that are
+    # also current-proven dust. DRAIN: the normal recurring monitor and
+    # settlement continue for that position. RESET: a changed current minimum
+    # omits the dust identity and restores ordinary action-authority debt.
+    unresolved_no_action_ids = no_action_authority_ids - non_executable_dust_ids
+    completed_ids = (canonical_ids - unresolved_no_action_ids) | discharged_ids
     return (
         int(summary.get("held_monitor_candidates") or 0) == len(candidate_ids)
         and candidate_ids.issubset(completed_ids)

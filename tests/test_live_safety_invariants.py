@@ -20404,6 +20404,76 @@ def test_quote_incomplete_exit_preserves_current_probability_axis(monkeypatch):
     ]
 
 
+def test_quote_incomplete_current_dust_is_scoped_from_full_book_debt(monkeypatch):
+    """Current-proven dust remains no-action without poisoning sibling cadence."""
+    from src.engine import cycle_runtime
+    from src.execution import exit_lifecycle
+
+    position = _make_position(
+        trade_id="monitor-quote-incomplete-current-dust",
+        state="pending_exit",
+        chain_state="synced",
+        shares=0.002221,
+        chain_shares=0.002221,
+        exit_state="backoff_exhausted",
+        order_status="backoff_exhausted",
+    )
+    emitted = []
+
+    def refresh(*_args):
+        context = _monitor_test_edge_context(position)
+        position.last_monitor_market_price_is_fresh = False
+        position.last_monitor_best_bid = None
+        return context
+
+    monkeypatch.setattr("src.engine.monitor_refresh.refresh_position", refresh)
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "_is_non_executable_dust_hold",
+        lambda *_args, **_kwargs: True,
+    )
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "release_backoff_exhausted_pending_exit_for_redecision",
+        lambda *_args, **_kwargs: False,
+    )
+    monkeypatch.setattr(
+        Position,
+        "evaluate_exit",
+        lambda *_args, **_kwargs: ExitDecision(
+            False,
+            "EVIDENCE_UNAVAILABLE",
+            trigger="EVIDENCE_UNAVAILABLE",
+            applied_validations=["evidence_unavailable_third_state"],
+        ),
+    )
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_emit_monitor_refreshed_canonical_if_available",
+        lambda *_args, **kwargs: emitted.append(kwargs) or True,
+    )
+    summary = {"monitors": 0, "exits": 0}
+
+    cycle_runtime.execute_monitoring_phase(
+        None,
+        object(),
+        _make_portfolio(position),
+        _monitor_test_artifact(),
+        _monitor_test_tracker(),
+        summary,
+        deps=_monitor_test_deps("test_quote_incomplete_current_dust"),
+        run_exit_preflight=False,
+    )
+
+    assert len(emitted) == 1
+    assert summary["held_monitor_no_action_authority_position_ids"] == [
+        position.trade_id
+    ]
+    assert summary["held_monitor_non_executable_dust_position_ids"] == [
+        position.trade_id
+    ]
+
+
 def test_probability_incomplete_monitor_preserves_current_quote_axis():
     """A missing q witness cannot erase an independently current executable book."""
     from src.engine import cycle_runtime
