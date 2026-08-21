@@ -1,5 +1,5 @@
 # Created: 2026-06-18
-# Last reused or audited: 2026-06-18
+# Last reused or audited: 2026-08-21
 # Authority basis: docs/evidence/coarse_global_removal/FINAL_no_shadow_execution_flow_2026-06-18.md §6.
 #   The q_lcb empirical reliability guard is injected in family_decision_engine.decide() between
 #   scoring and selection: a candidate whose reliability cell abstains gets a non-positive edge,
@@ -132,6 +132,25 @@ def test_guard_inert_keeps_the_trade(monkeypatch, tmp_path):
     decision = _decide(engine, case, space, exposure, matrix, sizing)
     assert isinstance(decision, FamilyDecision)
     assert decision.selected is not None, "INERT guard must not block the trade"
+    assert decision.no_trade_reason is None
+    guard_mod.reset_reliability_cache()
+
+
+def test_stale_predecessor_artifact_is_inert_and_keeps_the_trade(monkeypatch, tmp_path):
+    artifact = tmp_path / "stale.json"
+    artifact.write_text(
+        '{"meta":{"schema_version":3},"cells":'
+        '{"high|L1|YES|modal|qb1|coarse_global":{"n":100,"hit_rate":0.8}}}'
+    )
+    monkeypatch.setattr(guard_mod, "_QLCB_OOF_RELIABILITY_PATH", str(artifact))
+    guard_mod.reset_reliability_cache()
+
+    engine, case, space, exposure, matrix, sizing = _tradeable_family(monkeypatch)
+    decision = _decide(engine, case, space, exposure, matrix, sizing)
+
+    assert guard_mod.reliability_artifact_status()["status"] == "STALE_SEMANTICS"
+    assert guard_mod.reliability_artifact_status()["active"] is False
+    assert decision.selected is not None
     assert decision.no_trade_reason is None
     guard_mod.reset_reliability_cache()
 

@@ -1,15 +1,14 @@
 # Created: 2026-06-18
-# Last reused or audited: 2026-06-18
+# Last reused or audited: 2026-08-21
 # Authority basis: coarse-global removal single-serving-rule evidence packet.
 #   §"THE q_lcb RELIABILITY GUARD — exact form" + step 6/7 of the single-serving-rule flow.
 #   Operator RAW no-de-bias law: q_lcb is made honest by an EMPIRICAL out-of-fold reliability
 #   guard that does NOT move μ (not a de-bias → law-compliant) and is the LIVE SERVING RULE
 #   (not a parallel product). Artifact-gated like the settlement sigma-floor
 #   (src/data/replacement_forecast_materializer._replacement_sigma_scale_lookup precedent):
-#   Runtime compatibility remains INERT (pass-through, no abstain) only when the OOF
-#   reliability table is absent. Live restart preflight is stricter: it requires an
-#   ACTIVE_VALID artifact so "absent" is not confused with "ready".
-#   Once the artifact exists, a missing side-aware cell is an evidence gap and abstains.
+#   Runtime compatibility remains INERT (pass-through, no abstain) unless the OOF
+#   reliability table is current-compatible and has at least one valid cell. Only an
+#   ACTIVE_VALID artifact may make a missing side-aware cell abstain.
 """q_lcb empirical reliability guard — the RAW-honest serving rule.
 
 THE CRUX (single-serving-rule flow): a RAW (uncorrected) center has a per-city
@@ -41,14 +40,13 @@ serving rule applied where the decision layer consumes q_lcb (family_decision_en
 abstains globally, the correct DIRECT decision is "do not trade those bins" — never "quietly
 use EB".
 
-ARTIFACT-GATED (absent-artifact runtime-inert only): the OOF reliability table is read from
+ARTIFACT-GATED: the OOF reliability table is read from
 ``state/qlcb_oof_reliability.json`` (gitignored generated artifact, same posture as the σ-floor
-and the anchor-debias artifacts). When the artifact is ABSENT the runtime guard remains INERT
-for compatibility — it serves ``band.q_lcb`` unchanged and abstains on NOTHING. That is not a
-live-restart readiness signal: restart preflight requires ``ACTIVE_VALID`` so absent/inert cannot
-be mistaken for a production-ready guard. Once the artifact exists, an unseen or incompatible
-cell ABSTAINS instead of passing through; an active artifact cannot silently authorize a side/bin
-it did not grade. The table itself is built OFFLINE from settled OOF predictions (the same
+and the anchor-debias artifacts). When the artifact is absent, malformed, empty, or stale for the
+current probability semantics, the predecessor guard remains INERT — it serves ``band.q_lcb``
+unchanged and abstains on NOTHING. Only a current-compatible artifact with at least one valid cell
+becomes ACTIVE_VALID; once active, an unseen cell ABSTAINS instead of passing through. The table
+itself is built OFFLINE from settled OOF predictions (the same
 settlement truth everything else grades on); this module only READS it and applies the Wilson
 lower bound + the trade/abstain rule. It NEVER fits per-city offsets, NEVER moves μ, and NEVER
 constructs a parallel q.
@@ -109,7 +107,7 @@ QLCB_BUCKET_EDGES: tuple[float, ...] = tuple(round(0.05 * i, 2) for i in range(2
 # Wilson interval z for a one-sided 95% lower bound (z_{0.95}).
 _WILSON_Z_95: float = 1.6448536269514722
 
-# The OOF reliability artifact path (gitignored generated file; INERT when absent).
+# The OOF reliability artifact path (gitignored generated file; INERT unless active-valid).
 _QLCB_OOF_RELIABILITY_PATH: str = "state/qlcb_oof_reliability.json"
 
 # A shape-valid artifact is not automatically live authority. These fields bind the table to
@@ -318,17 +316,17 @@ def wilson_lower_bound_95(hits: int, n: int) -> float:
 
 
 # ---------------------------------------------------------------------------
-# The OOF reliability table (artifact-gated; INERT when absent).
+# The OOF reliability table (artifact-gated; INERT unless active-valid).
 # ---------------------------------------------------------------------------
 
 def _load_reliability_table() -> dict[str, tuple[int, float]]:
     """Load the OOF reliability table ``{cell_key: (n, hit_rate)}`` (one-shot, cached).
 
     The artifact maps each cell key to ``{"n": int, "hit_rate": float}`` (the OOF realized
-    frequency the offline fitter wrote from settled predictions). The only inert state is
-    physical absence. A present but malformed, unreadable, empty, or incompatible artifact is
-    active with zero usable cells so live candidates abstain rather than consuming stale or
-    broken reliability evidence.
+    frequency the offline fitter wrote from settled predictions). Only a current-compatible
+    artifact with at least one valid cell is active. A malformed, unreadable, empty, or stale
+    predecessor artifact is observable through status telemetry but remains inert; it cannot
+    turn a local artifact fault into a global candidate veto.
     """
     global _RELIABILITY_CACHE, _RELIABILITY_LOADED
     global _RELIABILITY_ARTIFACT_ACTIVE, _RELIABILITY_ARTIFACT_STATUS
@@ -340,7 +338,6 @@ def _load_reliability_table() -> dict[str, tuple[int, float]]:
     path = _reliability_artifact_path()
     try:
         if os.path.exists(path):
-            artifact_active = True
             artifact_status = "ACTIVE_INVALID"
             with open(path, "r", encoding="utf-8") as fh:
                 artifact = json.load(fh)
@@ -350,7 +347,7 @@ def _load_reliability_table() -> dict[str, tuple[int, float]]:
                 out = {}
                 _RELIABILITY_CACHE = out
                 _RELIABILITY_LOADED = True
-                _RELIABILITY_ARTIFACT_ACTIVE = artifact_active
+                _RELIABILITY_ARTIFACT_ACTIVE = False
                 _RELIABILITY_ARTIFACT_STATUS = artifact_status
                 return out
             cells = artifact.get("cells") if isinstance(artifact, dict) else None
@@ -375,11 +372,12 @@ def _load_reliability_table() -> dict[str, tuple[int, float]]:
                         continue
                     if n > 0 and math.isfinite(hr) and 0.0 <= hr <= 1.0:
                         out[str(key)] = (n, hr)
-                artifact_status = "ACTIVE_VALID" if out else "ACTIVE_INVALID"
-    except Exception:  # noqa: BLE001 — present-but-bad is active fail-closed.
+                artifact_active = bool(out)
+                artifact_status = "ACTIVE_VALID" if artifact_active else "ACTIVE_INVALID"
+    except Exception:  # noqa: BLE001 — invalid predecessor evidence is observable but inert.
         out = {}
-        artifact_active = os.path.exists(path)
-        artifact_status = "ACTIVE_INVALID" if artifact_active else "ABSENT_ALLOWED"
+        artifact_active = False
+        artifact_status = "ACTIVE_INVALID" if os.path.exists(path) else "ABSENT_ALLOWED"
     _RELIABILITY_CACHE = out
     _RELIABILITY_LOADED = True
     _RELIABILITY_ARTIFACT_ACTIVE = artifact_active
@@ -449,7 +447,7 @@ class GuardVerdict:
     * ``abstained`` — True when the guard deflated q_safe to 0 (cell thin / below floor). The
       caller forces a non-positive edge so the candidate is rejected — never traded.
     * ``cell_key`` / ``L_g`` / ``n_g`` / ``bucket_floor`` — the guard provenance (step 7).
-    * ``basis`` — "INERT" when the artifact was absent (pass-through) so the receipt records
+    * ``basis`` — "INERT" when no active-valid artifact exists (pass-through) so the receipt records
       that the guard did not deflate; "OOF_WILSON_95" when an exact OOF cell was applied;
       "OOF_WILSON_95_POOLED_TAIL" when a sparse exact bucket was licensed by the same-family
       coarsened right-tail cell;
@@ -549,7 +547,7 @@ def apply_guard(
       1. Resolves the cell
          ``g = (metric, lead_bucket, side, bin_position, q_lcb_bucket, precision_class)``.
       2. Reads the OOF cell ``(N_g, hit_rate_g)`` from the table (artifact or injected).
-      3. INERT path — artifact absent: serves ``band_q_lcb`` unchanged, ``trade=True``,
+      3. INERT path — no active-valid artifact: serves ``band_q_lcb`` unchanged, ``trade=True``,
          ``basis="INERT"`` (pass-through, no abstain; the conservative edge_lcb>0 gate
          downstream is still the trade authority).
       4. ACTIVE path — cell known: ``L_g = wilson_lower_bound_95(hits, N_g)`` where
@@ -565,8 +563,8 @@ def apply_guard(
          claim families are not authority for live money.
 
     The guard NEVER moves μ and NEVER fits a per-city offset; it only serves a lower bound the
-    realized frequency supports (or abstains). Artifact read failures are active fail-closed when
-    the artifact is present; only physical absence is inert.
+    realized frequency supports (or abstains). Artifact read/compatibility failures are inert;
+    only a current-compatible, non-empty artifact may make a candidate abstain.
     """
     table = reliability_table if reliability_table is not None else _load_reliability_table()
     if reliability_artifact_active is not None:
@@ -586,8 +584,8 @@ def apply_guard(
     cell = table.get(key)
     if cell is None:
         if not artifact_active:
-            # INERT: no artifact at all. Serve band q_lcb unchanged — byte-identical to
-            # pre-guard behavior.
+            # INERT: no active-valid artifact. Serve band q_lcb unchanged — byte-identical to
+            # pre-guard behavior and isolated from predecessor artifact faults.
             return GuardVerdict(
                 q_safe=float(band_q_lcb),
                 trade=True,

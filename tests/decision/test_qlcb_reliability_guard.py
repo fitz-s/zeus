@@ -1,5 +1,5 @@
 # Created: 2026-06-18
-# Last reused or audited: 2026-06-18
+# Last reused or audited: 2026-08-21
 # Authority basis: docs/evidence/coarse_global_removal/FINAL_no_shadow_execution_flow_2026-06-18.md
 #   §"THE q_lcb RELIABILITY GUARD — exact form" + step 6. The guard serves
 #   q_safe = min(band.q_lcb, L_g) on known deep OOF cells and abstains (q_safe=0)
@@ -214,7 +214,7 @@ def test_guard_is_inert_when_artifact_absent_default_load(tmp_path, monkeypatch)
     guard_mod.reset_reliability_cache()
 
 
-def test_present_malformed_artifact_is_active_fail_closed(tmp_path, monkeypatch):
+def test_present_malformed_artifact_is_observable_but_inert(tmp_path, monkeypatch):
     artifact = tmp_path / "qlcb_oof_reliability.json"
     artifact.write_text("{not-json")
     monkeypatch.setattr(guard_mod, "_QLCB_OOF_RELIABILITY_PATH", str(artifact))
@@ -222,11 +222,11 @@ def test_present_malformed_artifact_is_active_fail_closed(tmp_path, monkeypatch)
 
     v = apply_guard(band_q_lcb=0.88, metric="low", lead_days=2.0, bin_position="modal")
 
-    assert v.basis == "OOF_WILSON_95_MISSING_CELL"
-    assert v.abstained is True
-    assert v.q_safe == 0.0
+    assert v.basis == "INERT"
+    assert v.abstained is False
+    assert v.q_safe == 0.88
     status = guard_mod.reliability_artifact_status()
-    assert status["active"] is True
+    assert status["active"] is False
     assert status["status"] == "ACTIVE_INVALID"
     guard_mod.reset_reliability_cache()
 
@@ -253,9 +253,11 @@ def test_shape_valid_artifact_without_live_semantic_meta_is_stale(tmp_path, monk
     v = apply_guard(band_q_lcb=0.08, metric="high", lead_days=1.0, bin_position="modal")
 
     assert status["status"] == "STALE_SEMANTICS"
+    assert status["active"] is False
     assert status["cell_count"] == 0
-    assert v.basis == "OOF_WILSON_95_MISSING_CELL"
-    assert v.abstained is True
+    assert v.basis == "INERT"
+    assert v.abstained is False
+    assert v.q_safe == 0.08
     guard_mod.reset_reliability_cache()
 
 
@@ -328,7 +330,9 @@ def test_file_artifact_without_current_probability_semantics_is_stale(
     )
 
     assert status["status"] == "STALE_SEMANTICS"
+    assert status["active"] is False
     assert status["cell_count"] == 0
-    assert verdict.abstained is True
-    assert verdict.q_safe == 0.0
+    assert verdict.basis == "INERT"
+    assert verdict.abstained is False
+    assert verdict.q_safe == 0.08
     guard_mod.reset_reliability_cache()
