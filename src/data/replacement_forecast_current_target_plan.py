@@ -113,6 +113,7 @@ class ReplacementForecastCurrentTargetPlanRow:
     openmeteo_source_run_id: str | None = None
     day0_observed_extreme_required: bool = False
     input_lag_reason: str | None = None
+    baseline_seed_eligible: bool = True
 
     @property
     def covered(self) -> bool:
@@ -129,6 +130,7 @@ class ReplacementForecastCurrentTargetPlanRow:
         return (
             not self.covered
             and not self.day0_observed_extreme_required
+            and self.baseline_seed_eligible
             and self.openmeteo_manifest_count > 0
             and self.fusion_current_value_count > 0
         )
@@ -161,6 +163,7 @@ class ReplacementForecastCurrentTargetPlanRow:
             "openmeteo_source_run_id": self.openmeteo_source_run_id,
             "day0_observed_extreme_required": self.day0_observed_extreme_required,
             "input_lag_reason": self.input_lag_reason,
+            "baseline_seed_eligible": self.baseline_seed_eligible,
             "covered": self.covered,
             "can_seed": self.can_seed,
             "missing_openmeteo_manifest": self.missing_openmeteo_manifest,
@@ -2312,6 +2315,9 @@ def build_replacement_forecast_current_target_plan(
             if "source_run_coverage" in tables
             else set()
         )
+        source_run_columns = (
+            _columns(conn, "source_run") if "source_run" in tables else set()
+        )
         if "source_run_coverage" in tables and not source_run_targets:
             return _blocked_plan("REPLACEMENT_CURRENT_TARGET_PLAN_SOURCE_RUN_DEPENDENCY_SCHEMA_MISSING")
         posterior_source_run_clause = ""
@@ -2363,6 +2369,31 @@ def build_replacement_forecast_current_target_plan(
                 if "city_timezone" in source_run_coverage_columns
                 else "NULL AS city_timezone"
             )
+            reference_sql = (
+                "julianday('"
+                + _ref_clock.isoformat().replace("'", "''")
+                + "')"
+            )
+            baseline_seed_terms = [
+                "c.completeness_status = 'COMPLETE'",
+                "c.readiness_status = 'LIVE_ELIGIBLE'",
+                f"julianday(c.computed_at) <= {reference_sql}",
+            ]
+            if "expires_at" in source_run_coverage_columns:
+                baseline_seed_terms.extend(
+                    (
+                        "c.expires_at IS NOT NULL",
+                        f"julianday(c.expires_at) > {reference_sql}",
+                    )
+                )
+            if "source_available_at" in source_run_columns:
+                baseline_seed_terms.extend(
+                    (
+                        "sr.source_available_at IS NOT NULL",
+                        f"julianday(sr.source_available_at) <= {reference_sql}",
+                    )
+                )
+            baseline_seed_predicate = " AND ".join(baseline_seed_terms)
             expected_high = expected_replacement_dependency_identity_by_role("high")["baseline_b0"]
             expected_low = expected_replacement_dependency_identity_by_role("low")["baseline_b0"]
             if metadata_column is not None:
@@ -2407,13 +2438,15 @@ def build_replacement_forecast_current_target_plan(
                         c.temperature_metric,
                         c.source_run_id AS baseline_source_run_id,
                         sr.source_cycle_time AS baseline_source_cycle_time,
+                        CASE WHEN {baseline_seed_predicate} THEN 1 ELSE 0 END
+                            AS baseline_seed_eligible,
                         c.computed_at,
                         c.recorded_at,
                         ROW_NUMBER() OVER (
                             PARTITION BY c.city, c.target_local_date, c.temperature_metric
                             ORDER BY
-                                CASE WHEN c.completeness_status = 'COMPLETE' THEN 0 ELSE 1 END,
-                                CASE WHEN c.readiness_status = 'LIVE_ELIGIBLE' THEN 0 ELSE 1 END,
+                                CASE WHEN {baseline_seed_predicate} THEN 0 ELSE 1 END,
+                                julianday(sr.source_cycle_time) DESC,
                                 c.computed_at DESC,
                                 c.recorded_at DESC
                         ) AS rn
@@ -2445,6 +2478,7 @@ def build_replacement_forecast_current_target_plan(
                         rc.temperature_metric,
                         rc.baseline_source_run_id,
                         rc.baseline_source_cycle_time,
+                        rc.baseline_seed_eligible,
                         (
                             SELECT COUNT(*)
                             FROM market_events m
@@ -2466,6 +2500,7 @@ def build_replacement_forecast_current_target_plan(
                     targets.temperature_metric,
                     targets.baseline_source_run_id,
                     targets.baseline_source_cycle_time,
+                    targets.baseline_seed_eligible,
                     targets.market_bin_count,
                     {coverage_select}
                 FROM targets
@@ -2757,6 +2792,11 @@ def build_replacement_forecast_current_target_plan(
                     openmeteo_source_run_id=openmeteo_source_run_id,
                     day0_observed_extreme_required=day0_observed_extreme_required,
                     input_lag_reason=input_lag_reason,
+                    baseline_seed_eligible=bool(
+                        row["baseline_seed_eligible"]
+                        if "baseline_seed_eligible" in row.keys()
+                        else True
+                    ),
                 )
             )
     finally:

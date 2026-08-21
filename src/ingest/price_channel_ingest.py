@@ -1285,69 +1285,72 @@ def _edli_durable_fill_bridge_candidate_ids(conn, *, limit: int) -> tuple[str, .
     table = _edli_events_table(conn)
     if table not in {"world.edli_live_order_events", "edli_live_order_events"}:
         raise ValueError(f"unexpected EDLI events table: {table!r}")
-    aggregate_ids = tuple(
-        str(_row_get(row, "aggregate_id") or "")
-        for row in conn.execute(
-            f"""
-            SELECT DISTINCT aggregate_id
-              FROM {table}
-             WHERE event_type = 'UserTradeObserved'
-               AND json_extract(payload_json, '$.fill_authority_state')
-                   = 'FILL_CONFIRMED'
-             ORDER BY aggregate_id ASC
-            """
-        ).fetchall()
-        if str(_row_get(row, "aggregate_id") or "")
-    )
-    if not aggregate_ids:
-        return False
+    bounded_limit = max(0, int(limit))
+    if bounded_limit == 0:
+        return ()
 
-    position_ids = {
-        str(_row_get(row, "position_id") or "")
-        for row in conn.execute("SELECT position_id FROM position_current").fetchall()
-        if str(_row_get(row, "position_id") or "")
-    }
-    command_position_by_aggregate = {
-        str(_row_get(row, "aggregate_id") or ""): str(
-            _row_get(row, "position_id") or ""
-        )
-        for row in conn.execute(
+    # The aggregate index streams one group at a time.  Do not materialize all
+    # confirmed fills, all positions, or the global command join merely to
+    # answer a limit=1 boot probe on append-only canonical databases.
+    aggregate_rows = conn.execute(
+        f"""
+        SELECT aggregate_id
+          FROM {table} INDEXED BY idx_edli_live_order_events_aggregate
+         WHERE event_type = 'UserTradeObserved'
+           AND json_extract(payload_json, '$.fill_authority_state')
+               = 'FILL_CONFIRMED'
+         GROUP BY aggregate_id
+         ORDER BY aggregate_id ASC
+        """
+    )
+    orphan_ids: list[str] = []
+    for row in aggregate_rows:
+        aggregate_id = str(_row_get(row, "aggregate_id") or "")
+        if not aggregate_id:
+            continue
+        canonical_position = conn.execute(
+            """
+            SELECT 1
+              FROM position_current
+             WHERE position_id IN (?, ?)
+             LIMIT 1
+            """,
+            (
+                edli_bridge_position_id(aggregate_id),
+                edli_bridge_position_id_legacy(aggregate_id),
+            ),
+        ).fetchone()
+        if canonical_position is not None:
+            continue
+        linked_position = conn.execute(
             f"""
-            WITH command_events AS (
-                SELECT aggregate_id,
-                       json_extract(
-                           payload_json,
-                           '$.execution_command_id'
-                       ) AS execution_command_id
-                  FROM {table}
-                 WHERE event_type = 'ExecutionCommandCreated'
-                   AND json_extract(
-                           payload_json,
-                           '$.execution_command_id'
-                       ) IS NOT NULL
-            )
-            SELECT ce.aggregate_id, vc.position_id
-              FROM command_events ce
+            SELECT 1
+              FROM {table} ce
               JOIN venue_commands vc
-                ON vc.command_id = ce.execution_command_id
-                OR vc.decision_id = ce.execution_command_id
+                ON vc.command_id = json_extract(
+                       ce.payload_json,
+                       '$.execution_command_id'
+                   )
+                OR vc.decision_id = json_extract(
+                       ce.payload_json,
+                       '$.execution_command_id'
+                   )
               JOIN position_current pc
                 ON pc.position_id = vc.position_id
-             WHERE vc.position_id IS NOT NULL
+             WHERE ce.aggregate_id = ?
+               AND ce.event_type = 'ExecutionCommandCreated'
+               AND vc.position_id IS NOT NULL
                AND vc.position_id != ''
-            """
-        ).fetchall()
-        if str(_row_get(row, "aggregate_id") or "")
-        and str(_row_get(row, "position_id") or "")
-    }
-    orphan_ids = (
-        aggregate_id
-        for aggregate_id in aggregate_ids
-        if edli_bridge_position_id(aggregate_id) not in position_ids
-        and edli_bridge_position_id_legacy(aggregate_id) not in position_ids
-        and command_position_by_aggregate.get(aggregate_id) not in position_ids
-    )
-    return tuple(list(orphan_ids)[: max(0, limit)])
+             LIMIT 1
+            """,
+            (aggregate_id,),
+        ).fetchone()
+        if linked_position is not None:
+            continue
+        orphan_ids.append(aggregate_id)
+        if len(orphan_ids) >= bounded_limit:
+            break
+    return tuple(orphan_ids)
 
 
 def _edli_durable_fill_bridge_work_exists(conn) -> bool:

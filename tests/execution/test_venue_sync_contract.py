@@ -328,6 +328,27 @@ def test_capture_snapshot_preserves_authenticated_point_absence():
     snapshot = vsc.capture_venue_read_snapshot(Client(), order_ids=["order-1"])
 
     assert snapshot.get_order("order-1") is None
+    assert snapshot.authenticated_point_order_absent("order-1") is True
+    assert snapshot.authenticated_point_order_absent("another-order") is False
+
+
+def test_capture_snapshot_preserves_declared_authenticated_none_absence():
+    from src.execution import venue_sync_contract as vsc
+
+    class Client:
+        authenticated_point_absence_returns_none = True
+
+        def get_account_truth(self, *, deadline_monotonic):
+            assert deadline_monotonic > time.monotonic()
+            return type("Truth", (), {"open_orders": (), "trades": ()})()
+
+        def get_order(self, _order_id):
+            return None
+
+    snapshot = vsc.capture_venue_read_snapshot(Client(), order_ids=["order-1"])
+
+    assert snapshot.get_order("order-1") is None
+    assert snapshot.authenticated_point_order_absent("order-1") is True
 
 
 def test_complete_account_snapshot_also_captures_authenticated_point_order_reads():
@@ -357,6 +378,7 @@ def test_complete_account_snapshot_also_captures_authenticated_point_order_reads
 
     assert snapshot.get_order("order-live") == open_order
     assert snapshot.get_order("order-absent") is None
+    assert snapshot.authenticated_point_order_absent("order-absent") is False
 
 
 def test_point_order_snapshot_stops_network_reads_after_shared_deadline():

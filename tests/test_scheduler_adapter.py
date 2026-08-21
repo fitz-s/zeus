@@ -275,7 +275,9 @@ def test_replacement_materializer_default_limit_matches_seed_burst(monkeypatch) 
     )
 
 
-def test_replacement_materialize_poll_uses_configured_micro_batch(monkeypatch) -> None:
+def test_replacement_materialize_poll_reclaims_priority_after_each_worker_tranche(
+    monkeypatch,
+) -> None:
     """Every hot-queue branch must use the configured bounded micro-batch."""
     import src.data.replacement_forecast_production as prod
     import src.ingest.forecast_live_daemon as daemon
@@ -318,9 +320,9 @@ def test_replacement_materialize_poll_uses_configured_micro_batch(monkeypatch) -
     daemon._replacement_forecast_materialize_poll_job()
 
     assert calls == [
-        {"discover": False, "limit": 8, "seed_limit": 0},
-        {"discover": False, "limit": 8, "seed_limit": 8},
-        {"discover": False, "limit": 8, "seed_limit": 0},
+        {"discover": False, "limit": 1, "seed_limit": 0},
+        {"discover": False, "limit": 1, "seed_limit": 1},
+        {"discover": False, "limit": 1, "seed_limit": 0},
     ]
 
 

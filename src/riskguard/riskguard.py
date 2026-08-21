@@ -6,7 +6,7 @@ and emits durable risk actions into zeus.db when the canonical table exists.
 Graduated response: GREEN → YELLOW → ORANGE → RED.
 
 # Created: (pre-audit)
-# Last reused or audited: 2026-08-18
+# Last reused or audited: 2026-08-19
 # Authority basis: connection-leak audit 2026-05-10 — 51 open zeus-world.db-wal
 #   handles observed on PID 18538. Root cause: tick() and tick_with_portfolio()
 #   opened zeus_conn / risk_conn without try/finally, so any exception in the
@@ -14,6 +14,9 @@ Graduated response: GREEN → YELLOW → ORANGE → RED.
 #   try/finally to guarantee conn.close() on every exit path.
 #   2026-05-17 live lock remediation: trade/world metric lock loss degrades to
 #   a fresh DATA_DEGRADED risk_state row, not stale RED force-exit.
+#   2026-08-19 Day0 revision admission: an established Day0 strategy whose
+#   current probability semantics lacks causal capital proof is revision-gated
+#   before BUY while its no-money shadow continues to drain evidence.
 #   2026-06-08 thepath/audit-realign iron #4/#6 fix: (1) init_risk_db re-applies
 #   busy_timeout after executescript (Fitz #5 strip-trap); (2) lock-attestation
 #   FAILS CONSERVATIVE — max(previous_level, DATA_DEGRADED), never re-stamps a
@@ -32,6 +35,7 @@ import math
 import os
 import shutil
 import sqlite3
+import subprocess
 import sys
 import time
 from collections.abc import Mapping
@@ -41,6 +45,7 @@ from datetime import datetime, timedelta, timezone
 from src.config import settings, get_mode
 from src.data.replacement_forecast_cycle_policy import (
     CURRENT_EVIDENCE_SEMANTICS_REVISION,
+    LIVE_CURRENT_EVIDENCE_SEMANTICS_REVISIONS,
     STALE_ENSEMBLE_ABSOLUTE_DISAGREEMENT_SEMANTICS_REVISION,
     _current_evidence_shape,
     current_evidence_shape_semantics_mismatch,
@@ -113,6 +118,189 @@ _RISKGUARD_OPEN_RUNTIME_STATES = frozenset({
 _STORAGE_ENTRY_MIN_FREE_BYTES_DEFAULT = 64 * 1024**3
 _STORAGE_ENTRY_MIN_FREE_RATIO_DEFAULT = 0.10
 _disk_usage = shutil.disk_usage
+
+_POWER_RUNWAY_YELLOW_MINUTES_DEFAULT = 60.0
+_POWER_RUNWAY_ORANGE_MINUTES_DEFAULT = 30.0
+_POWER_RUNWAY_RED_MINUTES_DEFAULT = 15.0
+_POWER_PERCENT_YELLOW_DEFAULT = 20
+_POWER_PERCENT_ORANGE_DEFAULT = 10
+_POWER_PERCENT_RED_DEFAULT = 5
+
+
+def _pmset_battery_status() -> str:
+    completed = subprocess.run(
+        ["pmset", "-g", "batt"],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=2.0,
+    )
+    return completed.stdout
+
+
+def host_power_runway_snapshot(raw_status: str | None = None) -> dict[str, object]:
+    """Classify whether the live host can retain execution authority.
+
+    SCOPE: YELLOW blocks new entries, ORANGE permits only favorable reduction,
+    and RED activates the existing portfolio-wide reduce-only sweep. DRAIN:
+    RiskGuard re-reads macOS power truth every 60 seconds while the host is
+    awake. RESET: AC power, or Battery Power above every configured runway and
+    percentage watermark, returns GREEN on the next tick.
+    """
+
+    if raw_status is None and (get_mode() != "live" or sys.platform != "darwin"):
+        return {
+            "level": RiskLevel.GREEN.value,
+            "status": "NOT_APPLICABLE",
+            "reason": None,
+            "source": "non_live_or_non_darwin_host",
+        }
+
+    power_config = settings["riskguard"]
+    try:
+        yellow_minutes = float(
+            power_config.get(
+                "power_runway_yellow_minutes",
+                _POWER_RUNWAY_YELLOW_MINUTES_DEFAULT,
+            )
+        )
+        orange_minutes = float(
+            power_config.get(
+                "power_runway_orange_minutes",
+                _POWER_RUNWAY_ORANGE_MINUTES_DEFAULT,
+            )
+        )
+        red_minutes = float(
+            power_config.get(
+                "power_runway_red_minutes",
+                _POWER_RUNWAY_RED_MINUTES_DEFAULT,
+            )
+        )
+        yellow_percent = int(
+            power_config.get(
+                "power_percent_yellow",
+                _POWER_PERCENT_YELLOW_DEFAULT,
+            )
+        )
+        orange_percent = int(
+            power_config.get(
+                "power_percent_orange",
+                _POWER_PERCENT_ORANGE_DEFAULT,
+            )
+        )
+        red_percent = int(
+            power_config.get("power_percent_red", _POWER_PERCENT_RED_DEFAULT)
+        )
+        if not (
+            math.isfinite(yellow_minutes)
+            and math.isfinite(orange_minutes)
+            and math.isfinite(red_minutes)
+            and yellow_minutes > orange_minutes > red_minutes > 0.0
+            and 100 >= yellow_percent > orange_percent > red_percent >= 0
+        ):
+            raise ValueError("power runway watermarks are not strictly ordered")
+    except (TypeError, ValueError) as exc:
+        return {
+            "level": RiskLevel.DATA_DEGRADED.value,
+            "status": "CONFIG_INVALID",
+            "reason": f"{type(exc).__name__}:{exc}",
+            "source": "pmset",
+        }
+
+    try:
+        status = raw_status if raw_status is not None else _pmset_battery_status()
+    except (OSError, subprocess.SubprocessError) as exc:
+        return {
+            "level": RiskLevel.DATA_DEGRADED.value,
+            "status": "POWER_TRUTH_UNAVAILABLE",
+            "reason": f"{type(exc).__name__}:{exc}",
+            "source": "pmset",
+        }
+
+    lines = [line.strip() for line in str(status).splitlines() if line.strip()]
+    source = ""
+    if lines and "'" in lines[0]:
+        source = lines[0].split("'", 2)[1].strip()
+    battery_line = next((line for line in lines[1:] if "%" in line), "")
+    try:
+        percent_text = next(
+            part.strip().removesuffix("%")
+            for part in battery_line.split(";")
+            if part.strip().endswith("%")
+        )
+        percent = int(percent_text.rsplit(None, 1)[-1])
+    except (StopIteration, TypeError, ValueError):
+        percent = None
+
+    remaining_minutes: float | None = None
+    for part in battery_line.split(";"):
+        token = part.strip()
+        if " remaining" not in token:
+            continue
+        clock = token.split(" remaining", 1)[0].strip()
+        if ":" not in clock:
+            continue
+        hours_text, minutes_text = clock.split(":", 1)
+        try:
+            remaining_minutes = int(hours_text) * 60.0 + int(minutes_text)
+        except ValueError:
+            remaining_minutes = None
+        break
+
+    if source == "AC Power":
+        return {
+            "level": RiskLevel.GREEN.value,
+            "status": "AC_POWER",
+            "reason": None,
+            "source": "pmset",
+            "power_source": source,
+            "battery_percent": percent,
+            "remaining_minutes": remaining_minutes,
+        }
+    if source != "Battery Power" or percent is None:
+        return {
+            "level": RiskLevel.DATA_DEGRADED.value,
+            "status": "POWER_TRUTH_INVALID",
+            "reason": "POWER_SOURCE_OR_PERCENT_UNREADABLE",
+            "source": "pmset",
+            "power_source": source or None,
+            "battery_percent": percent,
+            "remaining_minutes": remaining_minutes,
+        }
+
+    level = RiskLevel.GREEN
+    reason = None
+    if percent <= red_percent or (
+        remaining_minutes is not None and remaining_minutes <= red_minutes
+    ):
+        level = RiskLevel.RED
+        reason = "HOST_EXECUTION_RUNWAY_CRITICAL"
+    elif percent <= orange_percent or (
+        remaining_minutes is not None and remaining_minutes <= orange_minutes
+    ):
+        level = RiskLevel.ORANGE
+        reason = "HOST_EXECUTION_RUNWAY_SEVERE"
+    elif percent <= yellow_percent or (
+        remaining_minutes is not None and remaining_minutes <= yellow_minutes
+    ):
+        level = RiskLevel.YELLOW
+        reason = "HOST_EXECUTION_RUNWAY_LOW"
+
+    return {
+        "level": level.value,
+        "status": "BATTERY_POWER",
+        "reason": reason,
+        "source": "pmset",
+        "power_source": source,
+        "battery_percent": percent,
+        "remaining_minutes": remaining_minutes,
+        "yellow_minutes": yellow_minutes,
+        "orange_minutes": orange_minutes,
+        "red_minutes": red_minutes,
+        "yellow_percent": yellow_percent,
+        "orange_percent": orange_percent,
+        "red_percent": red_percent,
+    }
 
 
 def storage_capacity_snapshot(path=None) -> dict[str, object]:
@@ -1816,10 +2004,7 @@ def _bind_qkernel_probability_semantics(
     """
 
     output = [dict(row) for row in rows]
-    accepted_revisions = {
-        CURRENT_EVIDENCE_SEMANTICS_REVISION,
-        STALE_ENSEMBLE_ABSOLUTE_DISAGREEMENT_SEMANTICS_REVISION,
-    }
+    accepted_revisions = set(LIVE_CURRENT_EVIDENCE_SEMANTICS_REVISIONS)
     qkernel_rows = [
         row
         for row in output
@@ -2411,10 +2596,7 @@ def _settled_market_relative_alpha_shadow_rows(
         expected_revisions = {DAY0_PROBABILITY_SEMANTICS_REVISION}
         expected_source_status = "current_day0_probability_authority"
     elif strategy_key == "forecast_qkernel_entry":
-        expected_revisions = {
-            CURRENT_EVIDENCE_SEMANTICS_REVISION,
-            STALE_ENSEMBLE_ABSOLUTE_DISAGREEMENT_SEMANTICS_REVISION,
-        }
+        expected_revisions = set(LIVE_CURRENT_EVIDENCE_SEMANTICS_REVISIONS)
         expected_source_status = "current_qkernel_probability_authority"
     else:
         raise ValueError("market-relative alpha shadow strategy is not canonical")
@@ -5053,6 +5235,8 @@ def _persist_dependency_db_locked_attestation(exc: sqlite3.OperationalError) -> 
     only the metrics refresh degraded. If no full attestation is fresh, degrade
     to DATA_DEGRADED.
     """
+    host_power = host_power_runway_snapshot()
+    host_power_level = RiskLevel(str(host_power["level"]))
     now = datetime.now(timezone.utc)
     now_ts = now.isoformat()
     risk_conn = get_connection(RISK_DB_PATH, write_class="live")
@@ -5096,6 +5280,11 @@ def _persist_dependency_db_locked_attestation(exc: sqlite3.OperationalError) -> 
                 "previous_full_risk_checked_at": previous_full["checked_at"],
                 "conservative_floor_applied": False,
             }
+        stored_level = level
+        level = overall_level(level, host_power_level)
+        details["host_power_level"] = host_power_level.value
+        details["host_power"] = host_power
+        details["host_power_floor_applied"] = level is not stored_level
         risk_conn.execute(
             """
             INSERT INTO risk_state (level, brier, accuracy, win_rate, details_json, checked_at)
@@ -5128,6 +5317,8 @@ def _persist_tick_in_progress_attestation() -> None:
     tick. Rows written here are not full metrics and are never accepted by
     _latest_fresh_full_risk_row; they expire through the normal freshness floor.
     """
+    host_power = host_power_runway_snapshot()
+    host_power_level = RiskLevel(str(host_power["level"]))
     now = datetime.now(timezone.utc)
     risk_conn = get_connection(RISK_DB_PATH, write_class="live")
     try:
@@ -5135,6 +5326,8 @@ def _persist_tick_in_progress_attestation() -> None:
         previous_full = _latest_fresh_full_risk_row(risk_conn, now=now)
         if previous_full is None:
             return
+        previous_level = RiskLevel(str(previous_full["level"]))
+        level = overall_level(previous_level, host_power_level)
         details = {
             **_risk_details_contract_from_full_row(previous_full),
             "status": "metrics_in_progress_previous_risk_level_preserved",
@@ -5142,6 +5335,9 @@ def _persist_tick_in_progress_attestation() -> None:
             "full_metrics_status": "in_progress_previous_fresh_level_preserved",
             "previous_full_risk_level": previous_full["level"],
             "previous_full_risk_checked_at": previous_full["checked_at"],
+            "host_power_level": host_power_level.value,
+            "host_power": host_power,
+            "host_power_floor_applied": level is not previous_level,
         }
         risk_conn.execute(
             """
@@ -5149,7 +5345,7 @@ def _persist_tick_in_progress_attestation() -> None:
             VALUES (?, NULL, NULL, NULL, ?, ?)
             """,
             (
-                previous_full["level"],
+                level.value,
                 json.dumps(details),
                 now.isoformat(),
             ),
@@ -5204,6 +5400,8 @@ def _tick_once() -> RiskLevel:
     # attestation row can be written), the short busy_timeout, and the WAL-leak
     # fix are all preserved.
     # Relationship test: tests/riskguard/test_no_network_io_under_conn.py.
+    host_power = host_power_runway_snapshot()
+    host_power_level = RiskLevel(str(host_power["level"]))
     bankroll_of_record = _bankroll_of_record_for_riskguard()
 
     try:
@@ -5262,13 +5460,16 @@ def _tick_once() -> RiskLevel:
             if previous_full is not None:
                 details["previous_full_risk_level"] = previous_full["level"]
                 details["previous_full_risk_checked_at"] = previous_full["checked_at"]
+            level = overall_level(RiskLevel.DATA_DEGRADED, host_power_level)
+            details["host_power_level"] = host_power_level.value
+            details["host_power"] = host_power
             risk_conn.execute(
                 """
                 INSERT INTO risk_state (level, brier, accuracy, win_rate, details_json, checked_at)
                 VALUES (?, NULL, NULL, NULL, ?, ?)
                 """,
                 (
-                    RiskLevel.DATA_DEGRADED.value,
+                    level.value,
                     json.dumps(details),
                     now_ts,
                 ),
@@ -5278,7 +5479,7 @@ def _tick_once() -> RiskLevel:
                 "RiskGuard tick fail-closed: bankroll truth unavailable "
                 "(no fresh collateral snapshot and no direct wallet value)",
             )
-            return RiskLevel.DATA_DEGRADED
+            return level
 
         current_bankroll_usd = float(bankroll_of_record.value_usd)
         settlement_scan_rows = query_authoritative_settlement_rows(
@@ -5459,13 +5660,18 @@ def _tick_once() -> RiskLevel:
                 required_evalue=market_relative_alpha_evalue,
             )
         )
-        (
-            day0_market_relative_alpha_gate_reason,
-            day0_market_relative_alpha_gate_revisions,
-        ) = _market_relative_alpha_rejection_gate_reason(
-            day0_probability_semantics_binding,
-            day0_market_relative_alpha_evidence,
-            required_evalue=market_relative_alpha_evalue,
+        day0_market_relative_alpha_gate_reason = (
+            _market_relative_alpha_gate_reason(
+                day0_probability_semantics_binding,
+                day0_market_relative_alpha_evidence,
+                required_evalue=market_relative_alpha_evalue,
+            )
+        )
+        day0_market_relative_alpha_gate_revisions = (
+            _market_relative_alpha_unproven_revisions(
+                day0_probability_semantics_binding,
+                day0_market_relative_alpha_evidence,
+            )
         )
         day0_market_relative_alpha_gate_required = (
             day0_market_relative_alpha_gate_reason is not None
@@ -5618,11 +5824,14 @@ def _tick_once() -> RiskLevel:
         recommended_control_reasons: dict[str, list[str]] = {}
         recommended_strategy_gate_reasons: dict[str, list[str]] = {}
         recommended_strategy_gate_scopes: dict[str, set[str]] = {}
-        # Current q/book/wealth economics are the decision authority. Walk-forward
-        # market-relative evidence remains revision-bound, but missing or
-        # inconclusive history cannot create an absorbing no-entry state: doing
-        # so prevents the fills that can ever settle that evidence. Only direct
-        # rejection of the same executable capital law emits an alpha gate.
+        # Current q/book/wealth economics are the decision authority. Qkernel
+        # revisions retain rejection-only gating because their ordinary live
+        # cohort already supplies a causal settlement drain. A new Day0
+        # probability semantics revision has a different contract: it must earn
+        # admission from the no-money global-auction shadow before risking
+        # capital. The shadow continues while gated and later verified
+        # settlements reset the exact revision-scoped gate. Held monitoring and
+        # exits are outside this entry-only policy.
         probability_semantics_level = RiskLevel.GREEN
         if probability_semantics_binding.get("status") == "unavailable":
             probability_semantics_level = RiskLevel.DATA_DEGRADED
@@ -6077,6 +6286,7 @@ def _tick_once() -> RiskLevel:
             unresolved_exposure_level,
             probability_semantics_level,
             storage_capacity_level,
+            host_power_level,
         )
 
         risk_conn.execute("""
@@ -6147,7 +6357,7 @@ def _tick_once() -> RiskLevel:
                     day0_market_relative_alpha_evidence
                 ),
                 "day0_market_relative_alpha_admission_role": (
-                    "revision_scoped_rejection_gate"
+                    "revision_scoped_pretrade_proof_gate"
                 ),
                 "day0_market_relative_alpha_gate_reason": (
                     day0_market_relative_alpha_gate_reason
@@ -6178,6 +6388,8 @@ def _tick_once() -> RiskLevel:
                 "unresolved_exposure_level": unresolved_exposure_level.value,
                 "storage_capacity_level": storage_capacity_level.value,
                 "storage_capacity": storage_capacity,
+                "host_power_level": host_power_level.value,
+                "host_power": host_power,
                 "daily_loss_level": daily_loss_level.value,
                 "weekly_loss_level": weekly_loss_level.value,
                 "trailing_loss_decision_role": "record_only",
@@ -6510,6 +6722,8 @@ def tick_with_portfolio(portfolio: PortfolioState) -> RiskLevel:
     Connection discipline: both connections closed in finally so exceptions
     never leave dangling handles (same leak fix as tick(), 2026-05-10).
     """
+    host_power = host_power_runway_snapshot()
+    host_power_level = RiskLevel(str(host_power["level"]))
     risk_conn = get_connection(RISK_DB_PATH, write_class="live")
     zeus_conn = _get_runtime_trade_connection()
     try:
@@ -6541,6 +6755,7 @@ def tick_with_portfolio(portfolio: PortfolioState) -> RiskLevel:
             RiskLevel.GREEN,
             collateral_identity_level,
             storage_capacity_level,
+            host_power_level,
         )
 
         return level

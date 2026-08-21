@@ -31,6 +31,7 @@ from src.data.market_topology_rows import prime_frozen_schema_reads
 from src.data.replacement_forecast_cycle_policy import (
     BETWEEN_COHORT_STATUS_SIMULTANEOUS_PROVEN,
     CURRENT_EVIDENCE_SEMANTICS_REVISION,
+    LIVE_CURRENT_EVIDENCE_SEMANTICS_REVISIONS,
     STALE_ENSEMBLE_ABSOLUTE_DISAGREEMENT_SEMANTICS_REVISION,
     _current_evidence_shape,
     current_evidence_shape_has_entry_authority,
@@ -5014,8 +5015,8 @@ def _qkernel_shadow_current_semantics_by_posterior(
         return {}
     # FAIL-CLOSED GATE CONTRACT
     # SCOPE: qkernel no-money shadow evidence only; auction actions are unchanged.
-    # DRAIN: the next same-cycle or bounded latest-causal posterior on this
-    # decision snapshot is eligible.
+    # DRAIN: the next same-cycle target-specific posterior on this decision
+    # snapshot is eligible.
     # RESET: a fresh posterior hash maps to its exact licensed semantics and
     # may claim its target-date key.
     output: dict[str, str] = {}
@@ -5040,10 +5041,7 @@ def _qkernel_shadow_current_semantics_by_posterior(
                     and not current_evidence_shape_semantics_mismatch(provenance)
                 ):
                     revision = str(shape.get("semantics_revision") or "")
-                    if revision in {
-                        CURRENT_EVIDENCE_SEMANTICS_REVISION,
-                        STALE_ENSEMBLE_ABSOLUTE_DISAGREEMENT_SEMANTICS_REVISION,
-                    }:
+                    if revision in LIVE_CURRENT_EVIDENCE_SEMANTICS_REVISIONS:
                         output[str(posterior_identity_hash)] = revision
     except (sqlite3.Error, TypeError, ValueError):
         # Evidence collection may drain an entry gate but must never disturb the
@@ -5211,11 +5209,7 @@ def _market_relative_alpha_shadow_events(
             probability_ready = bool(
                 q_version
                 and posterior_identity_hash
-                and revision
-                in {
-                    CURRENT_EVIDENCE_SEMANTICS_REVISION,
-                    STALE_ENSEMBLE_ABSOLUTE_DISAGREEMENT_SEMANTICS_REVISION,
-                }
+                and revision in LIVE_CURRENT_EVIDENCE_SEMANTICS_REVISIONS
             )
             source_status = "current_qkernel_probability_authority"
             shadow_reason = _QKERNEL_ALPHA_SHADOW_REASON
@@ -5514,11 +5508,7 @@ def _market_relative_alpha_shadow_exit_events(
             and current_revision != DAY0_PROBABILITY_SEMANTICS_REVISION
         ) or (
             strategy_key == "forecast_qkernel_entry"
-            and current_revision
-            not in {
-                CURRENT_EVIDENCE_SEMANTICS_REVISION,
-                STALE_ENSEMBLE_ABSOLUTE_DISAGREEMENT_SEMANTICS_REVISION,
-            }
+            and current_revision not in LIVE_CURRENT_EVIDENCE_SEMANTICS_REVISIONS
         ):
             continue
         current_q = family_payoff_point_q(witness, bin_id=bin_id, side=side)

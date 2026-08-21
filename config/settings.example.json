@@ -175,7 +175,13 @@
     "max_drawdown_pct": 0.2,
     "staleness_hours": 6,
     "storage_entry_min_free_bytes": 68719476736,
-    "storage_entry_min_free_ratio": 0.1
+    "storage_entry_min_free_ratio": 0.1,
+    "power_runway_yellow_minutes": 60,
+    "power_runway_orange_minutes": 30,
+    "power_runway_red_minutes": 15,
+    "power_percent_yellow": 20,
+    "power_percent_orange": 10,
+    "power_percent_red": 5
   },
   "execution": {
     "order_type": "limit_only",

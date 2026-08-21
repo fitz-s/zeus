@@ -3026,6 +3026,68 @@ def test_current_target_plan_reseeds_when_openmeteo_anchor_advances_under_same_b
     assert paris.can_seed is True
 
 
+def test_current_target_plan_does_not_call_expired_or_partial_baseline_seedable(tmp_path) -> None:
+    """Planner and seed discovery must share the baseline eligibility contract."""
+
+    db = tmp_path / "forecasts.db"
+    _create_db(db)
+    conn = sqlite3.connect(db)
+    try:
+        conn.execute("ALTER TABLE source_run ADD COLUMN source_available_at TEXT")
+        conn.execute("ALTER TABLE source_run_coverage ADD COLUMN expires_at TEXT")
+        conn.execute(
+            "UPDATE source_run SET source_available_at='2026-06-07T08:00:00+00:00'"
+        )
+        conn.execute(
+            "UPDATE source_run_coverage SET expires_at='2026-06-08T00:00:00+00:00'"
+        )
+        conn.execute(
+            "UPDATE source_run_coverage SET expires_at='2026-06-07T10:00:00+00:00' "
+            "WHERE city='Paris'"
+        )
+        conn.execute(
+            "INSERT INTO source_run VALUES (?, ?, ?)",
+            (
+                "baseline-partial-Paris",
+                "2026-06-07T09:00:00+00:00",
+                "2026-06-07T11:00:00+00:00",
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO source_run_coverage (
+                coverage_id, source_run_id, source_id, city, target_local_date,
+                temperature_metric, data_version, completeness_status,
+                readiness_status, computed_at, recorded_at, expires_at
+            ) VALUES (
+                'coverage-partial-Paris', 'baseline-partial-Paris',
+                'ecmwf_open_data', 'Paris', '2026-06-09', 'high',
+                'ecmwf_opendata_mx2t3_local_calendar_day_max',
+                'PARTIAL', 'BLOCKED', '2026-06-07T11:00:00+00:00',
+                '2026-06-07T11:00:00+00:00', NULL
+            )
+            """
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    plan = build_replacement_forecast_current_target_plan(
+        db,
+        now_utc=datetime(2026, 6, 7, 12, 0, tzinfo=timezone.utc),
+    )
+    paris = next(row for row in plan.rows if row.city == "Paris")
+    download_plan = replacement_forecast_download_plan_from_current_targets(plan)
+
+    assert paris.baseline_source_run_id == "baseline-partial-Paris"
+    assert paris.baseline_seed_eligible is False
+    assert paris.can_seed is False
+    assert all(
+        target["city"] != "Paris"
+        for target in download_plan["seedable_targets"]
+    )
+
+
 def test_current_target_plan_does_not_treat_blocked_replacement_readiness_as_covered(tmp_path) -> None:
     db = tmp_path / "forecasts.db"
     _create_db(db)

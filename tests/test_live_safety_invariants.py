@@ -1,9 +1,9 @@
 # Created: 2026-03-31
-# Lifecycle: created=2026-03-31; last_reviewed=2026-08-18; last_reused=2026-08-18
+# Lifecycle: created=2026-03-31; last_reviewed=2026-08-20; last_reused=2026-08-20
 # Purpose: Lock live-money safety invariants across fill, exit, chain, and P&L flows.
 # Reuse: Run for execution finality, live exit, chain reconciliation, and safety invariant changes.
-# Last reused/audited: 2026-08-18
-# Authority basis: finite-evidence single-q global SELL ownership; price-band parity hot-fix
+# Last reused/audited: 2026-08-20
+# Authority basis: monitor evidence-axis independence and unavailable-decision hot-fix
 """Live safety invariant tests: relationship tests, not function tests.
 
 These verify cross-module relationships that prevent ghost positions,
@@ -6767,7 +6767,11 @@ def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_
         position.last_monitor_market_price_is_fresh = True
         position.last_monitor_best_bid = 0.49
         position.last_monitor_best_ask = 0.50
-        position.last_monitor_at = "2026-07-14T18:00:00+00:00"
+        position.last_monitor_at = (
+            "2026-07-14T17:59:59+00:00"
+            if posterior_support_zero
+            else "2026-07-14T18:00:00+00:00"
+        )
         setattr(
             position,
             monitor_refresh._HELD_MONITOR_MIN_ORDER_SIZE_ATTR,
@@ -7245,6 +7249,10 @@ def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_
                 pos.applied_validations
             )
             assert execute_authorities[0] is not None
+            assert execute_authorities[0].probability_observed_at == (
+                "2026-07-14T18:00:00+00:00"
+            )
+            assert execute_authorities[0].probability_observed_at == pos.last_monitor_at
         else:
             assert execute_authorities == [None]
         assert execute_calls == [pos]
@@ -20158,6 +20166,73 @@ def test_monitor_degraded_attempt_is_not_an_economic_hold_decision():
     assert payload["exit_decision_trigger"] == "MONITOR_INPUTS_UNAVAILABLE"
 
 
+def test_monitor_deadline_preserves_current_axes_without_decision_authority(monkeypatch):
+    """A completed refresh remains observable even when decision time expires."""
+    from src.engine import cycle_runtime
+
+    position = _make_position(trade_id="monitor-deadline-current-axes")
+    position.last_monitor_prob = 0.91
+    position.last_monitor_prob_is_fresh = True
+    position.last_monitor_edge = 0.41
+    position.last_monitor_market_price = 0.50
+    position.last_monitor_market_price_is_fresh = True
+    emitted = []
+    results = []
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_emit_monitor_refreshed_canonical_if_available",
+        lambda *_args, **kwargs: emitted.append(kwargs) or True,
+    )
+    artifact = type(
+        "Artifact",
+        (),
+        {"add_monitor_result": lambda self, result: results.append(result)},
+    )()
+    summary = {"monitors": 0}
+
+    assert cycle_runtime._record_monitor_data_degraded_attempt(
+        None,
+        position,
+        artifact=artifact,
+        deps=_monitor_test_deps("test_monitor_deadline_current_axes"),
+        summary=summary,
+        stage="refresh_deadline",
+        preserve_current_attempt_axes=True,
+    ) is True
+
+    assert position.last_monitor_prob_is_fresh is True
+    assert position.last_monitor_market_price_is_fresh is True
+    assert position.last_monitor_edge is None
+    assert results[0].fresh_prob == pytest.approx(0.91)
+    assert results[0].fresh_edge is None
+    assert emitted[0]["decision_unavailable_reason"] == (
+        "MONITOR_INPUTS_UNAVAILABLE:REFRESH_DEADLINE"
+    )
+    assert summary["monitors"] == 1
+
+
+def test_monitor_cadence_rejects_fresh_axes_without_completed_decision():
+    """Fresh q/book cannot turn a deadline event into a completed redecision."""
+    from src.ops.monitor_cadence import _monitor_event_fresh_input_issue
+
+    payload = {
+        "last_monitor_prob": 0.91,
+        "last_monitor_prob_is_fresh": True,
+        "last_monitor_market_price": 0.50,
+        "last_monitor_market_price_is_fresh": True,
+        "exit_decision_available": False,
+    }
+    event = {"payload_json": json.dumps(payload)}
+
+    assert _monitor_event_fresh_input_issue(event) == (
+        "monitor_exit_decision_unavailable"
+    )
+    payload["last_monitor_market_price"] = None
+    payload["last_monitor_market_price_is_fresh"] = False
+    event["payload_json"] = json.dumps(payload)
+    assert _monitor_event_fresh_input_issue(event) == "monitor_clob_stale"
+
+
 def test_incomplete_exit_context_is_not_persisted_as_economic_hold(monkeypatch):
     from src.engine import cycle_runtime
 
@@ -22655,8 +22730,8 @@ def test_blocked_global_debt_lineage_preserves_eight_primary_refreshes(
     conn.close()
 
 
-def test_monitor_refresh_deadline_defers_before_canonical_emit(monkeypatch):
-    """A refresh that consumes its claim budget cannot append stale monitor truth."""
+def test_monitor_refresh_deadline_preserves_current_refresh_without_decision(monkeypatch):
+    """A completed refresh survives its decision deadline but cannot authorize action."""
     from src.engine import cycle_runtime
 
     position = _make_position(
@@ -22666,6 +22741,7 @@ def test_monitor_refresh_deadline_defers_before_canonical_emit(monkeypatch):
     )
     clock = [0.0]
     canonical_emits = []
+    results = []
     monkeypatch.setattr(cycle_runtime.time, "monotonic", lambda: clock[0])
     monkeypatch.setattr(
         cycle_runtime,
@@ -22681,7 +22757,7 @@ def test_monitor_refresh_deadline_defers_before_canonical_emit(monkeypatch):
     monkeypatch.setattr(
         cycle_runtime,
         "_emit_monitor_refreshed_canonical_if_available",
-        lambda *_args, **_kwargs: canonical_emits.append(True),
+        lambda *_args, **kwargs: canonical_emits.append(kwargs) or True,
     )
     monkeypatch.setattr(
         Position,
@@ -22694,7 +22770,11 @@ def test_monitor_refresh_deadline_defers_before_canonical_emit(monkeypatch):
         None,
         object(),
         _make_portfolio(position),
-        _monitor_test_artifact(),
+        type(
+            "Artifact",
+            (),
+            {"add_monitor_result": lambda self, result: results.append(result)},
+        )(),
         _monitor_test_tracker(),
         summary,
         deps=_monitor_test_deps("refresh_deadline_before_canonical_emit"),
@@ -22702,9 +22782,16 @@ def test_monitor_refresh_deadline_defers_before_canonical_emit(monkeypatch):
         held_position_monitor_budget_seconds=6.0,
     )
 
-    assert canonical_emits == [True]
-    assert summary["monitor_canonical_write_failed"] == 1
-    assert summary["monitors"] == 0
+    assert len(canonical_emits) == 1
+    assert canonical_emits[0]["decision_unavailable_reason"] == (
+        "MONITOR_INPUTS_UNAVAILABLE:REFRESH_DEADLINE"
+    )
+    assert position.last_monitor_prob_is_fresh is True
+    assert position.last_monitor_market_price_is_fresh is True
+    assert position.last_monitor_edge is None
+    assert results[0].fresh_prob == pytest.approx(0.61)
+    assert results[0].fresh_edge is None
+    assert summary["monitors"] == 1
     assert summary["held_monitor_defer_reason"] == "MONITOR_DEADLINE_EXPIRED_AFTER_REFRESH"
     assert summary["held_monitor_deadline_deferred_positions"] == 1
     assert summary["held_monitor_primary_belief_deferred_position_ids"] == [

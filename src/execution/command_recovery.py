@@ -1005,15 +1005,24 @@ def _lookup_unknown_side_effect_order(
     and never supplies that absence proof.
     """
 
+    point_read = None
+    point_error_type = None
     if cmd.venue_order_id:
-        return (
-            "found",
-            _venue_order_payload(client.get_order(cmd.venue_order_id)),
-            None,
-            "venue_order_id",
-        )
+        try:
+            point_read = _client_point_order_read(client, cmd.venue_order_id)
+        except Exception as exc:  # noqa: BLE001
+            point_error_type = exc.__class__.__name__
+            logger.warning(
+                "recovery: command %s authenticated point-order read failed (%s); "
+                "falling back to complete authenticated venue reads",
+                cmd.command_id,
+                point_error_type,
+            )
+        else:
+            if point_read.point_order is not None:
+                return "found", point_read.point_order, None, "venue_order_id"
     finder = getattr(client, "find_order_by_idempotency_key", None)
-    if callable(finder):
+    if not cmd.venue_order_id and callable(finder):
         try:
             found = finder(cmd.idempotency_key.value)
         except Exception as exc:  # noqa: BLE001
@@ -1027,7 +1036,8 @@ def _lookup_unknown_side_effect_order(
                 logger.warning(
                     "recovery: command %s idempotency-key lookup returned non-order %s; "
                     "treating lookup as unavailable",
-                    cmd.command_id, type(found).__name__,
+                    cmd.command_id,
+                    type(found).__name__,
                 )
                 return "unavailable", None, None, "idempotency_key"
             logger.info(
@@ -1035,7 +1045,26 @@ def _lookup_unknown_side_effect_order(
                 "corroborating with complete authenticated venue reads",
                 cmd.command_id,
             )
-    venue_status, venue_resp, proof = _lookup_unknown_side_effect_by_venue_reads(cmd, client)
+    venue_status, venue_resp, proof = _lookup_unknown_side_effect_by_venue_reads(
+        cmd, client
+    )
+    if proof is not None and cmd.venue_order_id:
+        proof = {
+            **proof,
+            "point_order_checked": True,
+            "point_order_query_complete": bool(
+                point_read is not None and point_read.query_complete
+            ),
+            "point_order_absent": bool(point_read is not None and point_read.absent),
+            "point_order_source": (
+                point_read.source if point_read is not None else None
+            ),
+            "point_order_absence_reason": (
+                point_read.absence_reason if point_read is not None else None
+            ),
+            "point_order_error_type": point_error_type,
+            "venue_order_id": cmd.venue_order_id,
+        }
     return venue_status, venue_resp, proof, "authenticated_venue_absence"
 
 
@@ -1991,6 +2020,7 @@ def _latest_terminal_order_fact_candidates(conn: sqlite3.Connection) -> list[dic
         sorted(
             {
                 *_ACKED_ORDER_STATES,
+                CommandState.SUBMITTING.value,
                 CommandState.CANCEL_PENDING.value,
                 CommandState.CANCELLED.value,
                 CommandState.EXPIRED.value,
@@ -2009,7 +2039,7 @@ def _latest_terminal_order_fact_candidates(conn: sqlite3.Connection) -> list[dic
              WHERE cmd.intent_kind = 'ENTRY'
                AND cmd.state IN ({command_state_placeholders})
                AND (
-                    cmd.state IN ('ACKED', 'POST_ACKED', 'CANCEL_PENDING')
+                    cmd.state IN ('SUBMITTING', 'ACKED', 'POST_ACKED', 'CANCEL_PENDING')
                     OR pc.position_id IS NULL
                     OR (
                         cmd.state IN ('CANCELLED', 'EXPIRED')
@@ -4233,6 +4263,8 @@ def _latest_unprojected_filled_entry_candidates(conn: sqlite3.Connection) -> lis
                entry_fill.fill_states AS fill_states,
                entry_fill.has_confirmed_fill AS has_confirmed_fill,
                entry_fill.trade_fact_id AS source_trade_fact_id,
+               flow.entry_filled_size AS position_entry_filled_size,
+               flow.exit_filled_size AS position_exit_filled_size,
                pc.phase AS projected_phase,
                pc.shares AS projected_shares,
                pc.cost_basis_usd AS projected_cost_basis_usd,
@@ -4354,7 +4386,7 @@ def _latest_unprojected_filled_entry_candidates(conn: sqlite3.Connection) -> lis
                 )
                 OR (
                     (
-                        cmd.state = 'PARTIAL'
+                        cmd.state IN ('PARTIAL', 'CANCELLED')
                         OR (
                             cmd.state IN ('FILLED', 'REVIEW_REQUIRED')
                             AND entry_fill.has_confirmed_fill = 1
@@ -5956,6 +5988,53 @@ def _append_filled_entry_projection_repair(
             """,
             (position_id, command_id, venue_order_id),
         ).fetchone()
+        entry_filled = _positive_decimal_or_none(
+            candidate.get("position_entry_filled_size")
+        )
+        exit_filled = _positive_decimal_or_none(
+            candidate.get("position_exit_filled_size")
+        )
+        projected_shares = _decimal_or_none(candidate.get("projected_shares"))
+        net_flow_shares = (
+            max(Decimal("0"), entry_filled - exit_filled)
+            if entry_filled is not None and exit_filled is not None
+            else None
+        )
+        post_reduction_provenance_only = (
+            existing_fill is None
+            and exit_filled is not None
+            and exit_filled > 0
+            and projected_shares is not None
+            and net_flow_shares is not None
+            and abs(projected_shares - net_flow_shares) <= Decimal("0.000001")
+        )
+        if post_reduction_provenance_only:
+            # Acquisition facts are immutable even after capital has been
+            # released.  If authenticated command flow already reproduces the
+            # current residual, backfill only the missing command provenance;
+            # replaying the entry projection here would resurrect sold shares.
+            _append_cancelled_entry_terminal_partial_order_fact(
+                conn,
+                candidate=candidate,
+            )
+            _log_filled_entry_trade_candidate_execution_fact(
+                conn,
+                candidate={
+                    **candidate,
+                    "cmd_state": candidate.get("state"),
+                    "cmd_size": candidate.get("size"),
+                    "cmd_price": candidate.get("price"),
+                    "cmd_created_at": candidate.get("created_at"),
+                    "filled_size": candidate.get("fill_filled_size"),
+                    "trade_fact_id": candidate.get("source_trade_fact_id"),
+                    "execution_filled_at": candidate.get("fill_observed_at"),
+                },
+            )
+            reconcile_terminal_entry_exposure_obligations(
+                conn,
+                command_id=command_id,
+            )
+            return True
         if existing_fill is not None:
             later_reduction = conn.execute(
                 """
@@ -9701,7 +9780,6 @@ def _terminal_partial_entry_obligation_proven(
             CommandState.CANCELLED.value,
             CommandState.EXPIRED.value,
         }
-        or not command_bound_projection
         or not canonical_orders
     ):
         return False
@@ -9813,8 +9891,16 @@ def _terminal_partial_entry_obligation_proven(
         return False
     execution = _dict_row(execution_rows[0])
     execution_shares = _positive_decimal_or_none(execution.get("shares"))
+    exposure_accounted = (
+        command_bound_projection
+        or _terminal_partial_post_reduction_flow_absorbed(
+            conn,
+            command=command,
+        )
+    )
     return (
-        execution_shares is not None
+        exposure_accounted
+        and execution_shares is not None
         and abs(execution_shares - filled_size) <= Decimal("0.000001")
         and str(execution.get("terminal_exec_status") or "").lower()
         in (
@@ -9823,6 +9909,82 @@ def _terminal_partial_entry_obligation_proven(
             else {"partial"}
         )
         and str(execution.get("venue_status") or "").upper() == "PARTIAL"
+    )
+
+
+def _terminal_partial_post_reduction_flow_absorbed(
+    conn: sqlite3.Connection,
+    *,
+    command: Mapping[str, object],
+) -> bool:
+    """Prove a terminal entry increment is already inside the post-SELL residual."""
+
+    position_id = str(command.get("position_id") or "").strip()
+    if not position_id or not _table_exists(conn, "position_current"):
+        return False
+    sql = (
+        "WITH "
+        + _canonical_trade_fact_cte()
+        + ",\n"
+        + _economic_trade_fact_cte()
+        + """
+        SELECT SUM(
+                   CASE WHEN cmd.intent_kind = 'ENTRY' AND cmd.side = 'BUY'
+                        THEN CAST(fact.filled_size AS REAL) ELSE 0.0 END
+               ) AS entry_filled_size,
+               SUM(
+                   CASE WHEN cmd.intent_kind = 'EXIT' AND cmd.side = 'SELL'
+                        THEN CAST(fact.filled_size AS REAL) ELSE 0.0 END
+               ) AS exit_filled_size
+          FROM economic_trade_fact fact
+          JOIN venue_commands cmd
+            ON cmd.command_id = fact.command_id
+           AND cmd.venue_order_id = fact.venue_order_id
+         WHERE cmd.position_id = ?
+           AND fact.state IN ('MATCHED', 'MINED', 'CONFIRMED')
+           AND CAST(COALESCE(fact.filled_size, '0') AS REAL) > 0
+        """
+    )
+    flow = conn.execute(sql, (position_id,)).fetchone()
+    if flow is None:
+        return False
+    entry_filled = _positive_decimal_or_none(flow["entry_filled_size"])
+    exit_filled = _positive_decimal_or_none(flow["exit_filled_size"])
+    if entry_filled is None or exit_filled is None or exit_filled <= 0:
+        return False
+    expected_residual = max(Decimal("0"), entry_filled - exit_filled)
+    if expected_residual <= 0:
+        return False
+    position = conn.execute(
+        """
+        SELECT phase, shares, cost_basis_usd, chain_state, chain_shares,
+               chain_cost_basis_usd
+          FROM position_current
+         WHERE position_id = ?
+         LIMIT 1
+        """,
+        (position_id,),
+    ).fetchone()
+    if position is None or str(position["phase"] or "") not in {
+        "active",
+        "day0_window",
+        "pending_exit",
+    }:
+        return False
+    shares = _positive_decimal_or_none(position["shares"])
+    chain_shares = _positive_decimal_or_none(position["chain_shares"])
+    cost = _positive_decimal_or_none(position["cost_basis_usd"])
+    chain_cost = _positive_decimal_or_none(position["chain_cost_basis_usd"])
+    tolerance = Decimal("0.000001")
+    return (
+        str(position["chain_state"] or "") == "synced"
+        and shares is not None
+        and chain_shares is not None
+        and cost is not None
+        and chain_cost is not None
+        and abs(shares - expected_residual) <= tolerance
+        and abs(chain_shares - expected_residual) <= tolerance
+        and abs(cost - chain_cost) <= _ENTRY_AGGREGATE_ABSORPTION_TOLERANCE
     )
 
 
@@ -11286,7 +11448,10 @@ def reconcile_terminal_order_facts(
                     resolved_at=occurred_at,
                     resolution="command_recovery_terminal_no_fill",
                 )
-                if command_state in _ACKED_ORDER_STATES:
+                if command_state in (
+                    *_ACKED_ORDER_STATES,
+                    CommandState.SUBMITTING.value,
+                ):
                     append_event(
                         conn,
                         command_id=command_id,
@@ -14488,6 +14653,12 @@ def _partial_remainder_candidates(
     )
     if terminal_exit_only:
         phase_placeholders = ",".join("?" for _ in _HARD_TERMINAL_REPAIR_PHASES)
+        terminal_states = (
+            CommandState.ACKED.value,
+            CommandState.POST_ACKED.value,
+            CommandState.PARTIAL.value,
+        )
+        terminal_state_placeholders = ",".join("?" for _ in terminal_states)
         rows = conn.execute(
             f"""
             SELECT cmd.*, pc.condition_id AS position_condition_id
@@ -14495,15 +14666,28 @@ def _partial_remainder_candidates(
               JOIN position_current pc
                 ON pc.position_id = cmd.position_id
              WHERE cmd.intent_kind = 'EXIT'
-               AND cmd.state = ?
+               AND cmd.state IN ({terminal_state_placeholders})
                AND COALESCE(cmd.venue_order_id, '') != ''
                AND pc.phase IN ({phase_placeholders})
+               AND (
+                    cmd.state = ?
+                    OR EXISTS (
+                        SELECT 1
+                          FROM venue_trade_facts trade
+                         WHERE trade.command_id = cmd.command_id
+                           AND trade.venue_order_id = cmd.venue_order_id
+                           AND UPPER(COALESCE(trade.state, '')) IN
+                               ('MATCHED', 'MINED', 'CONFIRMED')
+                           AND CAST(COALESCE(trade.filled_size, '0') AS REAL) > 0
+                    )
+               )
                AND (? IS NULL OR cmd.updated_at < ?)
              ORDER BY cmd.updated_at, cmd.command_id
             """,
             (
-                CommandState.PARTIAL.value,
+                *terminal_states,
                 *_HARD_TERMINAL_REPAIR_PHASES,
+                CommandState.PARTIAL.value,
                 updated_before,
                 updated_before,
             ),
@@ -16023,8 +16207,23 @@ def _point_order_terminal_for_partial_remainder(client, venue_order_id: str) -> 
     get_order = getattr(client, "get_order", None)
     if not callable(get_order):
         raise RuntimeError("client lacks get_order; partial remainder terminal proof is unknown")
-    raw = _venue_order_payload(get_order(venue_order_id))
+    try:
+        raw = _venue_order_payload(get_order(venue_order_id))
+    except Exception as exc:
+        from src.venue.response_contracts import VenueOrderNotFound
+
+        order_not_found = (
+            exc
+            if isinstance(exc, VenueOrderNotFound)
+            else exc.__cause__
+        )
+        if not isinstance(order_not_found, VenueOrderNotFound):
+            raise
+        return True, "NOT_FOUND", None
     if raw is None:
+        absence_proof = getattr(client, "authenticated_point_order_absent", None)
+        if callable(absence_proof) and absence_proof(venue_order_id):
+            return True, "NOT_FOUND", None
         return False, "UNAVAILABLE", None
     status = _order_status(raw)
     if status in _TERMINAL_NO_FILL_VENUE_STATUSES:
@@ -17212,7 +17411,11 @@ def reconcile_partial_remainders(
                 command_id=command_id,
             )
             if existing_terminal_remainder is not None and not terminal_exit_only:
-                if command_state == CommandState.PARTIAL.value:
+                if command_state in {
+                    CommandState.ACKED.value,
+                    CommandState.POST_ACKED.value,
+                    CommandState.PARTIAL.value,
+                }:
                     append_event(
                         conn,
                         command_id=command_id,
@@ -17237,6 +17440,15 @@ def reconcile_partial_remainders(
                 client,
                 venue_order_id,
             )
+            if point_status == "NOT_FOUND" and venue_order_id in open_order_ids:
+                logger.warning(
+                    "recovery: command %s point order is absent but open-order enumeration "
+                    "still contains %s; staying fail-closed",
+                    command_id,
+                    venue_order_id,
+                )
+                summary["stayed"] += 1
+                continue
             if not point_terminal and venue_order_id in open_order_ids:
                 summary["stayed"] += 1
                 continue
@@ -17409,7 +17621,11 @@ def reconcile_partial_remainders(
                     resolved_at=now,
                     resolution="command_recovery_expired_partial_remainder",
                 )
-                if command_state == CommandState.PARTIAL.value:
+                if command_state in {
+                    CommandState.ACKED.value,
+                    CommandState.POST_ACKED.value,
+                    CommandState.PARTIAL.value,
+                }:
                     append_event(
                         conn,
                         command_id=command_id,

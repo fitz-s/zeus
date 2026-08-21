@@ -1,6 +1,6 @@
 # Created: 2026-06-01
-# Lifecycle: created=2026-06-01; last_reviewed=2026-07-30; last_reused=2026-07-30
-# Last reused or audited: 2026-07-30
+# Lifecycle: created=2026-06-01; last_reviewed=2026-08-20; last_reused=2026-08-20
+# Last reused or audited: 2026-08-20
 # Authority basis: DEFECT-1 capital-recoverability bridge. An EDLI FILL_CONFIRMED
 #   must materialise a canonical position_current row (the seam audited as
 #   missing), idempotently, chain-reconcilable by token, summing partial fills.
@@ -79,7 +79,7 @@ def test_forecast_strategy_fallback_uses_qkernel_entry_not_direction_aliases():
         )
 
 
-def test_edli_events_table_prefers_trade_main_when_world_copy_is_stale(tmp_path):
+def test_edli_events_table_uses_world_authority_without_freshness_scan(tmp_path):
     from src.events.edli_position_bridge import _edli_events_table
     from src.state.db import init_schema
 
@@ -111,7 +111,63 @@ def test_edli_events_table_prefers_trade_main_when_world_copy_is_stale(tmp_path)
         occurred_at="2026-06-29T20:01:58+00:00",
     )
 
-    assert _edli_events_table(trade_conn) == "edli_live_order_events"
+    traced: list[str] = []
+    trade_conn.set_trace_callback(traced.append)
+
+    assert _edli_events_table(trade_conn) == "world.edli_live_order_events"
+    assert not any("MAX(occurred_at)" in statement for statement in traced)
+
+
+def test_fill_bridge_candidate_probe_uses_exact_position_reads_and_stops_at_limit():
+    from src.events.edli_position_bridge import edli_bridge_position_id
+    from src.ingest.price_channel_ingest import _edli_durable_fill_bridge_candidate_ids
+
+    c = sqlite3.connect(":memory:")
+    c.row_factory = sqlite3.Row
+    c.executescript(
+        """
+        CREATE TABLE edli_live_order_events (
+            aggregate_id TEXT NOT NULL,
+            event_sequence INTEGER NOT NULL,
+            event_type TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            occurred_at TEXT NOT NULL
+        );
+        CREATE INDEX idx_edli_live_order_events_aggregate
+            ON edli_live_order_events(aggregate_id, event_sequence);
+        CREATE TABLE position_current (position_id TEXT PRIMARY KEY);
+        CREATE TABLE venue_commands (
+            command_id TEXT PRIMARY KEY,
+            decision_id TEXT NOT NULL,
+            position_id TEXT
+        );
+        """
+    )
+    confirmed = json.dumps({"fill_authority_state": "FILL_CONFIRMED"})
+    c.executemany(
+        """
+        INSERT INTO edli_live_order_events (
+            aggregate_id, event_sequence, event_type, payload_json, occurred_at
+        ) VALUES (?, 1, 'UserTradeObserved', ?, '2026-08-20T00:00:00+00:00')
+        """,
+        (("a-bridged", confirmed), ("b-orphan", confirmed), ("c-unvisited", confirmed)),
+    )
+    c.execute(
+        "INSERT INTO position_current(position_id) VALUES (?)",
+        (edli_bridge_position_id("a-bridged"),),
+    )
+    traced: list[str] = []
+    c.set_trace_callback(traced.append)
+
+    assert _edli_durable_fill_bridge_candidate_ids(c, limit=1) == ("b-orphan",)
+    position_reads = [
+        statement
+        for statement in traced
+        if "FROM position_current" in statement
+    ]
+    assert position_reads
+    assert all("WHERE position_id IN" in statement for statement in position_reads)
+    assert not any("SELECT position_id FROM position_current" in statement for statement in traced)
 
 
 @pytest.fixture()

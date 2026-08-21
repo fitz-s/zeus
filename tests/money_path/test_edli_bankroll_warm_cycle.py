@@ -208,6 +208,9 @@ def test_chain_collateral_publish_emits_identity_bound_authority_wake(monkeypatc
     )
     emitted = []
     monkeypatch.setattr("src.state.db._zeus_trade_db_path", lambda: tmp_path / "trades.db")
+    # Hot refresh path validates (never migrates) the collateral schema;
+    # bootstrap the tmp DB first, as the deployed bootstrap caller does.
+    CollateralLedger(db_path=tmp_path / "trades.db", initialize_schema=True)
     monkeypatch.setattr(
         "src.runtime.timeout_guard.run_with_timeout",
         lambda *_args, **_kwargs: ({}, None, ""),
@@ -652,6 +655,10 @@ def test_post_trade_durable_snapshot_wake_refreshes_allocator_without_entry_reac
     from src.runtime import reactor_wake
 
     trade_db = tmp_path / "trades.db"
+    # The hot refresh cycle is fail-closed on an uninitialized collateral
+    # schema (initialize_schema=False validates read-only); bootstrap the tmp
+    # DB the way a deployed bootstrap caller would.
+    CollateralLedger(db_path=trade_db, initialize_schema=True)
     wake_path = tmp_path / "edli-reactor-wake.json"
     payload = {
         "pusd_balance_micro": 17_000_000,
@@ -1023,6 +1030,9 @@ def test_post_trade_collateral_wake_cross_process_relationship(
     case_root = tmp_path / f"{authority_tier.lower()}-{int(stale_seconds)}"
     case_root.mkdir()
     trade_db = case_root / "trades.db"
+    # Subprocesses run the fail-closed hot refresh path; the parent plays the
+    # bootstrap role and initializes the collateral schema once.
+    CollateralLedger(db_path=trade_db, initialize_schema=True)
     wake_path = case_root / "edli-reactor-wake.json"
 
     producer = _run_relationship_subprocess(

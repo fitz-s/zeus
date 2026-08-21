@@ -41,7 +41,11 @@ from src.data.replacement_forecast_seed_discovery import (
 
 Runner = Callable[[Sequence[str]], subprocess.CompletedProcess[str]]
 DEFAULT_MATERIALIZATION_SUBPROCESS_TIMEOUT_SECONDS = 240.0
-DEFAULT_MATERIALIZATION_MAX_WORKERS = 4
+# Every subprocess commits to the same SQLite forecast DB. Parallel commit
+# processes only multiply cold-page reads and writer contention; on 2026-08-19
+# four workers exhausted the same 240s deadline for all eight current requests
+# and committed zero posteriors. Keep one queue owner and one DB writer.
+DEFAULT_MATERIALIZATION_MAX_WORKERS = 1
 MATERIALIZATION_INFLIGHT_DIR_NAME = "inflight"
 _CLAIM_METADATA_NAME = "_claim.json"
 _STALE_CLAIM_GRACE_SECONDS = 30.0

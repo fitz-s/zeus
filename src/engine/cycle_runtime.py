@@ -3614,22 +3614,44 @@ def _record_monitor_data_degraded_attempt(
     deps,
     summary: dict,
     stage: str,
+    preserve_current_attempt_axes: bool = False,
 ) -> bool:
     """Persist one attempted redecision without inventing action authority.
 
     A bounded q/book/metadata read that returns unavailable is still a real
     monitor attempt. Leaving the prior MONITOR_REFRESHED timestamp untouched
     makes the fair scheduler select the same failed head forever and blinds the
-    rest of the held book. Revoke both freshness witnesses before persisting so
-    the event cannot authorize BUY, SELL, or an economic HOLD; family-scoped
-    DATA_DEGRADED remains responsible for repairing the missing input.
+    rest of the held book. By default, revoke both freshness witnesses because
+    a pre-refresh failure proved neither axis. A caller that completed the
+    current refresh before exhausting its decision deadline may preserve each
+    independently proven q/book axis. The event still has no action authority
+    and its edge is always cleared; family-scoped DATA_DEGRADED repairs the
+    missing decision input.
     """
 
-    _revoke_monitor_action_authority(pos)
+    preserved_validations: list[str] = []
+    if preserve_current_attempt_axes:
+        missing_fields: set[str] = set()
+        if bool(getattr(pos, "last_monitor_prob_is_fresh", False)):
+            preserved_validations.append(
+                "monitor_attempt_current_probability_preserved"
+            )
+        else:
+            missing_fields.add("fresh_prob_is_fresh")
+        if bool(getattr(pos, "last_monitor_market_price_is_fresh", False)):
+            preserved_validations.append("monitor_attempt_current_market_preserved")
+        else:
+            missing_fields.add("current_market_price_is_fresh")
+        if missing_fields:
+            _revoke_monitor_action_authority(pos, missing_fields=missing_fields)
+        pos.last_monitor_edge = None
+    else:
+        _revoke_monitor_action_authority(pos)
     pos.applied_validations = list(
         dict.fromkeys(
             [
                 *(getattr(pos, "applied_validations", []) or []),
+                *preserved_validations,
                 "monitor_attempt_data_degraded_no_action_authority",
             ]
         )
@@ -3648,10 +3670,11 @@ def _record_monitor_data_degraded_attempt(
             summary.get("monitor_canonical_write_failed", 0) + 1
         )
         return False
+    monitor_fresh_prob, _ = _current_monitor_result_probability_and_edge(pos)
     artifact.add_monitor_result(
         deps.MonitorResult(
             position_id=pos.trade_id,
-            fresh_prob=None,
+            fresh_prob=monitor_fresh_prob,
             fresh_edge=None,
             should_exit=False,
             exit_reason=reason,
@@ -8979,7 +9002,6 @@ def execute_monitoring_phase(
                 ),
             )
             if deadline_expiry is not None:
-                restore_refresh_state(pos, refresh_position_state)
                 _record_monitor_data_degraded_attempt(
                     conn,
                     pos,
@@ -8987,6 +9009,7 @@ def execute_monitoring_phase(
                     deps=deps,
                     summary=summary,
                     stage="refresh_deadline",
+                    preserve_current_attempt_axes=True,
                 )
                 if deadline_expiry == "global":
                     break
@@ -9046,7 +9069,6 @@ def execute_monitoring_phase(
                     ),
                 )
                 if deadline_expiry is not None:
-                    restore_refresh_state(pos, refresh_position_state)
                     _record_monitor_data_degraded_attempt(
                         conn,
                         pos,
@@ -9054,6 +9076,7 @@ def execute_monitoring_phase(
                         deps=deps,
                         summary=summary,
                         stage="pending_exit_retry_quote_deadline",
+                        preserve_current_attempt_axes=True,
                     )
                     if deadline_expiry == "global":
                         break
@@ -9768,6 +9791,22 @@ def execute_monitoring_phase(
                     )
                     portfolio_dirty = True
                     continue
+                if posterior_support_zero_direct_sell:
+                    # MONITOR_REFRESHED advances ``last_monitor_at`` before the
+                    # side effect.  Rebind the immutable direct-SELL proof to
+                    # that canonical observation; the pre-write proof otherwise
+                    # fails its exact submit-time identity check despite no
+                    # probability, support, holding, or book change.
+                    from src.execution.exit_lifecycle import (
+                        BranchwiseDominantSellAuthority,
+                    )
+
+                    branchwise_sell_authority = (
+                        BranchwiseDominantSellAuthority.from_current(
+                            pos,
+                            replace(exit_context, exit_reason=exit_reason),
+                        )
+                    )
                 exit_intent = build_exit_intent(
                     pos,
                     replace(exit_context, exit_reason=exit_reason),

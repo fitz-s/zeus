@@ -34,7 +34,7 @@ DAY0_REMAINING_DAY_GLOBAL_AUTHORITY = "day0_remaining_day_global_probability_v1"
 # authorized a fill.  Increment this when the Day0 probability construction
 # changes; the value is stamped into every live ENTRY q_version.
 DAY0_PROBABILITY_SEMANTICS_REVISION = (
-    "day0_conditional_remaining_path_error_no_marginal_peak_v3"
+    "day0_source_clock_total_variance_minus_path_spread_v4"
 )
 _DAY0_SEMANTIC_Q_VERSION_PREFIX = "day0-semrev:"
 DAY0_DETERMINISTIC_BIN_PAYOFF_Q_SOURCE = "day0_deterministic_bin_payoff"

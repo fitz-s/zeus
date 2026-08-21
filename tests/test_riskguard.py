@@ -1,11 +1,13 @@
 # Created: 2026-03-30
-# Last reused/audited: 2026-08-18
+# Last reused/audited: 2026-08-19
 # Authority basis: docs/operations/task_2026-04-28_contamination_remediation/plan.md Batch D RiskGuard test-law remediation; Wave26 verification-noise helper alignment; PR90 current-env fallback review fix; 2026-08-15 economic-settlement trailing-loss hotfix.
 #                  2026-05-17 live lock remediation: RiskGuard trade/world DB lock degrades to fresh DATA_DEGRADED rather than stale RED.
-# Lifecycle: created=2026-03-30; last_reviewed=2026-08-18; last_reused=2026-08-18
+# Lifecycle: created=2026-03-30; last_reviewed=2026-08-19; last_reused=2026-08-19
 # Purpose: Guard RiskGuard protective metrics, policy resolution, source authority, and portfolio loader invariants.
 # Reuse: Run after RiskGuard risk details, portfolio loader, settlement source, bankroll, or risk-action changes.
 # 2026-08-17: Brier strategy-gate evidence is independent by target date.
+# 2026-08-19: New Day0 probability semantics must earn revision-scoped causal
+# capital admission before BUY; shadow evidence and held exits remain live.
 """Tests for RiskGuard metrics, policy resolution, and risk levels."""
 
 import json
@@ -40,6 +42,18 @@ from src.state.portfolio import (
     Position,
     total_exposure_usd,
 )
+
+
+@pytest.fixture(autouse=True)
+def _stable_host_power_truth(monkeypatch):
+    monkeypatch.setattr(
+        riskguard_module,
+        "_pmset_battery_status",
+        lambda: (
+            "Now drawing from 'AC Power'\n"
+            " -InternalBattery-0 (id=1)\t80%; charging; present: true\n"
+        ),
+    )
 
 
 class TestForwardCapitalAudit:
@@ -1495,7 +1509,10 @@ class TestMetrics:
 
         by_id = {row["trade_id"]: row for row in bound}
         assert by_id["current"]["probability_semantics_ready"] is True
-        assert by_id["stale"]["probability_semantics_ready"] is True
+        assert by_id["stale"]["probability_semantics_ready"] is False
+        assert by_id["stale"]["probability_semantics_blocked_reason"] == (
+            "superseded_probability_semantics"
+        )
         assert by_id["superseded"]["probability_semantics_blocked_reason"] == (
             "superseded_probability_semantics"
         )
@@ -1513,18 +1530,17 @@ class TestMetrics:
             "status": "ok",
             "licensed_revisions": [
                 riskguard_module.CURRENT_EVIDENCE_SEMANTICS_REVISION,
-                riskguard_module.STALE_ENSEMBLE_ABSOLUTE_DISAGREEMENT_SEMANTICS_REVISION,
             ],
             "strategy_candidate_count": 7,
-            "current_count": 2,
-            "superseded_count": 2,
+            "current_count": 1,
+            "superseded_count": 3,
             "missing_count": 2,
             "mixed_count": 1,
         }
         assert [
             row["trade_id"]
             for row in riskguard_module._riskguard_brier_actuating_rows(bound)
-        ] == ["current", "stale"]
+        ] == ["current"]
 
     def test_qkernel_semantics_lookup_unavailable_fails_closed(self, tmp_path):
         row = {
@@ -4442,7 +4458,13 @@ class TestStrategyBrierMinSampleContinued:
         assert details["brier_actuating_sample_size"] == 11
         assert details["brier_evidence_ready_sample_size"] == 0
         assert details["portfolio_brier_thin_sample_no_verdict"] is True
-        assert details["recommended_strategy_gates"] == []
+        assert details["recommended_strategy_gates"] == [
+            "day0_nowcast_entry"
+        ]
+        assert details["day0_market_relative_alpha_gate_required"] is True
+        assert details["day0_market_relative_alpha_gate_reason"].startswith(
+            "market_relative_alpha_unproven("
+        )
         assert details["market_relative_alpha_observation"].startswith(
             "market_relative_alpha_unproven("
         )
@@ -5842,21 +5864,24 @@ class TestQkernelMarketRelativeAlphaEvidence:
         assert evidence["validated"] is False
         conn.close()
 
-    def test_current_day0_without_validated_causal_evidence_is_observed(self):
+    def test_current_day0_without_validated_causal_evidence_is_gated(self):
         from src.events.day0_authority import DAY0_PROBABILITY_SEMANTICS_REVISION
 
+        binding = {
+            "status": "ok",
+            "current_count": 0,
+            "current_revision": DAY0_PROBABILITY_SEMANTICS_REVISION,
+        }
+        evidence = {
+            "status": "no_evidence",
+            "validated": False,
+            "rejected": False,
+            "cohorts": [],
+        }
+
         reason = riskguard_module._market_relative_alpha_gate_reason(
-            {
-                "status": "ok",
-                "current_count": 0,
-                "current_revision": DAY0_PROBABILITY_SEMANTICS_REVISION,
-            },
-            {
-                "status": "no_evidence",
-                "validated": False,
-                "rejected": False,
-                "cohorts": [],
-            },
+            binding,
+            evidence,
             required_evalue=10.0,
         )
 
@@ -5866,6 +5891,10 @@ class TestQkernelMarketRelativeAlphaEvidence:
             "law=executable_min_order_capital_gain_v2,"
             f"revision={DAY0_PROBABILITY_SEMANTICS_REVISION})"
         )
+        assert riskguard_module._market_relative_alpha_unproven_revisions(
+            binding,
+            evidence,
+        ) == (DAY0_PROBABILITY_SEMANTICS_REVISION,)
 
     def test_qkernel_alpha_observation_does_not_gate_unproven_revision(self):
         current = riskguard_module.CURRENT_EVIDENCE_SEMANTICS_REVISION
@@ -6220,17 +6249,19 @@ class TestQkernelMarketRelativeAlphaEvidence:
         conn.close()
 
     @pytest.mark.parametrize(
-        ("revision", "shape_lag_hours", "stale_shape_reused"),
+        ("revision", "shape_lag_hours", "stale_shape_reused", "expected_ready"),
         (
             (
                 riskguard_module.CURRENT_EVIDENCE_SEMANTICS_REVISION,
                 0.0,
                 False,
+                True,
             ),
             (
                 riskguard_module.STALE_ENSEMBLE_ABSOLUTE_DISAGREEMENT_SEMANTICS_REVISION,
                 6.0,
                 True,
+                False,
             ),
         ),
     )
@@ -6240,6 +6271,7 @@ class TestQkernelMarketRelativeAlphaEvidence:
         revision,
         shape_lag_hours,
         stale_shape_reused,
+        expected_ready,
     ):
         from src.state.schema.no_trade_regret_events_schema import ensure_table
         from src.strategy.live_inference.no_trade_regret import (
@@ -6401,6 +6433,15 @@ class TestQkernelMarketRelativeAlphaEvidence:
                 ),
             )
         )
+
+        if not expected_ready:
+            assert rows == []
+            assert status["certificate_ready_count"] == 0
+            assert status["blocked_reasons"] == {
+                "certificate_identity_mismatch": 1
+            }
+            conn.close()
+            return
 
         assert status["status"] == "ok"
         assert status["settlement_ready_count"] == 1
@@ -6594,7 +6635,7 @@ class TestQkernelMarketRelativeAlphaEvidence:
         )
         assert details["market_relative_alpha_gate_confirmation"] == {}
         assert details["day0_market_relative_alpha_admission_role"] == (
-            "revision_scoped_rejection_gate"
+            "revision_scoped_pretrade_proof_gate"
         )
         assert details["day0_market_relative_alpha_gate_required"] is False
         assert details["day0_market_relative_alpha_gate_confirmation"] == {}
@@ -8653,3 +8694,128 @@ def test_storage_capacity_read_failure_fails_closed(monkeypatch, tmp_path):
 
     assert snapshot["level"] == RiskLevel.DATA_DEGRADED.value
     assert snapshot["status"] == "CAPACITY_UNAVAILABLE"
+
+
+def test_host_power_runway_uses_time_to_preserve_execution_authority():
+    snapshot = riskguard_module.host_power_runway_snapshot(
+        "Now drawing from 'Battery Power'\n"
+        " -InternalBattery-0 (id=1)\t25%; discharging; 0:29 remaining present: true\n"
+    )
+
+    assert snapshot["level"] == RiskLevel.ORANGE.value
+    assert snapshot["reason"] == "HOST_EXECUTION_RUNWAY_SEVERE"
+    assert snapshot["battery_percent"] == 25
+    assert snapshot["remaining_minutes"] == 29.0
+
+
+def test_host_power_runway_red_precedes_forced_low_power_hibernate():
+    snapshot = riskguard_module.host_power_runway_snapshot(
+        "Now drawing from 'Battery Power'\n"
+        " -InternalBattery-0 (id=1)\t4%; discharging; 0:18 remaining present: true\n"
+    )
+
+    assert snapshot["level"] == RiskLevel.RED.value
+    assert snapshot["reason"] == "HOST_EXECUTION_RUNWAY_CRITICAL"
+
+
+def test_host_power_runway_resets_on_ac_power():
+    snapshot = riskguard_module.host_power_runway_snapshot(
+        "Now drawing from 'AC Power'\n"
+        " -InternalBattery-0 (id=1)\t4%; charging; 0:12 remaining present: true\n"
+    )
+
+    assert snapshot["level"] == RiskLevel.GREEN.value
+    assert snapshot["status"] == "AC_POWER"
+
+
+def test_host_power_runway_unreadable_truth_fails_closed(monkeypatch):
+    monkeypatch.setattr(
+        riskguard_module,
+        "_pmset_battery_status",
+        lambda: (_ for _ in ()).throw(OSError("pmset unavailable")),
+    )
+    monkeypatch.setattr(riskguard_module.sys, "platform", "darwin")
+
+    snapshot = riskguard_module.host_power_runway_snapshot()
+
+    assert snapshot["level"] == RiskLevel.DATA_DEGRADED.value
+    assert snapshot["status"] == "POWER_TRUTH_UNAVAILABLE"
+
+
+def test_host_power_red_flows_through_existing_risk_authority(monkeypatch):
+    risk_conn = sqlite3.connect(":memory:")
+    risk_conn.row_factory = sqlite3.Row
+    trade_conn = sqlite3.connect(":memory:")
+    trade_conn.row_factory = sqlite3.Row
+
+    monkeypatch.setattr(
+        riskguard_module,
+        "host_power_runway_snapshot",
+        lambda: {"level": RiskLevel.RED.value},
+    )
+    monkeypatch.setattr(
+        riskguard_module,
+        "_bankroll_of_record_for_riskguard",
+        lambda: object(),
+    )
+    monkeypatch.setattr(
+        riskguard_module,
+        "_collateral_identity_level",
+        lambda _conn: RiskLevel.GREEN,
+    )
+    monkeypatch.setattr(
+        riskguard_module,
+        "storage_capacity_snapshot",
+        lambda: {"level": RiskLevel.GREEN.value},
+    )
+    monkeypatch.setattr(riskguard_module, "get_connection", lambda *_a, **_k: risk_conn)
+    monkeypatch.setattr(
+        riskguard_module,
+        "_get_runtime_trade_connection",
+        lambda: trade_conn,
+    )
+
+    level = riskguard_module.tick_with_portfolio(
+        PortfolioState(bankroll=100.0, authority="canonical_db")
+    )
+
+    assert level is RiskLevel.RED
+
+
+def test_host_power_red_is_not_weakened_by_dependency_lock_attestation(
+    monkeypatch,
+    tmp_path,
+):
+    risk_db = tmp_path / "risk_state.db"
+    conn = get_connection(risk_db)
+    riskguard_module.init_risk_db(conn)
+    _insert_risk_state_row(
+        conn,
+        checked_at=datetime.now(timezone.utc).isoformat(),
+        level=RiskLevel.GREEN.value,
+    )
+    conn.commit()
+    conn.close()
+
+    monkeypatch.setattr(
+        riskguard_module,
+        "get_connection",
+        lambda *_a, **_k: get_connection(risk_db),
+    )
+    monkeypatch.setattr(
+        riskguard_module,
+        "host_power_runway_snapshot",
+        lambda: {"level": RiskLevel.RED.value},
+    )
+
+    level = riskguard_module._persist_dependency_db_locked_attestation(
+        sqlite3.OperationalError("database is locked")
+    )
+
+    row = get_connection(risk_db).execute(
+        "SELECT level, details_json FROM risk_state ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    details = json.loads(row["details_json"])
+    assert level is RiskLevel.RED
+    assert row["level"] == RiskLevel.RED.value
+    assert details["host_power_floor_applied"] is True

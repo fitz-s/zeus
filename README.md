@@ -2,7 +2,10 @@
 
 Zeus trades daily-temperature prediction markets. Each contract turns a city's weather, a settlement station, an observation convention, and an integer rounding rule into a family of mutually exclusive claims. A forecast can be meteorologically accurate and still lose because it prices the wrong station, the wrong preimage of a rounded bin, or a book that cannot fill at the assumed cost.
 
-The engine therefore treats understanding as a chain of proof. It records what evidence existed before the decision, turns the forecast into one probability distribution over the complete settlement space, maps each executable route to its actual payoff, and moves capital only when the lower tail of that decision remains useful after depth, fees, existing exposure, and a fresh submit-time replay. Settlement judges the exact belief the system committed to—not a more favorable story reconstructed afterwards.
+The engine therefore treats understanding as a chain of proof. It records what evidence existed before the decision, turns the forecast into one probability distribution over the complete settlement space, maps each executable route to its actual payoff, and moves capital only when the lower tail of that decision remains useful after depth, fees, existing exposure, and a fresh submit-time replay. Settlement judges the exact belief the system committed to where its frozen certificate exists—not a more favorable story reconstructed afterwards; a missing certificate is a published coverage failure, never a reconstruction license.
+
+**Evidence:** [decision-time provenance](#evidence-has-a-clock) · [settled calibration, adverse verdicts included](docs/reference/calibration_report.md) · [scope and limits](#state-and-learning)
+
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/architecture-dark.svg">
   <img alt="Zeus cycle from source evidence through forecast, probability, capital allocation, execution, settlement, and learning" src="docs/architecture-light.svg">
@@ -14,7 +17,7 @@ The repository contains the production decision, execution, reconciliation, and 
 
 A market is a complete family of YES/NO bins over one city's daily high or low: an exact value, a closed range, an open floor, or an open ceiling. Exactly one bin resolves YES on the integer published for the contract's local date. High and low markets remain separate objects because they have different physical processes, observation histories, and calibration errors.
 
-The city name is not the settlement definition. The definition also binds the station, source, timezone, metric, unit, precision, finalization rule, and bin topology. Most cities use half-up rounding; Hong Kong uses truncation. Treating the displayed bin label as the event itself ignores the continuous sensor values that map into that label and introduces the same directional pricing error on every affected trade.
+The city name is not the settlement definition. The definition also binds the station, source, timezone, metric, unit, precision, finalization rule, and bin topology. Most cities use half-up rounding; Hong Kong uses truncation. Treating the displayed bin label as the event itself ignores the continuous sensor values that map into that label and introduces the same systematic pricing error on every affected trade.
 
 Those semantics are represented as typed resolution and outcome-space objects. The bins must form a complete, non-overlapping partition before a probability vector can become executable; normalizing an incomplete subset would quietly redistribute omitted tail mass into the contracts that happened to be present.
 
@@ -33,7 +36,7 @@ A provider value can enter a decision only when its publication and capture evid
 
 The reader selects a coherent source-run, coverage, readiness, and snapshot bundle rather than taking the latest row from each table independently. A newer forecast cycle can begin after the part of the local day capable of producing the settlement extreme; selecting it merely because it is newer can displace the older cycle that still contains the physically relevant window.
 
-Current provider values remain unshifted. Settled residual history estimates trust, covariance, disagreement, and predictive width, but it does not subtract a historical mean from the served center. Applying that correction again would create separate entry and monitoring beliefs whose probabilities no longer describe the same forecast.
+Current provider values remain unshifted. Settled residual history estimates provider trust and covariance; it neither subtracts a historical mean from the served center nor sets the served predictive width. A center that moved with history would create separate entry and monitoring beliefs whose probabilities no longer describe the same forecast.
 
 Heavy forecast acquisition runs in the data plane, outside the trading daemon. Materialization consumes already downloaded artifacts on a lighter path. Keeping large downloads in the money process once allowed disk and database pressure from data acquisition to starve market evaluation and risk dependencies.
 
@@ -69,7 +72,7 @@ A grid forecast is localized to the settlement station. Distance, elevation mism
 
 ### Construct the predictive distribution
 
-The fused center is not enough. The served width includes current fusion uncertainty and walk-forward error of the fused forecast, then respects a realized settlement-error floor for the relevant city, metric, season, and lead regime. Member agreement alone cannot justify a narrow distribution when every member shares the same unresolved station or settlement error.
+The fused center is not enough. The served width is current evidence, not history: the member spread of the same-cycle causal ECMWF ensemble for the exact target, the disagreement between providers at the decision instant, and the displacement between the ensemble and fused centers, combined in quadrature. A missing or stale ensemble shape blocks the live posterior rather than falling back to a historical residual, a constant width, or a fitted floor — walk-forward residual history informs trust and covariance upstream, never the served width itself.
 
 Open or thin-history sources enter at conservative prior precision and sharpen only as settled evidence accrues. Excluding a new source until an arbitrary sample count is reached throws away information; trusting its first few residuals at full strength lets chance dominate the center.
 
@@ -121,7 +124,7 @@ For a high, probability below the observed maximum collapses onto that maximum; 
 
 The integrated bin masses form one normalized joint distribution $`q`$ over the complete outcome space $`\Omega`$. Parameter draws are each normalized before forming a coherent uncertainty band, so the lower tail remains a distribution rather than a collection of independently pessimistic bin estimates whose mass no longer sums to one.
 
-A selection calibrator then asks a different question from parameter uncertainty: among prior settled candidates with this side, lead bucket, bin class, and raw probability bucket, how often did the executable claim pay? The admission probability is bounded by a one-sided Wilson lower interval. Thin cells borrow from nearby pooled cells that clear the evidence threshold; using an unconstrained cell would promote noise, while banning every thin cell would prevent the system from learning where new evidence belongs.
+A selection calibrator then asks a different question from parameter uncertainty: among prior settled candidates with this side, lead bucket, bin class, and raw probability bucket, how often did the executable claim pay? The admission probability is bounded by a one-sided Wilson lower interval. Thin cells cascade to the narrowest predefined pool clearing the sample floor; absent or stale calibration evidence fails closed. Using an unconstrained cell would promote noise, while banning every thin cell would prevent the system from learning where new evidence belongs.
 
 Benjamini–Hochberg control runs separately within each market over every hypothesis tested in that family. A missing p-value is a hard error. Running the procedure only on candidates that survived earlier filters would select on the same evidence the correction is meant to control and understate the false-discovery burden.
 
@@ -163,97 +166,18 @@ q_y
 s_r^*
 =
 \arg\max_s
-\operatorname{Quantile}_{\alpha}
+\operatorname{CVaR}_{\alpha}
 \left(
 \Delta U_r(s;Q)
 \right)
 ```
 
 
-The selected route must have positive lower-tail edge, positive utility at the venue minimum, and positive optimized lower-tail utility. Its cost is read from the same depth curve at the chosen stake. Independent binary Kelly sizing can allocate the same bankroll repeatedly across mutually exclusive siblings, and pricing the final size from top-of-book can erase the edge that selected it.
+The stake objective is the lower-tail CVaR — the mean of the worst $`\alpha`$-fraction of draws — rather than the raw quantile: each draw's utility is concave in the stake, and the lower-tail CVaR of concave functions stays concave, so the optimizer can certify a global optimum where a quantile objective cannot. The selected route must have positive lower-tail edge, positive utility at the venue minimum, and positive optimized lower-tail utility. Its cost is read from the same depth curve at the chosen stake. Independent binary Kelly sizing can allocate the same bankroll repeatedly across mutually exclusive siblings, and pricing the final size from top-of-book can erase the edge that selected it.
 
 The optimizer may evaluate broader payoff geometry, but the current live actuator accepts only implemented direct native routes. A synthetic or multi-leg optimum becomes a typed no-trade; silently mapping it to one order would execute a different payoff from the one that won selection.
 
 A two-rail data-density discount remains outside the statistical posterior. The absolute rail stops entry when station coverage is indefensible. The relative rail compares current density with a low percentile of the city's own history. A rolling mean is not a safe baseline here: as a station degrades gradually, the mean degrades with it and converts a sustained failure into the new normal. Missing or non-finite density evidence sizes to zero.
-
-## Worked example
-
-Consider an illustrative Tokyo daily-high family with four bins:
-| Outcome | Continuous preimage |
-|---|---:|
-| `49°F or below` | $`(-\infty,49.5)`$ |
-| `50–51°F` | $`[49.5,51.5)`$ |
-| `52–53°F` | $`[51.5,53.5)`$ |
-| `54°F or above` | $`[53.5,\infty)`$ |
-
-Four current provider values enter with settlement-tested precision weights:
-| Provider | Value | Weight |
-|---|---:|---:|
-| ECMWF | 50.8°F | 0.35 |
-| ICON | 51.4°F | 0.25 |
-| UKMO | 51.0°F | 0.20 |
-| HRRR | 51.8°F | 0.20 |
-
-The weighted center is $`51.19^\circ\!F`$, served as $`51.2^\circ\!F`$. After source representativeness is included, the fusion component of uncertainty is $`0.76^\circ\!F`$. A $`1.40^\circ\!F`$ walk-forward residual component gives:
-
-```math
-\sqrt{0.76^2+1.40^2}=1.593^\circ\!F
-```
-
-
-The realized settlement floor is $`1.60^\circ\!F`$, so the served distribution is:
-
-```math
-Y\sim\mathcal N(51.2,1.6^2)
-```
-
-
-Integration gives:
-| Bin | Calculation | Probability |
-|---|---|---:|
-| `49°F or below` | $`\Phi((49.5-51.2)/1.6)`$ | 0.1440 |
-| `50–51°F` | $`\Phi((51.5-51.2)/1.6)-\Phi((49.5-51.2)/1.6)`$ | 0.4304 |
-| `52–53°F` | $`\Phi((53.5-51.2)/1.6)-\Phi((51.5-51.2)/1.6)`$ | 0.3503 |
-| `54°F or above` | $`1-\Phi((53.5-51.2)/1.6)`$ | 0.0753 |
-| **Total** |  | **1.0000** |
-
-The coherent probability band places the fifth-percentile payoff probability of `YES 50–51°F` at 0.4018. Its empirical admission bound is 0.4070, so the probability band remains binding. After admission and the family error test, two direct routes remain:
-| Route | Point fair value | Payoff $`q_{\mathrm{LCB}}`$ | All-in cost | Edge $`q_{\mathrm{LCB}}-c`$ | Best lower-tail $`\Delta U`$ | Stake |
-|---|---:|---:|---:|---:|---:|---:|
-| `YES 49°F or below` | 0.1440 | 0.1260 | 0.1200 | 0.0060 | 0.00031 | \$8 |
-| `YES 50–51°F` | 0.4304 | 0.4018 | 0.3800 | 0.0218 | 0.00224 | \$52 |
-
-Existing family positions make pre-trade wealth outcome-dependent:
-
-```math
-A=[1015,\ 970,\ 1015,\ 1015]
-```
-
-
-For `YES 50–51°F` bought at 0.38 with dollar stake $`s`$:
-
-```math
-R(s)=
-\left[
--s,\
-\left(\frac{1}{0.38}-1\right)s,\
--s,\
--s
-\right]
-```
-
-
-The lower-tail utility sweep is:
-| Stake | Fifth-percentile $`\Delta U`$ |
-|---:|---:|
-| \$0 | 0.000000 |
-| \$20 | 0.001391 |
-| \$35 | 0.001996 |
-| \$52 | 0.002235 |
-| \$65 | 0.002105 |
-| \$80 | 0.001622 |
-
-The route wins at approximately \$52. At the escalation deadline, a fresh book raises its all-in cost to 0.39. The lower-tail edge remains positive at $`0.4018-0.39=0.0118`$, but the repeated utility sweep reduces the stake to approximately \$37. The final command is built from that fresh snapshot and smaller size. At a cost of 0.402 or after a sibling-rank reversal, no command would be produced.
 
 ## Positions and exits
 
@@ -284,9 +208,9 @@ Holding a SQLite writer across network I/O turns a slow external dependency into
 
 World facts, forecast facts, and trading facts live in separate SQLite databases. A machine-readable table-ownership registry assigns every canonical table to one database and names sanctioned readers and writers. A table merely existing in SQLite does not make it valid authority; an undeclared copy in another database can become a ghost surface whose readers and migrations silently diverge.
 
-Changes that must span databases use one connection with attached databases and a bounded savepoint or transaction. Independent commits would expose intermediate states in which, for example, a command exists without its position attribution or a settlement grade exists without the certificate it claims to judge.
+Cross-database writes are confined to the sanctioned helpers that group them within one connection's bounded transaction. Independent commits would expose intermediate states in which, for example, a command exists without its position attribution or a settlement grade exists without the certificate it claims to judge.
 
-Local holdings are projections over immutable command, order, trade, balance, and chain facts. Reconciliation distinguishes a complete empty snapshot from a missing or stale snapshot, and it surfaces venue or chain inventory with no matching Zeus intent instead of adopting it silently.
+Local holdings are projections over immutable command, order, trade, balance, and chain facts. Reconciliation distinguishes a complete empty snapshot from a missing or stale snapshot, and it surfaces venue or chain inventory with no matching Zeus intent instead of adopting it silently. Unexplained inventory is quarantined behind a scoped entry block until it is reconciled.
 
 Each decision receipt binds the forecast identity, probability vector, uncertainty basis, route, payoff-vector hash, executable cost, stake, and decision result. Derived fields such as probability mass and member envelopes are computed from the same arrays used by the decision; accepting them as free metadata would allow a receipt to describe a different calculation from the one that moved capital.
 
@@ -298,11 +222,11 @@ After settlement, a position is attributed to one of six outcomes:
 - `STALE_DECISION`
 - `UNATTRIBUTABLE_Q_MISSING`
 
-This taxonomy governs performance attribution and claims about strategy skill. Probability calibration uses every causally eligible decision joined to verified settlement, not only rows later labeled as skill. Treating a lucky win as evidence of forecasting skill corrupts attribution; filtering the reliability sample by an outcome-dependent skill label would corrupt calibration in the opposite direction.
+This taxonomy governs performance attribution and claims about strategy skill. Probability calibration uses every causally eligible decision with a resolvable frozen probability joined to verified settlement, not only rows later labeled as skill; missing-probability settlements remain counted coverage failures, never reconstructed. Treating a lucky win as evidence of forecasting skill corrupts attribution; filtering the reliability sample by an outcome-dependent skill label would corrupt calibration in the opposite direction.
 
-The decision probability comes from the immutable certificate attached to the entry. A time-reconstructed posterior is diagnostic only. One earlier staleness predicate was rejected after its own audit showed that the supposedly fresher forecasts were generally computed after the decisions they were used to condemn. Superseded grades are archived rather than overwritten so the old predicate and the repaired one remain distinguishable.
+For a scoreable entry, the decision probability comes from the immutable certificate attached to it. A time-reconstructed posterior is diagnostic only. One earlier staleness predicate was rejected after its own audit showed that the supposedly fresher forecasts were generally computed after the decisions they were used to condemn. Superseded grades are archived rather than overwritten so the old predicate and the repaired one remain distinguishable.
 
-[`docs/reference/calibration_report.md`](docs/reference/calibration_report.md) is regenerated from settled attribution records. It includes reliability bins, Wilson intervals, Brier decomposition, and cuts by lead time, side, strategy, and attribution class. The current corpus is a few hundred settled positions: enough to examine calibration with explicit uncertainty, not enough to establish durable net alpha. Capital exposure is in the low four figures, and the account contains unrelated inventory, so aggregate account PnL is not presented as a clean return series for this engine.
+[`docs/reference/calibration_report.md`](docs/reference/calibration_report.md) is regenerated from settled attribution records. It includes reliability bins, Wilson intervals, Brier decomposition, and cuts by lead time, side, strategy, and attribution class. The current corpus contains several hundred scoreable settled positions, with missing-probability settlements counted as coverage failures: enough to examine calibration with explicit uncertainty, not enough to establish durable net alpha. Capital exposure is in the low four figures, and the account contains unrelated inventory, so aggregate account PnL is not presented as a clean return series for this engine.
 
 Drift may arm a retraining candidate, but it cannot promote one. Promotion requires an operator-controlled gate, identity-complete settled evidence, and a passing frozen replay; failed candidates remain versioned evidence rather than replacing the active model. Allowing the same process that detects drift to fit and deploy its own remedy would turn a noisy diagnostic into an automatic money-path change.
 
@@ -339,7 +263,7 @@ The unattended improvement lane has three capability tiers:
 
 The operating-system sandbox denies writes to production source, architecture authority, `.git`, live state databases, and paths outside the declared workspace; network access is also denied. After the agent exits, a separate wrapper reloads the allowlist from the immutable base commit, compares against the pre-run co-tenant baseline, rejects symlink and rename escapes, applies a 20-file and 600-line circuit breaker, and commits only explicit permitted paths. Letting the model report its own compliance would make the actor being constrained the authority on whether the constraint held.
 
-Interactive coding agents use linked worktrees and the same review law, but a worktree is workflow isolation rather than a security boundary. Linked worktrees share the repository's ref store; an agent once used `git update-ref` from an isolated worktree and briefly moved the branch checked out by the live tree. The exact prior ref was restored and the incident is documented in [`AI_ASSISTANCE.md`](AI_ASSISTANCE.md). The remaining shared-ref escape is published rather than being hidden behind a claim that file isolation also isolates repository authority.
+Interactive coding agents use linked worktrees and the same review law, but a worktree is workflow isolation rather than a security boundary. Linked worktrees share the repository's ref store; an agent once used a ref-mutation command from an isolated worktree and briefly moved the branch checked out by the live tree. The exact prior ref was restored and the incident is documented in [`AI_ASSISTANCE.md`](AI_ASSISTANCE.md). The remaining shared-ref escape is published rather than being hidden behind a claim that file isolation also isolates repository authority.
 
 Architecture, research assumptions, merge acceptance, deployment, and capital-risk decisions remain human-owned. Deployment is an explicit operator action, not an agent capability.
 

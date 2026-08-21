@@ -88,6 +88,7 @@ URGENT_WAKE_REASONS = frozenset(
 _WAKE_QUEUE_CACHE_LOCK = threading.Lock()
 _WAKE_QUEUE_CACHE: dict[Path, dict[Path, ReactorWake | None]] = {}
 _WAKE_QUEUE_REVISIONS: dict[Path, tuple[int, ...]] = {}
+_WAKE_QUEUE_REFRESH_LOCKS: dict[Path, threading.Lock] = {}
 _HELD_SELL_REAUCTION_RECEIPT_LINEAGE_LOCK = threading.Lock()
 HELD_SELL_REAUCTION_LINEAGE_LOCK_TIMEOUT_SECONDS = 0.25
 _HELD_SELL_REAUCTION_RECOVERY_CHILD_LOCK = threading.Lock()
@@ -1019,54 +1020,74 @@ def _queued_wakes(
     """Read immutable queue files once, then refresh only on durable revision change."""
 
     queue_dir = _wake_queue_dir(path)
-    revision = _wake_queue_revision(
-        queue_dir,
-        path=path,
-        fail_on_error=fail_on_error,
-    )
-    if revision is None:
-        return []
-    cached_snapshot: dict[Path, ReactorWake | None] | None = None
     with _WAKE_QUEUE_CACHE_LOCK:
-        if _WAKE_QUEUE_REVISIONS.get(queue_dir) == revision:
-            cached_snapshot = _WAKE_QUEUE_CACHE.get(queue_dir, {})
-    if cached_snapshot is not None:
-        if fail_on_error and any(wake is None for wake in cached_snapshot.values()):
-            raise ValueError("REACTOR_WAKE_INVALID")
+        refresh_lock = _WAKE_QUEUE_REFRESH_LOCKS.setdefault(
+            queue_dir,
+            threading.Lock(),
+        )
+    # Several scheduler/wake-listener threads can observe the same directory
+    # revision concurrently.  Serialize only the cache refresh: without this
+    # single-flight fence, every cold reader reparses the entire durable queue
+    # before any of them can publish the shared cache.  The queue is a wake
+    # hint, but an unbounded duplicate scan can consume the decision deadline.
+    with refresh_lock:
+        revision = _wake_queue_revision(
+            queue_dir,
+            path=path,
+            fail_on_error=fail_on_error,
+        )
+        if revision is None:
+            return []
+        cached_snapshot: dict[Path, ReactorWake | None] | None = None
+        with _WAKE_QUEUE_CACHE_LOCK:
+            if _WAKE_QUEUE_REVISIONS.get(queue_dir) == revision:
+                cached_snapshot = _WAKE_QUEUE_CACHE.get(queue_dir, {})
+        if cached_snapshot is not None:
+            if fail_on_error and any(
+                wake is None for wake in cached_snapshot.values()
+            ):
+                raise ValueError("REACTOR_WAKE_INVALID")
+            return [
+                (queue_file, wake)
+                for queue_file, wake in cached_snapshot.items()
+                if wake is not None
+            ]
+        try:
+            queue_files = sorted(queue_dir.glob("*.json"))
+        except OSError:
+            if fail_on_error:
+                raise
+            return []
+        with _WAKE_QUEUE_CACHE_LOCK:
+            cached = dict(_WAKE_QUEUE_CACHE.get(queue_dir, {}))
+        fresh: dict[Path, ReactorWake | None] = {}
+        for queue_file in queue_files:
+            fresh[queue_file] = (
+                cached[queue_file]
+                if queue_file in cached
+                else _read_reactor_wake_path(
+                    queue_file,
+                    fail_on_error=fail_on_error,
+                )
+            )
+            if fail_on_error and fresh[queue_file] is None:
+                raise ValueError("REACTOR_WAKE_INVALID")
+        current_revision = _wake_queue_revision(
+            queue_dir,
+            path=path,
+            fail_on_error=fail_on_error,
+        )
+        with _WAKE_QUEUE_CACHE_LOCK:
+            _WAKE_QUEUE_CACHE[queue_dir] = fresh
+            if current_revision == revision:
+                _WAKE_QUEUE_REVISIONS[queue_dir] = revision
+            else:
+                _WAKE_QUEUE_REVISIONS.pop(queue_dir, None)
         return [
             (queue_file, wake)
-            for queue_file, wake in cached_snapshot.items()
+            for queue_file, wake in fresh.items()
             if wake is not None
         ]
-    try:
-        queue_files = sorted(queue_dir.glob("*.json"))
-    except OSError:
-        if fail_on_error:
-            raise
-        return []
-    with _WAKE_QUEUE_CACHE_LOCK:
-        cached = dict(_WAKE_QUEUE_CACHE.get(queue_dir, {}))
-    fresh: dict[Path, ReactorWake | None] = {}
-    for queue_file in queue_files:
-        fresh[queue_file] = (
-            cached[queue_file]
-            if queue_file in cached
-            else _read_reactor_wake_path(queue_file, fail_on_error=fail_on_error)
-        )
-        if fail_on_error and fresh[queue_file] is None:
-            raise ValueError("REACTOR_WAKE_INVALID")
-    current_revision = _wake_queue_revision(
-        queue_dir,
-        path=path,
-        fail_on_error=fail_on_error,
-    )
-    with _WAKE_QUEUE_CACHE_LOCK:
-        _WAKE_QUEUE_CACHE[queue_dir] = fresh
-        if current_revision == revision:
-            _WAKE_QUEUE_REVISIONS[queue_dir] = revision
-        else:
-            _WAKE_QUEUE_REVISIONS.pop(queue_dir, None)
-    return [(queue_file, wake) for queue_file, wake in fresh.items() if wake is not None]
 
 
 def _exact_held_sell_deadline_expired(

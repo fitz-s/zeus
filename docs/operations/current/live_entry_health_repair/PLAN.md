@@ -2505,3 +2505,395 @@ publication barrier.
   remains blocked by the same malformed current-live YAML scalar at line 1285,
   and the repo-wide test registry reports the existing unrelated drift; neither
   touches this changed behavior or its registered antibody.
+
+### Slice B120 — Durable same-station fast observation closes an absorbing dead bin (2026-08-19)
+
+- Forward defect: Seoul HIGH 28°C YES filled at 02:25 UTC. RKSI then published
+  29°C at 02:30; Zeus durably received the raw METAR and a priority-60
+  `DAY0_EXTREME_UPDATED` at 02:34:24, but held hard-fact evaluation admitted
+  only the slower WU row imported at 02:35:46. The position did not record its
+  exact-zero decision until 02:38:26, when no executable bid remained. This
+  order is a genuine current-revision forward loss, not historical garbage or
+  proof of capital gain.
+- First-principles invariant: an intraday observation is not final settlement
+  truth, but a qualified same-station running HIGH above a finite bin (or LOW
+  below it) is a monotone physical proof that the bin cannot recover. It may
+  authorize only that absorbing payoff. A bare scalar, an unmeasured station,
+  missing raw report, absent publication/fetch clock, future row, wrong local
+  date/metric/unit/station, non-live event, or replay that disagrees with the
+  frozen per-city WU/METAR margin proves nothing.
+- Executable proof requires both immutable surfaces: `observation_prints`
+  replays the exact raw AviationWeather METAR sequence at the decision cutoff,
+  plausibility rule, settlement unit, and empirical divergence margin;
+  `DAY0_EXTREME_UPDATED` must independently reproduce the same extreme after
+  its source/station/local-date/DST/metric/rounding/live-authority gates. The
+  fixed-size evidence identity hashes the complete publication set and event.
+- SCOPE: Day0 WU-ICAO held positions and resting/submit rechecks for one exact
+  city/date/metric whose finite-bin/absorbing-shoulder payoff is already fixed
+  by the monotone boundary. DRAIN: the next targeted or periodic held monitor
+  consumes the durable evidence without network I/O. RESET: later source facts
+  combine monotonically; missing or mismatched proof abstains and ordinary
+  statistical redecision continues. Final settlement, lifecycle closure,
+  probability modeling, Kelly, market-price input, and venue order grammar are
+  unchanged.
+- Files authorized: `src/execution/day0_hard_fact_exit.py`,
+  `tests/test_day0_hard_fact_exit.py`, this plan, and their existing source/test
+  registries. Forbidden: use the event payload without its raw ledger, use the
+  ledger without the live-authority event, infer probability from the CLOB,
+  bypass the empirical margin, or label an intraday finite-bin containment as
+  a winner.
+- Acceptance: the frozen Seoul cutoff at 02:34:30 returns `EXIT_DEAD_BIN` at
+  29°C before the 02:35:46 WU import; a station-mismatched event returns no
+  verdict; existing WU, HKO-abstention, boundary, margin, plausibility,
+  direction, and structural-win contracts remain green. Focused tests,
+  compilation, registries, planning gate, and diff checks must pass before a
+  hot-fix deployment. Runtime closeout requires exact loaded SHA plus a new
+  fast-event monitor receipt; it does not claim realized profitability.
+
+### Slice B121 — Prove known-order absence before releasing unknown submit debt (2026-08-19)
+
+- Live defect: command `6db607fa346d47ca` remained
+  `SUBMIT_UNKNOWN_SIDE_EFFECT` after a post-sign CLOB 503. During restart
+  preflight the known-order lookup returned no payload, and recovery appended
+  `safe_replay_permitted_no_order_found` with `venue_absence_proof=null`.
+  A missing point-order payload is not proof that the order never rested or
+  filled, so the current shape can release duplicate/capital locks without
+  authenticated exposure evidence.
+- First-principles invariant: a known venue order id may recover immediately
+  from a valid authenticated point-order payload. Any absent, malformed, or
+  failed point read must fall through to complete authenticated open-order and
+  trade enumeration. Safe replay is legal only when both enumerations are
+  complete and show no matching command exposure; any matching exposure or
+  incomplete read remains unknown.
+- SCOPE: recovery of `SUBMIT_UNKNOWN_SIDE_EFFECT` commands carrying a known
+  venue order id. DRAIN: every command-recovery cadence retries the point read
+  and complete account reads. RESET: a point order recovers the command; a
+  matching account order/trade keeps it fail closed for fact recovery; complete
+  zero-exposure proof permits the existing age-gated terminalization.
+- Files authorized: `src/execution/command_recovery.py`,
+  `tests/test_command_recovery.py`, this plan, and the existing test registry.
+  Price, probability, sizing, global ranking, command grammar, and venue submit
+  I/O are unchanged.
+- Acceptance: a point-order 503 plus complete zero-exposure account reads
+  records a non-null absence proof and releases the aged command; the same 503
+  plus any matching trade remains `SUBMIT_UNKNOWN_SIDE_EFFECT`. Focused command
+  recovery tests, compilation, registry/planning checks, and `git diff --check`
+  must pass before hot-fix deployment. Runtime verification separately checks
+  exact loaded SHA and current CLOB order/trade absence.
+
+### Slice B122 — Keep global scope on indexed family point probes (2026-08-19)
+
+- Live defect: after storage risk reset to GREEN, every full global auction from
+  20:11 through 20:27 failed its 45-second work cut in
+  `scope:forecast:sql_interrupt`. The identical current-scope query ranged from
+  4.6 to 43 seconds under live ingest load; book capture and solve were not the
+  bottleneck. Query-plan evidence showed SQLite choosing `readiness_state` as
+  the outer loop and scanning the bounded `market_families` CTE for each row.
+- First-principles invariant: every auction must finish the complete current
+  BUY/SELL/HOLD/CASH comparison before no-order can be authoritative. The
+  already-bounded current-market family set is the outer loop; each family
+  point-probes the existing strategy/family readiness index. Join order is an
+  execution-shape contract only and must not alter scope rows, posterior
+  identity, probability, price, sizing, ranking, or venue I/O.
+- SCOPE: unrestricted replacement-carrier current-scope SQL inside
+  `ForecastSnapshotReadyTrigger`. DRAIN: the next reactor retry completes a
+  fresh full-scope auction and durably records its receipt. RESET: every call
+  rebuilds the bounded market-family CTE from current decision-time rows; an
+  absent current readiness or market still fails closed exactly as before.
+- Files authorized: `src/events/triggers/forecast_snapshot_ready.py`,
+  `tests/events/test_forecast_snapshot_ready.py`, this plan, and the existing
+  test topology registry. Forbidden: extending the 45-second authority window,
+  caching stale scope, dropping families, changing risk gates, or bypassing
+  current probability/book refresh.
+- Acceptance: the frozen query plan contains `CROSS JOIN readiness_state` and
+  probes `idx_readiness_state_strategy_family_latest` on strategy, city, target,
+  and metric; the same live read returns the same row count in under the work
+  cut; the full forecast-trigger test file, compilation, registry/planning
+  checks, and diff checks pass. Runtime closeout requires exact loaded SHA plus
+  a post-load full-scope decision receipt; any order still requires positive
+  posterior-mean expected log growth and all submit-time truth gates.
+
+### Slice B123 — Remove posterior-history scan from current family scope (2026-08-19)
+
+- Residual defect: B122 removed the reversed readiness/family nested scan and a
+  standalone live-DB read fell to 1.493 seconds, but the first loaded auction's
+  shared-connection scope still took 27.516 seconds under live writers and a
+  following cut again expired in `scope:forecast:sql_interrupt`. One successful
+  receipt is not robust time-sensitive coverage.
+- First-principles invariant: a family without strategy readiness cannot emit a
+  probability-authorized event. Build the bounded current family frontier from
+  strategy `readiness_state`, not the much larger append-only posterior history;
+  then preserve the exact readiness dependency's `posterior_id` rejoin and all
+  live-layer/product/source/data-version/time checks before emission.
+- SCOPE: unrestricted market-family CTE only. DRAIN and RESET are B122's next
+  fresh retry/current-row rebuild. Forbidden: using readiness as probability,
+  skipping the exact posterior rejoin, accepting BLOCKED readiness, widening
+  dates, extending deadline, or changing candidate economics and execution.
+- Acceptance: the query plan has no current-posterior frontier scan, still uses
+  indexed readiness and market family probes, produces the same frozen event
+  set, and completes repeated live shared-connection scope cuts with adequate
+  margin. The restart guard remains active until a post-load receipt and fresh
+  monitor proof both pass; only then may its witness-bound CAS release entries.
+
+### Slice B124 — Serialize the replacement posterior SQLite writer (2026-08-19)
+
+- Live evidence: after the current-evidence revision advanced, the materializer
+  ran eight current requests in two four-process waves against the same 66 GB
+  `zeus-forecasts.db`. Every subprocess exhausted the 240 second deadline; the
+  batch took about 8.5 minutes and committed zero posteriors, leaving six of
+  seven held positions without current probability authority.
+- First-principles invariant: SQLite has one writer. Parallel commit subprocesses
+  cannot add write throughput; they multiply cold-page reads and lock contention.
+  Preserve one queue owner, claim-time held-family priority, batch ordering, and
+  the existing timeout, but execute exactly one materialization subprocess at a
+  time.
+- SCOPE: replacement live materialization subprocess concurrency only. DRAIN:
+  the active subprocess reaches success, typed blocked authority, or its existing
+  timeout before the next request starts. RESET: the next one-second poll claims
+  remaining durable work. No probability math, source selection, queue priority,
+  or fail-closed admission rule changes.
+- Acceptance: the relationship test fixes the writer cap at one and proves a
+  second exact Day0 request stays retryable until the first writer releases;
+  focused queue/Day0 tests, compile, lint, and diff checks pass. Runtime proof
+  requires a post-load batch with at least one current posterior commit or a
+  truthful per-request authority block, followed by fresh held-position monitor
+  evidence under the exact loaded SHA.
+
+### Slice B125 — Admit same-cycle 06Z/18Z ENS through the complete live horizon (2026-08-19)
+
+- Live defect: after the provider carrier advanced to 18Z, every held statistical
+  posterior still used the 12Z ENS shape (`shape_lag_hours=6`) and correctly lost
+  live authority. The canonical source DB contained successful 00Z/12Z ENS runs
+  only because `source_release_calendar.yaml` marked the 06Z/18Z profile
+  non-live, even though both that profile and the executable OpenData fetch grid
+  end at 144h. The result was a self-created probability blackout, not missing
+  ECMWF data.
+- External truth: ECMWF's current Open Data specification publishes ENS direct
+  model output for all 00/06/12/18 UTC runs; 06/18 provide steps 0..144h by 3h.
+  Zeus fetches 3..144h and the live weather universe is capped at five days, so
+  the upstream "short" profile covers the complete executable target horizon.
+- First-principles invariant: same-cycle current ENS is strictly better source
+  truth than either a stale cross-cycle shape or no probability. Cycle-profile
+  authorization is target-horizon specific: a profile is live when it covers
+  every required step for the exact executable universe, not when it carries an
+  upstream `full` name or an unused >144h tail.
+- SCOPE: ECMWF OpenData HIGH/LOW 06Z/18Z fetch-plan admission through 144h only.
+  DRAIN: the five-minute safe-cycle poll fetches the newest released cycle,
+  commits its target-specific snapshots, and wakes the existing materializer.
+  RESET: each poll re-evaluates source release time and required max step; any
+  cycle not released or any target beyond 144h still fails closed. Same-cycle
+  shape semantics, current q bounds, pricing, ranking, Kelly, and venue I/O are
+  unchanged.
+- Files authorized: `config/source_release_calendar.yaml`,
+  `tests/test_release_calendar.py`,
+  `tests/test_opendata_release_calendar_selection.py`, and this plan. Forbidden:
+  admit a step above 144h, relabel stale 00/12 members as current, translate
+  members, lower release lag, or bypass target-window completeness.
+- Acceptance: the release-calendar tests prove 18Z becomes the latest safe cycle
+  for a 144h target while 145h remains blocked, both HIGH and LOW short profiles
+  are live, and the ordinary 00/12 behavior remains unchanged. Runtime closeout
+  requires a successful 18Z ENS `source_run`, target snapshots, a same-cycle v4
+  posterior, fresh held-position monitor evidence, and exact loaded SHA before
+  any new entry can resume.
+
+### Slice B126 — Point-probe the readiness-bound posterior in global scope (2026-08-19)
+
+- Live defect: after B125 restored 18Z same-cycle q for all seven held families,
+  three consecutive global auctions still consumed 30–39 seconds in forecast
+  scope. One completed all 83-family book capture and winner computation but
+  crossed the 45-second cut immediately before receipt persistence; therefore
+  no order/no-order outcome was authoritative.
+- Query proof: the readiness dependency already contains the exact immutable
+  `posterior_id`, but SQLite reversed the ordinary join and searched
+  `forecast_posteriors` through `idx_forecast_posteriors_target`, scanning
+  append-only family history. The identical live count took about 26 seconds.
+  Forcing readiness as the outer loop with `CROSS JOIN` made SQLite use the
+  integer primary-key point probe and returned the same bound rows in about
+  0.05 seconds.
+- First-principles invariant: an exact certified identity is a point lookup,
+  never a history search. The query must still revalidate product, runtime
+  layer, training flag, source/data version, family identity, decision clocks,
+  and market existence after the lookup; join order changes execution shape,
+  not the feasible set or economics.
+- SCOPE: unrestricted replacement-carrier current-scope posterior rejoin only.
+  DRAIN: the next requeued money-path event completes the full global auction
+  under its unchanged 45-second cut. RESET: every auction rebuilds readiness,
+  exact posterior, market, and book truth at its own decision time. No cache,
+  family omission, deadline extension, probability, sizing, ranking, or venue
+  behavior changes.
+- Files authorized: `src/events/triggers/forecast_snapshot_ready.py`,
+  `tests/events/test_forecast_snapshot_ready.py`, and this plan.
+- Acceptance: the relationship test requires a primary-key posterior search and
+  rejects the family-history index; focused trigger tests preserve the emitted
+  family set. Live closeout requires an exact-SHA full-auction receipt followed
+  by its actual BUY/SELL/HOLD/CASH result and any resulting command evidence.
+
+### Slice B127 — Single-flight durable wake-queue cache refresh (2026-08-20)
+
+- Live defect: B126 completed a 1,945-candidate auction and produced a confirmed
+  Busan fill, but later construction cuts repeatedly exhausted 45 seconds before
+  selection. A process sample showed multiple reactor/scheduler threads inside
+  the same 24,506-file wake-directory scan while the queue cache was cold or its
+  revision was advancing; each thread could independently parse the entire
+  96 MB backlog before any one published the shared cache.
+- First-principles invariant: durable wakes remain one complete fail-closed set,
+  but one process performs at most one cache refresh for a queue revision.
+  Concurrent readers wait for that identical refresh and then consume the same
+  snapshot; no wake is dropped, coalesced, acknowledged, reordered, or treated
+  as probability/market/order truth.
+- SCOPE: process-local `_queued_wakes` cache refresh concurrency only. DRAIN:
+  the one refresh reads every immutable queue JSON and publishes its cache;
+  waiting readers then return from that cache. RESET: any durable directory
+  revision still invalidates the cached revision and causes the next reader to
+  refresh. Strict malformed/unreadable behavior remains unchanged.
+- Files authorized: `src/runtime/reactor_wake.py`,
+  `tests/events/test_reactor.py`, and this plan. Forbidden: deleting backlog,
+  weakening `fail_on_error`, skipping exact held-SELL debt, changing wake
+  priority, extending auction deadlines, or altering probability/economics.
+- Acceptance: six simultaneous cold readers over the same queue parse each file
+  exactly once in aggregate and all receive the complete snapshot; strict queue
+  tests, compilation, source lint, and diff checks pass. Runtime closeout
+  requires exact loaded SHA plus a post-load construction/auction cut that no
+  longer expires behind duplicate wake parsing.
+
+### Slice B128 — Serialize ENTRY admission on the canonical TRADE writer lease (2026-08-20)
+
+- Live defect: after B127 restored complete global auctions, Seattle 80–81°F
+  YES at 17–18¢ passed one 1,882-candidate global comparison and a `STABLE`
+  submit-time preflight. Its immutable live-order aggregate then recorded
+  `SubmitRejected` before any venue call with
+  `EXECUTOR_PRE_VENUE_REJECTED:database is locked`; the live-cap reservation
+  released correctly, but a positive executable order was missed. EXIT already
+  entered the canonical TRADE writer coordinator; ENTRY began `BEGIN IMMEDIATE`
+  without that lease and could collide with monitor/recovery writers.
+- First-principles invariant: command, submission envelope, collateral
+  reservation, and unresolved exposure remain one atomic pre-venue admission,
+  but a current globally selected ENTRY must join the same bounded TRADE writer
+  serialization as every participating live writer. It may wait only inside the
+  short submit-time authority budget; a raw/legacy writer collision remains a
+  clean no-side-effect transient rejection and is re-decided from fresh truth.
+- SCOPE: canonical live ENTRY pre-submit admission only. DRAIN: the coordinator
+  admits the writer after any incumbent short transaction, then the existing
+  fresh attached snapshot and atomic admission commit complete. RESET: the
+  lease releases on every success, rejection, exception, or timeout; a timeout
+  rolls back and the reactor requeues the candidate for a new current cut.
+  Probability, ranking, Kelly, order type, quote/JIT gates, venue I/O, and EXIT
+  semantics are unchanged.
+- Files authorized: `src/execution/executor.py`, `tests/test_executor.py`,
+  `architecture/source_rationale.yaml`, `architecture/test_topology.yaml`, and
+  this plan. Forbidden: extending book/probability freshness, submitting after
+  a lease timeout, holding the lease across SDK I/O, weakening monitor priority,
+  or classifying a pre-venue lock as an unknown side effect.
+- Acceptance: a deterministic executor antibody proves the ENTRY path enters
+  the canonical writer lease and maps lease timeout to the existing clean
+  `pre_submit_db_locked_transient` result with no command/envelope/reservation,
+  no client construction, and no venue call. Focused executor and coordinator
+  tests, compilation, lint, registry checks, and diff checks pass. Runtime
+  closeout requires exact loaded SHA plus a later positive global candidate that
+  either persists a command before venue contact or produces a truthful
+  non-lock rejection from a freshly rebuilt cut.
+
+### Slice B130 — Preserve fill truth when WS beats the submit ACK (2026-08-20)
+
+- Live defect: a complete 121-family global cut selected a 44.8-share FOK BUY
+  at 10¢ with posterior-mean q=0.309946898 and expected EV +$9.661817. The
+  authenticated user channel persisted its 44.8-share MATCHED trade before
+  `place_limit_order` returned to the executor, moving the command from
+  `SUBMITTING` to `PARTIAL`. The following `SUBMIT_ACKED` append was rejected
+  as an illegal `PARTIAL -> SUBMIT_ACKED` transition, producing
+  `POST_SUBMIT_UNKNOWN/REVIEW_REQUIRED` despite a venue order id and later
+  CONFIRMED transaction fact.
+- First-principles invariant: authenticated fill evidence is stronger than and
+  causally independent of the synchronous submit ACK. A late ACK must still be
+  journaled and bind the venue order identity, but it must never downgrade or
+  invalidate already-observed `PARTIAL` or `FILLED` exposure.
+- SCOPE: venue-command grammar for `SUBMIT_ACKED` arriving after an authenticated
+  partial/full fill only. DRAIN: the same executor call appends the late ACK and
+  continues normally; existing recovery consumes any already-stranded
+  `REVIEW_REQUIRED` command from authenticated trade facts. RESET: the command
+  remains `PARTIAL`/`FILLED` and ordinary fill, reconciliation, and terminal
+  recovery cadence owns all later transitions. Probability, ranking, Kelly,
+  price, sizing, venue submission, and fill authentication are unchanged.
+- Files authorized: `src/state/venue_command_repo.py`,
+  `tests/test_venue_command_repo.py`, `architecture/source_rationale.yaml`,
+  `architecture/test_topology.yaml`, and this plan. Forbidden: accepting an ACK
+  without a prior submit side-effect state, treating an ACK as fill proof,
+  weakening authenticated fill validation, or replaying the venue submission.
+- Acceptance: deterministic grammar tests reproduce both
+  `SUBMITTING -> PARTIAL/FILLED -> SUBMIT_ACKED` orderings, prove the ACK event
+  and venue id persist, and prove the final state remains the stronger fill
+  state. Focused journal/executor/recovery tests, compilation, lint baseline,
+  registry checks, and diff checks pass. Runtime closeout requires exact loaded
+  SHA and either a naturally reordered fill/ACK that converges without review,
+  or recovery of the already-confirmed live command with no duplicate submit.
+
+### Slice B131 — Terminalize stale global-winner carriers at the command fence (2026-08-20)
+
+- Live defect: after B130 changed the current portfolio endowment, repeated
+  complete auctions selected Seattle YES with positive posterior-mean EV. The
+  first immutable winner carrier was rejected at submit-time wealth binding,
+  after its EDLI aggregate had already recorded `ExecutionCommandCreated` and
+  `VenueSubmitAttempted`. The reactor treated both
+  `global_increment_binding:wealth_economic_identity_superseded` and every later
+  `GLOBAL_WINNER_CLAIM_FENCE_LOST` as unknown transient reasons, so the same
+  carrier requeued even though the exactly-once fence correctly forbade it from
+  ever acquiring command ownership again.
+- First-principles invariant: durable command/attempt evidence is never replayed,
+  and obsolete wealth economics are never retried as if current. Terminalize the
+  exact immutable carrier; the next producer/redecision carrier must rebuild the
+  complete q/book/wealth feasible set under a new event identity.
+- SCOPE: runtime disposition of `GLOBAL_WINNER_CLAIM_FENCE_LOST` and
+  `global_increment_binding:*` for one immutable event only. DRAIN: terminal
+  finalization consumes that carrier while normal command recovery owns any
+  durable command/attempt evidence. RESET: a fresh forecast, price, fill, or
+  redecision carrier has a new `event_id`, may replace the old winner pointer,
+  and must acquire the unchanged command fence before actuation.
+- Files authorized: `src/events/reactor.py`, `tests/events/test_reactor.py`,
+  `architecture/source_rationale.yaml`, `architecture/test_topology.yaml`, and
+  this plan. Forbidden: removing the command-event `NOT EXISTS` fence, reviving
+  a terminal event row, reusing an idempotency key/order envelope, treating the
+  stale carrier as a live order, or changing probability/ranking/Kelly/price.
+- Acceptance: classifier antibodies prove both bases are explicit terminal
+  reasons with no unknown-reason fallback; a carrier with durable venue-attempt
+  evidence cannot reclaim/refence, while a fresh carrier can replace it and
+  acquire the unchanged fence. Focused fence/reactor tests, compilation, lint,
+  registry/planning checks, and diff checks must pass. Runtime closeout requires
+  exact loaded SHA, terminal disposition of the stuck carrier, and a later fresh
+  carrier reaching a truthful submit/no-submit result without duplicate venue
+  submission.
+
+### Slice B132 — Preserve executor venue-boundary facts in EDLI receipts (2026-08-20)
+
+- Live defect: Seattle's submit-time
+  `global_increment_binding:wealth_economic_identity_superseded` rejection
+  occurred before command persistence or any venue call, yet EDLI recorded
+  `VenueSubmitAttempted` and serialized `venue_call_started=true` plus
+  `venue_ack_received=true`. The executor already returned explicit boundary
+  facts, but the event-bound bridge and adapter re-derived both booleans from
+  the generic `REJECTED` status and overwrote the direct evidence.
+- First-principles invariant: venue contact and ACK are independent facts, not
+  implications of an outcome label. Executor-provided boundary facts outrank
+  status-string inference. A local rejection is terminal with known zero side
+  effect and no attempt event; a real venue rejection preserves its exact
+  call/ACK tuple; an unknown post-call result remains reconcile-required.
+- SCOPE: the submit-result translation, normalization, and terminal aggregate
+  payload for one already-built EDLI command. DRAIN: every returned result still
+  appends exactly one terminal event and releases or transitions its existing
+  live-cap reservation. RESET: the terminal event closes the aggregate; a fresh
+  event may re-auction and must cross the unchanged global-winner and executor
+  fences before any venue I/O.
+- Files authorized: `src/engine/event_bound_final_intent.py`,
+  `src/engine/event_reactor_adapter.py`,
+  `tests/engine/test_pre_venue_rejection_terminal.py`,
+  `architecture/source_rationale.yaml`, `architecture/test_topology.yaml`, and
+  this plan. Forbidden: inferring venue contact from `REJECTED`, suppressing a
+  genuine venue attempt/ACK, changing global ranking, q, Kelly, price, size,
+  cap law, order identity, or replaying a prior command.
+- Acceptance: exact antibodies prove the Seattle local rejection becomes
+  `PRE_SUBMIT_ERROR` with `false/false`, no attempt implication, and
+  `pre_submit_rejection=true`; a genuine venue rejection remains `REJECTED`
+  with its explicit call/ACK facts; submitted and unknown outcomes retain their
+  existing semantics. Focused tests, compilation, lint baseline, topology and
+  registry checks, and `git diff --check` must pass. Runtime closeout requires
+  the exact loaded SHA and future receipts/aggregate events to agree with the
+  canonical executor command and venue evidence.

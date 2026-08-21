@@ -859,8 +859,6 @@ def _monitor_event_fresh_input_issue(
     quote_fresh = quote_flag and _is_unit_interval(
         payload.get("last_monitor_market_price")
     )
-    if probability_fresh and quote_fresh:
-        return None
     structural_win = (
         probability_fresh
         and payload.get("last_monitor_prob") == 1.0
@@ -868,6 +866,10 @@ def _monitor_event_fresh_input_issue(
         and "day0_hard_fact_structural_win_quote_bypassed" in validations
     )
     if structural_win:
+        return None
+    if probability_fresh and quote_fresh:
+        if payload.get("exit_decision_available") is False:
+            return "monitor_exit_decision_unavailable"
         return None
     if probability_flag and not probability_fresh:
         return "monitor_probability_value_invalid"

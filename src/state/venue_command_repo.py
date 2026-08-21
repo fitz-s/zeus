@@ -117,6 +117,8 @@ _TRANSITIONS: dict[tuple[str, str], str] = {
     ("POSTING", "SUBMIT_UNKNOWN"):             "UNKNOWN",
     ("POSTING", "SUBMIT_TIMEOUT_UNKNOWN"):     "SUBMIT_UNKNOWN_SIDE_EFFECT",
     ("POSTING", "CLOSED_MARKET_UNKNOWN"):      "SUBMIT_UNKNOWN_SIDE_EFFECT",
+    ("POSTING", "PARTIAL_FILL_OBSERVED"):       "PARTIAL",
+    ("POSTING", "FILL_CONFIRMED"):              "FILLED",
     ("POSTING", "CANCEL_REQUESTED"):           "CANCEL_PENDING",
     ("POSTING", "REVIEW_REQUIRED"):            "REVIEW_REQUIRED",
     ("POST_ACKED", "SUBMIT_ACKED"):            "ACKED",
@@ -132,6 +134,11 @@ _TRANSITIONS: dict[tuple[str, str], str] = {
     ("SUBMITTING", "SUBMIT_UNKNOWN"):         "UNKNOWN",
     ("SUBMITTING", "SUBMIT_TIMEOUT_UNKNOWN"): "SUBMIT_UNKNOWN_SIDE_EFFECT",
     ("SUBMITTING", "CLOSED_MARKET_UNKNOWN"):  "SUBMIT_UNKNOWN_SIDE_EFFECT",
+    # A venue fill is stronger evidence than the submit ACK that may have been
+    # lost when the process crossed the SDK side-effect boundary.  Preserve
+    # the observed fill instead of stranding the command in SUBMITTING.
+    ("SUBMITTING", "PARTIAL_FILL_OBSERVED"):   "PARTIAL",
+    ("SUBMITTING", "FILL_CONFIRMED"):          "FILLED",
     ("SUBMITTING", "CANCEL_REQUESTED"):       "CANCEL_PENDING",
     ("SUBMITTING", "EXPIRED"):                "EXPIRED",
     ("SUBMITTING", "REVIEW_REQUIRED"):        "REVIEW_REQUIRED",
@@ -164,6 +171,10 @@ _TRANSITIONS: dict[tuple[str, str], str] = {
     ("SUBMIT_UNKNOWN_SIDE_EFFECT", "REVIEW_REQUIRED"):       "REVIEW_REQUIRED",
 
     # from PARTIAL
+    # User-channel fill evidence can beat the synchronous SDK return back to
+    # this process.  A later submit ACK binds its order identity but cannot
+    # downgrade the already-observed exposure.
+    ("PARTIAL", "SUBMIT_ACKED"):              "PARTIAL",
     ("PARTIAL", "PARTIAL_FILL_OBSERVED"):     "PARTIAL",
     ("PARTIAL", "FILL_CONFIRMED"):            "FILLED",
     ("PARTIAL", "CANCEL_REQUESTED"):          "CANCEL_PENDING",
@@ -171,6 +182,7 @@ _TRANSITIONS: dict[tuple[str, str], str] = {
     ("PARTIAL", "REVIEW_REQUIRED"):           "REVIEW_REQUIRED",
 
     # from FILLED
+    ("FILLED", "SUBMIT_ACKED"):               "FILLED",
     ("FILLED", "PARTIAL_FILL_OBSERVED"):      "PARTIAL",
     ("FILLED", "REVIEW_REQUIRED"):            "REVIEW_REQUIRED",
 

@@ -908,38 +908,40 @@ class ForecastSnapshotReadyTrigger:
         _ranked_readiness_from_sql = "FROM readiness_state AS rs"
         _ranked_readiness_prefix_params: tuple[str, ...] = ()
         if market_backed_current_scope:
-            # Drive the current-scope scan from the bounded live-posterior
-            # frontier, then point-probe market existence.  ``market_events``
-            # is append-only history and can grow far beyond the current
-            # tradable universe; scanning it by target_date (not a leading
-            # index column) pinned the only reactor lane for minutes.  The
-            # posterior partial index and market family index make this shape
-            # proportional to current probability authority instead.
-            # The latest-row ranking remains unchanged inside each requested
-            # family, so a newer BLOCKED row still suppresses an older READY row.
+            # Drive the current-scope scan from the bounded strategy-readiness
+            # frontier, then point-probe market existence. Readiness is required
+            # before any posterior can emit, while forecast_posteriors is a much
+            # larger append-only history. The exact certified posterior_id still
+            # rejoins and validates the live posterior below, so this changes
+            # execution shape only. A newer BLOCKED row still suppresses an older
+            # READY row inside each requested family.
             _ranked_readiness_market_cte_sql = f"""
             market_families AS (
                 SELECT DISTINCT
-                       current_fp.city,
-                       current_fp.target_date,
-                       current_fp.temperature_metric
-                  FROM forecast_posteriors AS current_fp
-                 WHERE current_fp.product_id = '{REPLACEMENT_0_1_PRODUCT_ID}'
-                   AND current_fp.runtime_layer = 'live'
-                   AND current_fp.training_allowed = 0
-                   AND current_fp.target_date >= ?
+                       current_rs.city,
+                       current_rs.target_local_date AS target_date,
+                       current_rs.temperature_metric
+                  FROM readiness_state AS current_rs
+                 WHERE current_rs.strategy_key = '{REPLACEMENT_STRATEGY_KEY}'
+                   AND current_rs.scope_type = 'strategy'
+                   AND current_rs.source_id = '{REPLACEMENT_SOURCE_ID}'
+                   AND current_rs.target_local_date >= ?
                    AND EXISTS (
                        SELECT 1
                          FROM market_events AS m
-                        WHERE m.city = current_fp.city
-                          AND m.target_date = current_fp.target_date
-                          AND m.temperature_metric = current_fp.temperature_metric
+                        WHERE m.city = current_rs.city
+                          AND m.target_date = current_rs.target_local_date
+                          AND m.temperature_metric = current_rs.temperature_metric
                    )
             ),
             """
+            # Keep the bounded current-market family set as the outer loop.
+            # With an ordinary JOIN SQLite may reverse this into every strategy
+            # readiness row x a scan of market_families; CROSS JOIN makes each
+            # family an indexed readiness point probe without changing rows.
             _ranked_readiness_from_sql = f"""
                   FROM market_families AS mf
-                  JOIN readiness_state AS rs
+                  CROSS JOIN readiness_state AS rs
                     ON rs.strategy_key = '{REPLACEMENT_STRATEGY_KEY}'
                    AND rs.city = mf.city
                    AND rs.target_local_date = mf.target_date
@@ -1080,7 +1082,11 @@ class ForecastSnapshotReadyTrigger:
                 ) AS carrier_expected,
                 NULL AS snapshot_members_json
               FROM ready_posterior AS rs
-              JOIN forecast_posteriors AS fp
+              -- The dependency carries the exact certified posterior_id. Keep
+              -- readiness outermost so SQLite must point-probe that immutable
+              -- row; an ordinary JOIN may reverse into a per-family scan of
+              -- the append-only posterior history and consume the auction cut.
+              CROSS JOIN forecast_posteriors AS fp
                 ON fp.posterior_id = json_extract(
                     rs.dependency,
                     '$.posterior_id'

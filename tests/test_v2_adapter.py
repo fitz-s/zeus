@@ -4158,6 +4158,7 @@ def test_polymarket_client_maps_typed_point_order_absence_to_none():
     client._v2_adapter = FakeAdapter()
 
     assert client.get_order("ord-missing") is None
+    assert client.authenticated_point_absence_returns_none is True
 
 
 @pytest.mark.parametrize(

@@ -1,4 +1,4 @@
-# Lifecycle: created=2026-05-24; last_reviewed=2026-07-16; last_reused=2026-07-16
+# Lifecycle: created=2026-05-24; last_reviewed=2026-08-19; last_reused=2026-08-19
 # Purpose: Prove FSR emits only complete, current, authority-bound forecast carriers.
 # Reuse: Re-audit replacement readiness binding and event clocks before trigger changes.
 # Authority basis: EDLI v1 implementation prompt §8 ForecastSnapshotReadyTrigger contract.
@@ -780,19 +780,24 @@ def test_unrestricted_redecision_drives_readiness_from_current_market_families(
         if "market_families AS" in sql and "ranked_ready AS" in sql
     )
     assert "FROM market_families AS mf" in current_scope_sql
-    assert "FROM forecast_posteriors AS current_fp" in current_scope_sql
+    assert "CROSS JOIN readiness_state AS rs" in current_scope_sql
+    assert "FROM readiness_state AS current_rs" in current_scope_sql
     assert (
-        "current_fp.product_id = 'openmeteo_ecmwf_ifs9_bayes_fusion_v1'"
+        "current_rs.strategy_key = 'openmeteo_ecmwf_ifs9_bayes_fusion'"
         in current_scope_sql
     )
-    assert "current_fp.runtime_layer = 'live'" in current_scope_sql
-    assert "current_fp.training_allowed = 0" in current_scope_sql
-    assert "current_fp.target_date >= '2026-05-23'" in current_scope_sql
-    assert "FROM market_events AS m" in current_scope_sql
-    assert "m.city = current_fp.city" in current_scope_sql
-    assert "m.target_date = current_fp.target_date" in current_scope_sql
+    assert "current_rs.scope_type = 'strategy'" in current_scope_sql
     assert (
-        "m.temperature_metric = current_fp.temperature_metric"
+        "current_rs.source_id = 'openmeteo_ecmwf_ifs9_bayes_fusion'"
+        in current_scope_sql
+    )
+    assert "current_rs.target_local_date >= '2026-05-23'" in current_scope_sql
+    assert "FROM forecast_posteriors AS current_fp" not in current_scope_sql
+    assert "FROM market_events AS m" in current_scope_sql
+    assert "m.city = current_rs.city" in current_scope_sql
+    assert "m.target_date = current_rs.target_local_date" in current_scope_sql
+    assert (
+        "m.temperature_metric = current_rs.temperature_metric"
         in current_scope_sql
     )
     assert (
@@ -802,6 +807,7 @@ def test_unrestricted_redecision_drives_readiness_from_current_market_families(
     assert "rs.city = mf.city" in current_scope_sql
     assert "rs.target_local_date = mf.target_date" in current_scope_sql
     assert "rs.temperature_metric = mf.temperature_metric" in current_scope_sql
+    assert "CROSS JOIN forecast_posteriors AS fp" in current_scope_sql
     plan = forecasts_conn.execute(
         "EXPLAIN QUERY PLAN " + current_scope_sql
     ).fetchall()
@@ -813,8 +819,29 @@ def test_unrestricted_redecision_drives_readiness_from_current_market_families(
         and "temperature_metric=?" in detail
         for detail in details
     )
+    assert any(
+        "idx_readiness_state_strategy_family_latest" in detail
+        and "strategy_key=?" in detail
+        and "city=?" in detail
+        and "target_local_date=?" in detail
+        and "temperature_metric=?" in detail
+        for detail in details
+    )
+    assert not any(
+        "SCAN current_fp" in detail
+        or "idx_forecast_posteriors_runtime_layer_target" in detail
+        for detail in details
+    )
     assert not any(
         detail == "SCAN m" or detail.startswith("SCAN market_events")
+        for detail in details
+    )
+    assert any(
+        "SEARCH fp USING INTEGER PRIMARY KEY" in detail
+        for detail in details
+    )
+    assert not any(
+        "idx_forecast_posteriors_target" in detail
         for detail in details
     )
 

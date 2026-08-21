@@ -49,35 +49,35 @@
 <line x1="64.0" y1="576.0" x2="576.0" y2="64.0" stroke="#999" stroke-width="1.5" stroke-dasharray="5,4"/>
 <text x="381.4" y="238.1" font-size="11" fill="#999" transform="rotate(-40 381.4 238.1)">perfect calibration</text>
 <line x1="93.5" y1="576.0" x2="93.5" y2="422.8" stroke="#c0392b" stroke-width="1.5"/>
-<circle cx="93.5" cy="576.0" r="6.6" fill="#c0392b" fill-opacity="0.75"/>
-<text x="103.0" y="566.4" font-size="10" fill="#333">n=9</text>
+<circle cx="93.5" cy="576.0" r="6.1" fill="#c0392b" fill-opacity="0.75"/>
+<text x="102.6" y="566.9" font-size="10" fill="#333">n=9</text>
 <line x1="139.6" y1="576.0" x2="139.6" y2="465.8" stroke="#c0392b" stroke-width="1.5"/>
-<circle cx="139.6" cy="576.0" r="7.2" fill="#c0392b" fill-opacity="0.75"/>
-<text x="149.8" y="565.8" font-size="10" fill="#333">n=14</text>
-<line x1="194.5" y1="576.0" x2="194.5" y2="288.5" stroke="#c0392b" stroke-width="1.5"/>
-<circle cx="194.5" cy="576.0" r="5.5" fill="#c0392b" fill-opacity="0.75"/>
-<text x="203.0" y="567.5" font-size="10" fill="#333">n=3</text>
-<line x1="245.2" y1="549.7" x2="245.2" y2="331.8" stroke="#c0392b" stroke-width="1.5"/>
-<circle cx="245.2" cy="482.9" r="6.8" fill="#c0392b" fill-opacity="0.75"/>
-<text x="255.1" y="473.1" font-size="10" fill="#333">n=11</text>
-<line x1="286.8" y1="539.4" x2="286.8" y2="273.5" stroke="#c0392b" stroke-width="1.5"/>
-<circle cx="286.8" cy="448.0" r="6.4" fill="#c0392b" fill-opacity="0.75"/>
-<text x="296.2" y="438.6" font-size="10" fill="#333">n=8</text>
-<line x1="349.0" y1="539.4" x2="349.0" y2="273.5" stroke="#c0392b" stroke-width="1.5"/>
-<circle cx="349.0" cy="448.0" r="6.4" fill="#c0392b" fill-opacity="0.75"/>
-<text x="358.5" y="438.6" font-size="10" fill="#333">n=8</text>
-<line x1="404.7" y1="534.1" x2="404.7" y2="318.7" stroke="#c0392b" stroke-width="1.5"/>
-<circle cx="404.7" cy="457.8" r="7.1" fill="#c0392b" fill-opacity="0.75"/>
-<text x="414.7" y="447.8" font-size="10" fill="#333">n=13</text>
-<line x1="455.2" y1="392.4" x2="455.2" y2="256.9" stroke="#2166ac" stroke-width="1.5"/>
-<circle cx="455.2" cy="325.0" r="10.1" fill="#2166ac" fill-opacity="0.75"/>
-<text x="468.3" y="311.9" font-size="10" fill="#333">n=51</text>
-<line x1="500.3" y1="313.2" x2="500.3" y2="225.9" stroke="#2166ac" stroke-width="1.5"/>
-<circle cx="500.3" cy="268.0" r="13.4" fill="#2166ac" fill-opacity="0.75"/>
-<text x="516.7" y="251.5" font-size="10" fill="#333">n=123</text>
-<line x1="566.1" y1="261.4" x2="566.1" y2="183.7" stroke="#2166ac" stroke-width="1.5"/>
-<circle cx="566.1" cy="219.8" r="14.0" fill="#2166ac" fill-opacity="0.75"/>
-<text x="583.1" y="202.8" font-size="10" fill="#333">n=138</text>
+<circle cx="139.6" cy="576.0" r="6.6" fill="#c0392b" fill-opacity="0.75"/>
+<text x="149.2" y="566.4" font-size="10" fill="#333">n=14</text>
+<line x1="194.8" y1="553.9" x2="194.8" y2="359.8" stroke="#c0392b" stroke-width="1.5"/>
+<circle cx="194.8" cy="497.2" r="6.5" fill="#c0392b" fill-opacity="0.75"/>
+<text x="204.4" y="487.7" font-size="10" fill="#333">n=13</text>
+<line x1="243.8" y1="555.5" x2="243.8" y2="427.6" stroke="#c0392b" stroke-width="1.5"/>
+<circle cx="243.8" cy="516.9" r="7.6" fill="#c0392b" fill-opacity="0.75"/>
+<text x="254.4" y="506.3" font-size="10" fill="#333">n=26</text>
+<line x1="293.2" y1="551.7" x2="293.2" y2="405.3" stroke="#c0392b" stroke-width="1.5"/>
+<circle cx="293.2" cy="506.2" r="7.3" fill="#c0392b" fill-opacity="0.75"/>
+<text x="303.5" y="495.9" font-size="10" fill="#333">n=22</text>
+<line x1="342.2" y1="501.5" x2="342.2" y2="310.3" stroke="#c0392b" stroke-width="1.5"/>
+<circle cx="342.2" cy="422.4" r="7.2" fill="#c0392b" fill-opacity="0.75"/>
+<text x="352.4" y="412.2" font-size="10" fill="#333">n=20</text>
+<line x1="398.5" y1="521.7" x2="398.5" y2="367.3" stroke="#c0392b" stroke-width="1.5"/>
+<circle cx="398.5" cy="462.2" r="7.7" fill="#c0392b" fill-opacity="0.75"/>
+<text x="409.2" y="451.5" font-size="10" fill="#333">n=27</text>
+<line x1="452.0" y1="374.8" x2="452.0" y2="270.7" stroke="#2166ac" stroke-width="1.5"/>
+<circle cx="452.0" cy="322.9" r="10.7" fill="#2166ac" fill-opacity="0.75"/>
+<text x="465.7" y="309.2" font-size="10" fill="#333">n=89</text>
+<line x1="501.2" y1="324.8" x2="501.2" y2="255.0" stroke="#2166ac" stroke-width="1.5"/>
+<circle cx="501.2" cy="289.3" r="14.0" fill="#2166ac" fill-opacity="0.75"/>
+<text x="518.2" y="272.3" font-size="10" fill="#333">n=200</text>
+<line x1="563.7" y1="264.4" x2="563.7" y2="192.8" stroke="#2166ac" stroke-width="1.5"/>
+<circle cx="563.7" cy="226.5" r="13.1" fill="#2166ac" fill-opacity="0.75"/>
+<text x="579.8" y="210.4" font-size="10" fill="#333">n=167</text>
 <text x="320.0" y="622.0" font-size="12" fill="#111" text-anchor="middle">predicted probability (q_live, decision-time)</text>
 <text x="18" y="320.0" font-size="12" fill="#111" text-anchor="middle" transform="rotate(-90 18 320.0)">settled frequency (observed win rate)</text>
 <text x="320.0" y="24" font-size="13" fill="#111" text-anchor="middle">Reliability diagram — settled positions, dot area ∝ bin n, red = n&lt;30</text>

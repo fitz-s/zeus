@@ -36,6 +36,7 @@ from src.data.replacement_forecast_cycle_policy import (
     STALE_ENSEMBLE_ABSOLUTE_DISAGREEMENT_SEMANTICS_REVISION,
     TRADEABLE_GRADE_QLCB_BASIS,
     classify_cycle_phase,
+    current_evidence_shape_has_entry_authority,
     cycle_age_outside_bound,
     replacement_source_cycle_max_age_hours,
 )
@@ -96,6 +97,9 @@ REPLACEMENT_CAPTURE_STATUS_FULL_CURRENT = "FULL_CURRENT"
 REPLACEMENT_CAPTURE_STATUS_PARTIAL_CURRENT = "PARTIAL_CURRENT"
 REPLACEMENT_CAPTURE_STATUS_STALE_HISTORY_ONLY = "STALE_HISTORY_ONLY"
 REPLACEMENT_CAPTURE_STATUS_DB_READ_ERROR = "DB_READ_ERROR"
+REPLACEMENT_CAPTURE_STATUS_CURRENT_EVIDENCE_NOT_LIVE = (
+    "CURRENT_EVIDENCE_NOT_LIVE"
+)
 REPLACEMENT_LIVE_POSTERIOR_REQUIREMENTS_NOT_MET = "REPLACEMENT_LIVE_POSTERIOR_REQUIREMENTS_NOT_MET"
 STALE_DAY0_ENQUEUE_OWNER = "STALE_DAY0_ENQUEUE_OWNER"
 
@@ -2226,8 +2230,9 @@ class _CurrentEvidenceShape:
     center_sigma_c: float
     shape_hash: str
     # Stale-shape provenance: shape_lag_hours is carrier_cycle_time -
-    # source_cycle_time in hours. A bounded older shape may be reused, but its
-    # raw members remain finite evidence and are never translated.
+    # source_cycle_time in hours. A bounded older shape may be constructed for
+    # offline evidence, but cannot be published as live probability authority;
+    # its raw members remain finite evidence and are never translated.
     # ens_center_delta_raw_c is the signed mu_t - member_mean witness.
     shape_lag_hours: float
     translation_applied: bool
@@ -2769,6 +2774,19 @@ def _read_current_evidence_shape(
         )
     except (json.JSONDecodeError, sqlite3.Error, TypeError, ValueError):
         return None
+
+
+def _fusion_current_evidence_shape_has_live_authority(
+    fusion: object,
+) -> bool:
+    """Apply the shared live shape law at the producer commit boundary."""
+
+    shape = getattr(fusion, "current_evidence_shape", None)
+    if not isinstance(shape, Mapping):
+        return False
+    return current_evidence_shape_has_entry_authority(
+        {"bayes_precision_fusion": {"current_evidence_shape": shape}}
+    )
 
 
 def served_predictive_sigma_c(sigma_realized_c: float, *, floor_c: float = 1.0) -> float:
@@ -5920,8 +5938,13 @@ def _compute_posterior_payload(
     # DB_READ_ERROR is reserved for an explicit DB read failure surfaced by the capture reader; the
     # override layer is fail-soft (returns None) so at this seam an absent override reads as
     # STALE_HISTORY_ONLY (the live gate rejects it via BAYES_PRECISION_FUSION_CAPTURE_MISSING regardless).
+    current_shape_live = _fusion_current_evidence_shape_has_live_authority(
+        bayes_precision_fusion_override
+    )
     if bayes_precision_fusion_override is None:
         capture_status = REPLACEMENT_CAPTURE_STATUS_STALE_HISTORY_ONLY
+    elif not current_shape_live:
+        capture_status = REPLACEMENT_CAPTURE_STATUS_CURRENT_EVIDENCE_NOT_LIVE
     elif bayes_precision_fusion_override.decorrelated_providers_complete:
         capture_status = REPLACEMENT_CAPTURE_STATUS_FULL_CURRENT
     else:
@@ -5929,7 +5952,7 @@ def _compute_posterior_payload(
     # CYCLE-PHASE PROVENANCE. 00/06/12/18Z are live runtime cycles; this tag is provenance only,
     # never a live/experiment switch.
     cycle_phase = classify_cycle_phase(_to_utc(request.source_cycle_time, field_name="source_cycle_time"))
-    live_layer = _replacement_is_live_layer(
+    live_layer = current_shape_live and _replacement_is_live_layer(
         replacement_q_mode=replacement_q_mode,
         q_lcb_map=q_lcb_map,
         q_ucb_map=q_ucb_map,

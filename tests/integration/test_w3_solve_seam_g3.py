@@ -1,5 +1,5 @@
 # Created: 2026-07-03
-# Last reused/audited: 2026-08-18
+# Last reused/audited: 2026-08-19
 # Authority basis: current global auction, posterior-mean Fractional Kelly,
 #                  Day0 global-cut routing, and auditable SELL holding bindings
 """Current global auction, q-kernel, and live actuation integration contracts."""
@@ -15534,12 +15534,21 @@ def test_global_preflight_jit_worse_curve_replaces_and_reauctions(monkeypatch):
     assert isinstance(stable.global_jit_candidate, era._GlobalJitHandoff)
 
 
-@pytest.mark.parametrize("execution_mode", ("TAKER_LIMIT", "MAKER_REST"))
 @pytest.mark.parametrize("side", ("YES", "NO"))
-def test_global_preflight_jit_allows_settlement_hold_but_maker_requires_exit_depth(
+@pytest.mark.parametrize(
+    ("execution_mode", "bid_price", "expected_accepted"),
+    (
+        ("TAKER_LIMIT", "0.04", False),
+        ("TAKER_LIMIT", "0.05", True),
+        ("MAKER_REST", "0.04", False),
+    ),
+)
+def test_global_preflight_jit_requires_exit_depth_for_statistical_settlement_hold(
     monkeypatch,
     execution_mode,
     side,
+    bid_price,
+    expected_accepted,
 ):
     event = _global_scope_event(city="Alpha", source_run_id="run-a")
     at = _dt.datetime(2026, 8, 10, 20, 5, tzinfo=_dt.timezone.utc)
@@ -15592,7 +15601,7 @@ def test_global_preflight_jit_allows_settlement_hold_but_maker_requires_exit_dep
         resolution_identity="resolution-a",
         neg_risk=False,
         native_bid_levels=(
-            BookLevel(price=Decimal("0.04"), size=Decimal("100")),
+            BookLevel(price=Decimal(bid_price), size=Decimal("100")),
         ),
         **maker_terms,
     )
@@ -15649,13 +15658,13 @@ def test_global_preflight_jit_allows_settlement_hold_but_maker_requires_exit_dep
         book_quote_provider=lambda token_id: {
             "asset_id": token_id,
             "hash": "jit-book-a",
-            "bids": [{"price": "0.04", "size": "100"}],
+            "bids": [{"price": bid_price, "size": "100"}],
             "asks": [{"price": "0.07", "size": "100"}],
         },
     )
 
-    assert checked.proof_accepted is (execution_mode == "TAKER_LIMIT")
-    if execution_mode == "TAKER_LIMIT":
+    assert checked.proof_accepted is expected_accepted
+    if expected_accepted:
         assert isinstance(checked.global_jit_candidate, era._GlobalJitHandoff)
     else:
         assert checked.reason.startswith(
@@ -34652,9 +34661,6 @@ def test_alpha_shadow_freezes_exact_global_proof_winner_without_money():
         f"posterior-{family_a}": (
             global_batch_runtime.CURRENT_EVIDENCE_SEMANTICS_REVISION
         ),
-        f"posterior-{family_b}": (
-            global_batch_runtime.STALE_ENSEMBLE_ABSOLUTE_DISAGREEMENT_SEMANTICS_REVISION
-        ),
     }
     qkernel_events = global_batch_runtime._market_relative_alpha_shadow_events(
         selected=SimpleNamespace(
@@ -34739,12 +34745,7 @@ def test_alpha_shadow_freezes_exact_global_proof_winner_without_money():
         },
         strategy_keys=("forecast_qkernel_entry",),
     )
-    assert len(stale_events) == 1
-    assert json.loads(stale_events[0].envelope_json)[
-        "probability_semantics_revision"
-    ] == (
-        global_batch_runtime.STALE_ENSEMBLE_ABSOLUTE_DISAGREEMENT_SEMANTICS_REVISION
-    )
+    assert stale_events == ()
     missing_posterior_witnesses = {
         family_key: SimpleNamespace(
             **{
