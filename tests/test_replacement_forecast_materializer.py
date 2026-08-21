@@ -1,6 +1,6 @@
 # Created: 2026-06-06
-# Last reused/audited: 2026-08-19
-# Lifecycle: created=2026-06-06; last_reviewed=2026-08-19; last_reused=2026-08-19
+# Last reused/audited: 2026-08-20
+# Lifecycle: created=2026-06-06; last_reviewed=2026-08-20; last_reused=2026-08-20
 # Purpose: Protect DB materialization for Open-Meteo ECMWF IFS 9km + Bayes-fusion replacement live layer.
 # Reuse: Run before changing replacement forecast live/experiment write path.
 # Authority basis: Operator-directed replacement forecast simple-switch readiness.
@@ -2231,6 +2231,34 @@ def test_materialize_script_attaches_world_observations_read_only(
     conn.close()
 
 
+def test_materializer_connection_skips_journal_bootstrap_behind_bulk_writer(
+    tmp_path, monkeypatch
+) -> None:
+    import src.state.db as state_db
+
+    forecast_path = tmp_path / "forecasts.db"
+    bootstrap = sqlite3.connect(forecast_path)
+    assert bootstrap.execute("PRAGMA journal_mode=WAL").fetchone()[0] == "wal"
+    bootstrap.execute("CREATE TABLE source_rows (value INTEGER NOT NULL)")
+    bootstrap.commit()
+    bootstrap.execute("BEGIN IMMEDIATE")
+    bootstrap.execute("INSERT INTO source_rows VALUES (1)")
+    monkeypatch.setattr(state_db, "ZEUS_FORECASTS_DB_PATH", forecast_path)
+
+    started = time.monotonic()
+    materializer = (
+        state_db.connect_existing_forecasts_db_without_journal_bootstrap()
+    )
+    elapsed = time.monotonic() - started
+    try:
+        assert elapsed < 0.5
+        assert materializer.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
+    finally:
+        materializer.close()
+        bootstrap.rollback()
+        bootstrap.close()
+
+
 def test_materialize_script_batch_reuses_connection_and_wakes_each_commit(
     tmp_path, monkeypatch, capsys
 ) -> None:
@@ -2250,8 +2278,8 @@ def test_materialize_script_batch_reuses_connection_and_wakes_each_commit(
     conn = _Connection()
     monkeypatch.setattr(
         state_db,
-        "get_forecasts_connection",
-        lambda **_kwargs: conn,
+        "connect_existing_forecasts_db_without_journal_bootstrap",
+        lambda: conn,
     )
     monkeypatch.setattr(cli, "_attach_world_read_only", lambda _conn: None)
 
@@ -2339,8 +2367,8 @@ def test_materialize_script_batch_prepares_schema_before_first_input_error(
     conn = _Connection()
     monkeypatch.setattr(
         state_db,
-        "get_forecasts_connection",
-        lambda **_kwargs: conn,
+        "connect_existing_forecasts_db_without_journal_bootstrap",
+        lambda: conn,
     )
     monkeypatch.setattr(cli, "_attach_world_read_only", lambda _conn: None)
 

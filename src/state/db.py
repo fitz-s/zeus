@@ -334,18 +334,17 @@ def _connect(
         raise
 
 
-def connect_existing_trade_db_without_journal_bootstrap(
+def _connect_existing_db_without_journal_bootstrap(
     db_path: Path,
 ) -> sqlite3.Connection:
-    """Open an existing trade DB for one latency-critical canonical write.
+    """Open an existing canonical DB without repeating journal bootstrap.
 
-    The normal factory ensures WAL mode and is the default for every runtime
-    owner.  A signed-order identity is persisted after its command transaction
-    has committed but immediately before venue POST.  Repeating
-    ``PRAGMA journal_mode=WAL`` at that boundary can itself contend for the WAL
-    writer lock before the caller's write retry is active.  This narrow helper
-    opens only an existing file, installs the canonical busy handler and
-    connection functions, and deliberately leaves journal mode unchanged.
+    The normal factory establishes WAL and remains the default. Latency-critical
+    writers that already own an explicit bounded transaction retry must not run
+    ``PRAGMA journal_mode=WAL`` before that retry: even when WAL is already set,
+    SQLite can wait on an unrelated writer for the connection-wide busy timeout.
+    This helper therefore requires an existing file and leaves journal mode
+    unchanged while preserving the canonical connection functions and timeout.
     """
 
     path = db_path.resolve(strict=True)
@@ -367,6 +366,26 @@ def connect_existing_trade_db_without_journal_bootstrap(
     except BaseException:
         conn.close()
         raise
+
+
+def connect_existing_trade_db_without_journal_bootstrap(
+    db_path: Path,
+) -> sqlite3.Connection:
+    """Open an existing trade DB for one latency-critical canonical write."""
+
+    return _connect_existing_db_without_journal_bootstrap(db_path)
+
+
+def connect_existing_forecasts_db_without_journal_bootstrap() -> sqlite3.Connection:
+    """Open the existing forecast DB for an explicitly bounded live write.
+
+    The replacement materializer performs its own short ``BEGIN IMMEDIATE``
+    retry after lock-free probability computation. Skipping only the redundant
+    journal-mode bootstrap keeps that bound effective while an atomic bulk
+    source ingest owns the WAL writer.
+    """
+
+    return _connect_existing_db_without_journal_bootstrap(ZEUS_FORECASTS_DB_PATH)
 
 
 def _connect_read_only(

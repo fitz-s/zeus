@@ -876,9 +876,21 @@ def _materialize(
     writer_lock: _WriterLockFactory | None = None,
 ) -> tuple[int, dict[str, object]]:
     if conn is None:
-        from src.state.db import get_forecasts_connection
+        from src.state.db import (
+            connect_existing_forecasts_db_without_journal_bootstrap,
+            get_forecasts_connection,
+        )
 
-        owned_conn = get_forecasts_connection(write_class=None)
+        # WAL is established at daemon/schema boot. Repeating journal-mode
+        # bootstrap here can wait for the full connection busy timeout behind
+        # an atomic bulk ENS ingest, before this module's bounded writer retry
+        # is active. Open the existing DB directly so one upstream transaction
+        # cannot freeze every city's materialization poll.
+        owned_conn = (
+            connect_existing_forecasts_db_without_journal_bootstrap()
+            if commit
+            else get_forecasts_connection(write_class=None)
+        )
         try:
             _attach_world_read_only(owned_conn)
             return _materialize(
@@ -1178,9 +1190,16 @@ def main(argv: list[str] | None = None) -> int:
             "--input-json or --batch-input-json is required unless --print-template is set"
         )
     if args.batch_input_json:
-        from src.state.db import get_forecasts_connection
+        from src.state.db import (
+            connect_existing_forecasts_db_without_journal_bootstrap,
+            get_forecasts_connection,
+        )
 
-        conn = get_forecasts_connection(write_class=None)
+        conn = (
+            connect_existing_forecasts_db_without_journal_bootstrap()
+            if args.commit
+            else get_forecasts_connection(write_class=None)
+        )
         try:
             _attach_world_read_only(conn)
             schema_ready = False
