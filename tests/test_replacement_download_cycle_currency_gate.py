@@ -263,6 +263,50 @@ def test_rotation_cursor_normalizes_when_same_cycle_universe_shrinks(
     }
 
 
+def test_timeboxed_zero_complete_targets_keeps_rotation_for_point_cache_progress(
+    tmp_path: Path,
+) -> None:
+    import scripts.download_replacement_forecast_current_targets as dl
+
+    cycle = AVAILABLE_CYCLE.replace(hour=5)
+    state_path = tmp_path / "rotation.json"
+    state_path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "cycle": cycle.isoformat(),
+                "next_start": 2,
+                "generation": 7,
+            }
+        )
+    )
+    _, start, row_count, generation, state_token = dl._rotate_current_target_rows(
+        [
+            _TargetRow(city, "2026-06-10", "high", False, True)
+            for city in ("Amsterdam", "Ankara", "Atlanta")
+        ],
+        cycle=cycle,
+        state_path=state_path,
+    )
+
+    assert start == 2
+    assert dl._advance_current_target_rotation(
+        cycle=cycle,
+        row_count=row_count,
+        attempted_count=0,
+        incomplete=True,
+        state_path=state_path,
+        expected_generation=generation,
+        expected_state_token=state_token,
+    ) == (2, True)
+    assert json.loads(state_path.read_text()) == {
+        "version": 1,
+        "cycle": cycle.isoformat(),
+        "next_start": 2,
+        "generation": 8,
+    }
+
+
 def test_rotation_cursor_cas_prevents_cross_process_regression(
     tmp_path: Path,
 ) -> None:

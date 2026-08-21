@@ -310,7 +310,11 @@ def _advance_current_target_rotation(
                 if state_path is not None
                 else _CURRENT_TARGET_ROTATION_OFFSETS.get(cycle_key, 0)
             )
-            next_start = (current_start + max(1, int(attempted_count))) % row_count
+            # A timeboxed bucket payload may have decoded and cached only a valid-time
+            # prefix while completing zero targets. Keep that target at the head so the
+            # next slice can reuse the per-cycle point cache; rotate only past targets
+            # whose full payload was processed.
+            next_start = (current_start + max(0, int(attempted_count))) % row_count
         _CURRENT_TARGET_ROTATION_OFFSETS.clear()
         _CURRENT_TARGET_ROTATION_OFFSETS[cycle_key] = next_start
         if state_path is not None:

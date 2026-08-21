@@ -5,6 +5,12 @@
 
 ## 现状(forward)
 
+### 2026-08-21 B131 — zero-completion timeout保持同一target直到point cache收敛
+- **实时反例:** B130 live后单次held wave可完成/跳过1个scope，但连续broad report仍为`10/10 unattempted`。代码核对证明timeboxed target即使`processed_target_count=0`也被rotation强制`+1`；下一tick换了city/grid index，B130缓存的同城24小时点值无法复用，真实跨tick收敛语义被rotation打断。
+- **修复:** incomplete wave只有在至少一个完整target已processed时才按该数量前移；零完整target保持当前rotation start，复用per-cycle point cache继续同一payload。完成后仍正常前移，canonical reuse与non-admissible skip也仍计入processed，因此不破坏全局公平覆盖。
+- **SCOPE / DRAIN / RESET:** scope仅是同cycle动态target universe的cursor advance，不改变target ordering、admission、source truth或q。drain为同一target的成功point值累积至完整payload后`processed_target_count=1`并前移；reset为target完成、cycle变化或异常关闭pool。抗体固定`start=2/attempted=0/incomplete=true`并要求持久化start仍为2、generation递增，证明CAS有效但不丢progress。
+- **验收:** currency rotation/timeout tests、B130 bucket tests、compile/ruff/registry/diff通过后立即landing；live必须看到同一broad wave在有限ticks内`unattempted`下降并产生新manifest，否则继续追踪而不宣称恢复。
+
 ### 2026-08-21 B130 — bucket hourly objects有界并行，解除串行24步收敛停滞
 - **实时反例:** B129 live已证明quota false时metered waves零消耗并进入bucket，但连续production report仍为held `0/6`、broad `0/10` attempted；一个新pool的单城raw resolver在12秒与25秒均未完成，且cache约10分钟只新增2个对象。根因是每个local-day payload按24个独立hourly OM对象串行读取，而deadline只能在不可中断的单次read之后检查，persistent pool虽最终可热却无法满足快速概率链。
 - **修复:** raw bucket payload对不同valid-time对象使用现有`fetch_workers`的有界fanout（上限8）；每个URI仍由独立pooled reader读取，pool以锁保护reader map，并在同一cycle内缓存已成功解码的`(URI, grid index)`值，使timeboxed重试从上次原子进度继续而非重复解码前缀。结果按valid-time确定性重排，只有全部exact-run timestep成功后才组装payload并进入原manifest/DB/materializer链；任一timeout/non-finite仍零payload。
