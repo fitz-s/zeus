@@ -23,6 +23,7 @@ from typing import Callable, Mapping, Sequence
 from src.contracts.executable_cost_curve import ExecutableCostCurve
 from src.contracts.executable_market_snapshot import FRESHNESS_WINDOW_DEFAULT
 from src.contracts.global_auction_receipt import (
+    CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION,
     global_auction_artifact_summary_hash,
     global_auction_execution_binding_hash,
     global_auction_receipt_ref_from_artifact,
@@ -87,16 +88,6 @@ from src.state.collateral_ledger import COLLATERAL_SNAPSHOT_MAX_AGE_SECONDS
 
 _GLOBAL_AUCTION_WRITE_FALLBACK_DEADLINE_MS = 1_000
 _GLOBAL_AUCTION_WRITE_MAX_HOLD_MS = 500
-
-# Capital proof must bind settlements and fills to the exact comparison law
-# that selected one action across the complete executable universe.  Increment
-# this identity whenever the common comparison, feasible-set construction, or
-# sizing semantics change; old receipts remain facts but cannot license the new
-# law.
-CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION = (
-    "global_single_order_posterior_mean_expected_growth_v2"
-)
-
 
 class _GlobalArtifactCommitRevoked(RuntimeError):
     """A receipt lost current authority before its durable commit."""
@@ -4953,7 +4944,7 @@ _QKERNEL_ALPHA_SHADOW_REASON = (
     "MARKET_RELATIVE_ALPHA_SHADOW:forecast_qkernel_entry"
 )
 _QKERNEL_ALPHA_SHADOW_EVENT_VERSION = (
-    "market-relative-alpha-shadow-v4-global-winner"
+    "market-relative-alpha-shadow-v5-global-selection"
 )
 _QKERNEL_ALPHA_SHADOW_DECISION_LAW = "executable_min_order_capital_gain_v2"
 _QKERNEL_ALPHA_SHADOW_SELECTION_RULE = _ALPHA_SHADOW_SELECTION_RULE
@@ -5198,7 +5189,7 @@ def _market_relative_alpha_shadow_events(
             shadow_reason = _DAY0_ALPHA_SHADOW_REASON
             decision_law = _DAY0_ALPHA_SHADOW_DECISION_LAW
             selection_rule = _DAY0_ALPHA_SHADOW_SELECTION_RULE
-            event_version = "market-relative-alpha-shadow-v4-global-winner"
+            event_version = "market-relative-alpha-shadow-v5-global-selection"
         else:
             revision = str(
                 (qkernel_semantics_by_posterior or {}).get(
@@ -5238,9 +5229,12 @@ def _market_relative_alpha_shadow_events(
         if not math.isfinite(expected_edge) or expected_edge <= 0.0:
             continue
         envelope = {
-            "schema_version": 2,
+            "schema_version": 3,
             "strategy_key": strategy_key,
             "decision_law_id": decision_law,
+            "global_selection_revision": (
+                CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION
+            ),
             "probability_semantics_revision": revision,
             "selection_rule": selection_rule,
             "selection_epoch_identity": selection_epoch_identity,
@@ -5296,7 +5290,9 @@ def _market_relative_alpha_shadow_events(
         return (
             NoTradeRegretEvent(
                 event_id=(
-                    f"{event_version}:{strategy_key}:{revision}:{target_date}"
+                    f"{event_version}:{strategy_key}:"
+                    f"{CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION}:"
+                    f"{revision}:{target_date}"
                 ),
                 rejection_stage="RISK_GUARD",
                 rejection_reason=shadow_reason,
@@ -5409,7 +5405,7 @@ def _market_relative_alpha_shadow_exit_events(
             (
                 _DAY0_ALPHA_SHADOW_REASON,
                 _QKERNEL_ALPHA_SHADOW_REASON,
-                "market-relative-alpha-shadow-v4-global-winner:%",
+                "market-relative-alpha-shadow-v5-global-selection:%",
             ),
         ).fetchall()
     except sqlite3.Error:
@@ -5448,8 +5444,10 @@ def _market_relative_alpha_shadow_exit_events(
         except (ArithmeticError, TypeError, ValueError, json.JSONDecodeError):
             continue
         if (
-            int(envelope.get("schema_version") or 0) != 2
+            int(envelope.get("schema_version") or 0) != 3
             or envelope.get("global_proof_winner") is not True
+            or envelope.get("global_selection_revision")
+            != CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION
             or str(envelope.get("selection_rule") or "")
             != _ALPHA_SHADOW_SELECTION_RULE
             or strategy_key
@@ -5644,6 +5642,9 @@ def _market_relative_alpha_shadow_exit_events(
             "decision_law_id": _ALPHA_SHADOW_EXIT_DECISION_LAW,
             "entry_shadow_regret_event_id": str(regret_event_id),
             "entry_shadow_event_id": str(entry_event_id),
+            "global_selection_revision": (
+                CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION
+            ),
             "entry_decision_at_utc": entry_at.isoformat(),
             "entry_probability_semantics_revision": str(
                 envelope.get("probability_semantics_revision") or ""

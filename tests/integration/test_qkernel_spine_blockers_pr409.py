@@ -27,7 +27,10 @@ import numpy as np
 import pytest
 
 from src.contracts.strategy_capital_allocation import STRATEGY_LOG_UTILITY_BASIS
-from src.contracts.global_auction_receipt import GlobalAuctionReceiptRef
+from src.contracts.global_auction_receipt import (
+    CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION,
+    GlobalAuctionReceiptRef,
+)
 from src.engine import event_reactor_adapter as era
 from src.engine import qkernel_spine_bridge as bridge
 from src.decision_kernel.canonicalization import stable_hash
@@ -1645,6 +1648,9 @@ def test_global_current_winner_survives_book_and_sizes_from_its_sealed_curve():
         "global_winner_event_id": "event-global-current",
         "global_economic_identity": "global-economic-current",
         "global_optimum_semantics": "CUT_TIME_GLOBAL_OPTIMUM",
+        "global_selection_revision": (
+            CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION
+        ),
         "global_candidate_id": "global-candidate-current",
         "global_execution_mode": "TAKER_LIMIT",
         "global_bin_id": "bin-1",

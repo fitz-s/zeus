@@ -43,6 +43,9 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
 from src.config import settings, get_mode
+from src.contracts.global_auction_receipt import (
+    CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION,
+)
 from src.data.replacement_forecast_cycle_policy import (
     CURRENT_EVIDENCE_SEMANTICS_REVISION,
     LIVE_CURRENT_EVIDENCE_SEMANTICS_REVISIONS,
@@ -2703,13 +2706,19 @@ def _settled_market_relative_alpha_shadow_rows(
         if envelope.get("decision_law_id") != "executable_min_order_capital_gain_v2":
             block("superseded_decision_law")
             continue
+        if (
+            envelope.get("global_selection_revision")
+            != CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION
+        ):
+            block("global_selection_revision_mismatch")
+            continue
         revision_identity_ready = (
             day0_probability_semantics_revision(q_version) == revision
             if strategy_key == "day0_nowcast_entry"
             else bool(q_version and posterior_identity_hash)
         )
         if (
-            envelope.get("schema_version") != 2
+            envelope.get("schema_version") != 3
             or envelope.get("strategy_key") != strategy_key
             or envelope.get("selection_rule")
             != (
@@ -2964,6 +2973,9 @@ def _settled_market_relative_alpha_shadow_rows(
                     "probability_semantics_revisions"
                 ],
                 "decision_law_id": "executable_min_order_capital_gain_v2",
+                "global_selection_revision": (
+                    CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION
+                ),
                 "settled_at": settled_at.isoformat(),
                 "entry_market_benchmark_ready": True,
                 "entry_market_benchmark": row["market"],
@@ -2991,9 +3003,9 @@ def _settled_market_relative_alpha_shadow_rows(
                     * row["min_order_size"]
                 ),
                 "evidence_source": (
-                    "no_trade_regret_events_day0_shadow_v2"
+                    "no_trade_regret_events_day0_shadow_v3"
                     if strategy_key == "day0_nowcast_entry"
-                    else "no_trade_regret_events_qkernel_shadow_v2"
+                    else "no_trade_regret_events_qkernel_shadow_v3"
                 ),
             }
         )
@@ -3655,8 +3667,8 @@ def _global_winner_certificate_q(
     payload_json: object,
     *,
     strategy_key: str,
-) -> tuple[float, float, float] | None:
-    """Return frozen q, target shares, and max spend for one winner."""
+) -> tuple[float, float, float, str] | None:
+    """Return frozen q, size, spend, and selection law for one winner."""
 
     try:
         payload = json.loads(str(payload_json or ""))
@@ -3667,6 +3679,9 @@ def _global_winner_certificate_q(
         max_spend = float(economics["global_max_spend_usd"])
         expected_growth = float(economics["global_expected_delta_log_wealth"])
         expected_ev = float(economics["global_expected_ev_usd"])
+        selection_revision = str(
+            economics["global_selection_revision"]
+        ).strip()
     except (KeyError, TypeError, ValueError, json.JSONDecodeError):
         return None
     if not isinstance(payload, Mapping) or not isinstance(economics, Mapping):
@@ -3689,6 +3704,7 @@ def _global_winner_certificate_q(
         or not actuation_id
         or not epoch_id
         or not winner_event_id
+        or not selection_revision
         or str(receipt.get("winner_candidate_id") or "") != candidate_id
         or str(receipt.get("winner_actuation_identity") or "") != actuation_id
         or str(receipt.get("selection_epoch_identity") or "") != epoch_id
@@ -3704,7 +3720,7 @@ def _global_winner_certificate_q(
         or expected_ev <= 0.0
     ):
         return None
-    return q, target_shares, max_spend
+    return q, target_shares, max_spend, selection_revision
 
 
 def _bind_actual_global_capital_evidence(
@@ -3803,6 +3819,7 @@ def _bind_actual_global_capital_evidence(
         position_id: [] for position_id in candidates
     }
     invalid: set[str] = set()
+    explicitly_blocked: set[str] = set()
     ids = sorted(candidates)
     for start in range(0, len(ids), 500):
         chunk = ids[start : start + 500]
@@ -3865,7 +3882,17 @@ def _bind_actual_global_capital_evidence(
             ):
                 invalid.add(position_id)
                 continue
-            q, _certified_target_shares, certified_max_spend = certificate
+            (
+                q,
+                _certified_target_shares,
+                certified_max_spend,
+                selection_revision,
+            ) = certificate
+            if selection_revision != CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION:
+                block("global_selection_revision_mismatch")
+                invalid.add(position_id)
+                explicitly_blocked.add(position_id)
+                continue
             if min_price * min_shares > certified_max_spend + 0.011:
                 invalid.add(position_id)
                 continue
@@ -3881,13 +3908,17 @@ def _bind_actual_global_capital_evidence(
     for position_id in sorted(candidates):
         parts = command_parts.get(position_id, [])
         if position_id in invalid or not parts:
-            block("global_certificate_identity_incomplete")
+            if position_id not in explicitly_blocked:
+                block("global_certificate_identity_incomplete")
             continue
         total_shares = sum(shares for _q, shares in parts)
         composite_q = sum(q * shares for q, shares in parts) / total_shares
         capital = capital_by_position.get(position_id)
         binding: dict[str, object] = {
             "p_posterior": composite_q,
+            "global_selection_revision": (
+                CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION
+            ),
             "capital_gain_proof_ready": False,
             "capital_evidence_source": "actual_global_winner_fill",
         }
@@ -3979,7 +4010,10 @@ def _market_relative_alpha_evidence(
         evaluated_at = evaluated_at.replace(tzinfo=timezone.utc)
     not_before = evaluated_at - timedelta(days=window_days)
 
-    cohorts: dict[tuple[str, tuple[str, ...]], dict[tuple[str, str], dict]] = {}
+    cohorts: dict[
+        tuple[str, str, tuple[str, ...]],
+        dict[tuple[str, str], dict],
+    ] = {}
     missing_benchmark_count = 0
     for row in rows:
         if str(row.get("strategy") or "").strip() != strategy_key:
@@ -4029,7 +4063,14 @@ def _market_relative_alpha_evidence(
                 if str(revision).strip()
             )
         )
-        cohort_key = (decision_law_id, revisions)
+        global_selection_revision = str(
+            row.get("global_selection_revision") or ""
+        ).strip()
+        cohort_key = (
+            decision_law_id,
+            global_selection_revision,
+            revisions,
+        )
         # Sibling bins and HIGH/LOW from one city-date share weather,
         # observation, and market-information shocks.  Different cities are
         # distinct settlement claims; collapsing them by calendar date alone
@@ -4070,7 +4111,11 @@ def _market_relative_alpha_evidence(
             cluster_rows[evidence_cluster] = candidate
 
     cohort_evidence: list[dict[str, object]] = []
-    for (decision_law_id, revisions), cluster_rows in sorted(cohorts.items()):
+    for (
+        decision_law_id,
+        global_selection_revision,
+        revisions,
+    ), cluster_rows in sorted(cohorts.items()):
         log_model_over_market = 0.0
         for row in cluster_rows.values():
             q = min(max(float(row["q"]), 1e-12), 1.0 - 1e-12)
@@ -4114,6 +4159,7 @@ def _market_relative_alpha_evidence(
         cohort_evidence.append(
             {
                 "decision_law_id": decision_law_id,
+                "global_selection_revision": global_selection_revision,
                 "probability_semantics_revisions": list(revisions),
                 "independent_cluster_count": len(cluster_rows),
                 "candidate_count": sum(
@@ -4122,6 +4168,8 @@ def _market_relative_alpha_evidence(
                     if str(row.get("strategy") or "").strip() == strategy_key
                     and str(row.get("decision_law_id") or "").strip()
                     == decision_law_id
+                    and str(row.get("global_selection_revision") or "").strip()
+                    == global_selection_revision
                     and tuple(sorted(row.get("probability_semantics_revisions") or ()))
                     == revisions
                     and row.get("entry_market_benchmark_ready", False)
@@ -4143,17 +4191,26 @@ def _market_relative_alpha_evidence(
             }
         )
 
-    rejected = [cohort for cohort in cohort_evidence if cohort["rejected"]]
-    validated = [cohort for cohort in cohort_evidence if cohort["validated"]]
+    current_cohorts = [
+        cohort
+        for cohort in cohort_evidence
+        if cohort["global_selection_revision"]
+        == CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION
+    ]
+    rejected = [cohort for cohort in current_cohorts if cohort["rejected"]]
+    validated = [cohort for cohort in current_cohorts if cohort["validated"]]
     return {
         "strategy_key": strategy_key,
+        "global_selection_revision": (
+            CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION
+        ),
         "status": (
             "rejected"
             if rejected
             else (
                 "validated"
                 if validated
-                else ("inconclusive" if cohort_evidence else "no_evidence")
+                else ("inconclusive" if current_cohorts else "no_evidence")
             )
         ),
         "rejection_evalue": rejection_evalue,
@@ -4184,6 +4241,11 @@ def _qkernel_market_relative_alpha_evidence(
     )
     cohorts = []
     for cohort in evidence["cohorts"]:
+        if (
+            cohort.get("global_selection_revision")
+            != CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION
+        ):
+            continue
         projected = dict(cohort)
         projected.pop("model_over_market_evalue", None)
         projected.pop("validated", None)
@@ -4195,6 +4257,7 @@ def _qkernel_market_relative_alpha_evidence(
             else ("ok" if cohorts else "no_evidence")
         ),
         "rejection_evalue": evidence["rejection_evalue"],
+        "global_selection_revision": evidence["global_selection_revision"],
         "window_days": evidence["window_days"],
         "evaluated_at": evidence["evaluated_at"],
         "rejected": evidence["rejected"],
@@ -4211,11 +4274,12 @@ def _market_relative_alpha_gate_reason(
 ) -> str | None:
     """Return the licensed revisions' missing capital-proof gate reason.
 
-    SCOPE: only the strategy and exact probability-semantics revisions named by
-    ``semantics_binding``. DRAIN: settled, walk-forward model-vs-market capital
-    evidence is refreshed every RiskGuard tick. RESET: a revision disappears
-    from the reason when it attains the required e-value and positive realized-
-    capital proof; a new revision starts its own cohort.
+    SCOPE: only the strategy, exact global-selection revision, and exact
+    probability-semantics revisions named by ``semantics_binding``. DRAIN:
+    settled, walk-forward model-vs-market capital evidence is refreshed every
+    RiskGuard tick. RESET: a revision disappears from the reason when it attains
+    the required e-value and positive realized-capital proof under the current
+    selector; either revision change starts its own cohort.
     """
 
     if semantics_binding.get("status") != "ok":
@@ -4243,6 +4307,8 @@ def _market_relative_alpha_gate_reason(
         if isinstance(cohort, Mapping)
         and cohort.get("decision_law_id")
         == "executable_min_order_capital_gain_v2"
+        and cohort.get("global_selection_revision")
+        == CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION
         and (
             not target_revisions
             or bool(
@@ -4326,6 +4392,7 @@ def _market_relative_alpha_gate_reason(
         f"required={required_evalue},"
         f"clusters={clusters},"
         "law=executable_min_order_capital_gain_v2,"
+        f"selection_revision={CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION},"
         f"revision={revision_label}"
         ")"
     )
@@ -4361,6 +4428,8 @@ def _market_relative_alpha_unproven_revisions(
         if isinstance(cohort, Mapping)
         and cohort.get("decision_law_id")
         == "executable_min_order_capital_gain_v2"
+        and cohort.get("global_selection_revision")
+        == CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION
         and cohort.get("validated") is True
         for revision in cohort.get("probability_semantics_revisions", [])
         if str(revision).strip()
@@ -4386,6 +4455,8 @@ def _market_relative_alpha_rejected_revisions(
         if isinstance(cohort, Mapping)
         and cohort.get("decision_law_id")
         == "executable_min_order_capital_gain_v2"
+        and cohort.get("global_selection_revision")
+        == CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION
         and cohort.get("rejected") is True
         for revision in cohort.get("probability_semantics_revisions", [])
         if str(revision).strip()

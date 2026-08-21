@@ -185,6 +185,7 @@ from src.contracts.day0_payoff_truth import (
 from src.contracts.execution_intent import ExecutableCostBasis
 from src.contracts.execution_price import ExecutionPrice, ExecutionPriceContractError
 from src.contracts.global_auction_receipt import (
+    CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION,
     GlobalAuctionReceiptRef,
     GlobalSellReceiptClosure,
 )
@@ -16205,6 +16206,9 @@ def _global_actuation_selected_proof(
                 getattr(global_actuation, "winner_event_id", "") or ""
             ),
             "global_auction_receipt": receipt_ref.as_payload(),
+            "global_selection_revision": (
+                CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION
+            ),
             "global_economic_identity": str(
                 getattr(global_actuation, "economic_identity", "") or ""
             ),

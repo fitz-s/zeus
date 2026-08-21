@@ -39,7 +39,10 @@ from src.riskguard.risk_level import RiskLevel
 from src.contracts.executable_cost_curve import BookLevel, ExecutableCostCurve, FeeModel
 from src.contracts.execution_price import ExecutionPrice
 from src.contracts.execution_intent import DecisionSourceContext
-from src.contracts.global_auction_receipt import GlobalAuctionReceiptRef
+from src.contracts.global_auction_receipt import (
+    CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION,
+    GlobalAuctionReceiptRef,
+)
 from src.contracts.strategy_capital_allocation import STRATEGY_LOG_UTILITY_BASIS
 from src.decision_kernel import claims
 from src.decision_kernel.canonicalization import stable_hash
@@ -210,6 +213,9 @@ def _global_current_qkernel_cert(*, side: str = "YES") -> dict:
         global_auction_receipt=_global_receipt_payload(),
         global_economic_identity="global-economic-1",
         global_optimum_semantics="CUT_TIME_GLOBAL_OPTIMUM",
+        global_selection_revision=(
+            CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION
+        ),
         global_candidate_id="global-candidate-1",
         global_execution_mode="TAKER_LIMIT",
         global_bin_id="bin-1",
@@ -2356,6 +2362,19 @@ def test_global_current_state_rejects_resealed_missing_execution_mode():
         cert,
         direction="buy_no",
     ) == "current_state:global_execution_mode"
+
+
+def test_global_current_state_rejects_superseded_selection_revision():
+    cert = _global_current_qkernel_cert(side="NO")
+    cert["global_selection_revision"] = (
+        "global_single_order_posterior_mean_expected_growth_v1"
+    )
+    _seal_current_qkernel_cert(cert)
+
+    assert era.qkernel_global_current_state_rejection_reason(
+        cert,
+        direction="buy_no",
+    ) == "global_selection_revision"
 
 
 def test_global_taker_action_fresh_revalidation_never_downgrades_to_maker():

@@ -11,7 +11,10 @@ from decimal import Decimal
 from enum import Enum
 from typing import Any, Mapping
 
-from src.contracts.global_auction_receipt import GlobalAuctionReceiptRef
+from src.contracts.global_auction_receipt import (
+    CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION,
+    GlobalAuctionReceiptRef,
+)
 from src.contracts.strategy_capital_allocation import STRATEGY_LOG_UTILITY_BASIS
 
 CANONICALIZATION_VERSION = "decision-kernel-json-v1"
@@ -92,6 +95,7 @@ _QKERNEL_CURRENT_STATE_IDENTITY_FIELDS: tuple[str, ...] = (
     "global_actuation_identity",
     "global_winner_event_id",
     "global_auction_receipt",
+    "global_selection_revision",
     "global_optimum_semantics",
     "global_candidate_id",
     "global_execution_mode",
@@ -433,6 +437,11 @@ def qkernel_global_current_state_rejection_reason(
             return field
     if economics.get("global_optimum_semantics") != "CUT_TIME_GLOBAL_OPTIMUM":
         return "global_optimum_semantics"
+    if (
+        economics.get("global_selection_revision")
+        != CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION
+    ):
+        return "global_selection_revision"
     execution_mode = economics.get("global_execution_mode")
     if execution_mode is not None and execution_mode not in {
         "TAKER_LIMIT",

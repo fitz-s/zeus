@@ -4758,6 +4758,9 @@ class TestQkernelMarketRelativeAlphaEvidence:
             "trade_id": trade_id,
             "strategy": "forecast_qkernel_entry",
             "decision_law_id": "predicted_bin_ev_v1",
+            "global_selection_revision": (
+                riskguard_module.CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION
+            ),
             "probability_semantics_ready": True,
             "probability_semantics_revisions": (
                 "stale_ensemble_absolute_disagreement_v2",
@@ -4804,6 +4807,7 @@ class TestQkernelMarketRelativeAlphaEvidence:
         receipt_candidate_id: str = "candidate",
         terminal_status: str = "partial",
         strategy_key: str = "forecast_qkernel_entry",
+        global_selection_revision: str | None = None,
     ) -> sqlite3.Connection:
         conn = sqlite3.connect(":memory:")
         conn.row_factory = sqlite3.Row
@@ -4842,6 +4846,10 @@ class TestQkernelMarketRelativeAlphaEvidence:
                 "global_actuation_identity": "actuation",
                 "global_selection_epoch_identity": "epoch",
                 "global_winner_event_id": "winner-event",
+                "global_selection_revision": (
+                    global_selection_revision
+                    or riskguard_module.CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION
+                ),
                 "global_cut_time_win_probability_mean": q,
                 "global_target_shares": "5",
                 "global_max_spend_usd": "0.25",
@@ -5025,6 +5033,9 @@ class TestQkernelMarketRelativeAlphaEvidence:
         assert status["capital_gain_proof_ready_count"] == 1
         assert bound[0]["persisted_decision_law_id"] == "predicted_bin_ev_v1"
         assert bound[0]["decision_law_id"] == "executable_min_order_capital_gain_v2"
+        assert bound[0]["global_selection_revision"] == (
+            riskguard_module.CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION
+        )
         assert bound[0]["capital_gain_proof_ready"] is True
         assert bound[0]["hypothetical_capital_committed_usd"] == pytest.approx(0.25)
         assert bound[0]["hypothetical_realized_pnl_usd"] == pytest.approx(-0.25)
@@ -5032,6 +5043,28 @@ class TestQkernelMarketRelativeAlphaEvidence:
         assert evidence["cohorts"][0]["market_over_model_evalue"] == pytest.approx(19.0)
         assert revisions == (current,)
         assert reason is not None and "status=rejected" in reason
+        conn.close()
+
+    def test_superseded_global_selection_cannot_name_current_capital_law(self):
+        conn = self._actual_global_conn(
+            global_selection_revision=(
+                "global_single_order_posterior_mean_expected_growth_v1"
+            )
+        )
+
+        bound, status = riskguard_module._bind_actual_global_capital_evidence(
+            conn,
+            [self._actual_global_row()],
+            strategy_key="forecast_qkernel_entry",
+            capital_curve=self._actual_capital_curve(),
+        )
+
+        assert status["status"] == "no_verified_winners"
+        assert status["capital_law_ready_count"] == 0
+        assert status["blocked_reasons"] == {
+            "global_selection_revision_mismatch": 1,
+        }
+        assert bound[0]["decision_law_id"] == "predicted_bin_ev_v1"
         conn.close()
 
     def test_mismatched_global_winner_receipt_cannot_name_capital_law(self):
@@ -5086,6 +5119,9 @@ class TestQkernelMarketRelativeAlphaEvidence:
         assert evidence == {
             "status": "no_evidence",
             "rejection_evalue": 10.0,
+            "global_selection_revision": (
+                riskguard_module.CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION
+            ),
             "window_days": 7.0,
             "evaluated_at": "2026-08-11T00:00:00+00:00",
             "rejected": False,
@@ -5308,6 +5344,9 @@ class TestQkernelMarketRelativeAlphaEvidence:
             "cohorts": [
                 {
                     "decision_law_id": "executable_min_order_capital_gain_v2",
+                    "global_selection_revision": (
+                        riskguard_module.CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION
+                    ),
                     "probability_semantics_revisions": [
                         DAY0_PROBABILITY_SEMANTICS_REVISION
                     ],
@@ -5893,6 +5932,8 @@ class TestQkernelMarketRelativeAlphaEvidence:
             "market_relative_alpha_unproven("
             "status=no_evidence,model_evalue=0.0,required=10.0,clusters=0,"
             "law=executable_min_order_capital_gain_v2,"
+            "selection_revision="
+            f"{riskguard_module.CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION},"
             f"revision={DAY0_PROBABILITY_SEMANTICS_REVISION})"
         )
         assert riskguard_module._market_relative_alpha_unproven_revisions(
@@ -5913,6 +5954,9 @@ class TestQkernelMarketRelativeAlphaEvidence:
             "cohorts": [
                 {
                     "decision_law_id": "executable_min_order_capital_gain_v2",
+                    "global_selection_revision": (
+                        riskguard_module.CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION
+                    ),
                     "probability_semantics_revisions": [current],
                     "model_over_market_evalue": 12.0,
                     "independent_cluster_count": 3,
@@ -5921,6 +5965,9 @@ class TestQkernelMarketRelativeAlphaEvidence:
                 },
                 {
                     "decision_law_id": "executable_min_order_capital_gain_v2",
+                    "global_selection_revision": (
+                        riskguard_module.CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION
+                    ),
                     "probability_semantics_revisions": [stale],
                     "model_over_market_evalue": 2.0,
                     "independent_cluster_count": 1,
@@ -5960,6 +6007,9 @@ class TestQkernelMarketRelativeAlphaEvidence:
             "cohorts": [
                 {
                     "decision_law_id": "executable_min_order_capital_gain_v2",
+                    "global_selection_revision": (
+                        riskguard_module.CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION
+                    ),
                     "probability_semantics_revisions": [current],
                     "model_over_market_evalue": 1.0,
                     "independent_cluster_count": 12,
@@ -5968,6 +6018,9 @@ class TestQkernelMarketRelativeAlphaEvidence:
                 },
                 {
                     "decision_law_id": "executable_min_order_capital_gain_v2",
+                    "global_selection_revision": (
+                        riskguard_module.CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION
+                    ),
                     "probability_semantics_revisions": [stale],
                     "model_over_market_evalue": 0.05,
                     "independent_cluster_count": 12,
@@ -6019,6 +6072,8 @@ class TestQkernelMarketRelativeAlphaEvidence:
             "market_relative_alpha_unproven("
             "status=no_evidence,model_evalue=0.0,required=10.0,clusters=0,"
             "law=executable_min_order_capital_gain_v2,"
+            "selection_revision="
+            f"{riskguard_module.CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION},"
             f"revision={DAY0_PROBABILITY_SEMANTICS_REVISION})"
         )
 
@@ -6038,6 +6093,9 @@ class TestQkernelMarketRelativeAlphaEvidence:
                         "decision_law_id": (
                             "executable_min_order_capital_gain_v2"
                         ),
+                        "global_selection_revision": (
+                            riskguard_module.CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION
+                        ),
                         "probability_semantics_revisions": ["superseded-v1"],
                         "model_over_market_evalue": 100.0,
                         "independent_cluster_count": 30,
@@ -6053,8 +6111,44 @@ class TestQkernelMarketRelativeAlphaEvidence:
             "market_relative_alpha_unproven("
             "status=no_evidence,model_evalue=0.0,required=10.0,clusters=0,"
             "law=executable_min_order_capital_gain_v2,"
+            "selection_revision="
+            f"{riskguard_module.CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION},"
             f"revision={current_revision})"
         )
+
+    def test_superseded_global_selector_cannot_unlock_current_law(self):
+        current_revision = riskguard_module.CURRENT_EVIDENCE_SEMANTICS_REVISION
+        evidence = {
+            "status": "validated",
+            "validated": True,
+            "rejected": False,
+            "cohorts": [
+                {
+                    "decision_law_id": "executable_min_order_capital_gain_v2",
+                    "global_selection_revision": (
+                        "global_single_order_posterior_mean_expected_growth_v1"
+                    ),
+                    "probability_semantics_revisions": [current_revision],
+                    "model_over_market_evalue": 100.0,
+                    "independent_cluster_count": 30,
+                    "validated": True,
+                    "rejected": False,
+                }
+            ],
+        }
+
+        reason = riskguard_module._market_relative_alpha_gate_reason(
+            {"status": "ok", "current_revision": current_revision},
+            evidence,
+            required_evalue=10.0,
+        )
+
+        assert reason is not None
+        assert "status=no_evidence" in reason
+        assert (
+            f"selection_revision="
+            f"{riskguard_module.CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION}"
+        ) in reason
 
     def test_day0_shadow_joins_only_later_verified_exact_condition(self, tmp_path):
         from src.events.day0_authority import (
@@ -6070,9 +6164,12 @@ class TestQkernelMarketRelativeAlphaEvidence:
         decision_at = datetime(2026, 8, 10, 16, tzinfo=timezone.utc)
         q_version = bind_day0_probability_semantics("q-shadow")
         envelope = {
-            "schema_version": 2,
+            "schema_version": 3,
             "strategy_key": "day0_nowcast_entry",
             "decision_law_id": "executable_min_order_capital_gain_v2",
+            "global_selection_revision": (
+                riskguard_module.CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION
+            ),
             "probability_semantics_revision": (
                 DAY0_PROBABILITY_SEMANTICS_REVISION
             ),
@@ -6123,8 +6220,9 @@ class TestQkernelMarketRelativeAlphaEvidence:
         NoTradeRegretLedger(conn).insert_idempotent(
             NoTradeRegretEvent(
                 event_id=(
-                    "market-relative-alpha-shadow-v4-global-winner:"
+                    "market-relative-alpha-shadow-v5-global-selection:"
                     "day0_nowcast_entry:"
+                    f"{riskguard_module.CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION}:"
                     f"{DAY0_PROBABILITY_SEMANTICS_REVISION}:"
                     "2026-08-10"
                 ),
@@ -6230,6 +6328,9 @@ class TestQkernelMarketRelativeAlphaEvidence:
                     DAY0_PROBABILITY_SEMANTICS_REVISION,
                 ),
                 "decision_law_id": "executable_min_order_capital_gain_v2",
+                "global_selection_revision": (
+                    riskguard_module.CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION
+                ),
                 "settled_at": "2026-08-11T10:00:00+00:00",
                 "entry_market_benchmark_ready": True,
                 "entry_market_benchmark": 0.20,
@@ -6246,10 +6347,32 @@ class TestQkernelMarketRelativeAlphaEvidence:
                 "hypothetical_settlement_payout_usd": 5.0,
                 "hypothetical_realized_pnl_usd": 3.95,
                 "evidence_source": (
-                    "no_trade_regret_events_day0_shadow_v2"
+                    "no_trade_regret_events_day0_shadow_v3"
                 ),
             }
         ]
+        envelope["global_selection_revision"] = (
+            "global_single_order_posterior_mean_expected_growth_v1"
+        )
+        conn.execute(
+            "UPDATE no_trade_regret_events SET envelope_json=?",
+            (json.dumps(envelope, sort_keys=True),),
+        )
+        conn.commit()
+        superseded_rows, superseded_status = (
+            riskguard_module._settled_day0_market_relative_alpha_shadow_rows(
+                conn,
+                window_days=7.0,
+                as_of=datetime(2026, 8, 12, tzinfo=timezone.utc),
+                forecasts_connection_factory=lambda: sqlite3.connect(
+                    forecasts_path
+                ),
+            )
+        )
+        assert superseded_rows == []
+        assert superseded_status["blocked_reasons"] == {
+            "global_selection_revision_mismatch": 1,
+        }
         conn.close()
 
     @pytest.mark.parametrize(
@@ -6285,9 +6408,12 @@ class TestQkernelMarketRelativeAlphaEvidence:
 
         decision_at = datetime(2026, 8, 10, 16, tzinfo=timezone.utc)
         envelope = {
-            "schema_version": 2,
+            "schema_version": 3,
             "strategy_key": "forecast_qkernel_entry",
             "decision_law_id": "executable_min_order_capital_gain_v2",
+            "global_selection_revision": (
+                riskguard_module.CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION
+            ),
             "probability_semantics_revision": revision,
             "selection_rule": (
                 "earliest_complete_global_cut_exact_global_posterior_mean_"
@@ -6336,8 +6462,10 @@ class TestQkernelMarketRelativeAlphaEvidence:
         NoTradeRegretLedger(conn).insert_idempotent(
             NoTradeRegretEvent(
                 event_id=(
-                    "market-relative-alpha-shadow-v4-global-winner:"
-                    f"forecast_qkernel_entry:{revision}:2026-08-10"
+                    "market-relative-alpha-shadow-v5-global-selection:"
+                    "forecast_qkernel_entry:"
+                    f"{riskguard_module.CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION}:"
+                    f"{revision}:2026-08-10"
                 ),
                 rejection_stage="RISK_GUARD",
                 rejection_reason=(
@@ -6454,7 +6582,7 @@ class TestQkernelMarketRelativeAlphaEvidence:
         assert rows[0]["hypothetical_realized_pnl_usd"] == pytest.approx(3.95)
         assert (
             rows[0]["evidence_source"]
-            == "no_trade_regret_events_qkernel_shadow_v2"
+            == "no_trade_regret_events_qkernel_shadow_v3"
         )
 
         forecasts = sqlite3.connect(forecasts_path)
@@ -6496,7 +6624,7 @@ class TestQkernelMarketRelativeAlphaEvidence:
         }
         conn.close()
 
-    def test_tick_gates_unproven_current_qkernel_revision_and_replaces_legacy_gate(
+    def test_tick_gates_current_revision_without_mixing_legacy_selector(
         self,
         monkeypatch,
         tmp_path,
@@ -6629,7 +6757,8 @@ class TestQkernelMarketRelativeAlphaEvidence:
 
         assert level == RiskLevel.GREEN
         assert risk_row["level"] == RiskLevel.GREEN.value
-        assert details["market_relative_alpha_evidence"]["rejected"] is True
+        assert details["market_relative_alpha_evidence"]["status"] == "no_evidence"
+        assert details["market_relative_alpha_evidence"]["rejected"] is False
         assert details["market_relative_alpha_admission_role"] == (
             "revision_scoped_pretrade_proof_gate"
         )

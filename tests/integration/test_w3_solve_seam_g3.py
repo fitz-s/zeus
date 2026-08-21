@@ -14956,6 +14956,9 @@ def test_global_winner_binding_does_not_reapply_legacy_price_floor(monkeypatch):
     assert cert["global_auction_receipt"] == (
         actuation.auction_receipt_ref.as_payload()
     )
+    assert cert["global_selection_revision"] == (
+        global_batch_runtime.CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION
+    )
     assert captured["global_execution_mode"] == "TAKER_LIMIT"
     assert captured["cost"] == 0.027666
     assert captured["current_candidate_cap"] == pytest.approx(0.42)
@@ -14966,6 +14969,16 @@ def test_global_winner_binding_does_not_reapply_legacy_price_floor(monkeypatch):
     assert qkernel_current_state_identity_hash(captured) != (
         qkernel_current_state_identity_hash(
             {**captured, "global_current_token_shares": "31"}
+        )
+    )
+    assert qkernel_current_state_identity_hash(captured) != (
+        qkernel_current_state_identity_hash(
+            {
+                **captured,
+                "global_selection_revision": (
+                    "global_single_order_posterior_mean_expected_growth_v1"
+                ),
+            }
         )
     )
 
@@ -34770,8 +34783,11 @@ def test_alpha_shadow_freezes_exact_global_proof_winner_without_money():
     assert events[0].q_live == pytest.approx(0.90)
     assert events[0].hypothetical_fill_price == pytest.approx(0.20)
     envelope = json.loads(events[0].envelope_json)
-    assert envelope["schema_version"] == 2
+    assert envelope["schema_version"] == 3
     assert envelope["decision_law_id"] == "executable_min_order_capital_gain_v2"
+    assert envelope["global_selection_revision"] == (
+        global_batch_runtime.CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION
+    )
     assert envelope["selection_rule"].endswith(
         "posterior_mean_expected_growth_winner_v3"
     )
@@ -34933,8 +34949,10 @@ def test_alpha_shadow_freezes_exact_global_proof_winner_without_money():
         event.rejection_reason
         == "MARKET_RELATIVE_ALPHA_SHADOW:forecast_qkernel_entry"
         and event.event_id.startswith(
-            "market-relative-alpha-shadow-v4-global-winner:"
+            "market-relative-alpha-shadow-v5-global-selection:"
         )
+        and global_batch_runtime.CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION
+        in event.event_id
         for event in qkernel_events
     )
     stale_events = global_batch_runtime._market_relative_alpha_shadow_events(
@@ -35093,6 +35111,9 @@ def test_alpha_shadow_freezes_exact_global_proof_winner_without_money():
     assert exits[0].regret_bucket == "EXECUTABLE_GAIN_LOCKED"
     exit_envelope = json.loads(exits[0].envelope_json)
     assert exit_envelope["decision_law_id"].endswith("sell-over-hold-v1")
+    assert exit_envelope["global_selection_revision"] == (
+        global_batch_runtime.CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION
+    )
     assert Decimal(exit_envelope["locked_gain_usd"]) >= Decimal("0.05")
     assert Decimal(exit_envelope["sell_over_hold_usd"]) >= Decimal("0.05")
     assert exit_envelope["full_depth_executable"] is True
