@@ -64,10 +64,13 @@ def test_required_phrase_present(theme, phrase):
     assert phrase in gen_diagram.render(theme)
 
 
-def test_import_has_no_side_effects(tmp_path, monkeypatch):
-    # Importing the renderer (as this test does) must write nothing; only
-    # main() touches the filesystem, and only under docs/.
+def test_import_has_no_side_effects():
+    # Importing the renderer must write nothing; only main() touches the
+    # filesystem, and only under docs/. Execute a fresh module instance (not
+    # just a spec) so a module-level write would actually run and be caught.
     before = {p.name: p.stat().st_mtime_ns for p in (ROOT / "docs").glob("architecture-*.svg")}
-    importlib.util.spec_from_file_location("gen_diagram_reimport", ROOT / "scripts" / "gen_diagram.py")
+    spec = importlib.util.spec_from_file_location("gen_diagram_reimport", ROOT / "scripts" / "gen_diagram.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
     after = {p.name: p.stat().st_mtime_ns for p in (ROOT / "docs").glob("architecture-*.svg")}
     assert before == after

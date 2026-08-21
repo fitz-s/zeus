@@ -1570,7 +1570,7 @@ class TestMonitorPrimaryAuthority:
                 best_ask=0.22,
                 bid_size=100.0,
                 ask_size=100.0,
-                diagnostic_market_price=0.21,
+                mark_price=0.21,
                 source_timestamp=NOW.isoformat(),
             ),
         )
