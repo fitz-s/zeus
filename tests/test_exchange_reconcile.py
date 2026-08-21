@@ -1,7 +1,7 @@
 # Created: 2026-04-27
-# Last reused/audited: 2026-08-12
-# Lifecycle: created=2026-04-27; last_reviewed=2026-08-12; last_reused=2026-08-12
-# Authority basis: first-principles same-position incremental fill aggregation
+# Last reused/audited: 2026-08-21
+# Lifecycle: created=2026-04-27; last_reviewed=2026-08-21; last_reused=2026-08-21
+# Authority basis: first-principles command-scoped entry/exit fill aggregation
 # Purpose: R3 M5 exchange reconciliation sweep antibodies.
 # Reuse: Run when exchange_reconcile, venue facts, findings, heartbeat/cutover reconciliation, or operator finding resolution changes.
 """R3 M5 exchange-reconciliation findings and trade-fact tests."""
@@ -3192,7 +3192,7 @@ def test_late_confirmed_exit_trade_leg_respects_close_intent_and_aggregates_once
     ).fetchone()["phase"] == "economically_closed"
     assert conn.execute(
         "SELECT shares, fill_price FROM execution_fact WHERE intent_id = ?",
-        (f"{with_intent['position_id']}:exit",),
+        (f"{with_intent['position_id']}:exit:{with_intent['command_id']}",),
     ).fetchone()[:] == pytest.approx((4.0, 0.25))
     # The canonical command aggregate promotes the terminal transition once;
     # re-observing either leg cannot append a duplicate confirmation.
@@ -5403,7 +5403,7 @@ def test_confirmed_exit_trade_economically_closes_active_position_projection(con
         """
         SELECT filled_at, fill_price, shares, venue_status, terminal_exec_status, command_id
           FROM execution_fact
-         WHERE intent_id = 'pos-exit-confirmed:exit'
+         WHERE intent_id = 'pos-exit-confirmed:exit:cmd-exit-confirmed'
         """
     ).fetchone()
     assert dict(fact) == {
@@ -5667,7 +5667,7 @@ def test_chain_zero_authenticated_full_exit_closes_stale_residual_once(
     }
     fact = conn.execute(
         "SELECT shares, fill_price FROM execution_fact WHERE intent_id = ?",
-        (f"{position_id}:exit",),
+        (f"{position_id}:exit:{command_id}",),
     ).fetchone()
     assert dict(fact) == {
         "shares": 60.0,
@@ -5922,7 +5922,7 @@ def test_recorded_confirmed_exit_trade_repair_hook_economically_closes_projectio
         """
         SELECT filled_at, fill_price, shares, venue_status, terminal_exec_status, command_id
           FROM execution_fact
-         WHERE intent_id = 'pos-exit-recorded-confirmed:exit'
+         WHERE intent_id = 'pos-exit-recorded-confirmed:exit:cmd-recorded-exit-confirmed'
         """
     ).fetchone()
     assert dict(fact) == {
@@ -6518,7 +6518,7 @@ def test_recorded_nonfinal_full_exit_trade_terminalizes_command_without_economic
             """
             SELECT COUNT(*)
               FROM execution_fact
-             WHERE intent_id = 'pos-exit-recorded-matched:exit'
+             WHERE intent_id = 'pos-exit-recorded-matched:exit:cmd-recorded-exit-matched'
                AND terminal_exec_status = 'filled'
             """
         ).fetchone()[0]
@@ -6732,7 +6732,7 @@ def test_full_size_nonconfirmed_exit_trade_leaves_actionable_finality_finding(co
             """
             SELECT COUNT(*)
               FROM execution_fact
-             WHERE intent_id = 'pos-exit-finality-wait:exit'
+             WHERE intent_id = 'pos-exit-finality-wait:exit:cmd-exit-finality-wait'
                AND terminal_exec_status = 'filled'
             """
         ).fetchone()[0]
@@ -6771,7 +6771,7 @@ def test_full_size_nonconfirmed_exit_trade_leaves_actionable_finality_finding(co
         """
         SELECT command_id, filled_at, fill_price, shares, venue_status, terminal_exec_status
           FROM execution_fact
-         WHERE intent_id = 'pos-exit-finality-wait:exit'
+         WHERE intent_id = 'pos-exit-finality-wait:exit:cmd-exit-finality-wait'
         """
     ).fetchone()
     assert dict(execution) == {

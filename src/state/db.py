@@ -10393,6 +10393,15 @@ def log_execution_fact(
     if order_role not in {"entry", "exit"}:
         raise ValueError(f"execution_fact order_role must be entry/exit, got {order_role!r}")
 
+    # One venue command is one immutable execution atom. Exit lifecycle intent
+    # exists before a command and legitimately uses ``position:exit``; once a
+    # command exists, retaining that position-level key lets a later retry
+    # overwrite the earlier command's fill, price, latency, and decision link.
+    # Entry producers already use command-scoped identities for incremental
+    # fills. Apply the same identity law centrally to every exit writer.
+    if order_role == "exit" and command_id not in (None, ""):
+        intent_id = f"{position_id}:exit:{command_id}"
+
     # H2_E2E: posterior_id is an additive column; legacy DBs that have not yet run
     # the ALTER may lack it. Guard so the write stays robust either way (when the
     # column is absent the posterior link simply is not persisted — fail-soft).

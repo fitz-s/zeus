@@ -6485,9 +6485,13 @@ def _exit_fill_materialization_is_current(
         SELECT position_id, command_id, order_role, filled_at, fill_price,
                shares, venue_status, terminal_exec_status
           FROM execution_fact
-         WHERE intent_id = ?
+         WHERE position_id = ?
+           AND command_id = ?
+           AND order_role = 'exit'
+         ORDER BY COALESCE(filled_at, posted_at, '') DESC, intent_id DESC
+         LIMIT 1
         """,
-        (f"{position_id}:exit",),
+        (position_id, str(command.get("command_id") or "")),
     ).fetchone()
     if fact is None:
         return False

@@ -1,8 +1,8 @@
 # Created: 2026-04-26
-# Lifecycle: created=2026-04-26; last_reviewed=2026-08-20; last_reused=2026-08-20
+# Lifecycle: created=2026-04-26; last_reviewed=2026-08-21; last_reused=2026-08-21
 # Purpose: Lock INV-31 command recovery behavior plus snapshot-gated command inserts.
 # Reuse: Run when command recovery, command journal schema, or executable snapshot gating changes.
-# Last reused/audited: 2026-08-20
+# Last reused/audited: 2026-08-21
 # Authority basis: docs/operations/task_2026-04-26_execution_state_truth_p1_command_bus/implementation_plan.md u00a7P1.S4
 """INV-31 anchor tests: command recovery loop.
 
@@ -25410,7 +25410,7 @@ class TestRecoveryResolutionTable:
             """
             SELECT command_id, shares, fill_price, venue_status, terminal_exec_status
               FROM execution_fact
-             WHERE intent_id = 'pos-001:exit'
+             WHERE intent_id = 'pos-001:exit:cmd-exit'
             """
         ).fetchone()
         assert dict(execution) == {
@@ -25494,7 +25494,7 @@ class TestRecoveryResolutionTable:
             """
             SELECT command_id, shares, fill_price, venue_status, terminal_exec_status
               FROM execution_fact
-             WHERE intent_id = 'pos-001:exit'
+             WHERE intent_id = 'pos-001:exit:cmd-exit'
             """
         ).fetchone()
         assert dict(execution) == {
@@ -25880,7 +25880,7 @@ class TestRecoveryResolutionTable:
             """
             SELECT command_id, shares, fill_price, terminal_exec_status
               FROM execution_fact
-             WHERE intent_id = 'pos-001:exit'
+             WHERE intent_id = 'pos-001:exit:cmd-exit'
             """
         ).fetchone()
         assert dict(execution) == {
