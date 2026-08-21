@@ -1051,6 +1051,7 @@ def _cycle_advance_seed_priority_map(
     if not queue_files:
         return {}
     names_by_scope: dict[tuple[str, str, str, str], set[str]] = {}
+    request_time_by_name: dict[str, str] = {}
     for path in queue_files:
         payload = (
             payloads[path]
@@ -1059,6 +1060,9 @@ def _cycle_advance_seed_priority_map(
         )
         if payload is None:
             continue
+        computed_at = _parse_utc_iso(payload.get("computed_at"))
+        if computed_at is not None:
+            request_time_by_name[path.name] = computed_at.isoformat()
         cycle = _parse_utc_iso(payload.get("source_cycle_time"))
         scope = (
             str(payload.get("city") or "").strip(),
@@ -1140,9 +1144,8 @@ def _cycle_advance_seed_priority_map(
             tier = 0
         else:
             tier = 1
-        value = (tier, enqueued_at)
         for name in names:
-            priority[name] = value
+            priority[name] = (tier, request_time_by_name.get(name) or enqueued_at)
     return priority
 
 

@@ -1207,6 +1207,104 @@ def test_cycle_priority_held_position_still_beats_plain_refresh_when_both_priced
     assert priority[paris.name] < priority[seoul.name]
 
 
+def test_cycle_priority_uses_request_time_not_historical_scope_marker(tmp_path) -> None:
+    """A current request's own age, not any older same-scope marker, orders its tier."""
+    import src.data.replacement_forecast_live_materialization_queue as queue_mod
+
+    forecast_db = tmp_path / "forecasts.db"
+    conn = sqlite3.connect(forecast_db)
+    conn.executescript(
+        """
+        CREATE TABLE cycle_advance_enqueues (
+            city TEXT NOT NULL,
+            target_date TEXT NOT NULL,
+            metric TEXT NOT NULL,
+            target_cycle_time TEXT NOT NULL,
+            seed_file TEXT,
+            held_position INTEGER NOT NULL,
+            enqueued_at TEXT NOT NULL
+        );
+        CREATE TABLE forecast_posteriors (
+            source_id TEXT,
+            city TEXT,
+            target_date TEXT,
+            temperature_metric TEXT,
+            source_cycle_time TEXT,
+            computed_at TEXT
+        );
+        """
+    )
+    conn.executemany(
+        "INSERT INTO cycle_advance_enqueues VALUES (?, ?, ?, ?, ?, ?, ?)",
+        [
+            (
+                "Eligible Refresh",
+                "2026-08-21",
+                "high",
+                "2026-08-21T00:00:00+00:00",
+                "historical-eligible.json",
+                0,
+                "2026-08-21T07:00:00+00:00",
+            ),
+            (
+                "Lagged Repair",
+                "2026-08-21",
+                "high",
+                "2026-08-21T00:00:00+00:00",
+                "historical-lagged.json",
+                0,
+                "2026-08-21T08:00:00+00:00",
+            ),
+        ],
+    )
+    conn.executemany(
+        "INSERT INTO forecast_posteriors VALUES (?, ?, ?, ?, ?, ?)",
+        [
+            (
+                queue_mod.SOURCE_ID,
+                city,
+                "2026-08-21",
+                "high",
+                "2026-08-20T18:00:00+00:00",
+                "2026-08-20T20:00:00+00:00",
+            )
+            for city in ("Eligible Refresh", "Lagged Repair")
+        ],
+    )
+    conn.commit()
+    conn.close()
+
+    eligible = tmp_path / "eligible.json"
+    lagged = tmp_path / "lagged.json"
+    for path, city, computed_at in (
+        (eligible, "Eligible Refresh", "2026-08-21T11:30:00+00:00"),
+        (lagged, "Lagged Repair", "2026-08-21T07:50:00+00:00"),
+    ):
+        path.write_text(
+            json.dumps(
+                {
+                    "city": city,
+                    "target_date": "2026-08-21",
+                    "temperature_metric": "high",
+                    "source_cycle_time": "2026-08-21T00:00:00+00:00",
+                    "computed_at": computed_at,
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    priority = queue_mod._cycle_advance_seed_priority_map(
+        forecast_db,
+        (eligible, lagged),
+    )
+
+    assert priority[eligible.name] == (1, "2026-08-21T11:30:00+00:00")
+    assert priority[lagged.name] == (1, "2026-08-21T07:50:00+00:00")
+    assert queue_mod._cycle_advance_file_sort_key(
+        lagged, priority
+    ) < queue_mod._cycle_advance_file_sort_key(eligible, priority)
+
+
 def test_materialization_queue_timeout_backs_off_without_blocking_other_family(
     tmp_path, monkeypatch
 ) -> None:

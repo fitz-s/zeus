@@ -5,6 +5,12 @@
 
 ## 现状(forward)
 
+### 2026-08-21 B124 — 同 priority tier 使用 request 自身时间，禁止历史 marker 冒充年龄
+- **实时反例:** B123 把 280 个 requests 暴露给全局排序后，当前 top-40 仍有 31 个是 auction 已 eligible family，仅 4 个 HWM、5 个 identity-missing。全部 request 被分在 tier 1；排序 secondary key 来自 scope/cycle 上任意历史 `cycle_advance_enqueues.enqueued_at`，所以 `computed_at=11:32` 的新 eligible fusion refresh 可继承 `07:45` marker并排在真正 `computed_at=07:50` 的 HWM repair前。最近 30 个成功 materialization 全是已 eligible family，且 successive auction 的坏 family set未变化，证明旧 marker 时间正在误导唯一 writer。
+- **结构性修复:** chain-confirmed exposure / never-priced / held-marker 仍只决定 tier；同 tier secondary key改为每个 request 自身 causal `computed_at`，仅在 payload无合法 computed_at时才回退历史 enqueue time。不同 producer 的新 request不再继承同 scope旧 marker的虚假年龄；真正等待最久的 current repair先用 writer。
+- **SCOPE / DRAIN / RESET:** scope 仅 request sort secondary key，不改变 tier、ownership、validity、q math、subprocess count或 DB writer。drain 每个 poll对当前 request snapshot重算，最老 request执行后自然移出；reset是更早 current request到达或更高 tier出现，下一 tranche立即重新排序。抗体固定两个均已priced tier-1 scope：marker较早但 request较新的 eligible refresh必须排在 request自身更老的 lagged repair之后。
+- **验收:** priority/queue/Day0 tests与compile/ruff/diff/planning通过后 landing；live top-ranked request应从 eligible refresh转向 missing/mismatch/HWM repair，successive auction至少出现坏 family resolution或eligible上升，且 `failed_count=0`、single writer不变。
+
 ### 2026-08-21 B123 — seed admission breadth 与 SQLite writer concurrency 解耦
 - **实时反例:** B122 后最新 global auction 仅 `122/263` family 有 current probability；40 个因 Day0 posterior identity missing、11 个 mismatch、65 个 raw-input HWM lag 被排除。把 family identity 反向映射到 canonical seed queue 后，50/51 个 Day0 identity family 与 64/65 个 HWM family 已有 ownership=`CURRENT` 的 queued seed，等待中位数约 2.1–3.3 小时。config 明确提供 `poll_batch_limit=8`、`seed_limit=80`，但 daemon 把 seed admission 也压到 `DEFAULT_MATERIALIZATION_MAX_WORKERS=1`；未 admission 的 current work因此无法进入 request-level global held/never-priced priority sort。
 - **结构性修复:** 每 poll admission 使用 configured bounded micro-batch 8，将 current seeds 转成可全局排序/coalesce 的 requests；actual claim `limit` 仍由 `DEFAULT_MATERIALIZATION_MAX_WORKERS=1` 限定，所以每 poll 至多一个 subprocess、一个 SQLite writer。request backlog 每个 worker tranche 重新读取 chain-confirmed held exposure并全局排序，不会冻结 8-request stale priority tranche。
