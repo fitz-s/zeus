@@ -5959,6 +5959,104 @@ def _event_bound_effective_live_quality_floors(
     }
 
 
+def _global_statistical_sell_capital_gate_reason(
+    conn: sqlite3.Connection | None,
+    candidate: object,
+    *,
+    probability_semantics_revision: str | None,
+    checked_at: datetime,
+) -> str | None:
+    """Hold when an automated proof gate rejects the SELL probability law.
+
+    SCOPE: one posterior-driven SELL candidate for one canonical position.
+    DRAIN: RiskGuard's revision-scoped no-money shadow continues collecting
+    settled capital evidence while ordinary held monitoring remains live.
+    RESET: the next cut re-reads ``risk_actions``; expiration or positive proof
+    restores statistical SELL eligibility.  Deterministic payoff and RED exits
+    do not consume this probability authority.
+    """
+
+    if str(getattr(candidate, "action", "") or "").strip().upper() != "SELL":
+        return None
+    functional = str(
+        getattr(candidate, "probability_functional", "") or ""
+    ).strip().upper()
+    authority_status = str(
+        getattr(candidate, "exit_authority_status", "") or ""
+    ).strip().lower()
+    if functional == "DETERMINISTIC_PAYOFF" or authority_status == "deterministic":
+        return None
+    if conn is None or checked_at.tzinfo is None:
+        return "GLOBAL_STATISTICAL_SELL_CAPITAL_GATE_UNAVAILABLE"
+    try:
+        scoped_gate_exists = conn.execute(
+            "SELECT 1 FROM risk_actions "
+            "WHERE action_type='gate' AND status='active' "
+            "AND instr(value, 'probability_semantics_revisions') > 0 LIMIT 1"
+        ).fetchone()
+    except sqlite3.OperationalError as exc:
+        if "no such table" in str(exc).lower():
+            return None
+        return (
+            "GLOBAL_STATISTICAL_SELL_CAPITAL_GATE_UNAVAILABLE:"
+            f"{type(exc).__name__}"
+        )
+    if scoped_gate_exists is None:
+        return None
+
+    position_id = str(getattr(candidate, "position_id", "") or "").strip()
+    if not position_id:
+        return "GLOBAL_STATISTICAL_SELL_POSITION_IDENTITY_MISSING"
+    try:
+        row = conn.execute(
+            "SELECT strategy_key,exit_reason FROM position_current "
+            "WHERE position_id=? LIMIT 1",
+            (position_id,),
+        ).fetchone()
+    except sqlite3.Error as exc:
+        return (
+            "GLOBAL_STATISTICAL_SELL_POSITION_AUTHORITY_UNAVAILABLE:"
+            f"{type(exc).__name__}"
+        )
+    if row is None:
+        return "GLOBAL_STATISTICAL_SELL_POSITION_AUTHORITY_MISSING"
+    try:
+        strategy_key = str(row["strategy_key"] or "").strip()
+        exit_reason = str(row["exit_reason"] or "").strip().upper()
+    except (IndexError, KeyError, TypeError):
+        strategy_key = str(row[0] or "").strip()
+        exit_reason = str(row[1] or "").strip().upper()
+    if exit_reason == "RED_FORCE_EXIT":
+        return None
+    if not strategy_key:
+        return "GLOBAL_STATISTICAL_SELL_STRATEGY_IDENTITY_MISSING"
+
+    try:
+        from src.riskguard.policy import (
+            active_probability_revision_capital_gate_action_ids,
+        )
+
+        action_ids = active_probability_revision_capital_gate_action_ids(
+            conn,
+            strategy_key,
+            checked_at,
+            probability_semantics_revision=probability_semantics_revision,
+        )
+    except Exception as exc:  # noqa: BLE001 - missing proof authority holds
+        return (
+            "GLOBAL_STATISTICAL_SELL_CAPITAL_GATE_UNAVAILABLE:"
+            f"{type(exc).__name__}"
+        )
+    if not action_ids:
+        return None
+    revision = str(probability_semantics_revision or "").strip() or "missing"
+    return (
+        "GLOBAL_STATISTICAL_SELL_PROBABILITY_REVISION_UNPROVEN:"
+        f"strategy={strategy_key}:revision={revision}:"
+        f"actions={','.join(action_ids)}"
+    )
+
+
 def _global_current_entry_feasibility_rejection_reason(
     candidate: object,
     *,
@@ -8688,15 +8786,39 @@ def event_bound_live_adapter_from_trade_conn(
                 )
                 if not identity_matches or not ttl_ok:
                     jit_handoff = None
-            receipt = _global_preflight_candidate_receipt(
-                _submit_inner,
-                event=event,
-                actuation=actuation,
-                decision_time=at,
-            )
             decision = getattr(actuation, "decision", None)
             candidate = getattr(decision, "candidate", None)
             action = str(getattr(candidate, "action", "") or "").upper()
+            sell_policy_reason = (
+                _global_statistical_sell_capital_gate_reason(
+                    trade_conn,
+                    candidate,
+                    probability_semantics_revision=(
+                        _global_entry_probability_revision_by_family.get(
+                            str(getattr(candidate, "family_key", "") or "")
+                        )
+                    ),
+                    checked_at=at,
+                )
+                if action == "SELL"
+                else None
+            )
+            receipt = (
+                EventSubmissionReceipt(
+                    False,
+                    event.event_id,
+                    event.causal_snapshot_id,
+                    reason=sell_policy_reason,
+                    proof_accepted=False,
+                )
+                if sell_policy_reason is not None
+                else _global_preflight_candidate_receipt(
+                    _submit_inner,
+                    event=event,
+                    actuation=actuation,
+                    decision_time=at,
+                )
+            )
             sell_preflight = (
                 action == "SELL"
                 or str(receipt.reason or "").startswith("GLOBAL_SELL_")
@@ -8861,6 +8983,42 @@ def event_bound_live_adapter_from_trade_conn(
                         proof_accepted=False,
                     )
                 )
+            final_candidate = getattr(
+                getattr(actuation, "decision", None), "candidate", None
+            )
+            if str(
+                getattr(final_candidate, "action", "") or ""
+            ).strip().upper() == "SELL":
+                final_sell_policy_reason = (
+                    _global_statistical_sell_capital_gate_reason(
+                        trade_conn,
+                        final_candidate,
+                        probability_semantics_revision=(
+                            _global_entry_probability_revision_by_family.get(
+                                str(
+                                    getattr(
+                                        final_candidate,
+                                        "family_key",
+                                        "",
+                                    )
+                                    or ""
+                                )
+                            )
+                        ),
+                        checked_at=now,
+                    )
+                )
+                if final_sell_policy_reason is not None:
+                    _stable_preflight_monitor_handoff[0] = False
+                    return _stamp_live_adapter_lane(
+                        EventSubmissionReceipt(
+                            False,
+                            event.event_id,
+                            event.causal_snapshot_id,
+                            reason=final_sell_policy_reason,
+                            proof_accepted=False,
+                        )
+                    )
             wealth_block = _global_actuation_current_wealth_block_reason(
                 trade_conn,
                 global_actuation=actuation,
@@ -10644,7 +10802,31 @@ def event_bound_live_adapter_from_trade_conn(
                     str(getattr(candidate, "token_id", "") or "").strip(),
                 ) not in exact_completion_sell_keys:
                     return "GLOBAL_EXACT_HELD_COMPLETION_OTHER_POSITION"
-                return None
+                family_key = str(
+                    getattr(candidate, "family_key", "") or ""
+                ).strip()
+                sell_gate_reason = _global_statistical_sell_capital_gate_reason(
+                    trade_conn,
+                    candidate,
+                    probability_semantics_revision=(
+                        _global_entry_probability_revision_by_family.get(
+                            family_key
+                        )
+                    ),
+                    checked_at=decision_time,
+                )
+                if (
+                    proof_only
+                    and sell_gate_reason is not None
+                    and sell_gate_reason.startswith(
+                        "GLOBAL_STATISTICAL_SELL_PROBABILITY_REVISION_UNPROVEN:"
+                    )
+                ):
+                    # The paired proof solve has no actuator. Preserve the exact
+                    # counterfactual SELL so settlement can drain this gate,
+                    # while the live solve above remains HOLD-only.
+                    return None
+                return sell_gate_reason
             # The proof solve has no actuator and therefore may ignore only
             # admission state whose own recovery needs current economic
             # evidence. Candidate-local data/source/price/capital laws and
@@ -13815,6 +13997,13 @@ def _global_preflight_block_status(reason: str) -> str:
         # Targeted chain inventory/approval governs only this exact SELL. The
         # batch can safely compare the remaining BUY/SELL/HOLD/CASH actions,
         # while the next cut retries this token with fresh chain truth.
+        return "CANDIDATE_BLOCKED"
+    if reason.startswith(
+        "GLOBAL_STATISTICAL_SELL_PROBABILITY_REVISION_UNPROVEN:"
+    ):
+        # The evidence gate scopes one strategy+probability revision. Exclude
+        # only this posterior-driven SELL; deterministic/RED exits and every
+        # independent family remain comparable in the same frozen cut.
         return "CANDIDATE_BLOCKED"
     if reason.startswith(
         (

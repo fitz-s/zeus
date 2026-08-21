@@ -1,8 +1,8 @@
 # Created: 2026-03-30
-# Last reused/audited: 2026-08-19
+# Last reused/audited: 2026-08-21
 # Authority basis: docs/operations/task_2026-04-28_contamination_remediation/plan.md Batch D RiskGuard test-law remediation; Wave26 verification-noise helper alignment; PR90 current-env fallback review fix; 2026-08-15 economic-settlement trailing-loss hotfix.
 #                  2026-05-17 live lock remediation: RiskGuard trade/world DB lock degrades to fresh DATA_DEGRADED rather than stale RED.
-# Lifecycle: created=2026-03-30; last_reviewed=2026-08-19; last_reused=2026-08-19
+# Lifecycle: created=2026-03-30; last_reviewed=2026-08-21; last_reused=2026-08-21
 # Purpose: Guard RiskGuard protective metrics, policy resolution, source authority, and portfolio loader invariants.
 # Reuse: Run after RiskGuard risk details, portfolio loader, settlement source, bankroll, or risk-action changes.
 # 2026-08-17: Brier strategy-gate evidence is independent by target date.
@@ -7045,6 +7045,31 @@ class TestStrategyPolicyResolver:
         assert old.gated is True
         assert current.gated is False
         assert unknown.gated is True
+        assert policy_module.active_probability_revision_capital_gate_action_ids(
+            conn,
+            "forecast_qkernel_entry",
+            now,
+            probability_semantics_revision=old_revision,
+        ) == ("ra-gate-old-q",)
+        assert policy_module.active_probability_revision_capital_gate_action_ids(
+            conn,
+            "forecast_qkernel_entry",
+            now,
+            probability_semantics_revision=current_revision,
+        ) == ()
+        assert policy_module.active_probability_revision_capital_gate_action_ids(
+            conn,
+            "forecast_qkernel_entry",
+            now,
+            probability_semantics_revision=None,
+        ) == ("ra-gate-old-q",)
+        monkeypatch.setattr(policy_module, "is_entries_paused", lambda: True)
+        assert policy_module.active_probability_revision_capital_gate_action_ids(
+            conn,
+            "forecast_qkernel_entry",
+            now,
+            probability_semantics_revision=old_revision,
+        ) == ("ra-gate-old-q",)
         conn.close()
 
     def test_permissive_manual_gate_cannot_waive_matching_revision_risk_gate(

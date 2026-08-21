@@ -94,7 +94,7 @@ _GLOBAL_AUCTION_WRITE_MAX_HOLD_MS = 500
 # sizing semantics change; old receipts remain facts but cannot license the new
 # law.
 CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION = (
-    "global_single_order_posterior_mean_expected_growth_v1"
+    "global_single_order_posterior_mean_expected_growth_v2"
 )
 
 

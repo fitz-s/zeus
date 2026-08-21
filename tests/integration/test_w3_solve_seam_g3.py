@@ -9327,6 +9327,21 @@ def test_live_adapter_routes_each_global_truth_to_its_owner(monkeypatch, event_f
     import src.runtime.reactor_wake as reactor_wake
 
     trade = sqlite3.connect(":memory:")
+    trade.row_factory = sqlite3.Row
+    trade.executescript(
+        """
+        CREATE TABLE risk_actions (
+            action_id TEXT PRIMARY KEY,
+            strategy_key TEXT,
+            action_type TEXT,
+            value TEXT,
+            issued_at TEXT,
+            effective_until TEXT,
+            precedence INTEGER,
+            status TEXT
+        );
+        """
+    )
     forecast = sqlite3.connect(":memory:")
     topology = sqlite3.connect(":memory:")
     world = sqlite3.connect(":memory:")
@@ -9513,8 +9528,68 @@ def test_live_adapter_routes_each_global_truth_to_its_owner(monkeypatch, event_f
             action="SELL",
             position_id="position-nyc",
             token_id="token-nyc",
+            family_key="family-dallas",
+            probability_functional="POSTERIOR_PREDICTIVE_MEAN",
+            exit_authority_status="not_applicable",
         )
     ) is None
+    trade.executescript(
+        """
+        CREATE TABLE position_current (
+            position_id TEXT PRIMARY KEY,
+            strategy_key TEXT,
+            exit_reason TEXT
+        );
+        INSERT INTO position_current VALUES (
+            'position-nyc', 'forecast_qkernel_entry', 'SELL_REVERSAL'
+        );
+        """
+    )
+    trade.execute(
+        "INSERT INTO risk_actions VALUES (?,?,?,?,?,?,?,?)",
+        (
+            "gate-unproven-q",
+            "forecast_qkernel_entry",
+            "gate",
+            json.dumps(
+                {
+                    "gate": True,
+                    "probability_semantics_revisions": ["blocked-revision"],
+                }
+            ),
+            "2026-07-10T08:00:00+00:00",
+            "2026-07-10T09:00:00+00:00",
+            50,
+            "active",
+        ),
+    )
+    statistical_sell = SimpleNamespace(
+        action="SELL",
+        position_id="position-nyc",
+        token_id="token-nyc",
+        family_key="family-dallas",
+        probability_functional="POSTERIOR_PREDICTIVE_MEAN",
+        exit_authority_status="not_applicable",
+    )
+    assert exact_completion_policy(statistical_sell).startswith(
+        "GLOBAL_STATISTICAL_SELL_PROBABILITY_REVISION_UNPROVEN:"
+    )
+    proof_policy = captured["proof_candidate_policy_rejection_resolver"]
+    assert proof_policy(statistical_sell) is None
+    assert exact_completion_policy(
+        SimpleNamespace(
+            **{
+                **vars(statistical_sell),
+                "probability_functional": "DETERMINISTIC_PAYOFF",
+                "exit_authority_status": "deterministic",
+            }
+        )
+    ) is None
+    trade.execute(
+        "UPDATE position_current SET exit_reason='RED_FORCE_EXIT' "
+        "WHERE position_id='position-nyc'"
+    )
+    assert exact_completion_policy(statistical_sell) is None
     assert exact_completion_policy(
         SimpleNamespace(
             action="SELL",
@@ -9522,6 +9597,8 @@ def test_live_adapter_routes_each_global_truth_to_its_owner(monkeypatch, event_f
             token_id="token-unrelated",
         )
     ) == "GLOBAL_EXACT_HELD_COMPLETION_OTHER_POSITION"
+    trade.execute("DELETE FROM risk_actions")
+    trade.execute("DROP TABLE position_current")
     with pytest.raises(
         ValueError,
         match="GLOBAL_EXACT_HELD_COMPLETION_SCOPE_UNRESERVED",
@@ -9643,6 +9720,10 @@ def test_live_adapter_routes_each_global_truth_to_its_owner(monkeypatch, event_f
         action="SELL",
         family_key="family-dallas",
         side="YES",
+        position_id="position-nyc",
+        token_id="token-nyc",
+        probability_functional="POSTERIOR_PREDICTIVE_MEAN",
+        exit_authority_status="not_applicable",
     )
     assert policy(low_price) == "entries_paused:test_containment"
     assert policy(live_floor) == "entries_paused:test_containment"
@@ -26185,6 +26266,138 @@ def test_live_adapter_sell_preflight_skips_entry_checks_and_survives_monitor_han
     assert receipt.side_effect_status == "NO_SUBMIT"
     assert receipt.reason.startswith(
         "GLOBAL_FINAL_AUTHORITY_UNAVAILABLE:RuntimeError:"
+    )
+
+
+def test_live_adapter_rechecks_statistical_sell_capital_gate_before_submit(
+    monkeypatch,
+):
+    captured = {}
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "process_current_global_batch",
+        lambda events, **kwargs: captured.update(kwargs)
+        or SimpleNamespace(events=tuple(events)),
+    )
+    monkeypatch.setattr(
+        era,
+        "_global_preflight_candidate_receipt",
+        lambda _submit, *, event, **_kwargs: EventSubmissionReceipt(
+            False,
+            event.event_id,
+            event.causal_snapshot_id,
+            reason="GLOBAL_SELL_PREFLIGHT_STABLE",
+            proof_accepted=True,
+        ),
+    )
+    trade = sqlite3.connect(":memory:")
+    trade.row_factory = sqlite3.Row
+    trade.executescript(
+        """
+        CREATE TABLE position_current (
+            position_id TEXT PRIMARY KEY,
+            strategy_key TEXT,
+            exit_reason TEXT
+        );
+        CREATE TABLE risk_actions (
+            action_id TEXT PRIMARY KEY,
+            strategy_key TEXT,
+            action_type TEXT,
+            value TEXT,
+            issued_at TEXT,
+            effective_until TEXT,
+            precedence INTEGER,
+            status TEXT
+        );
+        INSERT INTO position_current VALUES (
+            'position-1', 'forecast_qkernel_entry', 'SELL_REVERSAL'
+        );
+        """
+    )
+    adapter = era.event_bound_live_adapter_from_trade_conn(
+        trade,
+        get_current_level=lambda: era.RiskLevel.GREEN,
+        forecast_conn=sqlite3.connect(":memory:"),
+        topology_conn=sqlite3.connect(":memory:"),
+        calibration_conn=sqlite3.connect(":memory:"),
+    )
+    event = _global_scope_event(city="Alpha", source_run_id="run-a")
+    decision_at = _dt.datetime.now(_dt.timezone.utc)
+    adapter.process_global_batch((event,), decision_at)
+    candidate = SimpleNamespace(
+        action="SELL",
+        family_key="family-alpha",
+        position_id="position-1",
+        token_id="token-1",
+        probability_functional="POSTERIOR_PREDICTIVE_MEAN",
+        exit_authority_status="not_applicable",
+    )
+    actuation = SimpleNamespace(
+        actuation_identity="actuation-1",
+        wealth_witness_identity="wealth-1",
+        decision=SimpleNamespace(candidate=candidate),
+    )
+    authority = global_batch_runtime.GlobalPreflightAuthority(
+        probability_manifest=(("family-alpha", "q-1"),),
+        book_epoch_identity="book-1",
+        book_economics_manifest=(("family-alpha", "book-1"),),
+        wealth_witness_identity="wealth-1",
+        actuation_deadline=decision_at + _dt.timedelta(seconds=30),
+    )
+    stable = captured["preflight_winner"](
+        event,
+        actuation,
+        decision_at,
+        authority,
+    )
+    assert stable.status == "STABLE"
+
+    trade.execute(
+        "INSERT INTO risk_actions VALUES (?,?,?,?,?,?,?,?)",
+        (
+            "gate-unproven-q",
+            "forecast_qkernel_entry",
+            "gate",
+            json.dumps(
+                {
+                    "gate": True,
+                    "probability_semantics_revisions": ["blocked-revision"],
+                }
+            ),
+            (decision_at - _dt.timedelta(minutes=1)).isoformat(),
+            (decision_at + _dt.timedelta(minutes=10)).isoformat(),
+            50,
+            "active",
+        ),
+    )
+    blocked = captured["preflight_winner"](
+        event,
+        actuation,
+        decision_at + _dt.timedelta(seconds=1),
+        authority,
+    )
+    assert blocked.status == "CANDIDATE_BLOCKED"
+    assert blocked.reason.startswith(
+        "GLOBAL_STATISTICAL_SELL_PROBABILITY_REVISION_UNPROVEN:"
+    )
+    monkeypatch.setattr(
+        era,
+        "_global_actuation_current_wealth_block_reason",
+        lambda *_args, **_kwargs: pytest.fail(
+            "final revision gate must run before wealth or venue work"
+        ),
+    )
+    receipt = captured["actuate_preflighted_winner"].consume(
+        event,
+        actuation,
+        decision_at + _dt.timedelta(seconds=1),
+        stable.binding_token,
+        authority,
+    )
+    assert receipt.submitted is False
+    assert receipt.venue_call_started is False
+    assert receipt.reason.startswith(
+        "GLOBAL_STATISTICAL_SELL_PROBABILITY_REVISION_UNPROVEN:"
     )
 
 
