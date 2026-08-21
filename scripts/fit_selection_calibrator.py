@@ -68,6 +68,9 @@ from dataclasses import dataclass
 # SAME settled cells the same way.
 import scripts.fit_sigma_scale as fs
 from src.decision import selection_calibrator as sc
+from src.data.replacement_forecast_cycle_policy import (
+    CURRENT_EVIDENCE_SEMANTICS_REVISION,
+)
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 FCST_DEFAULT = os.path.join(REPO, "state", "zeus-forecasts.db")
@@ -236,6 +239,7 @@ def fit_cells(
             "authority": AUTHORITY,
             "version": "sel_v1",
             "posterior_version": posterior_version,
+            "probability_semantics_revision": CURRENT_EVIDENCE_SEMANTICS_REVISION,
             "temperature_metrics": [FIT_TEMPERATURE_METRIC],
             "armed_sides": _armed_sides_from_cells(cells, min_n=min_n),
             "min_n": int(min_n),
@@ -449,6 +453,7 @@ def fit_eb_cells(
             "version": "sel_eb_v2",
             "schema": "eb_v2",
             "posterior_version": posterior_version,
+            "probability_semantics_revision": CURRENT_EVIDENCE_SEMANTICS_REVISION,
             "temperature_metrics": [FIT_TEMPERATURE_METRIC],
             "armed_sides": _armed_sides_from_cells(cells, min_n=min_n),
             "min_n": int(min_n),

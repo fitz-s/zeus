@@ -65,6 +65,7 @@ def test_fit_cells_uses_only_settled_rows_and_keys_match_live_schema():
     assert "_meta" in artifact and "cells" in artifact
     meta = artifact["_meta"]
     assert meta["posterior_version"] == fsc.POSTERIOR_VERSION
+    assert meta["probability_semantics_revision"] == fsc.CURRENT_EVIDENCE_SEMANTICS_REVISION
     assert meta["min_n"] == 30
     assert "max_settled_at" in meta
     # Every persisted cell key parses to the live schema (side|lead|class|pbN).

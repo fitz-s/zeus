@@ -96,6 +96,7 @@ def _artifact(cells: dict, *, version: str = "sel_v1", min_n: int = 30, fitted_b
             # Source-of-truth constant so runtime/fitter version strings can never drift apart
             # again (the BLOCKER the consult flagged).
             "posterior_version": sc.DEFAULT_POSTERIOR_VERSION,
+            "probability_semantics_revision": sc.CURRENT_EVIDENCE_SEMANTICS_REVISION,
             "temperature_metrics": ["high"],
             "min_n": min_n,
             "max_settled_at": fitted_before,
@@ -326,6 +327,25 @@ def test_fail_closed_on_stale_artifact_version():
     assert v.basis == "FAIL_CLOSED_STALE_VERSION"
 
 
+def test_runtime_artifact_fails_closed_on_stale_probability_semantics(monkeypatch):
+    raw = 0.875
+    key = sc.cell_key(side="NO", lead_days=1.0, bin_class="nonmodal", raw_side_prob=raw)
+    art = _artifact({key: {"n": 104, "hit_rate": 0.679}})
+    art["_meta"]["probability_semantics_revision"] = "superseded_shape"
+    monkeypatch.setattr(sc, "load_artifact", lambda: art)
+
+    verdict = sc.apply_selection_calibrator(
+        raw_side_prob=raw,
+        side="NO",
+        lead_days=1.0,
+        bin_class="nonmodal",
+    )
+
+    assert verdict.trade is False
+    assert verdict.q_safe == 0.0
+    assert verdict.basis == "FAIL_CLOSED_STALE_SEMANTICS"
+
+
 def test_blocker_fix_runtime_and_fitter_version_strings_agree():
     # [BLOCKER, consult REQ-20260622-154643] A freshly-fit artifact (stamped with the FITTER's
     # POSTERIOR_VERSION) must NOT stale-version-fail-close on the runtime DEFAULT path. Regression
@@ -339,7 +359,12 @@ def test_blocker_fix_runtime_and_fitter_version_strings_agree():
     key = f"{side}|{lead_b}|{bin_class}|pb{bucket_idx}"
     # Artifact stamped exactly as the fitter would stamp it.
     art = {
-        "_meta": {"posterior_version": fsc.POSTERIOR_VERSION, "min_n": 30, "armed_sides": ["NO"]},
+        "_meta": {
+            "posterior_version": fsc.POSTERIOR_VERSION,
+            "probability_semantics_revision": fsc.CURRENT_EVIDENCE_SEMANTICS_REVISION,
+            "min_n": 30,
+            "armed_sides": ["NO"],
+        },
         "cells": {key: {"n": 104, "hit_rate": 0.679}},
     }
     v = sc.apply_selection_calibrator(
