@@ -269,6 +269,9 @@ def test_file_artifact_with_live_semantic_meta_is_active_valid(tmp_path, monkeyp
                     "guard_semantic_version": guard_mod.EXPECTED_GUARD_SEMANTIC_VERSION,
                     "center_method_version": guard_mod.EXPECTED_CENTER_METHOD_VERSION,
                     "band_semantic_version": guard_mod.EXPECTED_BAND_SEMANTIC_VERSION,
+                    "probability_semantics_revision": (
+                        guard_mod.CURRENT_EVIDENCE_SEMANTICS_REVISION
+                    ),
                     "corpus_authority": guard_mod.EXPECTED_CORPUS_AUTHORITY,
                 },
                 "cells": {
@@ -284,4 +287,48 @@ def test_file_artifact_with_live_semantic_meta_is_active_valid(tmp_path, monkeyp
 
     assert status["status"] == "ACTIVE_VALID"
     assert status["cell_count"] == 1
+    assert status["expected_probability_semantics_revision"] == (
+        guard_mod.CURRENT_EVIDENCE_SEMANTICS_REVISION
+    )
+    guard_mod.reset_reliability_cache()
+
+
+def test_file_artifact_without_current_probability_semantics_is_stale(
+    tmp_path, monkeypatch
+):
+    artifact = tmp_path / "qlcb_oof_reliability.json"
+    artifact.write_text(
+        json.dumps(
+            {
+                "meta": {
+                    "schema_version": guard_mod.EXPECTED_SCHEMA_VERSION,
+                    "guard_semantic_version": guard_mod.EXPECTED_GUARD_SEMANTIC_VERSION,
+                    "center_method_version": guard_mod.EXPECTED_CENTER_METHOD_VERSION,
+                    "band_semantic_version": guard_mod.EXPECTED_BAND_SEMANTIC_VERSION,
+                    "corpus_authority": guard_mod.EXPECTED_CORPUS_AUTHORITY,
+                },
+                "cells": {
+                    "high|L1|YES|modal|qb1|coarse_global": {
+                        "n": 100,
+                        "hit_rate": 0.80,
+                    },
+                },
+            }
+        )
+    )
+    monkeypatch.setattr(guard_mod, "_QLCB_OOF_RELIABILITY_PATH", str(artifact))
+    guard_mod.reset_reliability_cache()
+
+    status = guard_mod.reliability_artifact_status()
+    verdict = apply_guard(
+        band_q_lcb=0.08,
+        metric="high",
+        lead_days=1.0,
+        bin_position="modal",
+    )
+
+    assert status["status"] == "STALE_SEMANTICS"
+    assert status["cell_count"] == 0
+    assert verdict.abstained is True
+    assert verdict.q_safe == 0.0
     guard_mod.reset_reliability_cache()

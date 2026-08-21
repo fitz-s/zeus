@@ -19,7 +19,9 @@ from decimal import Decimal
 
 import pytest
 
+import src.decision.family_decision_engine as family_engine_mod
 import src.decision.qlcb_reliability_guard as guard_mod
+import src.decision.selection_calibrator as selection_mod
 from src.decision.family_decision_engine import FamilyDecision
 from src.probability.joint_q import build_joint_q
 from src.strategy.utility_ranker import PortfolioExposureVector
@@ -44,6 +46,32 @@ from tests.decision.test_family_decision_engine import (
     _tick,
     _yes_sizing,
 )
+
+
+@pytest.fixture(autouse=True)
+def _isolate_selection_calibrator(monkeypatch, tmp_path):
+    """This suite owns qLCB behavior; selection evidence is an independent guard."""
+    monkeypatch.setattr(
+        selection_mod,
+        "_SELECTION_CALIBRATOR_PATH",
+        str(tmp_path / "absent_selection_calibrator.json"),
+    )
+    selection_mod.reset_artifact_cache()
+    monkeypatch.setattr(
+        family_engine_mod,
+        "apply_selection_calibrator",
+        lambda **_kwargs: selection_mod.CalibratorVerdict(
+            q_safe=1.0,
+            trade=True,
+            abstained=False,
+            cell_key="test_selection_identity",
+            L_g=1.0,
+            n_g=1,
+            basis="TEST_SELECTION_IDENTITY",
+        ),
+    )
+    yield
+    selection_mod.reset_artifact_cache()
 
 
 def _tradeable_family(monkeypatch):

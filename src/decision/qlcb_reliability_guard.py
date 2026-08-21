@@ -69,6 +69,10 @@ import os
 from dataclasses import dataclass
 from typing import Mapping, Optional
 
+from src.data.replacement_forecast_cycle_policy import (
+    CURRENT_EVIDENCE_SEMANTICS_REVISION,
+)
+
 # ---------------------------------------------------------------------------
 # Named constants (sane defaults; NO magic in the hot path).
 # ---------------------------------------------------------------------------
@@ -395,6 +399,8 @@ def _artifact_meta_is_live_compatible(meta: object) -> bool:
         and str(meta.get("guard_semantic_version", "")) == EXPECTED_GUARD_SEMANTIC_VERSION
         and str(meta.get("center_method_version", "")) == EXPECTED_CENTER_METHOD_VERSION
         and str(meta.get("band_semantic_version", "")) == EXPECTED_BAND_SEMANTIC_VERSION
+        and str(meta.get("probability_semantics_revision", ""))
+        == CURRENT_EVIDENCE_SEMANTICS_REVISION
         and str(meta.get("corpus_authority", "")) == EXPECTED_CORPUS_AUTHORITY
     )
 
@@ -423,6 +429,7 @@ def reliability_artifact_status() -> dict[str, object]:
         "expected_guard_semantic_version": EXPECTED_GUARD_SEMANTIC_VERSION,
         "expected_center_method_version": EXPECTED_CENTER_METHOD_VERSION,
         "expected_band_semantic_version": EXPECTED_BAND_SEMANTIC_VERSION,
+        "expected_probability_semantics_revision": CURRENT_EVIDENCE_SEMANTICS_REVISION,
         "expected_corpus_authority": EXPECTED_CORPUS_AUTHORITY,
     }
 
