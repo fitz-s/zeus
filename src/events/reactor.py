@@ -5,7 +5,7 @@ must flow through injected final-intent/executor seams owned by `src.engine` and
 `src.execution`.
 """
 
-# Last reused/audited: 2026-06-12
+# Last reused/audited: 2026-08-21
 # Authority basis (2026-06-12 external deep-review): registered TRANSIENT money-path
 #   reason bases LIVE_DEPTH_AUTHORITY_MISSING (FINDING-A taker-depth twin-authority),
 #   BANKROLL_FREE_CASH_MISSING (FINDING-B free-cash bound under injected provider) and
@@ -5973,9 +5973,10 @@ def run_edli_day0_hourly_refresh_cycle(*, trading_lane_active: bool) -> None:
             timeout_s=_day0_hourly_fetch_timeout_seconds(),
             quota_critical_cities=quota_critical_cities,
             quota_priority_cities=quota_priority_cities,
-            allow_priority_recovery=(
-                held_city_count == 0 and priority_city_count > 0
-            ),
+            # Recovery has its own hard ceiling below the held-capital reserve.
+            # A held scope therefore must not disable recovery for an independent
+            # priority scope after the ordinary priority tranche is exhausted.
+            allow_priority_recovery=quota_priority_cities > 0,
             remaining_window_starts={
                 (city_name, target_date): window_start
                 for city_name, target_date, window_start in priority_probe.window_starts

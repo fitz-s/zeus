@@ -1,6 +1,6 @@
 # Created: 2026-06-10
-# Last reused or audited: 2026-08-20
-# Lifecycle: created=2026-06-10; last_reviewed=2026-08-20; last_reused=2026-08-20
+# Last reused or audited: 2026-08-21
+# Lifecycle: created=2026-06-10; last_reviewed=2026-08-21; last_reused=2026-08-21
 # Purpose: Protect causal Day0 remaining-window probability construction.
 # Reuse: Run before changing Day0 hourly members, state diagnostics, or bootstrap pricing.
 # Authority basis: operator green-light 2026-06-10 item B (remaining-day
@@ -4100,6 +4100,79 @@ class TestRequestHashProvenance:
         )
 
         assert [c.name for c in rotated] == ["Wellington", "Paris", "London"]
+
+    def test_scheduler_held_scope_does_not_disable_bounded_priority_recovery(
+        self, monkeypatch
+    ):
+        import src.config as config_module
+        import src.data.day0_hourly_vectors as vectors_module
+        from src.events import reactor
+
+        held = _paris()
+        priority = _wellington()
+        held_family = ("Paris", "2026-06-10", "high")
+        priority_family = ("Wellington", "2026-06-10", "high")
+        captured = {}
+        order_calls = 0
+
+        monkeypatch.setattr(config_module, "runtime_cities", lambda: [held, priority])
+        monkeypatch.setattr(
+            reactor,
+            "_edli_current_held_position_family_keys",
+            lambda: {held_family},
+        )
+        monkeypatch.setattr(
+            reactor,
+            "_edli_day0_hourly_refresh_due_families",
+            lambda **_kwargs: reactor._Day0HourlyPriorityProbe(
+                refresh_due_families=frozenset({held_family, priority_family}),
+                proved=True,
+            ),
+        )
+        monkeypatch.setattr(
+            reactor,
+            "_edli_day0_hourly_priority_families",
+            lambda **_kwargs: [held_family, priority_family],
+        )
+
+        def order(cities, **_kwargs):
+            nonlocal order_calls
+            order_calls += 1
+            return (list(cities), 2 if order_calls == 1 else 1)
+
+        monkeypatch.setattr(reactor, "_edli_order_day0_hourly_refresh_cities", order)
+        monkeypatch.setattr(
+            reactor,
+            "_edli_rotate_day0_hourly_refresh_order",
+            lambda cities, **_kwargs: list(cities),
+        )
+        monkeypatch.setattr(
+            reactor,
+            "_day0_hourly_refresh_max_cities",
+            lambda **_kwargs: 3,
+        )
+
+        def refresh(cities, **kwargs):
+            captured["cities"] = [city.name for city in cities]
+            captured.update(kwargs)
+            return SimpleNamespace(
+                vectors_written=0,
+                cities_attempted=0,
+                cities_skipped_throttle=0,
+                cities_skipped_quota=0,
+                incomplete_expected_bundles=0,
+                priority_reserve_exhausted=False,
+                budget_exhausted=False,
+            )
+
+        monkeypatch.setattr(vectors_module, "maybe_refresh_day0_hourly_vectors", refresh)
+
+        reactor.run_edli_day0_hourly_refresh_cycle(trading_lane_active=True)
+
+        assert captured["cities"] == ["Paris", "Wellington"]
+        assert captured["quota_critical_cities"] == 1
+        assert captured["quota_priority_cities"] == 1
+        assert captured["allow_priority_recovery"] is True
 
     def test_scheduler_day0_hourly_refresh_defaults_to_microbatch(self, monkeypatch):
         # R4-b2: the microbatch sizing helpers moved to src.events.reactor with the
