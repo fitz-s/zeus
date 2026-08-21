@@ -1035,6 +1035,7 @@ def _current_money_risk_scopes(
 def _cycle_advance_seed_priority_map(
     forecast_db: Path | str | None,
     queue_files: Sequence[Path],
+    payloads: Mapping[Path, Mapping[str, object] | None] | None = None,
     *,
     trade_db: Path | str | None = None,
 ) -> dict[str, tuple[int, str]]:
@@ -1051,7 +1052,11 @@ def _cycle_advance_seed_priority_map(
         return {}
     names_by_scope: dict[tuple[str, str, str, str], set[str]] = {}
     for path in queue_files:
-        payload = _load_request_payload_for_coalescing(path)
+        payload = (
+            payloads[path]
+            if payloads is not None and path in payloads
+            else _load_request_payload_for_coalescing(path)
+        )
         if payload is None:
             continue
         cycle = _parse_utc_iso(payload.get("source_cycle_time"))
@@ -1887,6 +1892,74 @@ def _rotate_seed_snapshot_after_cursor(seeds: Sequence[Path], cursor: str | None
     return snapshot
 
 
+def _coalesce_superseded_materialization_seeds(
+    seeds: Sequence[Path],
+    *,
+    processed_path: Path,
+) -> tuple[
+    tuple[Path, ...],
+    tuple[str, ...],
+    dict[Path, Mapping[str, object] | None],
+]:
+    """Keep the newest valid seed for each existing request semantic key."""
+    keys: dict[Path, tuple[str, ...]] = {}
+    payloads: dict[Path, Mapping[str, object]] = {}
+    payload_cache: dict[Path, Mapping[str, object] | None] = {}
+    newest_by_key: dict[tuple[str, ...], tuple[tuple[datetime, int, str], Path]] = {}
+    for path in seeds:
+        payload = _load_request_payload_for_coalescing(path)
+        payload_cache[path] = payload
+        if payload is None:
+            continue
+        try:
+            validate_materialization_seed(payload)
+        except ContractViolation:
+            continue
+        if (
+            payload.get("cycle_advance_enqueue_owner") is True
+            and payload.get("day0_observed_extreme_observation_time") is not None
+        ):
+            continue
+        request_key = _request_semantic_key(payload)
+        if request_key is None:
+            continue
+        key = request_key + (
+            "seed_upgrade_trigger=" + str(payload.get("upgrade_trigger") or ""),
+            "cycle_advance_enqueue_owner="
+            + str(payload.get("cycle_advance_enqueue_owner") is True),
+        )
+        keys[path] = key
+        payloads[path] = payload
+        freshness = _request_freshness_key(path, payload)
+        current = newest_by_key.get(key)
+        if current is None or freshness > current[0]:
+            newest_by_key[key] = (freshness, path)
+
+    keepers = {path for _freshness, path in newest_by_key.values()}
+    remaining: list[Path] = []
+    superseded: list[str] = []
+    for path in seeds:
+        key = keys.get(path)
+        if key is None or path in keepers:
+            remaining.append(path)
+            continue
+        newest_path = newest_by_key[key][1]
+        moved = _move_request(path, processed_path)
+        _write_sidecar(
+            moved,
+            {
+                "status": "SKIPPED_SUPERSEDED_SEED",
+                "reason_codes": [
+                    "REPLACEMENT_LIVE_MATERIALIZATION_SEED_SUPERSEDED_BY_NEWER_DUPLICATE"
+                ],
+                "request_written": False,
+                "superseded_by": newest_path.name,
+            },
+        )
+        superseded.append(str(moved))
+    return tuple(remaining), tuple(superseded), payload_cache
+
+
 def _prepare_seed_requests(
     *,
     seed_dir: Path | str | None,
@@ -1926,10 +1999,27 @@ def _prepare_seed_requests(
         _DAY0_ENQUEUE_OWNERSHIP_MIN_INSPECTIONS,
     )
     raw_window = rotated_raw_snapshot[:inspection_cap]
-    priority = _cycle_advance_seed_priority_map(forecast_db, raw_window)
+    (
+        coalesced_window,
+        superseded_seeds,
+        seed_payloads,
+    ) = _coalesce_superseded_materialization_seeds(
+        raw_window,
+        processed_path=processed_path,
+    )
+    processed.extend(superseded_seeds)
+    if superseded_seeds:
+        reasons.append(
+            "REPLACEMENT_LIVE_MATERIALIZATION_SEED_SUPERSEDED_BY_NEWER_DUPLICATE"
+        )
+    priority = _cycle_advance_seed_priority_map(
+        forecast_db,
+        coalesced_window,
+        seed_payloads,
+    )
     seeds = tuple(
         sorted(
-            raw_window,
+            coalesced_window,
             key=lambda path: _cycle_advance_file_sort_key(path, priority),
         )
     )

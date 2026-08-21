@@ -5,6 +5,12 @@
 
 ## 现状(forward)
 
+### 2026-08-21 B122 — exact duplicate seed 在唯一 writer 前合并
+- **实时反例:** 使用与 daemon 相同的 absolute canonical paths 复核后，当前 seed ownership 为全 `CURRENT`，排除了 stale-owner 假设；真实队列仍有 319 个文件。按生产 request 已有的 semantic key（city/date/metric/source cycle/baseline + OpenMeteo run IDs/完整 Day0 conditioning identity）分组，一次 8-file cursor rotation 可证明 39 个较旧 seed 被同 key 的更新 `computed_at` seed 严格取代。现有 coalescing 位于 request 阶段，但 `seed_limit=1` 使 duplicate seeds 在不同 poll 单独进入 request 并逐个 materialize，旧 q 因此消耗唯一 SQLite writer、延后当前 q 与 global market comparison。
+- **结构性修复:** 在同一 bounded 8-file seed window 内复用既有 semantic key 与 freshness order，并把 `upgrade_trigger`、`cycle_advance_enqueue_owner` 作为 seed producer authority 加入等价关系；只将 full seed contract 合法且完整 key 相同的旧 seed写为 terminal superseded receipt。不同 trigger 不合并，Day0 cycle-owner seeds 无论 marker 当前是否可读都留给原 exact ownership fence，Day0 observation/source/extreme/unit、provider run、source cycle 或 scope 任一不同也不合并，malformed seed 留给原精确失败路径。coalescing 不占 materialization limit，同 poll 仍只产生至多一个 request/一个 subprocess/一个 DB writer。
+- **SCOPE / DRAIN / RESET:** scope 是当前 raw window 内 exact-key duplicate seed；drain 每秒 poll、每轮最多 8 个文件，旧 seed 终止后 newest keeper 使用原 worker slot；reset 来自 key 或 freshness 不再满足严格取代关系，此时两者都保留并各自进入正常验证。抗体固定 `limit=1` 下 older/newer duplicate seeds 只 build newer、旧 seed留审计 receipt、newer request 继续生成。
+- **验收:** focused seed/request coalescing 与 materialization queue suite、compile/ruff/diff、source/test registry、planning lock通过后 hot-fix landing；live 必须出现 seed superseded reason、`seed_processed_count>1` 同时 `committed_posterior_count=1`、`failed_count=0`，并以 successive global-auction identity coverage而非单点 side-effect-free EV 判定资本链改善。
+
 ### 2026-08-21 B121 — globally-ranked EXIT 的概率 revision 与命令原子绑定
 - **实时反例:** 过去 24 小时 17 个 filled EXIT 的 `venue_commands.q_version` 全为空；其中 9 个只能经 decision-certificate attribution 间接找回决策，8 个旧仓仍不可归因。最新 Mexico City global SELL 也缺 q-version，证明断层仍在当前统一竞价路径，不是单纯历史数据问题。同期 global capital basis 从约 `$466.99` 降到 `$450.98`；因此不能以局部 realized PnL 掩盖逐单审计缺口。
 - **结构性修复:** submit-time probability content 已与 selection witness 精确复核后，global SELL `ExitIntent` 同时携带 `q_version`、probability witness/content identity 与 source-truth identity；相同字段进入 capital certificate。`venue_command_repo` 对带 typed `GlobalSellReceiptClosure` 的 SELL 强制 non-empty q-version，并在 command/envelope/event 任一写入前原子拒绝缺失 identity。RED/legacy/recovery 等非 global statistical paths 不被误加同一约束。

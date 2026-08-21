@@ -1619,6 +1619,69 @@ def test_materialization_queue_coalesces_duplicate_requests_before_limit(tmp_pat
     assert not processed_dir.exists() or not tuple(processed_dir.iterdir())
 
 
+def test_materialization_queue_coalesces_duplicate_seeds_before_limit(
+    tmp_path, monkeypatch
+) -> None:
+    import src.data.replacement_forecast_live_materialization_queue as queue_mod
+
+    seed_dir = tmp_path / "seeds"
+    seed_dir.mkdir()
+    request_dir = tmp_path / "requests"
+    base_seed = {
+        "city": "Shanghai",
+        "target_date": "2026-07-02",
+        "temperature_metric": "high",
+        "source_cycle_time": "2026-07-02T00:00:00+00:00",
+        "baseline_source_run_id": "ecmwf_open_data:mx2t6_high:2026-07-02T00Z",
+        "openmeteo_source_run_id": "openmeteo-current-targets-Shanghai-high-20260702T000000Z",
+        "openmeteo_payload_json": "payload.json",
+        "precision_metadata_json": "precision.json",
+        "bins": [{"bin_id": "30C"}],
+        "upgrade_trigger": "instrument_set_expansion",
+    }
+    older = {**base_seed, "computed_at": "2026-07-02T08:19:11+00:00"}
+    newer = {**base_seed, "computed_at": "2026-07-02T08:31:11+00:00"}
+    older_path = seed_dir / "Shanghai.2026-07-02.high.20260702T081911Z.json"
+    newer_path = seed_dir / "Shanghai.2026-07-02.high.20260702T083111Z.json"
+    older_path.write_text(json.dumps(older), encoding="utf-8")
+    newer_path.write_text(json.dumps(newer), encoding="utf-8")
+    built: list[str] = []
+
+    def build(seed, **_kwargs):
+        built.append(str(seed["computed_at"]))
+        return types.SimpleNamespace(
+            ok=True,
+            status="READY",
+            reason_codes=("REPLACEMENT_MATERIALIZATION_REQUEST_READY",),
+            request=dict(seed),
+        )
+
+    monkeypatch.setattr(
+        queue_mod,
+        "build_replacement_forecast_materialization_request",
+        build,
+    )
+    processed, failed, reasons = queue_mod._prepare_seed_requests(
+        seed_dir=seed_dir,
+        seed_processed_dir=tmp_path / "seed_processed",
+        seed_failed_dir=tmp_path / "seed_failed",
+        request_dir=request_dir,
+        forecast_db=tmp_path / "forecasts.db",
+        limit=1,
+    )
+
+    assert not failed
+    assert len(processed) == 2
+    assert built == [newer["computed_at"]]
+    assert not older_path.exists()
+    assert not newer_path.exists()
+    assert (request_dir / newer_path.name).is_file()
+    assert (
+        "REPLACEMENT_LIVE_MATERIALIZATION_SEED_SUPERSEDED_BY_NEWER_DUPLICATE"
+        in reasons
+    )
+
+
 def test_materialization_queue_runs_default_requests_in_bounded_parallel(
     tmp_path, monkeypatch
 ) -> None:
