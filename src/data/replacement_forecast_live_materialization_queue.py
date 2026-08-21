@@ -40,15 +40,21 @@ from src.data.replacement_forecast_seed_discovery import (
 
 
 Runner = Callable[[Sequence[str]], subprocess.CompletedProcess[str]]
-DEFAULT_MATERIALIZATION_SUBPROCESS_TIMEOUT_SECONDS = 240.0
+DEFAULT_MATERIALIZATION_SUBPROCESS_TIMEOUT_SECONDS = 30.0
 # Every subprocess commits to the same SQLite forecast DB. Parallel commit
-# processes only multiply cold-page reads and writer contention; on 2026-08-19
-# four workers exhausted the same 240s deadline for all eight current requests
-# and committed zero posteriors. Keep one queue owner and one DB writer.
+# processes only multiply cold-page reads and writer contention. Keep one queue
+# owner and one DB writer, but bound one pathological family to 30 seconds so it
+# cannot stop current-q production for every other city.
 DEFAULT_MATERIALIZATION_MAX_WORKERS = 1
 MATERIALIZATION_INFLIGHT_DIR_NAME = "inflight"
 _CLAIM_METADATA_NAME = "_claim.json"
 _STALE_CLAIM_GRACE_SECONDS = 30.0
+_TIMEOUT_RETRY_MARKER = ".timeout-retry-"
+_TIMEOUT_RETRY_BASE_SECONDS = 60.0
+_TIMEOUT_RETRY_MAX_SECONDS = 600.0
+_TIMEOUT_RETRY_DEFERRED_REASON = (
+    "REPLACEMENT_LIVE_MATERIALIZATION_TIMEOUT_RETRY_DEFERRED"
+)
 _DAY0_ENQUEUE_OWNERSHIP_CURSOR_NAME = ".replacement-day0-enqueue.cursor"
 _DAY0_ENQUEUE_OWNERSHIP_INSPECTION_MULTIPLIER = 4
 _DAY0_ENQUEUE_OWNERSHIP_MIN_INSPECTIONS = 8
@@ -132,6 +138,7 @@ class _MaterializationQueueClaim:
     claimed_count: int
     skipped_count: int
     inflight_deferred_count: int
+    timeout_retry_deferred_count: int
     processed_files: tuple[str, ...]
     failed_files: tuple[str, ...]
     seed_processed_files: tuple[str, ...]
@@ -1701,6 +1708,54 @@ def _restore_claimed_request(path: Path, request_path: Path, batch_name: str) ->
         return target
 
 
+def _timeout_retry_state(path: Path) -> tuple[str, int, float | None]:
+    """Return the stable stem, attempt count, and retry wall clock."""
+
+    stem = path.stem
+    if _TIMEOUT_RETRY_MARKER not in stem:
+        return stem, 0, None
+    base, encoded = stem.rsplit(_TIMEOUT_RETRY_MARKER, 1)
+    try:
+        attempt_raw, retry_ns_raw = encoded.split("-", 1)
+        attempt = int(attempt_raw)
+        retry_ns = int(retry_ns_raw)
+    except (TypeError, ValueError):
+        return stem, 0, None
+    if not base or attempt <= 0 or retry_ns <= 0:
+        return stem, 0, None
+    return base, attempt, retry_ns / 1_000_000_000.0
+
+
+def _restore_claimed_request_after_timeout(
+    path: Path,
+    request_path: Path,
+) -> Path:
+    """Requeue one timed-out family without letting it reclaim the next poll."""
+
+    request_path.mkdir(parents=True, exist_ok=True)
+    base, prior_attempt, _retry_at = _timeout_retry_state(path)
+    attempt = prior_attempt + 1
+    exponent = min(max(0, attempt - 1), 10)
+    delay_seconds = min(
+        _TIMEOUT_RETRY_BASE_SECONDS * (2**exponent),
+        _TIMEOUT_RETRY_MAX_SECONDS,
+    )
+    retry_ns = int((time.time() + delay_seconds) * 1_000_000_000)
+    while True:
+        target = request_path / (
+            f"{base}{_TIMEOUT_RETRY_MARKER}{attempt}-{retry_ns}{path.suffix}"
+        )
+        try:
+            os.link(path, target)
+        except FileExistsError:
+            retry_ns += 1
+            continue
+        _fsync_directory(request_path)
+        path.unlink()
+        _fsync_directory(path.parent)
+        return target
+
+
 def _remove_empty_claim_batch(batch_path: Path) -> None:
     if _claim_request_files(batch_path):
         return
@@ -2159,6 +2214,7 @@ def _claim_replacement_forecast_live_materialization_queue_locked(
             claimed_count=0,
             skipped_count=0,
             inflight_deferred_count=0,
+            timeout_retry_deferred_count=0,
             processed_files=(),
             failed_files=(),
             seed_processed_files=tuple(seed_processed),
@@ -2180,7 +2236,13 @@ def _claim_replacement_forecast_live_materialization_queue_locked(
     )
     claimable: list[Path] = []
     inflight_deferred = 0
+    timeout_retry_deferred = 0
+    now = time.time()
     for path in requests:
+        _base, _attempt, retry_at = _timeout_retry_state(path)
+        if retry_at is not None and retry_at > now:
+            timeout_retry_deferred += 1
+            continue
         payload = _load_request_payload_for_coalescing(path)
         key = _request_semantic_key(payload) if payload is not None else None
         if key is not None and key in active_keys:
@@ -2199,8 +2261,13 @@ def _claim_replacement_forecast_live_materialization_queue_locked(
         processed_path=processed_path,
         failed_path=failed_path,
         claimed_count=len(selected),
-        skipped_count=inflight_deferred + max(len(claimable) - limit, 0),
+        skipped_count=(
+            inflight_deferred
+            + timeout_retry_deferred
+            + max(len(claimable) - limit, 0)
+        ),
         inflight_deferred_count=inflight_deferred,
+        timeout_retry_deferred_count=timeout_retry_deferred,
         processed_files=tuple(superseded),
         failed_files=(),
         seed_processed_files=tuple(seed_processed),
@@ -2218,7 +2285,11 @@ def _claim_only_report(
     reasons = list(claim.seed_reasons)
     if claim.inflight_deferred_count:
         reasons.append("REPLACEMENT_LIVE_MATERIALIZATION_REQUEST_INFLIGHT")
-    if claim.skipped_count > claim.inflight_deferred_count:
+    if claim.timeout_retry_deferred_count:
+        reasons.append(_TIMEOUT_RETRY_DEFERRED_REASON)
+    if claim.skipped_count > (
+        claim.inflight_deferred_count + claim.timeout_retry_deferred_count
+    ):
         reasons.append("REPLACEMENT_LIVE_MATERIALIZATION_QUEUE_LIMIT_REACHED")
     if processed or failed:
         reasons.append("REPLACEMENT_LIVE_MATERIALIZATION_QUEUE_PROCESSED")
@@ -2323,7 +2394,11 @@ def process_replacement_forecast_live_materialization_queue(
     reasons = [*claim.seed_reasons, *batch_report.reason_codes]
     if claim.inflight_deferred_count:
         reasons.append("REPLACEMENT_LIVE_MATERIALIZATION_REQUEST_INFLIGHT")
-    if claim.skipped_count > claim.inflight_deferred_count:
+    if claim.timeout_retry_deferred_count:
+        reasons.append(_TIMEOUT_RETRY_DEFERRED_REASON)
+    if claim.skipped_count > (
+        claim.inflight_deferred_count + claim.timeout_retry_deferred_count
+    ):
         reasons.append("REPLACEMENT_LIVE_MATERIALIZATION_QUEUE_LIMIT_REACHED")
     if claim.processed_files:
         reasons.append(
@@ -2402,6 +2477,7 @@ def _process_claimed_materialization_batch(
     unchanged_blocked: list[str] = []
     stale_day0_superseded: list[str] = []
     write_deferred: list[str] = []
+    timed_out_requests: list[str] = []
     pending: list[_PendingMaterialization] = []
     marker_dir = marker_dir or request_path.parent / "blocked_attempts"
     for input_json in requests[:limit]:
@@ -2525,6 +2601,12 @@ def _process_claimed_materialization_batch(
                     },
                 )
                 processed.append(str(receipt))
+        elif timed_out:
+            restored = _restore_claimed_request_after_timeout(
+                input_json,
+                retry_path or request_path,
+            )
+            timed_out_requests.append(str(restored))
         elif (
             item.request_payload is not None
             and _STALE_DAY0_ENQUEUE_OWNER_REASON in result_reason_codes
@@ -2594,6 +2676,17 @@ def _process_claimed_materialization_batch(
         _LOG.warning(
             "replacement forecast writes deferred by transient contention: count=%d",
             len(write_deferred),
+        )
+    if timed_out_requests:
+        reasons.extend(
+            (
+                "REPLACEMENT_LIVE_MATERIALIZATION_REQUEST_TIMEOUT",
+                _TIMEOUT_RETRY_DEFERRED_REASON,
+            )
+        )
+        _LOG.warning(
+            "replacement forecast materializations timed out and were deferred: count=%d",
+            len(timed_out_requests),
         )
     if failed:
         reasons.append("REPLACEMENT_LIVE_MATERIALIZATION_REQUEST_FAILED")

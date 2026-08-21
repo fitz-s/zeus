@@ -1,5 +1,5 @@
 # Created: 2026-06-11
-# Last reused or audited: 2026-08-10
+# Last reused or audited: 2026-08-21
 # Authority basis: Task #32 follow-up (operator 2026-06-11) — 没有新的就用老的 applied to fusion
 #   membership. The gem_global-only previous_runs exception (edc598b440) is generalized into the
 #   SINGLE serving authority (src/data/replacement_current_value_serving.py): a provider absent
@@ -1207,13 +1207,17 @@ def test_cycle_priority_held_position_still_beats_plain_refresh_when_both_priced
     assert priority[paris.name] < priority[seoul.name]
 
 
-def test_materialization_queue_timeout_moves_request_to_failed(tmp_path) -> None:
+def test_materialization_queue_timeout_backs_off_without_blocking_other_family(
+    tmp_path, monkeypatch
+) -> None:
     import src.data.replacement_forecast_live_materialization_queue as queue_mod
 
     request_dir = tmp_path / "requests"
     processed_dir = tmp_path / "processed"
     failed_dir = tmp_path / "failed"
     request_dir.mkdir()
+    now = [1_000.0]
+    monkeypatch.setattr(queue_mod.time, "time", lambda: now[0])
     request = {
         "city": "London",
         "target_date": "2026-06-25",
@@ -1244,20 +1248,67 @@ def test_materialization_queue_timeout_moves_request_to_failed(tmp_path) -> None
         runner=_timeout_runner,
     )
 
-    assert report.status == "FAILED"
-    assert report.failed_count == 1
+    assert report.status == "PROCESSED"
+    assert report.failed_count == 0
     assert not request_path.exists()
-    assert len(report.failed_files) == 1
-    failed_request = Path(report.failed_files[0])
-    assert failed_request.exists()
-    sidecar = json.loads(
-        failed_request.with_suffix(failed_request.suffix + ".receipt.json").read_text()
+    assert not report.failed_files
+    assert "REPLACEMENT_LIVE_MATERIALIZATION_REQUEST_TIMEOUT" in report.reason_codes
+    assert queue_mod._TIMEOUT_RETRY_DEFERRED_REASON in report.reason_codes
+    deferred = tuple(request_dir.glob("London.2026-06-25.high.timeout.timeout-retry-*.json"))
+    assert len(deferred) == 1
+
+    other = request_dir / "Paris.2026-06-25.high.json"
+    other.write_text(
+        json.dumps({**request, "city": "Paris"}),
+        encoding="utf-8",
     )
-    assert sidecar["returncode"] == 124
-    assert sidecar["timeout_seconds"] == 1.5
-    assert sidecar["reason_codes"] == [
-        "REPLACEMENT_LIVE_MATERIALIZATION_REQUEST_TIMEOUT"
-    ]
+    second = queue_mod.process_replacement_forecast_live_materialization_queue(
+        request_dir=request_dir,
+        processed_dir=processed_dir,
+        failed_dir=failed_dir,
+        forecast_db=tmp_path / "forecasts.db",
+        raw_manifest_dir=None,
+        limit=1,
+        runner=lambda argv: subprocess.CompletedProcess(
+            list(argv), 0, stdout="ok\n", stderr=""
+        ),
+    )
+    assert second.processed_count == 1
+    assert Path(second.processed_files[0]).name.startswith("Paris.")
+
+    waiting = queue_mod.process_replacement_forecast_live_materialization_queue(
+        request_dir=request_dir,
+        processed_dir=processed_dir,
+        failed_dir=failed_dir,
+        forecast_db=tmp_path / "forecasts.db",
+        raw_manifest_dir=None,
+        limit=1,
+        runner=lambda _argv: pytest.fail("timeout backoff must not run early"),
+    )
+    assert waiting.status == "NO_REQUESTS"
+    assert queue_mod._TIMEOUT_RETRY_DEFERRED_REASON in waiting.reason_codes
+
+    now[0] += queue_mod._TIMEOUT_RETRY_BASE_SECONDS + 1.0
+    retried = queue_mod.process_replacement_forecast_live_materialization_queue(
+        request_dir=request_dir,
+        processed_dir=processed_dir,
+        failed_dir=failed_dir,
+        forecast_db=tmp_path / "forecasts.db",
+        raw_manifest_dir=None,
+        limit=1,
+        runner=lambda argv: subprocess.CompletedProcess(
+            list(argv), 0, stdout="ok\n", stderr=""
+        ),
+    )
+    assert retried.processed_count == 1
+
+
+def test_materialization_queue_default_timeout_bounds_one_family(monkeypatch) -> None:
+    import src.data.replacement_forecast_live_materialization_queue as queue_mod
+
+    monkeypatch.delenv("ZEUS_REPLACEMENT_MATERIALIZATION_TIMEOUT_SECONDS", raising=False)
+
+    assert queue_mod._materialization_subprocess_timeout_seconds() == 30.0
 
 
 def test_materialization_queue_requeues_transient_writer_contention(tmp_path) -> None:
@@ -2015,18 +2066,15 @@ def test_materialization_timeout_isolated_to_its_own_request(
         limit=2,
     )
 
-    assert report.status == "FAILED"
+    assert report.status == "PROCESSED"
     assert report.processed_count == 1
-    assert report.failed_count == 1
+    assert report.failed_count == 0
     assert report.committed_posterior_count == 1
     assert report.reactor_wake_published_count == 1
-    failed_request = Path(report.failed_files[0])
-    assert failed_request.name.startswith("B.")
-    sidecar = json.loads(
-        failed_request.with_suffix(failed_request.suffix + ".receipt.json").read_text()
-    )
-    assert sidecar["returncode"] == 124
-    assert sidecar["timeout_seconds"] == 1.5
+    assert not report.failed_files
+    assert len(tuple(request_dir.glob("B.timeout-retry-*.json"))) == 1
+    assert "REPLACEMENT_LIVE_MATERIALIZATION_REQUEST_TIMEOUT" in report.reason_codes
+    assert queue_mod._TIMEOUT_RETRY_DEFERRED_REASON in report.reason_codes
 
 
 def test_materialization_queue_retries_blocked_request_only_after_input_change(
