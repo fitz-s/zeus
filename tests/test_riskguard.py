@@ -4459,8 +4459,12 @@ class TestStrategyBrierMinSampleContinued:
         assert details["brier_evidence_ready_sample_size"] == 0
         assert details["portfolio_brier_thin_sample_no_verdict"] is True
         assert details["recommended_strategy_gates"] == [
-            "day0_nowcast_entry"
+            "day0_nowcast_entry",
+            "forecast_qkernel_entry",
         ]
+        assert details["market_relative_alpha_gate_reason"].startswith(
+            "market_relative_alpha_unproven("
+        )
         assert details["day0_market_relative_alpha_gate_required"] is True
         assert details["day0_market_relative_alpha_gate_reason"].startswith(
             "market_relative_alpha_unproven("
@@ -4657,7 +4661,7 @@ class TestStrategyBrierMinSampleContinued:
                 True,
                 "not_applicable",
                 "portfolio_brier_thin_sample_no_verdict",
-                [],
+                ["forecast_qkernel_entry"],
             ),
             (
                 10,
@@ -6492,7 +6496,7 @@ class TestQkernelMarketRelativeAlphaEvidence:
         }
         conn.close()
 
-    def test_tick_records_qkernel_evidence_and_replaces_legacy_alpha_gate(
+    def test_tick_gates_unproven_current_qkernel_revision_and_replaces_legacy_gate(
         self,
         monkeypatch,
         tmp_path,
@@ -6627,13 +6631,17 @@ class TestQkernelMarketRelativeAlphaEvidence:
         assert risk_row["level"] == RiskLevel.GREEN.value
         assert details["market_relative_alpha_evidence"]["rejected"] is True
         assert details["market_relative_alpha_admission_role"] == (
-            "revision_scoped_rejection_gate"
+            "revision_scoped_pretrade_proof_gate"
         )
-        assert details["market_relative_alpha_gate_reason"] is None
+        assert details["market_relative_alpha_gate_reason"].startswith(
+            "market_relative_alpha_unproven("
+        )
         assert details["market_relative_alpha_observation"].startswith(
             "market_relative_alpha_unproven("
         )
-        assert details["market_relative_alpha_gate_confirmation"] == {}
+        assert details["market_relative_alpha_gate_confirmation"] == {
+            "forecast_qkernel_entry": True,
+        }
         assert details["day0_market_relative_alpha_admission_role"] == (
             "revision_scoped_pretrade_proof_gate"
         )
@@ -6648,8 +6656,8 @@ class TestQkernelMarketRelativeAlphaEvidence:
             "legacy_day0_alpha_gate",
         )
         assert gate_state["forecast_qkernel_entry"] == (
-            "expired",
-            "legacy_alpha_gate",
+            "active",
+            details["market_relative_alpha_gate_reason"],
         )
 
 

@@ -5609,19 +5609,21 @@ def _tick_once() -> RiskLevel:
                 required_evalue=market_relative_alpha_evalue,
             )
         )
-        (
-            qkernel_market_relative_alpha_gate_reason,
-            qkernel_market_relative_alpha_gate_revisions,
-        ) = _market_relative_alpha_rejection_gate_reason(
-            probability_semantics_binding,
-            qkernel_market_relative_alpha_gate_evidence,
-            required_evalue=market_relative_alpha_evalue,
+        qkernel_market_relative_alpha_gate_reason = (
+            _market_relative_alpha_gate_reason(
+                probability_semantics_binding,
+                qkernel_market_relative_alpha_gate_evidence,
+                required_evalue=market_relative_alpha_evalue,
+            )
         )
-        qkernel_market_relative_alpha_unproven_revisions = (
+        qkernel_market_relative_alpha_gate_revisions = (
             _market_relative_alpha_unproven_revisions(
                 probability_semantics_binding,
                 qkernel_market_relative_alpha_gate_evidence,
             )
+        )
+        qkernel_market_relative_alpha_unproven_revisions = (
+            qkernel_market_relative_alpha_gate_revisions
         )
         (
             day0_market_relative_alpha_shadow_rows,
@@ -5824,14 +5826,12 @@ def _tick_once() -> RiskLevel:
         recommended_control_reasons: dict[str, list[str]] = {}
         recommended_strategy_gate_reasons: dict[str, list[str]] = {}
         recommended_strategy_gate_scopes: dict[str, set[str]] = {}
-        # Current q/book/wealth economics are the decision authority. Qkernel
-        # revisions retain rejection-only gating because their ordinary live
-        # cohort already supplies a causal settlement drain. A new Day0
-        # probability semantics revision has a different contract: it must earn
-        # admission from the no-money global-auction shadow before risking
-        # capital. The shadow continues while gated and later verified
-        # settlements reset the exact revision-scoped gate. Held monitoring and
-        # exits are outside this entry-only policy.
+        # Current q/book/wealth economics rank actions only after the exact
+        # probability revision has proved positive capital value. Both qkernel
+        # and Day0 revisions earn admission from the no-money global-auction
+        # shadow before risking capital. The shadow continues while gated and
+        # later verified settlements reset the exact revision-scoped gate. Held
+        # monitoring and exits are outside this entry-only policy.
         probability_semantics_level = RiskLevel.GREEN
         if probability_semantics_binding.get("status") == "unavailable":
             probability_semantics_level = RiskLevel.DATA_DEGRADED
@@ -6339,7 +6339,7 @@ def _tick_once() -> RiskLevel:
                     qkernel_market_relative_alpha_unproven_revisions
                 ),
                 "market_relative_alpha_admission_role": (
-                    "revision_scoped_rejection_gate"
+                    "revision_scoped_pretrade_proof_gate"
                 ),
                 "qkernel_market_relative_alpha_shadow": (
                     qkernel_market_relative_alpha_shadow_status
