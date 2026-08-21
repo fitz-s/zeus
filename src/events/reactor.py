@@ -5889,7 +5889,17 @@ def run_edli_day0_hourly_refresh_cycle(*, trading_lane_active: bool) -> None:
             held_city_count=held_city_count,
             cursor=_DAY0_HOURLY_REFRESH_CURSOR,
         )
-        cursor_span = held_city_count or priority_city_count or len(ordered_cities)
+        # One cursor rotates three independent segments. Bounding it by the
+        # held prefix meant a non-empty held set could expose only the first
+        # few members of a much larger discovery-priority segment, permanently
+        # starving every later city's Day0 q. Advance one page-start at a time
+        # over the longest segment so every city receives a bounded turn.
+        cursor_span = max(
+            held_city_count,
+            priority_city_count - held_city_count,
+            len(ordered_cities) - priority_city_count,
+            1,
+        )
         cursor_advance = 0
         max_cities = _day0_hourly_refresh_max_cities(
             priority_city_count=priority_city_count,
@@ -5912,16 +5922,22 @@ def run_edli_day0_hourly_refresh_cycle(*, trading_lane_active: bool) -> None:
                 # Priority proof failed locally. Do not promote an unproved city,
                 # but preserve the ordinary maintenance universe sweep.
                 ordered_cities = ordered_cities[:max_cities]
-                cursor_advance = min(max_cities, cursor_span)
+                cursor_advance = 1
             elif held_refresh_due:
-                # Current capital is approaching the strict bundle cliff.
-                # Discovery cannot consume one of this bounded cut's slots
-                # until every offered held city retains critical-quota
-                # authority. Cursor rotation preserves fairness across a held
-                # segment larger than the microbatch.
-                ordered_cities = held[:max_cities]
-                quota_critical_cities = len(ordered_cities)
-                cursor_advance = len(ordered_cities)
+                # Current capital keeps most of the bounded cut, but one failed
+                # held-city provider must not stop probability generation for
+                # the rest of the market universe. Reserve one independent
+                # discovery slot whenever both segments exist.
+                if priority and max_cities >= 2:
+                    held_cut = held[: max(1, max_cities - 1)]
+                    priority_cut = priority[:1]
+                    ordered_cities = held_cut + priority_cut
+                    quota_critical_cities = len(held_cut)
+                    quota_priority_cities = len(priority_cut)
+                else:
+                    ordered_cities = held[:max_cities]
+                    quota_critical_cities = len(ordered_cities)
+                cursor_advance = 1
             elif held and priority and max_cities >= 2:
                 # First protect one money-at-risk city, then make discovery
                 # progress before a slow held fetch can exhaust the whole
@@ -5929,15 +5945,15 @@ def run_edli_day0_hourly_refresh_cycle(*, trading_lane_active: bool) -> None:
                 ordered_cities = [held[0], priority[0]] + held[1:max_cities - 1]
                 quota_critical_cities = 1
                 quota_priority_cities = 1
-                cursor_advance = 1 + len(held[1:max_cities - 1])
+                cursor_advance = 1
             elif held:
                 ordered_cities = held[:max_cities]
                 quota_critical_cities = len(ordered_cities)
-                cursor_advance = len(ordered_cities)
+                cursor_advance = 1
             else:
                 ordered_cities = priority[:max_cities]
                 quota_priority_cities = len(ordered_cities)
-                cursor_advance = len(ordered_cities)
+                cursor_advance = 1
         else:
             # Preserve capital priority for the whole proved prefix, not just
             # the first ``max_cities`` list positions. The fetcher itself caps
@@ -5948,7 +5964,7 @@ def run_edli_day0_hourly_refresh_cycle(*, trading_lane_active: bool) -> None:
             quota_priority_cities = max(
                 0, priority_city_count - held_city_count
             )
-            cursor_advance = min(max_cities, cursor_span)
+            cursor_advance = 1
         stats = maybe_refresh_day0_hourly_vectors(
             ordered_cities,
             decision_time=decision_time,
@@ -5969,10 +5985,9 @@ def run_edli_day0_hourly_refresh_cycle(*, trading_lane_active: bool) -> None:
         )
         vectors_written = int(getattr(stats, "vectors_written", stats))
         cities_attempted = int(getattr(stats, "cities_attempted", 0) or 0)
-        # Fairness is about which complete held segment was OFFERED a slot,
-        # not whether its fetch escaped throttle/provider failure. Advancing
-        # only on attempts and taking modulo the truncated microbatch trapped
-        # the cursor in its first three held cities indefinitely.
+        # Fairness is about which segment page was OFFERED a slot, not whether
+        # its fetch escaped throttle/provider failure. A unit advance is
+        # coprime to every segment length, so no city can be skipped forever.
         if cursor_advance > 0 and cursor_span > 0:
             _DAY0_HOURLY_REFRESH_CURSOR = (
                 _DAY0_HOURLY_REFRESH_CURSOR + cursor_advance

@@ -1980,10 +1980,12 @@ files:
       relying on the unknown-reason fallback or replaying stale truth. Qkernel
       MAKER_TAKER_FORBIDDEN after
       fresh-book revalidation is a transient re-rank condition, not a terminal
-      event verdict. Day0 hourly refresh rotates over the complete held-capital
-      segment by offered slots, so throttle and provider failure cannot trap a
-      bounded microbatch on its first page or starve later held families of
-      current probability authority. Held reauction request inference uses the
+      event verdict. Day0 hourly refresh rotates over the longest held,
+      discovery-priority, and maintenance segment with a unit cursor advance,
+      while every active microbatch reserves one discovery slot after
+      protecting held capital. Segment-size mismatch, throttle, or one provider
+      failure therefore cannot trap the cursor on an early page or starve
+      unrelated cities of current probability authority. Held reauction request inference uses the
       same inclusive submit-price band as the durable request validator, so a
       positive but non-submittable bid remains explicit no-book debt instead of
       disappearing before publish. V4 reservation reuses one stable
