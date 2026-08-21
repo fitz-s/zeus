@@ -2405,6 +2405,72 @@ def test_direct_downloader_batches_run_pinned_anchor_locations(
     assert report["downloaded"]["openmeteo_single_runs_location_batch_count"] == 1
 
 
+def test_exhausted_metered_quota_goes_directly_to_bucket_rung(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    import scripts.download_replacement_forecast_current_targets as dl
+
+    rows = tuple(
+        _TargetRow(
+            city=city,
+            target_date="2026-06-10",
+            temperature_metric="high",
+            covered=False,
+            missing_openmeteo_manifest=True,
+        )
+        for city in ("London", "Paris")
+    )
+    plan = _PlanStub(ready=False, rows=rows)
+    bucket_calls: list[dict[str, object]] = []
+    monkeypatch.setattr(dl.quota_tracker, "can_call", lambda: False)
+    monkeypatch.setattr(dl, "_single_runs_public_for_request", lambda _request: True)
+    monkeypatch.setattr(
+        dl,
+        "_fetch_run_pinned_anchor_wave",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("exhausted quota must skip run-pinned wave")
+        ),
+    )
+    monkeypatch.setattr(
+        dl,
+        "_fetch_meta_stamped_anchor_wave",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("exhausted quota must skip meta-stamped wave")
+        ),
+    )
+
+    def _bucket(**kwargs):
+        assert kwargs["meta_wave_failure"] is not None
+        bucket_calls.append(kwargs)
+        return (
+            _anchor_payload(),
+            {
+                "openmeteo_endpoint": "bucket",
+                "run_authority": "bucket_partial_run_test",
+            },
+        )
+
+    monkeypatch.setattr(dl, "_resolve_anchor_payload", _bucket)
+    report = dl.download_current_target_raw_inputs(
+        forecast_db=tmp_path / "forecasts.db",
+        output_dir=tmp_path / "raw",
+        cycle=AVAILABLE_CYCLE,
+        limit=None,
+        write_db=False,
+        release_lag_hours=14.0,
+        anchor_sigma_c=3.0,
+        include_covered=True,
+        precomputed_plan=plan,
+        max_wall_clock_seconds=5.0,
+        quota_priority=True,
+    )
+
+    assert report["downloaded"]["openmeteo_metered_quota_available"] is False
+    assert report["manifest_count"] == 2
+    assert len(bucket_calls) == 2
+
+
 def test_timebox_commits_ready_wave_payloads_before_deferring_unresolved(
     tmp_path,
     monkeypatch,

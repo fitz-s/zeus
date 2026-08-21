@@ -1302,7 +1302,32 @@ def download_current_target_raw_inputs(
         and _single_runs_public_for_request(first_request)
     )
     single_runs_wave_failure: Exception | None = None
-    if single_runs_public and len(pending_requests) > 1:
+    metered_quota_context = (
+        quota_tracker.critical_lane()
+        if quota_critical
+        else quota_tracker.priority_lane()
+        if quota_priority
+        else contextlib.nullcontext()
+    )
+    with metered_quota_context:
+        metered_anchor_quota_available = (
+            not pending_requests or quota_tracker.can_call()
+        )
+    downloaded["openmeteo_metered_quota_available"] = (
+        metered_anchor_quota_available
+    )
+    if pending_requests and not metered_anchor_quota_available:
+        quota_skip = RuntimeError(
+            "metered Open-Meteo anchor quota unavailable; using independent bucket rung"
+        )
+        single_runs_wave_failure = quota_skip
+        meta_wave_failures = {key: quota_skip for key in pending_requests}
+
+    if (
+        metered_anchor_quota_available
+        and single_runs_public
+        and len(pending_requests) > 1
+    ):
         try:
             wave_resolved = _fetch_run_pinned_anchor_wave(
                 pending_requests,
@@ -1326,7 +1351,11 @@ def download_current_target_raw_inputs(
             downloaded["openmeteo_wave_payload_count"] = len(wave_resolved)
         downloaded["openmeteo_single_runs_location_batch_count"] = 1
 
-    if pending_requests and (not single_runs_public or single_runs_wave_failure is not None):
+    if (
+        metered_anchor_quota_available
+        and pending_requests
+        and (not single_runs_public or single_runs_wave_failure is not None)
+    ):
         try:
             wave_resolved, meta_wave_failures = _fetch_meta_stamped_anchor_wave(
                 pending_requests,

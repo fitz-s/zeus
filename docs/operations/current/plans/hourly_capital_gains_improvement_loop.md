@@ -5,6 +5,13 @@
 
 ## 现状(forward)
 
+### 2026-08-21 B129 — quota耗尽时直接走独立bucket，不先浪费deadline
+- **实时反例:** 22:34Z global auction `0/197` probability eligible、0 candidates，全部由12Z ENS相对00/06Z consumed posterior的HWM supersession拒绝；provider quota=9500。当前 downloader每个10秒wave仍先尝试必败的run-pinned与meta-stamped API，日志随后显示8/10 targets unattempted，独立S3 bucket几乎拿不到deadline。
+- **已有当前真相:** bucket `in_progress`与`latest`均明确声明12Z completed，145个valid hours；54个settlement cities中34个在严格cross-check raw whitelist。bucket不绕过概率或城市精度法：不在whitelist的20城仍拒绝，所需local-day任一时刻缺失仍拒绝。
+- **修复:** downloader在正确quota lane内先只读`can_call()`；metered quota不可用时不调用run-pinned/meta waves，为每个city/date注入同一typed quota refusal并直接进入既有bucket rung。production持久化的per-cycle `BucketPointReaderPool`跨timeboxed ticks保留reader/cache，初次24小时对象读取可渐进变热；任何成功payload仍走原materializable、precision、manifest与DB验证。
+- **SCOPE / DRAIN / RESET:** scope是当前download wave的metered transport选择，不改变target、cycle、q或whitelist。drain是bucket manifest/point read→canonical manifest→materialization；reset为quota恢复，下一tick重新优先metered rungs。抗体证明quota false时两个API wave零调用、bucket per-city执行且manifest正常产生。
+- **验收:** targeted currency/bucket tests、compile/ruff/freshness通过；live quota=9500时报告`openmeteo_metered_quota_available=false`，bucket-qualified城市manifest/HWM开始收敛，非qualified城市保持fail-closed。
+
 ### 2026-08-21 B128 — 终止成功但永不收敛的 multi-location quota循环
 - **实时反例:** canonical quota ledger显示 day_count=9500；`bayes_precision_fusion_single_runs_locations_batched`单独消耗5762（60.7%），其中priority下6个 request key累计267次、locations计费5553。transport多数成功，但 exact-cycle anchor仍缺248 scopes，说明quota被成功重抓而非新coverage消耗。
 - **结构性根因:** BPF target universe可以只含HIGH或只含LOW；location fast path与普通 batched path却固定要求`("high","low")`都已持久化才skip。fetch后 writer只为实际`city_targets`写行，因此不存在的 sibling metric永远不会出现，同一成功batch每poll重抓。
