@@ -1407,13 +1407,13 @@ def test_stale_day0_cleanup_does_not_consume_current_materialization_budget(
         )
         return path
 
-    current = write_seed(
-        "000.current.json",
-        str(identity["day0_observed_extreme_observation_time"]),
-    )
     stale = (
-        write_seed("001.stale.json", "2026-07-19T05:00:00+00:00"),
-        write_seed("002.stale.json", "2026-07-19T05:01:00+00:00"),
+        write_seed("000.stale.json", "2026-07-19T05:00:00+00:00"),
+        write_seed("001.stale.json", "2026-07-19T05:01:00+00:00"),
+    )
+    current = write_seed(
+        "999.current.json",
+        str(identity["day0_observed_extreme_observation_time"]),
     )
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row

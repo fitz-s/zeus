@@ -1938,7 +1938,7 @@ def _prepare_seed_requests(
     indeterminate_count = 0
     stale_owner_count = 0
     for seed_json in seeds:
-        if actionable_limit <= 0 or inspected_count >= inspection_cap:
+        if actionable_count >= actionable_limit or inspected_count >= inspection_cap:
             break
         inspected_count += 1
         try:
@@ -1968,8 +1968,6 @@ def _prepare_seed_requests(
                 continue
             if ownership is _Day0EnqueueOwnership.INDETERMINATE:
                 indeterminate_count += 1
-                continue
-            if actionable_count >= actionable_limit:
                 continue
             # BOUNDARY CONTRACT (2026-06-10): the seed consumer half. _looks_like_seed
             # only discriminates "is this file a seed at all"; the full SEED schema is
@@ -2121,8 +2119,6 @@ def _prepare_seed_requests(
             processed.append(str(moved))
             actionable_count += 1
         except Exception as exc:
-            if actionable_count >= actionable_limit:
-                continue
             moved = _move_request(seed_json, failed_path)
             _write_sidecar(
                 moved,
