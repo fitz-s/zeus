@@ -1,5 +1,5 @@
 # Created: 2026-07-03
-# Last reused/audited: 2026-08-20
+# Last reused/audited: 2026-08-21
 # Authority basis: current global auction, posterior-mean Fractional Kelly,
 #                  Day0 global-cut routing, and auditable SELL holding bindings
 """Current global auction, q-kernel, and live actuation integration contracts."""
@@ -26928,6 +26928,14 @@ def test_global_batch_claims_unpaged_cut_time_winner_and_continues_actuation(
             (
                 "GLOBAL_CURRENT_PROBABILITY_PREPARE_FAILED:"
                 "FamilyAuthorityUnavailable:"
+                "GLOBAL_DAY0_PROVISIONAL_OBSERVATION_NOT_EXECUTION_AUTHORITY"
+            ),
+            True,
+        ),
+        (
+            (
+                "GLOBAL_CURRENT_PROBABILITY_PREPARE_FAILED:"
+                "FamilyAuthorityUnavailable:"
                 "GLOBAL_DAY0_CONDITIONING_OBSERVATION_MISMATCH"
             ),
             True,
@@ -27081,6 +27089,10 @@ def test_global_batch_excludes_typed_current_q_ineligible_family(
                     )
                 if "FAST_OBSERVATION_ENTRY_STALE" in ineligible_reason:
                     raise ValueError("GLOBAL_DAY0_FAST_OBSERVATION_ENTRY_STALE")
+                if "PROVISIONAL_OBSERVATION_NOT_EXECUTION" in ineligible_reason:
+                    raise ValueError(
+                        "GLOBAL_DAY0_PROVISIONAL_OBSERVATION_NOT_EXECUTION_AUTHORITY"
+                    )
                 if "CONDITIONING_OBSERVATION_MISMATCH" in ineligible_reason:
                     raise ValueError("GLOBAL_DAY0_CONDITIONING_OBSERVATION_MISMATCH")
                 if "PROVISIONAL_REVISION_LIKELIHOOD" in ineligible_reason:
