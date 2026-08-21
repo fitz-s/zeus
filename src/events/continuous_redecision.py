@@ -1,6 +1,6 @@
 # Created: 2026-05-31
 # Last reused or audited: 2026-06-29
-# Authority basis: PLAN_CONTINUOUS_REDECISION_MAX_ALPHA_2026-05-31.md (v2, opus-critic-resolved) +
+# Authority basis: PLAN_CONTINUOUS_REDECISION_MAX_ALPHA_2026-05-31.md (v2, review-resolved) +
 #   GOAL #36 expanded (continuous entry+exit, evidence-gated). Implements P1 (belief cache) + P2
 #   (cheap screen + enqueue). screen_exit/screen_exit_cancel deleted Wave 3 (zero live callers —
 #   exit path is Position.evaluate_exit in src/state/portfolio.py).

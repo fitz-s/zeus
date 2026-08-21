@@ -565,7 +565,7 @@ The refactor is done only when:
 
 ## CodexPro Run Result
 
-CodexPro local bridge was started through `/Users/leofitz/.local/bin/codexpro-zeus`
+CodexPro local bridge was started through `<local>/.local/bin/codexpro-zeus`
 in handoff mode. Because CodexPro is a bridge and not a model, the direct CLI
 does not itself return a ChatGPT Pro answer. The usable fallback path is to
 generate a `.ai-bridge/pro-context.md` bundle for a Pro-capable planning model,
@@ -603,11 +603,11 @@ runtime write paths.
 
 Conversation:
 
-`https://chatgpt.com/g/g-p-6a2990f77bdc81919f9702e3cb6ae20d-claude-code/c/6a3ec942-0808-83ea-b307-82173e8cdb4c`
+`[external consult thread]`
 
 Captured answer:
 
-`.ai-bridge/runtime-db-lock-refactor/chatgpt-pro-consult/answer_REQ-20260626-132906-myba1mxy.md`
+`[consult answer artifact]`
 
 The consult verdict was:
 

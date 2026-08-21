@@ -92,12 +92,12 @@
    - `PostToolUse` post-tool-use.mjs:无 matcher → `"Skill|Task|Agent"`
    - 效果:Read/Grep/Glob/MCP 等大宗调用(一个 session 数百次)不再各起一个 Node 进程(~47ms/次)。steer-now.sh 保持全量(已是 /bin/sh,设计如此)。JSON 校验通过。
 2. **superpowers 注入** ✅ using-superpowers/SKILL.md 3.1KB→1.4KB:弃"1% 就必须"+red-flags 反合理化墙(弱模型脚手架),换判断优先 + 6 行触发表 + 优先级规则。SessionStart 注入自动缩水(hook 是 cat SKILL.md)。⚠️ 同 caveman:插件更新会 revert。
-3. **行业前卫调查** 🔄 ChatGPT Pro consult 已发(REQ-20260701-150857,gist=提案稿+审计报告),覆盖 (a) CLAUDE.md/AGENTS.md 先锋方法论 (b) agentic search vs RAG (c) context/loop engineering;本地 WebSearch 已确认:业界 2025-05 起弃 embedding RAG 转 agentic search(Anthropic/Cursor/Devin/Amp 全部 grep+工具循环;Amazon AAAI 2026: agentic keyword search = 94.5% RAG faithfulness 零向量库),Zeus 的 codegraph 路线正确。官方 best-practices 新杠杆待并入 v3:逐行 prune 测试("删了会犯错吗?")、compaction 保留指令、advisory→hook 迁移原则、按需知识走 skills、@import 分层。
+3. **行业前卫调查** 🔄 ChatGPT Pro consult 已发(external consult, 2026-07-01,gist=提案稿+审计报告),覆盖 (a) CLAUDE.md/AGENTS.md 先锋方法论 (b) agentic search vs RAG (c) context/loop engineering;本地 WebSearch 已确认:业界 2025-05 起弃 embedding RAG 转 agentic search(Anthropic/Cursor/Devin/Amp 全部 grep+工具循环;Amazon AAAI 2026: agentic keyword search = 94.5% RAG faithfulness 零向量库),Zeus 的 codegraph 路线正确。官方 best-practices 新杠杆待并入 v3:逐行 prune 测试("删了会犯错吗?")、compaction 保留指令、advisory→hook 迁移原则、按需知识走 skills、@import 分层。
 4. 未动(有意):keyword-detector/steer-guard(每 prompt 一次,量级无关紧要)、code-review-graph per-edit 增量索引(有真实价值)。
 
 ## 9. 第四轮:consult 裁决 + 前卫分解落地 (2026-07-01)
 
-Consult(REQ-20260701-150857,答案 /tmp/cgc_answer_REQ-20260701-150857-127dc8.txt)BLOCKER 裁决:**monolith 全局 CLAUDE.md 是反模式**;2026 前卫分层 = ≤3KB 全局 bootstrap(跨项目操作员契约)+ 项目 boot digest(定位器)+ path-scoped rules + skills(按需全文)+ hooks(强制层)。与官方 docs 一致("长文件降 adherence、<200 行、程序性内容进 skill")。
+Consult(external consult, 2026-07-01,答案 [consult answer artifact])BLOCKER 裁决:**monolith 全局 CLAUDE.md 是反模式**;2026 前卫分层 = ≤3KB 全局 bootstrap(跨项目操作员契约)+ 项目 boot digest(定位器)+ path-scoped rules + skills(按需全文)+ hooks(强制层)。与官方 docs 一致("长文件降 adherence、<200 行、程序性内容进 skill")。
 
 **接受并落地:**
 - 全局提案稿重写为 3.97KB bootstrap(`~/.claude/CLAUDE.fable5-proposed.md`):Turn contract / Context economy(含 compaction 保留指令、2-corrections 法)/ Agents(标注 schema 验证日期 2026-07-01)/ Retrieval meta / Memory / Style / Provenance 法条版。
@@ -184,7 +184,7 @@ Consult(REQ-20260701-150857,答案 /tmp/cgc_answer_REQ-20260701-150857-127dc8.tx
 
 操作员两次纠偏定住方法:(a) 不重述已删的;(b) 训练先验≠2026-07 共识,只有活源(live browse + 多源交叉)算数。我凭先验加的 9 条"社区共识"全部回滚——事后逐条对照,每条都已有 skill/hook/memory 归属,回滚双重正确。
 
-**活源验证通道:** followup consult(浏览 Q2-2026 vendor docs/changelog/practitioner posts,答案 /tmp/cgc_answer_delta2026.txt)+ 本地搜索(GitHub 官方 2500 仓库分析、ICLR 2026 AMBIG-SWE、Augment/Morph/Osmani 2026 指南)。两通道独立收敛。
+**活源验证通道:** followup consult(浏览 Q2-2026 vendor docs/changelog/practitioner posts,答案 [consult answer artifact])+ 本地搜索(GitHub 官方 2500 仓库分析、ICLR 2026 AMBIG-SWE、Augment/Morph/Osmani 2026 指南)。两通道独立收敛。
 
 **Consult 裁决:没有缺失的宪法;一处伪共识修正 + 按优先级的小增量,"替换不增长"。已按十四行诗体落笔(bootstrap 3.17→3.83KB,lint 绿):**
 1. [HIGH-修正] "embeddings lost to grep" 是我写的过时先验——Q2 实况 = hybrid retrieval。替换为四路由:rg / semantic / graph / deep source,后接 Read-before-assert。(Cursor Q2 SDK、Sourcegraph Q2 双源)

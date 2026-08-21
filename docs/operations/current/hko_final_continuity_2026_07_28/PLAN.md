@@ -2,7 +2,9 @@
 
 Date: 2026-07-28
 Branch: `fix/hko-final-continuity-20260728`
-Status: active
+Status: closed — landed. The dedicated `ingest_k2_hko_daily_final` scheduler job is live
+(`src/ingest_main.py`), with its own lock lane and antibody tests. Retained for the
+why-isolate-this-poll reasoning, not as in-flight work.
 
 ## Background
 

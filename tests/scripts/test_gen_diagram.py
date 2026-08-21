@@ -16,7 +16,7 @@ gen_diagram = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(gen_diagram)
 
 STALE_PHRASES = [
-    "de-biased",              # served centers are raw; de-bias is walk-forward inside fusion
+    "de-bias",                # RAW centers on the live path; eb_bias has no live caller
     "emp. Bayes",
     "empirical-Bayes",
     "fractional Kelly",
@@ -30,7 +30,7 @@ STALE_PHRASES = [
 ]
 
 REQUIRED_PHRASES = [
-    "walk-forward de-bias trust",
+    "raw current centers",
     "current-cycle evidence width",
     "posterior-mean action q",
     "robust log-wealth argmax",

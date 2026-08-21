@@ -11,7 +11,7 @@ Restore truthful live entry admission after the global auction reached a real wi
 ## Current truth
 
 - Live PID 98439 is loaded at `16cec04f6`; entries are not paused.
-- Chain-mirror repair succeeded: `6be10bfa-f2f` is canonical `voided/closed_exited`.
+- Chain-mirror repair succeeded: `6be10bf…[redacted]` is canonical `voided/closed_exited`.
 - Reactor reached winner claim, then selected winner identity `e664824…`.
 - Entry authority currently fails on `entry_q_version`, `forecast_event_bridge`, and `pending_exit_release_loop`.
 - A reactor cycle started at 2026-07-10T17:32:26Z and did not return through three following scheduled intervals, which were skipped by `max_instances_reached`.
@@ -28,7 +28,7 @@ Restore truthful live entry admission after the global auction reached a real wi
 
 ## Slice A -- Active ENTRY q_version
 
-- Dry-run found exactly one active missing row: Seoul position `656594aa-af2`, command `d671dcc6142a4152`.
+- Dry-run found exactly one active missing row: Seoul position `656594a…[redacted]`, command `d671dcc6142a4152`.
 - Existing FinalIntentCertificate reconstructs exactly one posterior identity: `5aa5d7d02c36827aa1f6d11fb5da81ad79d02f855f49aab4156e871a3cea5597`.
 - Apply may update only that command's empty `venue_commands.q_version` through the registered repair script.
 - Acceptance: applied_count=1, subsequent dry-run candidate_count=0, no share/phase/state change, no venue action, no backup.
@@ -44,7 +44,7 @@ Restore truthful live entry admission after the global auction reached a real wi
 
 ## Slice B2 -- Released exit projection health
 
-- Canonical sequence for Seoul `656594aa-af2`: `EXIT_ORDER_REJECTED` seq 663 left `pending_exit`; `EXIT_RETRY_RELEASED` seq 666 legally transitioned `pending_exit -> day0_window`; held `MONITOR_REFRESHED` starts at seq 667.
+- Canonical sequence for Seoul `656594a…[redacted]`: `EXIT_ORDER_REJECTED` seq 663 left `pending_exit`; `EXIT_RETRY_RELEASED` seq 666 legally transitioned `pending_exit -> day0_window`; held `MONITOR_REFRESHED` starts at seq 667.
 - Defect: the projection-regression query selects the latest event only from `EXIT_INTENT`, `EXIT_ORDER_REJECTED`, and `EXIT_ORDER_POSTED`. It excludes `EXIT_RETRY_RELEASED`, so every legal held monitor after release is compared against the older rejection and mislabeled as a regression.
 - Minimal repair: make release part of the latest exit-transition ordering and exclude a position when that latest transition is `EXIT_RETRY_RELEASED`. A new exit intent/rejection after release remains blocking because it becomes latest again.
 - Forbidden: change position phase, suppress a genuine held projection after an unreleased exit, weaken any exit submit/runtime gate, or mutate live DB state.
@@ -123,7 +123,7 @@ Restore truthful live entry admission after the global auction reached a real wi
 
 ## Slice B69 -- Stable probability-content handoff for held statistical SELL
 
-- Current proof: Seoul position `e582b997-daf` reached held-side q `0` with a
+- Current proof: Seoul position `e582b99…[redacted]` reached held-side q `0` with a
   current executable bid of `0.07` at `2026-07-24T05:36:12Z`. The global
   auction had evaluated the position, but its probability witness identity
   differed from the monitor's immediately rebuilt identity, so the monitor
@@ -164,7 +164,7 @@ Restore truthful live entry admission after the global auction reached a real wi
 
 ## Slice B70 -- Preserve token-typed holdings and sell dominated live legs
 
-- Current proof: Guangzhou position `02a8db2c-c2e` first filled `5.2` NO
+- Current proof: Guangzhou position `02a8db2…[redacted]` first filled `5.2` NO
   shares at `0.34`. A later certified YES BUY for `6.5` shares at `0.88`
   reused that NO position id because the executor's same-token query matched
   either token column of the binary market. The projection now says
@@ -959,7 +959,7 @@ Restore truthful live entry admission after the global auction reached a real wi
 
 ## Slice B59 -- Project authenticated entry fills in the ingest transaction
 
-- Live proof after B58: command `9bd083d376334765` received one authenticated `CONFIRMED` REST trade fact for `47.1` Munich NO shares at `0.06`, but remained `ACKED`; position `1605bc27-b62` remained `pending_entry` with zero shares and zero cost. No duplicate command was persisted. The continuous fill synchronizer had durably observed the fill, while recurring recovery repeatedly deferred its first unrelated `REVIEW_REQUIRED` pass under auction DB contention. More fundamentally, no recovery pass consumes the ordinary `ACKED + CONFIRMED trade fact` shape: matched-order recovery explicitly stays when a positive trade fact already exists, and filled-position repair requires the command to be `FILLED` first.
+- Live proof after B58: command `9bd083d376334765` received one authenticated `CONFIRMED` REST trade fact for `47.1` Munich NO shares at `0.06`, but remained `ACKED`; position `1605bc2…[redacted]` remained `pending_entry` with zero shares and zero cost. No duplicate command was persisted. The continuous fill synchronizer had durably observed the fill, while recurring recovery repeatedly deferred its first unrelated `REVIEW_REQUIRED` pass under auction DB contention. More fundamentally, no recovery pass consumes the ordinary `ACKED + CONFIRMED trade fact` shape: matched-order recovery explicitly stays when a positive trade fact already exists, and filled-position repair requires the command to be `FILLED` first.
 - First-principles invariant: an authenticated fill changes owned terminal wealth at the instant its canonical trade fact commits. The command event and position projection derived from that exact fact must commit in the same transaction; an asynchronous poll is crash recovery, not the normal capital truth path. The reducer must validate exact command/order identity, authenticated source, confirmed state, cumulative size, submitted limit, and legal command grammar before projecting either partial or full exposure.
 - Minimal repair: add one idempotent canonical reducer in command recovery for `ACKED`/`POST_ACKED`/`PARTIAL` BUY entries backed by exact `CONFIRMED` `REST`/`WS_USER` trade facts. The fill synchronizer invokes that reducer for each newly appended local command before advancing its watermark, inside its existing `BEGIN IMMEDIATE`; boot/live recovery invokes the same reducer as a DB-only backstop. Do not duplicate lifecycle grammar in ingest, perform venue I/O, or alter selection/probability/Kelly.
 - Files authorized: `src/execution/command_recovery.py`, `src/ingest/fill_synchronizer.py`, `tests/test_command_recovery.py`, `tests/test_fill_synchronizer.py`, this packet, and its scope sidecar.

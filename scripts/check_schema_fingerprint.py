@@ -40,7 +40,12 @@ assert sqlite3.sqlite_version_info >= (3, 37, 0), (
     f"SQLite {sqlite3.sqlite_version} < 3.37.0; PRAGMA user_version guarantee may not hold."
 )
 
-from src.state.db import init_schema, init_schema_forecasts, init_schema_trade_only  # noqa: E402
+from src.state.db import (  # noqa: E402
+    init_schema,
+    init_schema_family_book_evidence,
+    init_schema_forecasts,
+    init_schema_trade_only,
+)
 
 PIN_FILE = _ZEUS_ROOT / "architecture" / "_schema_fingerprint.txt"
 
@@ -70,6 +75,11 @@ def compute_fingerprint() -> str:
     trade_rows = _schema_rows(trade_conn)
     trade_conn.close()
 
+    fb_evidence_conn = sqlite3.connect(":memory:")
+    init_schema_family_book_evidence(fb_evidence_conn)
+    fb_evidence_rows = _schema_rows(fb_evidence_conn)
+    fb_evidence_conn.close()
+
     canonical = repr(
         (
             "world",
@@ -78,6 +88,8 @@ def compute_fingerprint() -> str:
             forecast_rows,
             "trade",
             trade_rows,
+            "family_book_evidence",
+            fb_evidence_rows,
         )
     )
     return hashlib.sha256(canonical.encode()).hexdigest()

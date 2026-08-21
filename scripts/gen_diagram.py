@@ -66,7 +66,7 @@ def render(theme):
     px, py, pw, ph, gap = 276, 100, 216, 124, 22
     o.append(f'<text x="{px}" y="{py-8}" font-family="{FS}" font-size="10.5" font-weight="650" letter-spacing="1.1" fill="{t["muted"]}">DECIDE</text>')
     stages = [
-      ("1  FORECAST", ["walk-forward de-bias trust", "current-cycle evidence width", "date-aligned covariance", "station/grid localization"]),
+      ("1  FORECAST", ["raw current centers", "history sets trust + covariance", "current-cycle evidence width", "station/grid localization"]),
       ("2  PROBABILITY", ["integrate the PREIMAGE", "of each rounding rule", "condition on observed", "freeze one coherent q"]),
       ("3  EDGE", ["posterior-mean action q", "bounds gate admission+size", "all-in executable cost", "Benjamini–Hochberg FDR"]),
       ("4  SIZE", ["outcome-contingent wealth", "robust log-wealth argmax", "existing exposure included", "missing authority → zero"]),

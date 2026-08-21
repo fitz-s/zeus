@@ -674,7 +674,7 @@ def _fit_bucket(
     #
     # Run BEFORE deactivate_model + save_platt_model so a noisy refit
     # never overwrites a previously healthy VERIFIED row with a REJECTED
-    # one (PR #70 Copilot review): the loader filters authority='VERIFIED',
+    # one (PR #70 review): the loader filters authority='VERIFIED',
     # so writing REJECTED-replacing-VERIFIED would silently downgrade live
     # serving from a real calibrator to the season-pool fallback. Instead we
     # leave the existing row intact (if any) and report+count the rejection.
@@ -899,7 +899,7 @@ def refit(
                 failed_buckets.append(bucket_key)
                 print(f"ERR {bucket_key}: {type(e).__name__}: {e}", flush=True)
                 # Write failure record to refit_bucket_failures for operator triage.
-                # Gated on `not dry_run` (PR #65 Codex P2 follow-up 2026-05-06):
+                # Gated on `not dry_run` (PR #65 review P2 follow-up 2026-05-06):
                 # the outer SAVEPOINT can persist on RELEASE if it began outside
                 # an explicit transaction, so a dry-run preview must NOT mutate
                 # state. Best-effort: if the failures table doesn't exist yet
@@ -937,7 +937,7 @@ def refit(
                 # visibility, dump the failure summary to stderr BEFORE the
                 # rollback. Operator parses stderr; the DB ledger will be
                 # empty after strict rollback (intentional; documented).
-                # PR #65 Copilot follow-up 2026-05-06: explicit file=sys.stderr
+                # PR #65 review follow-up 2026-05-06: explicit file=sys.stderr
                 # on every print() in this branch — the comment above said
                 # stderr but the calls defaulted to stdout, so any operator
                 # parsing stderr would have missed the rollback summary.

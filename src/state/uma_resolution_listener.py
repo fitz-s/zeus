@@ -261,7 +261,7 @@ class UmaRpcClient(ABC):
         (legitimate empty result — caller must not advance cursor on raise).
         Raises RuntimeError on RPC transport errors or malformed responses so
         the caller can distinguish fetch failure from a legitimately empty
-        block window (PR #84 Codex P1: cursor must not advance after error).
+        block window (PR #84 review P1: cursor must not advance after error).
         """
 
     @abstractmethod

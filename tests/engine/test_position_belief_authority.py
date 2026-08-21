@@ -49,6 +49,7 @@ from src.engine.position_belief import (
     ReplacementBelief,
     _latest_live_input_cycle,
     _observed_running_extreme_native,
+    held_side_bounds,
     load_replacement_belief,
 )
 from src.data.replacement_forecast_cycle_policy import (
@@ -449,6 +450,34 @@ def _install_live_readiness_binding(
     )
     conn.commit()
     conn.close()
+
+class TestHeldSideBounds:
+    """``held_side_bounds`` is the single blessed complement site (K1 authority)
+    both ``load_replacement_belief`` and monitor_refresh's read-through
+    recompute now call. Pin it against the two call sites' pre-extraction
+    inline formulas so the numeric behavior is provably unchanged."""
+
+    def test_buy_yes_passes_bounds_through_unchanged(self):
+        lcb, ucb = held_side_bounds(0.2, 0.7, "buy_yes")
+        assert (lcb, ucb) == (0.2, 0.7)
+
+    def test_buy_no_crosses_bounds_with_order_reversal(self):
+        q_yes_lcb, q_yes_ucb = 0.2, 0.7
+        lcb, ucb = held_side_bounds(q_yes_lcb, q_yes_ucb, "buy_no")
+        # Pre-extraction inline formula from both call sites:
+        #   held_lcb = 1.0 - q_yes_ucb; held_ucb = 1.0 - q_yes_lcb
+        assert (lcb, ucb) == (1.0 - q_yes_ucb, 1.0 - q_yes_lcb)
+
+    def test_accepts_direction_enum_like_object_via_value_attribute(self):
+        class _Direction:
+            value = "buy_no"
+
+        lcb, ucb = held_side_bounds(0.2, 0.7, _Direction())
+        assert (lcb, ucb) == (1.0 - 0.7, 1.0 - 0.2)
+
+    def test_rejects_unrecognized_direction(self):
+        with pytest.raises(ValueError):
+            held_side_bounds(0.2, 0.7, "buy_maybe")
 
 
 class TestLoadReplacementBelief:

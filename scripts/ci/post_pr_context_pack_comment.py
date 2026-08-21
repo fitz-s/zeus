@@ -73,7 +73,7 @@ def list_pr_comments(pr: int, repo: str) -> list[dict[str, Any]]:
     `--slurp` description). The earlier implementation parsed concatenated
     JSON arrays via `][` boundary splitting — fragile, and on parse failure
     silently returned an empty list, which could trigger duplicate sticky
-    comments (Copilot finding on PR #344).
+    comments (finding on PR #344).
     """
     out = subprocess.run(
         [

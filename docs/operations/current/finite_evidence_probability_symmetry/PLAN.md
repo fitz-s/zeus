@@ -5229,7 +5229,7 @@ already-landed Shenzhen correction antibody is reused unchanged.
 After Shenzhen probability freshness recovered on the exact loaded SHA, the
 restart guard remained closed despite complete current global-auction receipts.
 The current monitor set contained 27 executable obligations, while every
-receipt contained those 27 plus Miami position `ada88123-2d6`, an exact
+receipt contained those 27 plus Miami position `ada8812…[redacted]`, an exact
 0.00857-share residual classified by the auction as
 `EXCLUDED:SELLABLE_SHARES_BELOW_PRECISION`. The execution lifecycle correctly
 keeps that dust as real exposure, but it is not a current monitor execution
@@ -5280,7 +5280,7 @@ matches the canonical ledger print; same value at a different clock, a
 different source, or a future/unavailable row cannot reset provenance debt.
 Acceptance requires the OGIMET peak/frontier antibody, the full focused Day0
 suite, live DB replay for Tel Aviv, deployment, fresh probability for
-`b065ae33-f9f`, proof-driven restart-guard reset, and resumed global auction.
+`b065ae3…[redacted]`, proof-driven restart-guard reset, and resumed global auction.
 
 Allowed files for this hot-fix are
 `src/data/replacement_forecast_current_target_plan.py`,

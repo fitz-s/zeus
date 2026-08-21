@@ -2,7 +2,7 @@
 
 **Recommended repo path:** `docs/reference/modules/analysis.md`
 **Current code path:** `src/analysis`
-**Authority status:** Dense reference for an intentionally thin/placeholder module. This book exists mainly to prevent accidental promotion of ad hoc analytics into authority.
+**Authority status:** Reference for a derived-only zone. The module is no longer thin — eleven modules live here, including the six-class post-settlement grader (`settlement_skill_attribution.py`) that the calibration report and every skill claim rest on. This book exists to prevent accidental promotion of that analytics into decision authority: the zone reads truth and writes reports, never the reverse.
 
 ## 1. Module purpose
 Document that `src/analysis` is currently minimal and must not become an ungoverned catch-all.
@@ -23,7 +23,7 @@ The main rule is containment: keep analysis derived, explicit, and demotable unl
 
 ## 6. Read/write surfaces and canonical truth
 ### Canonical truth surfaces
-- `src/analysis/AGENTS.md` current placeholder status
+- `src/analysis/AGENTS.md` zone rules (derived-only: reads truth, writes reports)
 - `docs/authority/zeus_current_delivery.md` authority hygiene and packet doctrine
 
 ### Non-authority surfaces
@@ -38,10 +38,17 @@ The main rule is containment: keep analysis derived, explicit, and demotable unl
 ## 9. Source files and their roles
 | File / surface | Role |
 |---|---|
-| `(directory currently sparse)` | Treat as placeholder unless durable code lands with packet, tests, and manifest registration. |
+| `settlement_skill_attribution.py` | Six-class post-settlement grader (skill/lucky win, skill/miscalibrated loss, stale decision, unattributable). The calibration report and every skill claim rest on it. |
+| `regret_decomposer.py` | Decomposes realized regret against the decision-time certificate. |
+| `exit_timing_attribution.py` | Attributes exit outcomes to timing versus belief change. |
+| `evidence_report.py` | Evidence-ladder reporting over settled rows. |
+| `epoch.py` | Epoch boundaries shared by the reports below. |
+| `day0_boundary_report.py`, `event_opportunity_report.py`, `forecast_release_reaction_report.py`, `orderbook_execution_feasibility_report.py`, `settlement_guard_report.py` | Per-surface derived reports. |
+| `market_analysis_vnext.py` | Offline market-analysis comparison surface. |
 
 ## 10. Relevant tests
-- No dedicated durable tests are clearly surfaced today; this is itself evidence that analysis should stay non-authority until promoted deliberately.
+- `tests/test_settlement_skill_attribution.py`, `tests/analysis/test_regret_decomposer.py`, `tests/analysis/test_exit_timing_attribution.py`, plus the run-mode and atlas-anchor suites that exercise these modules.
+- Tests here prove the derived-only boundary as much as the arithmetic: analysis reads settled truth and emits reports, and nothing in this zone may write back into a surface it grades.
 
 ## 11. Invariants
 - Analysis must remain derived and non-canonical unless explicitly promoted.

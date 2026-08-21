@@ -155,6 +155,10 @@ EXPECTED_TRADE_DB_TABLES = EXPECTED_RUNTIME_TRADE_TABLES | frozenset({
     "token_price_log",
     "token_suppression",
     "token_suppression_history",
+    # book_snapshot_persistence: family_book_states/family_book_observations
+    # were trade-class here through 2026-07-29; the 2026-08-19 DB split moved
+    # both onto their own physical file, state/zeus-family-book-evidence.db
+    # (see TestFamilyBookEvidenceRegistry below) -- no longer trade tables.
 })
 
 # ---------------------------------------------------------------------------
@@ -309,6 +313,100 @@ class TestA1RegistryVsSqliteMaster:
             f"db._FORECAST_TABLES: {sorted(not_in_constant)}. "
             f"Add to _FORECAST_TABLES or reclassify in registry YAML."
         )
+
+
+# ---------------------------------------------------------------------------
+# book_snapshot_persistence DB split (2026-08-19): family-book evidence
+# (family_book_states/family_book_observations) registry coherence on its
+# OWN physical file, state/zeus-family-book-evidence.db. Mirrors the A1
+# world/forecasts bidirectional pattern above, plus an A4 pass-through proof
+# that assert_db_matches_registry accepts a freshly-initialized evidence DB
+# — this fails without the DB-split change: before it, these two tables were
+# trade_class and tables_for(FAMILY_BOOK_EVIDENCE) would be empty while
+# init_schema_family_book_evidence would not exist at all.
+# ---------------------------------------------------------------------------
+
+class TestFamilyBookEvidenceRegistry:
+    def test_a1_family_book_evidence_side_bidirectional(self):
+        """family_book_evidence registry == init_schema_family_book_evidence
+        sqlite_master (both directions)."""
+        from src.state.db import init_schema_family_book_evidence
+        from src.state.table_registry import DBIdentity, tables_for
+
+        registry_evidence = tables_for(DBIdentity.FAMILY_BOOK_EVIDENCE)
+        assert registry_evidence == {"family_book_states", "family_book_observations"}, (
+            f"registry declares an unexpected family_book_evidence table set: "
+            f"{sorted(registry_evidence)}"
+        )
+
+        conn = sqlite3.connect(":memory:")
+        init_schema_family_book_evidence(conn)
+        disk_tables = frozenset(
+            row[0]
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' "
+                "AND name NOT LIKE 'sqlite_%'"
+            ).fetchall()
+        )
+        conn.close()
+
+        missing_from_disk = registry_evidence - disk_tables
+        extra_on_disk = disk_tables - registry_evidence
+        assert not missing_from_disk, (
+            f"A1 FAMILY_BOOK_EVIDENCE FAIL (direction 1): registry declares these "
+            f"tables but init_schema_family_book_evidence() doesn't create them: "
+            f"{sorted(missing_from_disk)}."
+        )
+        assert not extra_on_disk, (
+            f"A1 FAMILY_BOOK_EVIDENCE FAIL (direction 2): init_schema_family_book_evidence() "
+            f"creates these tables but registry doesn't declare them: {sorted(extra_on_disk)}."
+        )
+
+    def test_a4_family_book_evidence_db_passes_registry_assertion(self):
+        """assert_db_matches_registry accepts a freshly-initialized evidence DB."""
+        from src.state.db import init_schema_family_book_evidence
+        from src.state.table_registry import DBIdentity, assert_db_matches_registry
+
+        conn = sqlite3.connect(":memory:")
+        init_schema_family_book_evidence(conn)
+        try:
+            assert_db_matches_registry(conn, DBIdentity.FAMILY_BOOK_EVIDENCE)
+        finally:
+            conn.close()
+
+    def test_page_count_ceiling_uses_the_connections_actual_page_size(self):
+        """src.state.db.page_count_ceiling_for_byte_budget converts a byte
+        budget to PRAGMA max_page_count using the connection's REAL
+        page_size, not an assumed 4 KiB -- proven by a page_size the default
+        interpreter does not normally use."""
+        from src.state.db import page_count_ceiling_for_byte_budget
+
+        conn = sqlite3.connect(":memory:")
+        # page_size can only be changed before any table is created.
+        conn.execute("PRAGMA page_size = 8192")
+        conn.execute("CREATE TABLE _force_page_size (x)")
+        page_size = conn.execute("PRAGMA page_size").fetchone()[0]
+        assert page_size == 8192, "test setup: page_size override did not take"
+
+        assert page_count_ceiling_for_byte_budget(conn, 8192 * 10) == 10
+        # An assumed-4KiB computation would have said 20 here -- proves the
+        # function is reading the ACTUAL page_size, not a hardcoded constant.
+        assert page_count_ceiling_for_byte_budget(conn, 8192 * 10) != (8192 * 10) // 4096
+        conn.close()
+
+    def test_family_book_evidence_db_has_a_real_growth_ceiling_end_to_end(self):
+        """init_schema_family_book_evidence arms PRAGMA max_page_count from
+        the DEFAULT byte budget, converted via the connection's real
+        page_size, BEFORE creating any table (so the ceiling is a true cap,
+        not best-effort after the schema already exists)."""
+        from src.state.db import _FAMILY_BOOK_EVIDENCE_MAX_BYTES_DEFAULT, init_schema_family_book_evidence
+
+        conn = sqlite3.connect(":memory:")
+        page_size = conn.execute("PRAGMA page_size").fetchone()[0]
+        init_schema_family_book_evidence(conn)
+        max_page_count = conn.execute("PRAGMA max_page_count").fetchone()[0]
+        conn.close()
+        assert max_page_count == _FAMILY_BOOK_EVIDENCE_MAX_BYTES_DEFAULT // page_size
 
 
 # ---------------------------------------------------------------------------

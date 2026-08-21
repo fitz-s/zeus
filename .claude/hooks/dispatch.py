@@ -1535,9 +1535,43 @@ def _run_advisory_check_pr_monitor_arm_ack(
         return None
 
 
-# Main checkout that LIVE daemons run from. Hard-coded: the guard's whole job
-# is to detect "this git command would mutate the main tree's branch/state".
-_MAIN_TREE = Path("/Users/leofitz/zeus").resolve()
+def _resolve_main_tree() -> Path:
+    """The main checkout LIVE daemons run from.
+
+    This guard's whole job is to detect "this git command would mutate the main
+    tree's branch/state", so it must resolve to the REAL live checkout or every
+    such check silently degrades to always-False.
+
+    Walking up from ``__file__`` is WRONG: a linked worktree carries its own
+    tracked copy of this file, so the parent walk names the worktree and the
+    guard then treats the worktree as live — protecting nothing and blocking
+    ordinary worktree edits. ``--git-common-dir`` resolves to the live
+    checkout's ``.git`` from inside any worktree, so its parent is the main
+    tree. ``ZEUS_MAIN_TREE`` overrides for a non-default install.
+    """
+    override = os.environ.get("ZEUS_MAIN_TREE")
+    if override:
+        return Path(override).resolve()
+    try:
+        out = subprocess.run(
+            ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
+            cwd=str(Path(__file__).resolve().parent),
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=True,
+        ).stdout.strip()
+        if out:
+            return Path(out).resolve().parent
+    except (subprocess.SubprocessError, OSError):
+        pass
+    # Unresolvable: return a path that matches nothing rather than guessing.
+    # Every use compares for equality, so a non-matching path only ever
+    # declines to claim "this is live" — it never mislabels a worktree as live.
+    return Path("/nonexistent/zeus-main-tree-unresolved")
+
+
+_MAIN_TREE = _resolve_main_tree()
 
 
 def _is_nested_linked_worktree(path: Path) -> bool:

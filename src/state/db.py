@@ -89,6 +89,15 @@ ZEUS_WORLD_DB_PATH = STATE_DIR / "zeus-world.db"  # Shared world data (settlemen
 ZEUS_FORECASTS_DB_PATH = STATE_DIR / "zeus-forecasts.db"  # K1 split 2026-05-11: forecast/harvester-truth class
 ZEUS_BACKTEST_DB_PATH = STATE_DIR / "zeus_backtest.db"  # Derived audit output; never runtime authority
 RISK_DB_PATH = STATE_DIR / "risk_state.db"  # Single risk DB (live-only)
+# book_snapshot_persistence DB split (2026-08-19): family-book decision-time
+# evidence (family_book_states/family_book_observations) lives on its OWN
+# physical file, never zeus_trades.db. It was originally trade-class
+# co-located with executable_market_snapshots; splitting it out means an
+# optional, evidence-only writer can never open a second connection to the
+# live-money DB at all — the DB boundary itself is what removes the
+# money-path contention class, not the yield guard around it (which stays as
+# a courtesy — see _family_book_telemetry_ingest_cycle in src/main.py).
+ZEUS_FAMILY_BOOK_EVIDENCE_DB_PATH = STATE_DIR / "zeus-family-book-evidence.db"
 
 def _canonical_strategy_keys_from_registry() -> frozenset[str]:
     """Live strategy identity comes from the strategy-profile registry, not a
@@ -487,7 +496,18 @@ def get_trade_connection(
     busy_timeout_ms: int | None = None,
     deadline_monotonic: float | None = None,
 ) -> sqlite3.Connection:
-    """Trade DB connection (zeus_trades.db)."""
+    """Trade DB connection (zeus_trades.db).
+
+    ``busy_timeout_ms`` mirrors ``get_world_connection``'s parameter: optional
+    derived/telemetry publication (e.g. the family-book observation writer
+    thread, src/events/family_book_telemetry_writer.py) may choose a shorter
+    budget so it yields to live writers instead of holding the default
+    30-second wait. Connection PRAGMA only -- INV-37 / txn semantics unchanged.
+
+    ``deadline_monotonic`` bounds the total wait (connection open + busy
+    retries) against an absolute ``time.monotonic()`` deadline, independent
+    of ``busy_timeout_ms``'s per-connection budget; see ``_connect``.
+    """
     return _connect(
         _zeus_trade_db_path(),
         write_class=write_class,
@@ -529,6 +549,41 @@ def get_forecasts_connection(
     BULK forecast ingest cannot starve LIVE/world writes (K1 contention fix).
     """
     return _connect(ZEUS_FORECASTS_DB_PATH, write_class=write_class)
+
+
+def get_family_book_evidence_connection(
+    *,
+    write_class: WriteClass | str | None = None,
+    busy_timeout_ms: int | None = None,
+) -> sqlite3.Connection:
+    """Family-book decision-time evidence DB (zeus-family-book-evidence.db).
+
+    Owns: family_book_states, family_book_observations — EVIDENCE ONLY, never
+    decision authority (book_snapshot_persistence). Physically separate from
+    zeus_trades.db by construction: the daemon's telemetry ingest job
+    (src/main.py _family_book_telemetry_ingest_cycle) and the writer's
+    read-only cache-seed bootstrap both open THIS connection, never
+    get_trade_connection — so an optional, evidence-only write can never
+    contend with a money-path write for the same file's WAL lock, structurally
+    rather than by cooperative yielding alone.
+
+    ``busy_timeout_ms`` mirrors ``get_world_connection``'s parameter for the
+    same "optional derived publication may choose a shorter budget" carve-out
+    documented on ``_connect``.
+    """
+    return _connect(
+        ZEUS_FAMILY_BOOK_EVIDENCE_DB_PATH,
+        write_class=write_class,
+        busy_timeout_ms=busy_timeout_ms,
+    )
+
+
+def get_family_book_evidence_connection_read_only() -> sqlite3.Connection:
+    """Read-only family-book evidence DB connection (write_class=None).
+    T1 thin wrapper — encodes read-only intent in the call site name.
+    INV-37: single-DB read; no ATTACH path.
+    """
+    return _connect_read_only(ZEUS_FAMILY_BOOK_EVIDENCE_DB_PATH)
 
 
 def get_world_connection_read_only() -> sqlite3.Connection:
@@ -934,6 +989,24 @@ def assert_sqlite_version_safe() -> None:
     )
 
 
+def page_count_ceiling_for_byte_budget(conn: sqlite3.Connection, byte_budget: int) -> int:
+    """Convert a BYTE budget to a ``PRAGMA max_page_count`` value using the
+    connection's ACTUAL ``page_size``, never an assumed constant.
+
+    ``max_page_count`` is denominated in pages, not bytes. A caller that
+    divides a byte budget by an assumed page size (SQLite's common default is
+    4 KiB, but a connection can carry a different compile-time or
+    file-creation-time page size) silently changes the real ceiling — the
+    physical backstop would then bound something other than what it claims to.
+    Querying ``PRAGMA page_size`` on the connection being bounded is exact
+    regardless of what that value turns out to be.
+    """
+    page_size = conn.execute("PRAGMA page_size").fetchone()[0]
+    if not page_size or int(page_size) <= 0:
+        raise ValueError(f"page_count_ceiling_for_byte_budget: connection reported invalid page_size={page_size!r}")
+    return max(1, int(byte_budget) // int(page_size))
+
+
 def checkpoint_wal(db_path: Path) -> tuple[int, int, int, int]:
     """Run ``PRAGMA wal_checkpoint(PASSIVE)`` on the canonical DB at ``db_path``.
 
@@ -1055,7 +1128,7 @@ def forecasts_connection_with_trades_flocked(
 ):
     """Context manager: forecasts.db as MAIN with zeus_trades.db ATTACHed as 'trades'.
 
-    INV-37 harvester fix (ChatGPT PR#408 review B1, 2026-06-14): the settlement
+    INV-37 harvester fix (PR #408 review B1, 2026-06-14): the settlement
     harvester must write BOTH forecasts-class tables (settlements, calibration_pairs,
     ensemble_snapshots, observations) AND trade-class tables (position_current,
     position_events, decision_log, chronicle, settlement_commands) in a single
@@ -1083,8 +1156,7 @@ def forecasts_connection_with_trades_flocked(
     (``zeus-forecasts.db`` before ``zeus_trades.db``) to prevent deadlocks with
     other cross-DB writers (v4 §3.1.3 invariant).
 
-    Authority: ChatGPT PR#408 review B1 INV-37,
-    docs/evidence/pr408_review/chatgpt_deep_review_2026-06-14.md
+    Authority: PR #408 review B1 INV-37
     Created: 2026-06-14
     Last audited: 2026-06-14
     """
@@ -1152,7 +1224,7 @@ def get_world_connection_with_trades_required(
 
     Created: 2026-06-20
     Last audited: 2026-06-20
-    Authority basis: PR415 ChatGPT deep-review B5 (INV-37), .claude/CLAUDE.md K1 DB split.
+    Authority basis: PR #415 review B5 (INV-37); K1 DB split.
     """
     resolved = _resolve_write_class(write_class)
     conn = get_world_connection(write_class=resolved)
@@ -1223,7 +1295,7 @@ def world_connection_with_trades_flocked(
 
     Created: 2026-06-20
     Last audited: 2026-06-20
-    Authority basis: PR415 ChatGPT deep-review B5 (INV-37), .claude/CLAUDE.md K1 DB split.
+    Authority basis: PR #415 review B5 (INV-37); K1 DB split.
     """
     from src.state.db_writer_lock import (
         canonical_lock_order,
@@ -2407,7 +2479,7 @@ def init_schema(
             order_posted_at TEXT,
             entered_at_ts TEXT,
             chain_state TEXT,
-            -- Attribution fields (CLAUDE.md: mandatory on every trade)
+            -- Attribution fields (AGENTS.md: mandatory on every trade)
             strategy TEXT,
             edge_source TEXT,
             bin_type TEXT,
@@ -3522,7 +3594,7 @@ def init_schema(
     # REOPEN-2 (2026-04-24, data-readiness-tail): settlements UNIQUE migration.
     # Pre-REOPEN-2 schema: UNIQUE(city, target_date) — structurally blocks
     # dual-track (a HIGH row for city+date makes a LOW row for the same
-    # city+date UNIQUE-collide). Per critic-opus P0.2 forensic-triage C3+C4,
+    # city+date UNIQUE-collide). Per review P0.2 forensic-triage C3+C4,
     # this is a pre-flip BLOCKER for DR-33-C — first low-market settlement
     # attempt on flag-flip would silently drop the row and break the learning
     # chain for the LOW track.
@@ -5701,6 +5773,10 @@ _TRADE_CLASS_TABLES: frozenset[str] = frozenset({
     "execution_fact",
     "execution_feasibility_evidence",
     "executable_market_snapshots",
+    # book_snapshot_persistence (2026-07-29): decision-time family book
+    # manifest + observation history moved OFF the trade DB (2026-08-19 DB
+    # split) onto its own file, state/zeus-family-book-evidence.db — see
+    # init_schema_family_book_evidence. No longer trade_class.
     # Repoint 2 (fix/prearm-fill-exit-readiness 2026-06-03): outcome_fact
     # corrected to trade_class. The live writer (harvester.py log_settlement_event)
     # has always written to zeus_trades.db via trade_conn (18 live rows confirmed,
@@ -6607,6 +6683,66 @@ END;
 """
 
 
+# Physical ceiling on the family-book evidence DB (state/zeus-family-book-
+# evidence.db). Its two tables are append-only by design (no-update/no-delete
+# triggers in family_book_states_schema.py / family_book_observations_schema.py)
+# and the repo's retention policy for this store is an OPEN operator decision
+# (see docs/operations/current/book_snapshot_persistence/PLAN.md "Retention"):
+# whichever way that lands, growth must fail closed and OBSERVABLY in the
+# meantime rather than consume the host disk without bound. Overridable via
+# ZEUS_FAMILY_BOOK_EVIDENCE_MAX_BYTES once the operator has made the retention
+# call; this default is a generous backstop, not a routine limit — evidence
+# throughput is expected to bind on the writer's own sampling policy (Y1/H4 in
+# the PLAN) long before this.
+_FAMILY_BOOK_EVIDENCE_MAX_BYTES_DEFAULT = 21_474_836_480  # 20 GiB
+
+
+def init_schema_family_book_evidence(conn: sqlite3.Connection) -> None:
+    """Create family-book evidence tables on state/zeus-family-book-evidence.db.
+    Idempotent.
+
+    book_snapshot_persistence DB split (2026-08-19): family_book_states/
+    family_book_observations were trade-class, created by
+    init_schema_trade_only, co-located with executable_market_snapshots. They
+    are EVIDENCE ONLY — never decision authority — so isolating them onto
+    their own physical file means an optional writer can structurally never
+    open a second connection to the live-money DB (zeus_trades.db) at all,
+    closing the money-path-contention class at the DB-boundary level rather
+    than relying only on the cooperative yield guard around it (see
+    src/main.py _family_book_telemetry_ingest_cycle, which still keeps that
+    guard as a courtesy). See src/events/family_book_telemetry_writer.py and
+    docs/operations/current/book_snapshot_persistence/PLAN.md.
+    """
+    _busy_ms = int(os.environ.get("ZEUS_DB_BUSY_TIMEOUT_MS", "30000"))
+    conn.execute(f"PRAGMA busy_timeout = {_busy_ms}")
+    _install_connection_functions(conn)
+
+    # Growth ceiling FIRST, before any DDL: real byte budget converted to
+    # pages via THIS connection's actual page_size
+    # (page_count_ceiling_for_byte_budget -- never an assumed 4 KiB).
+    # PRAGMA max_page_count refuses to go below the CURRENT page count once
+    # set, so arming it before the tables/indexes/triggers below exist is
+    # what makes it a real ceiling rather than best-effort after the fact.
+    # journal_size_limit bounds the WAL a large burst would otherwise leave
+    # permanently grown, matching the private spool's own physical-ceiling
+    # discipline (family_book_telemetry_outbox_schema.ensure_table).
+    max_bytes = int(
+        os.environ.get(
+            "ZEUS_FAMILY_BOOK_EVIDENCE_MAX_BYTES",
+            str(_FAMILY_BOOK_EVIDENCE_MAX_BYTES_DEFAULT),
+        )
+    )
+    max_pages = page_count_ceiling_for_byte_budget(conn, max_bytes)
+    conn.execute(f"PRAGMA max_page_count = {max_pages}")
+    conn.execute("PRAGMA journal_size_limit = 268435456")  # 256 MiB
+
+    from src.state.schema.family_book_states_schema import ensure_table as _ensure_family_book_states_table
+    from src.state.schema.family_book_observations_schema import ensure_table as _ensure_family_book_observations_table
+    _ensure_family_book_states_table(conn)
+    _ensure_family_book_observations_table(conn)
+    conn.commit()
+
+
 def init_schema_trade_only(conn: sqlite3.Connection) -> None:
     """Create trade-class tables on state/zeus_trades.db. Idempotent.
 
@@ -6699,6 +6835,10 @@ def init_schema_trade_only(conn: sqlite3.Connection) -> None:
     init_snapshot_schema(conn)
     from src.state.schema.book_hash_transitions_schema import ensure_table as _ensure_book_hash_transitions_table
     _ensure_book_hash_transitions_table(conn)
+    # book_snapshot_persistence: family_book_states/family_book_observations
+    # moved OFF this DB (2026-08-19 split) onto state/zeus-family-book-evidence.db
+    # — see init_schema_family_book_evidence, called separately at boot
+    # (src/main.py) on its own connection. Not created here anymore.
     from src.state.schema.execution_feasibility_evidence_schema import ensure_table as _ensure_execution_feasibility_evidence_table
     _ensure_execution_feasibility_evidence_table(conn)
     # W0.2 blind-window metric (architecture/invariants.yaml
@@ -13729,7 +13869,7 @@ def _position_current_effective_entry_economics(
         }
 
     pnl_cost_basis_usd = projection_cost_basis_usd if projection_cost_basis_usd > 0.0 else submitted_size_usd
-    # PR #355 Copilot SEV-1: if the projection row already carries a non-NULL,
+    # PR #355 review SEV-1: if the projection row already carries a non-NULL,
     # non-"none" fill_authority (e.g. "venue_position_observed" written by the
     # F1 balance-only rescue), honour it rather than unconditionally returning
     # FILL_AUTHORITY_NONE.  The Position properties (effective_shares,

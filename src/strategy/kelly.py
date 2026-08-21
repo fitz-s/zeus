@@ -175,7 +175,7 @@ def _unified_uncertainty_budget_enabled() -> bool:
     vetoes (oracle_penalty=0, strategy_phase=0, executable_mask=0) stay
     multiplicative.
 
-    SAFETY DIRECTION (corrected after Copilot review of PR #348):
+    SAFETY DIRECTION (corrected after PR #348 review):
         On the multiplier basis alone, flag ON produces equal-or-LARGER
         multipliers than flag OFF (because it REMOVES haircuts ≤ 1.0).
         The compensating SMALLER edge comes from edge_LCB widening via
@@ -194,7 +194,7 @@ def _unified_uncertainty_budget_enabled() -> bool:
     while ``_ENV_EVALUATOR_EQE_ENABLED=0`` removes multipliers WITHOUT the
     σ_market widening that compensates them. This combination is what the
     staged-promotion contract explicitly forbids (Stage 2 without Stage 1).
-    Pre-Wave-6-post-Copilot-review fix (2026-05-27): this function
+    Pre-Wave-6 post-review fix (2026-05-27): this function
     REFUSES to report enabled=True unless the Wave 5.5 flag is also set.
     Operator must promote in order 0 → 1 → 2.
     """

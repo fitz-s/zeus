@@ -44,7 +44,7 @@ def test_for_high_localday_max_opendata_distinct_from_tigge():
     """opendata factory must produce a DIFFERENT data_version than tigge.
 
     If both produced the same string, OpenData forecasts would silently
-    inherit TIGGE Platt buckets — exactly the bug critic-opus BLOCKER 3
+    inherit TIGGE Platt buckets — exactly the bug review BLOCKER 3
     flagged.
     """
     tigge = MetricIdentity.for_high_localday_max("tigge")

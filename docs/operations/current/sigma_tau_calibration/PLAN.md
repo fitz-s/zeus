@@ -2,7 +2,10 @@
 
 Date: 2026-07-28
 Branch: `claude/sigma-tau-calib`
-Status: active
+Status: transitional — implementation complete (Batch A + B landed, artifact regenerated and
+round-tripped through the materializer's strict loader). Nothing further is being built here.
+The one remaining step is an operator decision: placing the fitted artifact at
+`state/sigma_tau_calibration.json`, deliberately kept separate from the re-fit.
 
 ## Problem
 

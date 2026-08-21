@@ -82,7 +82,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-# db_writer_lock removed: this script is read-only (PR #86 Copilot fix)
+# db_writer_lock removed: this script is read-only (PR #86 review fix)
 
 DEFAULT_REPORT_DIR = REPO_ROOT / "docs" / "operations" / "calibration_observation"
 DEFAULT_DB_PATH = REPO_ROOT / "state" / "zeus-shared.db"

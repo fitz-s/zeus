@@ -94,7 +94,7 @@ def get_offset(city: str, season: str, metric: str = "high") -> dict[str, Any] |
     """Return the offset entry for (city, season) if activated, else None.
 
     The current table is fit for ``metric='high'`` ONLY. The ``metric`` parameter
-    is now LOAD-BEARING (codex P1, 2026-06-02): any non-'high' metric FAILS CLOSED
+    is now LOAD-BEARING (review P1, 2026-06-02): any non-'high' metric FAILS CLOSED
     (returns None), because applying a HIGH-derived city/season offset to a LOW
     member array would mix the high/low tracks and shift LOW-market p_raw by the
     wrong physical quantity. To support LOW, fit a separate low-offset table and

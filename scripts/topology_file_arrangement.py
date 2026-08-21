@@ -15,7 +15,7 @@ Public:
     audit_file_arrangement(root, manifest) -> list[ArrangementFinding]
     explain_path(path, root, manifest) -> ArrangementFinding
 
-Codex-importable: stdlib + PyYAML only.
+Importable: stdlib + PyYAML only.
 """
 from __future__ import annotations
 

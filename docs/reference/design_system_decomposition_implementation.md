@@ -7,14 +7,14 @@ Authority basis: docs/reference/design_system_decomposition_plan.md (the spec �
   §8 migration steps, §9 regression-unconstructable proof). This report records WHAT was
   implemented against that plan and the verification evidence; the plan remains the law.
 
-Worktree: /Users/leofitz/zeus-decomp · branch refactor/system-decomposition · HEAD 5626c18b38
+Worktree: `<local>/zeus-decomp` · branch refactor/system-decomposition · HEAD 5626c18b38
 Verification harness:
-`cd /Users/leofitz/zeus-decomp && PYTHONSAFEPATH=1 PYTHONPATH=/Users/leofitz/zeus-decomp /Users/leofitz/zeus/.venv/bin/python -m pytest <files> -q`
+`cd <local>/zeus-decomp && PYTHONSAFEPATH=1 PYTHONPATH=<local>/zeus-decomp <local>/zeus/.venv/bin/python -m pytest <files> -q`
 
 > **DEPLOY POSTURE: ARTIFACT-ONLY.** This refactor created the new daemon entry-point
 > modules and their launchd `.plist` artifacts. It did NOT `launchctl load`, kickstart,
 > enable, or restart any service, and it did NOT touch the live checkout
-> (`/Users/leofitz/zeus`). The residual operator deploy steps are listed in §7.
+> (`<local>/zeus`). The residual operator deploy steps are listed in §7.
 
 ---
 
@@ -270,5 +270,5 @@ This refactor is artifact-only. To cut over (each step independently rollback-ab
    instead of `src/main.py` — the guard moved with the lifted harvester; the safety property is
    already preserved.
 
-The live checkout `/Users/leofitz/zeus` was NOT touched; no `launchctl load`/`kickstart`/restart
+The live checkout `<local>/zeus` was NOT touched; no `launchctl load`/`kickstart`/restart
 was performed by this refactor.

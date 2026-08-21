@@ -8,7 +8,7 @@
 #   and the table has been FROZEN since 2026-07-02. This restores it. SINGLE-DB,
 #   crash-atomic in one WAL transaction.
 # Authority basis: docs/operations/current/plans/db_first_principles_audit_2026-07-20/
-#   implementation/W0_RUNBOOK.md + consult_W0_verdict.md (GPT-5.6 round-3 adversarial
+#   implementation/W0_RUNBOOK.md + consult_W0_verdict.md (round-3 adversarial
 #   pass, "NO-GO as specified -> GO after the 5 corrections"). Fence/kill-point pattern
 #   mirrors scripts/migrations/2026_07_quarantine_phase_retirement.py (T5).
 """W0-a live-money schema migration: drop trade_decisions' dangling FK by table rebuild.

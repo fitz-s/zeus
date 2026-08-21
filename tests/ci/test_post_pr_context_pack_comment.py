@@ -203,7 +203,7 @@ def test_marker_html_is_html_comment():
 
 # ---------------------------------------------------------------------------
 # Phase C.1 — gh api --paginate --slurp pagination contract
-# Anchor: Copilot finding on PR #344 — silent parse-failure fallback could
+# Anchor: finding on PR #344 — silent parse-failure fallback could
 # return empty list → script POST a duplicate sticky comment.
 # ---------------------------------------------------------------------------
 
