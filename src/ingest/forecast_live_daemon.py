@@ -1318,7 +1318,11 @@ def _replacement_forecast_materialize_poll_job() -> None:
         _replacement_forecast_materialize_job(
             discover=False,
             limit=batch_limit,
-            seed_limit=0,
+            # Admit one fresh seed into the same priority sort even while a
+            # deferred request exists.  Current held-capital work can then
+            # preempt a background retry instead of waiting for request_dir to
+            # become globally empty.
+            seed_limit=batch_limit if seeds_pending else 0,
         )
     elif seeds_pending:
         _replacement_forecast_materialize_job(

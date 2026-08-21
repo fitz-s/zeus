@@ -2711,6 +2711,32 @@ def test_materialize_writer_contention_exhaustion_is_retryable(
     holder.close()
 
 
+def test_forecast_writer_lock_never_blocks_outside_bounded_retry(monkeypatch) -> None:
+    import scripts.materialize_replacement_forecast_live as cli
+    import src.state.db_writer_lock as lock_mod
+    from src.state.db import ZEUS_FORECASTS_DB_PATH
+
+    observed: dict[str, object] = {}
+
+    @contextmanager
+    def nonblocking_lock(db_path, write_class, *, blocking=True):
+        observed.update(
+            db_path=db_path,
+            write_class=write_class,
+            blocking=blocking,
+        )
+        yield
+
+    monkeypatch.setattr(lock_mod, "db_writer_lock", nonblocking_lock)
+
+    with cli._forecast_writer_lock():
+        pass
+
+    assert observed["db_path"] == ZEUS_FORECASTS_DB_PATH
+    assert observed["write_class"] is lock_mod.WriteClass.LIVE
+    assert observed["blocking"] is False
+
+
 def test_materialize_transaction_body_busy_is_retryable() -> None:
     import scripts.materialize_replacement_forecast_live as cli
 

@@ -312,8 +312,9 @@ def test_replacement_materialize_poll_reclaims_priority_after_each_worker_tranch
 
     pending["request_dir"] = True
     daemon._replacement_forecast_materialize_poll_job()
-    pending["request_dir"] = False
     pending["seed_dir"] = True
+    daemon._replacement_forecast_materialize_poll_job()
+    pending["request_dir"] = False
     daemon._replacement_forecast_materialize_poll_job()
     pending["seed_dir"] = False
     pending["inflight"] = True
@@ -321,6 +322,7 @@ def test_replacement_materialize_poll_reclaims_priority_after_each_worker_tranch
 
     assert calls == [
         {"discover": False, "limit": 1, "seed_limit": 0},
+        {"discover": False, "limit": 1, "seed_limit": 1},
         {"discover": False, "limit": 1, "seed_limit": 1},
         {"discover": False, "limit": 1, "seed_limit": 0},
     ]

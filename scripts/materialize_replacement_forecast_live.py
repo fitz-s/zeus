@@ -76,7 +76,14 @@ def _forecast_writer_lock():
     from src.state.db import ZEUS_FORECASTS_DB_PATH
     from src.state.db_writer_lock import WriteClass, db_writer_lock
 
-    with db_writer_lock(ZEUS_FORECASTS_DB_PATH, WriteClass.LIVE):
+    # The surrounding transaction helper owns the bounded retry loop.  A
+    # blocking flock here would bypass that bound and let one background
+    # materialization retain the queue worker behind another writer forever.
+    with db_writer_lock(
+        ZEUS_FORECASTS_DB_PATH,
+        WriteClass.LIVE,
+        blocking=False,
+    ):
         yield
 
 
