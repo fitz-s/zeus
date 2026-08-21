@@ -1845,6 +1845,26 @@ def _latest_eligible_ensemble_input_mark(
     return (snapshot_id, cycle) if cycle is not None else None
 
 
+def latest_eligible_ensemble_input_cycle(
+    conn: sqlite3.Connection,
+    *,
+    city: str,
+    target_date: object,
+    metric: str,
+    decision_time: datetime,
+) -> datetime | None:
+    """Newest decision-time-eligible ENS cycle for pre-materialization admission."""
+
+    mark = _latest_eligible_ensemble_input_mark(
+        conn,
+        city=city,
+        target_date=target_date,
+        metric=metric,
+        decision_time=decision_time,
+    )
+    return None if mark is None else mark[1]
+
+
 def _replacement_live_input_lag_reason(
     conn: sqlite3.Connection,
     *,

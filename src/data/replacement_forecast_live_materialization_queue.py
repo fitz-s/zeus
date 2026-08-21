@@ -898,26 +898,27 @@ def _parse_utc_iso(value: object) -> datetime | None:
     return parsed.astimezone(timezone.utc)
 
 
-def _seed_source_cycle_regresses_current_posterior(
+def _seed_source_cycle_regression(
     *,
     forecast_db: Path | str | None,
     seed: dict[str, object],
-) -> bool:
-    """True when this seed is older than the family's latest materialized posterior.
+) -> tuple[str, str] | None:
+    """Why this seed is already below current family cycle truth, if known.
 
     The materializer's monotone consumed-cycle guard remains the final authority.
-    This queue-side check only prevents a seed that is already known to be
-    unconstructable from spending a subprocess slot every cycle.
+    This queue-side check prevents a seed that is already known to be
+    unconstructable or immediately HWM-ineligible from spending the single
+    subprocess slot every cycle.
     """
 
     if forecast_db is None:
-        return False
+        return None
     request_cycle = _parse_utc_iso(seed.get("source_cycle_time"))
     if request_cycle is None:
-        return False
+        return None
     db_path = Path(forecast_db)
     if not db_path.exists():
-        return False
+        return None
     from src.state.db import _connect_read_only
 
     try:
@@ -942,15 +943,29 @@ def _seed_source_cycle_regresses_current_posterior(
                     str(seed.get("temperature_metric")),
                 ),
             ).fetchone()
+            from src.data.replacement_input_hwm import (  # noqa: PLC0415
+                latest_eligible_ensemble_input_cycle,
+            )
+
+            latest_ensemble_cycle = latest_eligible_ensemble_input_cycle(
+                conn,
+                city=str(seed.get("city")),
+                target_date=str(seed.get("target_date")),
+                metric=str(seed.get("temperature_metric")),
+                decision_time=datetime.now(timezone.utc),
+            )
         finally:
             conn.close()
     except Exception:
-        return False
-    if row is None:
-        return False
-    current_raw = row["source_cycle_time"] if hasattr(row, "keys") else row[0]
-    current_cycle = _parse_utc_iso(current_raw)
-    return current_cycle is not None and request_cycle < current_cycle
+        return None
+    if row is not None:
+        current_raw = row["source_cycle_time"] if hasattr(row, "keys") else row[0]
+        current_cycle = _parse_utc_iso(current_raw)
+        if current_cycle is not None and request_cycle < current_cycle:
+            return "current_posterior", current_cycle.isoformat()
+    if latest_ensemble_cycle is not None and request_cycle < latest_ensemble_cycle:
+        return "current_ensemble_hwm", latest_ensemble_cycle.isoformat()
+    return None
 
 
 def _write_request(path: Path, payload: dict[str, object]) -> None:
@@ -2110,16 +2125,26 @@ def _prepare_seed_requests(
             # capturable-family-superset) transition). A consumed failure can
             # atomically reclaim that marker, while this terminal unchanged-input
             # receipt remains a no-retry witness — so this bypass cannot loop.
-            if _seed_source_cycle_regresses_current_posterior(
+            cycle_regression = _seed_source_cycle_regression(
                 forecast_db=forecast_db, seed=seed
-            ):
+            )
+            if cycle_regression is not None:
+                regression_basis, current_cycle = cycle_regression
+                reason_code = (
+                    "REPLACEMENT_MATERIALIZATION_SOURCE_CYCLE_BELOW_INPUT_HWM"
+                    if regression_basis == "current_ensemble_hwm"
+                    else "REPLACEMENT_MATERIALIZATION_SOURCE_CYCLE_REGRESSION"
+                )
                 moved = _move_request(seed_json, processed_path)
                 _write_sidecar(
                     moved,
                     {
                         "status": "SKIPPED_SOURCE_CYCLE_REGRESSION",
-                        "reason_codes": ["REPLACEMENT_MATERIALIZATION_SOURCE_CYCLE_REGRESSION"],
+                        "reason_codes": [reason_code],
                         "request_written": False,
+                        "regression_basis": regression_basis,
+                        "request_source_cycle_time": seed.get("source_cycle_time"),
+                        "current_cycle_time": current_cycle,
                     },
                 )
                 processed.append(str(moved))
@@ -2618,20 +2643,36 @@ def _process_claimed_materialization_batch(
             failed.append(str(moved))
             continue
         request_payload = _load_request_payload_for_coalescing(input_json)
-        if request_payload is not None and _seed_source_cycle_regresses_current_posterior(
-            forecast_db=forecast_db,
-            seed=dict(request_payload),
-        ):
+        cycle_regression = (
+            _seed_source_cycle_regression(
+                forecast_db=forecast_db,
+                seed=dict(request_payload),
+            )
+            if request_payload is not None
+            else None
+        )
+        if request_payload is not None and cycle_regression is not None:
+            regression_basis, current_cycle = cycle_regression
+            reason_code = (
+                "REPLACEMENT_MATERIALIZATION_SOURCE_CYCLE_BELOW_INPUT_HWM"
+                if regression_basis == "current_ensemble_hwm"
+                else "REPLACEMENT_MATERIALIZATION_SOURCE_CYCLE_REGRESSION"
+            )
             receipt = _record_latest_terminal_request(
                 input_json,
                 processed_path=processed_path,
                 request_payload=request_payload,
                 receipt_dir_name="superseded_latest",
                 status="SKIPPED_SOURCE_CYCLE_REGRESSION",
-                reason_codes=("REPLACEMENT_MATERIALIZATION_SOURCE_CYCLE_REGRESSION",),
+                reason_codes=(reason_code,),
                 result_evidence={
                     "request_validated": True,
                     "subprocess_spawned": False,
+                    "regression_basis": regression_basis,
+                    "request_source_cycle_time": request_payload.get(
+                        "source_cycle_time"
+                    ),
+                    "current_cycle_time": current_cycle,
                 },
             )
             processed.append(str(receipt))

@@ -5,6 +5,12 @@
 
 ## 现状(forward)
 
+### 2026-08-21 B132 — pre-spawn淘汰低于当前ENS HWM的旧request
+- **实时反例:** 12Z Miami LOW request自23:06Z等待时，唯一materializer在23:09Z启动Manila 00Z request；latest auction同时把182个family明确判为`REPLACEMENT_RAW_INPUT_HWM`。现有JIT只在同family已经存在更新posterior时终止旧request；若新posterior尚未生成，已知低于12Z ENS HWM的00Z request仍占用sole writer并产出不可交易q。
+- **修复:** shared HWM模块公开decision-time eligible ENS cycle读取；seed与request在写request/启动subprocess前同时比较current posterior与current ENS HWM。request cycle低于任一者即terminal `SKIPPED_SOURCE_CYCLE_REGRESSION`、`subprocess_spawned=false`；ENS HWM路径记录typed reason、request/current cycle。HWM读取不可用时queue optimization fail-soft，最终materializer/read-time HWM仍是fail-closed authority。
+- **SCOPE / DRAIN / RESET:** scope是exact city/date/metric request；不改变q、target、cycle选择或writer count。drain为旧request写terminal receipt后移出queue，释放slot给新cycle；reset为request cycle追上eligible ENS HWM，正常启动。抗体固定无新posterior但存在12Z ensemble snapshot、00Z request，要求零subprocess并记录00Z→12Z evidence。
+- **验收:** previous-runs priority/regression tests、queue suite、compile/ruff/registry/diff通过后landing；live要求`REPLACEMENT_MATERIALIZATION_SOURCE_CYCLE_BELOW_INPUT_HWM` receipts出现、00/06Z subprocess减少、Miami等12Z request完成，并随后观察auction HWM/eligible变化。
+
 ### 2026-08-21 B131 — zero-completion timeout保持同一target直到point cache收敛
 - **实时反例:** B130 live后单次held wave可完成/跳过1个scope，但连续broad report仍为`10/10 unattempted`。代码核对证明timeboxed target即使`processed_target_count=0`也被rotation强制`+1`；下一tick换了city/grid index，B130缓存的同城24小时点值无法复用，真实跨tick收敛语义被rotation打断。
 - **修复:** incomplete wave只有在至少一个完整target已processed时才按该数量前移；零完整target保持当前rotation start，复用per-cycle point cache继续同一payload。完成后仍正常前移，canonical reuse与non-admissible skip也仍计入processed，因此不破坏全局公平覆盖。

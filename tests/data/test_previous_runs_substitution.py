@@ -1410,6 +1410,101 @@ def test_request_drain_skips_cycle_regression_before_subprocess(tmp_path) -> Non
     assert evidence["result_evidence"]["subprocess_spawned"] is False
 
 
+def test_request_drain_skips_cycle_below_current_ensemble_hwm_before_subprocess(
+    tmp_path,
+) -> None:
+    """No newer posterior is needed to prove an old request already fails HWM."""
+
+    import src.data.replacement_forecast_live_materialization_queue as queue_mod
+
+    forecast_db = tmp_path / "forecasts.db"
+    conn = sqlite3.connect(forecast_db)
+    conn.execute(
+        """
+        CREATE TABLE forecast_posteriors (
+            source_id TEXT,
+            city TEXT,
+            target_date TEXT,
+            temperature_metric TEXT,
+            source_cycle_time TEXT,
+            computed_at TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE ensemble_snapshots (
+            snapshot_id INTEGER PRIMARY KEY,
+            city TEXT,
+            target_date TEXT,
+            temperature_metric TEXT,
+            source_cycle_time TEXT,
+            source_available_at TEXT
+        )
+        """
+    )
+    conn.execute(
+        "INSERT INTO ensemble_snapshots VALUES (?, ?, ?, ?, ?, ?)",
+        (
+            1,
+            "Miami",
+            "2026-08-22",
+            "low",
+            "2026-08-21T12:00:00+00:00",
+            "2026-08-21T18:00:00+00:00",
+        ),
+    )
+    conn.commit()
+    conn.close()
+    request_dir = tmp_path / "requests"
+    request_dir.mkdir()
+    request = {
+        "city": "Miami",
+        "target_date": "2026-08-22",
+        "temperature_metric": "low",
+        "source_cycle_time": "2026-08-21T00:00:00+00:00",
+        "computed_at": "2026-08-21T19:00:00+00:00",
+        "baseline_source_run_id": "baseline:0",
+        "openmeteo_source_run_id": "openmeteo:0",
+        "openmeteo_payload_json": "payload.json",
+        "precision_metadata_json": "precision.json",
+        "bins": [{"bin_id": "warm"}],
+    }
+    request_path = request_dir / "old-cycle.json"
+    request_path.write_text(json.dumps(request), encoding="utf-8")
+    spawned: list[list[str]] = []
+
+    def runner(argv):
+        spawned.append(list(argv))
+        return subprocess.CompletedProcess(list(argv), 0, stdout="ok", stderr="")
+
+    report = queue_mod.process_replacement_forecast_live_materialization_queue(
+        request_dir=request_dir,
+        processed_dir=tmp_path / "processed",
+        failed_dir=tmp_path / "failed",
+        forecast_db=forecast_db,
+        seed_limit=0,
+        limit=1,
+        runner=runner,
+    )
+
+    assert spawned == []
+    assert report.processed_count == 1
+    assert "REPLACEMENT_MATERIALIZATION_SOURCE_CYCLE_REGRESSION" in report.reason_codes
+    receipt = next((tmp_path / "superseded_latest").glob("*.json"))
+    evidence = json.loads(receipt.read_text(encoding="utf-8"))
+    assert evidence["reason_codes"] == [
+        "REPLACEMENT_MATERIALIZATION_SOURCE_CYCLE_BELOW_INPUT_HWM"
+    ]
+    assert evidence["result_evidence"] == {
+        "request_validated": True,
+        "subprocess_spawned": False,
+        "regression_basis": "current_ensemble_hwm",
+        "request_source_cycle_time": "2026-08-21T00:00:00+00:00",
+        "current_cycle_time": "2026-08-21T12:00:00+00:00",
+    }
+
+
 def test_materialization_queue_timeout_backs_off_without_blocking_other_family(
     tmp_path, monkeypatch
 ) -> None:
