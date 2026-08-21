@@ -647,10 +647,10 @@ def _upgrade_day0_seed_has_current_enqueue_ownership(
     db_path = Path(forecast_db)
     if not db_path.exists():
         return _Day0EnqueueOwnershipCheck(_Day0EnqueueOwnership.INDETERMINATE)
-    from src.state.db import _connect  # noqa: PLC0415
+    from src.state.db import _connect_read_only  # noqa: PLC0415
 
     try:
-        conn = _connect(db_path, write_class="live")
+        conn = _connect_read_only(db_path)
         try:
             conn.execute("PRAGMA query_only=ON")
             columns = {
@@ -714,12 +714,12 @@ def _upgrade_day0_seed_has_current_enqueue_ownership(
 def _seed_already_covered(*, forecast_db: Path | str | None, seed: dict[str, object]) -> bool:
     if forecast_db is None:
         return False
-    from src.state.db import _connect
+    from src.state.db import _connect_read_only
 
     db_path = Path(forecast_db)
     if not db_path.exists():
         return False
-    conn = _connect(db_path, write_class="live")
+    conn = _connect_read_only(db_path)
     try:
         conn.execute("PRAGMA query_only=ON")
         tables = {
@@ -911,10 +911,10 @@ def _seed_source_cycle_regresses_current_posterior(
     db_path = Path(forecast_db)
     if not db_path.exists():
         return False
-    from src.state.db import _connect
+    from src.state.db import _connect_read_only
 
     try:
-        conn = _connect(db_path, write_class="live")
+        conn = _connect_read_only(db_path)
         try:
             conn.execute("PRAGMA query_only=ON")
             row = conn.execute(
@@ -1384,9 +1384,9 @@ def _blocked_attempt_fingerprint(
     if computed_at is None:
         return None
     try:
-        from src.state.db import _connect  # noqa: PLC0415
+        from src.state.db import _connect_read_only  # noqa: PLC0415
 
-        conn = _connect(db_path, write_class=None)
+        conn = _connect_read_only(db_path)
         try:
             conn.execute("PRAGMA query_only=ON")
             missing_sources = _source_clock_missing_configured_sources(conn, payload)

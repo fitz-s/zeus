@@ -1,6 +1,6 @@
 # Created: 2026-07-19
-# Last reused/audited: 2026-08-19
-# Lifecycle: created=2026-07-19; last_reviewed=2026-08-19; last_reused=2026-08-19
+# Last reused/audited: 2026-08-20
+# Lifecycle: created=2026-07-19; last_reviewed=2026-08-20; last_reused=2026-08-20
 # Purpose: Prove Day0 reseed ownership and single-writer materialization ordering.
 # Reuse: Run after changing Day0 enqueue, replacement queue claims, or writer concurrency.
 # Authority basis: operator directive 2026-07-19 (Day0 is a zero-sum race against the market
@@ -1514,10 +1514,10 @@ def test_queue_defers_current_day0_upgrade_seed_when_marker_read_is_transient(
         "build_replacement_forecast_materialization_request",
         unexpected_builder,
     )
-    original_connect = state_db._connect
+    original_connect = state_db._connect_read_only
     monkeypatch.setattr(
         state_db,
-        "_connect",
+        "_connect_read_only",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(sqlite3.OperationalError("locked")),
     )
     processed, failed, reasons = materialization_queue._prepare_seed_requests(
@@ -1536,7 +1536,7 @@ def test_queue_defers_current_day0_upgrade_seed_when_marker_read_is_transient(
     assert not tuple((tmp_path / "requests").glob("*.json"))
     assert reasons == ["REPLACEMENT_MATERIALIZATION_DAY0_ENQUEUE_OWNER_INDETERMINATE"]
 
-    monkeypatch.setattr(state_db, "_connect", original_connect)
+    monkeypatch.setattr(state_db, "_connect_read_only", original_connect)
     built: list[Mapping[str, object]] = []
 
     def ready_builder(payload, **_kwargs):
