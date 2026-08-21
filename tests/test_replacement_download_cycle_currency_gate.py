@@ -1645,6 +1645,21 @@ def test_covered_critical_scope_does_not_rewrite_anchor(
     conn.close()
     calls: list = []
     _wire(monkeypatch, plan=_PlanStub(ready=False), calls=calls)
+    import src.data.replacement_forecast_production as production
+
+    class _Pool:
+        close_count = 0
+
+        def close(self):
+            self.close_count += 1
+
+    pool = _Pool()
+    production._close_current_target_bucket_pool()
+    monkeypatch.setattr(
+        "src.data.openmeteo_ecmwf_ifs9_bucket_transport.BucketPointReaderPool",
+        lambda: pool,
+    )
+    assert production._current_target_bucket_pool(AVAILABLE_CYCLE) is pool
     monkeypatch.setattr(
         "src.data.replacement_forecast_seed_discovery.held_position_family_priorities",
         lambda: {scope: 0},
@@ -1660,6 +1675,8 @@ def test_covered_critical_scope_does_not_rewrite_anchor(
     assert report["target_count"] == 1
     assert report["written_manifest_count"] == 0
     assert calls == []
+    assert pool.close_count == 0
+    production._close_current_target_bucket_pool()
 
 
 def test_all_null_critical_raw_does_not_mask_missing_anchor(
@@ -1988,6 +2005,80 @@ def test_timeboxed_current_target_slices_reuse_cycle_bucket_pool(
     assert calls[0]["bucket_reader_pool"] is pool
     assert calls[1]["bucket_reader_pool"] is pool
     assert pool.close_count == 1
+
+
+def test_scoped_success_does_not_discard_broad_timebox_bucket_pool(
+    tmp_path, monkeypatch
+) -> None:
+    db = _make_db(tmp_path, {
+        "ecmwf_aifs_ens": STALE_CYCLE_ISO,
+        "openmeteo_ecmwf_ifs_9km": STALE_CYCLE_ISO,
+    })
+    calls: list[dict[str, object]] = []
+    pools: list[object] = []
+    import scripts.download_replacement_forecast_current_targets as dl
+    import src.data.replacement_forecast_current_target_plan as plan_mod
+    import src.data.replacement_forecast_production as production
+
+    class _Pool:
+        close_count = 0
+
+        def read(self, _uri, _index):
+            return 0.0
+
+        def close(self):
+            self.close_count += 1
+
+    def _new_pool():
+        pool = _Pool()
+        pools.append(pool)
+        return pool
+
+    production._close_current_target_bucket_pool()
+    monkeypatch.setattr(
+        production, "_probe_resolved_available_cycle", lambda: AVAILABLE_CYCLE
+    )
+    monkeypatch.setattr(
+        plan_mod,
+        "build_replacement_forecast_current_target_plan",
+        lambda *_args, **_kwargs: _PlanStub(
+            ready=False,
+            missing_openmeteo_manifest_count=1,
+        ),
+    )
+    monkeypatch.setattr(
+        "src.data.openmeteo_ecmwf_ifs9_bucket_transport.BucketPointReaderPool",
+        _new_pool,
+    )
+
+    def _download(**kwargs):
+        calls.append(kwargs)
+        return {
+            "status": "CURRENT_TARGET_RAW_INPUTS_DOWNLOADED",
+            "timeboxed_incomplete": len(calls) != 2,
+        }
+
+    monkeypatch.setattr(dl, "download_current_target_raw_inputs", _download)
+
+    broad_first = _download_replacement_forecast_current_targets_if_needed(
+        _cfg(db, tmp_path), max_wall_clock_seconds=5.0
+    )
+    scoped = _download_replacement_forecast_current_targets_if_needed(
+        _cfg(db, tmp_path),
+        max_wall_clock_seconds=5.0,
+        required_scopes=(("London", "2026-06-10", "high"),),
+    )
+    broad_second = _download_replacement_forecast_current_targets_if_needed(
+        _cfg(db, tmp_path), max_wall_clock_seconds=5.0
+    )
+
+    assert broad_first["timeboxed_incomplete"] is True
+    assert scoped["timeboxed_incomplete"] is False
+    assert broad_second["timeboxed_incomplete"] is True
+    assert len(pools) == 1
+    assert all(call["bucket_reader_pool"] is pools[0] for call in calls)
+    assert pools[0].close_count == 0
+    production._close_current_target_bucket_pool()
 
 
 def test_cycle_change_closes_timeboxed_pool_before_zero_budget_return(

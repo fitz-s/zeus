@@ -5,6 +5,12 @@
 
 ## 现状(forward)
 
+### 2026-08-21 B133 — scoped held完成不得清空broad timebox的cycle cache
+- **实时反例:** B132恢复12Z materializer后，source-clock日志仍连续报告broad `10/10 unattempted`。B130的pool确实由production跨tick持有，B131也保持同一target；但同一poll中的held/critical scope完成或已覆盖时会关闭共享cycle pool，清空broad target已经成功解码的小时点，下一tick只能从零重来。
+- **修复:** exact-cycle bucket pool仍由source cycle唯一拥有；显式`required_scopes`只拥有自己的下载结果，不拥有共享pool生命周期。scoped成功/已覆盖不再关闭pool；只有unscoped broad完成、cycle rollover、异常或进程退出关闭。概率、admission、source cycle、target ordering与quota law不变。
+- **SCOPE / DRAIN / RESET:** scope仅是同cycle bucket reader/value cache生命周期。drain为broad timeboxed retries持续复用已解码点直到完整target写manifest；reset为broad完成、cycle前移、异常或进程退出。抗体执行broad-timeout→scoped-success→broad-timeout，要求三次同一pool且中间零close；原有broad完成close与cycle-change close抗体继续成立。
+- **验收:** cycle-currency targeted suite、compile/ruff/registry/diff通过后landing；live要求held完成之后broad `unattempted_target_count`仍在有限ticks内下降、exact-cycle gap低于241，并观察HWM family继续减少。未达到前不把0订单解释为资本最优。
+
 ### 2026-08-21 B132 — pre-spawn淘汰低于当前ENS HWM的旧request
 - **实时反例:** 12Z Miami LOW request自23:06Z等待时，唯一materializer在23:09Z启动Manila 00Z request；latest auction同时把182个family明确判为`REPLACEMENT_RAW_INPUT_HWM`。现有JIT只在同family已经存在更新posterior时终止旧request；若新posterior尚未生成，已知低于12Z ENS HWM的00Z request仍占用sole writer并产出不可交易q。
 - **修复:** shared HWM模块公开decision-time eligible ENS cycle读取；seed与request在写request/启动subprocess前同时比较current posterior与current ENS HWM。request cycle低于任一者即terminal `SKIPPED_SOURCE_CYCLE_REGRESSION`、`subprocess_spawned=false`；ENS HWM路径记录typed reason、request/current cycle。HWM读取不可用时queue optimization fail-soft，最终materializer/read-time HWM仍是fail-closed authority。

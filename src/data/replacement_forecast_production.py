@@ -820,7 +820,6 @@ def _download_replacement_forecast_current_targets_if_needed(
             if missing_critical_scopes is None:
                 raise RuntimeError("critical current-target anchor coverage unreadable")
             if not missing_critical_scopes:
-                _close_current_target_bucket_pool()
                 return {
                     "status": "CURRENT_TARGET_CRITICAL_SCOPES_ALREADY_COVERED",
                     "available_cycle": available_cycle.isoformat(),
@@ -936,7 +935,13 @@ def _download_replacement_forecast_current_targets_if_needed(
     except Exception:
         _close_current_target_bucket_pool(cycle)
         raise
-    if not bool(result.get("timeboxed_incomplete")):
+    # A scoped held-capital slice shares the cycle pool with the broad downloader.
+    # Completing that local slice does not prove the broad cycle is complete; closing
+    # here discards the broad slice's partially decoded hourly points and makes every
+    # later timebox restart from zero. Only the unscoped broad owner may close on local
+    # completion. Cycle rollover, broad coverage, exceptions, and process exit retain
+    # their existing cleanup paths.
+    if required_scopes is None and not bool(result.get("timeboxed_incomplete")):
         _close_current_target_bucket_pool(cycle)
     result.setdefault("available_cycle", available_cycle.isoformat())
     result.setdefault(
