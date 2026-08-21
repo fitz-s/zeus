@@ -3220,8 +3220,11 @@ files:
       preflight, post-start deploy verification, and operator healthcheck.
       Uses canonical position_events.MONITOR_REFRESHED per current-money-risk
       position; canonical sequence decides which event is latest while its
-      timestamp decides freshness. Unknown exposure remains a fail-closed
-      monitor obligation, and position_current.updated_at is never accepted as
+      timestamp decides freshness. Restart proof separately recognizes a typed
+      post-boot probability-degraded attempt only when held-side CLOB truth is
+      fresh; ordinary runtime cadence and family admission remain fail-closed
+      on the probability loss. Unknown exposure remains a fail-closed monitor
+      obligation, and position_current.updated_at is never accepted as
       monitor/redecision proof.
     hazards:
     - NO_WRITE_PATH

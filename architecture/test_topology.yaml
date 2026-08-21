@@ -801,7 +801,7 @@ test_trust_policy:
     # same commit) also deleted.
     # PR #400 compliance additions — operator-directed TDD tests (2026-06-08)
     tests/test_no_internal_version_suffixes.py: {created: "2026-06-11", last_used: "2026-06-12", note: "PR#405 rename ban-test: no internal _v[0-9] suffixes (allowlist external SDK names; grandfather shrinks only); u0r=0 occurrences pin"}
-    tests/test_ops_scripts_smoke.py: {created: "2026-06-12", last_used: "2026-08-07", note: "Ops scripts smoke: stopped deploy recovery plus mandatory parsing of the restart-blocking INV-43 price-band attestation before daemon start; price truth excludes only latest-snapshot conditions proven past market_end_at and keeps unknown topology fail-closed."}
+    tests/test_ops_scripts_smoke.py: {created: "2026-06-12", last_used: "2026-08-21", note: "Ops scripts smoke: stopped deploy recovery, post-boot held monitor coverage that accepts only typed probability degradation with fresh held-side CLOB while leaving runtime family gates intact, plus mandatory parsing of the restart-blocking INV-43 price-band attestation before daemon start; unknown topology remains fail-closed."}
     tests/test_fee_authority.py: {created: "2026-06-12", last_used: "2026-06-12", note: "fee schedule-vs-realized data-semantics antibody: realized-fill evidence governs EV fee fraction; schedule CAP only as thin/stale fallback"}
     tests/test_cotenant_staging_guard.py: {created: "2026-06-12", last_used: "2026-06-12", note: "BLOCKING cotenant hook antibody: broad-add forms block, inline/env bypass honored, git -C worktree exemption (external review 2026-06-12)"}
     tests/test_fill_bridge_dispositions_migration.py: {created: "2026-06-13", last_used: "2026-06-13", note: "fill-bridge retry-storm pair antibody: ensure_table rebuilds legacy NOT NULL disposition (CREATE IF NOT EXISTS cannot relax constraints — quarantine was unreachable live 2026-06-12); orphan bridge excludes terminal-RECONCILED aggregates + poison row never aborts batch"}
@@ -2217,16 +2217,20 @@ test_metadata:
     asserted_invariants:
       - PRECEDENCE-1-AUTO-PAUSE-CANNOT-OVERRIDE-OPERATOR-INDEFINITE-FREEZE
       - PRECEDENCE-SKIP-EMITS-LOG-WARNING
+      - DEPLOY-RESTART-PROBABILITY-DEGRADATION-REMAINS-FAMILY-SCOPED
     source_under_test:
       - src/control/control_plane.py
+      - src/ops/monitor_cadence.py
       - src/state/db.py
     notes: >
       Antibody tests for PRECEDENCE-1: system_auto_pause cannot overwrite an
       operator indefinite freeze. Tests cover: skip fires when operator freeze
       active; no skip when operator freeze absent; log warning emitted on skip;
-      in-memory state restored to operator values after skip (not auto_exception).
+      in-memory state restored to operator values after skip (not auto_exception),
+      and restart guard proof accepts a post-boot typed probability-degraded
+      monitor attempt without weakening ordinary runtime family blocking.
     created: 2026-05-18
-    last_reused_or_audited: 2026-08-10
+    last_reused_or_audited: 2026-08-21
 
   tests/test_day0_bound_classification.py:
     modules: [contracts, signal]

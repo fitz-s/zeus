@@ -74,7 +74,7 @@ from src.ops.edli_queue import (
 )
 from src.ops.monitor_cadence import (
     collect_monitor_cadence_evidence,
-    monitor_cadence_blocking_evidence,
+    monitor_restart_blocking_evidence,
 )
 from src.state.db import query_control_override_state
 from src.control.runtime_code_plane import is_runtime_code_path
@@ -534,7 +534,7 @@ def _wait_for_post_start_monitor_cadence(
     launched_after: datetime,
     timeout_seconds: float = LIVE_MONITOR_CADENCE_VERIFY_TIMEOUT_SECONDS,
 ) -> tuple[bool, str]:
-    """Wait until every held position has a fresh decision after this boot.
+    """Wait until every held position has a current attempt after this boot.
 
     Chain reconciliation can refresh ``position_current.updated_at`` without any
     exit/hold decision.  The deployment gate and the restart-guard reset must use
@@ -543,9 +543,12 @@ def _wait_for_post_start_monitor_cadence(
 
     SCOPE: this deploy invocation's entry pause, across canonical open exposure.
     DRAIN: recurring held monitoring emits fresh ``MONITOR_REFRESHED`` evidence
-    for every open position within the configured three-cycle contract.
-    RESET: zero stale/missing and zero future monitor events after the launch
-    floor; any newly opened or stale position restores the wait.
+    for every open position within the configured three-cycle contract. A typed
+    post-boot probability-degraded attempt is restart coverage when its held-side
+    CLOB is fresh; runtime family admission remains blocked until probability
+    authority recovers. RESET: zero restart-blocking/future evidence after the
+    launch floor; any newly opened, unevaluated, or CLOB-blind position restores
+    the wait.
     """
 
     trade_db = Path(_require_live_repo()) / "state" / "zeus_trades.db"
@@ -599,15 +602,18 @@ def _wait_for_post_start_monitor_cadence(
                     )
                 else:
                     fresh_count = int(cadence["fresh_position_count"])
-                    cadence_groups = monitor_cadence_blocking_evidence(cadence)
+                    cadence_groups = monitor_restart_blocking_evidence(cadence)
                     blocking_count = int(
-                        cadence_groups["blocking_stale_position_count"]
+                        cadence_groups["restart_blocking_stale_position_count"]
+                    )
+                    probability_degraded_count = int(
+                        cadence_groups["probability_only_stale_position_count"]
                     )
                     quote_only_count = int(
                         cadence_groups["quote_only_stale_position_count"]
                     )
                     stale_or_missing = list(
-                        cadence_groups["blocking_stale_positions"]
+                        cadence_groups["restart_blocking_stale_positions"]
                     )
                     held_position_ids = tuple(
                         str(value or "").strip()
@@ -647,6 +653,7 @@ def _wait_for_post_start_monitor_cadence(
                             "post-start monitor cadence verified: "
                             f"fresh_positions={fresh_count} "
                             f"open_positions={open_count} full_book=true"
+                            f" probability_degraded_positions={probability_degraded_count}"
                             f"{auction_detail}",
                         )
                     if blocking_count == 0 and quote_only_count > 0:
@@ -847,10 +854,10 @@ def _paused_entry_backlog_is_expected_parked(
     return (
         True,
         "post-start EDLI queue expected parked: "
-        "durable_entries_paused=true monitor_fresh_inputs=verified "
+        "durable_entries_paused=true monitor_restart_coverage=verified "
         "canonical_unresolved_positions=0 "
         "nonterminal_sell_commands=0 held_sell_global_auction_debt=0 "
-        "stale_processing=0 post_start_freshness=verified "
+        "stale_processing=0 post_start_monitor_coverage=verified "
         f"claimable_pending={int(queue.get('claimable_pending_count') or 0)}",
     )
 

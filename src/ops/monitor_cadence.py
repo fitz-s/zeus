@@ -260,6 +260,11 @@ def collect_monitor_cadence_evidence(
         for item in stale_or_missing
         if item.get("issue") == "monitor_clob_stale"
     ]
+    probability_only_stale = [
+        item
+        for item in stale_or_missing
+        if item.get("issue") == "monitor_probability_stale"
+    ]
     blocking_stale = [
         item
         for item in stale_or_missing
@@ -280,6 +285,13 @@ def collect_monitor_cadence_evidence(
         # bounded by sample_limit.
         "quote_only_stale_position_count": len(quote_only_stale),
         "quote_only_stale_positions": quote_only_stale[:sample_limit],
+        # A post-boot monitor can prove that the new runtime saw current CLOB
+        # truth while probability authority remains DATA_DEGRADED. Runtime
+        # entry law still treats this as blocking for the exact family; restart
+        # proof may classify it separately so it cannot become a global deploy
+        # pause with no reset until an external provider recovers.
+        "probability_only_stale_position_count": len(probability_only_stale),
+        "probability_only_stale_positions": probability_only_stale[:sample_limit],
         "blocking_stale_position_count": len(blocking_stale),
         "blocking_stale_positions": blocking_stale[:sample_limit],
         "settlement_recoverable_position_count": len(settlement_recoverable),
@@ -328,6 +340,69 @@ def monitor_cadence_blocking_evidence(
             evidence.get("quote_only_stale_position_count") or 0
         ),
         "quote_only_stale_positions": list(evidence["quote_only_stale_positions"]),
+    }
+
+
+def monitor_restart_blocking_evidence(
+    evidence: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Narrow restart blocking without weakening runtime family admission.
+
+    A recent MONITOR_REFRESHED event with a fresh held-side CLOB but degraded
+    probability proves the restarted process evaluated that position. It does
+    not authorize BUY/SELL and remains part of ordinary cadence blocking. Only
+    restart/deploy proof subtracts this exact typed subset; unknown or legacy
+    evidence shapes remain wholly blocking.
+    """
+
+    strict = monitor_cadence_blocking_evidence(evidence)
+    strict_count = int(strict["blocking_stale_position_count"])
+    probability_fields = {
+        "probability_only_stale_position_count",
+        "probability_only_stale_positions",
+    }
+    probability_count = 0
+    probability_positions: list[Any] = []
+    if probability_fields.issubset(evidence):
+        candidate_count = int(
+            evidence.get("probability_only_stale_position_count") or 0
+        )
+        candidate_positions = list(
+            evidence.get("probability_only_stale_positions") or []
+        )
+        sample_is_typed = all(
+            isinstance(item, Mapping)
+            and bool(str(item.get("position_id") or ""))
+            and item.get("issue") == "monitor_probability_stale"
+            for item in candidate_positions
+        )
+        if (
+            0 <= candidate_count <= strict_count
+            and sample_is_typed
+            and (candidate_count == 0 or candidate_positions)
+        ):
+            probability_count = candidate_count
+            probability_positions = candidate_positions
+    probability_ids = {
+        str(item.get("position_id") or "")
+        for item in probability_positions
+        if isinstance(item, Mapping)
+    }
+    restart_blocking_positions = [
+        item
+        for item in strict["blocking_stale_positions"]
+        if not (
+            isinstance(item, Mapping)
+            and str(item.get("position_id") or "") in probability_ids
+            and item.get("issue") == "monitor_probability_stale"
+        )
+    ]
+    return {
+        **strict,
+        "probability_only_stale_position_count": probability_count,
+        "probability_only_stale_positions": probability_positions,
+        "restart_blocking_stale_position_count": strict_count - probability_count,
+        "restart_blocking_stale_positions": restart_blocking_positions,
     }
 
 
@@ -475,7 +550,7 @@ def collect_monitor_restart_proof(
             require_fresh_inputs=True,
             sample_limit=sample_limit,
         )
-        groups = monitor_cadence_blocking_evidence(monitor)
+        groups = monitor_restart_blocking_evidence(monitor)
         open_count = int(monitor.get("open_position_count") or 0)
         held_ids = tuple(
             str(value or "").strip()
@@ -498,7 +573,7 @@ def collect_monitor_restart_proof(
         green = (
             identity_complete
             and int(monitor.get("future_monitor_event_count") or 0) == 0
-            and int(groups["blocking_stale_position_count"]) == 0
+            and int(groups["restart_blocking_stale_position_count"]) == 0
             and (quote_only_count == 0 or receipt is not None)
         )
         return {

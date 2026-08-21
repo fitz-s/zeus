@@ -5,6 +5,12 @@
 
 ## 现状(forward)
 
+### 2026-08-21 B134 — probability degradation不得成为deploy-wide无reset暂停
+- **实时反例:** live-trading从`c6cf171d2`重启到`8a2168e07`时，7/7持仓均在新进程下数秒内写入`MONITOR_REFRESHED`且held-side CLOB fresh；但Day0 hourly provider quota为9500/9500，probability不可刷新。runtime已按exact held family阻断BUY，deploy wait与control-plane restart guard却再次要求`require_fresh_inputs=true`，因此全局`deploy_live_restart_guard`永不解除，所有其它family也无订单。
+- **修复:** canonical monitor evidence保留严格stale分类，并新增仅用于restart proof的typed子集：`issue=monitor_probability_stale`且CLOB fresh的post-boot attempt证明新runtime已评估该持仓。它只从deploy/restart blocking中扣除；普通monitor cadence、held exit authority与runtime family entry gate仍把probability loss视为blocking。CLOB stale、两者皆stale、invalid probability、缺event、future event与legacy evidence继续fail closed。
+- **SCOPE / DRAIN / RESET:** scope仅是本次deploy的全局暂停；不产生概率、订单或退出authority。drain为每个current exposure写post-boot typed monitor attempt，并证明runtime SHA/queue；reset为缺attempt/CLOB或出现新持仓时重新关闭restart proof。外部probability恢复只解除对应family runtime gate，不再是deploy pause的reset前提。
+- **验收:** monitor restart helper、control-plane CAS proof与deploy post-start wait三者语义一致；抗体证明probability-only degraded通过restart proof、quote-only仍需complete held auction、unknown/legacy仍阻断。targeted tests、ruff/compile/registry/diff通过后landing并重跑标准deploy，要求guard reset、entries pause解除、全局receipt继续生成；资本评估仍独立FAIL直到真实after-cost证据转正。
+
 ### 2026-08-21 B133 — scoped held完成不得清空broad timebox的cycle cache
 - **实时反例:** B132恢复12Z materializer后，source-clock日志仍连续报告broad `10/10 unattempted`。B130的pool确实由production跨tick持有，B131也保持同一target；但同一poll中的held/critical scope完成或已覆盖时会关闭共享cycle pool，清空broad target已经成功解码的小时点，下一tick只能从零重来。
 - **修复:** exact-cycle bucket pool仍由source cycle唯一拥有；显式`required_scopes`只拥有自己的下载结果，不拥有共享pool生命周期。scoped成功/已覆盖不再关闭pool；只有unscoped broad完成、cycle rollover、异常或进程退出关闭。概率、admission、source cycle、target ordering与quota law不变。

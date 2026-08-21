@@ -4,7 +4,7 @@
 # Reuse: asserts the FAIL-SOFT contract (a locked/empty/missing DB degrades one
 #   section to ERR, the rest still render) and that each script runs read-only
 #   against temp DBs. No live DB is touched.
-# Last reused/audited: 2026-08-07
+# Last reused/audited: 2026-08-21
 # Authority basis: operator big-direction 2026-06-12 ("大方向现在也只是添加几个文件现在做")
 """Smoke tests for scripts/zeus_status.py, deploy_live.py, generate_schema_cheatsheet.py."""
 from __future__ import annotations
@@ -3120,6 +3120,66 @@ def test_deploy_live_waits_for_post_start_monitor_refresh(monkeypatch, tmp_path)
 
     assert ok is True
     assert "post-start monitor cadence verified" in detail
+
+
+def test_deploy_live_accepts_post_start_probability_degraded_monitor_attempt(
+    monkeypatch, tmp_path
+):
+    dl = _load("deploy_live_monitor_probability_degraded", "deploy_live.py")
+    state = tmp_path / "state"
+    state.mkdir()
+    trade_db = state / "zeus_trades.db"
+    launched = datetime.now(timezone.utc) - timedelta(seconds=1)
+    conn = sqlite3.connect(trade_db)
+    conn.executescript(
+        """
+        CREATE TABLE position_current (
+            position_id TEXT PRIMARY KEY,
+            phase TEXT,
+            shares REAL,
+            chain_shares REAL
+        );
+        CREATE TABLE position_events (
+            sequence_no INTEGER PRIMARY KEY,
+            position_id TEXT,
+            event_type TEXT,
+            occurred_at TEXT,
+            payload_json TEXT
+        );
+        INSERT INTO position_current VALUES ('pos-1', 'active', 1.0, 1.0);
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO position_events (
+            sequence_no, position_id, event_type, occurred_at, payload_json
+        ) VALUES (1, 'pos-1', 'MONITOR_REFRESHED', ?, ?)
+        """,
+        (
+            datetime.now(timezone.utc).isoformat(),
+            json.dumps(
+                {
+                    "last_monitor_prob": None,
+                    "last_monitor_prob_is_fresh": False,
+                    "last_monitor_market_price": 0.61,
+                    "last_monitor_market_price_is_fresh": True,
+                    "exit_decision_available": False,
+                    "applied_validations": ["DATA_DEGRADED"],
+                }
+            ),
+        ),
+    )
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(dl, "LIVE_REPO", str(tmp_path))
+
+    ok, detail = dl._wait_for_post_start_monitor_cadence(
+        launched_after=launched,
+        timeout_seconds=0,
+    )
+
+    assert ok is True
+    assert "probability_degraded_positions=1" in detail
 
 
 def test_deploy_live_quote_only_monitor_staleness_requires_complete_held_auction(
