@@ -1328,6 +1328,14 @@ files:
     - src/data/openmeteo_ecmwf_ifs9_anchor.py
     - src/data/solar_append.py
     - src/data/source_health_probe.py
+  src/data/openmeteo_ecmwf_ifs9_bucket_transport.py:
+    zone: K2_runtime
+    authority_role: openmeteo_anchor_bucket_transport
+    why: Reads only an exact bucket-declared ECMWF IFS run whose complete target local-day valid-time set is present and whose city transport method passed the strict bucket/API cross-check. Raw valid-time objects may be read with bounded fanout and successful per-cycle point values may be reused across timeboxed retries, but payload assembly and downstream persistence remain all-or-nothing; no missing timestep, unverified city, or stale run can be gap-filled.
+    hazards:
+    - SOURCE_TRUTH_PLANE_COLLAPSE
+    downstream:
+    - scripts/download_replacement_forecast_current_targets.py
   src/data/latency_metrics.py:
     zone: K2_runtime
     authority_role: input_to_posterior_latency_metric

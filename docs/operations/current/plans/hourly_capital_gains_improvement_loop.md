@@ -5,6 +5,12 @@
 
 ## 现状(forward)
 
+### 2026-08-21 B130 — bucket hourly objects有界并行，解除串行24步收敛停滞
+- **实时反例:** B129 live已证明quota false时metered waves零消耗并进入bucket，但连续production report仍为held `0/6`、broad `0/10` attempted；一个新pool的单城raw resolver在12秒与25秒均未完成，且cache约10分钟只新增2个对象。根因是每个local-day payload按24个独立hourly OM对象串行读取，而deadline只能在不可中断的单次read之后检查，persistent pool虽最终可热却无法满足快速概率链。
+- **修复:** raw bucket payload对不同valid-time对象使用现有`fetch_workers`的有界fanout（上限8）；每个URI仍由独立pooled reader读取，pool以锁保护reader map，并在同一cycle内缓存已成功解码的`(URI, grid index)`值，使timeboxed重试从上次原子进度继续而非重复解码前缀。结果按valid-time确定性重排，只有全部exact-run timestep成功后才组装payload并进入原manifest/DB/materializer链；任一timeout/non-finite仍零payload。
+- **SCOPE / DRAIN / RESET:** scope仅是一个已通过run/city/valid-time admission的raw bucket payload内部I/O调度；不改变target、cycle、whitelist、downscaled路径、q或market比较。drain为最多8个独立valid-time read并行完成后原子组装；reset为本次调用结束或per-cycle pool在complete/cycle-change/exception时关闭。抗体用barrier证明四个distinct valid-times真正并发，同时输出时间与温度仍严格按valid-time排序。
+- **验收:** barrier与wiring抗体、compile/ruff/registry/diff通过；真实Denver 12Z/24-hour读取在production同款10秒deadline与同一pool下为`timeout 10.79s → timeout 10.63s → complete 6.77s/24 samples`，证明跨tick单调收敛。landing后live仍必须观察bucket-qualified manifest写入、exact-cycle gap下降、HWM rejection下降与global eligible恢复；仅有更快read或进程健康不算资本证明。
+
 ### 2026-08-21 B129 — quota耗尽时直接走独立bucket，不先浪费deadline
 - **实时反例:** 22:34Z global auction `0/197` probability eligible、0 candidates，全部由12Z ENS相对00/06Z consumed posterior的HWM supersession拒绝；provider quota=9500。当前 downloader每个10秒wave仍先尝试必败的run-pinned与meta-stamped API，日志随后显示8/10 targets unattempted，独立S3 bucket几乎拿不到deadline。
 - **已有当前真相:** bucket `in_progress`与`latest`均明确声明12Z completed，145个valid hours；54个settlement cities中34个在严格cross-check raw whitelist。bucket不绕过概率或城市精度法：不在whitelist的20城仍拒绝，所需local-day任一时刻缺失仍拒绝。

@@ -697,6 +697,7 @@ def _try_bucket_rung_three(
     deadline_monotonic: float | None = None,
     bucket_manifest_provider: Callable[[], dict] | None = None,
     bucket_read_point: Callable[[str, int], float] | None = None,
+    bucket_read_workers: int = 1,
 ) -> tuple[dict, dict]:
     """Rung-3 admission gate: serve from the S3 data_spatial bucket, or re-raise rung-2.
 
@@ -773,6 +774,7 @@ def _try_bucket_rung_three(
                 needed_valid_times=needed,
                 manifest=manifest,
                 read_point=bucket_read_point,
+                read_workers=bucket_read_workers,
                 deadline_monotonic=deadline_monotonic,
             )
         else:  # "raw"
@@ -824,6 +826,7 @@ def _resolve_anchor_payload(
     deadline_monotonic: float | None = None,
     bucket_manifest_provider: Callable[[], dict] | None = None,
     bucket_read_point: Callable[[str, int], float] | None = None,
+    bucket_read_workers: int = 1,
     client: httpx.Client | None = None,
     meta_wave_failure: Exception | None = None,
 ) -> tuple[dict, dict]:
@@ -952,6 +955,8 @@ def _resolve_anchor_payload(
         rung_three_kwargs["bucket_manifest_provider"] = bucket_manifest_provider
     if bucket_read_point is not None:
         rung_three_kwargs["bucket_read_point"] = bucket_read_point
+    if bucket_read_workers != 1:
+        rung_three_kwargs["bucket_read_workers"] = bucket_read_workers
     return _try_bucket_rung_three(
         **rung_three_kwargs,
     )
@@ -1451,6 +1456,7 @@ def download_current_target_raw_inputs(
                             deadline_monotonic=deadline_monotonic,
                             bucket_manifest_provider=current_bucket_manifests,
                             bucket_read_point=bucket_pool.read,
+                            bucket_read_workers=min(max(1, int(fetch_workers)), 8),
                             client=openmeteo_client,
                             meta_wave_failure=meta_wave_failures.get(target_key),
                         )

@@ -39,8 +39,10 @@ from __future__ import annotations
 
 import json
 import math
+import threading
 import time
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from functools import lru_cache
@@ -461,6 +463,8 @@ class BucketPointReaderPool:
         self._cache_dir = cache_dir
         self._open_reader = open_reader or self._open
         self._readers: dict[str, Any] = {}
+        self._values: dict[tuple[str, int], float] = {}
+        self._lock = threading.Lock()
 
     @staticmethod
     def _open(s3_uri: str, cache_dir: str) -> Any:
@@ -482,19 +486,29 @@ class BucketPointReaderPool:
         self.close()
 
     def close(self) -> None:
-        for reader in self._readers.values():
+        with self._lock:
+            readers = tuple(self._readers.values())
+            self._readers.clear()
+            self._values.clear()
+        for reader in readers:
             try:
                 reader.close()
             except Exception:  # noqa: BLE001 - best-effort handle cleanup
                 pass
-        self._readers.clear()
 
     def read(self, s3_uri: str, flat_index: int) -> float:
-        reader = self._readers.get(s3_uri)
-        if reader is None:
-            reader = self._open_reader(s3_uri, self._cache_dir)
-            self._readers[s3_uri] = reader
-        return _read_point_from_om_reader(reader, flat_index)
+        value_key = (s3_uri, flat_index)
+        with self._lock:
+            cached = self._values.get(value_key)
+            if cached is not None:
+                return cached
+            reader = self._readers.get(s3_uri)
+            if reader is None:
+                reader = self._open_reader(s3_uri, self._cache_dir)
+                self._readers[s3_uri] = reader
+        value = _read_point_from_om_reader(reader, flat_index)
+        with self._lock:
+            return self._values.setdefault(value_key, value)
 
 
 def _check_deadline(deadline_monotonic: float | None) -> None:
@@ -518,6 +532,7 @@ def fetch_bucket_anchor_payload(
     manifest: BucketRunManifest,
     cache_dir: str = "/tmp/zeus_om_bucket_cache",
     read_point: Any = None,
+    read_workers: int = 1,
     deadline_monotonic: float | None = None,
 ) -> BucketAnchorPayloadResult:
     """Assemble an API-shaped hourly payload from per-timestep bucket om reads.
@@ -540,7 +555,8 @@ def fetch_bucket_anchor_payload(
     temps: list[float] = []
     per_step_keys: list[str] = []
     ordered = sorted(admission.needed_valid_times)
-    for vt in ordered:
+
+    def read_step(vt: datetime) -> tuple[datetime, str, float]:
         _check_deadline(deadline_monotonic)
         key = _spatial_key_for(run, vt)
         s3_uri = f"s3://{BUCKET_S3_PREFIX.split('/', 1)[0]}/{key}"
@@ -548,10 +564,27 @@ def fetch_bucket_anchor_payload(
         _check_deadline(deadline_monotonic)
         if value is None or not math.isfinite(float(value)):
             raise ValueError(f"non-finite bucket temperature at {vt.isoformat()} ({key})")
+        return vt, key, float(value)
+
+    worker_count = min(max(1, int(read_workers)), 8, len(ordered))
+    if worker_count == 1:
+        step_results = tuple(read_step(vt) for vt in ordered)
+    else:
+        # Each valid time is a distinct OM object and therefore a distinct pooled reader.
+        # Bounded fanout removes the 24-object serial waterfall without permitting partial
+        # payloads: executor shutdown joins in-flight reads and assembly begins only after
+        # every exact-run timestep succeeds.
+        with ThreadPoolExecutor(
+            max_workers=worker_count,
+            thread_name_prefix="zeus-bucket-step",
+        ) as executor:
+            step_results = tuple(executor.map(read_step, ordered))
+
+    for vt, key, value in step_results:
         local = vt.astimezone(zone)
         # API time format: local wall-clock without offset, minute resolution.
         times_local.append(local.strftime("%Y-%m-%dT%H:%M"))
-        temps.append(round(float(value), 2))
+        temps.append(round(value, 2))
         per_step_keys.append(key)
 
     sample_local = ordered[0].astimezone(zone)

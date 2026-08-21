@@ -2469,6 +2469,7 @@ def test_exhausted_metered_quota_goes_directly_to_bucket_rung(
     assert report["downloaded"]["openmeteo_metered_quota_available"] is False
     assert report["manifest_count"] == 2
     assert len(bucket_calls) == 2
+    assert {call["bucket_read_workers"] for call in bucket_calls} == {4}
 
 
 def test_timebox_commits_ready_wave_payloads_before_deferring_unresolved(
