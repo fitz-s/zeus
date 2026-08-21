@@ -1936,6 +1936,7 @@ def _prepare_seed_requests(
     actionable_count = 0
     inspected_count = 0
     indeterminate_count = 0
+    stale_owner_count = 0
     for seed_json in seeds:
         if actionable_count >= actionable_limit or inspected_count >= inspection_cap:
             break
@@ -1963,7 +1964,7 @@ def _prepare_seed_requests(
                     },
                 )
                 processed.append(str(moved))
-                actionable_count += 1
+                stale_owner_count += 1
                 continue
             if ownership is _Day0EnqueueOwnership.INDETERMINATE:
                 indeterminate_count += 1
@@ -2093,7 +2094,7 @@ def _prepare_seed_requests(
                     },
                 )
                 processed.append(str(moved))
-                actionable_count += 1
+                stale_owner_count += 1
                 continue
             if ownership_check.ownership is _Day0EnqueueOwnership.INDETERMINATE:
                 indeterminate_count += 1
@@ -2136,6 +2137,8 @@ def _prepare_seed_requests(
         reasons.append("REPLACEMENT_MATERIALIZATION_DAY0_ENQUEUE_CURSOR_WRITE_FAILED")
     if indeterminate_count:
         reasons.append("REPLACEMENT_MATERIALIZATION_DAY0_ENQUEUE_OWNER_INDETERMINATE")
+    if stale_owner_count:
+        reasons.append("REPLACEMENT_MATERIALIZATION_STALE_DAY0_ENQUEUE_OWNER")
     if processed:
         reasons.append("REPLACEMENT_LIVE_MATERIALIZATION_SEED_QUEUE_PROCESSED")
     if failed:
