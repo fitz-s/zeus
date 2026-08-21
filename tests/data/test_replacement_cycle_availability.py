@@ -1,5 +1,5 @@
 # Created: 2026-06-11
-# Last reused or audited: 2026-08-05
+# Last reused or audited: 2026-08-21
 # Authority basis: operator directive 2026-06-11 ~03:40Z (automatic download, ahead of
 #   need, NO guessed numbers) and 2026-06-18 live/experiment separation. Relationship
 #   tests for probe-resolved anchor cycle selection and fetch decision.
@@ -233,16 +233,16 @@ class TestProbeResolvedSelection:
 class TestPollFetchDecision:
     """The production poll layer: anchor high-water vs probed publication."""
 
-    def _run_poll(self, monkeypatch, tmp_path, *, anchor_pub, anchor_have):
+    def _run_poll(self, monkeypatch, tmp_path, *, anchor_pub, anchor_have, anchor_gaps=0):
         import scripts.download_replacement_forecast_current_targets as dl
         import src.data.replacement_cycle_availability as rca
         import src.data.replacement_forecast_production as prod
         import src.data.source_clock_update_probe as source_clock_probe
 
-        fetched: list[tuple[str, str]] = []
+        fetched: list[tuple[str, dict[str, object]]] = []
 
         def fake_download(**kwargs):
-            fetched.append(("anchor", kwargs["cycle"].isoformat()))
+            fetched.append(("anchor", kwargs))
             return {"status": "OK"}
 
         monkeypatch.setattr(dl, "download_current_target_openmeteo_inputs", fake_download)
@@ -253,6 +253,11 @@ class TestPollFetchDecision:
             rca, "probe_anchor_available_any", lambda c, **k: c <= anchor_pub
         )
         monkeypatch.setattr(prod, "_per_leg_downloaded_cycle", lambda db, sid: anchor_have)
+        monkeypatch.setattr(
+            prod,
+            "_current_target_anchor_gap_count",
+            lambda db, cycle: anchor_gaps,
+        )
 
         class _NoSourceClockChange:
             updated_sources = ()
@@ -292,7 +297,10 @@ class TestPollFetchDecision:
             anchor_pub=_dt("2026-06-10T06:00:00"),
             anchor_have=None,
         )
-        assert fetched == [("anchor", "2026-06-10T06:00:00+00:00")]
+        assert [(leg, row["cycle"].isoformat()) for leg, row in fetched] == [
+            ("anchor", "2026-06-10T06:00:00+00:00")
+        ]
+        assert fetched[0][1]["quota_priority"] is True
         assert report["status"] == "AVAILABILITY_POLL"
 
     def test_noop_when_holdings_match_publication(self, monkeypatch, tmp_path):
@@ -312,7 +320,27 @@ class TestPollFetchDecision:
             anchor_pub=_dt("2026-06-10T12:00:00"),
             anchor_have=None,
         )
-        assert ("anchor", "2026-06-10T12:00:00+00:00") in fetched
+        assert [(leg, row["cycle"].isoformat()) for leg, row in fetched] == [
+            ("anchor", "2026-06-10T12:00:00+00:00")
+        ]
+
+    def test_partial_cycle_coverage_keeps_fetching_missing_targets(
+        self, monkeypatch, tmp_path
+    ):
+        cycle = _dt("2026-06-10T12:00:00")
+        report, fetched = self._run_poll(
+            monkeypatch,
+            tmp_path,
+            anchor_pub=cycle,
+            anchor_have=cycle,
+            anchor_gaps=205,
+        )
+
+        assert report["anchor_missing_scope_count"] == 205
+        assert len(fetched) == 1
+        assert fetched[0][1]["include_covered"] is False
+        assert fetched[0][1]["missing_manifests_only"] is True
+        assert fetched[0][1]["quota_priority"] is True
 
     def test_flag_off_is_inert(self, tmp_path):
         import src.data.replacement_forecast_production as prod

@@ -1,5 +1,5 @@
 # Created: 2026-06-08
-# Last reused/audited: 2026-07-28
+# Last reused/audited: 2026-08-21
 # Authority basis: operator Point-1 directive 2026-06-08 — move BAYES_PRECISION_FUSION/replacement_0_1
 #   forecast PRODUCTION (raw-input download + live materialization) OFF the
 #   live-trading daemon (src/main.py) INTO the forecast-live (data) daemon. The
@@ -2560,6 +2560,28 @@ def _per_leg_downloaded_cycle(forecast_db: Path, source_id: str) -> datetime | N
         return None
 
 
+def _current_target_anchor_gap_count(
+    forecast_db: Path,
+    cycle: datetime,
+) -> int | None:
+    """Return exact-cycle current-target anchor gaps (None = unreadable -> retry)."""
+
+    if not forecast_db.exists():
+        return 0
+    try:
+        from src.data.replacement_forecast_current_target_plan import (  # noqa: PLC0415
+            build_replacement_forecast_current_target_plan,
+        )
+
+        plan = build_replacement_forecast_current_target_plan(
+            forecast_db,
+            required_openmeteo_source_cycle_time=cycle,
+        )
+        return int(plan.missing_openmeteo_manifest_count)
+    except Exception:
+        return None
+
+
 def _replacement_cycle_availability_poll_if_needed(
     cfg: dict[str, object],
     *,
@@ -2590,13 +2612,27 @@ def _replacement_cycle_availability_poll_if_needed(
 
     now = datetime.now(timezone.utc)
     availability = resolve_provider_anchor_cycle_availability(now)
-    anchor_have = _per_leg_downloaded_cycle(Path(str(forecast_db)), "openmeteo_ecmwf_ifs_9km")
+    forecast_db_path = Path(str(forecast_db))
+    anchor_have = _per_leg_downloaded_cycle(forecast_db_path, "openmeteo_ecmwf_ifs_9km")
     newest_anchor_published = next((a.cycle for a in availability if a.anchor_available), None)
+    anchor_missing_scope_count = (
+        _current_target_anchor_gap_count(forecast_db_path, newest_anchor_published)
+        if newest_anchor_published is not None
+        else 0
+    )
+    anchor_cycle_advanced = (
+        newest_anchor_published is not None
+        and (anchor_have is None or newest_anchor_published > anchor_have)
+    )
 
     fetch_anchor_cycle = (
         newest_anchor_published
         if newest_anchor_published is not None
-        and (anchor_have is None or newest_anchor_published > anchor_have)
+        and (
+            anchor_cycle_advanced
+            or anchor_missing_scope_count is None
+            or anchor_missing_scope_count > 0
+        )
         else None
     )
     report: dict[str, object] = {
@@ -2609,6 +2645,7 @@ def _replacement_cycle_availability_poll_if_needed(
             else None
         ),
         "anchor_downloaded_cycle": anchor_have.isoformat() if anchor_have else None,
+        "anchor_missing_scope_count": anchor_missing_scope_count,
         "legs_fetched": [],
     }
     try:
@@ -2645,8 +2682,10 @@ def _replacement_cycle_availability_poll_if_needed(
                 write_db=True,
                 release_lag_hours=float(cfg.get("download_release_lag_hours") or 14.0),
                 anchor_sigma_c=float(cfg.get("download_anchor_sigma_c") or 3.0),
-                include_covered=True,
+                include_covered=anchor_cycle_advanced,
+                missing_manifests_only=not anchor_cycle_advanced,
                 fetch_workers=int(cfg.get("source_clock_fanout_workers") or 4),
+                quota_priority=True,
             )
             report["legs_fetched"].append({"leg": leg, "cycle": cycle.isoformat()})  # type: ignore[union-attr]
         except Exception as exc:  # noqa: BLE001 — anchor fail-soft; next tick retries

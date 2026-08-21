@@ -5,6 +5,12 @@
 
 ## 现状(forward)
 
+### 2026-08-21 B126 — exact-cycle anchor coverage逐 scope排空
+- **实时反例:** 12Z/06Z ENS 已提交且203个 family被 HWM拒绝；availability poll 对新 cycle只下载 `limit=10` 个 scope，然后 `_per_leg_downloaded_cycle=MAX(source_cycle_time)` 已等于 published cycle，后续 poll把其余约205个 scope误判为 current并永久停取。日志同时显示 source-clock anchor以 maintenance quota运行，未使用 quota模块明确保留的 source-clock tranche。
+- **结构性修复:** 每个 poll对 probe-resolved published cycle构建 exact-cycle current-target plan；只要任一 scope缺 anchor manifest，即使全局 MAX 已前进也继续用 durable rotation下载 residual。新 cycle首次 wave可包含全部目标；后续 wave仅选 missing manifests。availability anchor标记 `quota_priority`，并将 priority context显式传播进 metadata、run-pinned与 worker-thread transport，避免 thread-local在 executor边界丢失。
+- **SCOPE / DRAIN / RESET:** scope 是 published cycle × current city/date/metric manifest，不触碰 q math、market comparison或 order law；drain每次 bounded poll最多处理 config limit并由 durable rotation继续；reset是 exact-cycle gap归零或 provider cycle推进。gap probe不可读时fail-open重试，不把全局 MAX当完整性证明。provider hard daily cap仍保留，修复不绕过限额。
+- **验收:** partial-cycle residual、worker-thread priority、availability与currency suites、compile/ruff/diff/planning通过后 landing；live 应在 quota允许时连续看到 `anchor_missing_scope_count`下降并随后 HWM rejection下降。hard cap耗尽期间只证明正确重试/限流，不能声称概率链已恢复。
+
 ### 2026-08-21 B125 — newest source cycle 优先并在 subprocess 前二次单调校验
 - **实时反例:** 当天 12Z/06Z ensemble snapshots 到达后，latest auction 仅 `1/221` family eligible，203 个被 raw-input HWM拒绝；其中 111 个 latest=12Z但 posterior仍消费00Z、85 个 latest=06Z但仍消费00Z、7 个 latest=12Z但消费06Z。materializer仍持续 commit且0 failures，证明活跃 writer正在生成过期 cycle q。current requests 同时含 00Z=37、06Z=10、12Z=11；现有排序不区分同 family source cycle，且仅在 seed admission检查 cycle regression，request 等待期间 posterior前进后不会 pre-spawn重检。
 - **结构性修复:** chain-money/never-priced/held/plain authority classes不变；每类拆成 newest queued source cycle 与 older cycle相邻 subtiers，再按 request自身 computed_at FIFO。newest cycle先更新 posterior；任何等待后已落后于该 family current posterior 的 request在 subprocess前写 terminal superseded receipt，不启动 materializer。旧 cycle不能再次占用 writer或成为最新 q。

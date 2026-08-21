@@ -1,6 +1,6 @@
 # Created: 2026-06-09
-# Last reused or audited: 2026-08-18
-# Lifecycle: created=2026-06-09; last_reviewed=2026-08-18; last_reused=2026-08-18
+# Last reused or audited: 2026-08-21
+# Lifecycle: created=2026-06-09; last_reviewed=2026-08-21; last_reused=2026-08-21
 # Purpose: Prove current-target anchor cycle currency and scoped quota authority.
 # Reuse: Run for replacement current-target download, source-clock, or quota-lane changes.
 # Authority basis: 2026-06-09 anchor-lag root cause (/tmp/anchor_lag_report.md, verified against
@@ -1771,6 +1771,60 @@ def test_critical_quota_context_propagates_into_anchor_worker(
 
     assert failures == {}
     assert tuple(payloads) == (("Dallas", "2026-08-17"),)
+    assert observed == [True]
+
+
+def test_priority_quota_context_propagates_into_anchor_worker(
+    monkeypatch,
+) -> None:
+    import scripts.download_replacement_forecast_current_targets as dl
+    from src.data.openmeteo_ecmwf_ifs9_anchor import build_anchor_request
+
+    class _Tracker:
+        def __init__(self) -> None:
+            self.local = threading.local()
+
+        @contextmanager
+        def priority_lane(self):
+            self.local.priority = True
+            try:
+                yield
+            finally:
+                self.local.priority = False
+
+        def is_priority(self) -> bool:
+            return bool(getattr(self.local, "priority", False))
+
+    tracker = _Tracker()
+    observed: list[bool] = []
+    monkeypatch.setattr(dl, "quota_tracker", tracker)
+    monkeypatch.setattr(dl, "fetch_openmeteo_ifs9_model_meta", lambda **_kwargs: {})
+    monkeypatch.setattr(dl, "validate_openmeteo_ecmwf_ifs9_meta_window", lambda *_args: {})
+    monkeypatch.setattr(
+        dl,
+        "fetch_openmeteo_ecmwf_ifs9_anchor_payload_standard_unstamped",
+        lambda *_args, **_kwargs: (
+            observed.append(tracker.is_priority())
+            or _anchor_payload("2026-08-21")
+        ),
+    )
+    request = build_anchor_request(
+        latitude=32.8998,
+        longitude=-97.0403,
+        run="2026-08-21T12:00:00+00:00",
+        timezone_name="America/Chicago",
+    )
+
+    payloads, failures = dl._fetch_meta_stamped_anchor_wave(
+        {("Dallas", "2026-08-21"): request},
+        max_workers=1,
+        deadline_monotonic=None,
+        client=object(),
+        quota_priority=True,
+    )
+
+    assert failures == {}
+    assert tuple(payloads) == (("Dallas", "2026-08-21"),)
     assert observed == [True]
 
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # Created: 2026-06-07
-# Last reused/audited: 2026-08-18
-# Lifecycle: created=2026-06-07; last_reviewed=2026-08-18; last_reused=2026-08-18
+# Last reused/audited: 2026-08-21
+# Lifecycle: created=2026-06-07; last_reviewed=2026-08-21; last_reused=2026-08-21
 # Purpose: Download current-target Open-Meteo ECMWF IFS 9km raw inputs for replacement forecast materialization.
 # Reuse: Run before live replacement materialization when dry-run reports current-target coverage gaps.
 # Authority basis: Raw artifacts are live inputs only after the replacement materializer emits
@@ -964,6 +964,7 @@ def _fetch_meta_stamped_anchor_wave(
     deadline_monotonic: float | None,
     client: httpx.Client,
     quota_critical: bool = False,
+    quota_priority: bool = False,
 ) -> tuple[
     dict[tuple[str, str], tuple[dict, dict[str, object], datetime]],
     dict[tuple[str, str], Exception],
@@ -973,12 +974,20 @@ def _fetch_meta_stamped_anchor_wave(
         return {}, {}
     request0 = next(iter(requests.values()))
     timeout = _deadline_timeout(deadline_monotonic, default=30.0)
-    meta_before = fetch_openmeteo_ifs9_model_meta(
-        timeout=timeout,
-        max_retries=1,
-        fast_fail_429=True,
-        client=client,
+    quota_context = (
+        quota_tracker.critical_lane()
+        if quota_critical
+        else quota_tracker.priority_lane()
+        if quota_priority
+        else contextlib.nullcontext()
     )
+    with quota_context:
+        meta_before = fetch_openmeteo_ifs9_model_meta(
+            timeout=timeout,
+            max_retries=1,
+            fast_fail_429=True,
+            client=client,
+        )
     # Refuse before issuing city payload requests when the provider does not declare this run.
     validate_openmeteo_ecmwf_ifs9_meta_window(request0, meta_before, meta_before)
 
@@ -996,6 +1005,8 @@ def _fetch_meta_stamped_anchor_wave(
         quota_context = (
             quota_tracker.critical_lane()
             if quota_critical
+            else quota_tracker.priority_lane()
+            if quota_priority
             else contextlib.nullcontext()
         )
         with quota_context:
@@ -1030,12 +1041,20 @@ def _fetch_meta_stamped_anchor_wave(
             except Exception as exc:  # each city retains its independent bucket fallback
                 failures[key] = exc
 
-    meta_after = fetch_openmeteo_ifs9_model_meta(
-        timeout=_deadline_timeout(deadline_monotonic, default=20.0),
-        max_retries=1,
-        fast_fail_429=True,
-        client=client,
+    quota_context = (
+        quota_tracker.critical_lane()
+        if quota_critical
+        else quota_tracker.priority_lane()
+        if quota_priority
+        else contextlib.nullcontext()
     )
+    with quota_context:
+        meta_after = fetch_openmeteo_ifs9_model_meta(
+            timeout=_deadline_timeout(deadline_monotonic, default=20.0),
+            max_retries=1,
+            fast_fail_429=True,
+            client=client,
+        )
     try:
         provenance = dict(
             validate_openmeteo_ecmwf_ifs9_meta_window(request0, meta_before, meta_after)
@@ -1057,19 +1076,29 @@ def _fetch_run_pinned_anchor_wave(
     *,
     deadline_monotonic: float | None,
     client: httpx.Client,
+    quota_critical: bool = False,
+    quota_priority: bool = False,
 ) -> dict[tuple[str, str], tuple[dict, dict[str, object], datetime]]:
     """Fetch every city/date anchor in one run-pinned multi-location call."""
 
     items = tuple(requests.items())
     if not items:
         return {}
-    payloads = fetch_openmeteo_ecmwf_ifs9_anchor_payloads(
-        tuple(request for _, request in items),
-        timeout=_deadline_timeout(deadline_monotonic, default=30.0),
-        max_retries=1,
-        fast_fail_429=True,
-        client=client,
+    quota_context = (
+        quota_tracker.critical_lane()
+        if quota_critical
+        else quota_tracker.priority_lane()
+        if quota_priority
+        else contextlib.nullcontext()
     )
+    with quota_context:
+        payloads = fetch_openmeteo_ecmwf_ifs9_anchor_payloads(
+            tuple(request for _, request in items),
+            timeout=_deadline_timeout(deadline_monotonic, default=30.0),
+            max_retries=1,
+            fast_fail_429=True,
+            client=client,
+        )
     captured_at = datetime.now(tz=UTC)
     resolved: dict[tuple[str, str], tuple[dict, dict[str, object], datetime]] = {}
     for (key, request), payload in zip(items, payloads, strict=True):
@@ -1110,6 +1139,7 @@ def download_current_target_raw_inputs(
     fetch_workers: int = 4,
     bucket_reader_pool=None,
     quota_critical: bool = False,
+    quota_priority: bool = False,
 ) -> dict[str, object]:
     # Fetch the FULL plan (no limit) so uncovered cities beyond the first `limit`
     # alphabetical slots are visible.  The per-cycle cap is applied AFTER filtering
@@ -1278,6 +1308,8 @@ def download_current_target_raw_inputs(
                 pending_requests,
                 deadline_monotonic=deadline_monotonic,
                 client=openmeteo_client,
+                quota_critical=quota_critical,
+                quota_priority=quota_priority,
             )
         except httpx.HTTPStatusError as exc:
             status_code = exc.response.status_code
@@ -1302,6 +1334,7 @@ def download_current_target_raw_inputs(
                 deadline_monotonic=deadline_monotonic,
                 client=openmeteo_client,
                 quota_critical=quota_critical,
+                quota_priority=quota_priority,
             )
             downloaded["openmeteo_model_meta_fetch_count"] = 2
         except Exception as exc:
@@ -1594,6 +1627,7 @@ def download_current_target_openmeteo_inputs(
     fetch_workers: int = 4,
     bucket_reader_pool=None,
     quota_critical: bool = False,
+    quota_priority: bool = False,
 ) -> dict[str, object]:
     """Live replacement-chain downloader for Open-Meteo current-target inputs."""
 
@@ -1613,6 +1647,7 @@ def download_current_target_openmeteo_inputs(
         fetch_workers=fetch_workers,
         bucket_reader_pool=bucket_reader_pool,
         quota_critical=quota_critical,
+        quota_priority=quota_priority,
     )
 
 
