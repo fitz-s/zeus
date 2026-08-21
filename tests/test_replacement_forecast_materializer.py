@@ -1,6 +1,6 @@
 # Created: 2026-06-06
-# Last reused/audited: 2026-08-20
-# Lifecycle: created=2026-06-06; last_reviewed=2026-08-20; last_reused=2026-08-20
+# Last reused/audited: 2026-08-21
+# Lifecycle: created=2026-06-06; last_reviewed=2026-08-21; last_reused=2026-08-21
 # Purpose: Protect DB materialization for Open-Meteo ECMWF IFS 9km + Bayes-fusion replacement live layer.
 # Reuse: Run before changing replacement forecast live/experiment write path.
 # Authority basis: Operator-directed replacement forecast simple-switch readiness.
@@ -3561,6 +3561,31 @@ def test_final_ens_frontier_exact_city_update_supersedes_casefold() -> None:
     conn.close()
 
     assert current_id == 102
+
+
+def test_existing_frontier_indexes_require_no_live_ddl() -> None:
+    """A normal posterior write must not wait on an already-complete schema."""
+
+    conn = sqlite3.connect(":memory:")
+    _create_target_frontier_tables(conn)
+    _ensure_replacement_frontier_indexes(conn)
+
+    def deny_index_ddl(
+        action: int,
+        _arg1: str | None,
+        _arg2: str | None,
+        _database: str | None,
+        _trigger: str | None,
+    ) -> int:
+        if action == sqlite3.SQLITE_CREATE_INDEX:
+            return sqlite3.SQLITE_DENY
+        return sqlite3.SQLITE_OK
+
+    conn.set_authorizer(deny_index_ddl)
+    try:
+        _ensure_replacement_frontier_indexes(conn)
+    finally:
+        conn.close()
 
 
 def test_final_ens_selector_has_indexed_logarithmic_work() -> None:

@@ -500,6 +500,25 @@ def _ensure_replacement_frontier_indexes(conn: sqlite3.Connection) -> None:
         raise RuntimeError(
             "REPLACEMENT_FRONTIER_INDEX_BOOTSTRAP_REQUIRES_AUTOCOMMIT"
         )
+    existing_indexes = {
+        str(row[0])
+        for row in conn.execute(
+            """
+            SELECT name
+              FROM sqlite_master
+             WHERE type = 'index'
+               AND name IN (
+                    'idx_forecast_posteriors_source_family_frontier',
+                    'idx_raw_model_forecasts_target_model_frontier',
+                    'idx_raw_model_forecasts_target_frontier',
+                    'idx_ensemble_snapshots_replacement_exact_frontier',
+                    'idx_ensemble_snapshots_replacement_casefold_frontier'
+               )
+            """
+        ).fetchall()
+    }
+    if len(existing_indexes) == 5:
+        return
     posterior_columns = _table_columns(conn, "forecast_posteriors")
     if {
         "source_id",
