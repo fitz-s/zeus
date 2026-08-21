@@ -1478,7 +1478,7 @@ files:
   src/ingest/forecast_live_daemon.py:
     zone: K2_runtime
     authority_role: forecast_live_daemon_entry
-    why: Dedicated OpenData live forecast producer daemon; schedules ECMWF OpenData HIGH/LOW ingest plus replacement source-clock recovery, heartbeat, and source-health refresh. Seed discovery continues behind unrelated queue backlog and rechecks revisions while an exact family remains pending, preventing a global queue-head starvation ratchet.
+    why: Dedicated OpenData live forecast producer daemon; schedules ECMWF OpenData HIGH/LOW ingest plus replacement source-clock recovery, heartbeat, and source-health refresh. Seed discovery continues behind unrelated queue backlog and rechecks revisions while an exact family remains pending, preventing a global queue-head starvation ratchet. Each poll admits the configured bounded seed micro-batch into request-level global priority while still claiming only the single safe SQLite writer tranche, so admission breadth cannot be mistaken for writer concurrency.
     hazards:
     - SOURCE_TRUTH_PLANE_COLLAPSE
     downstream:

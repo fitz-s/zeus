@@ -1311,6 +1311,7 @@ def _replacement_forecast_materialize_poll_job() -> None:
         max(1, int(cfg["poll_batch_limit"])),
         max(1, int(DEFAULT_MATERIALIZATION_MAX_WORKERS)),
     )
+    seed_admission_limit = max(1, int(cfg["poll_batch_limit"]))
     requests_pending = _replacement_forecast_queue_pending(cfg, "request_dir")
     seeds_pending = _replacement_forecast_queue_pending(cfg, "seed_dir")
     inflight_pending = _replacement_forecast_inflight_pending(cfg)
@@ -1318,17 +1319,16 @@ def _replacement_forecast_materialize_poll_job() -> None:
         _replacement_forecast_materialize_job(
             discover=False,
             limit=batch_limit,
-            # Admit one fresh seed into the same priority sort even while a
-            # deferred request exists.  Current held-capital work can then
-            # preempt a background retry instead of waiting for request_dir to
-            # become globally empty.
-            seed_limit=batch_limit if seeds_pending else 0,
+            # Admission is bounded independently of the single SQLite writer.
+            # This exposes a current seed micro-batch to the request-level
+            # global priority sort while each poll still claims one subprocess.
+            seed_limit=seed_admission_limit if seeds_pending else 0,
         )
     elif seeds_pending:
         _replacement_forecast_materialize_job(
             discover=False,
             limit=batch_limit,
-            seed_limit=batch_limit,
+            seed_limit=seed_admission_limit,
         )
     elif inflight_pending:
         _replacement_forecast_materialize_job(

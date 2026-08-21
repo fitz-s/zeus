@@ -322,8 +322,8 @@ def test_replacement_materialize_poll_reclaims_priority_after_each_worker_tranch
 
     assert calls == [
         {"discover": False, "limit": 1, "seed_limit": 0},
-        {"discover": False, "limit": 1, "seed_limit": 1},
-        {"discover": False, "limit": 1, "seed_limit": 1},
+        {"discover": False, "limit": 1, "seed_limit": 8},
+        {"discover": False, "limit": 1, "seed_limit": 8},
         {"discover": False, "limit": 1, "seed_limit": 0},
     ]
 
