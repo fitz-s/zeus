@@ -5,12 +5,6 @@
 
 ## 现状(forward)
 
-### 2026-08-21 B122 — stale Day0 identity 清理不再吞掉 current-q worker budget
-- **实时反例:** live seed queue 有 335 个待处理文件；逐个以 canonical `cycle_advance_enqueues` ownership 复核时，至少 91 个已被更新 observation 明确判为 `STALE`。materializer 保持正确的单 SQLite writer、每秒一个 worker slot，但 seed admission 把每个无需 subprocess 的 stale receipt 也计入 `actionable_limit=1`；旧身份清理速度因此低于全城市 Day0 observation 更新速度。最新 full auction 仍有 42 个 family 因 provisional posterior identity missing、11 个 identity mismatch 被排除，证明概率生产与全局资本比较之间存在当前断层。
-- **结构性修复:** stale owner 仍在 bounded inspection window 内写 terminal receipt 并移出 queue，但不消耗 materialization worker budget；同一 poll 可清除多个明确 stale identity，并继续把唯一 writer slot 留给一个 current seed。`CURRENT`、`INDETERMINATE`、malformed、blocked-input、already-covered、timeout 与 actual subprocess 的既有语义不变；不并发 DB writer、不使用 stale q、不放宽 freshness。
-- **SCOPE / DRAIN / RESET:** scope 仅是具有 exact newer enqueue-owner proof 的 superseded Day0 seed。drain 每秒最多受既有 inspection cap 约束，旧 seed 终止后由 current owner 进入 request/materializer；reset 只来自 canonical marker 指向相同文件和完整 conditioning identity，读不确定仍保留 seed。新增关系抗体要求 `limit=1` 时两个 stale seed 与一个 current seed同轮得到“2 个 terminal cleanup + 1 个 current request”，并验证 builder 从不读取 stale identity。
-- **验收:** focused Day0 queue suite、materializer queue suite、source/test registries、compile、diff 与 planning-lock 全部通过后才 hot-fix landing。live reload 后必须看到 stale seed count 快速下降、eligible family 数上升、provisional identity missing/mismatch 收敛，且 materializer `failed_count=0`、单 writer 不变；这只恢复 current probability coverage，不把 side-effect-free EV 冒充资本利得。
-
 ### 2026-08-21 B121 — globally-ranked EXIT 的概率 revision 与命令原子绑定
 - **实时反例:** 过去 24 小时 17 个 filled EXIT 的 `venue_commands.q_version` 全为空；其中 9 个只能经 decision-certificate attribution 间接找回决策，8 个旧仓仍不可归因。最新 Mexico City global SELL 也缺 q-version，证明断层仍在当前统一竞价路径，不是单纯历史数据问题。同期 global capital basis 从约 `$466.99` 降到 `$450.98`；因此不能以局部 realized PnL 掩盖逐单审计缺口。
 - **结构性修复:** submit-time probability content 已与 selection witness 精确复核后，global SELL `ExitIntent` 同时携带 `q_version`、probability witness/content identity 与 source-truth identity；相同字段进入 capital certificate。`venue_command_repo` 对带 typed `GlobalSellReceiptClosure` 的 SELL 强制 non-empty q-version，并在 command/envelope/event 任一写入前原子拒绝缺失 identity。RED/legacy/recovery 等非 global statistical paths 不被误加同一约束。

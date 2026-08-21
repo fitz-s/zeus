@@ -1,6 +1,6 @@
 # Created: 2026-07-19
-# Last reused/audited: 2026-08-21
-# Lifecycle: created=2026-07-19; last_reviewed=2026-08-21; last_reused=2026-08-21
+# Last reused/audited: 2026-08-20
+# Lifecycle: created=2026-07-19; last_reviewed=2026-08-20; last_reused=2026-08-20
 # Purpose: Prove Day0 reseed ownership and single-writer materialization ordering.
 # Reuse: Run after changing Day0 enqueue, replacement queue claims, or writer concurrency.
 # Authority basis: operator directive 2026-07-19 (Day0 is a zero-sum race against the market
@@ -1363,111 +1363,6 @@ def test_queue_quarantines_preexisting_stale_day0_upgrade_seed(tmp_path, monkeyp
     assert json.loads(receipt.read_text(encoding="utf-8"))["status"] == (
         "SKIPPED_STALE_DAY0_ENQUEUE_OWNER"
     )
-
-
-def test_stale_day0_cleanup_does_not_consume_current_materialization_budget(
-    tmp_path,
-    monkeypatch,
-) -> None:
-    """Obsolete identities drain inside the inspection bound, not the worker budget."""
-    db_path = _prepare_forecast_db(tmp_path)
-    seed_dir = tmp_path / "seeds"
-    seed_dir.mkdir()
-    request_dir = tmp_path / "requests"
-    cycle = "2026-07-19T00:00:00+00:00"
-    identity = {
-        "day0_observed_extreme_source": "wu_icao_history",
-        "day0_observed_extreme_observation_time": "2026-07-19T05:02:00+00:00",
-        "day0_observed_extreme_c": 21.0,
-        "day0_observed_extreme_unit": "C",
-    }
-
-    def write_seed(name: str, observation_time: str) -> Path:
-        path = seed_dir / name
-        path.write_text(
-            json.dumps(
-                {
-                    "city": "Shanghai",
-                    "target_date": "2026-07-19",
-                    "temperature_metric": "high",
-                    "computed_at": "2026-07-19T05:03:00+00:00",
-                    "source_cycle_time": cycle,
-                    "baseline_source_run_id": "baseline:0",
-                    "openmeteo_source_run_id": "openmeteo:0",
-                    "openmeteo_payload_json": "payload.json",
-                    "precision_metadata_json": "precision.json",
-                    "bins": [{"bin_id": "warm"}],
-                    "upgrade_trigger": "day0_observation_advanced",
-                    "cycle_advance_enqueue_owner": True,
-                    **identity,
-                    "day0_observed_extreme_observation_time": observation_time,
-                }
-            ),
-            encoding="utf-8",
-        )
-        return path
-
-    stale = (
-        write_seed("000.stale.json", "2026-07-19T05:00:00+00:00"),
-        write_seed("001.stale.json", "2026-07-19T05:01:00+00:00"),
-    )
-    current = write_seed(
-        "999.current.json",
-        str(identity["day0_observed_extreme_observation_time"]),
-    )
-    conn = sqlite3.connect(db_path)
-    conn.row_factory = sqlite3.Row
-    assert cycle_advance._record_enqueue(
-        conn,
-        city="Shanghai",
-        target_date="2026-07-19",
-        metric="high",
-        consumed_cycle_iso=cycle,
-        target_cycle_iso=cycle,
-        held_position=True,
-        seed_file=str(current),
-        **identity,
-    ) is True
-    conn.commit()
-    conn.close()
-
-    built: list[str] = []
-
-    def build(seed, **_kwargs):
-        built.append(str(seed["day0_observed_extreme_observation_time"]))
-        return SimpleNamespace(
-            ok=True,
-            status="READY",
-            reason_codes=("REPLACEMENT_MATERIALIZATION_REQUEST_READY",),
-            request={
-                "city": "Shanghai",
-                "target_date": "2026-07-19",
-                "temperature_metric": "high",
-                "source_cycle_time": cycle,
-            },
-        )
-
-    monkeypatch.setattr(
-        materialization_queue,
-        "build_replacement_forecast_materialization_request",
-        build,
-    )
-    processed, failed, reasons = materialization_queue._prepare_seed_requests(
-        seed_dir=seed_dir,
-        seed_processed_dir=tmp_path / "seed_processed",
-        seed_failed_dir=tmp_path / "seed_failed",
-        request_dir=request_dir,
-        forecast_db=db_path,
-        limit=1,
-    )
-
-    assert not failed
-    assert len(processed) == 3
-    assert built == [identity["day0_observed_extreme_observation_time"]]
-    assert not any(path.exists() for path in stale)
-    assert not current.exists()
-    assert (request_dir / current.name).is_file()
-    assert "REPLACEMENT_MATERIALIZATION_STALE_DAY0_ENQUEUE_OWNER" in reasons
 
 
 def test_current_day0_owner_uses_latest_enqueue_not_consumed_source_cycle(
