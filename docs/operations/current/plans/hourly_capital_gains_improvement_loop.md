@@ -5,6 +5,12 @@
 
 ## 现状(forward)
 
+### 2026-08-21 B128 — 终止成功但永不收敛的 multi-location quota循环
+- **实时反例:** canonical quota ledger显示 day_count=9500；`bayes_precision_fusion_single_runs_locations_batched`单独消耗5762（60.7%），其中priority下6个 request key累计267次、locations计费5553。transport多数成功，但 exact-cycle anchor仍缺248 scopes，说明quota被成功重抓而非新coverage消耗。
+- **结构性根因:** BPF target universe可以只含HIGH或只含LOW；location fast path与普通 batched path却固定要求`("high","low")`都已持久化才skip。fetch后 writer只为实际`city_targets`写行，因此不存在的 sibling metric永远不会出现，同一成功batch每poll重抓。
+- **修复与边界:** completion/metrics_needed改为当前 city/date实际 target metrics集合；HIGH-only在HIGH exact-cycle行存在后立即complete，LOW同理，双metric仍要求两者。不制造非市场 sibling、不改变model/q math、cycle identity或transport失败重试。SCOPE是model×city×date×实际metric；DRAIN为一次成功persist；RESET为新cycle或新metric target出现。
+- **验收:** HIGH-only连续运行两次只发一次multi-location请求、第二次written=0且不伪造LOW；完整BPF suite、compile/ruff/freshness通过。live在UTC reset后同 request key attempts不再线性增长，quota用于residual anchor/BPF新coverage。
+
 ### 2026-08-21 B127 — 把 residual drain 接到真正的 data-ingest owner
 - **实时反例:** B126 landing/restart后，forecast-live registry证明旧 `_replacement_cycle_availability_poll_if_needed` 已明确不再调度；真实 owner是 `src.ingest_main._replacement_availability_poll_tick`。新 live 日志仍出现 ordinary anchor `priority=maintenance reason=day_limit=9500/8500`，证明仅修共享旧 wrapper不能改变生产。该 owner还会在 source cursor无更新时直接返回，使 bounded首 wave后残余 scope只能等慢 maintenance。
 - **结构性修复:** production current-target helper新增互斥 `quota_priority` authority并传到 downloader各 transport。真实 data-ingest owner的 ECMWF source-clock broad anchor与 committed ordinary partitions显式使用 priority；source clock无更新时先只读测量 probe-resolved exact-cycle gaps，零 gap保持轻量，正 gap/不可读才触发一个 bounded residual wave并发布 reseeds。

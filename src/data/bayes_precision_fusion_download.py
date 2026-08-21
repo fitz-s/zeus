@@ -1902,6 +1902,7 @@ def download_bayes_precision_fusion_extra_raw_inputs(
         ] = defaultdict(dict)
         for (city, target_date), city_targets in target_groups:
             ref = city_targets[0]
+            required_metrics = {target.metric for target in city_targets}
             if (
                 not _model_in_domain(
                     model,
@@ -1928,7 +1929,7 @@ def download_bayes_precision_fusion_extra_raw_inputs(
                     source_cycle_time=request_cycle_iso,
                     endpoint="single_runs",
                 )
-                for metric in ("high", "low")
+                for metric in required_metrics
             ):
                 single_success_models.add(model)
                 continue
@@ -2080,6 +2081,7 @@ def download_bayes_precision_fusion_extra_raw_inputs(
             # their real public run so one Open-Meteo request never mixes 06Z and 12Z identities.
             single_models_by_run: dict[datetime, list[str]] = defaultdict(list)
             single_request_by_model: dict[str, _SourceClockSingleRunsRequest] = {}
+            required_metrics = {target.metric for target in city_targets}
             for model in all_models:
                 if not _model_in_domain(model, lat=ref.latitude, lon=ref.longitude, lead_days=int(ref.lead_days)):
                     domain_excluded.append(f"{model}:{city}")
@@ -2108,9 +2110,10 @@ def download_bayes_precision_fusion_extra_raw_inputs(
                 if not allow_single_runs_fallback and fast_fail_key in single_fast_transport_failed:
                     dropped.append(f"{model}:single_runs_fast_transport_cached_drop")
                     continue
-                # R1+R2 skip: check both metrics already persisted for this (model,city,date,cycle).
+                # R1+R2 skip: check every metric in the current target family. An absent
+                # non-market sibling must not keep a successful batch permanently incomplete.
                 metrics_needed = [
-                    met for met in ("high", "low")
+                    met for met in required_metrics
                     if not _has_persisted_row(
                         model=model,
                         city=city,
