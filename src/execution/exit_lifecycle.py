@@ -4823,11 +4823,12 @@ def _red_force_exit_authorized(
     *,
     conn: sqlite3.Connection | None = None,
 ) -> bool:
-    """Authorize RED from current RED or an exact, still-open RED handoff.
+    """Authorize the emergency exemption only from current RED plus provenance.
 
-    The current risk level authorizes a new sweep. Once the sweep's exact
-    decision is canonical, a later RiskGuard read must not revoke that exit
-    obligation. Caller strings alone never grant the emergency exemption.
+    A persisted RED handoff remains audit/lifecycle truth, but it cannot make a
+    later GREEN decision use emergency submit authority. Once RED clears, the
+    ordinary live SELL path requires a current global capital comparison.
+    Caller strings alone never grant the emergency exemption.
     """
 
     if (
@@ -4838,9 +4839,15 @@ def _red_force_exit_authorized(
         return False
     if not _red_runtime_position_open(conn, position, require_canonical=False):
         return False
-    # Both current RED and a persisted handoff must prove canonical live
-    # provenance.  The later RiskLevel read is therefore never an authority
-    # downgrade or a row-missing fallback.
+    try:
+        from src.riskguard.risk_level import RiskLevel
+        from src.riskguard.riskguard import get_current_level
+
+        if get_current_level() is not RiskLevel.RED:
+            return False
+    except Exception:  # noqa: BLE001 — unreadable current risk cannot grant an exemption.
+        return False
+    # Current RED and the persisted handoff are cumulative requirements.
     return _canonical_red_force_exit_provenance(conn, position)
 
 

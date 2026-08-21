@@ -1,6 +1,6 @@
 # Created: 2026-04-27
-# Last reused/audited: 2026-08-14
-# Lifecycle: created=2026-04-27; last_reviewed=2026-08-14; last_reused=2026-08-14
+# Last reused/audited: 2026-08-21
+# Lifecycle: created=2026-04-27; last_reviewed=2026-08-21; last_reused=2026-08-21
 # Authority basis: docs/operations/current/finite_evidence_probability_symmetry/PLAN.md
 # Purpose: Lock R3 M4 cancel/replace exit mutex, typed cancel outcomes, replacement gates, and CTF preflight.
 # Reuse: Run when exit_safety, executor exit submit, exit_lifecycle cancel retry, venue command transitions, or collateral sell preflight changes.
@@ -10160,7 +10160,7 @@ def test_pre_settlement_stale_market_price_still_enters_retry(conn):
     assert payload["status"] == "retry_pending"
 
 
-def test_red_stale_retry_preserves_intent_then_sells_after_green_risk_recovery(
+def test_red_stale_retry_requires_global_sell_after_green_risk_recovery(
     conn, monkeypatch
 ):
     from src.execution import exit_lifecycle
@@ -10191,9 +10191,10 @@ def test_red_stale_retry_preserves_intent_then_sells_after_green_risk_recovery(
         exit_reason="red_force_exit",
     )
     _seed_red_monitor_provenance(conn, position_id=trade_id)
+    risk = {"level": RiskLevel.RED}
     monkeypatch.setattr(
         "src.riskguard.riskguard.get_current_level",
-        lambda: RiskLevel.GREEN,
+        lambda: risk["level"],
     )
 
     class Clob:
@@ -10234,6 +10235,7 @@ def test_red_stale_retry_preserves_intent_then_sells_after_green_risk_recovery(
     assert exit_lifecycle.check_pending_retries(position, conn=conn) is True
     assert position.state == "day0_window"
     assert position.exit_reason == "red_force_exit"
+    risk["level"] = RiskLevel.GREEN
 
     def persist_and_return_pending(**kwargs):
         _insert_exit_command(
@@ -10275,19 +10277,14 @@ def test_red_stale_retry_preserves_intent_then_sells_after_green_risk_recovery(
         clob=Clob(),
         conn=conn,
     )
-    assert retry_outcome.startswith("sell_pending:")
-    command = conn.execute(
-        "SELECT intent_kind, side, state FROM venue_commands "
-        "WHERE command_id = 'cmd-red-obligation-retry'"
-    ).fetchone()
-    assert dict(command) == {
-        "intent_kind": "EXIT",
-        "side": "SELL",
-        "state": "INTENT_CREATED",
-    }
+    assert retry_outcome == "exit_blocked: global_capital_optimal_sell_intent_required"
+    assert conn.execute(
+        "SELECT COUNT(*) FROM venue_commands WHERE command_id = ?",
+        ("cmd-red-obligation-retry",),
+    ).fetchone()[0] == 0
 
 
-def test_red_intent_survives_partial_fill_and_nonterminal_override(conn, monkeypatch):
+def test_red_intent_loses_emergency_exemption_after_green_recovery(conn, monkeypatch):
     from src.execution import exit_lifecycle
     from src.riskguard.risk_level import RiskLevel
     from src.state.portfolio import ExitContext, Position
@@ -10362,7 +10359,7 @@ def test_red_intent_survives_partial_fill_and_nonterminal_override(conn, monkeyp
         position,
         ExitContext(exit_reason="RED_FORCE_EXIT", current_market_price=0.45),
         conn=conn,
-    ) is True
+    ) is False
 
     conn.execute(
         """
@@ -10388,7 +10385,9 @@ def test_red_intent_survives_partial_fill_and_nonterminal_override(conn, monkeyp
     ) is False
 
 
-def test_red_obligation_survives_many_hold_monitor_rows(conn, monkeypatch):
+def test_red_obligation_lookup_survives_many_rows_but_requires_current_red(
+    conn, monkeypatch
+):
     from src.execution import exit_lifecycle
     from src.riskguard.risk_level import RiskLevel
     from src.state.portfolio import ExitContext, Position
@@ -10431,9 +10430,10 @@ def test_red_obligation_survives_many_hold_monitor_rows(conn, monkeypatch):
         (trade_id,),
     ).fetchone()
     assert "selected_outcome_token_id" not in json.loads(red_monitor["payload_json"])
+    risk = {"level": RiskLevel.RED}
     monkeypatch.setattr(
         "src.riskguard.riskguard.get_current_level",
-        lambda: RiskLevel.GREEN,
+        lambda: risk["level"],
     )
 
     assert exit_lifecycle._red_force_exit_authorized(
@@ -10470,6 +10470,12 @@ def test_red_obligation_survives_many_hold_monitor_rows(conn, monkeypatch):
         for statement in trace
     )
     assert not any("event_type = 'MONITOR_REFRESHED'" in statement for statement in trace)
+    risk["level"] = RiskLevel.GREEN
+    assert exit_lifecycle._red_force_exit_authorized(
+        position,
+        ExitContext(exit_reason="RED_FORCE_EXIT", current_market_price=0.45),
+        conn=conn,
+    ) is False
 
 
 def test_non_red_intent_persistence_failure_blocks_venue_sell(conn, monkeypatch):
