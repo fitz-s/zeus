@@ -88,9 +88,12 @@ Registered follow-ups (not claimed in the published pages):
 
 ## Next action / rollback
 
-Branch `claude/transcendent-docs` (5 commits on 9acb47042) is release-ready.
-BLOCKED ON OPERATOR: pushing it publishes the 30 unpushed local-live commits
-in its history; alternatives are pushing live first, or rebasing the docs
-commits onto origin/live (074f887a16 — old README, conflicts resolved by
-taking the new pages wholesale). Rollback: drop the branch; main tree
-untouched.
+DONE 2026-08-21. Remote lineage divergence discovered (origin/live +21 via
+merged PRs #470/489/490/492/493/494 vs local +30); union merged with README
+taking origin's #492 lineage + ported gate-verified corrections (final union
+gate PASS 0.98; corrected en route: raw centers / eb_bias has no live caller
+per scoped AGENTS + test_raw_unify_forecast_posteriors — the June authority
+doc §1a de-bias predates the 2026-06-18 cleanup). Remote tidied: 3 merged
+topic branches deleted, repo description replaced, PR #495 opened
+(claude/transcendent-docs -> live) carrying the union + docs release;
+PR monitor armed. Rollback: close PR #495, delete the remote branch.
