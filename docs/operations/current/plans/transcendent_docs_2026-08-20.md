@@ -69,7 +69,28 @@ Rollback: revert the single PR.
   only"/"only the skill outcomes", "hourly", "lapse rate", "lucky win teaches".
 - Third-party consult gate on the full diff before PR.
 
+## Outcome (2026-08-21)
+
+Three gate rounds: FAIL 0.82 -> FAIL 0.93 -> **PASS 0.98**
+(REQ-20260820-191822-1567bb thread). Two consult findings were REVERSED by
+code verification before applying: walk-forward EB de-bias is live law
+(kept), and the promoted selection-calibrator artifact is 96/96 v1 cells so
+the served admission bound IS the one-sided Wilson lower bound (round-1 EB
+wording reverted). GitHub repo description replaced per audit A1 (no
+"live 24/7"). All 75 targeted tests green; report regenerated (902 settled,
+587 scoreable, BSS -0.155, data through 2026-08-20).
+
+Registered follow-ups (not claimed in the published pages):
+- calibration report: per-decision-law-version cut of the scoreable corpus
+  (needs a law-version identifier on certificates or a dated mapping).
+- calibration report: market-family × date clustered intervals or block
+  bootstrap alongside the position-level Wilson bars.
+
 ## Next action / rollback
 
-Compose 1-7, run acceptance, fire consult, revise, PR to live. Rollback point:
-worktree branch `transcendent-docs` off 9acb47042; main tree untouched.
+Branch `claude/transcendent-docs` (5 commits on 9acb47042) is release-ready.
+BLOCKED ON OPERATOR: pushing it publishes the 30 unpushed local-live commits
+in its history; alternatives are pushing live first, or rebasing the docs
+commits onto origin/live (074f887a16 — old README, conflicts resolved by
+taking the new pages wholesale). Rollback: drop the branch; main tree
+untouched.
