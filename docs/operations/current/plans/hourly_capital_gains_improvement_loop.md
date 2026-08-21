@@ -5,6 +5,12 @@
 
 ## 现状(forward)
 
+### 2026-08-21 B127 — 把 residual drain 接到真正的 data-ingest owner
+- **实时反例:** B126 landing/restart后，forecast-live registry证明旧 `_replacement_cycle_availability_poll_if_needed` 已明确不再调度；真实 owner是 `src.ingest_main._replacement_availability_poll_tick`。新 live 日志仍出现 ordinary anchor `priority=maintenance reason=day_limit=9500/8500`，证明仅修共享旧 wrapper不能改变生产。该 owner还会在 source cursor无更新时直接返回，使 bounded首 wave后残余 scope只能等慢 maintenance。
+- **结构性修复:** production current-target helper新增互斥 `quota_priority` authority并传到 downloader各 transport。真实 data-ingest owner的 ECMWF source-clock broad anchor与 committed ordinary partitions显式使用 priority；source clock无更新时先只读测量 probe-resolved exact-cycle gaps，零 gap保持轻量，正 gap/不可读才触发一个 bounded residual wave并发布 reseeds。
+- **SCOPE / DRAIN / RESET:** scope 是 data-ingest的 ECMWF anchor current-target path；critical held scope仍优先且不与 priority叠加。drain由15秒 owner tick逐次旋转，single-download lock隔离并发；reset为 exact-cycle gap归零或 provider cycle推进。provider daily hard cap不变，今日9500用尽时只能证明 priority routing与持续重试，不能证明 gap下降。
+- **验收:** unchanged-clock residual、source-update broad anchor、source-commit ordinary partition、quota lane互斥和现有 scheduler suites通过；deploy后日志不再把该路径标为 maintenance，并在UTC quota reset后观察 `anchor_missing_scope_count`单调下降、HWM rejection下降。
+
 ### 2026-08-21 B126 — exact-cycle anchor coverage逐 scope排空
 - **实时反例:** 12Z/06Z ENS 已提交且203个 family被 HWM拒绝；availability poll 对新 cycle只下载 `limit=10` 个 scope，然后 `_per_leg_downloaded_cycle=MAX(source_cycle_time)` 已等于 published cycle，后续 poll把其余约205个 scope误判为 current并永久停取。日志同时显示 source-clock anchor以 maintenance quota运行，未使用 quota模块明确保留的 source-clock tranche。
 - **结构性修复:** 每个 poll对 probe-resolved published cycle构建 exact-cycle current-target plan；只要任一 scope缺 anchor manifest，即使全局 MAX 已前进也继续用 durable rotation下载 residual。新 cycle首次 wave可包含全部目标；后续 wave仅选 missing manifests。availability anchor标记 `quota_priority`，并将 priority context显式传播进 metadata、run-pinned与 worker-thread transport，避免 thread-local在 executor边界丢失。

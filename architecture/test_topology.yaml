@@ -349,7 +349,7 @@ test_trust_policy:
     tests/test_ingest_scheduler_jobs.py: {created: "2026-05-17", last_used: "2026-08-04", note: "Exact registry scheduler construction, cadence, and retirement antibody for alternate calibration auto-promotion."}
     tests/state/test_daily_obs_cross_db_atomicity.py: {created: "2026-05-14", last_used: "2026-07-28", note: "Atomic forecasts+world daily observation writes and explicit non-blocking admission propagation across both ordered flocks."}
     tests/test_opendata_ownership_singleton.py: {created: "2026-05-24", last_used: "2026-05-24"}
-    tests/test_scheduler_adapter.py: {created: "2026-05-24", last_used: "2026-08-21", note: "Single-live scheduler set, bounded seed admission independent of the single materialization writer tranche, causal executor lanes, committed-scope materialization, and bounded held-BPF deadline reservation under source-clock load."}
+    tests/test_scheduler_adapter.py: {created: "2026-05-24", last_used: "2026-08-21", note: "Single-live scheduler set, bounded seed admission independent of the single materialization writer tranche, causal executor lanes, exact-cycle anchor residual draining on the source-clock priority lane, committed-scope materialization, and bounded held-BPF deadline reservation under source-clock load."}
     # PR #335: assert_writer_jobs_registered boot guard accepts registry spec-list wiring.
     tests/test_writer_jobs_registry_guard.py: {created: "2026-05-24", last_used: "2026-05-24"}
     # P5-1 + P5-3 (PR #19 closeout completion, 2026-04-26):

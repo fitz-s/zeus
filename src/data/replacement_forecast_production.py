@@ -744,11 +744,14 @@ def _download_replacement_forecast_current_targets_if_needed(
     max_wall_clock_seconds: float | None = None,
     required_scopes: Sequence[tuple[str, str, str]] | None = None,
     quota_critical: bool = False,
+    quota_priority: bool = False,
 ) -> dict[str, object] | None:
     forecast_db = cfg.get("forecast_db")
     output_dir = cfg.get("download_output_dir") or cfg.get("raw_manifest_dir")
     if forecast_db is None or output_dir is None:
         raise ValueError("replacement current-target download requires forecast_db and raw_manifest_dir/download_output_dir")
+    if quota_critical and quota_priority:
+        raise ValueError("current-target quota lane must be critical or priority, not both")
     from scripts.download_replacement_forecast_current_targets import (
         download_current_target_openmeteo_inputs,
     )
@@ -890,6 +893,13 @@ def _download_replacement_forecast_current_targets_if_needed(
             # above. DRAIN: this bounded raw-anchor call and its existing manifest
             # commit. RESET: context exit; every later call re-proves current phase.
             quota_context = quota_tracker.critical_lane()
+        elif quota_priority:
+            from src.data.openmeteo_quota import quota_tracker  # noqa: PLC0415
+
+            # SCOPE: probe-resolved source-clock anchor capture only. DRAIN: the
+            # bounded exact-cycle target wave commits manifests, then the next poll
+            # re-counts residual scopes. RESET: context exit or zero residual gaps.
+            quota_context = quota_tracker.priority_lane()
         with quota_context:
             result = download_current_target_openmeteo_inputs(
                 forecast_db=Path(str(forecast_db)),
@@ -920,6 +930,7 @@ def _download_replacement_forecast_current_targets_if_needed(
                 fetch_workers=int(cfg.get("source_clock_fanout_workers") or 4),
                 bucket_reader_pool=bucket_pool,
                 quota_critical=quota_critical,
+                quota_priority=quota_priority,
                 **download_kwargs,
             )
     except Exception:

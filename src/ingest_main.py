@@ -1,4 +1,4 @@
-# Lifecycle: created=2026-04-30; last_reviewed=2026-07-16; last_reused=2026-07-16
+# Lifecycle: created=2026-04-30; last_reviewed=2026-08-21; last_reused=2026-08-21
 # Authority basis: docs/archive/2026-Q2/task_2026-05-14_data_daemon_live_efficiency/DATA_DAEMON_LIVE_EFFICIENCY_REFACTOR_PLAN.md
 #   Phase 2 legacy OpenData mutual exclusion with forecast-live-daemon; 2026-05-20
 #   live stability hotfix keeps SIGTERM scheduler shutdown exit code clean.
@@ -3108,6 +3108,7 @@ def _replacement_availability_poll_tick():
         max_wall_clock_seconds: float | None = None,
         required_scopes: tuple[tuple[str, str, str], ...] | None = None,
         quota_critical: bool = False,
+        quota_priority: bool = False,
     ):
         current_target_timeout = (
             _replacement_current_target_poll_timeout_seconds(
@@ -3124,6 +3125,8 @@ def _replacement_availability_poll_tick():
                 kwargs["required_scopes"] = required_scopes
             if quota_critical:
                 kwargs["quota_critical"] = True
+            if quota_priority:
+                kwargs["quota_priority"] = True
             return _download_replacement_forecast_current_targets_if_needed(
                 cfg,
                 **kwargs,
@@ -3168,6 +3171,65 @@ def _replacement_availability_poll_tick():
         }
         if _station_reseed_report is not None:
             report["station_forecast_reseed"] = _station_reseed_report
+        # The source cursor can advance after a bounded first anchor wave, while
+        # exact-cycle target manifests still have residual gaps. Global source
+        # high-water is therefore never completion evidence. Keep the no-change
+        # tick network-light when coverage is complete, but drain a proven gap on
+        # the reserved source-clock quota lane.
+        if source_clock_status == "SOURCE_CLOCK_NO_PUBLICLY_USABLE_CHANGE":
+            try:
+                from src.data.replacement_forecast_production import (  # noqa: PLC0415
+                    _current_target_anchor_gap_count,
+                )
+
+                source_runs = source_clock_payload.get("source_runs")
+                ecmwf_run = (
+                    source_runs.get("ecmwf_ifs")
+                    if isinstance(source_runs, dict)
+                    else None
+                )
+                residual_cycle_raw = (
+                    ecmwf_run.get("initialisation_time")
+                    if isinstance(ecmwf_run, dict)
+                    else None
+                )
+                try:
+                    residual_cycle = datetime.fromisoformat(
+                        str(residual_cycle_raw).replace("Z", "+00:00")
+                    )
+                    if residual_cycle.tzinfo is None:
+                        residual_cycle = residual_cycle.replace(tzinfo=timezone.utc)
+                    residual_cycle = residual_cycle.astimezone(timezone.utc)
+                except (TypeError, ValueError):
+                    residual_cycle = None
+                residual_gap_count = (
+                    _current_target_anchor_gap_count(
+                        Path(str(cfg["forecast_db"])),
+                        residual_cycle,
+                    )
+                    if residual_cycle is not None and cfg.get("forecast_db") is not None
+                    else 0
+                )
+                report["anchor_missing_scope_count"] = residual_gap_count
+                if residual_gap_count is None or residual_gap_count > 0:
+                    residual_report = _download_current_targets(quota_priority=True)
+                    if (
+                        isinstance(residual_report, dict)
+                        and int(residual_report.get("written_manifest_count") or 0) > 0
+                    ):
+                        _attach_reseed_reports(
+                            residual_report,
+                            changed_sources=("ecmwf_ifs",),
+                        )
+                    compact = _compact_replacement_current_target_report(
+                        residual_report
+                    )
+                    if compact is not None:
+                        report["source_clock_anchor_residual_download"] = compact
+            except Exception as exc:  # noqa: BLE001 - next poll retries exact gap
+                report["source_clock_anchor_residual_error"] = (
+                    f"{type(exc).__name__}: {str(exc)[:220]}"
+                )
         report["maintenance_status"] = "REPLACEMENT_MAINTENANCE_DECOUPLED"
         logger.info("replacement source-clock poll current: %s", report)
         return report
@@ -3235,7 +3297,8 @@ def _replacement_availability_poll_tick():
                 _replacement_current_target_poll_timeout_seconds(
                     _replacement_availability_poll_seconds()
                 ),
-            )
+            ),
+            quota_priority=True,
         )
         if (
             isinstance(source_clock_anchor_report, dict)
@@ -3355,6 +3418,8 @@ def _replacement_availability_poll_tick():
                     }
                     if quota_critical:
                         anchor_kwargs["quota_critical"] = True
+                    else:
+                        anchor_kwargs["quota_priority"] = True
                     anchor_report = _download_replacement_forecast_current_targets_if_needed(
                         cfg,
                         **anchor_kwargs,

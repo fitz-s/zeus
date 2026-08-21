@@ -1774,6 +1774,20 @@ def test_critical_quota_context_propagates_into_anchor_worker(
     assert observed == [True]
 
 
+def test_current_target_quota_lanes_are_mutually_exclusive(tmp_path) -> None:
+    import src.data.replacement_forecast_production as prod
+
+    with pytest.raises(ValueError, match="critical or priority"):
+        prod._download_replacement_forecast_current_targets_if_needed(
+            {
+                "forecast_db": tmp_path / "forecasts.db",
+                "download_output_dir": tmp_path / "raw",
+            },
+            quota_critical=True,
+            quota_priority=True,
+        )
+
+
 def test_priority_quota_context_propagates_into_anchor_worker(
     monkeypatch,
 ) -> None:
