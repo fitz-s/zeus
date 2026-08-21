@@ -5,6 +5,12 @@
 
 ## 现状(forward)
 
+### 2026-08-21 B121 — globally-ranked EXIT 的概率 revision 与命令原子绑定
+- **实时反例:** 过去 24 小时 17 个 filled EXIT 的 `venue_commands.q_version` 全为空；其中 9 个只能经 decision-certificate attribution 间接找回决策，8 个旧仓仍不可归因。最新 Mexico City global SELL 也缺 q-version，证明断层仍在当前统一竞价路径，不是单纯历史数据问题。同期 global capital basis 从约 `$466.99` 降到 `$450.98`；因此不能以局部 realized PnL 掩盖逐单审计缺口。
+- **结构性修复:** submit-time probability content 已与 selection witness 精确复核后，global SELL `ExitIntent` 同时携带 `q_version`、probability witness/content identity 与 source-truth identity；相同字段进入 capital certificate。`venue_command_repo` 对带 typed `GlobalSellReceiptClosure` 的 SELL 强制 non-empty q-version，并在 command/envelope/event 任一写入前原子拒绝缺失 identity。RED/legacy/recovery 等非 global statistical paths 不被误加同一约束。
+- **SCOPE / DRAIN / RESET:** scope 仅为一个 globally-ranked SELL candidate/command。缺失 identity 时该候选不提交；complete auction 可在下一 cut 重新比较其余 BUY/SELL/HOLD/CASH。reset 只能由下一次 current probability witness 产生完整四元 identity，不能回填旧订单或用 entry belief 替代 current held belief。
+- **验收:** integration antibody 证明 ranking witness 精确进入 `ExitIntent.probability_receipt` 与 capital certificate；command-journal antibody 证明 closure+q 原子持久化、closure-without-q 零行回滚。focused integration、venue journal、compile、diff、planning-lock 通过后 hot-fix landing；live 只以未来 globally-ranked EXIT command 的 non-empty q-version 与 exact receipt closure 作为生产证据，不修改或粉饰旧亏损。
+
 ### 2026-08-21 B120 — global proof evidence 按 city-date 原子持久化
 - **实时反例:** current-law side-effect-free auction 在同一 target date 先后选择了独立城市（Aug-21 Lucknow/Tel Aviv；Aug-22 Helsinki/Singapore），但 `NoTradeRegretEvent.event_id` 只绑定 strategy/revision/target_date。唯一约束因此每天只保留一个城市；RiskGuard 后续虽按 `(city,target_date)` 聚类，仍永远收不到同日其余独立城市，令 automated alpha gate 的 forward settlement drain 人为失速。
 - **结构性修复:** entry shadow event revision 升为 city-date-cluster identity；同一城市日期的 sibling bins 与 HIGH/LOW 继续幂等去重，不同城市在同一日期可各自落一份 exact global-winner certificate。exit-shadow reader 同时接受既有 v5 和新 v6 证书；不改 probability、ranking、Kelly、RiskGuard threshold 或 venue actuation。

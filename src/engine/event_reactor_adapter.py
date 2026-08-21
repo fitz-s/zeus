@@ -13121,6 +13121,51 @@ def _global_sell_held_probability(candidate: object, witness: object) -> float:
     return float(samples.mean())
 
 
+def _global_sell_probability_receipt(
+    *,
+    candidate: object,
+    witness: object,
+    held_side_probability: float,
+) -> dict[str, object]:
+    """Bind the exact ranked probability witness into the EXIT command path."""
+
+    q_version = str(getattr(witness, "q_version", "") or "").strip()
+    witness_identity = str(
+        getattr(witness, "witness_identity", "") or ""
+    ).strip()
+    content_identity = str(
+        getattr(witness, "probability_content_identity", "") or ""
+    ).strip()
+    source_truth_identity = str(
+        getattr(witness, "source_truth_identity", "") or ""
+    ).strip()
+    if not all(
+        (
+            q_version,
+            witness_identity,
+            content_identity,
+            source_truth_identity,
+        )
+    ):
+        # SCOPE: only this selected SELL lacks an atomic probability-to-command
+        # identity. DRAIN: the same cut excludes it and re-auctions remaining
+        # actions. RESET: the next cut rebuilds a complete current witness.
+        raise ValueError("GLOBAL_SELL_PROBABILITY_RECEIPT_INCOMPLETE")
+    return {
+        "schema_version": 1,
+        "selected_method": "global_single_order_auction",
+        "probability_authority": "current_global_probability_witness",
+        "probability_functional": str(
+            getattr(candidate, "probability_functional", "") or ""
+        ),
+        "held_side_probability": float(held_side_probability),
+        "q_version": q_version,
+        "probability_witness_identity": witness_identity,
+        "probability_content_identity": content_identity,
+        "source_truth_identity": source_truth_identity,
+    }
+
+
 def _submit_current_global_sell(
     event: OpportunityEvent,
     *,
@@ -13488,6 +13533,11 @@ def _submit_current_global_sell(
                 candidate,
                 getattr(global_actuation, "probability_witness", None),
             )
+            probability_receipt = _global_sell_probability_receipt(
+                candidate=candidate,
+                witness=getattr(global_actuation, "probability_witness", None),
+                held_side_probability=held_q,
+            )
             state_raw = getattr(position, "state", "")
             position_state = str(getattr(state_raw, "value", state_raw) or "")
             best_bid = float(current_candidate.executable_sell_curve.levels[0].price)
@@ -13588,6 +13638,7 @@ def _submit_current_global_sell(
                 fresh_prob=held_q,
                 fresh_prob_is_fresh=True,
                 position_state=position_state,
+                probability_receipt=probability_receipt,
                 capital_certificate={
                     "action": "SELL",
                     "position_id": str(getattr(position, "trade_id", "") or ""),
@@ -13605,6 +13656,13 @@ def _submit_current_global_sell(
                     "probability_witness_identity": str(
                         getattr(candidate, "probability_witness_identity", "") or ""
                     ),
+                    "probability_content_identity": probability_receipt[
+                        "probability_content_identity"
+                    ],
+                    "q_version": probability_receipt["q_version"],
+                    "source_truth_identity": probability_receipt[
+                        "source_truth_identity"
+                    ],
                     "sell_probability_functional": str(
                         getattr(candidate, "probability_functional", "") or ""
                     ),

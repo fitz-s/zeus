@@ -660,6 +660,7 @@ class TestGlobalSellReceiptClosure:
             size=10.0,
             price=0.5,
             created_at="2026-08-09T00:00:00Z",
+            q_version=kwargs.pop("q_version", "q-global-sell"),
             global_sell_receipt_closure=closure,
             **kwargs,
         )
@@ -701,7 +702,8 @@ class TestGlobalSellReceiptClosure:
             "global_sell_receipt_closure"
         ]
         assert conn.execute(
-            "SELECT COUNT(*) FROM venue_commands WHERE command_id = ?",
+            "SELECT COUNT(*) FROM venue_commands "
+            "WHERE command_id = ? AND q_version = 'q-global-sell'",
             ("cmd-global-sell-closure",),
         ).fetchone()[0] == 1
         assert GlobalSellReceiptClosure.from_payload(
@@ -759,12 +761,33 @@ class TestGlobalSellReceiptClosure:
             size=10.0,
             price=0.5,
             created_at="2026-08-09T00:00:00Z",
+            q_version="q-global-sell",
             global_sell_receipt_closure=closure,
         )
         assert conn.execute(
             "SELECT COUNT(*) FROM venue_commands WHERE command_id = ?",
             ("cmd-global-sell-persisted",),
         ).fetchone()[0] == 1
+
+    def test_closure_missing_q_version_rejected_atomically(self, conn):
+        ref = _insert_global_auction_receipt(conn)
+        closure = _global_sell_closure(ref)
+        with pytest.raises(
+            ValueError,
+            match="global SELL venue command requires non-empty q_version",
+        ):
+            self._insert_closure_command(
+                conn,
+                closure=closure,
+                command_id="cmd-global-sell-no-q",
+                idempotency_key="idem-global-sell-no-q",
+                q_version=None,
+            )
+        self._assert_zero_rows(
+            conn,
+            command_id="cmd-global-sell-no-q",
+            envelope_id="pre-submit:cmd-global-sell-no-q",
+        )
 
     def test_closure_rejects_string_post_only_and_accepts_sqlite_zero(self, conn):
         ref = _insert_global_auction_receipt(conn)

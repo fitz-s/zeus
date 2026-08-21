@@ -32590,6 +32590,8 @@ def _adapter_sell_actuation(
     witness = SimpleNamespace(
         family_key="Alpha|2026-07-14|high",
         witness_identity="probability-1",
+        probability_content_identity="probability-content-1",
+        source_truth_identity="source-truth-1",
         family_binding_identity="family-binding-1",
         sample_matrix_identity="sample-matrix-1",
         q_version="q-version-1",
@@ -33090,10 +33092,28 @@ def test_global_sell_adapter_bypasses_entry_lane_and_uses_reduce_only_exit(
             ],
         }
         intent = kwargs["exit_intent"]
+        assert intent.probability_receipt == {
+            "schema_version": 1,
+            "selected_method": "global_single_order_auction",
+            "probability_authority": "current_global_probability_witness",
+            "probability_functional": probability_functional,
+            "held_side_probability": pytest.approx(0.30),
+            "q_version": "q-version-1",
+            "probability_witness_identity": "probability-1",
+            "probability_content_identity": "probability-content-1",
+            "source_truth_identity": "source-truth-1",
+        }
         assert type(intent.global_sell_receipt_closure) is GlobalSellReceiptClosure
         assert intent.global_sell_receipt_closure.receipt_ref is actuation.auction_receipt_ref
         assert intent.capital_certificate["global_auction_receipt"] == (
             actuation.auction_receipt_ref.as_payload()
+        )
+        assert intent.capital_certificate["q_version"] == "q-version-1"
+        assert intent.capital_certificate["probability_content_identity"] == (
+            "probability-content-1"
+        )
+        assert intent.capital_certificate["source_truth_identity"] == (
+            "source-truth-1"
         )
         assert intent.exact_limit_price == pytest.approx(expected_limit)
         assert intent.shares == pytest.approx(5.0)

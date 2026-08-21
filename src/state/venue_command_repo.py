@@ -1425,7 +1425,8 @@ def insert_command(
 
     q_version (SCH-W1.2-ORDER-STATE): the forecast_posteriors.posterior_identity_hash
     of the q this command's decision was made against, write-once at creation.
-    Required for live-mode ENTRY commands at this repo boundary; nullable only for
+    Required for live-mode ENTRY commands and every globally-ranked SELL carrying
+    a GlobalSellReceiptClosure at this repo boundary; nullable only for other
     non-entry commands, offline fixtures/replay, and the repository-owned typed
     reconciliation creation helpers. Never re-stamped after insert.
 
@@ -1475,6 +1476,13 @@ def insert_command(
         and _strict_live_entry_q_version_required()
     ):
         raise ValueError("ENTRY venue command requires non-empty q_version")
+    if global_sell_receipt_closure is not None and q_version_value is None:
+        # SCOPE: only this globally-ranked SELL command. DRAIN: its receipt
+        # closure is rejected before command/envelope persistence, allowing the
+        # auction to re-decide. RESET: a complete current witness supplies q.
+        raise ValueError(
+            "global SELL venue command requires non-empty q_version"
+        )
     _assert_snapshot_gate(
         conn,
         snapshot_id=snapshot_id_value,
