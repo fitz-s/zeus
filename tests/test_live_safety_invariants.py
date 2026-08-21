@@ -6710,6 +6710,7 @@ def test_pending_exit_backoff_exhausted_reenters_redecision_when_still_held(monk
         ("SELL_REVERSAL", False, True, "direct", False, True),
         ("EDGE_REVERSAL", False, True, "dust", False, False),
         ("EDGE_REVERSAL", False, True, "sub_precision", False, False),
+        ("EDGE_REVERSAL", False, True, "no_book", False, False),
     ),
 )
 def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_red(
@@ -6778,7 +6779,7 @@ def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_
         position.last_monitor_edge = -0.50 if posterior_support_zero else -0.40
         position.last_monitor_market_price = 0.50
         position.last_monitor_market_price_is_fresh = True
-        position.last_monitor_best_bid = 0.49
+        position.last_monitor_best_bid = 0.0 if outcome == "no_book" else 0.49
         position.last_monitor_best_ask = 0.50
         position.last_monitor_at = (
             "2026-07-14T17:59:59+00:00"
@@ -7079,6 +7080,16 @@ def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_
         assert auction_completion_requests == []
         if outcome == "sub_precision":
             assert "below sell share precision 0.01" in results[0].exit_reason
+    elif outcome == "no_book":
+        assert summary["monitor_statistical_sell_no_book_holds"] == 1
+        assert summary["exits"] == 0
+        assert results[0].should_exit is False
+        assert results[0].exit_reason == "NO_EXECUTABLE_SELL_BOOK_HOLD"
+        assert "current_sell_book_not_executable" in pos.applied_validations
+        assert auction_completion_requests == []
+        assert published_requests == []
+        assert reserved_requests == []
+        assert execute_calls == []
     elif outcome in {"blocked", "request_failed"}:
         completion_accepted = request_accepted and not malformed_request
         assert summary.get("monitor_sells_delegated_to_global_auction", 0) == 0

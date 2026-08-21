@@ -9395,6 +9395,36 @@ def execute_monitoring_phase(
                 pos,
                 exit_context,
             )
+            fresh_no_executable_sell_book = bool(
+                statistical_sell_requires_global
+                and global_sell_request_context["book_state"]
+                == "NO_EXECUTABLE_BOOK"
+                and global_sell_request_context["bid_observed_at"]
+                and exit_context.current_market_price_is_fresh
+            )
+            if fresh_no_executable_sell_book:
+                # A current out-of-band/zero bid is not an executable proposal,
+                # so it cannot compete for capital or require a new global cut.
+                # SCOPE: only this fresh held-token monitor witness. DRAIN: any
+                # already-armed older SELL obligation remains owned by the
+                # independent debt-recovery lane above. RESET: the next monitor
+                # refresh with an in-band bid re-enters the global auction.
+                should_exit = False
+                statistical_sell_requires_global = False
+                exit_reason = "NO_EXECUTABLE_SELL_BOOK_HOLD"
+                local_exit_trigger = exit_reason
+                pos.applied_validations = list(
+                    dict.fromkeys(
+                        [
+                            *(pos.applied_validations or []),
+                            "current_sell_book_not_executable",
+                            "global_auction_inapplicable:no_executable_sell_book",
+                        ]
+                    )
+                )
+                summary["monitor_statistical_sell_no_book_holds"] = (
+                    summary.get("monitor_statistical_sell_no_book_holds", 0) + 1
+                )
             probability_content_identity = str(
                 global_sell_request_context["probability_content_identity"] or ""
             )
