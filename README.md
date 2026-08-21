@@ -48,8 +48,8 @@ A cycle prices every bin of every market in 54 cities. Applying Benjamini–Hoch
 candidates that already passed earlier filters would be selecting on the outcome. It runs
 across the full set tested that cycle. Above it sits a selection calibrator: each candidate
 is keyed by `(side, lead, bin class, probability bucket)` and its admission probability is
-replaced by a conservative 95% lower bound on how often that cell has historically settled
-in its favour — an empirical-Bayes beta-binomial bound, cascade-pooled when the cell is
+replaced by a one-sided 95% Wilson lower bound on how often that cell has historically
+settled in its favour, cascade-pooled to the narrowest sufficient sample when the cell is
 thin, fail-closed when its evidence is absent or stale.
 [→ Probability to edge](#probability-to-edge)
 
@@ -58,8 +58,9 @@ against that record.**
 When a market resolves, the position is graded into one of six classes — forecast-earned
 win, lucky win, foreseeable loss, miscalibration loss, stale-data decision, unattributable —
 against the probability frozen at decision time where that certificate exists, never one
-reconstructed afterwards. A missing certificate is counted as unattributable, published as a
-coverage failure, and never imputed. Attribution classifies the outcome relative to the
+reconstructed afterwards. Missing decision-probability evidence stays counted in the settled
+corpus, is published as a coverage failure, and is never imputed. Attribution classifies the
+outcome relative to the
 frozen evidence; it does not filter the reliability sample, which pools every scoreable
 decision, adverse ones included. Learning is strictly walk-forward — an outcome may change
 the next decision, never the record of the last one.
@@ -157,10 +158,10 @@ the action probability.
    claim.
 
 2. **Admission bound.** Each candidate is keyed by `(side, lead, bin class, probability
-   bucket)` and admitted at a conservative 95% lower bound on how often that cell has
-   historically settled in its favour — an empirical-Bayes beta-binomial bound over the
-   engine's own settled record, cascade-pooled when the cell is thin, fail-closed when its
-   evidence is absent or stale.
+   bucket)` and admitted at a one-sided 95% Wilson lower bound on how often that cell has
+   historically settled in its favour, over the engine's own settled record — cascade-pooled
+   to the narrowest sufficient sample when the cell is thin, fail-closed when its evidence
+   is absent or stale.
 
 3. **Edge.** A candidate must clear its executable all-in cost — price and the Polymarket
    taker fee `rate·p·(1−p)` — at its conservative bound, not at its point estimate.
@@ -282,14 +283,16 @@ launchd daemons designed for continuous operation.
 Three paths worth reading closely, each for a different reason:
 
 - [`src/decision/selection_calibrator.py`](src/decision/selection_calibrator.py) — the
-  admission lower bound, backed by a from-scratch, pure-Python regularized incomplete-beta
-  function and an empirical-Bayes bound over settled cells, with no SciPy in the hot path.
+  admission lower bound: a one-sided Wilson bound served over settled cells, with a
+  from-scratch, pure-Python regularized incomplete-beta function backing the offline
+  empirical-Bayes fitter — no SciPy in the hot path.
 - [`src/execution/command_bus.py`](src/execution/command_bus.py) — `IdempotencyKey`, a
   frozen value object with a deterministic factory whose collision probability is argued
   from first principles (birthday bound over a 128-bit key), not assumed away.
 - [`src/analysis/settlement_skill_attribution.py`](src/analysis/settlement_skill_attribution.py)
-  — grades every settled position into one of six skill/luck classes off an immutable,
-  decision-time certificate, so a lucky win can never be counted as evidence of skill.
+  — classifies settled positions into six skill/luck classes off immutable decision-time
+  evidence where it exists — missing-q rows stay explicit coverage failures — so a lucky
+  win can never be counted as evidence of skill.
 
 ## License
 
