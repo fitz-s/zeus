@@ -3342,7 +3342,7 @@ files:
   src/ingest/post_trade_capital_daemon.py:
     zone: K2_runtime
     authority_role: post_trade_capital_daemon
-    why: Launchable daemon boundary for P4 post-trade capital lifecycle so chain/redeem/wrap faults and WAL contention do not block live order decisions.
+    why: Launchable daemon boundary for P4 post-trade capital lifecycle so chain/redeem/wrap faults and WAL contention do not block live order decisions. It also refreshes the read-only current-regime after-cost capital evidence artifact in a killable bounded child; a normal FAIL verdict remains valid observational evidence, while timeout, process failure, or stale/invalid output fails only this scheduler-health job and never becomes order authority.
     downstream:
     - deploy/launchd/com.zeus.post-trade-capital.plist
   src/data/job_lock.py:
