@@ -931,7 +931,7 @@ scripts:
     write_targets: ["~/.openclaw/workspace-zeus-loss-investigator/"]
     external_inputs: [codex_binary, dedicated_nonlive_repair_worktree]
     required_tests: [tests/test_full_loss_investigation_loop.py]
-    reuse_when: "Continuously detect canonical settled positions with realized_pnl_usd <= -0.95*cost_basis_usd, create idempotent incidents, and trigger schema-validated ephemeral Codex investigations using only the dedicated full-loss memory registry."
+    reuse_when: "Continuously detect canonical settled positions whose cumulative realized loss is at least 95% of command-deduped confirmed entry-fill gross basis, retract economically corrected false incidents without deleting their trail, and trigger schema-validated ephemeral Codex investigations using only the dedicated full-loss memory registry."
     do_not_use_when: "Do not treat its investigation memory as canonical trade truth, let it write a live checkout or canonical DB, or use its output as proof that a repair is loaded or profitable."
     canonical_command: "python3 scripts/watch_full_loss_investigation.py --workspace ~/.openclaw/workspace-zeus-loss-investigator bootstrap|scan-once|daemon|status|record-repair|requeue"
     unguarded_write_rationale: "Writes only the declared isolated external investigation workspace; canonical Zeus DB access uses SQLite mode=ro."

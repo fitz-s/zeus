@@ -335,7 +335,19 @@ LOSS_COLUMNS = (
 )
 
 
-def scan_losses(db_path: Path, *, not_before: datetime, lookback_days: int = 7) -> list[dict[str, Any]]:
+def scan_loss_economics(
+    db_path: Path,
+    *,
+    not_before: datetime,
+    lookback_days: int = 7,
+) -> list[dict[str, Any]]:
+    """Return terminal losses with a whole-position capital denominator.
+
+    ``position_current.cost_basis_usd`` is the basis of the remaining slice.
+    A partial exit reduces it, while ``realized_pnl_usd`` remains cumulative.
+    Comparing those fields directly therefore creates false full losses.  The
+    command-deduped execution aggregate is the canonical gross entry basis.
+    """
     floor = max(not_before, utc_now() - timedelta(days=lookback_days)).isoformat()
     connection = open_read_only(str(db_path.resolve()), timeout=5)
     try:
@@ -343,15 +355,59 @@ def scan_losses(db_path: Path, *, not_before: datetime, lookback_days: int = 7) 
             f"""SELECT {LOSS_COLUMNS}
                 FROM position_current
                 WHERE phase = 'settled'
-                  AND cost_basis_usd > 0
-                  AND realized_pnl_usd <= -? * cost_basis_usd
+                  AND realized_pnl_usd < 0
                   AND settled_at >= ?
                 ORDER BY settled_at, position_id""",
-            (FULL_LOSS_RATIO, floor),
+            (floor,),
         ).fetchall()
-        return [dict(row) for row in rows]
+        try:
+            from src.state.db import query_entry_execution_fill_aggregate
+        except ImportError:
+            query_entry_execution_fill_aggregate = None
+
+        evaluated: list[dict[str, Any]] = []
+        for raw in rows:
+            row = dict(raw)
+            remaining_basis = float(row.get("cost_basis_usd") or 0.0)
+            gross_basis = remaining_basis
+            authority = "position_current_remaining_basis_fallback"
+            aggregate = None
+            if query_entry_execution_fill_aggregate is not None:
+                aggregate = query_entry_execution_fill_aggregate(
+                    connection,
+                    str(row["position_id"]),
+                    strict=False,
+                )
+            if aggregate:
+                filled_basis = float(aggregate.get("filled_cost_basis_usd") or 0.0)
+                if filled_basis > 0:
+                    gross_basis = max(remaining_basis, filled_basis)
+                    authority = "execution_fact_command_dedup_v1"
+            if gross_basis <= 0:
+                continue
+            realized = float(row["realized_pnl_usd"])
+            row.update(
+                gross_entry_cost_basis_usd=gross_basis,
+                capital_recovered_usd=max(0.0, gross_basis + realized),
+                loss_ratio=max(0.0, -realized / gross_basis),
+                loss_basis_authority=authority,
+            )
+            evaluated.append(row)
+        return evaluated
     finally:
         connection.close()
+
+
+def scan_losses(db_path: Path, *, not_before: datetime, lookback_days: int = 7) -> list[dict[str, Any]]:
+    return [
+        row
+        for row in scan_loss_economics(
+            db_path,
+            not_before=not_before,
+            lookback_days=lookback_days,
+        )
+        if float(row["loss_ratio"]) + 1e-12 >= FULL_LOSS_RATIO
+    ]
 
 
 def bootstrap_workspace(
@@ -409,22 +465,117 @@ def bootstrap_workspace(
     return {"workspace": str(workspace), "activation": activation, "config": config}
 
 
+def _detach_retracted_incident_from_root_cause(
+    workspace: Path,
+    *,
+    root_cause_id: str,
+    incident_id: str,
+) -> None:
+    cause_path = workspace / "memory" / "root_causes" / f"{root_cause_id}.json"
+    registry_path = workspace / "memory" / "root_causes" / "registry.json"
+    registry = read_json(registry_path, {"schema_version": SCHEMA_VERSION, "causes": {}})
+    registry_causes = registry.setdefault("causes", {})
+    cause = read_json(cause_path, registry_causes.get(root_cause_id, {}))
+    if not isinstance(cause, dict) or not cause:
+        return
+    incident_ids = [
+        value for value in cause.get("incident_ids", []) if str(value) != incident_id
+    ]
+    retracted = list(cause.get("retracted_incident_ids", []))
+    if incident_id not in retracted:
+        retracted.append(incident_id)
+    cause["incident_ids"] = incident_ids
+    cause["retracted_incident_ids"] = retracted[-200:]
+    cause["occurrence_count"] = len(incident_ids)
+    cause["last_updated_at"] = iso_now()
+    registry_causes[root_cause_id] = cause
+    registry["updated_at"] = iso_now()
+    atomic_json(cause_path, cause)
+    atomic_json(registry_path, registry)
+
+
+def _reconcile_incident_economics(
+    workspace: Path,
+    evaluated: list[dict[str, Any]],
+) -> dict[tuple[str, str], str]:
+    economics = {
+        (str(row["position_id"]), str(row["settled_at"])): row
+        for row in evaluated
+    }
+    existing_identity: dict[tuple[str, str], str] = {}
+    for path in (workspace / "runtime" / "incidents").glob("*.json"):
+        incident = read_json(path, {})
+        loss = incident.get("loss", {})
+        if not loss.get("position_id") or not loss.get("settled_at"):
+            continue
+        identity = (str(loss["position_id"]), str(loss["settled_at"]))
+        ident = str(incident["incident_id"])
+        existing_identity[identity] = ident
+        current = economics.get(identity)
+        if current is None or incident.get("status") == "batched":
+            continue
+        incident["loss"] = current
+        qualifies = float(current["loss_ratio"]) + 1e-12 >= FULL_LOSS_RATIO
+        if not qualifies and incident.get("status") != "retracted_not_full_loss":
+            prior_status = str(incident.get("status") or "unknown")
+            prior_root = incident.pop("root_cause_id", None)
+            incident["status"] = "retracted_not_full_loss"
+            incident["retracted_at"] = iso_now()
+            incident["retracted_from_status"] = prior_status
+            incident["retraction_reason"] = (
+                "whole-position loss ratio below threshold after command-deduped "
+                "entry-fill basis reconstruction"
+            )
+            incident.pop("batch_id", None)
+            incident.pop("next_attempt_at", None)
+            if prior_root:
+                incident["retracted_root_cause_id"] = prior_root
+                _detach_retracted_incident_from_root_cause(
+                    workspace,
+                    root_cause_id=str(prior_root),
+                    incident_id=ident,
+                )
+            append_event(
+                workspace,
+                "FULL_LOSS_RETRACTED",
+                incident_id=ident,
+                position_id=current["position_id"],
+                gross_entry_cost_basis_usd=current["gross_entry_cost_basis_usd"],
+                capital_recovered_usd=current["capital_recovered_usd"],
+                loss_ratio=current["loss_ratio"],
+            )
+        elif qualifies and incident.get("status") == "retracted_not_full_loss":
+            incident["status"] = "pending"
+            incident["restored_at"] = iso_now()
+            incident.pop("next_attempt_at", None)
+            append_event(
+                workspace,
+                "FULL_LOSS_RESTORED",
+                incident_id=ident,
+                position_id=current["position_id"],
+                loss_ratio=current["loss_ratio"],
+            )
+        atomic_json(path, incident)
+        atomic_json(workspace / "memory" / "incidents" / ident / "incident.json", incident)
+    return existing_identity
+
+
 def detect(workspace: Path, config: dict[str, Any]) -> list[str]:
     activation = read_json(workspace / "runtime" / "activation.json", {})
     if not activation.get("not_before"):
         raise RuntimeError("workspace is not bootstrapped")
-    rows = scan_losses(
+    evaluated = scan_loss_economics(
         Path(config["trades_db"]),
         not_before=parse_time(activation["not_before"]),
         lookback_days=int(activation.get("lookback_days", 7)),
     )
+    rows = [
+        row
+        for row in evaluated
+        if float(row["loss_ratio"]) + 1e-12 >= FULL_LOSS_RATIO
+    ]
     reset_blocked_if_contract_changed(workspace, config)
-    existing_identity: dict[tuple[str, str], str] = {}
-    for path in (workspace / "runtime" / "incidents").glob("*.json"):
-        prior = read_json(path, {})
-        loss = prior.get("loss", {})
-        if loss.get("position_id") and loss.get("settled_at"):
-            existing_identity[(str(loss["position_id"]), str(loss["settled_at"]))] = str(prior["incident_id"])
+    existing_identity = _reconcile_incident_economics(workspace, evaluated)
     created: list[str] = []
     for row in rows:
         identity = (str(row["position_id"]), str(row["settled_at"]))
@@ -449,6 +600,9 @@ def detect(workspace: Path, config: dict[str, Any]) -> list[str]:
             position_id=row["position_id"],
             settled_at=row["settled_at"],
             cost_basis_usd=row["cost_basis_usd"],
+            gross_entry_cost_basis_usd=row["gross_entry_cost_basis_usd"],
+            capital_recovered_usd=row["capital_recovered_usd"],
+            loss_ratio=row["loss_ratio"],
             realized_pnl_usd=row["realized_pnl_usd"],
         )
         created.append(ident)

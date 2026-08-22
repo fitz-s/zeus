@@ -10,6 +10,8 @@ import sqlite3
 from datetime import timedelta
 from pathlib import Path
 
+import pytest
+
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SPEC = importlib.util.spec_from_file_location(
@@ -36,6 +38,13 @@ def _db(path: Path) -> None:
             exit_reason TEXT, decision_law_id TEXT, position_origin TEXT
             , updated_at TEXT, last_monitor_prob_is_fresh INTEGER,
             last_monitor_market_price_is_fresh INTEGER
+        )"""
+    )
+    connection.execute(
+        """CREATE TABLE execution_fact (
+            intent_id TEXT PRIMARY KEY, position_id TEXT, order_role TEXT,
+            posted_at TEXT, filled_at TEXT, fill_price REAL, shares REAL,
+            terminal_exec_status TEXT, venue_status TEXT, command_id TEXT
         )"""
     )
     connection.commit()
@@ -76,6 +85,28 @@ def _insert(path: Path, position_id: str, cost: float, pnl: float, settled_at: s
     connection.close()
 
 
+def _entry_fill(path: Path, position_id: str, shares: float, price: float) -> None:
+    command_id = f"entry-{position_id}"
+    connection = sqlite3.connect(path)
+    connection.execute(
+        """INSERT INTO execution_fact (
+            intent_id, position_id, order_role, posted_at, filled_at,
+            fill_price, shares, terminal_exec_status, venue_status, command_id
+        ) VALUES (?, ?, 'entry', ?, ?, ?, ?, 'filled', 'FILLED', ?)""",
+        (
+            f"{position_id}:entry",
+            position_id,
+            loop.iso_now(),
+            loop.iso_now(),
+            price,
+            shares,
+            command_id,
+        ),
+    )
+    connection.commit()
+    connection.close()
+
+
 def _bootstrap(tmp_path: Path, db: Path) -> tuple[Path, dict]:
     repo = tmp_path / "repo"
     (repo / "state").mkdir(parents=True)
@@ -109,6 +140,65 @@ def test_detects_exact_threshold_once_and_ignores_non_loss(tmp_path: Path) -> No
     incident = loop.read_json(workspace / "runtime" / "incidents" / f"{first[0]}.json", {})
     assert incident["loss"]["position_id"] == "loss"
     assert incident["status"] == "pending"
+
+
+def test_partial_recovery_uses_gross_entry_basis_and_retracts_false_incident(
+    tmp_path: Path,
+) -> None:
+    db = tmp_path / "trades.db"
+    _db(db)
+    now = loop.iso_now()
+    _insert(db, "partial", 0.72, -2.12, now)
+    workspace, config = _bootstrap(tmp_path, db)
+
+    [ident] = loop.detect(workspace, config)
+    incident_path = workspace / "runtime" / "incidents" / f"{ident}.json"
+    incident = loop.read_json(incident_path, {})
+    incident["root_cause_id"] = "RC-PARTIAL"
+    loop.atomic_json(incident_path, incident)
+    cause = {
+        "root_cause_id": "RC-PARTIAL",
+        "incident_ids": [ident],
+        "occurrence_count": 1,
+    }
+    loop.atomic_json(
+        workspace / "memory" / "root_causes" / "RC-PARTIAL.json",
+        cause,
+    )
+    loop.atomic_json(
+        workspace / "memory" / "root_causes" / "registry.json",
+        {"schema_version": 1, "causes": {"RC-PARTIAL": cause}},
+    )
+    _entry_fill(db, "partial", 43.0, 0.09)
+
+    assert loop.detect(workspace, config) == []
+    incident = loop.read_json(
+        incident_path,
+        {},
+    )
+    assert incident["status"] == "retracted_not_full_loss"
+    assert incident["loss"]["gross_entry_cost_basis_usd"] == pytest.approx(3.87)
+    assert incident["loss"]["capital_recovered_usd"] == pytest.approx(1.75)
+    assert incident["loss"]["loss_ratio"] == pytest.approx(2.12 / 3.87)
+    corrected_cause = loop.read_json(
+        workspace / "memory" / "root_causes" / "RC-PARTIAL.json",
+        {},
+    )
+    assert corrected_cause["incident_ids"] == []
+    assert corrected_cause["occurrence_count"] == 0
+    assert corrected_cause["retracted_incident_ids"] == [ident]
+
+    connection = sqlite3.connect(db)
+    connection.execute(
+        "UPDATE position_current SET realized_pnl_usd = -3.8 WHERE position_id = 'partial'"
+    )
+    connection.commit()
+    connection.close()
+    assert loop.detect(workspace, config) == []
+    assert loop.read_json(incident_path, {})["status"] == "pending"
+    events = (workspace / "runtime" / "events.jsonl").read_text()
+    assert "FULL_LOSS_RETRACTED" in events
+    assert "FULL_LOSS_RESTORED" in events
 
 
 def test_activation_and_seven_day_window_are_both_enforced(tmp_path: Path) -> None:
