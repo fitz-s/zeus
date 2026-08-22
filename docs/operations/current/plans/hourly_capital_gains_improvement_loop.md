@@ -5,6 +5,12 @@
 
 ## 现状(forward)
 
+### 2026-08-22 B140 — supporting observation时钟不得冻结current remaining-path q
+- **实时反例:** 11:46Z完整global auction覆盖176个family，仅101 eligible；75个拒绝中50个为`GLOBAL_DAY0_FAST_OBSERVATION_ENTRY_STALE`。同一时刻source-clock ingest健康，城市最新METAR多为16–58分钟前，说明15分钟门槛把正常的小时级发布间隔误判为整个action q过期，而不是发现scheduler停摆。
+- **结构性根因与修复:** global Day0 action q随后会从canonical current-temperature ledger、完整hourly trajectories、remaining conditional error与observation-latency floor重建到decision time；source-clock conditioning在此仅是bound/provenance carrier。仅对本地目标日的global ENTRY允许该supporting clock超过15分钟，且仍必须成功构造完整current remaining-day simplex。direct source-clock action路径、缺carrier/current observation/vector/topology、invalid clock与submit JIT不一致继续fail closed；Day0 semantics升为v7，防止与旧realized cohort混池。
+- **SCOPE / DRAIN / RESET:** scope是一个current-local-day global ENTRY family的supporting-conditioning age检查，不改变q math、market ranking、Kelly或venue price。drain是同一cut完成remaining-path builder并经submit-time exact reproduction；reset是任一必需输入缺失/无效、remaining builder失败或路径不再使用current remaining q，此时原严格门槛立即恢复。
+- **验收:** integration antibody证明30分钟前supporting conditioning仍由current remaining simplex定价，同时remaining vectors不可用时仍零候选；direct helper原15分钟抗体不变。部署后先看stale拒绝数下降与eligible family恢复，再独立看global winner、venue fill、settlement与strict evaluator；候选恢复不是资本盈利证明。
+
 ### 2026-08-21 B137 — ENS尚未发布的future-cycle request不得消耗sole materializer
 - **实时反例:** 磁盘/RiskGuard恢复后，global scope 195 families仅4个entry-authoritative，171个因旧00Z carrier跨过24h进入`REPLACEMENT_STALENESS_RED_ENTRY_ISOLATED`。18Z deterministic providers已到，但18Z OpenData ENS两track每5分钟仍是48/48 `NOT_RELEASED`；queue仍把18Z requests启动subprocess，然后统一以`CAPTURE:CURRENT_EVIDENCE_NOT_LIVE`失败，使唯一writer在无法构造同same-cycle shape时做重复计算。
 - **修复:** 复用现有decision-time eligible ENS HWM读取；seed/request的source cycle若严格高于该family当前ENS HWM，在request build/subprocess前写`DEFERRED_SOURCE_CYCLE_AWAITING_ENSEMBLE_HWM` typed receipt并移出本轮队列。不生q、不使用旧shape、不改HWM/read-time或same-cycle probability law；ENS提交后原cycle-advance publisher重新生成request。

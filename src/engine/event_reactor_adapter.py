@@ -33137,8 +33137,12 @@ def _day0_replacement_conditioning(
     unit: str,
     decision_time: datetime,
     entry_authority: bool,
+    allow_stale_supporting_conditioning: bool = False,
 ) -> Mapping[str, object]:
     """Return the current observation conditioning carried by replacement q."""
+
+    if not isinstance(allow_stale_supporting_conditioning, bool):
+        raise ValueError("GLOBAL_DAY0_SUPPORTING_CONDITIONING_POLICY_INVALID")
 
     provenance = getattr(replacement_bundle, "provenance_json", None) or {}
     if not isinstance(provenance, Mapping):
@@ -33197,7 +33201,10 @@ def _day0_replacement_conditioning(
             age_seconds = (
                 decision_time.astimezone(UTC) - observation_time.astimezone(UTC)
             ).total_seconds()
-            if age_seconds > FAST_LANE_ENTRY_MAX_CACHE_AGE_S:
+            if (
+                age_seconds > FAST_LANE_ENTRY_MAX_CACHE_AGE_S
+                and not allow_stale_supporting_conditioning
+            ):
                 # SCOPE: only new ENTRY risk for this Day0 family; held redecision
                 # and reduce-only SELL continue on their independent authority.
                 # DRAIN: the station fast lane publishes its next causal print and
@@ -36052,6 +36059,25 @@ def _prepare_current_global_probability_family(
                         unit=str(omega.resolution.measurement_unit),
                         decision_time=decision_time,
                         entry_authority=entry_authority,
+                        # The source-clock observation is only a provenance
+                        # carrier when the action q is rebuilt from the current
+                        # remaining path below. Its age cannot freeze the whole
+                        # city between hourly provider publications: the
+                        # remaining-path builder prices the unobserved interval
+                        # through decision_time from the causal current-state
+                        # ledger. Direct source-clock action routes retain the
+                        # strict 15-minute gate above.
+                        # SCOPE: current-local-day global ENTRY only.
+                        # DRAIN: the remaining-path builder must produce a
+                        # complete current simplex before this family is usable.
+                        # RESET: a missing carrier/current observation/hourly
+                        # vector/topology or failed submit reproduction blocks
+                        # this family on the same cut.
+                        allow_stale_supporting_conditioning=(
+                            entry_authority
+                            and local_target == local_now.date()
+                            and _day0_remaining_day_q_enabled()
+                        ),
                     )
                     if bundle is not None
                     else None

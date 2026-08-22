@@ -3,7 +3,7 @@
 **Status:** Live replacement probability law. Runtime rows use `forecast_posteriors.runtime_layer='live'`; no second row-authority label or alternate runtime layer exists.
 **Supersedes:** `BAYES_PRECISION_FUSION_SPEC.md` (deleted).  
 **Created:** 2026-06-09  
-**Last audited:** 2026-08-22 (Day0 remaining-path point q separates conditional path error from the immutable full-day source-clock width; WU zero-transition Jeffreys prior is held/reduce-only and cannot authorize ENTRY; ENTRY/HELD JIT equality distinguishes exact action-q content from lane provenance)
+**Last audited:** 2026-08-22 (Day0 current remaining-path q cannot be suppressed by stale supporting-conditioning provenance; direct source-clock action q retains strict freshness; WU zero-transition Jeffreys prior is held/reduce-only and cannot authorize ENTRY)
 **Authority basis:** Commits 140d75ff6d · 6860f00a21 · edc598b440 · 94b584cc3f · 49492f1528 · 2b6936d3b5 · 9c594c9fc3 · df8199ef8e · e80c101c4c · 8541bc93cd · 8f20d39863 · a70436d478 · a1c2163e46 plus June 18 live-runtime cleanup. Historical experiment reports remain evidence only; they do not define the live execution layer.
 
 ---
@@ -223,6 +223,16 @@ not permission to fall back to historical residual width, an unbound path set,
 or a market-price anchor. Any change to this conditional operator increments
 `DAY0_PROBABILITY_SEMANTICS_REVISION`, so settlement attribution never pools the
 new law with an older realized-capital record.
+
+The source-clock observation clock is supporting provenance when the global
+action q is rebuilt from the current remaining-path random variable. Its age
+alone must not suppress statistical ENTRY between normal provider publications:
+the remaining-path builder prices the unresolved interval from the latest causal
+current-state ledger through decision time. This exception exists only when that
+builder produces a complete current simplex. Missing carrier identity, current
+observation, hourly trajectories, topology, or submit-time equality still fails
+closed. Any route that uses the source-clock posterior itself as action q retains
+the strict fast-observation ENTRY freshness contract.
 
 WU changed-payload revision history is a statistical modifier, not settlement
 truth. When one city has zero changed-payload transitions in the bounded causal
