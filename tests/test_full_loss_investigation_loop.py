@@ -265,6 +265,12 @@ def test_result_rejects_path_traversal_root_cause_id(tmp_path: Path) -> None:
     else:
         raise AssertionError("unsafe root cause id was accepted")
 
+    valid = {**result, "incidents": [{
+        "incident_id": "incident",
+        "root_cause_id": "RC-20260822-GLOBAL-REAUCTION-DRAIN-STALLED",
+    }]}
+    loop._validate_result(valid, batch)
+
 
 def test_repair_tracking_requires_live_proof(tmp_path: Path, monkeypatch) -> None:
     db = tmp_path / "trades.db"

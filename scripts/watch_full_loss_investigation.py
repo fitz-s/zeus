@@ -43,7 +43,7 @@ DEFAULT_CODEX = shutil.which("codex") or str(Path.home() / ".npm-global" / "bin"
 SCHEMA_VERSION = 1
 FULL_LOSS_RATIO = 0.95
 MAX_BATCH = 20
-ROOT_CAUSE_ID = re.compile(r"[a-z0-9][a-z0-9._-]{0,95}")
+ROOT_CAUSE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,95}")
 
 
 INVESTIGATOR_RULES = """# Zeus Full-Loss Investigator
