@@ -1339,8 +1339,8 @@ def _replacement_forecast_materialize_poll_job() -> None:
 
 
 @_scheduler_job(REPLACEMENT_FORECAST_DISCOVERY_JOB_ID)
-def _replacement_forecast_discovery_job() -> None:
-    """Run global recovery discovery without occupying the hot materialization lane."""
+def _replacement_forecast_discovery_job() -> dict[str, object] | None:
+    """Run global recovery discovery only when the hot materialization queue is idle."""
 
     global _replacement_forecast_last_discovery_revision
 
@@ -1352,6 +1352,27 @@ def _replacement_forecast_discovery_job() -> None:
     )
 
     cfg = _replacement_forecast_live_materialization_queue_config()
+    pending_stages = tuple(
+        stage
+        for stage, pending in (
+            ("request", _replacement_forecast_queue_pending(cfg, "request_dir")),
+            ("seed", _replacement_forecast_queue_pending(cfg, "seed_dir")),
+            ("inflight", _replacement_forecast_inflight_pending(cfg)),
+        )
+        if pending
+    )
+    if pending_stages:
+        # Global recovery is a backstop, never part of the hot q-production
+        # critical path. Its current-target/HWM scan is deliberately broad and
+        # can compete with the exact-family queue reads on the same forecast DB.
+        # SCOPE: discovery only; queued requests and seeds keep draining.
+        # DRAIN: the one-second materialization poll consumes every active stage.
+        # RESET: once all three stages are empty, the unchanged discovery
+        # revision remains unacknowledged and the next minute runs recovery.
+        return {
+            "status": "deferred_active_materialization_queue",
+            "pending_stages": pending_stages,
+        }
     revision = _replacement_forecast_discovery_revision(cfg)
     if revision is not None and revision == _replacement_forecast_last_discovery_revision:
         return

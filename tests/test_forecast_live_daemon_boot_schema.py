@@ -1,10 +1,11 @@
 # Created: 2026-07-20
-# Last reused/audited: 2026-08-10
+# Last reused/audited: 2026-08-22
 # Authority basis: operator-directed DB hot-path, fault-isolation, and committed ENS wake liveness.
 
 from __future__ import annotations
 
 import sqlite3
+from pathlib import Path
 
 import pytest
 
@@ -78,6 +79,100 @@ def test_replacement_materializer_serializes_forecast_db_writer(monkeypatch) -> 
     )
     assert daemon.REPLACEMENT_FORECAST_MATERIALIZE_MAX_INSTANCES == 1
     assert materialize[2]["max_instances"] == 1
+
+
+@pytest.mark.parametrize("stage", ("request", "seed", "inflight"))
+def test_replacement_recovery_discovery_yields_to_active_hot_queue(
+    monkeypatch, tmp_path: Path, stage: str
+) -> None:
+    request_dir = tmp_path / "requests"
+    seed_dir = tmp_path / "seeds"
+    inflight_dir = tmp_path / "inflight"
+    request_dir.mkdir()
+    seed_dir.mkdir()
+    inflight_dir.mkdir()
+    active_dir = {
+        "request": request_dir,
+        "seed": seed_dir,
+        "inflight": inflight_dir / "batch",
+    }[stage]
+    active_dir.mkdir(exist_ok=True)
+    (active_dir / "family.json").write_text("{}", encoding="utf-8")
+    cfg = {
+        "request_dir": request_dir,
+        "seed_dir": seed_dir,
+        "inflight_dir": inflight_dir,
+    }
+    monkeypatch.setattr(
+        production,
+        "_replacement_forecast_live_materialization_queue_config",
+        lambda: cfg,
+    )
+    monkeypatch.setattr(
+        daemon,
+        "_replacement_forecast_discovery_revision",
+        lambda _cfg: pytest.fail("active queue must preempt the broad DB scan"),
+    )
+
+    result = daemon._replacement_forecast_discovery_job.__wrapped__()
+
+    assert result == {
+        "status": "deferred_active_materialization_queue",
+        "pending_stages": (stage,),
+    }
+
+
+def test_replacement_recovery_discovery_resumes_after_hot_queue_drains(
+    monkeypatch, tmp_path: Path
+) -> None:
+    request_dir = tmp_path / "requests"
+    seed_dir = tmp_path / "seeds"
+    inflight_dir = tmp_path / "inflight"
+    request_dir.mkdir()
+    seed_dir.mkdir()
+    inflight_dir.mkdir()
+    cfg = {
+        "forecast_db": tmp_path / "forecasts.db",
+        "raw_manifest_dir": tmp_path / "raw",
+        "request_dir": request_dir,
+        "seed_dir": seed_dir,
+        "inflight_dir": inflight_dir,
+        "seed_discovery_limit": 10,
+    }
+    revision = ("current",)
+    daemon._replacement_forecast_last_discovery_revision = None
+    monkeypatch.setattr(
+        production,
+        "_replacement_forecast_live_materialization_queue_config",
+        lambda: cfg,
+    )
+    monkeypatch.setattr(
+        daemon,
+        "_replacement_forecast_discovery_revision",
+        lambda _cfg: revision,
+    )
+
+    class _Report:
+        status = "NO_ELIGIBLE_TARGETS"
+        reason_codes: tuple[str, ...] = ()
+        discovered_count = 0
+
+        @staticmethod
+        def as_dict() -> dict[str, object]:
+            return {"status": "NO_ELIGIBLE_TARGETS"}
+
+    calls: list[int] = []
+    monkeypatch.setattr(
+        "src.data.replacement_forecast_seed_discovery."
+        "discover_replacement_forecast_materialization_seeds",
+        lambda **kwargs: calls.append(int(kwargs["limit"])) or _Report(),
+    )
+    try:
+        assert daemon._replacement_forecast_discovery_job.__wrapped__() is None
+        assert calls == [10]
+        assert daemon._replacement_forecast_last_discovery_revision == revision
+    finally:
+        daemon._replacement_forecast_last_discovery_revision = None
 
 
 def test_forecast_live_boot_schema_fast_check_rejects_missing_live_index() -> None:
