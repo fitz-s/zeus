@@ -34,6 +34,8 @@ def _db(path: Path) -> None:
             no_token_id TEXT, condition_id TEXT, order_id TEXT,
             settled_at TEXT, settlement_price REAL, exit_price REAL,
             exit_reason TEXT, decision_law_id TEXT, position_origin TEXT
+            , updated_at TEXT, last_monitor_prob_is_fresh INTEGER,
+            last_monitor_market_price_is_fresh INTEGER
         )"""
     )
     connection.commit()
@@ -147,6 +149,8 @@ def test_dedicated_rules_and_ephemeral_prompt_forbid_memory_mixing(tmp_path: Pat
     assert "continuous timeline" in prompt
     assert "Never infer" in prompt
     assert "A personalized rule" in prompt
+    assert "Never run\n`sqlite3`" in rules
+    assert "Do not open or query live_repo/state/*.db directly" in prompt
     codex_home = Path(config["codex_home"])
     assert codex_home.parent == workspace
     assert not (codex_home / "memories").exists()
@@ -426,3 +430,82 @@ def test_launchd_runner_path_resolves_node_for_codex_npm_shim() -> None:
     path = payload["EnvironmentVariables"]["PATH"]
     assert "/opt/homebrew/bin" in path.split(":")
     assert "ZEUS_HOME_PLACEHOLDER/.npm-global/bin" in path.split(":")
+
+
+def test_capital_lane_guard_blocks_stale_open_monitor(tmp_path: Path) -> None:
+    db = tmp_path / "trades.db"
+    _db(db)
+    workspace, config = _bootstrap(tmp_path, db)
+    state = Path(config["repo_root"]) / "state"
+    loop.atomic_json(state / "daemon-heartbeat.json", {
+        "alive": True,
+        "timestamp": loop.iso_now(),
+    })
+    connection = sqlite3.connect(db)
+    connection.execute(
+        """INSERT INTO position_current(
+               position_id,phase,updated_at,last_monitor_prob_is_fresh,
+               last_monitor_market_price_is_fresh
+           ) VALUES (?,?,?,?,?)""",
+        ("open", "active", loop.iso_now(), 1, 1),
+    )
+    connection.commit()
+
+    assert loop.capital_lane_guard(config)["healthy"] is True
+
+    stale = (loop.utc_now() - timedelta(minutes=5)).isoformat()
+    connection.execute("UPDATE position_current SET updated_at=?", (stale,))
+    connection.commit()
+    connection.close()
+    guard = loop.capital_lane_guard(config)
+    assert guard["healthy"] is False
+    assert guard["reasons"] == ["open_monitor_overdue"]
+    assert guard["overdue"][0]["position_id"] == "open"
+
+
+def test_bounded_rows_enforces_row_ceiling(tmp_path: Path) -> None:
+    db = tmp_path / "rows.db"
+    connection = sqlite3.connect(db)
+    connection.execute("CREATE TABLE facts(id INTEGER PRIMARY KEY, value TEXT)")
+    connection.executemany(
+        "INSERT INTO facts(value) VALUES (?)",
+        [(str(index),) for index in range(10)],
+    )
+    connection.commit()
+    connection.close()
+
+    result = loop._bounded_rows(
+        db,
+        "SELECT * FROM facts ORDER BY id",
+        (),
+        seconds=1.0,
+        max_rows=3,
+    )
+
+    assert len(result["rows"]) == 3
+    assert result["truncated"] is True
+    assert result["error"] is None
+
+
+def test_capital_preemption_defers_without_runner_failure(tmp_path: Path) -> None:
+    db = tmp_path / "trades.db"
+    _db(db)
+    workspace, _config = _bootstrap(tmp_path, db)
+    incident_path = workspace / "runtime" / "incidents" / "incident.json"
+    batch_path = workspace / "runtime" / "batches" / "batch.json"
+    loop.atomic_json(incident_path, {"incident_id": "incident", "status": "batched"})
+    loop.atomic_json(batch_path, {
+        "batch_id": "batch",
+        "incident_ids": ["incident"],
+        "status": "running",
+    })
+    loop.atomic_json(workspace / "runtime" / "active.json", {"batch_id": "batch"})
+
+    loop.defer_active_batch(workspace, {"batch_id": "batch"}, "open_monitor_overdue")
+
+    incident = loop.read_json(incident_path, {})
+    batch = loop.read_json(batch_path, {})
+    assert incident["status"] == "pending"
+    assert "attempts" not in incident
+    assert batch["status"] == "capital_lane_deferred"
+    assert not (workspace / "runtime" / "active.json").exists()

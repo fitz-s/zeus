@@ -54,6 +54,12 @@ agent's sessions, or unrelated conversation memory.  Runtime and canonical DB
 facts outrank this memory.  Prior root causes are hypotheses to falsify, never
 authority.
 
+Canonical DB access is owned by the deterministic controller.  Consume only
+the bounded evidence bundle named in the invocation prompt.  Never run
+`sqlite3`, Python SQL, or another direct query against a live Zeus DB.  If the
+bundle is insufficient, return `insufficient_evidence` and name the exact
+missing evidence in `next_actions`; do not widen a query yourself.
+
 Do not mutate /Users/leofitz/zeus, operate tmux, stop/start other agents, or
 deploy.  A configured non-live worktree may be edited only when the invocation
 prompt explicitly says `repair_mode=workspace_write`.  Obey that repository's
@@ -116,6 +122,14 @@ repair_mode={repair_mode}
 live_repo={live_repo}
 analysis_repo={analysis_repo}
 loaded_sha_at_detection={loaded_sha}
+evidence_bundle={evidence_bundle}
+
+LIVE DATA CONTRACT:
+- The evidence bundle is a controller-produced, read-only, bounded projection.
+- Do not open or query live_repo/state/*.db directly.
+- Source files in analysis_repo may be inspected normally.
+- Missing evidence is an explicit result, never permission for an unbounded
+  production query.
 
 PRIOR ROOT-CAUSE REGISTRY (dedicated memory only):
 {root_causes}
@@ -373,6 +387,7 @@ def bootstrap_workspace(
         "repo_root": str(repo_root.resolve()),
         "repair_worktree": str(repair_worktree.resolve()) if repair_worktree else None,
         "trades_db": str((repo_root / "state" / "zeus_trades.db").resolve()),
+        "forecasts_db": str((repo_root / "state" / "zeus-forecasts.db").resolve()),
         "codex_bin": DEFAULT_CODEX,
         "codex_home": str(isolated_codex_home(workspace)),
         "model": model,
@@ -380,6 +395,11 @@ def bootstrap_workspace(
         "poll_seconds": 15,
         "agent_timeout_seconds": 2700,
         "max_batch": MAX_BATCH,
+        "max_open_monitor_age_seconds": 120,
+        "max_heartbeat_age_seconds": 90,
+        "evidence_query_seconds": 1.5,
+        "evidence_max_rows": 200,
+        "investigator_nice": 15,
     }
     atomic_json(workspace / "runtime" / "config.json", config)
     registry_path = workspace / "memory" / "root_causes" / "registry.json"
@@ -516,6 +536,216 @@ def repair_context(config: dict[str, Any]) -> tuple[Path, str, str]:
     return candidate, "workspace_write", "repair_worktree_clean"
 
 
+def capital_lane_guard(config: dict[str, Any]) -> dict[str, Any]:
+    """Prove that background investigation cannot preempt current capital work."""
+    repo = Path(config["repo_root"])
+    heartbeat = read_json(repo / "state" / "daemon-heartbeat.json", {})
+    now = utc_now()
+    reasons: list[str] = []
+    heartbeat_at = heartbeat.get("timestamp")
+    heartbeat_age: float | None = None
+    if not heartbeat.get("alive") or not heartbeat_at:
+        reasons.append("live_heartbeat_missing")
+    else:
+        try:
+            heartbeat_age = max(0.0, (now - parse_time(str(heartbeat_at))).total_seconds())
+            if heartbeat_age > float(config.get("max_heartbeat_age_seconds", 45)):
+                reasons.append("live_heartbeat_stale")
+        except (TypeError, ValueError):
+            reasons.append("live_heartbeat_invalid")
+
+    overdue: list[dict[str, Any]] = []
+    connection = open_read_only(str(Path(config["trades_db"]).resolve()), timeout=0.2)
+    try:
+        rows = connection.execute(
+            """SELECT position_id, updated_at, last_monitor_prob_is_fresh,
+                      last_monitor_market_price_is_fresh
+                 FROM position_current
+                WHERE phase IN ('active', 'day0_window', 'pending_exit')
+                ORDER BY position_id"""
+        ).fetchall()
+        limit = float(config.get("max_open_monitor_age_seconds", 120))
+        for row in rows:
+            try:
+                age = max(0.0, (now - parse_time(str(row["updated_at"]))).total_seconds())
+            except (TypeError, ValueError):
+                age = float("inf")
+            if age > limit:
+                overdue.append({"position_id": row["position_id"], "age_seconds": age})
+    finally:
+        connection.close()
+    incomplete = [
+        {
+            "position_id": row["position_id"],
+            "prob_fresh": row["last_monitor_prob_is_fresh"],
+            "market_fresh": row["last_monitor_market_price_is_fresh"],
+        }
+        for row in rows
+        if row["last_monitor_prob_is_fresh"] != 1
+        or row["last_monitor_market_price_is_fresh"] != 1
+    ]
+    if overdue:
+        reasons.append("open_monitor_overdue")
+    if incomplete:
+        reasons.append("open_monitor_authority_incomplete")
+    return {
+        "healthy": not reasons,
+        "checked_at": now.isoformat(),
+        "heartbeat_age_seconds": heartbeat_age,
+        "overdue": overdue,
+        "incomplete": incomplete,
+        "reasons": reasons,
+    }
+
+
+def _bounded_rows(
+    db_path: Path,
+    sql: str,
+    params: tuple[Any, ...],
+    *,
+    seconds: float,
+    max_rows: int,
+) -> dict[str, Any]:
+    """Run one indexed read with wall-clock and row-count ceilings."""
+    started = time.monotonic()
+    connection = open_read_only(str(db_path.resolve()), timeout=0.1)
+    try:
+        connection.set_progress_handler(
+            lambda: 1 if time.monotonic() - started > seconds else 0,
+            1_000,
+        )
+        rows = connection.execute(sql, params).fetchmany(max_rows + 1)
+        return {
+            "rows": [dict(row) for row in rows[:max_rows]],
+            "truncated": len(rows) > max_rows,
+            "error": None,
+            "elapsed_seconds": round(time.monotonic() - started, 6),
+        }
+    except Exception as exc:
+        return {
+            "rows": [],
+            "truncated": False,
+            "error": f"{type(exc).__name__}: {exc}",
+            "elapsed_seconds": round(time.monotonic() - started, 6),
+        }
+    finally:
+        connection.set_progress_handler(None, 0)
+        connection.close()
+
+
+def build_evidence_bundle(
+    config: dict[str, Any],
+    batch: dict[str, Any],
+    run_dir: Path,
+) -> Path:
+    """Materialize a small projection so the LLM never scans live databases."""
+    trades = Path(config["trades_db"])
+    forecasts = Path(config["forecasts_db"])
+    seconds = float(config.get("evidence_query_seconds", 1.5))
+    max_rows = int(config.get("evidence_max_rows", 200))
+    incidents: dict[str, Any] = {}
+    for incident in batch["incidents"]:
+        loss = incident["loss"]
+        position_id = str(loss["position_id"])
+        city = str(loss.get("city") or "")
+        target_date = str(loss.get("target_date") or "")[:10]
+        metric = str(loss.get("temperature_metric") or "")
+        condition_id = str(loss.get("condition_id") or "")
+        token_id = str(loss.get("token_id") or "")
+        commands = _bounded_rows(
+            trades,
+            "SELECT * FROM venue_commands WHERE position_id=? ORDER BY created_at, command_id",
+            (position_id,), seconds=seconds, max_rows=max_rows,
+        )
+        command_events: list[dict[str, Any]] = []
+        command_event_errors: list[str] = []
+        for command in commands["rows"][:50]:
+            result = _bounded_rows(
+                trades,
+                "SELECT * FROM venue_command_events WHERE command_id=? ORDER BY sequence_no",
+                (str(command["command_id"]),), seconds=seconds, max_rows=max_rows,
+            )
+            command_events.extend(result["rows"])
+            if result["error"]:
+                command_event_errors.append(result["error"])
+        incidents[str(incident["incident_id"])] = {
+            "incident": incident,
+            "position_events": _bounded_rows(
+                trades,
+                "SELECT * FROM position_events WHERE position_id=? ORDER BY sequence_no",
+                (position_id,), seconds=seconds, max_rows=max_rows,
+            ),
+            "venue_commands": commands,
+            "venue_command_events": {
+                "rows": command_events[:max_rows],
+                "truncated": len(command_events) > max_rows,
+                "error": "; ".join(command_event_errors) or None,
+            },
+            "market_events": _bounded_rows(
+                forecasts,
+                "SELECT * FROM market_events WHERE condition_id=? ORDER BY event_id",
+                (condition_id,), seconds=seconds, max_rows=20,
+            ) if condition_id else {"rows": [], "truncated": False, "error": "condition_id_missing"},
+            "settlement": _bounded_rows(
+                forecasts,
+                "SELECT * FROM settlements WHERE city=? AND target_date=? AND temperature_metric=?",
+                (city, target_date, metric), seconds=seconds, max_rows=5,
+            ),
+            "observations": _bounded_rows(
+                forecasts,
+                "SELECT * FROM observations WHERE city=? AND target_date=? ORDER BY source",
+                (city, target_date), seconds=seconds, max_rows=50,
+            ),
+            "live_posteriors": _bounded_rows(
+                forecasts,
+                """SELECT posterior_id, source_id, product_id, data_version, city,
+                          target_date, temperature_metric, source_cycle_time,
+                          source_available_at, computed_at, q_json, q_lcb_json,
+                          q_ucb_json, posterior_method, dependency_source_run_ids_json,
+                          posterior_identity_hash, provenance_json, recorded_at
+                     FROM forecast_posteriors
+                    WHERE runtime_layer='live' AND city=? AND target_date=?
+                      AND temperature_metric=?
+                    ORDER BY computed_at DESC, posterior_id DESC LIMIT ?""",
+                (city, target_date, metric, max_rows), seconds=seconds, max_rows=max_rows,
+            ),
+            "raw_forecast_frontier": _bounded_rows(
+                forecasts,
+                """SELECT raw_model_forecast_id, model, source_id, product_id, city,
+                          target_date, metric, source_cycle_time, source_available_at,
+                          captured_at, forecast_value_c, endpoint, provider, recorded_at
+                     FROM raw_model_forecasts
+                    WHERE city=? AND target_date=? AND metric=?
+                    ORDER BY raw_model_forecast_id DESC LIMIT ?""",
+                (city, target_date, metric, max_rows), seconds=seconds, max_rows=max_rows,
+            ),
+            "token_book_events": _bounded_rows(
+                trades,
+                """SELECT event_id, event_type, observed_at, available_at, received_at,
+                          causal_snapshot_id, payload_json
+                     FROM opportunity_events
+                    WHERE event_type IN ('BOOK_SNAPSHOT','BEST_BID_ASK_CHANGED')
+                      AND json_extract(payload_json, '$.token_id')=?
+                    ORDER BY available_at DESC LIMIT ?""",
+                (token_id, max_rows), seconds=seconds, max_rows=max_rows,
+            ) if token_id else {"rows": [], "truncated": False, "error": "token_id_missing"},
+        }
+        lane = capital_lane_guard(config)
+        if not lane["healthy"]:
+            raise RuntimeError(f"CAPITAL_LANE_PREEMPTED_EVIDENCE_BUILD:{lane['reasons']}")
+    path = run_dir / "evidence_bundle.json"
+    atomic_json(path, {
+        "schema_version": SCHEMA_VERSION,
+        "batch_id": batch["batch_id"],
+        "created_at": iso_now(),
+        "query_seconds_per_slice": seconds,
+        "max_rows_per_slice": max_rows,
+        "authority": "bounded_read_only_projection_of_canonical_dbs",
+        "incidents": incidents,
+    })
+    return path
+
+
 def create_batch(workspace: Path, config: dict[str, Any]) -> dict[str, Any] | None:
     if (workspace / "runtime" / "active.json").exists():
         return None
@@ -567,13 +797,21 @@ def recover_orphan_batches(workspace: Path) -> list[str]:
     return recovered
 
 
-def build_prompt(workspace: Path, config: dict[str, Any], batch: dict[str, Any], mode: str, repo: Path) -> str:
+def build_prompt(
+    workspace: Path,
+    config: dict[str, Any],
+    batch: dict[str, Any],
+    mode: str,
+    repo: Path,
+    evidence_bundle: Path,
+) -> str:
     registry = read_json(workspace / "memory" / "root_causes" / "registry.json", {"causes": {}})
     return PROMPT_TEMPLATE.format(
         repair_mode=mode,
         live_repo=config["repo_root"],
         analysis_repo=str(repo),
         loaded_sha=_loaded_sha(Path(config["repo_root"])) or "unknown",
+        evidence_bundle=str(evidence_bundle),
         root_causes=json.dumps(registry, ensure_ascii=False, indent=2, sort_keys=True),
         batch=json.dumps(batch, ensure_ascii=False, indent=2, sort_keys=True),
     )
@@ -586,8 +824,20 @@ def start_batch(workspace: Path, config: dict[str, Any], batch: dict[str, Any]) 
     prompt_path = run_dir / "prompt.md"
     result_path = run_dir / "last_message.json"
     log_path = run_dir / "codex.jsonl"
-    prompt_path.write_text(build_prompt(workspace, config, batch, mode, repo))
-    command = [
+    try:
+        evidence_bundle = build_evidence_bundle(config, batch, run_dir)
+    except Exception:
+        for ident in batch["incident_ids"]:
+            incident_path = workspace / "runtime" / "incidents" / f"{ident}.json"
+            incident = read_json(incident_path, {})
+            incident["status"] = "pending"
+            incident.pop("batch_id", None)
+            atomic_json(incident_path, incident)
+        batch["status"] = "evidence_build_deferred"
+        atomic_json(workspace / "runtime" / "batches" / f"{batch['batch_id']}.json", batch)
+        raise
+    prompt_path.write_text(build_prompt(workspace, config, batch, mode, repo, evidence_bundle))
+    codex_command = [
         config.get("codex_bin") or DEFAULT_CODEX,
         "exec", "--ephemeral", "--ignore-user-config",
         "--sandbox", "workspace-write" if mode == "workspace_write" else "read-only",
@@ -598,6 +848,14 @@ def start_batch(workspace: Path, config: dict[str, Any], batch: dict[str, Any]) 
         "--output-last-message", str(result_path),
         "--json", "-",
     ]
+    command = codex_command
+    if Path("/usr/bin/taskpolicy").exists():
+        command = ["/usr/bin/taskpolicy", "-b", *command]
+    if Path("/usr/bin/nice").exists():
+        command = [
+            "/usr/bin/nice", "-n", str(int(config.get("investigator_nice", 15))),
+            *command,
+        ]
     prompt_handle = prompt_path.open("rb")
     log_handle = log_path.open("wb")
     child_env = os.environ.copy()
@@ -635,6 +893,7 @@ def start_batch(workspace: Path, config: dict[str, Any], batch: dict[str, Any]) 
         "analysis_repo": str(repo),
         "repair_mode": mode,
         "repair_gate": gate,
+        "evidence_bundle": str(evidence_bundle),
     }
     batch["status"] = "running"
     batch["attempts"] = int(batch.get("attempts", 0)) + 1
@@ -787,11 +1046,43 @@ def complete_batch(workspace: Path, returncode: int | None = None) -> bool:
         return False
 
 
+def defer_active_batch(workspace: Path, active: dict[str, Any], reason: str) -> None:
+    """Return an investigation to pending without counting capital preemption as failure."""
+    batch_path = workspace / "runtime" / "batches" / f"{active['batch_id']}.json"
+    batch = read_json(batch_path, {})
+    next_attempt = (utc_now() + timedelta(minutes=5)).isoformat()
+    for ident in batch.get("incident_ids", []):
+        incident_path = workspace / "runtime" / "incidents" / f"{ident}.json"
+        incident = read_json(incident_path, {})
+        incident["status"] = "pending"
+        incident["next_attempt_at"] = next_attempt
+        incident.pop("batch_id", None)
+        atomic_json(incident_path, incident)
+    batch["status"] = "capital_lane_deferred"
+    batch["deferred_at"] = iso_now()
+    batch["defer_reason"] = reason
+    atomic_json(batch_path, batch)
+    (workspace / "runtime" / "active.json").unlink(missing_ok=True)
+    append_event(
+        workspace,
+        "BATCH_DEFERRED_FOR_CAPITAL_LANE",
+        batch_id=active["batch_id"],
+        reason=reason,
+        next_attempt_at=next_attempt,
+    )
+
+
 def process_alive(pid: int) -> bool:
     try:
         os.kill(pid, 0)
-        return True
-    except (ProcessLookupError, PermissionError):
+        state = subprocess.run(
+            ["/bin/ps", "-o", "state=", "-p", str(pid)],
+            capture_output=True,
+            text=True,
+            timeout=1,
+        ).stdout.strip()
+        return bool(state) and not state.startswith("Z")
+    except (ProcessLookupError, PermissionError, subprocess.TimeoutExpired):
         return False
 
 
@@ -836,6 +1127,31 @@ def status(workspace: Path) -> dict[str, Any]:
     active = read_json(workspace / "runtime" / "active.json", None)
     if isinstance(active, dict):
         active["process_alive"] = process_alive(int(active["pid"]))
+    config = read_json(workspace / "runtime" / "config.json", {})
+    activation = read_json(workspace / "runtime" / "activation.json", {})
+    coverage: dict[str, Any] | None = None
+    lane: dict[str, Any] | None = None
+    if isinstance(config, dict) and config.get("trades_db") and activation.get("not_before"):
+        activated = scan_losses(
+            Path(config["trades_db"]),
+            not_before=parse_time(activation["not_before"]),
+            lookback_days=int(activation.get("lookback_days", 7)),
+        )
+        window = scan_losses(
+            Path(config["trades_db"]),
+            not_before=utc_now() - timedelta(days=int(activation.get("lookback_days", 7))),
+            lookback_days=int(activation.get("lookback_days", 7)),
+        )
+        coverage = {
+            "activation_not_before": activation["not_before"],
+            "activation_full_losses": len(activated),
+            "lookback_full_losses": len(window),
+            "pre_activation_full_losses": max(0, len(window) - len(activated)),
+        }
+        try:
+            lane = capital_lane_guard(config)
+        except Exception as exc:
+            lane = {"healthy": False, "reasons": [f"guard_error:{type(exc).__name__}:{exc}"]}
     return {
         "schema_version": SCHEMA_VERSION,
         "workspace": str(workspace),
@@ -843,6 +1159,8 @@ def status(workspace: Path) -> dict[str, Any]:
         "active": active,
         "incidents": counts,
         "root_causes": len(read_json(workspace / "memory" / "root_causes" / "registry.json", {"causes": {}}).get("causes", {})),
+        "coverage": coverage,
+        "capital_lane": lane,
     }
 
 
@@ -974,10 +1292,24 @@ def run_daemon(workspace: Path) -> int:
                 elif (utc_now() - started).total_seconds() > int(config.get("agent_timeout_seconds", 2700)):
                     terminate_process_group(pid)
                     complete_batch(workspace, 124)
+                else:
+                    lane = capital_lane_guard(config)
+                    if not lane["healthy"]:
+                        append_event(
+                            workspace,
+                            "AGENT_PREEMPTED_FOR_CAPITAL_LANE",
+                            batch_id=active["batch_id"],
+                            reasons=lane["reasons"],
+                            overdue=lane["overdue"],
+                        )
+                        terminate_process_group(pid)
+                        defer_active_batch(workspace, active, ",".join(lane["reasons"]))
             else:
-                batch = create_batch(workspace, config)
-                if batch:
-                    start_batch(workspace, config, batch)
+                lane = capital_lane_guard(config)
+                if lane["healthy"]:
+                    batch = create_batch(workspace, config)
+                    if batch:
+                        start_batch(workspace, config, batch)
             atomic_json(
                 workspace / "runtime" / "heartbeat.json",
                 {
