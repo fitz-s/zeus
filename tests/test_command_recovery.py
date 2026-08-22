@@ -1,8 +1,8 @@
 # Created: 2026-04-26
-# Lifecycle: created=2026-04-26; last_reviewed=2026-08-21; last_reused=2026-08-21
+# Lifecycle: created=2026-04-26; last_reviewed=2026-08-22; last_reused=2026-08-22
 # Purpose: Lock INV-31 command recovery behavior plus snapshot-gated command inserts.
 # Reuse: Run when command recovery, command journal schema, or executable snapshot gating changes.
-# Last reused/audited: 2026-08-21
+# Last reused/audited: 2026-08-22
 # Authority basis: docs/operations/task_2026-04-26_execution_state_truth_p1_command_bus/implementation_plan.md u00a7P1.S4
 """INV-31 anchor tests: command recovery loop.
 
@@ -6105,6 +6105,7 @@ def _insert_actionable_certificate_for_recovery(
     direction: str = "buy_yes",
     payoff_q_point: float | None = None,
     quarantine: bool = False,
+    global_auction_binding: dict | None = None,
 ) -> str:
     q_lcb = max(0.0, q_live - 0.05)
     side = "YES" if direction == "buy_yes" else "NO"
@@ -6112,6 +6113,27 @@ def _insert_actionable_certificate_for_recovery(
     payoff_q_lcb = q_lcb
     cost = 0.05
     edge_lcb = payoff_q_lcb - cost
+    qkernel_execution_economics = {
+        "source": "qkernel_spine",
+        "side": side,
+        "candidate_id": f"{side}:bin-test:DIRECT_{side}:bin-test@proof",
+        "route_id": f"DIRECT_{side}:bin-test@proof",
+        "bin_id": "bin-test",
+        "payoff_q_point": payoff_q_point,
+        "payoff_q_lcb": payoff_q_lcb,
+        "cost": cost,
+        "edge_lcb": edge_lcb,
+        "delta_u_at_min": max(edge_lcb, 0.01),
+        "optimal_stake_usd": 10.0,
+        "optimal_delta_u": max(edge_lcb, 0.01),
+        "false_edge_rate": 0.01,
+        "direction_law_ok": True,
+        "coherence_allows": True,
+        "selection_guard_basis": "SELECTION_BETA_95",
+        "selection_guard_abstained": False,
+        "selection_guard_q_safe": payoff_q_lcb,
+    }
+    qkernel_execution_economics.update(global_auction_binding or {})
     payload = {
         "event_id": event_id,
         "event_type": "FORECAST_SNAPSHOT_READY",
@@ -6142,28 +6164,13 @@ def _insert_actionable_certificate_for_recovery(
         "native_quote_available": True,
         "side_effect_status": "ACTIONABLE_NOT_SUBMITTED",
         "selection_authority_applied": "qkernel_spine",
-        "qkernel_execution_economics": {
-            "source": "qkernel_spine",
-            "side": side,
-            "candidate_id": f"{side}:bin-test:DIRECT_{side}:bin-test@proof",
-            "route_id": f"DIRECT_{side}:bin-test@proof",
-            "bin_id": "bin-test",
-            "payoff_q_point": payoff_q_point,
-            "payoff_q_lcb": payoff_q_lcb,
-            "cost": cost,
-            "edge_lcb": edge_lcb,
-            "delta_u_at_min": max(edge_lcb, 0.01),
-            "optimal_stake_usd": 10.0,
-            "optimal_delta_u": max(edge_lcb, 0.01),
-            "false_edge_rate": 0.01,
-            "direction_law_ok": True,
-            "coherence_allows": True,
-            "selection_guard_basis": "SELECTION_BETA_95",
-            "selection_guard_abstained": False,
-            "selection_guard_q_safe": payoff_q_lcb,
-        },
+        "qkernel_execution_economics": qkernel_execution_economics,
         "final_intent_id": f"intent:{event_id}:{token_id}",
     }
+    if global_auction_binding:
+        payload["global_auction_receipt"] = global_auction_binding[
+            "global_auction_receipt"
+        ]
     payload_json = json.dumps(payload, sort_keys=True)
     payload_hash = hashlib.sha256(payload_json.encode()).hexdigest()
     cert_hash = hashlib.sha256((payload_json + ":cert").encode()).hexdigest()
@@ -6210,6 +6217,92 @@ def _insert_actionable_certificate_for_recovery(
             ),
         )
     return cert_hash
+
+
+def _insert_global_auction_receipt_for_recovery(
+    conn,
+    *,
+    event_id: str,
+) -> tuple[int, dict]:
+    from src.contracts.global_auction_receipt import (
+        GlobalAuctionReceiptRef,
+        global_auction_artifact_summary_hash,
+        global_auction_execution_binding_hash,
+    )
+
+    candidate_id = "global-candidate"
+    actuation_identity = "global-actuation"
+    selection_epoch_identity = "global-epoch"
+    summary = {
+        "schema_version": 22,
+        "global_selection_revision": (
+            "global_single_order_posterior_mean_expected_growth_v2"
+        ),
+        "selection_epoch_identity": selection_epoch_identity,
+        "selection_cut_at_utc": "2026-04-26T00:00:00+00:00",
+        "decision_at_utc": "2026-04-26T00:00:01+00:00",
+        "full_scope_identity": "scope",
+        "book_epoch_identity": "book",
+        "wealth_witness_identity": "wealth",
+        "wealth_economic_identity": "economics",
+        "winner_event_id": event_id,
+        "winner_candidate_id": candidate_id,
+        "winner_actuation_identity": actuation_identity,
+        "payload_identity": "1" * 64,
+        "decision_payload_identity": "2" * 64,
+        "audit_context_sha256": "3" * 64,
+        "book_native_side_states_sha256": "4" * 64,
+        "candidate_evaluations_sha256": "5" * 64,
+        "buy_minimum_marketable_repairs_sha256": "6" * 64,
+        "holding_auction_coverage_sha256": "7" * 64,
+        "portfolio_wealth": {
+            "ledger_snapshot_id": "ledger",
+            "position_set_hash": "positions",
+            "wealth_floor_usd": "18",
+            "wealth_ceiling_usd": "22",
+            "spendable_cash_usd": "10",
+            "reservations_usd": "2",
+            "collateral_authority": "CHAIN",
+        },
+    }
+    summary["execution_binding_hash"] = global_auction_execution_binding_hash(
+        summary
+    )
+    summary["receipt_hash"] = "8" * 64
+    summary["artifact_summary_hash"] = global_auction_artifact_summary_hash(summary)
+    cursor = conn.execute(
+        """
+        INSERT INTO decision_log (
+            mode, started_at, completed_at, artifact_json, timestamp, env
+        ) VALUES (?, ?, ?, ?, ?, 'live')
+        """,
+        (
+            "global_single_order_auction_delta",
+            "2026-04-26T00:00:00+00:00",
+            "2026-04-26T00:00:01+00:00",
+            json.dumps({"summary": summary}, sort_keys=True),
+            "2026-04-26T00:00:01+00:00",
+        ),
+    )
+    row_id = int(cursor.lastrowid)
+    receipt = GlobalAuctionReceiptRef(
+        decision_log_id=row_id,
+        decision_log_mode="global_single_order_auction_delta",
+        receipt_hash=summary["receipt_hash"],
+        execution_binding_hash=summary["execution_binding_hash"],
+        artifact_summary_hash=summary["artifact_summary_hash"],
+        schema_version=22,
+        winner_event_id=event_id,
+        winner_candidate_id=candidate_id,
+        winner_actuation_identity=actuation_identity,
+        selection_epoch_identity=selection_epoch_identity,
+    )
+    return row_id, {
+        "global_auction_receipt": receipt.as_payload(),
+        "global_candidate_id": candidate_id,
+        "global_actuation_identity": actuation_identity,
+        "global_selection_epoch_identity": selection_epoch_identity,
+    }
 
 
 def _insert_final_intent_certificate_for_recovery(
@@ -20820,6 +20913,98 @@ class TestRecoveryResolutionTable:
         assert trade_case["entry_method"] == "qkernel_spine"
         assert trade_case["p_posterior"] == pytest.approx(0.91)
         assert trade_case["entry_ci_width"] == pytest.approx(0.18)
+
+    def test_edli_filled_entry_recovery_binds_exact_global_auction_receipt(
+        self,
+        conn,
+        mock_client,
+    ):
+        """A recovered fill remains settlement-grade attributable to its winner cut."""
+
+        from src.execution.command_recovery import (
+            _verified_edli_global_auction_decision_log_id,
+            reconcile_unresolved_commands,
+        )
+        from src.state.venue_command_repo import append_event
+
+        event_id = "edli_evt_global_receipt_projection"
+        decision_id = (
+            f"edli_exec_cmd:{event_id}:intent:tok-001-no:tok-001-no:buy_no"
+        )
+        _insert(
+            conn,
+            decision_id=decision_id,
+            token_id="tok-001",
+            no_token_id="tok-001-no",
+            selected_token_id="tok-001-no",
+            outcome_label="NO",
+            size=5.0,
+            price=0.34,
+        )
+        _advance_to_acked(conn, venue_order_id="ord-global-receipt")
+        append_event(
+            conn,
+            command_id="cmd-001",
+            event_type="FILL_CONFIRMED",
+            occurred_at="2026-04-26T00:06:00Z",
+            payload={
+                "venue_order_id": "ord-global-receipt",
+                "venue_status": "MATCHED",
+            },
+        )
+        _append_trade_fact(
+            conn,
+            order_id="ord-global-receipt",
+            state="MATCHED",
+            filled_size="5",
+            fill_price="0.34",
+        )
+        receipt_row_id, global_binding = (
+            _insert_global_auction_receipt_for_recovery(
+                conn,
+                event_id=event_id,
+            )
+        )
+        certificate_hash = _insert_actionable_certificate_for_recovery(
+            conn,
+            event_id=event_id,
+            token_id="tok-001-no",
+            q_live=0.91,
+            direction="buy_no",
+            global_auction_binding=global_binding,
+        )
+        conn.execute("ATTACH DATABASE ':memory:' AS world")
+        conn.execute(
+            "CREATE TABLE world.decision_certificates AS "
+            "SELECT * FROM main.decision_certificates WHERE 0"
+        )
+        conn.execute(
+            "INSERT INTO world.decision_certificates "
+            "SELECT * FROM main.decision_certificates WHERE certificate_hash = ?",
+            (certificate_hash,),
+        )
+
+        mismatched = dict(global_binding)
+        mismatched["global_candidate_id"] = "different-candidate"
+        assert _verified_edli_global_auction_decision_log_id(
+            conn,
+            event_id=event_id,
+            economics=mismatched,
+        ) is None
+
+        summary = reconcile_unresolved_commands(conn, mock_client)
+        assert summary["filled_entry_projection_repair"]["advanced"] == 1
+        filled_payload = json.loads(
+            conn.execute(
+                """
+                SELECT payload_json
+                  FROM position_events
+                 WHERE position_id = 'pos-001'
+                   AND event_type = 'ENTRY_ORDER_FILLED'
+                """
+            ).fetchone()[0]
+        )
+        assert filled_payload["decision_log_id"] == receipt_row_id
 
     def test_edli_trade_case_marks_non_qkernel_actionable_as_venue_fact_recovery(
         self,

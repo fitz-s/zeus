@@ -4815,6 +4815,52 @@ def _causal_decision_log_rows(
     return rows
 
 
+def _verified_edli_global_auction_decision_log_id(
+    conn: sqlite3.Connection,
+    *,
+    event_id: str,
+    economics: Mapping[str, Any],
+) -> int | None:
+    """Recover the exact global receipt row already bound into EDLI evidence."""
+
+    receipt_payload = _json_mapping(economics.get("global_auction_receipt"))
+    if not receipt_payload or not _table_exists(conn, "decision_log"):
+        return None
+    try:
+        from src.contracts.global_auction_receipt import (
+            GlobalAuctionReceiptRef,
+            assert_global_auction_receipt_artifact,
+        )
+
+        receipt = GlobalAuctionReceiptRef.from_payload(receipt_payload)
+        receipt.assert_matches_actuation(
+            winner_event_id=event_id,
+            winner_candidate_id=economics.get("global_candidate_id"),
+            winner_actuation_identity=economics.get("global_actuation_identity"),
+            selection_epoch_identity=economics.get("global_selection_epoch_identity"),
+        )
+        row = conn.execute(
+            "SELECT mode, artifact_json FROM decision_log WHERE id = ?",
+            (receipt.decision_log_id,),
+        ).fetchone()
+        if row is None:
+            raise ValueError("GLOBAL_AUCTION_RECEIPT_ROW_MISSING")
+        assert_global_auction_receipt_artifact(
+            expected=receipt,
+            decision_log_id=receipt.decision_log_id,
+            decision_log_mode=str(row[0]),
+            artifact_json=row[1],
+        )
+    except (TypeError, ValueError) as exc:
+        logger.warning(
+            "recovery: EDLI global receipt binding unavailable event_id=%s error=%s",
+            event_id,
+            exc,
+        )
+        return None
+    return receipt.decision_log_id
+
+
 def _decision_log_trade_case_for_command(
     conn: sqlite3.Connection,
     command: dict,
@@ -4828,7 +4874,10 @@ def _decision_log_trade_case_for_command(
         # can manufacture ens_member_counting rows with zero posterior/economics
         # for orders that should instead remain unresolved/quarantined.
         edli_case = _edli_trade_case_for_command(conn, command, client=client)
-        return (edli_case, None) if edli_case else ({}, None)
+        if not edli_case:
+            return {}, None
+        receipt_id = edli_case.get("global_auction_decision_log_id")
+        return edli_case, int(receipt_id) if receipt_id is not None else None
 
     position_id = str(command.get("position_id") or "")
     token_id = str(command.get("token_id") or "")
@@ -5493,6 +5542,15 @@ def _edli_trade_case_for_command(
         if qkernel_point is not None and qkernel_lcb is not None:
             q_live = qkernel_point
             q_lcb = qkernel_lcb
+    global_auction_decision_log_id = (
+        _verified_edli_global_auction_decision_log_id(
+            conn,
+            event_id=event_id,
+            economics=qkernel_payload,
+        )
+        if isinstance(qkernel_payload, dict)
+        else None
+    )
     entry_ci_width = 0.0
     if q_live is not None and q_lcb is not None and q_live > q_lcb:
         entry_ci_width = min(1.0, max(0.0, 2.0 * float(q_live - q_lcb)))
@@ -5599,6 +5657,7 @@ def _edli_trade_case_for_command(
             or command.get("snapshot_id")
             or ""
         ),
+        "global_auction_decision_log_id": global_auction_decision_log_id,
         "size_usd": None,
     }
 

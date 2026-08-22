@@ -2897,3 +2897,32 @@ publication barrier.
   registry checks, and `git diff --check` must pass. Runtime closeout requires
   the exact loaded SHA and future receipts/aggregate events to agree with the
   canonical executor command and venue evidence.
+
+### Slice B133 — Preserve global winner receipt identity through fill projection repair (2026-08-22)
+
+- Live defect: a current-revision Dallas fill carried schema-22 global winner
+  receipt `523659` inside its verified EDLI qkernel economics, but command
+  recovery projected `ENTRY_ORDER_FILLED` with `decision_log_id=null`. The
+  venue fact and position were correct, while the decision-to-fill attribution
+  atom was severed, preventing later settlement from grading the exact winning
+  selection law.
+- First-principles invariant: recovered exposure must retain the same exact
+  globally selected decision identity as the command that caused it. Recovery
+  may copy a receipt id only after validating the typed receipt against the
+  EDLI event/candidate/actuation/epoch and re-reading the immutable
+  `decision_log` artifact with exact hash equality. Missing or mismatched
+  evidence still projects the authenticated fill but leaves attribution empty.
+- SCOPE: EDLI ENTRY fill/live projection recovery metadata only. DRAIN: every
+  recovery pass validates any embedded receipt and writes the id into the
+  append-only position event. RESET: a missing/malformed receipt remains null;
+  no search, inference, or historical backfill is attempted. Probability,
+  ranking, Kelly, order size, venue I/O, fill authority, and lifecycle are
+  unchanged.
+- Files authorized: `src/execution/command_recovery.py`,
+  `tests/test_command_recovery.py`, `architecture/test_topology.yaml`, and this
+  plan. Acceptance: a valid schema-22 receipt round-trips into
+  `ENTRY_ORDER_FILLED.decision_log_id`; a candidate mismatch fails closed to
+  null; focused command-recovery tests, compilation, planning lock, lint, and
+  `git diff --check` pass. Runtime closeout requires exact loaded SHA and a
+  future recovered ENTRY whose position event carries the same receipt id as
+  its verified EDLI certificate.
