@@ -3283,7 +3283,9 @@ class OpportunityEventReactor:
                     "GLOBAL_BOOK_RESPONSE_INCOMPLETE",
                     "GLOBAL_AUCTION_NO_CURRENT_PROBABILITY_FAMILY",
                     "GLOBAL_FAMILY_INELIGIBLE",
-                } or _is_day0_hourly_refresh_reason(last_reason):
+                } or _is_day0_hourly_refresh_reason(
+                    last_reason
+                ) or _is_posterior_staleness_reason(last_reason):
                     try:
                         snapshot_block_attempts = self._store.attempt_count(event.event_id)
                     except Exception:
