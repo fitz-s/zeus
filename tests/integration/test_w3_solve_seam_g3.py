@@ -5567,6 +5567,111 @@ def test_day0_buy_jit_requires_entry_and_held_probability_content_equality(
     conn.close()
 
 
+def test_day0_buy_jit_accepts_exact_q_with_lane_specific_provenance(
+    monkeypatch,
+):
+    from src.events.day0_authority import DAY0_PROBABILITY_SEMANTICS_REVISION
+
+    content = {
+        field: f"current-{field}"
+        for field in era._GLOBAL_PROBABILITY_CONTENT_FIELDS
+    }
+    content.update(
+        {
+            "q_version": (
+                f"day0-semrev:{DAY0_PROBABILITY_SEMANTICS_REVISION}:entry"
+            ),
+            "posterior_identity_hash": "entry-posterior",
+            "source_truth_identity": "entry-source",
+        }
+    )
+    selected = SimpleNamespace(
+        **content,
+        yes_point_q=np.asarray((0.2, 0.8), dtype=np.float64),
+        authority_certificate_hash="selected-cert",
+        witness_identity="selected-entry",
+    )
+    held_content = dict(content)
+    held_content.update(
+        {
+            "q_version": (
+                f"day0-semrev:{DAY0_PROBABILITY_SEMANTICS_REVISION}:held"
+            ),
+            "posterior_identity_hash": "held-posterior",
+            "source_truth_identity": "held-source",
+        }
+    )
+    held = SimpleNamespace(
+        **held_content,
+        yes_point_q=np.asarray((0.2, 0.8), dtype=np.float64),
+        authority_certificate_hash="held-cert",
+        witness_identity="current-held",
+    )
+
+    def prepare_current(*_args, **kwargs):
+        if kwargs["probability_use"] is era._CurrentProbabilityUse.ENTRY:
+            kwargs["day0_payload_out"].update({"q_source": "day0"})
+            witness = selected
+        else:
+            witness = held
+        return bridge.PreparedGlobalFamily(
+            decision_id="current-day0",
+            probability_witness=witness,
+            candidate_seeds=(),
+        )
+
+    monkeypatch.setattr(
+        era,
+        "_prepare_current_global_probability_family",
+        prepare_current,
+    )
+    candidate = _global_test_buy_candidate(
+        family_key=str(selected.family_key),
+        probability_witness_identity=str(selected.witness_identity),
+        book_identity="selected-book",
+        price="0.40",
+        captured_at=_dt.datetime(
+            2026, 7, 10, 20, 0, tzinfo=_dt.timezone.utc
+        ),
+        condition_id="c0",
+    )
+    conn = sqlite3.connect(":memory:")
+    rebound, _payload = era._current_global_actuation_prepared_family(
+        SimpleNamespace(event_type="DAY0_EXTREME_UPDATED"),
+        global_actuation=SimpleNamespace(
+            probability_witness=selected,
+            decision=SimpleNamespace(candidate=candidate),
+        ),
+        forecast_conn=conn,
+        topology_conn=conn,
+        observation_conn=conn,
+        decision_time=_dt.datetime(
+            2026, 7, 10, 20, 0, tzinfo=_dt.timezone.utc
+        ),
+    )
+
+    assert rebound.probability_witness is selected
+    assert era._global_probability_witness_content_mismatches(held, selected) == (
+        "q_version",
+        "posterior_identity_hash",
+        "source_truth_identity",
+    )
+    assert era._global_probability_action_content_mismatches(held, selected) == ()
+    retired_content = dict(held_content)
+    retired_content["q_version"] = "day0-semrev:retired-day0-v0:held"
+    retired = SimpleNamespace(
+        **retired_content,
+        yes_point_q=np.asarray((0.2, 0.8), dtype=np.float64),
+        authority_certificate_hash="retired-cert",
+        witness_identity="retired-held",
+    )
+    assert era._global_probability_action_content_mismatches(
+        retired,
+        selected,
+    ) == ("q_version",)
+    conn.close()
+
+
 def test_day0_buy_jit_blocks_probability_use_divergence_or_unavailable_held(
     monkeypatch,
 ):

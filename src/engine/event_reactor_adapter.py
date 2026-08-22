@@ -16958,7 +16958,7 @@ def _current_global_actuation_prepared_family(
         held_mismatches = (
             ("probability_witness",)
             if held_witness is None
-            else _global_probability_witness_content_mismatches(
+            else _global_probability_action_content_mismatches(
                 held_witness,
                 current_witness,
             )
@@ -34011,6 +34011,15 @@ _GLOBAL_PROBABILITY_CONTENT_FIELDS = (
     "sample_matrix_identity",
 )
 
+_GLOBAL_PROBABILITY_ACTION_CONTENT_FIELDS = (
+    "family_key",
+    "resolution_identity",
+    "topology_identity",
+    "band_alpha",
+    "band_basis",
+    "sample_matrix_identity",
+)
+
 
 def _global_probability_witness_content_matches(
     current: object,
@@ -34033,6 +34042,50 @@ def _global_probability_witness_content_mismatches(
         if getattr(current, field, None) != getattr(selected, field, None)
     )
     if not _global_probability_point_q_matches(current, selected):
+        mismatches += ("yes_point_q",)
+    return mismatches
+
+
+def _global_probability_action_content_mismatches(
+    current: object,
+    monitored: object,
+) -> tuple[str, ...]:
+    """Compare the q facts that can change one fixed action's economics.
+
+    ENTRY and HELD_MONITOR may serialize different causal provenance while
+    producing the exact same current probability distribution. That provenance
+    distinction remains in each immutable witness, but it cannot by itself make
+    an immediately monitored BUY economically divergent. A type, semantics,
+    topology, band, sample, binding, or point-q change still fails closed.
+    """
+
+    mismatches: tuple[str, ...] = ()
+    if type(current) is not type(monitored):
+        mismatches += ("witness_type",)
+    mismatches += tuple(
+        field
+        for field in _GLOBAL_PROBABILITY_ACTION_CONTENT_FIELDS
+        if getattr(current, field, None) != getattr(monitored, field, None)
+    )
+    if not str(getattr(current, "sample_matrix_identity", "") or "").strip():
+        if "sample_matrix_identity" not in mismatches:
+            mismatches += ("sample_matrix_identity",)
+    if tuple(getattr(current, "bindings", ()) or ()) != tuple(
+        getattr(monitored, "bindings", ()) or ()
+    ):
+        mismatches += ("bindings",)
+    current_q_version = str(getattr(current, "q_version", "") or "")
+    monitored_q_version = str(getattr(monitored, "q_version", "") or "")
+    if current_q_version != monitored_q_version:
+        from src.events.day0_authority import day0_probability_semantics_revision
+
+        current_revision = day0_probability_semantics_revision(current_q_version)
+        monitored_revision = day0_probability_semantics_revision(
+            monitored_q_version
+        )
+        if current_revision is None or current_revision != monitored_revision:
+            mismatches += ("q_version",)
+    if not _global_probability_point_q_matches(current, monitored):
         mismatches += ("yes_point_q",)
     return mismatches
 

@@ -3,7 +3,7 @@
 **Status:** Live replacement probability law. Runtime rows use `forecast_posteriors.runtime_layer='live'`; no second row-authority label or alternate runtime layer exists.
 **Supersedes:** `BAYES_PRECISION_FUSION_SPEC.md` (deleted).  
 **Created:** 2026-06-09  
-**Last audited:** 2026-08-22 (Day0 remaining-path point q separates conditional path error from the immutable full-day source-clock width; WU zero-transition Jeffreys prior is held/reduce-only and cannot authorize ENTRY)
+**Last audited:** 2026-08-22 (Day0 remaining-path point q separates conditional path error from the immutable full-day source-clock width; WU zero-transition Jeffreys prior is held/reduce-only and cannot authorize ENTRY; ENTRY/HELD JIT equality distinguishes exact action-q content from lane provenance)
 **Authority basis:** Commits 140d75ff6d · 6860f00a21 · edc598b440 · 94b584cc3f · 49492f1528 · 2b6936d3b5 · 9c594c9fc3 · df8199ef8e · e80c101c4c · 8541bc93cd · 8f20d39863 · a70436d478 · a1c2163e46 plus June 18 live-runtime cleanup. Historical experiment reports remain evidence only; they do not define the live execution layer.
 
 ---
@@ -232,6 +232,17 @@ REDUCE_ONLY_EXIT may use the same Jeffreys-Beta model at its zero-observation
 prior. The prior-only basis is serialized into the probability content and a
 new Day0 semantics revision; it never creates deterministic payoff support and
 cannot pass the ENTRY/HELD equality gate for a history-free BUY.
+
+For a Day0 BUY that has already passed current ENTRY authority, the immediate
+HELD_MONITOR gate compares the facts that can change that fixed action's
+economics: witness type, Day0 semantics revision, family/token bindings,
+resolution/topology, probability band, sample matrix, and point simplex. Both
+witnesses retain their own immutable source/posterior/certificate identities;
+those lane-specific provenance hashes may differ only when all action-q content
+above is exact. Any sample, point, topology, band, binding, witness-type, or
+semantics-revision change remains a candidate-local fail-closed divergence.
+This exception cannot legalize the history-free WU prior: ENTRY still fails
+before equality is evaluated, while the prior remains held/reduce-only.
 
 ### 1f. Finite current-evidence tail limit
 
