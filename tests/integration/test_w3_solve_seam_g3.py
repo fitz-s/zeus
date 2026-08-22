@@ -24681,12 +24681,14 @@ def test_global_batch_held_fallback_disables_buy_but_keeps_family_in_auction(
         captured_at_utc=decision_at,
         posterior_identity_hash="run-a",
         witness_identity="held-q",
+        probability_content_identity="held-q-content",
         q_version="held-q-version",
         family_binding_identity="held-binding",
         sample_matrix_identity="held-samples",
         band_alpha=0.05,
         band_basis="lower-tail",
     )
+    held_prepared = SimpleNamespace(probability_witness=witness)
     obligation = global_batch_runtime._CurrentHeldObligation(
         position_id="held-position",
         family_key=family_key,
@@ -24782,6 +24784,7 @@ def test_global_batch_held_fallback_disables_buy_but_keeps_family_in_auction(
         )
 
         selected_kwargs.update(kwargs)
+        selected_kwargs["prepared_by_event"] = _args[0]
         return PreparedGlobalAuctionResult(
             decision=GlobalSingleOrderDecision(
                 shares=Decimal("0"),
@@ -24822,7 +24825,7 @@ def test_global_batch_held_fallback_disables_buy_but_keeps_family_in_auction(
             False,
             item.event_id,
             item.causal_snapshot_id,
-            prepared_global_family=SimpleNamespace(probability_witness=witness),
+            prepared_global_family=held_prepared,
         ),
         actuate_winner=lambda *_: pytest.fail("cash-dominant auction must not actuate"),
         stamp_receipt=lambda receipt: receipt,
@@ -24844,6 +24847,116 @@ def test_global_batch_held_fallback_disables_buy_but_keeps_family_in_auction(
     assert result.held_sell_completion_cut.outcome == "CAPITAL_REJECTED"
     assert result.held_sell_completion_cut.holding_coverage == (coverage,)
 
+    if entry_only_reason.endswith("FamilyAuthorityUnavailable:test"):
+        entry_witness = SimpleNamespace(
+            **{
+                **vars(witness),
+                "witness_identity": "entry-q",
+                "probability_content_identity": "entry-q-content",
+            }
+        )
+        entry_prepared = SimpleNamespace(probability_witness=entry_witness)
+        held_prepare_calls = []
+        selected_kwargs.clear()
+        stored_kwargs.clear()
+        global_batch_runtime.process_current_global_batch(
+            (event,),
+            decision_time=decision_at,
+            world_conn=object(),
+            forecast_conn=object(),
+            trade_conn=object(),
+            payload_reader=lambda item: json.loads(item.payload_json),
+            prepare_event=lambda item, _at: EventSubmissionReceipt(
+                False,
+                item.event_id,
+                item.causal_snapshot_id,
+                prepared_global_family=entry_prepared,
+            ),
+            prepare_held_event=lambda item, _at: (
+                held_prepare_calls.append(item.event_id)
+                or EventSubmissionReceipt(
+                    False,
+                    item.event_id,
+                    item.causal_snapshot_id,
+                    prepared_global_family=held_prepared,
+                )
+            ),
+            actuate_winner=lambda *_: pytest.fail(
+                "cash-dominant auction must not actuate"
+            ),
+            stamp_receipt=lambda receipt: receipt,
+            venue_submit_count=lambda: 0,
+            current_execution=lambda *_: object(),
+            current_time_provider=lambda: decision_at,
+            portfolio_state_provider=lambda: object(),
+        )
+
+        assert held_prepare_calls == [event.event_id]
+        assert list(selected_kwargs["prepared_by_event"].values()) == [
+            held_prepared
+        ]
+        assert selected_kwargs["buy_disabled_family_keys"] == frozenset(
+            {family_key}
+        )
+        assert stored_kwargs["buy_disabled_reason_by_family"] == {
+            family_key: "GLOBAL_HELD_ENTRY_PROBABILITY_CONTENT_DIVERGED"
+        }
+
+        same_entry = bridge.PreparedGlobalFamily(
+            decision_id="entry-decision",
+            probability_witness=witness,
+            candidate_seeds=("entry-seed",),
+            day0_exit_authority_status="unavailable",
+            day0_exit_authority_reason="entry-authority",
+            sell_action_authority_identity="entry-sell-authority",
+        )
+        same_held = bridge.PreparedGlobalFamily(
+            decision_id="held-decision",
+            probability_witness=witness,
+            candidate_seeds=(),
+            day0_exit_authority_status="immature",
+            day0_exit_authority_reason="held-current-authority",
+            sell_action_authority_identity="held-sell-authority",
+        )
+        selected_kwargs.clear()
+        stored_kwargs.clear()
+        global_batch_runtime.process_current_global_batch(
+            (event,),
+            decision_time=decision_at,
+            world_conn=object(),
+            forecast_conn=object(),
+            trade_conn=object(),
+            payload_reader=lambda item: json.loads(item.payload_json),
+            prepare_event=lambda item, _at: EventSubmissionReceipt(
+                False,
+                item.event_id,
+                item.causal_snapshot_id,
+                prepared_global_family=same_entry,
+            ),
+            prepare_held_event=lambda item, _at: EventSubmissionReceipt(
+                False,
+                item.event_id,
+                item.causal_snapshot_id,
+                prepared_global_family=same_held,
+            ),
+            actuate_winner=lambda *_: pytest.fail(
+                "cash-dominant auction must not actuate"
+            ),
+            stamp_receipt=lambda receipt: receipt,
+            venue_submit_count=lambda: 0,
+            current_execution=lambda *_: object(),
+            current_time_provider=lambda: decision_at,
+            portfolio_state_provider=lambda: object(),
+        )
+
+        merged = next(iter(selected_kwargs["prepared_by_event"].values()))
+        assert merged.candidate_seeds == same_entry.candidate_seeds
+        assert merged.day0_exit_authority_status == "immature"
+        assert merged.day0_exit_authority_reason == "held-current-authority"
+        assert merged.sell_action_authority_identity == "held-sell-authority"
+        assert selected_kwargs["buy_disabled_family_keys"] == frozenset()
+        assert stored_kwargs["buy_disabled_reason_by_family"] == {}
+
     selected_kwargs.clear()
     stored_kwargs.clear()
     global_batch_runtime.process_current_global_batch(
@@ -24863,7 +24976,7 @@ def test_global_batch_held_fallback_disables_buy_but_keeps_family_in_auction(
             False,
             item.event_id,
             item.causal_snapshot_id,
-            prepared_global_family=SimpleNamespace(probability_witness=witness),
+            prepared_global_family=held_prepared,
         ),
         actuate_winner=lambda *_: pytest.fail(
             "book-omitted held family must not actuate"

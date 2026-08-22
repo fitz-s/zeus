@@ -652,6 +652,35 @@
   statistical payloads still fail before command persistence. Live
   command/venue/portfolio facts remain required before any profit claim.
 
+### 2026-08-22 — held-family probability authority is atomic with the global cut (B145)
+
+- **Observed defect:** Lucknow HIGH 31C NO filled 5.75 shares at 0.68 from an
+  ENTRY point q of about 0.799. The first held monitor then produced current
+  HELD q about 0.509 against an executable 0.67 bid, but every global SELL cut
+  rejected the action as `NON_POSITIVE_EXPECTED_OBJECTIVE` because it continued
+  pricing the held payoff at the ENTRY q.
+- **Root cause:** `process_current_global_batch` invoked the HELD probability
+  preparer only when ENTRY preparation failed. A held family whose ENTRY
+  witness remained constructible therefore used that witness for BUY, SELL,
+  HOLD, and CASH even when the independently current HELD witness had different
+  probability content.
+- **Contract:** every held family with a HELD preparer evaluates both authority
+  scopes. Equal probability content retains ENTRY candidate seeds but rebinds
+  the temporal SELL authority from HELD preparation. Divergent content selects
+  the HELD witness and disables BUY for that family; missing HELD authority or
+  missing content identity fails the family closed. The held-only witness may
+  release existing capital but cannot authorize new risk.
+- **SCOPE / DRAIN / RESET:** scope is one held family inside one immutable global
+  selection epoch. The next current cut drains by rebuilding ENTRY and HELD
+  witnesses; exact content equality restores BUY eligibility, while closure of
+  the holding removes the HELD obligation. No price, fee, depth, wealth, Kelly,
+  RiskGuard, venue, or settlement gate is weakened.
+- **Acceptance:** a held family with divergent ENTRY/HELD content reaches the
+  selector with HELD q and a typed BUY-disabled reason; equal content preserves
+  ENTRY seeds and uses HELD temporal SELL authority. Focused integration tests,
+  live receipts, command events, venue fills, and realized/settled capital
+  evidence remain separate proof lines; no open position is profit proof.
+
 ### 2026-08-02 — partial EXIT realized-PnL canonical continuity (hot-fix slice)
 
 - **Scope / seam:** `src/execution/exit_lifecycle.py` emits canonical

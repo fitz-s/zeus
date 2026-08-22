@@ -7406,24 +7406,71 @@ def process_current_global_batch(
             owner = claimed_by_family.get(family_key, scope_event)
             prepared_receipt = prepare_event(scope_event, scope_at)
             prepared = prepared_receipt.prepared_global_family
-            if prepared is None:
-                failure_receipt = prepared_receipt
-                held_prepare_attempted = bool(
-                    prepare_held_event is not None
-                    and family_key in held_obligation_family_keys
-                )
-                if held_prepare_attempted:
-                    held_receipt = prepare_held_event(scope_event, scope_at)
-                    prepared = held_receipt.prepared_global_family
-                    if prepared is not None:
+            failure_receipt = prepared_receipt
+            held_prepare_attempted = bool(
+                prepare_held_event is not None
+                and family_key in held_obligation_family_keys
+            )
+            if held_prepare_attempted:
+                held_receipt = prepare_held_event(scope_event, scope_at)
+                held_prepared = held_receipt.prepared_global_family
+                if held_prepared is None:
+                    prepared = None
+                    failure_receipt = held_receipt
+                elif prepared is None:
+                    prepared = held_prepared
+                    held_only_family_keys.add(family_key)
+                    held_only_buy_disabled_reasons[family_key] = str(
+                        prepared_receipt.reason
+                        or "GLOBAL_CURRENT_PROBABILITY_PREPARE_FAILED"
+                    )
+                else:
+                    entry_content = _probability_content_identity(
+                        prepared.probability_witness
+                    )
+                    held_content = _probability_content_identity(
+                        held_prepared.probability_witness
+                    )
+                    if not entry_content or not held_content:
+                        prepared = None
+                        failure_receipt = EventSubmissionReceipt(
+                            False,
+                            scope_event.event_id,
+                            scope_event.causal_snapshot_id,
+                            reason=(
+                                "GLOBAL_HELD_ENTRY_PROBABILITY_CONTENT_IDENTITY_MISSING"
+                            ),
+                            proof_accepted=False,
+                        )
+                    elif entry_content != held_content:
+                        # The held-capital action must consume the same current q
+                        # as its monitor. A broader ENTRY witness may still be
+                        # valid for adding risk, but it cannot price SELL/HOLD.
+                        # Use the held witness for this family and remove BUY so
+                        # relaxed held-only evidence cannot authorize new risk.
+                        prepared = held_prepared
                         held_only_family_keys.add(family_key)
-                        held_only_buy_disabled_reasons[family_key] = str(
-                            prepared_receipt.reason
-                            or "GLOBAL_CURRENT_PROBABILITY_PREPARE_FAILED"
+                        held_only_buy_disabled_reasons[family_key] = (
+                            "GLOBAL_HELD_ENTRY_PROBABILITY_CONTENT_DIVERGED"
                         )
                     else:
-                        failure_receipt = held_receipt
-                if prepared is None and (
+                        # Equal probability content permits BUY and SELL to share
+                        # one simplex, but temporal SELL authority still belongs
+                        # to the held-purpose preparation.
+                        prepared = replace(
+                            prepared,
+                            day0_exit_authority_status=(
+                                held_prepared.day0_exit_authority_status
+                            ),
+                            day0_exit_authority_reason=(
+                                held_prepared.day0_exit_authority_reason
+                            ),
+                            sell_action_authority_identity=(
+                                held_prepared.sell_action_authority_identity
+                            ),
+                        )
+            if prepared is None:
+                if (
                     held_prepare_attempted
                     or _current_probability_ineligible(prepared_receipt)
                 ):
@@ -7432,11 +7479,10 @@ def process_current_global_batch(
                     if family_key in claimed_by_family:
                         ineligible_by_event[owner.event_id] = reason
                     continue
-                if prepared is None:
-                    return reject(
-                        "GLOBAL_PREPARED_FAMILY_INCOMPLETE:"
-                        f"{family_key}:{prepared_receipt.reason or 'missing'}"
-                    )
+                return reject(
+                    "GLOBAL_PREPARED_FAMILY_INCOMPLETE:"
+                    f"{family_key}:{prepared_receipt.reason or 'missing'}"
+                )
             if not _forecast_carrier_matches(
                 scope_event,
                 payload_reader(scope_event),
