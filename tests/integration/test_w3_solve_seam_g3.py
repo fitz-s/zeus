@@ -7956,8 +7956,10 @@ def test_current_day0_global_probability_uses_current_remaining_day_simplex(
     )
 
     observed_extreme = {"value": 69.0}
+    conditioning_reads: list[Mapping[str, object] | None] = []
 
     def current_observation_payload(*_args, **kwargs):
+        conditioning_reads.append(kwargs["conditioning"])
         base_identity = kwargs["probability_base_identity"]
         rounded = observed_extreme["value"]
         return {
@@ -8123,6 +8125,49 @@ def test_current_day0_global_probability_uses_current_remaining_day_simplex(
             q_lcb=0.3,
         )
     assert replacement_bound_reads == 1
+    provisional_conditioning = source_clock_bundle.provenance_json.pop(
+        "day0_provisional_observation"
+    )
+    source_clock_bundle.provenance_json["day0_conditioning"] = {
+        **provisional_conditioning,
+        "source": "aviationweather_metar",
+        "observation_time": "2026-07-11T17:50:00+00:00",
+    }
+    statistical_payload: dict[str, object] = {}
+    statistical = era._prepare_current_global_probability_family(
+        _global_day0_scope_event(city="Dallas", source_run_id="run-dallas"),
+        forecast_conn=forecast,
+        topology_conn=forecast,
+        observation_conn=observations,
+        decision_time=_dt.datetime(2026, 7, 11, 18, 0, tzinfo=_dt.timezone.utc),
+        max_age=_dt.timedelta(seconds=30),
+        day0_payload_out=statistical_payload,
+    )
+    assert statistical.probability_witness.yes_point_q.tolist() == pytest.approx(
+        [0.0, 0.2, 0.8]
+    )
+    assert conditioning_reads[-1]["source"] == "aviationweather_metar"
+    source_clock_bundle.provenance_json["day0_conditioning"] = {
+        **source_clock_bundle.provenance_json["day0_conditioning"],
+        "observation_time": "2026-07-11T17:30:00+00:00",
+    }
+    with pytest.raises(
+        ValueError, match="GLOBAL_DAY0_FAST_OBSERVATION_ENTRY_STALE"
+    ):
+        era._prepare_current_global_probability_family(
+            _global_day0_scope_event(city="Dallas", source_run_id="run-dallas"),
+            forecast_conn=forecast,
+            topology_conn=forecast,
+            observation_conn=observations,
+            decision_time=_dt.datetime(
+                2026, 7, 11, 18, 0, tzinfo=_dt.timezone.utc
+            ),
+            max_age=_dt.timedelta(seconds=30),
+        )
+    source_clock_bundle.provenance_json.pop("day0_conditioning")
+    source_clock_bundle.provenance_json[
+        "day0_provisional_observation"
+    ] = provisional_conditioning
     caps = {
         row[:4]: row[4]
         for row in prepared.candidate_payoff_q_lcb_caps
@@ -8133,7 +8178,7 @@ def test_current_day0_global_probability_uses_current_remaining_day_simplex(
     assert day0_payload[
         "_edli_day0_provisional_boundary_survival_probability"
     ] == pytest.approx(0.6)
-    assert revision_prior_permissions == [False]
+    assert revision_prior_permissions == [False, False]
     assert witness.yes_point_q.tolist() == pytest.approx([0.0, 0.2, 0.8])
     assert day0_payload["_edli_day0_source_clock_bound_posterior_identity"]
 
@@ -8152,7 +8197,7 @@ def test_current_day0_global_probability_uses_current_remaining_day_simplex(
         probability_use=era._CurrentProbabilityUse.HELD_MONITOR,
     )
     held_witness = held.probability_witness
-    assert replacement_bound_reads == 1
+    assert replacement_bound_reads == 3
     assert held_witness.yes_point_q.tolist() == pytest.approx(
         witness.yes_point_q.tolist()
     )
@@ -8162,7 +8207,7 @@ def test_current_day0_global_probability_uses_current_remaining_day_simplex(
     assert held_payload[
         "_edli_day0_provisional_boundary_survival_probability"
     ] == pytest.approx(0.6)
-    assert revision_prior_permissions == [False, True]
+    assert revision_prior_permissions == [False, False, True]
 
     capture_time["value"] = "2026-07-11T17:31:00+00:00"
     recaptured_payload: dict[str, object] = {}
@@ -8185,7 +8230,7 @@ def test_current_day0_global_probability_uses_current_remaining_day_simplex(
     assert witness.probability_content_identity != (
         recaptured.probability_witness.probability_content_identity
     )
-    assert revision_prior_permissions == [False, True, False]
+    assert revision_prior_permissions == [False, False, True, False]
 
     missing_observations = sqlite3.connect(":memory:")
     with pytest.raises(ValueError, match="GLOBAL_DAY0_OBSERVATION_HWM_UNAVAILABLE"):

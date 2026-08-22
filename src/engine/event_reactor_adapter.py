@@ -32722,13 +32722,18 @@ def _live_yes_probabilities(
                 raise ValueError(
                     "GLOBAL_DAY0_PROVISIONAL_REPLACEMENT_BUNDLE_MISSING"
                 )
+            probability_conditioning_is_provisional = (
+                _replacement_uses_provisional_day0_conditioning(
+                    replacement_bundle
+                )
+            )
             current_observation = _global_day0_execution_payload(
                 event,
                 family=family,
                 resolution=resolution,
                 conditioning=_day0_replacement_conditioning(
                     replacement_bundle,
-                    provisional=True,
+                    provisional=probability_conditioning_is_provisional,
                     metric=str(family.metric),
                     unit=unit,
                     decision_time=decision_time,
@@ -32752,10 +32757,11 @@ def _live_yes_probabilities(
                     ),
                 }
             )
-            _assert_provisional_day0_replacement_bundle(
-                replacement_bundle,
-                current_observation,
-            )
+            if probability_conditioning_is_provisional:
+                _assert_provisional_day0_replacement_bundle(
+                    replacement_bundle,
+                    current_observation,
+                )
             payload.update(current_observation)
             probability_block = _global_day0_probability_authority_payload(
                 current_observation
@@ -33213,6 +33219,18 @@ def _assert_provisional_day0_replacement_bundle(
         )
     ):
         raise ValueError("GLOBAL_DAY0_PROVISIONAL_POSTERIOR_IDENTITY_MISMATCH")
+
+
+def _replacement_uses_provisional_day0_conditioning(
+    replacement_bundle: object,
+) -> bool:
+    """Return whether the current posterior q uses the provisional overlay."""
+
+    provenance = getattr(replacement_bundle, "provenance_json", None) or {}
+    if not isinstance(provenance, Mapping):
+        return False
+    provisional = provenance.get("day0_provisional_observation")
+    return isinstance(provisional, Mapping) and provisional.get("active") is True
 
 
 def _day0_replacement_conditioning(
@@ -35662,6 +35680,7 @@ def _prepare_current_global_probability_family(
     post_local_incomplete_monitor_authority = False
     provisional_day0_fact: Mapping[str, object] | None = None
     fast_residual_conditioning: Mapping[str, object] | None = None
+    probability_conditioning_is_provisional = False
     physical_frontier_requires_confirmation = False
     final_daily_observation = None
     source_available_at = ""
@@ -35931,6 +35950,9 @@ def _prepare_current_global_probability_family(
             source_cycle_raw = bundle.source_cycle_time
             source_available_at = str(bundle.source_available_at or "").strip()
             day0_base_identity = posterior_identity_hash
+            probability_conditioning_is_provisional = (
+                _replacement_uses_provisional_day0_conditioning(bundle)
+            )
             fast_residual_conditioning = _fast_residual_day0_conditioning(
                 bundle
             )
@@ -35965,7 +35987,7 @@ def _prepare_current_global_probability_family(
                 raise ValueError(
                     "GLOBAL_DAY0_PHYSICAL_FRONTIER_NOT_SETTLEMENT_CONFIRMED"
                 )
-            if provisional_day0_observation:
+            if probability_conditioning_is_provisional:
                 _assert_provisional_day0_replacement_bundle(
                     bundle,
                     {
@@ -36083,7 +36105,7 @@ def _prepare_current_global_probability_family(
                 conditioning=(
                     _day0_replacement_conditioning(
                         bundle,
-                        provisional=provisional_day0_observation,
+                        provisional=probability_conditioning_is_provisional,
                         metric=str(family.metric),
                         unit=str(omega.resolution.measurement_unit),
                         decision_time=decision_time,
@@ -36109,7 +36131,7 @@ def _prepare_current_global_probability_family(
                     raise ValueError(
                         "GLOBAL_DAY0_PROVISIONAL_REPLACEMENT_BUNDLE_MISSING"
                     )
-            elif provisional_day0_observation:
+            elif probability_conditioning_is_provisional:
                 if fast_residual_conditioning is not None:
                     _assert_provisional_day0_replacement_bundle(
                         bundle,
@@ -37322,7 +37344,13 @@ def _replacement_authority_probability_and_fdr_proof(
             day0_evidence_finality,
         )
 
-        if day0_evidence_finality(payload) == DAY0_PROVISIONAL_CURRENT_SNAPSHOT:
+        if (
+            day0_evidence_finality(payload)
+            == DAY0_PROVISIONAL_CURRENT_SNAPSHOT
+            and _replacement_uses_provisional_day0_conditioning(
+                replacement_bundle
+            )
+        ):
             _assert_provisional_day0_replacement_bundle(
                 replacement_bundle,
                 payload,
