@@ -6113,6 +6113,7 @@ def _global_current_entry_feasibility_rejection_reason(
             )
             maker_gate_is_atomic = (
                 execution_mode == "MAKER_REST"
+                and side == "NO"
                 and risk_gate_sources == {"risk_action:gate"}
                 and _risk_action_gate_is_market_alpha_only(
                     strategy_policy_conn,
@@ -6125,13 +6126,13 @@ def _global_current_entry_feasibility_rejection_reason(
             ):
                 # The proof solve is side-effect-free and shares the exact live
                 # q/book/wealth cut, so it may expose the economic frontier hidden
-                # by an automated performance gate. Live maker-rest proposals are
-                # also atomic: they remain contingent on a fill, already require
-                # an exitable seed, and the submit-time JIT gate requires full
-                # selected-share pre-cliff liquidation capacity. SCOPE: only this
-                # maker proposal escapes an automated revision gate; taker and
-                # manual gates stay. DRAIN: RiskGuard keeps grading the exact
-                # revision. RESET: a validated/expired gate restores ordinary
+                # by an automated performance gate. Live NO maker-rest proposals
+                # are also atomic: they remain contingent on a fill, already
+                # require an exitable seed, and the submit-time JIT gate requires
+                # full selected-share pre-cliff liquidation capacity. SCOPE: only
+                # this NO maker proposal escapes an automated revision gate; YES,
+                # taker, and manual gates stay. DRAIN: RiskGuard keeps grading the
+                # exact revision. RESET: a validated/expired gate restores ordinary
                 # strategy admission.
                 strategy_block = None
             if strategy_block is not None:

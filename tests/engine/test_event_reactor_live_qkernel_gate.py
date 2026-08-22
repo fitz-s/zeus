@@ -2849,6 +2849,10 @@ def test_global_current_entry_feasibility_proof_observes_through_only_automated_
     market_alpha_only[0] = True
     assert era._global_current_entry_feasibility_rejection_reason(
         candidate, **kwargs
+    ) == reason[0]
+    candidate.side = "NO"
+    assert era._global_current_entry_feasibility_rejection_reason(
+        candidate, **kwargs
     ) is None
 
     reason[0] = (
