@@ -5661,6 +5661,10 @@ def _terminal_held_sell_reauction_receipts(
     """
 
     from src.execution.exit_safety import can_submit_replacement_sell
+    from src.events.day0_authority import (
+        DAY0_ABSORBING_FINALITIES,
+        day0_evidence_finality,
+    )
     from src.runtime.reactor_wake import (
         HELD_SELL_REAUCTION_V4,
         POSITION_NO_LONGER_EXPOSED,
@@ -5923,6 +5927,22 @@ def _terminal_held_sell_reauction_receipts(
         if not isinstance(obligation, dict):
             continue
         validations = monitor_payload.get("applied_validations")
+        probability_receipt = monitor_payload.get("monitor_probability_receipt")
+        hard_fact_evidence = (
+            probability_receipt.get("hard_fact_evidence")
+            if isinstance(probability_receipt, dict)
+            else None
+        )
+        hard_fact_source = (
+            str(hard_fact_evidence.get("source") or "").strip()
+            if isinstance(hard_fact_evidence, dict)
+            else ""
+        )
+        hard_fact_finality = (
+            day0_evidence_finality(hard_fact_evidence)
+            if isinstance(hard_fact_evidence, dict)
+            else ""
+        )
         probability = monitor_payload.get("last_monitor_prob")
         if isinstance(probability, bool):
             continue
@@ -5958,6 +5978,8 @@ def _terminal_held_sell_reauction_receipts(
             or not isinstance(validations, list)
             or "day0_absorbing_hard_fact" not in validations
             or "day0_hard_fact_structural_win_hold" not in validations
+            or not hard_fact_source
+            or hard_fact_finality not in DAY0_ABSORBING_FINALITIES
         ):
             continue
         for request in position_requests:
@@ -6038,6 +6060,8 @@ def _terminal_held_sell_reauction_receipts(
                     monitor_selected_method="day0_absorbing_hard_fact",
                     monitor_should_exit=False,
                     monitor_trigger="DAY0_HARD_FACT_STRUCTURAL_WIN_HOLD",
+                    hard_fact_source=hard_fact_source,
+                    hard_fact_finality=hard_fact_finality,
                 )
             )
     return tuple(receipts)

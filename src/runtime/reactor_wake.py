@@ -207,6 +207,8 @@ class HeldSellReauctionReceipt:
     monitor_selected_method: str = ""
     monitor_should_exit: bool | None = None
     monitor_trigger: str = ""
+    hard_fact_source: str = ""
+    hard_fact_finality: str = ""
 
 
 @dataclass(frozen=True)
@@ -1694,6 +1696,10 @@ def _held_sell_reauction_receipt_from_payload(
             ).strip(),
             monitor_should_exit=payload.get("monitor_should_exit"),
             monitor_trigger=str(payload.get("monitor_trigger") or "").strip(),
+            hard_fact_source=str(payload.get("hard_fact_source") or "").strip(),
+            hard_fact_finality=str(
+                payload.get("hard_fact_finality") or ""
+            ).strip(),
         )
     except (KeyError, TypeError, ValueError):
         return None
@@ -2027,6 +2033,11 @@ def _structural_win_supersession_receipt_valid(
 ) -> bool:
     """Validate one exact V4 debt superseded by a later absorbing win."""
 
+    from src.events.day0_authority import (
+        DAY0_ABSORBING_FINALITIES,
+        day0_evidence_finality,
+    )
+
     if isinstance(receipt.monitor_probability, bool):
         return False
     try:
@@ -2060,6 +2071,14 @@ def _structural_win_supersession_receipt_valid(
         and receipt.monitor_selected_method == "day0_absorbing_hard_fact"
         and receipt.monitor_should_exit is False
         and receipt.monitor_trigger == "DAY0_HARD_FACT_STRUCTURAL_WIN_HOLD"
+        and receipt.hard_fact_finality in DAY0_ABSORBING_FINALITIES
+        and day0_evidence_finality(
+            {
+                "source": receipt.hard_fact_source,
+                "evidence_finality": receipt.hard_fact_finality,
+            }
+        )
+        == receipt.hard_fact_finality
     )
 
 

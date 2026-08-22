@@ -1,6 +1,6 @@
 # Created: 2026-07-30
-# Last reused/audited: 2026-08-08
-# Lifecycle: created=2026-07-30; last_reviewed=2026-08-08; last_reused=2026-08-08
+# Last reused/audited: 2026-08-22
+# Lifecycle: created=2026-07-30; last_reviewed=2026-08-22; last_reused=2026-08-22
 # Authority basis: operator-directed held SELL terminal-wake hotfix.
 """Held SELL terminal-wake completion antibodies."""
 
@@ -453,6 +453,9 @@ def _install_structural_win_reader(
             "exit_decision_trigger": "DAY0_HARD_FACT_STRUCTURAL_WIN_HOLD",
             "last_monitor_prob": 1.0,
             "last_monitor_prob_is_fresh": True,
+            "monitor_probability_receipt": {
+                "hard_fact_evidence": {"source": "ogimet_metar_lfpg"}
+            },
             "selected_method": "day0_absorbing_hard_fact",
             "target_date": request.family[1],
         }
@@ -595,6 +598,9 @@ def test_structural_win_supersedes_exact_v4_debt_after_terminal_command(
         {"monitor_sequence_no": 10},
         {"monitor_probability_is_fresh": False},
         {"held_token_id": "different-held-token"},
+        {"hard_fact_source": ""},
+        {"hard_fact_finality": ""},
+        {"hard_fact_source": "wu_icao_history"},
     ),
 )
 def test_structural_win_receipt_rejects_invalid_proof_or_lineage(
@@ -654,6 +660,17 @@ def test_structural_win_cannot_supersede_nonterminal_or_unknown_command(
         ({"selected_method": "model_only_v1"}, None, 10, 11),
         ({"exit_decision_should_exit": True}, None, 10, 11),
         ({"exit_decision_trigger": "SELL_REVERSAL"}, None, 10, 11),
+        ({"monitor_probability_receipt": {}}, None, 10, 11),
+        (
+            {
+                "monitor_probability_receipt": {
+                    "hard_fact_evidence": {"source": "wu_icao_history"}
+                }
+            },
+            None,
+            10,
+            11,
+        ),
         (None, {"attempt_identity": "stale-attempt"}, 10, 11),
         (None, {"schema_version": 3}, 10, 11),
         (None, {"schema_version": None}, 10, 11),
