@@ -1279,7 +1279,11 @@ def _update_registry(workspace: Path, result: dict[str, Any]) -> None:
         previous = causes.get(cause_id, {})
         first_seen = previous.get("first_seen_at") or iso_now()
         merged = {**previous, **update, "root_cause_id": cause_id, "first_seen_at": first_seen, "last_seen_at": iso_now()}
-        incident_ids = list(previous.get("incident_ids", []))
+        incident_ids = list(dict.fromkeys(
+            str(incident_id)
+            for incident_id in previous.get("incident_ids", [])
+            if str(incident_id or "").strip()
+        ))
         incident_ids.extend(
             row["incident_id"]
             for row in result.get("incidents", [])
