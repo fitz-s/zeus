@@ -3197,7 +3197,7 @@ class EventStore:
                        AND attempt_count = ?
                     """,
                     (
-                        None if targeted else not_before,
+                        not_before,
                         (
                             GLOBAL_WINNER_TARGETED_CLAIM
                             if targeted

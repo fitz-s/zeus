@@ -11263,6 +11263,7 @@ def test_fenced_global_target_without_command_requeues_for_retry_and_boot():
         target.event_id,
         claimed_at=claimed_at,
         attempt_count=attempt_count,
+        not_before="2026-05-24T18:01:00+00:00",
         last_error="GLOBAL_SELL_EXECUTION_FAILED",
     )
     assert tuple(
@@ -11271,7 +11272,11 @@ def test_fenced_global_target_without_command_requeues_for_retry_and_boot():
             "FROM opportunity_event_processing WHERE consumer_name=? AND event_id=?",
             (store.consumer_name, target.event_id),
         ).fetchone()
-    ) == ("pending", None, GLOBAL_WINNER_TARGETED_CLAIM)
+    ) == (
+        "pending",
+        "2026-05-24T18:01:00+00:00",
+        GLOBAL_WINNER_TARGETED_CLAIM,
+    )
 
     assert store.claim(
         target.event_id,
