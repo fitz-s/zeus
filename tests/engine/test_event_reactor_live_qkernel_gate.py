@@ -4468,6 +4468,47 @@ def _day0_payload(**overrides) -> dict:
     return payload
 
 
+def test_statistical_day0_probability_does_not_require_absorbing_source_parents():
+    event = SimpleNamespace(event_type="DAY0_EXTREME_UPDATED")
+    decision_time = datetime(2026, 8, 22, 2, 21, tzinfo=timezone.utc)
+    statistical = _day0_payload(
+        probability_authority="day0_remaining_day_global_probability_v1",
+        q_source="day0_remaining_day",
+        _edli_q_source="day0_remaining_day",
+        settlement_source="wu_icao_history",
+    )
+
+    assert (
+        era._day0_live_source_parent_certificates(
+            event=event,
+            payload=statistical,
+            base_certs=(),
+            decision_time=decision_time,
+        )
+        == ()
+    )
+
+    deterministic = _day0_payload(
+        probability_authority="day0_deterministic_bin_payoff_v1",
+        q_source="day0_deterministic_bin_payoff",
+        _edli_q_source="day0_deterministic_bin_payoff",
+        settlement_source="wu_icao_history",
+    )
+    with pytest.raises(
+        ValueError,
+        match=(
+            "DAY0_SOURCE_PARENT_AUTHORITY_BLOCKED:"
+            "day0 evidence is not absorbing:PROVISIONAL_CURRENT_SNAPSHOT"
+        ),
+    ):
+        era._day0_live_source_parent_certificates(
+            event=event,
+            payload=deterministic,
+            base_certs=(),
+            decision_time=decision_time,
+        )
+
+
 def test_live_entry_day0_observation_does_not_qualify_remaining_probability():
     payload = _day0_payload(
         **_day0_probability_fields(),

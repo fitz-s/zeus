@@ -24303,6 +24303,22 @@ def _day0_live_source_parent_certificates(
         return ()
     if _uses_replacement_probability_authority(payload):
         return ()
+    q_source = str(
+        payload.get("_edli_q_source") or payload.get("q_source") or ""
+    ).strip()
+    probability_authority = str(
+        payload.get("probability_authority") or ""
+    ).strip()
+    if (
+        q_source == "day0_remaining_day"
+        and probability_authority
+        == "day0_remaining_day_global_probability_v1"
+    ):
+        # Remaining-day q is a current statistical simplex. Its observation and
+        # forecast inputs already belong to the probability witness; it must not
+        # acquire deterministic DAY0_AUTHORITY / ABSORBING_BOUNDARY parents.
+        # Exact payoff witnesses continue through the absorbing checks below.
+        return ()
 
     from src.events.day0_authority import (
         Day0AuthorityError,

@@ -547,6 +547,33 @@
   conditioning still raises the exact identity mismatch. Focused probability
   tests and live preflight receipts precede any order or profit claim.
 
+### 2026-08-22 — statistical Day0 certificates do not claim absorbing truth (B141)
+
+- **Observed defect:** B140 reached a stable preflight for a globally selected
+  Shenzhen LOW NO candidate (5 shares, $3.306875 cost, q_mean 0.778, expected EV
+  +$0.658792), but final certificate construction rejected the order because WU
+  intraday evidence was provisional rather than absorbing.
+- **Root cause:** live entry authority already accepts the typed current
+  `day0_remaining_day_global_probability_v1` statistical simplex, but the
+  certificate parent builder routed every non-replacement Day0 probability
+  through the deterministic `DAY0_AUTHORITY` + `ABSORBING_BOUNDARY` seam. That
+  mislabeled probability evidence as settlement certainty and blocked the same
+  statistical action the global optimizer had lawfully selected.
+- **Contract:** the exact `day0_remaining_day` statistical authority carries no
+  deterministic source parents. Its current observation, remaining trajectory,
+  probability witness, qkernel economics, and submit-time JIT validation remain
+  mandatory. `day0_deterministic_bin_payoff` continues to require absorbing
+  evidence and fails closed on provisional WU/HKO truth.
+- **SCOPE / DRAIN / RESET:** scope is final certificate construction for one
+  typed remaining-day statistical candidate. Each auction/JIT build drains by
+  reconstructing its current probability and executable economics; a malformed
+  authority pair, changed witness, or nonpositive economics remains rejected.
+  Deterministic hard-fact authority is unchanged.
+- **Acceptance:** the exact statistical authority returns no hard-fact parents;
+  the same provisional payload relabeled as deterministic still raises
+  `DAY0_SOURCE_PARENT_AUTHORITY_BLOCKED`. Focused certificate and global JIT
+  tests, then live command/venue receipts, precede any capital-gain claim.
+
 ### 2026-08-02 — partial EXIT realized-PnL canonical continuity (hot-fix slice)
 
 - **Scope / seam:** `src/execution/exit_lifecycle.py` emits canonical
