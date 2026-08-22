@@ -491,6 +491,33 @@
   posterior generation from those retained seeds after ENS commit. Rollback is
   the B138 hot-fix commits.
 
+### 2026-08-22 — Day0 v5 bootstrap without a missing-history blanket gate (B139)
+
+- **Observed defect:** after 18Z probability recovery, the exact global proof
+  solve selected a current Day0 v5 BUY with positive posterior-mean EV,
+  delta-log-wealth, and confidence-cost margin, while the live solve rejected
+  every Day0 BUY solely because the new revision had zero settled shadow
+  clusters. The no-money shadow could eventually drain the gate after future
+  settlements, but the blanket wait discarded the current time-sensitive
+  positive-capital opportunity despite complete decision-time evidence.
+- **Contract:** qkernel keeps its pretrade proof gate while its current live
+  after-cost curve is nonpositive. Day0 v5 missing or inconclusive shadow
+  history remains observable but does not gate; only an explicitly rejected
+  cohort bound to the same probability revision, current global selector, and
+  executable capital law emits the existing revision-scoped gate. Source and
+  quote freshness, Brier rejection, absolute price band, expected EV/log
+  growth, Kelly, global ranking, and submit-time JIT checks remain cumulative.
+- **SCOPE / DRAIN / RESET:** scope is Day0 v5 risk-increasing BUY admission;
+  SELL/HOLD/CASH and qkernel policy are unchanged. Shadow and realized
+  settlement evidence continue to drain each RiskGuard tick. A direct
+  market-over-model rejection reaches the existing e-value threshold and
+  resets the revision to gated; a new semantics revision owns a new cohort.
+- **Acceptance:** a no-evidence Day0 cohort produces observation telemetry and
+  no gate, while a directly rejected Day0 cohort still produces the exact
+  revision-scoped gate; qkernel missing proof remains gated. Focused RiskGuard
+  tests and live risk-action expiry precede any order claim. Capital success
+  still requires venue facts, settlements, and the strict evaluator.
+
 ### 2026-08-02 — partial EXIT realized-PnL canonical continuity (hot-fix slice)
 
 - **Scope / seam:** `src/execution/exit_lifecycle.py` emits canonical

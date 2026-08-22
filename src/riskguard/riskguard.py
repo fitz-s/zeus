@@ -5733,18 +5733,13 @@ def _tick_once() -> RiskLevel:
                 required_evalue=market_relative_alpha_evalue,
             )
         )
-        day0_market_relative_alpha_gate_reason = (
-            _market_relative_alpha_gate_reason(
-                day0_probability_semantics_binding,
-                day0_market_relative_alpha_evidence,
-                required_evalue=market_relative_alpha_evalue,
-            )
-        )
-        day0_market_relative_alpha_gate_revisions = (
-            _market_relative_alpha_unproven_revisions(
-                day0_probability_semantics_binding,
-                day0_market_relative_alpha_evidence,
-            )
+        (
+            day0_market_relative_alpha_gate_reason,
+            day0_market_relative_alpha_gate_revisions,
+        ) = _market_relative_alpha_rejection_gate_reason(
+            day0_probability_semantics_binding,
+            day0_market_relative_alpha_evidence,
+            required_evalue=market_relative_alpha_evalue,
         )
         day0_market_relative_alpha_gate_required = (
             day0_market_relative_alpha_gate_reason is not None
@@ -5897,12 +5892,13 @@ def _tick_once() -> RiskLevel:
         recommended_control_reasons: dict[str, list[str]] = {}
         recommended_strategy_gate_reasons: dict[str, list[str]] = {}
         recommended_strategy_gate_scopes: dict[str, set[str]] = {}
-        # Current q/book/wealth economics rank actions only after the exact
-        # probability revision has proved positive capital value. Both qkernel
-        # and Day0 revisions earn admission from the no-money global-auction
-        # shadow before risking capital. The shadow continues while gated and
-        # later verified settlements reset the exact revision-scoped gate. Held
-        # monitoring and exits are outside this entry-only policy.
+        # Qkernel retains its existing pretrade-proof gate. Day0 v5 instead
+        # bootstraps from its exact current
+        # q/book/wealth optimum while no-evidence/inconclusive shadow history
+        # remains telemetry. Only direct rejection of that same Day0 probability
+        # revision and global selector emits a gate. Every ordinary source,
+        # price, Brier, Kelly, global-ranking, and submit-time JIT boundary stays
+        # cumulative; held monitoring and exits remain outside this entry policy.
         probability_semantics_level = RiskLevel.GREEN
         if probability_semantics_binding.get("status") == "unavailable":
             probability_semantics_level = RiskLevel.DATA_DEGRADED
@@ -6428,7 +6424,7 @@ def _tick_once() -> RiskLevel:
                     day0_market_relative_alpha_evidence
                 ),
                 "day0_market_relative_alpha_admission_role": (
-                    "revision_scoped_pretrade_proof_gate"
+                    "revision_scoped_rejection_gate"
                 ),
                 "day0_market_relative_alpha_gate_reason": (
                     day0_market_relative_alpha_gate_reason

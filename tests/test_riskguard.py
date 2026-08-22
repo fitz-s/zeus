@@ -1,13 +1,14 @@
 # Created: 2026-03-30
-# Last reused/audited: 2026-08-21
+# Last reused/audited: 2026-08-22
 # Authority basis: docs/operations/task_2026-04-28_contamination_remediation/plan.md Batch D RiskGuard test-law remediation; Wave26 verification-noise helper alignment; PR90 current-env fallback review fix; 2026-08-15 economic-settlement trailing-loss hotfix.
 #                  2026-05-17 live lock remediation: RiskGuard trade/world DB lock degrades to fresh DATA_DEGRADED rather than stale RED.
-# Lifecycle: created=2026-03-30; last_reviewed=2026-08-21; last_reused=2026-08-21
+# Lifecycle: created=2026-03-30; last_reviewed=2026-08-22; last_reused=2026-08-22
 # Purpose: Guard RiskGuard protective metrics, policy resolution, source authority, and portfolio loader invariants.
 # Reuse: Run after RiskGuard risk details, portfolio loader, settlement source, bankroll, or risk-action changes.
 # 2026-08-17: Brier strategy-gate evidence is independent by target date.
-# 2026-08-19: New Day0 probability semantics must earn revision-scoped causal
-# capital admission before BUY; shadow evidence and held exits remain live.
+# 2026-08-22: Day0 v5 missing/inconclusive shadow history remains telemetry;
+# only direct revision-scoped capital rejection gates BUY. Qkernel retains its
+# pretrade proof gate while its current live capital curve is nonpositive.
 """Tests for RiskGuard metrics, policy resolution, and risk levels."""
 
 import json
@@ -4459,16 +4460,13 @@ class TestStrategyBrierMinSampleContinued:
         assert details["brier_evidence_ready_sample_size"] == 0
         assert details["portfolio_brier_thin_sample_no_verdict"] is True
         assert details["recommended_strategy_gates"] == [
-            "day0_nowcast_entry",
             "forecast_qkernel_entry",
         ]
         assert details["market_relative_alpha_gate_reason"].startswith(
             "market_relative_alpha_unproven("
         )
-        assert details["day0_market_relative_alpha_gate_required"] is True
-        assert details["day0_market_relative_alpha_gate_reason"].startswith(
-            "market_relative_alpha_unproven("
-        )
+        assert details["day0_market_relative_alpha_gate_required"] is False
+        assert details["day0_market_relative_alpha_gate_reason"] is None
         assert details["market_relative_alpha_observation"].startswith(
             "market_relative_alpha_unproven("
         )
@@ -5684,6 +5682,7 @@ class TestQkernelMarketRelativeAlphaEvidence:
         assert '"day0_live_realized_capital_curve":' in tick_source
         assert "qkernel_market_relative_alpha_gate_reason" in tick_source
         assert "day0_market_relative_alpha_gate_required" in tick_source
+        assert "_market_relative_alpha_rejection_gate_reason(" in tick_source
         assert "recommended_strategy_gate_scopes" in tick_source
         assert "live_capital_curve" not in inspect.signature(
             riskguard_module._qkernel_market_relative_alpha_evidence
@@ -5907,7 +5906,7 @@ class TestQkernelMarketRelativeAlphaEvidence:
         assert evidence["validated"] is False
         conn.close()
 
-    def test_current_day0_without_validated_causal_evidence_is_gated(self):
+    def test_current_day0_without_rejection_keeps_missing_evidence_as_observation(self):
         from src.events.day0_authority import DAY0_PROBABILITY_SEMANTICS_REVISION
 
         binding = {
@@ -5940,6 +5939,48 @@ class TestQkernelMarketRelativeAlphaEvidence:
             binding,
             evidence,
         ) == (DAY0_PROBABILITY_SEMANTICS_REVISION,)
+        assert riskguard_module._market_relative_alpha_rejection_gate_reason(
+            binding,
+            evidence,
+            required_evalue=10.0,
+        ) == (None, ())
+
+    def test_current_day0_direct_capital_rejection_still_gates_exact_revision(self):
+        from src.events.day0_authority import DAY0_PROBABILITY_SEMANTICS_REVISION
+
+        reason, revisions = (
+            riskguard_module._market_relative_alpha_rejection_gate_reason(
+                {
+                    "status": "ok",
+                    "current_revision": DAY0_PROBABILITY_SEMANTICS_REVISION,
+                },
+                {
+                    "cohorts": [
+                        {
+                            "decision_law_id": (
+                                "executable_min_order_capital_gain_v2"
+                            ),
+                            "global_selection_revision": (
+                                riskguard_module.CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION
+                            ),
+                            "probability_semantics_revisions": [
+                                DAY0_PROBABILITY_SEMANTICS_REVISION
+                            ],
+                            "model_over_market_evalue": 0.05,
+                            "independent_cluster_count": 12,
+                            "validated": False,
+                            "rejected": True,
+                        }
+                    ]
+                },
+                required_evalue=10.0,
+            )
+        )
+
+        assert revisions == (DAY0_PROBABILITY_SEMANTICS_REVISION,)
+        assert reason is not None
+        assert "status=rejected" in reason
+        assert f"revision={DAY0_PROBABILITY_SEMANTICS_REVISION})" in reason
 
     def test_qkernel_alpha_observation_does_not_gate_unproven_revision(self):
         current = riskguard_module.CURRENT_EVIDENCE_SEMANTICS_REVISION
@@ -6772,7 +6813,7 @@ class TestQkernelMarketRelativeAlphaEvidence:
             "forecast_qkernel_entry": True,
         }
         assert details["day0_market_relative_alpha_admission_role"] == (
-            "revision_scoped_pretrade_proof_gate"
+            "revision_scoped_rejection_gate"
         )
         assert details["day0_market_relative_alpha_gate_required"] is False
         assert details["day0_market_relative_alpha_gate_confirmation"] == {}
