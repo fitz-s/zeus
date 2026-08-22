@@ -299,13 +299,7 @@ def isolated_codex_home(workspace: Path) -> Path:
 
 
 def incident_id(row: Mapping[str, Any]) -> str:
-    material = "|".join(
-        [
-            str(row["position_id"]), str(row["settled_at"]),
-            f"{float(row['cost_basis_usd']):.12f}",
-            f"{float(row['realized_pnl_usd']):.12f}",
-        ]
-    )
+    material = "|".join([str(row["position_id"]), str(row["settled_at"])])
     return hashlib.sha256(material.encode()).hexdigest()[:24]
 
 
@@ -396,9 +390,17 @@ def detect(workspace: Path, config: dict[str, Any]) -> list[str]:
         not_before=parse_time(activation["not_before"]),
         lookback_days=int(activation.get("lookback_days", 7)),
     )
+    reset_blocked_if_contract_changed(workspace, config)
+    existing_identity: dict[tuple[str, str], str] = {}
+    for path in (workspace / "runtime" / "incidents").glob("*.json"):
+        prior = read_json(path, {})
+        loss = prior.get("loss", {})
+        if loss.get("position_id") and loss.get("settled_at"):
+            existing_identity[(str(loss["position_id"]), str(loss["settled_at"]))] = str(prior["incident_id"])
     created: list[str] = []
     for row in rows:
-        ident = incident_id(row)
+        identity = (str(row["position_id"]), str(row["settled_at"]))
+        ident = existing_identity.get(identity) or incident_id(row)
         path = workspace / "runtime" / "incidents" / f"{ident}.json"
         if path.exists():
             continue
@@ -423,6 +425,38 @@ def detect(workspace: Path, config: dict[str, Any]) -> list[str]:
         )
         created.append(ident)
     return created
+
+
+def runner_contract_fingerprint(config: dict[str, Any]) -> str:
+    body = json.dumps(
+        {
+            "codex_bin": config.get("codex_bin"),
+            "codex_home": config.get("codex_home"),
+            "model": config.get("model"),
+            "reasoning_effort": config.get("reasoning_effort"),
+            "prompt": PROMPT_TEMPLATE,
+            "schema": OUTPUT_SCHEMA,
+        },
+        sort_keys=True,
+    )
+    return hashlib.sha256(body.encode()).hexdigest()
+
+
+def reset_blocked_if_contract_changed(workspace: Path, config: dict[str, Any]) -> list[str]:
+    current = runner_contract_fingerprint(config)
+    reset: list[str] = []
+    for path in (workspace / "runtime" / "incidents").glob("*.json"):
+        incident = read_json(path, {})
+        if incident.get("status") != "runner_blocked" or incident.get("failure_contract") == current:
+            continue
+        incident["status"] = "pending"
+        incident["same_failure_count"] = 0
+        incident.pop("next_attempt_at", None)
+        atomic_json(path, incident)
+        reset.append(str(incident["incident_id"]))
+    if reset:
+        append_event(workspace, "RUNNER_CONTRACT_CHANGED", incident_ids=reset)
+    return reset
 
 
 def _pending_incidents(workspace: Path) -> list[dict[str, Any]]:
@@ -610,6 +644,32 @@ def _validate_result(result: Any, batch: dict[str, Any]) -> None:
             raise ValueError(f"unsafe root_cause update id: {cause_id!r}")
 
 
+def _failure_fingerprint(active: dict[str, Any], exc: Exception) -> str:
+    log_path = Path(active["run_dir"]) / "codex.jsonl"
+    try:
+        tail = log_path.read_bytes()[-16_384:].decode(errors="replace")
+    except OSError:
+        tail = ""
+    material = f"{type(exc).__name__}:{exc}\n{tail}"
+    return hashlib.sha256(material.encode()).hexdigest()
+
+
+def _release_runner_blocked(workspace: Path) -> list[str]:
+    released: list[str] = []
+    for path in (workspace / "runtime" / "incidents").glob("*.json"):
+        incident = read_json(path, {})
+        if incident.get("status") != "runner_blocked":
+            continue
+        incident["status"] = "pending"
+        incident["same_failure_count"] = 0
+        incident.pop("next_attempt_at", None)
+        atomic_json(path, incident)
+        released.append(str(incident["incident_id"]))
+    if released:
+        append_event(workspace, "RUNNER_RECOVERY_PROVEN", incident_ids=released)
+    return released
+
+
 def _update_registry(workspace: Path, result: dict[str, Any]) -> None:
     path = workspace / "memory" / "root_causes" / "registry.json"
     registry = read_json(path, {"schema_version": SCHEMA_VERSION, "causes": {}})
@@ -675,21 +735,34 @@ def complete_batch(workspace: Path, returncode: int | None = None) -> bool:
         atomic_json(batch_path, batch)
         if result.get("batch_status") == "repair_ready":
             atomic_json(workspace / "repairs" / "queue" / f"{batch['batch_id']}.json", result)
+        _release_runner_blocked(workspace)
         append_event(workspace, "AGENT_COMPLETED", batch_id=batch["batch_id"], status=result["batch_status"])
         active_path.unlink(missing_ok=True)
         return True
     except Exception as exc:
+        fingerprint = _failure_fingerprint(active, exc)
+        contract = runner_contract_fingerprint(read_json(workspace / "runtime" / "config.json", {}))
         batch["status"] = "retryable_failure"
         batch["last_error"] = f"{type(exc).__name__}: {exc}"
+        batch["failure_fingerprint"] = fingerprint
         batch["last_failed_at"] = iso_now()
         atomic_json(batch_path, batch)
         for ident in batch.get("incident_ids", []):
             incident_path = workspace / "runtime" / "incidents" / f"{ident}.json"
             incident = read_json(incident_path, {})
-            incident["status"] = "pending"
             incident["attempts"] = int(incident.get("attempts", 0)) + 1
-            delay = min(3600, 60 * (2 ** min(incident["attempts"] - 1, 6)))
-            incident["next_attempt_at"] = (utc_now() + timedelta(seconds=delay)).isoformat()
+            same = int(incident.get("same_failure_count", 0)) + 1 if incident.get("failure_fingerprint") == fingerprint else 1
+            incident["failure_fingerprint"] = fingerprint
+            incident["failure_contract"] = contract
+            incident["same_failure_count"] = same
+            if same >= 3:
+                incident["status"] = "runner_blocked"
+                incident.pop("next_attempt_at", None)
+                batch["status"] = "runner_blocked"
+            else:
+                incident["status"] = "pending"
+                delay = min(3600, 60 * (2 ** min(incident["attempts"] - 1, 6)))
+                incident["next_attempt_at"] = (utc_now() + timedelta(seconds=delay)).isoformat()
             atomic_json(incident_path, incident)
         append_event(workspace, "AGENT_FAILED", batch_id=batch.get("batch_id"), error=batch["last_error"])
         active_path.unlink(missing_ok=True)

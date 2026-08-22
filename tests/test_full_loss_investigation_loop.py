@@ -322,3 +322,56 @@ def test_output_schema_is_strict_at_every_object_boundary() -> None:
                 visit(value)
 
     visit(loop.OUTPUT_SCHEMA)
+
+
+def test_incident_identity_survives_economic_correction() -> None:
+    base = {
+        "position_id": "position-1",
+        "settled_at": "2026-08-22T00:00:00+00:00",
+        "cost_basis_usd": 10.0,
+        "realized_pnl_usd": -10.0,
+    }
+    corrected = {**base, "cost_basis_usd": 9.5, "realized_pnl_usd": -9.5}
+    assert loop.incident_id(base) == loop.incident_id(corrected)
+
+
+def test_three_identical_runner_failures_circuit_break_until_contract_changes(tmp_path: Path) -> None:
+    db = tmp_path / "trades.db"
+    _db(db)
+    workspace, config = _bootstrap(tmp_path, db)
+    ident = "incident"
+    batch_id = "batch"
+    incident_path = workspace / "runtime" / "incidents" / f"{ident}.json"
+    batch_path = workspace / "runtime" / "batches" / f"{batch_id}.json"
+    run_dir = workspace / "runs" / batch_id
+    run_dir.mkdir(parents=True)
+    (run_dir / "codex.jsonl").write_text("same deterministic failure\n")
+    loop.atomic_json(incident_path, {
+        "incident_id": ident,
+        "status": "batched",
+        "attempts": 0,
+        "loss": {"position_id": "position", "settled_at": loop.iso_now()},
+    })
+    loop.atomic_json(batch_path, {"batch_id": batch_id, "incident_ids": [ident], "status": "running"})
+
+    for attempt in range(3):
+        loop.atomic_json(workspace / "runtime" / "active.json", {
+            "batch_id": batch_id,
+            "result_path": str(run_dir / "missing.json"),
+            "run_dir": str(run_dir),
+        })
+        assert not loop.complete_batch(workspace, 1)
+        incident = loop.read_json(incident_path, {})
+        if attempt < 2:
+            assert incident["status"] == "pending"
+            incident["status"] = "batched"
+            loop.atomic_json(incident_path, incident)
+
+    blocked = loop.read_json(incident_path, {})
+    assert blocked["status"] == "runner_blocked"
+    assert blocked["same_failure_count"] == 3
+
+    config["model"] = "changed-model"
+    loop.atomic_json(workspace / "runtime" / "config.json", config)
+    assert loop.reset_blocked_if_contract_changed(workspace, config) == [ident]
+    assert loop.read_json(incident_path, {})["status"] == "pending"
