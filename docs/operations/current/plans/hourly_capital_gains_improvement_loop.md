@@ -5,6 +5,12 @@
 
 ## 现状(forward)
 
+### 2026-08-22 B142 — supporting clock例外必须原子穿过current-observation seam
+- **实时反例:** B140加载后的首个完整production auction覆盖174 families、82 eligible、1869 candidates；旧`GLOBAL_DAY0_FAST_OBSERVATION_ENTRY_STALE`降为0，但16个family随即在下一层变成`GLOBAL_DAY0_CONDITIONING_OBSERVATION_TIME_MISMATCH`。说明age gate已修，调用者却仍以ENTRY身份禁止same-extreme clock advance，supporting carrier与current observation ledger之间形成第二个非原子断层。
+- **修复:** 对同一个current-local-day global remaining-path ENTRY布尔authority，同时允许stale supporting age与same-extreme conditioning clock advance。action state始终取current named source，carrier clock lag进入binding；remaining-path builder仍必须产生current simplex。任何extreme值、unit、named source、station、decision-time causality、topology或submit JIT content不一致继续拒绝；direct source-clock action route保持严格。Day0 semantics升v8。
+- **SCOPE / DRAIN / RESET:** scope仍是exact current-day global ENTRY family，且只在remaining-path q enabled时生效。drain是current observation + remaining trajectories重建并在submit重现；reset为值/source/clock不可调和或builder/JIT失败，立即回到family-scoped fail closed，不影响其他城市或held SELL。
+- **验收:** end-to-end antibody必须证明caller对30分钟前same-extreme supporting carrier同时传入age与clock两项permission，并继续用remaining q；helper默认strict与changed-value rejection不变。live要求time-mismatch计数下降、eligible family恢复；订单/fill/settlement/strict资本曲线另行证明。
+
 ### 2026-08-22 B141 — 单一terminal-review证据缺口不得阻断全局restart
 - **实时反例:** B140标准deploy在command `736b13b34fee4f89`的restart preflight失败，entry guard持续armed。该20-share GTC在point order上matched 19.998533，但当时authenticated CONFIRMED trade facts仅覆盖4.858533；`REVIEW_REQUIRED`边界正确等待其余legs，authenticated recovery却尝试追加普通`PARTIAL_FILL_OBSERVED`清除review，被terminal-partial validator正确拒绝并升级为deploy-wide error。稍后其余facts到达后同command已原子投影FILLED，证明这是局部evidence ordering而非未知venue side effect。
 - **修复:** `REVIEW_REQUIRED`的authenticated cumulative facts若仍未达到BUY completion tolerance，只返回`stayed`；不追加command event、不投影position、不清除review。完整confirmed legs到达后仍走既有`review_cleared_confirmed_fill`原子路径；真正terminal short fill仍只能由既有terminal-order recovery携带`terminal_partial_order_fact`三项proof清除。

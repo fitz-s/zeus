@@ -3,7 +3,7 @@
 **Status:** Live replacement probability law. Runtime rows use `forecast_posteriors.runtime_layer='live'`; no second row-authority label or alternate runtime layer exists.
 **Supersedes:** `BAYES_PRECISION_FUSION_SPEC.md` (deleted).  
 **Created:** 2026-06-09  
-**Last audited:** 2026-08-22 (Day0 current remaining-path q cannot be suppressed by stale supporting-conditioning provenance; direct source-clock action q retains strict freshness; WU zero-transition Jeffreys prior is held/reduce-only and cannot authorize ENTRY)
+**Last audited:** 2026-08-22 (Day0 current remaining-path q accepts same-extreme supporting-clock advance without weakening value/source/JIT equality; direct source-clock action q retains strict freshness; WU zero-transition Jeffreys prior is held/reduce-only and cannot authorize ENTRY)
 **Authority basis:** Commits 140d75ff6d · 6860f00a21 · edc598b440 · 94b584cc3f · 49492f1528 · 2b6936d3b5 · 9c594c9fc3 · df8199ef8e · e80c101c4c · 8541bc93cd · 8f20d39863 · a70436d478 · a1c2163e46 plus June 18 live-runtime cleanup. Historical experiment reports remain evidence only; they do not define the live execution layer.
 
 ---
@@ -233,6 +233,15 @@ builder produces a complete current simplex. Missing carrier identity, current
 observation, hourly trajectories, topology, or submit-time equality still fails
 closed. Any route that uses the source-clock posterior itself as action q retains
 the strict fast-observation ENTRY freshness contract.
+
+That exception is atomic across both conditioning seams: when the named current
+source and supporting carrier clocks differ while preserving the same physical
+extreme, the global remaining-path route binds current action state and records
+the carrier-clock lag instead of rejecting ENTRY. The values, unit, named source,
+station identity, decision-time causality, and current action-q content remain
+exact; a changed extreme or a carrier clock that cannot be reconciled to its
+named current source still blocks. Direct source-clock action routes do not
+receive this clock-advance permission.
 
 WU changed-payload revision history is a statistical modifier, not settlement
 truth. When one city has zero changed-payload transitions in the bounded causal

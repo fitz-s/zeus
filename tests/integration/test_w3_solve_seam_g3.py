@@ -7964,9 +7964,13 @@ def test_current_day0_global_probability_uses_current_remaining_day_simplex(
 
     observed_extreme = {"value": 69.0}
     conditioning_reads: list[Mapping[str, object] | None] = []
+    conditioning_clock_advance_permissions: list[bool] = []
 
     def current_observation_payload(*_args, **kwargs):
         conditioning_reads.append(kwargs["conditioning"])
+        conditioning_clock_advance_permissions.append(
+            kwargs["allow_equivalent_conditioning_clock_advance"]
+        )
         base_identity = kwargs["probability_base_identity"]
         rounded = observed_extreme["value"]
         return {
@@ -8174,6 +8178,7 @@ def test_current_day0_global_probability_uses_current_remaining_day_simplex(
         [0.0, 0.2, 0.8]
     )
     assert stale_support_payload["q_source"] == "day0_remaining_day"
+    assert conditioning_clock_advance_permissions[-1] is True
     assert conditioning_reads[-1]["observation_time"] == (
         "2026-07-11T17:30:00+00:00"
     )

@@ -36040,6 +36040,11 @@ def _prepare_current_global_probability_family(
     )
     omega = build_outcome_space(family, case)
     if is_day0 and not use_unobserved_day0_replacement:
+        remaining_path_supporting_conditioning = bool(
+            entry_authority
+            and local_target == local_now.date()
+            and _day0_remaining_day_q_enabled()
+        )
         if final_daily_observation is not None:
             current_day0_payload = _global_final_daily_probability_payload(
                 family=family,
@@ -36074,9 +36079,7 @@ def _prepare_current_global_probability_family(
                         # vector/topology or failed submit reproduction blocks
                         # this family on the same cut.
                         allow_stale_supporting_conditioning=(
-                            entry_authority
-                            and local_target == local_now.date()
-                            and _day0_remaining_day_q_enabled()
+                            remaining_path_supporting_conditioning
                         ),
                     )
                     if bundle is not None
@@ -36088,7 +36091,15 @@ def _prepare_current_global_probability_family(
                     bundle.posterior_id if bundle is not None else None
                 ),
                 probability_base_identity=day0_base_identity,
-                allow_equivalent_conditioning_clock_advance=not entry_authority,
+                # The same supporting-carrier exception must cross this second
+                # clock seam atomically.  The current observation ledger owns
+                # action state; a same-extreme carrier clock may differ while
+                # the remaining-path builder below reproduces current q. Value,
+                # unit, source, topology, and JIT equality remain strict.
+                allow_equivalent_conditioning_clock_advance=(
+                    not entry_authority
+                    or remaining_path_supporting_conditioning
+                ),
             )
             if current_day0_redecision_only:
                 current_day0_payload[
