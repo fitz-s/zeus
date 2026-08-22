@@ -903,6 +903,36 @@ def loaded_fix_proof(workspace: Path, fix_sha: str) -> str:
     return f"deployment_freshness.boot_sha={loaded}; includes_fix={fix_sha}"
 
 
+def requeue_root_cause(workspace: Path, *, root_cause_id: str, reason: str) -> list[str]:
+    if not ROOT_CAUSE_ID.fullmatch(root_cause_id):
+        raise ValueError("unsafe root_cause_id")
+    if not reason.strip():
+        raise ValueError("requeue requires a concrete evidence-delta reason")
+    requeued: list[str] = []
+    for path in (workspace / "runtime" / "incidents").glob("*.json"):
+        incident = read_json(path, {})
+        if incident.get("root_cause_id") != root_cause_id:
+            continue
+        if incident.get("status") == "batched":
+            raise ValueError(f"incident is active in a batch: {incident.get('incident_id')}")
+        incident["status"] = "pending"
+        incident["requeued_at"] = iso_now()
+        incident["requeue_reason"] = reason.strip()
+        incident.pop("next_attempt_at", None)
+        atomic_json(path, incident)
+        requeued.append(str(incident["incident_id"]))
+    if not requeued:
+        raise ValueError(f"no incidents found for root cause: {root_cause_id}")
+    append_event(
+        workspace,
+        "ROOT_CAUSE_REQUEUED",
+        root_cause_id=root_cause_id,
+        reason=reason.strip(),
+        incident_ids=requeued,
+    )
+    return sorted(requeued)
+
+
 def run_daemon(workspace: Path) -> int:
     config = read_json(workspace / "runtime" / "config.json", None)
     if not isinstance(config, dict):
@@ -987,6 +1017,9 @@ def build_parser() -> argparse.ArgumentParser:
     repair.add_argument("--fix-sha")
     repair.add_argument("--evidence", action="append", default=[])
     repair.add_argument("--antibody", action="append", default=[])
+    requeue = sub.add_parser("requeue")
+    requeue.add_argument("--root-cause-id", required=True)
+    requeue.add_argument("--reason", required=True)
     return parser
 
 
@@ -1014,6 +1047,13 @@ def main(argv: list[str] | None = None) -> int:
             evidence=args.evidence,
             antibodies=args.antibody,
         ), ensure_ascii=False, indent=2))
+        return 0
+    if args.command == "requeue":
+        print(json.dumps({"requeued": requeue_root_cause(
+            workspace,
+            root_cause_id=args.root_cause_id,
+            reason=args.reason,
+        )}, ensure_ascii=False, indent=2))
         return 0
     config = read_json(workspace / "runtime" / "config.json", None)
     if not isinstance(config, dict):

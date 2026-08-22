@@ -394,3 +394,26 @@ def test_daemon_identity_binds_repo_head_and_script_digest(tmp_path: Path, monke
     assert identity["repo_sha"] == "abc123"
     assert identity["script_path"].endswith("scripts/watch_full_loss_investigation.py")
     assert len(identity["script_sha256"]) == 64
+
+
+def test_requeue_requires_evidence_delta_and_targets_one_root(tmp_path: Path) -> None:
+    db = tmp_path / "trades.db"
+    _db(db)
+    workspace, _config = _bootstrap(tmp_path, db)
+    for ident, root in [("a", "RC-A"), ("b", "RC-B")]:
+        loop.atomic_json(workspace / "runtime" / "incidents" / f"{ident}.json", {
+            "incident_id": ident,
+            "status": "investigated",
+            "root_cause_id": root,
+            "loss": {"position_id": ident, "settled_at": loop.iso_now()},
+        })
+
+    requeued = loop.requeue_root_cause(
+        workspace,
+        root_cause_id="RC-A",
+        reason="execution-only classification left upstream probability untested",
+    )
+
+    assert requeued == ["a"]
+    assert loop.read_json(workspace / "runtime" / "incidents" / "a.json", {})["status"] == "pending"
+    assert loop.read_json(workspace / "runtime" / "incidents" / "b.json", {})["status"] == "investigated"
