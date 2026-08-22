@@ -1662,6 +1662,21 @@ def _subprocess_result_reason_codes(completed: subprocess.CompletedProcess[str])
     return ()
 
 
+def _subprocess_result_status(completed: subprocess.CompletedProcess[str]) -> str | None:
+    for stream in (completed.stdout or "", completed.stderr or ""):
+        for line in reversed(stream.splitlines()):
+            try:
+                payload = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(payload, Mapping):
+                continue
+            status = payload.get("status")
+            if status not in (None, ""):
+                return str(status).upper()
+    return None
+
+
 def _record_latest_terminal_request(
     input_json: Path,
     *,
@@ -2918,6 +2933,7 @@ def _process_claimed_materialization_batch(
                 "REPLACEMENT_LIVE_MATERIALIZATION_REQUEST_TIMEOUT"
             ]
         result_reason_codes = _subprocess_result_reason_codes(completed)
+        result_status = _subprocess_result_status(completed)
         if completed.returncode == 0:
             if item.marker_path is not None:
                 try:
@@ -2975,7 +2991,10 @@ def _process_claimed_materialization_batch(
             stale_day0_superseded.append(str(receipt))
         elif (
             item.request_payload is not None
-            and _UNCHANGED_BLOCKED_REASON in result_reason_codes
+            and (
+                result_status == "BLOCKED"
+                or _UNCHANGED_BLOCKED_REASON in result_reason_codes
+            )
         ):
             try:
                 _write_blocked_attempt_marker(

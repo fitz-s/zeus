@@ -2850,8 +2850,15 @@ def test_materialization_timeout_isolated_to_its_own_request(
     assert queue_mod._TIMEOUT_RETRY_DEFERRED_REASON in report.reason_codes
 
 
+@pytest.mark.parametrize(
+    "blocked_reason",
+    [
+        "REPLACEMENT_LIVE_POSTERIOR_REQUIREMENTS_NOT_MET",
+        "REPLACEMENT_MATERIALIZATION_OM9_LOCALDAY_HOURLY_COVERAGE_INCOMPLETE",
+    ],
+)
 def test_materialization_queue_retries_blocked_request_only_after_input_change(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, blocked_reason
 ) -> None:
     import src.data.replacement_forecast_live_materialization_queue as queue_mod
 
@@ -2898,9 +2905,7 @@ def test_materialization_queue_retries_blocked_request_only_after_input_change(
             stdout=json.dumps(
                 {
                     "status": "BLOCKED",
-                    "reason_codes": [
-                        "REPLACEMENT_LIVE_POSTERIOR_REQUIREMENTS_NOT_MET"
-                    ],
+                    "reason_codes": [blocked_reason],
                 }
             )
             + "\n",
