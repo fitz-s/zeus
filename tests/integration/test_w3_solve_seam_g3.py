@@ -7895,15 +7895,21 @@ def test_current_day0_global_probability_uses_current_remaining_day_simplex(
         "_global_day0_execution_payload",
         current_observation_payload,
     )
-    monkeypatch.setattr(
-        "src.data.day0_observation_reader.wu_provisional_revision_likelihood",
-        lambda *args, **kwargs: {
+    revision_prior_permissions: list[bool] = []
+
+    def revision_likelihood(*_args, **kwargs):
+        revision_prior_permissions.append(kwargs["allow_prior_only"])
+        return {
             "semantics": "wu_changed_payload_retraction_beta_jeffreys_v1",
             "transition_count": 20,
             "retraction_count": 2,
             "projected_remaining_updates": 6,
             "boundary_survival_probability": 0.6,
-        },
+        }
+
+    monkeypatch.setattr(
+        "src.data.day0_observation_reader.wu_provisional_revision_likelihood",
+        revision_likelihood,
     )
 
     remaining_day_calls = 0
@@ -8022,6 +8028,7 @@ def test_current_day0_global_probability_uses_current_remaining_day_simplex(
     assert day0_payload[
         "_edli_day0_provisional_boundary_survival_probability"
     ] == pytest.approx(0.6)
+    assert revision_prior_permissions == [False]
     assert witness.yes_point_q.tolist() == pytest.approx([0.0, 0.2, 0.8])
     assert day0_payload["_edli_day0_source_clock_bound_posterior_identity"]
 
@@ -8050,6 +8057,7 @@ def test_current_day0_global_probability_uses_current_remaining_day_simplex(
     assert held_payload[
         "_edli_day0_provisional_boundary_survival_probability"
     ] == pytest.approx(0.6)
+    assert revision_prior_permissions == [False, True]
 
     capture_time["value"] = "2026-07-11T17:31:00+00:00"
     recaptured_payload: dict[str, object] = {}
@@ -8072,6 +8080,7 @@ def test_current_day0_global_probability_uses_current_remaining_day_simplex(
     assert witness.probability_content_identity != (
         recaptured.probability_witness.probability_content_identity
     )
+    assert revision_prior_permissions == [False, True, False]
 
     missing_observations = sqlite3.connect(":memory:")
     with pytest.raises(ValueError, match="GLOBAL_DAY0_OBSERVATION_HWM_UNAVAILABLE"):

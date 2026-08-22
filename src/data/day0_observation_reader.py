@@ -595,6 +595,7 @@ def wu_provisional_revision_likelihood(
     target_date: str,
     temperature_metric: str,
     decision_time: datetime,
+    allow_prior_only: bool = False,
 ) -> dict[str, object]:
     """Estimate survival of a current WU hourly boundary through day end.
 
@@ -603,7 +604,9 @@ def wu_provisional_revision_likelihood(
     remain inside q instead of being erased by an absorbing max/min mask.  The
     denominator intentionally contains only changed-payload transitions; this
     overstates revision risk relative to unchanged polls and is conservative
-    for new capital.
+    for new capital. A caller may explicitly request the Jeffreys prior at zero
+    transitions for reduce-only held redecision; ENTRY must keep the default
+    empirical-history requirement.
     """
 
     metric = str(temperature_metric).strip().lower()
@@ -641,7 +644,11 @@ def wu_provisional_revision_likelihood(
             break
         except sqlite3.Error:
             rows = None
-    if not rows:
+    if rows is None:
+        raise ValueError("WU_PROVISIONAL_REVISION_HISTORY_INSUFFICIENT")
+    if not isinstance(allow_prior_only, bool):
+        raise ValueError("WU_PROVISIONAL_REVISION_PRIOR_POLICY_INVALID")
+    if not rows and not allow_prior_only:
         raise ValueError("WU_PROVISIONAL_REVISION_HISTORY_INSUFFICIENT")
 
     transition_count = 0
@@ -665,7 +672,7 @@ def wu_provisional_revision_likelihood(
             metric == "low" and incoming_value > existing_value + 1e-9
         ):
             retraction_count += 1
-    if transition_count <= 0:
+    if transition_count <= 0 and (rows or not allow_prior_only):
         raise ValueError("WU_PROVISIONAL_REVISION_HISTORY_INSUFFICIENT")
 
     try:
@@ -692,13 +699,21 @@ def wu_provisional_revision_likelihood(
     if not 0.0 < survival_probability < 1.0:
         raise ValueError("WU_PROVISIONAL_REVISION_LIKELIHOOD_INVALID")
     return {
-        "semantics": "wu_changed_payload_retraction_beta_jeffreys_v1",
+        "semantics": (
+            "wu_changed_payload_retraction_beta_jeffreys_prior_only_v1"
+            if transition_count == 0
+            else "wu_changed_payload_retraction_beta_jeffreys_v1"
+        ),
         "lookback_start": lookback_start.isoformat(),
         "lookback_end": target.isoformat(),
         "transition_count": transition_count,
         "retraction_count": retraction_count,
         "projected_remaining_updates": remaining_updates,
-        "denominator_basis": "changed_payload_transitions_conservative",
+        "denominator_basis": (
+            "jeffreys_prior_only_no_changed_payload_transitions"
+            if transition_count == 0
+            else "changed_payload_transitions_conservative"
+        ),
         "boundary_survival_probability": survival_probability,
     }
 

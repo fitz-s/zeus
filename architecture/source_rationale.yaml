@@ -366,7 +366,7 @@ files:
   src/data/day0_observation_reader.py:
     zone: K2_runtime
     authority_role: day0_current_observation_and_revision_likelihood_reader
-    why: Reads source-typed current-day extrema without mixing provider roles. WU changed-payload observation_revisions provide a causal, conservative Jeffreys estimate that the current hourly boundary survives through the remaining source updates; this uncertainty stays inside q and prevents a revisable WU print from becoming exact payoff authority.
+    why: Reads source-typed current-day extrema without mixing provider roles. WU changed-payload observation_revisions provide a causal, conservative Jeffreys estimate that the current hourly boundary survives through the remaining source updates; this uncertainty stays inside q and prevents a revisable WU print from becoming exact payoff authority. If a city has zero changed-payload transitions in the bounded lookback, the Jeffreys zero-observation prior is available only to HELD_MONITOR/REDUCE_ONLY_EXIT so existing capital remains re-decidable; ENTRY still requires empirical history and fails closed.
     hazards:
     - SOURCE_TRUTH_PLANE_COLLAPSE
     downstream:
@@ -1948,7 +1948,7 @@ files:
   src/events/day0_authority.py:
     zone: K2_runtime
     authority_role: day0_probability_semantics_and_hard_fact_contract
-    why: Owns Day0 live-authority validation, q-source/mode grammar, and revision-stamped q-version identity so changed conditional probability laws cannot pool with old realized capital evidence. WU current/hourly carriers are provisional because the venue settles a revisable Daily Observations product; their empirical revision-survival likelihood stays inside q and can never create exact bin payoffs.
+    why: Owns Day0 live-authority validation, q-source/mode grammar, and revision-stamped q-version identity so changed conditional probability laws cannot pool with old realized capital evidence. WU current/hourly carriers are provisional because the venue settles a revisable Daily Observations product; their empirical revision-survival likelihood stays inside q and can never create exact bin payoffs. The v6 identity distinguishes held/reduce-only WU Jeffreys prior-only redecision from older regimes while ENTRY remains empirically gated.
     downstream:
     - src/engine/event_reactor_adapter.py
     - src/riskguard/riskguard.py

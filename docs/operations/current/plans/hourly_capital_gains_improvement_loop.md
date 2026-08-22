@@ -704,6 +704,36 @@
   order still require separate current SHA/process/DB/receipt/venue evidence;
   this gate prevents one demonstrated loss mechanism but is not profit proof.
 
+### 2026-08-22 — zero-revision WU history cannot blind held capital (B147)
+
+- **Observed defect:** Chengdu HIGH 30C YES retained 22 chain shares and fresh
+  executable quotes, but at least 14 consecutive monitor cycles lacked fresh q
+  with `GLOBAL_DAY0_PROVISIONAL_REVISION_LIKELIHOOD_UNAVAILABLE`. Canonical WU
+  hourly data was complete for the prior seven target dates and current day;
+  the bounded `observation_revisions` slice had zero changed-payload rows.
+- **Root cause:** the WU revision model uses a Jeffreys-Beta posterior but
+  rejected `transition_count == 0` before evaluating its mathematically defined
+  zero-observation prior. Because unchanged hourly ingestion does not create a
+  revision row, this fail-closed gate had no source-driven reset before final
+  daily truth and left existing capital unpriceable.
+- **Contract:** ENTRY still requires empirical city-specific changed-payload
+  history. HELD_MONITOR and REDUCE_ONLY_EXIT may evaluate the identical
+  Jeffreys model at its zero-observation prior, with explicit prior-only
+  semantics and denominator basis serialized into q content. It remains a
+  statistical simplex and can never create deterministic payoff support.
+- **SCOPE / DRAIN / RESET:** scope is WU provisional held/reduce-only q for one
+  family with an existing exposure. The normal monitor cycle immediately drains
+  by rebuilding q from current observation, source-clock forecast, and the
+  prior-only revision witness; the first empirical changed-payload transition
+  automatically replaces the prior-only basis. ENTRY never consumes this
+  relaxation, so missing empirical history cannot open new risk.
+- **Acceptance:** tests prove zero-history ENTRY still raises, explicit
+  prior-only produces a finite `0 < survival < 1`, and the adapter passes that
+  permission only for HELD_MONITOR. `DAY0_PROBABILITY_SEMANTICS_REVISION` moves
+  to v6 so settlement attribution cannot pool old and new conditional laws.
+  Live acceptance requires Chengdu `last_monitor_prob_is_fresh=1`, complete
+  exit-monitor receipts, and independent command/venue evidence for any action.
+
 ### 2026-08-02 — partial EXIT realized-PnL canonical continuity (hot-fix slice)
 
 - **Scope / seam:** `src/execution/exit_lifecycle.py` emits canonical

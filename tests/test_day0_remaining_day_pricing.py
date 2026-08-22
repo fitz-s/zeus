@@ -1,6 +1,6 @@
 # Created: 2026-06-10
-# Last reused or audited: 2026-08-21
-# Lifecycle: created=2026-06-10; last_reviewed=2026-08-21; last_reused=2026-08-21
+# Last reused or audited: 2026-08-22
+# Lifecycle: created=2026-06-10; last_reviewed=2026-08-22; last_reused=2026-08-22
 # Purpose: Protect causal Day0 remaining-window probability construction.
 # Reuse: Run before changing Day0 hourly members, state diagnostics, or bootstrap pricing.
 # Authority basis: operator green-light 2026-06-10 item B (remaining-day
@@ -107,6 +107,73 @@ def test_wu_revision_history_keeps_current_boundary_inside_probability():
     assert likelihood["retraction_count"] == 1
     assert likelihood["projected_remaining_updates"] == 9
     assert 0.0 < likelihood["boundary_survival_probability"] < 1.0
+
+
+def test_wu_zero_revision_history_prior_is_reduce_only_opt_in():
+    from src.data.day0_observation_reader import (
+        wu_provisional_revision_likelihood,
+    )
+
+    conn = sqlite3.connect(":memory:")
+    conn.execute(
+        "CREATE TABLE observation_revisions ("
+        "id INTEGER PRIMARY KEY, table_name TEXT, city TEXT, target_date TEXT, "
+        "source TEXT, existing_row_json TEXT, incoming_row_json TEXT, "
+        "recorded_at TEXT)"
+    )
+    kwargs = {
+        "city": "Chengdu",
+        "timezone_name": "Asia/Shanghai",
+        "target_date": "2026-08-22",
+        "temperature_metric": "high",
+        "decision_time": datetime(2026, 8, 22, 4, 0, tzinfo=UTC),
+    }
+
+    with pytest.raises(
+        ValueError,
+        match="WU_PROVISIONAL_REVISION_HISTORY_INSUFFICIENT",
+    ):
+        wu_provisional_revision_likelihood(conn, **kwargs)
+
+    likelihood = wu_provisional_revision_likelihood(
+        conn,
+        **kwargs,
+        allow_prior_only=True,
+    )
+
+    assert likelihood["semantics"] == (
+        "wu_changed_payload_retraction_beta_jeffreys_prior_only_v1"
+    )
+    assert likelihood["transition_count"] == 0
+    assert likelihood["retraction_count"] == 0
+    assert likelihood["denominator_basis"] == (
+        "jeffreys_prior_only_no_changed_payload_transitions"
+    )
+    assert likelihood["projected_remaining_updates"] == 12
+    assert 0.0 < likelihood["boundary_survival_probability"] < 1.0
+    conn.execute(
+        "INSERT INTO observation_revisions VALUES (?,?,?,?,?,?,?,?)",
+        (
+            1,
+            "observation_instants",
+            "Chengdu",
+            "2026-08-22",
+            "wu_icao_history",
+            "{}",
+            "{}",
+            "2026-08-22T03:00:00+00:00",
+        ),
+    )
+    with pytest.raises(
+        ValueError,
+        match="WU_PROVISIONAL_REVISION_HISTORY_INSUFFICIENT",
+    ):
+        wu_provisional_revision_likelihood(
+            conn,
+            **kwargs,
+            allow_prior_only=True,
+        )
+    conn.close()
 
 
 def test_shenzhen_wu_31c_revision_risk_cannot_mint_exact_30c_no(monkeypatch):

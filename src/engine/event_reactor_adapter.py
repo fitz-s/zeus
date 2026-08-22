@@ -36136,6 +36136,10 @@ def _prepare_current_global_probability_family(
                         target_date=str(family.target_date),
                         temperature_metric=str(family.metric),
                         decision_time=decision_time,
+                        # A zero-transition Jeffreys prior is intentionally
+                        # reduce-only: it keeps existing capital observable,
+                        # while ENTRY still requires empirical city history.
+                        allow_prior_only=not entry_authority,
                     )
                 else:
                     raise ValueError(
