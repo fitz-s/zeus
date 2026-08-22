@@ -32471,17 +32471,18 @@ def _live_yes_probabilities(
                 raise ValueError("GLOBAL_DAY0_CITY_CONFIG_MISSING")
             unit = str(getattr(city, "settlement_unit", "") or "").strip()
             resolution = SimpleNamespace(measurement_unit=unit)
-            current_observation = _global_day0_execution_payload(
-                event,
-                family=family,
-                resolution=resolution,
-                conditioning=None,
-                observation_conn=calibration_conn,
-                decision_time=decision_time,
-                posterior_id=None,
-                probability_base_identity="provisional_replacement_pending",
-            )
-            payload.update(current_observation)
+            if not isinstance(payload.get("_edli_global_day0_binding"), Mapping):
+                current_observation = _global_day0_execution_payload(
+                    event,
+                    family=family,
+                    resolution=resolution,
+                    conditioning=None,
+                    observation_conn=calibration_conn,
+                    decision_time=decision_time,
+                    posterior_id=None,
+                    probability_base_identity="provisional_replacement_pending",
+                )
+                payload.update(current_observation)
             capture = provenance_capture if provenance_capture is not None else {}
             replacement = _replacement_authority_probability_and_fdr_proof(
                 event=event,
@@ -32504,11 +32505,23 @@ def _live_yes_probabilities(
                 raise ValueError(
                     "GLOBAL_DAY0_PROVISIONAL_POSTERIOR_IDENTITY_MISSING"
                 )
+            replacement_bundle = capture.get("replacement_bundle")
+            if replacement_bundle is None:
+                raise ValueError(
+                    "GLOBAL_DAY0_PROVISIONAL_REPLACEMENT_BUNDLE_MISSING"
+                )
             current_observation = _global_day0_execution_payload(
                 event,
                 family=family,
                 resolution=resolution,
-                conditioning=None,
+                conditioning=_day0_replacement_conditioning(
+                    replacement_bundle,
+                    provisional=True,
+                    metric=str(family.metric),
+                    unit=unit,
+                    decision_time=decision_time,
+                    entry_authority=True,
+                ),
                 observation_conn=calibration_conn,
                 decision_time=decision_time,
                 posterior_id=posterior_id,
@@ -32527,11 +32540,6 @@ def _live_yes_probabilities(
                     ),
                 }
             )
-            replacement_bundle = capture.get("replacement_bundle")
-            if replacement_bundle is None:
-                raise ValueError(
-                    "GLOBAL_DAY0_PROVISIONAL_REPLACEMENT_BUNDLE_MISSING"
-                )
             _assert_provisional_day0_replacement_bundle(
                 replacement_bundle,
                 current_observation,

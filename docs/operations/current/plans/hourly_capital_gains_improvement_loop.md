@@ -574,6 +574,32 @@
   `DAY0_SOURCE_PARENT_AUTHORITY_BLOCKED`. Focused certificate and global JIT
   tests, then live command/venue receipts, precede any capital-gain claim.
 
+### 2026-08-22 — preserve global conditioning through local proof (B142)
+
+- **Observed defect:** after B141, complete auctions recovered to 107 eligible
+  families / 2730 candidates, but London LOW repeatedly failed provisional
+  posterior identity despite an unchanged current 14C fast-residual bundle.
+- **Root cause:** global JIT had already bound and validated the statistical
+  conditioning, but `_live_yes_probabilities` overwrote it with a fresh
+  `conditioning=None` settlement-only payload before loading the replacement
+  bundle. That discarded B140's exact identity at the local-proof compatibility
+  seam and guaranteed another mismatch.
+- **Contract:** when final global preflight supplies `_edli_global_day0_binding`,
+  local proof keeps it until the current replacement bundle is loaded. It then
+  extracts that bundle's typed provisional conditioning and reproduces it through
+  `_global_day0_execution_payload`, which rechecks the current station value,
+  unit, causal clock, settlement boundary, and 15-minute entry freshness. A path
+  without the global binding retains the prior settlement-first fail-closed flow.
+- **SCOPE / DRAIN / RESET:** scope is provisional global-winner local-proof
+  compatibility only. The same submit preflight drains through a current bundle
+  and current observation read; changed/missing/stale conditioning resets to the
+  existing no-trade reason. Ranking, q, price, Kelly, risk, and venue boundaries
+  are unchanged.
+- **Acceptance:** the local proof calls current-observation reconstruction once
+  with the exact bundle conditioning, never first with `None`; focused identity
+  and global JIT tests plus live command/venue facts are required before any
+  order or profit claim.
+
 ### 2026-08-02 — partial EXIT realized-PnL canonical continuity (hot-fix slice)
 
 - **Scope / seam:** `src/execution/exit_lifecycle.py` emits canonical
