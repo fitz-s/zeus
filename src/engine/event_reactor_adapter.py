@@ -21764,6 +21764,7 @@ def _build_live_execution_command_certificates(
                 event=event,
                 forecast_authority=forecast_authority,
                 day0_source_certs=day0_source_certs,
+                actionable_payload=actionable.payload,
             ),
             passive_maker_context=passive_maker_context,
             decision_time=decision_time,
@@ -24455,20 +24456,156 @@ def _final_intent_decision_source_context_payload(
     event: OpportunityEvent,
     forecast_authority: DecisionCertificate,
     day0_source_certs: tuple[DecisionCertificate, ...],
+    actionable_payload: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
     """Return the live source context the executor must verify at submit.
 
     Forecast events use the forecast authority directly. Day0 events are not a
-    separate order type; they are the same qkernel submit path fed by a different
-    source of probability evidence: a live observation hard fact absorbing the
-    latest base forecast distribution. The executor context must therefore bind
-    both certificates instead of pretending the Day0 belief is an entry-primary
-    forecast or dropping the observation from the submit proof.
+    separate order type; they are the same qkernel submit path fed by a current
+    observation plus either a statistical probability witness or an absorbing
+    hard fact. The executor context must bind that Day0 authority instead of
+    pretending the base distribution is an entry-primary forecast.
     """
 
     forecast_payload = dict(forecast_authority.payload)
-    if event.event_type != "DAY0_EXTREME_UPDATED" or not day0_source_certs:
+    if event.event_type != "DAY0_EXTREME_UPDATED":
         return forecast_payload
+
+    if not day0_source_certs:
+        if not isinstance(actionable_payload, Mapping):
+            raise ValueError(
+                "DAY0_STATISTICAL_DECISION_SOURCE_CONTEXT_MISSING_ACTIONABLE"
+            )
+        from src.events.day0_authority import (
+            Day0AuthorityError,
+            assert_live_day0_payload_authority,
+            assert_live_day0_probability_authority,
+        )
+
+        try:
+            assert_live_day0_payload_authority(actionable_payload)
+            assert_live_day0_probability_authority(
+                actionable_payload,
+                direction=actionable_payload.get("direction"),
+                condition_id=actionable_payload.get("condition_id"),
+                q_live=_optional_float(actionable_payload.get("q_live")),
+                q_lcb=_optional_float(actionable_payload.get("q_lcb_5pct")),
+            )
+        except Day0AuthorityError as exc:
+            raise ValueError(
+                f"DAY0_STATISTICAL_DECISION_SOURCE_CONTEXT_INVALID:{exc}"
+            ) from None
+
+        observation_time = _nonnull(
+            actionable_payload.get("observation_time")
+        )
+        observation_available_at = _nonnull(
+            actionable_payload.get("observation_available_at")
+        )
+        raw_payload_sha256 = _nonnull(
+            actionable_payload.get("raw_payload_sha256")
+        )
+        configured_station_id = _nonnull(
+            actionable_payload.get("configured_station_id")
+        )
+        provenance_hash = _nonnull(
+            actionable_payload.get("day0_observation_provenance_hash")
+        )
+        if not observation_time or not observation_available_at:
+            raise ValueError(
+                "DAY0_STATISTICAL_DECISION_SOURCE_CONTEXT_MISSING_OBSERVATION_CLOCK"
+            )
+        if not raw_payload_sha256 or not configured_station_id or not provenance_hash:
+            raise ValueError(
+                "DAY0_STATISTICAL_DECISION_SOURCE_CONTEXT_MISSING_RAW_PROVENANCE"
+            )
+        economics = actionable_payload.get("qkernel_execution_economics")
+        if not isinstance(economics, Mapping):
+            raise ValueError(
+                "DAY0_STATISTICAL_DECISION_SOURCE_CONTEXT_MISSING_QKERNEL"
+            )
+        q_source = _nonnull(
+            actionable_payload.get("_edli_q_source")
+            or actionable_payload.get("q_source")
+        )
+        probability_authority = _nonnull(
+            actionable_payload.get("probability_authority")
+        )
+        probability_identity = _nonnull(
+            economics.get("current_state_identity_hash")
+            or economics.get("q_version")
+            or economics.get("receipt_hash")
+        )
+        if not q_source or not probability_authority or not probability_identity:
+            raise ValueError(
+                "DAY0_STATISTICAL_DECISION_SOURCE_CONTEXT_MISSING_PROBABILITY_IDENTITY"
+            )
+        base_source_id = _nonnull(
+            forecast_payload.get("forecast_source_id")
+            or forecast_payload.get("source_id")
+        )
+        base_model = _nonnull(
+            forecast_payload.get("model_family") or forecast_payload.get("model")
+        )
+        source_id = (
+            "day0_statistical_probability:"
+            f"{_nonnull(actionable_payload.get('city'))}:"
+            f"{_nonnull(actionable_payload.get('target_date'))}:"
+            f"{_nonnull(actionable_payload.get('metric'))}:"
+            f"{_nonnull(actionable_payload.get('station_id')) or 'station'}"
+        )
+        raw_payload_hash = stable_hash(
+            {
+                "source": "day0_statistical_probability_over_base_forecast",
+                "forecast_authority_certificate_hash": (
+                    forecast_authority.certificate_hash
+                ),
+                "q_source": q_source,
+                "probability_authority": probability_authority,
+                "probability_identity": probability_identity,
+                "observation_time": observation_time,
+                "observation_available_at": observation_available_at,
+                "raw_payload_sha256": raw_payload_sha256,
+                "configured_station_id": configured_station_id,
+                "day0_observation_provenance_hash": provenance_hash,
+            }
+        )
+        return {
+            **forecast_payload,
+            "source_id": source_id,
+            "forecast_source_id": source_id,
+            "model": f"day0_observed_probability:{base_model or 'base_forecast'}",
+            "model_family": (
+                f"day0_observed_probability:{base_model or 'base_forecast'}"
+            ),
+            "raw_payload_hash": raw_payload_hash,
+            "posterior_identity_hash": raw_payload_hash,
+            "degradation_level": "OK",
+            "forecast_source_role": "day0_observed_probability",
+            "authority_tier": "DAY0_OBSERVATION",
+            "observation_time": observation_time,
+            "observation_available_at": observation_available_at,
+            "provider_reported_time": actionable_payload.get(
+                "provider_reported_time"
+            ),
+            "raw_payload_sha256": raw_payload_sha256,
+            "configured_station_id": configured_station_id,
+            "day0_observation_provenance_hash": provenance_hash,
+            "decision_source_basis": (
+                "day0_statistical_probability_over_base_forecast"
+            ),
+            "base_forecast_source_id": base_source_id,
+            "base_forecast_model_family": base_model,
+            "base_posterior_identity_hash": forecast_payload.get(
+                "posterior_identity_hash"
+            ),
+            "forecast_authority_certificate_hash": (
+                forecast_authority.certificate_hash
+            ),
+            "day0_probability_q_source": q_source,
+            "day0_probability_authority": probability_authority,
+            "day0_probability_identity": probability_identity,
+        }
 
     day0_authority = next(
         (cert for cert in day0_source_certs if cert.certificate_type == claims.DAY0_AUTHORITY),

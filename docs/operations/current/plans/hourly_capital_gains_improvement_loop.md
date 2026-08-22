@@ -625,6 +625,33 @@
   certificate and global-JIT tests, then live command/venue facts, are required
   before any order or profit claim.
 
+### 2026-08-22 — statistical Day0 source context reaches the executor (B144)
+
+- **Observed defect:** after B143, stable global preflight repeatedly reached
+  `FinalExecutionIntent`, but the executor rejected the selected statistical
+  Day0 order as `forecast_role_not_entry_primary:day0_base_distribution` with
+  missing ensemble member/run clocks.
+- **Root cause:** removing false deterministic parents in B141 made the final
+  source-context bridge take its generic no-Day0-parent branch. That branch
+  passed only the base forecast certificate and dropped the already-verified
+  statistical Day0 observation/probability authority at the module boundary.
+- **Contract:** a Day0 actionable graph without deterministic parents must carry
+  a valid typed Day0 probability authority and live observation contract into a
+  `day0_observed_probability` executor context. The context binds the exact
+  qkernel probability identity, observation clocks, raw provenance, and base
+  forecast certificate without claiming absorbing settlement truth. Ordinary
+  forecast and deterministic hard-fact contexts are unchanged.
+- **SCOPE / DRAIN / RESET:** scope is only `FinalExecutionIntent` source-context
+  construction for one verified statistical Day0 winner. Each JIT attempt drains
+  by reconstructing and validating the actionable probability/observation
+  payload; missing provenance, clocks, qkernel identity, or typed authority
+  resets to a pre-venue rejection. Price, q, global ranking, sizing, Kelly,
+  collateral, venue, and settlement checks are unchanged.
+- **Acceptance:** a typed statistical remaining-day actionable payload with no
+  absorbing parents produces a zero-error `DecisionSourceContext`; malformed
+  statistical payloads still fail before command persistence. Live
+  command/venue/portfolio facts remain required before any profit claim.
+
 ### 2026-08-02 — partial EXIT realized-PnL canonical continuity (hot-fix slice)
 
 - **Scope / seam:** `src/execution/exit_lifecycle.py` emits canonical

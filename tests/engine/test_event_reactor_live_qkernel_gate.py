@@ -5882,6 +5882,127 @@ def test_day0_final_intent_source_context_binds_observation_and_base_forecast():
     assert ctx.integrity_errors() == ()
 
 
+def test_statistical_day0_final_intent_context_is_not_base_forecast_only():
+    decision_time = datetime(2026, 7, 1, 21, tzinfo=timezone.utc)
+    observation = {
+        "city": "Chicago",
+        "target_date": "2026-07-01",
+        "metric": "high",
+        "settlement_source": "wu_icao_history",
+        "station_id": "KORD",
+        "configured_station_id": "KORD",
+        "raw_payload_sha256": "a" * 64,
+        "observation_time": "2026-07-01T20:51:00+00:00",
+        "observation_available_at": "2026-07-01T20:55:56+00:00",
+    }
+    forecast = build_certificate(
+        certificate_type=claims.FORECAST_AUTHORITY,
+        semantic_key="forecast:statistical-day0-base",
+        claim_type=claims.FORECAST_AUTHORITY,
+        mode="LIVE",
+        decision_time=decision_time,
+        source_available_at=decision_time,
+        agent_received_at=decision_time,
+        persisted_at=decision_time,
+        payload={
+            "source_id": "replacement_raw_second_moment",
+            "forecast_source_id": "replacement_raw_second_moment",
+            "model_family": "replacement_raw_second_moment",
+            "forecast_issue_time": "2026-07-01T06:00:00+00:00",
+            "forecast_fetch_time": "2026-07-01T06:20:00+00:00",
+            "forecast_available_at": "2026-07-01T06:20:00+00:00",
+            "raw_payload_hash": "b" * 64,
+            "posterior_identity_hash": "qv-day0-base-001",
+            "degradation_level": "OK",
+            "forecast_source_role": "day0_base_distribution",
+            "authority_tier": "FORECAST",
+            "decision_time": decision_time.isoformat(),
+            "decision_time_status": "OK",
+            "polymarket_end_anchor_source": "gamma_explicit",
+            "zeus_submit_intent_time": "2026-07-01T21:00:01+00:00",
+            "venue_ack_time": "2026-07-01T21:00:02+00:00",
+        },
+        authority_id="test",
+        authority_version="v1",
+        algorithm_id="test",
+        algorithm_version="v1",
+    )
+    transform = {
+        "yes_lcb_by_condition": {"condition-1": 0.6},
+        "no_lcb_by_condition": {"condition-1": 0.2},
+        "mask": [1.0],
+    }
+    actionable = {
+        **observation,
+        "day0_observation_provenance_hash": stable_hash(observation),
+        "event_type": "DAY0_EXTREME_UPDATED",
+        "source_match_status": "MATCH",
+        "local_date_status": "MATCH",
+        "station_match_status": "MATCH",
+        "dst_status": "UNAMBIGUOUS",
+        "metric_match_status": "MATCH",
+        "rounding_status": "MATCH",
+        "source_authorized_status": "AUTHORIZED",
+        "live_authority_status": "live",
+        "raw_value": 20.0,
+        "rounded_value": 20,
+        "probability_authority": "day0_remaining_day_global_probability_v1",
+        "q_source": "day0_remaining_day",
+        "_edli_q_source": "day0_remaining_day",
+        "_edli_day0_q_mode": "remaining_day",
+        "_edli_day0_remaining_models": 3,
+        "_edli_day0_lcb_transform": transform,
+        "day0_probability_authority": {
+            "probability_authority": (
+                "day0_remaining_day_global_probability_v1"
+            ),
+            "q_source": "day0_remaining_day",
+            "q_mode": "remaining_day",
+            "remaining_models": 3,
+            "rounded_value": 20,
+            "observation_time": observation["observation_time"],
+            "observation_available_at": observation[
+                "observation_available_at"
+            ],
+            "lcb_transform": transform,
+        },
+        "direction": "buy_yes",
+        "condition_id": "condition-1",
+        "q_live": 0.7,
+        "q_lcb_5pct": 0.6,
+        "qkernel_execution_economics": {
+            "current_state_identity_hash": "c" * 64,
+        },
+    }
+
+    payload = _final_intent_decision_source_context_payload(
+        event=SimpleNamespace(event_type="DAY0_EXTREME_UPDATED"),
+        forecast_authority=forecast,
+        day0_source_certs=(),
+        actionable_payload=actionable,
+    )
+    context = DecisionSourceContext.from_forecast_context(payload)
+
+    assert payload["forecast_source_role"] == "day0_observed_probability"
+    assert payload["authority_tier"] == "DAY0_OBSERVATION"
+    assert payload["day0_probability_identity"] == "c" * 64
+    assert context is not None
+    assert context.integrity_errors() == ()
+
+    malformed = dict(actionable)
+    malformed["q_source"] = "day0_deterministic_bin_payoff"
+    with pytest.raises(
+        ValueError,
+        match="DAY0_STATISTICAL_DECISION_SOURCE_CONTEXT_INVALID",
+    ):
+        _final_intent_decision_source_context_payload(
+            event=SimpleNamespace(event_type="DAY0_EXTREME_UPDATED"),
+            forecast_authority=forecast,
+            day0_source_certs=(),
+            actionable_payload=malformed,
+        )
+
+
 @pytest.mark.parametrize(
     "event_type",
     ("FORECAST_SNAPSHOT_READY", "DAY0_EXTREME_UPDATED"),
