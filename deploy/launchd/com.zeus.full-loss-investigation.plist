@@ -14,6 +14,8 @@
 		<string>ZEUS_REPO_PLACEHOLDER</string>
 		<key>PYTHONSAFEPATH</key>
 		<string>1</string>
+		<key>PATH</key>
+		<string>ZEUS_HOME_PLACEHOLDER/.npm-global/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
 		<key>ZEUS_FULL_LOSS_WORKSPACE</key>
 		<string>ZEUS_HOME_PLACEHOLDER/.openclaw/workspace-zeus-loss-investigator</string>
 	</dict>

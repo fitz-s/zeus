@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import plistlib
 import sqlite3
 from datetime import timedelta
 from pathlib import Path
@@ -417,3 +418,11 @@ def test_requeue_requires_evidence_delta_and_targets_one_root(tmp_path: Path) ->
     assert requeued == ["a"]
     assert loop.read_json(workspace / "runtime" / "incidents" / "a.json", {})["status"] == "pending"
     assert loop.read_json(workspace / "runtime" / "incidents" / "b.json", {})["status"] == "investigated"
+
+
+def test_launchd_runner_path_resolves_node_for_codex_npm_shim() -> None:
+    with (REPO_ROOT / "deploy" / "launchd" / "com.zeus.full-loss-investigation.plist").open("rb") as handle:
+        payload = plistlib.load(handle)
+    path = payload["EnvironmentVariables"]["PATH"]
+    assert "/opt/homebrew/bin" in path.split(":")
+    assert "ZEUS_HOME_PLACEHOLDER/.npm-global/bin" in path.split(":")
