@@ -189,6 +189,7 @@ def test_validated_result_updates_only_dedicated_memory(tmp_path: Path) -> None:
             "uncertainty_quadrant": "known_known",
             "earliest_causal_divergence": "2026-08-22T00:00:00Z",
             "last_executable_exit": "2026-08-22T00:01:00Z bid=0.20",
+            "upstream_decision_assessment": "forecast and posterior still require event-time audit",
             "causal_timeline": [],
             "evidence_refs": ["position_events:event-1"],
             "falsifier": "show a fresh monitor event",

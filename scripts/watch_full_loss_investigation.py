@@ -85,6 +85,12 @@ For every incident:
   capital-preserving action.  Separate prediction/source error, stale or
   missing monitoring, probability-update error, decision-law error, command
   persistence/submission error, no-bid/gap risk, and settlement jump.
+- A no-bid/gap finding closes only the downstream execution question.  It does
+  not prove the loss was unavoidable.  Reconstruct the upstream forecast,
+  source revisions, posterior, and decision law before the last in-band bid.
+  `market_unavoidable` is permitted only when those upstream decisions are
+  independently proved event-time correct; otherwise use mixed or unknown and
+  name the missing upstream evidence.
 - Compare against every prior root cause.  Classify as same_root, variant,
   new_root, repair_regression, historical_exposure, or insufficient_evidence.
 - Map uncertainty to known_known, known_unknown, unasked_known, or
@@ -144,7 +150,8 @@ OUTPUT_SCHEMA: dict[str, Any] = {
                     "incident_id", "position_id", "classification", "root_cause_id",
                     "preventability", "confidence", "uncertainty_quadrant",
                     "earliest_causal_divergence", "last_executable_exit",
-                    "causal_timeline", "evidence_refs", "falsifier", "repair_spec",
+                    "upstream_decision_assessment", "causal_timeline",
+                    "evidence_refs", "falsifier", "repair_spec",
                 ],
                 "properties": {
                     "incident_id": {"type": "string"},
@@ -168,6 +175,7 @@ OUTPUT_SCHEMA: dict[str, Any] = {
                     },
                     "earliest_causal_divergence": {"type": ["string", "null"]},
                     "last_executable_exit": {"type": ["string", "null"]},
+                    "upstream_decision_assessment": {"type": "string"},
                     "causal_timeline": {
                         "type": "array",
                         "items": {
