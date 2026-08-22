@@ -2954,3 +2954,29 @@ publication barrier.
   REVIEW_REQUIRED -> FILLED in `reconcile_authenticated_entry_trade_facts`,
   projects exact `$15.99` cost, remains limited to the named review reason, and
   passes focused command-recovery plus planning/registry checks.
+
+## B135 — Terminal-fill review recovery preserves global selection attribution
+
+- Live evidence: B134 correctly recovered Chicago command
+  `5b4f659b33104cf6` as 41 additional shares, but its canonical
+  `ENTRY_ORDER_FILLED` event omitted the already verified schema-22 global
+  auction receipt. The normal missing-position recovery path preserved the
+  same field (for example Chicago 78–79°F command `5d35f63557de4541` carried
+  receipt 524132), so the B134 path restored wealth while leaving a proof seam
+  that would exclude a real fill from global-selection-bound performance.
+- Decision: for the exact B134 review shape, reuse the existing typed EDLI
+  receipt validator before projection and pass only its positive decision-log
+  id into the canonical entry-fill event. Receipt absence or mismatch remains
+  null and never blocks exposure projection. Other review reasons remain
+  excluded.
+- SCOPE: future exact terminal-fill review recovery events only. DRAIN: the
+  same atomic confirmed-fill fold. RESET: one `ENTRY_ORDER_FILLED` payload
+  carries the verified receipt id; missing authority stays absent without
+  inference or historical mutation.
+- Files authorized: `src/execution/command_recovery.py`,
+  `src/execution/exchange_reconcile.py`, `tests/test_command_recovery.py`,
+  `tests/test_exchange_reconcile.py`, `architecture/test_topology.yaml`, and
+  this plan. Acceptance: the B134 41
+  share antibody reproduces receipt 524132 in the canonical position event;
+  unrelated reviews remain fail-closed; focused recovery and registry gates
+  pass before exact-SHA deployment.

@@ -24708,6 +24708,12 @@ def _reconcile_authenticated_entry_trade_fact(
     }
     projection_command = command
     snapshot_market_identity: dict[str, object] | None = None
+    terminal_fill_decision_log_id: int | None = None
+    if terminal_fill_review:
+        _, terminal_fill_decision_log_id = _decision_log_trade_case_for_command(
+            conn,
+            command,
+        )
     if not str(command.get("projected_phase") or "").strip():
         projection_command, snapshot_market_identity = (
             _immutable_snapshot_identity_for_missing_entry_projection(conn, command)
@@ -24803,6 +24809,7 @@ def _reconcile_authenticated_entry_trade_fact(
             order_fact_source=source,
             authoritative_market_metadata=snapshot_market_identity,
             defer_identity_finding_until_rollback=True,
+            decision_log_id=terminal_fill_decision_log_id,
         )
         expected_state = (
             CommandState.FILLED.value if complete else CommandState.PARTIAL.value

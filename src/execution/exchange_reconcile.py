@@ -5424,6 +5424,7 @@ def _ensure_entry_fill_position_event(
     authoritative_market_metadata: Mapping[str, Any] | None = None,
     context: ReconcileContext = "periodic",
     defer_identity_finding_until_rollback: bool = False,
+    decision_log_id: int | None = None,
 ) -> None:
     if str(command.get("intent_kind") or "").upper() != "ENTRY":
         return
@@ -5986,6 +5987,16 @@ def _ensure_entry_fill_position_event(
             for event in events:
                 if event.get("event_type") == "ENTRY_ORDER_FILLED":
                     event["command_id"] = command_id
+    if decision_log_id is not None:
+        if isinstance(decision_log_id, bool) or int(decision_log_id) <= 0:
+            raise ValueError("entry fill decision_log_id must be a positive integer")
+        for event in events:
+            if event.get("event_type") != "ENTRY_ORDER_FILLED":
+                continue
+            raw_payload = event.get("payload_json")
+            payload = _json_mapping(raw_payload)
+            payload["decision_log_id"] = int(decision_log_id)
+            event["payload_json"] = json.dumps(payload, default=str, sort_keys=True)
     _apply_entry_fill_projection_and_execution_fact(
         conn,
         events=events,

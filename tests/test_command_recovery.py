@@ -5275,7 +5275,11 @@ class TestAuthenticatedEntryTradeFactProjection:
             (position_id, order_id),
         ).fetchone()[0] == 1
 
-    def test_confirmed_terminal_fill_review_preempts_broad_recovery(self, conn):
+    def test_confirmed_terminal_fill_review_preempts_broad_recovery(
+        self,
+        conn,
+        monkeypatch,
+    ):
         """A late confirmed fill clears its exact point-order review locally."""
         from src.execution.command_recovery import (
             reconcile_authenticated_entry_trade_facts,
@@ -5329,6 +5333,10 @@ class TestAuthenticatedEntryTradeFactProjection:
             filled_size="41",
             fill_price="0.39",
         )
+        monkeypatch.setattr(
+            "src.execution.command_recovery._decision_log_trade_case_for_command",
+            lambda _conn, _command: ({}, 524132),
+        )
 
         summary = reconcile_authenticated_entry_trade_facts(
             conn,
@@ -5342,6 +5350,13 @@ class TestAuthenticatedEntryTradeFactProjection:
         assert event["event_type"] == "FILL_CONFIRMED"
         assert payload["reason"] == "review_cleared_confirmed_fill"
         assert payload["proof_class"] == "authenticated_trade_fact_full_fill"
+        position_event = conn.execute(
+            "SELECT payload_json FROM position_events "
+            "WHERE position_id = ? AND event_type = 'ENTRY_ORDER_FILLED' "
+            "AND command_id = ?",
+            (position_id, command_id),
+        ).fetchone()
+        assert json.loads(position_event["payload_json"])["decision_log_id"] == 524132
         position = conn.execute(
             "SELECT shares, cost_basis_usd, order_id, order_status "
             "FROM position_current WHERE position_id = ?",
