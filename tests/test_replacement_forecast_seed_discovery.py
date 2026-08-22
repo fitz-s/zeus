@@ -1,6 +1,6 @@
 # Created: 2026-06-06
-# Last reused/audited: 2026-08-17
-# Lifecycle: created=2026-06-06; last_reviewed=2026-08-17; last_reused=2026-08-17
+# Last reused/audited: 2026-08-21
+# Lifecycle: created=2026-06-06; last_reviewed=2026-08-21; last_reused=2026-08-21
 # Purpose: Protect automatic replacement seed discovery from DB context plus raw manifests.
 # Reuse: Run before enabling daemon-side replacement shadow materialization discovery.
 # Authority basis: Simple switch must not depend on hand-authored seeds once raw inputs exist.
@@ -889,6 +889,71 @@ def test_seed_discovery_writes_seed_from_db_target_and_raw_manifests(tmp_path: P
     assert seed["openmeteo_payload_json"].endswith("raw/openmeteo.json")
     assert seed["openmeteo_manifest_json"].endswith("raw/openmeteo.manifest.json")
     assert seed["precision_metadata_json"].endswith("raw/precision_metadata.json")
+
+
+def test_seed_discovery_does_not_churn_future_of_ensemble_hwm(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    db_path = tmp_path / "forecast.db"
+    raw_dir = tmp_path / "raw"
+    seed_dir = tmp_path / "seeds"
+    _init_db(db_path)
+    _write_raw_inputs(raw_dir)
+    monkeypatch.setattr(
+        seed_discovery,
+        "_seed_awaits_current_ensemble_hwm",
+        lambda **_kwargs: True,
+    )
+
+    report = discover_replacement_forecast_materialization_seeds(
+        forecast_db=db_path,
+        raw_manifest_dir=raw_dir,
+        seed_dir=seed_dir,
+        computed_at="2026-06-06T04:00:00+00:00",
+    )
+
+    assert report.status == "NO_ELIGIBLE_TARGETS"
+    assert report.discovered_count == 0
+    assert (
+        "REPLACEMENT_SEED_DISCOVERY_SOURCE_CYCLE_AWAITING_ENSEMBLE_HWM"
+        in report.reason_codes
+    )
+    assert not seed_dir.exists() or not tuple(seed_dir.glob("*.json"))
+
+
+def test_seed_discovery_ensemble_wait_reuses_queue_boundary(monkeypatch) -> None:
+    import src.data.replacement_forecast_live_materialization_queue as queue_mod
+
+    calls: list[dict[str, object]] = []
+
+    def boundary(**kwargs):
+        calls.append(kwargs)
+        return "awaiting_current_ensemble_hwm", "2026-08-21T12:00:00+00:00"
+
+    monkeypatch.setattr(queue_mod, "_seed_source_cycle_boundary", boundary)
+    seed = {
+        "city": "Shanghai",
+        "target_date": "2026-08-22",
+        "temperature_metric": "high",
+        "source_cycle_time": "2026-08-21T18:00:00+00:00",
+    }
+
+    assert seed_discovery._seed_awaits_current_ensemble_hwm(
+        seed=seed,
+        forecast_db="forecast.db",
+    )
+    assert calls == [{"forecast_db": "forecast.db", "seed": seed}]
+
+    monkeypatch.setattr(
+        queue_mod,
+        "_seed_source_cycle_boundary",
+        lambda **_kwargs: ("current_ensemble_hwm", "2026-08-21T18:00:00+00:00"),
+    )
+    assert not seed_discovery._seed_awaits_current_ensemble_hwm(
+        seed=seed,
+        forecast_db="forecast.db",
+    )
 
 
 def test_legacy_single_runs_manifest_horizon_admits_later_target_dates(tmp_path: Path) -> None:

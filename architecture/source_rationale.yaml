@@ -424,7 +424,7 @@ files:
   src/data/replacement_forecast_seed_discovery.py:
     zone: K2_runtime
     authority_role: replacement_forecast_seed_discovery
-    why: Builds causal replacement materialization seeds from current raw forecast artifacts and Day0 facts. Live discovery resolves the exact content-addressed manifest set selected by the canonical current-target source-run identities instead of rescanning immutable history; an incomplete index falls back to strict inventory. Queue deduplication is scoped to the exact city-date-metric family so unrelated pending work cannot starve discovery. A raw same-station fast extreme may supersede the slower WU seed value only when the seven-day station-local residual likelihood is qualified; thin or missing evidence preserves the settlement-channel seed byte-for-byte.
+    why: Builds causal replacement materialization seeds from current raw forecast artifacts and Day0 facts. Live discovery resolves the exact content-addressed manifest set selected by the canonical current-target source-run identities instead of rescanning immutable history; an incomplete index falls back to strict inventory. Queue deduplication is scoped to the exact city-date-metric family so unrelated pending work cannot starve discovery. Recovery discovery suppresses a deterministic-cycle seed while that exact family is still awaiting its same-cycle eligible ENS shape; unknown boundary state fails open and the queue repeats the authoritative JIT check. A raw same-station fast extreme may supersede the slower WU seed value only when the seven-day station-local residual likelihood is qualified; thin or missing evidence preserves the settlement-channel seed byte-for-byte.
     hazards:
     - SOURCE_TRUTH_PLANE_COLLAPSE
     downstream:

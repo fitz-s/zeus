@@ -936,6 +936,37 @@ def _unchanged_blocked_seed_attempt(
         return False
 
 
+def _seed_awaits_current_ensemble_hwm(
+    *,
+    seed: Mapping[str, object],
+    forecast_db: Path | str,
+) -> bool:
+    """Avoid rediscovering a deterministic cycle before its ENS shape exists.
+
+    The queue keeps the same JIT boundary as the final pre-subprocess guard.
+    Applying it during recovery discovery prevents a future-of-ENS family from
+    being written, terminally consumed, and rediscovered every poll. Unknown
+    boundary state fails open so committed ENS or unreadable evidence can still
+    reach the queue's authoritative recheck.
+    """
+
+    try:
+        from src.data.replacement_forecast_live_materialization_queue import (  # noqa: PLC0415
+            _seed_source_cycle_boundary,
+        )
+
+        boundary = _seed_source_cycle_boundary(
+            forecast_db=forecast_db,
+            seed=dict(seed),
+        )
+    except Exception:  # noqa: BLE001 - queue remains the final fail-closed boundary
+        return False
+    return bool(
+        boundary is not None
+        and boundary[0] == "awaiting_current_ensemble_hwm"
+    )
+
+
 def discover_replacement_forecast_materialization_seeds(
     *,
     forecast_db: Path | str,
@@ -1173,6 +1204,14 @@ def discover_replacement_forecast_materialization_seeds(
             if not seed_result.ok or seed_result.seed is None:
                 failed.append(target_key)
                 reasons.extend(seed_result.reason_codes)
+                continue
+            if _seed_awaits_current_ensemble_hwm(
+                seed=seed_result.seed,
+                forecast_db=forecast_db,
+            ):
+                reasons.append(
+                    "REPLACEMENT_SEED_DISCOVERY_SOURCE_CYCLE_AWAITING_ENSEMBLE_HWM"
+                )
                 continue
             seed_file = seed_path / _seed_name(target, computed_at=computed)
             if _unchanged_blocked_seed_attempt(

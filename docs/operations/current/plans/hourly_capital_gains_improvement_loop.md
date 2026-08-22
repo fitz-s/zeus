@@ -465,6 +465,26 @@
 
 （历史分析已按操作员指令清除;需要旧内容从 git history 取。）
 
+### 2026-08-21 — pre-persistence future-of-ENS recovery suppression (B138)
+
+- **Observed defect:** after a newer deterministic cycle arrived before its
+  same-cycle ENS shape, recovery discovery repeatedly wrote the same
+  city-date-metric seeds. The queue correctly consumed them without spawning a
+  materializer, but the next discovery pass recreated them, spending the
+  bounded seed tranche and filesystem/receipt budget while current probability
+  coverage was already scarce.
+- **Contract:** recovery discovery applies the queue's exact family/cycle ENS
+  boundary before seed persistence. A deterministic cycle ahead of the newest
+  decision-time-eligible ENS is not written. Unknown boundary state fails open,
+  and the queue retains the final authoritative JIT recheck. Once ENS advances,
+  ordinary discovery and the committed-ENS cycle-advance trigger can enqueue
+  the scope immediately; probability math and HWM authority do not change.
+- **Acceptance:** a recovery-discovery antibody proves future-of-ENS input
+  yields zero seed files and a typed reason; existing discovery and queue JIT
+  tests remain green. Production acceptance is cessation of repeated deferred
+  seed churn, followed by current-cycle posterior generation after ENS commit.
+  Rollback is one hot-fix commit.
+
 ### 2026-08-02 — partial EXIT realized-PnL canonical continuity (hot-fix slice)
 
 - **Scope / seam:** `src/execution/exit_lifecycle.py` emits canonical
