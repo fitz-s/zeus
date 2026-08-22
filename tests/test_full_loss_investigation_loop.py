@@ -381,3 +381,15 @@ def test_three_identical_runner_failures_circuit_break_until_contract_changes(tm
     loop.atomic_json(workspace / "runtime" / "config.json", config)
     assert loop.reset_blocked_if_contract_changed(workspace, config) == [ident]
     assert loop.read_json(incident_path, {})["status"] == "pending"
+
+
+def test_daemon_identity_binds_repo_head_and_script_digest(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(
+        loop,
+        "_git",
+        lambda _repo, *_args: type("Result", (), {"returncode": 0, "stdout": "abc123\n"})(),
+    )
+    identity = loop.daemon_code_identity(tmp_path)
+    assert identity["repo_sha"] == "abc123"
+    assert identity["script_path"].endswith("scripts/watch_full_loss_investigation.py")
+    assert len(identity["script_sha256"]) == 64

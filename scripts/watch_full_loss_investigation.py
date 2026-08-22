@@ -475,6 +475,16 @@ def _loaded_sha(repo_root: Path) -> str | None:
     return payload.get("boot_sha") or payload.get("current_sha")
 
 
+def daemon_code_identity(repo_root: Path) -> dict[str, str | None]:
+    head = _git(repo_root, "rev-parse", "HEAD")
+    script = Path(__file__).resolve()
+    return {
+        "repo_sha": head.stdout.strip() if head.returncode == 0 else None,
+        "script_path": str(script),
+        "script_sha256": hashlib.sha256(script.read_bytes()).hexdigest(),
+    }
+
+
 def _git(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(["git", "-C", str(repo), *args], capture_output=True, text=True, timeout=15)
 
@@ -905,7 +915,8 @@ def run_daemon(workspace: Path) -> int:
 
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
-    append_event(workspace, "DAEMON_STARTED", pid=os.getpid())
+    code_identity = daemon_code_identity(Path(config["repo_root"]))
+    append_event(workspace, "DAEMON_STARTED", pid=os.getpid(), **code_identity)
     recover_orphan_batches(workspace)
     while not stopping:
         try:
@@ -931,12 +942,21 @@ def run_daemon(workspace: Path) -> int:
                     start_batch(workspace, config, batch)
             atomic_json(
                 workspace / "runtime" / "heartbeat.json",
-                {"alive": True, "pid": os.getpid(), "at": iso_now(), "new_incidents": new_ids},
+                {
+                    "alive": True,
+                    "pid": os.getpid(),
+                    "at": iso_now(),
+                    "new_incidents": new_ids,
+                    **code_identity,
+                },
             )
         except Exception as exc:
             append_event(workspace, "DAEMON_CYCLE_FAILED", error=f"{type(exc).__name__}: {exc}")
         time.sleep(max(5, int(config.get("poll_seconds", 15))))
-    atomic_json(workspace / "runtime" / "heartbeat.json", {"alive": False, "pid": os.getpid(), "at": iso_now()})
+    atomic_json(
+        workspace / "runtime" / "heartbeat.json",
+        {"alive": False, "pid": os.getpid(), "at": iso_now(), **code_identity},
+    )
     append_event(workspace, "DAEMON_STOPPED", pid=os.getpid())
     return 0
 
