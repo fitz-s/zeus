@@ -681,6 +681,29 @@
   live receipts, command events, venue fills, and realized/settled capital
   evidence remain separate proof lines; no open position is profit proof.
 
+### 2026-08-22 — Day0 BUY must be monitor-stable before venue I/O (B146)
+
+- **Observed defect:** after B145 made Lucknow's held action consume HELD q, the
+  exact live round trip exposed the upstream inconsistency: BUY filled 5.75 NO
+  at 0.68 from ENTRY q about 0.799, then current HELD q about 0.50 authorized a
+  0.67 SELL. Gross realized PnL was -0.06; the strict evaluator remains FAIL.
+- **Contract:** at JIT/pre-submit, every selected Day0 BUY rebuilds both current
+  ENTRY and immediate HELD_MONITOR probability witnesses for the exact family
+  and condition. Their complete probability content, including the point
+  simplex, must match. Missing HELD authority or any divergence rejects the BUY
+  before venue I/O; no HELD-only evidence is promoted into entry authority.
+- **SCOPE / DRAIN / RESET:** scope is the exact selected Day0 BUY candidate.
+  Candidate-local fallthrough lets independent current actions continue to
+  compete against CASH in the same cut. A later recurring cut rebuilds both
+  witnesses and exact equality restores eligibility. Price, fees, depth,
+  wealth, Kelly, RiskGuard, collateral, settlement, and SELL authority remain
+  unchanged.
+- **Acceptance:** focused antibodies prove equal content proceeds and preserves
+  the selected immutable witness; q-content divergence and unavailable HELD
+  truth both return candidate-local no-submit reasons. Deployment and any later
+  order still require separate current SHA/process/DB/receipt/venue evidence;
+  this gate prevents one demonstrated loss mechanism but is not profit proof.
+
 ### 2026-08-02 — partial EXIT realized-PnL canonical continuity (hot-fix slice)
 
 - **Scope / seam:** `src/execution/exit_lifecycle.py` emits canonical

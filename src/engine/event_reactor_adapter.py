@@ -14123,6 +14123,17 @@ def _global_preflight_block_status(reason: str) -> str:
         # Exclude that exact action and let the complete auction compare its
         # remaining candidates with CASH.
         return "CANDIDATE_BLOCKED"
+    if reason.endswith(
+        (
+            "GLOBAL_ACTUATION_HELD_PROBABILITY_UNAVAILABLE",
+            "GLOBAL_ACTUATION_PROBABILITY_USE_DIVERGED",
+        )
+    ):
+        # ENTRY remains the authority for opening risk, but a Day0 BUY is not
+        # executable when its immediate HELD monitor cannot reproduce the same
+        # probability content. This scopes the fault to the selected candidate
+        # so independent current opportunities still compete against CASH.
+        return "CANDIDATE_BLOCKED"
     if reason == (
         "GLOBAL_ACTUATION_PREPARE_FAILED:"
         "SELECTION_SCOPE_EMPTY:execution_price:input=1:"
@@ -16909,6 +16920,62 @@ def _current_global_actuation_prepared_family(
             getattr(current_witness, "witness_identity", "missing"),
         )
         raise ValueError("GLOBAL_ACTUATION_PROBABILITY_SUPERSEDED")
+    if (
+        probability_use is _CurrentProbabilityUse.ENTRY
+        and current_day0_payload
+    ):
+        try:
+            held_current = _prepare_current_global_probability_family(
+                event,
+                forecast_conn=forecast_conn,
+                topology_conn=topology_conn,
+                observation_conn=observation_conn,
+                decision_time=decision_time,
+                max_age=FRESHNESS_WINDOW_DEFAULT,
+                required_condition_id=required_condition_id,
+                allow_partial_deterministic=False,
+                allow_unobserved_day0_replacement=True,
+                allow_provisional_day0_replacement=True,
+                probability_use=_CurrentProbabilityUse.HELD_MONITOR,
+            )
+        except Exception as exc:  # noqa: BLE001 - an unmonitorable BUY is unsafe.
+            logging.getLogger(__name__).warning(
+                "global Day0 BUY held probability unavailable: family=%s "
+                "selected_witness=%s error=%s:%s",
+                getattr(selected, "family_key", "unknown"),
+                getattr(selected, "witness_identity", "unknown"),
+                type(exc).__name__,
+                exc,
+            )
+            # SCOPE: this exact selected Day0 BUY candidate. DRAIN: the current
+            # auction excludes it and compares the remaining BUY/SELL/HOLD/CASH
+            # actions. RESET: a later cut rebuilds both current ENTRY and HELD
+            # witnesses; equality restores eligibility without persisted state.
+            raise ValueError(
+                "GLOBAL_ACTUATION_HELD_PROBABILITY_UNAVAILABLE"
+            ) from exc
+        held_witness = getattr(held_current, "probability_witness", None)
+        held_mismatches = (
+            ("probability_witness",)
+            if held_witness is None
+            else _global_probability_witness_content_mismatches(
+                held_witness,
+                current_witness,
+            )
+        )
+        if held_mismatches:
+            logging.getLogger(__name__).warning(
+                "global Day0 BUY probability use diverged: family=%s fields=%s "
+                "entry_witness=%s held_witness=%s",
+                getattr(selected, "family_key", "unknown"),
+                ",".join(held_mismatches),
+                getattr(current_witness, "witness_identity", "unknown"),
+                getattr(held_witness, "witness_identity", "missing"),
+            )
+            # SCOPE/DRAIN/RESET are identical to the unavailable branch above:
+            # no new position may be opened when its immediate monitor would
+            # price the same claim from different probability content.
+            raise ValueError("GLOBAL_ACTUATION_PROBABILITY_USE_DIVERGED")
     if isinstance(selected, DeterministicBinPayoffWitness):
         _bind_current_deterministic_day0_witness(
             current_day0_payload,

@@ -5490,6 +5490,189 @@ def test_global_actuation_revalidates_content_then_preserves_selected_witness(
     conn.close()
 
 
+def test_day0_buy_jit_requires_entry_and_held_probability_content_equality(
+    monkeypatch,
+):
+    content = {
+        field: f"current-{field}"
+        for field in era._GLOBAL_PROBABILITY_CONTENT_FIELDS
+    }
+    selected = SimpleNamespace(
+        **content,
+        yes_point_q=np.asarray((0.2, 0.8), dtype=np.float64),
+        authority_certificate_hash="selected-cert",
+        witness_identity="selected-entry",
+    )
+    held = SimpleNamespace(
+        **content,
+        yes_point_q=np.asarray((0.2, 0.8), dtype=np.float64),
+        authority_certificate_hash="held-cert",
+        witness_identity="current-held",
+    )
+    calls: list[dict[str, object]] = []
+
+    def prepare_current(*_args, **kwargs):
+        calls.append(dict(kwargs))
+        if kwargs["probability_use"] is era._CurrentProbabilityUse.ENTRY:
+            kwargs["day0_payload_out"].update({"q_source": "day0"})
+            witness = selected
+        else:
+            witness = held
+        return bridge.PreparedGlobalFamily(
+            decision_id="current-day0",
+            probability_witness=witness,
+            candidate_seeds=(),
+        )
+
+    monkeypatch.setattr(
+        era,
+        "_prepare_current_global_probability_family",
+        prepare_current,
+    )
+    conn = sqlite3.connect(":memory:")
+    candidate = _global_test_buy_candidate(
+        family_key=str(selected.family_key),
+        probability_witness_identity=str(selected.witness_identity),
+        book_identity="selected-book",
+        price="0.40",
+        captured_at=_dt.datetime(
+            2026, 7, 10, 20, 0, tzinfo=_dt.timezone.utc
+        ),
+        condition_id="c0",
+    )
+    actuation = SimpleNamespace(
+        probability_witness=selected,
+        decision=SimpleNamespace(candidate=candidate),
+    )
+
+    rebound, payload = era._current_global_actuation_prepared_family(
+        SimpleNamespace(event_type="DAY0_EXTREME_UPDATED"),
+        global_actuation=actuation,
+        forecast_conn=conn,
+        topology_conn=conn,
+        observation_conn=conn,
+        decision_time=_dt.datetime(2026, 7, 10, 20, 0, tzinfo=_dt.timezone.utc),
+    )
+
+    assert rebound.probability_witness is selected
+    assert payload == {"q_source": "day0"}
+    assert [call["probability_use"] for call in calls] == [
+        era._CurrentProbabilityUse.ENTRY,
+        era._CurrentProbabilityUse.HELD_MONITOR,
+    ]
+    assert calls[1]["required_condition_id"] == "c0"
+    assert calls[1]["allow_partial_deterministic"] is False
+    assert calls[1]["allow_unobserved_day0_replacement"] is True
+    assert calls[1]["allow_provisional_day0_replacement"] is True
+    conn.close()
+
+
+def test_day0_buy_jit_blocks_probability_use_divergence_or_unavailable_held(
+    monkeypatch,
+):
+    content = {
+        field: f"current-{field}"
+        for field in era._GLOBAL_PROBABILITY_CONTENT_FIELDS
+    }
+    selected = SimpleNamespace(
+        **content,
+        yes_point_q=np.asarray((0.2, 0.8), dtype=np.float64),
+        authority_certificate_hash="selected-cert",
+        witness_identity="selected-entry",
+    )
+    candidate = _global_test_buy_candidate(
+        family_key=str(selected.family_key),
+        probability_witness_identity=str(selected.witness_identity),
+        book_identity="selected-book",
+        price="0.40",
+        captured_at=_dt.datetime(
+            2026, 7, 10, 20, 0, tzinfo=_dt.timezone.utc
+        ),
+        condition_id="c0",
+    )
+    actuation = SimpleNamespace(
+        probability_witness=selected,
+        decision=SimpleNamespace(candidate=candidate),
+    )
+    conn = sqlite3.connect(":memory:")
+
+    def divergent(*_args, **kwargs):
+        if kwargs["probability_use"] is era._CurrentProbabilityUse.ENTRY:
+            kwargs["day0_payload_out"].update({"q_source": "day0"})
+            witness = selected
+        else:
+            witness = SimpleNamespace(
+                **content,
+                yes_point_q=np.asarray((0.7, 0.3), dtype=np.float64),
+                authority_certificate_hash="held-cert",
+                witness_identity="current-held",
+            )
+        return bridge.PreparedGlobalFamily(
+            decision_id="current-day0",
+            probability_witness=witness,
+            candidate_seeds=(),
+        )
+
+    monkeypatch.setattr(
+        era,
+        "_prepare_current_global_probability_family",
+        divergent,
+    )
+    with pytest.raises(
+        ValueError,
+        match="GLOBAL_ACTUATION_PROBABILITY_USE_DIVERGED",
+    ):
+        era._current_global_actuation_prepared_family(
+            SimpleNamespace(event_type="DAY0_EXTREME_UPDATED"),
+            global_actuation=actuation,
+            forecast_conn=conn,
+            topology_conn=conn,
+            observation_conn=conn,
+            decision_time=_dt.datetime(
+                2026, 7, 10, 20, 0, tzinfo=_dt.timezone.utc
+            ),
+        )
+
+    def unavailable(*_args, **kwargs):
+        if kwargs["probability_use"] is era._CurrentProbabilityUse.HELD_MONITOR:
+            raise ValueError("held source missing")
+        kwargs["day0_payload_out"].update({"q_source": "day0"})
+        return bridge.PreparedGlobalFamily(
+            decision_id="current-day0",
+            probability_witness=selected,
+            candidate_seeds=(),
+        )
+
+    monkeypatch.setattr(
+        era,
+        "_prepare_current_global_probability_family",
+        unavailable,
+    )
+    with pytest.raises(
+        ValueError,
+        match="GLOBAL_ACTUATION_HELD_PROBABILITY_UNAVAILABLE",
+    ):
+        era._current_global_actuation_prepared_family(
+            SimpleNamespace(event_type="DAY0_EXTREME_UPDATED"),
+            global_actuation=actuation,
+            forecast_conn=conn,
+            topology_conn=conn,
+            observation_conn=conn,
+            decision_time=_dt.datetime(
+                2026, 7, 10, 20, 0, tzinfo=_dt.timezone.utc
+            ),
+        )
+    assert era._global_preflight_block_status(
+        "GLOBAL_ACTUATION_PROBABILITY_REVALIDATION_FAILED:ValueError:"
+        "GLOBAL_ACTUATION_PROBABILITY_USE_DIVERGED"
+    ) == "CANDIDATE_BLOCKED"
+    assert era._global_preflight_block_status(
+        "GLOBAL_ACTUATION_PROBABILITY_REVALIDATION_FAILED:ValueError:"
+        "GLOBAL_ACTUATION_HELD_PROBABILITY_UNAVAILABLE"
+    ) == "CANDIDATE_BLOCKED"
+    conn.close()
+
+
 def test_global_sell_jit_deterministic_hard_fact_supersedes_statistical_selection(
     monkeypatch,
 ):
