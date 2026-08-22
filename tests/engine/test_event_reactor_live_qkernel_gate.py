@@ -2834,7 +2834,16 @@ def test_global_current_entry_feasibility_proof_observes_through_only_automated_
         **kwargs,
         observe_through_automated_risk_gate=True,
     ) is None
+    candidate.execution_mode = "MAKER_REST"
+    candidate.side = "NO"
+    market_alpha_only[0] = True
+    assert era._global_current_entry_feasibility_rejection_reason(
+        candidate, **kwargs
+    ) is None
 
+    candidate.execution_mode = "TAKER_LIMIT"
+    candidate.side = "YES"
+    market_alpha_only[0] = False
     reason[0] = (
         "STRATEGY_POLICY_GATED:forecast_qkernel_entry:"
         "sources=risk_action:gate"
