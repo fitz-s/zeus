@@ -11053,6 +11053,14 @@ def event_bound_live_adapter_from_trade_conn(
     _submit._live_ack_count = _live_ack_count  # type: ignore[attr-defined]
     _submit.prepare_global_event = _prepare_global_event  # type: ignore[attr-defined]
     _submit.process_global_batch = _process_global_batch  # type: ignore[attr-defined]
+    # SCOPE: this adapter's exact held-SELL completion requests only. DRAIN:
+    # the reactor runs one global SELL/HOLD/CASH cut even when no ordinary
+    # OpportunityEvent is pending. RESET: the immutable request receives its
+    # terminal receipt or remains durable for the next wake; an empty request
+    # set keeps the ordinary empty-queue no-op.
+    _submit.requires_empty_global_completion_cut = bool(  # type: ignore[attr-defined]
+        held_sell_reauction_requests
+    )
     _submit.bind_global_claim_generations = (  # type: ignore[attr-defined]
         _bind_global_claim_generations
     )

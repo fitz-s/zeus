@@ -1418,6 +1418,7 @@ class OpportunityEventReactor:
         # Default 22s; override via ZEUS_REACTOR_CYCLE_BUDGET_SECONDS.
         budget = _cycle_budget_seconds()
         cycle_start = time.monotonic()
+        empty_global_completion_used = False
         batch_limit = _fetch_batch_limit() if limit is None else max(1, int(limit))
         remaining = None if limit is None else batch_limit
         try:
@@ -1466,8 +1467,20 @@ class OpportunityEventReactor:
                 # multi-winner epoch or pagination fetch. Subsequent re-fetches
                 # retain target/winner continuity without claiming more debt.
                 fetch_kwargs["bridge_stale_debt_slots"] = 0
-            if not events:
+            empty_global_completion = bool(
+                not events
+                and callable(getattr(self._submit, "process_global_batch", None))
+                and getattr(
+                    self._submit,
+                    "requires_empty_global_completion_cut",
+                    False,
+                )
+                and not empty_global_completion_used
+            )
+            if not events and not empty_global_completion:
                 break
+            if empty_global_completion:
+                empty_global_completion_used = True
             # FAIR LANE INTERLEAVE (2026-06-15). The per-cycle wall-clock budget completes
             # only ~3-4 family decisions (p99=59s each), and fetch_pending returns ALL
             # Tier-0 DAY0_EXTREME_UPDATED before ANY Tier-1 FORECAST_SNAPSHOT_READY — so the
@@ -1702,7 +1715,11 @@ class OpportunityEventReactor:
                     newly_claimed += 1
             if cancelled():
                 break
-        if not claimed:
+        if not claimed and not getattr(
+            self._submit,
+            "requires_empty_global_completion_cut",
+            False,
+        ):
             return GlobalEpochOutcome(
                 attempted=attempted,
                 submitted=False,

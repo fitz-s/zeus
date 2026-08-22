@@ -1,6 +1,6 @@
 # Created: 2026-05-24
-# Last reused/audited: 2026-08-20
-# Lifecycle: created=2026-05-24; last_reviewed=2026-08-20; last_reused=2026-08-20
+# Last reused/audited: 2026-08-22
+# Lifecycle: created=2026-05-24; last_reviewed=2026-08-22; last_reused=2026-08-22
 # Authority basis: EDLI v1 implementation prompt §13 event reactor no-bypass contract.
 from __future__ import annotations
 
@@ -5591,6 +5591,46 @@ def test_reactor_carries_immutable_held_sell_cut_from_global_batch_result():
     )
 
     assert result.global_held_sell_completion_cuts == [cut]
+
+
+def test_exact_held_sell_completion_runs_global_cut_with_empty_event_queue():
+    _conn, store = _store()
+    observations: dict[str, object] = {}
+    cut = _held_sell_completion_result(
+        position_id="held-empty-cut",
+        token_id="token-held-empty-cut",
+        probability_content_identity="q-held-empty-cut",
+        outcome="INCOMPLETE",
+    ).global_held_sell_completion_cuts[0]
+    reactor = _global_batch_probe_reactor(
+        store,
+        observations,
+        held_sell_completion_cut=cut,
+    )
+    reactor._submit.requires_empty_global_completion_cut = True
+
+    result = reactor.process_pending(
+        decision_time=_DT_VENUE_OPEN,
+        limit=1,
+    )
+
+    assert observations["batch_calls"] == 1
+    assert observations["batch_event_ids"] == ()
+    assert result.global_held_sell_completion_cuts == [cut]
+
+
+def test_empty_event_queue_without_exact_completion_remains_noop():
+    _conn, store = _store()
+    observations: dict[str, object] = {}
+    reactor = _global_batch_probe_reactor(store, observations)
+
+    result = reactor.process_pending(
+        decision_time=_DT_VENUE_OPEN,
+        limit=1,
+    )
+
+    assert observations["batch_calls"] == 0
+    assert result.global_held_sell_completion_cuts == []
 
 
 def _terminal_surfaces(conn: sqlite3.Connection, event_id: str) -> dict[str, int]:
