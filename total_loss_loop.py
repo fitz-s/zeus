@@ -1542,7 +1542,10 @@ def probe_capabilities(cfg: Mapping[str, Any], *, smoke: bool = True) -> dict[st
             },
         )
         output = runtime_dir(cfg) / "capability-smoke.json"
-        command = _codex_exec_base(cfg, sandbox="workspace-write", cwd=smoke_dir, schema=schema, output=output, persistent=True)
+        command = _codex_exec_base(
+            cfg, sandbox="workspace-write", cwd=smoke_dir, schema=schema,
+            output=output, persistent=True, reasoning_effort=effort,
+        )
         smoke_run = _run_probe_capture(
             command,
             cwd=smoke_dir,
@@ -1593,6 +1596,7 @@ def probe_capabilities(cfg: Mapping[str, Any], *, smoke: bool = True) -> dict[st
             output=network_output,
             persistent=False,
             network=True,
+            reasoning_effort=effort,
         )
         network_run = _run_probe_capture(
             network_command,
@@ -1692,6 +1696,7 @@ def _codex_exec_base(
     output: Path,
     persistent: bool,
     network: bool = False,
+    reasoning_effort: str | None = None,
 ) -> list[str]:
     cap = read_json(runtime_dir(cfg) / "capabilities.json", {})
     profile = cfg["profiles"][cfg["active"]["profile"]]
@@ -1705,7 +1710,7 @@ def _codex_exec_base(
         "-C", str(cwd),
         "--skip-git-repo-check",
         "-m", str(profile["model"]),
-        "-c", f'model_reasoning_effort="{cap.get("reasoning_effort") or profile["preferred_reasoning"]}"',
+        "-c", f'model_reasoning_effort="{reasoning_effort or cap.get("reasoning_effort") or profile["preferred_reasoning"]}"',
         "-c", "features.memories=false",
         "-c", "features.multi_agent=true",
         "--output-schema", str(schema),
