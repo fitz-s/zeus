@@ -5,6 +5,12 @@
 
 ## 现状(forward)
 
+### 2026-08-22 B141 — 单一terminal-review证据缺口不得阻断全局restart
+- **实时反例:** B140标准deploy在command `736b13b34fee4f89`的restart preflight失败，entry guard持续armed。该20-share GTC在point order上matched 19.998533，但当时authenticated CONFIRMED trade facts仅覆盖4.858533；`REVIEW_REQUIRED`边界正确等待其余legs，authenticated recovery却尝试追加普通`PARTIAL_FILL_OBSERVED`清除review，被terminal-partial validator正确拒绝并升级为deploy-wide error。稍后其余facts到达后同command已原子投影FILLED，证明这是局部evidence ordering而非未知venue side effect。
+- **修复:** `REVIEW_REQUIRED`的authenticated cumulative facts若仍未达到BUY completion tolerance，只返回`stayed`；不追加command event、不投影position、不清除review。完整confirmed legs到达后仍走既有`review_cleared_confirmed_fill`原子路径；真正terminal short fill仍只能由既有terminal-order recovery携带`terminal_partial_order_fact`三项proof清除。
+- **SCOPE / DRAIN / RESET:** scope是一个exact ENTRY command的terminal-review boundary。drain为trade ingestion补齐command-bound CONFIRMED legs，或terminal-order lane证明真实short fill；reset为下一recovery pass重新聚合facts并只在完整/typed proof时推进。其他commands、held monitor和SELL不被该局部等待阻断。
+- **验收:** antibody复现20 requested、4.858533 confirmed prefix、MATCHED review，要求`scanned=1/stayed=1/errors=0`、零新command/position event；原完整41-share review-clearance抗体继续advanced。landing后重跑标准restart，必须guard reset且完整global entry auction恢复。
+
 ### 2026-08-22 B140 — supporting observation时钟不得冻结current remaining-path q
 - **实时反例:** 11:46Z完整global auction覆盖176个family，仅101 eligible；75个拒绝中50个为`GLOBAL_DAY0_FAST_OBSERVATION_ENTRY_STALE`。同一时刻source-clock ingest健康，城市最新METAR多为16–58分钟前，说明15分钟门槛把正常的小时级发布间隔误判为整个action q过期，而不是发现scheduler停摆。
 - **结构性根因与修复:** global Day0 action q随后会从canonical current-temperature ledger、完整hourly trajectories、remaining conditional error与observation-latency floor重建到decision time；source-clock conditioning在此仅是bound/provenance carrier。仅对本地目标日的global ENTRY允许该supporting clock超过15分钟，且仍必须成功构造完整current remaining-day simplex。direct source-clock action路径、缺carrier/current observation/vector/topology、invalid clock与submit JIT不一致继续fail closed；Day0 semantics升为v7，防止与旧realized cohort混池。

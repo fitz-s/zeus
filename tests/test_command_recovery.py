@@ -5369,6 +5369,78 @@ class TestAuthenticatedEntryTradeFactProjection:
             "order_status": "filled",
         }
 
+    def test_incomplete_confirmed_prefix_keeps_terminal_fill_review_local(
+        self,
+        conn,
+    ):
+        """A partial authenticated prefix waits without becoming a global error."""
+        from src.execution.command_recovery import (
+            reconcile_authenticated_entry_trade_facts,
+        )
+        from src.state.venue_command_repo import append_event
+
+        command_id = "cmd-authenticated-terminal-prefix"
+        position_id = "pos-authenticated-terminal-prefix"
+        order_id = "ord-authenticated-terminal-prefix"
+        token_id = "tok-authenticated-terminal-prefix"
+        _insert(
+            conn,
+            command_id=command_id,
+            position_id=position_id,
+            token_id=token_id,
+            order_type="GTC",
+            size=20.0,
+            price=0.18,
+        )
+        _advance_to_partial(
+            conn,
+            command_id=command_id,
+            venue_order_id=order_id,
+        )
+        _seed_pending_entry_projection(
+            conn,
+            position_id=position_id,
+            command_id=command_id,
+            order_id=order_id,
+            token_id=token_id,
+        )
+        append_event(
+            conn,
+            command_id=command_id,
+            event_type="REVIEW_REQUIRED",
+            occurred_at="2026-04-26T00:08:00Z",
+            payload={
+                "reason": (
+                    "partial_remainder_point_order_filled_without_full_trade_fact"
+                ),
+                "venue_order_id": order_id,
+                "point_order_status": "MATCHED",
+            },
+        )
+        _append_confirmed_trade_fact(
+            conn,
+            command_id=command_id,
+            order_id=order_id,
+            trade_id="trade-authenticated-terminal-prefix",
+            filled_size="4.858533",
+            fill_price="0.18",
+        )
+        events_before = len(_get_events(conn, command_id))
+
+        summary = reconcile_authenticated_entry_trade_facts(
+            conn,
+            command_id=command_id,
+        )
+
+        assert summary == {"scanned": 1, "advanced": 0, "stayed": 1, "errors": 0}
+        assert _get_state(conn, command_id) == "REVIEW_REQUIRED"
+        assert len(_get_events(conn, command_id)) == events_before
+        assert conn.execute(
+            "SELECT COUNT(*) FROM position_events "
+            "WHERE position_id = ? AND event_type = 'ENTRY_ORDER_FILLED'",
+            (position_id,),
+        ).fetchone()[0] == 0
+
     def test_unrelated_fill_review_remains_operator_visible(self, conn):
         """Confirmed facts do not clear a differently typed review boundary."""
         from src.execution.command_recovery import (

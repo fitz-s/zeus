@@ -24658,7 +24658,15 @@ def _reconcile_authenticated_entry_trade_fact(
         )
     cancel_pending = command_state == CommandState.CANCEL_PENDING.value
     terminal_fill_review = command_state == CommandState.REVIEW_REQUIRED.value
-    if cancel_pending and not complete:
+    if (cancel_pending or terminal_fill_review) and not complete:
+        # SCOPE: this exact ENTRY command whose review boundary says the venue
+        # order is terminal while confirmed trade facts still cover only a
+        # prefix.  A partial prefix cannot clear that boundary or mint shares.
+        # DRAIN: authenticated trade ingestion adds the missing command-bound
+        # CONFIRMED legs, or the terminal-order recovery proves a true short
+        # fill with its dedicated terminal-partial payload.
+        # RESET: the next recovery pass recomputes the cumulative facts; only a
+        # complete fill or typed terminal-partial proof advances the command.
         return "stayed"
     event_type = (
         CommandEventType.FILL_CONFIRMED.value
