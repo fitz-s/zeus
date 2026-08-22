@@ -601,6 +601,7 @@ def test_structural_win_supersedes_exact_v4_debt_after_terminal_command(
         {"hard_fact_source": ""},
         {"hard_fact_finality": ""},
         {"hard_fact_source": "wu_icao_history"},
+        {"hard_fact_finality": "FINAL_DAILY_SETTLEMENT"},
     ),
 )
 def test_structural_win_receipt_rejects_invalid_proof_or_lineage(
@@ -650,6 +651,39 @@ def test_structural_win_cannot_supersede_nonterminal_or_unknown_command(
     )
 
     assert main._terminal_held_sell_reauction_receipts((request,)) == ()
+
+
+@pytest.mark.parametrize(
+    ("source", "expected"),
+    (
+        ("hko_daily_api", True),
+        ("ogimet_metar_lfpg", True),
+        ("hko_hourly_accumulator_v1", False),
+        ("wu_icao_history", False),
+    ),
+)
+def test_structural_win_requires_absorbing_source_finality(
+    monkeypatch,
+    tmp_path: Path,
+    source: str,
+    expected: bool,
+) -> None:
+    request = _request(
+        position_id=f"structural-source-{source}",
+        schema_version=4,
+    )
+    _install_structural_win_reader(
+        monkeypatch,
+        tmp_path,
+        request,
+        monitor_overrides={
+            "monitor_probability_receipt": {
+                "hard_fact_evidence": {"source": source}
+            }
+        },
+    )
+
+    assert bool(main._terminal_held_sell_reauction_receipts((request,))) is expected
 
 
 @pytest.mark.parametrize(

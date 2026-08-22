@@ -1537,6 +1537,7 @@ class OpportunityEventReactor:
                             claimed_event_ids_seen
                         ),
                         cancelled=cycle_cancelled,
+                        allow_empty_global_completion=empty_global_completion,
                     )
                     if epoch.auction_completed_non_cancelled:
                         result.global_auction_completed_non_cancelled += 1
@@ -1670,6 +1671,7 @@ class OpportunityEventReactor:
         remaining: int | None,
         already_charged_event_ids: frozenset[str],
         cancelled: Callable[[], bool],
+        allow_empty_global_completion: bool = False,
     ) -> GlobalEpochOutcome:
         """Claim/gate all epoch events, then let one opaque adapter auction act once.
 
@@ -1715,11 +1717,7 @@ class OpportunityEventReactor:
                     newly_claimed += 1
             if cancelled():
                 break
-        if not claimed and not getattr(
-            self._submit,
-            "requires_empty_global_completion_cut",
-            False,
-        ):
+        if not claimed and not allow_empty_global_completion:
             return GlobalEpochOutcome(
                 attempted=attempted,
                 submitted=False,

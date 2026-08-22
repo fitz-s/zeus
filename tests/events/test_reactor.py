@@ -5633,6 +5633,38 @@ def test_empty_event_queue_without_exact_completion_remains_noop():
     assert result.global_held_sell_completion_cuts == []
 
 
+def test_nonempty_unclaimed_queue_cannot_spend_empty_completion_authority(
+    monkeypatch,
+):
+    _conn, store = _store()
+    observations: dict[str, object] = {}
+    event = _forecast_event("held-nonempty-unclaimed", target_date="2026-05-25")
+    store.insert_or_ignore(event)
+    reactor = _global_batch_probe_reactor(store, observations)
+    reactor._submit.requires_empty_global_completion_cut = True
+    monkeypatch.setattr(
+        reactor,
+        "_process_event_unit",
+        lambda *_args, **_kwargs: None,
+    )
+
+    epoch = reactor._process_global_event_batch(
+        (event,),
+        decision_time=_DT_VENUE_OPEN,
+        result=ReactorResult(),
+        budget=None,
+        cycle_start=time.monotonic(),
+        remaining=1,
+        already_charged_event_ids=frozenset(),
+        cancelled=lambda: False,
+        allow_empty_global_completion=False,
+    )
+
+    assert observations["batch_calls"] == 0
+    assert epoch.claimed_event_ids == frozenset()
+    assert epoch.auction_completed_non_cancelled is False
+
+
 def _terminal_surfaces(conn: sqlite3.Connection, event_id: str) -> dict[str, int]:
     verified_no_submit = conn.execute(
         """
