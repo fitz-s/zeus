@@ -28,6 +28,7 @@ import time
 from collections import Counter
 from collections.abc import Mapping
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
@@ -368,34 +369,66 @@ def scan_loss_economics(
         evaluated: list[dict[str, Any]] = []
         for raw in rows:
             row = dict(raw)
-            remaining_basis = float(row.get("cost_basis_usd") or 0.0)
-            gross_basis = remaining_basis
-            authority = "position_current_remaining_basis_fallback"
-            aggregate = None
-            if query_entry_execution_fill_aggregate is not None:
-                aggregate = query_entry_execution_fill_aggregate(
+            aggregate = (
+                query_entry_execution_fill_aggregate(
                     connection,
                     str(row["position_id"]),
                     strict=False,
                 )
-            if aggregate:
-                filled_basis = float(aggregate.get("filled_cost_basis_usd") or 0.0)
-                if filled_basis > 0:
-                    gross_basis = max(remaining_basis, filled_basis)
-                    authority = "execution_fact_command_dedup_v1"
-            if gross_basis <= 0:
+                if query_entry_execution_fill_aggregate is not None
+                else None
+            )
+            if not aggregate or not aggregate.get("entry_fill_command_identity_complete"):
+                row.update(
+                    gross_entry_cost_basis_usd=None,
+                    capital_recovered_usd=None,
+                    loss_ratio=None,
+                    loss_basis_authority="execution_fact_command_identity_unavailable",
+                )
+                evaluated.append(row)
                 continue
-            realized = float(row["realized_pnl_usd"])
+            try:
+                gross_basis = Decimal(str(aggregate["filled_cost_basis_usd"]))
+                realized = Decimal(str(row["realized_pnl_usd"]))
+            except (InvalidOperation, KeyError, TypeError, ValueError):
+                gross_basis = Decimal("0")
+                realized = Decimal("0")
+            if not gross_basis.is_finite() or gross_basis <= 0 or not realized.is_finite():
+                row.update(
+                    gross_entry_cost_basis_usd=None,
+                    capital_recovered_usd=None,
+                    loss_ratio=None,
+                    loss_basis_authority="execution_fact_gross_basis_invalid",
+                )
+                evaluated.append(row)
+                continue
+            recovered = max(Decimal("0"), gross_basis + realized)
+            ratio = max(Decimal("0"), -realized / gross_basis)
             row.update(
-                gross_entry_cost_basis_usd=gross_basis,
-                capital_recovered_usd=max(0.0, gross_basis + realized),
-                loss_ratio=max(0.0, -realized / gross_basis),
-                loss_basis_authority=authority,
+                gross_entry_cost_basis_usd=float(gross_basis),
+                capital_recovered_usd=float(recovered),
+                loss_ratio=float(ratio),
+                loss_basis_authority="execution_fact_command_dedup_v1",
             )
             evaluated.append(row)
         return evaluated
     finally:
         connection.close()
+
+
+def _is_full_loss(row: Mapping[str, Any]) -> bool:
+    try:
+        realized = Decimal(str(row["realized_pnl_usd"]))
+        gross_basis = Decimal(str(row["gross_entry_cost_basis_usd"]))
+    except (InvalidOperation, KeyError, TypeError, ValueError):
+        return False
+    return (
+        realized.is_finite()
+        and gross_basis.is_finite()
+        and realized < 0
+        and gross_basis > 0
+        and -realized >= Decimal(str(FULL_LOSS_RATIO)) * gross_basis
+    )
 
 
 def scan_losses(db_path: Path, *, not_before: datetime, lookback_days: int = 7) -> list[dict[str, Any]]:
@@ -406,7 +439,7 @@ def scan_losses(db_path: Path, *, not_before: datetime, lookback_days: int = 7) 
             not_before=not_before,
             lookback_days=lookback_days,
         )
-        if float(row["loss_ratio"]) + 1e-12 >= FULL_LOSS_RATIO
+        if _is_full_loss(row)
     ]
 
 
@@ -422,7 +455,7 @@ def bootstrap_workspace(
     workspace.chmod(0o700)
     for rel in [
         "memory/incidents", "memory/root_causes", "runtime/incidents",
-        "runtime/batches", "runs", "repairs/queue",
+        "runtime/batches", "runs", "repairs/queue", "repairs/retracted",
     ]:
         (workspace / rel).mkdir(parents=True, exist_ok=True)
     (workspace / "AGENTS.md").write_text(INVESTIGATOR_RULES)
@@ -494,9 +527,39 @@ def _detach_retracted_incident_from_root_cause(
     atomic_json(registry_path, registry)
 
 
+def _retract_repair_queue(
+    workspace: Path,
+    *,
+    batch_id: str,
+    incident_id: str,
+) -> None:
+    queue_path = workspace / "repairs" / "queue" / f"{batch_id}.json"
+    retracted_path = workspace / "repairs" / "retracted" / f"{batch_id}.json"
+    payload = read_json(queue_path, read_json(retracted_path, {}))
+    if not isinstance(payload, dict) or not payload:
+        return
+    invalidated = list(payload.get("retracted_incident_ids", []))
+    if incident_id not in invalidated:
+        invalidated.append(incident_id)
+    payload["repair_queue_status"] = "retracted_not_full_loss"
+    payload["retracted_incident_ids"] = invalidated
+    payload["retracted_at"] = iso_now()
+    atomic_json(retracted_path, payload)
+    queue_path.unlink(missing_ok=True)
+    append_event(
+        workspace,
+        "REPAIR_QUEUE_RETRACTED",
+        batch_id=batch_id,
+        incident_id=incident_id,
+        retained_at=str(retracted_path),
+    )
+
+
 def _reconcile_incident_economics(
     workspace: Path,
     evaluated: list[dict[str, Any]],
+    *,
+    include_batched: bool = False,
 ) -> dict[tuple[str, str], str]:
     economics = {
         (str(row["position_id"]), str(row["settled_at"])): row
@@ -512,13 +575,24 @@ def _reconcile_incident_economics(
         ident = str(incident["incident_id"])
         existing_identity[identity] = ident
         current = economics.get(identity)
-        if current is None or incident.get("status") == "batched":
+        if current is None or (
+            incident.get("status") == "batched" and not include_batched
+        ):
             continue
         incident["loss"] = current
-        qualifies = float(current["loss_ratio"]) + 1e-12 >= FULL_LOSS_RATIO
+        if current.get("loss_ratio") is None:
+            incident["economics_revalidation"] = "entry_fill_authority_unavailable"
+            atomic_json(path, incident)
+            atomic_json(
+                workspace / "memory" / "incidents" / ident / "incident.json",
+                incident,
+            )
+            continue
+        qualifies = _is_full_loss(current)
         if not qualifies and incident.get("status") != "retracted_not_full_loss":
             prior_status = str(incident.get("status") or "unknown")
             prior_root = incident.pop("root_cause_id", None)
+            prior_batch = str(incident.get("batch_id") or "")
             incident["status"] = "retracted_not_full_loss"
             incident["retracted_at"] = iso_now()
             incident["retracted_from_status"] = prior_status
@@ -533,6 +607,12 @@ def _reconcile_incident_economics(
                 _detach_retracted_incident_from_root_cause(
                     workspace,
                     root_cause_id=str(prior_root),
+                    incident_id=ident,
+                )
+            if prior_batch:
+                _retract_repair_queue(
+                    workspace,
+                    batch_id=prior_batch,
                     incident_id=ident,
                 )
             append_event(
@@ -572,7 +652,7 @@ def detect(workspace: Path, config: dict[str, Any]) -> list[str]:
     rows = [
         row
         for row in evaluated
-        if float(row["loss_ratio"]) + 1e-12 >= FULL_LOSS_RATIO
+        if _is_full_loss(row)
     ]
     reset_blocked_if_contract_changed(workspace, config)
     existing_identity = _reconcile_incident_economics(workspace, evaluated)
@@ -647,7 +727,7 @@ def _pending_incidents(workspace: Path) -> list[dict[str, Any]]:
         row = read_json(path, {})
         due_at = row.get("next_attempt_at")
         due = not due_at or parse_time(str(due_at)) <= utc_now()
-        if row.get("status") == "pending" and due:
+        if row.get("status") == "pending" and due and _is_full_loss(row.get("loss", {})):
             pending.append(row)
     return sorted(pending, key=lambda row: (row["loss"]["settled_at"], row["incident_id"]))
 
@@ -900,9 +980,81 @@ def build_evidence_bundle(
     return path
 
 
+def _refresh_workspace_economics(
+    workspace: Path,
+    config: dict[str, Any],
+    *,
+    include_batched: bool = False,
+) -> list[dict[str, Any]]:
+    activation = read_json(workspace / "runtime" / "activation.json", {})
+    if not activation.get("not_before"):
+        raise RuntimeError("workspace is not bootstrapped")
+    evaluated = scan_loss_economics(
+        Path(config["trades_db"]),
+        not_before=parse_time(str(activation["not_before"])),
+        lookback_days=int(activation.get("lookback_days", 7)),
+    )
+    _reconcile_incident_economics(
+        workspace,
+        evaluated,
+        include_batched=include_batched,
+    )
+    return evaluated
+
+
+def _revalidate_batch_economics(
+    workspace: Path,
+    config: dict[str, Any],
+    batch: dict[str, Any],
+) -> bool:
+    _refresh_workspace_economics(workspace, config, include_batched=True)
+    invalid: list[str] = []
+    refreshed: list[dict[str, Any]] = []
+    for ident in batch.get("incident_ids", []):
+        incident = read_json(
+            workspace / "runtime" / "incidents" / f"{ident}.json",
+            {},
+        )
+        loss = incident.get("loss", {})
+        if incident.get("status") == "retracted_not_full_loss" or not _is_full_loss(loss):
+            invalid.append(str(ident))
+        refreshed.append(incident)
+    if not invalid:
+        batch["incidents"] = refreshed
+        return True
+    for incident in refreshed:
+        if incident.get("status") != "batched":
+            continue
+        incident["status"] = "pending"
+        incident.pop("batch_id", None)
+        atomic_json(
+            workspace / "runtime" / "incidents" / f"{incident['incident_id']}.json",
+            incident,
+        )
+        atomic_json(
+            workspace / "memory" / "incidents" / str(incident["incident_id"]) / "incident.json",
+            incident,
+        )
+    batch["status"] = "economics_revalidation_rejected"
+    batch["economics_rejected_at"] = iso_now()
+    batch["invalid_incident_ids"] = invalid
+    atomic_json(
+        workspace / "runtime" / "batches" / f"{batch['batch_id']}.json",
+        batch,
+    )
+    append_event(
+        workspace,
+        "BATCH_REJECTED_BY_ECONOMICS_REVALIDATION",
+        batch_id=batch["batch_id"],
+        invalid_incident_ids=invalid,
+    )
+    return False
+
+
 def create_batch(workspace: Path, config: dict[str, Any]) -> dict[str, Any] | None:
     if (workspace / "runtime" / "active.json").exists():
         return None
+    _refresh_workspace_economics(workspace, config)
     pending = _pending_incidents(workspace)[: int(config.get("max_batch", MAX_BATCH))]
     if not pending:
         return None
@@ -1147,6 +1299,10 @@ def complete_batch(workspace: Path, returncode: int | None = None) -> bool:
             raise RuntimeError(f"codex exited {returncode}")
         result = json.loads(result_path.read_text())
         _validate_result(result, batch)
+        config = read_json(workspace / "runtime" / "config.json", {})
+        if not _revalidate_batch_economics(workspace, config, batch):
+            active_path.unlink(missing_ok=True)
+            return False
         _update_registry(workspace, result)
         atomic_json(Path(active["run_dir"]) / "validated_result.json", result)
         by_id = {row["incident_id"]: row for row in result["incidents"]}

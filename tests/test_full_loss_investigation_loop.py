@@ -51,7 +51,15 @@ def _db(path: Path) -> None:
     connection.close()
 
 
-def _insert(path: Path, position_id: str, cost: float, pnl: float, settled_at: str) -> None:
+def _insert(
+    path: Path,
+    position_id: str,
+    cost: float,
+    pnl: float,
+    settled_at: str,
+    *,
+    with_fill: bool = True,
+) -> None:
     connection = sqlite3.connect(path)
     columns = [part.strip() for part in loop.LOSS_COLUMNS.split(",")]
     row = {column: None for column in columns}
@@ -83,6 +91,8 @@ def _insert(path: Path, position_id: str, cost: float, pnl: float, settled_at: s
     )
     connection.commit()
     connection.close()
+    if with_fill:
+        _entry_fill(path, position_id, cost / 0.2, 0.2)
 
 
 def _entry_fill(path: Path, position_id: str, shares: float, price: float) -> None:
@@ -130,6 +140,7 @@ def test_detects_exact_threshold_once_and_ignores_non_loss(tmp_path: Path) -> No
     now = loop.iso_now()
     _insert(db, "loss", 10.0, -9.5, now)
     _insert(db, "not-loss", 10.0, -9.49, now)
+    _insert(db, "just-below", 10.0, -9.499999999, now)
     workspace, config = _bootstrap(tmp_path, db)
 
     first = loop.detect(workspace, config)
@@ -142,20 +153,53 @@ def test_detects_exact_threshold_once_and_ignores_non_loss(tmp_path: Path) -> No
     assert incident["status"] == "pending"
 
 
+def test_missing_command_identity_never_falls_back_to_remaining_basis(tmp_path: Path) -> None:
+    db = tmp_path / "trades.db"
+    _db(db)
+    _insert(db, "unverified", 1.0, -2.0, loop.iso_now(), with_fill=False)
+    workspace, config = _bootstrap(tmp_path, db)
+
+    assert loop.detect(workspace, config) == []
+    [economics] = loop.scan_loss_economics(
+        db,
+        not_before=loop.utc_now() - timedelta(hours=1),
+    )
+    assert economics["loss_ratio"] is None
+    assert economics["loss_basis_authority"] == "execution_fact_command_identity_unavailable"
+
+
 def test_partial_recovery_uses_gross_entry_basis_and_retracts_false_incident(
     tmp_path: Path,
 ) -> None:
     db = tmp_path / "trades.db"
     _db(db)
     now = loop.iso_now()
-    _insert(db, "partial", 0.72, -2.12, now)
+    _insert(db, "partial", 0.72, -2.12, now, with_fill=False)
     workspace, config = _bootstrap(tmp_path, db)
 
-    [ident] = loop.detect(workspace, config)
+    [legacy_loss] = loop.scan_loss_economics(
+        db,
+        not_before=loop.utc_now() - timedelta(hours=1),
+    )
+    ident = loop.incident_id(legacy_loss)
     incident_path = workspace / "runtime" / "incidents" / f"{ident}.json"
-    incident = loop.read_json(incident_path, {})
-    incident["root_cause_id"] = "RC-PARTIAL"
+    incident = {
+        "schema_version": 1,
+        "incident_id": ident,
+        "status": "repair_ready",
+        "batch_id": "old-batch",
+        "root_cause_id": "RC-PARTIAL",
+        "loss": legacy_loss,
+    }
     loop.atomic_json(incident_path, incident)
+    loop.atomic_json(
+        workspace / "memory" / "incidents" / ident / "incident.json",
+        incident,
+    )
+    loop.atomic_json(
+        workspace / "repairs" / "queue" / "old-batch.json",
+        {"batch_id": "old-batch", "incident_ids": [ident]},
+    )
     cause = {
         "root_cause_id": "RC-PARTIAL",
         "incident_ids": [ident],
@@ -187,6 +231,18 @@ def test_partial_recovery_uses_gross_entry_basis_and_retracts_false_incident(
     assert corrected_cause["incident_ids"] == []
     assert corrected_cause["occurrence_count"] == 0
     assert corrected_cause["retracted_incident_ids"] == [ident]
+    registry = loop.read_json(
+        workspace / "memory" / "root_causes" / "registry.json",
+        {},
+    )
+    assert registry["causes"]["RC-PARTIAL"]["occurrence_count"] == 0
+    assert not (workspace / "repairs" / "queue" / "old-batch.json").exists()
+    retracted_queue = loop.read_json(
+        workspace / "repairs" / "retracted" / "old-batch.json",
+        {},
+    )
+    assert retracted_queue["repair_queue_status"] == "retracted_not_full_loss"
+    assert retracted_queue["retracted_incident_ids"] == [ident]
 
     connection = sqlite3.connect(db)
     connection.execute(
@@ -226,6 +282,36 @@ def test_batch_is_deterministic_and_marks_each_incident_batched(tmp_path: Path) 
         row = loop.read_json(workspace / "runtime" / "incidents" / f"{ident}.json", {})
         assert row["status"] == "batched"
         assert row["batch_id"] == batch["batch_id"]
+
+
+def test_batch_economics_revalidation_rejects_corrected_false_loss(tmp_path: Path) -> None:
+    db = tmp_path / "trades.db"
+    _db(db)
+    _insert(db, "corrected", 10.0, -10.0, loop.iso_now())
+    workspace, config = _bootstrap(tmp_path, db)
+    [ident] = loop.detect(workspace, config)
+    batch = loop.create_batch(workspace, config)
+    assert batch is not None
+
+    connection = sqlite3.connect(db)
+    connection.execute(
+        "UPDATE execution_fact SET shares=100 WHERE position_id='corrected'"
+    )
+    connection.commit()
+    connection.close()
+
+    assert not loop._revalidate_batch_economics(workspace, config, batch)
+    incident = loop.read_json(
+        workspace / "runtime" / "incidents" / f"{ident}.json",
+        {},
+    )
+    assert incident["status"] == "retracted_not_full_loss"
+    stored_batch = loop.read_json(
+        workspace / "runtime" / "batches" / f"{batch['batch_id']}.json",
+        {},
+    )
+    assert stored_batch["status"] == "economics_revalidation_rejected"
+    assert stored_batch["invalid_incident_ids"] == [ident]
 
 
 def test_dedicated_rules_and_ephemeral_prompt_forbid_memory_mixing(tmp_path: Path) -> None:
