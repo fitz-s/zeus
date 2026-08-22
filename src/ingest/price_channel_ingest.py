@@ -138,6 +138,8 @@ _held_quote_seed_refresh_lock = threading.Lock()
 _candidate_quote_seed_refresh_lock = threading.Lock()
 _global_exit_audit_token_ids_lock = threading.Lock()
 _global_exit_audit_token_ids: set[str] = set()
+_held_quote_audit_token_ids_lock = threading.Lock()
+_held_quote_audit_token_ids: set[str] = set()
 
 EDLI_EVENT_DRIVEN_MODES = {
     "edli_live",
@@ -2621,6 +2623,22 @@ def _edli_current_global_exit_audit_token_ids() -> set[str]:
         return set(_global_exit_audit_token_ids)
 
 
+def _edli_publish_held_quote_audit_token_ids(token_ids: set[str]) -> None:
+    """Publish the open-exposure tokens whose quote history must be lossless."""
+
+    with _held_quote_audit_token_ids_lock:
+        _held_quote_audit_token_ids.clear()
+        _held_quote_audit_token_ids.update(token_ids)
+
+
+def _edli_current_loss_audit_token_ids() -> set[str]:
+    """Return every token needed to reconstruct pre-floor exit opportunity."""
+
+    with _held_quote_audit_token_ids_lock:
+        held = set(_held_quote_audit_token_ids)
+    return held | _edli_current_global_exit_audit_token_ids()
+
+
 def _edli_append_global_exit_audit_quote_evidence(
     trade_conn,
     token_ids: set[str],
@@ -3455,6 +3473,7 @@ def _edli_refresh_held_position_quote_evidence(
                     coalescer=EventCoalescer(max_market_keys=1000),
                     market_event_sink=_edli_price_channel_redecision_sink(),
                     market_event_sink_independently_coordinated=True,
+                    append_evidence_token_ids=_edli_current_loss_audit_token_ids,
                 ),
                 fetch_orderbook=fetch_orderbook,
                 fetch_orderbooks=fetch_orderbooks,
@@ -3856,6 +3875,7 @@ def _edli_market_channel_token_metadata_reloader(
                 limit=max(1, int(candidate_priority_limit)),
             )
             held_token_ids = _edli_held_position_priority_token_ids(trade_read)
+            _edli_publish_held_quote_audit_token_ids(held_token_ids)
             open_rest_token_ids = _edli_open_rest_priority_token_ids(trade_read)
             day0_token_ids = _edli_current_day0_priority_token_ids(
                 trade_read,
@@ -4035,6 +4055,7 @@ def _edli_market_channel_ingestor_cycle() -> dict | None:
     trade_conn = get_trade_connection(write_class=None)
     try:
         held_priority_token_ids = _edli_held_position_priority_token_ids(trade_conn)
+        _edli_publish_held_quote_audit_token_ids(held_priority_token_ids)
         open_rest_priority_token_ids = _edli_open_rest_priority_token_ids(trade_conn)
         try:
             day0_priority_token_ids = _edli_current_day0_priority_token_ids(
@@ -4333,7 +4354,7 @@ def _edli_market_channel_ingestor_cycle() -> dict | None:
                         ),
                         market_event_sink_independently_coordinated=True,
                         append_evidence_token_ids=(
-                            _edli_current_global_exit_audit_token_ids
+                            _edli_current_loss_audit_token_ids
                         ),
                     ),
                     fetch_orderbook=clob.get_orderbook_snapshot,

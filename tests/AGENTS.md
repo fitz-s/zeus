@@ -52,6 +52,7 @@ authoritative machine registry is `architecture/test_topology.yaml`.
 | `test_edge_observation_weekly.py` | End-to-end runner antibody for edge observation batch-3 weekly dispatch (created 2026-04-28) |
 | `test_evaluate_current_regime_capital_advantage.py` | Exact current-revision proof receipt, causal settlement, independent family-day, delta-log-wealth LCB, and live-capital admission antibodies (created 2026-08-12) |
 | `test_forecast_live_daemon.py` | Held-SELL reactor-wake antibodies: phase-specific Chain-first terminal proof, settlement-only SELL completion, V1/V2/V3 receipt identity, and bounded fair queue drain (recreated 2026-07-30 after single-live test excision) |
+| `test_total_loss_loop.py` | Event-time held-bid floor crossing, bounded backfill, precursor ranking, evidence DB, dedicated memory, and Codex harness relationship antibodies (created 2026-08-22) |
 | `test_finite_evidence_probability_symmetry.py` | INV-06/INV-41 source-clock current-evidence YES/NO ambiguity-band symmetry and Day0 dominance (created 2026-07-11) |
 | `test_harvester_split_independence.py` | Antibody #12: structural boundary between ingest-side settlement harvester and trading lane (created 2026-04-30) |
 | `test_heartbeat_dual_coverage.py` | Antibody #15: heartbeat sensor must monitor BOTH daemon heartbeat files (two-system independence; created 2026-04-30) |

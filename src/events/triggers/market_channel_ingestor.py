@@ -857,7 +857,6 @@ class MarketChannelIngestor:
             for row in rows
             if str(row.get("token_id") or "") in append_tokens
             and str(row.get("direction") or "").startswith("buy_")
-            and row.get("depth_before_json") not in {None, ""}
         ]
         if audit_rows:
             insert_execution_feasibility_evidence_batch(

@@ -704,6 +704,35 @@ def test_selective_audit_token_appends_every_full_depth_quote():
     ).fetchone()[0] == 4
 
 
+def test_selective_audit_token_appends_bba_without_depth() -> None:
+    conn, writer = _conn_writer()
+    ingestor = MarketChannelIngestor(
+        writer,
+        active_token_ids={"token-1"},
+        token_metadata=_metadata(),
+        append_evidence_token_ids=lambda: {"token-1"},
+    )
+
+    result = ingestor.handle_message(
+        {
+            "event_type": "best_bid_ask",
+            "asset_id": "token-1",
+            "market": "0xcondition",
+            "timestamp": "2026-08-13T08:44:00+00:00",
+            "best_bid": "0.04",
+            "best_ask": "0.06",
+            "hash": "bba-only",
+        },
+        received_at="2026-08-13T08:44:00+00:00",
+    )
+
+    assert result is not None
+    assert conn.execute(
+        "SELECT token_id,direction,best_bid_before,depth_before_json "
+        "FROM execution_feasibility_evidence"
+    ).fetchall() == [("token-1", "buy_yes", 0.04, None)]
+
+
 def test_buffered_older_delta_cannot_regress_seeded_quote():
     conn, writer = _conn_writer()
     cache = QuoteCache()

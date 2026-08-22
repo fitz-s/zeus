@@ -1,0 +1,52 @@
+[loop]
+schema_version = 3
+poll_ms = 250
+detector_budget_ms = 200
+history_days = 7
+quote_batch_size = 2000
+backfill_budget_ms = 50
+backfill_positions_per_cycle = 8
+agent_timeout_seconds = 5400
+stage_retry_seconds = 60
+floor_config_key = "execution.absolute_live_unit_price_min"
+hard_slots = 1
+precursor_slots = 1
+max_evidence_rows_per_table = 250000
+
+[active]
+profile = "frontier_current"
+
+[profiles.frontier_current]
+runner = "codex_cli"
+model = "gpt-5.6-sol"
+preferred_reasoning = "max"
+fallback_reasoning = ["xhigh", "high"]
+strategy = "split_blind_investigate_then_persistent_repair"
+persistent_incident_session = true
+fresh_review_session = true
+supports_multi_agent = true
+
+[paths]
+trades_db = "state/zeus_trades.db"
+forecasts_db = "state/zeus-forecasts.db"
+settings = "config/settings.json"
+runtime = ".total_loss"
+prompt = "total_loss_prompt.md"
+deploy_script = "scripts/deploy_live.py"
+pr_monitor = "scripts/pr_monitor.py"
+
+[delivery]
+enabled = true
+base_branch = "live"
+branch_prefix = "automation/total-loss"
+deploy_timeout_seconds = 1200
+production_observation_seconds = 900
+
+[capital_lane]
+max_main_heartbeat_age_seconds = 90
+max_open_monitor_age_seconds = 120
+agent_nice = 15
+
+[meta]
+minimum_benchmark_incidents = 20
+keep_change_only_if_metric_improves = true
