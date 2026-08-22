@@ -2105,20 +2105,21 @@ def _useful_roots(cfg: Mapping[str, Any], diagnosis: Mapping[str, Any]) -> list[
 
 
 def _worktree(cfg: Mapping[str, Any], incident_id: str) -> Path:
-    path = runtime_dir(cfg) / "worktrees" / incident_id
-    if (path / ".git").exists():
-        return path
-    path.parent.mkdir(parents=True, exist_ok=True)
     branch = f"{cfg['delivery']['branch_prefix']}/{incident_id[:12]}"
-    check = _run_capture(["git", "show-ref", "--verify", "--quiet", f"refs/heads/{branch}"], cwd=ROOT)
-    command = ["git", "worktree", "add"]
-    if check.returncode == 0:
-        command.extend([str(path), branch])
-    else:
-        command.extend(["-b", branch, str(path), str(cfg["delivery"]["base_branch"])])
-    created = _run_capture(command, cwd=ROOT, timeout=120)
-    if created.returncode != 0:
-        raise RuntimeError(f"incident worktree creation failed: {created.stderr.strip()}")
+    configured = os.environ.get("ZEUS_TOTAL_LOSS_REPAIR_WORKTREE", "").strip()
+    if not configured:
+        raise RuntimeError("managed repair worktree is not provisioned")
+    path = Path(configured).expanduser().resolve()
+    listing = _run_capture(["git", "worktree", "list", "--porcelain"], cwd=ROOT)
+    registered = any(line == f"worktree {path}" for line in listing.stdout.splitlines())
+    if listing.returncode != 0 or not registered or path == ROOT:
+        raise RuntimeError("configured repair worktree is not a registered non-live worktree")
+    dirty = _run_capture(["git", "status", "--porcelain", "--untracked-files=all"], cwd=path)
+    current = _run_capture(["git", "branch", "--show-current"], cwd=path)
+    if dirty.returncode != 0 or dirty.stdout.strip():
+        raise RuntimeError("configured repair worktree is dirty")
+    if current.returncode != 0 or current.stdout.strip() != branch:
+        raise RuntimeError(f"configured repair worktree must already own {branch}")
     return path
 
 
@@ -2629,23 +2630,15 @@ def deploy_incident(cfg: Mapping[str, Any], incident_id: str) -> int:
         return blocked("pr_changed_files_unavailable")
     files = [item for page in pages for item in (page if isinstance(page, list) else [page]) if isinstance(item, Mapping)]
     paths = [str(item.get("filename") or "") for item in files]
-    forbidden_prefixes = (
-        "architecture/",
-        "config/",
-        "docs/authority/",
-        "scripts/migrations/",
-        "src/control/",
-        "src/riskguard/",
-        "src/state/schema/",
-        "src/supervisor_api/",
-    )
-    forbidden_exact = {"src/state/db.py"}
+    allowed_source = {
+        "src/engine/monitor_refresh.py",
+        "src/execution/exit_lifecycle.py",
+        "src/events/triggers/market_channel_ingestor.py",
+        "src/ingest/price_channel_ingest.py",
+    }
     forbidden = [
-        path
-        for path in paths
-        if path in forbidden_exact
-        or path.startswith(forbidden_prefixes)
-        or (path.startswith("src/contracts/") and "command" in Path(path).name)
+        path for path in paths
+        if not path.startswith("tests/") and path not in allowed_source
     ]
     destructive = [
         str(item.get("filename") or "")
@@ -2810,6 +2803,21 @@ def status(cfg: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def _record_cycle_latency(
+    cfg: Mapping[str, Any], *, detector_elapsed: float, total_elapsed: float
+) -> None:
+    run = runtime_dir(cfg)
+    if detector_elapsed * 1000.0 > float(cfg["loop"].get("detector_budget_ms", 200.0)):
+        atomic_json(
+            run / "detector-budget-breach.json",
+            {"at": iso(), "elapsed_ms": detector_elapsed * 1000.0},
+        )
+    atomic_json(
+        run / "cycle-latency.json",
+        {"at": iso(), "detector_ms": detector_elapsed * 1000.0, "total_ms": total_elapsed * 1000.0},
+    )
+
+
 def daemon(cfg: Mapping[str, Any]) -> int:
     bootstrap(cfg)
     run = runtime_dir(cfg)
@@ -2827,11 +2835,14 @@ def daemon(cfg: Mapping[str, Any]) -> int:
     poll = max(0.05, float(cfg["loop"].get("poll_ms", 250)) / 1000.0)
     while not stopping and not (run / "HALT").exists():
         cycle_started = time.monotonic()
+        detector_elapsed = 0.0
         error = None
         created: list[str] = []
         launched: list[str] = []
         try:
+            detector_started = time.monotonic()
             created = detect(cfg)
+            detector_elapsed = time.monotonic() - detector_started
             poll_runs(cfg)
             launched = dispatch(cfg)
         except Exception as exc:  # the detector remains restartable and evidence-backed
@@ -2841,11 +2852,7 @@ def daemon(cfg: Mapping[str, Any]) -> int:
             {"alive": True, "pid": os.getpid(), "at": iso(), "created": created, "launched": launched, "error": error},
         )
         elapsed = time.monotonic() - cycle_started
-        if elapsed * 1000.0 > float(cfg["loop"].get("detector_budget_ms", 200.0)):
-            atomic_json(
-                run / "detector-budget-breach.json",
-                {"at": iso(), "elapsed_ms": elapsed * 1000.0},
-            )
+        _record_cycle_latency(cfg, detector_elapsed=detector_elapsed, total_elapsed=elapsed)
         if elapsed < poll:
             time.sleep(poll - elapsed)
     terminated: list[str] = []

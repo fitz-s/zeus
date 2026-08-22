@@ -538,9 +538,16 @@ def test_failed_repair_retry_resumes_persistent_session(cfg: dict, monkeypatch) 
 @pytest.mark.parametrize(
     ("changed_path", "conclusion", "expected_blocker"),
     [
-        ("src/engine/example.py", "FAILURE", "pr_checks_not_green:money-path-required"),
-        ("src/engine/example.py", "SKIPPED", "pr_checks_not_green:money-path-required"),
+        ("src/engine/monitor_refresh.py", "FAILURE", "pr_checks_not_green:money-path-required"),
+        ("src/engine/monitor_refresh.py", "SKIPPED", "pr_checks_not_green:money-path-required"),
         ("config/settings.json", "SUCCESS", "automation_forbidden_paths:config/settings.json"),
+        ("src/execution/command_bus.py", "SUCCESS", "automation_forbidden_paths:src/execution/command_bus.py"),
+        ("src/risk_allocator/example.py", "SUCCESS", "automation_forbidden_paths:src/risk_allocator/example.py"),
+        ("src/strategy/risk_limits.py", "SUCCESS", "automation_forbidden_paths:src/strategy/risk_limits.py"),
+        ("src/state/schema_introspection.py", "SUCCESS", "automation_forbidden_paths:src/state/schema_introspection.py"),
+        ("scripts/migrate_example.py", "SUCCESS", "automation_forbidden_paths:scripts/migrate_example.py"),
+        ("src/state/lifecycle_manager.py", "SUCCESS", "automation_forbidden_paths:src/state/lifecycle_manager.py"),
+        ("src/state/venue_command_repo.py", "SUCCESS", "automation_forbidden_paths:src/state/venue_command_repo.py"),
     ],
 )
 def test_controller_rejects_unsafe_merged_pr(
@@ -594,3 +601,22 @@ def test_controller_rejects_unsafe_merged_pr(
     result = json.loads((incident_dir / "production.json").read_text())
     assert result["status"] == "blocked"
     assert result["blocker"] == expected_blocker
+
+
+def test_repair_requires_preprovisioned_managed_worktree(cfg: dict, monkeypatch) -> None:
+    monkeypatch.delenv("ZEUS_TOTAL_LOSS_REPAIR_WORKTREE", raising=False)
+
+    with pytest.raises(RuntimeError, match="managed repair worktree is not provisioned"):
+        loop._worktree(cfg, "incident-1")
+
+
+def test_slow_dispatch_does_not_create_detector_budget_breach(cfg: dict) -> None:
+    runtime = Path(cfg["paths"]["runtime"])
+    runtime.mkdir(parents=True)
+
+    loop._record_cycle_latency(cfg, detector_elapsed=0.01, total_elapsed=3.0)
+
+    assert not (runtime / "detector-budget-breach.json").exists()
+    latency = json.loads((runtime / "cycle-latency.json").read_text())
+    assert latency["detector_ms"] == 10.0
+    assert latency["total_ms"] == 3000.0
