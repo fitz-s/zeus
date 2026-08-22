@@ -7,6 +7,8 @@ import importlib.util
 import json
 import plistlib
 import sqlite3
+import subprocess
+import sys
 from datetime import timedelta
 from pathlib import Path
 
@@ -166,6 +168,28 @@ def test_missing_command_identity_never_falls_back_to_remaining_basis(tmp_path: 
     )
     assert economics["loss_ratio"] is None
     assert economics["loss_basis_authority"] == "execution_fact_command_identity_unavailable"
+
+
+def test_direct_entrypoint_matches_imported_scanner_coverage(tmp_path: Path) -> None:
+    db = tmp_path / "trades.db"
+    _db(db)
+    _insert(db, "loss", 10.0, -10.0, loop.iso_now())
+    workspace, _config = _bootstrap(tmp_path, db)
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(REPO_ROOT / "scripts" / "watch_full_loss_investigation.py"),
+            "--workspace",
+            str(workspace),
+            "status",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    payload = json.loads(completed.stdout)
+    assert payload["coverage"]["activation_full_losses"] == 1
 
 
 def test_partial_recovery_uses_gross_entry_basis_and_retracts_false_incident(

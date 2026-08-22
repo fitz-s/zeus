@@ -24,6 +24,7 @@ import re
 import shutil
 import signal
 import subprocess
+import sys
 import time
 from collections import Counter
 from collections.abc import Mapping
@@ -361,6 +362,9 @@ def scan_loss_economics(
                 ORDER BY settled_at, position_id""",
             (floor,),
         ).fetchall()
+        project_root = str(PROJECT_ROOT)
+        if project_root not in sys.path:
+            sys.path.insert(0, project_root)
         try:
             from src.state.db import query_entry_execution_fill_aggregate
         except ImportError:
