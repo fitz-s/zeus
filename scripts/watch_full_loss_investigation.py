@@ -803,16 +803,29 @@ def capital_lane_guard(config: dict[str, Any]) -> dict[str, Any]:
     connection = open_read_only(str(Path(config["trades_db"]).resolve()), timeout=0.2)
     try:
         rows = connection.execute(
-            """SELECT position_id, updated_at, last_monitor_prob_is_fresh,
-                      last_monitor_market_price_is_fresh
-                 FROM position_current
-                WHERE phase IN ('active', 'day0_window', 'pending_exit')
-                ORDER BY position_id"""
+            """WITH latest_monitor AS (
+                   SELECT position_id, MAX(sequence_no) AS sequence_no
+                     FROM position_events
+                    WHERE event_type = 'MONITOR_REFRESHED'
+                    GROUP BY position_id
+               )
+               SELECT position.position_id,
+                      monitor.occurred_at AS monitor_at,
+                      position.last_monitor_prob_is_fresh,
+                      position.last_monitor_market_price_is_fresh
+                 FROM position_current AS position
+                 LEFT JOIN latest_monitor AS latest
+                   ON latest.position_id = position.position_id
+                 LEFT JOIN position_events AS monitor
+                   ON monitor.position_id = latest.position_id
+                  AND monitor.sequence_no = latest.sequence_no
+                WHERE position.phase IN ('active', 'day0_window', 'pending_exit')
+                ORDER BY position.position_id"""
         ).fetchall()
         limit = float(config.get("max_open_monitor_age_seconds", 120))
         for row in rows:
             try:
-                age = max(0.0, (now - parse_time(str(row["updated_at"]))).total_seconds())
+                age = max(0.0, (now - parse_time(str(row["monitor_at"]))).total_seconds())
             except (TypeError, ValueError):
                 age = float("inf")
             if age > limit:

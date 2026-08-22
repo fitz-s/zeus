@@ -49,6 +49,12 @@ def _db(path: Path) -> None:
             terminal_exec_status TEXT, venue_status TEXT, command_id TEXT
         )"""
     )
+    connection.execute(
+        """CREATE TABLE position_events (
+            position_id TEXT, event_type TEXT, sequence_no INTEGER,
+            occurred_at TEXT
+        )"""
+    )
     connection.commit()
     connection.close()
 
@@ -659,18 +665,36 @@ def test_capital_lane_guard_blocks_stale_open_monitor(tmp_path: Path) -> None:
            ) VALUES (?,?,?,?,?)""",
         ("open", "active", loop.iso_now(), 1, 1),
     )
+    connection.execute(
+        "INSERT INTO position_events VALUES (?,?,?,?)",
+        ("open", "MONITOR_REFRESHED", 1, loop.iso_now()),
+    )
     connection.commit()
 
     assert loop.capital_lane_guard(config)["healthy"] is True
 
     stale = (loop.utc_now() - timedelta(minutes=5)).isoformat()
-    connection.execute("UPDATE position_current SET updated_at=?", (stale,))
+    connection.execute("UPDATE position_events SET occurred_at=?", (stale,))
     connection.commit()
-    connection.close()
     guard = loop.capital_lane_guard(config)
     assert guard["healthy"] is False
     assert guard["reasons"] == ["open_monitor_overdue"]
     assert guard["overdue"][0]["position_id"] == "open"
+
+    connection.execute("UPDATE position_current SET updated_at=?", (stale,))
+    connection.execute(
+        "UPDATE position_events SET occurred_at=?",
+        (loop.iso_now(),),
+    )
+    connection.commit()
+    connection.close()
+    assert loop.capital_lane_guard(config)["healthy"] is True
+
+    connection = sqlite3.connect(db)
+    connection.execute("DELETE FROM position_events")
+    connection.commit()
+    connection.close()
+    assert loop.capital_lane_guard(config)["reasons"] == ["open_monitor_overdue"]
 
 
 def test_bounded_rows_enforces_row_ceiling(tmp_path: Path) -> None:
