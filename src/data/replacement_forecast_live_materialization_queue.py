@@ -2206,25 +2206,14 @@ def _prepare_seed_requests(
                 cycle_boundary is not None
                 and cycle_boundary[0] == "awaiting_current_ensemble_hwm"
             ):
-                boundary_basis, current_cycle = cycle_boundary
-                moved = _move_request(seed_json, processed_path)
-                _write_sidecar(
-                    moved,
-                    {
-                        "status": _AWAITING_ENSEMBLE_HWM_STATUS,
-                        "reason_codes": [_AWAITING_ENSEMBLE_HWM_REASON],
-                        "request_written": False,
-                        "subprocess_spawned": False,
-                        "boundary_basis": boundary_basis,
-                        "request_source_cycle_time": seed.get(
-                            "source_cycle_time"
-                        ),
-                        "current_ensemble_cycle_time": current_cycle,
-                    },
-                )
-                processed.append(str(moved))
+                # SCOPE: this exact city/date/metric seed. DRAIN: the same file
+                # is reconsidered on the one-second queue cadence and becomes
+                # actionable when its same-cycle ENS HWM arrives. RESET: the
+                # JIT boundary returns None at equality. Retaining the producer-
+                # owned seed also keeps discovery/cycle/fusion deduplication
+                # active; terminally moving it would let every producer recreate
+                # the same unmaterializable debt on its next poll.
                 reasons.append(_AWAITING_ENSEMBLE_HWM_REASON)
-                actionable_count += 1
                 continue
             if cycle_boundary is not None:
                 regression_basis, current_cycle = cycle_boundary

@@ -475,15 +475,18 @@
   coverage was already scarce.
 - **Contract:** recovery discovery applies the queue's exact family/cycle ENS
   boundary before seed persistence. A deterministic cycle ahead of the newest
-  decision-time-eligible ENS is not written. Unknown boundary state fails open,
-  and the queue retains the final authoritative JIT recheck. Once ENS advances,
-  ordinary discovery and the committed-ENS cycle-advance trigger can enqueue
-  the scope immediately; probability math and HWM authority do not change.
+  decision-time-eligible ENS is not written. Direct cycle-advance or fusion-
+  upgrade seeds remain pending in place at the queue JIT boundary instead of
+  being terminally moved and recreated; their presence preserves producer
+  deduplication. Unknown boundary state fails open. Once ENS advances, equality
+  resets the defer and the same retained seed proceeds immediately; probability
+  math and HWM authority do not change.
 - **Acceptance:** a recovery-discovery antibody proves future-of-ENS input
   yields zero seed files and a typed reason; existing discovery and queue JIT
   tests remain green. Production acceptance is cessation of repeated deferred
-  seed churn, followed by current-cycle posterior generation after ENS commit.
-  Rollback is one hot-fix commit.
+  seed churn, a stable bounded pending set before ENS, and current-cycle
+  posterior generation from those retained seeds after ENS commit. Rollback is
+  the B138 hot-fix commits.
 
 ### 2026-08-02 — partial EXIT realized-PnL canonical continuity (hot-fix slice)
 

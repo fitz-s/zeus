@@ -685,25 +685,47 @@ def test_queue_defers_seed_ahead_of_current_ensemble_hwm(tmp_path, monkeypatch) 
     )
 
     assert not failed
-    assert len(processed) == 1
+    assert processed == []
     assert (
         "REPLACEMENT_MATERIALIZATION_SOURCE_CYCLE_AWAITING_ENSEMBLE_HWM"
         in reasons
     )
     assert not request_dir.exists()
-    receipt_path = next((tmp_path / "seed_processed").glob("*.receipt.json"))
-    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
-    assert receipt == {
-        "status": "DEFERRED_SOURCE_CYCLE_AWAITING_ENSEMBLE_HWM",
-        "reason_codes": [
-            "REPLACEMENT_MATERIALIZATION_SOURCE_CYCLE_AWAITING_ENSEMBLE_HWM"
-        ],
-        "request_written": False,
-        "subprocess_spawned": False,
-        "boundary_basis": "awaiting_current_ensemble_hwm",
-        "request_source_cycle_time": "2026-08-21T18:00:00+00:00",
-        "current_ensemble_cycle_time": "2026-08-21T12:00:00+00:00",
-    }
+    assert (seed_dir / "future-of-ens.json").is_file()
+    assert not (tmp_path / "seed_processed").exists()
+
+    conn = sqlite3.connect(forecast_db)
+    conn.execute(
+        "UPDATE ensemble_snapshots SET source_cycle_time = ?",
+        ("2026-08-21T18:00:00+00:00",),
+    )
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(
+        queue_mod,
+        "build_replacement_forecast_materialization_request",
+        lambda *_args, **_kwargs: types.SimpleNamespace(
+            ok=True,
+            status="READY",
+            reason_codes=("READY",),
+            request={"city": "Shanghai"},
+        ),
+    )
+
+    processed, failed, reasons = queue_mod._prepare_seed_requests(
+        seed_dir=seed_dir,
+        seed_processed_dir=tmp_path / "seed_processed",
+        seed_failed_dir=tmp_path / "seed_failed",
+        request_dir=request_dir,
+        forecast_db=forecast_db,
+        limit=10,
+    )
+
+    assert not failed
+    assert len(processed) == 1
+    assert "REPLACEMENT_MATERIALIZATION_SOURCE_CYCLE_AWAITING_ENSEMBLE_HWM" not in reasons
+    assert not (seed_dir / "future-of-ens.json").exists()
+    assert (request_dir / "future-of-ens.json").is_file()
 
 
 def test_queue_coverage_skip_requires_matching_openmeteo_anchor_source_run(tmp_path) -> None:
