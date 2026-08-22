@@ -3182,7 +3182,7 @@ files:
   src/observability/scheduler_health.py:
     zone: K2_runtime
     authority_role: derived_scheduler_health
-    why: Derived scheduler/job-health view for operators; must stay evidence-only and never become canonical truth.
+    why: Derived scheduler/job-health view for operators; cross-thread and cross-process locking makes each read-merge-replace upsert atomic so concurrent daemons cannot erase sibling health rows. It stays evidence-only and never becomes canonical truth.
     downstream:
     - src/main.py
   src/observability/status_summary.py:

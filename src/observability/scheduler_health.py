@@ -1,7 +1,7 @@
 """Per-scheduler-job health artifact (B047).
 
 Created: 2026-04-21
-Last reused/audited: 2026-04-21
+Last reused/audited: 2026-08-22
 Authority basis: Phase 10 DT-close — docs/operations/task_2026-04-16_dual_track_metric_spine/phase10_evidence/SCAFFOLD_B047_scheduler_observability.md
 
 Writes atomic per-job entries to ``state/scheduler_jobs_health.json``.
@@ -21,10 +21,12 @@ Contract (B047):
 
 from __future__ import annotations
 
+import fcntl
 import json
 import logging
 import os
 import tempfile
+import threading
 from datetime import datetime, timezone
 from typing import Any, Optional
 
@@ -34,6 +36,7 @@ logger = logging.getLogger(__name__)
 
 
 _SCHEDULER_HEALTH_PATH = state_path("scheduler_jobs_health.json")
+_SCHEDULER_HEALTH_THREAD_LOCK = threading.Lock()
 
 
 def _write_scheduler_health(
@@ -55,59 +58,67 @@ def _write_scheduler_health(
     Never raises — observability writes are best-effort and must not
     mask the primary job exception. Debug-logs on write failure.
     """
-    now = datetime.now(timezone.utc).isoformat()
-    path = _SCHEDULER_HEALTH_PATH
-    existing: dict = {}
-    if path.exists():
-        try:
-            with open(path) as f:
-                existing = json.load(f)
-            if not isinstance(existing, dict):
-                existing = {}
-        except (OSError, json.JSONDecodeError):
-            # Corrupt or unreadable — start fresh rather than mask.
-            existing = {}
-
-    entry = dict(existing.get(job_name) or {})
-    entry["last_run_at"] = now
-    if skipped:
-        entry["status"] = "SKIPPED"
-        entry["last_skip_at"] = now
-        entry["last_skip_reason"] = skip_reason or reason or ""
-        entry["consecutive_skips"] = int(entry.get("consecutive_skips") or 0) + 1
-        entry.pop("last_failure_reason", None)
-    elif started:
-        entry["status"] = "RUNNING"
-        entry["last_started_at"] = now
-        entry["consecutive_skips"] = 0
-        entry.pop("last_failure_reason", None)
-    elif failed:
-        entry["status"] = "FAILED"
-        entry["last_failure_at"] = now
-        entry["last_failure_reason"] = reason or ""
-        entry["consecutive_skips"] = 0
-    else:
-        entry["status"] = "OK"
-        entry["last_success_at"] = now
-        entry["consecutive_skips"] = 0
-        entry.pop("last_failure_reason", None)
-    if extra:
-        entry["business_liveness"] = dict(extra)
-    existing[job_name] = entry
-
     try:
+        path = _SCHEDULER_HEALTH_PATH
         path.parent.mkdir(parents=True, exist_ok=True)
-        fd, tmp = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
-        try:
-            with os.fdopen(fd, "w") as f:
-                json.dump(existing, f, indent=2, sort_keys=True)
-            os.replace(tmp, str(path))
-        except Exception:
+        lock_path = path.with_name(f"{path.name}.lock")
+        with _SCHEDULER_HEALTH_THREAD_LOCK, open(lock_path, "a+") as lock_file:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
             try:
-                os.unlink(tmp)
-            except OSError:
-                pass
-            raise
+                now = datetime.now(timezone.utc).isoformat()
+                existing: dict = {}
+                if path.exists():
+                    try:
+                        with open(path) as f:
+                            existing = json.load(f)
+                        if not isinstance(existing, dict):
+                            existing = {}
+                    except (OSError, json.JSONDecodeError):
+                        # Corrupt or unreadable — start fresh rather than mask.
+                        existing = {}
+
+                entry = dict(existing.get(job_name) or {})
+                entry["last_run_at"] = now
+                if skipped:
+                    entry["status"] = "SKIPPED"
+                    entry["last_skip_at"] = now
+                    entry["last_skip_reason"] = skip_reason or reason or ""
+                    entry["consecutive_skips"] = int(
+                        entry.get("consecutive_skips") or 0
+                    ) + 1
+                    entry.pop("last_failure_reason", None)
+                elif started:
+                    entry["status"] = "RUNNING"
+                    entry["last_started_at"] = now
+                    entry["consecutive_skips"] = 0
+                    entry.pop("last_failure_reason", None)
+                elif failed:
+                    entry["status"] = "FAILED"
+                    entry["last_failure_at"] = now
+                    entry["last_failure_reason"] = reason or ""
+                    entry["consecutive_skips"] = 0
+                else:
+                    entry["status"] = "OK"
+                    entry["last_success_at"] = now
+                    entry["consecutive_skips"] = 0
+                    entry.pop("last_failure_reason", None)
+                if extra:
+                    entry["business_liveness"] = dict(extra)
+                existing[job_name] = entry
+
+                fd, tmp = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
+                try:
+                    with os.fdopen(fd, "w") as f:
+                        json.dump(existing, f, indent=2, sort_keys=True)
+                    os.replace(tmp, str(path))
+                except Exception:
+                    try:
+                        os.unlink(tmp)
+                    except OSError:
+                        pass
+                    raise
+            finally:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
     except Exception:
         logger.debug(
             "failed to write scheduler health for %s", job_name, exc_info=True

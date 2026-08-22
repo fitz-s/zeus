@@ -360,7 +360,7 @@ test_trust_policy:
     tests/test_backfill_completeness_guardrails.py: {created: "2026-04-25", last_used: "2026-04-25"}
     tests/test_backfill_scripts_match_live_config.py: {created: "2026-04-21", last_used: "2026-04-25"}
     tests/test_backtest_settlement_value_outcome.py: {created: "2026-04-25", last_used: "2026-04-25"}
-    tests/test_bug100_k1_k2_structural.py: {created: "2026-04-21", last_used: "2026-04-21"}
+    tests/test_bug100_k1_k2_structural.py: {created: "2026-04-21", last_used: "2026-08-22", note: "B001/B047 structural and runtime antibodies, including cross-process scheduler-health read-merge-replace serialization so concurrent daemon upserts cannot erase sibling rows."}
     tests/test_calibration_bins_canonical.py: {created: "2026-04-14", last_used: "2026-04-23"}
 
     tests/test_promote_pending_trades.py: {created: "2026-05-17", last_used: "2026-07-16", note: "EXIT trade-fact promotion preserves exact matched size for full and partial FAK fills; original order size cannot overwrite confirmed partial-fill quantity."}

@@ -1,7 +1,7 @@
 """Structural antibodies for bug100 K1/K2 tail (B001 + B047).
 
 Created: 2026-04-21
-Last reused/audited: 2026-04-21
+Last reused/audited: 2026-08-22
 Authority basis: Phase 10 DT-close — docs/operations/task_2026-04-16_dual_track_metric_spine/phase10_evidence/SCAFFOLD_B001_config_contract.md + SCAFFOLD_B047_scheduler_observability.md
 
 These tests are antibodies, not coverage. They enforce cross-module
@@ -23,6 +23,9 @@ from __future__ import annotations
 import ast
 import json
 import re
+import subprocess
+import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -345,3 +348,50 @@ def test_scheduler_health_success_clears_stale_failure_reason(tmp_path, monkeypa
     assert "last_success_at" in entry
     assert "last_failure_at" in entry
     assert "last_failure_reason" not in entry
+
+
+def test_scheduler_health_cross_process_upserts_do_not_stomp(tmp_path, monkeypatch):
+    """A writer must merge after a competing daemon releases the file lock."""
+    from src.observability import scheduler_health
+
+    health_path = tmp_path / "health.json"
+    lock_path = tmp_path / "health.json.lock"
+    ready_path = tmp_path / "child-ready"
+    monkeypatch.setattr(scheduler_health, "_SCHEDULER_HEALTH_PATH", health_path)
+
+    child_code = """
+import fcntl
+import json
+import sys
+import time
+from pathlib import Path
+
+health_path, lock_path, ready_path = map(Path, sys.argv[1:])
+with open(lock_path, "a+") as lock_file:
+    fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+    ready_path.write_text("ready", encoding="utf-8")
+    time.sleep(0.25)
+    health_path.write_text(
+        json.dumps({"child_job": {"status": "OK"}}), encoding="utf-8"
+    )
+    fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+"""
+    child = subprocess.Popen(
+        [sys.executable, "-c", child_code, health_path, lock_path, ready_path]
+    )
+    try:
+        deadline = time.monotonic() + 5.0
+        while not ready_path.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert ready_path.exists(), "competing health writer did not acquire its lock"
+
+        scheduler_health._write_scheduler_health("parent_job", failed=False)
+        assert child.wait(timeout=5.0) == 0
+    finally:
+        if child.poll() is None:
+            child.kill()
+            child.wait(timeout=5.0)
+
+    data = json.loads(health_path.read_text(encoding="utf-8"))
+    assert data["child_job"]["status"] == "OK"
+    assert data["parent_job"]["status"] == "OK"
