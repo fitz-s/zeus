@@ -1,6 +1,6 @@
 # Created: 2026-04-27
-# Last reused/audited: 2026-08-21
-# Lifecycle: created=2026-04-27; last_reviewed=2026-08-21; last_reused=2026-08-21
+# Last reused/audited: 2026-08-22
+# Lifecycle: created=2026-04-27; last_reviewed=2026-08-22; last_reused=2026-08-22
 # Authority basis: docs/operations/current/finite_evidence_probability_symmetry/PLAN.md
 # Purpose: Lock R3 M4 cancel/replace exit mutex, typed cancel outcomes, replacement gates, and CTF preflight.
 # Reuse: Run when exit_safety, executor exit submit, exit_lifecycle cancel retry, venue command transitions, or collateral sell preflight changes.
@@ -8466,6 +8466,184 @@ def test_live_exit_with_fresh_snapshot_but_no_bid_records_liquidity_block(
     ]
 
 
+@pytest.mark.parametrize(
+    ("direction", "expected_token"),
+    (("buy_yes", YES_TOKEN), ("buy_no", NO_TOKEN)),
+)
+def test_hard_fact_exit_uses_fresh_bid_protective_fak(
+    conn, monkeypatch, direction, expected_token
+):
+    from src.execution import exit_lifecycle
+    from src.state.portfolio import ExitContext, PortfolioState, Position
+
+    position = Position(
+        trade_id="pos-hard-fact-protective-fak",
+        market_id="condition-test",
+        condition_id="condition-test",
+        city="Manila",
+        cluster="asia",
+        target_date="2026-07-02",
+        bin_label="32C",
+        direction=direction,
+        token_id=YES_TOKEN,
+        no_token_id=NO_TOKEN,
+        entry_price=0.71,
+        size_usd=7.1,
+        shares=10.0,
+        chain_shares=10.0,
+        cost_basis_usd=7.1,
+        state="day0_window",
+        chain_state="synced",
+        strategy_key="forecast_qkernel_entry",
+        env="live",
+    )
+    submitted = {}
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "_hard_fact_sell_authority_valid",
+        lambda *_args, **_kwargs: True,
+    )
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "_latest_or_capture_exit_snapshot_context",
+        lambda *_args, **_kwargs: {
+            "executable_snapshot_id": "snapshot-hard-fact-protective",
+            "executable_snapshot_hash": "hash-hard-fact-protective",
+            "executable_snapshot_orderbook_top_bid": 0.18,
+            "executable_snapshot_min_order_size": 0.01,
+        },
+    )
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "check_sell_collateral",
+        lambda *_args, **_kwargs: (True, ""),
+    )
+
+    def return_pending(**kwargs):
+        submitted.update(kwargs)
+        return exit_lifecycle.OrderResult(
+            trade_id=position.trade_id,
+            status="pending",
+            order_id="ord-hard-fact-protective",
+            external_order_id="ord-hard-fact-protective",
+        )
+
+    monkeypatch.setattr(exit_lifecycle, "place_sell_order", return_pending)
+
+    class Clob:
+        @staticmethod
+        def get_order_status(_order_id):
+            return {"status": "OPEN"}
+
+    outcome = exit_lifecycle.execute_exit(
+        PortfolioState(positions=[position]),
+        position,
+        ExitContext(
+            exit_reason="DAY0_HARD_FACT_BIN_DEAD",
+            probability_receipt={
+                "probability_authority": "day0_absorbing_hard_fact",
+                "hard_fact_evidence": {"source": "test-final-observation"},
+            },
+            current_market_price=0.22,
+            current_market_price_is_fresh=False,
+            best_bid=0.20,
+            hours_to_settlement=0.5,
+            day0_active=True,
+        ),
+        clob=Clob(),
+        conn=conn,
+        hard_fact_authority=object(),
+    )
+
+    assert outcome.startswith("sell_pending: order=ord-hard-fact-protective")
+    assert submitted["submit_order_type"] == "FAK"
+    assert submitted["exact_limit_price"] == 0.18
+    authority = submitted["protective_sell_execution_authority"]
+    assert authority.kind == "DAY0_HARD_FACT_BIN_DEAD"
+    assert authority.token_id == expected_token
+    assert authority.best_bid == "0.18"
+
+
+def test_protective_semantic_receipt_gap_records_retry_without_submit(
+    conn, monkeypatch
+):
+    from src.execution import exit_lifecycle
+    from src.state.portfolio import ExitContext, PortfolioState, Position
+
+    position = Position(
+        trade_id="pos-protective-semantic-gap",
+        market_id="condition-test",
+        condition_id="condition-test",
+        city="Manila",
+        cluster="asia",
+        target_date="2026-07-02",
+        bin_label="32C",
+        direction="buy_yes",
+        token_id=YES_TOKEN,
+        no_token_id=NO_TOKEN,
+        entry_price=0.71,
+        size_usd=7.1,
+        shares=10.0,
+        chain_shares=10.0,
+        cost_basis_usd=7.1,
+        state="day0_window",
+        chain_state="synced",
+        strategy_key="forecast_qkernel_entry",
+        env="live",
+    )
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "_hard_fact_sell_authority_valid",
+        lambda *_args, **_kwargs: True,
+    )
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "_latest_or_capture_exit_snapshot_context",
+        lambda *_args, **_kwargs: {
+            "executable_snapshot_id": "snapshot-protective-semantic-gap",
+            "executable_snapshot_hash": "hash-protective-semantic-gap",
+            "executable_snapshot_orderbook_top_bid": 0.18,
+            "executable_snapshot_min_order_size": 0.01,
+        },
+    )
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "place_sell_order",
+        lambda **_kwargs: pytest.fail("unproved protective authority must not submit"),
+    )
+
+    outcome = exit_lifecycle.execute_exit(
+        PortfolioState(positions=[position]),
+        position,
+        ExitContext(
+            exit_reason="DAY0_HARD_FACT_BIN_DEAD",
+            current_market_price=0.20,
+            current_market_price_is_fresh=True,
+            best_bid=0.18,
+            hours_to_settlement=0.5,
+            day0_active=True,
+        ),
+        clob=object(),
+        conn=conn,
+        hard_fact_authority=object(),
+    )
+
+    assert outcome == "exit_blocked: protective_authority_unavailable"
+    assert position.exit_state == "retry_pending"
+    assert position.last_exit_error.startswith(
+        "protective_sell_execution_authority_unavailable:ValueError:"
+    )
+    event = conn.execute(
+        """SELECT event_type, payload_json FROM position_events
+            WHERE position_id=? ORDER BY sequence_no DESC LIMIT 1""",
+        (position.trade_id,),
+    ).fetchone()
+    assert event["event_type"] == "EXIT_ORDER_REJECTED"
+    assert json.loads(event["payload_json"])["error"].startswith(
+        "protective_sell_execution_authority_unavailable:ValueError:"
+    )
+
+
 def test_exit_liquidity_classification_uses_snapshot_bid_truth():
     from src.execution.exit_lifecycle import ExitIntent, _exit_sell_liquidity_error
 
@@ -10160,8 +10338,9 @@ def test_pre_settlement_stale_market_price_still_enters_retry(conn):
     assert payload["status"] == "retry_pending"
 
 
-def test_red_stale_retry_requires_global_sell_after_green_risk_recovery(
-    conn, monkeypatch
+@pytest.mark.parametrize("stale_price", [0.45, None])
+def test_red_stale_or_missing_monitor_quote_recaptures_snapshot_and_uses_fak(
+    conn, monkeypatch, stale_price
 ):
     from src.execution import exit_lifecycle
     from src.riskguard.risk_level import RiskLevel
@@ -10191,10 +10370,9 @@ def test_red_stale_retry_requires_global_sell_after_green_risk_recovery(
         exit_reason="red_force_exit",
     )
     _seed_red_monitor_provenance(conn, position_id=trade_id)
-    risk = {"level": RiskLevel.RED}
     monkeypatch.setattr(
         "src.riskguard.riskguard.get_current_level",
-        lambda: risk["level"],
+        lambda: RiskLevel.RED,
     )
 
     class Clob:
@@ -10204,62 +10382,28 @@ def test_red_stale_retry_requires_global_sell_after_green_risk_recovery(
 
     stale = ExitContext(
         exit_reason="RED_FORCE_EXIT",
-        current_market_price=0.45,
+        current_market_price=stale_price,
         current_market_price_is_fresh=False,
         best_bid=0.45,
     )
-    outcome = exit_lifecycle.execute_exit(
-        PortfolioState(positions=[position]),
-        position,
-        stale,
-        clob=Clob(),
-        conn=conn,
-    )
-    assert outcome == "exit_blocked: stale_market_price"
-    events = conn.execute(
-        "SELECT event_type FROM position_events WHERE position_id = ? "
-        "ORDER BY sequence_no",
-        (trade_id,),
-    ).fetchall()
-    assert [row["event_type"] for row in events][-2:] == [
-        "EXIT_INTENT",
-        "EXIT_ORDER_REJECTED",
-    ]
-    assert conn.execute(
-        "SELECT COUNT(*) FROM venue_commands WHERE position_id = ? "
-        "AND intent_kind = 'EXIT' AND side = 'SELL'",
-        (trade_id,),
-    ).fetchone()[0] == 0
+    submitted = {}
 
-    position.next_exit_retry_at = (_NOW - timedelta(minutes=1)).isoformat()
-    assert exit_lifecycle.check_pending_retries(position, conn=conn) is True
-    assert position.state == "day0_window"
-    assert position.exit_reason == "red_force_exit"
-    risk["level"] = RiskLevel.GREEN
-
-    def persist_and_return_pending(**kwargs):
-        _insert_exit_command(
-            conn,
-            command_id="cmd-red-obligation-retry",
-            position_id=trade_id,
-            token_id=YES_TOKEN,
-            size=10.0,
-            price=0.45,
-            venue_order_id="ord-red-obligation-retry",
-        )
+    def return_pending(**kwargs):
+        submitted.update(kwargs)
         return exit_lifecycle.OrderResult(
             trade_id=trade_id,
             status="pending",
-            order_id="ord-red-obligation-retry",
-            external_order_id="ord-red-obligation-retry",
+            order_id="ord-red-protective",
+            external_order_id="ord-red-protective",
         )
 
     monkeypatch.setattr(
         exit_lifecycle,
         "_latest_or_capture_exit_snapshot_context",
         lambda *_args, **_kwargs: {
-            "executable_snapshot_id": "snapshot-red-obligation-retry",
-            "executable_snapshot_orderbook_top_bid": 0.45,
+            "executable_snapshot_id": "snapshot-red-protective",
+            "executable_snapshot_hash": "hash-red-protective",
+            "executable_snapshot_orderbook_top_bid": 0.44,
             "executable_snapshot_min_order_size": 0.01,
         },
     )
@@ -10268,20 +10412,23 @@ def test_red_stale_retry_requires_global_sell_after_green_risk_recovery(
         "check_sell_collateral",
         lambda *_args, **_kwargs: (True, ""),
     )
-    monkeypatch.setattr(exit_lifecycle, "place_sell_order", persist_and_return_pending)
-    fresh = replace(stale, current_market_price_is_fresh=True)
-    retry_outcome = exit_lifecycle.execute_exit(
+    monkeypatch.setattr(exit_lifecycle, "place_sell_order", return_pending)
+    outcome = exit_lifecycle.execute_exit(
         PortfolioState(positions=[position]),
         position,
-        fresh,
+        stale,
         clob=Clob(),
         conn=conn,
     )
-    assert retry_outcome == "exit_blocked: global_capital_optimal_sell_intent_required"
-    assert conn.execute(
-        "SELECT COUNT(*) FROM venue_commands WHERE command_id = ?",
-        ("cmd-red-obligation-retry",),
-    ).fetchone()[0] == 0
+    assert outcome.startswith("sell_pending: order=ord-red-protective")
+    assert submitted["submit_order_type"] == "FAK"
+    assert submitted["exact_limit_price"] == 0.44
+    assert submitted["current_price"] == 0.44
+    assert submitted["best_bid"] == 0.44
+    authority = submitted["protective_sell_execution_authority"]
+    assert authority.kind == "RED_FORCE_EXIT"
+    assert authority.snapshot_id == "snapshot-red-protective"
+    assert authority.best_bid == "0.44"
 
 
 def test_red_intent_loses_emergency_exemption_after_green_recovery(conn, monkeypatch):

@@ -1,8 +1,8 @@
-# Lifecycle: created=2026-04-27; last_reviewed=2026-08-20; last_reused=2026-08-20
+# Lifecycle: created=2026-04-27; last_reviewed=2026-08-22; last_reused=2026-08-22
 # Purpose: Regression coverage for executor and portfolio mechanics under R3 cutover preflight opt-outs.
 # Reuse: Run when executor order submission or portfolio save/load mechanics change.
 # Created: 2026-04-27
-# Last reused/audited: 2026-08-20
+# Last reused/audited: 2026-08-22
 # Authority basis: docs/archive/2026-Q2/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md; R3 Z1 cutover guard audit.
 #                  + docs/operations/task_2026-05-21_live_side_effect_risk_boundaries/task.md P0-1 side-effect boundary fault injection.
 #                  + docs/operations/task_2026-05-21_live_side_effect_risk_boundaries/task.md P2-1 required live ATTACH seam.
@@ -2481,6 +2481,207 @@ class TestExecutor:
         assert result.status == "rejected"
         assert result.reason.startswith("marketable_sell_authority_required:")
         assert after == before
+
+    def test_protective_sell_authority_overrides_passive_allocator_with_fak(
+        self, monkeypatch
+    ):
+        from src.execution.exit_lifecycle import (
+            _build_protective_sell_execution_authority,
+        )
+        from src.state.snapshot_repo import get_snapshot
+
+        token_id = "yes-token-protective-fak-boundary"
+        snapshot_id = _ensure_snapshot(
+            _TEST_CONN,
+            token_id=token_id,
+            direction="sell_yes",
+            final_limit_price=Decimal("0.44"),
+            snapshot_top_bid=Decimal("0.44"),
+            snapshot_top_ask=Decimal("0.45"),
+        )
+        snapshot = get_snapshot(_TEST_CONN, snapshot_id)
+        assert snapshot is not None
+        position = SimpleNamespace(trade_id="trade-protective-fak-boundary")
+        decision_id = "exit:trade-protective-fak-boundary:hard-fact"
+        semantic_payload = {
+            "exit_intent_reason": "DAY0_HARD_FACT_BIN_DEAD",
+            "exit_intent_token_id": token_id,
+            "exit_intent_shares": 10.0,
+            "exit_intent_decision_id": decision_id,
+            "exit_intent_probability_receipt": {
+                "probability_authority": "day0_absorbing_hard_fact",
+                "hard_fact_evidence": {"source": "test-final-observation"},
+            },
+        }
+        _TEST_CONN.execute(
+            """INSERT INTO position_current(
+                   position_id, phase, direction, token_id, no_token_id,
+                   shares, chain_shares, chain_state, updated_at,
+                   temperature_metric
+               ) VALUES (?, 'pending_exit', 'buy_yes', ?, ?, 10, 10,
+                         'synced', ?, 'high')""",
+            (position.trade_id, token_id, f"{token_id}-no", _NOW.isoformat()),
+        )
+        _TEST_CONN.execute(
+            """INSERT INTO position_events(
+                   event_id, position_id, event_version, sequence_no,
+                   event_type, occurred_at, phase_before, phase_after,
+                   decision_id, source_module, env, payload_json
+               ) VALUES (?, ?, 1, 1, 'EXIT_INTENT', ?, 'day0_window',
+                         'pending_exit', ?, 'src.execution.exit_lifecycle',
+                         'live', ?)""",
+            (
+                "event-protective-fak-boundary",
+                position.trade_id,
+                _NOW.isoformat(),
+                decision_id,
+                json.dumps(semantic_payload, sort_keys=True),
+            ),
+        )
+        authority = _build_protective_sell_execution_authority(
+            kind="DAY0_HARD_FACT_BIN_DEAD",
+            position=position,
+            token_id=token_id,
+            shares=10.0,
+            snapshot_context={
+                "executable_snapshot_id": snapshot_id,
+                "executable_snapshot_hash": snapshot.executable_snapshot_hash,
+                "executable_snapshot_orderbook_top_bid": Decimal("0.44"),
+            },
+            conn=_TEST_CONN,
+        )
+        captured = {}
+
+        class DummyClient:
+            def __init__(self):
+                self.bound_envelope = None
+
+            def bind_submission_envelope(self, envelope):
+                self.bound_envelope = envelope
+
+            def bind_signed_submission_identity_persister(self, persister):
+                self.signed_identity_persister = persister
+
+            def place_limit_order(self, *, token_id, price, size, side, order_type="GTC"):
+                captured.update(
+                    token_id=token_id,
+                    price=price,
+                    size=size,
+                    side=side,
+                    order_type=order_type,
+                )
+                return _final_submit_result(
+                    self.bound_envelope,
+                    order_id="protective-fak-boundary-order",
+                )
+
+        monkeypatch.setattr("src.data.polymarket_client.PolymarketClient", DummyClient)
+        monkeypatch.setattr(
+            "src.execution.executor._select_risk_allocator_order_type",
+            lambda *_args, **_kwargs: "GTC",
+        )
+        monkeypatch.setattr(
+            "src.execution.executor._refresh_exit_collateral_snapshot_for_submit",
+            lambda *_args, **_kwargs: {"component": "collateral_refresh", "allowed": True},
+        )
+        monkeypatch.setattr(
+            "src.execution.executor._assert_collateral_allows_sell",
+            lambda *_args, **_kwargs: {"component": "collateral_sell", "allowed": True},
+        )
+        result = execute_exit_order(
+            create_exit_order_intent(
+                trade_id=position.trade_id,
+                token_id=token_id,
+                shares=10.0,
+                current_price=0.44,
+                best_bid=0.44,
+                exact_limit_price=0.44,
+                submit_order_type="FAK",
+                executable_snapshot_id=snapshot_id,
+                executable_snapshot_hash=snapshot.executable_snapshot_hash,
+                executable_snapshot_min_tick_size=Decimal("0.01"),
+                executable_snapshot_min_order_size=Decimal("0.01"),
+                executable_snapshot_neg_risk=False,
+                protective_sell_execution_authority=authority,
+            ),
+            conn=_TEST_CONN,
+            decision_id="decision-protective-fak-boundary",
+        )
+
+        assert result.status == "pending", result.reason
+        assert captured["order_type"] == "FAK"
+        assert captured["price"] == pytest.approx(0.44)
+        assert captured["side"] == "SELL"
+        _TEST_CONN.execute(
+            """INSERT INTO position_events(
+                   event_id, position_id, event_version, sequence_no,
+                   event_type, occurred_at, phase_before, phase_after,
+                   source_module, env, payload_json
+               ) VALUES (?, ?, 1, 2, 'SETTLED', ?, 'pending_exit',
+                         'settled', 'tests.test_executor', 'live', '{}')""",
+            (
+                "event-protective-fak-terminal",
+                position.trade_id,
+                (_NOW + timedelta(seconds=1)).isoformat(),
+            ),
+        )
+        from src.execution.exit_lifecycle import (
+            _protective_sell_execution_authority_error,
+        )
+
+        assert _protective_sell_execution_authority_error(
+            authority,
+            conn=_TEST_CONN,
+            trade_id=position.trade_id,
+            token_id=token_id,
+            shares=10.0,
+            limit_price=0.44,
+            snapshot_id=snapshot_id,
+            snapshot_hash=snapshot.executable_snapshot_hash,
+        ) == "protective_sell_semantic_authority_superseded"
+
+    def test_untyped_protective_fak_is_rejected_before_persistence(self, monkeypatch):
+        from src.state.snapshot_repo import get_snapshot
+
+        token_id = "yes-token-invalid-protective-authority"
+        snapshot_id = _ensure_snapshot(
+            _TEST_CONN,
+            token_id=token_id,
+            direction="sell_yes",
+            final_limit_price=Decimal("0.44"),
+            snapshot_top_bid=Decimal("0.44"),
+            snapshot_top_ask=Decimal("0.45"),
+        )
+        snapshot = get_snapshot(_TEST_CONN, snapshot_id)
+        assert snapshot is not None
+        monkeypatch.setattr(
+            "src.execution.executor._select_risk_allocator_order_type",
+            lambda *_args, **_kwargs: "GTC",
+        )
+        before = _TEST_CONN.execute("SELECT COUNT(*) FROM venue_commands").fetchone()[0]
+        result = execute_exit_order(
+            create_exit_order_intent(
+                trade_id="trade-invalid-protective-authority",
+                token_id=token_id,
+                shares=10.0,
+                current_price=0.44,
+                best_bid=0.44,
+                exact_limit_price=0.44,
+                submit_order_type="FAK",
+                executable_snapshot_id=snapshot_id,
+                executable_snapshot_hash=snapshot.executable_snapshot_hash,
+                executable_snapshot_min_tick_size=Decimal("0.01"),
+                executable_snapshot_min_order_size=Decimal("0.01"),
+                executable_snapshot_neg_risk=False,
+                protective_sell_execution_authority=object(),
+            ),
+            conn=_TEST_CONN,
+            decision_id="decision-invalid-protective-authority",
+        )
+
+        assert result.status == "rejected"
+        assert "protective_sell_execution_authority_invalid" in str(result.reason)
+        assert _TEST_CONN.execute("SELECT COUNT(*) FROM venue_commands").fetchone()[0] == before
 
     @pytest.mark.parametrize(
         ("order_type", "best_bid", "limit_price"),

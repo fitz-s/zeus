@@ -2275,6 +2275,258 @@ class ExitIntent:
     day0_active: bool | None = None
 
 
+@dataclass(frozen=True)
+class ProtectiveSellExecutionAuthority:
+    """Immutable RED/hard-fact authority for one fresh FAK reduce-only SELL."""
+
+    kind: str
+    position_id: str
+    token_id: str
+    shares: str
+    snapshot_id: str
+    snapshot_hash: str
+    best_bid: str
+    semantic_event_id: str
+    semantic_payload_sha256: str
+    authority_identity: str
+
+    def __post_init__(self) -> None:
+        if self.kind not in {"RED_FORCE_EXIT", "DAY0_HARD_FACT_BIN_DEAD"}:
+            raise ValueError("protective sell kind invalid")
+        if not all((
+            self.position_id,
+            self.token_id,
+            self.snapshot_id,
+            self.snapshot_hash,
+            self.semantic_event_id,
+            self.semantic_payload_sha256,
+        )):
+            raise ValueError("protective sell identity incomplete")
+        shares = Decimal(self.shares)
+        bid = Decimal(self.best_bid)
+        if shares <= 0 or not LIVE_ORDER_MIN_UNIT_PRICE <= bid <= LIVE_ORDER_MAX_UNIT_PRICE:
+            raise ValueError("protective sell economics invalid")
+        if self.authority_identity != _protective_sell_authority_identity(
+            kind=self.kind,
+            position_id=self.position_id,
+            token_id=self.token_id,
+            shares=self.shares,
+            snapshot_id=self.snapshot_id,
+            snapshot_hash=self.snapshot_hash,
+            best_bid=self.best_bid,
+            semantic_event_id=self.semantic_event_id,
+            semantic_payload_sha256=self.semantic_payload_sha256,
+        ):
+            raise ValueError("protective sell authority identity invalid")
+
+
+def _protective_sell_authority_identity(**material: object) -> str:
+    return hashlib.sha256(
+        json.dumps(material, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+
+
+def _build_protective_sell_execution_authority(
+    *,
+    kind: str,
+    position: Position,
+    token_id: str,
+    shares: float,
+    snapshot_context: Mapping[str, object],
+    conn: sqlite3.Connection,
+) -> ProtectiveSellExecutionAuthority:
+    semantic = _protective_sell_semantic_receipt(
+        conn,
+        position_id=str(position.trade_id),
+        token_id=str(token_id),
+        shares=shares,
+        kind=kind,
+    )
+    if semantic is None:
+        raise ValueError("protective sell semantic authority unavailable")
+    semantic_event_id, semantic_payload_sha256 = semantic
+    material = {
+        "kind": kind,
+        "position_id": str(position.trade_id),
+        "token_id": str(token_id),
+        "shares": str(Decimal(str(shares))),
+        "snapshot_id": str(snapshot_context.get("executable_snapshot_id") or ""),
+        "snapshot_hash": str(snapshot_context.get("executable_snapshot_hash") or ""),
+        "best_bid": str(Decimal(str(snapshot_context["executable_snapshot_orderbook_top_bid"]))),
+        "semantic_event_id": semantic_event_id,
+        "semantic_payload_sha256": semantic_payload_sha256,
+    }
+    return ProtectiveSellExecutionAuthority(
+        **material,
+        authority_identity=_protective_sell_authority_identity(**material),
+    )
+
+
+def _protective_sell_execution_authority_error(
+    authority: object | None,
+    *,
+    conn: sqlite3.Connection,
+    trade_id: str,
+    token_id: str,
+    shares: float,
+    limit_price: float,
+    snapshot_id: str,
+    snapshot_hash: str,
+) -> str | None:
+    """Independently bind protective FAK authority to canonical snapshot truth."""
+    if type(authority) is not ProtectiveSellExecutionAuthority:
+        return "protective_sell_execution_authority_invalid"
+    try:
+        authority.__post_init__()
+    except (InvalidOperation, TypeError, ValueError):
+        return "protective_sell_execution_authority_invalid"
+    if (
+        authority.position_id != trade_id
+        or authority.token_id != token_id
+        or Decimal(authority.shares) != Decimal(str(shares))
+        or Decimal(authority.best_bid) != Decimal(str(limit_price))
+        or authority.snapshot_id != snapshot_id
+        or authority.snapshot_hash != snapshot_hash
+    ):
+        return "protective_sell_execution_authority_binding_mismatch"
+    semantic = _protective_sell_semantic_receipt(
+        conn,
+        position_id=trade_id,
+        token_id=token_id,
+        shares=shares,
+        kind=authority.kind,
+        event_id=authority.semantic_event_id,
+    )
+    if semantic != (
+        authority.semantic_event_id,
+        authority.semantic_payload_sha256,
+    ):
+        return "protective_sell_semantic_authority_superseded"
+    from src.state.snapshot_repo import get_snapshot
+
+    snapshot = get_snapshot(conn, snapshot_id)
+    if snapshot is None:
+        return "protective_sell_execution_snapshot_missing"
+    try:
+        snapshot_superseded = (
+            snapshot.executable_snapshot_hash != snapshot_hash
+            or snapshot.selected_outcome_token_id != token_id
+            or Decimal(str(snapshot.orderbook_top_bid)) != Decimal(authority.best_bid)
+            or snapshot.freshness_deadline is None
+            or snapshot.freshness_deadline < _utcnow()
+        )
+    except (InvalidOperation, TypeError, ValueError):
+        snapshot_superseded = True
+    if snapshot_superseded:
+        return "protective_sell_execution_snapshot_superseded"
+    return None
+
+
+def _protective_sell_semantic_receipt(
+    conn: sqlite3.Connection,
+    *,
+    position_id: str,
+    token_id: str,
+    shares: float,
+    kind: str,
+    event_id: str | None = None,
+) -> tuple[str, str] | None:
+    """Bind a protective order to exact canonical semantic exit evidence."""
+    try:
+        row = conn.execute(
+            """SELECT event_id, sequence_no, source_module, env, decision_id,
+                      phase_after, payload_json
+                 FROM position_events
+                WHERE position_id=? AND event_type='EXIT_INTENT'
+                  AND (? IS NULL OR event_id=?)
+                ORDER BY sequence_no DESC LIMIT 1""",
+            (position_id, event_id, event_id),
+        ).fetchone()
+        current = conn.execute(
+            """SELECT phase, direction, token_id, no_token_id, shares,
+                      chain_shares, chain_state
+                 FROM position_current WHERE position_id=? LIMIT 1""",
+            (position_id,),
+        ).fetchone()
+    except sqlite3.Error:
+        return None
+    if row is None or current is None:
+        return None
+    if (
+        str(row["source_module"] or "") != "src.execution.exit_lifecycle"
+        or str(row["env"] or "") != "live"
+        or str(row["phase_after"] or "") in _RED_TERMINAL_PHASES
+        or str(current["phase"] or "") in _RED_TERMINAL_PHASES
+    ):
+        return None
+    try:
+        payload_text = str(row["payload_json"] or "")
+        payload = json.loads(payload_text)
+        requested = _positive_decimal(payload.get("exit_intent_shares"))
+        requested_now = _positive_decimal(shares)
+        canonical_shares = _positive_decimal(
+            current["chain_shares"]
+            if current["chain_shares"] not in (None, "")
+            else current["shares"]
+        )
+    except (TypeError, ValueError):
+        return None
+    direction = str(current["direction"] or "")
+    canonical_token = str(
+        current["token_id"] if direction == "buy_yes" else current["no_token_id"]
+    )
+    if (
+        not isinstance(payload, Mapping)
+        or str(payload.get("exit_intent_token_id") or "") != token_id
+        or canonical_token != token_id
+        or requested is None
+        or requested_now is None
+        or canonical_shares is None
+        or requested != requested_now
+        or requested_now > canonical_shares
+        or not str(row["decision_id"] or "")
+        or str(payload.get("exit_intent_decision_id") or "")
+        != str(row["decision_id"] or "")
+    ):
+        return None
+    reason = str(payload.get("exit_intent_reason") or "")
+    if kind == "RED_FORCE_EXIT":
+        if reason.upper() != _RED_FORCE_EXIT:
+            return None
+        try:
+            from src.riskguard.risk_level import RiskLevel
+            from src.riskguard.riskguard import get_current_level
+
+            if get_current_level() is not RiskLevel.RED:
+                return None
+        except Exception:
+            return None
+    elif kind == "DAY0_HARD_FACT_BIN_DEAD":
+        receipt = payload.get("exit_intent_probability_receipt")
+        if (
+            not reason.startswith("DAY0_HARD_FACT_BIN_DEAD")
+            or not isinstance(receipt, Mapping)
+            or receipt.get("probability_authority") != "day0_absorbing_hard_fact"
+            or not isinstance(receipt.get("hard_fact_evidence"), Mapping)
+        ):
+            return None
+    else:
+        return None
+    try:
+        terminal = conn.execute(
+            """SELECT 1 FROM position_events
+                WHERE position_id=? AND sequence_no>? AND phase_after IN (
+                    'economically_closed','settled','voided','admin_closed'
+                ) LIMIT 1""",
+            (position_id, int(row["sequence_no"])),
+        ).fetchone()
+    except sqlite3.Error:
+        return None
+    if terminal is not None:
+        return None
+    return str(row["event_id"]), hashlib.sha256(payload_text.encode()).hexdigest()
+
+
 @dataclass
 class ExitExecutionEvidence:
     """Facts observed at the executor/venue boundary for one exit attempt."""
@@ -2771,6 +3023,7 @@ def place_sell_order(
     marketable_sell_certificate_identity: str = "",
     marketable_sell_execution_authority: object | None = None,
     global_sell_execution_authority: object | None = None,
+    protective_sell_execution_authority: object | None = None,
     execution_authority_deadline_utc: str = "",
     global_sell_receipt_closure: GlobalSellReceiptClosure | None = None,
 ) -> OrderResult:
@@ -2800,6 +3053,7 @@ def place_sell_order(
         marketable_sell_certificate_identity=marketable_sell_certificate_identity,
         marketable_sell_execution_authority=marketable_sell_execution_authority,
         global_sell_execution_authority=global_sell_execution_authority,
+        protective_sell_execution_authority=protective_sell_execution_authority,
         execution_authority_deadline_utc=execution_authority_deadline_utc,
         global_sell_receipt_closure=global_sell_receipt_closure,
     )
@@ -6052,6 +6306,16 @@ def execute_exit(
         exit_context,
         conn=conn,
     )
+    is_hard_fact_force_exit = bool(
+        not is_red_force_exit
+        and str(exit_context.exit_reason or "").startswith("DAY0_HARD_FACT_BIN_DEAD")
+        and _hard_fact_sell_authority_valid(
+            position,
+            hard_fact_authority,
+            conn=conn,
+            now=_utcnow(),
+        )
+    )
     if is_red_force_exit:
         active_exit = _active_exit_sell_for_lock(
             conn,
@@ -6101,9 +6365,10 @@ def execute_exit(
                 conn=conn,
             )
             return "exit_blocked: market_closed_hold_to_settlement"
-        retry_reason = f"{exit_context.exit_reason or 'EXIT'} [INCOMPLETE_CONTEXT]"
-        _mark_exit_retry(position, reason=retry_reason, error="missing_current_market_price", conn=conn)
-        return "exit_blocked: incomplete_context"
+        if not is_red_force_exit and not is_hard_fact_force_exit:
+            retry_reason = f"{exit_context.exit_reason or 'EXIT'} [INCOMPLETE_CONTEXT]"
+            _mark_exit_retry(position, reason=retry_reason, error="missing_current_market_price", conn=conn)
+            return "exit_blocked: incomplete_context"
     if not exit_context.current_market_price_is_fresh:
         if _exit_context_is_after_settlement_or_market_closed(exit_context):
             if not is_red_force_exit:
@@ -6114,9 +6379,10 @@ def execute_exit(
                     conn=conn,
                 )
                 return "exit_blocked: market_closed_hold_to_settlement"
-        retry_reason = f"{exit_context.exit_reason or 'EXIT'} [STALE_MARKET_PRICE]"
-        _mark_exit_retry(position, reason=retry_reason, error="stale_current_market_price", conn=conn)
-        return "exit_blocked: stale_market_price"
+        if not is_red_force_exit and not is_hard_fact_force_exit:
+            retry_reason = f"{exit_context.exit_reason or 'EXIT'} [STALE_MARKET_PRICE]"
+            _mark_exit_retry(position, reason=retry_reason, error="stale_current_market_price", conn=conn)
+            return "exit_blocked: stale_market_price"
 
     # Live path: sell order lifecycle
     return _execute_live_exit(
@@ -6128,6 +6394,7 @@ def execute_exit(
         conn=conn,
         execution_evidence=execution_evidence,
         is_red_force_exit=is_red_force_exit,
+        is_hard_fact_force_exit=is_hard_fact_force_exit,
         global_sell_authority=global_sell_authority,
         branchwise_sell_authority=branchwise_sell_authority,
         hard_fact_authority=hard_fact_authority,
@@ -6147,6 +6414,7 @@ def _execute_live_exit(
     conn: sqlite3.Connection | None,
     execution_evidence: ExitExecutionEvidence | None,
     is_red_force_exit: bool,
+    is_hard_fact_force_exit: bool = False,
     global_sell_authority: GlobalSellExecutionAuthority | None = None,
     branchwise_sell_authority: BranchwiseDominantSellAuthority | None = None,
     hard_fact_authority: object | None = None,
@@ -6216,6 +6484,7 @@ def _execute_live_exit(
     }
     hard_fact_authorized = bool(
         live_non_red
+        and is_hard_fact_force_exit
         and str(exit_intent.reason or "").startswith("DAY0_HARD_FACT_BIN_DEAD")
         and _hard_fact_sell_authority_valid(
             position,
@@ -6355,6 +6624,69 @@ def _execute_live_exit(
                 error=snapshot_error,
             )
         return "exit_blocked: executable_snapshot_error"
+    protective_sell_authority: ProtectiveSellExecutionAuthority | None = None
+    protective_kind = (
+        "RED_FORCE_EXIT"
+        if is_red_force_exit
+        else "DAY0_HARD_FACT_BIN_DEAD"
+        if hard_fact_authorized
+        else ""
+    )
+    protective_bid = _positive_decimal(
+        snapshot_context.get("executable_snapshot_orderbook_top_bid")
+    )
+    if (
+        protective_kind
+        and protective_bid is not None
+        and LIVE_ORDER_MIN_UNIT_PRICE <= protective_bid <= LIVE_ORDER_MAX_UNIT_PRICE
+    ):
+        try:
+            protective_sell_authority = _build_protective_sell_execution_authority(
+                kind=protective_kind,
+                position=position,
+                token_id=token_id,
+                shares=exit_intent.shares,
+                snapshot_context=snapshot_context,
+                conn=conn,
+            )
+        except (InvalidOperation, TypeError, ValueError) as exc:
+            authority_reason = (
+                f"{exit_context.exit_reason} [PROTECTIVE_AUTHORITY_ERROR]"
+            )
+            authority_error = (
+                "protective_sell_execution_authority_unavailable:"
+                f"{type(exc).__name__}:{str(exc)[:400]}"
+            )
+            _mark_exit_retry(
+                position,
+                reason=authority_reason,
+                error=authority_error,
+                conn=conn,
+            )
+            if conn is not None:
+                log_pending_exit_recovery_event(
+                    conn,
+                    position,
+                    event_type="EXIT_ORDER_REJECTED",
+                    reason=authority_reason,
+                    error=authority_error,
+                )
+                log_exit_retry_event(
+                    conn,
+                    position,
+                    reason=authority_reason,
+                    error=authority_error,
+                )
+            return "exit_blocked: protective_authority_unavailable"
+        # The monitor quote proves the semantic decision; FC-03 submit truth is
+        # the freshly captured snapshot.  Protective exits cross only that bid.
+        exit_intent = replace(
+            exit_intent,
+            current_market_price=float(protective_bid),
+            best_bid=float(protective_bid),
+            exact_limit_price=float(protective_bid),
+            submit_order_type="FAK",
+        )
     if live_non_red:
         if global_authorized:
             authority_error = _global_sell_capital_certificate_error(
@@ -6750,6 +7082,7 @@ def _execute_live_exit(
             global_sell_execution_authority=(
                 global_sell_authority if global_authorized else None
             ),
+            protective_sell_execution_authority=protective_sell_authority,
             global_sell_receipt_closure=(
                 exit_intent.global_sell_receipt_closure
                 if global_authorized
