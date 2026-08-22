@@ -19,8 +19,8 @@ profile = "frontier_current"
 [profiles.frontier_current]
 runner = "codex_cli"
 model = "gpt-5.6-sol"
-preferred_reasoning = "max"
-fallback_reasoning = ["xhigh", "high"]
+preferred_reasoning = "high"
+fallback_reasoning = []
 strategy = "split_blind_investigate_then_persistent_repair"
 persistent_incident_session = true
 fresh_review_session = true
