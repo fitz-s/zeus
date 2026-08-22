@@ -5817,6 +5817,13 @@ def _record_exit_intent_before_execution_gates(
     """
 
     _mark_pending_exit(position)
+    # The semantic intent being persisted is the current exit authority.  A
+    # prior retry/RED reason on the mutable position must not outrank it in the
+    # canonical event payload or projection.
+    if str(getattr(position, "exit_reason", "") or "").casefold() != str(
+        exit_intent.reason or ""
+    ).casefold():
+        position.exit_reason = exit_intent.reason
     position.exit_state = "exit_intent"
     position.order_status = "exit_intent"
     active_order_id = str(getattr(position, "last_exit_order_id", "") or "")
@@ -5929,6 +5936,12 @@ def _dual_write_canonical_pending_exit_if_available(
     """
     from src.state.db import transition_phase
 
+    event_payload = dict(extra_payload or {})
+    # The explicit reason belongs to this event.  The mutable position carries
+    # the current economic exit authority and may intentionally differ during
+    # retry/reprice bookkeeping.
+    event_payload["exit_reason"] = reason
+
     return transition_phase(
         conn,
         position,
@@ -5936,7 +5949,7 @@ def _dual_write_canonical_pending_exit_if_available(
         reason=reason,
         error=error,
         source_module="src.execution.exit_lifecycle",
-        extra_payload=extra_payload,
+        extra_payload=event_payload,
         decision_id=decision_id,
     )
 

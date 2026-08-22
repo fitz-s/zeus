@@ -11043,6 +11043,73 @@ def test_exit_intent_commit_failure_rolls_back_real_connection_boundary(conn):
     ).fetchone()[0] == 0
 
 
+def test_global_exit_intent_replaces_stale_red_reason_atomically(conn):
+    from src.execution import exit_lifecycle
+    from src.state.portfolio import Position
+
+    trade_id = "pos-global-replaces-stale-red"
+    position = Position(
+        trade_id=trade_id,
+        market_id="condition-test",
+        condition_id="condition-test",
+        city="Chengdu",
+        cluster="Chengdu",
+        target_date="2026-08-22",
+        bin_label="36C",
+        direction="buy_yes",
+        token_id=YES_TOKEN,
+        no_token_id=NO_TOKEN,
+        shares=22.0,
+        chain_shares=22.0,
+        state="day0_window",
+        chain_state="synced",
+        strategy_key="center_buy",
+        env="live",
+        exit_reason="RED_FORCE_EXIT",
+    )
+    _seed_canonical_position_identity(
+        conn,
+        position_id=trade_id,
+        token_id=YES_TOKEN,
+        no_token_id=NO_TOKEN,
+        shares=22.0,
+    )
+    intent = exit_lifecycle.ExitIntent(
+        trade_id=trade_id,
+        reason="GLOBAL_CAPITAL_OPTIMAL_SELL",
+        token_id=YES_TOKEN,
+        shares=17.0,
+        current_market_price=0.10176470588235294,
+        best_bid=0.10,
+        exact_limit_price=0.09,
+        decision_id="decision-global-replaces-stale-red",
+    )
+
+    assert exit_lifecycle._record_exit_intent_before_execution_gates(
+        conn, position, intent
+    ) is True
+
+    assert position.exit_reason == "GLOBAL_CAPITAL_OPTIMAL_SELL"
+    projection = conn.execute(
+        "SELECT exit_reason FROM position_current WHERE position_id = ?",
+        (trade_id,),
+    ).fetchone()
+    assert projection["exit_reason"] == "GLOBAL_CAPITAL_OPTIMAL_SELL"
+    event = conn.execute(
+        """
+        SELECT payload_json
+          FROM position_events
+         WHERE position_id = ? AND event_type = 'EXIT_INTENT'
+         ORDER BY sequence_no DESC
+         LIMIT 1
+        """,
+        (trade_id,),
+    ).fetchone()
+    payload = json.loads(event["payload_json"])
+    assert payload["exit_reason"] == "GLOBAL_CAPITAL_OPTIMAL_SELL"
+    assert payload["exit_intent_reason"] == "GLOBAL_CAPITAL_OPTIMAL_SELL"
+
+
 def test_repeated_red_execute_adopts_same_active_sell_without_duplicate(conn, monkeypatch):
     from src.execution import exit_lifecycle
     from src.riskguard.risk_level import RiskLevel
