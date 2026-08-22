@@ -1062,7 +1062,7 @@ files:
   src/data/ecmwf_open_data.py:
     zone: K2_runtime
     authority_role: forecast_fetcher
-    why: Fetches ECMWF/Open-Meteo ensemble data for probability generation.
+    why: Fetches ECMWF/Open-Meteo ensemble data for probability generation and reclaims only old raw GRIB cycle/parameter groups with exact COMPLETE source-run plus count-equal VERIFIED canonical snapshot proof, preserving current/prior days and all ambiguous inputs.
     downstream:
     - src/main.py
   src/data/ensemble_client.py:

@@ -5,6 +5,12 @@
 
 ## 现状(forward)
 
+### 2026-08-21 B136 — decoded ECMWF raw cache不得再次锁死全局资本分配
+- **实时反例:** 最新global auction的fresh families全部在最终allocator被`reduce_only_mode_active`reject；RiskGuard所有交易组件均GREEN，唯一隐藏驱动是OpenData raw GRIB增长到130GB，使磁盘仅76.0GB/7.64% free，违反64GiB与10%的较高者。安全回收已有canonical COMPLETE+VERIFIED证明且无open handle的20260813–20260818 raw后，free恢复到164.5GB/16.54%，RiskGuard自动reset为GREEN；随后一轮真实比较70个proposals，不再是全局故障性无订单。
+- **修复:** 每次OpenData canonical commit后，仅对严格`YYYYMMDD` raw目录中早于当前与前一calendar day的exact cycle+parameter组生成retention plan。每组必须有对应`source_run` SUCCESS/COMPLETE/non-partial/expected=observed>0，且`ensemble_snapshots` exact source_run的全部rows均VERIFIED且count相等，才在释放DB writer lock后删除该组raw files；未知文件、symlink、不完整证明或删除异常一律保留。
+- **SCOPE / DRAIN / RESET:** scope仅为可重下载的OpenData raw GRIB cache，不删canonical DB/decoded JSON，不改q、source selection或order law。drain是成功canonical commit后的有界proof query与按cycle/param原子文件集回收，且不持有DB writer lock删大文件。reset是任一proof欠缺/不一致时立即停止该组删除；当前与前一day永久保留供重启/redecode。
+- **验收:** antibodies证明complete+verified旧组被删、recent组保留，partial/missing/disputed/count mismatch/symlink均fail closed；targeted tests、compile/ruff/registry/diff通过后landing并restart forecast-live。live要求retention receipt/log可见、free ratio仍>10%、RiskGuard仍GREEN、global auction仍广泛比较候选；订单与资本利得仍由venue/settlement/strict evaluator独立证明。
+
 ### 2026-08-21 B135 — identical successful posterior不得独占sole materializer
 - **实时反例:** restart后writer持续生成12Z posterior，但最近87次写入仅覆盖12个target；Chengdu/Shanghai两个target占42次。逐行核对显示同target连续rows的`q_json`、`provenance_json`与`dependency_hash`完全相同，仅`computed_at`变化造成新identity；182个active family仍落后于ensemble HWM，sole subprocess被无新信息的重复成功占用。
 - **修复:** 每次成功receipt记录materializer现有的exact request/current-input/logic fingerprint。后续同family请求仅在原成功后的固定60秒窗口内、`committed_posterior=true`且fingerprint完全相同时零subprocess coalesce；成功receipt不被skip覆盖，因此重复请求不能滑动延长窗口。新provider/ENS/Day0 observation/input file/logic revision或窗口到期立即走原materializer，q与posterior identity law不变。

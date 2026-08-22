@@ -595,7 +595,7 @@ test_trust_policy:
     tests/test_db_writer_lock.py: {created: "2026-05-07", last_used: "2026-07-15", note: "Canonical writer-lock law, including forwarding nonblocking acquisition to both WORLD and TRADE flocks."}
     tests/test_dispatch_session_start.py: {created: "2026-05-07", last_used: "2026-05-07"}
     tests/test_doc_citation_lint.py: {created: "2026-05-17", last_used: "2026-05-17"}
-    tests/test_ecmwf_open_data_collect_cycle.py: {created: "2026-05-11", last_used: "2026-05-11"}
+    tests/test_ecmwf_open_data_collect_cycle.py: {created: "2026-05-11", last_used: "2026-08-21", note: "Cross-track/path-bundle collection plus decoded raw-retention antibodies: only old COMPLETE count-equal VERIFIED groups delete; recent, partial, missing, disputed, mismatch, and symlink inputs remain."}
     tests/test_ecmwf_open_data_hang_antibodies_2026_05_13.py: {created: "2026-05-13", last_used: "2026-05-13"}
     tests/test_ecmwf_open_data_parallel_fetch.py: {created: "2026-05-11", last_used: "2026-05-15"}
     tests/test_ecmwf_open_data_source_failover.py: {created: "2026-05-11", last_used: "2026-05-11"}

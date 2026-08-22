@@ -19,6 +19,7 @@ from pathlib import Path
 
 from src.state.db import init_schema
 from src.state.schema.v2_schema import apply_canonical_schema
+from src.state.source_run_repo import write_source_run
 
 
 def _make_conn(tmp_path: Path) -> sqlite3.Connection:
@@ -36,6 +37,176 @@ def _ok_fetch_impl(*, cycle_date, cycle_hour, param, step, output_dir, mirrors):
     canonical.parent.mkdir(parents=True, exist_ok=True)
     canonical.write_bytes(b"\x00" * 16)  # non-empty so resume logic treats it as done
     return ("OK", canonical)
+
+
+def _write_raw_group(root: Path, day: str, hour: int, param: str) -> list[Path]:
+    day_dir = root / "raw" / "ecmwf_open_ens" / "ecmwf" / day
+    day_dir.mkdir(parents=True, exist_ok=True)
+    paths = [
+        day_dir / f".{day}_{hour:02d}z_step003_{param}_ens51.grib2",
+        day_dir / f"open_ens_{day}_{hour:02d}z_steps_3to144_n48_test_params_{param}.grib2",
+    ]
+    for path in paths:
+        path.write_bytes(b"raw")
+    return paths
+
+
+def _record_raw_authority(
+    conn: sqlite3.Connection,
+    *,
+    day: str,
+    hour: int,
+    param: str,
+    status: str = "SUCCESS",
+    completeness: str = "COMPLETE",
+    partial: bool = False,
+    expected: int = 2,
+    snapshot_count: int = 2,
+    authority: str = "VERIFIED",
+) -> None:
+    track = "mx2t6_high" if param == "mx2t3" else "mn2t6_low"
+    metric = "high" if param == "mx2t3" else "low"
+    iso_day = datetime.strptime(day, "%Y%m%d").date().isoformat()
+    source_run_id = f"ecmwf_open_data:{track}:{iso_day}T{hour:02d}Z"
+    write_source_run(
+        conn,
+        source_run_id=source_run_id,
+        source_id="ecmwf_open_data",
+        track=track,
+        release_calendar_key=f"ecmwf_open_data:{track}:standard",
+        source_cycle_time=f"{iso_day}T{hour:02d}:00:00+00:00",
+        status=status,
+        completeness_status=completeness,
+        partial_run=partial,
+        expected_count=expected,
+        observed_count=expected,
+    )
+    for index in range(snapshot_count):
+        conn.execute(
+            """
+            INSERT INTO ensemble_snapshots (
+                city, target_date, temperature_metric, physical_quantity,
+                observation_field, issue_time, available_at, fetch_time,
+                lead_hours, members_json, model_version, dataset_id,
+                source_id, source_run_id, authority
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                f"City{index}",
+                iso_day,
+                metric,
+                "daily_extreme",
+                "high_temp" if metric == "high" else "low_temp",
+                f"{iso_day}T{hour:02d}:00:00+00:00",
+                f"{iso_day}T{hour:02d}:00:00+00:00",
+                f"{iso_day}T{hour:02d}:00:00+00:00",
+                24.0,
+                "[1.0]",
+                "test",
+                f"test_{source_run_id}",
+                "ecmwf_open_data",
+                source_run_id,
+                authority,
+            ),
+        )
+    conn.commit()
+
+
+def test_raw_retention_deletes_only_old_complete_verified_groups(tmp_path):
+    from src.data import ecmwf_open_data
+
+    raw_root = tmp_path / "51 source data"
+    old_paths = _write_raw_group(raw_root, "20260818", 0, "mx2t3")
+    recent_paths = _write_raw_group(raw_root, "20260820", 0, "mx2t3")
+    conn = _make_conn(tmp_path)
+    _record_raw_authority(conn, day="20260818", hour=0, param="mx2t3")
+
+    plan = ecmwf_open_data._plan_decoded_open_data_raw_retention(
+        conn,
+        raw_root=raw_root,
+        reference_date=date(2026, 8, 21),
+    )
+    result = ecmwf_open_data._apply_decoded_open_data_raw_retention(plan)
+
+    assert result["status"] == "APPLIED"
+    assert result["eligible_group_count"] == 1
+    assert result["deleted_file_count"] == 2
+    assert all(not path.exists() for path in old_paths)
+    assert all(path.exists() for path in recent_paths)
+
+
+def test_raw_retention_fails_closed_on_incomplete_canonical_proof(tmp_path):
+    from src.data import ecmwf_open_data
+
+    raw_root = tmp_path / "51 source data"
+    partial_paths = _write_raw_group(raw_root, "20260815", 0, "mx2t3")
+    missing_paths = _write_raw_group(raw_root, "20260816", 6, "mn2t3")
+    disputed_paths = _write_raw_group(raw_root, "20260817", 12, "mx2t3")
+    mismatch_paths = _write_raw_group(raw_root, "20260818", 18, "mn2t3")
+    conn = _make_conn(tmp_path)
+    _record_raw_authority(
+        conn,
+        day="20260815",
+        hour=0,
+        param="mx2t3",
+        status="PARTIAL",
+        completeness="PARTIAL",
+        partial=True,
+    )
+    # 20260816 intentionally has no source_run row.
+    _record_raw_authority(
+        conn,
+        day="20260817",
+        hour=12,
+        param="mx2t3",
+        authority="DISPUTED",
+    )
+    _record_raw_authority(
+        conn,
+        day="20260818",
+        hour=18,
+        param="mn2t3",
+        snapshot_count=1,
+    )
+
+    plan = ecmwf_open_data._plan_decoded_open_data_raw_retention(
+        conn,
+        raw_root=raw_root,
+        reference_date=date(2026, 8, 21),
+    )
+    result = ecmwf_open_data._apply_decoded_open_data_raw_retention(plan)
+
+    assert result["status"] == "NO_ELIGIBLE_RAW"
+    assert result["retained_group_count"] == 4
+    assert all(
+        path.exists()
+        for path in partial_paths + missing_paths + disputed_paths + mismatch_paths
+    )
+
+
+def test_raw_retention_never_follows_matching_symlink(tmp_path):
+    from src.data import ecmwf_open_data
+
+    raw_root = tmp_path / "51 source data"
+    day_dir = raw_root / "raw" / "ecmwf_open_ens" / "ecmwf" / "20260818"
+    day_dir.mkdir(parents=True)
+    target = tmp_path / "outside.grib2"
+    target.write_bytes(b"must remain")
+    link = day_dir / ".20260818_00z_step003_mx2t3_ens51.grib2"
+    link.symlink_to(target)
+    conn = _make_conn(tmp_path)
+    _record_raw_authority(conn, day="20260818", hour=0, param="mx2t3")
+
+    plan = ecmwf_open_data._plan_decoded_open_data_raw_retention(
+        conn,
+        raw_root=raw_root,
+        reference_date=date(2026, 8, 21),
+    )
+    result = ecmwf_open_data._apply_decoded_open_data_raw_retention(plan)
+
+    assert result["status"] == "NO_ELIGIBLE_RAW"
+    assert link.is_symlink()
+    assert target.read_bytes() == b"must remain"
 
 
 # ---------------------------------------------------------------------------
