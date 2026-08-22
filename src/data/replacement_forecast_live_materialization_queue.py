@@ -56,6 +56,12 @@ _TIMEOUT_RETRY_MAX_SECONDS = 600.0
 _TIMEOUT_RETRY_DEFERRED_REASON = (
     "REPLACEMENT_LIVE_MATERIALIZATION_TIMEOUT_RETRY_DEFERRED"
 )
+_AWAITING_ENSEMBLE_HWM_REASON = (
+    "REPLACEMENT_MATERIALIZATION_SOURCE_CYCLE_AWAITING_ENSEMBLE_HWM"
+)
+_AWAITING_ENSEMBLE_HWM_STATUS = (
+    "DEFERRED_SOURCE_CYCLE_AWAITING_ENSEMBLE_HWM"
+)
 _DAY0_ENQUEUE_OWNERSHIP_CURSOR_NAME = ".replacement-day0-enqueue.cursor"
 _DAY0_ENQUEUE_OWNERSHIP_INSPECTION_MULTIPLIER = 4
 _DAY0_ENQUEUE_OWNERSHIP_MIN_INSPECTIONS = 8
@@ -899,17 +905,18 @@ def _parse_utc_iso(value: object) -> datetime | None:
     return parsed.astimezone(timezone.utc)
 
 
-def _seed_source_cycle_regression(
+def _seed_source_cycle_boundary(
     *,
     forecast_db: Path | str | None,
     seed: dict[str, object],
 ) -> tuple[str, str] | None:
-    """Why this seed is already below current family cycle truth, if known.
+    """Return a proven posterior/ENS cycle boundary for this seed, if any.
 
     The materializer's monotone consumed-cycle guard remains the final authority.
-    This queue-side check prevents a seed that is already known to be
-    unconstructable or immediately HWM-ineligible from spending the single
-    subprocess slot every cycle.
+    This queue-side check prevents work already known to be below current truth,
+    or above the newest decision-time eligible same-cycle ENS shape, from
+    spending the single subprocess slot. An unreadable HWM returns ``None`` and
+    preserves the original materializer path.
     """
 
     if forecast_db is None:
@@ -966,6 +973,8 @@ def _seed_source_cycle_regression(
             return "current_posterior", current_cycle.isoformat()
     if latest_ensemble_cycle is not None and request_cycle < latest_ensemble_cycle:
         return "current_ensemble_hwm", latest_ensemble_cycle.isoformat()
+    if latest_ensemble_cycle is not None and request_cycle > latest_ensemble_cycle:
+        return "awaiting_current_ensemble_hwm", latest_ensemble_cycle.isoformat()
     return None
 
 
@@ -2190,11 +2199,35 @@ def _prepare_seed_requests(
             # capturable-family-superset) transition). A consumed failure can
             # atomically reclaim that marker, while this terminal unchanged-input
             # receipt remains a no-retry witness — so this bypass cannot loop.
-            cycle_regression = _seed_source_cycle_regression(
+            cycle_boundary = _seed_source_cycle_boundary(
                 forecast_db=forecast_db, seed=seed
             )
-            if cycle_regression is not None:
-                regression_basis, current_cycle = cycle_regression
+            if (
+                cycle_boundary is not None
+                and cycle_boundary[0] == "awaiting_current_ensemble_hwm"
+            ):
+                boundary_basis, current_cycle = cycle_boundary
+                moved = _move_request(seed_json, processed_path)
+                _write_sidecar(
+                    moved,
+                    {
+                        "status": _AWAITING_ENSEMBLE_HWM_STATUS,
+                        "reason_codes": [_AWAITING_ENSEMBLE_HWM_REASON],
+                        "request_written": False,
+                        "subprocess_spawned": False,
+                        "boundary_basis": boundary_basis,
+                        "request_source_cycle_time": seed.get(
+                            "source_cycle_time"
+                        ),
+                        "current_ensemble_cycle_time": current_cycle,
+                    },
+                )
+                processed.append(str(moved))
+                reasons.append(_AWAITING_ENSEMBLE_HWM_REASON)
+                actionable_count += 1
+                continue
+            if cycle_boundary is not None:
+                regression_basis, current_cycle = cycle_boundary
                 reason_code = (
                     "REPLACEMENT_MATERIALIZATION_SOURCE_CYCLE_BELOW_INPUT_HWM"
                     if regression_basis == "current_ensemble_hwm"
@@ -2677,6 +2710,7 @@ def _process_claimed_materialization_batch(
     unchanged_success: list[str] = []
     stale_day0_superseded: list[str] = []
     source_cycle_regressions: list[str] = []
+    source_cycles_awaiting_ensemble: list[str] = []
     write_deferred: list[str] = []
     timed_out_requests: list[str] = []
     pending: list[_PendingMaterialization] = []
@@ -2709,16 +2743,42 @@ def _process_claimed_materialization_batch(
             failed.append(str(moved))
             continue
         request_payload = _load_request_payload_for_coalescing(input_json)
-        cycle_regression = (
-            _seed_source_cycle_regression(
+        cycle_boundary = (
+            _seed_source_cycle_boundary(
                 forecast_db=forecast_db,
                 seed=dict(request_payload),
             )
             if request_payload is not None
             else None
         )
-        if request_payload is not None and cycle_regression is not None:
-            regression_basis, current_cycle = cycle_regression
+        if (
+            request_payload is not None
+            and cycle_boundary is not None
+            and cycle_boundary[0] == "awaiting_current_ensemble_hwm"
+        ):
+            boundary_basis, current_cycle = cycle_boundary
+            receipt = _record_latest_terminal_request(
+                input_json,
+                processed_path=processed_path,
+                request_payload=request_payload,
+                receipt_dir_name="blocked_latest",
+                status=_AWAITING_ENSEMBLE_HWM_STATUS,
+                reason_codes=(_AWAITING_ENSEMBLE_HWM_REASON,),
+                result_evidence={
+                    "request_validated": True,
+                    "subprocess_spawned": False,
+                    "boundary_basis": boundary_basis,
+                    "request_source_cycle_time": request_payload.get(
+                        "source_cycle_time"
+                    ),
+                    "current_ensemble_cycle_time": current_cycle,
+                },
+            )
+            processed.append(str(receipt))
+            source_cycles_awaiting_ensemble.append(str(receipt))
+            continue
+        if request_payload is not None and cycle_boundary is not None:
+            regression_basis, current_cycle = cycle_boundary
             reason_code = (
                 "REPLACEMENT_MATERIALIZATION_SOURCE_CYCLE_BELOW_INPUT_HWM"
                 if regression_basis == "current_ensemble_hwm"
@@ -2942,6 +3002,8 @@ def _process_claimed_materialization_batch(
         reasons.append(_STALE_DAY0_OWNER_SUPERSEDED_REASON)
     if source_cycle_regressions:
         reasons.append("REPLACEMENT_MATERIALIZATION_SOURCE_CYCLE_REGRESSION")
+    if source_cycles_awaiting_ensemble:
+        reasons.append(_AWAITING_ENSEMBLE_HWM_REASON)
     if write_deferred:
         reasons.append(_WRITE_DEFERRED_REASON)
         _LOG.warning(

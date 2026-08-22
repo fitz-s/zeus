@@ -5,6 +5,12 @@
 
 ## 现状(forward)
 
+### 2026-08-21 B137 — ENS尚未发布的future-cycle request不得消耗sole materializer
+- **实时反例:** 磁盘/RiskGuard恢复后，global scope 195 families仅4个entry-authoritative，171个因旧00Z carrier跨过24h进入`REPLACEMENT_STALENESS_RED_ENTRY_ISOLATED`。18Z deterministic providers已到，但18Z OpenData ENS两track每5分钟仍是48/48 `NOT_RELEASED`；queue仍把18Z requests启动subprocess，然后统一以`CAPTURE:CURRENT_EVIDENCE_NOT_LIVE`失败，使唯一writer在无法构造同same-cycle shape时做重复计算。
+- **修复:** 复用现有decision-time eligible ENS HWM读取；seed/request的source cycle若严格高于该family当前ENS HWM，在request build/subprocess前写`DEFERRED_SOURCE_CYCLE_AWAITING_ENSEMBLE_HWM` typed receipt并移出本轮队列。不生q、不使用旧shape、不改HWM/read-time或same-cycle probability law；ENS提交后原cycle-advance publisher重新生成request。
+- **SCOPE / DRAIN / RESET:** scope是exact city/date/metric future-of-ENS request的subprocess admission。drain是零spawn terminal/deferred receipt释放sole slot，同时保留完整request/ENS cycle evidence。reset是eligible ENS HWM追上request cycle；新seed正常build/spawn。HWM不可读时fail-open走原materializer，不把unknown当not-released。
+- **验收:** antibody固定12Z ENS HWM+18Z request，要求零runner调用、typed receipt含12Z→18Z证据；request=ENS cycle与HWM读取不可用仍走原路。targeted queue tests、compile/ruff/registry/diff通过后landing；live要求ahead-of-ENS receipt出现、committed=0时subprocess消耗下降，且18Z ENS COMPLETE后立即恢复committed posteriors/global eligible families。
+
 ### 2026-08-21 B136 — decoded ECMWF raw cache不得再次锁死全局资本分配
 - **实时反例:** 最新global auction的fresh families全部在最终allocator被`reduce_only_mode_active`reject；RiskGuard所有交易组件均GREEN，唯一隐藏驱动是OpenData raw GRIB增长到130GB，使磁盘仅76.0GB/7.64% free，违反64GiB与10%的较高者。安全回收已有canonical COMPLETE+VERIFIED证明且无open handle的20260813–20260818 raw后，free恢复到164.5GB/16.54%，RiskGuard自动reset为GREEN；随后一轮真实比较70个proposals，不再是全局故障性无订单。
 - **修复:** 每次OpenData canonical commit后，仅对严格`YYYYMMDD` raw目录中早于当前与前一calendar day的exact cycle+parameter组生成retention plan。每组必须有对应`source_run` SUCCESS/COMPLETE/non-partial/expected=observed>0，且`ensemble_snapshots` exact source_run的全部rows均VERIFIED且count相等，才在释放DB writer lock后删除该组raw files；未知文件、symlink、不完整证明或删除异常一律保留。

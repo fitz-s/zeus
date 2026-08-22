@@ -627,6 +627,85 @@ def test_queue_skips_seed_older_than_current_family_posterior(tmp_path, monkeypa
     assert not (tmp_path / "seeds_latest" / "Beijing.2026-06-12.high.json").exists()
 
 
+def test_queue_defers_seed_ahead_of_current_ensemble_hwm(tmp_path, monkeypatch) -> None:
+    import src.data.replacement_forecast_live_materialization_queue as queue_mod
+
+    forecast_db = tmp_path / "forecasts.db"
+    conn = sqlite3.connect(forecast_db)
+    conn.executescript(
+        """
+        CREATE TABLE forecast_posteriors (
+            source_id TEXT, city TEXT, target_date TEXT,
+            temperature_metric TEXT, source_cycle_time TEXT, computed_at TEXT
+        );
+        CREATE TABLE ensemble_snapshots (
+            snapshot_id INTEGER PRIMARY KEY, city TEXT, target_date TEXT,
+            temperature_metric TEXT, source_cycle_time TEXT,
+            source_available_at TEXT
+        );
+        """
+    )
+    conn.execute(
+        "INSERT INTO ensemble_snapshots VALUES (?, ?, ?, ?, ?, ?)",
+        (
+            1,
+            "Shanghai",
+            "2026-08-22",
+            "high",
+            "2026-08-21T12:00:00+00:00",
+            "2026-08-21T20:00:00+00:00",
+        ),
+    )
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(
+        queue_mod,
+        "build_replacement_forecast_materialization_request",
+        lambda *_args, **_kwargs: pytest.fail("future-of-ENS seed must not build a request"),
+    )
+    seed_dir = tmp_path / "seeds"
+    seed_dir.mkdir()
+    request_dir = tmp_path / "requests"
+    seed = {
+        **_minimal_seed(upgrade=False),
+        "city": "Shanghai",
+        "target_date": "2026-08-22",
+        "source_cycle_time": "2026-08-21T18:00:00+00:00",
+        "computed_at": "2026-08-22T00:30:00+00:00",
+    }
+    (seed_dir / "future-of-ens.json").write_text(json.dumps(seed), encoding="utf-8")
+
+    processed, failed, reasons = queue_mod._prepare_seed_requests(
+        seed_dir=seed_dir,
+        seed_processed_dir=tmp_path / "seed_processed",
+        seed_failed_dir=tmp_path / "seed_failed",
+        request_dir=request_dir,
+        forecast_db=forecast_db,
+        limit=10,
+    )
+
+    assert not failed
+    assert len(processed) == 1
+    assert (
+        "REPLACEMENT_MATERIALIZATION_SOURCE_CYCLE_AWAITING_ENSEMBLE_HWM"
+        in reasons
+    )
+    assert not request_dir.exists()
+    receipt_path = next((tmp_path / "seed_processed").glob("*.receipt.json"))
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    assert receipt == {
+        "status": "DEFERRED_SOURCE_CYCLE_AWAITING_ENSEMBLE_HWM",
+        "reason_codes": [
+            "REPLACEMENT_MATERIALIZATION_SOURCE_CYCLE_AWAITING_ENSEMBLE_HWM"
+        ],
+        "request_written": False,
+        "subprocess_spawned": False,
+        "boundary_basis": "awaiting_current_ensemble_hwm",
+        "request_source_cycle_time": "2026-08-21T18:00:00+00:00",
+        "current_ensemble_cycle_time": "2026-08-21T12:00:00+00:00",
+    }
+
+
 def test_queue_coverage_skip_requires_matching_openmeteo_anchor_source_run(tmp_path) -> None:
     import src.data.replacement_forecast_live_materialization_queue as queue_mod
 
@@ -1504,6 +1583,170 @@ def test_request_drain_skips_cycle_below_current_ensemble_hwm_before_subprocess(
         "request_source_cycle_time": "2026-08-21T00:00:00+00:00",
         "current_cycle_time": "2026-08-21T12:00:00+00:00",
     }
+
+
+def test_request_drain_defers_cycle_ahead_of_current_ensemble_hwm_before_subprocess(
+    tmp_path,
+) -> None:
+    """A deterministic 18Z request cannot construct q while ENS is still 12Z."""
+
+    import src.data.replacement_forecast_live_materialization_queue as queue_mod
+
+    forecast_db = tmp_path / "forecasts.db"
+    conn = sqlite3.connect(forecast_db)
+    conn.execute(
+        """
+        CREATE TABLE forecast_posteriors (
+            source_id TEXT, city TEXT, target_date TEXT,
+            temperature_metric TEXT, source_cycle_time TEXT, computed_at TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE ensemble_snapshots (
+            snapshot_id INTEGER PRIMARY KEY, city TEXT, target_date TEXT,
+            temperature_metric TEXT, source_cycle_time TEXT,
+            source_available_at TEXT
+        )
+        """
+    )
+    conn.execute(
+        "INSERT INTO ensemble_snapshots VALUES (?, ?, ?, ?, ?, ?)",
+        (
+            1,
+            "Shanghai",
+            "2026-08-22",
+            "high",
+            "2026-08-21T12:00:00+00:00",
+            "2026-08-21T20:00:00+00:00",
+        ),
+    )
+    conn.commit()
+    conn.close()
+    request_dir = tmp_path / "requests"
+    request_dir.mkdir()
+    request = {
+        "city": "Shanghai",
+        "target_date": "2026-08-22",
+        "temperature_metric": "high",
+        "source_cycle_time": "2026-08-21T18:00:00+00:00",
+        "computed_at": "2026-08-22T00:30:00+00:00",
+        "baseline_source_run_id": "baseline:12z",
+        "openmeteo_source_run_id": "openmeteo:18z",
+        "openmeteo_payload_json": "payload.json",
+        "precision_metadata_json": "precision.json",
+        "bins": [{"bin_id": "warm"}],
+    }
+    (request_dir / "future-of-ens.json").write_text(
+        json.dumps(request), encoding="utf-8"
+    )
+    spawned: list[list[str]] = []
+
+    def runner(argv):
+        spawned.append(list(argv))
+        return subprocess.CompletedProcess(list(argv), 0, stdout="ok", stderr="")
+
+    report = queue_mod.process_replacement_forecast_live_materialization_queue(
+        request_dir=request_dir,
+        processed_dir=tmp_path / "processed",
+        failed_dir=tmp_path / "failed",
+        forecast_db=forecast_db,
+        seed_limit=0,
+        limit=1,
+        runner=runner,
+    )
+
+    assert spawned == []
+    assert report.processed_count == 1
+    assert (
+        "REPLACEMENT_MATERIALIZATION_SOURCE_CYCLE_AWAITING_ENSEMBLE_HWM"
+        in report.reason_codes
+    )
+    receipt = next((tmp_path / "blocked_latest").glob("*.json"))
+    evidence = json.loads(receipt.read_text(encoding="utf-8"))
+    assert evidence["status"] == "DEFERRED_SOURCE_CYCLE_AWAITING_ENSEMBLE_HWM"
+    assert evidence["result_evidence"] == {
+        "request_validated": True,
+        "subprocess_spawned": False,
+        "boundary_basis": "awaiting_current_ensemble_hwm",
+        "request_source_cycle_time": "2026-08-21T18:00:00+00:00",
+        "current_ensemble_cycle_time": "2026-08-21T12:00:00+00:00",
+    }
+
+
+def test_request_at_current_ensemble_hwm_still_spawns(tmp_path) -> None:
+    import src.data.replacement_forecast_live_materialization_queue as queue_mod
+
+    forecast_db = tmp_path / "forecasts.db"
+    conn = sqlite3.connect(forecast_db)
+    conn.execute(
+        """
+        CREATE TABLE forecast_posteriors (
+            source_id TEXT, city TEXT, target_date TEXT,
+            temperature_metric TEXT, source_cycle_time TEXT, computed_at TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE ensemble_snapshots (
+            snapshot_id INTEGER PRIMARY KEY, city TEXT, target_date TEXT,
+            temperature_metric TEXT, source_cycle_time TEXT,
+            source_available_at TEXT
+        )
+        """
+    )
+    conn.execute(
+        "INSERT INTO ensemble_snapshots VALUES (?, ?, ?, ?, ?, ?)",
+        (
+            1,
+            "Shanghai",
+            "2026-08-22",
+            "high",
+            "2026-08-21T18:00:00+00:00",
+            "2026-08-22T00:40:00+00:00",
+        ),
+    )
+    conn.commit()
+    conn.close()
+    request_dir = tmp_path / "requests"
+    request_dir.mkdir()
+    request = {
+        "city": "Shanghai",
+        "target_date": "2026-08-22",
+        "temperature_metric": "high",
+        "source_cycle_time": "2026-08-21T18:00:00+00:00",
+        "computed_at": "2026-08-22T00:45:00+00:00",
+        "baseline_source_run_id": "baseline:18z",
+        "openmeteo_source_run_id": "openmeteo:18z",
+        "openmeteo_payload_json": "payload.json",
+        "precision_metadata_json": "precision.json",
+        "bins": [{"bin_id": "warm"}],
+    }
+    (request_dir / "same-cycle.json").write_text(json.dumps(request), encoding="utf-8")
+    spawned: list[list[str]] = []
+
+    def runner(argv):
+        spawned.append(list(argv))
+        return subprocess.CompletedProcess(list(argv), 0, stdout="ok", stderr="")
+
+    report = queue_mod.process_replacement_forecast_live_materialization_queue(
+        request_dir=request_dir,
+        processed_dir=tmp_path / "processed",
+        failed_dir=tmp_path / "failed",
+        forecast_db=forecast_db,
+        seed_limit=0,
+        limit=1,
+        runner=runner,
+    )
+
+    assert len(spawned) == 1
+    assert report.processed_count == 1
+    assert (
+        "REPLACEMENT_MATERIALIZATION_SOURCE_CYCLE_AWAITING_ENSEMBLE_HWM"
+        not in report.reason_codes
+    )
 
 
 def test_materialization_queue_timeout_backs_off_without_blocking_other_family(
