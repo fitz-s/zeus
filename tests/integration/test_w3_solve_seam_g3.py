@@ -7925,10 +7925,17 @@ def test_current_day0_global_probability_uses_current_remaining_day_simplex(
         source_available_at="2026-07-11T06:00:00+00:00",
     )
     replacement_bound_reads = 0
+    source_clock_available = {"value": True}
 
     def read_source_clock_bound(*_args, **_kwargs):
         nonlocal replacement_bound_reads
         replacement_bound_reads += 1
+        if not source_clock_available["value"]:
+            return SimpleNamespace(
+                ok=False,
+                bundle=None,
+                reason_code="STALE_FOR_LIVE",
+            )
         return SimpleNamespace(
             ok=True,
             bundle=source_clock_bundle,
@@ -8197,17 +8204,45 @@ def test_current_day0_global_probability_uses_current_remaining_day_simplex(
         probability_use=era._CurrentProbabilityUse.HELD_MONITOR,
     )
     held_witness = held.probability_witness
-    assert replacement_bound_reads == 3
+    assert replacement_bound_reads == 4
     assert held_witness.yes_point_q.tolist() == pytest.approx(
         witness.yes_point_q.tolist()
     )
-    assert held_payload["_edli_day0_redecision_authority_scope"] == (
-        "held_exposure_current_day0_only_v1"
+    assert "_edli_day0_redecision_authority_scope" not in held_payload
+    assert (
+        held_payload["_edli_day0_source_clock_bound_posterior_identity"]
+        == day0_payload["_edli_day0_source_clock_bound_posterior_identity"]
     )
+    assert held_witness.sample_matrix_identity == witness.sample_matrix_identity
     assert held_payload[
         "_edli_day0_provisional_boundary_survival_probability"
     ] == pytest.approx(0.6)
     assert revision_prior_permissions == [False, False, True]
+
+    source_clock_available["value"] = False
+    fallback_payload: dict[str, object] = {}
+    fallback = era._prepare_current_global_probability_family(
+        _global_day0_scope_event(city="Dallas", source_run_id="run-dallas"),
+        forecast_conn=forecast,
+        topology_conn=forecast,
+        observation_conn=observations,
+        decision_time=_dt.datetime(
+            2026, 7, 11, 18, 0, tzinfo=_dt.timezone.utc
+        ),
+        max_age=_dt.timedelta(seconds=30),
+        day0_payload_out=fallback_payload,
+        allow_provisional_day0_replacement=True,
+        probability_use=era._CurrentProbabilityUse.HELD_MONITOR,
+    )
+    source_clock_available["value"] = True
+    assert fallback_payload["_edli_day0_redecision_authority_scope"] == (
+        "held_exposure_current_day0_only_v1"
+    )
+    assert fallback_payload[
+        "_edli_day0_provisional_boundary_survival_probability"
+    ] == pytest.approx(0.6)
+    assert fallback.posterior_id is None
+    assert revision_prior_permissions == [False, False, True, True]
 
     capture_time["value"] = "2026-07-11T17:31:00+00:00"
     recaptured_payload: dict[str, object] = {}
@@ -8230,7 +8265,7 @@ def test_current_day0_global_probability_uses_current_remaining_day_simplex(
     assert witness.probability_content_identity != (
         recaptured.probability_witness.probability_content_identity
     )
-    assert revision_prior_permissions == [False, False, True, False]
+    assert revision_prior_permissions == [False, False, True, True, False]
 
     missing_observations = sqlite3.connect(":memory:")
     with pytest.raises(ValueError, match="GLOBAL_DAY0_OBSERVATION_HWM_UNAVAILABLE"):

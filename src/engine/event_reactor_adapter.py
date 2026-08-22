@@ -35588,6 +35588,7 @@ def _prepare_current_global_probability_family(
     raw_input_hwm_deadline_monotonic: float | None = None,
     raw_input_hwm_read_max_seconds: float | None = None,
     before_raw_input_hwm_read: Callable[[], float | None] | None = None,
+    _force_day0_redecision_fallback: bool = False,
 ):
     """Build current simplex or exact-bin payoff authority without price dependency.
 
@@ -35629,6 +35630,30 @@ def _prepare_current_global_probability_family(
             return before_raw_input_hwm_read()
         return raw_input_hwm_deadline_monotonic
 
+    def _prepare_held_day0_fallback():
+        return _prepare_current_global_probability_family(
+            event,
+            forecast_conn=forecast_conn,
+            topology_conn=topology_conn,
+            observation_conn=observation_conn,
+            decision_time=decision_time,
+            max_age=max_age,
+            day0_payload_out=day0_payload_out,
+            cache_metadata_out=cache_metadata_out,
+            required_condition_id=required_condition_id,
+            allow_partial_deterministic=allow_partial_deterministic,
+            allow_unobserved_day0_replacement=allow_unobserved_day0_replacement,
+            allow_provisional_day0_replacement=(
+                allow_provisional_day0_replacement
+            ),
+            probability_use=probability_use,
+            raw_input_hwm_conn=raw_input_hwm_conn,
+            raw_input_hwm_deadline_monotonic=raw_input_hwm_deadline_monotonic,
+            raw_input_hwm_read_max_seconds=raw_input_hwm_read_max_seconds,
+            before_raw_input_hwm_read=before_raw_input_hwm_read,
+            _force_day0_redecision_fallback=True,
+        )
+
     if max_age <= timedelta(0):
         raise ValueError("GLOBAL_PROBABILITY_FRESHNESS_CONTRACT_MISSING")
     if not isinstance(allow_unobserved_day0_replacement, bool):
@@ -35637,6 +35662,8 @@ def _prepare_current_global_probability_family(
         raise ValueError("GLOBAL_PROVISIONAL_DAY0_REPLACEMENT_POLICY_INVALID")
     if not isinstance(probability_use, _CurrentProbabilityUse):
         raise ValueError("GLOBAL_PROBABILITY_USE_INVALID")
+    if not isinstance(_force_day0_redecision_fallback, bool):
+        raise ValueError("GLOBAL_DAY0_REDECISION_FALLBACK_POLICY_INVALID")
     entry_authority = probability_use is _CurrentProbabilityUse.ENTRY
     bundle_authority_purpose = (
         ReplacementForecastAuthorityPurpose.ENTRY
@@ -35852,8 +35879,9 @@ def _prepare_current_global_probability_family(
                             hours=_DAY0_COVERAGE_WINDOW_GRACE_HOURS
                         )
                     )
+        held_day0_redecision_fallback_eligible = False
         if final_daily_observation is None:
-            current_day0_redecision_only = bool(
+            held_day0_redecision_fallback_eligible = bool(
                 provisional_day0_fact is not None
                 and (
                     provisional_day0_observation
@@ -35868,6 +35896,13 @@ def _prepare_current_global_probability_family(
                     _CurrentProbabilityUse.HELD_MONITOR,
                     _CurrentProbabilityUse.REDUCE_ONLY_EXIT,
                 }
+            )
+            current_day0_redecision_only = bool(
+                held_day0_redecision_fallback_eligible
+                and (
+                    _force_day0_redecision_fallback
+                    or local_target < local_now.date()
+                )
             )
         if final_daily_observation is None and current_day0_redecision_only:
             # SCOPE: this already-held family's genuinely provisional Day0 or
@@ -35907,6 +35942,12 @@ def _prepare_current_global_probability_family(
                 }
             )
         elif final_daily_observation is None:
+            # Current-day held q first reuses the same source-clock bundle as
+            # ENTRY so an admitted BUY is immediately monitorable on identical
+            # probability content. SCOPE: only this held family. DRAIN: a
+            # current bundle restores the shared authority; if it is missing,
+            # the existing reduce-only remaining-window fallback keeps capital
+            # observable. RESET: every redecision retries the current bundle.
             readiness = latest_replacement_readiness(
                 forecast_conn,
                 city=family.city,
@@ -35915,6 +35956,8 @@ def _prepare_current_global_probability_family(
                 decision_time=decision_time,
             )
             if readiness is None:
+                if held_day0_redecision_fallback_eligible:
+                    return _prepare_held_day0_fallback()
                 raise ValueError("GLOBAL_CURRENT_REPLACEMENT_READINESS_MISSING")
             result = read_replacement_forecast_bundle(
                 forecast_conn,
@@ -35933,6 +35976,8 @@ def _prepare_current_global_probability_family(
                 authority_purpose=bundle_authority_purpose,
             )
             if not result.ok or result.bundle is None:
+                if held_day0_redecision_fallback_eligible:
+                    return _prepare_held_day0_fallback()
                 raise ValueError(
                     "GLOBAL_CURRENT_REPLACEMENT_BUNDLE_BLOCKED:"
                     f"{result.reason_code}"
