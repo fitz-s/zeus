@@ -41,6 +41,7 @@ from src.data.replacement_forecast_seed_discovery import (
 
 Runner = Callable[[Sequence[str]], subprocess.CompletedProcess[str]]
 DEFAULT_MATERIALIZATION_SUBPROCESS_TIMEOUT_SECONDS = 30.0
+DEFAULT_RECENT_SUCCESS_COALESCE_SECONDS = 60.0
 # Every subprocess commits to the same SQLite forecast DB. Parallel commit
 # processes only multiply cold-page reads and writer contention. Keep one queue
 # owner and one DB writer, but bound one pathological family to 30 seconds so it
@@ -1221,6 +1222,9 @@ _BLOCKED_INPUT_RECEIPT_REASON = (
 _UNCHANGED_BLOCKED_SEED_SKIP_REASON = (
     "REPLACEMENT_LIVE_MATERIALIZATION_SEED_UNCHANGED_BLOCKED_INPUT"
 )
+_UNCHANGED_SUCCESS_SKIP_REASON = (
+    "REPLACEMENT_LIVE_MATERIALIZATION_REQUEST_RECENT_UNCHANGED_SUCCESS"
+)
 _STALE_DAY0_ENQUEUE_OWNER_REASON = "STALE_DAY0_ENQUEUE_OWNER"
 _STALE_DAY0_OWNER_SUPERSEDED_REASON = (
     "REPLACEMENT_LIVE_MATERIALIZATION_REQUEST_SUPERSEDED_BY_DAY0_OWNER"
@@ -1540,6 +1544,70 @@ def _blocked_attempt_state(
     return marker_path, fingerprint, marker.get("attempt_fingerprint") == fingerprint
 
 
+def _recent_success_coalesce_seconds() -> float:
+    raw = os.environ.get("ZEUS_REPLACEMENT_RECENT_SUCCESS_COALESCE_SECONDS")
+    if raw is None or not str(raw).strip():
+        return DEFAULT_RECENT_SUCCESS_COALESCE_SECONDS
+    try:
+        value = float(raw)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            "ZEUS_REPLACEMENT_RECENT_SUCCESS_COALESCE_SECONDS must be numeric"
+        ) from exc
+    if value < 0:
+        raise ValueError(
+            "ZEUS_REPLACEMENT_RECENT_SUCCESS_COALESCE_SECONDS must be >= 0"
+        )
+    return value
+
+
+def _terminal_receipt_path(
+    receipt_dir: Path,
+    request_payload: Mapping[str, object],
+) -> Path:
+    city = str(request_payload.get("city") or "unknown").replace(" ", "_")
+    target_date = str(request_payload.get("target_date") or "unknown")
+    metric = str(request_payload.get("temperature_metric") or "unknown").lower()
+    return receipt_dir / f"{city}.{target_date}.{metric}.json"
+
+
+def _recent_unchanged_success(
+    *,
+    processed_path: Path,
+    request_payload: Mapping[str, object],
+    attempt_fingerprint: str | None,
+    now: datetime | None = None,
+) -> bool:
+    """Whether an exact-input success is still inside the fixed coalescing window."""
+
+    window_seconds = _recent_success_coalesce_seconds()
+    if attempt_fingerprint is None or window_seconds <= 0:
+        return False
+    receipt_path = _terminal_receipt_path(
+        processed_path.parent / "succeeded_latest",
+        request_payload,
+    )
+    try:
+        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    if not isinstance(receipt, Mapping) or receipt.get("status") != "SUCCEEDED":
+        return False
+    evidence = receipt.get("result_evidence")
+    if not isinstance(evidence, Mapping):
+        return False
+    if evidence.get("committed_posterior") is not True:
+        return False
+    if evidence.get("attempt_fingerprint") != attempt_fingerprint:
+        return False
+    succeeded_at = _parse_utc_iso(receipt.get("recorded_at"))
+    if succeeded_at is None:
+        return False
+    current = now or datetime.now(timezone.utc)
+    age_seconds = (current - succeeded_at).total_seconds()
+    return 0 <= age_seconds < window_seconds
+
+
 def _write_blocked_attempt_marker(
     *,
     marker_path: Path | None,
@@ -1608,10 +1676,7 @@ def _record_latest_terminal_request(
         receipt_dir,
         durable_ancestor=processed_path.parent,
     )
-    city = str(request_payload.get("city") or "unknown").replace(" ", "_")
-    target_date = str(request_payload.get("target_date") or "unknown")
-    metric = str(request_payload.get("temperature_metric") or "unknown").lower()
-    target = receipt_dir / f"{city}.{target_date}.{metric}.json"
+    target = _terminal_receipt_path(receipt_dir, request_payload)
     temporary = receipt_dir / f".{target.name}.{os.getpid()}.tmp"
     witness = request_payload.get("day0_enqueue_owner_witness")
     receipt = {
@@ -2609,6 +2674,7 @@ def _process_claimed_materialization_batch(
     processed: list[str] = list(superseded)
     failed: list[str] = []
     unchanged_blocked: list[str] = []
+    unchanged_success: list[str] = []
     stale_day0_superseded: list[str] = []
     source_cycle_regressions: list[str] = []
     write_deferred: list[str] = []
@@ -2700,6 +2766,32 @@ def _process_claimed_materialization_batch(
             processed.append(str(receipt))
             unchanged_blocked.append(str(receipt))
             continue
+        # SCOPE: one exact city/date/metric request whose successful posterior
+        # commit and current input fingerprint are both proven. DRAIN: the fixed
+        # window is measured from the original success, so duplicate arrivals do
+        # not extend it. RESET: any input/logic revision or window expiry spawns
+        # the normal materializer immediately. This coalesces no probability fact.
+        if request_payload is not None and _recent_unchanged_success(
+            processed_path=processed_path,
+            request_payload=request_payload,
+            attempt_fingerprint=attempt_fingerprint,
+        ):
+            receipt = _record_latest_terminal_request(
+                input_json,
+                processed_path=processed_path,
+                request_payload=request_payload,
+                receipt_dir_name="success_coalesced_latest",
+                status="SKIPPED_RECENT_UNCHANGED_SUCCESS",
+                reason_codes=(_UNCHANGED_SUCCESS_SKIP_REASON,),
+                result_evidence={
+                    "request_validated": True,
+                    "subprocess_spawned": False,
+                    "attempt_fingerprint": attempt_fingerprint,
+                },
+            )
+            processed.append(str(receipt))
+            unchanged_success.append(str(receipt))
+            continue
         pending.append(
             _PendingMaterialization(
                 input_json=input_json,
@@ -2757,6 +2849,15 @@ def _process_claimed_materialization_batch(
                 _write_sidecar(moved, payload)
                 processed.append(str(moved))
             else:
+                result_evidence: dict[str, object] = {
+                    "returncode": int(completed.returncode),
+                    "committed_posterior": committed,
+                    "reactor_wake_published": wake_published,
+                }
+                if item.attempt_fingerprint is not None:
+                    result_evidence["attempt_fingerprint"] = (
+                        item.attempt_fingerprint
+                    )
                 receipt = _record_latest_terminal_request(
                     input_json,
                     processed_path=processed_path,
@@ -2764,11 +2865,7 @@ def _process_claimed_materialization_batch(
                     receipt_dir_name="succeeded_latest",
                     status="SUCCEEDED",
                     reason_codes=result_reason_codes,
-                    result_evidence={
-                        "returncode": int(completed.returncode),
-                        "committed_posterior": committed,
-                        "reactor_wake_published": wake_published,
-                    },
+                    result_evidence=result_evidence,
                 )
                 processed.append(str(receipt))
         elif timed_out:
@@ -2839,6 +2936,8 @@ def _process_claimed_materialization_batch(
         reasons.append("REPLACEMENT_LIVE_MATERIALIZATION_REQUEST_SUPERSEDED_BY_NEWER_DUPLICATE")
     if unchanged_blocked:
         reasons.append(_UNCHANGED_BLOCKED_SKIP_REASON)
+    if unchanged_success:
+        reasons.append(_UNCHANGED_SUCCESS_SKIP_REASON)
     if stale_day0_superseded:
         reasons.append(_STALE_DAY0_OWNER_SUPERSEDED_REASON)
     if source_cycle_regressions:

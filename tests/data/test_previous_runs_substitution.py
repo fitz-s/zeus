@@ -34,6 +34,7 @@ import json
 import sqlite3
 import subprocess
 import types
+from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -2142,6 +2143,143 @@ def test_materialization_queue_bounds_success_receipts_per_family(tmp_path) -> N
     }
     assert "large diagnostic output" not in receipts[0].read_text(encoding="utf-8")
     assert not tuple(processed_dir.glob("*.json"))
+
+
+def test_materialization_queue_coalesces_recent_exact_input_success(
+    tmp_path, monkeypatch
+) -> None:
+    import src.data.replacement_forecast_live_materialization_queue as queue_mod
+
+    request_dir = tmp_path / "requests"
+    processed_dir = tmp_path / "processed"
+    failed_dir = tmp_path / "failed"
+    request_dir.mkdir()
+    base_request = {
+        "city": "Shanghai",
+        "target_date": "2026-08-22",
+        "temperature_metric": "high",
+        "source_cycle_time": "2026-08-21T12:00:00+00:00",
+        "baseline_source_run_id": "baseline",
+        "openmeteo_source_run_id": "anchor",
+        "openmeteo_payload_json": "payload.json",
+        "precision_metadata_json": "precision.json",
+        "bins": [{"bin_id": "34C"}],
+    }
+    fingerprint = {"value": "same-inputs"}
+    monkeypatch.setattr(
+        queue_mod,
+        "_blocked_attempt_fingerprint",
+        lambda **_kwargs: fingerprint["value"],
+    )
+    spawned: list[str] = []
+
+    def _successful_runner(argv):
+        spawned.append(Path(argv[argv.index("--input-json") + 1]).name)
+        return subprocess.CompletedProcess(
+            list(argv),
+            0,
+            stdout=(
+                '{"status":"READY","reason_codes":[],"committed":true,'
+                '"posterior_id":42,"reactor_wake_published":true}\n'
+            ),
+            stderr="",
+        )
+
+    def _enqueue(computed_at: str) -> None:
+        path = request_dir / f"Shanghai.2026-08-22.high.{computed_at[14:16]}.json"
+        path.write_text(
+            json.dumps({**base_request, "computed_at": computed_at}),
+            encoding="utf-8",
+        )
+
+    _enqueue("2026-08-21T23:51:00+00:00")
+    first = queue_mod.process_replacement_forecast_live_materialization_queue(
+        request_dir=request_dir,
+        processed_dir=processed_dir,
+        failed_dir=failed_dir,
+        forecast_db=tmp_path / "forecasts.db",
+        limit=1,
+        runner=_successful_runner,
+    )
+    assert first.committed_posterior_count == 1
+    assert len(spawned) == 1
+    success_path = next((tmp_path / "succeeded_latest").glob("*.json"))
+    first_success = json.loads(success_path.read_text(encoding="utf-8"))
+    assert first_success["result_evidence"]["attempt_fingerprint"] == "same-inputs"
+
+    _enqueue("2026-08-21T23:51:10+00:00")
+    second = queue_mod.process_replacement_forecast_live_materialization_queue(
+        request_dir=request_dir,
+        processed_dir=processed_dir,
+        failed_dir=failed_dir,
+        forecast_db=tmp_path / "forecasts.db",
+        limit=1,
+        runner=_successful_runner,
+    )
+    assert second.committed_posterior_count == 0
+    assert len(spawned) == 1
+    assert queue_mod._UNCHANGED_SUCCESS_SKIP_REASON in second.reason_codes
+    assert json.loads(success_path.read_text(encoding="utf-8")) == first_success
+    coalesced = json.loads(
+        next((tmp_path / "success_coalesced_latest").glob("*.json")).read_text(
+            encoding="utf-8"
+        )
+    )
+    assert coalesced["status"] == "SKIPPED_RECENT_UNCHANGED_SUCCESS"
+    assert coalesced["result_evidence"]["subprocess_spawned"] is False
+
+    fingerprint["value"] = "new-inputs"
+    _enqueue("2026-08-21T23:51:20+00:00")
+    third = queue_mod.process_replacement_forecast_live_materialization_queue(
+        request_dir=request_dir,
+        processed_dir=processed_dir,
+        failed_dir=failed_dir,
+        forecast_db=tmp_path / "forecasts.db",
+        limit=1,
+        runner=_successful_runner,
+    )
+    assert third.committed_posterior_count == 1
+    assert len(spawned) == 2
+
+
+def test_recent_success_coalescing_window_is_fixed(tmp_path) -> None:
+    import src.data.replacement_forecast_live_materialization_queue as queue_mod
+
+    processed_dir = tmp_path / "processed"
+    success_dir = tmp_path / "succeeded_latest"
+    success_dir.mkdir()
+    request = {
+        "city": "Shanghai",
+        "target_date": "2026-08-22",
+        "temperature_metric": "high",
+    }
+    receipt_path = queue_mod._terminal_receipt_path(success_dir, request)
+    receipt_path.write_text(
+        json.dumps(
+            {
+                "status": "SUCCEEDED",
+                "recorded_at": "2026-08-21T23:51:00+00:00",
+                "result_evidence": {
+                    "committed_posterior": True,
+                    "attempt_fingerprint": "same-inputs",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert queue_mod._recent_unchanged_success(
+        processed_path=processed_dir,
+        request_payload=request,
+        attempt_fingerprint="same-inputs",
+        now=datetime.fromisoformat("2026-08-21T23:51:59+00:00"),
+    )
+    assert not queue_mod._recent_unchanged_success(
+        processed_path=processed_dir,
+        request_payload=request,
+        attempt_fingerprint="same-inputs",
+        now=datetime.fromisoformat("2026-08-21T23:52:00+00:00"),
+    )
 
 
 def test_materialization_queue_releases_lock_before_family_compute(

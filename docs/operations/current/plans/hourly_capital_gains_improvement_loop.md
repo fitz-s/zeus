@@ -5,6 +5,12 @@
 
 ## 现状(forward)
 
+### 2026-08-21 B135 — identical successful posterior不得独占sole materializer
+- **实时反例:** restart后writer持续生成12Z posterior，但最近87次写入仅覆盖12个target；Chengdu/Shanghai两个target占42次。逐行核对显示同target连续rows的`q_json`、`provenance_json`与`dependency_hash`完全相同，仅`computed_at`变化造成新identity；182个active family仍落后于ensemble HWM，sole subprocess被无新信息的重复成功占用。
+- **修复:** 每次成功receipt记录materializer现有的exact request/current-input/logic fingerprint。后续同family请求仅在原成功后的固定60秒窗口内、`committed_posterior=true`且fingerprint完全相同时零subprocess coalesce；成功receipt不被skip覆盖，因此重复请求不能滑动延长窗口。新provider/ENS/Day0 observation/input file/logic revision或窗口到期立即走原materializer，q与posterior identity law不变。
+- **SCOPE / DRAIN / RESET:** scope是一个city/date/metric的recent exact-input duplicate，不生成或修改probability。drain是写有界`success_coalesced_latest` receipt并释放sole worker给其它family；reset是fingerprint变化或从原成功时间起60秒到期。fingerprint不可证明、旧receipt无commit proof或future/invalid time均正常spawn。
+- **验收:** antibody要求首次commit、第二次同fingerprint零spawn且原成功时间不变、fingerprint改变立即再次commit、60秒边界不滑动；完整queue suite、ruff/compile/registry/diff通过后landing。live要求recent posterior的unique-target/row比显著上升、HWM rejected family下降并恢复global candidate evaluation；订单与资本证明仍由独立global receipt/venue/strict evaluator决定。
+
 ### 2026-08-21 B134 — probability degradation不得成为deploy-wide无reset暂停
 - **实时反例:** live-trading从`c6cf171d2`重启到`8a2168e07`时，7/7持仓均在新进程下数秒内写入`MONITOR_REFRESHED`且held-side CLOB fresh；但Day0 hourly provider quota为9500/9500，probability不可刷新。runtime已按exact held family阻断BUY，deploy wait与control-plane restart guard却再次要求`require_fresh_inputs=true`，因此全局`deploy_live_restart_guard`永不解除，所有其它family也无订单。
 - **修复:** canonical monitor evidence保留严格stale分类，并新增仅用于restart proof的typed子集：`issue=monitor_probability_stale`且CLOB fresh的post-boot attempt证明新runtime已评估该持仓。它只从deploy/restart blocking中扣除；普通monitor cadence、held exit authority与runtime family entry gate仍把probability loss视为blocking。CLOB stale、两者皆stale、invalid probability、缺event、future event与legacy evidence继续fail closed。
