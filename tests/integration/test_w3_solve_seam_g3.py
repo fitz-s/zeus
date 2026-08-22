@@ -8234,6 +8234,22 @@ def test_current_day0_global_probability_uses_current_remaining_day_simplex(
         allow_provisional_day0_replacement=True,
         probability_use=era._CurrentProbabilityUse.HELD_MONITOR,
     )
+    with pytest.raises(
+        ValueError,
+        match="GLOBAL_CURRENT_REPLACEMENT_BUNDLE_BLOCKED:STALE_FOR_LIVE",
+    ):
+        era._prepare_current_global_probability_family(
+            _global_day0_scope_event(city="Dallas", source_run_id="run-dallas"),
+            forecast_conn=forecast,
+            topology_conn=forecast,
+            observation_conn=observations,
+            decision_time=_dt.datetime(
+                2026, 7, 11, 18, 0, tzinfo=_dt.timezone.utc
+            ),
+            max_age=_dt.timedelta(seconds=30),
+            allow_provisional_day0_replacement=True,
+            probability_use=era._CurrentProbabilityUse.REDUCE_ONLY_EXIT,
+        )
     source_clock_available["value"] = True
     assert fallback_payload["_edli_day0_redecision_authority_scope"] == (
         "held_exposure_current_day0_only_v1"

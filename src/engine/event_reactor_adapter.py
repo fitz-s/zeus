@@ -35894,7 +35894,6 @@ def _prepare_current_global_probability_family(
                 and probability_use
                 in {
                     _CurrentProbabilityUse.HELD_MONITOR,
-                    _CurrentProbabilityUse.REDUCE_ONLY_EXIT,
                 }
             )
             current_day0_redecision_only = bool(
@@ -35906,7 +35905,9 @@ def _prepare_current_global_probability_family(
             )
         if final_daily_observation is None and current_day0_redecision_only:
             # SCOPE: this already-held family's genuinely provisional Day0 or
-            # post-local incomplete monitor/reduce-only submit revalidation.
+            # post-local incomplete monitor observability. REDUCE_ONLY_EXIT
+            # must retain the comparable source-clock bundle used by ENTRY;
+            # this lower-variance fallback cannot authorize a statistical sale.
             # Definitive current-day evidence uses the replacement bundle for
             # the same probability authority as ENTRY.
             # DRAIN: the strict remaining-window builder below consumes a fresh,

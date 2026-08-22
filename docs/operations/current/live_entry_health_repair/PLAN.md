@@ -2980,3 +2980,29 @@ publication barrier.
   share antibody reproduces receipt 524132 in the canonical position event;
   unrelated reviews remain fail-closed; focused recovery and registry gates
   pass before exact-SHA deployment.
+
+## B136 — Held-only Day0 fallback cannot authorize a statistical SELL
+
+- Live evidence: NYC 76–77°F NO was bought at `0.53`, then the same WU
+  observation produced alternating held q values as replacement authority
+  moved between a full source-clock bundle and the held-only fallback. At
+  10:06 UTC the fallback q `0.325075` authorized selling `18 @ 0.52`; by 10:07
+  the full witness returned and globally selected buying the same token at
+  `0.54`, blocked only by the recent-exit cooldown. This is probability-regime
+  churn, not a durable reversal.
+- Decision: retain the provisional fallback for `HELD_MONITOR` observability,
+  but remove it from `REDUCE_ONLY_EXIT`. A statistical SELL now requires the
+  same source-clock replacement bundle used by ENTRY and normal held
+  redecision; missing authority excludes that SELL candidate until the bundle
+  returns. Exact hard-fact paths remain separate and unchanged.
+- SCOPE: current/provisional Day0 statistical REDUCE_ONLY_EXIT only. DRAIN: the
+  next replacement materialization/read restores the full comparable witness.
+  RESET: each global reauction retries current authority; held monitoring and
+  unrelated families continue.
+- Files authorized: `src/engine/event_reactor_adapter.py`,
+  `tests/integration/test_w3_solve_seam_g3.py`,
+  `architecture/source_rationale.yaml`, `architecture/test_topology.yaml`, and
+  this plan. Acceptance: HELD_MONITOR still receives the fallback while
+  REDUCE_ONLY_EXIT fails closed with the bundle's typed unavailable reason;
+  focused/global Day0 tests, compilation, planning/registry checks, and exact
+  live-SHA restart pass.
