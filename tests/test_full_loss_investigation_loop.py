@@ -412,6 +412,9 @@ def test_validated_result_updates_only_dedicated_memory(tmp_path: Path) -> None:
     assert incident["status"] == "investigated"
     assert incident["root_cause_id"] == "monitor-gap-v1"
     assert registry["causes"]["monitor-gap-v1"]["occurrence_count"] == 1
+    loop._update_registry(workspace, result)
+    registry = loop.read_json(workspace / "memory" / "root_causes" / "registry.json", {})
+    assert registry["causes"]["monitor-gap-v1"]["occurrence_count"] == 1
 
 
 def test_orphan_batch_recovers_pending_incidents(tmp_path: Path) -> None:

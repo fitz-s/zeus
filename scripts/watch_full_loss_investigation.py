@@ -592,7 +592,14 @@ def _reconcile_incident_economics(
         if not qualifies and incident.get("status") != "retracted_not_full_loss":
             prior_status = str(incident.get("status") or "unknown")
             prior_root = incident.pop("root_cause_id", None)
-            prior_batch = str(incident.get("batch_id") or "")
+            prior_batches = {
+                str(value)
+                for value in (
+                    incident.get("batch_id"),
+                    incident.get("repair_batch_id"),
+                )
+                if str(value or "").strip()
+            }
             incident["status"] = "retracted_not_full_loss"
             incident["retracted_at"] = iso_now()
             incident["retracted_from_status"] = prior_status
@@ -609,7 +616,7 @@ def _reconcile_incident_economics(
                     root_cause_id=str(prior_root),
                     incident_id=ident,
                 )
-            if prior_batch:
+            for prior_batch in sorted(prior_batches):
                 _retract_repair_queue(
                     workspace,
                     batch_id=prior_batch,
@@ -1272,7 +1279,6 @@ def _update_registry(workspace: Path, result: dict[str, Any]) -> None:
         previous = causes.get(cause_id, {})
         first_seen = previous.get("first_seen_at") or iso_now()
         merged = {**previous, **update, "root_cause_id": cause_id, "first_seen_at": first_seen, "last_seen_at": iso_now()}
-        merged["occurrence_count"] = int(previous.get("occurrence_count", 0)) + counts[cause_id]
         incident_ids = list(previous.get("incident_ids", []))
         incident_ids.extend(
             row["incident_id"]
@@ -1280,6 +1286,7 @@ def _update_registry(workspace: Path, result: dict[str, Any]) -> None:
             if row.get("root_cause_id") == cause_id and row.get("incident_id") not in incident_ids
         )
         merged["incident_ids"] = incident_ids[-200:]
+        merged["occurrence_count"] = len(merged["incident_ids"])
         causes[cause_id] = merged
         atomic_json(workspace / "memory" / "root_causes" / f"{cause_id}.json", merged)
     registry["updated_at"] = iso_now()
@@ -1316,6 +1323,8 @@ def complete_batch(workspace: Path, returncode: int | None = None) -> bool:
             incident["last_analysis_at"] = iso_now()
             incident["classification"] = by_id[ident]["classification"]
             incident["root_cause_id"] = by_id[ident].get("root_cause_id")
+            if result["batch_status"] == "repair_ready":
+                incident["repair_batch_id"] = batch["batch_id"]
             atomic_json(incident_path, incident)
         batch["status"] = result["batch_status"]
         batch["completed_at"] = iso_now()
