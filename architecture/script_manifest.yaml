@@ -924,6 +924,17 @@ scripts:
   extract_tigge_mn2t6_localday_min.py: {class: etl_writer, dangerous_if_run: false, external_inputs: [TIGGE_GRIB_CACHE], write_targets: ["data/local_calendar_day_snapshots/"]}
   extract_tigge_mx2t6_localday_max.py: {class: etl_writer, dangerous_if_run: false, external_inputs: [TIGGE_GRIB_CACHE], write_targets: ["data/local_calendar_day_snapshots/"]}
   force_lifecycle.py: {class: repair, apply_flag: implicit, target_db: state/zeus_trades.db, unguarded_write_rationale: "Direct lifecycle forcing is unsafe and currently unguarded; do not run outside a dedicated repair packet."}
+  watch_full_loss_investigation.py:
+    class: runtime_support
+    dangerous_if_run: false
+    read_targets: [state/zeus_trades.db, state/deployment_freshness.json, git_repo_metadata]
+    write_targets: ["~/.openclaw/workspace-zeus-loss-investigator/"]
+    external_inputs: [codex_binary, dedicated_nonlive_repair_worktree]
+    required_tests: [tests/test_full_loss_investigation_loop.py]
+    reuse_when: "Continuously detect canonical settled positions with realized_pnl_usd <= -0.95*cost_basis_usd, create idempotent incidents, and trigger schema-validated ephemeral Codex investigations using only the dedicated full-loss memory registry."
+    do_not_use_when: "Do not treat its investigation memory as canonical trade truth, let it write a live checkout or canonical DB, or use its output as proof that a repair is loaded or profitable."
+    canonical_command: "python3 scripts/watch_full_loss_investigation.py --workspace ~/.openclaw/workspace-zeus-loss-investigator bootstrap|scan-once|daemon|status|record-repair"
+    unguarded_write_rationale: "Writes only the declared isolated external investigation workspace; canonical Zeus DB access uses SQLite mode=ro."
   generate_calibration_report.py: {class: evidence_report_writer, write_targets: [docs/reference/calibration_report.md, docs/reference/calibration_reliability.svg, stdout], read_targets: [state/zeus-world.db, state/zeus_trades.db], required_tests: [tests/scripts/test_generate_calibration_report.py], reuse_when: "Regenerate the settled-position reliability diagram (predicted probability vs settled frequency, decomposed, cut by lead time/side/strategy/six-class attribution) after new settlements land; READ-ONLY over zeus-world.db + zeus_trades.db via file:...?mode=ro, ATTACH read-only (INV-37); reads settlement_attribution exclusively (settled-only ground truth, never an unsettled/synthetic outcome).", do_not_use_when: "Do not treat this report as a return/PnL claim -- the sample is too small to support one (see the report's closing section); do not hand-edit the generated .md/.svg -- edit this generator instead.", canonical_command: "python3 scripts/generate_calibration_report.py [--stdout] [--world-db PATH] [--trades-db PATH]", external_inputs: [], promotion_barrier: "Generated report artifact only; not a promotion authority or live-decision input.", required_helpers: [], unguarded_write_rationale: "Writes only the declared docs/reference/calibration_report.md + calibration_reliability.svg; both live DB connections are opened mode=ro."}
   generate_calibration_pairs.py: {class: stale_deprecated, status: deprecated, lifecycle: deprecated_fail_closed, fail_closed: true, canonical_command: DO_NOT_RUN, replacement: rebuild_calibration_pairs_canonical.py, delete_policy: archive_or_delete_in_cleanup_packet, reason: legacy market_events calibration-pair generator retired}
   generate_monthly_bounds.py: {class: config_writer}

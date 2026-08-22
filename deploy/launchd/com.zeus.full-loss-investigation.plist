@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Created: 2026-08-22
+  Authority basis: operator-requested event-triggered full-loss investigation loop.
+  This failure-isolated sidecar reads canonical trades read-only.  It writes only
+  its dedicated external workspace and never gates or mutates the trading mesh.
+-->
+<plist version="1.0">
+<dict>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>PYTHONPATH</key>
+		<string>ZEUS_REPO_PLACEHOLDER</string>
+		<key>PYTHONSAFEPATH</key>
+		<string>1</string>
+		<key>ZEUS_FULL_LOSS_WORKSPACE</key>
+		<string>ZEUS_HOME_PLACEHOLDER/.openclaw/workspace-zeus-loss-investigator</string>
+	</dict>
+	<key>KeepAlive</key>
+	<true/>
+	<key>Label</key>
+	<string>com.zeus.full-loss-investigation</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>ZEUS_REPO_PLACEHOLDER/.venv/bin/python</string>
+		<string>ZEUS_REPO_PLACEHOLDER/scripts/watch_full_loss_investigation.py</string>
+		<string>daemon</string>
+	</array>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>StandardErrorPath</key>
+	<string>ZEUS_REPO_PLACEHOLDER/logs/zeus-full-loss-investigation.err</string>
+	<key>StandardOutPath</key>
+	<string>ZEUS_REPO_PLACEHOLDER/logs/zeus-full-loss-investigation.log</string>
+	<key>ThrottleInterval</key>
+	<integer>15</integer>
+	<key>WorkingDirectory</key>
+	<string>ZEUS_REPO_PLACEHOLDER</string>
+</dict>
+</plist>

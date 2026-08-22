@@ -65,6 +65,7 @@ Only list durable entry points here; use the manifest for the full catalog.
 |--------|---------|
 | `topology_doctor.py` | Compiled topology/digest/health checks |
 | `check_daemon_heartbeat.py` | Daemon heartbeat staleness check |
+| `watch_full_loss_investigation.py` | Read-only canonical full-loss detector, isolated incident/root-cause memory, and ephemeral Codex investigation dispatcher |
 | `venus_sensing_report.py` | Venus sensing report, including daemon-independent source-contract watch |
 | `backfill_tigge_snapshot_p_raw.py` | Replay-compatible TIGGE `p_raw_json` materialization |
 | `watch_source_contract.py` | Polymarket settlement source-contract monitor, city source-block writer, and conversion-history reporter |
