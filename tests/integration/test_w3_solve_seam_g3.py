@@ -1,5 +1,5 @@
 # Created: 2026-07-03
-# Last reused/audited: 2026-08-21
+# Last reused/audited: 2026-08-22
 # Authority basis: current global auction, posterior-mean Fractional Kelly,
 #                  Day0 global-cut routing, and auditable SELL holding bindings
 """Current global auction, q-kernel, and live actuation integration contracts."""
@@ -9964,9 +9964,7 @@ def test_live_adapter_routes_each_global_truth_to_its_owner(monkeypatch, event_f
         probability_functional="POSTERIOR_PREDICTIVE_MEAN",
         exit_authority_status="not_applicable",
     )
-    assert exact_completion_policy(statistical_sell).startswith(
-        "GLOBAL_STATISTICAL_SELL_PROBABILITY_REVISION_UNPROVEN:"
-    )
+    assert exact_completion_policy(statistical_sell) is None
     proof_policy = captured["proof_candidate_policy_rejection_resolver"]
     assert proof_policy(statistical_sell) is None
     assert exact_completion_policy(
@@ -26788,7 +26786,7 @@ def test_live_adapter_sell_preflight_skips_entry_checks_and_survives_monitor_han
     )
 
 
-def test_live_adapter_rechecks_statistical_sell_capital_gate_before_submit(
+def test_live_adapter_does_not_turn_entry_capital_gate_into_forced_hold(
     monkeypatch,
 ):
     captured = {}
@@ -26889,35 +26887,28 @@ def test_live_adapter_rechecks_statistical_sell_capital_gate_before_submit(
             "active",
         ),
     )
-    blocked = captured["preflight_winner"](
+    still_stable = captured["preflight_winner"](
         event,
         actuation,
         decision_at + _dt.timedelta(seconds=1),
         authority,
     )
-    assert blocked.status == "CANDIDATE_BLOCKED"
-    assert blocked.reason.startswith(
-        "GLOBAL_STATISTICAL_SELL_PROBABILITY_REVISION_UNPROVEN:"
-    )
+    assert still_stable.status == "STABLE"
     monkeypatch.setattr(
         era,
         "_global_actuation_current_wealth_block_reason",
-        lambda *_args, **_kwargs: pytest.fail(
-            "final revision gate must run before wealth or venue work"
-        ),
+        lambda *_args, **_kwargs: "TEST_STOP_AFTER_SELL_POLICY",
     )
     receipt = captured["actuate_preflighted_winner"].consume(
         event,
         actuation,
         decision_at + _dt.timedelta(seconds=1),
-        stable.binding_token,
+        still_stable.binding_token,
         authority,
     )
     assert receipt.submitted is False
     assert receipt.venue_call_started is False
-    assert receipt.reason.startswith(
-        "GLOBAL_STATISTICAL_SELL_PROBABILITY_REVISION_UNPROVEN:"
-    )
+    assert receipt.reason == "TEST_STOP_AFTER_SELL_POLICY"
 
 
 def test_live_adapter_preflight_transports_rejected_entry_evidence(monkeypatch):

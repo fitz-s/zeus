@@ -5960,78 +5960,15 @@ def _event_bound_effective_live_quality_floors(
     }
 
 
-def _global_statistical_sell_capital_gate_reason(
+def _risk_action_gate_is_market_alpha_only(
     conn: sqlite3.Connection | None,
-    candidate: object,
-    *,
-    probability_semantics_revision: str | None,
-    checked_at: datetime,
-) -> str | None:
-    """Hold when an automated proof gate rejects the SELL probability law.
+    strategy_key: str,
+    probability_semantics_revision: str,
+) -> bool:
+    """Identify the revision gate that measures alpha, not data/risk failure."""
 
-    SCOPE: one posterior-driven SELL candidate for one canonical position.
-    DRAIN: RiskGuard's revision-scoped no-money shadow continues collecting
-    settled capital evidence while ordinary held monitoring remains live.
-    RESET: the next cut re-reads ``risk_actions``; expiration or positive proof
-    restores statistical SELL eligibility.  Deterministic payoff and RED exits
-    do not consume this probability authority.
-    """
-
-    if str(getattr(candidate, "action", "") or "").strip().upper() != "SELL":
-        return None
-    functional = str(
-        getattr(candidate, "probability_functional", "") or ""
-    ).strip().upper()
-    authority_status = str(
-        getattr(candidate, "exit_authority_status", "") or ""
-    ).strip().lower()
-    if functional == "DETERMINISTIC_PAYOFF" or authority_status == "deterministic":
-        return None
-    if conn is None or checked_at.tzinfo is None:
-        return "GLOBAL_STATISTICAL_SELL_CAPITAL_GATE_UNAVAILABLE"
-    try:
-        scoped_gate_exists = conn.execute(
-            "SELECT 1 FROM risk_actions "
-            "WHERE action_type='gate' AND status='active' "
-            "AND instr(value, 'probability_semantics_revisions') > 0 LIMIT 1"
-        ).fetchone()
-    except sqlite3.OperationalError as exc:
-        if "no such table" in str(exc).lower():
-            return None
-        return (
-            "GLOBAL_STATISTICAL_SELL_CAPITAL_GATE_UNAVAILABLE:"
-            f"{type(exc).__name__}"
-        )
-    if scoped_gate_exists is None:
-        return None
-
-    position_id = str(getattr(candidate, "position_id", "") or "").strip()
-    if not position_id:
-        return "GLOBAL_STATISTICAL_SELL_POSITION_IDENTITY_MISSING"
-    try:
-        row = conn.execute(
-            "SELECT strategy_key,exit_reason FROM position_current "
-            "WHERE position_id=? LIMIT 1",
-            (position_id,),
-        ).fetchone()
-    except sqlite3.Error as exc:
-        return (
-            "GLOBAL_STATISTICAL_SELL_POSITION_AUTHORITY_UNAVAILABLE:"
-            f"{type(exc).__name__}"
-        )
-    if row is None:
-        return "GLOBAL_STATISTICAL_SELL_POSITION_AUTHORITY_MISSING"
-    try:
-        strategy_key = str(row["strategy_key"] or "").strip()
-        exit_reason = str(row["exit_reason"] or "").strip().upper()
-    except (IndexError, KeyError, TypeError):
-        strategy_key = str(row[0] or "").strip()
-        exit_reason = str(row[1] or "").strip().upper()
-    if exit_reason == "RED_FORCE_EXIT":
-        return None
-    if not strategy_key:
-        return "GLOBAL_STATISTICAL_SELL_STRATEGY_IDENTITY_MISSING"
-
+    if conn is None:
+        return False
     try:
         from src.riskguard.policy import (
             active_probability_revision_capital_gate_action_ids,
@@ -6040,21 +5977,32 @@ def _global_statistical_sell_capital_gate_reason(
         action_ids = active_probability_revision_capital_gate_action_ids(
             conn,
             strategy_key,
-            checked_at,
+            datetime.now(timezone.utc),
             probability_semantics_revision=probability_semantics_revision,
         )
-    except Exception as exc:  # noqa: BLE001 - missing proof authority holds
-        return (
-            "GLOBAL_STATISTICAL_SELL_CAPITAL_GATE_UNAVAILABLE:"
-            f"{type(exc).__name__}"
-        )
-    if not action_ids:
-        return None
-    revision = str(probability_semantics_revision or "").strip() or "missing"
-    return (
-        "GLOBAL_STATISTICAL_SELL_PROBABILITY_REVISION_UNPROVEN:"
-        f"strategy={strategy_key}:revision={revision}:"
-        f"actions={','.join(action_ids)}"
+        reasons = []
+        for action_id in action_ids:
+            row = conn.execute(
+                "SELECT reason FROM risk_actions WHERE action_id=? LIMIT 1",
+                (action_id,),
+            ).fetchone()
+            if row is None:
+                return False
+            try:
+                reasons.append(str(row["reason"] or ""))
+            except (IndexError, KeyError, TypeError):
+                reasons.append(str(row[0] or ""))
+    except Exception:  # noqa: BLE001 - ambiguity preserves the gate
+        return False
+    components = tuple(
+        component.strip()
+        for reason in reasons
+        for component in reason.split("|")
+        if component.strip()
+    )
+    return bool(action_ids and components) and all(
+        component.startswith("market_relative_alpha_unproven(")
+        for component in components
     )
 
 
@@ -6152,19 +6100,39 @@ def _global_current_entry_feasibility_rejection_reason(
                         )
                     )
                 strategy_block = strategy_policy_cache[policy_cache_key]
-            if (
-                observe_through_automated_risk_gate
-                and strategy_block is not None
+            strategy_sources = (strategy_block or "").partition("sources=")[2]
+            risk_gate_sources = {
+                source.strip()
+                for source in strategy_sources.split(",")
+                if strategy_block is not None and source.strip()
+            }
+            automated_gate_visible = (
+                strategy_block is not None
                 and strategy_block.startswith("STRATEGY_POLICY_GATED:")
-                and "risk_action:gate"
-                in strategy_block.partition("sources=")[2].split(",")
+                and "risk_action:gate" in risk_gate_sources
+            )
+            maker_gate_is_atomic = (
+                execution_mode == "MAKER_REST"
+                and risk_gate_sources == {"risk_action:gate"}
+                and _risk_action_gate_is_market_alpha_only(
+                    strategy_policy_conn,
+                    normalized_strategy,
+                    candidate_revision,
+                )
+            )
+            if automated_gate_visible and (
+                observe_through_automated_risk_gate or maker_gate_is_atomic
             ):
                 # The proof solve is side-effect-free and shares the exact live
-                # q/book/wealth cut.  Let it expose the economic frontier hidden
-                # by an automated performance gate without weakening live
-                # selection.  A restrictive manual gate never carries the
-                # risk_action source because it locks the field first, so it
-                # remains authoritative here.
+                # q/book/wealth cut, so it may expose the economic frontier hidden
+                # by an automated performance gate. Live maker-rest proposals are
+                # also atomic: they remain contingent on a fill, already require
+                # an exitable seed, and the submit-time JIT gate requires full
+                # selected-share pre-cliff liquidation capacity. SCOPE: only this
+                # maker proposal escapes an automated revision gate; taker and
+                # manual gates stay. DRAIN: RiskGuard keeps grading the exact
+                # revision. RESET: a validated/expired gate restores ordinary
+                # strategy admission.
                 strategy_block = None
             if strategy_block is not None:
                 return strategy_block
@@ -8790,35 +8758,11 @@ def event_bound_live_adapter_from_trade_conn(
             decision = getattr(actuation, "decision", None)
             candidate = getattr(decision, "candidate", None)
             action = str(getattr(candidate, "action", "") or "").upper()
-            sell_policy_reason = (
-                _global_statistical_sell_capital_gate_reason(
-                    trade_conn,
-                    candidate,
-                    probability_semantics_revision=(
-                        _global_entry_probability_revision_by_family.get(
-                            str(getattr(candidate, "family_key", "") or "")
-                        )
-                    ),
-                    checked_at=at,
-                )
-                if action == "SELL"
-                else None
-            )
-            receipt = (
-                EventSubmissionReceipt(
-                    False,
-                    event.event_id,
-                    event.causal_snapshot_id,
-                    reason=sell_policy_reason,
-                    proof_accepted=False,
-                )
-                if sell_policy_reason is not None
-                else _global_preflight_candidate_receipt(
-                    _submit_inner,
-                    event=event,
-                    actuation=actuation,
-                    decision_time=at,
-                )
+            receipt = _global_preflight_candidate_receipt(
+                _submit_inner,
+                event=event,
+                actuation=actuation,
+                decision_time=at,
             )
             sell_preflight = (
                 action == "SELL"
@@ -8984,42 +8928,6 @@ def event_bound_live_adapter_from_trade_conn(
                         proof_accepted=False,
                     )
                 )
-            final_candidate = getattr(
-                getattr(actuation, "decision", None), "candidate", None
-            )
-            if str(
-                getattr(final_candidate, "action", "") or ""
-            ).strip().upper() == "SELL":
-                final_sell_policy_reason = (
-                    _global_statistical_sell_capital_gate_reason(
-                        trade_conn,
-                        final_candidate,
-                        probability_semantics_revision=(
-                            _global_entry_probability_revision_by_family.get(
-                                str(
-                                    getattr(
-                                        final_candidate,
-                                        "family_key",
-                                        "",
-                                    )
-                                    or ""
-                                )
-                            )
-                        ),
-                        checked_at=now,
-                    )
-                )
-                if final_sell_policy_reason is not None:
-                    _stable_preflight_monitor_handoff[0] = False
-                    return _stamp_live_adapter_lane(
-                        EventSubmissionReceipt(
-                            False,
-                            event.event_id,
-                            event.causal_snapshot_id,
-                            reason=final_sell_policy_reason,
-                            proof_accepted=False,
-                        )
-                    )
             wealth_block = _global_actuation_current_wealth_block_reason(
                 trade_conn,
                 global_actuation=actuation,
@@ -10803,31 +10711,13 @@ def event_bound_live_adapter_from_trade_conn(
                     str(getattr(candidate, "token_id", "") or "").strip(),
                 ) not in exact_completion_sell_keys:
                     return "GLOBAL_EXACT_HELD_COMPLETION_OTHER_POSITION"
-                family_key = str(
-                    getattr(candidate, "family_key", "") or ""
-                ).strip()
-                sell_gate_reason = _global_statistical_sell_capital_gate_reason(
-                    trade_conn,
-                    candidate,
-                    probability_semantics_revision=(
-                        _global_entry_probability_revision_by_family.get(
-                            family_key
-                        )
-                    ),
-                    checked_at=decision_time,
-                )
-                if (
-                    proof_only
-                    and sell_gate_reason is not None
-                    and sell_gate_reason.startswith(
-                        "GLOBAL_STATISTICAL_SELL_PROBABILITY_REVISION_UNPROVEN:"
-                    )
-                ):
-                    # The paired proof solve has no actuator. Preserve the exact
-                    # counterfactual SELL so settlement can drain this gate,
-                    # while the live solve above remains HOLD-only.
-                    return None
-                return sell_gate_reason
+                # A revision-performance gate is entry authority, not permission
+                # to retain risk.  Statistical SELL still needs the current full
+                # probability witness and must beat HOLD on the shared global
+                # posterior-mean objective; deterministic and RED exits keep their
+                # own stricter authorities.  Blocking this risk-reducing proposal
+                # would force the exact failure cohort to settle at zero.
+                return None
             # The proof solve has no actuator and therefore may ignore only
             # admission state whose own recovery needs current economic
             # evidence. Candidate-local data/source/price/capital laws and

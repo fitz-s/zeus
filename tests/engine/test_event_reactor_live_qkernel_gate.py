@@ -1,5 +1,5 @@
 # Created: 2026-06-30
-# Last reused/audited: 2026-08-17
+# Last reused/audited: 2026-08-22
 # Authority basis: live-money qkernel submit authority and canonical selection-fact persistence.
 
 from __future__ import annotations
@@ -2795,8 +2795,12 @@ def test_global_current_entry_feasibility_proof_observes_through_only_automated_
     candidate = SimpleNamespace(
         action="BUY",
         side="YES",
+        execution_mode="TAKER_LIMIT",
         executable_cost_curve=SimpleNamespace(
             levels=(SimpleNamespace(price=Decimal("0.30")),)
+        ),
+        economic_cost_curve=SimpleNamespace(
+            levels=(SimpleNamespace(price=Decimal("0.29")),)
         ),
         native_bid_levels=(SimpleNamespace(price=Decimal("0.29")),),
     )
@@ -2809,6 +2813,12 @@ def test_global_current_entry_feasibility_proof_observes_through_only_automated_
         era,
         "_entry_strategy_policy_blocks_live_submit",
         lambda *_args, **_kwargs: reason[0],
+    )
+    market_alpha_only = [False]
+    monkeypatch.setattr(
+        era,
+        "_risk_action_gate_is_market_alpha_only",
+        lambda *_args, **_kwargs: market_alpha_only[0],
     )
 
     kwargs = {
@@ -2823,6 +2833,22 @@ def test_global_current_entry_feasibility_proof_observes_through_only_automated_
         candidate,
         **kwargs,
         observe_through_automated_risk_gate=True,
+    ) is None
+
+    reason[0] = (
+        "STRATEGY_POLICY_GATED:forecast_qkernel_entry:"
+        "sources=risk_action:gate"
+    )
+    assert era._global_current_entry_feasibility_rejection_reason(
+        candidate, **kwargs
+    ) == reason[0]
+    candidate.execution_mode = "MAKER_REST"
+    assert era._global_current_entry_feasibility_rejection_reason(
+        candidate, **kwargs
+    ) == reason[0]
+    market_alpha_only[0] = True
+    assert era._global_current_entry_feasibility_rejection_reason(
+        candidate, **kwargs
     ) is None
 
     reason[0] = (
