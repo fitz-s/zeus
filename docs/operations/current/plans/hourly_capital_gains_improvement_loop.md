@@ -478,9 +478,12 @@
   decision-time-eligible ENS is not written. Direct cycle-advance or fusion-
   upgrade seeds remain pending in place at the queue JIT boundary instead of
   being terminally moved and recreated; their presence preserves producer
-  deduplication. Unknown boundary state fails open. Once ENS advances, equality
-  resets the defer and the same retained seed proceeds immediately; probability
-  math and HWM authority do not change.
+  deduplication. While the boundary is active, consumer-side duplicate
+  coalescing also preserves every exact producer-owned path so it cannot detach
+  a durable marker and trigger republish churn. Unknown boundary state fails
+  open. Once ENS advances, equality resets the defer and normal coalescing plus
+  materialization proceed immediately; probability math and HWM authority do
+  not change.
 - **Acceptance:** a recovery-discovery antibody proves future-of-ENS input
   yields zero seed files and a typed reason; existing discovery and queue JIT
   tests remain green. Production acceptance is cessation of repeated deferred

@@ -2004,15 +2004,18 @@ def _coalesce_superseded_materialization_seeds(
     seeds: Sequence[Path],
     *,
     processed_path: Path,
+    forecast_db: Path | str | None,
 ) -> tuple[
     tuple[Path, ...],
     tuple[str, ...],
     dict[Path, Mapping[str, object] | None],
+    dict[Path, tuple[str, str] | None],
 ]:
     """Keep the newest valid seed for each existing request semantic key."""
     keys: dict[Path, tuple[str, ...]] = {}
     payloads: dict[Path, Mapping[str, object]] = {}
     payload_cache: dict[Path, Mapping[str, object] | None] = {}
+    cycle_boundary_cache: dict[Path, tuple[str, str] | None] = {}
     newest_by_key: dict[tuple[str, ...], tuple[tuple[datetime, int, str], Path]] = {}
     for path in seeds:
         payload = _load_request_payload_for_coalescing(path)
@@ -2028,6 +2031,25 @@ def _coalesce_superseded_materialization_seeds(
             and payload.get("day0_observed_extreme_observation_time") is not None
         ):
             continue
+        if payload.get("upgrade_trigger") or payload.get("cycle_advance_enqueue_owner") is True:
+            try:
+                cycle_boundary = _seed_source_cycle_boundary(
+                    forecast_db=forecast_db,
+                    seed=dict(payload),
+                )
+            except Exception:  # noqa: BLE001 - JIT boundary remains authoritative
+                cycle_boundary = None
+            cycle_boundary_cache[path] = cycle_boundary
+            if (
+                cycle_boundary is not None
+                and cycle_boundary[0] == "awaiting_current_ensemble_hwm"
+            ):
+                # The producer's durable marker owns this exact queue path. Moving
+                # it as a duplicate would make the producer believe its debt was
+                # consumed and publish it again while ENS is still unavailable.
+                # Retain every pre-existing owner during the bounded wait; after
+                # the HWM reaches equality normal coalescing/action resumes.
+                continue
         request_key = _request_semantic_key(payload)
         if request_key is None:
             continue
@@ -2065,7 +2087,12 @@ def _coalesce_superseded_materialization_seeds(
             },
         )
         superseded.append(str(moved))
-    return tuple(remaining), tuple(superseded), payload_cache
+    return (
+        tuple(remaining),
+        tuple(superseded),
+        payload_cache,
+        cycle_boundary_cache,
+    )
 
 
 def _prepare_seed_requests(
@@ -2111,9 +2138,11 @@ def _prepare_seed_requests(
         coalesced_window,
         superseded_seeds,
         seed_payloads,
+        seed_cycle_boundaries,
     ) = _coalesce_superseded_materialization_seeds(
         raw_window,
         processed_path=processed_path,
+        forecast_db=forecast_db,
     )
     processed.extend(superseded_seeds)
     if superseded_seeds:
@@ -2199,9 +2228,11 @@ def _prepare_seed_requests(
             # capturable-family-superset) transition). A consumed failure can
             # atomically reclaim that marker, while this terminal unchanged-input
             # receipt remains a no-retry witness — so this bypass cannot loop.
-            cycle_boundary = _seed_source_cycle_boundary(
-                forecast_db=forecast_db, seed=seed
-            )
+            cycle_boundary = seed_cycle_boundaries.get(seed_json)
+            if seed_json not in seed_cycle_boundaries:
+                cycle_boundary = _seed_source_cycle_boundary(
+                    forecast_db=forecast_db, seed=seed
+                )
             if (
                 cycle_boundary is not None
                 and cycle_boundary[0] == "awaiting_current_ensemble_hwm"

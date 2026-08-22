@@ -672,8 +672,15 @@ def test_queue_defers_seed_ahead_of_current_ensemble_hwm(tmp_path, monkeypatch) 
         "target_date": "2026-08-22",
         "source_cycle_time": "2026-08-21T18:00:00+00:00",
         "computed_at": "2026-08-22T00:30:00+00:00",
+        "upgrade_trigger": "instrument_set_expansion",
     }
-    (seed_dir / "future-of-ens.json").write_text(json.dumps(seed), encoding="utf-8")
+    older = seed_dir / "future-of-ens-older.json"
+    newer = seed_dir / "future-of-ens-newer.json"
+    older.write_text(json.dumps(seed), encoding="utf-8")
+    newer.write_text(
+        json.dumps({**seed, "computed_at": "2026-08-22T00:31:00+00:00"}),
+        encoding="utf-8",
+    )
 
     processed, failed, reasons = queue_mod._prepare_seed_requests(
         seed_dir=seed_dir,
@@ -691,7 +698,8 @@ def test_queue_defers_seed_ahead_of_current_ensemble_hwm(tmp_path, monkeypatch) 
         in reasons
     )
     assert not request_dir.exists()
-    assert (seed_dir / "future-of-ens.json").is_file()
+    assert older.is_file()
+    assert newer.is_file()
     assert not (tmp_path / "seed_processed").exists()
 
     conn = sqlite3.connect(forecast_db)
@@ -722,10 +730,11 @@ def test_queue_defers_seed_ahead_of_current_ensemble_hwm(tmp_path, monkeypatch) 
     )
 
     assert not failed
-    assert len(processed) == 1
+    assert len(processed) == 2
     assert "REPLACEMENT_MATERIALIZATION_SOURCE_CYCLE_AWAITING_ENSEMBLE_HWM" not in reasons
-    assert not (seed_dir / "future-of-ens.json").exists()
-    assert (request_dir / "future-of-ens.json").is_file()
+    assert not older.exists()
+    assert not newer.exists()
+    assert (request_dir / newer.name).is_file()
 
 
 def test_queue_coverage_skip_requires_matching_openmeteo_anchor_source_run(tmp_path) -> None:
