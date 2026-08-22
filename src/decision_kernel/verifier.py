@@ -35,6 +35,8 @@ from src.strategy.live_inference.live_admission import (
     replacement_no_bound_expected_from_parents,
 )
 from src.events.day0_authority import (
+    DAY0_REMAINING_DAY_GLOBAL_AUTHORITY,
+    DAY0_REMAINING_DAY_Q_SOURCE,
     Day0AuthorityError,
     assert_live_day0_probability_authority,
     assert_live_day0_payload_authority,
@@ -57,6 +59,39 @@ def _uses_replacement_probability_authority(payload: Mapping[str, object]) -> bo
         ).strip()
         == "replacement_0_1"
     )
+
+
+def _uses_remaining_day_probability_authority(
+    payload: Mapping[str, object],
+) -> bool:
+    q_source = str(payload.get("q_source") or "").strip()
+    internal_q_source = str(payload.get("_edli_q_source") or "").strip()
+    return (
+        q_source == DAY0_REMAINING_DAY_Q_SOURCE
+        and internal_q_source in ("", DAY0_REMAINING_DAY_Q_SOURCE)
+        and str(payload.get("probability_authority") or "").strip()
+        == DAY0_REMAINING_DAY_GLOBAL_AUTHORITY
+    )
+
+
+def _actionable_source_parent_types(
+    event_type: str,
+    payload: Mapping[str, object],
+) -> frozenset[str]:
+    if event_type in FORECAST_ACTIONABLE_EVENT_TYPES:
+        return frozenset({claims.FORECAST_AUTHORITY, claims.CALIBRATION})
+    if event_type != DAY0_ACTIONABLE_EVENT_TYPE:
+        raise CertificateVerificationError(
+            f"unsupported actionable event_type: {event_type!r}"
+        )
+    if (
+        _uses_replacement_probability_authority(payload)
+        or _uses_remaining_day_probability_authority(payload)
+    ):
+        return frozenset({claims.FORECAST_AUTHORITY, claims.CALIBRATION})
+    return frozenset({claims.DAY0_AUTHORITY, claims.ABSORBING_BOUNDARY})
+
+
 # mx2t3 carrier-decouple (GATE-1 C): the members_json_source value a posterior-provenance
 # FORECAST_AUTHORITY carries when belief is sourced from the multi-model raw_model_forecasts
 # fusion (via forecast_posteriors) instead of the cold ensemble_snapshots daily extrema. A cert
@@ -224,22 +259,12 @@ def verify_actionable_trade(cert: DecisionCertificate, parents: Iterable[Decisio
     if missing:
         raise CertificateVerificationError(f"actionable trade missing parents: {sorted(missing)}")
     event_type = cert.payload.get("event_type")
-    if event_type in FORECAST_ACTIONABLE_EVENT_TYPES:
-        source_required = {claims.FORECAST_AUTHORITY, claims.CALIBRATION}
-    elif event_type == DAY0_ACTIONABLE_EVENT_TYPE and not (
-        _uses_replacement_probability_authority(cert.payload)
-    ):
-        source_required = {claims.DAY0_AUTHORITY, claims.ABSORBING_BOUNDARY}
-    elif event_type == DAY0_ACTIONABLE_EVENT_TYPE:
-        source_required = {claims.FORECAST_AUTHORITY, claims.CALIBRATION}
-    else:
-        raise CertificateVerificationError(f"unsupported actionable event_type: {event_type!r}")
+    source_required = _actionable_source_parent_types(event_type, cert.payload)
     missing_source = source_required - parent_types
     if missing_source:
         raise CertificateVerificationError(f"actionable trade missing source parents: {sorted(missing_source)}")
-    if event_type in FORECAST_ACTIONABLE_EVENT_TYPES or (
-        event_type == DAY0_ACTIONABLE_EVENT_TYPE
-        and _uses_replacement_probability_authority(cert.payload)
+    if source_required == frozenset(
+        {claims.FORECAST_AUTHORITY, claims.CALIBRATION}
     ):
         _verify_actionable_live_calibration(parent_tuple)
     _verify_replacement_day0_posterior_parent_identity(cert, parent_tuple)

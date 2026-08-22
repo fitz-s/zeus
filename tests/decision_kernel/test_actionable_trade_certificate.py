@@ -19,7 +19,10 @@ from src.decision_kernel.canonicalization import (
 from src.decision_kernel.certificate import ParentEdge, build_certificate
 from src.decision_kernel.errors import CertificateVerificationError
 from src.decision_kernel.ledger import DecisionCertificateLedger
-from src.decision_kernel.verifier import verify_actionable_trade
+from src.decision_kernel.verifier import (
+    _actionable_source_parent_types,
+    verify_actionable_trade,
+)
 from src.engine import event_reactor_adapter as adapter
 from src.strategy.live_inference.live_admission import (
     replacement_probability_bundle_hash,
@@ -219,6 +222,73 @@ def test_actionable_accepts_day0_observation_authority_with_qkernel():
     )
 
     verify_actionable_trade(action, parents)
+
+
+def test_actionable_accepts_typed_remaining_day_without_absorbing_parents():
+    parents, action = actionable_graph(
+        action_payload={
+            "event_type": "DAY0_EXTREME_UPDATED",
+            "probability_authority": "day0_remaining_day_global_probability_v1",
+            "source_match_status": "MATCH",
+            "local_date_status": "MATCH",
+            "station_match_status": "MATCH",
+            "dst_status": "UNAMBIGUOUS",
+            "metric_match_status": "MATCH",
+            "rounding_status": "MATCH",
+            "source_authorized_status": "AUTHORIZED",
+            "live_authority_status": "live",
+            "raw_value": 20.0,
+            "rounded_value": 20,
+            "observation_time": "2026-05-25T11:30:00+00:00",
+            "observation_available_at": "2026-05-25T11:35:00+00:00",
+            "day0_probability_authority": _day0_probability_authority(),
+            "q_source": "day0_remaining_day",
+            "_edli_q_source": "day0_remaining_day",
+            "_edli_day0_q_mode": "remaining_day",
+            "_edli_day0_remaining_models": 3,
+            "_edli_day0_lcb_transform": _day0_lcb_transform(),
+            "qkernel_execution_economics": _day0_qkernel_economics(),
+        },
+    )
+
+    verify_actionable_trade(action, parents)
+
+
+def test_actionable_deterministic_day0_still_requires_absorbing_parents():
+    required = _actionable_source_parent_types(
+        "DAY0_EXTREME_UPDATED",
+        {
+            "probability_authority": "day0_deterministic_bin_payoff_v1",
+            "q_source": "day0_deterministic_bin_payoff",
+            "_edli_q_source": "day0_deterministic_bin_payoff",
+        },
+    )
+
+    assert required == frozenset(
+        {claims.DAY0_AUTHORITY, claims.ABSORBING_BOUNDARY}
+    )
+
+
+@pytest.mark.parametrize(
+    "payload",
+    (
+        {
+            "probability_authority": "day0_remaining_day_global_probability_v1",
+        },
+        {
+            "probability_authority": "day0_remaining_day_global_probability_v1",
+            "q_source": "day0_remaining_day",
+            "_edli_q_source": "day0_deterministic_bin_payoff",
+        },
+    ),
+)
+def test_actionable_incomplete_or_conflicting_remaining_day_type_fails_closed(
+    payload,
+):
+    assert _actionable_source_parent_types(
+        "DAY0_EXTREME_UPDATED",
+        payload,
+    ) == frozenset({claims.DAY0_AUTHORITY, claims.ABSORBING_BOUNDARY})
 
 
 def test_actionable_accepts_degenerate_day0_remaining_window_guarded_q():

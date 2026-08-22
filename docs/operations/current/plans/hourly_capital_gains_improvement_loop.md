@@ -600,6 +600,31 @@
   and global JIT tests plus live command/venue facts are required before any
   order or profit claim.
 
+### 2026-08-22 — statistical Day0 parent policy is atomic through verification (B143)
+
+- **Observed defect:** after B142 produced repeatable stable preflight for the
+  globally selected Shenzhen LOW NO candidate, certificate verification still
+  rejected it before venue submission for missing `DAY0_AUTHORITY` and
+  `ABSORBING_BOUNDARY` parents.
+- **Root cause:** B141 fixed the parent builder, but the downstream verifier only
+  recognized `replacement_0_1` as statistical Day0 authority. It misclassified
+  the exact `day0_remaining_day` +
+  `day0_remaining_day_global_probability_v1` pair as deterministic, creating a
+  module seam where a valid certificate graph could never verify.
+- **Contract:** the verifier recognizes only that exact typed remaining-day pair
+  as statistical and requires its `FORECAST_AUTHORITY` + `CALIBRATION` parents.
+  Conflicting or incomplete q-source fields fail that predicate. Deterministic
+  Day0 continues to require both hard-fact parents before payload validation.
+- **SCOPE / DRAIN / RESET:** scope is one Day0 actionable certificate graph at
+  final command construction. Every new JIT graph drains through current
+  forecast, calibration, probability, quote, Kelly, and risk parents; any
+  malformed authority pair resets to the deterministic fail-closed path. No
+  ranking, q, sizing, price-band, risk, venue, or settlement rule changes.
+- **Acceptance:** a fully typed remaining-day graph verifies without absorbing
+  parents, while a deterministic graph missing them is rejected. Focused
+  certificate and global-JIT tests, then live command/venue facts, are required
+  before any order or profit claim.
+
 ### 2026-08-02 — partial EXIT realized-PnL canonical continuity (hot-fix slice)
 
 - **Scope / seam:** `src/execution/exit_lifecycle.py` emits canonical

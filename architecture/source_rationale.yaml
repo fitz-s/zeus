@@ -3353,6 +3353,10 @@ files:
     zone: K2_runtime
     authority_role: pre_submit_certificate_contract
     why: Typed pre-submit certificate helpers for the sole live submission chain; every certificate binds current executable evidence before venue POST.
+  src/decision_kernel/verifier.py:
+    zone: K2_runtime
+    authority_role: decision_certificate_verifier
+    why: Verifies the complete live certificate graph, including exact separation between statistical Day0 forecast/calibration parents and deterministic Day0 absorbing-truth parents before any execution command can be minted.
   src/engine/native_holdings.py:
     zone: K2_runtime
     authority_role: native_holdings_projection

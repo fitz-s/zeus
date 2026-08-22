@@ -234,7 +234,7 @@ test_trust_policy:
     tests/decision_kernel/test_certificate_hashing.py: {created: "2026-05-25", last_used: "2026-05-25"}
     tests/decision_kernel/test_no_bypass.py: {created: "2026-05-25", last_used: "2026-05-25"}
     tests/decision_kernel/test_certificate_ledger.py: {created: "2026-05-25", last_used: "2026-05-25"}
-    tests/decision_kernel/test_actionable_trade_certificate.py: {created: "2026-05-25", last_used: "2026-07-13", note: "Actionable certificate closure, including symmetric YES/NO admission for a current Day0 replacement posterior bound to the exact posterior and current canonical observation, plus fail-closed posterior mismatch and replacement-calibration routing."}
+    tests/decision_kernel/test_actionable_trade_certificate.py: {created: "2026-05-25", last_used: "2026-08-22", note: "Actionable certificate closure, including symmetric YES/NO admission, exact statistical remaining-Day0 forecast/calibration routing without false absorbing parents, deterministic Day0 absorbing-parent enforcement, current replacement-posterior binding, and fail-closed mismatch handling."}
     tests/decision_kernel/test_execution_command_certificate.py: {created: "2026-05-25", last_used: "2026-05-25"}
     tests/decision_kernel/test_taker_execution_law.py: {created: "2026-05-31", last_used: "2026-05-31"}
     tests/engine/test_event_reactor_no_bypass.py: {created: "2026-05-24", last_used: "2026-08-10", note: "Event-bound no-bypass authority and execution contracts, including current monitor fixtures and refusal of a shaped replacement posterior from an older probability-semantics revision."}
