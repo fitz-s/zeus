@@ -24202,6 +24202,7 @@ def _authenticated_entry_trade_fact_candidates(
             "venue_commands",
             "venue_submission_envelopes",
             "venue_trade_facts",
+            "venue_command_events",
             "position_current",
             "position_events",
             "execution_fact",
@@ -24231,13 +24232,32 @@ def _authenticated_entry_trade_fact_candidates(
             ON pc.position_id = cmd.position_id
          WHERE cmd.intent_kind = 'ENTRY'
            AND cmd.side = 'BUY'
-           AND cmd.state IN (
-                'SUBMITTING',
-                'POST_ACKED',
-                'ACKED',
-                'PARTIAL',
-                'CANCEL_PENDING',
-                'FILLED'
+           AND (
+                cmd.state IN (
+                    'SUBMITTING',
+                    'POST_ACKED',
+                    'ACKED',
+                    'PARTIAL',
+                    'CANCEL_PENDING',
+                    'FILLED'
+                )
+                OR (
+                    cmd.state = 'REVIEW_REQUIRED'
+                    AND EXISTS (
+                        SELECT 1
+                          FROM venue_command_events review
+                         WHERE review.command_id = cmd.command_id
+                           AND review.event_type = 'REVIEW_REQUIRED'
+                           AND review.sequence_no = (
+                                SELECT MAX(latest.sequence_no)
+                                  FROM venue_command_events latest
+                                 WHERE latest.command_id = cmd.command_id
+                                   AND latest.event_type = 'REVIEW_REQUIRED'
+                           )
+                           AND json_extract(review.payload_json, '$.reason') =
+                               'partial_remainder_point_order_filled_without_full_trade_fact'
+                    )
+                )
            )
            AND COALESCE(cmd.venue_order_id, '') != ''
            AND (
@@ -24637,6 +24657,7 @@ def _reconcile_authenticated_entry_trade_fact(
             "terminal FILLED entry lacks complete authenticated fill economics"
         )
     cancel_pending = command_state == CommandState.CANCEL_PENDING.value
+    terminal_fill_review = command_state == CommandState.REVIEW_REQUIRED.value
     if cancel_pending and not complete:
         return "stayed"
     event_type = (
@@ -24735,7 +24756,7 @@ def _reconcile_authenticated_entry_trade_fact(
                 },
             )
         fill_event_payload = payload
-        if cancel_pending:
+        if cancel_pending or terminal_fill_review:
             fill_event_payload = {
                 **payload,
                 "reason": "review_cleared_confirmed_fill",
@@ -28195,6 +28216,12 @@ def _reconcile_passes_short_conn(
             read_conn_factory,
             label="recovery.capital_recovery_fast:snapshot",
         ) as conn:
+            terminal_fill_review_command_ids = {
+                str(row.get("command_id") or "")
+                for row in _authenticated_entry_trade_fact_candidates(conn)
+                if str(row.get("state") or "")
+                == CommandState.REVIEW_REQUIRED.value
+            }
             identity_submit_candidates, identity_submit_deferred = (
                 _identity_bound_submitting_candidates(conn)
             )
@@ -28260,6 +28287,41 @@ def _reconcile_passes_short_conn(
                     obligation_states,
                 ).fetchone()
             )
+        terminal_fill_review_result = None
+        if terminal_fill_review_command_ids:
+            # This is already-authenticated current exposure, not historical
+            # maintenance. Give the exact command-bound fold its own capital
+            # deadline before any venue read or broad recovery query can spend
+            # the cumulative live-tick budget.
+            review_deadline = _capital_deadline()
+            review_conn_factory = _capital_apply_conn_factory(review_deadline)
+
+            def _fold_terminal_fill_reviews(conn):
+                folded = {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
+                for command_id in sorted(terminal_fill_review_command_ids):
+                    result = reconcile_authenticated_entry_trade_facts(
+                        conn,
+                        command_id=command_id,
+                    )
+                    for key in folded:
+                        folded[key] += int(result.get(key, 0) or 0)
+                return folded
+
+            terminal_fill_review_result = _run_capital_pass(
+                "authenticated_terminal_fill_review_fast",
+                lambda: run_db_only_pass(
+                    _fold_terminal_fill_reviews,
+                    conn_factory=review_conn_factory,
+                    label="recovery.authenticated_terminal_fill_review_fast",
+                ),
+                deadline_monotonic=review_deadline,
+            )
+            if terminal_fill_review_result is not None:
+                _accumulate(
+                    summary,
+                    "authenticated_terminal_fill_review_fast",
+                    terminal_fill_review_result,
+                )
         exit_fill_result = None
         if exit_fill_projection_open:
             # A confirmed EXIT fill is already executable capital truth.
@@ -28453,7 +28515,8 @@ def _reconcile_passes_short_conn(
             # Do not let unrelated cancel/terminal candidates re-enter the
             # account-wide snapshot or historical point sweep after it.
             return (
-                exit_fill_result
+                terminal_fill_review_result
+                or exit_fill_result
                 or preexisting_terminal_result
                 or identity_result
                 or terminal_late_fill_result
@@ -28461,7 +28524,8 @@ def _reconcile_passes_short_conn(
             )
         if not cancel_candidates and not terminal_candidates and not partial_candidates:
             return (
-                exit_fill_result
+                terminal_fill_review_result
+                or exit_fill_result
                 or preexisting_terminal_result
                 or stale_terminal_finding_result
                 or terminal_late_fill_result
@@ -28609,7 +28673,8 @@ def _reconcile_passes_short_conn(
                     terminal_result,
                 )
         return (
-            exit_fill_result
+            terminal_fill_review_result
+            or exit_fill_result
             or preexisting_terminal_result
             or stale_terminal_finding_result
             or terminal_late_fill_result

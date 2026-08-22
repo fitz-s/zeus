@@ -2926,3 +2926,31 @@ publication barrier.
   `git diff --check` pass. Runtime closeout requires exact loaded SHA and a
   future recovered ENTRY whose position event carries the same receipt id as
   its verified EDLI certificate.
+
+## B134 — Current confirmed terminal-fill review must drain before broad recovery
+
+- Live evidence: Chicago command `5b4f659b33104cf6` reached
+  `REVIEW_REQUIRED` after its point order reported the full `41 @ 0.39`
+  MATCHED while the authenticated CONFIRMED trade fact arrived later. The
+  high-priority authenticated-entry pass excluded every `REVIEW_REQUIRED`
+  command; the only compatible clearance sat after broader work and repeatedly
+  lost the live-tick DB budget to held-monitor contention. Canonical position
+  economics therefore remained on the prior 22-share projection while the
+  allocator repeatedly reserved the reactor for the unresolved side effect.
+- Decision: admit only the exact
+  `partial_remainder_point_order_filled_without_full_trade_fact` review shape
+  into the existing high-priority authenticated-entry candidate set. The same
+  atomic fold must verify exact command/order/price/size facts, advance the
+  command to FILLED, and project the entry event plus execution fact. Other
+  review reasons remain excluded and operator-visible.
+- SCOPE: one ENTRY/BUY command with that exact latest review reason and a
+  canonical authenticated CONFIRMED fact. DRAIN: the next local live-tick pass,
+  before venue I/O or broad historical repair. RESET: the atomic
+  `FILL_CONFIRMED` event and owned-position projection remove the unknown side
+  effect; missing or mismatched facts keep REVIEW_REQUIRED.
+- Files authorized: `src/execution/command_recovery.py`,
+  `tests/test_command_recovery.py`, `architecture/test_topology.yaml`, and this
+  plan. Acceptance: a deterministic 41-share GTC case advances
+  REVIEW_REQUIRED -> FILLED in `reconcile_authenticated_entry_trade_facts`,
+  projects exact `$15.99` cost, remains limited to the named review reason, and
+  passes focused command-recovery plus planning/registry checks.

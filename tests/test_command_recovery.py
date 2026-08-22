@@ -1966,6 +1966,73 @@ def test_live_tick_projects_confirmed_exit_before_general_budget_defer(monkeypat
     assert summary["db_budget_deferred_at"] == "review_required_matched_submit_trade_fact"
 
 
+def test_live_tick_terminal_fill_review_has_own_capital_deadline(monkeypatch):
+    from src.execution import command_recovery
+    from src.execution import venue_sync_contract
+
+    calls = []
+    now = [0.0]
+
+    def _conn_factory():
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    def _candidates(_conn, *, command_id=None):
+        if command_id is not None:
+            return [{"command_id": command_id, "state": "REVIEW_REQUIRED"}]
+        return [{"command_id": "cmd-current-review", "state": "REVIEW_REQUIRED"}]
+
+    def _authenticated(_conn, *, command_id=None):
+        calls.append(("authenticated_terminal_fill_review_fast", command_id))
+        return {"scanned": 1, "advanced": 1, "stayed": 0, "errors": 0}
+
+    def _later_review(_conn):
+        calls.append(("review_required_matched_submit_trade_fact", None))
+        now[0] = 1.0
+        raise sqlite3.OperationalError("interrupted")
+
+    monkeypatch.setattr(venue_sync_contract, "default_trade_conn_factory", _conn_factory)
+    monkeypatch.setattr(command_recovery.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(
+        command_recovery,
+        "_authenticated_entry_trade_fact_candidates",
+        _candidates,
+    )
+    monkeypatch.setattr(
+        command_recovery,
+        "reconcile_authenticated_entry_trade_facts",
+        _authenticated,
+    )
+    monkeypatch.setattr(
+        command_recovery,
+        "reconcile_review_required_matched_submit_trade_facts",
+        _later_review,
+    )
+
+    summary = {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
+    command_recovery._reconcile_passes_short_conn(
+        MagicMock(),
+        summary,
+        "2026-08-22T09:27:54+00:00",
+        scope="live_tick",
+    )
+
+    assert calls == [
+        ("authenticated_terminal_fill_review_fast", "cmd-current-review"),
+        ("review_required_matched_submit_trade_fact", None),
+    ]
+    assert summary["authenticated_terminal_fill_review_fast"] == {
+        "scanned": 1,
+        "advanced": 1,
+        "stayed": 0,
+        "errors": 0,
+    }
+    assert summary["db_budget_deferred_at"] == (
+        "review_required_matched_submit_trade_fact"
+    )
+
+
 def test_recorded_exit_projection_candidate_excludes_completed_partial_reduction():
     from src.execution import command_recovery
 
@@ -5207,6 +5274,125 @@ class TestAuthenticatedEntryTradeFactProjection:
             """,
             (position_id, order_id),
         ).fetchone()[0] == 1
+
+    def test_confirmed_terminal_fill_review_preempts_broad_recovery(self, conn):
+        """A late confirmed fill clears its exact point-order review locally."""
+        from src.execution.command_recovery import (
+            reconcile_authenticated_entry_trade_facts,
+        )
+        from src.state.venue_command_repo import append_event
+
+        command_id = "cmd-authenticated-terminal-review"
+        position_id = "pos-authenticated-terminal-review"
+        order_id = "ord-authenticated-terminal-review"
+        token_id = "tok-authenticated-terminal-review"
+        _insert(
+            conn,
+            command_id=command_id,
+            position_id=position_id,
+            decision_id="dec-authenticated-terminal-review",
+            token_id=token_id,
+            order_type="GTC",
+            size=41.0,
+            price=0.39,
+        )
+        _advance_to_partial(
+            conn,
+            command_id=command_id,
+            venue_order_id=order_id,
+        )
+        _seed_pending_entry_projection(
+            conn,
+            position_id=position_id,
+            command_id=command_id,
+            order_id=order_id,
+            token_id=token_id,
+        )
+        append_event(
+            conn,
+            command_id=command_id,
+            event_type="REVIEW_REQUIRED",
+            occurred_at="2026-04-26T00:08:00Z",
+            payload={
+                "reason": (
+                    "partial_remainder_point_order_filled_without_full_trade_fact"
+                ),
+                "venue_order_id": order_id,
+                "point_order_status": "MATCHED",
+            },
+        )
+        _append_confirmed_trade_fact(
+            conn,
+            command_id=command_id,
+            order_id=order_id,
+            trade_id="trade-authenticated-terminal-review",
+            filled_size="41",
+            fill_price="0.39",
+        )
+
+        summary = reconcile_authenticated_entry_trade_facts(
+            conn,
+            command_id=command_id,
+        )
+
+        assert summary == {"scanned": 1, "advanced": 1, "stayed": 0, "errors": 0}
+        assert _get_state(conn, command_id) == "FILLED"
+        event = _get_events(conn, command_id)[-1]
+        payload = json.loads(event["payload_json"])
+        assert event["event_type"] == "FILL_CONFIRMED"
+        assert payload["reason"] == "review_cleared_confirmed_fill"
+        assert payload["proof_class"] == "authenticated_trade_fact_full_fill"
+        position = conn.execute(
+            "SELECT shares, cost_basis_usd, order_id, order_status "
+            "FROM position_current WHERE position_id = ?",
+            (position_id,),
+        ).fetchone()
+        assert dict(position) == {
+            "shares": 41.0,
+            "cost_basis_usd": 15.99,
+            "order_id": order_id,
+            "order_status": "filled",
+        }
+
+    def test_unrelated_fill_review_remains_operator_visible(self, conn):
+        """Confirmed facts do not clear a differently typed review boundary."""
+        from src.execution.command_recovery import (
+            reconcile_authenticated_entry_trade_facts,
+        )
+        from src.state.venue_command_repo import append_event
+
+        command_id = "cmd-authenticated-unrelated-review"
+        order_id = "ord-authenticated-unrelated-review"
+        _insert(
+            conn,
+            command_id=command_id,
+            position_id="pos-authenticated-unrelated-review",
+            token_id="tok-authenticated-unrelated-review",
+            size=8.0,
+            price=0.42,
+        )
+        _advance_to_acked(conn, command_id=command_id, venue_order_id=order_id)
+        append_event(
+            conn,
+            command_id=command_id,
+            event_type="REVIEW_REQUIRED",
+            occurred_at="2026-04-26T00:08:00Z",
+            payload={"reason": "operator_identity_dispute"},
+        )
+        _append_confirmed_trade_fact(
+            conn,
+            command_id=command_id,
+            order_id=order_id,
+            trade_id="trade-authenticated-unrelated-review",
+            filled_size="8",
+            fill_price="0.42",
+        )
+
+        assert reconcile_authenticated_entry_trade_facts(
+            conn,
+            command_id=command_id,
+        ) == {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
+        assert _get_state(conn, command_id) == "REVIEW_REQUIRED"
 
     def test_price_improved_fak_overfill_bootstraps_missing_position(
         self, conn, monkeypatch
