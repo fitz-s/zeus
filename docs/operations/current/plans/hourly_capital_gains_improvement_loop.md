@@ -518,6 +518,35 @@
   tests and live risk-action expiry precede any order claim. Capital success
   still requires venue facts, settlements, and the strict evaluator.
 
+### 2026-08-22 — fast-residual probability identity survives JIT reconstruction (B140)
+
+- **Observed defect:** after B139 expired the Day0 blanket gate, the global
+  auction repeatedly selected a positive-capital Singapore NO candidate, but
+  preflight alternated between probability supersession and
+  `GLOBAL_DAY0_PROVISIONAL_POSTERIOR_IDENTITY_MISMATCH`. The canonical posterior
+  and 31C fast observation were unchanged across the failed attempts.
+- **Root cause:** the replacement posterior correctly bound the composite
+  same-station fast conditioning (31C), while local proof reconstruction kept
+  deterministic payoff truth on the slower WU settlement channel (29C). It then
+  compared that settlement payload back to the statistical posterior identity,
+  making the two deliberately distinct truth planes appear contradictory.
+- **Contract:** when a current Day0 binding carries validated
+  `statistical_probability_conditioning`, provisional posterior identity uses
+  that Celsius conditioning tuple. The top-level payload remains settlement
+  truth, and `_global_day0_execution_payload` must still reproduce the fast
+  value, unit, station, and causal clock from current canonical evidence before
+  the tuple can reach this check. Without the typed nested conditioning, the
+  existing top-level identity rule remains unchanged and fail closed.
+- **SCOPE / DRAIN / RESET:** scope is one provisional fast-residual family's
+  proof reconstruction and JIT preflight. The next current probability build
+  drains it by re-reading both settlement and physical facts; a changed fast
+  value/clock or malformed conditioning resets to the existing mismatch/no-trade
+  result. No quote, price band, sizing, risk, settlement, or venue gate changes.
+- **Acceptance:** a slower 29C settlement payload paired with its validated 31C
+  statistical conditioning matches the 31C posterior; changing that nested
+  conditioning still raises the exact identity mismatch. Focused probability
+  tests and live preflight receipts precede any order or profit claim.
+
 ### 2026-08-02 — partial EXIT realized-PnL canonical continuity (hot-fix slice)
 
 - **Scope / seam:** `src/execution/exit_lifecycle.py` emits canonical

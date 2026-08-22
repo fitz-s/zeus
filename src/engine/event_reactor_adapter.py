@@ -32909,21 +32909,46 @@ def _assert_provisional_day0_replacement_bundle(
     if not isinstance(provisional, Mapping):
         raise ValueError("GLOBAL_DAY0_PROVISIONAL_POSTERIOR_IDENTITY_MISSING")
 
+    identity_payload = payload
+    identity_value_is_celsius = False
+    binding = payload.get("_edli_global_day0_binding")
+    if isinstance(binding, Mapping):
+        statistical_conditioning = binding.get(
+            "statistical_probability_conditioning"
+        )
+        if isinstance(statistical_conditioning, Mapping):
+            # The top-level Day0 payload deliberately remains settlement-channel
+            # truth.  A fast-residual posterior is instead identified by its
+            # separately validated statistical conditioning.  Comparing that
+            # posterior to the slower settlement extreme makes one coherent
+            # witness contradict itself during local-proof reconstruction.
+            identity_payload = statistical_conditioning
+            identity_value_is_celsius = True
     expected_source = str(
-        payload.get("settlement_source")
-        or payload.get("observation_source")
-        or payload.get("source")
+        identity_payload.get("settlement_source")
+        or identity_payload.get("observation_source")
+        or identity_payload.get("source")
         or ""
     ).strip()
-    expected_time = str(payload.get("observation_time") or "").strip()
+    expected_time = str(identity_payload.get("observation_time") or "").strip()
     metric = str(
-        payload.get("metric") or payload.get("temperature_metric") or ""
+        identity_payload.get("metric")
+        or identity_payload.get("temperature_metric")
+        or payload.get("metric")
+        or payload.get("temperature_metric")
+        or ""
     ).strip().lower()
-    raw_value = payload.get("high_so_far" if metric == "high" else "low_so_far")
+    raw_value = identity_payload.get(
+        "high_so_far" if metric == "high" else "low_so_far"
+    )
     if raw_value in (None, ""):
-        raw_value = payload.get("raw_value")
+        raw_value = identity_payload.get("raw_value")
     if raw_value in (None, ""):
-        raw_value = payload.get("observed_extreme_native")
+        raw_value = identity_payload.get(
+            "observed_extreme_c"
+            if identity_value_is_celsius
+            else "observed_extreme_native"
+        )
     try:
         expected_value_c = float(raw_value)
         observed_value_c = float(provisional["observed_extreme_c"])
@@ -32931,7 +32956,10 @@ def _assert_provisional_day0_replacement_bundle(
         raise ValueError(
             "GLOBAL_DAY0_PROVISIONAL_POSTERIOR_IDENTITY_MISSING"
         ) from None
-    if str(payload.get("settlement_unit") or "C").strip().upper() == "F":
+    if (
+        not identity_value_is_celsius
+        and str(payload.get("settlement_unit") or "C").strip().upper() == "F"
+    ):
         expected_value_c = (expected_value_c - 32.0) * 5.0 / 9.0
     if (
         provisional.get("active") is not True

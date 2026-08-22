@@ -866,6 +866,47 @@ def test_global_provisional_day0_rejects_observation_advance_after_bundle_read(
     observations.close()
 
 
+def test_provisional_identity_uses_statistical_conditioning_not_settlement_bound() -> None:
+    provisional = {
+        "active": True,
+        "source": "wu_api+same_station_fast_tail",
+        "observation_time": "2026-08-22T02:00:56+00:00",
+        "observed_extreme_c": 31.0,
+        "support_truncation": False,
+    }
+    bundle = SimpleNamespace(
+        provenance_json={"day0_provisional_observation": provisional}
+    )
+    payload = {
+        "metric": "high",
+        "settlement_source": "wu_icao_history",
+        "observation_time": "2026-08-22T01:00:00+00:00",
+        "high_so_far": 29.0,
+        "settlement_unit": "C",
+        "_edli_global_day0_binding": {
+            "statistical_probability_conditioning": {
+                **provisional,
+                "metric": "high",
+                "unit": "C",
+            }
+        },
+    }
+
+    adapter._assert_provisional_day0_replacement_bundle(bundle, payload)
+
+    payload["_edli_global_day0_binding"]["statistical_probability_conditioning"] = {
+        **provisional,
+        "metric": "high",
+        "unit": "C",
+        "observed_extreme_c": 30.0,
+    }
+    with pytest.raises(
+        ValueError,
+        match="GLOBAL_DAY0_PROVISIONAL_POSTERIOR_IDENTITY_MISMATCH",
+    ):
+        adapter._assert_provisional_day0_replacement_bundle(bundle, payload)
+
+
 def test_replacement_yes_lcb_ignores_aifs_provenance_fallback() -> None:
     bundle = SimpleNamespace(
         q_lcb=None,
