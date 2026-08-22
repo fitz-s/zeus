@@ -2115,11 +2115,19 @@ def _worktree(cfg: Mapping[str, Any], incident_id: str) -> Path:
     if listing.returncode != 0 or not registered or path == ROOT:
         raise RuntimeError("configured repair worktree is not a registered non-live worktree")
     dirty = _run_capture(["git", "status", "--porcelain", "--untracked-files=all"], cwd=path)
-    current = _run_capture(["git", "branch", "--show-current"], cwd=path)
     if dirty.returncode != 0 or dirty.stdout.strip():
         raise RuntimeError("configured repair worktree is dirty")
-    if current.returncode != 0 or current.stdout.strip() != branch:
-        raise RuntimeError(f"configured repair worktree must already own {branch}")
+    current = _run_capture(["git", "branch", "--show-current"], cwd=path)
+    if current.returncode != 0:
+        raise RuntimeError("configured repair worktree branch is unreadable")
+    if current.stdout.strip() != branch:
+        exists = _run_capture(["git", "show-ref", "--verify", "--quiet", f"refs/heads/{branch}"], cwd=ROOT)
+        switch = ["git", "switch", branch] if exists.returncode == 0 else [
+            "git", "switch", "-c", branch, str(cfg["delivery"]["base_branch"])
+        ]
+        changed = _run_capture(switch, cwd=path)
+        if changed.returncode != 0:
+            raise RuntimeError(f"managed repair branch provisioning failed: {changed.stderr.strip()}")
     return path
 
 
