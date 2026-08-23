@@ -323,7 +323,7 @@ def test_settlement_identity_survives_projection_and_payload_enrichment(
     assert len(rows) == 1
 
 
-def test_new_terminal_event_identity_is_not_over_deduplicated(
+def test_repeated_chain_mirror_settled_events_are_exactly_once(
     cfg: dict, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _settled_full_loss(cfg, payload={"outcome": 0, "payout_id": "payout-1"})
@@ -334,9 +334,33 @@ def test_new_terminal_event_identity_is_not_over_deduplicated(
         "2026-08-22T11:00:00+00:00", phase_before="settled", phase_after="settled",
         payload={"outcome": 0, "payout_id": "payout-2"},
     )
-    assert len(loop.detect(cfg)) == 1
+    assert loop.detect(cfg) == []
     rows = [row for row in _incidents(cfg) if row["crossing_kind"] == "settlement_full_loss"]
-    assert len(rows) == 2
+    assert len(rows) == 1
+
+
+def test_canonical_settlement_correction_revises_existing_loss_incident(
+    cfg: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _settled_full_loss(cfg, payload={"outcome": 0})
+    monkeypatch.setattr(loop, "_entry_execution_fill_aggregate", _command_dedup_basis)
+    assert len(loop.detect(cfg)) == 1
+    with sqlite3.connect(cfg["paths"]["trades_db"]) as conn:
+        conn.execute(
+            "UPDATE position_events SET payload_json=? WHERE event_id='settled-p-settled'",
+            (json.dumps({"outcome": 1}),),
+        )
+    assert loop.detect(cfg) == []
+    with loop.memory(cfg) as mem:
+        status = mem.execute(
+            "SELECT status FROM incidents WHERE crossing_kind='settlement_full_loss'"
+        ).fetchone()[0]
+        reason = mem.execute(
+            "SELECT reason FROM incident_transitions "
+            "WHERE reason='canonical_settlement_no_longer_full_loss'"
+        ).fetchone()[0]
+    assert status == "observing"
+    assert reason == "canonical_settlement_no_longer_full_loss"
 
 
 @pytest.mark.parametrize(

@@ -1064,6 +1064,19 @@ def _entry_execution_fill_aggregate(
     return dict(aggregate) if isinstance(aggregate, Mapping) else None
 
 
+def _settlement_economic_identity(
+    position: Mapping[str, Any], payload: Mapping[str, Any]
+) -> str | None:
+    settlement_price = _float(position.get("settlement_price"))
+    if settlement_price is None:
+        settlement_price = _float(
+            payload.get("settlement_price", payload.get("outcome"))
+        )
+    if settlement_price is None:
+        return None
+    return digest("settlement_economics", settlement_price)
+
+
 def _settlement_full_loss_candidate(
     trades: sqlite3.Connection,
     position: Mapping[str, Any],
@@ -1113,13 +1126,6 @@ def _settlement_full_loss_candidate(
         )
     if realized >= 0 or -realized < _FULL_LOSS_RATIO * basis:
         return None
-    terminal_identity = str(terminal_row.get("event_id") or "").strip()
-    if not terminal_identity:
-        terminal_identity = str(
-            payload.get("payout_id") or payload.get("settlement_id") or ""
-        ).strip()
-    if not terminal_identity:
-        return None
     command_ids = aggregate.get("execution_fact_command_ids")
     if isinstance(command_ids, (list, tuple)) and command_ids:
         entry_identity = digest(
@@ -1127,10 +1133,12 @@ def _settlement_full_loss_candidate(
         )
     else:
         entry_identity = digest("entry_basis", basis)
-    # Event identity is the immutable terminal fact anchor.  Do not hash the
-    # whole payload: later source/payout enrichment must revise one incident,
-    # not create a new memory/run for the same settlement.
-    payout_identity = digest("settlement_terminal", terminal_identity)
+    # Chain mirrors may emit many SETTLED rows for one terminal fact.  Anchor
+    # on stable economics only; event IDs, timestamps, source and enrichment
+    # are projection metadata, not a new loss.
+    payout_identity = _settlement_economic_identity(position, payload)
+    if payout_identity is None:
+        return None
     evidence_id = digest(
         position_id, "settlement_full_loss", payout_identity, entry_identity
     )
@@ -1180,6 +1188,38 @@ def _insert_settlement_full_loss_incident(
     return incident_id
 
 
+def _revise_settlement_non_loss_incidents(
+    mem: sqlite3.Connection,
+    trades: sqlite3.Connection,
+    position: Mapping[str, Any],
+) -> None:
+    """Retire an existing loss incident when canonical settlement corrects it."""
+
+    terminal = trades.execute(
+        "SELECT payload_json FROM position_events WHERE position_id=? AND event_type='SETTLED' "
+        "ORDER BY sequence_no DESC,occurred_at DESC LIMIT 1",
+        (position.get("position_id"),),
+    ).fetchone()
+    if terminal is None or _settlement_economic_identity(
+        position, read_json_text(str(terminal[0] or "{}"))
+    ) is None:
+        return
+    rows = mem.execute(
+        "SELECT incident_id,stage FROM incidents WHERE position_id=? "
+        "AND kind='hard' AND crossing_kind='settlement_full_loss' "
+        "AND status IN ('queued','running','retry_pending')",
+        (position.get("position_id"),),
+    ).fetchall()
+    for row in rows:
+        transition(
+            mem,
+            str(row["incident_id"]),
+            str(row["stage"]),
+            reason="canonical_settlement_no_longer_full_loss",
+            status="observing",
+        )
+
+
 def _settlement_backfill_fingerprint(position: Mapping[str, Any]) -> str:
     return digest(
         position.get("position_id"), position.get("settled_at"),
@@ -1220,11 +1260,10 @@ def _settlement_backfill_positions(
             "ORDER BY sequence_no DESC,occurred_at DESC LIMIT 1",
             (position["position_id"],),
         ).fetchone()
+        payload = read_json_text(str(terminal[2] or "{}")) if terminal else {}
         fingerprint = digest(
             _settlement_backfill_fingerprint(position),
-            terminal[0] if terminal else "",
-            terminal[1] if terminal else "",
-            terminal[2] if terminal else "",
+            _settlement_economic_identity(position, payload) or "",
         )
         state = mem.execute(
             "SELECT fingerprint,completed FROM settlement_backfill_state WHERE position_id=?",
@@ -1457,6 +1496,8 @@ def detect(cfg: Mapping[str, Any]) -> list[str]:
                 )
                 if incident_id:
                     created.append(incident_id)
+            else:
+                _revise_settlement_non_loss_incidents(mem, trades, position)
             mem.execute(
                 "UPDATE controller_debt SET status='resolved',reason='settlement_basis_complete',"
                 "updated_at=? WHERE debt_id=?",
