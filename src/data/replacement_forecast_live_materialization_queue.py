@@ -140,6 +140,7 @@ class _PendingMaterialization:
     request_payload: Mapping[str, object] | None
     marker_path: Path | None
     attempt_fingerprint: str | None
+    timeout_seconds: float | None = None
 
 
 @dataclass(frozen=True)
@@ -177,14 +178,20 @@ def _materialization_subprocess_timeout_seconds() -> float:
     return value
 
 
-def _run_command(argv: Sequence[str]) -> subprocess.CompletedProcess[str]:
+def _run_command(
+    argv: Sequence[str], *, timeout_seconds: float | None = None
+) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         list(argv),
         cwd=PROJECT_ROOT,
         check=False,
         capture_output=True,
         text=True,
-        timeout=_materialization_subprocess_timeout_seconds(),
+        timeout=(
+            _materialization_subprocess_timeout_seconds()
+            if timeout_seconds is None
+            else max(0.001, float(timeout_seconds))
+        ),
     )
 
 
@@ -257,7 +264,7 @@ def _run_materialization_item(
     item: _PendingMaterialization,
 ) -> subprocess.CompletedProcess[str]:
     try:
-        return _run_command(item.command)
+        return _run_command(item.command, timeout_seconds=item.timeout_seconds)
     except subprocess.TimeoutExpired as exc:
         return _timeout_result(item.command, exc)
     except Exception as exc:
@@ -503,133 +510,33 @@ def _write_sidecar(path: Path, payload: dict[str, object]) -> None:
     )
 
 
-def _read_lock_holder_pid(lock_path: Path) -> int | None:
-    """Parse ``pid=<n>`` from a queue lock file; None if missing/unreadable/garbled."""
-    try:
-        content = lock_path.read_text(encoding="utf-8", errors="replace")
-    except (FileNotFoundError, OSError):
-        return None
-    marker = "pid="
-    idx = content.find(marker)
-    if idx < 0:
-        return None
-    digits = ""
-    for ch in content[idx + len(marker):]:
-        if ch.isdigit():
-            digits += ch
-        else:
-            break
-    return int(digits) if digits else None
-
-
-def _pid_is_alive(pid: int) -> bool:
-    """True iff a process with this PID currently exists (signal-0 liveness probe)."""
-    if pid <= 0:
-        return False
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        # Exists but owned by another user — still a live holder.
-        return True
-    return True
-
-
-def _archive_stale_lock(lock_path: Path, *, holder_pid: int | None) -> Path | None:
-    """Move an orphaned lock into ``archived_stale_locks/`` (audit trail; never silent-delete)."""
-    qdir = lock_path.parent / "archived_stale_locks"
-    qdir.mkdir(parents=True, exist_ok=True)
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    pid_tag = holder_pid if holder_pid is not None else "unknown"
-    dest = qdir / f"{lock_path.name.lstrip('.')}.{stamp}.pid{pid_tag}"
-    try:
-        os.replace(lock_path, dest)
-        return dest
-    except FileNotFoundError:
-        return None  # another acquirer cleared it first — fine
-
-
 @contextmanager
 def _queue_lock(lock_path: Path, *, wait_seconds: float = 0.0):
-    """Exclusive single-writer lock for the materialization queue, with STALE-LOCK SELF-HEAL.
-
-    ANTIBODY (rules 5 + 3 — make the orphaned-lock stall UNCONSTRUCTABLE): the lock is released
-    only by this contextmanager's ``finally`` unlink. A holder process SIGKILL'd mid-run skips
-    ``finally`` entirely, so its lock file would block every future acquirer FOREVER (the ~12h
-    live stall: materializer dark -> readiness expired -> reactor READINESS_EXPIRED -> zero
-    trades). On ``FileExistsError`` we now probe the recorded holder PID: a DEAD (or
-    unparseable) holder means the lock is orphaned, so we archive it for audit and steal the
-    lock by retrying the exclusive create once; a genuinely ALIVE holder still blocks (no
-    concurrent double-run). ``fd`` stays None on the blocked path, so we never unlink a live
-    holder's lock.
-    """
+    """Acquire a persistent pathname lock whose ownership is the kernel flock."""
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     fd: int | None = None
     deadline = time.monotonic() + max(0.0, float(wait_seconds))
     try:
-        while fd is None:
+        fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR)
+        while True:
             try:
-                fd = os.open(
-                    str(lock_path),
-                    os.O_CREAT | os.O_EXCL | os.O_RDWR,
-                )
                 fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except FileExistsError:
-                try:
-                    candidate_fd = os.open(str(lock_path), os.O_RDWR)
-                except FileNotFoundError:
-                    continue
-                try:
-                    try:
-                        fcntl.flock(
-                            candidate_fd,
-                            fcntl.LOCK_EX | fcntl.LOCK_NB,
-                        )
-                    except BlockingIOError:
-                        if time.monotonic() >= deadline:
-                            yield False
-                            return
-                        time.sleep(
-                            min(0.01, max(0.0, deadline - time.monotonic()))
-                        )
-                        continue
-                    holder_pid = _read_lock_holder_pid(lock_path)
-                    if holder_pid is not None and _pid_is_alive(holder_pid):
-                        if time.monotonic() >= deadline:
-                            yield False
-                            return
-                        time.sleep(
-                            min(0.01, max(0.0, deadline - time.monotonic()))
-                        )
-                        continue
-                    _archive_stale_lock(lock_path, holder_pid=holder_pid)
-                finally:
-                    try:
-                        fcntl.flock(candidate_fd, fcntl.LOCK_UN)
-                    except OSError:
-                        pass
-                    os.close(candidate_fd)
-                continue
+                break
             except BlockingIOError:
-                # The just-created path is already flocked by this process; a
-                # failure here is only possible on an unusual platform.
-                if fd is not None:
-                    os.close(fd)
-                    fd = None
                 if time.monotonic() >= deadline:
                     yield False
                     return
                 time.sleep(min(0.01, max(0.0, deadline - time.monotonic())))
-            if fd is not None:
-                os.write(
-                    fd,
-                    f"pid={os.getpid()} acquired_at={datetime.now(timezone.utc).isoformat()}\n".encode(
-                        "utf-8"
-                    ),
-                )
-                yield True
-                return
+        os.ftruncate(fd, 0)
+        os.lseek(fd, 0, os.SEEK_SET)
+        os.write(
+            fd,
+            f"pid={os.getpid()} acquired_at={datetime.now(timezone.utc).isoformat()}\n".encode(
+                "utf-8"
+            ),
+        )
+        os.fsync(fd)
+        yield True
     finally:
         if fd is not None:
             try:
@@ -637,10 +544,6 @@ def _queue_lock(lock_path: Path, *, wait_seconds: float = 0.0):
             except OSError:
                 pass
             os.close(fd)
-            try:
-                lock_path.unlink()
-            except FileNotFoundError:
-                pass
 
 
 def _load_seed_json(path: Path) -> dict[str, object]:
@@ -2931,6 +2834,7 @@ def process_replacement_forecast_live_materialization_queue(
     runner: Runner | None = None,
     discover: bool = True,
     lane: str = MATERIALIZATION_LANE_ALL,
+    deadline_monotonic: float | None = None,
 ) -> ReplacementForecastLiveMaterializationQueueReport:
     """Process local materialization request JSON files.
 
@@ -2953,9 +2857,29 @@ def process_replacement_forecast_live_materialization_queue(
         MATERIALIZATION_LANE_BACKGROUND,
     }:
         raise ValueError(f"unknown materialization lane: {lane}")
+    remaining = (
+        None
+        if deadline_monotonic is None
+        else max(0.0, float(deadline_monotonic) - time.monotonic())
+    )
+    if remaining is not None and remaining <= 0.0:
+        return ReplacementForecastLiveMaterializationQueueReport(
+            status="NO_REQUESTS",
+            request_dir=str(request_path),
+            processed_dir=str(processed_path),
+            failed_dir=str(failed_path),
+            processed_count=0,
+            failed_count=0,
+            skipped_count=0,
+            reason_codes=("REPLACEMENT_LIVE_MATERIALIZATION_PRIORITY_DEADLINE",),
+        )
     with _queue_lock(
         request_path.parent / ".materialization_queue.lock",
-        wait_seconds=1.0 if lane == MATERIALIZATION_LANE_PRIORITY else 0.0,
+        wait_seconds=(
+            min(1.0, remaining)
+            if lane == MATERIALIZATION_LANE_PRIORITY and remaining is not None
+            else (1.0 if lane == MATERIALIZATION_LANE_PRIORITY else 0.0)
+        ),
     ) as lock_acquired:
         if not lock_acquired:
             return ReplacementForecastLiveMaterializationQueueReport(
@@ -2995,6 +2919,7 @@ def process_replacement_forecast_live_materialization_queue(
             runner=runner,
             marker_dir=request_path.parent / "blocked_attempts",
             retry_path=request_path,
+            deadline_monotonic=deadline_monotonic,
         )
     finally:
         _remove_empty_claim_batch(claim.batch_path)
@@ -3043,6 +2968,7 @@ def _process_claimed_materialization_batch(
     runner: Runner | None = None,
     marker_dir: Path | None = None,
     retry_path: Path | None = None,
+    deadline_monotonic: float | None = None,
 ) -> ReplacementForecastLiveMaterializationQueueReport:
     if not request_path.exists():
         return ReplacementForecastLiveMaterializationQueueReport(
@@ -3235,6 +3161,17 @@ def _process_claimed_materialization_batch(
                 request_payload=request_payload,
                 marker_path=marker_path,
                 attempt_fingerprint=attempt_fingerprint,
+                timeout_seconds=(
+                    None
+                    if deadline_monotonic is None
+                    else max(
+                        0.001,
+                        min(
+                            _materialization_subprocess_timeout_seconds(),
+                            deadline_monotonic - time.monotonic(),
+                        ),
+                    )
+                ),
             )
         )
     if runner is None:

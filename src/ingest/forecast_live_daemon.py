@@ -1226,6 +1226,7 @@ def _replacement_forecast_materialize_lane(
     *,
     lane: str,
     seed_limit: int,
+    deadline_monotonic: float | None = None,
 ) -> dict[str, object]:
     """Run one bounded durable queue lane without sharing the background slot."""
     from src.data.replacement_forecast_live_materialization_queue import (
@@ -1246,6 +1247,7 @@ def _replacement_forecast_materialize_lane(
         limit=1,
         discover=False,
         lane=lane,
+        deadline_monotonic=deadline_monotonic,
     )
     result = report.as_dict()
     logger.info("replacement forecast materialization lane=%s report=%s", lane, result)
@@ -1259,17 +1261,33 @@ def _replacement_forecast_priority_watch(
 ) -> None:
     """Claim late priority arrivals for one bounded background execution window."""
     deadline = time.monotonic() + _MATERIALIZATION_PRIORITY_WATCH_MAX_SECONDS
+    wait_event = threading.Event()
     while True:
-        _replacement_forecast_materialize_lane(
-            cfg,
-            lane="priority",
-            # A seed can arrive after the poll began; never freeze this at the
-            # initial queue snapshot.
-            seed_limit=1,
-        )
-        if background_done.is_set() or time.monotonic() >= deadline:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0.0:
             return
-        background_done.wait(_MATERIALIZATION_PRIORITY_WATCH_INTERVAL_SECONDS)
+        try:
+            _replacement_forecast_materialize_lane(
+                cfg,
+                lane="priority",
+                # A seed can arrive after the poll began; never freeze this at
+                # the initial queue snapshot.
+                seed_limit=1,
+                deadline_monotonic=deadline,
+            )
+        except Exception:
+            logger.warning(
+                "replacement forecast priority watcher attempt failed",
+                exc_info=True,
+            )
+        remaining = deadline - time.monotonic()
+        if remaining <= 0.0:
+            return
+        # The background event is intentionally not a termination condition:
+        # the hard wall-clock window owns a final priority rescan independently.
+        wait_event.wait(
+            min(_MATERIALIZATION_PRIORITY_WATCH_INTERVAL_SECONDS, remaining)
+        )
 
 
 def _replacement_forecast_queue_pending(

@@ -2377,10 +2377,21 @@ def test_forecast_poll_starts_reserved_and_background_lanes_together(monkeypatch
         "_replacement_forecast_inflight_pending",
         lambda _cfg: False,
     )
+    monkeypatch.setattr(
+        forecast_live_daemon,
+        "_MATERIALIZATION_PRIORITY_WATCH_INTERVAL_SECONDS",
+        0.001,
+    )
+    monkeypatch.setattr(
+        forecast_live_daemon,
+        "_MATERIALIZATION_PRIORITY_WATCH_MAX_SECONDS",
+        0.05,
+    )
 
-    def run_lane(_cfg, *, lane, seed_limit):
+    def run_lane(_cfg, *, lane, seed_limit, deadline_monotonic=None):
         started.append(lane)
-        entered.wait(1.0)
+        if len(started) <= 2:
+            entered.wait(1.0)
         return {"lane": lane, "seed_limit": seed_limit}
 
     monkeypatch.setattr(
@@ -2390,6 +2401,7 @@ def test_forecast_poll_starts_reserved_and_background_lanes_together(monkeypatch
     )
     forecast_live_daemon._replacement_forecast_materialize_poll_job()
     assert set(started) == {"priority", "background"}
+    assert started.count("priority") >= 2
 
 
 def test_forecast_poll_claims_priority_arriving_during_background(
@@ -2441,7 +2453,7 @@ def test_forecast_poll_claims_priority_arriving_during_background(
         0.5,
     )
 
-    def run_lane(_cfg, *, lane, seed_limit):
+    def run_lane(_cfg, *, lane, seed_limit, deadline_monotonic=None):
         if lane == "background":
             background_started.set()
             assert release_background.wait(1.0)
