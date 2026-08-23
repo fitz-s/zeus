@@ -35236,6 +35236,7 @@ def test_aged_authenticated_absence_exit_releases_pending_exit_to_fresh_redecisi
            SET phase = 'pending_exit', shares = 10, chain_shares = 10,
                cost_basis_usd = 5, city = 'Milan', target_date = '2026-08-23',
                temperature_metric = 'high', order_id = 'ord-entry',
+               order_status = 'sell_pending', exit_reason = 'prior_exit_retry',
                exit_retry_count = 3, next_exit_retry_at = '2026-08-23T13:00:00Z'
          WHERE position_id = 'pos-milan-exit'
         """
@@ -35254,6 +35255,7 @@ def test_aged_authenticated_absence_exit_releases_pending_exit_to_fresh_redecisi
     mock_client.get_open_orders.return_value = []
     mock_client.get_trades.return_value = []
     emitted = []
+    emission_attempts = [0, 1]
     monkeypatch.setattr(
         command_recovery,
         "_phase_after_terminal_exit_no_fill",
@@ -35262,12 +35264,42 @@ def test_aged_authenticated_absence_exit_releases_pending_exit_to_fresh_redecisi
     monkeypatch.setattr(
         command_recovery,
         "_emit_terminal_no_fill_redecision_from_recovery",
-        lambda _conn, *, continuation, occurred_at: emitted.append(continuation) or 1,
+        lambda _conn, *, continuation, occurred_at: (
+            emitted.append(continuation) if emission_attempts.pop(0) else None
+        ) or (1 if emitted else 0),
     )
 
+    first_summary = reconcile_unresolved_commands(conn, mock_client)
+
+    assert first_summary["errors"] >= 1
+    assert _get_state(conn, "cmd-milan-exit") == "SUBMIT_UNKNOWN_SIDE_EFFECT"
+    failed_current = conn.execute(
+        """
+        SELECT phase, order_id, order_status, exit_reason, exit_retry_count,
+               next_exit_retry_at
+          FROM position_current WHERE position_id = 'pos-milan-exit'
+        """
+    ).fetchone()
+    assert dict(failed_current) == {
+        "phase": "pending_exit",
+        "order_id": "ord-entry",
+        "order_status": "sell_pending",
+        "exit_reason": "prior_exit_retry",
+        "exit_retry_count": 3,
+        "next_exit_retry_at": "2026-08-23T13:00:00Z",
+    }
+    assert conn.execute(
+        "SELECT COUNT(*) FROM position_events WHERE command_id = 'cmd-milan-exit'"
+    ).fetchone()[0] == 0
+    assert conn.execute(
+        "SELECT COUNT(*) FROM opportunity_events WHERE source = 'terminal-no-fill:cmd-milan-exit'"
+    ).fetchone()[0] == 0
+
     summary = reconcile_unresolved_commands(conn, mock_client)
+    rerun_summary = reconcile_unresolved_commands(conn, mock_client)
 
     assert summary["advanced"] >= 1
+    assert rerun_summary["advanced"] == 0
     assert _get_state(conn, "cmd-milan-exit") == "SUBMIT_REJECTED"
     current = conn.execute(
         """
@@ -35291,6 +35323,9 @@ def test_aged_authenticated_absence_exit_releases_pending_exit_to_fresh_redecisi
         """
     ).fetchone()
     assert released["event_type"] == "EXIT_RETRY_RELEASED"
+    assert conn.execute(
+        "SELECT COUNT(*) FROM position_events WHERE command_id = 'cmd-milan-exit'"
+    ).fetchone()[0] == 1
     payload = json.loads(released["payload_json"])
     assert payload["old_probability_certificate_reusable"] is False
     assert emitted == [{
