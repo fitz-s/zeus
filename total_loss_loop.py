@@ -2053,6 +2053,10 @@ def dispatch(cfg: Mapping[str, Any]) -> list[str]:
     launched = _retry_pending(cfg, running)
     if launched:
         return launched
+    _recover_classification_debt(cfg, running)
+    repair = _dispatch_repair_waiting(cfg, running)
+    if repair:
+        return [repair]
     by_kind = {
         kind: sum(
             1
@@ -2245,13 +2249,17 @@ def _after_classification(cfg: Mapping[str, Any], run: Mapping[str, Any], classi
     diagnosis = read_json(incident_dir / "diagnosis.json", {})
     root_id = str(classification["root_id"])
     with memory(cfg) as mem:
+        linked = mem.execute(
+            "SELECT 1 FROM incident_root_links WHERE incident_id=? AND root_id=?",
+            (incident_id, root_id),
+        ).fetchone()
         existing = mem.execute("SELECT root_id FROM roots WHERE root_id=?", (root_id,)).fetchone()
         if existing is None:
             mem.execute(
                 "INSERT INTO roots(root_id,causal_seam,mechanism_fingerprint,earliest_divergence,affected_symbols_json,reproduction,updated_at) VALUES (?,?,?,?,?,?,?)",
                 (root_id, diagnosis.get("causal_seam", ""), classification.get("mechanism_fingerprint", ""), diagnosis.get("earliest_preventable_time"), json.dumps(diagnosis.get("changed_symbols", [])), json.dumps(diagnosis.get("evidence_refs", [])), iso()),
             )
-        else:
+        elif linked is None:
             mem.execute("UPDATE roots SET recurrence_count=recurrence_count+1,updated_at=? WHERE root_id=?", (iso(), root_id))
         mem.execute(
             "INSERT OR REPLACE INTO incident_root_links VALUES (?,?,?,?,?)",
@@ -2263,16 +2271,74 @@ def _after_classification(cfg: Mapping[str, Any], run: Mapping[str, Any], classi
             (classification["relation"], root_id, diagnosis.get("earliest_preventable_time"), counterfactual.get("avoidable_loss_usd"), iso(), incident_id),
         )
         mem.commit()
+    counterfactual = diagnosis.get("capital_counterfactual", {})
+    avoidable = float(counterfactual.get("avoidable_loss_usd") or 0)
+    if not diagnosis.get("earliest_preventable_time") or avoidable <= 0:
+        with memory(cfg) as mem:
+            transition(
+                mem, incident_id, "observing",
+                reason="no_engine_preventable_capital_loss", status="observing",
+            )
+            mem.commit()
+        return
+    with memory(cfg) as mem:
+        transition(mem, incident_id, "repair_waiting", reason="root_classified", status="queued")
+        mem.commit()
+
+
+def _start_repair(cfg: Mapping[str, Any], incident_id: str, kind: str) -> str:
+    incident_dir = runtime_dir(cfg) / "incidents" / incident_id
+    diagnosis = read_json(incident_dir / "diagnosis.json", {})
+    classification = read_json(incident_dir / "classification.json", {})
     worktree = _worktree(cfg, incident_id)
     output = incident_dir / "patch.json"
     events = incident_dir / "codex-repair.jsonl"
     schema = _schema_file(cfg, "patch", PATCH_SCHEMA)
     prompt = Path(str(cfg["paths"]["prompt"])).read_text() + "\n\nIMPLEMENTATION PHASE. Implement and test the structural repair in this incident worktree. Commit the patch but do not push, open a PR, merge, or deploy yet; the controller will run a fresh review first.\n\nDIAGNOSIS:\n" + json.dumps(diagnosis, ensure_ascii=False, indent=2) + "\n\nCLASSIFICATION:\n" + json.dumps(classification, ensure_ascii=False, indent=2) + f"\n\nincident evidence={incident_dir / 'evidence.db'}\n"
     command = _codex_exec_base(cfg, sandbox="workspace-write", cwd=worktree, schema=schema, output=output, persistent=True)
-    spawned = _spawn_run(cfg, incident_id=incident_id, kind=str(run["kind"]), stage="repair", command=command, cwd=worktree, prompt=prompt, output=output, events=events)
+    spawned = _spawn_run(cfg, incident_id=incident_id, kind=kind, stage="repair", command=command, cwd=worktree, prompt=prompt, output=output, events=events)
     with memory(cfg) as mem:
         transition(mem, incident_id, "repair", reason="root_classified", run_id=str(spawned["run_id"]))
         mem.commit()
+    return incident_id
+
+
+def _recover_classification_debt(cfg: Mapping[str, Any], running: list[dict[str, Any]]) -> None:
+    active = {str(row.get("incident_id")) for row in running}
+    with memory(cfg) as mem:
+        rows = mem.execute(
+            "SELECT incident_id,kind FROM incidents WHERE stage='classification' AND status='running'"
+        ).fetchall()
+    for row in rows:
+        incident_id = str(row["incident_id"])
+        if incident_id in active:
+            continue
+        incident_dir = runtime_dir(cfg) / "incidents" / incident_id
+        classification = read_json(incident_dir / "classification.json", None)
+        diagnosis = read_json(incident_dir / "diagnosis.json", None)
+        if not isinstance(classification, Mapping) or not isinstance(diagnosis, Mapping):
+            continue
+        _after_classification(
+            cfg,
+            {"incident_id": incident_id, "kind": str(row["kind"]), "run_id": "recovery"},
+            classification,
+        )
+
+
+def _dispatch_repair_waiting(cfg: Mapping[str, Any], running: list[dict[str, Any]]) -> str | None:
+    if any(str(row.get("stage")) in {"repair", "repair_feedback", "review", "delivery", "production"} for row in running):
+        return None
+    with memory(cfg) as mem:
+        row = mem.execute(
+            "SELECT incident_id,kind FROM incidents WHERE stage='repair_waiting' AND status='queued' "
+            "ORDER BY priority DESC,detected_at LIMIT 1"
+        ).fetchone()
+    if row is None:
+        return None
+    try:
+        return _start_repair(cfg, str(row["incident_id"]), str(row["kind"]))
+    except RuntimeError:
+        return None
 
 
 def _after_repair(cfg: Mapping[str, Any], run: Mapping[str, Any], patch: Mapping[str, Any]) -> None:

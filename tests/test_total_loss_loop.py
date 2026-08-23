@@ -620,3 +620,73 @@ def test_slow_dispatch_does_not_create_detector_budget_breach(cfg: dict) -> None
     latency = json.loads((runtime / "cycle-latency.json").read_text())
     assert latency["detector_ms"] == 10.0
     assert latency["total_ms"] == 3000.0
+
+
+def _classified_incident(cfg: dict, *, avoidable: float, preventable_at: str | None) -> str:
+    incident_id = "classified-incident"
+    runtime = Path(cfg["paths"]["runtime"])
+    incident_dir = runtime / "incidents" / incident_id
+    incident_dir.mkdir(parents=True)
+    loop.atomic_json(
+        incident_dir / "diagnosis.json",
+        {
+            "incident_id": incident_id,
+            "causal_seam": "test seam",
+            "changed_symbols": ["src.engine.monitor_refresh"],
+            "evidence_refs": ["evidence.db:test"],
+            "earliest_preventable_time": preventable_at,
+            "capital_counterfactual": {"avoidable_loss_usd": avoidable},
+        },
+    )
+    classification = {
+        "incident_id": incident_id,
+        "root_id": "root-test",
+        "relation": "new_root",
+        "mechanism_fingerprint": "test",
+    }
+    loop.atomic_json(incident_dir / "classification.json", classification)
+    with loop.memory(cfg) as mem:
+        mem.execute(
+            "INSERT INTO incidents(incident_id,kind,position_id,crossing_evidence_id,crossing_kind,"
+            "held_token_id,held_direction,t_floor,floor_price,observed_bid,detected_at,priority,status,stage,updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (incident_id, "hard", "p1", "q1", "below_floor", "yes", "sell_yes",
+             "2026-08-22T10:00:00+00:00", 0.05, 0.04, "2026-08-22T10:00:00+00:00",
+             1_000_000.0, "running", "classification", "2026-08-22T10:00:00+00:00"),
+        )
+        mem.commit()
+    return incident_id
+
+
+def test_zero_avoidable_loss_never_enters_repair(cfg: dict, monkeypatch) -> None:
+    incident_id = _classified_incident(cfg, avoidable=0.0, preventable_at=None)
+    monkeypatch.setattr(loop, "_worktree", lambda *_args, **_kwargs: pytest.fail("repair worktree used"))
+    classification = json.loads(
+        (Path(cfg["paths"]["runtime"]) / "incidents" / incident_id / "classification.json").read_text()
+    )
+
+    loop._after_classification(
+        cfg, {"incident_id": incident_id, "kind": "hard", "run_id": "run"}, classification
+    )
+
+    with loop.memory(cfg) as mem:
+        row = mem.execute("SELECT stage,status FROM incidents WHERE incident_id=?", (incident_id,)).fetchone()
+    assert tuple(row) == ("observing", "observing")
+
+
+def test_preventable_loss_queues_repair_without_claiming_workspace(cfg: dict, monkeypatch) -> None:
+    incident_id = _classified_incident(
+        cfg, avoidable=3.0, preventable_at="2026-08-22T09:59:00+00:00"
+    )
+    monkeypatch.setattr(loop, "_worktree", lambda *_args, **_kwargs: pytest.fail("repair worktree used"))
+    classification = json.loads(
+        (Path(cfg["paths"]["runtime"]) / "incidents" / incident_id / "classification.json").read_text()
+    )
+
+    loop._after_classification(
+        cfg, {"incident_id": incident_id, "kind": "hard", "run_id": "run"}, classification
+    )
+
+    with loop.memory(cfg) as mem:
+        row = mem.execute("SELECT stage,status FROM incidents WHERE incident_id=?", (incident_id,)).fetchone()
+    assert tuple(row) == ("repair_waiting", "queued")
