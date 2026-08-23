@@ -1,5 +1,5 @@
 # Created: 2026-07-03
-# Last reused/audited: 2026-08-22
+# Last reused/audited: 2026-08-23
 # Authority basis: current global auction, posterior-mean Fractional Kelly,
 #                  Day0 global-cut routing, and auditable SELL holding bindings
 """Current global auction, q-kernel, and live actuation integration contracts."""
@@ -12344,6 +12344,56 @@ def test_reduce_only_book_tokens_never_widen_incomplete_family_topology():
         held_by_family,
         ("other-token", "held-token", "held-token"),
     ) == ("held-token",)
+
+
+def test_reduce_only_family_delta_requires_an_exact_held_token_scope():
+    held = SimpleNamespace(
+        family_key="held-family",
+        bindings=(
+            SimpleNamespace(
+                bin_id="held-bin",
+                condition_id="held-condition",
+                yes_token_id="held-token",
+                no_token_id="held-no-token",
+            ),
+        ),
+    )
+    unrelated = SimpleNamespace(
+        family_key="other-family",
+        bindings=(
+            SimpleNamespace(
+                bin_id="other-bin",
+                condition_id="other-condition",
+                yes_token_id="other-token",
+                no_token_id="other-no-token",
+            ),
+        ),
+    )
+    held_without_bindings = SimpleNamespace(
+        family_key="held-family",
+        bindings=(),
+    )
+    held_by_family = {
+        "held-family": {"held-token"},
+        "other-family": {"other-token"},
+    }
+    authorized = frozenset({"held-token"})
+
+    assert era._global_reduce_only_capture_tokens(
+        {"held-family": held},
+        held_by_family,
+        authorized,
+    ) == ("held-token",)
+    assert era._global_reduce_only_capture_tokens(
+        {"other-family": unrelated},
+        held_by_family,
+        authorized,
+    ) == ()
+    assert era._global_reduce_only_capture_tokens(
+        {"held-family": held_without_bindings},
+        held_by_family,
+        authorized,
+    ) == ()
 
 
 def test_speculative_topology_fills_snapshot_gap_from_complete_receipt():

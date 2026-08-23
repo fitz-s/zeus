@@ -1527,6 +1527,30 @@ def _global_reduce_only_book_tokens(
     )
 
 
+def _global_reduce_only_capture_tokens(
+    probabilities: Mapping[str, object],
+    held_tokens_by_family: Mapping[str, set[str]],
+    authorized_tokens: frozenset[str],
+) -> tuple[str, ...]:
+    """Return the exact held tokens represented by one probability slice."""
+
+    represented: set[str] = set()
+    for raw_family_key, witness in probabilities.items():
+        family_key = str(raw_family_key or "").strip()
+        held = held_tokens_by_family.get(family_key, set())
+        if not held:
+            continue
+        for binding in tuple(getattr(witness, "bindings", ()) or ()):
+            for raw_token in (
+                getattr(binding, "yes_token_id", ""),
+                getattr(binding, "no_token_id", ""),
+            ):
+                token = str(raw_token or "").strip()
+                if token in held and token in authorized_tokens:
+                    represented.add(token)
+    return tuple(sorted(represented))
+
+
 def _global_book_exact_retry_facts(
     missing_tokens: tuple[str, ...],
     retry_books: Mapping[str, Mapping[str, object]],
@@ -9664,25 +9688,10 @@ def event_bound_live_adapter_from_trade_conn(
                     else None
                 )
                 expected_tokens = (
-                    tuple(
-                        sorted(
-                            {
-                                token_id
-                                for witness in bound_probabilities.values()
-                                for binding in tuple(
-                                    getattr(witness, "bindings", ()) or ()
-                                )
-                                for token_id in (
-                                    str(
-                                        getattr(binding, "yes_token_id", "") or ""
-                                    ).strip(),
-                                    str(
-                                        getattr(binding, "no_token_id", "") or ""
-                                    ).strip(),
-                                )
-                                if token_id in reduce_only_book_tokens
-                            }
-                        )
+                    _global_reduce_only_capture_tokens(
+                        bound_probabilities,
+                        held_tokens_by_family,
+                        reduce_only_book_tokens,
                     )
                     if reduce_only_book_tokens is not None
                     else _global_book_prefetch_tokens(bound_probabilities)
@@ -10505,6 +10514,25 @@ def event_bound_live_adapter_from_trade_conn(
                 )
                 if _urgent_book_preemption("after_delta_metadata"):
                     return probabilities, None
+                if (
+                    reduce_only_book_tokens is not None
+                    and _global_reduce_only_capture_tokens(
+                        probability_delta,
+                        held_tokens_by_family,
+                        reduce_only_book_tokens,
+                    )
+                    == ()
+                ):
+                    # SCOPE: this family-delta lost every exact held-token
+                    # binding; it cannot authorize any reduce-only book I/O.
+                    # DRAIN: retain the held SELL debt for the next recurring
+                    # metadata/book cut. RESET: a current binding restores a
+                    # non-empty exact token scope. Never widen empty to None.
+                    logging.getLogger(__name__).warning(
+                        "global reduce-only family delta lost exact held-token "
+                        "scope; returning an empty executable cut"
+                    )
+                    return {}, None
                 bound_probabilities.update(probability_delta)
                 prefetched = _complete_current_prefetch(
                     probability_delta,
