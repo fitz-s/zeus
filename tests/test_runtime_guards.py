@@ -1096,6 +1096,41 @@ def test_held_monitor_uses_causal_market_channel_depth_after_snapshot_invalidati
 
     _insert_executable_snapshot(
         conn,
+        snapshot_id="one-sided-tradeability",
+        selected_outcome_token_id="one-sided-token",
+        yes_token_id="one-sided-token",
+        no_token_id="one-sided-no",
+        condition_id="one-sided-condition",
+        captured_at=quote_at,
+        executable_allowed=True,
+    )
+    conn.execute(
+        """
+        INSERT INTO execution_feasibility_evidence (
+            evidence_id, event_id, condition_id, token_id,
+            outcome_label, direction, quote_seen_at,
+            best_bid_before, best_ask_before, depth_before_json,
+            created_at, schema_version
+        ) VALUES (
+            'one-sided-quote', 'event-one-sided-quote',
+            'one-sided-condition', 'one-sided-token',
+            'YES', 'buy_yes', ?, NULL, 0.15, ?, ?, 1
+        )
+        """,
+        (
+            quote_at.isoformat(),
+            json.dumps(
+                {
+                    "bids": [],
+                    "asks": [{"price": "0.15", "size": "40"}],
+                }
+            ),
+            quote_at.isoformat(),
+        ),
+    )
+
+    _insert_executable_snapshot(
+        conn,
         snapshot_id="stale-tradeability",
         selected_outcome_token_id="stale-token",
         yes_token_id="stale-token",
@@ -1159,6 +1194,10 @@ def test_held_monitor_uses_causal_market_channel_depth_after_snapshot_invalidati
         condition_id="invalidated-condition",
         token_id="invalidated-token",
     )
+    one_sided_pos = _position(
+        condition_id="one-sided-condition",
+        token_id="one-sided-token",
+    )
     clob = NoNetworkClob()
     summary = {}
     deps = types.SimpleNamespace(
@@ -1166,7 +1205,7 @@ def test_held_monitor_uses_causal_market_channel_depth_after_snapshot_invalidati
     )
     local_books = cycle_runtime._fresh_local_held_monitor_orderbooks(
         conn,
-        [pos, stale_pos, invalidated_pos],
+        [pos, stale_pos, invalidated_pos, one_sided_pos],
         now_utc=checked_at,
         summary={},
         deps=deps,

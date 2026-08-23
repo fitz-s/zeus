@@ -5240,7 +5240,10 @@ def _fresh_local_held_monitor_orderbooks(
 
     candidates: dict[str, tuple[datetime, dict]] = {}
     market_channel_tokens: set[str] = set()
-    from src.data.market_scanner import _top_book_level_decimal
+    from src.data.market_scanner import (
+        ExecutableSnapshotCaptureError,
+        _top_book_level_decimal,
+    )
     from src.engine.monitor_refresh import _monitor_snapshot_is_executable
 
     for row in snapshot_rows:
@@ -5269,6 +5272,8 @@ def _fresh_local_held_monitor_orderbooks(
                 candidates[token_id] = (captured_at, book)
 
     for row in quote_rows:
+        token_id = ""
+        captured_at = None
         try:
             token_id = str(row[0] or "").strip()
             if not token_id or not _monitor_snapshot_is_executable(
@@ -5293,7 +5298,21 @@ def _fresh_local_held_monitor_orderbooks(
                     float(ask), float(row[8]), rel_tol=0.0, abs_tol=1e-9
                 ):
                     continue
-        except (IndexError, TypeError, ValueError, json.JSONDecodeError):
+        except (
+            ExecutableSnapshotCaptureError,
+            IndexError,
+            TypeError,
+            ValueError,
+            json.JSONDecodeError,
+        ):
+            previous = candidates.get(token_id)
+            if (
+                previous is not None
+                and captured_at is not None
+                and captured_at >= previous[0]
+            ):
+                candidates.pop(token_id, None)
+                market_channel_tokens.discard(token_id)
             continue
         book = dict(book)
         book["asset_id"] = token_id
