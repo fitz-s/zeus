@@ -64,6 +64,7 @@ FORECAST_PIPELINE_HEALTH_JOBS = (
     "bayes_precision_fusion_capture",
     "replacement_forecast_download",
     "replacement_forecast_live_materialize",
+    "replacement_forecast_live_materialize_priority",
 )
 CURRENT_SCHEDULER_HEALTH_KEYS = ("edli_event_reactor",)
 ENTRY_Q_VERSION_LOOKBACK_SECONDS = 2 * 3600

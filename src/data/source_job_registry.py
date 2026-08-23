@@ -274,10 +274,15 @@ _FORECAST_LIVE: tuple[SourceJobSpec, ...] = (
                   dispatch_kind="startup", family="forecast", registry_built=False,
                   notes="one-shot date trigger 90s after boot; same download job as cron path"),
     SourceJobSpec("replacement_forecast_live_materialize", "forecast_live_daemon", "live", "default", True,
-                  callable_ref="_replacement_forecast_materialize_poll_job",
+                  callable_ref="_replacement_forecast_materialize_job",
                   misfire_grace_time=120, family="forecast", registry_built=False,
-                  notes="fast explicit seed/request drain only; dedicated "
+                  notes="bounded background seed/request drain; dedicated "
                         "replacement_production lane"),
+    SourceJobSpec("replacement_forecast_live_materialize_priority", "forecast_live_daemon", "live", "default", True,
+                  callable_ref="_replacement_forecast_priority_materialize_job",
+                  misfire_grace_time=120, family="forecast", registry_built=False,
+                  notes="bounded priority seed/request drain at 1-second cadence; dedicated "
+                        "replacement_priority lane"),
     SourceJobSpec("replacement_forecast_live_discovery", "forecast_live_daemon", "live", "default", False,
                   callable_ref="_replacement_forecast_discovery_job",
                   misfire_grace_time=120, family="forecast", registry_built=False,

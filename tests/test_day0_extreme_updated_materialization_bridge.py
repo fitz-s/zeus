@@ -2457,6 +2457,53 @@ def test_priority_job_exception_writes_failed_scheduler_health(monkeypatch, tmp_
     assert "priority boom" in str(health[-1][2])
 
 
+def test_materialize_callbacks_return_lane_receipts_and_truthful_status_health(
+    monkeypatch, tmp_path
+) -> None:
+    from src.ingest import forecast_live_daemon
+    from src.data import replacement_forecast_production
+    from src.observability import scheduler_health
+
+    cfg = {"request_dir": tmp_path / "requests"}
+    cfg["request_dir"].mkdir()
+    monkeypatch.setattr(
+        replacement_forecast_production,
+        "_replacement_forecast_live_materialization_queue_config",
+        lambda: cfg,
+    )
+    health: list[tuple[str, bool, str | None]] = []
+    monkeypatch.setattr(
+        scheduler_health,
+        "_write_scheduler_health",
+        lambda job, *, failed, started=False, reason=None: health.append(
+            (job, failed, reason)
+        ),
+    )
+
+    def report(_cfg, *, lane, seed_limit):
+        if lane == "background":
+            return {"status": "FAILED", "error": "background report"}
+        return {"status": "NO_REQUESTS"}
+
+    monkeypatch.setattr(forecast_live_daemon, "_replacement_forecast_materialize_lane", report)
+    background_receipt = forecast_live_daemon._replacement_forecast_materialize_job()
+    priority_receipt = forecast_live_daemon._replacement_forecast_priority_materialize_job()
+
+    assert background_receipt["status"] == "FAILED"
+    assert priority_receipt["status"] == "NO_REQUESTS"
+    final_health = {}
+    for job, failed, reason in health:
+        final_health[job] = (failed, reason)
+    assert final_health[forecast_live_daemon.REPLACEMENT_FORECAST_MATERIALIZE_JOB_ID] == (
+        True,
+        "failed: background report",
+    )
+    assert final_health[forecast_live_daemon.REPLACEMENT_FORECAST_PRIORITY_MATERIALIZE_JOB_ID] == (
+        False,
+        None,
+    )
+
+
 def test_scheduler_registers_independent_background_and_priority_jobs(monkeypatch) -> None:
     from src.ingest import forecast_live_daemon
 

@@ -7090,6 +7090,30 @@ def test_bpf_capture_failed_yields_forecast_pipeline_degraded(tmp_path: Path) ->
     )
 
 
+def test_priority_materializer_failed_yields_forecast_pipeline_degraded(
+    tmp_path: Path,
+) -> None:
+    sd = tmp_path
+    _setup_healthy_state(sd)
+    health_path = sd / "scheduler_jobs_health.json"
+    scheduler = json.loads(health_path.read_text())
+    scheduler["replacement_forecast_live_materialize_priority"] = {
+        "status": "FAILED",
+        "last_failure_reason": "priority lane failed",
+        "last_run_at": _now_iso(-5),
+    }
+    _write(health_path, scheduler)
+
+    result = compute_composite_live_health(state_dir=sd)
+
+    assert result["healthy"] is False
+    assert result["status"] == "DEGRADED"
+    assert "forecast_pipeline" in result["failing_surfaces"]
+    assert "replacement_forecast_live_materialize_priority" in (
+        result["surfaces"]["forecast_pipeline"]["issue"] or ""
+    )
+
+
 # ---------------------------------------------------------------------------
 # T2: status_summary stale → DEGRADED
 # ---------------------------------------------------------------------------

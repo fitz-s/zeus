@@ -3081,11 +3081,15 @@ publication barrier.
   The resulting lag is queue starvation, not an observation-to-q authority
   shortcut.
 - Decision: classify durable request/seed files by exact family plus canonical
-  Day0 conditioning identity. Run one reserved priority lane and one ordinary
-  lane inside the existing scheduler invocation. Same identity coalesces;
-  strictly newer Day0 observation identity supersedes the older pending file.
-  Both lanes still invoke the existing replacement materializer and writer lock;
-  posterior commit and family wake remain owned by the existing script.
+  Day0 conditioning identity. Register two independent APScheduler jobs: the
+  existing `replacement_forecast_live_materialize` background callback and the
+  explicit `replacement_forecast_live_materialize_priority` callback at a
+  one-second cadence. Each callback returns the existing lane receipt; the
+  scheduler decorator maps truthful `NO_REQUESTS`/success/`FAILED` statuses to
+  its exact health row. Same identity coalesces; strictly newer Day0
+  observation identity supersedes the older pending file. Both lanes still
+  invoke the existing replacement materializer and writer lock; posterior
+  commit and family wake remain owned by the existing script.
 - SCOPE: one `(city, target_date, metric, conditioning_identity)` queue family;
   current held exposure also qualifies its exact family for the reserved lane.
   No source role, ENS shape, posterior formula, ENTRY authority, or settlement
@@ -3100,8 +3104,11 @@ publication barrier.
   A wake alone does not clear a pending marker, and restart recovery reclaims
   durable request/inflight files through the same lane classifier.
 - Files authorized: `src/data/replacement_forecast_live_materialization_queue.py`,
-  `src/ingest/forecast_live_daemon.py`,
-  `tests/test_day0_extreme_updated_materialization_bridge.py`, and this plan.
+  `src/ingest/forecast_live_daemon.py`, `src/data/source_job_registry.py`,
+  `src/control/live_health.py`,
+  `tests/test_day0_extreme_updated_materialization_bridge.py`,
+  `tests/test_source_job_registry.py`, `tests/test_run_mode_failure_surfaces.py`,
+  and this plan.
   Acceptance: a blocked background runner does not delay a fresh priority
   runner; same-identity duplicate coalescing and newer-identity supersession
   are deterministic; ordinary work progresses without priority; no posterior

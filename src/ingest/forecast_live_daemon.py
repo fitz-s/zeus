@@ -199,6 +199,7 @@ FORECAST_LIVE_WORK_JOB_NAME_BY_TRACK = {
 
 _TRUTHFUL_FAIL_STATUSES = frozenset(
     {
+        "failed",
         "download_failed",
         "empty_ingest",
         "extract_failed",
@@ -1204,14 +1205,14 @@ def _replacement_forecast_materialize_job(
     discover: bool = True,
     limit: int | None = None,
     seed_limit: int | None = None,
-) -> None:
+) -> dict[str, object]:
     """Run one bounded background materialization lane."""
     from src.data.replacement_forecast_production import (
         _replacement_forecast_live_materialization_queue_config,
     )
 
     cfg = _replacement_forecast_live_materialization_queue_config()
-    _replacement_forecast_materialize_lane(
+    return _replacement_forecast_materialize_lane(
         cfg,
         lane="background",
         seed_limit=(
@@ -1223,14 +1224,14 @@ def _replacement_forecast_materialize_job(
 
 
 @_scheduler_job(REPLACEMENT_FORECAST_PRIORITY_MATERIALIZE_JOB_ID)
-def _replacement_forecast_priority_materialize_job() -> None:
+def _replacement_forecast_priority_materialize_job() -> dict[str, object]:
     """Run one independent bounded Day0/held priority claim."""
     from src.data.replacement_forecast_production import (
         _replacement_forecast_live_materialization_queue_config,
     )
 
     cfg = _replacement_forecast_live_materialization_queue_config()
-    _replacement_forecast_materialize_lane(
+    return _replacement_forecast_materialize_lane(
         cfg,
         lane="priority",
         seed_limit=1,
