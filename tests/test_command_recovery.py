@@ -26367,7 +26367,7 @@ class TestRecoveryResolutionTable:
             "terminal_exec_status": "filled",
         }
 
-    def test_m5_local_orphan_acked_no_fill_terminalizes_and_resolves_finding(
+    def test_scheduled_recovery_defers_local_orphan_to_m5_atomic_writer(
         self,
         conn,
         mock_client,
@@ -26398,12 +26398,12 @@ class TestRecoveryResolutionTable:
 
         assert summary["local_orphan_no_fill_findings"] == {
             "scanned": 1,
-            "advanced": 1,
-            "stayed": 0,
+            "advanced": 0,
+            "stayed": 1,
             "errors": 0,
         }
-        assert summary["terminal_order_facts"]["advanced"] == 1
-        assert _get_state(conn, "cmd-001") == "EXPIRED"
+        assert summary["terminal_order_facts"]["advanced"] == 0
+        assert _get_state(conn, "cmd-001") == "ACKED"
         latest_fact = conn.execute(
             """
             SELECT state, remaining_size, matched_size, source
@@ -26414,29 +26414,30 @@ class TestRecoveryResolutionTable:
             """
         ).fetchone()
         assert dict(latest_fact) == {
-            "state": "CANCEL_CONFIRMED",
-            "remaining_size": "0",
+            "state": "LIVE",
+            "remaining_size": "10",
             "matched_size": "0",
             "source": "REST",
         }
-        assert [row.finding_id for row in list_unresolved_findings(conn)] == []
+        assert [row.finding_id for row in list_unresolved_findings(conn)] == [finding.finding_id]
         resolved = conn.execute(
-            "SELECT resolution, resolved_by FROM exchange_reconcile_findings WHERE finding_id = ?",
+            "SELECT resolved_at, resolution, resolved_by FROM exchange_reconcile_findings WHERE finding_id = ?",
             (finding.finding_id,),
         ).fetchone()
         assert dict(resolved) == {
-            "resolution": "command_recovery_terminal_no_fill",
-            "resolved_by": "src.execution.command_recovery",
+            "resolved_at": None,
+            "resolution": None,
+            "resolved_by": None,
         }
         current = conn.execute(
             "SELECT phase, shares, cost_basis_usd, order_status FROM position_current WHERE position_id = 'pos-001'"
         ).fetchone()
-        assert current["phase"] == "voided"
+        assert current["phase"] == "pending_entry"
         assert Decimal(str(current["shares"])) == Decimal("0")
         assert Decimal(str(current["cost_basis_usd"])) == Decimal("0")
-        assert current["order_status"] == "canceled"
+        assert current["order_status"] == "pending"
 
-    def test_m5_local_orphan_acked_no_order_fact_terminalizes_zero_exposure_entry(
+    def test_scheduled_recovery_without_order_fact_still_defers_to_m5_writer(
         self,
         conn,
         mock_client,
@@ -26473,12 +26474,12 @@ class TestRecoveryResolutionTable:
 
         assert summary["local_orphan_no_fill_findings"] == {
             "scanned": 1,
-            "advanced": 1,
-            "stayed": 0,
+            "advanced": 0,
+            "stayed": 1,
             "errors": 0,
         }
-        assert summary["terminal_order_facts"]["advanced"] == 1
-        assert _get_state(conn, "cmd-001") == "EXPIRED"
+        assert summary["terminal_order_facts"]["advanced"] == 0
+        assert _get_state(conn, "cmd-001") == "ACKED"
         latest_fact = conn.execute(
             """
             SELECT state, remaining_size, matched_size, source
@@ -26488,28 +26489,24 @@ class TestRecoveryResolutionTable:
              LIMIT 1
             """
         ).fetchone()
-        assert dict(latest_fact) == {
-            "state": "CANCEL_CONFIRMED",
-            "remaining_size": "0",
-            "matched_size": "0",
-            "source": "REST",
-        }
-        assert [row.finding_id for row in list_unresolved_findings(conn)] == []
+        assert latest_fact is None
+        assert [row.finding_id for row in list_unresolved_findings(conn)] == [finding.finding_id]
         resolved = conn.execute(
-            "SELECT resolution, resolved_by FROM exchange_reconcile_findings WHERE finding_id = ?",
+            "SELECT resolved_at, resolution, resolved_by FROM exchange_reconcile_findings WHERE finding_id = ?",
             (finding.finding_id,),
         ).fetchone()
         assert dict(resolved) == {
-            "resolution": "command_recovery_terminal_no_fill",
-            "resolved_by": "src.execution.command_recovery",
+            "resolved_at": None,
+            "resolution": None,
+            "resolved_by": None,
         }
         current = conn.execute(
             "SELECT phase, shares, cost_basis_usd, order_status FROM position_current WHERE position_id = 'pos-001'"
         ).fetchone()
-        assert current["phase"] == "voided"
+        assert current["phase"] == "pending_entry"
         assert Decimal(str(current["shares"])) == Decimal("0")
         assert Decimal(str(current["cost_basis_usd"])) == Decimal("0")
-        assert current["order_status"] == "canceled"
+        assert current["order_status"] == "pending"
 
     def test_acked_terminal_order_fact_with_matched_size_waits_for_fill_reconciliation(
         self,
