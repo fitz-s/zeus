@@ -5848,6 +5848,17 @@ def test_process_pending_cancellation_includes_monitor_debt_for_protected_comple
     )
     assert exact_cancelled is not None
     assert exact_cancelled() is True
+    executable_exact_cancelled = _process_pending_cancelled(
+        committed_day0_wake=False,
+        producer_fast_path=False,
+        urgent_wake_pending=any_urgent,
+        urgent_day0_pending=day0_urgent,
+        held_position_monitor_debt_pending=lambda: True,
+        exact_held_completion=True,
+        exact_executable_held_completion=True,
+    )
+    assert executable_exact_cancelled is not None
+    assert executable_exact_cancelled() is False
     exact_debt = [False]
     ordinary_cancelled = _process_pending_cancelled(
         committed_day0_wake=False,
@@ -6121,6 +6132,69 @@ def test_reserved_or_exact_completion_yields_for_unresolved_monitor_debt(
         assert not lock.locked()
     finally:
         reactor_module._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.clear()
+
+
+def test_exact_executable_completion_bypasses_monitor_debt_before_setup(
+    monkeypatch,
+):
+    import src.events.reactor as reactor_module
+    import src.main as main
+    import src.state.db as db
+    from src.riskguard import riskguard
+    from src.riskguard.risk_level import RiskLevel
+    from src.runtime.reactor_wake import make_held_sell_reauction_request
+
+    class SetupReached(RuntimeError):
+        pass
+
+    request = make_held_sell_reauction_request(
+        position_id="buenos-aires-exact-completion",
+        family=("Buenos Aires", "2026-08-23", "low"),
+        probability_content_identity="q-buenos-aires-exact-completion",
+        held_token_id="buenos-aires-exact-token",
+        held_best_bid=0.18,
+        bid_observed_at="2026-08-23T12:00:00+00:00",
+        probability_observed_at="2026-08-23T12:00:00+00:00",
+        completion_deadline_at="2026-08-23T12:00:30+00:00",
+        schema_version=4,
+        book_state="EXECUTABLE",
+    )
+    monkeypatch.setattr(main, "_settings_section", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(main, "_defer_for_held_position_monitor", lambda _job: False)
+    monkeypatch.setattr(riskguard, "get_current_level", lambda: RiskLevel.GREEN)
+    monkeypatch.setattr(
+        reactor_module,
+        "_durable_exact_held_sell_completion_pending",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        reactor_module,
+        "_durable_exact_held_sell_completion_requests",
+        lambda: (request,),
+    )
+    monkeypatch.setattr(
+        reactor_module,
+        "_has_exact_executable_held_sell_completion",
+        lambda _requests: True,
+    )
+    monkeypatch.setattr(
+        reactor_module,
+        "_paused_entry_wake_should_park",
+        lambda **_kwargs: False,
+    )
+    monkeypatch.setattr(
+        db,
+        "get_world_connection",
+        lambda: (_ for _ in ()).throw(SetupReached()),
+    )
+
+    lock = threading.Lock()
+    with pytest.raises(SetupReached):
+        reactor_module.run_edli_event_reactor_cycle(
+            active_lock=lock,
+            held_position_monitor_debt_pending=lambda: True,
+        )
+    assert not lock.locked()
 
 
 @pytest.mark.parametrize("preemption", (False, True), ids=("deadline", "monitor"))
@@ -6657,6 +6731,184 @@ def test_monitor_fairness_debt_cancels_but_preserves_reserved_completion(
         assert reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.is_set()
     finally:
         reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.clear()
+
+
+def test_exact_executable_held_sell_completion_keeps_its_global_turn(monkeypatch):
+    from src.events import reactor
+    from src.runtime.reactor_wake import make_held_sell_reauction_request
+
+    request = make_held_sell_reauction_request(
+        position_id="exact-completion-position",
+        family=("Cape Town", "2026-08-23", "high"),
+        probability_content_identity="q-exact-completion",
+        held_token_id="exact-completion-token",
+        held_best_bid=0.21,
+        bid_observed_at="2026-08-23T12:00:00+00:00",
+        probability_observed_at="2026-08-23T12:00:00+00:00",
+        completion_deadline_at="2026-08-23T12:00:30+00:00",
+        schema_version=4,
+        book_state="EXECUTABLE",
+    )
+
+    monkeypatch.setattr(
+        reactor,
+        "request_global_auction_completion",
+        lambda **_kwargs: pytest.fail("exact executable turn must not re-arm monitor debt"),
+    )
+    reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.clear()
+    try:
+        due_at_start, cancellation_probe = (
+            reactor._global_auction_monitor_cancellation_probe(
+                lambda: True,
+                monitor_debt_pending=lambda: True,
+                completion_due=True,
+                exact_held_completion=True,
+                exact_executable_held_completion=True,
+            )
+        )
+        assert due_at_start is True
+        assert cancellation_probe() is False
+        assert cancellation_probe() is False
+    finally:
+        reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.clear()
+
+
+def test_active_lock_reads_exact_debt_before_skipping(monkeypatch):
+    import src.events.reactor as reactor_module
+    import src.main as main
+
+    calls = []
+
+    class HeldLock:
+        def locked(self):
+            return True
+
+    monkeypatch.setattr(main, "_settings_section", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(main, "_defer_for_held_position_monitor", lambda _job: False)
+    monkeypatch.setattr(
+        reactor_module,
+        "_reactor_wake_cancellation_probe",
+        lambda **_kwargs: (lambda: False),
+    )
+    monkeypatch.setattr(
+        reactor_module,
+        "_durable_exact_held_sell_completion_pending",
+        lambda: calls.append("pending") or True,
+    )
+    monkeypatch.setattr(
+        reactor_module,
+        "_durable_exact_held_sell_completion_requests",
+        lambda: calls.append("requests") or (),
+    )
+    monkeypatch.setattr(
+        reactor_module,
+        "_has_exact_executable_held_sell_completion",
+        lambda _requests: calls.append("eligible") or False,
+    )
+
+    assert reactor_module.run_edli_event_reactor_cycle(active_lock=HeldLock()) is False
+    assert calls == ["pending", "requests", "eligible"]
+
+
+def test_construct_checkpoint_preempts_for_new_exact_executable_debt(monkeypatch):
+    from src.engine.global_auction_universe import WorkContext, WorkDeferred
+    from src.events import reactor
+
+    exact_debt = [False]
+    monkeypatch.setattr(
+        reactor,
+        "_durable_exact_held_sell_completion_pending",
+        lambda: exact_debt[0],
+    )
+    monkeypatch.setattr(
+        reactor,
+        "_durable_exact_held_sell_completion_requests",
+        lambda: (object(),),
+    )
+    monkeypatch.setattr(
+        reactor,
+        "_has_exact_executable_held_sell_completion",
+        lambda _requests: exact_debt[0],
+    )
+    context = WorkContext(
+        deadline_monotonic=time.monotonic() + 1.0,
+        cancel_requested=reactor._exact_executable_held_sell_preemption_pending,
+    )
+
+    context.checkpoint("ordinary_construct")
+    exact_debt[0] = True
+    with pytest.raises(WorkDeferred):
+        context.checkpoint("ordinary_construct")
+
+
+def test_v4_scheduler_priority_requires_current_lineage_and_fresh_witnesses(
+    tmp_path,
+):
+    from dataclasses import replace
+
+    from src.runtime import reactor_wake
+
+    now = datetime(2026, 8, 23, 12, 0, tzinfo=timezone.utc)
+    path = tmp_path / "current-v4-wake.json"
+    request = reactor_wake.make_held_sell_reauction_request(
+        position_id="current-v4-position",
+        family=("Cape Town", "2026-08-23", "high"),
+        probability_content_identity="q-current-v4",
+        held_token_id="current-v4-token",
+        held_best_bid=0.21,
+        bid_observed_at=(now - timedelta(seconds=1)).isoformat(),
+        probability_observed_at=(now - timedelta(seconds=1)).isoformat(),
+        completion_deadline_at=(now + timedelta(seconds=30)).isoformat(),
+        schema_version=4,
+        book_state="EXECUTABLE",
+    )
+    reactor_wake.publish_reactor_wake(
+        source="held_position_monitor",
+        reason=reactor_wake.GLOBAL_AUCTION_COMPLETION_WAKE_REASON,
+        path=path,
+        held_sell_reauction_requests=(request,),
+    )
+    assert reactor_wake.v4_held_sell_reauction_request_is_current_executable(
+        request,
+        max_age_seconds=30.0,
+        now=now,
+        path=path,
+    )
+
+    for invalid in (
+        replace(
+            request,
+            probability_observed_at=(now - timedelta(seconds=31)).isoformat(),
+        ),
+        replace(request, probability_content_identity=""),
+        replace(request, held_best_bid=None),
+        replace(request, held_best_bid=0.96),
+    ):
+        assert not reactor_wake.v4_held_sell_reauction_request_is_current_executable(
+            invalid,
+            max_age_seconds=30.0,
+            now=now,
+            path=path,
+        )
+
+    empty_lineage = reactor_wake.make_held_sell_reauction_request(
+        position_id="empty-lineage-position",
+        family=("Buenos Aires", "2026-08-23", "low"),
+        probability_content_identity="q-empty-lineage",
+        held_token_id="empty-lineage-token",
+        held_best_bid=0.18,
+        bid_observed_at=(now - timedelta(seconds=1)).isoformat(),
+        probability_observed_at=(now - timedelta(seconds=1)).isoformat(),
+        completion_deadline_at=(now + timedelta(seconds=30)).isoformat(),
+        schema_version=4,
+        book_state="EXECUTABLE",
+    )
+    assert not reactor_wake.v4_held_sell_reauction_request_is_current_executable(
+        empty_lineage,
+        max_age_seconds=30.0,
+        now=now,
+        path=path,
+    )
 
 
 def test_monitor_fairness_debt_reserves_completion_before_cancelling(
@@ -8249,6 +8501,157 @@ def test_v4_expired_held_sell_deadline_terminalizes_exact_attempt_without_venue(
         request,
         path=path,
     ) == reactor_wake.DEADLINE_EXPIRED
+
+
+def test_v4_deadline_expiry_recovers_through_production_successor_chain(
+    monkeypatch,
+    tmp_path,
+):
+    from contextlib import nullcontext
+    from types import SimpleNamespace
+
+    from src.engine import global_batch_runtime
+    from src.events import reactor
+    from src.execution import exit_lifecycle
+    from src.runtime import reactor_wake
+
+    decision_at = datetime(2026, 8, 23, 12, 0, tzinfo=timezone.utc)
+    path = tmp_path / "deadline-successor-wake.json"
+    old = reactor_wake.make_held_sell_reauction_request(
+        position_id="deadline-successor-position",
+        family=("Cape Town", "2026-08-23", "high"),
+        probability_content_identity="q-before-deadline",
+        held_token_id="deadline-successor-token",
+        held_best_bid=0.21,
+        bid_observed_at=(decision_at - timedelta(seconds=1)).isoformat(),
+        probability_observed_at=(decision_at - timedelta(seconds=1)).isoformat(),
+        completion_deadline_at=decision_at.isoformat(),
+        schema_version=4,
+        book_state="EXECUTABLE",
+    )
+    reactor_wake.publish_reactor_wake(
+        source="held_position_monitor",
+        reason=reactor_wake.GLOBAL_AUCTION_COMPLETION_WAKE_REASON,
+        path=path,
+        held_sell_reauction_requests=(old,),
+    )
+    batch = global_batch_runtime.process_current_global_batch(
+        (),
+        decision_time=decision_at,
+        world_conn=object(),
+        forecast_conn=object(),
+        trade_conn=object(),
+        payload_reader=lambda _event: {},
+        prepare_event=lambda *_args: pytest.fail("expired before preparation"),
+        actuate_winner=lambda *_args: pytest.fail("expired before venue"),
+        stamp_receipt=lambda receipt: receipt,
+        venue_submit_count=lambda: 0,
+        current_execution=lambda *_args: None,
+        current_time_provider=lambda: decision_at,
+        held_sell_reauction_requests=(old,),
+    )
+    receipts = reactor._held_sell_reauction_receipts_from_global_cut(
+        requests=(old,),
+        result=ReactorResult(
+            global_held_sell_completion_cuts=[batch.held_sell_completion_cut]
+        ),
+    )
+    assert receipts[0].status == reactor_wake.DEADLINE_EXPIRED
+    assert reactor_wake.persist_held_sell_reauction_receipts(receipts, path=path)
+    assert reactor_wake.held_sell_reauction_requests_completed((old,), path=path)
+
+    obligation = {
+        field: getattr(old, field)
+        for field in (
+            "request_id", "material_identity", "generation", "attempt_identity",
+            "position_id", "held_token_id", "scope_identity", "schema_version",
+            "completion_deadline_at",
+        )
+    }
+    position = SimpleNamespace(trade_id=old.position_id)
+    conn = sqlite3.connect(":memory:")
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "needs_global_sell_snapshot_reauction",
+        lambda *_args: True,
+    )
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "latest_held_sell_reauction_obligation",
+        lambda *_args, **_kwargs: dict(obligation),
+    )
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "_pending_exit_no_order_waits_for_liquidity",
+        lambda *_args, **_kwargs: False,
+    )
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "_canonical_global_sell_command_ownership",
+        lambda *_args, **_kwargs: "GLOBAL_NO_COMMAND",
+    )
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "_record_global_sell_reauction_publish_claim",
+        lambda *_args, **_kwargs: True,
+    )
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "record_global_sell_reauction_reserved",
+        lambda *_args, **_kwargs: True,
+    )
+    monkeypatch.setattr(
+        "src.execution.executor._canonical_trade_write_lease",
+        lambda *_args, **_kwargs: nullcontext(),
+    )
+
+    successors = []
+
+    def requester(current, force_new_generation):
+        assert force_new_generation is True
+        accepted, successor = reactor.request_global_auction_completion(
+            reason="GLOBAL_SELL_SNAPSHOT_REAUCTION_REQUIRED",
+            position_id=old.position_id,
+            family=old.family,
+            probability_content_identity="q-after-deadline",
+            held_token_id=old.held_token_id,
+            held_best_bid=0.18,
+            bid_observed_at=(decision_at + timedelta(seconds=1)).isoformat(),
+            probability_observed_at=(decision_at + timedelta(seconds=1)).isoformat(),
+            completion_deadline_at=(decision_at + timedelta(seconds=31)).isoformat(),
+            schema_version=4,
+            scope_identity=old.scope_identity,
+            book_state="EXECUTABLE",
+            force_new_generation=force_new_generation,
+            return_request=True,
+            wake_path=path,
+        )
+        assert accepted is True
+        successors.append(successor)
+        current._held_sell_reauction_obligation = {
+            **obligation,
+            "request_id": successor.request_id,
+            "material_identity": successor.material_identity,
+            "generation": successor.generation,
+            "attempt_identity": successor.attempt_identity,
+            "completion_deadline_at": successor.completion_deadline_at,
+        }
+        return True
+
+    assert exit_lifecycle.recover_global_sell_snapshot_reauction_debt(
+        position,
+        conn=conn,
+        requester=requester,
+    )
+    successor = successors[0]
+    assert successor.scope_identity == old.scope_identity
+    assert successor.generation != old.generation
+    assert successor.attempt_identity != old.attempt_identity
+    assert successor.probability_content_identity == "q-after-deadline"
+    assert not reactor_wake.held_sell_reauction_requests_completed(
+        (successor,), path=path
+    )
+    conn.close()
 
 
 def test_v4_deadline_receipt_cannot_ack_another_attempt(tmp_path):
