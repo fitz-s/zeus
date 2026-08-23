@@ -4439,11 +4439,11 @@ def test_held_post_commit_enqueue_failure_fails_scheduler_until_snapshot_outcome
 
 
 @pytest.mark.parametrize(
-    ("canonical_count", "canonical_covered", "scope_unavailable", "freshness_debt", "expected_failed"),
-    ((1, 1, False, [], False), (1, 0, False, ["held"], True), (0, 0, False, [], False), (1, 1, True, [], True)),
+    ("canonical_count", "canonical_covered", "scope_unavailable", "freshness_debt", "audit_events", "expected_failed"),
+    ((1, 1, False, [], 0, False), (1, 1, False, [], 1, False), (1, 0, False, ["held"], 1, True), (0, 0, False, [], 0, False), (1, 1, True, [], 0, True)),
 )
 def test_held_quote_scheduler_health_uses_canonical_scope_not_audit_backlog(
-    monkeypatch, canonical_count, canonical_covered, scope_unavailable, freshness_debt, expected_failed
+    monkeypatch, canonical_count, canonical_covered, scope_unavailable, freshness_debt, audit_events, expected_failed
 ):
     from src.ingest import price_channel_ingest as lane
     from src.observability import scheduler_health
@@ -4458,7 +4458,7 @@ def test_held_quote_scheduler_health_uses_canonical_scope_not_audit_backlog(
             "canonical_held_freshness_debt_token_ids": freshness_debt,
             "canonical_held_scope_unavailable": scope_unavailable,
             "held_token_metadata": 55,
-            "held_quote_refresh_events": 0,
+            "held_quote_refresh_events": audit_events,
             "budget_skipped_tokens": 23,
             "held_snapshot_refresh_debt_actions": [],
             "held_snapshot_terminal_disposition_required": [],
@@ -4470,7 +4470,9 @@ def test_held_quote_scheduler_health_uses_canonical_scope_not_audit_backlog(
     assert recorded["failed"] is expected_failed
     if not expected_failed:
         assert result["audit_quote_refresh_degraded"] is True
-        assert result["audit_quote_refresh_degraded_reason"] == "quote_refresh_budget_exhausted_no_coverage"
+        assert result["audit_quote_refresh_degraded_reason"] == (
+            "quote_refresh_partial_coverage" if audit_events else "quote_refresh_budget_exhausted_no_coverage"
+        )
 
 
 def test_held_snapshot_debt_rebuilds_from_exact_snapshot_outcome_not_queue_state(monkeypatch, tmp_path):
