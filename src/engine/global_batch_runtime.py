@@ -8892,20 +8892,29 @@ def process_current_global_batch(
                         "EDLI_LIVE_CERTIFICATE_BUILD_FAILED:"
                         "LIVE_ENTRY_PROBABILITY_AUTHORITY_UNQUALIFIED:"
                     )
-                    entry_scope_exclusion = reason.startswith(
-                        (
-                            "LIVE_ENTRY_BLOCKED:entry_readiness_family:",
-                            "LIVE_ENTRY_BLOCKED:entry_readiness:",
+                    day0_fast_observation_entry_stale = reason == (
+                        "LIVE_INFERENCE_INPUTS_MISSING:"
+                        "GLOBAL_DAY0_FAST_OBSERVATION_ENTRY_STALE"
+                    )
+                    entry_scope_exclusion = (
+                        reason.startswith(
+                            (
+                                "LIVE_ENTRY_BLOCKED:entry_readiness_family:",
+                                "LIVE_ENTRY_BLOCKED:entry_readiness:",
+                            )
                         )
-                    ) or probability_authority_exclusion
+                        or probability_authority_exclusion
+                        or day0_fast_observation_entry_stale
+                    )
                     if (
                         reason.startswith(
                             "LIVE_ENTRY_BLOCKED:entry_readiness_family:"
                         )
                         or probability_authority_exclusion
+                        or day0_fast_observation_entry_stale
                     ):
-                        # The unqualified witness blocks this family's BUYs,
-                        # never its reduce-only SELLs.
+                        # The family-scoped entry witness blocks every BUY in
+                        # this family, never its reduce-only SELLs.
                         candidate_exclusion_keys = tuple(
                             sorted(
                                 {

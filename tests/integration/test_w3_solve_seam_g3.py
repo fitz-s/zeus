@@ -15666,6 +15666,11 @@ def test_global_winner_binding_does_not_reapply_legacy_price_floor(monkeypatch):
             "CANDIDATE_BLOCKED",
         ),
         (
+            "LIVE_INFERENCE_INPUTS_MISSING:"
+            "GLOBAL_DAY0_FAST_OBSERVATION_ENTRY_STALE",
+            "CANDIDATE_BLOCKED",
+        ),
+        (
             "GLOBAL_PREFLIGHT_CANDIDATE_PROOF_INVALID:"
             "REPLACEMENT_NO_BOUND_CERTIFICATE_PARENT_MISMATCH:served_yes_q",
             "CANDIDATE_BLOCKED",
@@ -29641,6 +29646,12 @@ def test_global_batch_falls_through_family_local_preflight_block(
             "SELL",
         ),
         (
+            "LIVE_INFERENCE_INPUTS_MISSING:"
+            "GLOBAL_DAY0_FAST_OBSERVATION_ENTRY_STALE",
+            "BUY",
+            "SELL",
+        ),
+        (
             "FDR_REJECTED:event_type=DAY0_EXTREME_UPDATED:"
             "attempted=22:selected_post_fdr=0:alpha=0.100000",
             "BUY",
@@ -29724,6 +29735,9 @@ def test_global_batch_candidate_block_keeps_sibling_eligible(
                 "LIVE_ENTRY_PROBABILITY_AUTHORITY_UNQUALIFIED:"
             ),
         )
+    ) or reason == (
+        "LIVE_INFERENCE_INPUTS_MISSING:"
+        "GLOBAL_DAY0_FAST_OBSERVATION_ENTRY_STALE"
     )
     candidate_b = SimpleNamespace(
         candidate_id="candidate-b",

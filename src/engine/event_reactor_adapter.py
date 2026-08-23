@@ -14013,6 +14013,17 @@ def _global_preflight_block_status(reason: str) -> str:
         # complete epoch here would let an impossible entry starve an executable
         # qualified BUY or reduce-only SELL.
         return "CANDIDATE_BLOCKED"
+    if reason == (
+        "LIVE_INFERENCE_INPUTS_MISSING:"
+        "GLOBAL_DAY0_FAST_OBSERVATION_ENTRY_STALE"
+    ):
+        # SCOPE: stale fast-observation truth invalidates only new BUY entry in
+        # this Day0 family; it does not invalidate that family's reduce-only
+        # SELL or any independent family. DRAIN: the batch excludes every BUY
+        # in this family and immediately re-ranks the same frozen cut. RESET:
+        # the next recurring cut rebuilds fast-observation truth from current
+        # source evidence and may admit the family again.
+        return "CANDIDATE_BLOCKED"
     if reason.startswith(
         (
             "FDR_REJECTED:",
