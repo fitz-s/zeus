@@ -2422,15 +2422,21 @@ def _ensure_repair_commit(
 def _after_review(cfg: Mapping[str, Any], run: Mapping[str, Any], review: Mapping[str, Any]) -> None:
     incident_id = str(run["incident_id"])
     incident_dir = runtime_dir(cfg) / "incidents" / incident_id
-    repair_session = str(run.get("repair_session_id") or "")
     worktree = Path(str(run["cwd"]))
     if review.get("blocking"):
         output = incident_dir / "patch.json"
         events = incident_dir / f"codex-repair-feedback-{int(time.time())}.jsonl"
         schema = _schema_file(cfg, "patch", PATCH_SCHEMA)
-        prompt = "Fresh independent review found blocking issues. Fix every finding, rerun affected tests, amend with a new commit, and return patch_ready only when resolved.\n\n" + json.dumps(review, ensure_ascii=False, indent=2)
-        command = _codex_resume_base(cfg, session_id=repair_session, schema=schema, output=output)
-        spawned = _spawn_run(cfg, incident_id=incident_id, kind=str(run["kind"]), stage="repair_feedback", command=command, cwd=worktree, prompt=prompt, output=output, events=events, session_id=repair_session)
+        prompt = "Fresh independent review found blocking issues. Fix every finding and rerun affected tests. Do not commit; the controller owns Git metadata and will commit the proven follow-up diff. Return patch_ready only when resolved.\n\n" + json.dumps(review, ensure_ascii=False, indent=2)
+        command = _codex_exec_base(
+            cfg, sandbox="workspace-write", cwd=worktree, schema=schema,
+            output=output, persistent=True,
+        )
+        spawned = _spawn_run(
+            cfg, incident_id=incident_id, kind=str(run["kind"]),
+            stage="repair_feedback", command=command, cwd=worktree,
+            prompt=prompt, output=output, events=events,
+        )
         with memory(cfg) as mem:
             transition(mem, incident_id, "repair_feedback", reason="fresh_review_blocking", run_id=str(spawned["run_id"]))
             mem.commit()

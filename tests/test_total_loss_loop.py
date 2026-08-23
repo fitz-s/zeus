@@ -729,3 +729,38 @@ def test_fresh_review_uses_structured_ephemeral_exec_not_invalid_exec_review(
     assert "exec" in command
     assert "review" not in command
     assert "--ephemeral" in command
+
+
+def test_blocking_review_starts_fresh_workspace_write_feedback(cfg: dict, monkeypatch) -> None:
+    incident_id = "review-feedback"
+    incident_dir = Path(cfg["paths"]["runtime"]) / "incidents" / incident_id
+    incident_dir.mkdir(parents=True)
+    loop.atomic_json(Path(cfg["paths"]["runtime"]) / "capabilities.json", {"reasoning_effort": "high"})
+    captured = {}
+
+    def capture_spawn(*_args, **kwargs):
+        captured.update(kwargs)
+        return {"run_id": "feedback-run", "session_id": None}
+
+    monkeypatch.setattr(loop, "_spawn_run", capture_spawn)
+    with loop.memory(cfg) as mem:
+        mem.execute(
+            "INSERT INTO incidents(incident_id,kind,position_id,crossing_evidence_id,crossing_kind,"
+            "held_token_id,held_direction,t_floor,floor_price,observed_bid,detected_at,priority,status,stage,updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (incident_id, "hard", "p1", "q1", "below_floor", "yes", "sell_yes",
+             "2026-08-22T10:00:00+00:00", 0.05, 0.04, "2026-08-22T10:00:00+00:00",
+             1_000_000.0, "running", "review", "2026-08-22T10:00:00+00:00"),
+        )
+        mem.commit()
+
+    loop._after_review(
+        cfg,
+        {"incident_id": incident_id, "kind": "hard", "cwd": str(ROOT), "repair_session_id": "old-read-only"},
+        {"blocking": True, "findings": [], "coverage": "test"},
+    )
+
+    command = captured["command"]
+    assert "resume" not in command
+    assert command[command.index("--sandbox") + 1] == "workspace-write"
+    assert captured.get("session_id") is None
