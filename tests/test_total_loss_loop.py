@@ -160,11 +160,21 @@ def _quote(
     token: str = "yes-token",
     direction: str = "buy_yes",
     latest: bool = True,
+    depth_bid: float | None | object = ...,
 ) -> None:
+    resolved_depth_bid = bid if depth_bid is ... else depth_bid
+    depth = (
+        {"bids": [], "asks": []}
+        if resolved_depth_bid is None
+        else {
+            "bids": [{"price": str(resolved_depth_bid), "size": "100"}],
+            "asks": [],
+        }
+    )
     values = (
         evidence_id, f"event-{evidence_id}", "condition-1", token, "YES",
         direction, at, f"book-{evidence_id}", bid, 0.5,
-        '{"bids":[],"asks":[]}', at, 1,
+        json.dumps(depth), at, 1,
     )
     with sqlite3.connect(cfg["paths"]["trades_db"]) as conn:
         conn.execute("INSERT INTO execution_feasibility_evidence VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)", values)
@@ -173,7 +183,7 @@ def _quote(
             latest_values = (
                 token, sell, evidence_id, f"event-{evidence_id}", "condition-1",
                 "YES", at, f"book-{evidence_id}", bid, 0.5,
-                '{"bids":[],"asks":[]}', at, 1,
+                json.dumps(depth), at, 1,
             )
             conn.execute(
                 "INSERT OR REPLACE INTO execution_feasibility_latest VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
@@ -251,6 +261,145 @@ def test_absent_bid_is_hard_no_book_incident_without_fabricated_floor_time(cfg: 
     row = _incidents(cfg)[0]
     assert row["crossing_kind"] == "no_bid"
     assert row["t_floor"] is None
+
+
+def test_depth_top_bid_overrides_conflicting_zero_scalar(cfg: dict) -> None:
+    _position(cfg)
+    _quote(
+        cfg,
+        "q-scalar-split",
+        "2026-08-22T09:00:02+00:00",
+        0.0,
+        depth_bid=0.999,
+    )
+
+    loop.detect(cfg)
+
+    assert not [row for row in _incidents(cfg) if row["kind"] == "hard"]
+    with loop.memory(cfg) as conn:
+        state = conn.execute(
+            "SELECT best_bid,quote_status,below_floor FROM position_quote_state "
+            "WHERE position_id='p1'"
+        ).fetchone()
+    assert tuple(state) == (0.999, "quote_integrity_conflict", 0)
+
+
+def test_missing_or_malformed_depth_is_not_no_bid(cfg: dict) -> None:
+    _position(cfg)
+    _quote(cfg, "q-malformed", "2026-08-22T09:00:02+00:00", None)
+    with sqlite3.connect(cfg["paths"]["trades_db"]) as conn:
+        conn.execute(
+            "UPDATE execution_feasibility_evidence SET depth_before_json='not-json' "
+            "WHERE evidence_id='q-malformed'"
+        )
+        conn.execute(
+            "UPDATE execution_feasibility_latest SET depth_before_json='not-json' "
+            "WHERE evidence_id='q-malformed'"
+        )
+
+    loop.detect(cfg)
+
+    assert not [row for row in _incidents(cfg) if row["kind"] == "hard"]
+    with loop.memory(cfg) as conn:
+        status = conn.execute(
+            "SELECT quote_status FROM position_quote_state WHERE position_id='p1'"
+        ).fetchone()[0]
+    assert status == "quote_incomplete"
+
+
+def test_incomplete_quote_does_not_hide_following_no_bid_transition(cfg: dict) -> None:
+    _position(cfg)
+    _quote(cfg, "q-healthy", "2026-08-22T09:00:01+00:00", 0.20)
+    loop.detect(cfg)
+    _quote(cfg, "q-malformed", "2026-08-22T09:00:02+00:00", None)
+    with sqlite3.connect(cfg["paths"]["trades_db"]) as conn:
+        conn.execute(
+            "UPDATE execution_feasibility_evidence SET depth_before_json='not-json' "
+            "WHERE evidence_id='q-malformed'"
+        )
+        conn.execute(
+            "UPDATE execution_feasibility_latest SET depth_before_json='not-json' "
+            "WHERE evidence_id='q-malformed'"
+        )
+    loop.detect(cfg)
+    _quote(cfg, "q-no-bid", "2026-08-22T09:00:03+00:00", None)
+
+    loop.detect(cfg)
+
+    hard = [row for row in _incidents(cfg) if row["kind"] == "hard"]
+    assert len(hard) == 1
+    assert hard[0]["crossing_kind"] == "no_bid"
+    assert hard[0]["crossing_evidence_id"] == "q-no-bid"
+
+
+@pytest.mark.parametrize(
+    "depth",
+    (
+        {"bids": [{"price": "bad", "size": "100"}], "asks": []},
+        {
+            "bids": [
+                {"price": "bad", "size": "100"},
+                {"price": "0.04", "size": "100"},
+            ],
+            "asks": [],
+        },
+    ),
+)
+def test_malformed_depth_level_cannot_fabricate_hard_crossing(
+    cfg: dict,
+    depth: dict,
+) -> None:
+    _position(cfg)
+    _quote(cfg, "q-bad-level", "2026-08-22T09:00:02+00:00", None)
+    with sqlite3.connect(cfg["paths"]["trades_db"]) as conn:
+        encoded = json.dumps(depth)
+        conn.execute(
+            "UPDATE execution_feasibility_evidence SET depth_before_json=? "
+            "WHERE evidence_id='q-bad-level'",
+            (encoded,),
+        )
+        conn.execute(
+            "UPDATE execution_feasibility_latest SET depth_before_json=? "
+            "WHERE evidence_id='q-bad-level'",
+            (encoded,),
+        )
+
+    loop.detect(cfg)
+
+    assert not [row for row in _incidents(cfg) if row["kind"] == "hard"]
+    with loop.memory(cfg) as conn:
+        status = conn.execute(
+            "SELECT quote_status FROM position_quote_state WHERE position_id='p1'"
+        ).fetchone()[0]
+    assert status == "quote_incomplete"
+
+
+def test_unrepresentable_residual_dust_does_not_create_hard_incident(cfg: dict) -> None:
+    _position(cfg)
+    with sqlite3.connect(cfg["paths"]["trades_db"]) as conn:
+        conn.execute(
+            "UPDATE position_current SET shares=?,chain_shares=?,cost_basis_usd=? "
+            "WHERE position_id='p1'",
+            (0.001426, 0.001426, 0.0004278),
+        )
+    _quote(cfg, "q-dust", "2026-08-22T09:00:02+00:00", 0.001)
+
+    loop.detect(cfg)
+
+    assert _incidents(cfg) == []
+
+
+def test_zero_chain_fact_does_not_fall_back_to_stale_local_shares(cfg: dict) -> None:
+    _position(cfg)
+    with sqlite3.connect(cfg["paths"]["trades_db"]) as conn:
+        conn.execute(
+            "UPDATE position_current SET shares=10,chain_shares=0 WHERE position_id='p1'"
+        )
+    _quote(cfg, "q-chain-zero", "2026-08-22T09:00:02+00:00", 0.001)
+
+    loop.detect(cfg)
+
+    assert _incidents(cfg) == []
 
 
 def test_buy_no_maps_to_no_token_sell_bid(cfg: dict) -> None:
@@ -516,6 +665,60 @@ def test_capability_fingerprint_changes_with_profile_content(cfg: dict) -> None:
     cfg["profiles"]["test"]["model"] = "gpt-5.6-luna"
 
     assert loop._capability_fingerprint(cfg) != before
+
+
+@pytest.mark.parametrize("effort", ["medium", "xhigh", "max", "ultra"])
+def test_current_capabilities_rejects_any_non_high_effort(
+    cfg: dict,
+    effort: str,
+) -> None:
+    runtime = Path(cfg["paths"]["runtime"])
+    runtime.mkdir(parents=True)
+    loop.atomic_json(
+        runtime / "capabilities.json",
+        {
+            "model": "gpt-5.6-sol",
+            "reasoning_effort": effort,
+            "structured_output_ok": True,
+            "workspace_write_ok": True,
+            "delivery_network_ok": True,
+            "resume_ok": True,
+            "multi_agent_ok": True,
+        },
+    )
+    loop.atomic_json(
+        runtime / "capability-fingerprint.json",
+        {"value": loop._capability_fingerprint(cfg)},
+    )
+
+    assert loop.current_capabilities(cfg) is None
+
+
+def test_codex_exec_rejects_non_high_override(cfg: dict) -> None:
+    runtime = Path(cfg["paths"]["runtime"])
+    runtime.mkdir(parents=True)
+
+    with pytest.raises(RuntimeError, match="reasoning_effort=high"):
+        loop._codex_exec_base(
+            cfg,
+            sandbox="read-only",
+            cwd=ROOT,
+            schema=runtime / "schema.json",
+            output=runtime / "output.json",
+            persistent=True,
+            reasoning_effort="max",
+        )
+
+
+def test_untyped_retry_cannot_replay_persisted_non_high_command(cfg: dict) -> None:
+    with pytest.raises(RuntimeError, match="without a typed stage"):
+        loop._retry_command(
+            cfg,
+            {
+                "stage": "unknown",
+                "command": ["codex", "-c", 'model_reasoning_effort="max"'],
+            },
+        )
 
 
 def test_failed_repair_retry_resumes_persistent_session(cfg: dict, monkeypatch) -> None:

@@ -157,6 +157,7 @@ CREATE TABLE IF NOT EXISTS position_quote_state (
     evidence_id TEXT NOT NULL,
     quote_seen_at TEXT NOT NULL,
     best_bid REAL,
+    quote_status TEXT NOT NULL DEFAULT 'unknown',
     below_floor INTEGER NOT NULL CHECK (below_floor IN (0,1)),
     updated_at TEXT NOT NULL
 );
@@ -277,6 +278,14 @@ def memory(cfg: Mapping[str, Any]) -> sqlite3.Connection:
     }
     if "stage" not in incident_columns:
         conn.execute("ALTER TABLE incidents ADD COLUMN stage TEXT NOT NULL DEFAULT 'blind'")
+    quote_columns = {
+        str(row[1]) for row in conn.execute("PRAGMA table_info(position_quote_state)")
+    }
+    if "quote_status" not in quote_columns:
+        conn.execute(
+            "ALTER TABLE position_quote_state "
+            "ADD COLUMN quote_status TEXT NOT NULL DEFAULT 'unknown'"
+        )
     conn.execute("DROP INDEX IF EXISTS idx_incident_queue")
     conn.execute(
         "CREATE INDEX idx_incident_queue "
@@ -341,6 +350,73 @@ def held_sell_direction(row: Mapping[str, Any]) -> str:
     return "sell_no" if str(row.get("direction") or "").lower() == "buy_no" else "sell_yes"
 
 
+def effective_shares(position: Mapping[str, Any]) -> float:
+    """Return Chain-authoritative exposure without reviving a zero Chain fact."""
+
+    chain = _float(position.get("chain_shares"))
+    if chain is not None:
+        return max(0.0, chain)
+    return max(0.0, _float(position.get("shares")) or 0.0)
+
+
+def has_material_share_precision(position: Mapping[str, Any]) -> bool:
+    """True when at least one venue-representable 0.01-share unit remains."""
+
+    return math.floor(effective_shares(position) * 100.0 + 1e-9) >= 1
+
+
+def _depth_best_bid(raw: object) -> tuple[bool, float | None]:
+    """Return (depth_is_authoritative, executable top bid)."""
+
+    if not isinstance(raw, str) or not raw.strip():
+        return False, None
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        return False, None
+    if not isinstance(payload, Mapping) or not isinstance(payload.get("bids"), list):
+        return False, None
+    prices: list[float] = []
+    for level in payload["bids"]:
+        if not isinstance(level, Mapping):
+            return False, None
+        price = _float(level.get("price"))
+        size = _float(level.get("size"))
+        if price is None or size is None or not 0 < price < 1 or size <= 0:
+            return False, None
+        prices.append(price)
+    return True, max(prices) if prices else None
+
+
+def reconcile_held_quote(quote: Mapping[str, Any]) -> tuple[str, float | None]:
+    """Classify one internally consistent held-side executable quote witness."""
+
+    depth_is_authoritative, depth_bid = _depth_best_bid(
+        quote.get("depth_before_json")
+    )
+    scalar = _float(quote.get("best_bid_before"))
+    if not depth_is_authoritative:
+        return "quote_incomplete", None
+    if depth_bid is None:
+        return (
+            ("no_bid", None)
+            if scalar is None or scalar <= 0
+            else ("quote_integrity_conflict", None)
+        )
+    if scalar is not None and (
+        scalar <= 0 or not math.isclose(scalar, depth_bid, abs_tol=1e-9)
+    ):
+        return "quote_integrity_conflict", depth_bid
+    return "executable", depth_bid
+
+
+def authoritative_held_bid(quote: Mapping[str, Any]) -> float | None:
+    """Return a bid only from a complete, internally consistent witness."""
+
+    status, bid = reconcile_held_quote(quote)
+    return bid if status == "executable" else None
+
+
 def tracked_positions(conn: sqlite3.Connection, *, history_days: int) -> dict[str, dict[str, Any]]:
     cutoff = iso(now() - timedelta(days=history_days))
     placeholders = ",".join("?" for _ in OPEN_PHASES)
@@ -365,7 +441,7 @@ def tracked_positions(conn: sqlite3.Connection, *, history_days: int) -> dict[st
           FROM position_current pc
          WHERE (
              pc.phase IN ({placeholders})
-             AND COALESCE(NULLIF(pc.chain_shares,0),pc.shares,0) > 0
+             AND COALESCE(pc.chain_shares,pc.shares,0) > 0
          ) OR (
              COALESCE(pc.shares,0) > 0
              AND COALESCE(pc.settled_at,pc.updated_at) >= ?
@@ -377,7 +453,7 @@ def tracked_positions(conn: sqlite3.Connection, *, history_days: int) -> dict[st
     for raw in rows:
         row = dict(raw)
         token = held_token(row)
-        if token:
+        if token and has_material_share_precision(row):
             row["held_token_id"] = token
             row["held_sell_direction"] = held_sell_direction(row)
             result[str(row["position_id"])] = row
@@ -485,11 +561,13 @@ def _observe_quote(
     seen_at = str(quote["quote_seen_at"])
     if not _quote_within_exposure(position, seen_at):
         return None
-    bid = quote.get("best_bid_before")
-    bid = float(bid) if bid is not None else None
+    quote_status, reconciled_bid = reconcile_held_quote(quote)
+    bid = reconciled_bid if quote_status == "executable" else None
     below = bid is not None and bid < floor
+    no_bid = quote_status == "no_bid"
     previous = mem.execute(
-        "SELECT below_floor,quote_seen_at,best_bid FROM position_quote_state WHERE position_id=?",
+        "SELECT below_floor,quote_seen_at,best_bid,quote_status "
+        "FROM position_quote_state WHERE position_id=?",
         (position_id,),
     ).fetchone()
     created = None
@@ -515,32 +593,46 @@ def _observe_quote(
             created = str(earliest[0])
     if created is None and (
         (below and (previous is None or not bool(previous[0])))
-        or (bid is None and (previous is None or previous[2] is not None))
+        or (no_bid and (previous is None or previous[3] != "no_bid"))
     ):
         created = _insert_incident(
             mem,
             position=position,
             evidence_id=evidence_id,
             quote_seen_at=seen_at,
-            bid=bid,
+            bid=(None if no_bid else bid),
             floor=floor,
             kind="hard",
             priority=1_000_000.0,
         )
     if out_of_order:
         return created
+    state_bid = reconciled_bid
+    state_below = int(below)
+    if quote_status == "quote_incomplete" and previous is not None:
+        state_bid = previous[2]
+        state_below = int(previous[0])
     mem.execute(
         """
-        INSERT INTO position_quote_state(position_id,evidence_id,quote_seen_at,best_bid,below_floor,updated_at)
-        VALUES (?,?,?,?,?,?)
+        INSERT INTO position_quote_state(position_id,evidence_id,quote_seen_at,best_bid,quote_status,below_floor,updated_at)
+        VALUES (?,?,?,?,?,?,?)
         ON CONFLICT(position_id) DO UPDATE SET
             evidence_id=excluded.evidence_id,
             quote_seen_at=excluded.quote_seen_at,
             best_bid=excluded.best_bid,
+            quote_status=excluded.quote_status,
             below_floor=excluded.below_floor,
             updated_at=excluded.updated_at
         """,
-        (position_id, evidence_id, seen_at, bid, int(below), iso()),
+        (
+            position_id,
+            evidence_id,
+            seen_at,
+            state_bid,
+            quote_status,
+            state_below,
+            iso(),
+        ),
     )
     return created
 
@@ -670,7 +762,9 @@ def backfill_step(
             continue
         tail = quote
         processed += 1
-        bid = _float(quote.get("best_bid_before"))
+        quote_status, bid = reconcile_held_quote(quote)
+        if quote_status not in {"executable", "no_bid"}:
+            continue
         below = bid is not None and bid < floor
         if below and not previous_below:
             found_crossing = True
@@ -798,9 +892,11 @@ def refresh_precursor(
     ranked: list[tuple[float, dict[str, Any], Mapping[str, Any]]] = []
     for position in open_positions:
         quote = latest.get(str(position["position_id"]))
-        if not quote or quote.get("best_bid_before") is None:
+        if not quote:
             continue
-        bid = float(quote["best_bid_before"])
+        quote_status, bid = reconcile_held_quote(quote)
+        if quote_status != "executable" or bid is None:
+            continue
         if bid < floor:
             continue
         velocity, acceleration = _velocity(trades, str(position["held_token_id"]))
@@ -842,7 +938,7 @@ def refresh_precursor(
             mem.execute(
                 "UPDATE incidents SET crossing_evidence_id=?,observed_bid=?,priority=?,status='queued',"
                 "evidence_revision=evidence_revision+1,updated_at=? WHERE incident_id=?",
-                (quote["evidence_id"], quote["best_bid_before"], score, iso(), precursor_id),
+                (quote["evidence_id"], bid, score, iso(), precursor_id),
             )
             return precursor_id
         return None
@@ -851,7 +947,7 @@ def refresh_precursor(
         position=position,
         evidence_id=str(quote["evidence_id"]),
         quote_seen_at=str(quote["quote_seen_at"]),
-        bid=float(quote["best_bid_before"]),
+        bid=bid,
         floor=floor,
         kind="precursor",
         priority=score,
@@ -899,7 +995,7 @@ def detect(cfg: Mapping[str, Any]) -> list[str]:
         open_positions = [
             row for row in positions.values()
             if row.get("phase") in OPEN_PHASES
-            and float(row.get("chain_shares") or row.get("shares") or 0) > 0
+            and has_material_share_precision(row)
         ]
         latest = _latest_quotes(trades, open_positions)
         for position in open_positions:
@@ -1415,6 +1511,20 @@ def codex_bin() -> str:
     return shutil.which("codex") or str(Path.home() / ".npm-global" / "bin" / "codex")
 
 
+def required_reasoning_effort(cfg: Mapping[str, Any]) -> str:
+    """The dedicated investigator is operator-pinned to exact high reasoning."""
+
+    profile = cfg["profiles"][cfg["active"]["profile"]]
+    preferred = str(profile.get("preferred_reasoning") or "")
+    fallbacks = list(profile.get("fallback_reasoning") or [])
+    if preferred != "high" or fallbacks:
+        raise RuntimeError(
+            "total-loss Codex profile must use preferred_reasoning=high "
+            "with no fallback"
+        )
+    return "high"
+
+
 def isolated_codex_home(cfg: Mapping[str, Any]) -> Path:
     home = runtime_dir(cfg) / "codex-home"
     home.mkdir(parents=True, exist_ok=True)
@@ -1497,16 +1607,10 @@ def probe_capabilities(cfg: Mapping[str, Any], *, smoke: bool = True) -> dict[st
     profile_name = str(cfg["active"]["profile"])
     profile = cfg["profiles"][profile_name]
     wanted = str(profile["model"])
+    required_effort = required_reasoning_effort(cfg)
     selected = next((row for row in catalog.get("models", []) if row.get("slug") == wanted), None)
     supported = [str(row.get("effort")) for row in (selected or {}).get("supported_reasoning_levels", [])]
-    effort = next(
-        (
-            candidate
-            for candidate in [profile.get("preferred_reasoning"), *profile.get("fallback_reasoning", [])]
-            if candidate in supported
-        ),
-        None,
-    )
+    effort = required_effort if required_effort in supported else None
     if selected is None or effort is None:
         raise RuntimeError(f"configured Codex profile unavailable: model={wanted} supported={supported}")
     prompt_probe = _run_probe_capture(
@@ -1631,7 +1735,13 @@ def capabilities(cfg: Mapping[str, Any]) -> dict[str, Any]:
     value = read_json(path, None)
     fingerprint = _capability_fingerprint(cfg)
     current = read_json(runtime_dir(cfg) / "capability-fingerprint.json", {})
-    if not isinstance(value, dict) or current.get("value") != fingerprint:
+    profile = cfg["profiles"][cfg["active"]["profile"]]
+    if (
+        not isinstance(value, dict)
+        or current.get("value") != fingerprint
+        or value.get("model") != profile.get("model")
+        or value.get("reasoning_effort") != required_reasoning_effort(cfg)
+    ):
         value = probe_capabilities(cfg, smoke=True)
         atomic_json(runtime_dir(cfg) / "capability-fingerprint.json", {"value": fingerprint, "at": iso()})
     return value
@@ -1651,7 +1761,13 @@ def _capability_fingerprint(cfg: Mapping[str, Any]) -> str:
 def current_capabilities(cfg: Mapping[str, Any]) -> dict[str, Any] | None:
     value = read_json(runtime_dir(cfg) / "capabilities.json", None)
     current = read_json(runtime_dir(cfg) / "capability-fingerprint.json", {})
-    if not isinstance(value, dict) or current.get("value") != _capability_fingerprint(cfg):
+    profile = cfg["profiles"][cfg["active"]["profile"]]
+    if (
+        not isinstance(value, dict)
+        or current.get("value") != _capability_fingerprint(cfg)
+        or value.get("model") != profile.get("model")
+        or value.get("reasoning_effort") != required_reasoning_effort(cfg)
+    ):
         return None
     required = (
         "structured_output_ok",
@@ -1708,8 +1824,10 @@ def _codex_exec_base(
     network: bool = False,
     reasoning_effort: str | None = None,
 ) -> list[str]:
-    cap = read_json(runtime_dir(cfg) / "capabilities.json", {})
     profile = cfg["profiles"][cfg["active"]["profile"]]
+    required_effort = required_reasoning_effort(cfg)
+    if reasoning_effort is not None and reasoning_effort != required_effort:
+        raise RuntimeError("total-loss Codex runs require reasoning_effort=high")
     command = [
         codex_bin(),
         "-a", "never",
@@ -1720,7 +1838,7 @@ def _codex_exec_base(
         "-C", str(cwd),
         "--skip-git-repo-check",
         "-m", str(profile["model"]),
-        "-c", f'model_reasoning_effort="{reasoning_effort or cap.get("reasoning_effort") or profile["preferred_reasoning"]}"',
+        "-c", f'model_reasoning_effort="{required_effort}"',
         "-c", "features.memories=false",
         "-c", "features.multi_agent=true",
         "--output-schema", str(schema),
@@ -1744,11 +1862,13 @@ def _codex_resume_base(
 ) -> list[str]:
     cap = capabilities(cfg)
     profile = cfg["profiles"][cfg["active"]["profile"]]
+    if cap.get("reasoning_effort") != required_reasoning_effort(cfg):
+        raise RuntimeError("total-loss Codex resume requires reasoning_effort=high")
     return [
         codex_bin(), "-a", "never", "exec", "resume", session_id,
         "--ignore-user-config", "--strict-config",
         "-m", str(profile["model"]),
-        "-c", f'model_reasoning_effort="{cap["reasoning_effort"]}"',
+        "-c", 'model_reasoning_effort="high"',
         "-c", "features.memories=false",
         "-c", "features.multi_agent=true",
         "--output-schema", str(schema),
@@ -2071,7 +2191,7 @@ def _retry_command(cfg: Mapping[str, Any], prior: Mapping[str, Any]) -> list[str
             schema=_schema_file(cfg, schema_name, schema),
             output=Path(str(prior["output"])),
         )
-    return [str(value) for value in prior["command"]]
+    raise RuntimeError("cannot safely retry a total-loss run without a typed stage")
 
 
 _WORKTREE_WRITE_STAGES = frozenset(
