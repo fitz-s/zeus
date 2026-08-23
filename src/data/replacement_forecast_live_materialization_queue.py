@@ -1040,6 +1040,15 @@ def _current_money_risk_scopes(
 
     if not fam_scopes:
         return frozenset()
+    return _current_money_risk_families(trade_db=trade_db) & fam_scopes
+
+
+def _current_money_risk_families(
+    *,
+    trade_db: Path | str | None = None,
+) -> frozenset[tuple[str, str, str]]:
+    """Return every chain-confirmed family whose probability protects capital."""
+
     try:
         from src.data.replacement_cycle_advance_trigger import (  # noqa: PLC0415
             _held_position_families,
@@ -1051,7 +1060,7 @@ def _current_money_risk_scopes(
             return frozenset()
         conn = _connect_read_only(db_path)
         try:
-            return frozenset(_held_position_families(conn) & fam_scopes)
+            return frozenset(_held_position_families(conn))
         finally:
             conn.close()
     except Exception as exc:  # noqa: BLE001 - priority loss is loud, queue still drains
@@ -1070,6 +1079,7 @@ def _cycle_advance_seed_priority_map(
     *,
     trade_db: Path | str | None = None,
     now_utc: datetime | None = None,
+    current_money_risk: frozenset[tuple[str, str, str]] | None = None,
 ) -> dict[str, tuple[float, str]]:
     """Return filename -> priority for queued materialization work.
 
@@ -1125,9 +1135,10 @@ def _cycle_advance_seed_priority_map(
     if not names_by_scope:
         return {}
     fam_scopes = frozenset(scope[:3] for scope in names_by_scope)
-    current_money_risk = _current_money_risk_scopes(
-        fam_scopes,
-        trade_db=trade_db,
+    current_money_risk = (
+        _current_money_risk_scopes(fam_scopes, trade_db=trade_db)
+        if current_money_risk is None
+        else current_money_risk & fam_scopes
     )
     rows: list[object] = []
     current_baseline_names: set[str] = set()
@@ -2060,6 +2071,33 @@ def _day0_enqueue_ownership_cursor_path(request_dir: Path) -> Path:
     return request_dir.parent / _DAY0_ENQUEUE_OWNERSHIP_CURSOR_NAME
 
 
+def _current_money_risk_seed_prefixes(
+    families: frozenset[tuple[str, str, str]],
+) -> tuple[str, ...]:
+    """Encode current-capital families in the exact canonical seed-name shape."""
+
+    return tuple(
+        f"{city.replace('/', '_').replace(' ', '_')}.{target_date}.{metric}."
+        for city, target_date, metric in families
+    )
+
+
+def _prioritize_current_money_risk_seed_files(
+    paths: Sequence[Path],
+    families: frozenset[tuple[str, str, str]],
+) -> tuple[Path, ...]:
+    """Stable-partition seed names before the bounded JSON/DB inspection window."""
+
+    prefixes = _current_money_risk_seed_prefixes(families)
+    if not prefixes:
+        return tuple(paths)
+    held: list[Path] = []
+    other: list[Path] = []
+    for path in paths:
+        (held if path.name.startswith(prefixes) else other).append(path)
+    return (*held, *other)
+
+
 def _read_day0_enqueue_ownership_cursor(cursor_path: Path) -> str | None:
     """Read a prior filename cursor; malformed sidecars safely restart the rotation."""
     try:
@@ -2229,6 +2267,11 @@ def _prepare_seed_requests(
         raw_snapshot,
         _read_day0_enqueue_ownership_cursor(cursor_path),
     )
+    current_money_risk = _current_money_risk_families()
+    prioritized_raw_snapshot = _prioritize_current_money_risk_seed_files(
+        rotated_raw_snapshot,
+        current_money_risk,
+    )
     # Cursor rotation and the inspection bound apply before JSON/DB priority work. The window's
     # raw boundary advances even when priority/actionable work stops early, so retained entries
     # make deterministic progress across passes without unbounded queue-lock I/O.
@@ -2237,7 +2280,7 @@ def _prepare_seed_requests(
         actionable_limit * _DAY0_ENQUEUE_OWNERSHIP_INSPECTION_MULTIPLIER,
         _DAY0_ENQUEUE_OWNERSHIP_MIN_INSPECTIONS,
     )
-    raw_window = rotated_raw_snapshot[:inspection_cap]
+    raw_window = prioritized_raw_snapshot[:inspection_cap]
     (
         coalesced_window,
         superseded_seeds,
@@ -2257,6 +2300,7 @@ def _prepare_seed_requests(
         forecast_db,
         coalesced_window,
         seed_payloads,
+        current_money_risk=current_money_risk,
     )
     seeds = tuple(
         sorted(

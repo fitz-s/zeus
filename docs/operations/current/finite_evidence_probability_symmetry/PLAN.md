@@ -4,6 +4,23 @@ Date: 2026-07-11
 Branch: `live` (was `p2-pending-exit-restart-redecision`; renamed at main→live cutover)
 Status: active
 
+## 2026-08-23 — current-capital q repair不得排在bounded seed window之外
+
+- **实时反例：** `live` reload后queue有392个pending seeds，其中29个marker绑定held
+  families。实现先按alphabetical cursor截取bounded raw window，再在窗口内部读取
+  chain-confirmed exposure；因此文档声称的held priority无法越过窗口边界，22个持仓虽被
+  monitor扫描，仍有15个缺fresh probability，restart guard正确保持entries paused。
+- **修复：** 每个queue pass只读一次current held family集合，并用canonical seed filename
+  shape在JSON/DB inspection前stable-partition当前资本；随后原有cycle/Day0/ownership排序
+  继续生效。ordinary backlog仍通过同一durable cursor推进，inspection cap与single writer
+  不变。
+- **SCOPE / DRAIN / RESET：** scope仅是seed inspection order，不改变probability、price、
+  Kelly或submit authority；drain是现有1-second queue poll；reset是held seed转为request并
+  commit新posterior，持仓退出后下一次claim-time exposure read自动移除其优先级。
+- **验收：** 100个alphabetically earlier普通seed加一个tail held seed、`limit=1`时必须先
+  build held request且不读取全backlog；再跑queue/Day0/cycle suites，并以live posterior
+  conditioning、`last_monitor_prob_is_fresh`和restart guard复验。
+
 ## 2026-08-23 — Day0 observation revision不得被不完整的future ENS cycle冻结
 
 - **实时反例：** Warsaw/Madrid/Munich 的最新settlement/physical extreme分别推进到

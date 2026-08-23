@@ -3440,6 +3440,102 @@ def test_empty_materialization_queues_skip_cycle_priority_reads(
     assert "REPLACEMENT_LIVE_MATERIALIZATION_QUEUE_EMPTY" in report.reason_codes
 
 
+def test_current_capital_seed_precedes_backlog_before_bounded_inspection(
+    tmp_path, monkeypatch
+) -> None:
+    """Held q repair must not wait for the raw cursor to traverse ordinary seeds."""
+    from types import SimpleNamespace
+
+    import src.data.replacement_forecast_live_materialization_queue as queue_mod
+
+    seed_dir = tmp_path / "seeds"
+    request_dir = tmp_path / "requests"
+    seed_dir.mkdir()
+    request_dir.mkdir()
+
+    def write_seed(city: str, filename_city: str) -> Path:
+        path = seed_dir / f"{filename_city}.2026-08-23.high.20260823T120000Z.json"
+        path.write_text(
+            json.dumps(
+                {
+                    "city": city,
+                    "target_date": "2026-08-23",
+                    "temperature_metric": "high",
+                    "computed_at": "2026-08-23T12:00:00+00:00",
+                    "source_cycle_time": "2026-08-23T06:00:00+00:00",
+                    "baseline_source_run_id": "baseline:06z",
+                    "openmeteo_source_run_id": "openmeteo:06z",
+                    "openmeteo_payload_json": "payload.json",
+                    "precision_metadata_json": "precision.json",
+                    "bins": [{"bin_id": "warm"}],
+                }
+            ),
+            encoding="utf-8",
+        )
+        return path
+
+    backlog = tuple(
+        write_seed(f"Backlog {index:03d}", f"Backlog_{index:03d}")
+        for index in range(100)
+    )
+    held = write_seed("Zulu City", "Zulu_City")
+    monkeypatch.setattr(
+        queue_mod,
+        "_current_money_risk_families",
+        lambda **_kwargs: frozenset({("Zulu City", "2026-08-23", "high")}),
+    )
+    loaded: list[Path] = []
+    original_load = queue_mod._load_request_payload_for_coalescing
+
+    def counting_load(path: Path):
+        loaded.append(path)
+        return original_load(path)
+
+    monkeypatch.setattr(
+        queue_mod,
+        "_load_request_payload_for_coalescing",
+        counting_load,
+    )
+    built: list[str] = []
+
+    def ready_builder(payload, **_kwargs):
+        built.append(str(payload["city"]))
+        return SimpleNamespace(
+            ok=True,
+            status="READY",
+            reason_codes=("REPLACEMENT_MATERIALIZATION_REQUEST_READY",),
+            request={
+                "city": str(payload["city"]),
+                "target_date": str(payload["target_date"]),
+                "temperature_metric": str(payload["temperature_metric"]),
+                "source_cycle_time": str(payload["source_cycle_time"]),
+            },
+        )
+
+    monkeypatch.setattr(
+        queue_mod,
+        "build_replacement_forecast_materialization_request",
+        ready_builder,
+    )
+
+    processed, failed, _reasons = queue_mod._prepare_seed_requests(
+        seed_dir=seed_dir,
+        seed_processed_dir=tmp_path / "seed_processed",
+        seed_failed_dir=tmp_path / "seed_failed",
+        request_dir=request_dir,
+        forecast_db=None,
+        limit=1,
+    )
+
+    assert not failed
+    assert len(processed) == 1
+    assert built == ["Zulu City"]
+    assert not held.exists()
+    assert all(path.exists() for path in backlog)
+    assert (request_dir / held.name).exists()
+    assert len(loaded) <= queue_mod._DAY0_ENQUEUE_OWNERSHIP_MIN_INSPECTIONS
+
+
 def test_processed_seed_publishes_one_zero_copy_family_cache(tmp_path) -> None:
     import src.data.replacement_forecast_live_materialization_queue as queue_mod
 

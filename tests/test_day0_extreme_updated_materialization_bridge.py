@@ -1902,7 +1902,9 @@ def test_queue_scans_past_indeterminate_day0_prefix_without_starving_current_see
     conn.commit()
     conn.close()
     monkeypatch.setattr(
-        materialization_queue, "_cycle_advance_seed_priority_map", lambda *_args: {}
+        materialization_queue,
+        "_cycle_advance_seed_priority_map",
+        lambda *_args, **_kwargs: {},
     )
     built: list[Mapping[str, object]] = []
 
