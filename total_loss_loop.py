@@ -3806,6 +3806,7 @@ def daemon(cfg: Mapping[str, Any]) -> int:
     signal.signal(signal.SIGINT, stop)
     poll = max(0.05, float(cfg["loop"].get("poll_ms", 250)) / 1000.0)
     dispatch_worker: subprocess.Popen[Any] | None = None
+    dispatch_error: str | None = None
     while not stopping and not (run / "HALT").exists():
         cycle_started = time.monotonic()
         detector_elapsed = 0.0
@@ -3817,6 +3818,7 @@ def daemon(cfg: Mapping[str, Any]) -> int:
             detector_elapsed = time.monotonic() - detector_started
         except Exception as exc:  # the detector remains restartable and evidence-backed
             error = f"{type(exc).__name__}: {exc}"
+        recorded_dispatch_error = dispatch_error
         atomic_json(
             run / "status.json",
             {
@@ -3830,6 +3832,7 @@ def daemon(cfg: Mapping[str, Any]) -> int:
                     else None
                 ),
                 "error": error,
+                "dispatch_error": dispatch_error,
             },
         )
         if error is None:
@@ -3837,8 +3840,27 @@ def daemon(cfg: Mapping[str, Any]) -> int:
                 poll_runs(cfg)
                 if dispatch_worker is None or dispatch_worker.poll() is not None:
                     dispatch_worker = _spawn_dispatch_worker(cfg)
-            except Exception:
-                pass
+            except Exception as exc:
+                dispatch_error = f"{type(exc).__name__}: {exc}"
+            else:
+                dispatch_error = None
+            if dispatch_error != recorded_dispatch_error:
+                atomic_json(
+                    run / "status.json",
+                    {
+                        "alive": True,
+                        "pid": os.getpid(),
+                        "at": iso(),
+                        "created": created,
+                        "dispatch_worker_pid": (
+                            dispatch_worker.pid
+                            if dispatch_worker is not None and dispatch_worker.poll() is None
+                            else None
+                        ),
+                        "error": error,
+                        "dispatch_error": dispatch_error,
+                    },
+                )
         elapsed = time.monotonic() - cycle_started
         _record_cycle_latency(cfg, detector_elapsed=detector_elapsed, total_elapsed=elapsed)
         if elapsed < poll:

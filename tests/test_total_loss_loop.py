@@ -305,6 +305,69 @@ def test_daemon_keeps_detecting_while_dispatch_worker_is_busy(
     assert len(spawned) == 1
 
 
+def test_daemon_records_dispatch_failures_without_blocking_next_detect(
+    cfg: dict,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = Path(cfg["paths"]["runtime"])
+    detected: list[int] = []
+    statuses: list[dict] = []
+    poll_calls = 0
+    spawn_calls = 0
+
+    class BusyDispatchWorker:
+        pid = 4243
+
+        def poll(self) -> None:
+            return None
+
+    def fake_bootstrap(_cfg: dict) -> dict[str, str]:
+        runtime.mkdir(parents=True, exist_ok=True)
+        return {"runtime": str(runtime)}
+
+    def fake_detect(_cfg: dict) -> list[str]:
+        detected.append(len(detected) + 1)
+        if len(detected) == 4:
+            (runtime / "HALT").touch()
+        return []
+
+    def fake_poll(_cfg: dict) -> list[str]:
+        nonlocal poll_calls
+        poll_calls += 1
+        if poll_calls == 1:
+            raise RuntimeError("poll unavailable")
+        return []
+
+    def fake_spawn(_cfg: dict) -> BusyDispatchWorker:
+        nonlocal spawn_calls
+        spawn_calls += 1
+        if spawn_calls == 1:
+            raise RuntimeError("worker spawn unavailable")
+        return BusyDispatchWorker()
+
+    def capture_atomic(path: Path, payload: dict) -> None:
+        if path.name == "status.json":
+            statuses.append(dict(payload))
+
+    monkeypatch.setattr(loop, "bootstrap", fake_bootstrap)
+    monkeypatch.setattr(loop, "detect", fake_detect)
+    monkeypatch.setattr(loop, "dispatch", lambda _cfg: pytest.fail("daemon must not synchronously dispatch"))
+    monkeypatch.setattr(loop, "poll_runs", fake_poll)
+    monkeypatch.setattr(loop, "_spawn_dispatch_worker", fake_spawn)
+    monkeypatch.setattr(loop, "_running", lambda _cfg: [])
+    monkeypatch.setattr(loop, "_terminate_process_group", lambda _pid: None)
+    monkeypatch.setattr(loop, "_record_cycle_latency", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(loop, "atomic_json", capture_atomic)
+    monkeypatch.setattr(loop.time, "sleep", lambda _seconds: None)
+
+    assert loop.daemon(cfg) == 0
+    active = [status for status in statuses if status.get("alive") is True]
+    assert detected == [1, 2, 3, 4]
+    assert any(status.get("dispatch_error") == "RuntimeError: poll unavailable" for status in active)
+    assert any(status.get("dispatch_error") == "RuntimeError: worker spawn unavailable" for status in active)
+    assert active[-1]["dispatch_error"] is None
+
+
 def test_missing_active_floor_fails_closed(cfg: dict) -> None:
     Path(cfg["paths"]["settings"]).write_text("{}")
 
