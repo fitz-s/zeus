@@ -110,6 +110,12 @@ _CURRENT_MONITOR_ORDERBOOK_BATCH: tuple[dict[str, dict], datetime | None] = (
 )
 _HELD_MONITOR_DEADLINE_ATTR = "_zeus_held_monitor_deadline_monotonic"
 _HELD_MONITOR_MIN_ORDER_SIZE_ATTR = "_zeus_held_monitor_min_order_size"
+# This is intentionally separate from monitor-price freshness.  A market-channel
+# BBA twin can truthfully carry a current price while lacking the full depth
+# required to authorize a SELL.
+_HELD_MONITOR_FULL_DEPTH_ACTION_AUTHORITY_ATTR = (
+    "_zeus_held_monitor_full_depth_action_authority"
+)
 HELD_MONITOR_PRIMARY_BELIEF_READ_MAX_SECONDS = 5.0
 HELD_MONITOR_QUOTE_READ_MAX_SECONDS = 1.0
 HELD_MONITOR_PROBABILITY_PREPARE_MAX_SECONDS = 2.5
@@ -558,7 +564,7 @@ def _monitor_receipt_quantiles(values) -> dict[str, float | None]:
 
 @dataclass(frozen=True)
 class HeldTokenMonitorQuote:
-    """Held-token executable quote surface for monitor/exit economics."""
+    """Held-token monitor-price truth with explicit SELL-book authority."""
 
     token_id: str
     best_bid: float
@@ -571,6 +577,9 @@ class HeldTokenMonitorQuote:
     # Held-side depth ladder (top rungs, price-descending) for the depth-honest
     # exit stopping law. Empty when the book was unavailable (one-sided/degraded).
     bid_ladder: tuple[tuple[float, float], ...] = ()
+    # ``False`` preserves an exact, fresh BBA price only for monitoring.  It
+    # cannot become a global SELL proposal or a direct exit command.
+    full_depth_action_authority: bool = False
 
 
 def _monitor_snapshot_is_executable(
@@ -813,10 +822,12 @@ def _fresh_canonical_monitor_no_bid_witness(
     *,
     now_utc: datetime | None = None,
 ) -> HeldTokenMonitorQuote | None:
-    """Return fresh exact market-channel evidence of zero held-side liquidity.
+    """Return fresh exact market-channel BBA truth without SELL authority.
 
-    This is monitor-only no-executable-book evidence.  It deliberately cannot
-    provide a positive bid, depth, or sizing input to a SELL/JIT path.
+    The producer projects a SELL latest row but selectively appends its BUY
+    twin.  This join may preserve a zero or out-of-band positive held bid as
+    monitor truth.  It deliberately cannot provide depth or sizing authority
+    to a SELL/JIT path.
 
     SCOPE: one exact ``condition_id/token_id/sell_direction`` witness.
     DRAIN: the next market-channel append is re-read on the next monitor turn.
@@ -950,7 +961,11 @@ def _fresh_canonical_monitor_no_bid_witness(
                 ):
                     continue
                 bid_raw, ask_raw, raw_depth = row[8], row[9], row[22]
-                if bid_raw is not None and float(bid_raw) != 0.0:
+                try:
+                    bid_f = 0.0 if bid_raw is None else float(bid_raw)
+                except (TypeError, ValueError):
+                    continue
+                if not np.isfinite(bid_f) or bid_f < 0.0:
                     continue
                 ask_f = None
                 if ask_raw is not None:
@@ -974,19 +989,20 @@ def _fresh_canonical_monitor_no_bid_witness(
                         ask_size = float(depth_ask_size)
                     elif ask_f is not None:
                         continue
-                elif ask_f is None:
+                elif bid_f == 0.0 and ask_f is None:
                     # Scalar-NULL without explicit full depth proves nothing.
                     continue
                 candidates.append(
                     HeldTokenMonitorQuote(
                         token_id=token_id,
-                        best_bid=0.0,
+                        best_bid=bid_f,
                         best_ask=ask_f,
                         bid_size=0.0,
                         ask_size=ask_size,
-                        mark_price=0.0,
+                        mark_price=bid_f,
                         source_timestamp=quote_at.isoformat(),
                         bid_ladder=(),
+                        full_depth_action_authority=False,
                     )
                 )
             except (
@@ -3541,7 +3557,10 @@ def _one_sided_monitor_quote(
             mark_price=bid_f,
             source_timestamp=source_timestamp,
             min_order_size=_book_min_order_size(book),
-            bid_ladder=_bid_ladder_from_book(book) if isinstance(book, dict) else (),
+            bid_ladder=(
+                _bid_ladder_from_book(book) if isinstance(book, dict) else ()
+            ),
+            full_depth_action_authority=True,
         )
     except Exception as exc:
         logger.debug(
@@ -3676,7 +3695,10 @@ def monitor_quote_refresh(
             mark_price=mark_price,
             source_timestamp=source_timestamp,
             min_order_size=_book_min_order_size(book),
-            bid_ladder=_bid_ladder_from_book(book) if isinstance(book, dict) else (),
+            bid_ladder=(
+                _bid_ladder_from_book(book) if isinstance(book, dict) else ()
+            ),
+            full_depth_action_authority=True,
         )
     except Exception as e:
         if book is not None:
@@ -6491,6 +6513,7 @@ def refresh_exact_one_position(pos: Position) -> EdgeContext:
     pos.last_monitor_market_vig = None
     pos.last_monitor_whale_toxicity = False
     pos.last_monitor_market_price_is_fresh = False
+    setattr(pos, _HELD_MONITOR_FULL_DEPTH_ACTION_AUTHORITY_ATTR, False)
     setattr(pos, _HELD_MONITOR_MIN_ORDER_SIZE_ATTR, None)
     for attr in (
         _GLOBAL_MONITOR_SAMPLES_ATTR,
@@ -6549,6 +6572,7 @@ def refresh_exact_zero_position(
     pos.last_monitor_market_vig = None
     pos.last_monitor_whale_toxicity = False
     pos.last_monitor_market_price_is_fresh = False
+    setattr(pos, _HELD_MONITOR_FULL_DEPTH_ACTION_AUTHORITY_ATTR, False)
     for attr in (
         _GLOBAL_MONITOR_SAMPLES_ATTR,
         _GLOBAL_MONITOR_ALPHA_ATTR,
@@ -6582,6 +6606,11 @@ def refresh_exact_zero_position(
         current_p_market = quote.mark_price
         pos.last_monitor_market_price = current_p_market
         pos.last_monitor_market_price_is_fresh = True
+        setattr(
+            pos,
+            _HELD_MONITOR_FULL_DEPTH_ACTION_AUTHORITY_ATTR,
+            bool(quote.full_depth_action_authority),
+        )
         setattr(pos, _HELD_MONITOR_MIN_ORDER_SIZE_ATTR, quote.min_order_size)
     else:
         setattr(pos, _HELD_MONITOR_MIN_ORDER_SIZE_ATTR, None)
@@ -6653,6 +6682,7 @@ def refresh_position(conn, clob: PolymarketClient, pos: Position) -> EdgeContext
     pos.last_monitor_whale_toxicity = None
     pos.last_monitor_market_price_is_fresh = False
     pos.last_monitor_prob_is_fresh = False
+    setattr(pos, _HELD_MONITOR_FULL_DEPTH_ACTION_AUTHORITY_ATTR, False)
     setattr(pos, _HELD_MONITOR_MIN_ORDER_SIZE_ATTR, None)
     _set_day0_zero_probability_exit_authority(pos, False)
     try:
@@ -6681,6 +6711,11 @@ def refresh_position(conn, clob: PolymarketClient, pos: Position) -> EdgeContext
         market_refreshed = True
         pos.last_monitor_market_price = current_p_market
         pos.last_monitor_market_price_is_fresh = True
+        setattr(
+            pos,
+            _HELD_MONITOR_FULL_DEPTH_ACTION_AUTHORITY_ATTR,
+            bool(quote.full_depth_action_authority),
+        )
         setattr(pos, _HELD_MONITOR_MIN_ORDER_SIZE_ATTR, quote.min_order_size)
 
     # 2. Recompute P_posterior from fresh ENS/Day0 evidence

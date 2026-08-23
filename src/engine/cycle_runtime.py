@@ -3448,6 +3448,25 @@ def _emit_monitor_refreshed_canonical_if_available(
                 decision_unavailable_reason=decision_unavailable_reason,
                 decision_unavailable_trigger=decision_unavailable_trigger,
             )
+            # The projection has no dedicated column for this monitor-turn
+            # authority axis. Keep it on the canonical MONITOR_REFRESHED cut
+            # so reload/recovery cannot reinterpret a BBA-only in-band price
+            # as a full-depth executable book.
+            for event in events:
+                payload = json.loads(str(event.get("payload_json") or "{}"))
+                if isinstance(payload, dict):
+                    payload["held_sell_full_depth_action_authority"] = bool(
+                        getattr(
+                            pos,
+                            "_zeus_held_monitor_full_depth_action_authority",
+                            False,
+                        )
+                    )
+                    event["payload_json"] = json.dumps(
+                        payload,
+                        default=str,
+                        sort_keys=True,
+                    )
             append_many_and_project(conn, events, projection)
             conn.commit()
         except Exception:
@@ -4502,6 +4521,9 @@ def _sync_position_from_canonical_monitor_row(
     pos.last_monitor_best_bid = _finite_probability_or_none(
         _row_get(row, "last_monitor_best_bid")
     )
+    # The column-less projection defaults closed. A canonical monitor payload
+    # may restore only an explicit full-depth authority fact from that same cut.
+    pos._zeus_held_monitor_full_depth_action_authority = False
     pos.neg_edge_count = 0
     monitor_payload = _row_get(row, "last_monitor_event_payload_json")
     pos._canonical_monitor_refreshed_at = str(
@@ -4518,6 +4540,9 @@ def _sync_position_from_canonical_monitor_row(
                 pos.applied_validations = [
                     str(value) for value in validations if str(value).strip()
                 ]
+            pos._zeus_held_monitor_full_depth_action_authority = (
+                monitor_event.get("held_sell_full_depth_action_authority") is True
+            )
             pos.neg_edge_count = max(0, neg_edge_count)
         except (TypeError, ValueError, json.JSONDecodeError):
             pos.neg_edge_count = 0
@@ -6039,6 +6064,7 @@ def _refresh_pending_exit_retry_quote_from_current_clob(
 
     from src.engine.monitor_refresh import (
         _HELD_MONITOR_DEADLINE_ATTR,
+        _HELD_MONITOR_FULL_DEPTH_ACTION_AUTHORITY_ATTR,
         monitor_quote_refresh,
     )
 
@@ -6074,6 +6100,7 @@ def _refresh_pending_exit_retry_quote_from_current_clob(
 
     if (
         quote is None
+        or not bool(quote.full_depth_action_authority)
         or (
             deadline_monotonic is not None
             and time.monotonic() >= float(deadline_monotonic)
@@ -6111,6 +6138,7 @@ def _refresh_pending_exit_retry_quote_from_current_clob(
     pos.last_monitor_market_price = telemetry_market_price
     pos.last_monitor_market_price_is_fresh = True
     pos.last_monitor_at = source_timestamp
+    setattr(pos, _HELD_MONITOR_FULL_DEPTH_ACTION_AUTHORITY_ATTR, True)
     return (
         replace(
             exit_context,
@@ -6205,6 +6233,14 @@ def _monitor_global_sell_request_context(position, exit_context) -> dict[str, ob
             if not math.isfinite(held_best_bid):
                 held_best_bid = None
                 book_state = "UNKNOWN"
+            elif not bool(
+                getattr(
+                    position,
+                    "_zeus_held_monitor_full_depth_action_authority",
+                    False,
+                )
+            ):
+                book_state = "NO_EXECUTABLE_BOOK"
             elif not _live_order_quote_is_executable(held_best_bid):
                 book_state = "NO_EXECUTABLE_BOOK"
             elif not bid_observed_at:
@@ -6711,6 +6747,7 @@ def execute_monitoring_phase(
         HELD_MONITOR_RAW_HWM_READ_MAX_SECONDS,
         _GLOBAL_MONITOR_SAMPLES_ATTR,
         _HELD_MONITOR_DEADLINE_ATTR,
+        _HELD_MONITOR_FULL_DEPTH_ACTION_AUTHORITY_ATTR,
         _HELD_MONITOR_MIN_ORDER_SIZE_ATTR,
         _MONITOR_PROBABILITY_RECEIPT_ATTR,
         install_monitor_day0_family_cache,
@@ -7041,12 +7078,25 @@ def execute_monitoring_phase(
                     "last_monitor_best_bid"
                 )
                 current_observed_at = canonical_monitor_at
+                current_book_action_authority = (
+                    canonical_monitor_payload.get(
+                        "held_sell_full_depth_action_authority"
+                    )
+                    is True
+                )
             else:
                 current_probability_content_identity = str(
                     runtime_probability_content_identity or ""
                 ).strip()
                 current_bid = getattr(position, "last_monitor_best_bid", None)
                 current_observed_at = runtime_monitor_at
+                current_book_action_authority = bool(
+                    getattr(
+                        position,
+                        "_zeus_held_monitor_full_depth_action_authority",
+                        False,
+                    )
+                )
             probability_content_identity = str(
                 (
                     current_probability_content_identity
@@ -7074,6 +7124,7 @@ def execute_monitoring_phase(
                 book_state = (
                     "EXECUTABLE"
                     if current_bid is not None
+                    and current_book_action_authority
                     and _live_order_quote_is_executable(current_bid)
                     else "NO_EXECUTABLE_BOOK"
                 )
@@ -8009,6 +8060,7 @@ def execute_monitoring_phase(
         _GLOBAL_MONITOR_ALPHA_ATTR,
         _GLOBAL_MONITOR_SAMPLES_ATTR,
         _HELD_MONITOR_MIN_ORDER_SIZE_ATTR,
+        _HELD_MONITOR_FULL_DEPTH_ACTION_AUTHORITY_ATTR,
         _MONITOR_PROBABILITY_RECEIPT_ATTR,
     )
     missing_refresh_attr = object()
@@ -9448,6 +9500,32 @@ def execute_monitoring_phase(
                     should_exit=should_exit,
                     exit_reason=exit_reason,
                     summary=summary,
+                )
+
+            # A BBA-only durable twin is fresh monitor truth, not a depth
+            # witness. This applies before every exit lane, including hard
+            # fact and RED paths: no monitor decision may mint an EXIT_INTENT
+            # from a scalar in-band bid.
+            if should_exit and not bool(
+                getattr(
+                    pos,
+                    "_zeus_held_monitor_full_depth_action_authority",
+                    False,
+                )
+            ):
+                should_exit = False
+                exit_reason = "NO_EXECUTABLE_SELL_BOOK_HOLD"
+                pos.applied_validations = list(
+                    dict.fromkeys(
+                        [
+                            *(pos.applied_validations or []),
+                            "current_sell_book_full_depth_authority_unavailable",
+                            "global_auction_inapplicable:no_executable_sell_book",
+                        ]
+                    )
+                )
+                summary["monitor_statistical_sell_no_book_holds"] = (
+                    summary.get("monitor_statistical_sell_no_book_holds", 0) + 1
                 )
 
             # Statistical SELL remains globally optimized. An absorbing hard-

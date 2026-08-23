@@ -3041,3 +3041,34 @@ publication barrier.
   `terminal_chain_exposure_restored`; the existing unsuppressed false-terminal
   restoration path remains covered.  Focused tests, compilation, planning
   lock, and diff checks pass before any exact-SHA deployment decision.
+
+## B138 — Separate fresh held monitor price truth from full-depth SELL authority
+
+- Defect: the market-channel producer projects exact SELL BBA latest rows while
+  selectively appending the corresponding BUY evidence twin.  A fresh held bid
+  of `0.001`, `0.04`, or even `0.05` is therefore a truthful monitor value, but
+  it has no held-side full-depth/size witness.  Treating the scalar `.05` as an
+  executable SELL would bypass the durable depth contract; dropping all
+  sub-floor values instead made monitor context falsely incomplete.
+- Decision: carry `HeldTokenMonitorQuote.full_depth_action_authority` explicitly.
+  The exact SELL-latest -> BUY-append BBA join preserves finite non-negative
+  bid truth (including NULL/zero as `0`) and marks it false.  Only current,
+  identity-exact full-depth books mark it true.  `MONITOR_REFRESHED` persists
+  the boolean in its canonical payload because `position_current` has no
+  column; reload defaults false and restores only an explicit payload true.
+- SCOPE: one exact held `(condition_id, token_id, direction)` monitor witness
+  and its current global SELL context.  No entry/BUY, submit/JIT, q, wealth,
+  or pricing-band rule changes.
+- DRAIN: every held monitor turn rereads the exact durable/network book; a
+  subsequent current full-depth witness replaces the BBA-only fact.  BBA-only
+  facts remain monitor-visible but return `NO_EXECUTABLE_BOOK` and cannot emit
+  an `EXIT_INTENT` or command.
+- RESET: a fresh exact full-depth book with a finite in-band bid restores the
+  ordinary global SELL eligibility path.  Stale, future, malformed, or twin-
+  mismatched BBA rows remain unavailable; no stale-as-fresh bridge exists.
+- Acceptance: real selective-append producer antibodies preserve `0`, `.001`,
+  `.04`, and `.05` monitor truth with false authority; BBA-only `.05` emits no
+  exit intent/command; ordinary full-depth `.05` remains globally eligible;
+  payload reload, stale/future, and mismatch paths fail closed.  Focused tests,
+  compilation, planning lock, and diff checks pass before any deployment
+  decision.

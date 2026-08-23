@@ -793,6 +793,7 @@ def test_monitor_quote_uses_ask_only_canonical_book_as_typed_zero_value(tmp_path
     assert quote.best_ask == pytest.approx(0.001)
     assert quote.mark_price == pytest.approx(0.0)
     assert quote.bid_ladder == ()
+    assert quote.full_depth_action_authority is True
     assert quote.min_order_size == pytest.approx(5.0)
     assert quote.source_timestamp == captured_at.isoformat()
     conn.close()
@@ -951,6 +952,7 @@ def test_monitor_quote_uses_fresh_exact_bba_no_bid_witness_without_snapshot(tmp_
     assert quote.best_ask == pytest.approx(0.001)
     assert quote.ask_size == pytest.approx(0.0)
     assert quote.source_timestamp == quote_at.isoformat()
+    assert quote.full_depth_action_authority is False
 
     conn.execute(
         "UPDATE execution_feasibility_latest SET event_id = 'mismatched-append' "
@@ -965,8 +967,14 @@ def test_monitor_quote_uses_fresh_exact_bba_no_bid_witness_without_snapshot(tmp_
     conn.close()
 
 
-def test_monitor_bba_no_bid_witness_matches_selective_append_producer(
+@pytest.mark.parametrize(
+    ("best_bid", "expected_bid"),
+    ((None, 0.0), ("0", 0.0), ("0.001", 0.001), ("0.04", 0.04), ("0.05", 0.05)),
+)
+def test_monitor_bba_witness_preserves_price_but_not_full_depth_authority(
     tmp_path,
+    best_bid,
+    expected_bid,
 ):
     from src.engine import monitor_refresh
     from src.events.triggers.market_channel_ingestor import (
@@ -1001,7 +1009,7 @@ def test_monitor_bba_no_bid_witness_matches_selective_append_producer(
             "asset_id": "yes123",
             "market": "condition-producer-bba",
             "timestamp": quote_at.isoformat(),
-            "best_bid": None,
+            "best_bid": best_bid,
             "best_ask": "0.001",
             "hash": "producer-bba-no-bid",
         },
@@ -1038,8 +1046,26 @@ def test_monitor_bba_no_bid_witness_matches_selective_append_producer(
         _position(condition_id="condition-producer-bba"),
     )
     assert quote is not None
-    assert quote.best_bid == pytest.approx(0.0)
+    assert quote.best_bid == pytest.approx(expected_bid)
     assert quote.best_ask == pytest.approx(0.001)
+    assert quote.full_depth_action_authority is False
+
+    pos = _position(condition_id="condition-producer-bba")
+    monitor_refresh.refresh_exact_zero_position(conn, clob, pos)
+    assert pos.last_monitor_market_price_is_fresh is True
+    assert pos.last_monitor_best_bid == pytest.approx(expected_bid)
+    assert getattr(
+        pos,
+        monitor_refresh._HELD_MONITOR_FULL_DEPTH_ACTION_AUTHORITY_ATTR,
+    ) is False
+    pos._monitor_probability_receipt = {
+        "probability_content_identity": "current-q-content",
+        "computed_at": quote.source_timestamp,
+    }
+    assert cycle_runtime._monitor_global_sell_request_context(
+        pos,
+        types.SimpleNamespace(best_bid=quote.best_bid),
+    )["book_state"] == "NO_EXECUTABLE_BOOK"
 
     conn.execute(
         "UPDATE execution_feasibility_evidence SET best_ask_before = 0.002 "
@@ -1065,6 +1091,186 @@ def test_monitor_bba_no_bid_witness_matches_selective_append_producer(
     conn.close()
 
 
+@pytest.mark.parametrize("bid", (0.001, 0.04, 0.05))
+def test_bba_only_monitor_truth_cannot_emit_exit_intent(monkeypatch, bid):
+    """RELATIONSHIP: fresh BBA prices are monitor truth, never SELL authority."""
+
+    from src.engine import monitor_refresh
+
+    pos = _position(trade_id="bba-only-in-band", state="holding")
+    quote = monitor_refresh.HeldTokenMonitorQuote(
+        token_id="yes123",
+        best_bid=bid,
+        best_ask=0.06,
+        bid_size=0.0,
+        ask_size=0.0,
+        mark_price=bid,
+        source_timestamp="2026-08-23T19:05:00+00:00",
+        full_depth_action_authority=False,
+    )
+
+    def _refresh_position(_conn, _clob, refreshed_pos):
+        refreshed_pos.last_monitor_at = quote.source_timestamp
+        refreshed_pos.last_monitor_market_price = quote.mark_price
+        refreshed_pos.last_monitor_market_price_is_fresh = True
+        refreshed_pos.last_monitor_best_bid = quote.best_bid
+        refreshed_pos.last_monitor_best_ask = quote.best_ask
+        refreshed_pos.last_monitor_bid_size = quote.bid_size
+        refreshed_pos.last_monitor_prob = 0.0
+        refreshed_pos.last_monitor_prob_is_fresh = True
+        refreshed_pos.last_monitor_edge = -quote.mark_price
+        setattr(
+            refreshed_pos,
+            monitor_refresh._HELD_MONITOR_FULL_DEPTH_ACTION_AUTHORITY_ATTR,
+            quote.full_depth_action_authority,
+        )
+        return types.SimpleNamespace(
+            p_market=np.array([quote.mark_price]),
+            p_posterior=0.0,
+            divergence_score=0.0,
+            market_velocity_1h=0.0,
+            forward_edge=-quote.mark_price,
+            confidence_band_lower=-quote.mark_price,
+            confidence_band_upper=-quote.mark_price,
+        )
+
+    monkeypatch.setattr("src.engine.monitor_refresh.refresh_position", _refresh_position)
+    monkeypatch.setattr(
+        Position,
+        "evaluate_exit",
+        lambda self, _ctx: ExitDecision(
+            True,
+            "TEST_SELL",
+            urgency="immediate",
+            trigger="TEST_SELL",
+            selected_method=self.selected_method or self.entry_method,
+            applied_validations=list(self.applied_validations),
+        ),
+    )
+    monkeypatch.setattr(
+        "src.execution.exit_lifecycle.build_exit_intent",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("BBA-only monitor truth must not create EXIT_INTENT")
+        ),
+    )
+    monkeypatch.setattr(
+        "src.execution.exit_lifecycle.execute_exit",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("BBA-only monitor truth must not submit a command")
+        ),
+    )
+    monkeypatch.setattr(
+        "src.events.reactor.request_global_auction_completion",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError(
+                "BBA-only monitor truth must not request executable global SELL"
+            )
+        ),
+    )
+
+    artifact = CycleArtifact(
+        mode="opening_hunt",
+        started_at="2026-08-23T19:05:00Z",
+    )
+    summary = {"monitors": 0, "exits": 0}
+    cycle_runtime.execute_monitoring_phase(
+        conn=None,
+        clob=types.SimpleNamespace(),
+        portfolio=PortfolioState(positions=[pos]),
+        artifact=artifact,
+        tracker=StrategyTracker(),
+        summary=summary,
+        deps=_monitor_chain_deps(
+            datetime(2026, 8, 23, 19, 5, tzinfo=timezone.utc)
+        ),
+        run_exit_preflight=False,
+    )
+
+    assert summary["exits"] == 0
+    assert artifact.monitor_results[0].should_exit is False
+    assert artifact.monitor_results[0].exit_reason == "NO_EXECUTABLE_SELL_BOOK_HOLD"
+
+
+def test_full_depth_in_band_monitor_quote_is_global_sell_eligible():
+    from src.engine import monitor_refresh
+
+    pos = _position()
+    quote = monitor_refresh._one_sided_monitor_quote(
+        None,
+        types.SimpleNamespace(),
+        pos,
+        "yes123",
+        book={
+            "bids": [{"price": "0.05", "size": "10"}],
+            "asks": [{"price": "0.06", "size": "10"}],
+        },
+        source_timestamp="2026-08-23T19:05:00+00:00",
+    )
+    assert quote is not None
+    assert quote.full_depth_action_authority is True
+    pos.last_monitor_at = quote.source_timestamp
+    pos.last_monitor_best_bid = quote.best_bid
+    pos._monitor_probability_receipt = {
+        "probability_content_identity": "current-q-content",
+        "computed_at": quote.source_timestamp,
+    }
+    setattr(
+        pos,
+        monitor_refresh._HELD_MONITOR_FULL_DEPTH_ACTION_AUTHORITY_ATTR,
+        quote.full_depth_action_authority,
+    )
+    assert cycle_runtime._monitor_global_sell_request_context(
+        pos,
+        types.SimpleNamespace(best_bid=quote.best_bid),
+    )["book_state"] == "EXECUTABLE"
+
+
+@pytest.mark.parametrize(
+    ("payload_authority", "expected_book_state"),
+    (
+        (False, "NO_EXECUTABLE_BOOK"),
+        (True, "EXECUTABLE"),
+        (None, "NO_EXECUTABLE_BOOK"),
+    ),
+)
+def test_monitor_payload_rehydrates_explicit_full_depth_authority_only(
+    payload_authority,
+    expected_book_state,
+):
+    pos = _position()
+    row = {
+        "phase": "active",
+        "order_status": "",
+        "exit_retry_count": 0,
+        "next_exit_retry_at": "",
+        "exit_reason": "",
+        "last_monitor_prob": 0.5,
+        "last_monitor_prob_is_fresh": 1,
+        "last_monitor_market_price_is_fresh": 1,
+        "last_monitor_best_bid": 0.05,
+        "last_monitor_event_occurred_at": "2026-08-23T19:05:00+00:00",
+        "last_monitor_event_payload_json": json.dumps(
+            (
+                {"held_sell_full_depth_action_authority": payload_authority}
+                if payload_authority is not None
+                else {}
+            )
+        ),
+        "shares": pos.shares,
+        "chain_shares": pos.chain_shares,
+    }
+    cycle_runtime._sync_position_from_canonical_monitor_row(pos, row)
+    pos.last_monitor_at = "2026-08-23T19:05:00+00:00"
+    pos._monitor_probability_receipt = {
+        "probability_content_identity": "current-q-content",
+        "computed_at": "2026-08-23T19:05:00+00:00",
+    }
+    assert cycle_runtime._monitor_global_sell_request_context(
+        pos,
+        types.SimpleNamespace(best_bid=0.05),
+    )["book_state"] == expected_book_state
+
+
 def test_bba_no_bid_witness_rejects_noncausal_or_incomplete_rows(tmp_path):
     from src.engine import monitor_refresh
     from src.state.schema.execution_feasibility_evidence_schema import ensure_table
@@ -1075,15 +1281,15 @@ def test_bba_no_bid_witness_rejects_noncausal_or_incomplete_rows(tmp_path):
     cases = (
         ("both-null", "sell_yes", checked_at - timedelta(seconds=1), None, None, None),
         (
-            "positive-bid",
+            "negative-bid",
             "sell_yes",
             checked_at - timedelta(seconds=1),
-            0.01,
+            -0.01,
             0.02,
             None,
         ),
-        ("stale", "sell_yes", checked_at - timedelta(minutes=5), None, 0.001, None),
-        ("future", "sell_yes", checked_at + timedelta(seconds=1), None, 0.001, None),
+        ("stale", "sell_yes", checked_at - timedelta(minutes=5), 0.04, 0.05, None),
+        ("future", "sell_yes", checked_at + timedelta(seconds=1), 0.04, 0.05, None),
         (
             "bad-depth",
             "sell_yes",
@@ -14606,6 +14812,7 @@ def test_orange_risk_exits_favorable_position_through_monitor_lifecycle(monkeypa
         refreshed_pos.last_monitor_market_price_is_fresh = True
         refreshed_pos.last_monitor_best_bid = 0.42
         refreshed_pos.last_monitor_best_ask = 0.43
+        refreshed_pos._zeus_held_monitor_full_depth_action_authority = True
         refreshed_pos.last_monitor_prob = 0.62
         refreshed_pos.last_monitor_prob_is_fresh = True
         refreshed_pos.last_monitor_edge = 0.21
