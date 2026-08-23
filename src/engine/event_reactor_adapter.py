@@ -35970,6 +35970,22 @@ def _prepare_current_global_probability_family(
                     or local_target < local_now.date()
                 )
             )
+        if pinned_complete_bundle is not None:
+            # A held pinned carrier is already the immutable source-clock
+            # authority.  Its identity must remain available even when the
+            # target is still the city's current local day; that route only
+            # overlays the authorized monotone Day0 observation below.
+            source_cycle_raw = str(
+                pinned_complete_bundle.source_cycle_time or ""
+            ).strip()
+            source_available_at = str(
+                pinned_complete_bundle.source_available_at or source_cycle_raw
+            ).strip()
+            day0_base_identity = str(
+                pinned_complete_bundle.posterior_identity_hash or ""
+            ).strip()
+            if not day0_base_identity:
+                raise ValueError("GLOBAL_HELD_PINNED_POSTERIOR_IDENTITY_MISSING")
         if final_daily_observation is None and current_day0_redecision_only:
             # SCOPE: this already-held family's genuinely provisional Day0 or
             # post-local incomplete monitor observability. REDUCE_ONLY_EXIT
@@ -36009,19 +36025,7 @@ def _prepare_current_global_probability_family(
                     ),
                 }
             )
-            if pinned_complete_bundle is not None:
-                source_cycle_raw = str(
-                    pinned_complete_bundle.source_cycle_time or ""
-                ).strip()
-                source_available_at = str(
-                    pinned_complete_bundle.source_available_at or source_cycle_raw
-                ).strip()
-                day0_base_identity = str(
-                    pinned_complete_bundle.posterior_identity_hash or ""
-                ).strip()
-                if not day0_base_identity:
-                    raise ValueError("GLOBAL_HELD_PINNED_POSTERIOR_IDENTITY_MISSING")
-        elif final_daily_observation is None:
+        elif final_daily_observation is None and pinned_complete_bundle is None:
             # Current-day held q first reuses the same source-clock bundle as
             # ENTRY so an admitted BUY is immediately monitorable on identical
             # probability content. SCOPE: only this held family. DRAIN: a

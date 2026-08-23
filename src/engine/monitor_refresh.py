@@ -5495,7 +5495,11 @@ def _build_current_global_day0_family_snapshot(
                     allow_provisional_day0_replacement=True,
                     probability_use=_CurrentProbabilityUse.HELD_MONITOR,
                     raw_input_hwm_conn=hwm_forecasts,
-                    before_raw_input_hwm_read=_begin_raw_hwm_read,
+                    before_raw_input_hwm_read=(
+                        _begin_raw_hwm_read
+                        if pinned_complete_bundle is None
+                        else None
+                    ),
                     raw_input_hwm_read_max_seconds=(
                         HELD_MONITOR_RAW_HWM_READ_MAX_SECONDS
                         if pinned_complete_bundle is None
