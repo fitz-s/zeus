@@ -1113,14 +1113,27 @@ def _settlement_full_loss_candidate(
         )
     if realized >= 0 or -realized < _FULL_LOSS_RATIO * basis:
         return None
-    payout_identity = digest(
-        terminal_row.get("event_id"),
-        payload.get("payout_id") or payload.get("settlement_id") or "",
-        payload.get("settlement_source") or payload.get("source") or "",
-        settlement_price,
-        json.dumps(payload, sort_keys=True, separators=(",", ":")),
+    terminal_identity = str(terminal_row.get("event_id") or "").strip()
+    if not terminal_identity:
+        terminal_identity = str(
+            payload.get("payout_id") or payload.get("settlement_id") or ""
+        ).strip()
+    if not terminal_identity:
+        return None
+    command_ids = aggregate.get("execution_fact_command_ids")
+    if isinstance(command_ids, (list, tuple)) and command_ids:
+        entry_identity = digest(
+            "entry_commands", *sorted(str(value) for value in command_ids)
+        )
+    else:
+        entry_identity = digest("entry_basis", basis)
+    # Event identity is the immutable terminal fact anchor.  Do not hash the
+    # whole payload: later source/payout enrichment must revise one incident,
+    # not create a new memory/run for the same settlement.
+    payout_identity = digest("settlement_terminal", terminal_identity)
+    evidence_id = digest(
+        position_id, "settlement_full_loss", payout_identity, entry_identity
     )
-    evidence_id = digest(position_id, "settlement_full_loss", payout_identity)
     settled_at = str(terminal_row.get("occurred_at") or position.get("settled_at") or "")
     return {
         "position_id": position_id,
@@ -1129,6 +1142,7 @@ def _settlement_full_loss_candidate(
         "settled_at": settled_at,
         "settlement_price": settlement_price,
         "payout_identity": payout_identity,
+        "entry_identity": entry_identity,
         "payload": payload,
         "basis": basis,
         "realized": realized,

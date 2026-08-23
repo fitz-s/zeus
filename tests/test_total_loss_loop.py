@@ -293,6 +293,52 @@ def test_settlement_full_loss_is_idempotent_and_keeps_floor_fields_null(
     assert settled == [("2026-08-22T10:00:00+00:00",)]
 
 
+def test_settlement_identity_survives_projection_and_payload_enrichment(
+    cfg: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _settled_full_loss(cfg, payload={"outcome": 0})
+    aggregate = {
+        **_command_dedup_basis(),
+        "execution_fact_command_ids": ["entry-command-1"],
+    }
+    monkeypatch.setattr(loop, "_entry_execution_fill_aggregate", lambda *_args, **_kwargs: aggregate)
+    assert len(loop.detect(cfg)) == 1
+    with sqlite3.connect(cfg["paths"]["trades_db"]) as conn:
+        conn.execute(
+            "UPDATE position_current SET updated_at=?,realized_pnl_usd=?,shares=? "
+            "WHERE position_id='p-settled'",
+            ("2026-08-22T11:00:00+00:00", -4.99, 9.9),
+        )
+        conn.execute(
+            "UPDATE position_events SET payload_json=? WHERE event_id='settled-p-settled'",
+            (json.dumps({
+                "outcome": 0,
+                "payout_id": "payout-stable",
+                "settlement_source": "gamma",
+                "source_receipt": "enriched-later",
+            }),),
+        )
+    assert loop.detect(cfg) == []
+    rows = [row for row in _incidents(cfg) if row["crossing_kind"] == "settlement_full_loss"]
+    assert len(rows) == 1
+
+
+def test_new_terminal_event_identity_is_not_over_deduplicated(
+    cfg: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _settled_full_loss(cfg, payload={"outcome": 0, "payout_id": "payout-1"})
+    monkeypatch.setattr(loop, "_entry_execution_fill_aggregate", _command_dedup_basis)
+    assert len(loop.detect(cfg)) == 1
+    _event(
+        cfg, "settled-p-settled-2", "p-settled", 3, "SETTLED",
+        "2026-08-22T11:00:00+00:00", phase_before="settled", phase_after="settled",
+        payload={"outcome": 0, "payout_id": "payout-2"},
+    )
+    assert len(loop.detect(cfg)) == 1
+    rows = [row for row in _incidents(cfg) if row["crossing_kind"] == "settlement_full_loss"]
+    assert len(rows) == 2
+
+
 @pytest.mark.parametrize(
     ("payload", "shares", "partial"),
     [
