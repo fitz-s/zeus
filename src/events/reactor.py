@@ -6664,21 +6664,52 @@ def _process_pending_cancelled(
     urgent_day0_pending: Callable[[], bool] | None,
     held_position_monitor_debt_pending: Callable[[], bool] | None = None,
     exact_held_completion: bool = False,
+    exact_held_completion_pending: Callable[[], bool] | None = None,
 ) -> Callable[[], bool] | None:
     base_cancelled = (
         None
         if committed_day0_wake
         else (urgent_day0_pending if producer_fast_path else urgent_wake_pending)
     )
-    if held_position_monitor_debt_pending is None:
+    if (
+        held_position_monitor_debt_pending is None
+        and (
+            exact_held_completion
+            or committed_day0_wake
+            or exact_held_completion_pending is None
+        )
+    ):
         return base_cancelled
 
     def cancelled() -> bool:
         if base_cancelled is not None and base_cancelled():
             return True
-        return _held_position_monitor_preemption_pending(
-            None,
-            held_position_monitor_debt_pending,
+        # SCOPE: only an ordinary replayable cycle; exact held completion and
+        # committed Day0 hard-fact work are protected. DRAIN: the ordinary cut
+        # exits at this safe checkpoint and the durable exact wake owns the next
+        # poll. RESET: receipt/ack removes the exact debt, so later ordinary
+        # cycles no longer observe this predicate.
+        if (
+            not exact_held_completion
+            and not committed_day0_wake
+            and exact_held_completion_pending is not None
+        ):
+            try:
+                if exact_held_completion_pending():
+                    return True
+            except Exception:  # noqa: BLE001 - unknown exact debt cancels ordinary work.
+                logging.getLogger("zeus.events.reactor").warning(
+                    "durable held SELL completion queue unreadable; cancelling "
+                    "ordinary reactor work",
+                    exc_info=True,
+                )
+                return True
+        return (
+            held_position_monitor_debt_pending is not None
+            and _held_position_monitor_preemption_pending(
+                None,
+                held_position_monitor_debt_pending,
+            )
         )
 
     return cancelled
@@ -7574,17 +7605,9 @@ _DURABLE_EXACT_HELD_COMPLETION_LOCK = threading.Lock()
 def _durable_exact_held_sell_completion_pending() -> bool:
     """Read durable exact held-SELL debt without claiming its auction turn."""
 
-    try:
-        from src.runtime.reactor_wake import exact_held_sell_completion_wake_ids
+    from src.runtime.reactor_wake import exact_held_sell_completion_wake_ids
 
-        return bool(exact_held_sell_completion_wake_ids(fail_on_error=True))
-    except (OSError, ValueError):
-        logging.getLogger("zeus.events.reactor").warning(
-            "durable held SELL completion queue unreadable; retaining ordinary "
-            "reactor scheduling",
-            exc_info=True,
-        )
-        return False
+    return bool(exact_held_sell_completion_wake_ids(fail_on_error=True))
 
 
 def _durable_exact_held_sell_completion_requests() -> tuple[object, ...]:
@@ -7846,9 +7869,23 @@ def run_edli_event_reactor_cycle(
     from src.riskguard.risk_level import RiskLevel
     from src.riskguard.riskguard import get_current_level
 
-    durable_exact_held_completion_pending = (
-        _durable_exact_held_sell_completion_pending()
-    )
+    try:
+        durable_exact_held_completion_pending = (
+            _durable_exact_held_sell_completion_pending()
+        )
+    except (OSError, ValueError):
+        _log.warning(
+            "durable held SELL completion queue unreadable; %s reactor admission",
+            (
+                "preserving committed producer"
+                if completion_wake or committed_day0_wake
+                else "aborting ordinary"
+            ),
+            exc_info=True,
+        )
+        if not completion_wake and not committed_day0_wake:
+            return False
+        durable_exact_held_completion_pending = False
     durable_exact_held_completion_requests = (
         _durable_exact_held_sell_completion_requests()
         if durable_exact_held_completion_pending
@@ -8867,6 +8904,9 @@ def run_edli_event_reactor_cycle(
                 urgent_day0_pending=urgent_day0_pending,
                 held_position_monitor_debt_pending=held_position_monitor_debt_pending,
                 exact_held_completion=active_held_sell_completion_cycle,
+                exact_held_completion_pending=(
+                    _durable_exact_held_sell_completion_pending
+                ),
             ),
         )
         terminal_no_book_completion = False

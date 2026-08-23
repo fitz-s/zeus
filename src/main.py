@@ -582,7 +582,7 @@ def _exact_held_sell_completion_pending() -> bool:
             "exact held-SELL completion debt unreadable; retaining monitor priority",
             exc_info=True,
         )
-        return False
+        return True
 
 
 def _defer_for_held_position_monitor(job_name: str) -> bool:
@@ -6355,20 +6355,19 @@ def _edli_reactor_wake_poll_once() -> bool:
     reactor_blocked_by_monitor_fairness = (
         _periodic_held_position_monitor_fairness_debt.is_set()
     )
-    exact_held_sell_wake_ids: frozenset[str] = frozenset()
-    if reactor_blocked_by_monitor_fairness:
-        try:
-            exact_held_sell_wake_ids = frozenset(
-                exact_held_sell_completion_wake_ids(fail_on_error=True)
-            )
-        except (OSError, ValueError):
-            logger.warning(
-                "exact held-SELL completion selection unreadable; retaining wake debt",
-                exc_info=True,
-            )
-            return False
-        if not exact_held_sell_wake_ids:
-            return False
+    try:
+        exact_held_sell_wake_ids = frozenset(
+            exact_held_sell_completion_wake_ids(fail_on_error=True)
+        )
+    except (OSError, ValueError):
+        logger.warning(
+            "exact held-SELL completion selection unreadable; retaining wake debt",
+            exc_info=True,
+        )
+        return False
+    if reactor_blocked_by_monitor_fairness and not exact_held_sell_wake_ids:
+        return False
+    prefer_exact_held_sell = bool(exact_held_sell_wake_ids)
 
     excluded_wake_ids = frozenset(
         _exit_monitor_excluded_wake_ids()
@@ -6411,20 +6410,28 @@ def _edli_reactor_wake_poll_once() -> bool:
             wake = (
                 read_reactor_wake(
                     exclude_wake_ids=excluded_wake_ids,
-                    prefer_exact_held_sell=reactor_blocked_by_monitor_fairness,
+                    **(
+                        {"prefer_exact_held_sell": True}
+                        if prefer_exact_held_sell
+                        else {}
+                    ),
                     prefer_forecast_carrier_progress=prefer_forecast_carrier_progress,
                     fail_on_error=(
                         prefer_forecast_carrier_progress
-                        or reactor_blocked_by_monitor_fairness
+                        or prefer_exact_held_sell
                     ),
                 )
                 if excluded_wake_ids
                 else read_reactor_wake(
-                    prefer_exact_held_sell=reactor_blocked_by_monitor_fairness,
+                    **(
+                        {"prefer_exact_held_sell": True}
+                        if prefer_exact_held_sell
+                        else {}
+                    ),
                     prefer_forecast_carrier_progress=prefer_forecast_carrier_progress,
                     fail_on_error=(
                         prefer_forecast_carrier_progress
-                        or reactor_blocked_by_monitor_fairness
+                        or prefer_exact_held_sell
                     ),
                 )
             )
@@ -6432,11 +6439,15 @@ def _edli_reactor_wake_poll_once() -> bool:
             excluded_wake_ids = frozenset(excluded_wake_ids | global_yield_ids)
             wake = read_reactor_wake(
                 exclude_wake_ids=excluded_wake_ids,
-                prefer_exact_held_sell=reactor_blocked_by_monitor_fairness,
+                **(
+                    {"prefer_exact_held_sell": True}
+                    if prefer_exact_held_sell
+                    else {}
+                ),
                 prefer_forecast_carrier_progress=prefer_forecast_carrier_progress,
                 fail_on_error=(
                     prefer_forecast_carrier_progress
-                    or reactor_blocked_by_monitor_fairness
+                    or prefer_exact_held_sell
                 ),
             )
         if (
@@ -6469,7 +6480,7 @@ def _edli_reactor_wake_poll_once() -> bool:
         )
         return False
     if (
-        reactor_blocked_by_monitor_fairness
+        exact_held_sell_wake_ids
         and (
             wake is None
             or wake.wake_id not in exact_held_sell_wake_ids

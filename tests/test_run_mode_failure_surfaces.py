@@ -11537,7 +11537,7 @@ def test_canonical_monitor_debt_runs_exact_held_sell_completion(
     assert fairness_debt.is_set() is True
 
 
-def test_reactor_poll_does_not_promote_canonical_family_debt_to_exact_only_queue(
+def test_reactor_poll_keeps_canonical_family_debt_ordinary_without_exact_debt(
     monkeypatch,
 ) -> None:
     import src.main as main_module
@@ -11579,8 +11579,10 @@ def test_reactor_poll_does_not_promote_canonical_family_debt_to_exact_only_queue
     monkeypatch.setattr(
         wake_module,
         "exact_held_sell_completion_wake_ids",
-        lambda **_kwargs: pytest.fail(
-            "family-scoped canonical debt must not require exact-only selection"
+        lambda **kwargs: (
+            frozenset()
+            if kwargs == {"fail_on_error": True}
+            else pytest.fail("exact debt discovery must fail closed")
         ),
     )
     monkeypatch.setattr(
@@ -11593,15 +11595,16 @@ def test_reactor_poll_does_not_promote_canonical_family_debt_to_exact_only_queue
     assert reads == [
         {
             "exclude_wake_ids": frozenset({"exact-held-sell"}),
-            "prefer_exact_held_sell": False,
             "prefer_forecast_carrier_progress": False,
             "fail_on_error": False,
         }
     ]
 
 
-def test_reactor_poll_keeps_fairness_debt_exact_only(
+@pytest.mark.parametrize("fairness_blocked", [False, True])
+def test_reactor_poll_prioritizes_exact_debt_with_or_without_fairness(
     monkeypatch,
+    fairness_blocked,
 ) -> None:
     import src.main as main_module
     import src.runtime.reactor_wake as wake_module
@@ -11609,7 +11612,8 @@ def test_reactor_poll_keeps_fairness_debt_exact_only(
     fairness_debt = type(
         main_module._periodic_held_position_monitor_fairness_debt
     )()
-    fairness_debt.set()
+    if fairness_blocked:
+        fairness_debt.set()
     reads: list[dict] = []
     monkeypatch.setattr(
         main_module,
@@ -11627,7 +11631,7 @@ def test_reactor_poll_keeps_fairness_debt_exact_only(
         lambda **kwargs: (
             frozenset({"exact-held-sell"})
             if kwargs == {"fail_on_error": True}
-            else pytest.fail("fairness selection must use the fail-closed reader")
+            else pytest.fail("exact debt discovery used the wrong failure policy")
         ),
     )
     monkeypatch.setattr(
@@ -11659,6 +11663,45 @@ def test_reactor_poll_keeps_fairness_debt_exact_only(
             "fail_on_error": True,
         }
     ]
+
+
+@pytest.mark.parametrize("fairness_blocked", [False, True])
+def test_reactor_poll_does_not_run_ordinary_work_when_exact_debt_is_unreadable(
+    monkeypatch,
+    fairness_blocked,
+) -> None:
+    import src.main as main_module
+    import src.runtime.reactor_wake as wake_module
+
+    fairness_debt = type(
+        main_module._periodic_held_position_monitor_fairness_debt
+    )()
+    if fairness_blocked:
+        fairness_debt.set()
+    reads: list[dict] = []
+    monkeypatch.setattr(
+        main_module,
+        "_defer_for_held_position_monitor",
+        lambda _job: False,
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_periodic_held_position_monitor_fairness_debt",
+        fairness_debt,
+    )
+    monkeypatch.setattr(
+        wake_module,
+        "exact_held_sell_completion_wake_ids",
+        lambda **_kwargs: (_ for _ in ()).throw(OSError("unreadable")),
+    )
+    monkeypatch.setattr(
+        wake_module,
+        "read_reactor_wake",
+        lambda **kwargs: reads.append(kwargs) or None,
+    )
+
+    assert main_module._edli_reactor_wake_poll_once() is False
+    assert reads == []
 
 
 def test_reactor_wrapper_keeps_existing_canonical_debt_family_scoped(

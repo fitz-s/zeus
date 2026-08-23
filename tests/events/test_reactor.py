@@ -5848,6 +5848,48 @@ def test_process_pending_cancellation_includes_monitor_debt_for_protected_comple
     )
     assert exact_cancelled is not None
     assert exact_cancelled() is True
+    exact_debt = [False]
+    ordinary_cancelled = _process_pending_cancelled(
+        committed_day0_wake=False,
+        producer_fast_path=False,
+        urgent_wake_pending=any_urgent,
+        urgent_day0_pending=day0_urgent,
+        exact_held_completion=False,
+        exact_held_completion_pending=lambda: exact_debt[0],
+    )
+    assert ordinary_cancelled is not None
+    assert ordinary_cancelled() is False
+    exact_debt[0] = True
+    assert ordinary_cancelled() is True
+    unreadable_exact_debt = _process_pending_cancelled(
+        committed_day0_wake=False,
+        producer_fast_path=False,
+        urgent_wake_pending=any_urgent,
+        urgent_day0_pending=day0_urgent,
+        exact_held_completion=False,
+        exact_held_completion_pending=lambda: (_ for _ in ()).throw(OSError()),
+    )
+    assert unreadable_exact_debt is not None
+    assert unreadable_exact_debt() is True
+    protected_exact = _process_pending_cancelled(
+        committed_day0_wake=False,
+        producer_fast_path=False,
+        urgent_wake_pending=any_urgent,
+        urgent_day0_pending=day0_urgent,
+        exact_held_completion=True,
+        exact_held_completion_pending=lambda: True,
+    )
+    assert protected_exact is any_urgent
+    assert protected_exact() is False
+    protected_day0 = _process_pending_cancelled(
+        committed_day0_wake=True,
+        producer_fast_path=True,
+        urgent_wake_pending=any_urgent,
+        urgent_day0_pending=day0_urgent,
+        exact_held_completion=False,
+        exact_held_completion_pending=lambda: True,
+    )
+    assert protected_day0 is None
     assert _held_position_monitor_preemption_pending(
         lambda: False,
         lambda: True,
@@ -5946,6 +5988,77 @@ def test_monitor_debt_yields_before_runtime_setup_and_releases_reactor_lock(
         assert not lock.locked()
     finally:
         reactor_module._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.clear()
+
+
+def test_unreadable_exact_completion_debt_aborts_ordinary_reactor_admission(
+    monkeypatch,
+):
+    import src.events.reactor as reactor_module
+    import src.main as main
+    import src.state.db as db
+
+    monkeypatch.setattr(main, "_defer_for_held_position_monitor", lambda _job: False)
+    monkeypatch.setattr(
+        reactor_module,
+        "_durable_exact_held_sell_completion_pending",
+        lambda: (_ for _ in ()).throw(OSError("unreadable")),
+    )
+    monkeypatch.setattr(
+        db,
+        "get_world_connection",
+        lambda: pytest.fail("unreadable exact debt must abort before DB setup"),
+    )
+
+    lock = threading.Lock()
+    assert reactor_module.run_edli_event_reactor_cycle(active_lock=lock) is False
+    assert not lock.locked()
+
+
+@pytest.mark.parametrize(
+    "producer_wake_reason",
+    (
+        "held_sell_global_auction_completion_requested",
+        "day0_extreme_event_committed",
+    ),
+)
+def test_unreadable_exact_completion_debt_preserves_committed_producer_cycle(
+    monkeypatch,
+    producer_wake_reason,
+):
+    import src.events.reactor as reactor_module
+    import src.main as main
+    import src.state.db as db
+    from src.riskguard import riskguard
+    from src.riskguard.risk_level import RiskLevel
+
+    class ProtectedProducerReachedDbSetup(Exception):
+        pass
+
+    monkeypatch.setattr(main, "_defer_for_held_position_monitor", lambda _job: False)
+    monkeypatch.setattr(riskguard, "get_current_level", lambda: RiskLevel.GREEN)
+    monkeypatch.setattr(
+        reactor_module,
+        "_durable_exact_held_sell_completion_pending",
+        lambda: (_ for _ in ()).throw(OSError("unreadable")),
+    )
+    monkeypatch.setattr(
+        reactor_module,
+        "_paused_entry_wake_should_park",
+        lambda **_kwargs: False,
+    )
+    monkeypatch.setattr(
+        db,
+        "get_world_connection",
+        lambda: (_ for _ in ()).throw(ProtectedProducerReachedDbSetup()),
+    )
+
+    lock = threading.Lock()
+    with pytest.raises(ProtectedProducerReachedDbSetup):
+        reactor_module.run_edli_event_reactor_cycle(
+            active_lock=lock,
+            producer_wake_reason=producer_wake_reason,
+        )
+    assert not lock.locked()
 
 
 @pytest.mark.parametrize(
