@@ -811,6 +811,10 @@ def read_replacement_forecast_bundle(
                         posterior_source_cycle_time=row_map["source_cycle_time"],
                         posterior_computed_at=row_map["computed_at"],
                         posterior_provenance=provenance,
+                        held_redecision=(
+                            authority_purpose
+                            is ReplacementForecastAuthorityPurpose.HELD_REDECISION
+                        ),
                     )
                     if (
                         hwm_deadline is not None

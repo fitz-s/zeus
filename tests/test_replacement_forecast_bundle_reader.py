@@ -1,6 +1,6 @@
 # Created: 2026-06-06
-# Last reused/audited: 2026-08-17
-# Lifecycle: created=2026-06-06; last_reviewed=2026-08-17; last_reused=2026-08-17
+# Last reused/audited: 2026-08-23
+# Lifecycle: created=2026-06-06; last_reviewed=2026-08-23; last_reused=2026-08-23
 # Purpose: Protect replacement posterior bundle reader no-bypass semantics.
 # Reuse: Run before wiring replacement posterior into executable forecast reader or event reactor.
 # Authority basis: Operator-directed live replacement forecast bundle reader semantics.
@@ -25,6 +25,7 @@ import src.data.replacement_input_hwm as input_hwm
 from src.data.replacement_forecast_bundle_reader import (
     HIGH_DATA_VERSION,
     PRODUCT_ID,
+    ReplacementForecastAuthorityPurpose,
     SOURCE_ID,
     read_replacement_forecast_bundle,
 )
@@ -960,6 +961,61 @@ def _insert_ensemble_snapshot(
     source_cycle_time: datetime,
     available_at: datetime,
 ) -> None:
+    source_run_id = f"ens-run-{snapshot_id}"
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS source_run (
+            source_run_id TEXT PRIMARY KEY,
+            source_id TEXT NOT NULL,
+            track TEXT NOT NULL,
+            release_calendar_key TEXT NOT NULL,
+            ingest_mode TEXT NOT NULL,
+            origin_mode TEXT NOT NULL,
+            source_cycle_time TEXT NOT NULL,
+            source_available_at TEXT,
+            fetch_finished_at TEXT,
+            captured_at TEXT,
+            imported_at TEXT,
+            target_local_date TEXT,
+            city_id TEXT,
+            city_timezone TEXT,
+            temperature_metric TEXT,
+            physical_quantity TEXT,
+            observation_field TEXT,
+            dataset_id TEXT,
+            expected_members INTEGER,
+            observed_members INTEGER,
+            completeness_status TEXT NOT NULL,
+            partial_run INTEGER NOT NULL,
+            status TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO source_run (
+            source_run_id, source_id, track, release_calendar_key,
+            ingest_mode, origin_mode, source_cycle_time, source_available_at,
+            fetch_finished_at, captured_at, imported_at, target_local_date,
+            city_id, city_timezone, temperature_metric, physical_quantity,
+            observation_field, dataset_id, expected_members, observed_members,
+            completeness_status, partial_run, status
+        ) VALUES (?, 'ecmwf_open_data', 'mx2t6_high', 'ecmwf_open_data.mx2t6_high',
+                  'SCHEDULED_LIVE', 'SCHEDULED_LIVE', ?, ?, ?, ?, ?,
+                  '2026-06-07', 'Shanghai', 'Asia/Shanghai', 'high',
+                  'daily_maximum_temperature', 'high_temp',
+                  'ecmwf_opendata_mx2t3_local_calendar_day_max', 51, 51,
+                  'COMPLETE', 0, 'SUCCESS')
+        """,
+        (
+            source_run_id,
+            source_cycle_time.isoformat(),
+            available_at.isoformat(),
+            available_at.isoformat(),
+            available_at.isoformat(),
+            available_at.isoformat(),
+        ),
+    )
     conn.execute(
         """
         INSERT INTO ensemble_snapshots (
@@ -968,9 +1024,9 @@ def _insert_ensemble_snapshot(
             fetch_time, lead_hours, members_json, model_version, dataset_id,
             causality_status, boundary_ambiguous, provenance_json, authority,
             members_unit, source_cycle_time, source_available_at,
-            contributes_to_target_extrema
+            contributes_to_target_extrema, source_run_id
         ) VALUES (?, 'Shanghai', '2026-06-07', 'high', ?, ?, ?, ?, ?, 24.0,
-                  ?, 'ecmwf_ens', ?, 'OK', 0, '{}', 'VERIFIED', 'degC', ?, ?, 1)
+                  ?, 'ecmwf_ens', ?, 'OK', 0, '{}', 'VERIFIED', 'degC', ?, ?, 1, ?)
         """,
         (
             snapshot_id,
@@ -983,6 +1039,7 @@ def _insert_ensemble_snapshot(
             "ecmwf_opendata_mx2t3_local_calendar_day_max",
             source_cycle_time.isoformat(),
             available_at.isoformat(),
+            source_run_id,
         ),
     )
 
@@ -1112,6 +1169,23 @@ def test_live_input_hwm_blocks_posterior_when_newer_ensemble_cycle_is_available(
         "consumed_ensemble_cycle=2026-06-06T00:00:00+00:00:"
         "lag_h=2.00"
     )
+
+    posterior_id = _insert_posterior(conn)
+    held = read_replacement_forecast_bundle(
+        conn,
+        baseline_bundle=_BaselineBundle(_Evidence("b0-run")),
+        readiness=_readiness(posterior_id=posterior_id),
+        city="Shanghai",
+        target_date="2026-06-07",
+        temperature_metric="high",
+        decision_time=_dt(4),
+        current_bin_topology_hash="topology-hash",
+        enforce_raw_input_hwm=True,
+        authority_purpose=ReplacementForecastAuthorityPurpose.HELD_REDECISION,
+    )
+
+    assert held.ok is False
+    assert "basis=current_ensemble_snapshot_superseded" in held.reason_code
 
 
 def _readiness(*, posterior_id: int, baseline_run_id: str = "b0-run", posterior_available_at: datetime | None = None):
@@ -2483,6 +2557,12 @@ def test_raw_hwm_fails_closed_when_available_anchor_has_no_consumed_id(
 
 def test_raw_hwm_blocks_newer_anchor_than_exact_consumed_artifact(tmp_path) -> None:
     conn = _conn()
+    _insert_ensemble_snapshot(
+        conn,
+        snapshot_id=1,
+        source_cycle_time=_dt(0),
+        available_at=_dt(1),
+    )
     posterior_id = _insert_posterior(
         conn,
         source_available_at=_dt(3, 5),
@@ -2543,6 +2623,22 @@ def test_raw_hwm_blocks_newer_anchor_than_exact_consumed_artifact(tmp_path) -> N
     assert result.ok is False
     assert "source_cycle_time_raw_forecast_artifacts_lag" in result.reason_code
     assert "consumed_anchor_cycle=2026-06-06T03:00:00+00:00" in result.reason_code
+
+    held = read_replacement_forecast_bundle(
+        conn,
+        baseline_bundle=_BaselineBundle(_Evidence("b0-run")),
+        readiness=_readiness(posterior_id=posterior_id),
+        city="Shanghai",
+        target_date="2026-06-07",
+        temperature_metric="high",
+        decision_time=_dt(5),
+        current_bin_topology_hash="topology-hash",
+        enforce_raw_input_hwm=True,
+        authority_purpose=ReplacementForecastAuthorityPurpose.HELD_REDECISION,
+    )
+
+    assert held.ok is True
+    assert held.reason_code == "REPLACEMENT_POSTERIOR_READY"
 
 
 def test_raw_hwm_lookup_binds_exact_same_cycle_materialization(tmp_path) -> None:
@@ -2785,6 +2881,12 @@ def test_raw_hwm_accepts_exact_authoritative_previous_run_substitution() -> None
 
 def test_raw_hwm_blocks_when_exact_consumed_model_is_superseded() -> None:
     conn = _conn()
+    _insert_ensemble_snapshot(
+        conn,
+        snapshot_id=1,
+        source_cycle_time=_dt(0),
+        available_at=_dt(1),
+    )
     posterior_id = _insert_posterior(conn)
     consumed: dict[str, dict[str, object]] = {}
     for model in ("ecmwf_ifs", "gfs"):
@@ -2833,6 +2935,77 @@ def test_raw_hwm_blocks_when_exact_consumed_model_is_superseded() -> None:
     assert result.ok is False
     assert "basis=used_raw_model_forecasts_superseded" in result.reason_code
     assert "model=gfs" in result.reason_code
+
+    held = read_replacement_forecast_bundle(
+        conn,
+        baseline_bundle=_BaselineBundle(_Evidence("b0-run")),
+        readiness=_readiness(posterior_id=posterior_id),
+        city="Shanghai",
+        target_date="2026-06-07",
+        temperature_metric="high",
+        decision_time=_dt(4),
+        current_bin_topology_hash="topology-hash",
+        enforce_raw_input_hwm=True,
+        authority_purpose=ReplacementForecastAuthorityPurpose.HELD_REDECISION,
+    )
+
+    assert held.ok is True
+    assert held.reason_code == "REPLACEMENT_POSTERIOR_READY"
+
+
+def test_held_redecision_blocks_same_cycle_late_input() -> None:
+    conn = _conn()
+    _insert_ensemble_snapshot(
+        conn,
+        snapshot_id=1,
+        source_cycle_time=_dt(0),
+        available_at=_dt(1),
+    )
+    posterior_id = _insert_posterior(conn, computed_at=_dt(3, 10))
+    consumed: dict[str, dict[str, object]] = {}
+    for model in ("ecmwf_ifs", "gfs"):
+        _insert_raw_model_forecast(
+            conn,
+            model=model,
+            source_cycle_time=_dt(3),
+            captured_at=_dt(3, 5),
+            source_available_at=_dt(3, 5),
+        )
+        consumed[model] = {
+            "raw_model_forecast_id": int(
+                conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+            ),
+            "served_cycle": _dt(3).isoformat(),
+            "captured_at": _dt(3, 5).isoformat(),
+            "served_via": "single_runs",
+        }
+    conn.execute(
+        "UPDATE forecast_posteriors SET provenance_json = ? WHERE posterior_id = ?",
+        (json.dumps(_with_current_value_serving(consumed)), posterior_id),
+    )
+    _insert_raw_model_forecast(
+        conn,
+        model="gfs",
+        source_cycle_time=_dt(3),
+        captured_at=_dt(3, 15),
+        source_available_at=_dt(3, 15),
+    )
+
+    held = read_replacement_forecast_bundle(
+        conn,
+        baseline_bundle=_BaselineBundle(_Evidence("b0-run")),
+        readiness=_readiness(posterior_id=posterior_id),
+        city="Shanghai",
+        target_date="2026-06-07",
+        temperature_metric="high",
+        decision_time=_dt(4),
+        current_bin_topology_hash="topology-hash",
+        enforce_raw_input_hwm=True,
+        authority_purpose=ReplacementForecastAuthorityPurpose.HELD_REDECISION,
+    )
+
+    assert held.ok is False
+    assert "basis=used_raw_model_forecasts_same_cycle_late_input" in held.reason_code
 
 
 def test_raw_hwm_marks_isolated_used_provider_revision_unconsumed() -> None:

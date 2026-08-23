@@ -4,6 +4,23 @@ Date: 2026-07-11
 Branch: `live` (was `p2-pending-exit-restart-redecision`; renamed at main→live cutover)
 Status: active
 
+## 2026-08-23 — partial deterministic cycle不得冻结reduce-only SELL
+
+- **实时反例：** global auction反复选择正 expected-log-growth SELL，但preflight在新
+  deterministic raw/artifact 06Z先于同周期ENS到达时，以
+  `REPLACEMENT_RAW_INPUT_HWM`全局拒绝。完整00Z bundle仍在绝对age horizon内，且
+  `HELD_REDECISION`已经是独立于ENTRY的typed authority purpose。
+- **修复：** ENTRY继续对任一新raw input严格fail closed。只有
+  `HELD_REDECISION`可在最新decision-time-eligible ENS cycle仍等于已消费shape cycle、
+  rich consumed-row identity完整时保留上一完整bundle；同周期late row、新ENS、identity
+  fault、HWM read loss或绝对过期继续拒绝。该例外只允许释放已有资本，不授权BUY。
+- **SCOPE / DRAIN / RESET：** scope是exact family的reduce-only held redecision；drain是
+  normal materializer在同周期eligible ENS提交后生成新bundle；reset是ENS frontier推进，
+  此时旧bundle对ENTRY与HELD同时失效。其他family继续参与全局比较。
+- **验收：** bundle-reader antibodies同时证明raw-model与anchor-artifact partial wave下
+  ENTRY blocked/HELD ready，以及newer complete ENS下两者均blocked；随后运行完整reader
+  suite、planning-lock/registry/compile/diff gates，并以live preflight与venue receipt独立复验。
+
 ## 2026-08-18 Early exit plus residual settlement is a hybrid capital route
 
 The forward capital audit treated the last lifecycle event as the entire
