@@ -402,6 +402,125 @@ def test_zero_chain_fact_does_not_fall_back_to_stale_local_shares(cfg: dict) -> 
     assert _incidents(cfg) == []
 
 
+def test_blind_legacy_scalar_depth_split_is_retired_before_dispatch(cfg: dict) -> None:
+    _position(cfg)
+    _quote(
+        cfg,
+        "q-legacy-split",
+        "2026-08-22T09:00:02+00:00",
+        0.0,
+        depth_bid=0.999,
+    )
+    with loop.open_ro(Path(cfg["paths"]["trades_db"])) as trades, loop.memory(cfg) as mem:
+        position = loop._position_with_exposure(trades, "p1")
+        assert position is not None
+        loop._insert_incident(
+            mem,
+            position=position,
+            evidence_id="q-legacy-split",
+            quote_seen_at="2026-08-22T09:00:02+00:00",
+            bid=0.0,
+            floor=0.05,
+            kind="hard",
+            priority=1_000_000.0,
+        )
+        mem.commit()
+
+    loop.detect(cfg)
+
+    row = _incidents(cfg)[0]
+    assert (row["status"], row["stage"]) == ("observing", "observing")
+    with loop.memory(cfg) as mem:
+        reason = mem.execute(
+            "SELECT reason FROM incident_transitions WHERE incident_id=?",
+            (row["incident_id"],),
+        ).fetchone()[0]
+    assert reason == "detector_revalidated:quote_integrity_conflict"
+
+
+def test_revalidation_uses_incident_floor_not_changed_current_floor(cfg: dict) -> None:
+    _position(cfg)
+    _quote(cfg, "q-historical", "2026-08-22T09:00:02+00:00", 0.04)
+    with loop.open_ro(Path(cfg["paths"]["trades_db"])) as trades, loop.memory(cfg) as mem:
+        position = loop._position_with_exposure(trades, "p1")
+        assert position is not None
+        loop._insert_incident(
+            mem,
+            position=position,
+            evidence_id="q-historical",
+            quote_seen_at="2026-08-22T09:00:02+00:00",
+            bid=0.04,
+            floor=0.05,
+            kind="hard",
+            priority=1_000_000.0,
+        )
+        mem.commit()
+    Path(cfg["paths"]["settings"]).write_text(
+        json.dumps({"execution": {"absolute_live_unit_price_min": 0.03}})
+    )
+
+    loop.detect(cfg)
+
+    row = _incidents(cfg)[0]
+    assert (row["status"], row["stage"], row["floor_price"]) == (
+        "queued",
+        "blind",
+        0.05,
+    )
+
+
+def test_revalidation_cas_does_not_retire_concurrently_claimed_incident(
+    cfg: dict,
+    monkeypatch,
+) -> None:
+    _position(cfg)
+    _quote(
+        cfg,
+        "q-race-split",
+        "2026-08-22T09:00:02+00:00",
+        0.0,
+        depth_bid=0.999,
+    )
+    with loop.open_ro(Path(cfg["paths"]["trades_db"])) as trades, loop.memory(cfg) as mem:
+        position = loop._position_with_exposure(trades, "p1")
+        assert position is not None
+        incident_id = loop._insert_incident(
+            mem,
+            position=position,
+            evidence_id="q-race-split",
+            quote_seen_at="2026-08-22T09:00:02+00:00",
+            bid=0.0,
+            floor=0.05,
+            kind="hard",
+            priority=1_000_000.0,
+        )
+        assert incident_id is not None
+        mem.commit()
+        original = loop.reconcile_held_quote
+
+        def claim_during_reconciliation(quote):
+            mem.execute(
+                "UPDATE incidents SET status='running' WHERE incident_id=?",
+                (incident_id,),
+            )
+            return original(quote)
+
+        monkeypatch.setattr(loop, "reconcile_held_quote", claim_during_reconciliation)
+        assert loop.revalidate_blind_hard_incidents(mem, trades) == 0
+        mem.commit()
+        row = mem.execute(
+            "SELECT status,stage FROM incidents WHERE incident_id=?",
+            (incident_id,),
+        ).fetchone()
+        transitions = mem.execute(
+            "SELECT COUNT(*) FROM incident_transitions WHERE incident_id=?",
+            (incident_id,),
+        ).fetchone()[0]
+
+    assert tuple(row) == ("running", "blind")
+    assert transitions == 0
+
+
 def test_buy_no_maps_to_no_token_sell_bid(cfg: dict) -> None:
     _position(cfg, direction="buy_no")
     _quote(cfg, "q-no", "2026-08-22T09:00:02+00:00", 0.03, token="no-token", direction="buy_no")

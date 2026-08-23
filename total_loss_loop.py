@@ -460,6 +460,109 @@ def tracked_positions(conn: sqlite3.Connection, *, history_days: int) -> dict[st
     return result
 
 
+def _position_with_exposure(
+    conn: sqlite3.Connection,
+    position_id: str,
+) -> dict[str, Any] | None:
+    row = conn.execute(
+        """
+        SELECT pc.*,
+               (
+                   SELECT MIN(pe.occurred_at)
+                     FROM position_events pe
+                    WHERE pe.position_id=pc.position_id
+                      AND pe.event_type IN ('ENTRY_ORDER_FILLED','VENUE_POSITION_OBSERVED','CHAIN_SYNCED')
+               ) AS exposure_start_at,
+               COALESCE((
+                   SELECT MIN(pe.occurred_at)
+                     FROM position_events pe
+                    WHERE pe.position_id=pc.position_id
+                      AND pe.event_type IN ('EXIT_ORDER_FILLED','SETTLED','ADMIN_VOIDED')
+               ), CASE
+                    WHEN pc.phase NOT IN ('pending_entry','active','day0_window','pending_exit')
+                    THEN COALESCE(pc.settled_at,pc.updated_at)
+               END) AS exposure_end_at
+          FROM position_current pc
+         WHERE pc.position_id=?
+        """,
+        (position_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    position = dict(row)
+    position["held_token_id"] = held_token(position)
+    position["held_sell_direction"] = held_sell_direction(position)
+    return position
+
+
+def revalidate_blind_hard_incidents(
+    mem: sqlite3.Connection,
+    trades: sqlite3.Connection,
+) -> int:
+    """Retire queued legacy triggers disproved by current detector invariants."""
+
+    rows = mem.execute(
+        "SELECT incident_id,position_id,crossing_evidence_id,crossing_kind,floor_price "
+        "FROM incidents WHERE kind='hard' AND stage='blind' "
+        "AND status IN ('queued','retry_pending')"
+    ).fetchall()
+    retired = 0
+    for row in rows:
+        position = _position_with_exposure(trades, str(row["position_id"]))
+        quote_row = trades.execute(
+            "SELECT * FROM execution_feasibility_evidence WHERE evidence_id=?",
+            (row["crossing_evidence_id"],),
+        ).fetchone()
+        if position is None or quote_row is None:
+            continue
+        quote = dict(quote_row)
+        status, bid = reconcile_held_quote(quote)
+        incident_floor = _float(row["floor_price"])
+        if incident_floor is None or not 0 < incident_floor < 1:
+            continue
+        reason = None
+        if not _quote_within_exposure(position, str(quote["quote_seen_at"])):
+            reason = "detector_revalidated:crossing_outside_exposure"
+        elif (
+            position.get("phase") in OPEN_PHASES
+            and not has_material_share_precision(position)
+        ):
+            reason = "detector_revalidated:unrepresentable_residual_dust"
+        elif status in {"quote_incomplete", "quote_integrity_conflict"}:
+            reason = f"detector_revalidated:{status}"
+        elif row["crossing_kind"] == "below_floor" and (
+            status != "executable" or bid is None or bid >= incident_floor
+        ):
+            reason = "detector_revalidated:below_floor_refuted"
+        elif row["crossing_kind"] == "no_bid" and status != "no_bid":
+            reason = "detector_revalidated:no_bid_refuted"
+        if reason is None:
+            continue
+        stamp = iso()
+        updated = mem.execute(
+            "UPDATE incidents SET stage='observing',status='observing',updated_at=? "
+            "WHERE incident_id=? AND stage='blind' "
+            "AND status IN ('queued','retry_pending')",
+            (stamp, row["incident_id"]),
+        )
+        if updated.rowcount != 1:
+            continue
+        mem.execute(
+            "INSERT INTO incident_transitions VALUES (?,?,?,?,?,?,?)",
+            (
+                digest(row["incident_id"], "blind", "observing", None, stamp),
+                row["incident_id"],
+                "blind",
+                "observing",
+                None,
+                reason,
+                stamp,
+            ),
+        )
+        retired += 1
+    return retired
+
+
 def _exposure_fingerprint(position: Mapping[str, Any]) -> str:
     return digest(
         position["position_id"],
@@ -965,6 +1068,7 @@ def detect(cfg: Mapping[str, Any]) -> list[str]:
     cutoff = iso(now() - timedelta(days=history_days))
     created: list[str] = []
     with open_ro(Path(str(cfg["paths"]["trades_db"]))) as trades, memory(cfg) as mem:
+        revalidate_blind_hard_incidents(mem, trades)
         positions = tracked_positions(trades, history_days=history_days)
         by_token: dict[str, list[dict[str, Any]]] = {}
         for position in positions.values():
