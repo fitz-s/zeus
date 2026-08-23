@@ -3375,15 +3375,18 @@ def monitor_quote_refresh(
 
     book = prefetched_monitor_orderbook(clob, tid)
     source_timestamp: str | None = None
-    if (
-        book is None
-        and monitor_orderbook_prefetch_attempted(clob, tid)
-        and not retry_after_prefetch
-    ):
+    if book is None:
+        # The market-channel snapshot is selection evidence, not submit
+        # authority. Consume it before any bounded venue read so a fresh
+        # durable held book cannot be starved by the monitor stage deadline.
         fallback = _fresh_canonical_monitor_orderbook(conn, pos, tid)
-        if fallback is None:
+        if fallback is not None:
+            book, source_timestamp = fallback
+        elif (
+            monitor_orderbook_prefetch_attempted(clob, tid)
+            and not retry_after_prefetch
+        ):
             return None
-        book, source_timestamp = fallback
     get_orderbook = getattr(clob, "get_orderbook", None)
     try:
         if book is None:

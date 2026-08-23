@@ -23,6 +23,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 
 import numpy as np
 import pytest
@@ -695,6 +696,7 @@ def test_monitor_quote_uses_fresh_exact_canonical_book_after_failed_batch(tmp_pa
         state="day0_window",
         condition_id="cond-canonical-monitor-fallback",
     )
+    setattr(pos, "_zeus_held_monitor_deadline_monotonic", time.monotonic() + 0.2)
 
     quote = monitor_refresh.monitor_quote_refresh(conn, clob, pos)
 
@@ -710,10 +712,13 @@ def test_monitor_quote_uses_fresh_exact_canonical_book_after_failed_batch(tmp_pa
         def get_orderbook(self, _token_id):
             raise ValueError("malformed adapter response")
 
-    assert (
-        monitor_refresh.monitor_quote_refresh(conn, ProgrammingFailureClob(), pos)
-        is None
+    recovered = monitor_refresh.monitor_quote_refresh(
+        conn,
+        ProgrammingFailureClob(),
+        pos,
     )
+    assert recovered is not None
+    assert recovered.best_bid == pytest.approx(0.999)
     conn.close()
 
 
@@ -770,6 +775,59 @@ def test_monitor_quote_uses_ask_only_canonical_book_as_typed_zero_value(tmp_path
     assert quote.best_bid == pytest.approx(0.0)
     assert quote.best_ask == pytest.approx(0.001)
     assert quote.mark_price == pytest.approx(0.0)
+    conn.close()
+
+
+@pytest.mark.parametrize("durable_state", ("missing", "stale", "future", "invalidated"))
+def test_monitor_quote_tries_network_when_durable_book_is_unusable(
+    tmp_path,
+    durable_state,
+):
+    from src.engine import monitor_refresh
+    from src.state.snapshot_repo import init_snapshot_schema, record_snapshot_invalidation
+
+    conn = get_connection(tmp_path / f"canonical-monitor-{durable_state}.db")
+    init_schema(conn)
+    init_schema_trade_only(conn)
+    init_snapshot_schema(conn)
+    now_utc = datetime.now(timezone.utc)
+    condition_id = f"cond-canonical-monitor-{durable_state}"
+    if durable_state != "missing":
+        captured_at = now_utc - timedelta(minutes=2)
+        if durable_state == "future":
+            captured_at = now_utc + timedelta(seconds=5)
+        _insert_executable_snapshot(
+            conn,
+            snapshot_id=f"canonical-monitor-{durable_state}",
+            selected_outcome_token_id="yes123",
+            yes_token_id="yes123",
+            no_token_id="no456",
+            condition_id=condition_id,
+            captured_at=captured_at,
+        )
+        conn.commit()
+        if durable_state == "invalidated":
+            record_snapshot_invalidation(
+                conn,
+                condition_id=condition_id,
+                token_id="yes123",
+                reason="test_market_channel_change",
+                invalidated_at=now_utc - timedelta(seconds=1),
+            )
+
+    clob = _TwoSidedMonitorBookClob()
+    quote = monitor_refresh.monitor_quote_refresh(
+        conn,
+        clob,
+        _position(
+            state="day0_window",
+            condition_id=condition_id,
+        ),
+    )
+
+    assert quote is not None
+    assert quote.best_bid == pytest.approx(0.40)
+    assert clob.orderbook_calls == 1
     conn.close()
 
 
