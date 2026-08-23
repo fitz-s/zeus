@@ -690,3 +690,42 @@ def test_preventable_loss_queues_repair_without_claiming_workspace(cfg: dict, mo
     with loop.memory(cfg) as mem:
         row = mem.execute("SELECT stage,status FROM incidents WHERE incident_id=?", (incident_id,)).fetchone()
     assert tuple(row) == ("repair_waiting", "queued")
+
+
+def test_fresh_review_uses_structured_ephemeral_exec_not_invalid_exec_review(
+    cfg: dict, monkeypatch
+) -> None:
+    incident_id = "review-command"
+    incident_dir = Path(cfg["paths"]["runtime"]) / "incidents" / incident_id
+    incident_dir.mkdir(parents=True)
+    loop.atomic_json(Path(cfg["paths"]["runtime"]) / "capabilities.json", {"reasoning_effort": "high"})
+    captured = {}
+    monkeypatch.setattr(loop, "_ensure_repair_commit", lambda *_args: "a" * 40)
+
+    def capture_spawn(*_args, **kwargs):
+        captured.update(kwargs)
+        return {"run_id": "review-run", "session_id": None}
+
+    monkeypatch.setattr(loop, "_spawn_run", capture_spawn)
+    with loop.memory(cfg) as mem:
+        mem.execute(
+            "INSERT INTO incidents(incident_id,kind,position_id,crossing_evidence_id,crossing_kind,"
+            "held_token_id,held_direction,t_floor,floor_price,observed_bid,detected_at,priority,status,stage,updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (incident_id, "hard", "p1", "q1", "below_floor", "yes", "sell_yes",
+             "2026-08-22T10:00:00+00:00", 0.05, 0.04, "2026-08-22T10:00:00+00:00",
+             1_000_000.0, "running", "repair", "2026-08-22T10:00:00+00:00"),
+        )
+        mem.commit()
+
+    loop._after_repair(
+        cfg,
+        {"incident_id": incident_id, "kind": "hard", "stage": "repair", "cwd": str(ROOT), "run_id": "repair-run"},
+        {"status": "patch_ready", "replay": {"passed": True}, "commit_sha": None},
+    )
+
+    command = captured["command"]
+    assert command[1:3] == ["-a", "never"]
+    assert "exec" in command
+    assert "review" not in command
+    assert "--ephemeral" in command

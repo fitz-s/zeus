@@ -2294,7 +2294,7 @@ def _start_repair(cfg: Mapping[str, Any], incident_id: str, kind: str) -> str:
     output = incident_dir / "patch.json"
     events = incident_dir / "codex-repair.jsonl"
     schema = _schema_file(cfg, "patch", PATCH_SCHEMA)
-    prompt = Path(str(cfg["paths"]["prompt"])).read_text() + "\n\nIMPLEMENTATION PHASE. Implement and test the structural repair in this incident worktree. Commit the patch but do not push, open a PR, merge, or deploy yet; the controller will run a fresh review first.\n\nDIAGNOSIS:\n" + json.dumps(diagnosis, ensure_ascii=False, indent=2) + "\n\nCLASSIFICATION:\n" + json.dumps(classification, ensure_ascii=False, indent=2) + f"\n\nincident evidence={incident_dir / 'evidence.db'}\n"
+    prompt = Path(str(cfg["paths"]["prompt"])).read_text() + "\n\nIMPLEMENTATION PHASE. Implement and test the structural repair in this incident worktree. Do not commit, push, open a PR, merge, or deploy; the controller owns Git metadata and will commit the proven diff before fresh review.\n\nDIAGNOSIS:\n" + json.dumps(diagnosis, ensure_ascii=False, indent=2) + "\n\nCLASSIFICATION:\n" + json.dumps(classification, ensure_ascii=False, indent=2) + f"\n\nincident evidence={incident_dir / 'evidence.db'}\n"
     command = _codex_exec_base(cfg, sandbox="workspace-write", cwd=worktree, schema=schema, output=output, persistent=True)
     spawned = _spawn_run(cfg, incident_id=incident_id, kind=kind, stage="repair", command=command, cwd=worktree, prompt=prompt, output=output, events=events)
     with memory(cfg) as mem:
@@ -2362,24 +2362,61 @@ def _after_repair(cfg: Mapping[str, Any], run: Mapping[str, Any], patch: Mapping
         return
     incident_dir = runtime_dir(cfg) / "incidents" / incident_id
     worktree = Path(str(run["cwd"]))
+    commit = _ensure_repair_commit(worktree, incident_id, patch)
+    if commit is None:
+        with memory(cfg) as mem:
+            transition(
+                mem, incident_id, str(run["stage"]),
+                reason="controller_commit_failed", run_id=str(run["run_id"]),
+                status="retry_pending",
+            )
+            mem.commit()
+        return
     output = incident_dir / "review.json"
     events = incident_dir / f"codex-review-{int(time.time())}.jsonl"
     schema = _schema_file(cfg, "review", REVIEW_SCHEMA)
-    command = [
-        codex_bin(), "-a", "never", "exec", "review",
-        "--ignore-user-config", "--strict-config", "--ephemeral",
-        "-m", str(cfg["profiles"][cfg["active"]["profile"]]["model"]),
-        "-c", f'model_reasoning_effort="{capabilities(cfg)["reasoning_effort"]}"',
-        "-c", "features.memories=false", "--base", str(cfg["delivery"]["base_branch"]),
-        "--output-schema", str(schema), "--output-last-message", str(output), "--json", "-",
-    ]
-    prompt = "Review the incident patch against repository law and the exact evidence. Lead with live-money findings. Return blocking=true for any unresolved correctness, causality, replay, or delivery defect."
+    command = _codex_exec_base(
+        cfg, sandbox="read-only", cwd=worktree, schema=schema,
+        output=output, persistent=False,
+    )
+    prompt = (
+        "Fresh independent code review. Review git diff "
+        f"{cfg['delivery']['base_branch']}...HEAD at commit {commit} against repository law "
+        "and the incident evidence. Lead with live-money findings. Return blocking=true "
+        "for any unresolved correctness, causality, replay, or delivery defect."
+    )
     review_run = _spawn_run(cfg, incident_id=incident_id, kind=str(run["kind"]), stage="review", command=command, cwd=worktree, prompt=prompt, output=output, events=events)
     review_run["repair_session_id"] = run.get("session_id")
     atomic_json(runtime_dir(cfg) / "runs" / f"{review_run['run_id']}.json", review_run)
     with memory(cfg) as mem:
         transition(mem, incident_id, "review", reason="repair_ready", run_id=str(review_run["run_id"]))
         mem.commit()
+
+
+def _ensure_repair_commit(
+    worktree: Path, incident_id: str, patch: Mapping[str, Any]
+) -> str | None:
+    expected = str(patch.get("commit_sha") or "").strip()
+    head = _run_capture(["git", "rev-parse", "HEAD"], cwd=worktree)
+    if head.returncode != 0:
+        return None
+    if expected and head.stdout.strip().startswith(expected):
+        return head.stdout.strip()
+    dirty = _run_capture(["git", "status", "--porcelain", "--untracked-files=all"], cwd=worktree)
+    checked = _run_capture(["git", "diff", "--check"], cwd=worktree)
+    if dirty.returncode != 0 or not dirty.stdout.strip() or checked.returncode != 0:
+        return None
+    staged = _run_capture(["git", "add", "-A"], cwd=worktree)
+    if staged.returncode != 0:
+        return None
+    committed = _run_capture(
+        ["git", "commit", "-m", f"fix(total-loss): repair {incident_id[:12]}"],
+        cwd=worktree,
+        timeout=120,
+    )
+    if committed.returncode != 0:
+        return None
+    return _run_capture(["git", "rev-parse", "HEAD"], cwd=worktree).stdout.strip() or None
 
 
 def _after_review(cfg: Mapping[str, Any], run: Mapping[str, Any], review: Mapping[str, Any]) -> None:
