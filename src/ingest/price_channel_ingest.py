@@ -141,6 +141,11 @@ _global_exit_audit_token_ids: set[str] = set()
 _held_quote_audit_token_ids_lock = threading.Lock()
 _held_quote_audit_token_ids: set[str] = set()
 
+
+class _CanonicalHeldScopeUnavailable(RuntimeError):
+    """The held monitor scope cannot be read safely from canonical TRADE truth."""
+
+
 EDLI_EVENT_DRIVEN_MODES = {
     "edli_live",
 }
@@ -3109,9 +3114,14 @@ def _edli_tokens_requiring_rest_quote_refresh(
     token_ids,
     *,
     checked_at: datetime,
-    max_age: timedelta,
+    continuity_max_age: timedelta,
+    evidence_max_age: timedelta,
 ) -> tuple[list[str], int]:
-    """Partition tokens by durable full-depth coverage in the current WS generation."""
+    """Partition tokens by fresh full-depth coverage in the current WS generation.
+
+    A continuity heartbeat proves only that the socket is connected.  It cannot
+    keep a quiet token's old book fresh: market-channel deltas are sparse.
+    """
 
     import sqlite3
 
@@ -3126,7 +3136,7 @@ def _edli_tokens_requiring_rest_quote_refresh(
         return [], 0
     generation_start = _edli_market_channel_generation_cut(
         checked_at=checked_at,
-        max_age=max_age,
+        max_age=continuity_max_age,
     )
     if generation_start is None:
         return tokens, 0
@@ -3166,6 +3176,7 @@ def _edli_tokens_requiring_rest_quote_refresh(
                 if (
                     token_id in chunk
                     and generation_start <= quote_seen_at <= checked_at
+                    and quote_seen_at >= checked_at - evidence_max_age
                     and isinstance(depth, dict)
                     and isinstance(depth.get("bids"), list)
                     and isinstance(depth.get("asks"), list)
@@ -3174,6 +3185,34 @@ def _edli_tokens_requiring_rest_quote_refresh(
     except sqlite3.Error:
         return tokens, 0
     return [token_id for token_id in tokens if token_id not in covered], len(covered)
+
+
+def _edli_canonical_open_held_token_ids(trade_conn) -> set[str]:
+    """Return only native outcome tokens the held monitor can act on."""
+
+    if trade_conn is None:
+        raise _CanonicalHeldScopeUnavailable("trade_connection_missing")
+    try:
+        rows = trade_conn.execute(
+            """
+            SELECT CASE
+                     WHEN lower(direction) = 'buy_no' THEN no_token_id
+                     ELSE token_id
+                   END AS held_token_id
+              FROM position_current
+             WHERE phase IN ('active', 'day0_window', 'pending_exit')
+               AND settled_at IS NULL
+            """
+        ).fetchall()
+    except Exception as exc:
+        raise _CanonicalHeldScopeUnavailable(
+            f"canonical_open_held_query_failed:{type(exc).__name__}"
+        ) from exc
+    return {
+        str(row[0]).strip()
+        for row in rows
+        if row and str(row[0] or "").strip() not in {"", "None"}
+    }
 
 
 def _edli_market_channel_seed_first_token_ids(
@@ -3298,13 +3337,15 @@ def _edli_refresh_held_position_quote_evidence(
 ) -> dict:
     """Refresh executable quote evidence for currently held exposure.
 
-    Current-generation full-depth WebSocket evidence already covers quiet books.
-    The scheduler spends REST budget only on missing, invalid, or disconnected
-    generation evidence; submit-time authority still performs its own JIT read.
+    Current-generation full-depth WebSocket evidence covers a quiet book only
+    until its monitor freshness deadline. The scheduler repairs missing,
+    invalid, disconnected, or aged evidence; submit-time authority still
+    performs its own JIT read.
     """
 
     from src.data.polymarket_client import PolymarketClient
     from src.data.polymarket_request_governor import RequestPriority
+    from src.contracts.executable_market_snapshot import FRESHNESS_WINDOW_DEFAULT
     from src.events.event_coalescer import EventCoalescer
     from src.events.triggers.market_channel_ingestor import (
         MarketChannelIngestor,
@@ -3332,31 +3373,73 @@ def _edli_refresh_held_position_quote_evidence(
 
     trade_read = get_trade_connection(write_class=None)
     try:
-        held_token_ids = _edli_held_position_priority_token_ids(trade_read)
-        exit_audit_token_ids = _edli_unsettled_global_exit_audit_token_ids(
-            trade_read
+        try:
+            canonical_held_token_ids = set(
+                _edli_canonical_open_held_token_ids(trade_read)
+            )
+        except _CanonicalHeldScopeUnavailable as exc:
+            return {
+                "canonical_held_scope_unavailable": True,
+                "canonical_held_scope_reason": str(exc),
+                "canonical_held_freshness_debt_scope": "open_native_held",
+                "canonical_held_freshness_debt_token_ids": [
+                    "CANONICAL_HELD_SCOPE_UNAVAILABLE"
+                ],
+                "held_quote_refresh_events": 0,
+            }
+        held_priority_token_ids = set(
+            _edli_held_position_priority_token_ids(trade_read)
+        )
+        exit_audit_token_ids = set(
+            _edli_unsettled_global_exit_audit_token_ids(trade_read)
+        )
+        held_token_ids = (
+            canonical_held_token_ids
+            | held_priority_token_ids
+            | exit_audit_token_ids
         )
         if not held_token_ids:
             return {"held_priority_token_ids": 0, "held_quote_refresh_events": 0}
         checked_at = datetime.now(timezone.utc)
-        rest_held_token_ids, ws_covered_tokens = (
+        continuity_max_age = timedelta(
+            milliseconds=_edli_bounded_positive_int(
+                edli_cfg,
+                "pre_submit_max_quote_age_ms",
+                default=1000,
+                maximum=60_000,
+            )
+        )
+        rest_canonical_held_token_ids, canonical_ws_covered_tokens = (
             _edli_tokens_requiring_rest_quote_refresh(
                 trade_read,
-                held_token_ids,
+                canonical_held_token_ids,
                 checked_at=checked_at,
-                max_age=timedelta(
-                    milliseconds=_edli_bounded_positive_int(
-                        edli_cfg,
-                        "pre_submit_max_quote_age_ms",
-                        default=1000,
-                        maximum=60_000,
-                    )
-                ),
+                continuity_max_age=continuity_max_age,
+                evidence_max_age=FRESHNESS_WINDOW_DEFAULT,
             )
+        )
+        residual_token_ids = held_token_ids - canonical_held_token_ids
+        rest_residual_token_ids, residual_ws_covered_tokens = (
+            _edli_tokens_requiring_rest_quote_refresh(
+                trade_read,
+                residual_token_ids,
+                checked_at=checked_at,
+                continuity_max_age=continuity_max_age,
+                evidence_max_age=FRESHNESS_WINDOW_DEFAULT,
+            )
+        )
+        ws_covered_tokens = (
+            canonical_ws_covered_tokens + residual_ws_covered_tokens
+        )
+        rest_held_token_ids = (
+            rest_canonical_held_token_ids + rest_residual_token_ids
         )
         if not rest_held_token_ids:
             return {
                 "held_priority_token_ids": len(held_token_ids),
+                "canonical_held_token_ids": len(canonical_held_token_ids),
+                "canonical_held_quote_ws_covered_tokens": canonical_ws_covered_tokens,
+                "canonical_held_freshness_debt_token_ids": [],
                 "held_token_metadata": 0,
                 "held_quote_refresh_ws_covered_tokens": ws_covered_tokens,
                 "held_quote_refresh_selected_tokens": 0,
@@ -3364,15 +3447,35 @@ def _edli_refresh_held_position_quote_evidence(
                 "held_quote_refresh_events": 0,
                 "budget_skipped_tokens": 0,
             }
-        ordered_held_token_ids = _edli_order_token_ids_by_feasibility_age(
-            trade_read,
-            rest_held_token_ids,
+        ordered_canonical_held_token_ids = (
+            _edli_order_token_ids_by_feasibility_age(
+                trade_read,
+                rest_canonical_held_token_ids,
+            )
+            if rest_canonical_held_token_ids
+            else []
+        )
+        ordered_residual_token_ids = (
+            _edli_order_token_ids_by_feasibility_age(
+                trade_read,
+                rest_residual_token_ids,
+            )
+            if rest_residual_token_ids
+            else []
         )
         max_tokens = _edli_quote_refresh_max_tokens(
             edli_cfg,
             "market_channel_held_quote_refresh_max_tokens_per_cycle",
             default=MARKET_CHANNEL_HELD_QUOTE_REFRESH_MAX_TOKENS_PER_CYCLE_DEFAULT,
         )
+        canonical_selected = ordered_canonical_held_token_ids[:max_tokens]
+        canonical_held_freshness_debt_token_ids = (
+            ordered_canonical_held_token_ids[max_tokens:]
+        )
+        ordered_held_token_ids = [
+            *canonical_selected,
+            *ordered_residual_token_ids,
+        ]
         selected_held_token_ids: list[str] = []
         scanned_held_token_ids: list[str] = []
         metadata_missing_token_ids: list[str] = []
@@ -3407,18 +3510,30 @@ def _edli_refresh_held_position_quote_evidence(
             for token_id in selected_held_token_ids
             if token_id in token_metadata
         }
+    canonical_held_freshness_debt_token_ids = list(
+        dict.fromkeys(
+            [
+                *canonical_held_freshness_debt_token_ids,
+                *(
+                    token_id
+                    for token_id in canonical_selected
+                    if token_id not in token_metadata
+                ),
+            ]
+        )
+    )
 
     if not token_metadata:
         return {
             "held_priority_token_ids": len(held_token_ids),
+            "canonical_held_token_ids": len(canonical_held_token_ids),
+            "canonical_held_quote_ws_covered_tokens": canonical_ws_covered_tokens,
+            "canonical_held_freshness_debt_token_ids": canonical_held_freshness_debt_token_ids,
             "held_quote_refresh_ws_covered_tokens": ws_covered_tokens,
             "held_quote_refresh_selected_tokens": len(selected_held_token_ids),
             "held_quote_refresh_metadata_scanned_tokens": len(scanned_held_token_ids),
             "held_quote_refresh_metadata_missing_tokens": len(metadata_missing_token_ids),
-            "held_quote_refresh_deferred_tokens": max(
-                0,
-                len(ordered_held_token_ids) - len(scanned_held_token_ids),
-            ),
+            "held_quote_refresh_deferred_tokens": max(0, len(rest_held_token_ids) - len(scanned_held_token_ids)),
             "held_quote_refresh_events": 0,
             "skipped": "no_held_token_metadata",
         }
@@ -3437,12 +3552,12 @@ def _edli_refresh_held_position_quote_evidence(
             token_metadata=len(token_metadata),
             attempted_tokens=len(ordered_metadata_tokens),
             extra={
+                "canonical_held_token_ids": len(canonical_held_token_ids),
+                "canonical_held_quote_ws_covered_tokens": canonical_ws_covered_tokens,
+                "canonical_held_freshness_debt_token_ids": canonical_held_freshness_debt_token_ids,
                 "held_quote_refresh_ws_covered_tokens": ws_covered_tokens,
                 "held_quote_refresh_selected_tokens": len(selected_held_token_ids),
-                "held_quote_refresh_deferred_tokens": max(
-                    0,
-                    len(ordered_held_token_ids) - len(selected_held_token_ids),
-                ),
+                "held_quote_refresh_deferred_tokens": max(0, len(rest_held_token_ids) - len(selected_held_token_ids)),
             },
         )
 
@@ -3523,6 +3638,9 @@ def _edli_refresh_held_position_quote_evidence(
         elapsed_seconds = max(0.0, time.monotonic() - started_monotonic)
         result = {
             "held_priority_token_ids": len(held_token_ids),
+            "canonical_held_token_ids": len(canonical_held_token_ids),
+            "canonical_held_quote_ws_covered_tokens": canonical_ws_covered_tokens,
+            "canonical_held_freshness_debt_token_ids": canonical_held_freshness_debt_token_ids,
             "held_token_metadata": len(token_metadata),
             "held_quote_refresh_ws_covered_tokens": ws_covered_tokens,
             "held_quote_refresh_events": int(written),
@@ -3530,10 +3648,7 @@ def _edli_refresh_held_position_quote_evidence(
             "held_quote_refresh_selected_tokens": len(selected_held_token_ids),
             "held_quote_refresh_metadata_scanned_tokens": len(scanned_held_token_ids),
             "held_quote_refresh_metadata_missing_tokens": len(metadata_missing_token_ids),
-            "held_quote_refresh_deferred_tokens": max(
-                0,
-                len(ordered_held_token_ids) - len(scanned_held_token_ids),
-            ),
+            "held_quote_refresh_deferred_tokens": max(0, len(rest_held_token_ids) - len(scanned_held_token_ids)),
             "held_quote_refresh_attempted_tokens": len(ordered_metadata_tokens),
             "budget_seconds": budget,
             "elapsed_seconds": elapsed_seconds,
@@ -3565,6 +3680,7 @@ def _edli_refresh_candidate_priority_quote_evidence(
     missing or newly introduced tokens retain the bounded fallback.
     """
 
+    from src.contracts.executable_market_snapshot import FRESHNESS_WINDOW_DEFAULT
     from src.data.polymarket_client import PolymarketClient
     from src.events.event_coalescer import EventCoalescer
     from src.events.triggers.market_channel_ingestor import (
@@ -3607,7 +3723,7 @@ def _edli_refresh_candidate_priority_quote_evidence(
                 trade_read,
                 priority_token_ids,
                 checked_at=checked_at,
-                max_age=timedelta(
+                continuity_max_age=timedelta(
                     milliseconds=_edli_bounded_positive_int(
                         edli_cfg,
                         "pre_submit_max_quote_age_ms",
@@ -3615,6 +3731,7 @@ def _edli_refresh_candidate_priority_quote_evidence(
                         maximum=60_000,
                     )
                 ),
+                evidence_max_age=FRESHNESS_WINDOW_DEFAULT,
             )
         )
         if not rest_candidate_token_ids:
@@ -3805,6 +3922,15 @@ def _edli_held_quote_refresh_cycle() -> dict:
         token_key="held_token_metadata",
         event_key="held_quote_refresh_events",
     )
+    if result.get("canonical_held_scope_unavailable"):
+        failed = True
+        reason = "canonical_held_scope_unavailable"
+    canonical_debt = list(
+        result.get("canonical_held_freshness_debt_token_ids") or ()
+    )
+    if not failed and canonical_debt:
+        failed = True
+        reason = "canonical_held_freshness_capacity_exhausted"
     if failed:
         result["scheduler_failed"] = True
         result["scheduler_failure_reason"] = reason or "held_quote_refresh_no_coverage"

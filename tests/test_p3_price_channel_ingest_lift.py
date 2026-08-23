@@ -3640,7 +3640,8 @@ def test_rest_quote_refresh_reuses_only_current_generation_full_depth(monkeypatc
             "missing",
         ],
         checked_at=checked_at,
-        max_age=timedelta(seconds=1),
+        continuity_max_age=timedelta(seconds=1),
+        evidence_max_age=timedelta(seconds=10),
     )
 
     assert covered == 1
@@ -3650,6 +3651,43 @@ def test_rest_quote_refresh_reuses_only_current_generation_full_depth(monkeypatc
         "future-depth",
         "missing",
     ]
+
+
+def test_rest_quote_refresh_does_not_treat_quiet_generation_depth_as_fresh(monkeypatch):
+    from src.ingest import price_channel_ingest as lane
+    from src.state.schema.execution_feasibility_evidence_schema import ensure_table
+
+    conn = sqlite3.connect(":memory:")
+    ensure_table(conn)
+    checked_at = datetime.fromisoformat("2026-07-17T05:04:00+00:00")
+    generation_start = datetime.fromisoformat("2026-07-17T05:00:00+00:00")
+    monkeypatch.setattr(
+        lane,
+        "_edli_market_channel_generation_cut",
+        lambda *, checked_at, max_age: generation_start,
+    )
+    conn.execute(
+        """
+        INSERT INTO execution_feasibility_latest (
+            token_id, direction, evidence_id, event_id, condition_id, outcome_label,
+            quote_seen_at, depth_before_json, created_at, schema_version
+        ) VALUES ('quiet-held', 'buy_yes', 'quiet-evidence', 'quiet-event', 'cond',
+                  'YES', '2026-07-17T05:00:01+00:00',
+                  '{"bids": [{"price": "0.50", "size": "1"}], "asks": [{"price": "0.51", "size": "1"}]}',
+                  '2026-07-17T05:00:01+00:00', 1)
+        """
+    )
+
+    required, covered = lane._edli_tokens_requiring_rest_quote_refresh(
+        conn,
+        ["quiet-held"],
+        checked_at=checked_at,
+        continuity_max_age=timedelta(seconds=1),
+        evidence_max_age=timedelta(seconds=180),
+    )
+
+    assert covered == 0
+    assert required == ["quiet-held"]
 
 
 def test_held_quote_refresh_skips_rest_when_ws_generation_covers_all(monkeypatch):
@@ -3662,11 +3700,14 @@ def test_held_quote_refresh_skips_rest_when_ws_generation_covers_all(monkeypatch
         "_edli_held_position_priority_token_ids",
         lambda conn: {"yes-token", "no-token"},
     )
-    monkeypatch.setattr(
-        lane,
-        "_edli_tokens_requiring_rest_quote_refresh",
-        lambda conn, token_ids, **kwargs: ([], len(token_ids)),
-    )
+    monkeypatch.setattr(lane, "_edli_canonical_open_held_token_ids", lambda conn: set())
+    seen = {}
+
+    def _covered(conn, token_ids, **kwargs):  # noqa: ANN001
+        seen.update(kwargs)
+        return [], len(token_ids)
+
+    monkeypatch.setattr(lane, "_edli_tokens_requiring_rest_quote_refresh", _covered)
     monkeypatch.setattr(
         market_ingestor,
         "active_weather_token_metadata_for_tokens",
@@ -3689,6 +3730,8 @@ def test_held_quote_refresh_skips_rest_when_ws_generation_covers_all(monkeypatch
 
     assert result["held_quote_refresh_ws_covered_tokens"] == 2
     assert result["held_quote_refresh_attempted_tokens"] == 0
+    assert seen["continuity_max_age"] == timedelta(seconds=1)
+    assert seen["evidence_max_age"] == timedelta(seconds=180)
     assert failed is False
     assert reason is None
 
@@ -3960,6 +4003,7 @@ def test_held_position_quote_refresh_backpressures_without_db_write_or_clob(monk
         "_edli_held_position_priority_token_ids",
         lambda conn: ["yes-token", "no-token"],
     )
+    monkeypatch.setattr(lane, "_edli_canonical_open_held_token_ids", lambda conn: set())
     monkeypatch.setattr(
         lane,
         "_edli_order_token_ids_by_feasibility_age",
@@ -4028,6 +4072,7 @@ def test_held_quote_refresh_skips_missing_metadata_tokens_to_refresh_tradeable_h
         } if name == "edli_v1" else default,
     )
     monkeypatch.setattr(lane, "_edli_held_position_priority_token_ids", lambda conn: set(ordered))
+    monkeypatch.setattr(lane, "_edli_canonical_open_held_token_ids", lambda conn: set())
     monkeypatch.setattr(lane, "_edli_order_token_ids_by_feasibility_age", lambda conn, token_ids: ordered)
 
     def _metadata(conn, *, token_ids, purpose="entry"):  # noqa: ANN001
@@ -4119,6 +4164,7 @@ def test_held_quote_refresh_caps_selected_tokens_before_metadata_and_rest_seed(m
         } if name == "edli_v1" else default,
     )
     monkeypatch.setattr(lane, "_edli_held_position_priority_token_ids", lambda conn: set(ordered))
+    monkeypatch.setattr(lane, "_edli_canonical_open_held_token_ids", lambda conn: set())
     monkeypatch.setattr(lane, "_edli_order_token_ids_by_feasibility_age", lambda conn, token_ids: ordered)
 
     def _metadata(conn, *, token_ids, purpose="entry"):  # noqa: ANN001
@@ -4190,6 +4236,168 @@ def test_held_quote_refresh_caps_selected_tokens_before_metadata_and_rest_seed(m
     assert result["held_quote_refresh_deferred_tokens"] == 7
     assert result["held_quote_refresh_attempted_tokens"] == 3
     assert result["budget_skipped_tokens"] == 0
+
+
+def test_held_quote_refresh_admits_all_native_held_sides_before_audit_backlog(monkeypatch):
+    from src.data import polymarket_client
+    from src.events.triggers import market_channel_ingestor as market_ingestor
+    from src.events.triggers.market_channel_ingestor import MarketTokenMetadata
+    from src.ingest import price_channel_ingest as lane
+    from src.state import db as state_db
+
+    held = {f"held-{index:02d}" for index in range(19)}
+    audit = {f"audit-{index:02d}" for index in range(69)}
+    seen: dict[str, list[str]] = {}
+    monkeypatch.setattr(
+        lane,
+        "_settings_section",
+        lambda name, default=None: {
+            "market_channel_held_quote_refresh_max_tokens_per_cycle": 32,
+        } if name == "edli_v1" else default,
+    )
+    monkeypatch.setattr(lane, "_edli_canonical_open_held_token_ids", lambda conn: held)
+    monkeypatch.setattr(
+        lane,
+        "_edli_held_position_priority_token_ids",
+        lambda conn: held | audit,
+    )
+    monkeypatch.setattr(lane, "_edli_unsettled_global_exit_audit_token_ids", lambda conn: set())
+    monkeypatch.setattr(
+        lane,
+        "_edli_tokens_requiring_rest_quote_refresh",
+        lambda conn, token_ids, **kwargs: (sorted(token_ids), 0),
+    )
+    monkeypatch.setattr(
+        lane,
+        "_edli_order_token_ids_by_feasibility_age",
+        lambda conn, token_ids: sorted(token_ids),
+    )
+
+    def _metadata(conn, *, token_ids, purpose="entry"):  # noqa: ANN001
+        assert purpose == "exit"
+        return {
+            token_id: MarketTokenMetadata(
+                condition_id=f"condition-{token_id}",
+                token_id=token_id,
+                outcome_label="YES",
+                min_tick_size="0.01",
+                min_order_size="5",
+                neg_risk=False,
+                executable_snapshot_id=f"snapshot-{token_id}",
+                market_end_at="2026-07-25T00:00:00+00:00",
+            )
+            for token_id in token_ids
+        }
+
+    class FakeService:
+        rest_seed_backpressure_count = 0
+        rest_seed_backpressure_reason = None
+
+        def __init__(self, *args, **kwargs):  # noqa: ANN002, ANN003
+            pass
+
+        def seed_rest_books_in_chunks(self, *, token_ids, **kwargs):  # noqa: ANN001, ANN003
+            seen["rest_seed"] = list(token_ids)
+            return len(token_ids)
+
+    class FakePolymarketClient:
+        def __init__(self, *, public_request_priority=None):  # noqa: ANN001
+            from src.data.polymarket_request_governor import RequestPriority
+
+            assert public_request_priority is RequestPriority.HELD_REDUCE_ONLY
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):  # noqa: ANN001
+            return False
+
+        def get_orderbook_snapshot(self, token_id, *, timeout=None):  # noqa: ANN001
+            return {}
+
+        def get_orderbook_snapshots(self, token_ids, *, timeout=None):  # noqa: ANN001
+            return {}
+
+    monkeypatch.setattr(market_ingestor, "active_weather_token_metadata_for_tokens", _metadata)
+    monkeypatch.setattr(market_ingestor, "MarketChannelIngestor", lambda *args, **kwargs: object())
+    monkeypatch.setattr(market_ingestor, "MarketChannelOnlineService", FakeService)
+    monkeypatch.setattr(state_db, "get_trade_connection", lambda *, write_class=None: sqlite3.connect(":memory:"))
+    monkeypatch.setattr(polymarket_client, "PolymarketClient", FakePolymarketClient)
+
+    result = lane._edli_refresh_held_position_quote_evidence(budget_seconds=10.0)
+
+    assert set(seen["rest_seed"][:19]) == held
+    assert result["canonical_held_token_ids"] == 19
+    assert result["canonical_held_freshness_debt_token_ids"] == []
+    assert result["held_quote_refresh_selected_tokens"] == 32
+
+
+def test_held_quote_refresh_reports_canonical_capacity_debt(monkeypatch):
+    from src.ingest import price_channel_ingest as lane
+    from src.observability import scheduler_health
+
+    recorded = {}
+    monkeypatch.setattr(
+        lane,
+        "_edli_refresh_held_position_quote_evidence",
+        lambda: {
+            "held_token_metadata": 33,
+            "held_quote_refresh_events": 32,
+            "canonical_held_freshness_debt_token_ids": ["held-32"],
+        },
+    )
+    monkeypatch.setattr(
+        scheduler_health,
+        "_write_scheduler_health",
+        lambda name, **kwargs: recorded.update(name=name, **kwargs),
+    )
+
+    result = lane._edli_held_quote_refresh_cycle()
+
+    assert result["scheduler_failed"] is True
+    assert result["scheduler_failure_reason"] == (
+        "canonical_held_freshness_capacity_exhausted"
+    )
+    assert recorded["failed"] is True
+
+
+def test_held_quote_refresh_fails_closed_when_canonical_scope_query_fails(monkeypatch):
+    from src.ingest import price_channel_ingest as lane
+    from src.observability import scheduler_health
+    from src.state import db as state_db
+
+    recorded = {}
+    broad_called = False
+
+    def _canonical_failure(conn):  # noqa: ANN001
+        raise lane._CanonicalHeldScopeUnavailable("canonical_open_held_query_failed:OperationalError")
+
+    def _broad_scope(conn):  # noqa: ANN001
+        nonlocal broad_called
+        broad_called = True
+        return {"audit-token"}
+
+    monkeypatch.setattr(lane, "_edli_canonical_open_held_token_ids", _canonical_failure)
+    monkeypatch.setattr(lane, "_edli_held_position_priority_token_ids", _broad_scope)
+    monkeypatch.setattr(state_db, "get_trade_connection", lambda *, write_class=None: sqlite3.connect(":memory:"))
+    monkeypatch.setattr(
+        scheduler_health,
+        "_write_scheduler_health",
+        lambda name, **kwargs: recorded.update(name=name, **kwargs),
+    )
+
+    result = lane._edli_held_quote_refresh_cycle()
+
+    assert broad_called is False
+    assert result["held_quote_refresh_events"] == 0
+    assert result["canonical_held_scope_unavailable"] is True
+    assert result["canonical_held_freshness_debt_token_ids"] == [
+        "CANONICAL_HELD_SCOPE_UNAVAILABLE"
+    ]
+    assert result["scheduler_failed"] is True
+    assert result["scheduler_failure_reason"] == "canonical_held_scope_unavailable"
+    assert recorded["failed"] is True
+    assert recorded["reason"] == "canonical_held_scope_unavailable"
 
 
 def test_candidate_priority_quote_refresh_writes_feasibility_rows(monkeypatch, tmp_path):
