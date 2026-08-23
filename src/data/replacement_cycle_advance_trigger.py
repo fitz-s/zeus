@@ -103,6 +103,21 @@ class _Day0EnqueueOwnerRequestState(Enum):
     INDETERMINATE = "INDETERMINATE"
 
 
+class _CycleAdvanceEnqueueDecision(Enum):
+    ADMIT = "ADMIT"
+    ALREADY_ENQUEUED = "ALREADY_ENQUEUED"
+    RETRY_PENDING = "RETRY_PENDING"
+
+    def __bool__(self) -> bool:
+        """Preserve the historical probe contract for read-only diagnostics."""
+
+        return self is not _CycleAdvanceEnqueueDecision.ADMIT
+
+
+class _CycleAdvanceRetryPending(RuntimeError):
+    """A transient owner-classification gap that must remain retryable."""
+
+
 @dataclass(frozen=True)
 class _Day0EnqueueOwnerRequestCheck:
     state: _Day0EnqueueOwnerRequestState
@@ -848,7 +863,7 @@ def _held_position_families(conn_trades: sqlite3.Connection) -> set[tuple[str, s
     return held
 
 
-def _already_enqueued(
+def _enqueue_decision(
     conn: sqlite3.Connection,
     *,
     city: str,
@@ -862,11 +877,11 @@ def _already_enqueued(
     day0_observed_extreme_unit: str | None = None,
     as_of: datetime | None = None,
     minimum_posterior_computed_at: datetime | None = None,
-) -> bool:
-    """True iff a real re-materialization seed already exists for this exact target cycle.
+) -> _CycleAdvanceEnqueueDecision:
+    """Classify whether this exact family/cycle can publish a new seed now.
 
     A ``CYCLE_LEG_ARTIFACT_MISSING`` row is a visible, typed gap marker, not a terminal enqueue.
-    Returning False for that row lets the next tick heal it when the same target cycle's artifact
+    Returning ADMIT for that row lets the next tick heal it when the same target cycle's artifact
     finally lands; ``_record_enqueue`` updates the marker in place under the UNIQUE bound.
 
     Day0 suppression requires the durable marker identity to match current
@@ -893,13 +908,16 @@ def _already_enqueued(
             (city, target_date, metric, target_cycle_iso),
         ).fetchone()
     except Exception:
-        return False
+        # SCOPE: this exact (city, target_date, metric, target_cycle) enqueue only.
+        # DRAIN: the next cycle/bridge poll repeats the canonical DB and owner check.
+        # RESET: a successful exact read classifies the scope as ADMIT or ALREADY_ENQUEUED.
+        return _CycleAdvanceEnqueueDecision.RETRY_PENDING
     if row is None:
-        return False
+        return _CycleAdvanceEnqueueDecision.ADMIT
     seed_file = str((row["seed_file"] if hasattr(row, "keys") else row[0]) or "")
     reason = str((row["reason"] if hasattr(row, "keys") else row[1]) or "")
     if not seed_file and reason.startswith("CYCLE_LEG_ARTIFACT_MISSING:"):
-        return False
+        return _CycleAdvanceEnqueueDecision.ADMIT
     recorded_identity_raw = (
         row["day0_conditioning_identity_json"] if hasattr(row, "keys") else row[5]
     )
@@ -939,7 +957,7 @@ def _already_enqueued(
                 or (owned_stage_file is not None and owned_stage_file.exists())
             )
         ):
-            return True
+            return _CycleAdvanceEnqueueDecision.ALREADY_ENQUEUED
         if visible_seed_file is not None:
             request_check = _day0_enqueue_owner_request_check(
                 city=city,
@@ -950,7 +968,7 @@ def _already_enqueued(
                 identity=recorded_identity,
             )
             if request_check.state is _Day0EnqueueOwnerRequestState.ACTIVE:
-                return True
+                return _CycleAdvanceEnqueueDecision.ALREADY_ENQUEUED
             if request_check.state is _Day0EnqueueOwnerRequestState.INDETERMINATE:
                 _LOG.warning(
                     "superseded day0 enqueue owner request INDETERMINATE; retaining marker "
@@ -961,7 +979,7 @@ def _already_enqueued(
                     target_cycle_iso,
                     request_check.reason,
                 )
-                return True
+                return _CycleAdvanceEnqueueDecision.RETRY_PENDING
         if visible_seed_file is not None and owned_stage_file is not None:
             _delete_missing_owned_cycle_advance_marker(
                 conn,
@@ -971,10 +989,10 @@ def _already_enqueued(
                 target_cycle_iso=target_cycle_iso,
                 seed_file=seed_file,
             )
-        return False
+        return _CycleAdvanceEnqueueDecision.ADMIT
     if incoming_identity is not None:
         if visible_seed_file is not None and visible_seed_file.exists():
-            return True
+            return _CycleAdvanceEnqueueDecision.ALREADY_ENQUEUED
         if _latest_posterior_matches_day0_conditioning(
             conn,
             city=city,
@@ -984,7 +1002,7 @@ def _already_enqueued(
             target_cycle_iso=target_cycle_iso,
             as_of=decision_as_of,
         ):
-            return True
+            return _CycleAdvanceEnqueueDecision.ALREADY_ENQUEUED
         if visible_seed_file is not None:
             request_check = _day0_enqueue_owner_request_check(
                 city=city,
@@ -995,7 +1013,7 @@ def _already_enqueued(
                 identity=incoming_identity,
             )
             if request_check.state is _Day0EnqueueOwnerRequestState.ACTIVE:
-                return True
+                return _CycleAdvanceEnqueueDecision.ALREADY_ENQUEUED
             if request_check.state is _Day0EnqueueOwnerRequestState.INDETERMINATE:
                 _LOG.warning(
                     "day0 enqueue owner request INDETERMINATE; retaining marker "
@@ -1006,7 +1024,7 @@ def _already_enqueued(
                     target_cycle_iso,
                     request_check.reason,
                 )
-                return True
+                return _CycleAdvanceEnqueueDecision.RETRY_PENDING
         if visible_seed_file is not None and owned_stage_file is not None:
             _delete_missing_owned_cycle_advance_marker(
                 conn,
@@ -1016,7 +1034,7 @@ def _already_enqueued(
                 target_cycle_iso=target_cycle_iso,
                 seed_file=seed_file,
             )
-        return False
+        return _CycleAdvanceEnqueueDecision.ADMIT
     if day0_observed_extreme_observation_time is not None:
         incoming_version = normalize_observation_version(day0_observed_extreme_observation_time)
         recorded_version = normalize_observation_version(
@@ -1026,9 +1044,9 @@ def _already_enqueued(
         if incoming_version is not None and (
             recorded_version is None or incoming_version > recorded_version
         ):
-            return False
+            return _CycleAdvanceEnqueueDecision.ADMIT
     if visible_seed_file is not None and visible_seed_file.exists():
-        return True
+        return _CycleAdvanceEnqueueDecision.ALREADY_ENQUEUED
     if visible_seed_file is not None and owned_stage_file is not None:
         if minimum_posterior_computed_at is not None:
             request_check = _day0_enqueue_owner_request_check(
@@ -1040,7 +1058,7 @@ def _already_enqueued(
                 identity=None,
             )
             if request_check.state is _Day0EnqueueOwnerRequestState.ACTIVE:
-                return True
+                return _CycleAdvanceEnqueueDecision.ALREADY_ENQUEUED
             if request_check.state is _Day0EnqueueOwnerRequestState.INDETERMINATE:
                 _LOG.warning(
                     "same-cycle held recompute request INDETERMINATE; retaining marker "
@@ -1051,7 +1069,7 @@ def _already_enqueued(
                     target_cycle_iso,
                     request_check.reason,
                 )
-                return True
+                return _CycleAdvanceEnqueueDecision.RETRY_PENDING
         if _latest_posterior_covers_target_cycle(
             conn,
             city=city,
@@ -1061,7 +1079,7 @@ def _already_enqueued(
             as_of=decision_as_of,
             minimum_computed_at=minimum_posterior_computed_at,
         ):
-            return True
+            return _CycleAdvanceEnqueueDecision.ALREADY_ENQUEUED
         _delete_missing_owned_cycle_advance_marker(
             conn,
             city=city,
@@ -1070,7 +1088,7 @@ def _already_enqueued(
             target_cycle_iso=target_cycle_iso,
             seed_file=seed_file,
         )
-        return False
+        return _CycleAdvanceEnqueueDecision.ADMIT
     # HELD-POSITION RE-HEAL (live freeze fix 2026-06-21): a held (money-at-risk) marker whose seed
     # was built then processed/moved out of the live queue but produced NO posterior — the
     # single_runs serving race materializes BLOCKED on REQUIREMENTS_NOT_MET — must NOT suppress
@@ -1088,9 +1106,15 @@ def _already_enqueued(
         if held and not allow_missing_seed_file_reenqueue:
             enqueued_at = row["enqueued_at"] if hasattr(row, "keys") else row[4]
             if not _fresh_enough_to_retry_held_reheal(enqueued_at):
-                return True
-        return False
-    return True
+                return _CycleAdvanceEnqueueDecision.ALREADY_ENQUEUED
+        return _CycleAdvanceEnqueueDecision.ADMIT
+    return _CycleAdvanceEnqueueDecision.ALREADY_ENQUEUED
+
+
+def _already_enqueued(conn: sqlite3.Connection, **kwargs: object) -> bool:
+    """Compatibility probe for diagnostics that historically consumed a boolean."""
+
+    return bool(_enqueue_decision(conn, **kwargs))
 
 
 def _superseded_baseline_seed_file(
@@ -1189,13 +1213,12 @@ def _superseded_baseline_seed_file(
             identity=recorded_identity,
             queue_lock_wait_seconds=_CAUSAL_BASELINE_OWNER_LOCK_WAIT_SECONDS,
         )
-        if request_check.state in {
-            _Day0EnqueueOwnerRequestState.ACTIVE,
-            _Day0EnqueueOwnerRequestState.INDETERMINATE,
-        }:
+        if request_check.state is _Day0EnqueueOwnerRequestState.INDETERMINATE:
+            raise _CycleAdvanceRetryPending(request_check.reason)
+        if request_check.state is _Day0EnqueueOwnerRequestState.ACTIVE:
             raise RuntimeError(
-                "missing marker seed still has an active or indeterminate owner: "
-                f"{request_check.state.value} {seed_file}"
+                "missing marker seed still has an active owner: "
+                f"{seed_file}"
             )
         return seed_file
     try:
@@ -1218,13 +1241,12 @@ def _superseded_baseline_seed_file(
         identity=recorded_identity,
         queue_lock_wait_seconds=_CAUSAL_BASELINE_OWNER_LOCK_WAIT_SECONDS,
     )
-    if request_check.state in {
-        _Day0EnqueueOwnerRequestState.ACTIVE,
-        _Day0EnqueueOwnerRequestState.INDETERMINATE,
-    }:
+    if request_check.state is _Day0EnqueueOwnerRequestState.INDETERMINATE:
+        raise _CycleAdvanceRetryPending(request_check.reason)
+    if request_check.state is _Day0EnqueueOwnerRequestState.ACTIVE:
         raise RuntimeError(
-            "superseded baseline seed still has an active or indeterminate owner: "
-            f"{request_check.state.value} {seed_file}"
+            "superseded baseline seed still has an active owner: "
+            f"{seed_file}"
         )
     return seed_file
 
@@ -1515,6 +1537,7 @@ def enqueue_cycle_advance_reseeds(
         "family_scope_check_failed": 0,
         "seed_build_failed": 0,
         "causal_baseline_scope_failed": 0,
+        "retry_pending": 0,
         "enqueued": [],
     }
     if not forecast_db.exists():
@@ -1740,17 +1763,20 @@ def enqueue_cycle_advance_reseeds(
                     city, target_date, metric, target_cycle_iso, is_held,
                     [src for _role, src in missing_legs],
                 )
-                if not _already_enqueued(
+                enqueue_decision = _enqueue_decision(
                     conn, city=city, target_date=target_date, metric=metric,
                     target_cycle_iso=target_cycle_iso,
                     as_of=now,
-                ):
+                )
+                if enqueue_decision is _CycleAdvanceEnqueueDecision.ADMIT:
                     _record_enqueue(
                         conn, city=city, target_date=target_date, metric=metric,
                         consumed_cycle_iso=consumed_cycle_iso, target_cycle_iso=target_cycle_iso,
                         held_position=is_held, seed_file=None, reason=reason,
                     )
                     conn.commit()
+                elif enqueue_decision is _CycleAdvanceEnqueueDecision.RETRY_PENDING:
+                    report["retry_pending"] = int(report.get("retry_pending", 0)) + 1
                 continue
             # Both legs present for the family: the family-scoped cycle is the authoritative target.
             # If it is NOT strictly newer than the consumed cycle, the global verdict was a false
@@ -1791,6 +1817,16 @@ def enqueue_cycle_advance_reseeds(
                     target_cycle_iso=target_cycle_iso,
                     required_baseline_source_run_id=causal_baseline_source_run_id,
                 )
+            except _CycleAdvanceRetryPending as exc:
+                report["retry_pending"] = int(report.get("retry_pending", 0)) + 1
+                _LOG.info(
+                    "cycle-advance committed ENS baseline owner pending for %s/%s/%s: %s",
+                    city,
+                    target_date,
+                    metric,
+                    exc,
+                )
+                continue
             except Exception as exc:  # noqa: BLE001 — keep only this source wake retryable
                 report["causal_baseline_scope_failed"] = int(
                     report["causal_baseline_scope_failed"]
@@ -1803,25 +1839,30 @@ def enqueue_cycle_advance_reseeds(
                     exc,
                 )
                 continue
-            if superseded_seed_file is None and _already_enqueued(
-                conn,
-                city=city,
-                target_date=target_date,
-                metric=metric,
-                target_cycle_iso=target_cycle_iso,
-                allow_missing_seed_file_reenqueue=(
-                    bool(day0_payload)
-                    or missing_posterior
-                    or bool(causal_baseline_source_run_id)
-                ),
-                day0_observed_extreme_observation_time=day0_observation_time,
-                day0_observed_extreme_source=day0_payload.get("day0_observed_extreme_source"),
-                day0_observed_extreme_c=day0_payload.get("day0_observed_extreme_c"),
-                day0_observed_extreme_unit=day0_payload.get("day0_observed_extreme_unit"),
-                as_of=now,
-            ):
-                report["already_enqueued"] = int(report["already_enqueued"]) + 1
-                continue
+            if superseded_seed_file is None:
+                enqueue_decision = _enqueue_decision(
+                    conn,
+                    city=city,
+                    target_date=target_date,
+                    metric=metric,
+                    target_cycle_iso=target_cycle_iso,
+                    allow_missing_seed_file_reenqueue=(
+                        bool(day0_payload)
+                        or missing_posterior
+                        or bool(causal_baseline_source_run_id)
+                    ),
+                    day0_observed_extreme_observation_time=day0_observation_time,
+                    day0_observed_extreme_source=day0_payload.get("day0_observed_extreme_source"),
+                    day0_observed_extreme_c=day0_payload.get("day0_observed_extreme_c"),
+                    day0_observed_extreme_unit=day0_payload.get("day0_observed_extreme_unit"),
+                    as_of=now,
+                )
+                if enqueue_decision is _CycleAdvanceEnqueueDecision.RETRY_PENDING:
+                    report["retry_pending"] = int(report.get("retry_pending", 0)) + 1
+                    continue
+                if enqueue_decision is _CycleAdvanceEnqueueDecision.ALREADY_ENQUEUED:
+                    report["already_enqueued"] = int(report["already_enqueued"]) + 1
+                    continue
             try:
                 staged_seed_file, visible_seed_file = _staged_cycle_advance_seed_paths(
                     seed_path=seed_path,
@@ -1959,6 +2000,8 @@ def enqueue_cycle_advance_reseeds(
         conn.close()
     if int(report["causal_baseline_scope_failed"]) > 0:
         report["status"] = "CYCLE_ADVANCE_CAUSAL_BASELINE_INCOMPLETE"
+    elif int(report["retry_pending"]) > 0:
+        report["status"] = "CYCLE_ADVANCE_RETRY_PENDING"
     return report
 
 
@@ -2090,14 +2133,21 @@ def enqueue_single_family_cycle_advance_reseed(
                 "(missing legs: %s) — recording typed gap (no silent skip)",
                 city, target_date, metric, target_cycle_iso, [src for _role, src in missing_legs],
             )
-            if not _already_enqueued(
+            enqueue_decision = _enqueue_decision(
                 conn,
                 city=city,
                 target_date=target_date,
                 metric=metric,
                 target_cycle_iso=target_cycle_iso,
                 as_of=now,
-            ):
+            )
+            if enqueue_decision is _CycleAdvanceEnqueueDecision.RETRY_PENDING:
+                report["status"] = "CYCLE_ADVANCE_RETRY_PENDING"
+                report["reason"] = reason
+                report["consumed_cycle"] = consumed_cycle_iso
+                report["target_cycle"] = target_cycle_iso
+                return report
+            if enqueue_decision is _CycleAdvanceEnqueueDecision.ADMIT:
                 _record_enqueue(
                     conn, city=city, target_date=target_date, metric=metric,
                     consumed_cycle_iso=consumed_cycle_iso, target_cycle_iso=target_cycle_iso,
@@ -2132,7 +2182,7 @@ def enqueue_single_family_cycle_advance_reseed(
                         report["consumed_cycle"] = consumed_cycle_iso
                         return report
                     target_cycle_iso = family_cycle.isoformat()
-                    if _already_enqueued(
+                    enqueue_decision = _enqueue_decision(
                         conn,
                         city=city,
                         target_date=target_date,
@@ -2146,7 +2196,13 @@ def enqueue_single_family_cycle_advance_reseed(
                         day0_observed_extreme_c=day0_observed_extreme_c,
                         day0_observed_extreme_unit=day0_observed_extreme_unit,
                         as_of=now,
-                    ):
+                    )
+                    if enqueue_decision is _CycleAdvanceEnqueueDecision.RETRY_PENDING:
+                        report["status"] = "CYCLE_ADVANCE_RETRY_PENDING"
+                        report["consumed_cycle"] = consumed_cycle_iso
+                        report["target_cycle"] = target_cycle_iso
+                        return report
+                    if enqueue_decision is _CycleAdvanceEnqueueDecision.ALREADY_ENQUEUED:
                         report["status"] = "CYCLE_ADVANCE_NOT_NEEDED"
                         report["consumed_cycle"] = consumed_cycle_iso
                         report["target_cycle"] = target_cycle_iso
@@ -2281,7 +2337,7 @@ def enqueue_single_family_cycle_advance_reseed(
                         report["consumed_cycle"] = consumed_cycle_iso
                         report["target_cycle"] = target_cycle_iso
                         return report
-                    if _already_enqueued(
+                    enqueue_decision = _enqueue_decision(
                         conn,
                         city=city,
                         target_date=target_date,
@@ -2289,7 +2345,13 @@ def enqueue_single_family_cycle_advance_reseed(
                         target_cycle_iso=target_cycle_iso,
                         as_of=now,
                         minimum_posterior_computed_at=minimum_posterior_computed_at,
-                    ):
+                    )
+                    if enqueue_decision is _CycleAdvanceEnqueueDecision.RETRY_PENDING:
+                        report["status"] = "SAME_CYCLE_RECOMPUTE_RETRY_PENDING"
+                        report["consumed_cycle"] = consumed_cycle_iso
+                        report["target_cycle"] = target_cycle_iso
+                        return report
+                    if enqueue_decision is _CycleAdvanceEnqueueDecision.ALREADY_ENQUEUED:
                         report["status"] = "SAME_CYCLE_RECOMPUTE_PENDING"
                         report["consumed_cycle"] = consumed_cycle_iso
                         report["target_cycle"] = target_cycle_iso
@@ -2378,7 +2440,7 @@ def enqueue_single_family_cycle_advance_reseed(
                 report["consumed_cycle"] = None
                 return report
             target_cycle_iso = family_cycle.isoformat()
-            if _already_enqueued(
+            enqueue_decision = _enqueue_decision(
                 conn,
                 city=city,
                 target_date=target_date,
@@ -2390,7 +2452,11 @@ def enqueue_single_family_cycle_advance_reseed(
                 day0_observed_extreme_c=day0_observed_extreme_c,
                 day0_observed_extreme_unit=day0_observed_extreme_unit,
                 as_of=now,
-            ):
+            )
+            if enqueue_decision is _CycleAdvanceEnqueueDecision.RETRY_PENDING:
+                report["status"] = "CYCLE_ADVANCE_RETRY_PENDING"
+                return report
+            if enqueue_decision is _CycleAdvanceEnqueueDecision.ALREADY_ENQUEUED:
                 if held_position:
                     report["held_priority_promoted"] = _promote_existing_enqueue_to_held(
                         conn,
@@ -2494,7 +2560,7 @@ def enqueue_single_family_cycle_advance_reseed(
             report["consumed_cycle"] = consumed_cycle_iso
             return report
         target_cycle_iso = family_cycle.isoformat()
-        if _already_enqueued(
+        enqueue_decision = _enqueue_decision(
             conn,
             city=city,
             target_date=target_date,
@@ -2506,7 +2572,13 @@ def enqueue_single_family_cycle_advance_reseed(
             day0_observed_extreme_c=day0_observed_extreme_c,
             day0_observed_extreme_unit=day0_observed_extreme_unit,
             as_of=now,
-        ):
+        )
+        if enqueue_decision is _CycleAdvanceEnqueueDecision.RETRY_PENDING:
+            report["status"] = "CYCLE_ADVANCE_RETRY_PENDING"
+            report["consumed_cycle"] = consumed_cycle_iso
+            report["target_cycle"] = target_cycle_iso
+            return report
+        if enqueue_decision is _CycleAdvanceEnqueueDecision.ALREADY_ENQUEUED:
             if held_position:
                 report["held_priority_promoted"] = _promote_existing_enqueue_to_held(
                     conn,
@@ -2717,9 +2789,11 @@ def _day0_bridge_status_retryable(status: object) -> bool:
         "CYCLE_ADVANCE_LEG_ARTIFACT_MISSING",
         "CYCLE_ADVANCE_MANIFEST_MISSING",
         "CYCLE_ADVANCE_NO_MATERIALIZABLE_CYCLE",
+        "CYCLE_ADVANCE_RETRY_PENDING",
         "DAY0_EXTREME_BRIDGE_FAILSOFT_SKIPPED",
         "DAY0_EXTREME_BRIDGE_NO_OBSERVED_EXTREME",
         "DAY0_EXTREME_BRIDGE_NOT_CONFIGURED",
+        "SAME_CYCLE_RECOMPUTE_RETRY_PENDING",
     }
 
 

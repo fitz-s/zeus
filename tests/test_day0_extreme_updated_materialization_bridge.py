@@ -992,6 +992,71 @@ def test_cycle_advance_reclaims_missing_non_day0_owned_stage_without_posterior(
     assert Path(str(retry["seed_file"])).is_file()
 
 
+def test_single_family_cycle_advance_preserves_retry_pending_decision(
+    tmp_path, monkeypatch
+) -> None:
+    db_path = _prepare_forecast_db(tmp_path)
+    monkeypatch.setattr(
+        cycle_advance,
+        "family_materializable_cycle",
+        lambda *args, **kwargs: (datetime(2026, 7, 19, 0, tzinfo=UTC), ()),
+    )
+    monkeypatch.setattr(
+        cycle_advance,
+        "_enqueue_decision",
+        lambda *args, **kwargs: cycle_advance._CycleAdvanceEnqueueDecision.RETRY_PENDING,
+    )
+
+    report = cycle_advance.enqueue_single_family_cycle_advance_reseed(
+        forecast_db=db_path,
+        seed_dir=tmp_path / "seeds",
+        raw_manifest_dir=tmp_path / "raw",
+        city="Shanghai",
+        target_date="2026-07-19",
+        metric="high",
+        computed_at=datetime(2026, 7, 19, 5, 2, tzinfo=UTC),
+    )
+
+    assert report["status"] == "CYCLE_ADVANCE_RETRY_PENDING"
+    assert report["enqueued"] is False
+
+
+def test_cycle_advance_batch_surfaces_retry_pending_as_non_success(
+    tmp_path, monkeypatch
+) -> None:
+    db_path = _prepare_forecast_db(tmp_path)
+    cycle = datetime(2026, 7, 19, 0, tzinfo=UTC)
+    monkeypatch.setattr(cycle_advance, "freshest_materializable_cycle", lambda _conn: cycle)
+    monkeypatch.setattr(
+        cycle_advance,
+        "family_materializable_cycle",
+        lambda *args, **kwargs: (cycle, ()),
+    )
+    monkeypatch.setattr(
+        seed_discovery,
+        "_day0_observed_extreme_seed_payload",
+        lambda **_kwargs: _day0_payload("2026-07-19T05:00:00+00:00"),
+    )
+    monkeypatch.setattr(
+        cycle_advance,
+        "_enqueue_decision",
+        lambda *args, **kwargs: cycle_advance._CycleAdvanceEnqueueDecision.RETRY_PENDING,
+    )
+
+    report = cycle_advance.enqueue_cycle_advance_reseeds(
+        forecast_db=db_path,
+        seed_dir=tmp_path / "seeds",
+        raw_manifest_dir=tmp_path / "raw",
+        computed_at=datetime(2026, 7, 19, 5, 2, tzinfo=UTC),
+        limit=1,
+        scopes=(("Shanghai", "2026-07-19", "high"),),
+        manifests=(),
+    )
+
+    assert report["retry_pending"] == 1, report
+    assert report["status"] == "CYCLE_ADVANCE_RETRY_PENDING"
+
+
 def test_cycle_advance_keeps_missing_non_day0_owned_stage_when_posterior_covers(tmp_path) -> None:
     """A missing owned seed is terminal only after a posterior consumed its cycle."""
     db_path = _prepare_forecast_db(tmp_path)
@@ -3041,6 +3106,21 @@ def test_day0_owner_config_read_failure_is_indeterminate_and_retains_marker(
         lambda: (_ for _ in ()).throw(RuntimeError("config unavailable")),
     )
 
+    decision = cycle_advance._enqueue_decision(
+        conn,
+        city="Shanghai",
+        target_date="2026-07-19",
+        metric="high",
+        target_cycle_iso=cycle,
+        as_of=datetime(2026, 7, 19, 6, tzinfo=UTC),
+        day0_observed_extreme_observation_time=str(
+            payload["day0_observed_extreme_observation_time"]
+        ),
+        day0_observed_extreme_source=str(payload["day0_observed_extreme_source"]),
+        day0_observed_extreme_c=float(payload["day0_observed_extreme_c"]),
+        day0_observed_extreme_unit=str(payload["day0_observed_extreme_unit"]),
+    )
+    assert decision is cycle_advance._CycleAdvanceEnqueueDecision.RETRY_PENDING
     assert _missing_day0_owner_is_retained(conn, payload=payload, cycle=cycle) is True
     assert _fetch_enqueue_row(db_path)["seed_file"] == str(seed_file)
     assert (
@@ -3601,4 +3681,10 @@ def test_async_bridge_retries_transient_failure_without_new_event(monkeypatch) -
     assert len(attempts) == 2
     assert cycle_advance._day0_bridge_status_retryable(
         "CYCLE_ADVANCE_FORECAST_DB_MISSING"
+    ) is True
+    assert cycle_advance._day0_bridge_status_retryable(
+        "CYCLE_ADVANCE_RETRY_PENDING"
+    ) is True
+    assert cycle_advance._day0_bridge_status_retryable(
+        "SAME_CYCLE_RECOMPUTE_RETRY_PENDING"
     ) is True
