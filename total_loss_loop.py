@@ -2509,15 +2509,22 @@ def _parse_session(events_path: Path) -> tuple[str | None, dict[str, Any]]:
     return session, usage
 
 
-_PROVIDER_LIMIT_TERMS = (
-    "usage limit exceeded", "usage limit reached", "quota exceeded",
-    "rate limit", "too many requests", "resource exhausted",
-    "exceeded quota",
-)
 _PROVIDER_LIMIT_MESSAGE = re.compile(
-    r"(?:hit|reached|exceeded)\s+(?:your\s+)?usage\s+limit"
-    r"|usage\s+limit\s+(?:reached|exceeded)"
+    r"^(?:you(?:'|’)ve|you have)\s+hit\s+your\s+usage\s+limit\b"
+    r"|^usage\s+limit\s+(?:reached|exceeded)\b"
+    r"|^rate\s+limit\s+(?:reached|exceeded)\b"
+    r"|^too\s+many\s+requests\b"
+    r"|^resource\s+exhausted\b"
 )
+
+
+def _terminal_error_message(event: Mapping[str, Any]) -> str:
+    error = event.get("error")
+    if isinstance(error, Mapping):
+        value = error.get("message") or error.get("detail") or error.get("reason")
+    else:
+        value = event.get("message") or event.get("reason") or error
+    return str(value or "")
 
 
 def _parse_terminal_failure(
@@ -2561,7 +2568,7 @@ def _parse_terminal_failure(
     detail = failed.get("error") or failed.get("message") or failed.get("reason")
     detail_text = json.dumps(detail, ensure_ascii=False, default=str) if isinstance(detail, (Mapping, list)) else str(detail or "")
     linked_detail = [
-        str(item.get("message") or item.get("error") or "")
+        _terminal_error_message(item)
         for item in linked_errors
     ]
     if not detail_text and linked_detail:
@@ -2577,11 +2584,15 @@ def _parse_terminal_failure(
         "usage_limit", "usage_limit_exceeded", "quota_exceeded",
         "rate_limit", "rate_limit_exceeded", "resource_exhausted",
     }
-    raw = " ".join([detail_text, *linked_detail]).lower()
+    provider_messages = [
+        _terminal_error_message(item)
+        for item in [failed, *linked_errors]
+    ]
     provider_limit = any(code in provider_codes or code.endswith("_quota_exceeded") for code in codes)
-    normalized = " ".join(raw.split())
-    provider_limit = provider_limit or any(term in normalized for term in _PROVIDER_LIMIT_TERMS)
-    provider_limit = provider_limit or bool(_PROVIDER_LIMIT_MESSAGE.search(normalized))
+    provider_limit = provider_limit or any(
+        bool(_PROVIDER_LIMIT_MESSAGE.search(" ".join(message.lower().replace("’", "'").split())))
+        for message in provider_messages
+    )
     retry_at = _retry_at_from_failure(failed, cfg)
     if retry_at is None:
         for error_event in reversed(linked_errors):

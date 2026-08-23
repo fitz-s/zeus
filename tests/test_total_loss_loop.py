@@ -514,6 +514,14 @@ def test_terminal_failure_is_turn_scoped_and_structured_codes_win(tmp_path: Path
     )
     assert loop._parse_terminal_failure(path)["kind"] == "provider_quota_limit"
 
+    path.write_text(
+        json.dumps({"type": "error", "error": {"message": "the documentation says you've hit your usage limit"}})
+        + "\n"
+        + json.dumps({"type": "turn.failed", "error": {"message": "the documentation says you've hit your usage limit"}})
+        + "\n"
+    )
+    assert loop._parse_terminal_failure(path)["kind"] == "terminal_failure"
+
 
 def test_retry_timestamp_units_and_invalid_values_fall_back_bounded(cfg: dict) -> None:
     cfg["loop"]["provider_cooldown_seconds"] = 2
