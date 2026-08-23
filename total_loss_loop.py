@@ -30,6 +30,7 @@ SCHEMA_VERSION = 3
 _probe_lock = threading.Lock()
 _probe_thread: threading.Thread | None = None
 _probe_process_groups: set[int] = set()
+_writer_lease_lock_fds: dict[str, int] = {}
 
 
 def now() -> datetime:
@@ -235,6 +236,15 @@ CREATE TABLE IF NOT EXISTS model_runs (
     status TEXT NOT NULL,
     usage_json TEXT NOT NULL DEFAULT '{}',
     events_path TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS workspace_writer_leases (
+    cwd TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL UNIQUE,
+    stage TEXT NOT NULL,
+    owner_pid INTEGER NOT NULL,
+    child_pid INTEGER,
+    lock_path TEXT NOT NULL,
+    acquired_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS loop_versions (
     version_id TEXT PRIMARY KEY,
@@ -1778,7 +1788,11 @@ def _spawn_run(
     output: Path,
     events: Path,
     session_id: str | None = None,
+    workspace_branch: str | None = None,
 ) -> dict[str, Any]:
+    started_at = iso()
+    run_id = digest(incident_id, stage, started_at, os.getpid(), time.monotonic_ns())
+    writer_lease = stage in _WORKTREE_WRITE_STAGES
     events.parent.mkdir(parents=True, exist_ok=True)
     env = os.environ.copy()
     env["CODEX_HOME"] = str(isolated_codex_home(cfg))
@@ -1791,7 +1805,23 @@ def _spawn_run(
     nice = shutil.which("nice")
     if nice:
         wrapped = [nice, "-n", str(int(cfg["capital_lane"].get("agent_nice", 15))), *command]
+    lease_acquired = False
+    lease_fd: int | None = None
     try:
+        if writer_lease:
+            lease_fd = _acquire_writer_lease(
+                cfg,
+                cwd=cwd,
+                run_id=run_id,
+                stage=stage,
+            )
+            lease_acquired = True
+            if workspace_branch:
+                _ensure_writer_worktree_branch(
+                    cfg,
+                    cwd=cwd,
+                    branch=workspace_branch,
+                )
         child = subprocess.Popen(
             wrapped,
             cwd=cwd,
@@ -1800,11 +1830,22 @@ def _spawn_run(
             stdout=events_handle,
             stderr=subprocess.STDOUT,
             start_new_session=True,
+            pass_fds=(lease_fd,) if lease_fd is not None else (),
         )
+        if writer_lease:
+            _bind_writer_lease_child(
+                cfg,
+                cwd=cwd,
+                run_id=run_id,
+                child_pid=child.pid,
+            )
+    except Exception:
+        if lease_acquired:
+            _release_writer_lease(cfg, cwd=cwd, run_id=run_id)
+        raise
     finally:
         prompt_handle.close()
         events_handle.close()
-    run_id = digest(incident_id, stage, iso(), child.pid)
     record = {
         "schema_version": SCHEMA_VERSION,
         "run_id": run_id,
@@ -1812,23 +1853,42 @@ def _spawn_run(
         "kind": kind,
         "stage": stage,
         "pid": child.pid,
-        "started_at": iso(),
+        "started_at": started_at,
         "cwd": str(cwd),
         "output": str(output),
         "events": str(events),
         "command": command,
         "session_id": session_id,
+        "workspace_branch": workspace_branch,
         "status": "running",
     }
-    atomic_json(runtime_dir(cfg) / "runs" / f"{run_id}.json", record)
-    with memory(cfg) as mem:
-        profile = cfg["profiles"][cfg["active"]["profile"]]
-        cap = capabilities(cfg)
-        mem.execute(
-            "INSERT INTO model_runs(run_id,incident_id,stage,session_id,model,reasoning_effort,started_at,status,events_path) VALUES (?,?,?,?,?,?,?,?,?)",
-            (run_id, incident_id, stage, session_id, profile["model"], cap["reasoning_effort"], record["started_at"], "running", str(events)),
-        )
-        mem.commit()
+    run_path = runtime_dir(cfg) / "runs" / f"{run_id}.json"
+    try:
+        atomic_json(run_path, record)
+        with memory(cfg) as mem:
+            profile = cfg["profiles"][cfg["active"]["profile"]]
+            cap = capabilities(cfg)
+            mem.execute(
+                "INSERT INTO model_runs(run_id,incident_id,stage,session_id,model,reasoning_effort,started_at,status,events_path) VALUES (?,?,?,?,?,?,?,?,?)",
+                (run_id, incident_id, stage, session_id, profile["model"], cap["reasoning_effort"], record["started_at"], "running", str(events)),
+            )
+            mem.commit()
+    except Exception as exc:
+        _terminate_process_group(child.pid)
+        failed = {
+            **record,
+            "status": "spawn_persistence_failed",
+            "completed_at": iso(),
+            "error": f"{type(exc).__name__}:{exc}",
+            "lease_finalization_complete": True,
+        }
+        try:
+            atomic_json(run_path, failed)
+        except Exception:
+            pass
+        if writer_lease:
+            _release_writer_lease(cfg, cwd=cwd, run_id=run_id)
+        raise
     return record
 
 
@@ -1843,19 +1903,43 @@ def _spawn_controller_run(
     output: Path,
     events: Path,
 ) -> dict[str, Any]:
+    started_at = iso()
+    run_id = digest(incident_id, stage, started_at, os.getpid(), time.monotonic_ns())
+    writer_lease = stage in _WORKTREE_WRITE_STAGES
     events.parent.mkdir(parents=True, exist_ok=True)
     events_handle = events.open("wb")
+    lease_acquired = False
+    lease_fd: int | None = None
     try:
+        if writer_lease:
+            lease_fd = _acquire_writer_lease(
+                cfg,
+                cwd=cwd,
+                run_id=run_id,
+                stage=stage,
+            )
+            lease_acquired = True
         child = subprocess.Popen(
             command,
             cwd=cwd,
             stdout=events_handle,
             stderr=subprocess.STDOUT,
             start_new_session=True,
+            pass_fds=(lease_fd,) if lease_fd is not None else (),
         )
+        if writer_lease:
+            _bind_writer_lease_child(
+                cfg,
+                cwd=cwd,
+                run_id=run_id,
+                child_pid=child.pid,
+            )
+    except Exception:
+        if lease_acquired:
+            _release_writer_lease(cfg, cwd=cwd, run_id=run_id)
+        raise
     finally:
         events_handle.close()
-    run_id = digest(incident_id, stage, iso(), child.pid)
     record = {
         "schema_version": SCHEMA_VERSION,
         "run_id": run_id,
@@ -1863,7 +1947,7 @@ def _spawn_controller_run(
         "kind": kind,
         "stage": stage,
         "pid": child.pid,
-        "started_at": iso(),
+        "started_at": started_at,
         "cwd": str(cwd),
         "output": str(output),
         "events": str(events),
@@ -1871,7 +1955,25 @@ def _spawn_controller_run(
         "controller": True,
         "status": "running",
     }
-    atomic_json(runtime_dir(cfg) / "runs" / f"{run_id}.json", record)
+    run_path = runtime_dir(cfg) / "runs" / f"{run_id}.json"
+    try:
+        atomic_json(run_path, record)
+    except Exception as exc:
+        _terminate_process_group(child.pid)
+        failed = {
+            **record,
+            "status": "spawn_persistence_failed",
+            "completed_at": iso(),
+            "error": f"{type(exc).__name__}:{exc}",
+            "lease_finalization_complete": True,
+        }
+        try:
+            atomic_json(run_path, failed)
+        except Exception:
+            pass
+        if writer_lease:
+            _release_writer_lease(cfg, cwd=cwd, run_id=run_id)
+        raise
     return record
 
 
@@ -1944,6 +2046,20 @@ def _retry_command(cfg: Mapping[str, Any], prior: Mapping[str, Any]) -> list[str
         "repair_feedback": ("patch", PATCH_SCHEMA),
         "delivery": ("delivery", DELIVERY_SCHEMA),
     }
+    # A feedback run follows an independently produced review.  Resuming a
+    # feedback session after a schema/identity failure repeats the same
+    # contaminated output and can occupy the only repair worktree forever.
+    # Retry feedback from a fresh workspace-write session; the controller-owned
+    # incident envelope below supplies the exact identity again.
+    if stage == "repair_feedback":
+        return _codex_exec_base(
+            cfg,
+            sandbox="workspace-write",
+            cwd=Path(str(prior["cwd"])),
+            schema=_schema_file(cfg, "patch", PATCH_SCHEMA),
+            output=Path(str(prior["output"])),
+            persistent=True,
+        )
     if session_id and stage in schemas:
         schema_name, schema = schemas[stage]
         return _codex_resume_base(
@@ -1953,6 +2069,210 @@ def _retry_command(cfg: Mapping[str, Any], prior: Mapping[str, Any]) -> list[str
             output=Path(str(prior["output"])),
         )
     return [str(value) for value in prior["command"]]
+
+
+_WORKTREE_WRITE_STAGES = frozenset(
+    {"repair", "repair_feedback", "delivery", "production"}
+)
+
+
+class WriterLeaseBusy(RuntimeError):
+    """A live child already owns the canonical workspace writer lease."""
+
+
+def _pid_alive(pid: object) -> bool:
+    try:
+        numeric_pid = int(pid or 0)
+    except (TypeError, ValueError):
+        return False
+    if numeric_pid <= 0:
+        return False
+    try:
+        os.kill(numeric_pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _writer_cwd(cwd: Path) -> str:
+    return str(cwd.resolve())
+
+
+def _writer_lease_finalized(cfg: Mapping[str, Any], run_id: str) -> bool:
+    record = read_json(runtime_dir(cfg) / "runs" / f"{run_id}.json", None)
+    return bool(
+        isinstance(record, Mapping)
+        and record.get("lease_finalization_complete") is True
+    )
+
+
+def _writer_lock_held(path: Path) -> bool:
+    try:
+        fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+    except OSError:
+        return True
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return True
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        return False
+    finally:
+        os.close(fd)
+
+
+def _acquire_writer_lease(
+    cfg: Mapping[str, Any],
+    *,
+    cwd: Path,
+    run_id: str,
+    stage: str,
+) -> int:
+    canonical_cwd = _writer_cwd(cwd)
+    lock_dir = runtime_dir(cfg) / "writer-leases"
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    lock_path = lock_dir / f"{run_id}.lock"
+    lock_fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        with memory(cfg) as mem:
+            mem.execute("BEGIN IMMEDIATE")
+            current = mem.execute(
+                "SELECT * FROM workspace_writer_leases WHERE cwd=?",
+                (canonical_cwd,),
+            ).fetchone()
+            if current is not None:
+                owner_alive = _pid_alive(current["owner_pid"])
+                child_alive = _pid_alive(current["child_pid"])
+                kernel_lock_held = bool(
+                    not owner_alive
+                    and _writer_lock_held(Path(str(current["lock_path"])))
+                )
+                finalized = _writer_lease_finalized(
+                    cfg,
+                    str(current["run_id"]),
+                )
+                if (
+                    kernel_lock_held
+                    or child_alive
+                    or (owner_alive and not finalized)
+                ):
+                    mem.rollback()
+                    raise WriterLeaseBusy(
+                        "workspace writer busy: "
+                        f"cwd={canonical_cwd} stage={current['stage']} "
+                        f"run_id={current['run_id']}"
+                    )
+                mem.execute(
+                    "DELETE FROM workspace_writer_leases WHERE cwd=? AND run_id=?",
+                    (canonical_cwd, str(current["run_id"])),
+                )
+                try:
+                    Path(str(current["lock_path"])).unlink(missing_ok=True)
+                except OSError:
+                    pass
+            mem.execute(
+                "INSERT INTO workspace_writer_leases"
+                "(cwd,run_id,stage,owner_pid,child_pid,lock_path,acquired_at) "
+                "VALUES (?,?,?,?,NULL,?,?)",
+                (
+                    canonical_cwd,
+                    run_id,
+                    stage,
+                    os.getpid(),
+                    str(lock_path),
+                    iso(),
+                ),
+            )
+            mem.commit()
+        _writer_lease_lock_fds[run_id] = lock_fd
+        return lock_fd
+    except Exception:
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        finally:
+            os.close(lock_fd)
+            try:
+                lock_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+        raise
+
+
+def _bind_writer_lease_child(
+    cfg: Mapping[str, Any],
+    *,
+    cwd: Path,
+    run_id: str,
+    child_pid: int,
+) -> None:
+    with memory(cfg) as mem:
+        updated = mem.execute(
+            "UPDATE workspace_writer_leases SET child_pid=? "
+            "WHERE cwd=? AND run_id=? AND owner_pid=?",
+            (child_pid, _writer_cwd(cwd), run_id, os.getpid()),
+        )
+        if updated.rowcount != 1:
+            mem.rollback()
+            _terminate_process_group(child_pid)
+            raise RuntimeError("workspace writer lease lost before child bind")
+        mem.commit()
+
+
+def _release_writer_lease(
+    cfg: Mapping[str, Any],
+    *,
+    cwd: Path,
+    run_id: str,
+) -> None:
+    last_error: sqlite3.Error | None = None
+    for attempt in range(3):
+        try:
+            with memory(cfg) as mem:
+                mem.execute(
+                    "DELETE FROM workspace_writer_leases WHERE cwd=? AND run_id=?",
+                    (_writer_cwd(cwd), run_id),
+                )
+                mem.commit()
+            fd = _writer_lease_lock_fds.pop(run_id, None)
+            if fd is not None:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_UN)
+                finally:
+                    os.close(fd)
+            lock_path = runtime_dir(cfg) / "writer-leases" / f"{run_id}.lock"
+            try:
+                lock_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            return
+        except sqlite3.Error as exc:
+            last_error = exc
+            if attempt < 2:
+                time.sleep(0.05 * (attempt + 1))
+    raise RuntimeError(
+        f"workspace writer lease release failed: cwd={_writer_cwd(cwd)} "
+        f"run_id={run_id} error={last_error}"
+    ) from last_error
+
+
+def _worktree_writer_running(
+    running: list[dict[str, Any]],
+    *,
+    stage: str,
+    cwd: Path,
+) -> bool:
+    if stage not in _WORKTREE_WRITE_STAGES:
+        return False
+    target = cwd.resolve()
+    return any(
+        str(row.get("stage") or "") in _WORKTREE_WRITE_STAGES
+        and Path(str(row.get("cwd") or ROOT)).resolve() == target
+        for row in running
+    )
 
 
 def _retry_pending(cfg: Mapping[str, Any], running: list[dict[str, Any]]) -> list[str]:
@@ -1981,6 +2301,14 @@ def _retry_pending(cfg: Mapping[str, Any], running: list[dict[str, Any]]) -> lis
                 break
         if not isinstance(prior, dict) or not isinstance(prior.get("command"), list):
             continue
+        prior_stage = str(prior.get("stage") or "")
+        prior_cwd = Path(str(prior.get("cwd") or ROOT))
+        if _worktree_writer_running(
+            running,
+            stage=prior_stage,
+            cwd=prior_cwd,
+        ):
+            continue
         completed_at = parse_time(str(prior.get("completed_at") or prior.get("started_at") or ""))
         if completed_at is not None and (now() - completed_at).total_seconds() < retry_delay:
             continue
@@ -1988,16 +2316,19 @@ def _retry_pending(cfg: Mapping[str, Any], running: list[dict[str, Any]]) -> lis
             f"{Path(str(prior['events'])).stem}-retry-{int(time.time())}.jsonl"
         )
         if prior.get("controller"):
-            retried = _spawn_controller_run(
-                cfg,
-                incident_id=incident_id,
-                kind=str(incident["kind"]),
-                stage=str(prior["stage"]),
-                command=[str(value) for value in prior["command"]],
-                cwd=Path(str(prior["cwd"])),
-                output=Path(str(prior["output"])),
-                events=retry_events,
-            )
+            try:
+                retried = _spawn_controller_run(
+                    cfg,
+                    incident_id=incident_id,
+                    kind=str(incident["kind"]),
+                    stage=str(prior["stage"]),
+                    command=[str(value) for value in prior["command"]],
+                    cwd=Path(str(prior["cwd"])),
+                    output=Path(str(prior["output"])),
+                    events=retry_events,
+                )
+            except WriterLeaseBusy:
+                continue
             with memory(cfg) as mem:
                 transition(mem, incident_id, str(prior["stage"]), reason="retry_controller_stage", run_id=str(retried["run_id"]))
                 mem.commit()
@@ -2006,18 +2337,34 @@ def _retry_pending(cfg: Mapping[str, Any], running: list[dict[str, Any]]) -> lis
         prompt_path = Path(str(prior["events"])).with_suffix(".prompt.md")
         if not prompt_path.is_file():
             continue
-        retried = _spawn_run(
-            cfg,
-            incident_id=incident_id,
-            kind=str(incident["kind"]),
-            stage=str(prior["stage"]),
-            command=_retry_command(cfg, prior),
-            cwd=Path(str(prior["cwd"])),
-            prompt=prompt_path.read_text(),
-            output=Path(str(prior["output"])),
-            events=retry_events,
-            session_id=prior.get("session_id"),
+        prompt = (
+            f"CONTROLLER INCIDENT ENVELOPE: incident_id={incident_id}. "
+            "Return this exact full incident_id unchanged.\n\n"
+            + prompt_path.read_text()
         )
+        try:
+            retried = _spawn_run(
+                cfg,
+                incident_id=incident_id,
+                kind=str(incident["kind"]),
+                stage=str(prior["stage"]),
+                command=_retry_command(cfg, prior),
+                cwd=Path(str(prior["cwd"])),
+                prompt=prompt,
+                output=Path(str(prior["output"])),
+                events=retry_events,
+                session_id=(
+                    None
+                    if prior_stage == "repair_feedback"
+                    else prior.get("session_id")
+                ),
+                workspace_branch=str(
+                    prior.get("workspace_branch")
+                    or _repair_branch(cfg, incident_id)
+                ) if prior_stage in _WORKTREE_WRITE_STAGES - {"production"} else None,
+            )
+        except WriterLeaseBusy:
+            continue
         if prior.get("repair_session_id"):
             retried["repair_session_id"] = prior["repair_session_id"]
             atomic_json(
@@ -2113,8 +2460,11 @@ def _useful_roots(cfg: Mapping[str, Any], diagnosis: Mapping[str, Any]) -> list[
     return sorted(rows, key=score, reverse=True)[:12]
 
 
+def _repair_branch(cfg: Mapping[str, Any], incident_id: str) -> str:
+    return f"{cfg['delivery']['branch_prefix']}/{incident_id[:12]}"
+
+
 def _worktree(cfg: Mapping[str, Any], incident_id: str) -> Path:
-    branch = f"{cfg['delivery']['branch_prefix']}/{incident_id[:12]}"
     configured = os.environ.get("ZEUS_TOTAL_LOSS_REPAIR_WORKTREE", "").strip()
     if not configured:
         raise RuntimeError("managed repair worktree is not provisioned")
@@ -2123,6 +2473,18 @@ def _worktree(cfg: Mapping[str, Any], incident_id: str) -> Path:
     registered = any(line == f"worktree {path}" for line in listing.stdout.splitlines())
     if listing.returncode != 0 or not registered or path == ROOT:
         raise RuntimeError("configured repair worktree is not a registered non-live worktree")
+    return path
+
+
+def _ensure_writer_worktree_branch(
+    cfg: Mapping[str, Any],
+    *,
+    cwd: Path,
+    branch: str,
+) -> None:
+    """Provision the incident branch while holding the cwd writer lease."""
+
+    path = cwd.resolve()
     dirty = _run_capture(["git", "status", "--porcelain", "--untracked-files=all"], cwd=path)
     if dirty.returncode != 0 or dirty.stdout.strip():
         raise RuntimeError("configured repair worktree is dirty")
@@ -2137,7 +2499,6 @@ def _worktree(cfg: Mapping[str, Any], incident_id: str) -> Path:
         changed = _run_capture(switch, cwd=path)
         if changed.returncode != 0:
             raise RuntimeError(f"managed repair branch provisioning failed: {changed.stderr.strip()}")
-    return path
 
 
 def _live_checkout(base_branch: str) -> Path:
@@ -2155,7 +2516,7 @@ def _live_checkout(base_branch: str) -> Path:
     raise RuntimeError(f"no checkout owns refs/heads/{base_branch}")
 
 
-def _finish_run(cfg: Mapping[str, Any], run: dict[str, Any], returncode: int) -> None:
+def _finish_run_inner(cfg: Mapping[str, Any], run: dict[str, Any], returncode: int) -> None:
     path = runtime_dir(cfg) / "runs" / f"{run['run_id']}.json"
     events = Path(str(run["events"]))
     session, usage = _parse_session(events)
@@ -2228,6 +2589,26 @@ def _finish_run(cfg: Mapping[str, Any], run: dict[str, Any], returncode: int) ->
         _after_production(cfg, run, result)
 
 
+def _finish_run(cfg: Mapping[str, Any], run: dict[str, Any], returncode: int) -> None:
+    try:
+        _finish_run_inner(cfg, run, returncode)
+    finally:
+        if str(run.get("stage") or "") in _WORKTREE_WRITE_STAGES:
+            run_path = runtime_dir(cfg) / "runs" / f"{run['run_id']}.json"
+            finalized = read_json(run_path, dict(run))
+            if not isinstance(finalized, dict):
+                finalized = dict(run)
+            finalized["lease_finalization_complete"] = True
+            try:
+                atomic_json(run_path, finalized)
+            finally:
+                _release_writer_lease(
+                    cfg,
+                    cwd=Path(str(run.get("cwd") or ROOT)),
+                    run_id=str(run["run_id"]),
+                )
+
+
 def _after_diagnosis(cfg: Mapping[str, Any], run: Mapping[str, Any], diagnosis: Mapping[str, Any]) -> None:
     incident_id = str(run["incident_id"])
     priors = _useful_roots(cfg, diagnosis)
@@ -2291,12 +2672,24 @@ def _start_repair(cfg: Mapping[str, Any], incident_id: str, kind: str) -> str:
     diagnosis = read_json(incident_dir / "diagnosis.json", {})
     classification = read_json(incident_dir / "classification.json", {})
     worktree = _worktree(cfg, incident_id)
+    workspace_branch = _repair_branch(cfg, incident_id)
     output = incident_dir / "patch.json"
     events = incident_dir / "codex-repair.jsonl"
     schema = _schema_file(cfg, "patch", PATCH_SCHEMA)
     prompt = Path(str(cfg["paths"]["prompt"])).read_text() + "\n\nIMPLEMENTATION PHASE. Implement and test the structural repair in this incident worktree. Do not commit, push, open a PR, merge, or deploy; the controller owns Git metadata and will commit the proven diff before fresh review.\n\nDIAGNOSIS:\n" + json.dumps(diagnosis, ensure_ascii=False, indent=2) + "\n\nCLASSIFICATION:\n" + json.dumps(classification, ensure_ascii=False, indent=2) + f"\n\nincident evidence={incident_dir / 'evidence.db'}\n"
     command = _codex_exec_base(cfg, sandbox="workspace-write", cwd=worktree, schema=schema, output=output, persistent=True)
-    spawned = _spawn_run(cfg, incident_id=incident_id, kind=kind, stage="repair", command=command, cwd=worktree, prompt=prompt, output=output, events=events)
+    spawned = _spawn_run(
+        cfg,
+        incident_id=incident_id,
+        kind=kind,
+        stage="repair",
+        command=command,
+        cwd=worktree,
+        prompt=prompt,
+        output=output,
+        events=events,
+        workspace_branch=workspace_branch,
+    )
     with memory(cfg) as mem:
         transition(mem, incident_id, "repair", reason="root_classified", run_id=str(spawned["run_id"]))
         mem.commit()
@@ -2385,7 +2778,21 @@ def _after_repair(cfg: Mapping[str, Any], run: Mapping[str, Any], patch: Mapping
         "and the incident evidence. Lead with live-money findings. Return blocking=true "
         "for any unresolved correctness, causality, replay, or delivery defect."
     )
-    review_run = _spawn_run(cfg, incident_id=incident_id, kind=str(run["kind"]), stage="review", command=command, cwd=worktree, prompt=prompt, output=output, events=events)
+    review_run = _spawn_run(
+        cfg,
+        incident_id=incident_id,
+        kind=str(run["kind"]),
+        stage="review",
+        command=command,
+        cwd=worktree,
+        prompt=prompt,
+        output=output,
+        events=events,
+        workspace_branch=str(
+            run.get("workspace_branch")
+            or _repair_branch(cfg, incident_id)
+        ),
+    )
     review_run["repair_session_id"] = run.get("session_id")
     atomic_json(runtime_dir(cfg) / "runs" / f"{review_run['run_id']}.json", review_run)
     with memory(cfg) as mem:
@@ -2424,19 +2831,63 @@ def _after_review(cfg: Mapping[str, Any], run: Mapping[str, Any], review: Mappin
     incident_dir = runtime_dir(cfg) / "incidents" / incident_id
     worktree = Path(str(run["cwd"]))
     if review.get("blocking"):
+        if _worktree_writer_running(
+            _running(cfg),
+            stage="repair_feedback",
+            cwd=worktree,
+        ):
+            # The review is read-only, so it may finish while another incident
+            # owns the shared repair worktree.  Re-review later instead of
+            # starting a second workspace writer against that checkout.
+            with memory(cfg) as mem:
+                transition(
+                    mem,
+                    incident_id,
+                    "review",
+                    reason="feedback_waiting_for_worktree_writer",
+                    run_id=str(run.get("run_id") or ""),
+                    status="retry_pending",
+                )
+                mem.commit()
+            return
         output = incident_dir / "patch.json"
         events = incident_dir / f"codex-repair-feedback-{int(time.time())}.jsonl"
         schema = _schema_file(cfg, "patch", PATCH_SCHEMA)
-        prompt = "Fresh independent review found blocking issues. Fix every finding and rerun affected tests. Do not commit; the controller owns Git metadata and will commit the proven follow-up diff. Return patch_ready only when resolved.\n\n" + json.dumps(review, ensure_ascii=False, indent=2)
+        prompt = (
+            f"CONTROLLER INCIDENT ENVELOPE: incident_id={incident_id}. "
+            "Return this exact full incident_id unchanged.\n\n"
+            "Fresh independent review found blocking issues. Fix every finding "
+            "and rerun affected tests. Do not commit; the controller owns Git "
+            "metadata and will commit the proven follow-up diff. Return "
+            "patch_ready only when resolved.\n\n"
+            + json.dumps(review, ensure_ascii=False, indent=2)
+        )
         command = _codex_exec_base(
             cfg, sandbox="workspace-write", cwd=worktree, schema=schema,
             output=output, persistent=True,
         )
-        spawned = _spawn_run(
-            cfg, incident_id=incident_id, kind=str(run["kind"]),
-            stage="repair_feedback", command=command, cwd=worktree,
-            prompt=prompt, output=output, events=events,
-        )
+        try:
+            spawned = _spawn_run(
+                cfg, incident_id=incident_id, kind=str(run["kind"]),
+                stage="repair_feedback", command=command, cwd=worktree,
+                prompt=prompt, output=output, events=events,
+                workspace_branch=str(
+                    run.get("workspace_branch")
+                    or _repair_branch(cfg, incident_id)
+                ),
+            )
+        except WriterLeaseBusy:
+            with memory(cfg) as mem:
+                transition(
+                    mem,
+                    incident_id,
+                    "review",
+                    reason="feedback_writer_lease_busy",
+                    run_id=str(run.get("run_id") or ""),
+                    status="retry_pending",
+                )
+                mem.commit()
+            return
         with memory(cfg) as mem:
             transition(mem, incident_id, "repair_feedback", reason="fresh_review_blocking", run_id=str(spawned["run_id"]))
             mem.commit()
@@ -2492,17 +2943,34 @@ def _after_review(cfg: Mapping[str, Any], run: Mapping[str, Any], review: Mappin
         persistent=True,
         network=True,
     )
-    spawned = _spawn_run(
-        cfg,
-        incident_id=incident_id,
-        kind=str(run["kind"]),
-        stage="delivery",
-        command=command,
-        cwd=worktree,
-        prompt=prompt,
-        output=output,
-        events=events,
-    )
+    try:
+        spawned = _spawn_run(
+            cfg,
+            incident_id=incident_id,
+            kind=str(run["kind"]),
+            stage="delivery",
+            command=command,
+            cwd=worktree,
+            prompt=prompt,
+            output=output,
+            events=events,
+            workspace_branch=str(
+                run.get("workspace_branch")
+                or _repair_branch(cfg, incident_id)
+            ),
+        )
+    except WriterLeaseBusy:
+        with memory(cfg) as mem:
+            transition(
+                mem,
+                incident_id,
+                "review",
+                reason="delivery_writer_lease_busy",
+                run_id=str(run.get("run_id") or ""),
+                status="retry_pending",
+            )
+            mem.commit()
+        return
     with memory(cfg) as mem:
         transition(mem, incident_id, "delivery", reason="fresh_review_clear", run_id=str(spawned["run_id"]))
         mem.commit()
@@ -2538,16 +3006,29 @@ def _after_delivery(cfg: Mapping[str, Any], run: Mapping[str, Any], delivery: Ma
         "deploy-incident",
         incident_id,
     ]
-    spawned = _spawn_controller_run(
-        cfg,
-        incident_id=incident_id,
-        kind=str(run["kind"]),
-        stage="production",
-        command=command,
-        cwd=ROOT,
-        output=output,
-        events=events,
-    )
+    try:
+        spawned = _spawn_controller_run(
+            cfg,
+            incident_id=incident_id,
+            kind=str(run["kind"]),
+            stage="production",
+            command=command,
+            cwd=ROOT,
+            output=output,
+            events=events,
+        )
+    except WriterLeaseBusy:
+        with memory(cfg) as mem:
+            transition(
+                mem,
+                incident_id,
+                "delivery",
+                reason="production_writer_lease_busy",
+                run_id=str(run.get("run_id") or ""),
+                status="retry_pending",
+            )
+            mem.commit()
+        return
     with memory(cfg) as mem:
         transition(mem, incident_id, "production", reason="merge_receipt_ready", run_id=str(spawned["run_id"]))
         mem.commit()

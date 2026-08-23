@@ -8,6 +8,7 @@ from __future__ import annotations
 import importlib.util
 import inspect
 import json
+import os
 import sqlite3
 import subprocess
 from pathlib import Path
@@ -119,8 +120,8 @@ def cfg(tmp_path: Path) -> dict:
         "profiles": {
             "test": {
                 "model": "gpt-5.6-sol",
-                "preferred_reasoning": "max",
-                "fallback_reasoning": ["xhigh", "high"],
+                "preferred_reasoning": "high",
+                "fallback_reasoning": [],
             }
         },
         "paths": {
@@ -453,7 +454,7 @@ def test_evidence_db_exposes_timeline_tables_without_copying_canonical_db(cfg: d
 def test_codex_command_persists_primary_and_places_approval_before_exec(cfg: dict) -> None:
     runtime = Path(cfg["paths"]["runtime"])
     runtime.mkdir(parents=True)
-    loop.atomic_json(runtime / "capabilities.json", {"reasoning_effort": "max"})
+    loop.atomic_json(runtime / "capabilities.json", {"reasoning_effort": "high"})
     schema = runtime / "schema.json"
     output = runtime / "output.json"
     loop.atomic_json(schema, {"type": "object"})
@@ -512,13 +513,13 @@ def test_unverified_delivery_claim_cannot_complete_incident(cfg: dict) -> None:
 
 def test_capability_fingerprint_changes_with_profile_content(cfg: dict) -> None:
     before = loop._capability_fingerprint(cfg)
-    cfg["profiles"]["test"]["preferred_reasoning"] = "high"
+    cfg["profiles"]["test"]["model"] = "gpt-5.6-luna"
 
     assert loop._capability_fingerprint(cfg) != before
 
 
 def test_failed_repair_retry_resumes_persistent_session(cfg: dict, monkeypatch) -> None:
-    monkeypatch.setattr(loop, "capabilities", lambda _cfg: {"reasoning_effort": "max"})
+    monkeypatch.setattr(loop, "capabilities", lambda _cfg: {"reasoning_effort": "high"})
     output = Path(cfg["paths"]["runtime"]) / "patch.json"
     command = loop._retry_command(
         cfg,
@@ -764,3 +765,466 @@ def test_blocking_review_starts_fresh_workspace_write_feedback(cfg: dict, monkey
     assert "resume" not in command
     assert command[command.index("--sandbox") + 1] == "workspace-write"
     assert captured.get("session_id") is None
+    assert f"incident_id={incident_id}" in captured["prompt"]
+
+
+def test_feedback_retry_is_fresh_and_preserves_exact_incident_envelope(
+    cfg: dict, monkeypatch
+) -> None:
+    incident_id = "full-incident-identity-123456"
+    runtime = Path(cfg["paths"]["runtime"])
+    events = runtime / "incidents" / incident_id / "feedback.jsonl"
+    events.parent.mkdir(parents=True)
+    events.with_suffix(".prompt.md").write_text("repair the reviewed finding")
+    output = events.with_name("patch.json")
+    loop.atomic_json(runtime / "capabilities.json", {"reasoning_effort": "high"})
+    prior = {
+        "incident_id": incident_id,
+        "stage": "repair_feedback",
+        "session_id": "contaminated-session",
+        "cwd": str(events.parent),
+        "output": str(output),
+        "events": str(events),
+        "command": ["codex", "exec", "resume", "contaminated-session"],
+        "completed_at": "2026-08-22T09:00:00+00:00",
+        "status": "failed",
+    }
+    loop.atomic_json(runtime / "runs" / "prior.json", prior)
+    with loop.memory(cfg) as mem:
+        mem.execute(
+            "INSERT INTO incidents(incident_id,kind,position_id,crossing_evidence_id,crossing_kind,"
+            "held_token_id,held_direction,t_floor,floor_price,observed_bid,detected_at,priority,status,stage,updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (incident_id, "hard", "p1", "q1", "below_floor", "yes", "sell_yes",
+             "2026-08-22T10:00:00+00:00", 0.05, 0.04, "2026-08-22T10:00:00+00:00",
+             1_000_000.0, "retry_pending", "repair_feedback", "2026-08-22T09:00:00+00:00"),
+        )
+        mem.commit()
+    captured = {}
+
+    def capture_spawn(*_args, **kwargs):
+        captured.update(kwargs)
+        return {"run_id": "fresh-feedback", "session_id": None}
+
+    monkeypatch.setattr(loop, "_spawn_run", capture_spawn)
+    monkeypatch.setattr(loop, "now", lambda: loop.parse_time("2026-08-22T10:05:00+00:00"))
+
+    assert loop._retry_pending(cfg, []) == [incident_id]
+    assert "resume" not in captured["command"]
+    assert f"incident_id={incident_id}" in captured["prompt"]
+    assert captured["session_id"] is None
+
+
+def test_retry_does_not_start_second_writer_in_same_worktree(
+    cfg: dict, monkeypatch, tmp_path: Path
+) -> None:
+    incident_id = "feedback-waiting"
+    runtime = Path(cfg["paths"]["runtime"])
+    events = runtime / "incidents" / incident_id / "feedback.jsonl"
+    events.parent.mkdir(parents=True)
+    events.with_suffix(".prompt.md").write_text("repair")
+    prior = {
+        "incident_id": incident_id,
+        "stage": "repair_feedback",
+        "cwd": str(tmp_path),
+        "output": str(events.with_name("patch.json")),
+        "events": str(events),
+        "command": ["codex", "exec"],
+        "completed_at": "2026-08-22T09:00:00+00:00",
+        "status": "failed",
+    }
+    loop.atomic_json(runtime / "runs" / "prior.json", prior)
+    with loop.memory(cfg) as mem:
+        mem.execute(
+            "INSERT INTO incidents(incident_id,kind,position_id,crossing_evidence_id,crossing_kind,"
+            "held_token_id,held_direction,t_floor,floor_price,observed_bid,detected_at,priority,status,stage,updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (incident_id, "hard", "p1", "q1", "below_floor", "yes", "sell_yes",
+             "2026-08-22T10:00:00+00:00", 0.05, 0.04, "2026-08-22T10:00:00+00:00",
+             1_000_000.0, "retry_pending", "repair_feedback", "2026-08-22T09:00:00+00:00"),
+        )
+        mem.commit()
+    monkeypatch.setattr(loop, "_spawn_run", lambda *_args, **_kwargs: pytest.fail("second writer spawned"))
+    monkeypatch.setattr(loop, "now", lambda: loop.parse_time("2026-08-22T10:05:00+00:00"))
+    running = [{
+        "incident_id": "other-repair",
+        "stage": "repair",
+        "cwd": str(tmp_path),
+        "status": "running",
+    }]
+
+    assert loop._retry_pending(cfg, running) == []
+
+
+def test_blocking_review_defers_feedback_while_worktree_writer_runs(
+    cfg: dict, monkeypatch, tmp_path: Path
+) -> None:
+    incident_id = "review-must-wait"
+    incident_dir = Path(cfg["paths"]["runtime"]) / "incidents" / incident_id
+    incident_dir.mkdir(parents=True)
+    with loop.memory(cfg) as mem:
+        mem.execute(
+            "INSERT INTO incidents(incident_id,kind,position_id,crossing_evidence_id,crossing_kind,"
+            "held_token_id,held_direction,t_floor,floor_price,observed_bid,detected_at,priority,status,stage,updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (incident_id, "hard", "p1", "q1", "below_floor", "yes", "sell_yes",
+             "2026-08-22T10:00:00+00:00", 0.05, 0.04, "2026-08-22T10:00:00+00:00",
+             1_000_000.0, "running", "review", "2026-08-22T10:00:00+00:00"),
+        )
+        mem.commit()
+    monkeypatch.setattr(
+        loop,
+        "_running",
+        lambda _cfg: [{
+            "incident_id": "other-repair",
+            "stage": "repair",
+            "cwd": str(tmp_path),
+            "status": "running",
+        }],
+    )
+    monkeypatch.setattr(
+        loop,
+        "_spawn_run",
+        lambda *_args, **_kwargs: pytest.fail("concurrent feedback writer spawned"),
+    )
+
+    loop._after_review(
+        cfg,
+        {
+            "incident_id": incident_id,
+            "kind": "hard",
+            "cwd": str(tmp_path),
+            "run_id": "review-run",
+        },
+        {"blocking": True, "findings": ["fix me"], "coverage": "test"},
+    )
+
+    with loop.memory(cfg) as mem:
+        row = mem.execute(
+            "SELECT stage,status FROM incidents WHERE incident_id=?",
+            (incident_id,),
+        ).fetchone()
+    assert tuple(row) == ("review", "retry_pending")
+
+
+def test_writer_lease_is_atomic_per_canonical_cwd(cfg: dict, tmp_path: Path) -> None:
+    worktree = tmp_path / "writer-worktree"
+    worktree.mkdir()
+
+    loop._acquire_writer_lease(
+        cfg,
+        cwd=worktree,
+        run_id="writer-one",
+        stage="repair",
+    )
+    with pytest.raises(loop.WriterLeaseBusy, match="workspace writer busy"):
+        loop._acquire_writer_lease(
+            cfg,
+            cwd=worktree / ".",
+            run_id="writer-two",
+            stage="repair_feedback",
+        )
+
+    loop._release_writer_lease(cfg, cwd=worktree, run_id="writer-one")
+    loop._acquire_writer_lease(
+        cfg,
+        cwd=worktree,
+        run_id="writer-two",
+        stage="production",
+    )
+    loop._release_writer_lease(cfg, cwd=worktree, run_id="writer-two")
+
+
+def test_production_defers_when_atomic_writer_lease_is_busy(
+    cfg: dict, monkeypatch
+) -> None:
+    incident_id = "delivery-waits-for-production-lease"
+    with loop.memory(cfg) as mem:
+        mem.execute(
+            "INSERT INTO incidents(incident_id,kind,position_id,crossing_evidence_id,crossing_kind,"
+            "held_token_id,held_direction,t_floor,floor_price,observed_bid,detected_at,priority,status,stage,updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (incident_id, "hard", "p1", "q1", "below_floor", "yes", "sell_yes",
+             "2026-08-22T10:00:00+00:00", 0.05, 0.04, "2026-08-22T10:00:00+00:00",
+             1_000_000.0, "running", "delivery", "2026-08-22T10:00:00+00:00"),
+        )
+        mem.commit()
+    monkeypatch.setattr(
+        loop,
+        "_spawn_controller_run",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            loop.WriterLeaseBusy("production busy")
+        ),
+    )
+
+    loop._after_delivery(
+        cfg,
+        {
+            "incident_id": incident_id,
+            "kind": "hard",
+            "run_id": "delivery-run",
+        },
+        {
+            "status": "merged",
+            "pr": "https://example.test/pr/1",
+            "head_sha": "a" * 40,
+            "merge_sha": "b" * 40,
+        },
+    )
+
+    with loop.memory(cfg) as mem:
+        row = mem.execute(
+            "SELECT stage,status FROM incidents WHERE incident_id=?",
+            (incident_id,),
+        ).fetchone()
+    assert tuple(row) == ("delivery", "retry_pending")
+
+
+def test_post_bind_record_failure_terminates_child_and_releases_lease(
+    cfg: dict, monkeypatch, tmp_path: Path
+) -> None:
+    calls: list[tuple[str, object]] = []
+
+    class Child:
+        pid = 424242
+
+    monkeypatch.setattr(
+        loop.subprocess,
+        "Popen",
+        lambda *_args, **_kwargs: Child(),
+    )
+    monkeypatch.setattr(
+        loop,
+        "_acquire_writer_lease",
+        lambda *_args, **kwargs: calls.append(("acquire", kwargs["run_id"])),
+    )
+    monkeypatch.setattr(
+        loop,
+        "_bind_writer_lease_child",
+        lambda *_args, **kwargs: calls.append(("bind", kwargs["child_pid"])),
+    )
+    monkeypatch.setattr(
+        loop,
+        "_terminate_process_group",
+        lambda pid: calls.append(("terminate", pid)),
+    )
+    monkeypatch.setattr(
+        loop,
+        "_release_writer_lease",
+        lambda *_args, **kwargs: calls.append(("release", kwargs["run_id"])),
+    )
+    monkeypatch.setattr(
+        loop,
+        "atomic_json",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("disk full")),
+    )
+
+    with pytest.raises(OSError, match="disk full"):
+        loop._spawn_controller_run(
+            cfg,
+            incident_id="persistence-failure",
+            kind="hard",
+            stage="production",
+            command=["controller"],
+            cwd=tmp_path,
+            output=tmp_path / "production.json",
+            events=tmp_path / "controller.jsonl",
+        )
+
+    assert [name for name, _value in calls] == [
+        "acquire",
+        "bind",
+        "terminate",
+        "release",
+    ]
+
+
+def test_dead_child_completed_run_lease_is_reclaimable(
+    cfg: dict, tmp_path: Path
+) -> None:
+    worktree = tmp_path / "reclaim-worktree"
+    worktree.mkdir()
+    runtime = Path(cfg["paths"]["runtime"])
+    loop.atomic_json(
+        runtime / "runs" / "old-run.json",
+        {
+            "run_id": "old-run",
+            "status": "completed",
+            "lease_finalization_complete": True,
+        },
+    )
+    with loop.memory(cfg) as mem:
+        mem.execute(
+            "INSERT INTO workspace_writer_leases"
+            "(cwd,run_id,stage,owner_pid,child_pid,lock_path,acquired_at) "
+            "VALUES (?,?,?,?,?,?,?)",
+            (
+                str(worktree.resolve()),
+                "old-run",
+                "repair",
+                os.getpid(),
+                999999,
+                str(tmp_path / "old-run.lock"),
+                "2026-08-22T00:00:00+00:00",
+            ),
+        )
+        mem.commit()
+
+    loop._acquire_writer_lease(
+        cfg,
+        cwd=worktree,
+        run_id="new-run",
+        stage="repair_feedback",
+    )
+    with loop.memory(cfg) as mem:
+        row = mem.execute(
+            "SELECT run_id FROM workspace_writer_leases WHERE cwd=?",
+            (str(worktree.resolve()),),
+        ).fetchone()
+    assert row["run_id"] == "new-run"
+    loop._release_writer_lease(cfg, cwd=worktree, run_id="new-run")
+
+
+def test_completed_child_lease_stays_busy_until_post_child_callback_finishes(
+    cfg: dict, tmp_path: Path
+) -> None:
+    worktree = tmp_path / "finalizing-worktree"
+    worktree.mkdir()
+    runtime = Path(cfg["paths"]["runtime"])
+    loop.atomic_json(
+        runtime / "runs" / "finalizing-run.json",
+        {"run_id": "finalizing-run", "status": "completed"},
+    )
+    with loop.memory(cfg) as mem:
+        mem.execute(
+            "INSERT INTO workspace_writer_leases"
+            "(cwd,run_id,stage,owner_pid,child_pid,lock_path,acquired_at) "
+            "VALUES (?,?,?,?,?,?,?)",
+            (
+                str(worktree.resolve()),
+                "finalizing-run",
+                "repair",
+                os.getpid(),
+                999999,
+                str(tmp_path / "finalizing-run.lock"),
+                "2026-08-22T00:00:00+00:00",
+            ),
+        )
+        mem.commit()
+
+    with pytest.raises(loop.WriterLeaseBusy, match="workspace writer busy"):
+        loop._acquire_writer_lease(
+            cfg,
+            cwd=worktree,
+            run_id="too-early",
+            stage="repair_feedback",
+        )
+    loop._release_writer_lease(
+        cfg,
+        cwd=worktree,
+        run_id="finalizing-run",
+    )
+
+
+def test_repair_branch_provisioning_occurs_after_atomic_lease_before_popen(
+    cfg: dict, monkeypatch, tmp_path: Path
+) -> None:
+    order: list[str] = []
+    runtime = Path(cfg["paths"]["runtime"])
+    loop.atomic_json(runtime / "capabilities.json", {"reasoning_effort": "high"})
+    monkeypatch.setattr(
+        loop,
+        "capabilities",
+        lambda _cfg: {"reasoning_effort": "high"},
+    )
+
+    class Child:
+        pid = 515151
+
+    monkeypatch.setattr(
+        loop,
+        "_acquire_writer_lease",
+        lambda *_args, **_kwargs: order.append("lease"),
+    )
+    monkeypatch.setattr(
+        loop,
+        "_ensure_writer_worktree_branch",
+        lambda *_args, **_kwargs: order.append("branch"),
+    )
+    monkeypatch.setattr(
+        loop.subprocess,
+        "Popen",
+        lambda *_args, **_kwargs: order.append("popen") or Child(),
+    )
+    monkeypatch.setattr(
+        loop,
+        "_bind_writer_lease_child",
+        lambda *_args, **_kwargs: order.append("bind"),
+    )
+
+    record = loop._spawn_run(
+        cfg,
+        incident_id="branch-ordering",
+        kind="hard",
+        stage="repair",
+        command=["codex", "exec"],
+        cwd=tmp_path,
+        prompt="repair",
+        output=tmp_path / "patch.json",
+        events=tmp_path / "repair.jsonl",
+        workspace_branch="test/total-loss/branch-order",
+    )
+
+    assert order == ["lease", "branch", "popen", "bind"]
+    assert record["workspace_branch"] == "test/total-loss/branch-order"
+
+
+def test_orphan_child_kernel_lock_closes_popen_bind_crash_gap(
+    cfg: dict, tmp_path: Path
+) -> None:
+    worktree = tmp_path / "orphan-worktree"
+    worktree.mkdir()
+    lease_fd = loop._acquire_writer_lease(
+        cfg,
+        cwd=worktree,
+        run_id="orphan-run",
+        stage="repair",
+    )
+    child = subprocess.Popen(
+        [loop.sys.executable, "-c", "import time; time.sleep(30)"],
+        pass_fds=(lease_fd,),
+        start_new_session=True,
+    )
+    parent_fd = loop._writer_lease_lock_fds.pop("orphan-run")
+    os.close(parent_fd)
+    with loop.memory(cfg) as mem:
+        mem.execute(
+            "UPDATE workspace_writer_leases SET owner_pid=?,child_pid=NULL "
+            "WHERE run_id='orphan-run'",
+            (999999,),
+        )
+        mem.commit()
+
+    try:
+        with pytest.raises(loop.WriterLeaseBusy, match="workspace writer busy"):
+            loop._acquire_writer_lease(
+                cfg,
+                cwd=worktree,
+                run_id="must-not-reclaim",
+                stage="repair_feedback",
+            )
+    finally:
+        os.killpg(child.pid, 15)
+        child.wait(timeout=5)
+
+    loop._acquire_writer_lease(
+        cfg,
+        cwd=worktree,
+        run_id="after-orphan-exit",
+        stage="repair_feedback",
+    )
+    loop._release_writer_lease(
+        cfg,
+        cwd=worktree,
+        run_id="after-orphan-exit",
+    )
