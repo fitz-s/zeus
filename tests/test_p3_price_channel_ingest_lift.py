@@ -4438,6 +4438,41 @@ def test_held_post_commit_enqueue_failure_fails_scheduler_until_snapshot_outcome
     assert recorded["failed"] is True
 
 
+@pytest.mark.parametrize(
+    ("canonical_count", "canonical_covered", "scope_unavailable", "freshness_debt", "expected_failed"),
+    ((1, 1, False, [], False), (1, 0, False, ["held"], True), (0, 0, False, [], False), (1, 1, True, [], True)),
+)
+def test_held_quote_scheduler_health_uses_canonical_scope_not_audit_backlog(
+    monkeypatch, canonical_count, canonical_covered, scope_unavailable, freshness_debt, expected_failed
+):
+    from src.ingest import price_channel_ingest as lane
+    from src.observability import scheduler_health
+
+    recorded = {}
+    monkeypatch.setattr(
+        lane,
+        "_edli_refresh_held_position_quote_evidence",
+        lambda: {
+            "canonical_held_pair_count": canonical_count,
+            "canonical_held_quote_ws_covered_tokens": canonical_covered,
+            "canonical_held_freshness_debt_token_ids": freshness_debt,
+            "canonical_held_scope_unavailable": scope_unavailable,
+            "held_token_metadata": 55,
+            "held_quote_refresh_events": 0,
+            "budget_skipped_tokens": 23,
+            "held_snapshot_refresh_debt_actions": [],
+            "held_snapshot_terminal_disposition_required": [],
+            "held_snapshot_refresh_enqueue_unavailable": [],
+        },
+    )
+    monkeypatch.setattr(scheduler_health, "_write_scheduler_health", lambda _name, **kwargs: recorded.update(kwargs))
+    result = lane._edli_held_quote_refresh_cycle()
+    assert recorded["failed"] is expected_failed
+    if not expected_failed:
+        assert result["audit_quote_refresh_degraded"] is True
+        assert result["audit_quote_refresh_degraded_reason"] == "quote_refresh_budget_exhausted_no_coverage"
+
+
 def test_held_snapshot_debt_rebuilds_from_exact_snapshot_outcome_not_queue_state(monkeypatch, tmp_path):
     from src.ingest import price_channel_ingest as lane
     from src.state import db as state_db
