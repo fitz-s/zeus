@@ -116,6 +116,7 @@ _CAPITAL_EVIDENCE_CHILD_CODE = (
 )
 _CAPITAL_EVIDENCE_CHILD_EXIT_GRACE_SECONDS = 2.0
 _CAPITAL_EVIDENCE_START_DELAY_SECONDS = 75.0
+_CAPITAL_EVIDENCE_READ_BUSY_TIMEOUT_MS = 5_000
 
 
 def _chain_sync_child_deadline_seconds() -> float:
@@ -357,12 +358,17 @@ def _current_regime_capital_evidence_isolated() -> dict[str, object]:
     started_at = datetime.now(timezone.utc)
     deadline = _capital_evidence_child_deadline_seconds()
     timeout = deadline + _CAPITAL_EVIDENCE_CHILD_EXIT_GRACE_SECONDS
+    child_env = os.environ.copy()
+    child_env["ZEUS_DB_BUSY_TIMEOUT_MS"] = str(
+        _CAPITAL_EVIDENCE_READ_BUSY_TIMEOUT_MS
+    )
     try:
         result = subprocess.run(
             [sys.executable, "-c", _CAPITAL_EVIDENCE_CHILD_CODE],
             cwd=Path(__file__).resolve().parents[2],
             check=False,
             timeout=timeout,
+            env=child_env,
         )
     except subprocess.TimeoutExpired as exc:
         raise RuntimeError(

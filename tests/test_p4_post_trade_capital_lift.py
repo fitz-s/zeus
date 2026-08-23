@@ -1134,8 +1134,10 @@ def test_capital_evidence_fail_verdict_is_a_successful_freshness_refresh(
 
     calls = []
 
-    def _run(cmd, *, cwd, check, timeout):
-        calls.append((cmd, cwd, check, timeout))
+    def _run(cmd, *, cwd, check, timeout, env):
+        calls.append(
+            (cmd, cwd, check, timeout, env["ZEUS_DB_BUSY_TIMEOUT_MS"])
+        )
         (tmp_path / "current_regime_capital_advantage.json").write_text(
             json.dumps(
                 {
@@ -1154,6 +1156,7 @@ def test_capital_evidence_fail_verdict_is_a_successful_freshness_refresh(
     monkeypatch.setattr(
         daemon, "_capital_evidence_child_deadline_seconds", lambda: 45.0
     )
+    monkeypatch.setenv("ZEUS_DB_BUSY_TIMEOUT_MS", "300000")
     monkeypatch.setattr("src.config.state_path", lambda name: tmp_path / name)
 
     artifact = daemon._current_regime_capital_evidence_isolated()
@@ -1165,6 +1168,7 @@ def test_capital_evidence_fail_verdict_is_a_successful_freshness_refresh(
             daemon.Path(daemon.__file__).resolve().parents[2],
             False,
             47.0,
+            "5000",
         )
     ]
 
@@ -1185,6 +1189,7 @@ def test_capital_evidence_default_deadline_covers_bounded_curve_reads(monkeypatc
 
     variable = "ZEUS_POST_TRADE_CAPITAL_EVIDENCE_DEADLINE_SECONDS"
     assert daemon._CAPITAL_EVIDENCE_START_DELAY_SECONDS == 75.0
+    assert daemon._CAPITAL_EVIDENCE_READ_BUSY_TIMEOUT_MS == 5_000
     monkeypatch.delenv(variable, raising=False)
     assert daemon._capital_evidence_child_deadline_seconds() == 75.0
 
