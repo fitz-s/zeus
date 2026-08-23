@@ -2508,7 +2508,9 @@ _PROVIDER_LIMIT_TERMS = (
 )
 
 
-def _parse_terminal_failure(events_path: Path) -> dict[str, Any] | None:
+def _parse_terminal_failure(
+    events_path: Path, cfg: Mapping[str, Any] | None = None
+) -> dict[str, Any] | None:
     """Read terminal Codex failure events even when the CLI exits rc=0."""
 
     turn_errors: list[Mapping[str, Any]] = []
@@ -2566,10 +2568,10 @@ def _parse_terminal_failure(events_path: Path) -> dict[str, Any] | None:
     raw = " ".join([detail_text, *linked_detail]).lower()
     provider_limit = any(code in provider_codes or code.endswith("_quota_exceeded") for code in codes)
     provider_limit = provider_limit or any(term in raw for term in _PROVIDER_LIMIT_TERMS)
-    retry_at = _retry_at_from_failure(failed)
+    retry_at = _retry_at_from_failure(failed, cfg)
     if retry_at is None:
         for error_event in reversed(linked_errors):
-            retry_at = _retry_at_from_failure(error_event)
+            retry_at = _retry_at_from_failure(error_event, cfg)
             if retry_at is not None:
                 break
     return {
@@ -2580,7 +2582,20 @@ def _parse_terminal_failure(events_path: Path) -> dict[str, Any] | None:
     }
 
 
-def _retry_at_from_failure(event: Mapping[str, Any]) -> str | None:
+def _retry_at_from_failure(
+    event: Mapping[str, Any], cfg: Mapping[str, Any] | None = None
+) -> str | None:
+    max_seconds = float((cfg or {}).get("loop", {}).get("max_provider_backoff_seconds", 86_400))
+    max_seconds = max(1.0, min(max_seconds, 86_400.0))
+    minimum_seconds = float((cfg or {}).get("loop", {}).get("provider_cooldown_seconds", 300))
+    minimum_seconds = max(1.0, min(minimum_seconds, max_seconds))
+
+    def bounded_absolute(value: datetime) -> str | None:
+        seconds = (value - now()).total_seconds()
+        if not math.isfinite(seconds) or seconds <= 0:
+            return None
+        return iso(now() + timedelta(seconds=max(minimum_seconds, min(seconds, max_seconds))))
+
     for key in (
         "next_retry_at", "retry_at", "reset_at", "retry_after",
         "retry_after_seconds", "retry_after_ms",
@@ -2592,7 +2607,10 @@ def _retry_at_from_failure(event: Mapping[str, Any]) -> str | None:
             continue
         parsed = parse_time(str(value))
         if parsed is not None:
-            return iso(parsed)
+            bounded = bounded_absolute(parsed)
+            if bounded is not None:
+                return bounded
+            continue
         try:
             numeric = float(value)
         except (TypeError, ValueError, OverflowError):
@@ -2603,9 +2621,17 @@ def _retry_at_from_failure(event: Mapping[str, Any]) -> str | None:
             if key.endswith("_ms") or key == "retry_after_ms":
                 seconds = numeric / 1000.0
             elif numeric >= 1_000_000_000_000:
-                seconds = (numeric / 1000.0) - now().timestamp()
+                absolute = datetime.fromtimestamp(numeric / 1000.0, UTC)
+                bounded = bounded_absolute(absolute)
+                if bounded is not None:
+                    return bounded
+                continue
             elif numeric >= 1_000_000_000:
-                return iso(datetime.fromtimestamp(numeric, UTC))
+                absolute = datetime.fromtimestamp(numeric, UTC)
+                bounded = bounded_absolute(absolute)
+                if bounded is not None:
+                    return bounded
+                continue
             elif key.endswith("_seconds") or key == "retry_after":
                 seconds = numeric
             elif numeric <= 86_400:
@@ -2643,9 +2669,16 @@ def _set_provider_backoff(
     failure: Mapping[str, Any],
 ) -> dict[str, Any]:
     retry_at = parse_time(str(failure.get("retry_at") or ""))
+    max_seconds = max(1.0, min(float(cfg["loop"].get("max_provider_backoff_seconds", 86_400)), 86_400.0))
+    minimum_seconds = max(1.0, min(float(cfg["loop"].get("provider_cooldown_seconds", 300)), max_seconds))
+    if retry_at is not None:
+        remaining = (retry_at - now()).total_seconds()
+        if not math.isfinite(remaining) or remaining <= 0:
+            retry_at = None
+        else:
+            retry_at = now() + timedelta(seconds=max(minimum_seconds, min(remaining, max_seconds)))
     if retry_at is None:
-        seconds = max(1.0, min(float(cfg["loop"].get("provider_cooldown_seconds", 300)), 86_400.0))
-        retry_at = now() + timedelta(seconds=seconds)
+        retry_at = now() + timedelta(seconds=minimum_seconds)
     payload = {
         "next_retry_at": iso(retry_at),
         "reason": str(failure.get("reason") or "provider_quota_limit")[:1000],
@@ -3760,7 +3793,7 @@ def _finish_run_inner(cfg: Mapping[str, Any], run: dict[str, Any], returncode: i
     path = runtime_dir(cfg) / "runs" / f"{run['run_id']}.json"
     events = Path(str(run["events"]))
     session, usage = _parse_session(events)
-    terminal_failure = _parse_terminal_failure(events)
+    terminal_failure = _parse_terminal_failure(events, cfg)
     effective_failed = returncode != 0 or terminal_failure is not None
     run["status"] = "failed" if effective_failed else "completed"
     run["returncode"] = returncode

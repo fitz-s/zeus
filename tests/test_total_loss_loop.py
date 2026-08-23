@@ -457,9 +457,10 @@ def test_provider_backoff_suppresses_global_launch_but_detector_continues(
 
 def test_provider_backoff_expiry_restores_dispatch_eligibility(cfg: dict, monkeypatch: pytest.MonkeyPatch) -> None:
     with loop.memory(cfg) as mem:
-        loop._set_provider_backoff(
-            cfg, mem,
-            {"kind": "provider_quota_limit", "reason": "quota", "retry_at": "2000-01-01T00:00:00+00:00"},
+        loop.meta_set(
+            mem,
+            "codex_provider_backoff",
+            json.dumps({"kind": "provider_quota_limit", "reason": "quota", "next_retry_at": "2000-01-01T00:00:00+00:00"}),
         )
         mem.commit()
     _queue_blind_dispatch_debt(cfg, incident_id="cooldown-expired")
@@ -515,19 +516,36 @@ def test_terminal_failure_is_turn_scoped_and_structured_codes_win(tmp_path: Path
 
 
 def test_retry_timestamp_units_and_invalid_values_fall_back_bounded(cfg: dict) -> None:
-    seconds = loop._retry_at_from_failure({"retry_after_seconds": 2})
-    milliseconds = loop._retry_at_from_failure({"retry_after_ms": 2_000})
+    cfg["loop"]["provider_cooldown_seconds"] = 2
+    seconds = loop._retry_at_from_failure({"retry_after_seconds": 2}, cfg)
+    milliseconds = loop._retry_at_from_failure({"retry_after_ms": 2_000}, cfg)
     assert seconds is not None and milliseconds is not None
     assert (loop.parse_time(seconds) - loop.now()).total_seconds() < 10
     assert (loop.parse_time(milliseconds) - loop.now()).total_seconds() < 10
-    assert loop._retry_at_from_failure({"retry_after": "not-a-time"}) is None
-    cfg["loop"]["provider_cooldown_seconds"] = 2
+    assert loop._retry_at_from_failure({"retry_after": "not-a-time"}, cfg) is None
     with loop.memory(cfg) as mem:
         payload = loop._set_provider_backoff(
             cfg, mem, {"provider_wide": True, "reason": "invalid retry"}
         )
         mem.commit()
     assert 0 < (loop.parse_time(payload["next_retry_at"]) - loop.now()).total_seconds() < 10
+
+
+def test_absolute_provider_retry_targets_are_bounded_and_past_falls_back(cfg: dict) -> None:
+    cfg["loop"].update(provider_cooldown_seconds=2, max_provider_backoff_seconds=10)
+    far_iso = loop._retry_at_from_failure({"retry_at": "2099-01-01T00:00:00+00:00"}, cfg)
+    far_epoch = loop._retry_at_from_failure({"retry_at": 4_102_444_800}, cfg)
+    past = loop._retry_at_from_failure({"retry_at": "2000-01-01T00:00:00+00:00"}, cfg)
+    assert far_iso is not None and far_epoch is not None
+    assert 1.0 < (loop.parse_time(far_iso) - loop.now()).total_seconds() <= 10.5
+    assert 1.0 < (loop.parse_time(far_epoch) - loop.now()).total_seconds() <= 10.5
+    assert past is None
+    with loop.memory(cfg) as mem:
+        payload = loop._set_provider_backoff(
+            cfg, mem, {"retry_at": "2099-01-01T00:00:00+00:00", "reason": "far"}
+        )
+        mem.commit()
+    assert (loop.parse_time(payload["next_retry_at"]) - loop.now()).total_seconds() <= 10.5
 
 
 def test_launch_guard_rechecks_durable_backoff_before_each_spawn(
