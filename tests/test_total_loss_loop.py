@@ -431,7 +431,9 @@ def test_rc0_turn_failed_is_failed_and_requeues_incident(cfg: dict) -> None:
             "SELECT reason FROM incident_transitions WHERE incident_id='turn-failed'"
         ).fetchone()[0]
     assert "codex_terminal_failure:provider_quota_limit" in reason
-    assert loop._provider_backoff(cfg) is not None
+    backoff = loop._provider_backoff(cfg)
+    assert backoff is not None
+    assert (loop.parse_time(backoff["next_retry_at"]) - loop.now()).total_seconds() > 23 * 3600
 
 
 def test_provider_backoff_suppresses_global_launch_but_detector_continues(
@@ -513,6 +515,12 @@ def test_terminal_failure_is_turn_scoped_and_structured_codes_win(tmp_path: Path
         + "\n"
     )
     assert loop._parse_terminal_failure(path)["kind"] == "provider_quota_limit"
+
+    path.write_text(
+        json.dumps({"type": "turn.failed", "error": {"code": "rate_limit_exceeded", "message": "retry later"}})
+        + "\n"
+    )
+    assert loop._parse_terminal_failure(path)["kind"] == "provider_rate_limit"
 
     path.write_text(
         json.dumps({"type": "error", "error": {"message": "the documentation says you've hit your usage limit"}})

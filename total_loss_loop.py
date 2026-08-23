@@ -2580,19 +2580,25 @@ def _parse_terminal_failure(
             for key in ("code", "error_code", "provider_code"):
                 if source.get(key):
                     codes.append(str(source[key]).lower().replace("-", "_"))
-    provider_codes = {
+    quota_codes = {
         "usage_limit", "usage_limit_exceeded", "quota_exceeded",
-        "rate_limit", "rate_limit_exceeded", "resource_exhausted",
     }
+    rate_codes = {"rate_limit", "rate_limit_exceeded", "resource_exhausted"}
     provider_messages = [
         _terminal_error_message(item)
         for item in [failed, *linked_errors]
     ]
-    provider_limit = any(code in provider_codes or code.endswith("_quota_exceeded") for code in codes)
-    provider_limit = provider_limit or any(
+    quota_signal = any(code in quota_codes or code.endswith("_quota_exceeded") for code in codes)
+    rate_signal = any(code in rate_codes for code in codes)
+    quota_signal = quota_signal or any(
         bool(_PROVIDER_LIMIT_MESSAGE.search(" ".join(message.lower().replace("’", "'").split())))
         for message in provider_messages
     )
+    rate_signal = rate_signal or any(
+        bool(re.search(r"^(?:rate\s+limit\s+(?:reached|exceeded)|too\s+many\s+requests|resource\s+exhausted)\b", " ".join(message.lower().split())))
+        for message in provider_messages
+    )
+    provider_limit = quota_signal or rate_signal
     retry_at = _retry_at_from_failure(failed, cfg)
     if retry_at is None:
         for error_event in reversed(linked_errors):
@@ -2600,7 +2606,11 @@ def _parse_terminal_failure(
             if retry_at is not None:
                 break
     return {
-        "kind": "provider_quota_limit" if provider_limit else "terminal_failure",
+        "kind": (
+            "provider_quota_limit" if quota_signal
+            else "provider_rate_limit" if rate_signal
+            else "terminal_failure"
+        ),
         "reason": detail_text[:1000] or "codex_turn_failed",
         "provider_wide": provider_limit,
         "retry_at": retry_at,
@@ -2715,7 +2725,12 @@ def _set_provider_backoff(
         else:
             retry_at = now() + timedelta(seconds=max(minimum_seconds, min(remaining, max_seconds)))
     if retry_at is None:
-        retry_at = now() + timedelta(seconds=minimum_seconds)
+        fallback_seconds = (
+            max_seconds
+            if str(failure.get("kind") or "") == "provider_quota_limit"
+            else minimum_seconds
+        )
+        retry_at = now() + timedelta(seconds=fallback_seconds)
     payload = {
         "next_retry_at": iso(retry_at),
         "reason": str(failure.get("reason") or "provider_quota_limit")[:1000],
