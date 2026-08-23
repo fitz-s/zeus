@@ -1,6 +1,6 @@
 # Created: 2026-06-06
-# Last reused/audited: 2026-08-22
-# Lifecycle: created=2026-06-06; last_reviewed=2026-08-22; last_reused=2026-08-22
+# Last reused/audited: 2026-08-23
+# Lifecycle: created=2026-06-06; last_reviewed=2026-08-23; last_reused=2026-08-23
 # Purpose: Protect DB materialization for Open-Meteo ECMWF IFS 9km + Bayes-fusion replacement live layer.
 # Reuse: Run before changing replacement forecast live/experiment write path.
 # Authority basis: Operator-directed replacement forecast simple-switch readiness.
@@ -4879,3 +4879,98 @@ def test_materialize_script_fails_closed_without_precision_metadata(tmp_path) ->
     payload = json.loads(result.stderr)
     assert payload["status"] == "ERROR"
     assert "precision_metadata_json" in payload["error"]
+
+
+def test_boot_current_posterior_family_scan_uses_covering_index(
+    tmp_path: Path,
+) -> None:
+    from src.data import replacement_forecast_production as production
+
+    forecast_db = tmp_path / "forecasts.db"
+    conn = sqlite3.connect(forecast_db)
+    conn.executescript(
+        """
+        CREATE TABLE forecast_posteriors (
+            posterior_id INTEGER PRIMARY KEY,
+            city TEXT NOT NULL,
+            target_date TEXT NOT NULL,
+            temperature_metric TEXT NOT NULL,
+            computed_at TEXT NOT NULL,
+            runtime_layer TEXT NOT NULL,
+            training_allowed INTEGER NOT NULL,
+            q_json TEXT NOT NULL
+        );
+        CREATE INDEX idx_forecast_posteriors_runtime_layer_target
+            ON forecast_posteriors(
+                runtime_layer, city, target_date, temperature_metric, computed_at
+            );
+        """
+    )
+    conn.executemany(
+        "INSERT INTO forecast_posteriors VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            (
+                1,
+                "Paris",
+                "2026-08-23",
+                "high",
+                "2026-08-23T09:00:00+00:00",
+                "live",
+                0,
+                "x" * 100_000,
+            ),
+            (
+                2,
+                "Munich",
+                "2026-08-23",
+                "high",
+                "2026-08-23T09:01:00+00:00",
+                "live",
+                0,
+                "y" * 100_000,
+            ),
+            (
+                3,
+                "Paris",
+                "2026-08-23",
+                "high",
+                "2026-08-23T09:02:00+00:00",
+                "live",
+                0,
+                "z" * 100_000,
+            ),
+            (
+                4,
+                "Experiment",
+                "2026-08-23",
+                "high",
+                "2026-08-23T09:03:00+00:00",
+                "experiment",
+                1,
+                "e" * 100_000,
+            ),
+        ),
+    )
+    plan = tuple(
+        str(row[3])
+        for row in conn.execute(
+            "EXPLAIN QUERY PLAN "
+            + production._CURRENT_POSTERIOR_FAMILY_SCAN_SQL,
+            (100,),
+        )
+    )
+    conn.commit()
+    conn.close()
+
+    assert any(
+        "USING COVERING INDEX idx_forecast_posteriors_runtime_layer_target"
+        in detail
+        for detail in plan
+    )
+    assert production._current_forecast_posterior_families(
+        {"forecast_db": str(forecast_db)},
+        limit=2,
+    ) == (
+        ("Paris", "2026-08-23", "high"),
+        ("Munich", "2026-08-23", "high"),
+    )

@@ -3221,12 +3221,34 @@ def _run_replacement_forecast_live_materialization_queue_once(
     return report
 
 
+_CURRENT_POSTERIOR_FAMILY_SCAN_SQL = """
+    SELECT city,
+           target_date,
+           temperature_metric,
+           MAX(computed_at) AS latest_computed_at,
+           MAX(posterior_id) AS latest_posterior_id
+      FROM forecast_posteriors
+           INDEXED BY idx_forecast_posteriors_runtime_layer_target
+     WHERE runtime_layer = 'live'
+     GROUP BY city, target_date, temperature_metric
+     ORDER BY latest_computed_at DESC, latest_posterior_id DESC
+     LIMIT ?
+"""
+
+
 def _current_forecast_posterior_families(
     cfg: dict[str, object],
     *,
     limit: int = 100,
 ) -> tuple[tuple[str, str, str], ...]:
-    """Return current live families from the append tail, newest compute first."""
+    """Return current live families from the covering index, newest first.
+
+    This is boot catch-up scope only; it never grants probability authority.
+    Live materialization writes ``training_allowed=0`` by contract, while every
+    woken family is re-read and re-authorized downstream.  Keeping the query on
+    the runtime-layer covering index avoids decoding the table's large q/provenance
+    payloads after a cold daemon restart.
+    """
 
     raw_path = cfg.get("forecast_db")
     if not raw_path:
@@ -3240,46 +3262,20 @@ def _current_forecast_posterior_families(
 
         conn = _connect_read_only(path)
         family_limit = max(1, min(int(limit), 100))
-        cursor: int | None = None
-        scanned = 0
-        latest: dict[tuple[str, str, str], tuple[str, int]] = {}
-        while len(latest) < family_limit and scanned < 5_000:
-            cursor_filter = " AND rowid < ?" if cursor is not None else ""
-            params: tuple[object, ...] = (cursor, 256) if cursor is not None else (256,)
-            rows = conn.execute(
-                f"""
-                SELECT rowid,
-                       city,
-                       target_date,
-                       temperature_metric,
-                       computed_at
-                  FROM forecast_posteriors NOT INDEXED
-                 WHERE runtime_layer = 'live'
-                   AND training_allowed = 0
-                   {cursor_filter}
-                 ORDER BY rowid DESC
-                 LIMIT ?
-                """,
-                params,
-            ).fetchall()
-            if not rows:
-                break
-            scanned += len(rows)
-            cursor = int(rows[-1][0])
-            for row in rows:
-                family = (
-                    str(row[1] or "").strip(),
-                    str(row[2] or "").strip(),
-                    str(row[3] or "").strip(),
-                )
-                if all(family) and family not in latest:
-                    latest[family] = (str(row[4] or ""), int(row[0]))
-        ordered = sorted(
-            latest,
-            key=lambda family: (latest[family][0], latest[family][1]),
-            reverse=True,
-        )
-        return tuple(ordered[:family_limit])
+        rows = conn.execute(
+            _CURRENT_POSTERIOR_FAMILY_SCAN_SQL,
+            (family_limit,),
+        ).fetchall()
+        families: list[tuple[str, str, str]] = []
+        for row in rows:
+            family = (
+                str(row[0] or "").strip(),
+                str(row[1] or "").strip(),
+                str(row[2] or "").strip(),
+            )
+            if all(family):
+                families.append(family)
+        return tuple(families)
     except (OSError, sqlite3.Error, TypeError, ValueError):
         return ()
     finally:

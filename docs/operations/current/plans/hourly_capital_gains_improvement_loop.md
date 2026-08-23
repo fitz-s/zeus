@@ -891,6 +891,32 @@
   the later exact-baseline request sorts first on the same risk tier. Live proof
   remains a committed 00Z posterior and subsequent held-position redecision.
 
+### 2026-08-23 — keep forecast restart catch-up off posterior payload pages (B155)
+
+- **Observed defect:** after a forecast-live restart, the optional boot-wake
+  thread scanned `forecast_posteriors NOT INDEXED`. The live DB was 77.7 GB and
+  each row carried large q/provenance JSON; a process stack sample showed the
+  boot thread reading SQLite overflow pages while the only materialization
+  worker waited in subprocess polling. The one-second poll then skipped for
+  minutes under `max_instances=1`, even though B154 had correctly ranked the
+  fresh Ankara Day0 request first.
+- **Contract:** boot catch-up is a family-scope wake only, never probability or
+  submit authority. Read current live family identities from the existing
+  runtime-layer covering index, group to the newest family occurrence, and let
+  the ordinary reactor re-read every probability/book/wealth fact. Do not decode
+  q/provenance payloads and do not add a schema/index migration to the live DB.
+- **SCOPE / DRAIN / RESET:** scope is forecast-live restart catch-up only;
+  steady-state materialization, posterior math, canonical DB writes, and order
+  authority are unchanged. The covering query drains once at boot and publishes
+  at most 100 family hints. A later restart reconstructs the hints from current
+  indexed rows; failure remains fail-soft because committed materializations
+  publish their own exact wakes.
+- **Acceptance:** SQLite query-plan antibody must prove `USING COVERING INDEX`;
+  a live read-only probe must return 100 families from the 77.7 GB DB in bounded
+  time. After forecast-live restart, heartbeat and materialization must remain
+  concurrent, and the first current Day0 request must reach a committed posterior
+  without a multi-minute boot-scan stall.
+
 ### 2026-08-23 — spend the live Day0 observation clock before timeless FIFO (B154)
 
 - **Observed defect:** Madrid published a canonical 09:04:22 METAR and emitted
