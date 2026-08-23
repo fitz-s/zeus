@@ -611,7 +611,7 @@ def _insert_incident(
     priority: float,
 ) -> str | None:
     position_id = str(position["position_id"])
-    incident_id = digest(position_id, evidence_id) if kind == "hard" else digest(kind, position_id, evidence_id)
+    incident_id = digest(position_id, evidence_id) if kind == "hard" else digest(kind, position_id)
     crossing_kind = "no_bid" if bid is None else ("below_floor" if kind == "hard" else "precursor")
     if kind == "hard":
         existing = conn.execute(
@@ -1082,9 +1082,9 @@ def refresh_precursor(
         (precursor_id,),
     ).fetchone()
     if existing:
-        if existing[1] not in {"running", "queued"} and existing[2] != quote["evidence_id"]:
+        if existing[2] != quote["evidence_id"]:
             mem.execute(
-                "UPDATE incidents SET crossing_evidence_id=?,observed_bid=?,priority=?,status='queued',"
+                "UPDATE incidents SET crossing_evidence_id=?,observed_bid=?,priority=?,"
                 "evidence_revision=evidence_revision+1,updated_at=? WHERE incident_id=?",
                 (quote["evidence_id"], bid, score, iso(), precursor_id),
             )

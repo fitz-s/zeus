@@ -1068,6 +1068,31 @@ def test_no_hard_incident_uses_idle_capacity_for_top_precursor(cfg: dict) -> Non
     assert [row["kind"] for row in _incidents(cfg)] == ["precursor"]
 
 
+def test_precursor_identity_is_stable_across_quotes_while_hard_crossing_stays_evidence_bound(cfg: dict) -> None:
+    _position(cfg)
+    _quote(cfg, "precursor-1", "2026-08-22T09:00:01+00:00", 0.30)
+    loop.detect(cfg)
+    _quote(cfg, "precursor-2", "2026-08-22T09:00:02+00:00", 0.20)
+    loop.detect(cfg)
+
+    precursor = [row for row in _incidents(cfg) if row["kind"] == "precursor"]
+    assert len(precursor) == 1
+    assert precursor[0]["incident_id"] == loop.digest("precursor", "p1")
+    assert precursor[0]["crossing_evidence_id"] == "precursor-2"
+    assert precursor[0]["evidence_revision"] == 2
+
+    _quote(cfg, "hard-later", "2026-08-22T09:00:04+00:00", 0.04)
+    loop.detect(cfg)
+    _quote(cfg, "hard-earlier", "2026-08-22T09:00:03+00:00", 0.03, latest=False)
+    loop.detect(cfg)
+
+    hard = [row for row in _incidents(cfg) if row["kind"] == "hard"]
+    assert len(hard) == 1
+    assert hard[0]["incident_id"] == loop.digest("p1", "hard-later")
+    assert hard[0]["crossing_evidence_id"] == "hard-earlier"
+    assert hard[0]["evidence_revision"] == 2
+
+
 def test_hard_incident_suppresses_precursor_creation(cfg: dict) -> None:
     _position(cfg)
     _quote(cfg, "q-low", "2026-08-22T09:00:02+00:00", 0.01)
