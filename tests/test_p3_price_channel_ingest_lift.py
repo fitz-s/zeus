@@ -4041,7 +4041,11 @@ def test_held_position_quote_refresh_backpressures_without_db_write_or_clob(monk
         "_edli_held_position_priority_token_ids",
         lambda conn: ["yes-token", "no-token"],
     )
-    monkeypatch.setattr(lane, "_edli_canonical_open_held_pairs", lambda conn: set())
+    monkeypatch.setattr(
+        lane,
+        "_edli_canonical_open_held_pairs",
+        lambda conn: {("0xcondition", "yes-token")},
+    )
     monkeypatch.setattr(
         lane,
         "_edli_order_token_ids_by_feasibility_age",
@@ -4090,6 +4094,9 @@ def test_held_position_quote_refresh_backpressures_without_db_write_or_clob(monk
     assert result["held_quote_refresh_events"] == 0
     assert result["held_quote_refresh_attempted_tokens"] == 0
     assert result["budget_skipped_tokens"] == 2
+    assert result["canonical_held_freshness_debt_token_ids"] == ["yes-token"]
+    assert result["canonical_rest_due_token_ids"] == ["yes-token"]
+    assert result["canonical_rest_refreshed_token_ids"] == []
 
 
 def test_held_quote_refresh_skips_missing_metadata_tokens_to_refresh_tradeable_holds(monkeypatch):
@@ -4139,8 +4146,18 @@ def test_held_quote_refresh_skips_missing_metadata_tokens_to_refresh_tradeable_h
         def __init__(self, *args, **kwargs):  # noqa: ANN002, ANN003
             pass
 
-        def seed_rest_books_in_chunks(self, *, token_ids, **kwargs):  # noqa: ANN001, ANN003
+        def seed_rest_books_in_chunks(
+            self, *, token_ids, post_commit_quote_sink, **kwargs  # noqa: ANN001, ANN003
+        ):
             seen["rest_seed"] = list(token_ids)
+            post_commit_quote_sink(
+                [
+                    types.SimpleNamespace(
+                        payload_json=json.dumps({"token_id": token_id})
+                    )
+                    for token_id in token_ids
+                ]
+            )
             return len(token_ids)
 
     class FakePolymarketClient:
@@ -4338,8 +4355,18 @@ def test_held_quote_refresh_admits_all_native_held_sides_before_audit_backlog(mo
         def __init__(self, *args, **kwargs):  # noqa: ANN002, ANN003
             pass
 
-        def seed_rest_books_in_chunks(self, *, token_ids, **kwargs):  # noqa: ANN001, ANN003
+        def seed_rest_books_in_chunks(
+            self, *, token_ids, post_commit_quote_sink, **kwargs  # noqa: ANN001, ANN003
+        ):
             seen["rest_seed"] = list(token_ids)
+            post_commit_quote_sink(
+                [
+                    types.SimpleNamespace(
+                        payload_json=json.dumps({"token_id": token_id})
+                    )
+                    for token_id in token_ids
+                ]
+            )
             return len(token_ids)
 
     class FakePolymarketClient:
@@ -4371,6 +4398,7 @@ def test_held_quote_refresh_admits_all_native_held_sides_before_audit_backlog(mo
     assert set(seen["rest_seed"][:19]) == held
     assert result["canonical_held_token_ids"] == 19
     assert result["canonical_held_freshness_debt_token_ids"] == []
+    assert set(result["canonical_rest_refreshed_token_ids"]) == held
     assert result["held_quote_refresh_selected_tokens"] == 32
 
 
@@ -4695,7 +4723,7 @@ def test_held_snapshot_debt_rebuilds_from_exact_snapshot_outcome_not_queue_state
     assert actions == []
 
 
-def test_held_quote_commit_without_persistent_sink_records_only_native_snapshot_debt(monkeypatch):
+def test_held_quote_commit_tracks_exact_native_refresh_and_rejects_audit_only_commit(monkeypatch):
     from types import SimpleNamespace
 
     from src.data import polymarket_client
@@ -4740,6 +4768,7 @@ def test_held_quote_commit_without_persistent_sink_records_only_native_snapshot_
     class FakeService:
         rest_seed_backpressure_count = 0
         rest_seed_backpressure_reason = None
+        emit_native = True
 
         def __init__(self, *args, **kwargs):  # noqa: ANN002, ANN003
             pass
@@ -4747,10 +4776,11 @@ def test_held_quote_commit_without_persistent_sink_records_only_native_snapshot_
         def seed_rest_books_in_chunks(self, *, token_ids, commit, post_commit_quote_sink, **kwargs):  # noqa: ANN001, ANN003
             commit()
             committed.append(True)
+            emitted = list(token_ids) if self.emit_native else [audit]
             post_commit_quote_sink(
                 [
                     SimpleNamespace(payload_json=json.dumps({"token_id": token_id}))
-                    for token_id in token_ids
+                    for token_id in emitted
                 ]
             )
             return len(token_ids)
@@ -4779,6 +4809,9 @@ def test_held_quote_commit_without_persistent_sink_records_only_native_snapshot_
     result = lane._edli_held_quote_refresh_cycle()
 
     assert committed == [True]
+    assert result["canonical_held_freshness_debt_token_ids"] == []
+    assert result["canonical_rest_due_token_ids"] == [native]
+    assert result["canonical_rest_refreshed_token_ids"] == [native]
     assert result["scheduler_failure_reason"] == "canonical_held_snapshot_refresh_debt"
     assert result["held_snapshot_refresh_debt_actions"] == [
         {
@@ -4788,6 +4821,19 @@ def test_held_quote_commit_without_persistent_sink_records_only_native_snapshot_
             "debt_reason": "snapshot_projection_unavailable",
         }
     ]
+    assert recorded["failed"] is True
+
+    FakeService.emit_native = False
+    recorded.clear()
+    audit_only = lane._edli_held_quote_refresh_cycle()
+
+    assert committed == [True, True]
+    assert audit_only["canonical_held_freshness_debt_token_ids"] == [native]
+    assert audit_only["canonical_rest_due_token_ids"] == [native]
+    assert audit_only["canonical_rest_refreshed_token_ids"] == []
+    assert audit_only["scheduler_failure_reason"] == (
+        "canonical_held_freshness_capacity_exhausted"
+    )
     assert recorded["failed"] is True
 
 
