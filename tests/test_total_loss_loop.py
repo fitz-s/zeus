@@ -574,6 +574,31 @@ def test_hard_incident_suppresses_precursor_creation(cfg: dict) -> None:
     assert [row["kind"] for row in _incidents(cfg)] == ["hard"]
 
 
+def test_hard_incident_does_not_starve_other_position_precursor(cfg: dict) -> None:
+    _position(cfg, position_id="p1")
+    _position(cfg, position_id="p2")
+    with sqlite3.connect(cfg["paths"]["trades_db"]) as conn:
+        conn.execute(
+            "UPDATE position_current SET token_id='yes-token-2', no_token_id='no-token-2' WHERE position_id='p2'"
+        )
+    _quote(cfg, "p1-hard", "2026-08-22T09:00:02+00:00", 0.01)
+    _quote(
+        cfg,
+        "p2-precursor",
+        "2026-08-22T09:00:03+00:00",
+        0.20,
+        token="yes-token-2",
+    )
+
+    loop.detect(cfg)
+
+    rows = _incidents(cfg)
+    assert [(row["kind"], row["position_id"]) for row in rows] == [
+        ("hard", "p1"),
+        ("precursor", "p2"),
+    ]
+
+
 def test_historical_backfill_ignores_low_quote_before_entry(cfg: dict) -> None:
     _position(cfg)
     _event(

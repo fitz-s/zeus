@@ -987,13 +987,19 @@ def refresh_precursor(
     latest: Mapping[str, Mapping[str, Any]],
     floor: float,
 ) -> str | None:
-    pending_hard = mem.execute(
-        "SELECT 1 FROM incidents WHERE kind='hard' AND status IN ('queued','running','retry_pending') LIMIT 1"
-    ).fetchone()
-    if pending_hard or not open_positions:
+    if not open_positions:
         return None
+    pending_hard_positions = {
+        str(row[0])
+        for row in mem.execute(
+            "SELECT position_id FROM incidents WHERE kind='hard' "
+            "AND status IN ('queued','running','retry_pending')"
+        ).fetchall()
+    }
     ranked: list[tuple[float, dict[str, Any], Mapping[str, Any]]] = []
     for position in open_positions:
+        if str(position["position_id"]) in pending_hard_positions:
+            continue
         quote = latest.get(str(position["position_id"]))
         if not quote:
             continue
@@ -2250,12 +2256,36 @@ def _terminate_process_group(pid: int, *, grace_seconds: float = 5.0) -> None:
 
 
 def _claim(cfg: Mapping[str, Any], kind: str) -> sqlite3.Row | None:
+    try:
+        with open_ro(Path(str(cfg["paths"]["trades_db"]))) as trades:
+            exposed_positions = {
+                str(row[0])
+                for row in trades.execute(
+                    "SELECT position_id FROM position_current WHERE phase IN "
+                    "('pending_entry','active','day0_window','pending_exit') "
+                    "AND CAST(COALESCE(chain_shares, shares, 0) AS REAL) > 0"
+                ).fetchall()
+            }
+    except sqlite3.Error:
+        return None
     with memory(cfg) as mem:
-        row = mem.execute(
-            "SELECT * FROM incidents WHERE kind=? AND status='queued' AND stage='blind' "
-            "ORDER BY priority DESC,detected_at LIMIT 1",
+        rows = mem.execute(
+            "SELECT * FROM incidents WHERE kind=? AND status='queued' AND stage='blind'",
             (kind,),
-        ).fetchone()
+        ).fetchall()
+        row = next(
+            iter(sorted(
+                rows,
+                key=lambda candidate: (
+                    str(candidate["position_id"]) in exposed_positions,
+                    float(candidate["priority"] or 0),
+                    float(candidate["avoidable_loss_usd"] or 0),
+                    str(candidate["detected_at"] or ""),
+                ),
+                reverse=True,
+            )),
+            None,
+        )
         if row is None:
             return None
         mem.execute("UPDATE incidents SET status='running',updated_at=? WHERE incident_id=?", (iso(), row["incident_id"]))
@@ -2629,11 +2659,12 @@ def dispatch(cfg: Mapping[str, Any]) -> list[str]:
             mem.commit()
     launched = _retry_pending(cfg, running)
     if launched:
-        return launched
+        running = _running(cfg)
     _recover_classification_debt(cfg, running)
     repair = _dispatch_repair_waiting(cfg, running)
     if repair:
-        return [repair]
+        launched.append(repair)
+        running = _running(cfg)
     by_kind = {
         kind: sum(
             1
