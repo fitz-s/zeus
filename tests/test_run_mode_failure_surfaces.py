@@ -11704,6 +11704,123 @@ def test_reactor_poll_does_not_run_ordinary_work_when_exact_debt_is_unreadable(
     assert reads == []
 
 
+def test_exact_held_sell_wake_bypasses_monitor_defer_and_retries_after_lock_release(
+    monkeypatch,
+) -> None:
+    import src.main as main_module
+    import src.runtime.reactor_wake as wake_module
+
+    request = wake_module.make_held_sell_reauction_request(
+        position_id="milan-exact-position",
+        family=("Milan", "2026-08-23", "high"),
+        probability_content_identity="q-milan-exact",
+        held_token_id="milan-exact-token",
+        held_best_bid=0.21,
+        bid_observed_at="2026-08-23T12:00:00+00:00",
+        probability_observed_at="2026-08-23T12:00:00+00:00",
+        completion_deadline_at="2026-08-23T12:00:30+00:00",
+        schema_version=4,
+        book_state="EXECUTABLE",
+    )
+    wake = wake_module.ReactorWake(
+        "wake-milan-exact",
+        "2026-08-23T12:00:00+00:00",
+        "held_position_monitor",
+        wake_module.GLOBAL_AUCTION_COMPLETION_WAKE_REASON,
+        forecast_families=(request.family,),
+        held_sell_reauction_requests=(request,),
+    )
+
+    class Gate:
+        locked_now = True
+
+        def locked(self) -> bool:
+            return self.locked_now
+
+    gate = Gate()
+    defer_calls: list[str] = []
+    cycle_calls: list[dict] = []
+    monkeypatch.setattr(
+        main_module,
+        "_defer_for_held_position_monitor",
+        lambda job: defer_calls.append(job) or True,
+    )
+    monkeypatch.setattr(
+        wake_module,
+        "exact_held_sell_completion_wake_ids",
+        lambda **kwargs: (
+            frozenset({wake.wake_id})
+            if kwargs == {"fail_on_error": True}
+            else pytest.fail("exact wake ids must use fail_on_error")
+        ),
+    )
+    monkeypatch.setattr(wake_module, "read_reactor_wake", lambda **_kwargs: wake)
+    monkeypatch.setattr(wake_module, "coalescible_reactor_wakes", lambda _wake: (wake,))
+    monkeypatch.setattr(
+        wake_module,
+        "held_sell_reauction_requests_completed",
+        lambda _requests: False,
+    )
+    monkeypatch.setattr(main_module, "_exit_monitor_excluded_wake_ids", lambda: frozenset())
+    monkeypatch.setattr(
+        main_module, "_collateral_authority_wake_backoff_ids", lambda: frozenset()
+    )
+    monkeypatch.setattr(
+        main_module, "_paused_forecast_carrier_priority_allowed", lambda **_kwargs: False
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_periodic_held_position_monitor_fairness_debt",
+        type(main_module._periodic_held_position_monitor_fairness_debt)(),
+    )
+    monkeypatch.setattr(main_module, "_edli_reactor_active_lock", gate)
+    monkeypatch.setattr(
+        main_module,
+        "_edli_event_reactor_cycle",
+        lambda **kwargs: cycle_calls.append(kwargs) or True,
+    )
+    monkeypatch.setattr(main_module, "_edli_last_reactor_wake_id", None)
+
+    assert main_module._edli_reactor_wake_poll_once() is False
+    assert defer_calls == []
+    assert cycle_calls == []
+
+    gate.locked_now = False
+    assert main_module._edli_reactor_wake_poll_once() is False
+    assert cycle_calls == [
+        {
+            "producer_wake_reason": wake.reason,
+            "producer_wake_ids": (wake.wake_id,),
+            "producer_wake_published_at": wake.published_at,
+            "producer_wake_event_ids": (),
+            "producer_wake_families": wake.forecast_families,
+            "allow_paused_forecast_snapshot_completion": False,
+            "producer_held_sell_reauction_requests": (request,),
+        }
+    ]
+
+
+def test_reactor_poll_defers_ordinary_work_after_exact_debt_read(monkeypatch) -> None:
+    import src.main as main_module
+    import src.runtime.reactor_wake as wake_module
+
+    reads: list[dict] = []
+    monkeypatch.setattr(
+        wake_module,
+        "exact_held_sell_completion_wake_ids",
+        lambda **kwargs: frozenset() if kwargs == {"fail_on_error": True} else None,
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_defer_for_held_position_monitor",
+        lambda job: job == "edli_event_reactor",
+    )
+    monkeypatch.setattr(wake_module, "read_reactor_wake", lambda **kwargs: reads.append(kwargs))
+
+    assert main_module._edli_reactor_wake_poll_once() is False
+    assert reads == []
+
+
 def test_reactor_wrapper_keeps_existing_canonical_debt_family_scoped(
     monkeypatch,
 ) -> None:

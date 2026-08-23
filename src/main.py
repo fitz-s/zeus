@@ -6338,9 +6338,6 @@ def _edli_reactor_wake_poll_once() -> bool:
 
     global _edli_last_reactor_wake_id
 
-    if _defer_for_held_position_monitor("edli_event_reactor"):
-        return False
-
     from src.runtime.reactor_wake import (
         GLOBAL_AUCTION_COMPLETION_WAKE_REASON,
         SUPERSEDED_BY_DAY0_HARD_FACT_STRUCTURAL_WIN,
@@ -6364,6 +6361,11 @@ def _edli_reactor_wake_poll_once() -> bool:
             "exact held-SELL completion selection unreadable; retaining wake debt",
             exc_info=True,
         )
+        return False
+    if (
+        not exact_held_sell_wake_ids
+        and _defer_for_held_position_monitor("edli_event_reactor")
+    ):
         return False
     if reactor_blocked_by_monitor_fairness and not exact_held_sell_wake_ids:
         return False
