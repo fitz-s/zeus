@@ -1,7 +1,7 @@
 """Runtime guard and live-cycle wiring tests."""
-# Lifecycle: created=2026-04-28; last_reviewed=2026-08-15; last_reused=2026-08-15
+# Lifecycle: created=2026-04-28; last_reviewed=2026-08-23; last_reused=2026-08-23
 # Created: 2026-04-28
-# Last reused/audited: 2026-08-15
+# Last reused/audited: 2026-08-23
 # Authority basis: docs/archive/2026-Q2/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md; task_2026-04-28_contamination_remediation Batch G; Phase 1B ENS snapshot persistence; Phase 1D forecast source policy; PR #56 MarketPhaseEvidence sidecar propagation; Wave26 explicit position env authority; task.md B3 exit executable snapshot identity; docs/operations/task_2026-05-21_live_side_effect_risk_boundaries/task.md P1-2 cluster projection; docs/archive/2026-Q2/task_2026-05-22_crosscheck_valid_window/CROSSCHECK_VALID_WINDOW_PLAN.md.
 #                  2026-08-15 economic-ready recent-exit hotfix.
 # Purpose: Lock runtime guard and live-cycle wiring contracts.
@@ -1014,6 +1014,181 @@ def test_held_monitor_uses_fresh_local_depth_before_network(monkeypatch, tmp_pat
     assert quote.best_bid == pytest.approx(0.40)
     assert quote.best_ask == pytest.approx(0.44)
     assert summary["held_monitor_orderbooks_local"] == 1
+    assert summary["held_monitor_orderbooks_network_requested"] == 0
+    conn.close()
+
+
+def test_held_monitor_uses_causal_market_channel_depth_after_snapshot_invalidation(
+    tmp_path,
+):
+    from src.engine import cycle_runtime, monitor_refresh
+    from src.state.snapshot_repo import (
+        init_snapshot_schema,
+        record_snapshot_invalidation,
+    )
+
+    conn = get_connection(tmp_path / "market-channel-monitor-depth.db")
+    init_schema(conn)
+    init_schema_trade_only(conn)
+    init_snapshot_schema(conn)
+    checked_at = datetime(2026, 8, 23, 13, 18, 6, tzinfo=timezone.utc)
+    snapshot_at = checked_at - timedelta(seconds=20)
+    quote_at = checked_at - timedelta(seconds=1)
+    future_quote_at = checked_at + timedelta(seconds=1)
+    _insert_executable_snapshot(
+        conn,
+        snapshot_id="market-channel-monitor-depth",
+        selected_outcome_token_id="yes123",
+        yes_token_id="yes123",
+        no_token_id="no123",
+        condition_id="condition-market-channel-depth",
+        top_bid="0.11",
+        top_ask="0.16",
+        captured_at=snapshot_at,
+        executable_allowed=True,
+    )
+    record_snapshot_invalidation(
+        conn,
+        condition_id="condition-market-channel-depth",
+        token_id="yes123",
+        reason="market_channel_quote_advanced",
+        invalidated_at=quote_at - timedelta(seconds=1),
+    )
+
+    def insert_quote(
+        evidence_id,
+        observed_at,
+        bid,
+        ask,
+        *,
+        condition_id="condition-market-channel-depth",
+        token_id="yes123",
+    ):
+        conn.execute(
+            """
+            INSERT INTO execution_feasibility_evidence (
+                evidence_id, event_id, condition_id, token_id,
+                outcome_label, direction, quote_seen_at,
+                best_bid_before, best_ask_before, depth_before_json,
+                created_at, schema_version
+            ) VALUES (?, ?, ?, ?, 'YES', 'buy_yes', ?, ?, ?, ?, ?, 1)
+            """,
+            (
+                evidence_id,
+                f"event-{evidence_id}",
+                condition_id,
+                token_id,
+                observed_at.isoformat(),
+                bid,
+                ask,
+                json.dumps(
+                    {
+                        "bids": [{"price": str(bid), "size": "50"}],
+                        "asks": [{"price": str(ask), "size": "40"}],
+                    }
+                ),
+                observed_at.isoformat(),
+            ),
+        )
+
+    insert_quote("causal-quote", quote_at, 0.07, 0.12)
+    insert_quote("future-quote", future_quote_at, 0.01, 0.03)
+
+    _insert_executable_snapshot(
+        conn,
+        snapshot_id="stale-tradeability",
+        selected_outcome_token_id="stale-token",
+        yes_token_id="stale-token",
+        no_token_id="stale-no",
+        condition_id="stale-condition",
+        captured_at=checked_at - timedelta(minutes=1),
+        executable_allowed=True,
+    )
+    insert_quote(
+        "fresh-quote-stale-tradeability",
+        quote_at,
+        0.20,
+        0.25,
+        condition_id="stale-condition",
+        token_id="stale-token",
+    )
+
+    _insert_executable_snapshot(
+        conn,
+        snapshot_id="pre-invalidation-quote",
+        selected_outcome_token_id="invalidated-token",
+        yes_token_id="invalidated-token",
+        no_token_id="invalidated-no",
+        condition_id="invalidated-condition",
+        captured_at=snapshot_at,
+        executable_allowed=True,
+    )
+    insert_quote(
+        "pre-invalidation-quote",
+        checked_at - timedelta(seconds=5),
+        0.30,
+        0.35,
+        condition_id="invalidated-condition",
+        token_id="invalidated-token",
+    )
+    record_snapshot_invalidation(
+        conn,
+        condition_id="invalidated-condition",
+        token_id="invalidated-token",
+        reason="newer_market_channel_quote",
+        invalidated_at=checked_at - timedelta(seconds=2),
+    )
+    conn.commit()
+
+    class NoNetworkClob:
+        def get_orderbook_snapshots(self, _token_ids):
+            raise AssertionError("fresh market-channel depth must suppress batch HTTP")
+
+        def get_orderbook(self, _token_id):
+            raise AssertionError("fresh market-channel depth must suppress singular HTTP")
+
+    pos = _position(
+        condition_id="condition-market-channel-depth",
+        token_id="yes123",
+    )
+    stale_pos = _position(
+        condition_id="stale-condition",
+        token_id="stale-token",
+    )
+    invalidated_pos = _position(
+        condition_id="invalidated-condition",
+        token_id="invalidated-token",
+    )
+    clob = NoNetworkClob()
+    summary = {}
+    deps = types.SimpleNamespace(
+        logger=types.SimpleNamespace(warning=lambda *args, **kwargs: None)
+    )
+    local_books = cycle_runtime._fresh_local_held_monitor_orderbooks(
+        conn,
+        [pos, stale_pos, invalidated_pos],
+        now_utc=checked_at,
+        summary={},
+        deps=deps,
+    )
+
+    assert set(local_books) == {"yes123"}
+
+    cycle_runtime._prefetch_held_monitor_orderbooks(
+        conn,
+        clob,
+        [pos],
+        summary,
+        now_utc=checked_at,
+        deps=deps,
+    )
+    quote = monitor_refresh.monitor_quote_refresh(conn, clob, pos)
+
+    assert quote is not None
+    assert quote.best_bid == pytest.approx(0.07)
+    assert quote.best_ask == pytest.approx(0.12)
+    assert quote.bid_ladder == ((0.07, 50.0),)
+    assert summary["held_monitor_orderbooks_market_channel"] == 1
     assert summary["held_monitor_orderbooks_network_requested"] == 0
     conn.close()
 

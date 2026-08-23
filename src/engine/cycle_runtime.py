@@ -5030,6 +5030,8 @@ def _fresh_local_held_monitor_orderbooks(
     deadline_monotonic: float | None = None,
     captured_at_out: list[datetime] | None = None,
 ) -> dict[str, dict]:
+    from src.contracts.executable_market_snapshot import FRESHNESS_WINDOW_DEFAULT
+
     if conn is None:
         return {}
     scope = list(
@@ -5067,7 +5069,7 @@ def _fresh_local_held_monitor_orderbooks(
         ).fetchone()
         if invalidation_table is None:
             return {}
-        rows = conn.execute(
+        snapshot_rows = conn.execute(
             f"""
             WITH requested(condition_id, token_id) AS (
                 VALUES {values_sql}
@@ -5125,6 +5127,90 @@ def _fresh_local_held_monitor_orderbooks(
             """,
             params,
         ).fetchall()
+        quote_table = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' "
+            "AND name='execution_feasibility_evidence' LIMIT 1"
+        ).fetchone()
+        quote_rows = []
+        if quote_table is not None:
+            quote_params = [part for pair in scope for part in pair]
+            quote_params.extend(
+                (
+                    (
+                        now_utc.astimezone(timezone.utc)
+                        - FRESHNESS_WINDOW_DEFAULT
+                    ).isoformat(),
+                    checked_at,
+                    checked_at,
+                )
+            )
+            quote_rows = conn.execute(
+                f"""
+            WITH requested(condition_id, token_id) AS (
+                VALUES {values_sql}
+            ),
+            ranked_quote AS (
+                SELECT evidence.*,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY evidence.token_id
+                           ORDER BY julianday(evidence.quote_seen_at) DESC,
+                                    julianday(evidence.created_at) DESC,
+                                    evidence.evidence_id DESC
+                       ) AS quote_rank
+                  FROM requested
+                  JOIN execution_feasibility_evidence AS evidence
+                    ON evidence.condition_id = requested.condition_id
+                   AND evidence.token_id = requested.token_id
+                   AND evidence.direction IN ('buy_yes', 'buy_no')
+                 WHERE evidence.depth_before_json IS NOT NULL
+                   AND julianday(evidence.quote_seen_at) IS NOT NULL
+                   AND julianday(evidence.quote_seen_at) >= julianday(?)
+                   AND julianday(evidence.quote_seen_at) <= julianday(?)
+                   AND julianday(evidence.created_at) <= julianday(?)
+                   AND NOT EXISTS (
+                       SELECT 1
+                         FROM executable_market_snapshot_invalidations AS invalidation
+                        WHERE (
+                               invalidation.condition_id = evidence.condition_id
+                               OR invalidation.token_id = evidence.token_id
+                          )
+                          AND julianday(invalidation.invalidated_at) >=
+                              julianday(evidence.quote_seen_at)
+                          AND julianday(invalidation.invalidated_at) <= julianday(?)
+                   )
+            ),
+            ranked_tradeability AS (
+                SELECT snapshot.*,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY snapshot.selected_outcome_token_id
+                           ORDER BY julianday(snapshot.captured_at) DESC,
+                                    snapshot.snapshot_id DESC
+                       ) AS tradeability_rank
+                  FROM requested
+                  JOIN executable_market_snapshots AS snapshot
+                    ON snapshot.condition_id = requested.condition_id
+                   AND snapshot.selected_outcome_token_id = requested.token_id
+                 WHERE julianday(snapshot.captured_at) <= julianday(?)
+                   AND julianday(snapshot.freshness_deadline) >= julianday(?)
+            )
+            SELECT quote.token_id,
+                   quote.depth_before_json,
+                   quote.quote_seen_at,
+                   latest.active,
+                   latest.closed,
+                   latest.accepting_orders,
+                   latest.tradeability_status_json,
+                   quote.best_bid_before,
+                   quote.best_ask_before
+              FROM ranked_quote AS quote
+              JOIN ranked_tradeability AS latest
+                ON latest.selected_outcome_token_id = quote.token_id
+               AND latest.condition_id = quote.condition_id
+             WHERE quote.quote_rank = 1
+               AND latest.tradeability_rank = 1
+                """,
+                (*quote_params, checked_at, checked_at, checked_at),
+            ).fetchall()
     except Exception as exc:  # noqa: BLE001 - network remains the fallback.
         if (
             deadline_monotonic is not None
@@ -5152,11 +5238,12 @@ def _fresh_local_held_monitor_orderbooks(
         )
         return {}
 
-    books: dict[str, dict] = {}
-    captured_times: list[datetime] = []
+    candidates: dict[str, tuple[datetime, dict]] = {}
+    market_channel_tokens: set[str] = set()
+    from src.data.market_scanner import _top_book_level_decimal
     from src.engine.monitor_refresh import _monitor_snapshot_is_executable
 
-    for row in rows:
+    for row in snapshot_rows:
         try:
             token_id, raw_book, raw_captured_at = row[0], row[1], row[2]
             if not _monitor_snapshot_is_executable(
@@ -5177,12 +5264,50 @@ def _fresh_local_held_monitor_orderbooks(
             or ""
         ).strip()
         if token_id and asset_id == token_id:
-            books[token_id] = book
             captured_at = _parse_utc_timestamp(raw_captured_at)
             if captured_at is not None:
-                captured_times.append(captured_at)
-    if captured_at_out is not None and captured_times:
-        captured_at_out.append(min(captured_times))
+                candidates[token_id] = (captured_at, book)
+
+    for row in quote_rows:
+        try:
+            token_id = str(row[0] or "").strip()
+            if not token_id or not _monitor_snapshot_is_executable(
+                active=row[3],
+                closed=row[4],
+                accepting_orders=row[5],
+                tradeability_status_json=row[6],
+            ):
+                continue
+            book = json.loads(str(row[1]))
+            captured_at = _parse_utc_timestamp(row[2])
+            if not isinstance(book, dict) or captured_at is None:
+                continue
+            bid, _bid_size = _top_book_level_decimal(book, "bids")
+            if row[7] is not None and not math.isclose(
+                float(bid), float(row[7]), rel_tol=0.0, abs_tol=1e-9
+            ):
+                continue
+            if row[8] is not None:
+                ask, _ask_size = _top_book_level_decimal(book, "asks")
+                if not math.isclose(
+                    float(ask), float(row[8]), rel_tol=0.0, abs_tol=1e-9
+                ):
+                    continue
+        except (IndexError, TypeError, ValueError, json.JSONDecodeError):
+            continue
+        book = dict(book)
+        book["asset_id"] = token_id
+        previous = candidates.get(token_id)
+        if previous is None or captured_at > previous[0]:
+            candidates[token_id] = (captured_at, book)
+            market_channel_tokens.add(token_id)
+
+    books = {token_id: value[1] for token_id, value in candidates.items()}
+    if captured_at_out is not None and candidates:
+        captured_at_out.append(min(value[0] for value in candidates.values()))
+    summary["held_monitor_orderbooks_market_channel"] = len(
+        market_channel_tokens
+    )
     return books
 
 
