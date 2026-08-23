@@ -294,6 +294,15 @@ def memory(cfg: Mapping[str, Any]) -> sqlite3.Connection:
     return conn
 
 
+def memory_ro(cfg: Mapping[str, Any]) -> sqlite3.Connection:
+    path = runtime_dir(cfg) / "memory.db"
+    conn = sqlite3.connect(f"file:{path.resolve()}?mode=ro", uri=True, timeout=2.0)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA query_only=ON")
+    conn.execute("PRAGMA busy_timeout=2000")
+    return conn
+
+
 def transition(
     conn: sqlite3.Connection,
     incident_id: str,
@@ -3685,9 +3694,12 @@ def deploy_incident(cfg: Mapping[str, Any], incident_id: str) -> int:
     return 0
 
 
-def poll_runs(cfg: Mapping[str, Any]) -> list[str]:
+def poll_runs(
+    cfg: Mapping[str, Any],
+    running: list[dict[str, Any]] | None = None,
+) -> list[str]:
     completed: list[str] = []
-    for run in _running(cfg):
+    for run in (running if running is not None else _running(cfg)):
         pid = int(run["pid"])
         started = parse_time(str(run.get("started_at") or ""))
         timeout = int(cfg["loop"].get("agent_timeout_seconds", 5400))
@@ -3778,7 +3790,7 @@ def _dispatch_has_eligible_debt(
         kind: sum(1 for row in running if str(row.get("kind") or "") == kind)
         for kind in ("hard", "precursor")
     }
-    with memory(cfg) as mem:
+    with memory_ro(cfg) as mem:
         blind = mem.execute(
             "SELECT kind FROM incidents WHERE status='queued' AND stage='blind'"
         ).fetchall()
@@ -3896,6 +3908,8 @@ def daemon(cfg: Mapping[str, Any]) -> int:
     poll = max(0.05, float(cfg["loop"].get("poll_ms", 250)) / 1000.0)
     dispatch_worker: subprocess.Popen[Any] | None = None
     dispatch_error: str | None = None
+    capabilities_ready = False
+    next_debt_check_at = 0.0
     while not stopping and not (run / "HALT").exists():
         cycle_started = time.monotonic()
         detector_elapsed = 0.0
@@ -3926,13 +3940,31 @@ def daemon(cfg: Mapping[str, Any]) -> int:
         )
         if error is None:
             try:
-                poll_runs(cfg)
-                if (
-                    dispatch_worker is None or dispatch_worker.poll() is not None
-                ) and (
-                    created or _dispatch_has_eligible_debt(cfg, _running(cfg))
-                ):
-                    dispatch_worker = _spawn_dispatch_worker(cfg)
+                running = _running(cfg)
+                completed = poll_runs(cfg, running)
+                if completed:
+                    completed_ids = set(completed)
+                    running = [
+                        item for item in running
+                        if str(item.get("run_id") or "") not in completed_ids
+                    ]
+                worker_exited = (
+                    dispatch_worker is not None and dispatch_worker.poll() is not None
+                )
+                if current_capabilities(cfg) is None:
+                    capabilities_ready = False
+                    ensure_capability_probe(cfg)
+                else:
+                    capability_became_ready = not capabilities_ready
+                    capabilities_ready = True
+                    retry_check_due = time.monotonic() >= next_debt_check_at
+                    dispatch_wake = bool(created) or bool(completed) or worker_exited or capability_became_ready or retry_check_due
+                    if (
+                        dispatch_worker is None or worker_exited
+                    ) and dispatch_wake:
+                        if _dispatch_has_eligible_debt(cfg, running):
+                            dispatch_worker = _spawn_dispatch_worker(cfg)
+                        next_debt_check_at = time.monotonic() + 5.0
             except Exception as exc:
                 dispatch_error = f"{type(exc).__name__}: {exc}"
             else:

@@ -304,7 +304,8 @@ def test_daemon_keeps_detecting_while_dispatch_worker_is_busy(
     monkeypatch.setattr(loop, "bootstrap", fake_bootstrap)
     monkeypatch.setattr(loop, "detect", fake_detect)
     monkeypatch.setattr(loop, "dispatch", lambda _cfg: pytest.fail("daemon must not synchronously dispatch"))
-    monkeypatch.setattr(loop, "poll_runs", lambda _cfg: [])
+    monkeypatch.setattr(loop, "current_capabilities", lambda _cfg: {"ready": True})
+    monkeypatch.setattr(loop, "poll_runs", lambda *_args: [])
     monkeypatch.setattr(loop, "_spawn_dispatch_worker", lambda _cfg: spawned.append(object()) or BusyDispatchWorker())
     monkeypatch.setattr(loop, "_running", lambda _cfg: [])
     monkeypatch.setattr(loop, "_terminate_process_group", lambda _pid: None)
@@ -324,6 +325,7 @@ def test_daemon_does_not_spawn_dispatch_worker_without_durable_debt(
     runtime = Path(cfg["paths"]["runtime"])
     detected: list[int] = []
     spawned: list[object] = []
+    debt_checks: list[object] = []
 
     def fake_bootstrap(_cfg: dict) -> dict[str, str]:
         runtime.mkdir(parents=True, exist_ok=True)
@@ -337,7 +339,9 @@ def test_daemon_does_not_spawn_dispatch_worker_without_durable_debt(
 
     monkeypatch.setattr(loop, "bootstrap", fake_bootstrap)
     monkeypatch.setattr(loop, "detect", fake_detect)
-    monkeypatch.setattr(loop, "poll_runs", lambda _cfg: [])
+    monkeypatch.setattr(loop, "current_capabilities", lambda _cfg: {"ready": True})
+    monkeypatch.setattr(loop, "poll_runs", lambda *_args: [])
+    monkeypatch.setattr(loop, "_dispatch_has_eligible_debt", lambda *_args: debt_checks.append(object()) or False)
     monkeypatch.setattr(loop, "_spawn_dispatch_worker", lambda _cfg: spawned.append(object()))
     monkeypatch.setattr(loop, "_running", lambda _cfg: [])
     monkeypatch.setattr(loop, "_record_cycle_latency", lambda *_args, **_kwargs: None)
@@ -346,6 +350,98 @@ def test_daemon_does_not_spawn_dispatch_worker_without_durable_debt(
     assert loop.daemon(cfg) == 0
     assert detected == [1, 2, 3]
     assert spawned == []
+    assert len(debt_checks) == 1
+
+
+def test_daemon_owns_missing_capability_probe_before_dispatch(
+    cfg: dict,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = Path(cfg["paths"]["runtime"])
+    detected: list[int] = []
+    probes: list[object] = []
+    spawned: list[object] = []
+
+    class BusyDispatchWorker:
+        pid = 4244
+
+        def poll(self) -> None:
+            return None
+
+    def fake_bootstrap(_cfg: dict) -> dict[str, str]:
+        runtime.mkdir(parents=True, exist_ok=True)
+        return {"runtime": str(runtime)}
+
+    def fake_detect(_cfg: dict) -> list[str]:
+        detected.append(len(detected) + 1)
+        if len(detected) == 3:
+            (runtime / "HALT").touch()
+        return []
+
+    monkeypatch.setattr(loop, "bootstrap", fake_bootstrap)
+    monkeypatch.setattr(loop, "detect", fake_detect)
+    monkeypatch.setattr(loop, "current_capabilities", lambda _cfg: None if len(detected) < 3 else {"ready": True})
+    monkeypatch.setattr(loop, "ensure_capability_probe", lambda _cfg: probes.append(object()))
+    monkeypatch.setattr(loop, "poll_runs", lambda *_args: [])
+    monkeypatch.setattr(loop, "_spawn_dispatch_worker", lambda _cfg: spawned.append(object()) or BusyDispatchWorker())
+    monkeypatch.setattr(loop, "_running", lambda _cfg: [])
+    monkeypatch.setattr(loop, "_terminate_process_group", lambda _pid: None)
+    monkeypatch.setattr(loop, "_record_cycle_latency", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(loop.time, "sleep", lambda _seconds: None)
+    _queue_blind_dispatch_debt(cfg, incident_id="capability-debt")
+
+    assert loop.daemon(cfg) == 0
+    assert detected == [1, 2, 3]
+    assert len(probes) == 2
+    assert len(spawned) == 1
+
+
+def test_model_completion_wakes_eligible_dispatch_once(
+    cfg: dict,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = Path(cfg["paths"]["runtime"])
+    detected: list[int] = []
+    spawned: list[object] = []
+    poll_calls = 0
+
+    class BusyDispatchWorker:
+        pid = 4245
+
+        def poll(self) -> None:
+            return None
+
+    def fake_bootstrap(_cfg: dict) -> dict[str, str]:
+        runtime.mkdir(parents=True, exist_ok=True)
+        return {"runtime": str(runtime)}
+
+    def fake_detect(_cfg: dict) -> list[str]:
+        detected.append(len(detected) + 1)
+        if len(detected) == 2:
+            (runtime / "HALT").touch()
+        return []
+
+    def fake_poll(_cfg: dict, _running: list[dict]) -> list[str]:
+        nonlocal poll_calls
+        poll_calls += 1
+        if poll_calls == 1:
+            _queue_blind_dispatch_debt(cfg, incident_id="completion-debt")
+            return ["model-run"]
+        return []
+
+    monkeypatch.setattr(loop, "bootstrap", fake_bootstrap)
+    monkeypatch.setattr(loop, "detect", fake_detect)
+    monkeypatch.setattr(loop, "current_capabilities", lambda _cfg: {"ready": True})
+    monkeypatch.setattr(loop, "poll_runs", fake_poll)
+    monkeypatch.setattr(loop, "_spawn_dispatch_worker", lambda _cfg: spawned.append(object()) or BusyDispatchWorker())
+    monkeypatch.setattr(loop, "_running", lambda _cfg: [])
+    monkeypatch.setattr(loop, "_terminate_process_group", lambda _pid: None)
+    monkeypatch.setattr(loop, "_record_cycle_latency", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(loop.time, "sleep", lambda _seconds: None)
+
+    assert loop.daemon(cfg) == 0
+    assert detected == [1, 2]
+    assert len(spawned) == 1
 
 
 def test_dispatch_eligibility_waits_for_stage_retry_due_time(
@@ -389,6 +485,20 @@ def test_dispatch_eligibility_waits_for_stage_retry_due_time(
     assert loop._dispatch_has_eligible_debt(cfg, []) is True
 
 
+def test_dispatch_eligibility_reads_memory_without_schema_maintenance(
+    cfg: dict,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _queue_blind_dispatch_debt(cfg, incident_id="readonly-debt")
+    monkeypatch.setattr(
+        loop,
+        "memory",
+        lambda _cfg: pytest.fail("eligibility must not open writable schema memory"),
+    )
+
+    assert loop._dispatch_has_eligible_debt(cfg, []) is True
+
+
 def test_daemon_records_dispatch_failures_without_blocking_next_detect(
     cfg: dict,
     monkeypatch: pytest.MonkeyPatch,
@@ -415,7 +525,7 @@ def test_daemon_records_dispatch_failures_without_blocking_next_detect(
             (runtime / "HALT").touch()
         return [f"wake-{detected[-1]}"] if len(detected) < 4 else []
 
-    def fake_poll(_cfg: dict) -> list[str]:
+    def fake_poll(_cfg: dict, _running: list[dict]) -> list[str]:
         nonlocal poll_calls
         poll_calls += 1
         if poll_calls == 1:
@@ -436,7 +546,9 @@ def test_daemon_records_dispatch_failures_without_blocking_next_detect(
     monkeypatch.setattr(loop, "bootstrap", fake_bootstrap)
     monkeypatch.setattr(loop, "detect", fake_detect)
     monkeypatch.setattr(loop, "dispatch", lambda _cfg: pytest.fail("daemon must not synchronously dispatch"))
+    monkeypatch.setattr(loop, "current_capabilities", lambda _cfg: {"ready": True})
     monkeypatch.setattr(loop, "poll_runs", fake_poll)
+    monkeypatch.setattr(loop, "_dispatch_has_eligible_debt", lambda *_args: True)
     monkeypatch.setattr(loop, "_spawn_dispatch_worker", fake_spawn)
     monkeypatch.setattr(loop, "_running", lambda _cfg: [])
     monkeypatch.setattr(loop, "_terminate_process_group", lambda _pid: None)
