@@ -876,6 +876,21 @@
   acceptance remains new 00Z seed, posterior provenance, held redecision, and
   separate venue evidence for any order.
 
+### 2026-08-23 — current same-cycle baseline precedes anchor-first FIFO (B153)
+
+- **Observed defect:** B152 emitted eleven exact 00Z held seeds, but the request
+  queue selected older 00Z-cycle requests whose baseline still named 18Z because
+  same-tier FIFO used only `computed_at`. Those requests consumed the bounded
+  workers and reproduced `CAPTURE:CURRENT_EVIDENCE_NOT_LIVE` before the exact
+  00Z requests could run.
+- **Contract:** within one family and source cycle only, a request whose baseline
+  source run is canonical `SUCCESS` at that exact cycle precedes stale-baseline
+  siblings. Held-family, never-priced, and newest-cycle tiers remain unchanged;
+  ordinary FIFO remains unchanged when no exact current baseline is present.
+- **Acceptance:** an antibody gives the stale request an earlier clock and proves
+  the later exact-baseline request sorts first on the same risk tier. Live proof
+  remains a committed 00Z posterior and subsequent held-position redecision.
+
 ### 2026-08-02 — partial EXIT realized-PnL canonical continuity (hot-fix slice)
 
 - **Scope / seam:** `src/execution/exit_lifecycle.py` emits canonical

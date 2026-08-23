@@ -1077,6 +1077,7 @@ def _cycle_advance_seed_priority_map(
         return {}
     names_by_scope: dict[tuple[str, str, str, str], set[str]] = {}
     request_time_by_name: dict[str, str] = {}
+    baseline_run_by_name: dict[str, str] = {}
     cycle_by_scope: dict[tuple[str, str, str, str], datetime] = {}
     latest_cycle_by_family: dict[tuple[str, str, str], datetime] = {}
     for path in queue_files:
@@ -1090,6 +1091,9 @@ def _cycle_advance_seed_priority_map(
         computed_at = _parse_utc_iso(payload.get("computed_at"))
         if computed_at is not None:
             request_time_by_name[path.name] = computed_at.isoformat()
+        baseline_run_id = str(payload.get("baseline_source_run_id") or "").strip()
+        if baseline_run_id:
+            baseline_run_by_name[path.name] = baseline_run_id
         cycle = _parse_utc_iso(payload.get("source_cycle_time"))
         scope = (
             str(payload.get("city") or "").strip(),
@@ -1113,6 +1117,7 @@ def _cycle_advance_seed_priority_map(
         trade_db=trade_db,
     )
     rows: list[object] = []
+    current_baseline_names: set[str] = set()
     never_priced_scopes: frozenset[tuple[str, str, str]] = frozenset()
     if forecast_db is not None and Path(forecast_db).exists():
         try:
@@ -1149,6 +1154,37 @@ def _cycle_advance_seed_priority_map(
                 never_priced_scopes = _cycle_advance_never_priced_scopes(
                     conn, fam_scopes
                 )
+                baseline_run_ids = tuple(dict.fromkeys(baseline_run_by_name.values()))
+                if baseline_run_ids:
+                    try:
+                        placeholders = ", ".join("?" for _ in baseline_run_ids)
+                        run_rows = conn.execute(
+                            f"""
+                            SELECT source_run_id, source_cycle_time, status
+                              FROM source_run
+                             WHERE source_run_id IN ({placeholders})
+                            """,
+                            baseline_run_ids,
+                        ).fetchall()
+                        current_cycle_by_run = {
+                            str(row[0]): _parse_utc_iso(row[1])
+                            for row in run_rows
+                            if str(row[2] or "").upper() == "SUCCESS"
+                        }
+                        for scope, names in names_by_scope.items():
+                            scope_cycle = cycle_by_scope.get(scope)
+                            if scope_cycle is None:
+                                continue
+                            current_baseline_names.update(
+                                name
+                                for name in names
+                                if current_cycle_by_run.get(
+                                    baseline_run_by_name.get(name, "")
+                                )
+                                == scope_cycle
+                            )
+                    except sqlite3.Error:
+                        pass
             finally:
                 conn.close()
         except Exception:  # noqa: BLE001 - priority is best-effort; queue must still drain
@@ -1166,6 +1202,11 @@ def _cycle_advance_seed_priority_map(
             enqueue_priority[scope] = candidate
 
     priority: dict[str, tuple[int, str]] = {}
+    scopes_with_current_baseline = {
+        scope
+        for scope, names in names_by_scope.items()
+        if any(name in current_baseline_names for name in names)
+    }
     for scope, names in names_by_scope.items():
         fam_scope = scope[:3]
         held_marker, enqueued_at = enqueue_priority.get(scope, (False, ""))
@@ -1186,7 +1227,12 @@ def _cycle_advance_seed_priority_map(
         )
         tier = base_tier * 2 + int(older_queued_cycle)
         for name in names:
-            priority[name] = (tier, request_time_by_name.get(name) or enqueued_at)
+            request_time = request_time_by_name.get(name) or enqueued_at
+            if scope in scopes_with_current_baseline:
+                request_time = (
+                    "0|" if name in current_baseline_names else "1|"
+                ) + request_time
+            priority[name] = (tier, request_time)
     return priority
 
 

@@ -1,5 +1,5 @@
 # Created: 2026-06-11
-# Last reused or audited: 2026-08-21
+# Last reused or audited: 2026-08-23
 # Authority basis: Task #32 follow-up (operator 2026-06-11) — 没有新的就用老的 applied to fusion
 #   membership. The gem_global-only previous_runs exception (edc598b440) is generalized into the
 #   SINGLE serving authority (src/data/replacement_current_value_serving.py): a provider absent
@@ -1414,6 +1414,80 @@ def test_cycle_priority_uses_request_time_not_historical_scope_marker(tmp_path) 
     assert queue_mod._cycle_advance_file_sort_key(
         lagged, priority
     ) < queue_mod._cycle_advance_file_sort_key(eligible, priority)
+
+
+def test_cycle_priority_prefers_current_same_cycle_baseline_over_older_request(
+    tmp_path,
+) -> None:
+    """Late ENS authority must drain before an older anchor-first request."""
+
+    import src.data.replacement_forecast_live_materialization_queue as queue_mod
+
+    forecast_db = tmp_path / "forecasts.db"
+    conn = sqlite3.connect(forecast_db)
+    conn.executescript(
+        """
+        CREATE TABLE cycle_advance_enqueues (
+            city TEXT, target_date TEXT, metric TEXT, target_cycle_time TEXT,
+            seed_file TEXT, held_position INTEGER, enqueued_at TEXT
+        );
+        CREATE TABLE forecast_posteriors (
+            source_id TEXT, city TEXT, target_date TEXT,
+            temperature_metric TEXT, source_cycle_time TEXT, computed_at TEXT
+        );
+        CREATE TABLE source_run (
+            source_run_id TEXT PRIMARY KEY, source_cycle_time TEXT, status TEXT
+        );
+        INSERT INTO cycle_advance_enqueues VALUES (
+            'Cape Town', '2026-08-23', 'high',
+            '2026-08-23T00:00:00+00:00', 'current.json', 1,
+            '2026-08-23T08:43:53+00:00'
+        );
+        INSERT INTO source_run VALUES (
+            'ecmwf_open_data:mx2t6_high:2026-08-23T00Z',
+            '2026-08-23T00:00:00+00:00', 'SUCCESS'
+        );
+        """
+    )
+    conn.commit()
+    conn.close()
+    old = tmp_path / "old.json"
+    current = tmp_path / "current.json"
+    for path, baseline, computed_at in (
+        (
+            old,
+            "ecmwf_open_data:mx2t6_high:2026-08-22T18Z",
+            "2026-08-23T06:36:38+00:00",
+        ),
+        (
+            current,
+            "ecmwf_open_data:mx2t6_high:2026-08-23T00Z",
+            "2026-08-23T08:43:53+00:00",
+        ),
+    ):
+        path.write_text(
+            json.dumps(
+                {
+                    "city": "Cape Town",
+                    "target_date": "2026-08-23",
+                    "temperature_metric": "high",
+                    "source_cycle_time": "2026-08-23T00:00:00+00:00",
+                    "baseline_source_run_id": baseline,
+                    "computed_at": computed_at,
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    priority = queue_mod._cycle_advance_seed_priority_map(
+        forecast_db,
+        (old, current),
+    )
+
+    assert priority[current.name][0] == priority[old.name][0]
+    assert queue_mod._cycle_advance_file_sort_key(
+        current, priority
+    ) < queue_mod._cycle_advance_file_sort_key(old, priority)
 
 
 def test_cycle_priority_selects_newest_queued_source_cycle_within_tier(tmp_path) -> None:
