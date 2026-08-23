@@ -2534,6 +2534,10 @@ def _worktree_writer_running(
 
 def _retry_pending(cfg: Mapping[str, Any], running: list[dict[str, Any]]) -> list[str]:
     active_incidents = {str(row["incident_id"]) for row in running}
+    by_kind = {
+        kind: sum(1 for row in running if str(row.get("kind") or "") == kind)
+        for kind in ("hard", "precursor")
+    }
     with memory(cfg) as mem:
         incidents = mem.execute(
             "SELECT incident_id,kind FROM incidents WHERE status='retry_pending' "
@@ -2543,7 +2547,10 @@ def _retry_pending(cfg: Mapping[str, Any], running: list[dict[str, Any]]) -> lis
     retry_delay = float(cfg["loop"].get("stage_retry_seconds", 60))
     for incident in incidents:
         incident_id = str(incident["incident_id"])
+        kind = str(incident["kind"])
         if incident_id in active_incidents:
+            continue
+        if by_kind.get(kind, 0) >= int(cfg["loop"].get(f"{kind}_slots", 1)):
             continue
         candidates = sorted(
             (runtime_dir(cfg) / "runs").glob("*.json"),
@@ -2590,6 +2597,7 @@ def _retry_pending(cfg: Mapping[str, Any], running: list[dict[str, Any]]) -> lis
                 transition(mem, incident_id, str(prior["stage"]), reason="retry_controller_stage", run_id=str(retried["run_id"]))
                 mem.commit()
             launched.append(incident_id)
+            by_kind[kind] = by_kind.get(kind, 0) + 1
             continue
         prompt_path = Path(str(prior["events"])).with_suffix(".prompt.md")
         if not prompt_path.is_file():
@@ -2641,6 +2649,7 @@ def _retry_pending(cfg: Mapping[str, Any], running: list[dict[str, Any]]) -> lis
             )
             mem.commit()
         launched.append(incident_id)
+        by_kind[kind] = by_kind.get(kind, 0) + 1
     return launched
 
 
@@ -2995,8 +3004,13 @@ def _dispatch_repair_waiting(cfg: Mapping[str, Any], running: list[dict[str, Any
         ).fetchone()
     if row is None:
         return None
+    kind = str(row["kind"])
+    if sum(1 for candidate in running if str(candidate.get("kind") or "") == kind) >= int(
+        cfg["loop"].get(f"{kind}_slots", 1)
+    ):
+        return None
     try:
-        return _start_repair(cfg, str(row["incident_id"]), str(row["kind"]))
+        return _start_repair(cfg, str(row["incident_id"]), kind)
     except RuntimeError:
         return None
 

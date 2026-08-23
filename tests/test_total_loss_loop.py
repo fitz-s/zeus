@@ -599,6 +599,31 @@ def test_hard_incident_does_not_starve_other_position_precursor(cfg: dict) -> No
     ]
 
 
+def test_claim_prefers_current_positive_exposure_and_fails_closed_without_trades(cfg: dict, monkeypatch) -> None:
+    _position(cfg, position_id="current")
+    _position(cfg, position_id="settled")
+    with sqlite3.connect(cfg["paths"]["trades_db"]) as conn:
+        conn.execute("UPDATE position_current SET phase='settled' WHERE position_id='settled'")
+    with loop.memory(cfg) as mem:
+        for incident_id, position_id, detected_at in (
+            ("current-incident", "current", "2026-08-22T09:00:00+00:00"),
+            ("settled-incident", "settled", "2026-08-22T10:00:00+00:00"),
+        ):
+            mem.execute(
+                """
+                INSERT INTO incidents(incident_id,kind,position_id,crossing_evidence_id,crossing_kind,
+                    held_token_id,held_direction,floor_price,detected_at,priority,status,stage,updated_at)
+                VALUES (?, 'hard', ?, ?, 'below_floor', 'yes-token', 'sell_yes', .05, ?, 1, 'queued', 'blind', ?)
+                """,
+                (incident_id, position_id, incident_id, detected_at, detected_at),
+            )
+        mem.commit()
+
+    assert loop._claim(cfg, "hard")["incident_id"] == "current-incident"
+    monkeypatch.setattr(loop, "open_ro", lambda _path: (_ for _ in ()).throw(sqlite3.OperationalError()))
+    assert loop._claim(cfg, "hard") is None
+
+
 def test_historical_backfill_ignores_low_quote_before_entry(cfg: dict) -> None:
     _position(cfg)
     _event(
