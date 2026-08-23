@@ -296,6 +296,38 @@ def classify_local_position(
     settlement = settlement_by_key.get(settlement_key)
     market_resolved = settlement is not None and settlement.authority == "VERIFIED"
 
+    # A token id alone is not enough to bind chain evidence to a canonical
+    # position: token reuse/malformed payloads must not authorize a settlement
+    # or a chain-size write for another condition.  Keep the typed finding
+    # non-writing so the next complete, exact chain read can decide it.
+    if chain_fact is not None:
+        local_condition_id = str(row.condition_id or "").strip()
+        chain_condition_id = str(chain_fact.condition_id or "").strip()
+        if not local_condition_id or not chain_condition_id:
+            return MirrorFinding(
+                classification=UNGRADEABLE,
+                position_id=row.position_id,
+                asset=held_token,
+                writes=False,
+                details={
+                    "reason": "chain_condition_identity_missing",
+                    "local_condition_id": local_condition_id,
+                    "chain_condition_id": chain_condition_id,
+                },
+            )
+        if local_condition_id != chain_condition_id:
+            return MirrorFinding(
+                classification=UNGRADEABLE,
+                position_id=row.position_id,
+                asset=held_token,
+                writes=False,
+                details={
+                    "reason": "chain_condition_identity_mismatch",
+                    "local_condition_id": local_condition_id,
+                    "chain_condition_id": chain_condition_id,
+                },
+            )
+
     if chain_fact is None:
         # Held token absent from the chain snapshot.
         if not market_resolved:

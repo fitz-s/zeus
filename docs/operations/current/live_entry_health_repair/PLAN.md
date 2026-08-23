@@ -3021,7 +3021,9 @@ publication barrier.
   suppression and leaves the verified settled projection terminal; an explicit
   higher-authority settlement invalidation/correction follows the existing
   suppression-history transition path.  A read/schema error for this exact
-  candidate fails closed and cannot resurrect exposure.
+  candidate fails closed and cannot resurrect exposure.  A present chain fact
+  must also carry the same non-empty condition id as the local row before it
+  can produce settlement, suppression, or any size correction.
 - RESET: only that explicit higher-authority suppression-history transition
   may replace `settled_position`; ordinary balance observations, stale
   in-memory `ignored_tokens`, and broad terminal scans cannot clear it.

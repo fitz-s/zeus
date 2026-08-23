@@ -374,7 +374,8 @@ def test_already_voided_duplicate_rows_on_same_token_get_no_size_correction():
     for position_id in ("dup-1", "dup-2", "dup-3", "dup-4"):
         row = _row(
             position_id=position_id, phase="voided", direction="buy_yes",
-            token_id="tok-seoul", chain_shares=None, shares=0.0,
+            token_id="tok-seoul", condition_id="cond-seoul",
+            chain_shares=None, shares=0.0,
         )
         finding = classify_local_position(row, chain_by_asset=chain, settlement_by_key={})
         assert finding.classification == CONSISTENT, position_id
@@ -893,6 +894,234 @@ def test_terminal_restore_fails_closed_when_current_suppression_schema_is_unavai
     assert stats["terminal_chain_exposure_suppression_unavailable"] == 1
 
 
+def test_terminal_restore_fails_closed_without_suppression_connection():
+    """A terminal wallet balance cannot restore when current suppression is absent."""
+    from src.state.chain_reconciliation import ChainPosition, reconcile as reconcile_portfolio
+    from src.state.portfolio import PortfolioState, Position
+
+    token_id = "tok-suppression-connection-unavailable"
+    stale_portfolio = PortfolioState(
+        positions=[
+            Position(
+                trade_id="pos-suppression-connection-unavailable",
+                market_id="market-suppression-connection-unavailable",
+                city="seoul",
+                cluster="seoul",
+                target_date="2026-06-21",
+                bin_label="24°C",
+                direction="buy_yes",
+                state="voided",
+                token_id=token_id,
+                condition_id="cond-suppression-connection-unavailable",
+                shares=5.0,
+                cost_basis_usd=2.5,
+                size_usd=2.5,
+                entry_price=0.5,
+            )
+        ],
+        ignored_tokens=[],
+    )
+
+    stats = reconcile_portfolio(
+        stale_portfolio,
+        [
+            ChainPosition(
+                token_id=token_id,
+                condition_id="cond-suppression-connection-unavailable",
+                size=5.0,
+                avg_price=0.5,
+                cost=2.5,
+            )
+        ],
+        conn=None,
+    )
+
+    assert stale_portfolio.positions[0].state == "voided"
+    assert stats.get("terminal_chain_exposure_restored", 0) == 0
+    assert stats["terminal_chain_exposure_suppression_unavailable"] == 1
+
+
+def test_terminal_restore_fails_closed_without_exact_chain_condition(trades_conn):
+    """An empty chain condition cannot bind a terminal local token identity."""
+    from src.state.chain_reconciliation import ChainPosition, reconcile as reconcile_portfolio
+    from src.state.portfolio import PortfolioState, Position
+
+    position_id = "pos-empty-chain-condition"
+    token_id = "tok-empty-chain-condition"
+    condition_id = "cond-empty-chain-condition"
+    _insert_position_current(
+        trades_conn,
+        position_id=position_id,
+        phase="voided",
+        direction="buy_yes",
+        token_id=token_id,
+        condition_id=condition_id,
+        shares=5.0,
+        cost_basis_usd=2.5,
+    )
+    stale_portfolio = PortfolioState(
+        positions=[
+            Position(
+                trade_id=position_id,
+                market_id="market-empty-chain-condition",
+                city="manila",
+                cluster="manila",
+                target_date="2026-07-04",
+                bin_label="33°C",
+                direction="buy_yes",
+                state="voided",
+                token_id=token_id,
+                condition_id=condition_id,
+                shares=5.0,
+                cost_basis_usd=2.5,
+                size_usd=2.5,
+                entry_price=0.5,
+            )
+        ],
+        ignored_tokens=[],
+    )
+
+    stats = reconcile_portfolio(
+        stale_portfolio,
+        [
+            ChainPosition(
+                token_id=token_id,
+                condition_id="",
+                size=5.0,
+                avg_price=0.5,
+                cost=2.5,
+            )
+        ],
+        conn=trades_conn,
+    )
+
+    assert stale_portfolio.positions[0].state == "voided"
+    assert stats.get("terminal_chain_exposure_restored", 0) == 0
+    assert stats["terminal_chain_exposure_condition_unavailable"] == 1
+
+
+def test_unsuppressed_exact_terminal_chain_exposure_still_restores(trades_conn):
+    """The new suppression check does not weaken exact Chain-over-local repair."""
+    from src.state.chain_reconciliation import ChainPosition, reconcile as reconcile_portfolio
+    from src.state.portfolio import PortfolioState, Position
+
+    position_id = "pos-unsuppressed-terminal-restore"
+    token_id = "tok-unsuppressed-terminal-restore"
+    condition_id = "cond-unsuppressed-terminal-restore"
+    _insert_position_current(
+        trades_conn,
+        position_id=position_id,
+        phase="voided",
+        direction="buy_yes",
+        token_id=token_id,
+        condition_id=condition_id,
+        shares=5.0,
+        cost_basis_usd=2.5,
+    )
+    stale_portfolio = PortfolioState(
+        positions=[
+            Position(
+                trade_id=position_id,
+                market_id="market-unsuppressed-terminal-restore",
+                city="manila",
+                cluster="manila",
+                target_date="2026-07-04",
+                bin_label="33°C",
+                direction="buy_yes",
+                state="voided",
+                token_id=token_id,
+                condition_id=condition_id,
+                shares=5.0,
+                cost_basis_usd=2.5,
+                size_usd=2.5,
+                entry_price=0.5,
+            )
+        ],
+        ignored_tokens=[],
+    )
+
+    stats = reconcile_portfolio(
+        stale_portfolio,
+        [
+            ChainPosition(
+                token_id=token_id,
+                condition_id=condition_id,
+                size=5.0,
+                avg_price=0.5,
+                cost=2.5,
+            )
+        ],
+        conn=trades_conn,
+    )
+
+    assert stale_portfolio.positions[0].state == "holding"
+    assert stats["terminal_chain_exposure_restored"] == 1
+
+
+@pytest.mark.parametrize(
+    ("chain_condition_id", "reason"),
+    [
+        ("", "chain_condition_identity_missing"),
+        ("cond-other", "chain_condition_identity_mismatch"),
+    ],
+)
+def test_present_chain_condition_must_exactly_bind_mirror_settlement(
+    trades_conn, forecasts_conn, chain_condition_id, reason
+):
+    """Same-token malformed/mismatched chain facts cannot settle or suppress."""
+    token_id = "tok-condition-bound-settlement"
+    _insert_position_current(
+        trades_conn,
+        position_id="pos-condition-bound-settlement",
+        phase="active",
+        city="seoul",
+        target_date="2026-06-21",
+        bin_label="24°C",
+        direction="buy_yes",
+        token_id=token_id,
+        condition_id="cond-local",
+        chain_shares=5.0,
+        shares=5.0,
+        cost_basis_usd=2.5,
+    )
+    _insert_settlement(
+        forecasts_conn,
+        city="seoul",
+        target_date="2026-06-21",
+        winning_bin="20°C",
+    )
+
+    report = reconcile(
+        trades_conn,
+        forecasts_conn,
+        chain_by_asset={
+            token_id: ChainPositionFact(
+                token_id=token_id,
+                condition_id=chain_condition_id,
+                size=5.0,
+                redeemable=True,
+                current_value=0.0,
+                side="Yes",
+            )
+        },
+        apply=True,
+    )
+
+    assert report.applied == 0
+    assert report.findings[0].classification == "ungradeable"
+    assert report.findings[0].details["reason"] == reason
+    assert trades_conn.execute(
+        "SELECT phase FROM position_current WHERE position_id = 'pos-condition-bound-settlement'"
+    ).fetchone()["phase"] == "active"
+    assert trades_conn.execute(
+        "SELECT COUNT(*) FROM position_events WHERE position_id = 'pos-condition-bound-settlement'"
+    ).fetchone()[0] == 0
+    assert trades_conn.execute(
+        "SELECT COUNT(*) FROM token_suppression WHERE token_id = ?",
+        (token_id,),
+    ).fetchone()[0] == 0
+
+
 def test_apply_buy_no_win_emits_distinct_market_and_position_results(
     trades_conn, forecasts_conn
 ):
@@ -1037,6 +1266,7 @@ def test_matching_chain_position_refreshes_sell_authority_before_expiry(
         bin_label="34°C",
         direction="buy_no",
         no_token_id=token_id,
+        condition_id="cond-beijing",
         chain_state="synced",
         chain_shares=10.0,
         shares=10.0,
@@ -1306,6 +1536,7 @@ def test_pending_exit_small_chain_delta_refreshes_without_owned_reduction(
         phase="pending_exit",
         direction="buy_no",
         no_token_id=token_id,
+        condition_id="cond-seoul",
         chain_shares=10.0,
         shares=10.0,
         cost_basis_usd=5.7,
@@ -1357,6 +1588,7 @@ def test_active_wallet_residual_refreshes_without_overattributing_owned_lot(
         phase="active",
         direction="buy_no",
         no_token_id=token_id,
+        condition_id="cond-shared",
         chain_shares=6.0,
         shares=6.0,
         cost_basis_usd=3.6,
@@ -1903,6 +2135,7 @@ def test_positive_chain_observation_repairs_already_consumed_torn_economics(
         bin_label="31°C",
         direction="buy_no",
         no_token_id=token_id,
+        condition_id="cond-seoul",
         chain_state="unknown",
         chain_shares=5.0,
         shares=5.0,
