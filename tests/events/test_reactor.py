@@ -6774,8 +6774,21 @@ def test_exact_executable_held_sell_completion_keeps_its_global_turn(monkeypatch
 def test_active_lock_reads_exact_debt_before_skipping(monkeypatch):
     import src.events.reactor as reactor_module
     import src.main as main
+    from src.runtime import reactor_wake
 
     calls = []
+    request = reactor_wake.make_held_sell_reauction_request(
+        position_id="active-lock-priority-position",
+        family=("Cape Town", "2026-08-23", "high"),
+        probability_content_identity="q-active-lock-priority",
+        held_token_id="active-lock-priority-token",
+        held_best_bid=0.21,
+        bid_observed_at="2026-08-23T12:00:00+00:00",
+        probability_observed_at="2026-08-23T12:00:00+00:00",
+        completion_deadline_at="2026-08-23T12:00:30+00:00",
+        schema_version=4,
+        book_state="EXECUTABLE",
+    )
 
     class HeldLock:
         def locked(self):
@@ -6800,12 +6813,17 @@ def test_active_lock_reads_exact_debt_before_skipping(monkeypatch):
     monkeypatch.setattr(
         reactor_module,
         "_durable_exact_held_sell_completion_requests",
-        lambda **_kwargs: calls.append("requests") or (object(),),
+        lambda **_kwargs: calls.append("requests") or (request,),
     )
     monkeypatch.setattr(
         reactor_module,
         "_has_exact_executable_held_sell_completion",
         lambda _requests: calls.append("eligible") or True,
+    )
+    monkeypatch.setattr(
+        reactor_wake,
+        "v4_held_sell_reauction_request_is_queued",
+        lambda candidate: candidate == request,
     )
 
     _EXACT_EXECUTABLE_HELD_SELL_PENDING.clear()
