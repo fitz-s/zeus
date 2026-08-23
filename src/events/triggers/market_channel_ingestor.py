@@ -1707,6 +1707,8 @@ class MarketChannelOnlineService:
     connected: bool = False
     gap_start: str | None = None
     refresh_action_count: int = 0
+    refresh_action_completed_count: int = 0
+    refresh_action_deferred_count: int = 0
     refresh_action_dropped_count: int = 0
     refresh_window_action_count: int = 0
     max_refresh_actions_per_window: int = 5
@@ -3331,6 +3333,10 @@ class MarketChannelOnlineService:
                 status = "deferred"
             with self._refresh_worker_lock:
                 self._inflight_refresh_actions.pop(key, None)
+                if status == "deferred":
+                    self.refresh_action_deferred_count += 1
+                else:
+                    self.refresh_action_completed_count += 1
             if status != "deferred":
                 continue
             retry_count = pending.retry_count + 1
@@ -3397,6 +3403,17 @@ class MarketChannelOnlineService:
 
     def wait_refresh_idle(self, timeout: float | None = None) -> bool:
         return self._refresh_worker_idle.wait(timeout)
+
+    def refresh_action_receipt(self) -> dict[str, int]:
+        """Expose exact queue state without granting ENTRY authority."""
+
+        with self._refresh_worker_lock:
+            return {
+                "queued_exact_actions": len(self._pending_refresh_actions),
+                "inflight_exact_actions": len(self._inflight_refresh_actions),
+                "completed_exact_actions": self.refresh_action_completed_count,
+                "deferred_exact_actions": self.refresh_action_deferred_count,
+            }
 
     def _attempt_refresh_action(
         self,

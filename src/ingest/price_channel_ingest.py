@@ -194,9 +194,10 @@ def _edli_held_snapshot_refresh_report(
     SCOPE: each canonical ``(condition_id, held_token_id)`` pair.
     DRAIN: the persistent market-channel queue retries accepted actions and this
     60-second scheduler re-emits any DB-observed debt after a crash or queue loss.
-    RESET: only a later snapshot projection for the same pair that is active,
-    open, accepting orders, orderbook-enabled, and fresh beyond the proactive
-    margin clears the debt. Queue acceptance is never a RESET.
+    RESET: an active/open/accepting/orderbook-enabled exact projection that is
+    current at ``checked_at`` clears hard actuation debt; a snapshot inside the
+    proactive margin is still current but schedules its next refresh. Queue
+    acceptance is never a RESET.
     """
 
     from src.contracts.executable_market_snapshot import FRESHNESS_WINDOW_DEFAULT
@@ -245,12 +246,17 @@ def _edli_held_snapshot_refresh_report(
         seconds=MARKET_CHANNEL_HELD_SNAPSHOT_PROACTIVE_REFRESH_SECONDS
     )
     fresh_pairs: list[dict[str, str]] = []
-    due_actions = []
-    due_pairs: list[dict[str, str]] = []
+    proactive_actions = []
+    proactive_pairs: list[dict[str, str]] = []
+    hard_actions = []
+    hard_pairs: list[dict[str, str]] = []
+    terminal_pairs: list[dict[str, str]] = []
+    due_deadlines: list[datetime] = []
     for condition_id, token_id in sorted(canonical_held_pairs):
         reason = "snapshot_projection_unavailable"
         row = None
         invalidation_rows = None
+        deadline = None
         if can_read:
             try:
                 row = trade_conn.execute(
@@ -282,6 +288,9 @@ def _edli_held_snapshot_refresh_report(
                 row = None
                 invalidation_rows = None
                 reason = "snapshot_projection_read_failed"
+        terminal = False
+        current_fresh = False
+        proactive_due = False
         if row is not None:
             try:
                 captured_at = datetime.fromisoformat(
@@ -298,9 +307,11 @@ def _edli_held_snapshot_refresh_report(
                 captured_at = None
                 deadline = None
             if int(row[0] or 0) != 1:
-                reason = "snapshot_inactive"
+                reason = "terminal_disposition_required: snapshot_inactive"
+                terminal = True
             elif int(row[1] or 0) != 0:
-                reason = "snapshot_closed"
+                reason = "terminal_disposition_required: snapshot_closed"
+                terminal = True
             elif int(row[2] if row[2] is not None else 1) != 1:
                 reason = "snapshot_not_accepting_orders"
             elif int(row[5] or 0) != 1:
@@ -311,8 +322,8 @@ def _edli_held_snapshot_refresh_report(
                 reason = "snapshot_invalid_freshness_window"
             elif deadline > captured_at + FRESHNESS_WINDOW_DEFAULT:
                 reason = "snapshot_invalid_freshness_window"
-            elif deadline <= freshness_cut:
-                reason = "snapshot_freshness_due"
+            elif deadline <= checked_at:
+                reason = "snapshot_expired"
             else:
                 if invalidation_rows is None:
                     reason = "snapshot_invalidation_projection_unavailable"
@@ -335,26 +346,114 @@ def _edli_held_snapshot_refresh_report(
                             invalidated = True
                             break
                     if not invalidated:
-                        fresh_pairs.append(
-                            {"condition_id": condition_id, "token_id": token_id}
-                        )
-                        continue
+                        current_fresh = True
+                        proactive_due = deadline <= freshness_cut
+        if current_fresh:
+            identity = {"condition_id": condition_id, "token_id": token_id}
+            fresh_pairs.append(identity)
+            if proactive_due:
+                action = MarketChannelAction(
+                    refresh_snapshot=True,
+                    reason="held_snapshot_due",
+                    condition_id=condition_id,
+                    token_id=token_id,
+                )
+                proactive_actions.append(action)
+                proactive_pairs.append(
+                    _edli_held_snapshot_debt_payload(
+                        action, reason="snapshot_proactive_due"
+                    )
+                )
+                due_deadlines.append(deadline)
+            continue
+        if terminal:
+            terminal_pairs.append(
+                {
+                    "condition_id": condition_id,
+                    "token_id": token_id,
+                    "reason": reason,
+                }
+            )
+            continue
         action = MarketChannelAction(
             refresh_snapshot=True,
             reason="held_snapshot_due",
             condition_id=condition_id,
             token_id=token_id,
         )
-        due_actions.append(action)
-        due_pairs.append(_edli_held_snapshot_debt_payload(action, reason=reason))
-    enqueue_report = _edli_enqueue_held_snapshot_refresh_actions(due_actions)
+        hard_actions.append(action)
+        hard_pairs.append(_edli_held_snapshot_debt_payload(action, reason=reason))
+        if deadline is not None:
+            due_deadlines.append(deadline)
+    enqueue_report = _edli_enqueue_held_snapshot_refresh_actions(
+        [*hard_actions, *proactive_actions]
+    )
     return {
         "canonical_held_pair_count": len(canonical_held_pairs),
         "held_snapshot_fresh_pairs": fresh_pairs,
-        "held_snapshot_due_pairs": due_pairs,
-        "held_snapshot_refresh_debt_actions": due_pairs,
+        "held_snapshot_proactive_due_pairs": proactive_pairs,
+        "held_snapshot_hard_debt_pairs": hard_pairs,
+        "held_snapshot_terminal_disposition_required": terminal_pairs,
+        "held_snapshot_due_pairs": [*hard_pairs, *proactive_pairs],
+        "held_snapshot_refresh_debt_actions": hard_pairs,
+        "held_snapshot_current_fresh_count": len(fresh_pairs),
+        "held_snapshot_proactive_due_count": len(proactive_pairs),
+        "held_snapshot_hard_debt_count": len(hard_pairs),
+        "held_snapshot_terminal_disposition_required_count": len(terminal_pairs),
+        "held_snapshot_oldest_due_deadline": (
+            min(due_deadlines).isoformat() if due_deadlines else None
+        ),
         **enqueue_report,
     }
+
+
+def _edli_exact_snapshot_refresh_completed(
+    trade_conn,
+    action,
+    *,
+    checked_at: datetime,
+) -> bool:
+    """Verify a callback wrote an exact, current executable projection.
+
+    SCOPE: the action's exact condition/token pair. DRAIN: a false result is a
+    typed queue defer, so the persistent retry and scheduler re-observation
+    retain the pair. RESET: only this read observing active/open/accepting,
+    orderbook-enabled, unexpired evidence completes the action.
+    """
+
+    condition_id = str(action.condition_id or "").strip()
+    token_id = str(action.token_id or "").strip()
+    if not condition_id or not token_id:
+        return False
+    try:
+        row = trade_conn.execute(
+            """
+            SELECT latest.active, latest.closed, latest.accepting_orders,
+                   latest.captured_at, latest.freshness_deadline,
+                   snapshot.enable_orderbook
+              FROM executable_market_snapshot_latest AS latest
+              JOIN executable_market_snapshots AS snapshot
+                ON snapshot.snapshot_id = latest.snapshot_id
+               AND snapshot.condition_id = latest.condition_id
+               AND snapshot.selected_outcome_token_id = latest.selected_outcome_token_id
+             WHERE latest.condition_id = ?
+               AND latest.selected_outcome_token_id = ?
+            """,
+            (condition_id, token_id),
+        ).fetchone()
+        if row is None or int(row[0] or 0) != 1 or int(row[1] or 0) != 0:
+            return False
+        if int(row[2] if row[2] is not None else 1) != 1 or int(row[5] or 0) != 1:
+            return False
+        captured_at = datetime.fromisoformat(str(row[3]).replace("Z", "+00:00"))
+        deadline = datetime.fromisoformat(str(row[4]).replace("Z", "+00:00"))
+        if captured_at.tzinfo is None or deadline.tzinfo is None:
+            return False
+        captured_at = captured_at.astimezone(timezone.utc)
+        deadline = deadline.astimezone(timezone.utc)
+        return captured_at <= checked_at < deadline
+    except Exception:  # noqa: BLE001 - projection/read failure is retryable
+        return False
 
 
 EDLI_EVENT_DRIVEN_MODES = {
@@ -4227,6 +4326,12 @@ def _edli_held_quote_refresh_cycle() -> dict:
     if not failed and snapshot_debt:
         failed = True
         reason = "canonical_held_snapshot_refresh_debt"
+    terminal_snapshot_debt = list(
+        result.get("held_snapshot_terminal_disposition_required") or ()
+    )
+    if not failed and terminal_snapshot_debt:
+        failed = True
+        reason = "canonical_held_terminal_disposition_required"
     enqueue_unavailable = list(
         result.get("held_snapshot_refresh_enqueue_unavailable") or ()
     )
@@ -4739,6 +4844,25 @@ def _edli_market_channel_ingestor_cycle() -> dict | None:
                                 )
                             ),
                         )
+                    inserted = int(summary.get("inserted", 0) or 0)
+                    if inserted <= 0:
+                        logger.warning(
+                            "EDLI market-channel refresh deferred: exact snapshot write inserted=0 condition_id=%s token_id=%s",
+                            action.condition_id,
+                            action.token_id,
+                        )
+                        return "deferred"
+                    if not _edli_exact_snapshot_refresh_completed(
+                        trade_conn,
+                        action,
+                        checked_at=datetime.now(timezone.utc),
+                    ):
+                        logger.warning(
+                            "EDLI market-channel refresh deferred: exact projection is not current condition_id=%s token_id=%s",
+                            action.condition_id,
+                            action.token_id,
+                        )
+                        return "deferred"
                 finally:
                     try:
                         if trade_conn is not None:

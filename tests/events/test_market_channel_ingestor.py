@@ -4040,6 +4040,12 @@ def test_persistent_action_sink_queues_exact_action_with_existing_callbacks():
 
     assert invalidated == [action]
     assert refreshed == [action]
+    assert service.refresh_action_receipt() == {
+        "queued_exact_actions": 0,
+        "inflight_exact_actions": 0,
+        "completed_exact_actions": 1,
+        "deferred_exact_actions": 0,
+    }
 
 
 def test_rest_seed_post_commit_sink_observes_committed_quote_evidence():

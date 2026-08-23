@@ -4516,12 +4516,13 @@ def test_held_snapshot_debt_rebuilds_from_exact_snapshot_outcome_not_queue_state
     )
 
     first = lane._edli_refresh_held_position_quote_evidence()
-    assert first["held_snapshot_refresh_debt_actions"] == [
+    assert first["held_snapshot_refresh_debt_actions"] == []
+    assert first["held_snapshot_proactive_due_pairs"] == [
         {
             "condition_id": "condition-held",
             "token_id": "held-token",
             "reason": "held_snapshot_due",
-            "debt_reason": "snapshot_freshness_due",
+            "debt_reason": "snapshot_proactive_due",
         }
     ]
     assert [(action.condition_id, action.token_id) for action in actions] == [
@@ -4532,7 +4533,8 @@ def test_held_snapshot_debt_rebuilds_from_exact_snapshot_outcome_not_queue_state
     # stale, so the next scheduler pass rebuilds and re-emits the exact debt.
     actions.clear()
     second = lane._edli_refresh_held_position_quote_evidence()
-    assert second["held_snapshot_refresh_debt_actions"] == first["held_snapshot_refresh_debt_actions"]
+    assert second["held_snapshot_refresh_debt_actions"] == []
+    assert second["held_snapshot_proactive_due_pairs"] == first["held_snapshot_proactive_due_pairs"]
     assert [(action.condition_id, action.token_id) for action in actions] == [
         ("condition-held", "held-token")
     ]
@@ -4631,6 +4633,29 @@ def test_held_snapshot_debt_rebuilds_from_exact_snapshot_outcome_not_queue_state
             "debt_reason": "snapshot_projection_unavailable",
         }
     ]
+
+    conn = sqlite3.connect(trade_path)
+    conn.execute(
+        "UPDATE executable_market_snapshot_latest SET active = 0, closed = 1 "
+        "WHERE condition_id = 'condition-held' AND selected_outcome_token_id = 'held-token'"
+    )
+    conn.commit()
+    actions.clear()
+    inactive = lane._edli_held_snapshot_refresh_report(
+        conn,
+        {("condition-held", "held-token")},
+        checked_at=datetime.now(timezone.utc),
+    )
+    conn.close()
+    assert inactive["held_snapshot_refresh_debt_actions"] == []
+    assert inactive["held_snapshot_terminal_disposition_required"] == [
+        {
+            "condition_id": "condition-held",
+            "token_id": "held-token",
+            "reason": "terminal_disposition_required: snapshot_inactive",
+        }
+    ]
+    assert actions == []
 
 
 def test_held_quote_commit_without_persistent_sink_records_only_native_snapshot_debt(monkeypatch):
