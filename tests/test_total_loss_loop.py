@@ -546,6 +546,19 @@ def test_absolute_provider_retry_targets_are_bounded_and_past_falls_back(cfg: di
         )
         mem.commit()
     assert (loop.parse_time(payload["next_retry_at"]) - loop.now()).total_seconds() <= 10.5
+    with loop.memory(cfg) as mem:
+        loop.meta_set(
+            mem,
+            "codex_provider_backoff",
+            json.dumps({"next_retry_at": "2099-01-01T00:00:00+00:00", "reason": "raw-far"}),
+        )
+        mem.commit()
+    migrated = loop._provider_backoff(cfg)
+    assert migrated is not None
+    assert (loop.parse_time(migrated["next_retry_at"]) - loop.now()).total_seconds() <= 10.5
+    with loop.memory(cfg) as mem:
+        persisted = json.loads(loop.meta_get(mem, "codex_provider_backoff"))
+    assert (loop.parse_time(persisted["next_retry_at"]) - loop.now()).total_seconds() <= 10.5
 
 
 def test_launch_guard_rechecks_durable_backoff_before_each_spawn(
@@ -562,6 +575,38 @@ def test_launch_guard_rechecks_durable_backoff_before_each_spawn(
     with pytest.raises(loop.ProviderBackoffActive):
         loop._spawn_run(cfg, incident_id="gated", kind="hard", stage="diagnosis", command=[], cwd=ROOT, prompt="", output=ROOT / "out", events=ROOT / "events")
     assert calls == []
+
+
+def test_active_backoff_blocks_stale_capability_probe_and_expiry_allows_probe(
+    cfg: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with loop.memory(cfg) as mem:
+        loop.meta_set(
+            mem,
+            "codex_provider_backoff",
+            json.dumps({"next_retry_at": "2099-01-01T00:00:00+00:00", "reason": "quota"}),
+        )
+        mem.commit()
+    calls: list[str] = []
+    monkeypatch.setattr(loop, "_probe_thread", None)
+    monkeypatch.setattr(loop, "probe_capabilities", lambda *_args, **_kwargs: calls.append("probe") or {})
+    loop.ensure_capability_probe(cfg)
+    assert loop._probe_thread is not None
+    loop._probe_thread.join(timeout=2)
+    assert calls == []
+
+    with loop.memory(cfg) as mem:
+        loop.meta_set(
+            mem,
+            "codex_provider_backoff",
+            json.dumps({"next_retry_at": "2000-01-01T00:00:00+00:00", "reason": "expired"}),
+        )
+        mem.commit()
+    monkeypatch.setattr(loop, "_probe_thread", None)
+    loop.ensure_capability_probe(cfg)
+    assert loop._probe_thread is not None
+    loop._probe_thread.join(timeout=2)
+    assert calls == ["probe"]
 
 
 def test_canonical_settlement_correction_revises_existing_loss_incident(

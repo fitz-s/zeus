@@ -2397,7 +2397,11 @@ def ensure_capability_probe(cfg: Mapping[str, Any]) -> None:
             return
 
         def run() -> None:
+            launch_lock: int | None = None
             try:
+                launch_lock = _acquire_provider_launch_lock(cfg)
+                if _provider_backoff(cfg) is not None:
+                    return
                 probe_capabilities(cfg, smoke=True)
                 atomic_json(
                     runtime_dir(cfg) / "capability-fingerprint.json",
@@ -2409,6 +2413,9 @@ def ensure_capability_probe(cfg: Mapping[str, Any]) -> None:
                     runtime_dir(cfg) / "capability-error.json",
                     {"at": iso(), "error": f"{type(exc).__name__}: {exc}"},
                 )
+            finally:
+                if launch_lock is not None:
+                    _release_provider_launch_lock(launch_lock)
 
         _probe_thread = threading.Thread(
             target=run,
@@ -2465,7 +2472,7 @@ def _codex_resume_base(
     schema: Path,
     output: Path,
 ) -> list[str]:
-    cap = capabilities(cfg)
+    cap = current_capabilities(cfg) or {"reasoning_effort": required_reasoning_effort(cfg)}
     profile = cfg["profiles"][cfg["active"]["profile"]]
     if cap.get("reasoning_effort") != required_reasoning_effort(cfg):
         raise RuntimeError("total-loss Codex resume requires reasoning_effort=high")
@@ -2660,7 +2667,19 @@ def _provider_backoff(cfg: Mapping[str, Any]) -> dict[str, Any] | None:
         return None
     if retry_at <= now():
         return None
-    return dict(value)
+    max_seconds = max(1.0, min(float(cfg["loop"].get("max_provider_backoff_seconds", 86_400)), 86_400.0))
+    minimum_seconds = max(1.0, min(float(cfg["loop"].get("provider_cooldown_seconds", 300)), max_seconds))
+    remaining = (retry_at - now()).total_seconds()
+    bounded_seconds = max(minimum_seconds, min(remaining, max_seconds))
+    bounded_at = now() + timedelta(seconds=bounded_seconds)
+    result = dict(value)
+    if abs(remaining - bounded_seconds) > 0.5:
+        result["next_retry_at"] = iso(bounded_at)
+        result["updated_at"] = iso()
+        with memory(cfg) as mem:
+            meta_set(mem, "codex_provider_backoff", json.dumps(result, sort_keys=True))
+            mem.commit()
+    return result
 
 
 def _set_provider_backoff(
@@ -2806,7 +2825,7 @@ def _spawn_run_unlocked(
         atomic_json(run_path, record)
         with memory(cfg) as mem:
             profile = cfg["profiles"][cfg["active"]["profile"]]
-            cap = capabilities(cfg)
+            cap = current_capabilities(cfg) or {"reasoning_effort": required_reasoning_effort(cfg)}
             mem.execute(
                 "INSERT INTO model_runs(run_id,incident_id,stage,session_id,model,reasoning_effort,started_at,status,events_path) VALUES (?,?,?,?,?,?,?,?,?)",
                 (run_id, incident_id, stage, session_id, profile["model"], cap["reasoning_effort"], record["started_at"], "running", str(events)),
