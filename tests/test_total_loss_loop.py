@@ -402,6 +402,93 @@ def test_stable_settlement_consolidates_legacy_duplicates_without_collateral(
         ).fetchone()[0] == "observing"
 
 
+def test_rc0_turn_failed_is_failed_and_requeues_incident(cfg: dict) -> None:
+    _queue_blind_dispatch_debt(cfg, incident_id="turn-failed")
+    with loop.memory(cfg) as mem:
+        mem.execute("UPDATE incidents SET status='running',stage='diagnosis' WHERE incident_id='turn-failed'")
+        mem.commit()
+    runtime = Path(cfg["paths"]["runtime"])
+    events = runtime / "runs" / "turn-failed.jsonl"
+    events.parent.mkdir(parents=True, exist_ok=True)
+    events.write_text(
+        json.dumps({"type": "error", "error": {"message": "usage limit reached"}})
+        + "\n"
+        + json.dumps({"type": "turn.failed", "error": {"message": "usage limit reached"}})
+        + "\n"
+    )
+    run = {
+        "run_id": "turn-failed", "incident_id": "turn-failed", "stage": "diagnosis",
+        "events": str(events), "pid": os.getpid(), "status": "running",
+    }
+    loop._finish_run_inner(cfg, run, 0)
+    assert run["status"] == "failed"
+    assert run["terminal_failure"]["kind"] == "provider_quota_limit"
+    with loop.memory(cfg) as mem:
+        assert mem.execute(
+            "SELECT status FROM incidents WHERE incident_id='turn-failed'"
+        ).fetchone()[0] == "retry_pending"
+        reason = mem.execute(
+            "SELECT reason FROM incident_transitions WHERE incident_id='turn-failed'"
+        ).fetchone()[0]
+    assert "codex_terminal_failure:provider_quota_limit" in reason
+    assert loop._provider_backoff(cfg) is not None
+
+
+def test_provider_backoff_suppresses_global_launch_but_detector_continues(
+    cfg: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with loop.memory(cfg) as mem:
+        loop._set_provider_backoff(
+            cfg, mem,
+            {"kind": "provider_quota_limit", "reason": "quota", "retry_at": "2099-01-01T00:00:00+00:00"},
+        )
+        mem.commit()
+    _queue_blind_dispatch_debt(cfg, incident_id="blocked-by-provider")
+    monkeypatch.setattr(loop, "current_capabilities", lambda _cfg: {"ready": True})
+    monkeypatch.setattr(loop, "_spawn_run", lambda *_args, **_kwargs: pytest.fail("provider backoff must block all new model runs"))
+    assert loop.dispatch(cfg) == []
+    assert loop._dispatch_has_eligible_debt(cfg, []) is False
+
+    _position(cfg)
+    _quote(cfg, "provider-detector-q", "2026-08-22T09:00:02+00:00", 0.01)
+    assert loop.detect(cfg)
+    assert any(row["incident_id"] == "blocked-by-provider" for row in _incidents(cfg))
+
+
+def test_provider_backoff_expiry_restores_dispatch_eligibility(cfg: dict, monkeypatch: pytest.MonkeyPatch) -> None:
+    with loop.memory(cfg) as mem:
+        loop._set_provider_backoff(
+            cfg, mem,
+            {"kind": "provider_quota_limit", "reason": "quota", "retry_at": "2000-01-01T00:00:00+00:00"},
+        )
+        mem.commit()
+    _queue_blind_dispatch_debt(cfg, incident_id="cooldown-expired")
+    monkeypatch.setattr(loop, "current_capabilities", lambda _cfg: {"ready": True})
+    monkeypatch.setattr(loop, "_running", lambda _cfg: [])
+    monkeypatch.setattr(loop, "_retry_pending", lambda *_args: [])
+    monkeypatch.setattr(loop, "_recover_classification_debt", lambda *_args: None)
+    monkeypatch.setattr(loop, "_dispatch_repair_waiting", lambda *_args: None)
+    monkeypatch.setattr(loop, "build_evidence", lambda *_args: Path("/tmp/evidence.db"))
+    monkeypatch.setattr(loop, "read_json", lambda *_args: {"loaded_sha": "sha"})
+    monkeypatch.setattr(loop, "_spawn_run", lambda *_args, **_kwargs: {"run_id": "resumed"})
+    assert loop.dispatch(cfg) == ["cooldown-expired"]
+
+
+def test_normal_completed_jsonl_has_no_terminal_failure() -> None:
+    # The parser must not turn an ordinary successful turn into provider debt.
+    path = Path("/tmp") / f"total-loss-success-{os.getpid()}.jsonl"
+    path.write_text(
+        json.dumps({"type": "thread.started", "thread_id": "session"})
+        + "\n"
+        + json.dumps({"type": "turn.completed", "usage": {"total_tokens": 1}})
+        + "\n"
+    )
+    try:
+        assert loop._parse_terminal_failure(path) is None
+    finally:
+        path.unlink(missing_ok=True)
+
+
 def test_canonical_settlement_correction_revises_existing_loss_incident(
     cfg: dict, monkeypatch: pytest.MonkeyPatch
 ) -> None:

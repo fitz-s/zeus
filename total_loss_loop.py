@@ -2500,6 +2500,113 @@ def _parse_session(events_path: Path) -> tuple[str | None, dict[str, Any]]:
     return session, usage
 
 
+_PROVIDER_LIMIT_TERMS = (
+    "usage limit", "quota", "rate limit", "too many requests",
+    "resource exhausted", "exceeded limit",
+)
+
+
+def _parse_terminal_failure(events_path: Path) -> dict[str, Any] | None:
+    """Read terminal Codex failure events even when the CLI exits rc=0."""
+
+    preceding_errors: list[str] = []
+    preceding_error_events: list[Mapping[str, Any]] = []
+    failed: Mapping[str, Any] | None = None
+    try:
+        lines = events_path.read_text(errors="replace").splitlines()
+    except OSError:
+        return None
+    for line in lines:
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(event, Mapping):
+            continue
+        event_type = str(event.get("type") or "")
+        if event_type == "error":
+            preceding_error_events.append(event)
+            preceding_errors.append(json.dumps(event, ensure_ascii=False, default=str))
+        elif event_type in {"turn.failed", "turn_failed"}:
+            failed = event
+    if failed is None:
+        return None
+    detail = failed.get("error") or failed.get("message") or failed.get("reason")
+    detail_text = json.dumps(detail, ensure_ascii=False, default=str) if isinstance(detail, (Mapping, list)) else str(detail or "")
+    if not detail_text and preceding_errors:
+        detail_text = preceding_errors[-1]
+    raw = " ".join([detail_text, *preceding_errors]).lower()
+    provider_limit = any(term in raw for term in _PROVIDER_LIMIT_TERMS)
+    retry_at = _retry_at_from_failure(failed)
+    if retry_at is None:
+        for error_event in reversed(preceding_error_events):
+            retry_at = _retry_at_from_failure(error_event)
+            if retry_at is not None:
+                break
+    return {
+        "kind": "provider_quota_limit" if provider_limit else "terminal_failure",
+        "reason": detail_text[:1000] or "codex_turn_failed",
+        "provider_wide": provider_limit,
+        "retry_at": retry_at,
+    }
+
+
+def _retry_at_from_failure(event: Mapping[str, Any]) -> str | None:
+    for key in ("next_retry_at", "retry_at", "reset_at", "retry_after"):
+        value = event.get(key)
+        if value is None and isinstance(event.get("error"), Mapping):
+            value = event["error"].get(key)
+        if value is None:
+            continue
+        parsed = parse_time(str(value))
+        if parsed is not None:
+            return iso(parsed)
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            continue
+        if not math.isfinite(numeric) or numeric <= 0:
+            continue
+        if numeric > 1_000_000_000:
+            return iso(datetime.fromtimestamp(numeric, UTC))
+        return iso(now() + timedelta(seconds=min(numeric, 86_400.0)))
+    return None
+
+
+def _provider_backoff(cfg: Mapping[str, Any]) -> dict[str, Any] | None:
+    try:
+        with memory_ro(cfg) as mem:
+            raw = meta_get(mem, "codex_provider_backoff", "")
+    except (OSError, sqlite3.Error):
+        return None
+    value = read_json_text(raw)
+    retry_at = parse_time(str(value.get("next_retry_at") or ""))
+    if not isinstance(value, Mapping) or retry_at is None:
+        return None
+    if retry_at <= now():
+        return None
+    return dict(value)
+
+
+def _set_provider_backoff(
+    cfg: Mapping[str, Any],
+    mem: sqlite3.Connection,
+    failure: Mapping[str, Any],
+) -> dict[str, Any]:
+    retry_at = parse_time(str(failure.get("retry_at") or ""))
+    if retry_at is None:
+        seconds = max(1.0, min(float(cfg["loop"].get("provider_cooldown_seconds", 300)), 86_400.0))
+        retry_at = now() + timedelta(seconds=seconds)
+    payload = {
+        "next_retry_at": iso(retry_at),
+        "reason": str(failure.get("reason") or "provider_quota_limit")[:1000],
+        "kind": str(failure.get("kind") or "provider_quota_limit"),
+        "updated_at": iso(),
+    }
+    meta_set(mem, "codex_provider_backoff", json.dumps(payload, sort_keys=True))
+    return payload
+
+
 def _spawn_run(
     cfg: Mapping[str, Any],
     *,
@@ -3399,6 +3506,8 @@ def _retry_pending(cfg: Mapping[str, Any], running: list[dict[str, Any]]) -> lis
 
 def dispatch(cfg: Mapping[str, Any]) -> list[str]:
     reconcile_orphan_incidents(cfg)
+    if _provider_backoff(cfg) is not None:
+        return []
     if current_capabilities(cfg) is None:
         ensure_capability_probe(cfg)
         return []
@@ -3553,10 +3662,14 @@ def _finish_run_inner(cfg: Mapping[str, Any], run: dict[str, Any], returncode: i
     path = runtime_dir(cfg) / "runs" / f"{run['run_id']}.json"
     events = Path(str(run["events"]))
     session, usage = _parse_session(events)
-    run["status"] = "completed" if returncode == 0 else "failed"
+    terminal_failure = _parse_terminal_failure(events)
+    effective_failed = returncode != 0 or terminal_failure is not None
+    run["status"] = "failed" if effective_failed else "completed"
     run["returncode"] = returncode
     run["completed_at"] = iso()
     run["session_id"] = session or run.get("session_id")
+    if terminal_failure is not None:
+        run["terminal_failure"] = terminal_failure
     atomic_json(path, run)
     with memory(cfg) as mem:
         if not run.get("controller"):
@@ -3564,17 +3677,25 @@ def _finish_run_inner(cfg: Mapping[str, Any], run: dict[str, Any], returncode: i
                 "UPDATE model_runs SET session_id=?,completed_at=?,status=?,usage_json=? WHERE run_id=?",
                 (run.get("session_id"), run["completed_at"], run["status"], json.dumps(usage), run["run_id"]),
             )
-        if returncode != 0:
+        if effective_failed:
+            reason = (
+                f"codex_terminal_failure:{terminal_failure['kind']}:{terminal_failure['reason']}"
+                if terminal_failure is not None
+                else f"run_failed:{returncode}"
+            )
+            if terminal_failure is not None and terminal_failure.get("provider_wide"):
+                run["provider_backoff"] = _set_provider_backoff(cfg, mem, terminal_failure)
             transition(
                 mem,
                 str(run["incident_id"]),
                 str(run["stage"]),
-                reason=f"run_failed:{returncode}",
+                reason=reason[:1200],
                 run_id=str(run["run_id"]),
                 status="retry_pending",
             )
-        mem.commit()
-    if returncode != 0:
+            mem.commit()
+    if effective_failed:
+        atomic_json(path, run)
         return
     result = read_json(Path(str(run["output"])), None)
     if not isinstance(result, dict) or result.get("incident_id") not in {None, run["incident_id"]}:
@@ -4443,6 +4564,7 @@ def status(cfg: Mapping[str, Any]) -> dict[str, Any]:
         "latest": latest,
         "running": _running(cfg),
         "capabilities": read_json(runtime_dir(cfg) / "capabilities.json", None),
+        "provider_backoff": _provider_backoff(cfg),
         "halted": (runtime_dir(cfg) / "HALT").exists(),
     }
 
@@ -4483,6 +4605,8 @@ def _dispatch_has_eligible_debt(
 ) -> bool:
     """Return whether one dispatch child can make durable progress now."""
 
+    if _provider_backoff(cfg) is not None:
+        return False
     active_incidents = {str(row.get("incident_id") or "") for row in running}
     by_kind = {
         kind: sum(1 for row in running if str(row.get("kind") or "") == kind)
@@ -4635,6 +4759,7 @@ def daemon(cfg: Mapping[str, Any]) -> int:
                 ),
                 "error": error,
                 "dispatch_error": dispatch_error,
+                "provider_backoff": _provider_backoff(cfg),
             },
         )
         if error is None:
@@ -4650,7 +4775,10 @@ def daemon(cfg: Mapping[str, Any]) -> int:
                 worker_exited = (
                     dispatch_worker is not None and dispatch_worker.poll() is not None
                 )
-                if current_capabilities(cfg) is None:
+                provider_backoff = _provider_backoff(cfg)
+                if provider_backoff is not None:
+                    capabilities_ready = False
+                elif current_capabilities(cfg) is None:
                     capabilities_ready = False
                     ensure_capability_probe(cfg)
                 else:
@@ -4683,6 +4811,7 @@ def daemon(cfg: Mapping[str, Any]) -> int:
                         ),
                         "error": error,
                         "dispatch_error": dispatch_error,
+                        "provider_backoff": _provider_backoff(cfg),
                     },
                 )
         elapsed = time.monotonic() - cycle_started
