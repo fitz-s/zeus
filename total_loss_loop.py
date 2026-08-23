@@ -1082,13 +1082,15 @@ def refresh_precursor(
         (precursor_id,),
     ).fetchone()
     if existing:
-        if existing[2] != quote["evidence_id"]:
+        if existing[1] == "queued" and existing[2] != quote["evidence_id"]:
+            before = mem.total_changes
             mem.execute(
                 "UPDATE incidents SET crossing_evidence_id=?,observed_bid=?,priority=?,"
-                "evidence_revision=evidence_revision+1,updated_at=? WHERE incident_id=?",
+                "evidence_revision=evidence_revision+1,updated_at=? "
+                "WHERE incident_id=? AND status='queued'",
                 (quote["evidence_id"], bid, score, iso(), precursor_id),
             )
-            return precursor_id
+            return precursor_id if mem.total_changes > before else None
         return None
     _insert_incident(
         mem,

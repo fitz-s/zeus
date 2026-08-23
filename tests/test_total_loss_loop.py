@@ -1093,6 +1093,33 @@ def test_precursor_identity_is_stable_across_quotes_while_hard_crossing_stays_ev
     assert hard[0]["evidence_revision"] == 2
 
 
+def test_precursor_refresh_does_not_rebind_running_or_retry_pending_evidence(cfg: dict) -> None:
+    _position(cfg)
+    _quote(cfg, "precursor-claimed", "2026-08-22T09:00:01+00:00", 0.30)
+    loop.detect(cfg)
+    incident_id = loop.digest("precursor", "p1")
+    mem = loop.memory(cfg)
+    mem.execute("UPDATE incidents SET status='running' WHERE incident_id=?", (incident_id,))
+    mem.commit()
+    mem.close()
+
+    _quote(cfg, "precursor-newer", "2026-08-22T09:00:02+00:00", 0.20)
+    loop.detect(cfg)
+    running = next(row for row in _incidents(cfg) if row["incident_id"] == incident_id)
+    assert running["crossing_evidence_id"] == "precursor-claimed"
+    assert running["evidence_revision"] == 1
+
+    mem = loop.memory(cfg)
+    mem.execute("UPDATE incidents SET status='retry_pending' WHERE incident_id=?", (incident_id,))
+    mem.commit()
+    mem.close()
+    _quote(cfg, "precursor-latest", "2026-08-22T09:00:03+00:00", 0.10)
+    loop.detect(cfg)
+    retrying = next(row for row in _incidents(cfg) if row["incident_id"] == incident_id)
+    assert retrying["crossing_evidence_id"] == "precursor-claimed"
+    assert retrying["evidence_revision"] == 1
+
+
 def test_hard_incident_suppresses_precursor_creation(cfg: dict) -> None:
     _position(cfg)
     _quote(cfg, "q-low", "2026-08-22T09:00:02+00:00", 0.01)
