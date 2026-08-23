@@ -3767,6 +3767,95 @@ def dispatch_once(cfg: Mapping[str, Any]) -> list[str]:
         lock.close()
 
 
+def _dispatch_has_eligible_debt(
+    cfg: Mapping[str, Any],
+    running: list[Mapping[str, Any]],
+) -> bool:
+    """Return whether one dispatch child can make durable progress now."""
+
+    active_incidents = {str(row.get("incident_id") or "") for row in running}
+    by_kind = {
+        kind: sum(1 for row in running if str(row.get("kind") or "") == kind)
+        for kind in ("hard", "precursor")
+    }
+    with memory(cfg) as mem:
+        blind = mem.execute(
+            "SELECT kind FROM incidents WHERE status='queued' AND stage='blind'"
+        ).fetchall()
+        repair = mem.execute(
+            "SELECT kind FROM incidents WHERE status='queued' AND stage='repair_waiting'"
+        ).fetchall()
+        classification = mem.execute(
+            "SELECT incident_id FROM incidents WHERE status='running' AND stage='classification'"
+        ).fetchall()
+        blocked_evidence = mem.execute(
+            "SELECT 1 FROM incidents WHERE status='blocked' AND stage='evidence' LIMIT 1"
+        ).fetchone()
+        retries = mem.execute(
+            "SELECT incident_id,kind FROM incidents WHERE status='retry_pending'"
+        ).fetchall()
+    if any(
+        by_kind.get(str(row[0]), 0) < int(cfg["loop"].get(f"{row[0]}_slots", 1))
+        for row in blind
+    ):
+        return True
+    if blocked_evidence is not None and _active_loaded_sha(cfg):
+        return True
+    for row in classification:
+        incident_id = str(row[0])
+        if incident_id in active_incidents:
+            continue
+        incident_dir = runtime_dir(cfg) / "incidents" / incident_id
+        if isinstance(read_json(incident_dir / "classification.json", None), Mapping) and isinstance(
+            read_json(incident_dir / "diagnosis.json", None), Mapping
+        ):
+            return True
+    if not any(
+        str(row.get("stage") or "") in {"repair", "repair_feedback", "review", "delivery", "production"}
+        for row in running
+    ) and any(
+        by_kind.get(str(row[0]), 0) < int(cfg["loop"].get(f"{row[0]}_slots", 1))
+        for row in repair
+    ):
+        return True
+    if not retries:
+        return False
+    retry_delay = float(cfg["loop"].get("stage_retry_seconds", 60))
+    records = sorted(
+        (runtime_dir(cfg) / "runs").glob("*.json"),
+        key=lambda item: item.stat().st_mtime_ns,
+        reverse=True,
+    )
+    for retry in retries:
+        incident_id = str(retry["incident_id"])
+        kind = str(retry["kind"])
+        if incident_id in active_incidents or by_kind.get(kind, 0) >= int(
+            cfg["loop"].get(f"{kind}_slots", 1)
+        ):
+            continue
+        prior = next(
+            (
+                record
+                for item in records
+                if isinstance((record := read_json(item, {})), dict)
+                and record.get("incident_id") == incident_id
+            ),
+            None,
+        )
+        if not isinstance(prior, dict) or not isinstance(prior.get("command"), list):
+            continue
+        stage = str(prior.get("stage") or "")
+        cwd = Path(str(prior.get("cwd") or ROOT))
+        if _worktree_writer_running(running, stage=stage, cwd=cwd):
+            continue
+        completed_at = parse_time(str(prior.get("completed_at") or prior.get("started_at") or ""))
+        if completed_at is not None and (now() - completed_at).total_seconds() < retry_delay:
+            continue
+        if prior.get("controller") or Path(str(prior.get("events") or "")).with_suffix(".prompt.md").is_file():
+            return True
+    return False
+
+
 def _spawn_dispatch_worker(cfg: Mapping[str, Any]) -> subprocess.Popen[Any]:
     logs = runtime_dir(cfg) / "logs"
     logs.mkdir(parents=True, exist_ok=True)
@@ -3838,7 +3927,11 @@ def daemon(cfg: Mapping[str, Any]) -> int:
         if error is None:
             try:
                 poll_runs(cfg)
-                if dispatch_worker is None or dispatch_worker.poll() is not None:
+                if (
+                    dispatch_worker is None or dispatch_worker.poll() is not None
+                ) and (
+                    created or _dispatch_has_eligible_debt(cfg, _running(cfg))
+                ):
                     dispatch_worker = _spawn_dispatch_worker(cfg)
             except Exception as exc:
                 dispatch_error = f"{type(exc).__name__}: {exc}"

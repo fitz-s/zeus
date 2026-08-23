@@ -221,6 +221,17 @@ def _incidents(cfg: dict) -> list[dict]:
         return [dict(row) for row in conn.execute("SELECT * FROM incidents ORDER BY detected_at")]
 
 
+def _queue_blind_dispatch_debt(cfg: dict, *, incident_id: str = "dispatch-debt") -> None:
+    with loop.memory(cfg) as mem:
+        mem.execute(
+            "INSERT INTO incidents(incident_id,kind,position_id,crossing_evidence_id,crossing_kind,"
+            "held_token_id,held_direction,floor_price,detected_at,priority,status,stage,updated_at) "
+            "VALUES (?, 'hard', 'p1', 'q1', 'below_floor', 'yes-token', 'sell_yes', .05, ?, 1, 'queued', 'blind', ?)",
+            (incident_id, "2026-08-22T09:00:00+00:00", "2026-08-22T09:00:00+00:00"),
+        )
+        mem.commit()
+
+
 def test_crossing_below_floor_creates_one_hard_incident(cfg: dict) -> None:
     _position(cfg)
     _quote(cfg, "q1", "2026-08-22T09:00:01+00:00", 0.08, latest=False)
@@ -299,10 +310,83 @@ def test_daemon_keeps_detecting_while_dispatch_worker_is_busy(
     monkeypatch.setattr(loop, "_terminate_process_group", lambda _pid: None)
     monkeypatch.setattr(loop, "_record_cycle_latency", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(loop.time, "sleep", lambda _seconds: None)
+    _queue_blind_dispatch_debt(cfg)
 
     assert loop.daemon(cfg) == 0
     assert detected == [1, 2]
     assert len(spawned) == 1
+
+
+def test_daemon_does_not_spawn_dispatch_worker_without_durable_debt(
+    cfg: dict,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = Path(cfg["paths"]["runtime"])
+    detected: list[int] = []
+    spawned: list[object] = []
+
+    def fake_bootstrap(_cfg: dict) -> dict[str, str]:
+        runtime.mkdir(parents=True, exist_ok=True)
+        return {"runtime": str(runtime)}
+
+    def fake_detect(_cfg: dict) -> list[str]:
+        detected.append(len(detected) + 1)
+        if len(detected) == 3:
+            (runtime / "HALT").touch()
+        return []
+
+    monkeypatch.setattr(loop, "bootstrap", fake_bootstrap)
+    monkeypatch.setattr(loop, "detect", fake_detect)
+    monkeypatch.setattr(loop, "poll_runs", lambda _cfg: [])
+    monkeypatch.setattr(loop, "_spawn_dispatch_worker", lambda _cfg: spawned.append(object()))
+    monkeypatch.setattr(loop, "_running", lambda _cfg: [])
+    monkeypatch.setattr(loop, "_record_cycle_latency", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(loop.time, "sleep", lambda _seconds: None)
+
+    assert loop.daemon(cfg) == 0
+    assert detected == [1, 2, 3]
+    assert spawned == []
+
+
+def test_dispatch_eligibility_waits_for_stage_retry_due_time(
+    cfg: dict,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = Path(cfg["paths"]["runtime"])
+    (runtime / "runs").mkdir(parents=True)
+    with loop.memory(cfg) as mem:
+        mem.execute(
+            "INSERT INTO incidents(incident_id,kind,position_id,crossing_evidence_id,crossing_kind,"
+            "held_token_id,held_direction,floor_price,detected_at,priority,status,stage,updated_at) "
+            "VALUES ('retry-debt', 'hard', 'p1', 'q1', 'below_floor', 'yes-token', 'sell_yes', .05, ?, 1, 'retry_pending', 'diagnosis', ?)",
+            ("2026-08-22T09:00:00+00:00", "2026-08-22T09:00:00+00:00"),
+        )
+        mem.commit()
+    monkeypatch.setattr(loop, "now", lambda: loop.parse_time("2026-08-22T10:00:00+00:00"))
+    loop.atomic_json(
+        runtime / "runs" / "retry.json",
+        {
+            "incident_id": "retry-debt",
+            "stage": "diagnosis",
+            "command": ["codex", "exec"],
+            "controller": True,
+            "completed_at": "2026-08-22T09:59:30+00:00",
+        },
+    )
+
+    assert loop._dispatch_has_eligible_debt(cfg, []) is False
+
+    loop.atomic_json(
+        runtime / "runs" / "retry.json",
+        {
+            "incident_id": "retry-debt",
+            "stage": "diagnosis",
+            "command": ["codex", "exec"],
+            "controller": True,
+            "completed_at": "2026-08-22T09:58:00+00:00",
+        },
+    )
+    assert loop._dispatch_has_eligible_debt(cfg, []) is True
 
 
 def test_daemon_records_dispatch_failures_without_blocking_next_detect(
@@ -329,7 +413,7 @@ def test_daemon_records_dispatch_failures_without_blocking_next_detect(
         detected.append(len(detected) + 1)
         if len(detected) == 4:
             (runtime / "HALT").touch()
-        return []
+        return [f"wake-{detected[-1]}"] if len(detected) < 4 else []
 
     def fake_poll(_cfg: dict) -> list[str]:
         nonlocal poll_calls
