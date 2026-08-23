@@ -71,12 +71,17 @@ def test_wu_revision_history_keeps_current_boundary_inside_probability():
     conn.execute(
         "CREATE TABLE observation_revisions ("
         "id INTEGER PRIMARY KEY, table_name TEXT, city TEXT, target_date TEXT, "
-        "source TEXT, existing_row_json TEXT, incoming_row_json TEXT, "
+        "source TEXT, existing_row_json TEXT, incoming_row_json TEXT, reason TEXT, "
         "recorded_at TEXT)"
     )
     rows = []
-    for index, (existing, incoming) in enumerate(
-        ((31.0, 29.0), (29.0, 30.0), (30.0, 30.0)), start=1
+    for index, (existing, incoming, reason) in enumerate(
+        (
+            (31.0, 29.0, "payload_hash_mismatch_source_revision_applied"),
+            (29.0, 30.0, "payload_hash_mismatch_monotone_widening_applied"),
+            (30.0, 30.0, "payload_hash_mismatch_monotone_widening_applied"),
+        ),
+        start=1,
     ):
         rows.append(
             (
@@ -87,11 +92,12 @@ def test_wu_revision_history_keeps_current_boundary_inside_probability():
                 "wu_icao_history",
                 json.dumps({"running_max": existing, "running_min": 27.0}),
                 json.dumps({"running_max": incoming, "running_min": 27.0}),
+                reason,
                 f"2026-08-20T0{index + 4}:00:00+00:00",
             )
         )
     conn.executemany(
-        "INSERT INTO observation_revisions VALUES (?,?,?,?,?,?,?,?)", rows
+        "INSERT INTO observation_revisions VALUES (?,?,?,?,?,?,?,?,?)", rows
     )
 
     likelihood = wu_provisional_revision_likelihood(
@@ -118,7 +124,7 @@ def test_wu_zero_revision_history_prior_is_reduce_only_opt_in():
     conn.execute(
         "CREATE TABLE observation_revisions ("
         "id INTEGER PRIMARY KEY, table_name TEXT, city TEXT, target_date TEXT, "
-        "source TEXT, existing_row_json TEXT, incoming_row_json TEXT, "
+        "source TEXT, existing_row_json TEXT, incoming_row_json TEXT, reason TEXT, "
         "recorded_at TEXT)"
     )
     kwargs = {
@@ -142,17 +148,17 @@ def test_wu_zero_revision_history_prior_is_reduce_only_opt_in():
     )
 
     assert likelihood["semantics"] == (
-        "wu_changed_payload_retraction_beta_jeffreys_prior_only_v1"
+        "wu_applied_changed_payload_retraction_beta_jeffreys_prior_only_v2"
     )
     assert likelihood["transition_count"] == 0
     assert likelihood["retraction_count"] == 0
     assert likelihood["denominator_basis"] == (
-        "jeffreys_prior_only_no_changed_payload_transitions"
+        "jeffreys_prior_only_no_applied_changed_payload_transitions"
     )
     assert likelihood["projected_remaining_updates"] == 12
     assert 0.0 < likelihood["boundary_survival_probability"] < 1.0
     conn.execute(
-        "INSERT INTO observation_revisions VALUES (?,?,?,?,?,?,?,?)",
+        "INSERT INTO observation_revisions VALUES (?,?,?,?,?,?,?,?,?)",
         (
             1,
             "observation_instants",
@@ -161,6 +167,7 @@ def test_wu_zero_revision_history_prior_is_reduce_only_opt_in():
             "wu_icao_history",
             "{}",
             "{}",
+            "payload_hash_mismatch_source_revision_applied",
             "2026-08-22T03:00:00+00:00",
         ),
     )
@@ -172,6 +179,80 @@ def test_wu_zero_revision_history_prior_is_reduce_only_opt_in():
             conn,
             **kwargs,
             allow_prior_only=True,
+        )
+    conn.close()
+
+
+def test_wu_quarantined_payload_mismatches_cannot_mint_revision_risk():
+    """Rejected HIGH/LOW payloads never became canonical state and cannot move q."""
+
+    from src.data.day0_observation_reader import (
+        wu_provisional_revision_likelihood,
+    )
+
+    conn = sqlite3.connect(":memory:")
+    conn.execute(
+        "CREATE TABLE observation_revisions ("
+        "id INTEGER PRIMARY KEY, table_name TEXT, city TEXT, target_date TEXT, "
+        "source TEXT, existing_row_json TEXT, incoming_row_json TEXT, reason TEXT, "
+        "recorded_at TEXT)"
+    )
+    rows = []
+    for index in range(143):
+        rows.append(
+            (
+                index + 1,
+                "observation_instants",
+                "Shanghai",
+                "2026-08-23",
+                "wu_icao_history",
+                json.dumps({"running_max": 30.0, "running_min": 27.0}),
+                json.dumps({"running_max": 31.0, "running_min": 26.0}),
+                "payload_hash_mismatch_monotone_widening_applied",
+                "2026-08-23T01:00:00+00:00",
+            )
+        )
+    for offset in range(24):
+        old_max = 31.0 if offset < 5 else 30.0
+        new_max = 30.0 if offset < 5 else old_max
+        old_min = 26.0
+        new_min = 27.0 if offset < 5 else old_min
+        rows.append(
+            (
+                144 + offset,
+                "observation_instants",
+                "Shanghai",
+                "2026-08-23",
+                "wu_icao_history",
+                json.dumps({"running_max": old_max, "running_min": old_min}),
+                json.dumps({"running_max": new_max, "running_min": new_min}),
+                "payload_hash_mismatch",
+                "2026-08-23T02:00:00+00:00",
+            )
+        )
+    conn.executemany(
+        "INSERT INTO observation_revisions VALUES (?,?,?,?,?,?,?,?,?)",
+        rows,
+    )
+
+    for metric in ("high", "low"):
+        likelihood = wu_provisional_revision_likelihood(
+            conn,
+            city="Shanghai",
+            timezone_name="Asia/Shanghai",
+            target_date="2026-08-23",
+            temperature_metric=metric,
+            decision_time=datetime(2026, 8, 23, 6, 30, tzinfo=UTC),
+        )
+
+        assert likelihood["transition_count"] == 143
+        assert likelihood["retraction_count"] == 0
+        assert likelihood["excluded_transition_count"] == 24
+        assert likelihood["denominator_basis"] == (
+            "applied_changed_payload_transitions_conservative"
+        )
+        assert likelihood["boundary_survival_probability"] == pytest.approx(
+            0.966823316277362
         )
     conn.close()
 

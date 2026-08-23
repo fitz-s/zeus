@@ -366,7 +366,7 @@ files:
   src/data/day0_observation_reader.py:
     zone: K2_runtime
     authority_role: day0_current_observation_and_revision_likelihood_reader
-    why: Reads source-typed current-day extrema without mixing provider roles. WU changed-payload observation_revisions provide a causal, conservative Jeffreys estimate that the current hourly boundary survives through the remaining source updates; this uncertainty stays inside q and prevents a revisable WU print from becoming exact payoff authority. If a city has zero changed-payload transitions in the bounded lookback, the Jeffreys zero-observation prior is available only to HELD_MONITOR/REDUCE_ONLY_EXIT so existing capital remains re-decidable; ENTRY still requires empirical history and fails closed.
+    why: Reads source-typed current-day extrema without mixing provider roles. Only WU changed-payload observation_revisions that the writer actually applied to canonical observation state provide the causal, conservative Jeffreys estimate that the current hourly boundary survives through the remaining source updates; quarantined payload mismatches are disagreement evidence and never become probability transitions. This uncertainty stays inside q and prevents a revisable WU print from becoming exact payoff authority. If a city has zero applied changed-payload transitions in the bounded lookback, the Jeffreys zero-observation prior is available only to HELD_MONITOR/REDUCE_ONLY_EXIT so existing capital remains re-decidable; ENTRY still requires empirical history and fails closed.
     hazards:
     - SOURCE_TRUTH_PLANE_COLLAPSE
     downstream:

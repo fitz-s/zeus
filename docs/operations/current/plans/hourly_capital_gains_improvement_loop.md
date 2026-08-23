@@ -752,6 +752,32 @@
   Live acceptance requires Chengdu `last_monitor_prob_is_fresh=1`, complete
   exit-monitor receipts, and independent command/venue evidence for any action.
 
+### 2026-08-23 — quarantined WU conflicts cannot become probability retractions (B148)
+
+- **Observed defect:** Shanghai HIGH 30C YES remained on fresh HOLD q about
+  0.17 after the canonical WU hourly surface had observed 31C, while its
+  executable bid had fallen to zero. In the seven-day likelihood window, all
+  five counted downward transitions were `payload_hash_mismatch` rows that the
+  observation writer quarantined and did not apply to canonical state. Seoul,
+  Singapore, and Tokyo showed the same contamination class.
+- **Contract:** the WU provisional-boundary likelihood admits only writer-applied
+  changed-payload transitions. Quarantined identity/clock conflicts remain
+  disagreement evidence and cannot be counted as a state transition or
+  boundary retraction. The admitted/excluded counts and denominator basis are
+  serialized into probability content, and Day0 semantics advances to v9.
+- **SCOPE / DRAIN / RESET:** scope is each WU provisional Day0 family. The next
+  recurring materialization/monitor cut rebuilds q from the bounded applied
+  revision slice. A later writer-applied source revision automatically enters
+  the same likelihood; rejected payloads never do. ENTRY still requires an
+  empirical applied-transition history, while held/reduce-only may use the
+  explicit zero-observation prior.
+- **Acceptance:** a frozen Shanghai-shaped antibody proves 143 applied widening
+  transitions plus 24 quarantined conflicts (five downward) yield zero admitted
+  retractions, 24 exclusions, and boundary survival about 0.9668 instead of the
+  contaminated about 0.7232. Deployment still requires live SHA/process/DB,
+  refreshed q, and independent order/venue evidence; this correction is not by
+  itself a profit claim.
+
 ### 2026-08-02 — partial EXIT realized-PnL canonical continuity (hot-fix slice)
 
 - **Scope / seam:** `src/execution/exit_lifecycle.py` emits canonical

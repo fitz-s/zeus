@@ -600,13 +600,15 @@ def wu_provisional_revision_likelihood(
     """Estimate survival of a current WU hourly boundary through day end.
 
     ``observation_revisions`` is the immutable causal record of later WU
-    payloads for one source-hour.  Retractions are common and therefore must
-    remain inside q instead of being erased by an absorbing max/min mask.  The
-    denominator intentionally contains only changed-payload transitions; this
-    overstates revision risk relative to unchanged polls and is conservative
-    for new capital. A caller may explicitly request the Jeffreys prior at zero
-    transitions for reduce-only held redecision; ENTRY must keep the default
-    empirical-history requirement.
+    payloads for one source-hour.  Only revisions the writer actually applied
+    to the canonical observation may enter the likelihood.  Quarantined
+    payload mismatches are disagreement evidence, not state transitions; using
+    them as retractions would make q price a boundary move that canonical truth
+    explicitly rejected.  The denominator intentionally contains only applied
+    changed-payload transitions; this still overstates revision risk relative
+    to unchanged polls and is conservative for new capital. A caller may
+    explicitly request the Jeffreys prior at zero transitions for reduce-only
+    held redecision; ENTRY must keep the default empirical-history requirement.
     """
 
     metric = str(temperature_metric).strip().lower()
@@ -625,7 +627,7 @@ def wu_provisional_revision_likelihood(
             rows = conn.execute(
                 f"""
                 SELECT target_date, existing_row_json, incoming_row_json,
-                       recorded_at
+                       reason, recorded_at
                   FROM {table_ref}
                  WHERE table_name = 'observation_instants'
                    AND city = ?
@@ -651,9 +653,22 @@ def wu_provisional_revision_likelihood(
     if not rows and not allow_prior_only:
         raise ValueError("WU_PROVISIONAL_REVISION_HISTORY_INSUFFICIENT")
 
+    applied_reasons = frozenset(
+        {
+            "payload_hash_mismatch_monotone_widening_applied",
+            "payload_hash_mismatch_source_revision_applied",
+        }
+    )
+    applied_row_count = 0
+    excluded_transition_count = 0
     transition_count = 0
     retraction_count = 0
     for row in rows:
+        reason = str(row[3] or "").strip()
+        if reason not in applied_reasons:
+            excluded_transition_count += 1
+            continue
+        applied_row_count += 1
         try:
             existing = json.loads(row[1])
             incoming = json.loads(row[2])
@@ -672,7 +687,7 @@ def wu_provisional_revision_likelihood(
             metric == "low" and incoming_value > existing_value + 1e-9
         ):
             retraction_count += 1
-    if transition_count <= 0 and (rows or not allow_prior_only):
+    if transition_count <= 0 and (applied_row_count or not allow_prior_only):
         raise ValueError("WU_PROVISIONAL_REVISION_HISTORY_INSUFFICIENT")
 
     try:
@@ -700,19 +715,20 @@ def wu_provisional_revision_likelihood(
         raise ValueError("WU_PROVISIONAL_REVISION_LIKELIHOOD_INVALID")
     return {
         "semantics": (
-            "wu_changed_payload_retraction_beta_jeffreys_prior_only_v1"
+            "wu_applied_changed_payload_retraction_beta_jeffreys_prior_only_v2"
             if transition_count == 0
-            else "wu_changed_payload_retraction_beta_jeffreys_v1"
+            else "wu_applied_changed_payload_retraction_beta_jeffreys_v2"
         ),
         "lookback_start": lookback_start.isoformat(),
         "lookback_end": target.isoformat(),
         "transition_count": transition_count,
         "retraction_count": retraction_count,
+        "excluded_transition_count": excluded_transition_count,
         "projected_remaining_updates": remaining_updates,
         "denominator_basis": (
-            "jeffreys_prior_only_no_changed_payload_transitions"
+            "jeffreys_prior_only_no_applied_changed_payload_transitions"
             if transition_count == 0
-            else "changed_payload_transitions_conservative"
+            else "applied_changed_payload_transitions_conservative"
         ),
         "boundary_survival_probability": survival_probability,
     }

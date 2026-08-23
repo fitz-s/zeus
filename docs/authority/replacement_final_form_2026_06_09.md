@@ -244,13 +244,17 @@ named current source still blocks. Direct source-clock action routes do not
 receive this clock-advance permission.
 
 WU changed-payload revision history is a statistical modifier, not settlement
-truth. When one city has zero changed-payload transitions in the bounded causal
-lookback, new capital remains ineligible: ENTRY may not substitute an empirical
-likelihood. Existing capital must remain re-decidable, so HELD_MONITOR and
-REDUCE_ONLY_EXIT may use the same Jeffreys-Beta model at its zero-observation
-prior. The prior-only basis is serialized into the probability content and a
-new Day0 semantics revision; it never creates deterministic payoff support and
-cannot pass the ENTRY/HELD equality gate for a history-free BUY.
+truth. Only a revision the observation writer applied to canonical state enters
+the Jeffreys-Beta transition denominator. A quarantined payload mismatch did
+not move current truth and therefore cannot be relabeled as a boundary
+retraction inside q. When one city has zero applied changed-payload transitions
+in the bounded causal lookback, new capital remains ineligible: ENTRY may not
+substitute an empirical likelihood. Existing capital must remain re-decidable,
+so HELD_MONITOR and REDUCE_ONLY_EXIT may use the same Jeffreys-Beta model at its
+zero-observation prior. The applied-revision or prior-only basis is serialized
+into the probability content and a new Day0 semantics revision; it never
+creates deterministic payoff support and cannot pass the ENTRY/HELD equality
+gate for a history-free BUY.
 
 For a Day0 BUY that has already passed current ENTRY authority, the immediate
 HELD_MONITOR gate compares the facts that can change that fixed action's
