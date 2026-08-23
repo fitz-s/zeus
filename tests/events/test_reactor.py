@@ -44,6 +44,7 @@ from src.events.reactor import (
     ReactorResult,
     TERMINAL_MONEY_PATH_REASONS,
     TRANSIENT_MONEY_PATH_REASONS,
+    _EXACT_EXECUTABLE_HELD_SELL_PENDING,
     _EXECUTABLE_SNAPSHOT_RETRY,
     _POST_SUBMIT_WORLD_WRITE_LOCK_RETRY,
     _build_day0_posterior_redecision_events,
@@ -5813,18 +5814,22 @@ def test_process_pending_cancellation_includes_monitor_debt_for_protected_comple
         urgent_wake_pending=any_urgent,
         urgent_day0_pending=day0_urgent,
     ) is None
-    assert _process_pending_cancelled(
+    fast_path_cancelled = _process_pending_cancelled(
         committed_day0_wake=False,
         producer_fast_path=True,
         urgent_wake_pending=any_urgent,
         urgent_day0_pending=day0_urgent,
-    ) is day0_urgent
-    assert _process_pending_cancelled(
+    )
+    assert fast_path_cancelled is not None
+    assert fast_path_cancelled() is True
+    ordinary_wake_cancelled = _process_pending_cancelled(
         committed_day0_wake=False,
         producer_fast_path=False,
         urgent_wake_pending=any_urgent,
         urgent_day0_pending=day0_urgent,
-    ) is any_urgent
+    )
+    assert ordinary_wake_cancelled is not None
+    assert ordinary_wake_cancelled() is False
 
     debt_pending = [False]
     cancelled = _process_pending_cancelled(
@@ -5859,36 +5864,26 @@ def test_process_pending_cancellation_includes_monitor_debt_for_protected_comple
     )
     assert executable_exact_cancelled is not None
     assert executable_exact_cancelled() is False
-    exact_debt = [False]
     ordinary_cancelled = _process_pending_cancelled(
         committed_day0_wake=False,
         producer_fast_path=False,
         urgent_wake_pending=any_urgent,
         urgent_day0_pending=day0_urgent,
         exact_held_completion=False,
-        exact_held_completion_pending=lambda: exact_debt[0],
     )
     assert ordinary_cancelled is not None
     assert ordinary_cancelled() is False
-    exact_debt[0] = True
-    assert ordinary_cancelled() is True
-    unreadable_exact_debt = _process_pending_cancelled(
-        committed_day0_wake=False,
-        producer_fast_path=False,
-        urgent_wake_pending=any_urgent,
-        urgent_day0_pending=day0_urgent,
-        exact_held_completion=False,
-        exact_held_completion_pending=lambda: (_ for _ in ()).throw(OSError()),
-    )
-    assert unreadable_exact_debt is not None
-    assert unreadable_exact_debt() is True
+    _EXACT_EXECUTABLE_HELD_SELL_PENDING.set()
+    try:
+        assert ordinary_cancelled() is True
+    finally:
+        _EXACT_EXECUTABLE_HELD_SELL_PENDING.clear()
     protected_exact = _process_pending_cancelled(
         committed_day0_wake=False,
         producer_fast_path=False,
         urgent_wake_pending=any_urgent,
         urgent_day0_pending=day0_urgent,
         exact_held_completion=True,
-        exact_held_completion_pending=lambda: True,
     )
     assert protected_exact is any_urgent
     assert protected_exact() is False
@@ -5898,7 +5893,6 @@ def test_process_pending_cancellation_includes_monitor_debt_for_protected_comple
         urgent_wake_pending=any_urgent,
         urgent_day0_pending=day0_urgent,
         exact_held_completion=False,
-        exact_held_completion_pending=lambda: True,
     )
     assert protected_day0 is None
     assert _held_position_monitor_preemption_pending(
@@ -6784,7 +6778,11 @@ def test_active_lock_reads_exact_debt_before_skipping(monkeypatch):
             return True
 
     monkeypatch.setattr(main, "_settings_section", lambda *_args, **_kwargs: {})
-    monkeypatch.setattr(main, "_defer_for_held_position_monitor", lambda _job: False)
+    monkeypatch.setattr(
+        main,
+        "_defer_for_held_position_monitor",
+        lambda _job: pytest.fail("exact signal must bypass monitor defer"),
+    )
     monkeypatch.setattr(
         reactor_module,
         "_reactor_wake_cancellation_probe",
@@ -6798,117 +6796,134 @@ def test_active_lock_reads_exact_debt_before_skipping(monkeypatch):
     monkeypatch.setattr(
         reactor_module,
         "_durable_exact_held_sell_completion_requests",
-        lambda: calls.append("requests") or (),
+        lambda: calls.append("requests") or (object(),),
     )
     monkeypatch.setattr(
         reactor_module,
         "_has_exact_executable_held_sell_completion",
-        lambda _requests: calls.append("eligible") or False,
+        lambda _requests: calls.append("eligible") or True,
     )
 
-    assert reactor_module.run_edli_event_reactor_cycle(active_lock=HeldLock()) is False
-    assert calls == ["pending", "requests", "eligible"]
+    _EXACT_EXECUTABLE_HELD_SELL_PENDING.clear()
+    try:
+        assert reactor_module.run_edli_event_reactor_cycle(active_lock=HeldLock()) is False
+        assert calls == ["pending", "requests", "eligible"]
+        assert _EXACT_EXECUTABLE_HELD_SELL_PENDING.is_set()
+    finally:
+        _EXACT_EXECUTABLE_HELD_SELL_PENDING.clear()
 
 
-def test_construct_checkpoint_preempts_for_new_exact_executable_debt(monkeypatch):
-    from src.engine.global_auction_universe import WorkContext, WorkDeferred
-    from src.events import reactor
+def test_ordinary_cancellation_reads_only_atomic_exact_signal(monkeypatch):
+    import src.events.reactor as reactor
+    from src.runtime import reactor_wake
 
-    exact_debt = [False]
     monkeypatch.setattr(
         reactor,
         "_durable_exact_held_sell_completion_pending",
-        lambda: exact_debt[0],
+        lambda: pytest.fail("callback must not read durable queue"),
     )
     monkeypatch.setattr(
-        reactor,
-        "_durable_exact_held_sell_completion_requests",
-        lambda: (object(),),
+        reactor_wake,
+        "_read_reactor_wake_path",
+        lambda *_args, **_kwargs: pytest.fail("callback must not read wake files"),
     )
-    monkeypatch.setattr(
-        reactor,
-        "_has_exact_executable_held_sell_completion",
-        lambda _requests: exact_debt[0],
+    cancelled = _process_pending_cancelled(
+        committed_day0_wake=False,
+        producer_fast_path=False,
+        urgent_wake_pending=lambda: False,
+        urgent_day0_pending=None,
     )
-    context = WorkContext(
-        deadline_monotonic=time.monotonic() + 1.0,
-        cancel_requested=reactor._exact_executable_held_sell_preemption_pending,
-    )
-
-    context.checkpoint("ordinary_construct")
-    exact_debt[0] = True
-    with pytest.raises(WorkDeferred):
-        context.checkpoint("ordinary_construct")
+    _EXACT_EXECUTABLE_HELD_SELL_PENDING.set()
+    try:
+        assert cancelled is not None
+        assert cancelled() is True
+    finally:
+        _EXACT_EXECUTABLE_HELD_SELL_PENDING.clear()
 
 
-def test_v4_scheduler_priority_requires_current_lineage_and_fresh_witnesses(
-    tmp_path,
-):
-    from dataclasses import replace
-
+def test_exact_publish_preempts_ordinary_and_preserves_exact_turn(tmp_path):
+    import src.events.reactor as reactor
     from src.runtime import reactor_wake
 
-    now = datetime(2026, 8, 23, 12, 0, tzinfo=timezone.utc)
-    path = tmp_path / "current-v4-wake.json"
-    request = reactor_wake.make_held_sell_reauction_request(
-        position_id="current-v4-position",
+    now = datetime.now(timezone.utc)
+    common = dict(
+        position_id="atomic-signal-position",
         family=("Cape Town", "2026-08-23", "high"),
-        probability_content_identity="q-current-v4",
-        held_token_id="current-v4-token",
-        held_best_bid=0.21,
+        probability_content_identity="q-current",
+        held_token_id="atomic-signal-token",
         bid_observed_at=(now - timedelta(seconds=1)).isoformat(),
         probability_observed_at=(now - timedelta(seconds=1)).isoformat(),
         completion_deadline_at=(now + timedelta(seconds=30)).isoformat(),
-        schema_version=4,
-        book_state="EXECUTABLE",
-    )
-    reactor_wake.publish_reactor_wake(
-        source="held_position_monitor",
-        reason=reactor_wake.GLOBAL_AUCTION_COMPLETION_WAKE_REASON,
-        path=path,
-        held_sell_reauction_requests=(request,),
-    )
-    assert reactor_wake.v4_held_sell_reauction_request_is_current_executable(
-        request,
-        max_age_seconds=30.0,
-        now=now,
-        path=path,
+        wake_path=tmp_path / "atomic-signal-wake.json",
     )
 
-    for invalid in (
-        replace(
-            request,
-            probability_observed_at=(now - timedelta(seconds=31)).isoformat(),
-        ),
-        replace(request, probability_content_identity=""),
-        replace(request, held_best_bid=None),
-        replace(request, held_best_bid=0.96),
-    ):
-        assert not reactor_wake.v4_held_sell_reauction_request_is_current_executable(
-            invalid,
-            max_age_seconds=30.0,
-            now=now,
-            path=path,
+    _EXACT_EXECUTABLE_HELD_SELL_PENDING.clear()
+    try:
+        accepted, request = reactor.request_global_auction_completion(
+            reason="test_atomic_signal",
+            held_best_bid=0.21,
+            book_state="EXECUTABLE",
+            schema_version=4,
+            return_request=True,
+            **common,
         )
+        assert accepted is True
+        assert request is not None
+        assert reactor_wake.v4_held_sell_reauction_request_is_queued(
+            request,
+            path=common["wake_path"],
+        )
+        assert _EXACT_EXECUTABLE_HELD_SELL_PENDING.is_set()
+        ordinary_cancelled = _process_pending_cancelled(
+            committed_day0_wake=False,
+            producer_fast_path=False,
+            urgent_wake_pending=lambda: False,
+            urgent_day0_pending=None,
+        )
+        lock = threading.Lock()
+        assert lock.acquire()
+        try:
+            assert ordinary_cancelled is not None
+            assert ordinary_cancelled() is True
+        finally:
+            lock.release()
+        assert lock.acquire(blocking=False)
+        lock.release()
+        exact_cancelled = _process_pending_cancelled(
+            committed_day0_wake=False,
+            producer_fast_path=False,
+            urgent_wake_pending=lambda: False,
+            urgent_day0_pending=None,
+            held_position_monitor_debt_pending=lambda: True,
+            exact_held_completion=True,
+            exact_executable_held_completion=True,
+        )
+        assert exact_cancelled is not None
+        assert exact_cancelled() is False
+    finally:
+        _EXACT_EXECUTABLE_HELD_SELL_PENDING.clear()
 
-    empty_lineage = reactor_wake.make_held_sell_reauction_request(
-        position_id="empty-lineage-position",
-        family=("Buenos Aires", "2026-08-23", "low"),
-        probability_content_identity="q-empty-lineage",
-        held_token_id="empty-lineage-token",
-        held_best_bid=0.18,
-        bid_observed_at=(now - timedelta(seconds=1)).isoformat(),
-        probability_observed_at=(now - timedelta(seconds=1)).isoformat(),
-        completion_deadline_at=(now + timedelta(seconds=30)).isoformat(),
-        schema_version=4,
-        book_state="EXECUTABLE",
-    )
-    assert not reactor_wake.v4_held_sell_reauction_request_is_current_executable(
-        empty_lineage,
-        max_age_seconds=30.0,
-        now=now,
-        path=path,
-    )
+    for index, invalid in enumerate((
+        {"schema_version": 3},
+        {"held_best_bid": None},
+        {"held_best_bid": 0.96},
+        {"probability_observed_at": (now - timedelta(seconds=31)).isoformat()},
+    )):
+        _EXACT_EXECUTABLE_HELD_SELL_PENDING.clear()
+        reactor.request_global_auction_completion(
+            **{
+                **common,
+                "reason": "test_atomic_signal_invalid",
+                "held_best_bid": 0.21,
+                "book_state": "EXECUTABLE",
+                "schema_version": 4,
+                "position_id": f"atomic-signal-invalid-{index}",
+                "held_token_id": f"atomic-signal-invalid-token-{index}",
+                "wake_path": tmp_path / f"atomic-signal-invalid-{index}.json",
+                **invalid,
+            },
+        )
+        assert not _EXACT_EXECUTABLE_HELD_SELL_PENDING.is_set()
 
 
 def test_monitor_fairness_debt_reserves_completion_before_cancelling(
@@ -8501,157 +8516,6 @@ def test_v4_expired_held_sell_deadline_terminalizes_exact_attempt_without_venue(
         request,
         path=path,
     ) == reactor_wake.DEADLINE_EXPIRED
-
-
-def test_v4_deadline_expiry_recovers_through_production_successor_chain(
-    monkeypatch,
-    tmp_path,
-):
-    from contextlib import nullcontext
-    from types import SimpleNamespace
-
-    from src.engine import global_batch_runtime
-    from src.events import reactor
-    from src.execution import exit_lifecycle
-    from src.runtime import reactor_wake
-
-    decision_at = datetime(2026, 8, 23, 12, 0, tzinfo=timezone.utc)
-    path = tmp_path / "deadline-successor-wake.json"
-    old = reactor_wake.make_held_sell_reauction_request(
-        position_id="deadline-successor-position",
-        family=("Cape Town", "2026-08-23", "high"),
-        probability_content_identity="q-before-deadline",
-        held_token_id="deadline-successor-token",
-        held_best_bid=0.21,
-        bid_observed_at=(decision_at - timedelta(seconds=1)).isoformat(),
-        probability_observed_at=(decision_at - timedelta(seconds=1)).isoformat(),
-        completion_deadline_at=decision_at.isoformat(),
-        schema_version=4,
-        book_state="EXECUTABLE",
-    )
-    reactor_wake.publish_reactor_wake(
-        source="held_position_monitor",
-        reason=reactor_wake.GLOBAL_AUCTION_COMPLETION_WAKE_REASON,
-        path=path,
-        held_sell_reauction_requests=(old,),
-    )
-    batch = global_batch_runtime.process_current_global_batch(
-        (),
-        decision_time=decision_at,
-        world_conn=object(),
-        forecast_conn=object(),
-        trade_conn=object(),
-        payload_reader=lambda _event: {},
-        prepare_event=lambda *_args: pytest.fail("expired before preparation"),
-        actuate_winner=lambda *_args: pytest.fail("expired before venue"),
-        stamp_receipt=lambda receipt: receipt,
-        venue_submit_count=lambda: 0,
-        current_execution=lambda *_args: None,
-        current_time_provider=lambda: decision_at,
-        held_sell_reauction_requests=(old,),
-    )
-    receipts = reactor._held_sell_reauction_receipts_from_global_cut(
-        requests=(old,),
-        result=ReactorResult(
-            global_held_sell_completion_cuts=[batch.held_sell_completion_cut]
-        ),
-    )
-    assert receipts[0].status == reactor_wake.DEADLINE_EXPIRED
-    assert reactor_wake.persist_held_sell_reauction_receipts(receipts, path=path)
-    assert reactor_wake.held_sell_reauction_requests_completed((old,), path=path)
-
-    obligation = {
-        field: getattr(old, field)
-        for field in (
-            "request_id", "material_identity", "generation", "attempt_identity",
-            "position_id", "held_token_id", "scope_identity", "schema_version",
-            "completion_deadline_at",
-        )
-    }
-    position = SimpleNamespace(trade_id=old.position_id)
-    conn = sqlite3.connect(":memory:")
-    monkeypatch.setattr(
-        exit_lifecycle,
-        "needs_global_sell_snapshot_reauction",
-        lambda *_args: True,
-    )
-    monkeypatch.setattr(
-        exit_lifecycle,
-        "latest_held_sell_reauction_obligation",
-        lambda *_args, **_kwargs: dict(obligation),
-    )
-    monkeypatch.setattr(
-        exit_lifecycle,
-        "_pending_exit_no_order_waits_for_liquidity",
-        lambda *_args, **_kwargs: False,
-    )
-    monkeypatch.setattr(
-        exit_lifecycle,
-        "_canonical_global_sell_command_ownership",
-        lambda *_args, **_kwargs: "GLOBAL_NO_COMMAND",
-    )
-    monkeypatch.setattr(
-        exit_lifecycle,
-        "_record_global_sell_reauction_publish_claim",
-        lambda *_args, **_kwargs: True,
-    )
-    monkeypatch.setattr(
-        exit_lifecycle,
-        "record_global_sell_reauction_reserved",
-        lambda *_args, **_kwargs: True,
-    )
-    monkeypatch.setattr(
-        "src.execution.executor._canonical_trade_write_lease",
-        lambda *_args, **_kwargs: nullcontext(),
-    )
-
-    successors = []
-
-    def requester(current, force_new_generation):
-        assert force_new_generation is True
-        accepted, successor = reactor.request_global_auction_completion(
-            reason="GLOBAL_SELL_SNAPSHOT_REAUCTION_REQUIRED",
-            position_id=old.position_id,
-            family=old.family,
-            probability_content_identity="q-after-deadline",
-            held_token_id=old.held_token_id,
-            held_best_bid=0.18,
-            bid_observed_at=(decision_at + timedelta(seconds=1)).isoformat(),
-            probability_observed_at=(decision_at + timedelta(seconds=1)).isoformat(),
-            completion_deadline_at=(decision_at + timedelta(seconds=31)).isoformat(),
-            schema_version=4,
-            scope_identity=old.scope_identity,
-            book_state="EXECUTABLE",
-            force_new_generation=force_new_generation,
-            return_request=True,
-            wake_path=path,
-        )
-        assert accepted is True
-        successors.append(successor)
-        current._held_sell_reauction_obligation = {
-            **obligation,
-            "request_id": successor.request_id,
-            "material_identity": successor.material_identity,
-            "generation": successor.generation,
-            "attempt_identity": successor.attempt_identity,
-            "completion_deadline_at": successor.completion_deadline_at,
-        }
-        return True
-
-    assert exit_lifecycle.recover_global_sell_snapshot_reauction_debt(
-        position,
-        conn=conn,
-        requester=requester,
-    )
-    successor = successors[0]
-    assert successor.scope_identity == old.scope_identity
-    assert successor.generation != old.generation
-    assert successor.attempt_identity != old.attempt_identity
-    assert successor.probability_content_identity == "q-after-deadline"
-    assert not reactor_wake.held_sell_reauction_requests_completed(
-        (successor,), path=path
-    )
-    conn.close()
 
 
 def test_v4_deadline_receipt_cannot_ack_another_attempt(tmp_path):

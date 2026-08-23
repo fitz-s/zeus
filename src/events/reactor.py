@@ -6665,7 +6665,6 @@ def _process_pending_cancelled(
     held_position_monitor_debt_pending: Callable[[], bool] | None = None,
     exact_held_completion: bool = False,
     exact_executable_held_completion: bool = False,
-    exact_held_completion_pending: Callable[[], bool] | None = None,
 ) -> Callable[[], bool] | None:
     base_cancelled = (
         None
@@ -6677,7 +6676,6 @@ def _process_pending_cancelled(
         and (
             exact_held_completion
             or committed_day0_wake
-            or exact_held_completion_pending is None
         )
     ):
         return base_cancelled
@@ -6693,18 +6691,9 @@ def _process_pending_cancelled(
         if (
             not exact_held_completion
             and not committed_day0_wake
-            and exact_held_completion_pending is not None
+            and _EXACT_EXECUTABLE_HELD_SELL_PENDING.is_set()
         ):
-            try:
-                if exact_held_completion_pending():
-                    return True
-            except Exception:  # noqa: BLE001 - unknown exact debt cancels ordinary work.
-                logging.getLogger("zeus.events.reactor").warning(
-                    "durable held SELL completion queue unreadable; cancelling "
-                    "ordinary reactor work",
-                    exc_info=True,
-                )
-                return True
+            return True
         if exact_executable_held_completion:
             # SCOPE: one exact V4 SELL request with a claimed executable bid.
             # DRAIN: this bounded global auction rebinds current q/book and
@@ -7174,6 +7163,8 @@ def request_global_auction_completion(
                 "durable completion was not accepted"
             )
             return (False, held_request) if return_request else False
+    if held_request is not None:
+        _mark_exact_executable_held_sell_pending(held_request)
     return (True, held_request) if return_request else True
 
 
@@ -7226,6 +7217,7 @@ def publish_prepared_global_auction_completion(
                 path=wake_path,
             )
         ):
+            _mark_exact_executable_held_sell_pending(latest)
             return True
         family = tuple(getattr(prepared_request, "family", ()) or ())
         clean_family = tuple(
@@ -7241,6 +7233,7 @@ def publish_prepared_global_auction_completion(
             forecast_families=(clean_family,) if len(clean_family) == 3 else (),
             held_sell_reauction_requests=(prepared_request,),
         )
+        _mark_exact_executable_held_sell_pending(prepared_request)
         return True
     except (OSError, TypeError, ValueError):
         logging.getLogger("zeus.events.reactor").exception(
@@ -7571,19 +7564,64 @@ def _has_exact_executable_held_sell_completion(
     from src.execution.exit_lifecycle import (
         GLOBAL_SELL_REAUCTION_COMPLETION_DEADLINE_SECONDS,
     )
-    from src.runtime.reactor_wake import (
-        HeldSellReauctionRequest,
-        v4_held_sell_reauction_request_is_current_executable,
-    )
 
-    return any(
-        isinstance(request, HeldSellReauctionRequest)
-        and v4_held_sell_reauction_request_is_current_executable(
-            request,
-            max_age_seconds=GLOBAL_SELL_REAUCTION_COMPLETION_DEADLINE_SECONDS,
-        )
-        for request in requests
-    )
+    now = datetime.now(timezone.utc)
+    for request in requests:
+        try:
+            if (
+                int(getattr(request, "schema_version", 0) or 0) != 4
+                or str(getattr(request, "book_state", "") or "").upper()
+                != "EXECUTABLE"
+            ):
+                continue
+            if not all(
+                str(getattr(request, field, "") or "").strip()
+                for field in (
+                    "request_id",
+                    "material_identity",
+                    "generation",
+                    "attempt_identity",
+                    "scope_identity",
+                    "position_id",
+                    "held_token_id",
+                    "probability_content_identity",
+                )
+            ):
+                continue
+            family = tuple(getattr(request, "family", ()) or ())
+            if len(family) != 3 or not all(str(value or "").strip() for value in family):
+                continue
+            bid = float(getattr(request, "held_best_bid", None))
+            bid_at = datetime.fromisoformat(
+                str(getattr(request, "bid_observed_at", "") or "").replace(
+                    "Z", "+00"
+                )
+            ).astimezone(timezone.utc)
+            q_at = datetime.fromisoformat(
+                str(
+                    getattr(request, "probability_observed_at", "") or ""
+                ).replace("Z", "+00")
+            ).astimezone(timezone.utc)
+            deadline = datetime.fromisoformat(
+                str(getattr(request, "completion_deadline_at", "") or "").replace(
+                    "Z", "+00"
+                )
+            ).astimezone(timezone.utc)
+        except (AttributeError, TypeError, ValueError):
+            continue
+        if (
+            math.isfinite(bid)
+            and 0.05 <= bid <= 0.95
+            and deadline > now
+            and bid_at <= now
+            and q_at <= now
+            and (now - bid_at).total_seconds()
+            <= GLOBAL_SELL_REAUCTION_COMPLETION_DEADLINE_SECONDS
+            and (now - q_at).total_seconds()
+            <= GLOBAL_SELL_REAUCTION_COMPLETION_DEADLINE_SECONDS
+        ):
+            return True
+    return False
 
 
 def _global_auction_completion_mode(
@@ -7641,6 +7679,7 @@ def _global_auction_completion_mode(
 
 _DURABLE_EXACT_HELD_COMPLETION_SEEN: set[str] = set()
 _DURABLE_EXACT_HELD_COMPLETION_LOCK = threading.Lock()
+_EXACT_EXECUTABLE_HELD_SELL_PENDING = threading.Event()
 
 
 def _durable_exact_held_sell_completion_pending() -> bool:
@@ -7686,19 +7725,24 @@ def _durable_exact_held_sell_completion_requests() -> tuple[object, ...]:
         return ()
 
 
-def _exact_executable_held_sell_preemption_pending() -> bool:
-    """Whether an ordinary construct must yield at its next safe checkpoint."""
+def _mark_exact_executable_held_sell_pending(request: object) -> None:
+    """Publish the in-process preemption signal after durable wake success."""
 
-    try:
-        if not _durable_exact_held_sell_completion_pending():
-            return False
-        return _has_exact_executable_held_sell_completion(
-            _durable_exact_held_sell_completion_requests()
-        )
-    except (OSError, ValueError):
-        # Unknown durable exact debt cannot let an ordinary construct retain
-        # the shared reactor lock past its next bounded checkpoint.
-        return True
+    if _has_exact_executable_held_sell_completion((request,)):
+        _EXACT_EXECUTABLE_HELD_SELL_PENDING.set()
+
+
+def _rehydrate_exact_executable_held_sell_pending(
+    requests: tuple[object, ...],
+) -> bool:
+    """Refresh the process-local signal at a non-callback durable boundary."""
+
+    exact = _has_exact_executable_held_sell_completion(requests)
+    if exact:
+        _EXACT_EXECUTABLE_HELD_SELL_PENDING.set()
+    else:
+        _EXACT_EXECUTABLE_HELD_SELL_PENDING.clear()
+    return exact
 
 
 def _held_sell_completion_cut_requests(
@@ -7925,7 +7969,7 @@ def run_edli_event_reactor_cycle(
         if durable_exact_held_completion_pending
         else ()
     )
-    exact_executable_held_completion = _has_exact_executable_held_sell_completion(
+    exact_executable_held_completion = _rehydrate_exact_executable_held_sell_pending(
         (
             producer_held_sell_reauction_requests
             if completion_wake
@@ -8028,7 +8072,7 @@ def run_edli_event_reactor_cycle(
             _urgent_wake_pending()
             or (
                 not exact_executable_held_completion
-                and _exact_executable_held_sell_preemption_pending()
+                and _EXACT_EXECUTABLE_HELD_SELL_PENDING.is_set()
             )
             or _held_position_monitor_preemption_pending(
                 (
@@ -8625,7 +8669,7 @@ def run_edli_event_reactor_cycle(
                 or _construct_monitor_cancelled()
                 or (
                     not exact_executable_held_completion
-                    and _exact_executable_held_sell_preemption_pending()
+                    and _EXACT_EXECUTABLE_HELD_SELL_PENDING.is_set()
                 )
             ),
         )
@@ -9006,9 +9050,6 @@ def run_edli_event_reactor_cycle(
                 exact_executable_held_completion=(
                     exact_executable_held_completion
                 ),
-                exact_held_completion_pending=(
-                    _durable_exact_held_sell_completion_pending
-                ),
             ),
         )
         terminal_no_book_completion = False
@@ -9037,6 +9078,10 @@ def run_edli_event_reactor_cycle(
             )
             if not requests_completed:
                 completion_wake_needs_retry = True
+            else:
+                _rehydrate_exact_executable_held_sell_pending(
+                    _durable_exact_held_sell_completion_requests()
+                )
             terminal_no_book_completion = bool(
                 requests_completed
                 and held_sell_reauction_receipts
