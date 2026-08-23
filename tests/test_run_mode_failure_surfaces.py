@@ -8352,6 +8352,67 @@ def test_systemic_capital_recovery_keeps_priority_during_held_monitor(monkeypatc
     assert calls == ["live_tick"]
 
 
+def test_confirmed_fill_projection_bypasses_monitor_bootstrap_defer(monkeypatch) -> None:
+    """Unprojected authenticated exposure outranks monitor bootstrap deferral."""
+    import threading
+
+    import src.execution.command_recovery as command_recovery
+    import src.main as main_module
+    import src.state.db as state_db
+    from src.execution.command_recovery import CapitalBlockingCommandScope
+
+    class FakeConn:
+        def close(self) -> None:
+            return None
+
+    calls: list[str] = []
+    defer_calls: list[str] = []
+    main_module._capital_recovery_handoff_pending.clear()
+    monkeypatch.setattr(main_module, "get_mode", lambda: "live")
+    monkeypatch.setattr(main_module, "_consume_live_control_commands", lambda: None)
+    monkeypatch.setattr(
+        main_module,
+        "_defer_for_held_position_monitor",
+        lambda job: defer_calls.append(job) or True,
+    )
+    monkeypatch.setattr(main_module, "_held_position_monitor_active", threading.Event())
+    monkeypatch.setattr(
+        main_module,
+        "_held_position_monitor_canonical_debt",
+        threading.Event(),
+    )
+    monkeypatch.setattr(main_module, "_edli_command_recovery_full_bucket", lambda: 17)
+    monkeypatch.setattr(main_module, "_EDLI_COMMAND_RECOVERY_LAST_FULL_BUCKET", 17)
+    monkeypatch.setattr(state_db, "get_trade_connection_read_only", FakeConn)
+    monkeypatch.setattr(
+        command_recovery,
+        "capital_blocking_command_count",
+        lambda _conn: 1,
+    )
+    monkeypatch.setattr(
+        command_recovery,
+        "capital_blocking_command_scope",
+        lambda _conn: CapitalBlockingCommandScope(
+            total_count=1,
+            scoped_markets=(),
+            unscopeable_count=0,
+            projection_count=1,
+        ),
+    )
+    monkeypatch.setattr(
+        command_recovery,
+        "reconcile_unresolved_commands",
+        lambda **kwargs: calls.append(str(kwargs.get("scope")))
+        or {"scanned": 1, "advanced": 0},
+    )
+
+    main_module._edli_command_recovery_cycle.__wrapped__()
+
+    assert calls == ["live_tick"]
+    assert defer_calls == []
+    assert not main_module._capital_recovery_handoff_pending.is_set()
+
+
 def test_capital_cancel_recovery_reserves_reactor_then_resets(monkeypatch) -> None:
     """Only the capital fast pass owns the reactor fairness handoff."""
     import src.execution.command_recovery as command_recovery

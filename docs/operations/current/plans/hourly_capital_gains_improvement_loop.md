@@ -940,6 +940,33 @@
   supersede the live boundary; targeted queue/materializer tests and a real
   restart show bounded pre-spawn latency.
 
+### 2026-08-23 — confirmed fill projection outranks monitor bootstrap (B157)
+
+- **Observed defect:** Warsaw BUY command `d8a93f3f1e4e4b23` returned a matched
+  FOK without a trade id and correctly entered `REVIEW_REQUIRED`. The fill
+  synchronizer later persisted one authenticated `CONFIRMED` trade fact, but
+  the command-recovery scheduler still deferred every minute behind held-monitor
+  bootstrap. Its blocker classifier counted only commands already projected as
+  `FILLED`, so the real 5.307691-share Chain exposure remained absent from
+  `position_current` and appeared as a chain-only unknown asset.
+- **Contract:** a recent `REVIEW_REQUIRED` ENTRY with a bound order and an exact
+  authenticated confirmed trade is unprojected capital exposure, identical in
+  priority to an unprojected `FILLED` command. It contributes to global
+  projection debt before any generic monitor-bootstrap deferral. The existing
+  command-bound recovery remains the sole writer and must still prove order id,
+  token, positive fill economics, limit compliance, and complete fill size.
+- **SCOPE / DRAIN / RESET:** scope is only confirmed command-bound entry exposure
+  missing its canonical position/event/execution projection. The 60-second
+  recovery live tick drains the exact durable fact without new venue I/O, while
+  taking the existing bounded reactor handoff. A `FILLED` command plus matching
+  positive `position_current`, `ENTRY_ORDER_FILLED`, and `execution_fact` clears
+  the blocker; ordinary historical recovery continues yielding to the monitor.
+- **Acceptance:** one blocker antibody reproduces the matched-submit/no-trade-id
+  shape and requires `projection_count = 1`; one scheduler antibody proves that
+  this projection debt bypasses generic monitor deferral. Live acceptance is the
+  exact Warsaw command becoming `FILLED`, a monitored token-matching canonical
+  position, and the chain-only review item draining or becoming superseded.
+
 ### 2026-08-23 — spend the live Day0 observation clock before timeless FIFO (B154)
 
 - **Observed defect:** Madrid published a canonical 09:04:22 METAR and emitted

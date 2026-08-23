@@ -33657,6 +33657,49 @@ def test_capital_blocker_count_includes_identity_bound_submits_and_unprojected_f
     assert capital_blocking_command_count(conn) == 2
 
 
+def test_capital_blocker_counts_review_required_confirmed_entry_fill(conn):
+    """A known confirmed fill cannot yield forever behind monitor bootstrap."""
+    from src.execution.command_recovery import capital_blocking_command_scope
+    from src.state.venue_command_repo import append_event
+
+    observed_at = datetime.now(timezone.utc).isoformat()
+    _insert(
+        conn,
+        command_id="cmd-review-confirmed-entry",
+        position_id="pos-review-confirmed-entry",
+        size=5.0,
+        price=0.69,
+        created_at=observed_at,
+    )
+    _advance_to_acked(
+        conn,
+        command_id="cmd-review-confirmed-entry",
+        venue_order_id="ord-review-confirmed-entry",
+    )
+    append_event(
+        conn,
+        command_id="cmd-review-confirmed-entry",
+        event_type="REVIEW_REQUIRED",
+        occurred_at=observed_at,
+        payload={"reason": "matched_submit_missing_trade_id"},
+    )
+    _append_trade_fact(
+        conn,
+        command_id="cmd-review-confirmed-entry",
+        order_id="ord-review-confirmed-entry",
+        trade_id="trade-review-confirmed-entry",
+        filled_size="5.307691",
+        fill_price="0.65",
+        observed_at=observed_at,
+    )
+
+    scope = capital_blocking_command_scope(conn)
+
+    assert scope.total_count == 1
+    assert scope.projection_count == 1
+    assert scope.requires_global_handoff(systemic_market_count_limit=2) is True
+
+
 def test_capital_blocker_count_prioritizes_terminal_exit_until_pnl_projection(conn):
     from src.execution.command_recovery import (
         capital_blocking_command_count,

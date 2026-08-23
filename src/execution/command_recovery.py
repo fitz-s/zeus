@@ -27597,8 +27597,10 @@ def _terminal_filled_entry_projection_blocker_count(
     }
     if not all(_table_exists(conn, table) for table in required):
         return 0
-    # SCOPE: one recent terminal FILLED ENTRY command with authenticated positive
-    # fill truth but incomplete command-bound position/execution projection.
+    # SCOPE: one recent terminal FILLED ENTRY command, or a REVIEW_REQUIRED
+    # matched submit whose authenticated trade has since become CONFIRMED, with
+    # positive fill truth but incomplete command-bound position/execution
+    # projection.
     # DRAIN: scheduled command recovery runs the existing filled-entry projection
     # repair under current-capital priority for one hour (sixty normal cadences);
     # older debt remains in background recovery rather than monopolizing current
@@ -27610,7 +27612,7 @@ def _terminal_filled_entry_projection_blocker_count(
           FROM venue_commands cmd
          WHERE cmd.intent_kind = 'ENTRY'
            AND cmd.side = 'BUY'
-           AND cmd.state = 'FILLED'
+           AND cmd.state IN ('FILLED', 'REVIEW_REQUIRED')
            AND COALESCE(cmd.venue_order_id, '') != ''
            AND EXISTS (
                 SELECT 1
