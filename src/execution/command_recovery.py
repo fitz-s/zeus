@@ -16229,6 +16229,110 @@ def _exit_command_has_positive_or_unresolved_cancel_truth(
     return row is not None
 
 
+def _release_submit_unknown_exit_after_authenticated_absence(
+    conn: sqlite3.Connection,
+    *,
+    command: Mapping[str, object],
+    observed_at: str,
+    absence_proof: Mapping[str, object],
+) -> dict | None:
+    """Release one exact pending EXIT after age-gated complete absence proof."""
+
+    if (
+        str(command.get("intent_kind") or "").upper() != "EXIT"
+        or str(command.get("side") or "").upper() != "SELL"
+    ):
+        return None
+    position_id = str(command.get("position_id") or "").strip()
+    command_id = str(command.get("command_id") or "").strip()
+    if not position_id or not command_id:
+        return None
+    if any(
+        absence_proof.get(key) is not True
+        for key in ("open_orders_query_complete", "trades_query_complete")
+    ):
+        return None
+    try:
+        no_matching_exposure = all(
+            int(absence_proof.get(key, -1)) == 0
+            for key in ("matching_open_order_count", "matching_trade_count")
+        )
+    except (TypeError, ValueError):
+        return None
+    if not no_matching_exposure:
+        return None
+    current = conn.execute(
+        "SELECT * FROM position_current WHERE position_id = ? LIMIT 1", (position_id,)
+    ).fetchone()
+    if current is None:
+        return None
+    current = _dict_row(current)
+    if str(current.get("phase") or "") != "pending_exit":
+        return None
+    if _decimal_is_zero(current.get("chain_shares") or current.get("shares")):
+        return None
+    if _fill_trade_fact_count(conn, command_id) > 0 or _exit_command_has_positive_or_unresolved_cancel_truth(
+        conn, position_id=position_id, command_id=command_id
+    ):
+        return None
+    phase_after = _phase_after_terminal_exit_no_fill(
+        {"position_city": current.get("city"), "position_target_date": current.get("target_date")},
+        observed_at=observed_at,
+    )
+    if phase_after is None:
+        return None
+    event_key = f"{position_id}:submit_unknown_absence_exit_retry:{command_id}"
+    if conn.execute(
+        "SELECT 1 FROM position_events WHERE idempotency_key = ? LIMIT 1", (event_key,)
+    ).fetchone() is None:
+        conn.execute(
+            """
+            INSERT INTO position_events (
+                event_id, position_id, event_version, sequence_no, event_type,
+                occurred_at, phase_before, phase_after, strategy_key, decision_id,
+                snapshot_id, order_id, command_id, caused_by, idempotency_key,
+                venue_status, source_module, payload_json, env
+            ) VALUES (?, ?, 1, ?, 'EXIT_RETRY_RELEASED', ?, 'pending_exit', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                event_key, position_id, _latest_position_sequence(conn, position_id) + 1,
+                observed_at, phase_after, current.get("strategy_key"), command.get("decision_id"),
+                current.get("decision_snapshot_id") or command.get("snapshot_id"),
+                command.get("venue_order_id"), command_id, f"venue_command:{command_id}",
+                event_key, "AUTHENTICATED_ABSENCE", "src.execution.command_recovery",
+                json.dumps({
+                    "reason": "submit_unknown_authenticated_absence_exit_retry_released",
+                    "proof_class": "authenticated_complete_absence_zero_positive_fill",
+                    "command_id": command_id,
+                    "safe_replay_permitted": True,
+                    "venue_absence_proof": dict(absence_proof),
+                    "fresh_redecision_required": True,
+                    "old_probability_certificate_reusable": False,
+                }, sort_keys=True, default=str),
+                _latest_position_env(conn, position_id),
+            ),
+        )
+    conn.execute(
+        """
+        UPDATE position_current
+           SET phase = ?, order_status = 'rejected',
+               exit_reason = 'SUBMIT_UNKNOWN_ABSENCE_REDECISION_REQUIRED',
+               updated_at = ?
+         WHERE position_id = ? AND phase = 'pending_exit'
+        """,
+        (phase_after, observed_at, position_id),
+    )
+    return {
+        "command_id": command_id,
+        "position_id": position_id,
+        "city": str(current.get("city") or ""),
+        "target_date": str(current.get("target_date") or ""),
+        "metric": str(current.get("temperature_metric") or "").lower(),
+        "temperature_metric": str(current.get("temperature_metric") or "").lower(),
+        "reason": "submit_unknown_authenticated_absence",
+    }
+
+
 def _release_exit_after_terminal_no_fill(
     conn: sqlite3.Connection,
     *,
@@ -26196,21 +26300,42 @@ def _reconcile_row(
                     cmd.command_id, age,
                 )
                 return "stayed"
-            append_event(
-                conn,
-                command_id=cmd.command_id,
-                event_type=CommandEventType.SUBMIT_REJECTED.value,
-                occurred_at=now,
-                payload={
-                    "reason": "safe_replay_permitted_no_order_found",
-                    "safe_replay_permitted": True,
-                    "previous_unknown_command_id": cmd.command_id,
-                    "idempotency_key": cmd.idempotency_key.value,
-                    "age_seconds": age,
-                    "lookup_method": lookup_method,
-                    "venue_absence_proof": venue_absence_proof,
-                },
-            )
+            safe_command_id = "".join(ch if ch.isalnum() else "_" for ch in cmd.command_id)
+            sp_name = f"sp_submit_unknown_absence_{safe_command_id}"
+            conn.execute(f"SAVEPOINT {sp_name}")
+            try:
+                append_event(
+                    conn,
+                    command_id=cmd.command_id,
+                    event_type=CommandEventType.SUBMIT_REJECTED.value,
+                    occurred_at=now,
+                    payload={
+                        "reason": "safe_replay_permitted_no_order_found",
+                        "safe_replay_permitted": True,
+                        "previous_unknown_command_id": cmd.command_id,
+                        "idempotency_key": cmd.idempotency_key.value,
+                        "age_seconds": age,
+                        "lookup_method": lookup_method,
+                        "venue_absence_proof": venue_absence_proof,
+                    },
+                )
+                continuation = _release_submit_unknown_exit_after_authenticated_absence(
+                    conn,
+                    command=command,
+                    observed_at=now,
+                    absence_proof=venue_absence_proof or {},
+                )
+                if continuation is not None and not _emit_terminal_no_fill_redecision_from_recovery(
+                    conn,
+                    continuation=continuation,
+                    occurred_at=now,
+                ):
+                    raise RuntimeError("authenticated-absence EXIT release did not emit redecision")
+                conn.execute(f"RELEASE SAVEPOINT {sp_name}")
+            except Exception:
+                conn.execute(f"ROLLBACK TO SAVEPOINT {sp_name}")
+                conn.execute(f"RELEASE SAVEPOINT {sp_name}")
+                raise
             logger.warning(
                 "recovery: command %s SUBMIT_UNKNOWN_SIDE_EFFECT -> SUBMIT_REJECTED "
                 "(safe replay permitted; idempotency key not found after %.1fs)",

@@ -35212,3 +35212,84 @@ def test_full_priming_limits_historical_matched_orders_to_one_network_quantum(
     assert priming["active_quantum_remaining"] is True
     assert priming["matched_quantum_remaining"] is True
     assert "filled-order-4" not in priming["order_ids"]
+
+
+def test_aged_authenticated_absence_exit_releases_pending_exit_to_fresh_redecision(
+    conn,
+    mock_client,
+    monkeypatch,
+):
+    from src.execution import command_recovery
+    from src.execution.command_recovery import reconcile_unresolved_commands
+
+    _insert(conn, command_id="cmd-entry", position_id="pos-milan-exit")
+    _advance_to_acked(conn, command_id="cmd-entry", venue_order_id="ord-entry")
+    _seed_pending_entry_projection(
+        conn,
+        command_id="cmd-entry",
+        position_id="pos-milan-exit",
+        order_id="ord-entry",
+    )
+    conn.execute(
+        """
+        UPDATE position_current
+           SET phase = 'pending_exit', shares = 10, chain_shares = 10,
+               cost_basis_usd = 5, city = 'Milan', target_date = '2026-08-23',
+               temperature_metric = 'high'
+         WHERE position_id = 'pos-milan-exit'
+        """
+    )
+    _insert(
+        conn,
+        command_id="cmd-milan-exit",
+        position_id="pos-milan-exit",
+        intent_kind="EXIT",
+        side="SELL",
+        token_id="tok-001",
+        size=10,
+        price=0.40,
+    )
+    _advance_to_unknown_side_effect(conn, command_id="cmd-milan-exit")
+    mock_client.get_open_orders.return_value = []
+    mock_client.get_trades.return_value = []
+    emitted = []
+    monkeypatch.setattr(
+        command_recovery,
+        "_phase_after_terminal_exit_no_fill",
+        lambda *_args, **_kwargs: "active",
+    )
+    monkeypatch.setattr(
+        command_recovery,
+        "_emit_terminal_no_fill_redecision_from_recovery",
+        lambda _conn, *, continuation, occurred_at: emitted.append(continuation) or 1,
+    )
+
+    summary = reconcile_unresolved_commands(conn, mock_client)
+
+    assert summary["advanced"] >= 1
+    assert _get_state(conn, "cmd-milan-exit") == "SUBMIT_REJECTED"
+    current = conn.execute(
+        "SELECT phase, exit_reason FROM position_current WHERE position_id = 'pos-milan-exit'"
+    ).fetchone()
+    assert dict(current) == {
+        "phase": "active",
+        "exit_reason": "SUBMIT_UNKNOWN_ABSENCE_REDECISION_REQUIRED",
+    }
+    released = conn.execute(
+        """
+        SELECT event_type, payload_json FROM position_events
+         WHERE position_id = 'pos-milan-exit' AND command_id = 'cmd-milan-exit'
+        """
+    ).fetchone()
+    assert released["event_type"] == "EXIT_RETRY_RELEASED"
+    payload = json.loads(released["payload_json"])
+    assert payload["old_probability_certificate_reusable"] is False
+    assert emitted == [{
+        "command_id": "cmd-milan-exit",
+        "position_id": "pos-milan-exit",
+        "city": "Milan",
+        "target_date": "2026-08-23",
+        "metric": "high",
+        "temperature_metric": "high",
+        "reason": "submit_unknown_authenticated_absence",
+    }]
