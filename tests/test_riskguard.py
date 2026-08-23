@@ -5474,6 +5474,86 @@ class TestQkernelMarketRelativeAlphaEvidence:
         assert curve["net_realized_pnl_usd"] == pytest.approx(3.5615)
         conn.close()
 
+    def test_live_capital_prefers_canonical_command_fact_over_bridge_alias(self):
+        conn = self._live_capital_conn(
+            phase="day0_window",
+            gross_pnl=None,
+            exit_price=None,
+        )
+        conn.execute("ALTER TABLE execution_fact ADD COLUMN intent_id TEXT")
+        conn.execute(
+            "UPDATE execution_fact SET intent_id='current-trial:entry' "
+            "WHERE command_id='entry-command'"
+        )
+        conn.execute(
+            "INSERT INTO execution_fact "
+            "(command_id,position_id,order_role,filled_at,terminal_exec_status,"
+            "fill_price,shares,intent_id) VALUES (?,?,?,?,?,?,?,?)",
+            (
+                "entry-command",
+                "current-trial",
+                "entry",
+                "2026-08-11T15:00:00+00:00",
+                "filled",
+                0.29,
+                6.24,
+                "edli_intent:event:token",
+            ),
+        )
+        conn.commit()
+
+        curve = riskguard_module._day0_live_realized_capital_curve(
+            conn,
+            window_days=7.0,
+            as_of=datetime(2026, 8, 11, 17, tzinfo=timezone.utc),
+        )
+
+        assert curve["status"] == "probation_in_flight"
+        assert curve["blocked_position_count"] == 0
+        assert curve["capital_committed_usd"] == pytest.approx(1.6185)
+        conn.close()
+
+    def test_live_capital_rejects_conflicting_noncanonical_command_facts(self):
+        conn = self._live_capital_conn(
+            phase="day0_window",
+            gross_pnl=None,
+            exit_price=None,
+        )
+        conn.execute("ALTER TABLE execution_fact ADD COLUMN intent_id TEXT")
+        conn.execute(
+            "UPDATE execution_fact SET intent_id='edli_intent:event:a' "
+            "WHERE command_id='entry-command'"
+        )
+        conn.execute(
+            "INSERT INTO execution_fact "
+            "(command_id,position_id,order_role,filled_at,terminal_exec_status,"
+            "fill_price,shares,intent_id) VALUES (?,?,?,?,?,?,?,?)",
+            (
+                "entry-command",
+                "current-trial",
+                "entry",
+                "2026-08-11T15:00:00+00:00",
+                "filled",
+                0.29,
+                6.24,
+                "edli_intent:event:b",
+            ),
+        )
+        conn.commit()
+
+        curve = riskguard_module._day0_live_realized_capital_curve(
+            conn,
+            window_days=7.0,
+            as_of=datetime(2026, 8, 11, 17, tzinfo=timezone.utc),
+        )
+
+        assert curve["status"] == "capital_truth_degraded"
+        assert curve["blocked_position_count"] == 1
+        assert curve["blocked_reasons"] == {
+            "entry_command_economics_conflict": 1
+        }
+        conn.close()
+
     def test_partial_exit_reconciles_original_capital_to_residual_projection(self):
         conn = self._live_capital_conn(
             phase="pending_exit",

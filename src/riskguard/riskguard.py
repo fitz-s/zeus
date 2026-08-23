@@ -3190,10 +3190,19 @@ def _live_realized_capital_curve(
         status.update(status="capital_truth_unavailable", error=type(exc).__name__)
         return status
 
+    execution_fact_has_intent_id = "intent_id" in {
+        str(row[1])
+        for row in conn.execute("PRAGMA table_info(execution_fact)").fetchall()
+    }
+    execution_intent_select = (
+        "ef.intent_id" if execution_fact_has_intent_id else "NULL"
+    )
+
     entry_rows = conn.execute(
         "SELECT pc.position_id,pc.phase,pc.city,pc.target_date,"
         "pc.temperature_metric,pc.cost_basis_usd,pc.realized_pnl_usd,"
-        "vc.command_id,vc.q_version,ef.fill_price,ef.shares,ef.filled_at,"
+        f"vc.command_id,{execution_intent_select},vc.q_version,"
+        "ef.fill_price,ef.shares,ef.filled_at,"
         "vse.post_only,vse.fee_details_json,pc.shares,"
         "EXISTS(SELECT 1 FROM venue_commands AS exit_vc "
         "JOIN execution_fact AS exit_ef ON exit_ef.command_id=exit_vc.command_id "
@@ -3236,24 +3245,45 @@ def _live_realized_capital_curve(
                 "metric": str(raw[4] or ""),
                 "projection_cost_basis_usd": raw[5],
                 "projection_realized_pnl_usd": raw[6],
-                "projection_shares": raw[14],
-                "has_filled_exit": bool(raw[15]),
+                "projection_shares": raw[15],
+                "has_filled_exit": bool(raw[16]),
                 "entries": [],
             },
         )
         position["entries"].append(
             {
                 "command_id": str(raw[7] or ""),
-                "q_version": str(raw[8] or ""),
-                "fill_price": raw[9],
-                "shares": raw[10],
-                "filled_at": str(raw[11] or ""),
-                "post_only": raw[12],
-                "fee_details_json": raw[13],
+                "intent_id": str(raw[8] or ""),
+                "q_version": str(raw[9] or ""),
+                "fill_price": raw[10],
+                "shares": raw[11],
+                "filled_at": str(raw[12] or ""),
+                "post_only": raw[13],
+                "fee_details_json": raw[14],
             }
         )
 
     for position in positions.values():
+        position_id = str(position["position_id"])
+        baseline_id = f"{position_id}:entry"
+
+        def intent_priority(entry: Mapping[str, object]) -> int:
+            command_id = str(entry["command_id"] or "")
+            intent_id = str(entry["intent_id"] or "")
+            if intent_id == baseline_id:
+                return 0
+            if intent_id == f"{baseline_id}:{command_id}":
+                return 1
+            return 2
+
+        canonical_priority_by_command: dict[str, int] = {}
+        for entry in position["entries"]:
+            command_id = str(entry["command_id"] or "")
+            priority = intent_priority(entry)
+            canonical_priority_by_command[command_id] = min(
+                priority,
+                canonical_priority_by_command.get(command_id, priority),
+            )
         deduped: dict[str, dict[str, object]] = {}
         conflict = False
         for entry in position["entries"]:
@@ -3261,6 +3291,9 @@ def _live_realized_capital_curve(
             incumbent = deduped.get(command_id)
             if not command_id:
                 conflict = True
+                continue
+            priority = intent_priority(entry)
+            if priority != canonical_priority_by_command[command_id]:
                 continue
             if incumbent is None:
                 deduped[command_id] = entry
