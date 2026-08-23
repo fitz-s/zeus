@@ -71,6 +71,9 @@ _HELD_MONITOR_CLOB_CLIENT_FACTORY = None
 _HELD_MONITOR_CLOB_CLIENT_LOCK = threading.Lock()
 GLOBAL_SELL_REAUCTION_COMPLETION_DEADLINE_SECONDS = 30.0
 HELD_SELL_REAUCTION_CLASSIFICATION_IO_MAX_SECONDS = 0.75
+_MONITOR_ARTIFACT_WRITE_LEASE_DEADLINE_MS = 250
+_MONITOR_ARTIFACT_WRITE_LEASE_MAX_HOLD_MS = 500
+_MONITOR_ARTIFACT_WRITE_RETRY_DEADLINE_MS = 5_000
 
 
 class GlobalSellSnapshotReauctionDebtStatus(str, Enum):
@@ -12629,6 +12632,74 @@ def held_monitor_pre_artifact_reserve_seconds() -> float:
     return 2.0 * float(HELD_MONITOR_PRIMARY_BELIEF_READ_MAX_SECONDS)
 
 
+def _persist_exit_monitor_artifact(
+    conn: sqlite3.Connection,
+    artifact,
+    *,
+    summary: dict,
+) -> tuple[bool, int | None]:
+    """Persist the final monitor artifact without bypassing TRADE writer order."""
+    from src.execution.executor import _canonical_trade_write_lease
+    from src.state.canonical_write import commit_then_export
+    from src.state.decision_chain import store_artifact
+    from src.state.write_coordinator import (
+        WriteLeaseTimeout,
+        WritePriority,
+        bounded_sqlite_write,
+    )
+
+    if conn.in_transaction:
+        raise RuntimeError("EXIT_MONITOR_ARTIFACT_REQUIRES_CLEAN_TRANSACTION")
+
+    artifact_id: list[int | None] = [None]
+
+    def persist_once(*, owner: str, deadline_ms: int) -> None:
+        def db_op():
+            artifact_id[0] = store_artifact(conn, artifact)
+            return artifact_id[0]
+
+        with _canonical_trade_write_lease(
+            conn,
+            owner=owner,
+            deadline_ms=deadline_ms,
+            max_hold_ms=_MONITOR_ARTIFACT_WRITE_LEASE_MAX_HOLD_MS,
+            priority=WritePriority.MONITOR,
+        ) as lease:
+            if lease is None:
+                commit_then_export(conn, db_op=db_op)
+                return
+            with bounded_sqlite_write(
+                conn,
+                lease,
+                max_hold_ms=_MONITOR_ARTIFACT_WRITE_LEASE_MAX_HOLD_MS,
+            ):
+                commit_then_export(conn, db_op=db_op)
+
+    try:
+        persist_once(
+            owner="exit_monitor_artifact",
+            deadline_ms=_MONITOR_ARTIFACT_WRITE_LEASE_DEADLINE_MS,
+        )
+    except WriteLeaseTimeout as first_exc:
+        summary["monitor_artifact_write_retried"] = True
+        try:
+            persist_once(
+                owner="exit_monitor_artifact_retry",
+                deadline_ms=_MONITOR_ARTIFACT_WRITE_RETRY_DEADLINE_MS,
+            )
+        except WriteLeaseTimeout as retry_exc:
+            summary["monitor_artifact_write_deferred"] = str(retry_exc)
+            logger.warning(
+                "exit_monitor artifact write deferred after bounded retry: "
+                "first=%s retry=%s",
+                first_exc,
+                retry_exc,
+            )
+            return False, None
+
+    return True, artifact_id[0]
+
+
 def run_exit_monitor_cycle(
     *,
     held_position_monitor_active: threading.Event,
@@ -12675,9 +12746,7 @@ def run_exit_monitor_cycle(
     )
     from src.engine.cycle_runtime import _held_position_monitor_budget_seconds
     from src.observability.scheduler_health import _write_scheduler_health
-    from src.state.canonical_write import commit_then_export
     from src.state.decision_chain import CycleArtifact
-    from src.state.decision_chain import store_artifact
     from src.riskguard.risk_level import RiskLevel
     from src.riskguard.riskguard import get_current_level
 
@@ -12883,10 +12952,6 @@ def run_exit_monitor_cycle(
             # monitor artifact is durable.
             _aid_box: list = [None]
 
-            def _db_op():
-                _aid_box[0] = store_artifact(conn, artifact)
-                return _aid_box[0]
-
             def _export_portfolio():
                 if portfolio_dirty and target_families is None:
                     save_portfolio(
@@ -12899,13 +12964,26 @@ def run_exit_monitor_cycle(
                 if tracker_dirty:
                     save_tracker(tracker)
 
-            commit_then_export(
+            artifact_persisted, _aid_box[0] = _persist_exit_monitor_artifact(
                 conn,
-                db_op=_db_op,
-                json_exports=[_export_portfolio, _export_tracker],
+                artifact,
+                summary=summary,
             )
-            mark_held_position_monitor_complete()
-            monitor_completion_marked = True
+            if artifact_persisted:
+                for export_fn in (_export_portfolio, _export_tracker):
+                    try:
+                        export_fn()
+                    except Exception:  # noqa: BLE001 - canonical DB is durable.
+                        logger.exception(
+                            "exit_monitor JSON export failed after artifact commit "
+                            "(artifact_id=%s)",
+                            _aid_box[0],
+                        )
+                mark_held_position_monitor_complete()
+                monitor_completion_marked = True
+            else:
+                summary["monitoring_error"] = "MONITOR_ARTIFACT_WRITE_DEFERRED"
+                succeeded = False
 
     except Exception as exc:
         logger.error(

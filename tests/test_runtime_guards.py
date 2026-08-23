@@ -1232,6 +1232,137 @@ def test_held_monitor_uses_causal_market_channel_depth_after_snapshot_invalidati
     conn.close()
 
 
+def test_exit_monitor_artifact_retries_under_trade_writer_serialization(monkeypatch):
+    from src.execution import executor, exit_lifecycle
+    from src.state import write_coordinator
+    from src.state.decision_chain import CycleArtifact
+    from src.state.write_coordinator import WriteLeaseTimeout, WritePriority
+
+    conn = sqlite3.connect(":memory:")
+    conn.execute(
+        """
+        CREATE TABLE decision_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            mode TEXT,
+            started_at TEXT,
+            completed_at TEXT,
+            artifact_json TEXT,
+            timestamp TEXT,
+            env TEXT
+        )
+        """
+    )
+    attempts = []
+    bounded_attempts = []
+    canonical_lease = object()
+
+    class LeaseAttempt:
+        def __init__(self, owner):
+            self.owner = owner
+
+        def __enter__(self):
+            attempts.append(self.owner)
+            if len(attempts) == 1:
+                raise WriteLeaseTimeout("held quote refresh owns writer")
+            return canonical_lease
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    def lease(_conn, *, owner, deadline_ms, max_hold_ms, priority):
+        assert deadline_ms > 0
+        assert max_hold_ms > 0
+        assert priority is WritePriority.MONITOR
+        return LeaseAttempt(owner)
+
+    class BoundedWrite:
+        def __enter__(self):
+            bounded_attempts.append(canonical_lease)
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    monkeypatch.setattr(executor, "_canonical_trade_write_lease", lease)
+    monkeypatch.setattr(
+        write_coordinator,
+        "bounded_sqlite_write",
+        lambda actual_conn, actual_lease, *, max_hold_ms: BoundedWrite(),
+    )
+    summary = {}
+    artifact = CycleArtifact(
+        mode="exit_monitor",
+        started_at="2026-08-23T14:04:21+00:00",
+        completed_at="2026-08-23T14:07:40+00:00",
+        summary=summary,
+    )
+
+    persisted, artifact_id = exit_lifecycle._persist_exit_monitor_artifact(
+        conn,
+        artifact,
+        summary=summary,
+    )
+    assert persisted is True
+    assert artifact_id == 1
+    assert attempts == ["exit_monitor_artifact", "exit_monitor_artifact_retry"]
+    assert bounded_attempts == [canonical_lease]
+    assert summary["monitor_artifact_write_retried"] is True
+    assert conn.execute("SELECT COUNT(*) FROM decision_log").fetchone()[0] == 1
+    assert conn.in_transaction is False
+    conn.close()
+
+
+def test_exit_monitor_artifact_reports_bounded_defer_without_partial_row(monkeypatch):
+    from src.execution import executor, exit_lifecycle
+    from src.state.decision_chain import CycleArtifact
+    from src.state.write_coordinator import WriteLeaseTimeout
+
+    conn = sqlite3.connect(":memory:")
+    conn.execute(
+        """
+        CREATE TABLE decision_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            mode TEXT,
+            started_at TEXT,
+            completed_at TEXT,
+            artifact_json TEXT,
+            timestamp TEXT,
+            env TEXT
+        )
+        """
+    )
+
+    class DeferredLease:
+        def __enter__(self):
+            raise WriteLeaseTimeout("writer remains busy")
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    monkeypatch.setattr(
+        executor,
+        "_canonical_trade_write_lease",
+        lambda *args, **kwargs: DeferredLease(),
+    )
+    summary = {}
+    persisted, artifact_id = exit_lifecycle._persist_exit_monitor_artifact(
+        conn,
+        CycleArtifact(
+            mode="exit_monitor",
+            started_at="2026-08-23T14:04:21+00:00",
+            completed_at="2026-08-23T14:07:40+00:00",
+            summary=summary,
+        ),
+        summary=summary,
+    )
+
+    assert persisted is False
+    assert artifact_id is None
+    assert "writer remains busy" in summary["monitor_artifact_write_deferred"]
+    assert conn.execute("SELECT COUNT(*) FROM decision_log").fetchone()[0] == 0
+    assert conn.in_transaction is False
+    conn.close()
+
+
 @pytest.mark.parametrize(
     ("status", "active", "closed", "accepting_orders", "expected"),
     (
