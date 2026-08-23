@@ -18,6 +18,7 @@ import threading
 import time
 import tomllib
 from collections.abc import Iterable, Mapping
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -2501,17 +2502,19 @@ def _parse_session(events_path: Path) -> tuple[str | None, dict[str, Any]]:
 
 
 _PROVIDER_LIMIT_TERMS = (
-    "usage limit", "quota", "rate limit", "too many requests",
-    "resource exhausted", "exceeded limit",
+    "usage limit exceeded", "usage limit reached", "quota exceeded",
+    "rate limit", "too many requests", "resource exhausted",
+    "exceeded quota",
 )
 
 
 def _parse_terminal_failure(events_path: Path) -> dict[str, Any] | None:
     """Read terminal Codex failure events even when the CLI exits rc=0."""
 
-    preceding_errors: list[str] = []
-    preceding_error_events: list[Mapping[str, Any]] = []
+    turn_errors: list[Mapping[str, Any]] = []
+    current_turn_id: str | None = None
     failed: Mapping[str, Any] | None = None
+    linked_errors: list[Mapping[str, Any]] = []
     try:
         lines = events_path.read_text(errors="replace").splitlines()
     except OSError:
@@ -2524,22 +2527,48 @@ def _parse_terminal_failure(events_path: Path) -> dict[str, Any] | None:
         if not isinstance(event, Mapping):
             continue
         event_type = str(event.get("type") or "")
-        if event_type == "error":
-            preceding_error_events.append(event)
-            preceding_errors.append(json.dumps(event, ensure_ascii=False, default=str))
+        if event_type == "turn.started":
+            current_turn_id = str(event.get("turn_id") or event.get("id") or "") or None
+            turn_errors = []
+        elif event_type == "error":
+            turn_errors.append(event)
         elif event_type in {"turn.failed", "turn_failed"}:
             failed = event
+            failed_turn_id = str(event.get("turn_id") or "") or current_turn_id
+            linked_errors = [
+                item for item in turn_errors
+                if failed_turn_id is None
+                or not str(item.get("turn_id") or "")
+                or str(item.get("turn_id") or "") == failed_turn_id
+            ]
+            break
     if failed is None:
         return None
     detail = failed.get("error") or failed.get("message") or failed.get("reason")
     detail_text = json.dumps(detail, ensure_ascii=False, default=str) if isinstance(detail, (Mapping, list)) else str(detail or "")
-    if not detail_text and preceding_errors:
-        detail_text = preceding_errors[-1]
-    raw = " ".join([detail_text, *preceding_errors]).lower()
-    provider_limit = any(term in raw for term in _PROVIDER_LIMIT_TERMS)
+    linked_detail = [
+        str(item.get("message") or item.get("error") or "")
+        for item in linked_errors
+    ]
+    if not detail_text and linked_detail:
+        detail_text = linked_detail[-1]
+    codes: list[str] = []
+    for item in [failed, *linked_errors]:
+        error = item.get("error")
+        for source in [item, error if isinstance(error, Mapping) else {}]:
+            for key in ("code", "error_code", "provider_code"):
+                if source.get(key):
+                    codes.append(str(source[key]).lower().replace("-", "_"))
+    provider_codes = {
+        "usage_limit", "usage_limit_exceeded", "quota_exceeded",
+        "rate_limit", "rate_limit_exceeded", "resource_exhausted",
+    }
+    raw = " ".join([detail_text, *linked_detail]).lower()
+    provider_limit = any(code in provider_codes or code.endswith("_quota_exceeded") for code in codes)
+    provider_limit = provider_limit or any(term in raw for term in _PROVIDER_LIMIT_TERMS)
     retry_at = _retry_at_from_failure(failed)
     if retry_at is None:
-        for error_event in reversed(preceding_error_events):
+        for error_event in reversed(linked_errors):
             retry_at = _retry_at_from_failure(error_event)
             if retry_at is not None:
                 break
@@ -2552,7 +2581,10 @@ def _parse_terminal_failure(events_path: Path) -> dict[str, Any] | None:
 
 
 def _retry_at_from_failure(event: Mapping[str, Any]) -> str | None:
-    for key in ("next_retry_at", "retry_at", "reset_at", "retry_after"):
+    for key in (
+        "next_retry_at", "retry_at", "reset_at", "retry_after",
+        "retry_after_seconds", "retry_after_ms",
+    ):
         value = event.get(key)
         if value is None and isinstance(event.get("error"), Mapping):
             value = event["error"].get(key)
@@ -2563,13 +2595,30 @@ def _retry_at_from_failure(event: Mapping[str, Any]) -> str | None:
             return iso(parsed)
         try:
             numeric = float(value)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             continue
         if not math.isfinite(numeric) or numeric <= 0:
             continue
-        if numeric > 1_000_000_000:
-            return iso(datetime.fromtimestamp(numeric, UTC))
-        return iso(now() + timedelta(seconds=min(numeric, 86_400.0)))
+        try:
+            if key.endswith("_ms") or key == "retry_after_ms":
+                seconds = numeric / 1000.0
+            elif numeric >= 1_000_000_000_000:
+                seconds = (numeric / 1000.0) - now().timestamp()
+            elif numeric >= 1_000_000_000:
+                return iso(datetime.fromtimestamp(numeric, UTC))
+            elif key.endswith("_seconds") or key == "retry_after":
+                seconds = numeric
+            elif numeric <= 86_400:
+                seconds = numeric
+            elif numeric <= 86_400_000:
+                seconds = numeric / 1000.0
+            else:
+                continue
+            if not math.isfinite(seconds) or seconds <= 0:
+                continue
+            return iso(now() + timedelta(seconds=min(seconds, 86_400.0)))
+        except (ValueError, OverflowError, OSError):
+            continue
     return None
 
 
@@ -2607,7 +2656,7 @@ def _set_provider_backoff(
     return payload
 
 
-def _spawn_run(
+def _spawn_run_unlocked(
     cfg: Mapping[str, Any],
     *,
     incident_id: str,
@@ -2755,7 +2804,7 @@ def _spawn_run(
     return record
 
 
-def _spawn_controller_run(
+def _spawn_controller_run_unlocked(
     cfg: Mapping[str, Any],
     *,
     incident_id: str,
@@ -2867,6 +2916,42 @@ def _spawn_controller_run(
             _release_spawn_witness(cfg, run_id, witness_path)
         raise
     return record
+
+
+def _acquire_provider_launch_lock(cfg: Mapping[str, Any]) -> int:
+    path = runtime_dir(cfg) / "provider-launch.lock"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+    fcntl.flock(fd, fcntl.LOCK_EX)
+    return fd
+
+
+def _release_provider_launch_lock(fd: int) -> None:
+    try:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        os.close(fd)
+
+
+@contextmanager
+def _provider_launch_guard(cfg: Mapping[str, Any]):
+    fd = _acquire_provider_launch_lock(cfg)
+    try:
+        if _provider_backoff(cfg) is not None:
+            raise ProviderBackoffActive("codex provider backoff active")
+        yield
+    finally:
+        _release_provider_launch_lock(fd)
+
+
+def _spawn_run(*args: Any, **kwargs: Any) -> dict[str, Any]:
+    with _provider_launch_guard(args[0] if args else kwargs["cfg"]):
+        return _spawn_run_unlocked(*args, **kwargs)
+
+
+def _spawn_controller_run(*args: Any, **kwargs: Any) -> dict[str, Any]:
+    with _provider_launch_guard(args[0] if args else kwargs["cfg"]):
+        return _spawn_controller_run_unlocked(*args, **kwargs)
 
 
 def _running(cfg: Mapping[str, Any]) -> list[dict[str, Any]]:
@@ -3177,6 +3262,10 @@ class WriterLeaseBusy(RuntimeError):
     """A live child already owns the canonical workspace writer lease."""
 
 
+class ProviderBackoffActive(RuntimeError):
+    """A durable provider cooldown won the launch gate."""
+
+
 def _pid_alive(pid: object) -> bool:
     try:
         numeric_pid = int(pid or 0)
@@ -3438,6 +3527,8 @@ def _retry_pending(cfg: Mapping[str, Any], running: list[dict[str, Any]]) -> lis
                 )
             except WriterLeaseBusy:
                 continue
+            except ProviderBackoffActive:
+                return launched
             except (OSError, RuntimeError) as exc:
                 _mark_spawn_failure(cfg, incident_id, stage=prior_stage, reason=f"{type(exc).__name__}:{exc}")
                 continue
@@ -3481,6 +3572,8 @@ def _retry_pending(cfg: Mapping[str, Any], running: list[dict[str, Any]]) -> lis
             )
         except WriterLeaseBusy:
             continue
+        except ProviderBackoffActive:
+            return launched
         except (OSError, RuntimeError) as exc:
             _mark_spawn_failure(cfg, incident_id, stage=prior_stage, reason=f"{type(exc).__name__}:{exc}")
             continue
@@ -3560,6 +3653,11 @@ def dispatch(cfg: Mapping[str, Any]) -> list[str]:
                 command = _codex_exec_base(cfg, sandbox="read-only", cwd=ROOT, schema=schema, output=output, persistent=True)
                 _spawn_run(cfg, incident_id=incident_id, kind=kind, stage="diagnosis", command=command, cwd=ROOT, prompt=prompt, output=output, events=events)
             except (OSError, RuntimeError, sqlite3.Error) as exc:
+                if isinstance(exc, ProviderBackoffActive):
+                    _mark_spawn_failure(
+                        cfg, incident_id, stage="blind", reason="provider_backoff_active"
+                    )
+                    return launched
                 _mark_spawn_failure(
                     cfg,
                     incident_id,
@@ -3670,6 +3768,9 @@ def _finish_run_inner(cfg: Mapping[str, Any], run: dict[str, Any], returncode: i
     run["session_id"] = session or run.get("session_id")
     if terminal_failure is not None:
         run["terminal_failure"] = terminal_failure
+    provider_failure = bool(
+        terminal_failure is not None and terminal_failure.get("provider_wide")
+    )
     atomic_json(path, run)
     with memory(cfg) as mem:
         if not run.get("controller"):
@@ -3683,8 +3784,6 @@ def _finish_run_inner(cfg: Mapping[str, Any], run: dict[str, Any], returncode: i
                 if terminal_failure is not None
                 else f"run_failed:{returncode}"
             )
-            if terminal_failure is not None and terminal_failure.get("provider_wide"):
-                run["provider_backoff"] = _set_provider_backoff(cfg, mem, terminal_failure)
             transition(
                 mem,
                 str(run["incident_id"]),
@@ -3694,6 +3793,16 @@ def _finish_run_inner(cfg: Mapping[str, Any], run: dict[str, Any], returncode: i
                 status="retry_pending",
             )
             mem.commit()
+    if provider_failure:
+        launch_lock = _acquire_provider_launch_lock(cfg)
+        try:
+            with memory(cfg) as backoff_mem:
+                run["provider_backoff"] = _set_provider_backoff(
+                    cfg, backoff_mem, terminal_failure or {}
+                )
+                backoff_mem.commit()
+        finally:
+            _release_provider_launch_lock(launch_lock)
     if effective_failed:
         atomic_json(path, run)
         return

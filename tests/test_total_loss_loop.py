@@ -489,6 +489,63 @@ def test_normal_completed_jsonl_has_no_terminal_failure() -> None:
         path.unlink(missing_ok=True)
 
 
+def test_terminal_failure_is_turn_scoped_and_structured_codes_win(tmp_path: Path) -> None:
+    path = tmp_path / "turns.jsonl"
+    path.write_text(
+        "\n".join(
+            [
+                json.dumps({"type": "turn.started", "turn_id": "old"}),
+                json.dumps({"type": "error", "turn_id": "old", "message": "usage limit exceeded"}),
+                json.dumps({"type": "turn.started", "turn_id": "current"}),
+                json.dumps({"type": "error", "turn_id": "current", "message": "temporary network issue"}),
+                json.dumps({"type": "turn.failed", "turn_id": "current", "error": {"code": "internal_error", "message": "failed"}}),
+            ]
+        )
+        + "\n"
+    )
+    failure = loop._parse_terminal_failure(path)
+    assert failure is not None
+    assert failure["kind"] == "terminal_failure"
+
+    path.write_text(
+        json.dumps({"type": "turn.failed", "error": {"code": "quota_exceeded", "message": "failed"}})
+        + "\n"
+    )
+    assert loop._parse_terminal_failure(path)["kind"] == "provider_quota_limit"
+
+
+def test_retry_timestamp_units_and_invalid_values_fall_back_bounded(cfg: dict) -> None:
+    seconds = loop._retry_at_from_failure({"retry_after_seconds": 2})
+    milliseconds = loop._retry_at_from_failure({"retry_after_ms": 2_000})
+    assert seconds is not None and milliseconds is not None
+    assert (loop.parse_time(seconds) - loop.now()).total_seconds() < 10
+    assert (loop.parse_time(milliseconds) - loop.now()).total_seconds() < 10
+    assert loop._retry_at_from_failure({"retry_after": "not-a-time"}) is None
+    cfg["loop"]["provider_cooldown_seconds"] = 2
+    with loop.memory(cfg) as mem:
+        payload = loop._set_provider_backoff(
+            cfg, mem, {"provider_wide": True, "reason": "invalid retry"}
+        )
+        mem.commit()
+    assert 0 < (loop.parse_time(payload["next_retry_at"]) - loop.now()).total_seconds() < 10
+
+
+def test_launch_guard_rechecks_durable_backoff_before_each_spawn(
+    cfg: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[str] = []
+    monkeypatch.setattr(loop, "_spawn_run_unlocked", lambda *_args, **_kwargs: calls.append("spawn") or {})
+    with loop.memory(cfg) as mem:
+        loop._set_provider_backoff(
+            cfg, mem,
+            {"provider_wide": True, "reason": "quota", "retry_at": "2099-01-01T00:00:00+00:00"},
+        )
+        mem.commit()
+    with pytest.raises(loop.ProviderBackoffActive):
+        loop._spawn_run(cfg, incident_id="gated", kind="hard", stage="diagnosis", command=[], cwd=ROOT, prompt="", output=ROOT / "out", events=ROOT / "events")
+    assert calls == []
+
+
 def test_canonical_settlement_correction_revises_existing_loss_incident(
     cfg: dict, monkeypatch: pytest.MonkeyPatch
 ) -> None:
