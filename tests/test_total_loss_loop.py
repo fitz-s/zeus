@@ -237,6 +237,74 @@ def test_crossing_below_floor_creates_one_hard_incident(cfg: dict) -> None:
     assert second == []
 
 
+def test_initial_quote_cursor_uses_primary_key_max_without_scan(
+    cfg: dict,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _position(cfg)
+    _quote(cfg, "q-current", "2026-08-22T09:00:02+00:00", 0.20)
+    queries: list[str] = []
+    original_open_ro = loop.open_ro
+
+    def traced_open_ro(path: Path):
+        conn = original_open_ro(path)
+        if Path(path) == Path(cfg["paths"]["trades_db"]):
+            conn.set_trace_callback(queries.append)
+        return conn
+
+    monkeypatch.setattr(loop, "open_ro", traced_open_ro)
+    loop.detect(cfg)
+
+    cursor_queries = [query for query in queries if "execution_feasibility_evidence" in query]
+    assert any("SELECT MAX(rowid) FROM execution_feasibility_evidence" in query for query in cursor_queries)
+    assert not any("ORDER BY rowid DESC LIMIT 1" in query for query in cursor_queries)
+    with sqlite3.connect(cfg["paths"]["trades_db"]) as conn:
+        plan = conn.execute(
+            "EXPLAIN QUERY PLAN SELECT MAX(rowid) FROM execution_feasibility_evidence"
+        ).fetchall()
+    plan_text = " ".join(str(column) for row in plan for column in row).upper()
+    assert "SCAN EXECUTION_FEASIBILITY_EVIDENCE" not in plan_text
+
+
+def test_daemon_keeps_detecting_while_dispatch_worker_is_busy(
+    cfg: dict,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = Path(cfg["paths"]["runtime"])
+    detected: list[int] = []
+    spawned: list[object] = []
+
+    class BusyDispatchWorker:
+        pid = 4242
+
+        def poll(self) -> None:
+            return None
+
+    def fake_bootstrap(_cfg: dict) -> dict[str, str]:
+        runtime.mkdir(parents=True, exist_ok=True)
+        return {"runtime": str(runtime)}
+
+    def fake_detect(_cfg: dict) -> list[str]:
+        detected.append(len(detected) + 1)
+        if len(detected) == 2:
+            (runtime / "HALT").touch()
+        return []
+
+    monkeypatch.setattr(loop, "bootstrap", fake_bootstrap)
+    monkeypatch.setattr(loop, "detect", fake_detect)
+    monkeypatch.setattr(loop, "dispatch", lambda _cfg: pytest.fail("daemon must not synchronously dispatch"))
+    monkeypatch.setattr(loop, "poll_runs", lambda _cfg: [])
+    monkeypatch.setattr(loop, "_spawn_dispatch_worker", lambda _cfg: spawned.append(object()) or BusyDispatchWorker())
+    monkeypatch.setattr(loop, "_running", lambda _cfg: [])
+    monkeypatch.setattr(loop, "_terminate_process_group", lambda _pid: None)
+    monkeypatch.setattr(loop, "_record_cycle_latency", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(loop.time, "sleep", lambda _seconds: None)
+
+    assert loop.daemon(cfg) == 0
+    assert detected == [1, 2]
+    assert len(spawned) == 1
+
+
 def test_missing_active_floor_fails_closed(cfg: dict) -> None:
     Path(cfg["paths"]["settings"]).write_text("{}")
 

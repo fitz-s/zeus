@@ -1112,9 +1112,9 @@ def detect(cfg: Mapping[str, Any]) -> list[str]:
         raw_cursor = meta_get(mem, "quote_cursor", "")
         if raw_cursor == "":
             latest_rowid = trades.execute(
-                "SELECT rowid FROM execution_feasibility_evidence ORDER BY rowid DESC LIMIT 1"
+                "SELECT MAX(rowid) FROM execution_feasibility_evidence"
             ).fetchone()
-            cursor = int(latest_rowid[0]) if latest_rowid else 0
+            cursor = int(latest_rowid[0]) if latest_rowid and latest_rowid[0] is not None else 0
             meta_set(mem, "quote_cursor", cursor)
             quote_rows: list[dict[str, Any]] = []
         else:
@@ -3752,6 +3752,44 @@ def _record_cycle_latency(
     )
 
 
+def dispatch_once(cfg: Mapping[str, Any]) -> list[str]:
+    """Run one bounded dispatch turn without sharing the detector's process."""
+
+    lock = (runtime_dir(cfg) / "dispatch.lock").open("w")
+    try:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        lock.close()
+        return []
+    try:
+        return dispatch(cfg)
+    finally:
+        lock.close()
+
+
+def _spawn_dispatch_worker(cfg: Mapping[str, Any]) -> subprocess.Popen[Any]:
+    logs = runtime_dir(cfg) / "logs"
+    logs.mkdir(parents=True, exist_ok=True)
+    log_path = logs / f"dispatch-{os.getpid()}-{time.monotonic_ns()}.log"
+    handle = log_path.open("wb")
+    try:
+        return subprocess.Popen(
+            [
+                sys.executable,
+                str(Path(__file__).resolve()),
+                "--config",
+                str(cfg.get("_config_path") or CONFIG_PATH),
+                "dispatch-once",
+            ],
+            cwd=ROOT,
+            stdout=handle,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
+    finally:
+        handle.close()
+
+
 def daemon(cfg: Mapping[str, Any]) -> int:
     bootstrap(cfg)
     run = runtime_dir(cfg)
@@ -3767,28 +3805,46 @@ def daemon(cfg: Mapping[str, Any]) -> int:
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
     poll = max(0.05, float(cfg["loop"].get("poll_ms", 250)) / 1000.0)
+    dispatch_worker: subprocess.Popen[Any] | None = None
     while not stopping and not (run / "HALT").exists():
         cycle_started = time.monotonic()
         detector_elapsed = 0.0
         error = None
         created: list[str] = []
-        launched: list[str] = []
         try:
             detector_started = time.monotonic()
             created = detect(cfg)
             detector_elapsed = time.monotonic() - detector_started
-            poll_runs(cfg)
-            launched = dispatch(cfg)
         except Exception as exc:  # the detector remains restartable and evidence-backed
             error = f"{type(exc).__name__}: {exc}"
         atomic_json(
             run / "status.json",
-            {"alive": True, "pid": os.getpid(), "at": iso(), "created": created, "launched": launched, "error": error},
+            {
+                "alive": True,
+                "pid": os.getpid(),
+                "at": iso(),
+                "created": created,
+                "dispatch_worker_pid": (
+                    dispatch_worker.pid
+                    if dispatch_worker is not None and dispatch_worker.poll() is None
+                    else None
+                ),
+                "error": error,
+            },
         )
+        if error is None:
+            try:
+                poll_runs(cfg)
+                if dispatch_worker is None or dispatch_worker.poll() is not None:
+                    dispatch_worker = _spawn_dispatch_worker(cfg)
+            except Exception:
+                pass
         elapsed = time.monotonic() - cycle_started
         _record_cycle_latency(cfg, detector_elapsed=detector_elapsed, total_elapsed=elapsed)
         if elapsed < poll:
             time.sleep(poll - elapsed)
+    if dispatch_worker is not None and dispatch_worker.poll() is None:
+        _terminate_process_group(dispatch_worker.pid)
     terminated: list[str] = []
     for active in _running(cfg):
         _terminate_process_group(int(active["pid"]))
@@ -3812,6 +3868,7 @@ def parser() -> argparse.ArgumentParser:
     sub.add_parser("bootstrap")
     sub.add_parser("probe")
     sub.add_parser("scan-once")
+    sub.add_parser("dispatch-once")
     sub.add_parser("daemon")
     sub.add_parser("status")
     evidence = sub.add_parser("build-evidence")
@@ -3839,6 +3896,10 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "scan-once":
         bootstrap(cfg)
         print(json.dumps({"created": detect(cfg)}, ensure_ascii=False, indent=2))
+        return 0
+    if args.command == "dispatch-once":
+        bootstrap(cfg)
+        print(json.dumps({"launched": dispatch_once(cfg)}, ensure_ascii=False, indent=2))
         return 0
     if args.command == "build-evidence":
         print(build_evidence(cfg, args.incident_id))
