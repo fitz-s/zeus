@@ -753,29 +753,29 @@ def _latest_quotes(trades: sqlite3.Connection, positions: Iterable[Mapping[str, 
             """,
             (position["held_token_id"], position["held_sell_direction"]),
         ).fetchone()
-        if row is not None:
-            current = dict(row)
-            status, _ = reconcile_held_quote(current)
-            if status == "quote_incomplete":
-                authoritative_row = trades.execute(
-                    "SELECT evidence_id,token_id,direction,quote_seen_at,best_bid_before,"
-                    "best_ask_before,depth_before_json,book_hash_before "
-                    "FROM execution_feasibility_evidence "
-                    "WHERE token_id=? AND direction=? AND depth_before_json IS NOT NULL "
-                    "ORDER BY quote_seen_at DESC,rowid DESC LIMIT 1",
-                    (position["held_token_id"], position["held_sell_direction"]),
-                ).fetchone()
-                if authoritative_row is None:
-                    result[str(position["position_id"])] = current
-                    continue
-                authoritative = dict(authoritative_row)
-                if reconcile_held_quote(authoritative)[0] not in {"executable", "no_bid"}:
-                    result[str(position["position_id"])] = current
-                    continue
-                authoritative["_current_quote"] = current
-                result[str(position["position_id"])] = authoritative
-            else:
+        current = dict(row) if row is not None else None
+        if current is not None and reconcile_held_quote(current)[0] != "quote_incomplete":
+            result[str(position["position_id"])] = current
+            continue
+        authoritative_row = trades.execute(
+            "SELECT evidence_id,token_id,direction,quote_seen_at,best_bid_before,"
+            "best_ask_before,depth_before_json,book_hash_before "
+            "FROM execution_feasibility_evidence "
+            "WHERE token_id=? AND direction=? AND depth_before_json IS NOT NULL "
+            "ORDER BY quote_seen_at DESC,rowid DESC LIMIT 1",
+            (position["held_token_id"], position["direction"]),
+        ).fetchone()
+        if authoritative_row is None:
+            if current is not None:
                 result[str(position["position_id"])] = current
+            continue
+        authoritative = dict(authoritative_row)
+        if reconcile_held_quote(authoritative)[0] not in {"executable", "no_bid"}:
+            if current is not None:
+                result[str(position["position_id"])] = current
+            continue
+        authoritative["_current_quote"] = current
+        result[str(position["position_id"])] = authoritative
     return result
 
 
@@ -935,16 +935,20 @@ def backfill_step(
     return created
 
 
-def _velocity(trades: sqlite3.Connection, token_id: str) -> tuple[float, float]:
+def _velocity(
+    trades: sqlite3.Connection,
+    token_id: str,
+    carrier_direction: str,
+) -> tuple[float, float]:
     rows = trades.execute(
         """
         SELECT quote_seen_at,best_bid_before
           FROM execution_feasibility_evidence
-         WHERE token_id=? AND direction IN ('buy_yes','buy_no')
+         WHERE token_id=? AND direction=?
            AND best_bid_before IS NOT NULL
          ORDER BY quote_seen_at DESC,rowid DESC LIMIT 3
         """,
-        (token_id,),
+        (token_id, carrier_direction),
     ).fetchall()
     if len(rows) < 2:
         return 0.0, 0.0
@@ -1029,18 +1033,22 @@ def refresh_precursor(
             continue
         if bid < floor:
             continue
-        velocity, acceleration = _velocity(trades, str(position["held_token_id"]))
+        velocity, acceleration = _velocity(
+            trades,
+            str(position["held_token_id"]),
+            str(position["direction"]),
+        )
         distance = max(0.0, bid - floor)
         time_to_floor = distance / max(-velocity, 1e-9) if velocity < 0 else float("inf")
         current_quote = quote.get("_current_quote", quote)
-        quote_at = parse_time(str(current_quote["quote_seen_at"]))
+        quote_at = parse_time(str(current_quote["quote_seen_at"])) if current_quote else None
         quote_age = max(0.0, (now() - quote_at).total_seconds()) if quote_at else 1e9
         probability_velocity, monitor_market_velocity, probability, monitor_fresh, monitor_at = _monitor_dynamics(
             trades,
             str(position["position_id"]),
         )
         monitor_age = max(0.0, (now() - monitor_at).total_seconds()) if monitor_at else 1e9
-        depth_loss = 1.0 if reconcile_held_quote(current_quote)[0] == "quote_incomplete" else 0.0
+        depth_loss = 1.0 if current_quote is None or reconcile_held_quote(current_quote)[0] == "quote_incomplete" else 0.0
         market_ahead = max(0.0, probability_velocity - min(velocity, monitor_market_velocity))
         belief_gap = max(0.0, probability - bid) if probability is not None else 0.0
         score = (
@@ -1133,9 +1141,11 @@ def detect(cfg: Mapping[str, Any]) -> list[str]:
         for position in open_positions:
             quote = latest.get(str(position["position_id"]))
             if quote:
-                ident = _observe_quote(mem, position, quote.get("_current_quote", quote), floor)
-                if ident:
-                    created.append(ident)
+                observed_quote = quote.get("_current_quote", quote)
+                if observed_quote is not None:
+                    ident = _observe_quote(mem, position, observed_quote, floor)
+                    if ident:
+                        created.append(ident)
         detector_remaining_ms = max(0.0, (detector_deadline - time.monotonic()) * 1000.0)
         backfill_budget_ms = min(
             float(cfg["loop"].get("backfill_budget_ms", 50.0)),

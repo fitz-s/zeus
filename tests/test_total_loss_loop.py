@@ -282,19 +282,19 @@ def test_velocity_uses_token_time_index_for_latest_three_quotes(cfg: dict) -> No
             "EXPLAIN QUERY PLAN "
             "SELECT quote_seen_at,best_bid_before "
             "FROM execution_feasibility_evidence "
-            "WHERE token_id=? AND direction IN ('buy_yes','buy_no') "
+            "WHERE token_id=? AND direction=? "
             "AND best_bid_before IS NOT NULL "
             "ORDER BY quote_seen_at DESC,rowid DESC LIMIT 3",
-            ("yes-token",),
+            ("yes-token", "buy_yes"),
         ).fetchall()
         newest = conn.execute(
             "SELECT quote_seen_at FROM execution_feasibility_evidence "
-            "WHERE token_id=? AND direction IN ('buy_yes','buy_no') "
+            "WHERE token_id=? AND direction=? "
             "AND best_bid_before IS NOT NULL "
             "ORDER BY quote_seen_at DESC,rowid DESC LIMIT 3",
-            ("yes-token",),
+            ("yes-token", "buy_yes"),
         ).fetchall()
-        velocity, acceleration = loop._velocity(conn, "yes-token")
+        velocity, acceleration = loop._velocity(conn, "yes-token", "buy_yes")
 
     plan_text = " ".join(str(column) for row in plan for column in row).upper()
     assert "USING INDEX IDX_EXECUTION_FEASIBILITY_EVIDENCE_TOKEN_TIME" in plan_text
@@ -355,7 +355,7 @@ def test_missing_or_malformed_depth_is_not_no_bid(cfg: dict) -> None:
 
 def test_incomplete_latest_uses_prior_authoritative_quote_for_precursor_only(cfg: dict) -> None:
     _position(cfg)
-    _quote(cfg, "q-complete", "2026-08-22T09:00:01+00:00", 0.20, direction="sell_yes")
+    _quote(cfg, "q-complete", "2026-08-22T09:00:01+00:00", 0.20, direction="buy_yes")
     with loop.open_ro(Path(cfg["paths"]["trades_db"])) as trades:
         position = loop.tracked_positions(trades, history_days=7)["p1"]
         complete = dict(trades.execute(
@@ -379,7 +379,7 @@ def test_incomplete_latest_uses_prior_authoritative_quote_for_precursor_only(cfg
             "SELECT evidence_id FROM execution_feasibility_evidence "
             "WHERE token_id=? AND direction=? AND depth_before_json IS NOT NULL "
             "ORDER BY quote_seen_at DESC,rowid DESC LIMIT 1",
-            ("yes-token", "sell_yes"),
+            ("yes-token", "buy_yes"),
         ).fetchall()
 
     loop.detect(cfg)
@@ -403,6 +403,84 @@ def test_incomplete_latest_uses_prior_authoritative_quote_for_precursor_only(cfg
     hard = [row for row in _incidents(cfg) if row["kind"] == "hard"]
     assert len(hard) == 1
     assert hard[0]["crossing_evidence_id"] == "q-hard"
+
+
+def test_precursor_uses_buy_no_carrier_when_sell_no_latest_is_incomplete(cfg: dict) -> None:
+    _position(cfg, direction="buy_no")
+    _quote(cfg, "old-sell", "2026-08-22T09:00:00+00:00", 0.60, token="no-token", direction="sell_no")
+    _quote(cfg, "buy-carrier", "2026-08-22T09:00:02+00:00", 0.20, token="no-token", direction="buy_no")
+    with sqlite3.connect(cfg["paths"]["trades_db"]) as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO execution_feasibility_latest "
+            "(token_id,direction,evidence_id,event_id,condition_id,outcome_label,quote_seen_at,"
+            "book_hash_before,best_bid_before,best_ask_before,depth_before_json,created_at,schema_version) "
+            "SELECT token_id,direction,evidence_id,event_id,condition_id,outcome_label,quote_seen_at,"
+            "book_hash_before,best_bid_before,best_ask_before,depth_before_json,created_at,schema_version "
+            "FROM execution_feasibility_evidence WHERE evidence_id='buy-carrier'"
+        )
+    with loop.open_ro(Path(cfg["paths"]["trades_db"])) as trades:
+        position = loop.tracked_positions(trades, history_days=7)["p1"]
+        carrier = dict(trades.execute(
+            "SELECT * FROM execution_feasibility_evidence WHERE evidence_id='buy-carrier'"
+        ).fetchone())
+    with loop.memory(cfg) as mem:
+        assert loop._observe_quote(mem, position, carrier, 0.05) is None
+        mem.commit()
+    _quote(cfg, "sell-incomplete", "2026-08-22T09:00:02+00:00", 0.20, token="no-token", direction="sell_no")
+    with sqlite3.connect(cfg["paths"]["trades_db"]) as conn:
+        conn.execute(
+            "UPDATE execution_feasibility_evidence SET depth_before_json=NULL "
+            "WHERE evidence_id='sell-incomplete'"
+        )
+        conn.execute(
+            "UPDATE execution_feasibility_latest SET depth_before_json=NULL "
+            "WHERE evidence_id='sell-incomplete'"
+        )
+        latest_depth = dict(conn.execute(
+            "SELECT direction,depth_before_json FROM execution_feasibility_latest "
+            "WHERE token_id='no-token'"
+        ).fetchall())
+
+    assert latest_depth["buy_no"] is not None
+    assert latest_depth["sell_no"] is None
+
+    loop.detect(cfg)
+
+    precursor = [row for row in _incidents(cfg) if row["kind"] == "precursor"]
+    assert len(precursor) == 1
+    assert precursor[0]["crossing_evidence_id"] == "buy-carrier"
+    with loop.open_ro(Path(cfg["paths"]["trades_db"])) as trades:
+        latest = loop._latest_quotes(trades, [position])["p1"]
+    assert latest["evidence_id"] == "buy-carrier"
+    assert latest["_current_quote"]["evidence_id"] == "sell-incomplete"
+
+
+def test_precursor_uses_buy_carrier_when_sell_latest_is_absent(cfg: dict) -> None:
+    _position(cfg, direction="buy_no")
+    _quote(cfg, "buy-carrier", "2026-08-22T09:00:02+00:00", 0.20, token="no-token", direction="buy_no")
+    with sqlite3.connect(cfg["paths"]["trades_db"]) as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO execution_feasibility_latest "
+            "(token_id,direction,evidence_id,event_id,condition_id,outcome_label,quote_seen_at,"
+            "book_hash_before,best_bid_before,best_ask_before,depth_before_json,created_at,schema_version) "
+            "SELECT token_id,direction,evidence_id,event_id,condition_id,outcome_label,quote_seen_at,"
+            "book_hash_before,best_bid_before,best_ask_before,depth_before_json,created_at,schema_version "
+            "FROM execution_feasibility_evidence WHERE evidence_id='buy-carrier'"
+        )
+        conn.execute(
+            "DELETE FROM execution_feasibility_latest WHERE token_id='no-token' AND direction='sell_no'"
+        )
+
+    loop.detect(cfg)
+
+    precursor = [row for row in _incidents(cfg) if row["kind"] == "precursor"]
+    assert len(precursor) == 1
+    assert precursor[0]["crossing_evidence_id"] == "buy-carrier"
+    with loop.open_ro(Path(cfg["paths"]["trades_db"])) as trades:
+        position = loop.tracked_positions(trades, history_days=7)["p1"]
+        latest = loop._latest_quotes(trades, [position])["p1"]
+    assert latest["evidence_id"] == "buy-carrier"
+    assert latest["_current_quote"] is None
 
 
 def test_incomplete_quote_does_not_hide_following_no_bid_transition(cfg: dict) -> None:
