@@ -599,6 +599,27 @@ def test_hard_incident_does_not_starve_other_position_precursor(cfg: dict) -> No
     ]
 
 
+def test_tel_aviv_precursor_precedes_hard_crossing_without_duplicate(cfg: dict) -> None:
+    _position(cfg)
+    with sqlite3.connect(cfg["paths"]["trades_db"]) as conn:
+        conn.execute("UPDATE position_current SET city='Tel Aviv' WHERE position_id='p1'")
+    _quote(cfg, "tel-aviv-precursor", "2026-08-22T09:00:01+00:00", 0.28)
+
+    loop.detect(cfg)
+    assert [(row["kind"], row["position_id"]) for row in _incidents(cfg)] == [
+        ("precursor", "p1"),
+    ]
+
+    _quote(cfg, "tel-aviv-crossing", "2026-08-22T09:00:02+00:00", 0.04)
+    loop.detect(cfg)
+    rows = _incidents(cfg)
+    assert {(row["kind"], row["position_id"]) for row in rows} == {
+        ("hard", "p1"),
+        ("precursor", "p1"),
+    }
+    assert sum(row["kind"] == "precursor" for row in rows) == 1
+
+
 def test_claim_prefers_current_positive_exposure_and_fails_closed_without_trades(cfg: dict, monkeypatch) -> None:
     _position(cfg, position_id="current")
     _position(cfg, position_id="settled")
@@ -622,6 +643,46 @@ def test_claim_prefers_current_positive_exposure_and_fails_closed_without_trades
     assert loop._claim(cfg, "hard")["incident_id"] == "current-incident"
     monkeypatch.setattr(loop, "open_ro", lambda _path: (_ for _ in ()).throw(sqlite3.OperationalError()))
     assert loop._claim(cfg, "hard") is None
+
+
+def test_controller_retry_consumes_its_kind_slot_without_blocking_precursor(
+    cfg: dict, monkeypatch
+) -> None:
+    runtime = Path(cfg["paths"]["runtime"])
+    claims: list[str] = []
+    launched: list[str] = []
+    controller = {"incident_id": "hard-controller", "kind": "hard", "controller": True}
+    monkeypatch.setattr(loop, "current_capabilities", lambda _cfg: {"ok": True})
+    monkeypatch.setattr(loop, "_running", lambda _cfg: [controller])
+    monkeypatch.setattr(loop, "_retry_pending", lambda *_args: [])
+    monkeypatch.setattr(loop, "_recover_classification_debt", lambda *_args: None)
+    monkeypatch.setattr(loop, "_dispatch_repair_waiting", lambda *_args: None)
+    monkeypatch.setattr(
+        loop,
+        "_claim",
+        lambda _cfg, kind: claims.append(kind) or (
+            {"incident_id": "precursor-ready", "kind": kind}
+            if kind == "precursor" and claims.count(kind) == 1
+            else None
+        ),
+    )
+    monkeypatch.setattr(loop, "build_evidence", lambda _cfg, incident_id: runtime / f"{incident_id}.db")
+    original_read_json = loop.read_json
+    monkeypatch.setattr(
+        loop,
+        "read_json",
+        lambda path, default=None: {"loaded_sha": "current"}
+        if Path(path).name == "manifest.json" else original_read_json(path, default),
+    )
+    monkeypatch.setattr(
+        loop,
+        "_spawn_run",
+        lambda _cfg, **kwargs: launched.append(kwargs["incident_id"]) or {"run_id": "precursor-run"},
+    )
+
+    assert loop.dispatch(cfg) == ["precursor-ready"]
+    assert "hard" not in claims
+    assert launched == ["precursor-ready"]
 
 
 def test_historical_backfill_ignores_low_quote_before_entry(cfg: dict) -> None:

@@ -2678,7 +2678,7 @@ def dispatch(cfg: Mapping[str, Any]) -> list[str]:
         kind: sum(
             1
             for row in running
-            if row.get("kind") == kind and not row.get("controller")
+            if row.get("kind") == kind
         )
         for kind in ("hard", "precursor")
     }
