@@ -2228,8 +2228,8 @@ def test_day0_conditioning_marker_allows_same_time_revisions_but_never_regresses
     assert row["seed_file"] == str(tmp_path / "same-time-3.json")
 
 
-def test_day0_request_coalescing_keeps_distinct_conditioning_identities(tmp_path) -> None:
-    """The request drain cannot discard a fresh Day0 condition as a duplicate cycle."""
+def test_day0_request_coalescing_supersedes_older_conditioning_identity(tmp_path) -> None:
+    """A newer monotone Day0 identity supersedes an older pending request."""
     base = {
         "city": "Shanghai",
         "target_date": "2026-07-19",
@@ -2256,8 +2256,140 @@ def test_day0_request_coalescing_keeps_distinct_conditioning_identities(tmp_path
         (first, second), processed_path=tmp_path / "processed"
     )
 
-    assert set(remaining) == {first, second}
-    assert superseded == ()
+    assert remaining == (second,)
+    assert len(superseded) == 1
+
+
+def test_day0_priority_lane_claims_while_background_runner_is_blocked(
+    tmp_path, monkeypatch
+) -> None:
+    """Reserved Day0 capacity starts without waiting for a background timeout."""
+    request_dir = tmp_path / "requests"
+    processed_dir = tmp_path / "processed"
+    failed_dir = tmp_path / "failed"
+    request_dir.mkdir()
+    ordinary = {
+        "city": "Oslo",
+        "target_date": "2026-07-19",
+        "temperature_metric": "high",
+        "source_cycle_time": "2026-07-19T00:00:00+00:00",
+        "baseline_source_run_id": "baseline:0",
+        "openmeteo_source_run_id": "openmeteo:0",
+    }
+    priority = {
+        **ordinary,
+        "city": "Ankara",
+        "day0_observed_extreme_source": "wu_icao_history",
+        "day0_observed_extreme_observation_time": "2026-07-19T05:00:00+00:00",
+        "day0_observed_extreme_c": 35.0,
+        "day0_observed_extreme_unit": "C",
+    }
+    ordinary_path = request_dir / "ordinary.json"
+    priority_path = request_dir / "priority.json"
+    ordinary_path.write_text(json.dumps(ordinary), encoding="utf-8")
+    priority_path.write_text(json.dumps(priority), encoding="utf-8")
+    monkeypatch.setattr(
+        materialization_queue,
+        "_validate_request_payload",
+        lambda _path: (True, "", ""),
+    )
+    background_started = threading.Event()
+    release_background = threading.Event()
+    priority_started = threading.Event()
+
+    def runner(command):
+        path = Path(command[-2])
+        if path.name == ordinary_path.name:
+            background_started.set()
+            assert release_background.wait(2.0)
+        else:
+            priority_started.set()
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    reports: list[object] = []
+    background_thread = threading.Thread(
+        target=lambda: reports.append(
+            materialization_queue.process_replacement_forecast_live_materialization_queue(
+                request_dir=request_dir,
+                processed_dir=processed_dir,
+                failed_dir=failed_dir,
+                forecast_db=None,
+                seed_dir=None,
+                limit=1,
+                runner=runner,
+                discover=False,
+                lane=materialization_queue.MATERIALIZATION_LANE_BACKGROUND,
+            )
+        )
+    )
+    background_thread.start()
+    assert background_started.wait(1.0)
+    priority_thread = threading.Thread(
+        target=lambda: reports.append(
+            materialization_queue.process_replacement_forecast_live_materialization_queue(
+                request_dir=request_dir,
+                processed_dir=processed_dir,
+                failed_dir=failed_dir,
+                forecast_db=None,
+                seed_dir=None,
+                limit=1,
+                runner=runner,
+                discover=False,
+                lane=materialization_queue.MATERIALIZATION_LANE_PRIORITY,
+            )
+        )
+    )
+    priority_thread.start()
+    assert priority_started.wait(1.0)
+    release_background.set()
+    background_thread.join(2.0)
+    priority_thread.join(2.0)
+    assert not background_thread.is_alive()
+    assert not priority_thread.is_alive()
+    assert len(reports) == 2
+
+
+def test_forecast_poll_starts_reserved_and_background_lanes_together(monkeypatch) -> None:
+    """The one-second poll owns two bounded lanes inside one scheduler turn."""
+    from src.ingest import forecast_live_daemon
+    from src.data import replacement_forecast_production
+
+    cfg = {
+        "request_dir": "/tmp/requests",
+        "seed_dir": "/tmp/seeds",
+        "inflight_dir": "/tmp/inflight",
+    }
+    started: list[str] = []
+    entered = threading.Barrier(2)
+
+    monkeypatch.setattr(
+        replacement_forecast_production,
+        "_replacement_forecast_live_materialization_queue_config",
+        lambda: cfg,
+    )
+    monkeypatch.setattr(
+        forecast_live_daemon,
+        "_replacement_forecast_queue_pending",
+        lambda _cfg, key: key in {"request_dir", "seed_dir"},
+    )
+    monkeypatch.setattr(
+        forecast_live_daemon,
+        "_replacement_forecast_inflight_pending",
+        lambda _cfg: False,
+    )
+
+    def run_lane(_cfg, *, lane, seed_limit):
+        started.append(lane)
+        entered.wait(1.0)
+        return {"lane": lane, "seed_limit": seed_limit}
+
+    monkeypatch.setattr(
+        forecast_live_daemon,
+        "_replacement_forecast_materialize_lane",
+        run_lane,
+    )
+    forecast_live_daemon._replacement_forecast_materialize_poll_job()
+    assert set(started) == {"priority", "background"}
 
 
 def test_day0_drained_marker_with_active_provisional_posterior_does_not_reenqueue(

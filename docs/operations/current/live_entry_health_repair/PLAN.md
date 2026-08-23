@@ -3072,3 +3072,38 @@ publication barrier.
   payload reload, stale/future, and mismatch paths fail closed.  Focused tests,
   compilation, planning lock, and diff checks pass before any deployment
   decision.
+
+## B139 — Reserve a bounded Day0/held materializer lane
+
+- Defect: canonical `DAY0_EXTREME_UPDATED` commits already enqueue the existing
+  replacement seed, but a single scheduler/materializer slot can keep a fresh
+  Day0 request behind a background subprocess and its 30-second timeout/retry.
+  The resulting lag is queue starvation, not an observation-to-q authority
+  shortcut.
+- Decision: classify durable request/seed files by exact family plus canonical
+  Day0 conditioning identity. Run one reserved priority lane and one ordinary
+  lane inside the existing scheduler invocation. Same identity coalesces;
+  strictly newer Day0 observation identity supersedes the older pending file.
+  Both lanes still invoke the existing replacement materializer and writer lock;
+  posterior commit and family wake remain owned by the existing script.
+- SCOPE: one `(city, target_date, metric, conditioning_identity)` queue family;
+  current held exposure also qualifies its exact family for the reserved lane.
+  No source role, ENS shape, posterior formula, ENTRY authority, or settlement
+  semantics change.
+- DRAIN: priority and background lanes each claim at most one bounded request;
+  priority lock acquisition waits only briefly for the claim lock, while
+  background never consumes the reserved lane. Timeout, writer contention, and
+  missing/mixed source cycle remain durable retry/fail-closed receipts. A later
+  posterior commit publishes the existing exact-family wake.
+- RESET: successful posterior/readiness with the matching conditioning identity
+  drains that marker; a newer authorized observation creates the next identity.
+  A wake alone does not clear a pending marker, and restart recovery reclaims
+  durable request/inflight files through the same lane classifier.
+- Files authorized: `src/data/replacement_forecast_live_materialization_queue.py`,
+  `src/ingest/forecast_live_daemon.py`,
+  `tests/test_day0_extreme_updated_materialization_bridge.py`, and this plan.
+  Acceptance: a blocked background runner does not delay a fresh priority
+  runner; same-identity duplicate coalescing and newer-identity supersession
+  are deterministic; ordinary work progresses without priority; no posterior
+  commit/wake bypass exists; focused tests, compilation, planning, and diff
+  checks pass before deployment consideration.

@@ -49,6 +49,9 @@ DEFAULT_RECENT_SUCCESS_COALESCE_SECONDS = 60.0
 # owner and one DB writer, but bound one pathological family to 30 seconds so it
 # cannot stop current-q production for every other city.
 DEFAULT_MATERIALIZATION_MAX_WORKERS = 1
+MATERIALIZATION_LANE_ALL = "all"
+MATERIALIZATION_LANE_PRIORITY = "priority"
+MATERIALIZATION_LANE_BACKGROUND = "background"
 MATERIALIZATION_INFLIGHT_DIR_NAME = "inflight"
 _CLAIM_METADATA_NAME = "_claim.json"
 _STALE_CLAIM_GRACE_SECONDS = 30.0
@@ -547,7 +550,7 @@ def _archive_stale_lock(lock_path: Path, *, holder_pid: int | None) -> Path | No
 
 
 @contextmanager
-def _queue_lock(lock_path: Path):
+def _queue_lock(lock_path: Path, *, wait_seconds: float = 0.0):
     """Exclusive single-writer lock for the materialization queue, with STALE-LOCK SELF-HEAL.
 
     ANTIBODY (rules 5 + 3 — make the orphaned-lock stall UNCONSTRUCTABLE): the lock is released
@@ -562,21 +565,20 @@ def _queue_lock(lock_path: Path):
     """
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     fd: int | None = None
+    deadline = time.monotonic() + max(0.0, float(wait_seconds))
     try:
-        try:
-            fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-        except FileExistsError:
-            holder_pid = _read_lock_holder_pid(lock_path)
-            if holder_pid is not None and _pid_is_alive(holder_pid):
-                yield False
-                return
-            _archive_stale_lock(lock_path, holder_pid=holder_pid)
+        while fd is None:
             try:
                 fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
             except FileExistsError:
-                # Lost a race to another acquirer that grabbed the freed lock first.
-                yield False
-                return
+                holder_pid = _read_lock_holder_pid(lock_path)
+                if holder_pid is None or not _pid_is_alive(holder_pid):
+                    _archive_stale_lock(lock_path, holder_pid=holder_pid)
+                    continue
+                if time.monotonic() >= deadline:
+                    yield False
+                    return
+                time.sleep(min(0.01, max(0.0, deadline - time.monotonic())))
         os.write(fd, f"pid={os.getpid()} acquired_at={datetime.now(timezone.utc).isoformat()}\n".encode("utf-8"))
         yield True
     finally:
@@ -1080,6 +1082,7 @@ def _cycle_advance_seed_priority_map(
     trade_db: Path | str | None = None,
     now_utc: datetime | None = None,
     current_money_risk: frozenset[tuple[str, str, str]] | None = None,
+    priority_names: set[str] | None = None,
 ) -> dict[str, tuple[float, str]]:
     """Return filename -> priority for queued materialization work.
 
@@ -1091,11 +1094,16 @@ def _cycle_advance_seed_priority_map(
     at risk in the family.
     """
     if not queue_files:
+        if priority_names is not None:
+            priority_names.clear()
         return {}
+    if priority_names is not None:
+        priority_names.clear()
     names_by_scope: dict[tuple[str, str, str, str], set[str]] = {}
     request_time_by_name: dict[str, str] = {}
     baseline_run_by_name: dict[str, str] = {}
     day0_observation_by_name: dict[str, datetime] = {}
+    day0_identity_by_name: dict[str, tuple[str, str, str, str]] = {}
     cycle_by_scope: dict[tuple[str, str, str, str], datetime] = {}
     latest_cycle_by_family: dict[tuple[str, str, str], datetime] = {}
     for path in queue_files:
@@ -1117,6 +1125,9 @@ def _cycle_advance_seed_priority_map(
         )
         if day0_observation is not None:
             day0_observation_by_name[path.name] = day0_observation
+        day0_identity = _day0_conditioning_identity_key(payload)
+        if day0_identity is not None:
+            day0_identity_by_name[path.name] = day0_identity
         cycle = _parse_utc_iso(payload.get("source_cycle_time"))
         scope = (
             str(payload.get("city") or "").strip(),
@@ -1256,6 +1267,15 @@ def _cycle_advance_seed_priority_map(
         )
         tier = base_tier * 2 + int(older_queued_cycle)
         for name in names:
+            if priority_names is not None and (
+                fam_scope in current_money_risk
+                or name in day0_identity_by_name
+            ):
+                # The Day0 conditioning identity is part of the durable request
+                # semantic key. A held family without Day0 evidence is still
+                # reserved by current chain-confirmed exposure; ordinary work
+                # cannot consume this slot.
+                priority_names.add(name)
             request_time = request_time_by_name.get(name) or enqueued_at
             if scope in scopes_with_current_baseline:
                 request_time = (
@@ -1295,6 +1315,54 @@ def _cycle_advance_file_sort_key(
     priority: dict[str, tuple[float, str]],
 ) -> tuple[float, str, str]:
     return (*priority.get(path.name, (1, "")), path.name)
+
+
+def _lane_matches(*, path: Path, priority_names: set[str], lane: str) -> bool:
+    if lane not in {
+        MATERIALIZATION_LANE_ALL,
+        MATERIALIZATION_LANE_PRIORITY,
+        MATERIALIZATION_LANE_BACKGROUND,
+    }:
+        raise ValueError(f"unknown materialization lane: {lane}")
+    if lane == MATERIALIZATION_LANE_ALL:
+        return True
+    is_priority = path.name in priority_names
+    return is_priority if lane == MATERIALIZATION_LANE_PRIORITY else not is_priority
+
+
+def _priority_map_with_names(
+    forecast_db: Path | str | None,
+    queue_files: Sequence[Path],
+    payloads: Mapping[Path, Mapping[str, object] | None] | None = None,
+    *,
+    current_money_risk: frozenset[tuple[str, str, str]] | None = None,
+) -> tuple[dict[str, tuple[float, str]], set[str]]:
+    """Call the classifier while keeping compatibility with narrow test doubles."""
+    priority_names: set[str] = set()
+    try:
+        priority = _cycle_advance_seed_priority_map(
+            forecast_db,
+            queue_files,
+            payloads,
+            current_money_risk=current_money_risk,
+            priority_names=priority_names,
+        )
+    except TypeError as exc:
+        if not any(
+            name in str(exc)
+            for name in ("priority_names", "current_money_risk")
+        ):
+            raise
+        priority = _cycle_advance_seed_priority_map(
+            forecast_db,
+            queue_files,
+            payloads,
+        )
+        for path in queue_files:
+            payload = payloads.get(path) if payloads is not None else _load_request_payload_for_coalescing(path)
+            if payload is not None and _day0_conditioning_identity_key(payload) is not None:
+                priority_names.add(path.name)
+    return priority, priority_names
 
 
 # POISON-PILL IMMUNITY (2026-06-10): the materializer subprocess accesses these keys
@@ -1506,8 +1574,58 @@ def _request_semantic_key(payload: Mapping[str, object]) -> tuple[str, ...] | No
     return tuple(values)
 
 
+def _day0_conditioning_identity_key(
+    payload: Mapping[str, object],
+) -> tuple[str, str, str, str] | None:
+    """Return the durable family + Day0 conditioning identity, if present."""
+    semantic_key = _request_semantic_key(payload)
+    if semantic_key is None:
+        return None
+    identity = next(
+        (
+            value.split("=", 1)[1]
+            for value in semantic_key
+            if value.startswith(_DAY0_CONDITIONING_IDENTITY_KEY + "=")
+        ),
+        None,
+    )
+    if identity is None:
+        return None
+    return (
+        semantic_key[0],
+        semantic_key[1],
+        semantic_key[2],
+        identity,
+    )
+
+
+def _request_coalescing_key(payload: Mapping[str, object]) -> tuple[str, ...] | None:
+    """Coalesce one Day0 family across monotone observation identities.
+
+    Ordinary requests retain their complete semantic key. Day0 requests use the
+    same source-cycle/input scope without the observation identity, so a newer
+    authorized observation supersedes the older request while same-identity
+    duplicates still coalesce. This only changes queue transport; the seed and
+    replacement materializer remain the authority for the resulting posterior.
+    """
+    semantic_key = _request_semantic_key(payload)
+    if semantic_key is None:
+        return None
+    if _day0_conditioning_identity_key(payload) is None:
+        return ("ordinary", *semantic_key)
+    return (
+        "day0",
+        *(value for value in semantic_key if not value.startswith(_DAY0_CONDITIONING_IDENTITY_KEY + "=")),
+    )
+
+
 def _request_freshness_key(path: Path, payload: Mapping[str, object]) -> tuple[datetime, int, str]:
-    computed_at = _parse_utc_iso(payload.get("computed_at"))
+    # Day0 identity is a monotone source observation clock. A later queue write
+    # must not let an older observation supersede it merely because its seed was
+    # computed later.
+    computed_at = _parse_utc_iso(
+        payload.get("day0_observed_extreme_observation_time")
+    ) or _parse_utc_iso(payload.get("computed_at"))
     if computed_at is None:
         computed_at = datetime.min.replace(tzinfo=timezone.utc)
     try:
@@ -1853,7 +1971,7 @@ def _coalesce_superseded_materialization_requests(
         payload = _load_request_payload_for_coalescing(path)
         if payload is None:
             continue
-        key = _request_semantic_key(payload)
+        key = _request_coalescing_key(payload)
         if key is None:
             continue
         keys[path] = key
@@ -2023,7 +2141,7 @@ def _recover_stale_claims(
             continue
         for path in request_files:
             payload = _load_request_payload_for_coalescing(path)
-            key = _request_semantic_key(payload) if payload is not None else None
+            key = _request_coalescing_key(payload) if payload is not None else None
             if key is not None:
                 active_keys.add(key)
     return frozenset(active_keys), recovered
@@ -2172,6 +2290,10 @@ def _coalesce_superseded_materialization_seeds(
             payload.get("cycle_advance_enqueue_owner") is True
             and payload.get("day0_observed_extreme_observation_time") is not None
         ):
+            # The durable cycle owner must remain visible until its exact
+            # request/inflight witness is resolved. Request-level Day0 files
+            # still coalesce newer identities; producer-owned seeds retain the
+            # existing marker recovery contract.
             continue
         if payload.get("upgrade_trigger") or payload.get("cycle_advance_enqueue_owner") is True:
             try:
@@ -2192,7 +2314,7 @@ def _coalesce_superseded_materialization_seeds(
                 # Retain every pre-existing owner during the bounded wait; after
                 # the HWM reaches equality normal coalescing/action resumes.
                 continue
-        request_key = _request_semantic_key(payload)
+        request_key = _request_coalescing_key(payload)
         if request_key is None:
             continue
         key = request_key + (
@@ -2245,6 +2367,7 @@ def _prepare_seed_requests(
     request_dir: Path,
     forecast_db: Path | str | None,
     limit: int,
+    lane: str = MATERIALIZATION_LANE_ALL,
 ) -> tuple[list[str], list[str], list[str]]:
     if seed_dir is None:
         return [], [], []
@@ -2296,7 +2419,7 @@ def _prepare_seed_requests(
         reasons.append(
             "REPLACEMENT_LIVE_MATERIALIZATION_SEED_SUPERSEDED_BY_NEWER_DUPLICATE"
         )
-    priority = _cycle_advance_seed_priority_map(
+    priority, priority_names = _priority_map_with_names(
         forecast_db,
         coalesced_window,
         seed_payloads,
@@ -2304,7 +2427,15 @@ def _prepare_seed_requests(
     )
     seeds = tuple(
         sorted(
-            coalesced_window,
+            (
+                path
+                for path in coalesced_window
+                if _lane_matches(
+                    path=path,
+                    priority_names=priority_names,
+                    lane=lane,
+                )
+            ),
             key=lambda path: _cycle_advance_file_sort_key(path, priority),
         )
     )
@@ -2559,6 +2690,7 @@ def _claim_replacement_forecast_live_materialization_queue_locked(
     seed_limit: int | None,
     limit: int,
     discover: bool,
+    lane: str = MATERIALIZATION_LANE_ALL,
 ) -> _MaterializationQueueClaim:
     inflight_path = request_path.parent / MATERIALIZATION_INFLIGHT_DIR_NAME
     active_keys, recovered_count = _recover_stale_claims(
@@ -2592,6 +2724,7 @@ def _claim_replacement_forecast_live_materialization_queue_locked(
             request_dir=request_path,
             forecast_db=forecast_db,
             limit=seed_batch_limit,
+            lane=lane,
         )
     else:
         seed_processed, seed_failed, seed_reasons = [], [], [
@@ -2623,10 +2756,21 @@ def _claim_replacement_forecast_live_materialization_queue_locked(
             discovery_report=discovery_report,
         )
 
-    priority = _cycle_advance_seed_priority_map(forecast_db, request_files)
+    priority, priority_names = _priority_map_with_names(
+        forecast_db,
+        request_files,
+    )
     requests = tuple(
         sorted(
-            request_files,
+            (
+                path
+                for path in request_files
+                if _lane_matches(
+                    path=path,
+                    priority_names=priority_names,
+                    lane=lane,
+                )
+            ),
             key=lambda path: _cycle_advance_file_sort_key(path, priority),
         )
     )
@@ -2644,7 +2788,7 @@ def _claim_replacement_forecast_live_materialization_queue_locked(
             timeout_retry_deferred += 1
             continue
         payload = _load_request_payload_for_coalescing(path)
-        key = _request_semantic_key(payload) if payload is not None else None
+        key = _request_coalescing_key(payload) if payload is not None else None
         if key is not None and key in active_keys:
             inflight_deferred += 1
         else:
@@ -2733,6 +2877,7 @@ def process_replacement_forecast_live_materialization_queue(
     limit: int = 10,
     runner: Runner | None = None,
     discover: bool = True,
+    lane: str = MATERIALIZATION_LANE_ALL,
 ) -> ReplacementForecastLiveMaterializationQueueReport:
     """Process local materialization request JSON files.
 
@@ -2749,7 +2894,16 @@ def process_replacement_forecast_live_materialization_queue(
     failed_path = Path(failed_dir)
     if limit <= 0:
         raise ValueError("limit must be positive")
-    with _queue_lock(request_path.parent / ".materialization_queue.lock") as lock_acquired:
+    if lane not in {
+        MATERIALIZATION_LANE_ALL,
+        MATERIALIZATION_LANE_PRIORITY,
+        MATERIALIZATION_LANE_BACKGROUND,
+    }:
+        raise ValueError(f"unknown materialization lane: {lane}")
+    with _queue_lock(
+        request_path.parent / ".materialization_queue.lock",
+        wait_seconds=1.0 if lane == MATERIALIZATION_LANE_PRIORITY else 0.0,
+    ) as lock_acquired:
         if not lock_acquired:
             return ReplacementForecastLiveMaterializationQueueReport(
                 status="LOCKED",
@@ -2774,6 +2928,7 @@ def process_replacement_forecast_live_materialization_queue(
             seed_limit=seed_limit,
             limit=limit,
             discover=discover,
+            lane=lane,
         )
     if claim.batch_path is None:
         return _claim_only_report(claim)

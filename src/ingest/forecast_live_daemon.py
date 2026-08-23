@@ -1219,6 +1219,37 @@ def _replacement_forecast_materialize_job(
     )
 
 
+def _replacement_forecast_materialize_lane(
+    cfg: dict[str, object],
+    *,
+    lane: str,
+    seed_limit: int,
+) -> dict[str, object]:
+    """Run one bounded durable queue lane without sharing the background slot."""
+    from src.data.replacement_forecast_live_materialization_queue import (
+        process_replacement_forecast_live_materialization_queue,
+    )
+
+    report = process_replacement_forecast_live_materialization_queue(
+        request_dir=cfg["request_dir"],
+        processed_dir=cfg["processed_dir"],
+        failed_dir=cfg["failed_dir"],
+        seed_dir=cfg["seed_dir"],
+        seed_processed_dir=cfg["seed_processed_dir"],
+        seed_failed_dir=cfg["seed_failed_dir"],
+        forecast_db=cfg["forecast_db"],
+        raw_manifest_dir=cfg["raw_manifest_dir"],
+        seed_discovery_limit=1,
+        seed_limit=seed_limit,
+        limit=1,
+        discover=False,
+        lane=lane,
+    )
+    result = report.as_dict()
+    logger.info("replacement forecast materialization lane=%s report=%s", lane, result)
+    return result
+
+
 def _replacement_forecast_queue_pending(
     cfg: dict[str, object], key: str
 ) -> bool:
@@ -1294,50 +1325,37 @@ def _replacement_forecast_discovery_revision(
 
 
 def _replacement_forecast_materialize_poll_job() -> None:
-    """Drain one preemptible worker tranche; discovery has its own lane."""
+    """Drain reserved Day0/held and ordinary lanes concurrently."""
 
     from src.data.replacement_forecast_production import (
         _replacement_forecast_live_materialization_queue_config,
     )
-    from src.data.replacement_forecast_live_materialization_queue import (
-        DEFAULT_MATERIALIZATION_MAX_WORKERS,
-    )
-
     cfg = _replacement_forecast_live_materialization_queue_config()
-    # One queue claim is one uninterruptible scheduler instance.  Claiming more
-    # requests than the inner worker count serializes them behind one stale
-    # priority snapshot, so a newly arrived held-capital refresh cannot preempt
-    # until the whole tranche finishes.  Re-rank current exposure after every
-    # actually concurrent tranche instead.
-    batch_limit = min(
-        max(1, int(cfg["poll_batch_limit"])),
-        max(1, int(DEFAULT_MATERIALIZATION_MAX_WORKERS)),
-    )
-    seed_admission_limit = max(1, int(cfg["poll_batch_limit"]))
     requests_pending = _replacement_forecast_queue_pending(cfg, "request_dir")
     seeds_pending = _replacement_forecast_queue_pending(cfg, "seed_dir")
     inflight_pending = _replacement_forecast_inflight_pending(cfg)
-    if requests_pending:
-        _replacement_forecast_materialize_job(
-            discover=False,
-            limit=batch_limit,
-            # Admission is bounded independently of the single SQLite writer.
-            # This exposes a current seed micro-batch to the request-level
-            # global priority sort while each poll still claims one subprocess.
-            seed_limit=seed_admission_limit if seeds_pending else 0,
+    if not (requests_pending or seeds_pending or inflight_pending):
+        return
+    # The scheduler remains single-instance, but the queue owns two bounded
+    # internal lanes. Background work cannot consume the reserved priority lane;
+    # a fresh Day0/held request therefore starts while an old background
+    # subprocess is still within its timeout window.
+    seed_limit = 1 if seeds_pending else 0
+    with ThreadPoolExecutor(max_workers=2, thread_name_prefix="forecast-materialize-lane") as executor:
+        futures = tuple(
+            executor.submit(
+                _replacement_forecast_materialize_lane,
+                cfg,
+                lane=lane,
+                seed_limit=seed_limit,
+            )
+            for lane in ("priority", "background")
         )
-    elif seeds_pending:
-        _replacement_forecast_materialize_job(
-            discover=False,
-            limit=batch_limit,
-            seed_limit=seed_admission_limit,
-        )
-    elif inflight_pending:
-        _replacement_forecast_materialize_job(
-            discover=False,
-            limit=batch_limit,
-            seed_limit=0,
-        )
+        for future in futures:
+            try:
+                future.result()
+            except Exception:
+                logger.warning("replacement forecast materialization lane failed", exc_info=True)
 
 
 @_scheduler_job(REPLACEMENT_FORECAST_DISCOVERY_JOB_ID)
