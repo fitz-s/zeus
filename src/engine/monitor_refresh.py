@@ -806,6 +806,190 @@ def _fresh_canonical_monitor_orderbook(
     return book, source_timestamp
 
 
+def _fresh_canonical_monitor_no_bid_witness(
+    conn,
+    pos: Position,
+    token_id: str,
+    *,
+    now_utc: datetime | None = None,
+) -> HeldTokenMonitorQuote | None:
+    """Return fresh exact market-channel evidence of zero held-side liquidity.
+
+    This is monitor-only no-executable-book evidence.  It deliberately cannot
+    provide a positive bid, depth, or sizing input to a SELL/JIT path.
+
+    SCOPE: one exact ``condition_id/token_id/sell_direction`` witness.
+    DRAIN: the next market-channel append is re-read on the next monitor turn.
+    RESET: only another fresh no-bid witness recreates this zero-value quote.
+    """
+
+    if not isinstance(conn, sqlite3.Connection):
+        return None
+    condition_id = str(getattr(pos, "condition_id", "") or "").strip()
+    token_id = str(token_id or "").strip()
+    position_direction = getattr(getattr(pos, "direction", ""), "value", None)
+    if position_direction is None:
+        position_direction = getattr(pos, "direction", "")
+    direction = {
+        "buy_yes": "sell_yes",
+        "buy_no": "sell_no",
+    }.get(str(position_direction or "").lower())
+    outcome_label = {"sell_yes": "YES", "sell_no": "NO"}.get(direction)
+    if not condition_id or not token_id or not direction or not outcome_label:
+        return None
+
+    from src.contracts.executable_market_snapshot import FRESHNESS_WINDOW_DEFAULT
+
+    checked_at = (now_utc or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    outer_deadline = getattr(pos, _HELD_MONITOR_DEADLINE_ATTR, None)
+    read_deadline = time.monotonic() + 0.25
+    if outer_deadline is not None:
+        read_deadline = min(read_deadline, float(outer_deadline))
+
+    readers = [conn]
+    owned_reader = None
+    caller_has_uncommitted_state = False
+    try:
+        db_path_row = conn.execute("PRAGMA database_list").fetchone()
+        db_path = str(db_path_row[2] or "").strip() if db_path_row else ""
+        caller_has_uncommitted_state = bool(db_path and conn.in_transaction)
+        if db_path:
+            from src.state.db import _connect_read_only
+
+            owned_reader = _connect_read_only(
+                Path(db_path),
+                deadline_monotonic=read_deadline,
+            )
+            readers.append(owned_reader)
+    except sqlite3.Error:
+        owned_reader = None
+
+    candidates: list[HeldTokenMonitorQuote] = []
+    try:
+        for reader in readers:
+            try:
+                with _day0_snapshot_sqlite_read_deadline(reader, read_deadline):
+                    row = reader.execute(
+                        """
+                        SELECT latest.evidence_id,
+                               latest.event_id,
+                               latest.condition_id,
+                               latest.token_id,
+                               latest.outcome_label,
+                               latest.direction,
+                               latest.quote_seen_at,
+                               latest.created_at,
+                               latest.best_bid_before,
+                               latest.best_ask_before,
+                               latest.depth_before_json,
+                               evidence.event_id,
+                               evidence.condition_id,
+                               evidence.token_id,
+                               evidence.outcome_label,
+                               evidence.direction,
+                               evidence.quote_seen_at,
+                               evidence.created_at,
+                               evidence.best_bid_before,
+                               evidence.best_ask_before,
+                               evidence.depth_before_json
+                          FROM execution_feasibility_latest AS latest
+                          JOIN execution_feasibility_evidence AS evidence
+                            ON evidence.evidence_id = latest.evidence_id
+                           AND evidence.event_id = latest.event_id
+                           AND evidence.condition_id = latest.condition_id
+                           AND evidence.token_id = latest.token_id
+                           AND evidence.outcome_label = latest.outcome_label
+                           AND evidence.direction = latest.direction
+                           AND evidence.quote_seen_at = latest.quote_seen_at
+                           AND evidence.created_at = latest.created_at
+                           AND evidence.best_bid_before IS latest.best_bid_before
+                           AND evidence.best_ask_before IS latest.best_ask_before
+                           AND evidence.depth_before_json IS latest.depth_before_json
+                         WHERE latest.condition_id = ?
+                           AND latest.token_id = ?
+                           AND latest.outcome_label = ?
+                           AND latest.direction = ?
+                         LIMIT 1
+                        """,
+                        (condition_id, token_id, outcome_label, direction),
+                    ).fetchone()
+                if row is None or (reader is conn and caller_has_uncommitted_state):
+                    continue
+                quote_at = datetime.fromisoformat(str(row[6]).replace("Z", "+00:00"))
+                created_at = datetime.fromisoformat(str(row[7]).replace("Z", "+00:00"))
+                if quote_at.tzinfo is None or created_at.tzinfo is None:
+                    continue
+                quote_at = quote_at.astimezone(timezone.utc)
+                created_at = created_at.astimezone(timezone.utc)
+                if (
+                    quote_at > checked_at
+                    or created_at > checked_at
+                    or checked_at - quote_at > FRESHNESS_WINDOW_DEFAULT
+                    or not str(row[0] or "").strip()
+                    or not str(row[1] or "").strip()
+                ):
+                    continue
+                bid_raw, ask_raw, raw_depth = row[8], row[9], row[10]
+                if bid_raw is not None and float(bid_raw) != 0.0:
+                    continue
+                ask_f = None
+                if ask_raw is not None:
+                    ask_f = float(ask_raw)
+                    if not np.isfinite(ask_f) or ask_f <= 0.0:
+                        continue
+                ask_size = 0.0
+                if raw_depth is not None and str(raw_depth).strip():
+                    depth = json.loads(str(raw_depth))
+                    if not isinstance(depth, dict):
+                        continue
+                    bids, asks = depth.get("bids"), depth.get("asks")
+                    if not isinstance(bids, list) or not isinstance(asks, list) or bids:
+                        continue
+                    if asks:
+                        from src.data.market_scanner import _top_book_level_decimal
+
+                        depth_ask, depth_ask_size = _top_book_level_decimal(depth, "asks")
+                        if ask_f is None or not np.isclose(float(depth_ask), ask_f):
+                            continue
+                        ask_size = float(depth_ask_size)
+                    elif ask_f is not None:
+                        continue
+                elif ask_f is None:
+                    # Scalar-NULL without explicit full depth proves nothing.
+                    continue
+                candidates.append(
+                    HeldTokenMonitorQuote(
+                        token_id=token_id,
+                        best_bid=0.0,
+                        best_ask=ask_f,
+                        bid_size=0.0,
+                        ask_size=ask_size,
+                        mark_price=0.0,
+                        source_timestamp=quote_at.isoformat(),
+                        bid_ladder=(),
+                    )
+                )
+            except (
+                sqlite3.Error,
+                TypeError,
+                ValueError,
+                json.JSONDecodeError,
+                _Day0SnapshotReadDeadlineExceeded,
+            ):
+                continue
+    finally:
+        if owned_reader is not None:
+            owned_reader.close()
+    if not candidates:
+        return None
+    return max(
+        candidates,
+        key=lambda quote: datetime.fromisoformat(
+            quote.source_timestamp.replace("Z", "+00:00")
+        ),
+    )
+
+
 def _compute_divergence_score(p_posterior: float, p_market: float, *, available: bool) -> float:
     """Adverse-only divergence: positive edge is entry signal, not exit signal.
 
@@ -3370,11 +3554,19 @@ def monitor_quote_refresh(
         fallback = _fresh_canonical_monitor_orderbook(conn, pos, tid)
         if fallback is not None:
             book, source_timestamp = fallback
-        elif (
-            monitor_orderbook_prefetch_attempted(clob, tid)
-            and not retry_after_prefetch
-        ):
-            return None
+        else:
+            no_bid_quote = _fresh_canonical_monitor_no_bid_witness(
+                conn,
+                pos,
+                tid,
+            )
+            if no_bid_quote is not None:
+                return no_bid_quote
+            if (
+                monitor_orderbook_prefetch_attempted(clob, tid)
+                and not retry_after_prefetch
+            ):
+                return None
     get_orderbook = getattr(clob, "get_orderbook", None)
     try:
         if book is None:
@@ -3401,7 +3593,11 @@ def monitor_quote_refresh(
                 if book is None:
                     fallback = _fresh_canonical_monitor_orderbook(conn, pos, tid)
                     if fallback is None:
-                        return None
+                        return _fresh_canonical_monitor_no_bid_witness(
+                            conn,
+                            pos,
+                            tid,
+                        )
                     book, source_timestamp = fallback
             else:
                 book = get_orderbook(tid) if callable(get_orderbook) else None
@@ -3409,6 +3605,12 @@ def monitor_quote_refresh(
                     fallback = _fresh_canonical_monitor_orderbook(conn, pos, tid)
                     if fallback is not None:
                         book, source_timestamp = fallback
+                    else:
+                        return _fresh_canonical_monitor_no_bid_witness(
+                            conn,
+                            pos,
+                            tid,
+                        )
             if source_timestamp is None:
                 _remember_monitor_orderbook(clob, tid, book)
         if book is not None:
@@ -3428,7 +3630,7 @@ def monitor_quote_refresh(
                 )
                 if one_sided_quote is not None:
                     return one_sided_quote
-                return None
+                return _fresh_canonical_monitor_no_bid_witness(conn, pos, tid)
             if bid >= ask:
                 return None
         else:
@@ -3468,6 +3670,7 @@ def monitor_quote_refresh(
             )
             if one_sided_quote is not None:
                 return one_sided_quote
+            return _fresh_canonical_monitor_no_bid_witness(conn, pos, tid)
         logger.debug("VWMP refresh failed for %s: %s", pos.trade_id, e)
         return None
 

@@ -852,6 +852,228 @@ def test_monitor_quote_uses_empty_canonical_depth_as_fresh_no_bid(tmp_path):
     conn.close()
 
 
+def _insert_latest_no_bid_witness(
+    conn,
+    *,
+    evidence_id: str,
+    condition_id: str,
+    token_id: str,
+    direction: str,
+    quote_seen_at: datetime,
+    best_bid=None,
+    best_ask=0.001,
+    depth=None,
+):
+    outcome_label = "YES" if direction.endswith("yes") else "NO"
+    conn.execute(
+        """
+        INSERT INTO execution_feasibility_evidence (
+            evidence_id, event_id, condition_id, token_id, outcome_label,
+            direction, quote_seen_at, best_bid_before, best_ask_before,
+            depth_before_json, created_at, schema_version
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+        """,
+        (
+            evidence_id,
+            f"event-{evidence_id}",
+            condition_id,
+            token_id,
+            outcome_label,
+            direction,
+            quote_seen_at.isoformat(),
+            best_bid,
+            best_ask,
+            None if depth is None else json.dumps(depth),
+            quote_seen_at.isoformat(),
+        ),
+    )
+    conn.execute(
+        """
+        INSERT INTO execution_feasibility_latest (
+            token_id, direction, evidence_id, event_id, condition_id,
+            outcome_label, quote_seen_at, best_bid_before, best_ask_before,
+            depth_before_json, created_at, schema_version
+        )
+        SELECT token_id, direction, evidence_id, event_id, condition_id,
+               outcome_label, quote_seen_at, best_bid_before, best_ask_before,
+               depth_before_json, created_at, schema_version
+          FROM execution_feasibility_evidence
+         WHERE evidence_id = ?
+        """,
+        (evidence_id,),
+    )
+
+
+def test_monitor_quote_uses_fresh_exact_bba_no_bid_witness_without_snapshot(tmp_path):
+    from src.engine import monitor_refresh
+    from src.state.schema.execution_feasibility_evidence_schema import ensure_table
+
+    conn = get_connection(tmp_path / "monitor-bba-no-bid.db")
+    ensure_table(conn)
+    quote_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+    _insert_latest_no_bid_witness(
+        conn,
+        evidence_id="bba-no-bid",
+        condition_id="condition-bba-no-bid",
+        token_id="yes123",
+        direction="sell_yes",
+        quote_seen_at=quote_at,
+    )
+    conn.commit()
+
+    class NoNetworkClob:
+        def get_orderbook(self, _token_id):
+            raise AssertionError("fresh no-bid BBA witness must avoid network")
+
+    clob = NoNetworkClob()
+    monitor_refresh.install_monitor_orderbook_prefetch(
+        clob,
+        {},
+        attempted_token_ids=("yes123",),
+    )
+    quote = monitor_refresh.monitor_quote_refresh(
+        conn,
+        clob,
+        _position(condition_id="condition-bba-no-bid"),
+    )
+
+    assert quote is not None
+    assert quote.best_bid == pytest.approx(0.0)
+    assert quote.bid_size == pytest.approx(0.0)
+    assert quote.bid_ladder == ()
+    assert quote.best_ask == pytest.approx(0.001)
+    assert quote.ask_size == pytest.approx(0.0)
+    assert quote.source_timestamp == quote_at.isoformat()
+
+    conn.execute(
+        "UPDATE execution_feasibility_latest SET event_id = 'mismatched-append' "
+        "WHERE token_id = 'yes123' AND direction = 'sell_yes'"
+    )
+    conn.commit()
+    assert monitor_refresh._fresh_canonical_monitor_no_bid_witness(
+        conn,
+        _position(condition_id="condition-bba-no-bid"),
+        "yes123",
+    ) is None
+    conn.close()
+
+
+def test_bba_no_bid_witness_rejects_noncausal_or_incomplete_rows(tmp_path):
+    from src.engine import monitor_refresh
+    from src.state.schema.execution_feasibility_evidence_schema import ensure_table
+
+    conn = get_connection(tmp_path / "monitor-bba-no-bid-rejections.db")
+    ensure_table(conn)
+    checked_at = datetime.now(timezone.utc)
+    cases = (
+        ("both-null", "sell_yes", checked_at - timedelta(seconds=1), None, None, None),
+        (
+            "positive-bid",
+            "sell_yes",
+            checked_at - timedelta(seconds=1),
+            0.01,
+            0.02,
+            None,
+        ),
+        ("stale", "sell_yes", checked_at - timedelta(minutes=5), None, 0.001, None),
+        ("future", "sell_yes", checked_at + timedelta(seconds=1), None, 0.001, None),
+        (
+            "bad-depth",
+            "sell_yes",
+            checked_at - timedelta(seconds=1),
+            None,
+            0.001,
+            {"bids": [], "asks": "bad"},
+        ),
+        (
+            "wrong-direction",
+            "sell_no",
+            checked_at - timedelta(seconds=1),
+            None,
+            0.001,
+            None,
+        ),
+    )
+    for name, direction, quote_at, bid, ask, depth in cases:
+        _insert_latest_no_bid_witness(
+            conn,
+            evidence_id=f"no-bid-{name}",
+            condition_id=f"condition-{name}",
+            token_id=f"token-{name}",
+            direction=direction,
+            quote_seen_at=quote_at,
+            best_bid=bid,
+            best_ask=ask,
+            depth=depth,
+        )
+    conn.commit()
+
+    for name, *_ in cases:
+        assert monitor_refresh._fresh_canonical_monitor_no_bid_witness(
+            conn,
+            _position(condition_id=f"condition-{name}"),
+            f"token-{name}",
+            now_utc=checked_at,
+        ) is None
+
+    conn.close()
+
+
+def test_multi_position_bba_no_bid_witnesses_complete_monitor_quote_contexts(tmp_path):
+    from src.engine import monitor_refresh
+    from src.state.schema.execution_feasibility_evidence_schema import ensure_table
+
+    conn = get_connection(tmp_path / "monitor-bba-no-bid-multi.db")
+    ensure_table(conn)
+    quote_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+    _insert_latest_no_bid_witness(
+        conn,
+        evidence_id="yes-no-bid",
+        condition_id="condition-yes-no-bid",
+        token_id="yes123",
+        direction="sell_yes",
+        quote_seen_at=quote_at,
+    )
+    _insert_latest_no_bid_witness(
+        conn,
+        evidence_id="no-empty-depth",
+        condition_id="condition-no-empty-depth",
+        token_id="no456",
+        direction="sell_no",
+        quote_seen_at=quote_at,
+        best_ask=None,
+        depth={"bids": [], "asks": []},
+    )
+    conn.commit()
+
+    class NoNetworkClob:
+        def get_orderbook(self, _token_id):
+            raise AssertionError("no-bid witness must complete monitor context")
+
+    clob = NoNetworkClob()
+    monitor_refresh.install_monitor_orderbook_prefetch(
+        clob,
+        {},
+        attempted_token_ids=("yes123", "no456"),
+    )
+    positions = (
+        _position(condition_id="condition-yes-no-bid"),
+        _position(
+            condition_id="condition-no-empty-depth",
+            direction="buy_no",
+        ),
+    )
+    quotes = [
+        monitor_refresh.monitor_quote_refresh(conn, clob, pos)
+        for pos in positions
+    ]
+
+    assert all(quote is not None for quote in quotes)
+    assert [quote.best_bid for quote in quotes] == [0.0, 0.0]
+    assert [quote.bid_ladder for quote in quotes] == [(), ()]
+    conn.close()
+
+
 @pytest.mark.parametrize("durable_state", ("missing", "stale", "future", "invalidated"))
 def test_monitor_quote_tries_network_when_durable_book_is_unusable(
     tmp_path,
