@@ -201,7 +201,10 @@ def _edli_held_snapshot_refresh_report(
     """
 
     from src.contracts.executable_market_snapshot import FRESHNESS_WINDOW_DEFAULT
-    from src.events.triggers.market_channel_ingestor import MarketChannelAction
+    from src.events.triggers.market_channel_ingestor import (
+        MarketChannelAction,
+        persistent_market_channel_action_receipt,
+    )
 
     required_latest = {
         "condition_id", "selected_outcome_token_id", "snapshot_id", "active",
@@ -403,6 +406,7 @@ def _edli_held_snapshot_refresh_report(
         "held_snapshot_oldest_due_deadline": (
             min(due_deadlines).isoformat() if due_deadlines else None
         ),
+        "held_snapshot_action_receipt": persistent_market_channel_action_receipt(),
         **enqueue_report,
     }
 
@@ -425,12 +429,14 @@ def _edli_exact_snapshot_refresh_completed(
     token_id = str(action.token_id or "").strip()
     if not condition_id or not token_id:
         return False
+    from src.contracts.executable_market_snapshot import FRESHNESS_WINDOW_DEFAULT
+
     try:
         row = trade_conn.execute(
             """
             SELECT latest.active, latest.closed, latest.accepting_orders,
                    latest.captured_at, latest.freshness_deadline,
-                   snapshot.enable_orderbook
+                   snapshot.enable_orderbook, latest.yes_token_id, latest.no_token_id
               FROM executable_market_snapshot_latest AS latest
               JOIN executable_market_snapshots AS snapshot
                 ON snapshot.snapshot_id = latest.snapshot_id
@@ -451,7 +457,22 @@ def _edli_exact_snapshot_refresh_completed(
             return False
         captured_at = captured_at.astimezone(timezone.utc)
         deadline = deadline.astimezone(timezone.utc)
-        return captured_at <= checked_at < deadline
+        if not (captured_at <= checked_at < deadline <= captured_at + FRESHNESS_WINDOW_DEFAULT):
+            return False
+        invalidations = trade_conn.execute(
+            """
+            SELECT invalidated_at FROM executable_market_snapshot_invalidations
+             WHERE condition_id = ? OR token_id IN (?, ?, ?)
+            """,
+            (condition_id, token_id, row[6], row[7]),
+        ).fetchall()
+        for invalidation in invalidations:
+            invalidated_at = datetime.fromisoformat(str(invalidation[0]).replace("Z", "+00:00"))
+            if invalidated_at.tzinfo is None:
+                return False
+            if captured_at <= invalidated_at.astimezone(timezone.utc) <= checked_at:
+                return False
+        return True
     except Exception:  # noqa: BLE001 - projection/read failure is retryable
         return False
 

@@ -3413,6 +3413,9 @@ class MarketChannelOnlineService:
                 "inflight_exact_actions": len(self._inflight_refresh_actions),
                 "completed_exact_actions": self.refresh_action_completed_count,
                 "deferred_exact_actions": self.refresh_action_deferred_count,
+                "coalesced_exact_actions": self.refresh_action_coalesced_count,
+                "max_held_actions_per_window": self.max_held_refresh_actions_per_window,
+                "max_background_actions_per_window": self.max_refresh_actions_per_window,
             }
 
     def _attempt_refresh_action(
@@ -3572,6 +3575,24 @@ def enqueue_persistent_market_channel_action(action: MarketChannelAction) -> Non
                 "no persistent market-channel action sink is registered"
             )
         service.enqueue_persistent_refresh_action(action)
+
+
+def persistent_market_channel_action_receipt() -> dict[str, int]:
+    """Return the registered persistent consumer's truthful queue receipt."""
+
+    with _persistent_action_sink_lock:
+        service = _persistent_action_sink
+        if service is None:
+            return {
+                "queued_exact_actions": 0,
+                "inflight_exact_actions": 0,
+                "completed_exact_actions": 0,
+                "deferred_exact_actions": 0,
+                "coalesced_exact_actions": 0,
+                "max_held_actions_per_window": 0,
+                "max_background_actions_per_window": 0,
+            }
+        return service.refresh_action_receipt()
 
 
 def run_market_channel_service_forever(

@@ -4045,6 +4045,9 @@ def test_persistent_action_sink_queues_exact_action_with_existing_callbacks():
         "inflight_exact_actions": 0,
         "completed_exact_actions": 1,
         "deferred_exact_actions": 0,
+        "coalesced_exact_actions": 0,
+        "max_held_actions_per_window": 32,
+        "max_background_actions_per_window": 5,
     }
 
 
