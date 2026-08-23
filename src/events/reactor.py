@@ -7768,7 +7768,30 @@ def _rehydrate_exact_executable_held_sell_pending(
             _EXACT_EXECUTABLE_HELD_SELL_PENDING.set()
         raise
     requests = tuple(dict.fromkeys((*durable_requests, *extra_requests)))
-    exact = _has_exact_executable_held_sell_completion(requests)
+    candidates = tuple(
+        request
+        for request in requests
+        if _has_exact_executable_held_sell_completion((request,))
+    )
+    try:
+        from src.runtime.reactor_wake import (
+            v4_held_sell_reauction_request_is_queued,
+        )
+
+        exact = any(
+            v4_held_sell_reauction_request_is_queued(request)
+            for request in candidates
+        )
+    except (OSError, TimeoutError, ValueError) as exc:
+        if strict:
+            with _EXACT_EXECUTABLE_HELD_SELL_SIGNAL_LOCK:
+                _EXACT_EXECUTABLE_HELD_SELL_PENDING.set()
+            raise _DurableExactHeldCompletionUnknown() from exc
+        logging.getLogger("zeus.events.reactor").warning(
+            "held SELL queue lineage unreadable during signal rehydrate",
+            exc_info=True,
+        )
+        exact = False
     with _EXACT_EXECUTABLE_HELD_SELL_SIGNAL_LOCK:
         if exact:
             _EXACT_EXECUTABLE_HELD_SELL_PENDING.set()

@@ -6092,7 +6092,7 @@ def test_reserved_or_exact_completion_yields_for_unresolved_monitor_debt(
     monkeypatch.setattr(
         reactor_module,
         "_durable_exact_held_sell_completion_requests",
-        lambda: (),
+        lambda **_kwargs: (),
     )
     monkeypatch.setattr(
         db,
@@ -6164,7 +6164,11 @@ def test_exact_executable_completion_bypasses_monitor_debt_before_setup(
     monkeypatch.setattr(
         reactor_module,
         "_durable_exact_held_sell_completion_requests",
-        lambda: (request,),
+        lambda **_kwargs: (request,),
+    )
+    monkeypatch.setattr(
+        "src.runtime.reactor_wake.v4_held_sell_reauction_request_is_queued",
+        lambda _request: True,
     )
     monkeypatch.setattr(
         reactor_module,
@@ -6909,6 +6913,90 @@ def test_rehydrate_keeps_concurrent_publish_signal_when_old_queue_is_empty(monke
         assert requests == ()
         assert pending is True
         assert reactor._EXACT_EXECUTABLE_HELD_SELL_PENDING.is_set()
+    finally:
+        reactor._EXACT_EXECUTABLE_HELD_SELL_PENDING.clear()
+
+
+@pytest.mark.parametrize("lineage_state", ("missing", "mismatched_latest"))
+def test_rehydrate_does_not_signal_unqueued_v4_lineage(monkeypatch, lineage_state):
+    from src.events import reactor
+    from src.runtime import reactor_wake
+
+    now = datetime.now(timezone.utc)
+    request = reactor_wake.make_held_sell_reauction_request(
+        position_id=f"{lineage_state}-lineage-position",
+        family=("Cape Town", "2026-08-23", "high"),
+        probability_content_identity=f"q-{lineage_state}-lineage",
+        held_token_id=f"{lineage_state}-lineage-token",
+        held_best_bid=0.21,
+        bid_observed_at=(now - timedelta(seconds=1)).isoformat(),
+        probability_observed_at=(now - timedelta(seconds=1)).isoformat(),
+        completion_deadline_at=(now + timedelta(seconds=30)).isoformat(),
+        schema_version=4,
+        book_state="EXECUTABLE",
+    )
+    monkeypatch.setattr(
+        reactor,
+        "_durable_exact_held_sell_completion_requests",
+        lambda **_kwargs: (request,),
+    )
+    monkeypatch.setattr(
+        reactor_wake,
+        "v4_held_sell_reauction_request_is_queued",
+        lambda _request: False,
+    )
+    reactor._EXACT_EXECUTABLE_HELD_SELL_PENDING.clear()
+    try:
+        pending, durable_requests = reactor._rehydrate_exact_executable_held_sell_pending(
+            strict=True
+        )
+        assert durable_requests == (request,)
+        assert pending is False
+        assert not reactor._EXACT_EXECUTABLE_HELD_SELL_PENDING.is_set()
+    finally:
+        reactor._EXACT_EXECUTABLE_HELD_SELL_PENDING.clear()
+
+
+def test_strict_rehydrate_queue_read_failure_keeps_signal(monkeypatch):
+    from src.events import reactor
+    from src.runtime import reactor_wake
+
+    now = datetime.now(timezone.utc)
+    request = reactor_wake.make_held_sell_reauction_request(
+        position_id="queue-read-failure-position",
+        family=("Cape Town", "2026-08-23", "high"),
+        probability_content_identity="q-queue-read-failure",
+        held_token_id="queue-read-failure-token",
+        held_best_bid=0.21,
+        bid_observed_at=(now - timedelta(seconds=1)).isoformat(),
+        probability_observed_at=(now - timedelta(seconds=1)).isoformat(),
+        completion_deadline_at=(now + timedelta(seconds=30)).isoformat(),
+        schema_version=4,
+        book_state="EXECUTABLE",
+    )
+    monkeypatch.setattr(
+        reactor,
+        "_durable_exact_held_sell_completion_requests",
+        lambda **_kwargs: (request,),
+    )
+    monkeypatch.setattr(
+        reactor_wake,
+        "v4_held_sell_reauction_request_is_queued",
+        lambda _request: (_ for _ in ()).throw(OSError("lineage read failed")),
+    )
+    reactor._EXACT_EXECUTABLE_HELD_SELL_PENDING.clear()
+    try:
+        with pytest.raises(reactor._DurableExactHeldCompletionUnknown):
+            reactor._rehydrate_exact_executable_held_sell_pending(strict=True)
+        assert reactor._EXACT_EXECUTABLE_HELD_SELL_PENDING.is_set()
+        ordinary_cancelled = _process_pending_cancelled(
+            committed_day0_wake=False,
+            producer_fast_path=False,
+            urgent_wake_pending=lambda: False,
+            urgent_day0_pending=None,
+        )
+        assert ordinary_cancelled is not None
+        assert ordinary_cancelled() is True
     finally:
         reactor._EXACT_EXECUTABLE_HELD_SELL_PENDING.clear()
 
