@@ -835,7 +835,16 @@ def _fresh_canonical_monitor_no_bid_witness(
         "buy_no": "sell_no",
     }.get(str(position_direction or "").lower())
     outcome_label = {"sell_yes": "YES", "sell_no": "NO"}.get(direction)
-    if not condition_id or not token_id or not direction or not outcome_label:
+    append_direction = {"sell_yes": "buy_yes", "sell_no": "buy_no"}.get(
+        direction
+    )
+    if (
+        not condition_id
+        or not token_id
+        or not direction
+        or not outcome_label
+        or not append_direction
+    ):
         return None
 
     from src.contracts.executable_market_snapshot import FRESHNESS_WINDOW_DEFAULT
@@ -882,6 +891,8 @@ def _fresh_canonical_monitor_no_bid_witness(
                                latest.best_bid_before,
                                latest.best_ask_before,
                                latest.depth_before_json,
+                               latest.schema_version,
+                               evidence.evidence_id,
                                evidence.event_id,
                                evidence.condition_id,
                                evidence.token_id,
@@ -891,27 +902,35 @@ def _fresh_canonical_monitor_no_bid_witness(
                                evidence.created_at,
                                evidence.best_bid_before,
                                evidence.best_ask_before,
-                               evidence.depth_before_json
+                               evidence.depth_before_json,
+                               evidence.schema_version
                           FROM execution_feasibility_latest AS latest
                           JOIN execution_feasibility_evidence AS evidence
-                            ON evidence.evidence_id = latest.evidence_id
-                           AND evidence.event_id = latest.event_id
+                            ON evidence.event_id = latest.event_id
                            AND evidence.condition_id = latest.condition_id
                            AND evidence.token_id = latest.token_id
                            AND evidence.outcome_label = latest.outcome_label
-                           AND evidence.direction = latest.direction
+                           AND evidence.direction = ?
                            AND evidence.quote_seen_at = latest.quote_seen_at
                            AND evidence.created_at = latest.created_at
+                           AND evidence.book_hash_before IS latest.book_hash_before
                            AND evidence.best_bid_before IS latest.best_bid_before
                            AND evidence.best_ask_before IS latest.best_ask_before
-                           AND evidence.depth_before_json IS latest.depth_before_json
+                           AND evidence.schema_version = latest.schema_version
                          WHERE latest.condition_id = ?
                            AND latest.token_id = ?
                            AND latest.outcome_label = ?
                            AND latest.direction = ?
+                           AND latest.depth_before_json IS NULL
                          LIMIT 1
                         """,
-                        (condition_id, token_id, outcome_label, direction),
+                        (
+                            append_direction,
+                            condition_id,
+                            token_id,
+                            outcome_label,
+                            direction,
+                        ),
                     ).fetchone()
                 if row is None or (reader is conn and caller_has_uncommitted_state):
                     continue
@@ -927,9 +946,10 @@ def _fresh_canonical_monitor_no_bid_witness(
                     or checked_at - quote_at > FRESHNESS_WINDOW_DEFAULT
                     or not str(row[0] or "").strip()
                     or not str(row[1] or "").strip()
+                    or not str(row[12] or "").strip()
                 ):
                     continue
-                bid_raw, ask_raw, raw_depth = row[8], row[9], row[10]
+                bid_raw, ask_raw, raw_depth = row[8], row[9], row[22]
                 if bid_raw is not None and float(bid_raw) != 0.0:
                     continue
                 ask_f = None

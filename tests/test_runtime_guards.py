@@ -865,6 +865,7 @@ def _insert_latest_no_bid_witness(
     depth=None,
 ):
     outcome_label = "YES" if direction.endswith("yes") else "NO"
+    append_direction = direction.replace("sell_", "buy_", 1)
     conn.execute(
         """
         INSERT INTO execution_feasibility_evidence (
@@ -879,7 +880,7 @@ def _insert_latest_no_bid_witness(
             condition_id,
             token_id,
             outcome_label,
-            direction,
+            append_direction,
             quote_seen_at.isoformat(),
             best_bid,
             best_ask,
@@ -893,14 +894,20 @@ def _insert_latest_no_bid_witness(
             token_id, direction, evidence_id, event_id, condition_id,
             outcome_label, quote_seen_at, best_bid_before, best_ask_before,
             depth_before_json, created_at, schema_version
-        )
-        SELECT token_id, direction, evidence_id, event_id, condition_id,
-               outcome_label, quote_seen_at, best_bid_before, best_ask_before,
-               depth_before_json, created_at, schema_version
-          FROM execution_feasibility_evidence
-         WHERE evidence_id = ?
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, 1)
         """,
-        (evidence_id,),
+        (
+            token_id,
+            direction,
+            f"sell-latest-{evidence_id}",
+            f"event-{evidence_id}",
+            condition_id,
+            outcome_label,
+            quote_seen_at.isoformat(),
+            best_bid,
+            best_ask,
+            quote_seen_at.isoformat(),
+        ),
     )
 
 
@@ -953,6 +960,106 @@ def test_monitor_quote_uses_fresh_exact_bba_no_bid_witness_without_snapshot(tmp_
     assert monitor_refresh._fresh_canonical_monitor_no_bid_witness(
         conn,
         _position(condition_id="condition-bba-no-bid"),
+        "yes123",
+    ) is None
+    conn.close()
+
+
+def test_monitor_bba_no_bid_witness_matches_selective_append_producer(
+    tmp_path,
+):
+    from src.engine import monitor_refresh
+    from src.events.triggers.market_channel_ingestor import (
+        MarketChannelIngestor,
+        MarketTokenMetadata,
+    )
+    from src.state.schema.execution_feasibility_evidence_schema import ensure_table
+
+    conn = get_connection(tmp_path / "monitor-bba-producer-contract.db")
+    ensure_table(conn)
+    ingestor = MarketChannelIngestor(
+        None,
+        feasibility_conn=conn,
+        active_token_ids={"yes123"},
+        token_metadata={
+            "yes123": MarketTokenMetadata(
+                condition_id="condition-producer-bba",
+                token_id="yes123",
+                outcome_label="YES",
+                min_tick_size="0.01",
+                min_order_size="5",
+                neg_risk=False,
+                executable_snapshot_id="snapshot-producer-bba",
+            )
+        },
+        append_evidence_token_ids=lambda: {"yes123"},
+    )
+    quote_at = datetime.now(timezone.utc).replace(microsecond=0)
+    event = ingestor._bba_event(
+        {
+            "event_type": "best_bid_ask",
+            "asset_id": "yes123",
+            "market": "condition-producer-bba",
+            "timestamp": quote_at.isoformat(),
+            "best_bid": None,
+            "best_ask": "0.001",
+            "hash": "producer-bba-no-bid",
+        },
+        received_at=quote_at.isoformat(),
+    )
+    assert event is not None
+    ingestor.write_prepared_quote_events(ingestor.prepare_quote_events((event,)))
+    conn.commit()
+
+    latest = conn.execute(
+        "SELECT evidence_id FROM execution_feasibility_latest "
+        "WHERE token_id = 'yes123' AND direction = 'sell_yes'"
+    ).fetchone()
+    appended = conn.execute(
+        "SELECT evidence_id FROM execution_feasibility_evidence "
+        "WHERE token_id = 'yes123' AND direction = 'buy_yes'"
+    ).fetchone()
+    assert latest is not None and appended is not None
+    assert latest[0] != appended[0]
+
+    class NoNetworkClob:
+        def get_orderbook(self, _token_id):
+            raise AssertionError("producer BBA no-bid witness must avoid network")
+
+    clob = NoNetworkClob()
+    monitor_refresh.install_monitor_orderbook_prefetch(
+        clob,
+        {},
+        attempted_token_ids=("yes123",),
+    )
+    quote = monitor_refresh.monitor_quote_refresh(
+        conn,
+        clob,
+        _position(condition_id="condition-producer-bba"),
+    )
+    assert quote is not None
+    assert quote.best_bid == pytest.approx(0.0)
+    assert quote.best_ask == pytest.approx(0.001)
+
+    conn.execute(
+        "UPDATE execution_feasibility_evidence SET best_ask_before = 0.002 "
+        "WHERE token_id = 'yes123' AND direction = 'buy_yes'"
+    )
+    conn.commit()
+    assert monitor_refresh._fresh_canonical_monitor_no_bid_witness(
+        conn,
+        _position(condition_id="condition-producer-bba"),
+        "yes123",
+    ) is None
+
+    conn.execute(
+        "DELETE FROM execution_feasibility_evidence "
+        "WHERE token_id = 'yes123' AND direction = 'buy_yes'"
+    )
+    conn.commit()
+    assert monitor_refresh._fresh_canonical_monitor_no_bid_witness(
+        conn,
+        _position(condition_id="condition-producer-bba"),
         "yes123",
     ) is None
     conn.close()
