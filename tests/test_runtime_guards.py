@@ -677,6 +677,7 @@ def test_monitor_quote_uses_fresh_exact_canonical_book_after_failed_batch(tmp_pa
             "asks": [],
         },
         captured_at=captured_at,
+        executable_allowed=False,
     )
     conn.commit()
 
@@ -713,6 +714,62 @@ def test_monitor_quote_uses_fresh_exact_canonical_book_after_failed_batch(tmp_pa
         monitor_refresh.monitor_quote_refresh(conn, ProgrammingFailureClob(), pos)
         is None
     )
+    conn.close()
+
+
+def test_monitor_quote_uses_ask_only_canonical_book_as_typed_zero_value(tmp_path):
+    from src.engine import monitor_refresh
+    from src.state.snapshot_repo import init_snapshot_schema
+
+    conn = get_connection(tmp_path / "canonical-monitor-ask-only.db")
+    init_schema(conn)
+    init_schema_trade_only(conn)
+    init_snapshot_schema(conn)
+    captured_at = datetime.now(timezone.utc) - timedelta(seconds=2)
+    _insert_executable_snapshot(
+        conn,
+        snapshot_id="canonical-monitor-ask-only",
+        selected_outcome_token_id="yes123",
+        yes_token_id="yes123",
+        no_token_id="no456",
+        condition_id="cond-canonical-monitor-ask-only",
+        top_bid="0.0001",
+        top_ask="0.001",
+        bid_size="0",
+        ask_size="38",
+        orderbook_depth={
+            "asset_id": "yes123",
+            "bids": [],
+            "asks": [{"price": "0.001", "size": "38"}],
+        },
+        captured_at=captured_at,
+        executable_allowed=False,
+    )
+    conn.commit()
+
+    class NoNetworkClob:
+        def get_orderbook(self, _token_id):
+            raise AssertionError("ask-only canonical evidence must avoid network")
+
+    clob = NoNetworkClob()
+    monitor_refresh.install_monitor_orderbook_prefetch(
+        clob,
+        {},
+        attempted_token_ids=("yes123",),
+    )
+    quote = monitor_refresh.monitor_quote_refresh(
+        conn,
+        clob,
+        _position(
+            state="day0_window",
+            condition_id="cond-canonical-monitor-ask-only",
+        ),
+    )
+
+    assert quote is not None
+    assert quote.best_bid == pytest.approx(0.0)
+    assert quote.best_ask == pytest.approx(0.001)
+    assert quote.mark_price == pytest.approx(0.0)
     conn.close()
 
 
@@ -758,7 +815,7 @@ def test_canonical_monitor_book_prefers_fresher_independent_commit(tmp_path):
         top_bid="0.55",
         top_ask="0.57",
         captured_at=new_at,
-        active=False,
+        active=True,
         executable_allowed=True,
     )
     writer.commit()
@@ -822,16 +879,6 @@ def test_canonical_monitor_book_rejects_stale_invalidated_and_wrong_token(tmp_pa
         captured_at=fresh_at,
         accepting_orders=False,
     )
-    _insert_executable_snapshot(
-        conn,
-        snapshot_id="canonical-monitor-explicitly-blocked",
-        selected_outcome_token_id="blocked-token",
-        yes_token_id="blocked-token",
-        no_token_id="blocked-no",
-        condition_id="cond-canonical-monitor-explicitly-blocked",
-        captured_at=fresh_at,
-        executable_allowed=False,
-    )
     conn.commit()
     record_snapshot_invalidation(
         conn,
@@ -856,10 +903,6 @@ def test_canonical_monitor_book_rejects_stale_invalidated_and_wrong_token(tmp_pa
         condition_id="cond-canonical-monitor-not-accepting",
         token_id="closed-token",
     )
-    explicitly_blocked_pos = _position(
-        condition_id="cond-canonical-monitor-explicitly-blocked",
-        token_id="blocked-token",
-    )
 
     assert conn.in_transaction
 
@@ -868,15 +911,6 @@ def test_canonical_monitor_book_rejects_stale_invalidated_and_wrong_token(tmp_pa
             conn,
             invalidated_pos,
             "yes123",
-            now_utc=now_utc,
-        )
-        is None
-    )
-    assert (
-        monitor_refresh._fresh_canonical_monitor_orderbook(
-            conn,
-            explicitly_blocked_pos,
-            "blocked-token",
             now_utc=now_utc,
         )
         is None
@@ -1389,6 +1423,24 @@ def test_monitor_snapshot_tradeability_requires_normalized_authority_or_legacy_n
         accepting_orders=accepting_orders,
         tradeability_status_json=status,
     ) is expected
+
+
+@pytest.mark.parametrize(
+    ("active", "closed", "accepting_orders"),
+    ((False, False, 1), (True, True, 1), (True, False, 0)),
+)
+def test_held_monitor_evidence_rejects_non_open_or_non_accepting_snapshot(
+    active,
+    closed,
+    accepting_orders,
+):
+    from src.engine.monitor_refresh import _monitor_snapshot_has_held_exit_evidence
+
+    assert not _monitor_snapshot_has_held_exit_evidence(
+        active=active,
+        closed=closed,
+        accepting_orders=accepting_orders,
+    )
 
 
 def test_local_monitor_book_rejects_blocked_future_invalidated_and_identity_mismatch(

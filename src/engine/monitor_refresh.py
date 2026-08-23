@@ -599,6 +599,23 @@ def _monitor_snapshot_is_executable(
     return False
 
 
+def _monitor_snapshot_has_held_exit_evidence(
+    *,
+    active: object,
+    closed: object,
+    accepting_orders: object,
+) -> bool:
+    """Accept an open, accepting snapshot as held-monitor quote evidence.
+
+    ``executable_allowed`` is the entry/submit predicate.  A held Day0
+    monitor may still consume a durable one-sided book: a positive bid is a
+    valid SELL quote even when no ask makes the snapshot entry-executable;
+    ask-only books become the typed zero-liquidation-value quote downstream.
+    """
+
+    return bool(active) and not bool(closed) and accepting_orders == 1
+
+
 def _book_min_order_size(book: dict | None) -> float | None:
     if not isinstance(book, dict):
         return None
@@ -700,11 +717,10 @@ def _fresh_canonical_monitor_orderbook(
                         """,
                         (condition_id, token_id),
                     ).fetchone()
-                    if row is None or not _monitor_snapshot_is_executable(
+                    if row is None or not _monitor_snapshot_has_held_exit_evidence(
                         active=row[4],
                         closed=row[5],
                         accepting_orders=row[6],
-                        tradeability_status_json=row[9],
                     ):
                         continue
                     captured_at = datetime.fromisoformat(
