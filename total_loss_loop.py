@@ -2509,10 +2509,12 @@ def _parse_session(events_path: Path) -> tuple[str | None, dict[str, Any]]:
     return session, usage
 
 
-_PROVIDER_LIMIT_MESSAGE = re.compile(
+_PROVIDER_QUOTA_MESSAGE = re.compile(
     r"^(?:you(?:'|’)ve|you have)\s+hit\s+your\s+usage\s+limit\b"
     r"|^usage\s+limit\s+(?:reached|exceeded)\b"
-    r"|^rate\s+limit\s+(?:reached|exceeded)\b"
+)
+_PROVIDER_RATE_MESSAGE = re.compile(
+    r"^rate\s+limit\s+(?:reached|exceeded)\b"
     r"|^too\s+many\s+requests\b"
     r"|^resource\s+exhausted\b"
 )
@@ -2591,11 +2593,11 @@ def _parse_terminal_failure(
     quota_signal = any(code in quota_codes or code.endswith("_quota_exceeded") for code in codes)
     rate_signal = any(code in rate_codes for code in codes)
     quota_signal = quota_signal or any(
-        bool(_PROVIDER_LIMIT_MESSAGE.search(" ".join(message.lower().replace("’", "'").split())))
+        bool(_PROVIDER_QUOTA_MESSAGE.search(" ".join(message.lower().replace("’", "'").split())))
         for message in provider_messages
     )
     rate_signal = rate_signal or any(
-        bool(re.search(r"^(?:rate\s+limit\s+(?:reached|exceeded)|too\s+many\s+requests|resource\s+exhausted)\b", " ".join(message.lower().split())))
+        bool(_PROVIDER_RATE_MESSAGE.search(" ".join(message.lower().split())))
         for message in provider_messages
     )
     provider_limit = quota_signal or rate_signal

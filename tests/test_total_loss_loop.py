@@ -492,7 +492,9 @@ def test_normal_completed_jsonl_has_no_terminal_failure() -> None:
         path.unlink(missing_ok=True)
 
 
-def test_terminal_failure_is_turn_scoped_and_structured_codes_win(tmp_path: Path) -> None:
+def test_terminal_failure_is_turn_scoped_and_structured_codes_win(
+    cfg: dict, tmp_path: Path
+) -> None:
     path = tmp_path / "turns.jsonl"
     path.write_text(
         "\n".join(
@@ -529,6 +531,20 @@ def test_terminal_failure_is_turn_scoped_and_structured_codes_win(tmp_path: Path
         + "\n"
     )
     assert loop._parse_terminal_failure(path)["kind"] == "terminal_failure"
+
+    for message in ("Rate limit exceeded. Please retry.", "Resource exhausted; retry later.", "Too many requests"):
+        path.write_text(
+            json.dumps({"type": "turn.failed", "error": {"message": message}}) + "\n"
+        )
+        failure = loop._parse_terminal_failure(path)
+        assert failure["kind"] == "provider_rate_limit"
+        cfg["loop"]["provider_cooldown_seconds"] = 2
+        with loop.memory(cfg) as mem:
+            payload = loop._set_provider_backoff(
+                cfg, mem, {**failure, "retry_at": None}
+            )
+            mem.commit()
+        assert (loop.parse_time(payload["next_retry_at"]) - loop.now()).total_seconds() < 10
 
 
 def test_retry_timestamp_units_and_invalid_values_fall_back_bounded(cfg: dict) -> None:
