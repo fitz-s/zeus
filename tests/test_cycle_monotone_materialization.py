@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from contextlib import contextmanager
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -975,6 +976,49 @@ def test_same_cycle_baseline_seed_replacement_uses_exact_marker_cas() -> None:
     assert conn.execute(
         "SELECT seed_file FROM cycle_advance_enqueues WHERE city='Cape Town'"
     ).fetchone()[0] == "new-owner.json"
+
+
+def test_causal_owner_check_waits_through_busy_queue_claim(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A short queue claim cannot turn a committed ENS wake into a retry lottery."""
+
+    request_dir = tmp_path / "requests"
+    inflight_dir = tmp_path / "inflight"
+    request_dir.mkdir()
+    inflight_dir.mkdir()
+    attempts = 0
+
+    @contextmanager
+    def _busy_once(_path):
+        nonlocal attempts
+        attempts += 1
+        yield attempts > 1
+
+    monkeypatch.setattr(
+        "src.data.replacement_forecast_production."
+        "_replacement_forecast_live_materialization_queue_config",
+        lambda: {"request_dir": request_dir, "inflight_dir": inflight_dir},
+    )
+    monkeypatch.setattr(
+        "src.data.replacement_forecast_live_materialization_queue._queue_lock",
+        _busy_once,
+    )
+
+    check = cycle_advance._day0_enqueue_owner_request_check(
+        city="Cape Town",
+        target_date="2026-08-23",
+        metric="high",
+        target_cycle_iso="2026-08-23T00:00:00+00:00",
+        seed_file="old-owner.json",
+        identity=None,
+        queue_lock_wait_seconds=0.2,
+    )
+
+    assert attempts == 2
+    assert check.state is cycle_advance._Day0EnqueueOwnerRequestState.INACTIVE
+    assert check.reason == "DAY0_ENQUEUE_OWNER_REQUEST_ABSENT"
 
 
 def test_scoped_source_commit_enqueues_missing_live_posterior(

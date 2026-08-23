@@ -64,6 +64,7 @@ UTC = timezone.utc
 
 _ANCHOR_LEG_SOURCE_ID = "openmeteo_ecmwf_ifs_9km"
 _HELD_REHEAL_COOLDOWN = timedelta(minutes=30)
+_CAUSAL_BASELINE_OWNER_LOCK_WAIT_SECONDS = 120.0
 _DAY0_CONDITIONING_IDENTITY_COLUMN = "day0_conditioning_identity_json"
 _CYCLE_ADVANCE_STAGING_DIR = ".cycle-advance-staging"
 _DAY0_BRIDGE_STOP = object()
@@ -568,6 +569,7 @@ def _day0_enqueue_owner_request_check(
     target_cycle_iso: str,
     seed_file: str,
     identity: str | None,
+    queue_lock_wait_seconds: float = 0.0,
 ) -> _Day0EnqueueOwnerRequestCheck:
     """Classify whether this exact Day0 enqueue owner still has a live queue request.
 
@@ -698,13 +700,19 @@ def _day0_enqueue_owner_request_check(
             _queue_lock,
         )
 
-        with _queue_lock(request_path.parent / ".materialization_queue.lock") as acquired:
-            if not acquired:
+        wait_seconds = max(0.0, float(queue_lock_wait_seconds))
+        deadline = time.monotonic() + wait_seconds
+        while True:
+            with _queue_lock(request_path.parent / ".materialization_queue.lock") as acquired:
+                if acquired:
+                    return _scan()
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
                 return _Day0EnqueueOwnerRequestCheck(
                     _Day0EnqueueOwnerRequestState.INDETERMINATE,
                     "DAY0_ENQUEUE_OWNER_REQUEST_QUEUE_LOCK_BUSY",
                 )
-            return _scan()
+            time.sleep(min(0.05, remaining))
     except OSError as exc:
         return _Day0EnqueueOwnerRequestCheck(
             _Day0EnqueueOwnerRequestState.INDETERMINATE,
@@ -1179,6 +1187,7 @@ def _superseded_baseline_seed_file(
             target_cycle_iso=target_cycle_iso,
             seed_file=seed_file,
             identity=recorded_identity,
+            queue_lock_wait_seconds=_CAUSAL_BASELINE_OWNER_LOCK_WAIT_SECONDS,
         )
         if request_check.state in {
             _Day0EnqueueOwnerRequestState.ACTIVE,
@@ -1207,6 +1216,7 @@ def _superseded_baseline_seed_file(
         target_cycle_iso=target_cycle_iso,
         seed_file=seed_file,
         identity=recorded_identity,
+        queue_lock_wait_seconds=_CAUSAL_BASELINE_OWNER_LOCK_WAIT_SECONDS,
     )
     if request_check.state in {
         _Day0EnqueueOwnerRequestState.ACTIVE,

@@ -859,6 +859,23 @@
   and separate command/venue/fill evidence for any selected order. This timing
   repair is not itself realized profit.
 
+### 2026-08-23 — committed ENS wake cannot lose every queue-lock race (B152)
+
+- **Observed defect:** after B151 deployment, exact live replay over all eleven
+  held HIGH scopes returned `INDETERMINATE` for 11/11. The one-second
+  materialization poll held its claim lock while preparing a large legacy
+  backlog, so every non-blocking owner scan lost the same lock race and emitted
+  zero current-cycle seeds.
+- **Contract:** only committed-ENS causal owner checks wait, for at most 120
+  seconds, to obtain the existing queue lock and perform the same exact
+  read-only request/inflight scan. Other Day0 checks preserve their non-blocking
+  behavior. The deadline remains fail-closed; active and indeterminate owners
+  still cannot be replaced.
+- **Acceptance:** an antibody makes the first lock attempt busy and the second
+  successful, then proves the exact absent owner becomes `INACTIVE`. Live
+  acceptance remains new 00Z seed, posterior provenance, held redecision, and
+  separate venue evidence for any order.
+
 ### 2026-08-02 — partial EXIT realized-PnL canonical continuity (hot-fix slice)
 
 - **Scope / seam:** `src/execution/exit_lifecycle.py` emits canonical
