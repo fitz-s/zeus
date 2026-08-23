@@ -739,6 +739,8 @@ def build_monitor_refreshed_canonical_write(
             if final_exit_trigger is not None
             else str(getattr(exit_decision, "trigger", "") or "")
         )
+        if should_exit:
+            projection["exit_reason"] = _nullable(reason)
         payload_dict.update(
             {
                 "exit_decision_available": True,

@@ -1,9 +1,9 @@
 # Created: 2026-03-31
-# Lifecycle: created=2026-03-31; last_reviewed=2026-08-21; last_reused=2026-08-21
+# Lifecycle: created=2026-03-31; last_reviewed=2026-08-22; last_reused=2026-08-22
 # Purpose: Lock live-money safety invariants across fill, exit, chain, and P&L flows.
 # Reuse: Run for execution finality, live exit, chain reconciliation, and safety invariant changes.
-# Last reused/audited: 2026-08-21
-# Authority basis: monitor evidence-axis independence and unavailable-decision hot-fix
+# Last reused/audited: 2026-08-22
+# Authority basis: incident b32ad42ae26a0650 RED exit event/projection atomicity
 """Live safety invariant tests: relationship tests, not function tests.
 
 These verify cross-module relationships that prevent ghost positions,
@@ -14701,6 +14701,155 @@ def test_monitor_refresh_canonical_emit_updates_current_projection(tmp_path):
     assert current["last_monitor_market_price"] == pytest.approx(0.44)
     assert current["updated_at"] == event["occurred_at"]
     conn.close()
+
+
+def test_incident_b32ad42_red_monitor_projection_authorizes_same_turn_exit(
+    tmp_path,
+    monkeypatch,
+):
+    """The final RED decision and projection commit as one causal cut."""
+    from src.engine.lifecycle_events import (
+        build_entry_canonical_write,
+        build_monitor_refreshed_canonical_write,
+    )
+    from src.execution import exit_lifecycle
+    from src.riskguard.risk_level import RiskLevel
+    from src.state.db import append_many_and_project, get_connection, init_schema
+    from src.state.lifecycle_manager import LifecyclePhase
+
+    conn = get_connection(tmp_path / "incident-b32ad42-red-monitor.db")
+    init_schema(conn)
+    conn.execute(
+        "CREATE INDEX idx_position_events_position_type_sequence "
+        "ON position_events(position_id, event_type, sequence_no DESC)"
+    )
+    pos = _make_position(
+        trade_id="21325000-644",
+        market_id="0x96914dbfe260f907aa0bb4b583783c9c728adb7b80534c3c5c3333d121132b12",
+        condition_id="0x96914dbfe260f907aa0bb4b583783c9c728adb7b80534c3c5c3333d121132b12",
+        city="Tel Aviv",
+        cluster="Tel Aviv",
+        target_date="2026-08-22",
+        bin_label="Will the highest temperature in Tel Aviv be 33°C on August 22?",
+        direction="buy_no",
+        unit="C",
+        size_usd=5.55,
+        shares=15.0,
+        cost_basis_usd=5.55,
+        entry_price=0.37,
+        strategy_key="forecast_qkernel_entry",
+        entry_method="qkernel_spine",
+        chain_state="synced",
+        chain_shares=15.0,
+        token_id="39140315509755399623283379877984014754091934066691703608348835448373343017660",
+        no_token_id="87169765848404993777794114769282164404205005719760912351823087747451493596913",
+        entered_at="2026-08-20T11:00:08.981000+00:00",
+        order_status="filled",
+    )
+    entry_events, entry_projection = build_entry_canonical_write(
+        pos,
+        phase_after=LifecyclePhase.ACTIVE.value,
+        decision_id="incident-b32ad42-entry",
+    )
+    append_many_and_project(conn, entry_events, entry_projection)
+
+    pos.last_monitor_prob = 0.9003278024817638
+    pos.last_monitor_prob_is_fresh = False
+    pos.last_monitor_market_price = 0.5242838774198156
+    pos.last_monitor_market_price_is_fresh = True
+    pos.last_monitor_best_bid = 0.49
+    pos.last_monitor_best_ask = 0.55
+    pos.applied_validations = [
+        "predicted_bin_exit_law",
+        "red_force_exit",
+        "dt2_red_force_exit_sweep_actuated",
+    ]
+    decision = ExitDecision(
+        True,
+        "RED_FORCE_EXIT",
+        urgency="immediate",
+        trigger="RED_FORCE_EXIT",
+        selected_method="qkernel_spine",
+        applied_validations=pos.applied_validations,
+    )
+    monitor_events, monitor_projection = build_monitor_refreshed_canonical_write(
+        pos,
+        sequence_no=1226,
+        phase_after=LifecyclePhase.ACTIVE.value,
+        occurred_at="2026-08-21T00:52:15.735899+00:00",
+        exit_decision=decision,
+        final_should_exit=True,
+        final_exit_reason="RED_FORCE_EXIT",
+        final_exit_trigger="RED_FORCE_EXIT",
+    )
+    append_many_and_project(conn, monitor_events, monitor_projection)
+
+    current = conn.execute(
+        "SELECT exit_reason FROM position_current WHERE position_id = ?",
+        (pos.trade_id,),
+    ).fetchone()
+    payload = json.loads(monitor_events[0]["payload_json"])
+    assert payload["exit_decision_reason"] == "RED_FORCE_EXIT"
+    assert current["exit_reason"] == "RED_FORCE_EXIT"
+    assert exit_lifecycle._red_monitor_provenance_matches(payload) is True
+
+    pos.exit_reason = "RED_FORCE_EXIT"
+    monkeypatch.setattr(
+        "src.riskguard.riskguard.get_current_level",
+        lambda: RiskLevel.RED,
+    )
+    assert exit_lifecycle._red_runtime_position_open(
+        conn,
+        pos,
+        require_canonical=True,
+    ) is True
+    assert exit_lifecycle._canonical_red_force_exit_provenance(conn, pos) is True
+    assert exit_lifecycle._red_force_exit_authorized(
+        pos,
+        ExitContext(
+            exit_reason="RED_FORCE_EXIT",
+            current_market_price=0.49,
+            current_market_price_is_fresh=True,
+            best_bid=0.49,
+        ),
+        conn=conn,
+    ) is True
+    assert 15.0 * 0.49 - 15.0 * 0.1 * 0.49 * (1.0 - 0.49) == pytest.approx(
+        6.97515
+    )
+    conn.close()
+
+
+def test_monitor_hold_projection_does_not_mint_exit_reason():
+    """A profitable HOLD receipt remains non-actuating canonical evidence."""
+    from src.engine.lifecycle_events import build_monitor_refreshed_canonical_write
+    from src.state.lifecycle_manager import LifecyclePhase
+
+    pos = _make_position(
+        trade_id="nearby-profitable-hold",
+        strategy_key="forecast_qkernel_entry",
+        entered_at="2026-08-21T00:00:00+00:00",
+        exit_reason="",
+    )
+    decision = ExitDecision(
+        False,
+        "CI_OVERLAP_HOLD",
+        trigger="CI_OVERLAP_HOLD",
+        applied_validations=["replacement_posterior"],
+    )
+    events, projection = build_monitor_refreshed_canonical_write(
+        pos,
+        sequence_no=4,
+        phase_after=LifecyclePhase.ACTIVE.value,
+        exit_decision=decision,
+        final_should_exit=False,
+        final_exit_reason="CI_OVERLAP_HOLD",
+        final_exit_trigger="CI_OVERLAP_HOLD",
+    )
+
+    payload = json.loads(events[0]["payload_json"])
+    assert payload["exit_decision_should_exit"] is False
+    assert projection["exit_reason"] is None
 
 
 def test_monitor_refresh_preserves_chain_corrected_entry_economics(tmp_path):
