@@ -2392,6 +2392,109 @@ def test_forecast_poll_starts_reserved_and_background_lanes_together(monkeypatch
     assert set(started) == {"priority", "background"}
 
 
+def test_forecast_poll_claims_priority_arriving_during_background(
+    tmp_path, monkeypatch
+) -> None:
+    """A late Day0 request is claimed before the blocked background runner releases."""
+    from src.ingest import forecast_live_daemon
+    from src.data import replacement_forecast_production
+
+    request_dir = tmp_path / "requests"
+    seed_dir = tmp_path / "seeds"
+    inflight_dir = tmp_path / "inflight"
+    request_dir.mkdir()
+    seed_dir.mkdir()
+    inflight_dir.mkdir()
+    cfg = {
+        "request_dir": request_dir,
+        "seed_dir": seed_dir,
+        "inflight_dir": inflight_dir,
+    }
+    background_started = threading.Event()
+    release_background = threading.Event()
+    priority_started = threading.Event()
+    call_count = {"priority": 0}
+
+    monkeypatch.setattr(
+        replacement_forecast_production,
+        "_replacement_forecast_live_materialization_queue_config",
+        lambda: cfg,
+    )
+    monkeypatch.setattr(
+        forecast_live_daemon,
+        "_replacement_forecast_queue_pending",
+        lambda _cfg, key: key == "request_dir" and request_dir.glob("*.json"),
+    )
+    monkeypatch.setattr(
+        forecast_live_daemon,
+        "_replacement_forecast_inflight_pending",
+        lambda _cfg: False,
+    )
+    monkeypatch.setattr(
+        forecast_live_daemon,
+        "_MATERIALIZATION_PRIORITY_WATCH_INTERVAL_SECONDS",
+        0.01,
+    )
+    monkeypatch.setattr(
+        forecast_live_daemon,
+        "_MATERIALIZATION_PRIORITY_WATCH_MAX_SECONDS",
+        0.5,
+    )
+
+    def run_lane(_cfg, *, lane, seed_limit):
+        if lane == "background":
+            background_started.set()
+            assert release_background.wait(1.0)
+        else:
+            call_count["priority"] += 1
+            if any(request_dir.glob("*.json")):
+                priority_started.set()
+        return {"lane": lane, "seed_limit": seed_limit}
+
+    monkeypatch.setattr(forecast_live_daemon, "_replacement_forecast_materialize_lane", run_lane)
+    poll_thread = threading.Thread(target=forecast_live_daemon._replacement_forecast_materialize_poll_job)
+    poll_thread.start()
+    assert background_started.wait(1.0)
+    (request_dir / "Ankara.priority.json").write_text("{}", encoding="utf-8")
+    assert priority_started.wait(1.0)
+    release_background.set()
+    poll_thread.join(2.0)
+    assert not poll_thread.is_alive()
+    assert call_count["priority"] >= 2
+
+
+def test_queue_lock_does_not_double_acquire_during_owner_publication(
+    tmp_path, monkeypatch
+) -> None:
+    """A second lane cannot steal a just-created empty lock."""
+    lock_path = tmp_path / "materialization_queue.lock"
+    original_write = materialization_queue.os.write
+    write_entered = threading.Event()
+    release_write = threading.Event()
+    second_acquired: list[bool] = []
+
+    def blocked_write(fd, payload):
+        write_entered.set()
+        assert release_write.wait(1.0)
+        return original_write(fd, payload)
+
+    monkeypatch.setattr(materialization_queue.os, "write", blocked_write)
+
+    def first_owner() -> None:
+        with materialization_queue._queue_lock(lock_path) as acquired:
+            assert acquired
+
+    first = threading.Thread(target=first_owner)
+    first.start()
+    assert write_entered.wait(1.0)
+    with materialization_queue._queue_lock(lock_path) as acquired:
+        second_acquired.append(acquired)
+    assert second_acquired == [False]
+    release_write.set()
+    first.join(2.0)
+    assert not first.is_alive()
+
+
 def test_day0_drained_marker_with_active_provisional_posterior_does_not_reenqueue(
     tmp_path,
 ) -> None:

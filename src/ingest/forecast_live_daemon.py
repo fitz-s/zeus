@@ -143,6 +143,8 @@ REPLACEMENT_FORECAST_EXECUTOR_LANE = "replacement_production"
 # add write throughput; they can exhaust the subprocess timeout waiting on each
 # other and permanently strand the freshest family request in failed/.
 REPLACEMENT_FORECAST_MATERIALIZE_MAX_INSTANCES = 1
+_MATERIALIZATION_PRIORITY_WATCH_INTERVAL_SECONDS = 0.5
+_MATERIALIZATION_PRIORITY_WATCH_MAX_SECONDS = 31.0
 # SEPARATE lane for the heavy download (publish-time cron + boot catch-up). The download
 # runs for tens of minutes (8 Open-Meteo models x all cities; slowed further by fail-soft
 # 400-retries on short-range models). On a SHARED max_workers=1 lane it serialized AHEAD of
@@ -1250,6 +1252,26 @@ def _replacement_forecast_materialize_lane(
     return result
 
 
+def _replacement_forecast_priority_watch(
+    cfg: dict[str, object],
+    *,
+    background_done: threading.Event,
+) -> None:
+    """Claim late priority arrivals for one bounded background execution window."""
+    deadline = time.monotonic() + _MATERIALIZATION_PRIORITY_WATCH_MAX_SECONDS
+    while True:
+        _replacement_forecast_materialize_lane(
+            cfg,
+            lane="priority",
+            # A seed can arrive after the poll began; never freeze this at the
+            # initial queue snapshot.
+            seed_limit=1,
+        )
+        if background_done.is_set() or time.monotonic() >= deadline:
+            return
+        background_done.wait(_MATERIALIZATION_PRIORITY_WATCH_INTERVAL_SECONDS)
+
+
 def _replacement_forecast_queue_pending(
     cfg: dict[str, object], key: str
 ) -> bool:
@@ -1341,15 +1363,26 @@ def _replacement_forecast_materialize_poll_job() -> None:
     # a fresh Day0/held request therefore starts while an old background
     # subprocess is still within its timeout window.
     seed_limit = 1 if seeds_pending else 0
-    with ThreadPoolExecutor(max_workers=2, thread_name_prefix="forecast-materialize-lane") as executor:
-        futures = tuple(
-            executor.submit(
-                _replacement_forecast_materialize_lane,
+    background_done = threading.Event()
+
+    def run_background() -> dict[str, object]:
+        try:
+            return _replacement_forecast_materialize_lane(
                 cfg,
-                lane=lane,
+                lane="background",
                 seed_limit=seed_limit,
             )
-            for lane in ("priority", "background")
+        finally:
+            background_done.set()
+
+    with ThreadPoolExecutor(max_workers=2, thread_name_prefix="forecast-materialize-lane") as executor:
+        futures = (
+            executor.submit(run_background),
+            executor.submit(
+                _replacement_forecast_priority_watch,
+                cfg,
+                background_done=background_done,
+            ),
         )
         for future in futures:
             try:

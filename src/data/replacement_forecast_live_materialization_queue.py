@@ -6,6 +6,7 @@ import hashlib
 import json
 import logging
 import os
+import fcntl
 import sqlite3
 import subprocess
 import sys
@@ -569,20 +570,72 @@ def _queue_lock(lock_path: Path, *, wait_seconds: float = 0.0):
     try:
         while fd is None:
             try:
-                fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                fd = os.open(
+                    str(lock_path),
+                    os.O_CREAT | os.O_EXCL | os.O_RDWR,
+                )
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except FileExistsError:
-                holder_pid = _read_lock_holder_pid(lock_path)
-                if holder_pid is None or not _pid_is_alive(holder_pid):
-                    _archive_stale_lock(lock_path, holder_pid=holder_pid)
+                try:
+                    candidate_fd = os.open(str(lock_path), os.O_RDWR)
+                except FileNotFoundError:
                     continue
+                try:
+                    try:
+                        fcntl.flock(
+                            candidate_fd,
+                            fcntl.LOCK_EX | fcntl.LOCK_NB,
+                        )
+                    except BlockingIOError:
+                        if time.monotonic() >= deadline:
+                            yield False
+                            return
+                        time.sleep(
+                            min(0.01, max(0.0, deadline - time.monotonic()))
+                        )
+                        continue
+                    holder_pid = _read_lock_holder_pid(lock_path)
+                    if holder_pid is not None and _pid_is_alive(holder_pid):
+                        if time.monotonic() >= deadline:
+                            yield False
+                            return
+                        time.sleep(
+                            min(0.01, max(0.0, deadline - time.monotonic()))
+                        )
+                        continue
+                    _archive_stale_lock(lock_path, holder_pid=holder_pid)
+                finally:
+                    try:
+                        fcntl.flock(candidate_fd, fcntl.LOCK_UN)
+                    except OSError:
+                        pass
+                    os.close(candidate_fd)
+                continue
+            except BlockingIOError:
+                # The just-created path is already flocked by this process; a
+                # failure here is only possible on an unusual platform.
+                if fd is not None:
+                    os.close(fd)
+                    fd = None
                 if time.monotonic() >= deadline:
                     yield False
                     return
                 time.sleep(min(0.01, max(0.0, deadline - time.monotonic())))
-        os.write(fd, f"pid={os.getpid()} acquired_at={datetime.now(timezone.utc).isoformat()}\n".encode("utf-8"))
-        yield True
+            if fd is not None:
+                os.write(
+                    fd,
+                    f"pid={os.getpid()} acquired_at={datetime.now(timezone.utc).isoformat()}\n".encode(
+                        "utf-8"
+                    ),
+                )
+                yield True
+                return
     finally:
         if fd is not None:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+            except OSError:
+                pass
             os.close(fd)
             try:
                 lock_path.unlink()
