@@ -5500,6 +5500,7 @@ def _global_batch_probe_reactor(
     incomplete=False,
     next_claim_event=None,
     held_sell_completion_cut=None,
+    economic_cut_completed=False,
 ):
     bound_claims = {"generations": {}, "attempt_counts": {}}
 
@@ -5551,6 +5552,7 @@ def _global_batch_probe_reactor(
             venue_submit_count=0,
             next_claim_event=next_claim_event,
             held_sell_completion_cut=held_sell_completion_cut,
+            economic_cut_completed=economic_cut_completed,
         )
 
     observations.update(direct_submit_calls=0, batch_calls=0)
@@ -5632,6 +5634,28 @@ def test_empty_event_queue_without_exact_completion_remains_noop():
 
     assert observations["batch_calls"] == 0
     assert result.global_held_sell_completion_cuts == []
+
+
+def test_generic_monitor_completion_runs_one_empty_global_no_trade_cut():
+    """A durable generic wake earns one global HOLD/CASH comparison, not a ratchet."""
+    _conn, store = _store()
+    observations: dict[str, object] = {}
+    reactor = _global_batch_probe_reactor(
+        store,
+        observations,
+        economic_cut_completed=True,
+    )
+
+    result = reactor.process_pending(
+        decision_time=_DT_VENUE_OPEN,
+        limit=1,
+        allow_empty_global_completion=True,
+    )
+
+    assert observations["batch_calls"] == 1
+    assert observations["batch_event_ids"] == ()
+    assert observations["direct_submit_calls"] == 0
+    assert result.global_auction_completed_non_cancelled == 1
 
 
 def test_nonempty_unclaimed_queue_cannot_spend_empty_completion_authority(
@@ -6123,6 +6147,47 @@ def test_reserved_or_exact_completion_yields_for_unresolved_monitor_debt(
         ) is False
         assert reservations == [("periodic_monitor_preemption", "")]
         assert reactor_module._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.is_set()
+        assert not lock.locked()
+    finally:
+        reactor_module._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.clear()
+
+
+def test_generic_completion_cannot_reacquire_before_monitor_successor(
+    monkeypatch,
+):
+    """A level-triggered generic wake must not leapfrog durable monitor debt."""
+    import src.events.reactor as reactor_module
+    import src.main as main
+    import src.state.db as db
+
+    defer_calls: list[str] = []
+    monkeypatch.setattr(main, "_settings_section", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(
+        main,
+        "_defer_for_held_position_monitor",
+        lambda job: defer_calls.append(job) or True,
+    )
+    monkeypatch.setattr(
+        reactor_module,
+        "_durable_exact_held_sell_completion_pending",
+        lambda: False,
+    )
+    monkeypatch.setattr(
+        reactor_module,
+        "_rehydrate_exact_executable_held_sell_pending",
+        lambda **_kwargs: (False, ()),
+    )
+    monkeypatch.setattr(
+        db,
+        "get_world_connection",
+        lambda: pytest.fail("generic completion must yield before DB setup"),
+    )
+
+    lock = threading.Lock()
+    reactor_module._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.set()
+    try:
+        assert reactor_module.run_edli_event_reactor_cycle(active_lock=lock) is False
+        assert defer_calls == ["edli_event_reactor"]
         assert not lock.locked()
     finally:
         reactor_module._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.clear()
@@ -9478,6 +9543,22 @@ def test_day0_cancellation_does_not_discharge_monitor_fairness_debt():
         reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.clear()
 
 
+def test_generic_no_trade_completion_discharges_monitor_fairness_debt():
+    from types import SimpleNamespace
+
+    from src.events import reactor
+
+    reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.set()
+    try:
+        assert reactor._settle_global_auction_monitor_fairness(
+            completion_due_at_start=True,
+            result=SimpleNamespace(global_auction_completed_non_cancelled=1),
+        )
+        assert not reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.is_set()
+    finally:
+        reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.clear()
+
+
 def test_new_fact_supersession_does_not_discharge_monitor_fairness_debt():
     from types import SimpleNamespace
 
@@ -9540,6 +9621,7 @@ def test_exact_v4_no_book_completion_discharges_monitor_fairness_debt():
             completion_due_at_start=True,
             result=SimpleNamespace(global_auction_completed_non_cancelled=0),
             terminal_no_book_completion=True,
+            exact_held_completion=True,
         )
         assert not reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.is_set()
     finally:
@@ -9565,6 +9647,67 @@ def test_pre_submit_rejection_cannot_discharge_monitor_fairness_debt():
             ),
         )
         assert reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.is_set() is True
+    finally:
+        reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.clear()
+
+
+def test_generic_no_trade_cannot_clear_unfinished_exact_v4_completion():
+    from types import SimpleNamespace
+
+    from src.events import reactor
+
+    reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.set()
+    try:
+        assert not reactor._settle_global_auction_monitor_fairness(
+            completion_due_at_start=True,
+            result=SimpleNamespace(global_auction_completed_non_cancelled=1),
+            exact_held_completion=True,
+            exact_completion_terminal=False,
+        )
+        assert reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.is_set()
+    finally:
+        reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.clear()
+
+
+def test_exact_v4_receipt_persist_failure_cannot_clear_completion_token(
+    monkeypatch,
+):
+    from types import SimpleNamespace
+
+    from src.events import reactor
+
+    request = object()
+    receipt = object()
+    persisted: list[tuple[object, ...]] = []
+    monkeypatch.setattr(
+        reactor,
+        "_held_sell_reauction_receipts_from_global_cut",
+        lambda **_kwargs: (receipt,),
+    )
+    receipts, matching_receipts_persisted, requests_completed = (
+        reactor._persist_exact_held_sell_completion_receipts(
+            requests=(request,),
+            result=SimpleNamespace(),
+            persist_receipts=lambda values: persisted.append(values) or False,
+            requests_completed=lambda values: values == (request,),
+        )
+    )
+    assert receipts == (receipt,)
+    assert persisted == [(receipt,)]
+    assert requests_completed is True
+    assert matching_receipts_persisted is False
+
+    reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.set()
+    try:
+        assert not reactor._settle_global_auction_monitor_fairness(
+            completion_due_at_start=True,
+            result=SimpleNamespace(global_auction_completed_non_cancelled=1),
+            exact_held_completion=True,
+            exact_completion_terminal=(
+                matching_receipts_persisted and requests_completed
+            ),
+        )
+        assert reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.is_set()
     finally:
         reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.clear()
 

@@ -1369,6 +1369,7 @@ class OpportunityEventReactor:
         targeted_event_ids: frozenset[str] = frozenset(),
         targeted_only: bool = False,
         bridge_stale_debt_slots: int = 0,
+        allow_empty_global_completion: bool = False,
         cancelled: Callable[[], bool] | None = None,
     ) -> ReactorResult:
         result = ReactorResult()
@@ -1470,10 +1471,13 @@ class OpportunityEventReactor:
             empty_global_completion = bool(
                 not events
                 and callable(getattr(self._submit, "process_global_batch", None))
-                and getattr(
-                    self._submit,
-                    "requires_empty_global_completion_cut",
-                    False,
+                and (
+                    allow_empty_global_completion
+                    or getattr(
+                        self._submit,
+                        "requires_empty_global_completion_cut",
+                        False,
+                    )
                 )
                 and not empty_global_completion_used
             )
@@ -7854,15 +7858,26 @@ def _settle_global_auction_monitor_fairness(
     completion_due_at_start: bool,
     result: object,
     terminal_no_book_completion: bool = False,
+    exact_held_completion: bool = False,
+    exact_completion_terminal: bool = False,
 ) -> bool:
-    """Clear a prior monitor preemption only after useful auction completion."""
+    """Settle one generic completion turn without consuming exact V4 debt."""
 
     if not completion_due_at_start:
         return False
     completed = int(
         getattr(result, "global_auction_completed_non_cancelled", 0) or 0
     )
-    if completed > 0 or terminal_no_book_completion:
+    # A generic fairness wake purchases exactly one completed global comparison:
+    # an economic HOLD/CASH result is terminal even when it starts no command.
+    # Exact V4 debt is different: aggregate completion cannot answer a specific
+    # lineage, so only its matching durable terminal receipt may clear this hint.
+    completed_turn = (
+        exact_completion_terminal or terminal_no_book_completion
+        if exact_held_completion
+        else completed > 0 or terminal_no_book_completion
+    )
+    if completed_turn:
         _GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.clear()
         logging.getLogger("zeus.events.reactor").info(
             "global auction completion debt cleared after terminal current cut"
@@ -7870,6 +7885,23 @@ def _settle_global_auction_monitor_fairness(
         return True
     _GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.set()
     return False
+
+
+def _persist_exact_held_sell_completion_receipts(
+    *,
+    requests: tuple[object, ...],
+    result: object,
+    persist_receipts: Callable[[tuple[object, ...]], bool],
+    requests_completed: Callable[[tuple[object, ...]], bool],
+) -> tuple[tuple[object, ...], bool, bool]:
+    """Return this cut's durable receipt state before it can settle exact debt."""
+
+    receipts = _held_sell_reauction_receipts_from_global_cut(
+        requests=requests,
+        result=result,
+    )
+    persisted = bool(receipts and persist_receipts(receipts))
+    return receipts, persisted, bool(requests_completed(requests))
 
 
 def run_edli_event_reactor_cycle(
@@ -8045,13 +8077,13 @@ def run_edli_event_reactor_cycle(
         exact_executable_held_completion = True
         durable_exact_held_completion_requests = ()
 
-    # SCOPE: admission of the one global cut already owed after a monitor
-    # handoff. DRAIN: that cut reaches the bounded in-reactor fairness probe;
-    # ordinary monitor pressure may still preempt the first unreserved cycle.
-    # RESET: a non-cancelled terminal cut clears the completion token.
+    # SCOPE: an exact V4 completion may pass monitor admission; generic fairness
+    # debt cannot. DRAIN: the currently active cut reaches an existing safe
+    # checkpoint, then the monitor gets one bounded successor turn before this
+    # generic wake can reacquire the sole reactor lock. RESET: the monitor clears
+    # its own fairness debt; exact debt remains durable and independently scoped.
     if (
-        not _GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.is_set()
-        and not exact_executable_held_completion
+        not exact_executable_held_completion
         and _defer_for_held_position_monitor("edli_event_reactor")
     ):
         return False
@@ -8061,8 +8093,7 @@ def run_edli_event_reactor_cycle(
     if not producer_fast_path and _urgent_wake_pending():
         return False
     if (
-        not _GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.is_set()
-        and not exact_executable_held_completion
+        not exact_executable_held_completion
         and _defer_for_held_position_monitor("edli_event_reactor")
     ):
         return False
@@ -8236,8 +8267,7 @@ def run_edli_event_reactor_cycle(
             active_lock.release()
             return False
         if (
-            not _GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.is_set()
-            and not exact_executable_held_completion
+            not exact_executable_held_completion
             and _defer_for_held_position_monitor("edli_event_reactor")
         ):
             active_lock.release()
@@ -9109,6 +9139,13 @@ def run_edli_event_reactor_cycle(
             targeted_event_ids=frozenset(targeted_event_ids),
             targeted_only=targeted_only_fast_path,
             bridge_stale_debt_slots=1 if targeted_only_fast_path else 0,
+            # Generic monitor fairness is owed one *global* current cut, even
+            # when no opportunity event is pending.  The adapter still owns the
+            # full q/book/wealth comparison and can only produce HOLD/CASH here.
+            allow_empty_global_completion=bool(
+                _monitor_completion_mode.fairness_reserved
+                and not held_sell_completion_cut_requests
+            ),
             cancelled=_process_pending_cancelled(
                 committed_day0_wake=committed_day0_wake,
                 producer_fast_path=producer_fast_path,
@@ -9122,6 +9159,7 @@ def run_edli_event_reactor_cycle(
             ),
         )
         terminal_no_book_completion = False
+        exact_completion_terminal = False
         if held_sell_completion_cut_requests:
             from src.runtime.reactor_wake import (
                 NO_EXECUTABLE_BOOK,
@@ -9129,21 +9167,28 @@ def run_edli_event_reactor_cycle(
                 persist_held_sell_reauction_receipts,
             )
 
-            held_sell_reauction_receipts = _held_sell_reauction_receipts_from_global_cut(
+            (
+                held_sell_reauction_receipts,
+                matching_receipts_persisted,
+                requests_completed,
+            ) = _persist_exact_held_sell_completion_receipts(
                 requests=held_sell_completion_cut_requests,
                 result=_rr,
+                persist_receipts=persist_held_sell_reauction_receipts,
+                requests_completed=held_sell_reauction_requests_completed,
             )
-            if held_sell_reauction_receipts and not persist_held_sell_reauction_receipts(
-                held_sell_reauction_receipts
-            ):
+            if held_sell_reauction_receipts and not matching_receipts_persisted:
                 completion_wake_needs_retry = True
             # A completed global cut is not completion authority for a wake
             # until every request in that wake has its own immutable terminal
             # receipt.  Keep the exact durable debt queued across witness,
             # partition, and receipt-write failures; this is deliberately not
             # folded into the generic monitor HOLD reason.
-            requests_completed = held_sell_reauction_requests_completed(
-                held_sell_completion_cut_requests
+            # Exact V4 completion has two independent durability boundaries:
+            # this cut's matching receipt write and the lineage-aware queue
+            # re-read.  A stale/old receipt must not clear the process token.
+            exact_completion_terminal = bool(
+                matching_receipts_persisted and requests_completed
             )
             if not requests_completed:
                 completion_wake_needs_retry = True
@@ -9153,8 +9198,7 @@ def run_edli_event_reactor_cycle(
                 except _DurableExactHeldCompletionUnknown:
                     completion_wake_needs_retry = True
             terminal_no_book_completion = bool(
-                requests_completed
-                and held_sell_reauction_receipts
+                exact_completion_terminal
                 and any(
                     getattr(receipt, "status", "") == NO_EXECUTABLE_BOOK
                     for receipt in held_sell_reauction_receipts
@@ -9164,6 +9208,8 @@ def run_edli_event_reactor_cycle(
             completion_due_at_start=_monitor_completion_due_at_start,
             result=_rr,
             terminal_no_book_completion=terminal_no_book_completion,
+            exact_held_completion=bool(held_sell_completion_cut_requests),
+            exact_completion_terminal=exact_completion_terminal,
         )
         completion_wake_needs_retry = completion_wake_needs_retry or (
             completion_wake and not completion_satisfied

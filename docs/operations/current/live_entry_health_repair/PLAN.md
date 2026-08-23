@@ -3126,6 +3126,52 @@ publication barrier.
   observes it only at existing safe cancellation checkpoints, releases its
   lock without acknowledging the durable request, and the next poll claims the
   exact request before ordinary work.  Generic monitor-fairness completion is
+  weaker: its in-process token is armed only after its generic wake is durable
+  and buys exactly one non-cancelled global selection turn.  A completed
+  global HOLD/CASH/NO_TRADE cut clears that generic token even when it starts no
+  command; a cancelled or superseded cut retains it.  While monitor fairness
+  debt is pending, a generic token cannot bypass invocation admission and
+  continuously reacquire the sole lock: the active cut may finish its existing
+  safe checkpoint, then the monitor receives one bounded successor turn.  A
+  publish/read failure cannot leave an ownerless reservation that repeatedly
+  reclaims the lock while monitor debt remains.  The exact turn remains
+  reduce-only and rebinds q/book/wealth through the existing global auction;
+  terminal outcome is an owned command or typed no-executable receipt only.
+- SCOPE: admission and bounded safe-point cancellation of one active ordinary
+  reactor cycle when current durable exact V4 held-SELL debt arrives.  No
+  unrelated event claim, command, BUY/ENTRY, q, capital comparison, JIT, or
+  acknowledgement semantics change.
+- DRAIN: the active ordinary cycle reaches its next existing cancellation
+  checkpoint and releases the one active lock; monitor fairness debt receives
+  one bounded handoff before a generic completion may re-enter.  The generic
+  wake then executes one full global empty/non-empty selection and clears only
+  on its non-cancelled completion.  The durable exact wake remains queued and
+  the next level-triggered poll obtains the exact-family global cut.
+- RESET: a matching durable command/terminal receipt removes the exact debt;
+  a typed no-executable receipt similarly completes only that lineage.  A
+  generic token resets after its owned non-cancelled selection, including
+  no-trade; failed publication never sets it.  Exact V4 requests reset only
+  through their matching durable terminal receipts, never through a generic
+  no-trade.  An unreadable durable queue fails closed and ordinary
+  admission stops; a new publication revision remains pending rather than
+  being cleared by an older handoff.
+- Acceptance: an ordinary locked cycle sees a late exact publication, cancels
+  at its safe callback without I/O, releases the lock, leaves the request
+  durable, and the next invocation enters the exact global completion lane.
+  Existing ordinary preservation, idempotency, and no-local-SELL antibodies
+  remain green; focused tests, compilation, planning lock, and diff checks
+  pass before any deployment decision.
+
+
+- Defect: a durable exact V4 held-SELL completion request can arrive after an
+  ordinary global-auction cycle has acquired the sole reactor lock.  The new
+  request marks completion due, but an active-lock admission skip leaves the
+  ordinary cycle running until the held request's bounded deadline expires.
+- Decision: retain single-flight by never starting a second reactor.  A late
+  exact executable request is an atomic preemption signal: the ordinary cycle
+  observes it only at existing safe cancellation checkpoints, releases its
+  lock without acknowledging the durable request, and the next poll claims the
+  exact request before ordinary work.  Generic monitor-fairness completion is
   weaker: its in-process token is armed only after its generic wake is durable;
   a publish/read failure cannot leave an ownerless reservation that repeatedly
   reclaims the lock while monitor debt remains.  The exact turn remains
