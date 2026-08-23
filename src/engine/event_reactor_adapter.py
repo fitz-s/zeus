@@ -13098,6 +13098,147 @@ def _global_sell_probability_receipt(
     }
 
 
+def _durable_global_sell_market_authority(
+    trade_conn: sqlite3.Connection,
+    *,
+    condition_id: str,
+    token_id: str,
+    side: str,
+    submit_at: datetime,
+    max_quote_age: timedelta = timedelta(seconds=1),
+) -> tuple[dict[str, object], _CurrentGlobalMarketAuthority]:
+    """Hydrate one final SELL book from current durable market-channel truth.
+
+    This is a fail-closed REST-outage fallback, not a projection hint.  It
+    accepts only the exact canonical buy-side carrier for the selected token
+    and seals its depth into a new immutable JIT snapshot before command use.
+    """
+
+    from src.contracts.executable_market_snapshot import fee_rate_fraction_from_details
+    from src.contracts.fee_authority import resolve_taker_fee_fraction
+    from src.data.market_scanner import _canonical_json, _optional_top_book_level_decimal
+    from src.state.snapshot_repo import get_snapshot, snapshot_is_invalidated
+
+    if submit_at.tzinfo is None or max_quote_age <= timedelta(0):
+        raise ValueError("GLOBAL_JIT_DURABLE_BOOK_CLOCK_INVALID")
+    checked_at = submit_at.astimezone(UTC)
+    selected_side = str(side or "").strip().upper()
+    expected_direction = {"YES": "buy_yes", "NO": "buy_no"}.get(selected_side)
+    if not expected_direction or not condition_id or not token_id:
+        raise ValueError("GLOBAL_JIT_DURABLE_BOOK_IDENTITY_INVALID")
+    row = trade_conn.execute(
+        """
+        SELECT evidence_id, condition_id, token_id, outcome_label, quote_seen_at,
+               book_hash_before, depth_before_json
+          FROM execution_feasibility_latest
+         WHERE token_id = ? AND condition_id = ? AND outcome_label = ?
+           AND direction = ?
+        """,
+        (token_id, condition_id, selected_side, expected_direction),
+    ).fetchone()
+    if row is None:
+        raise ValueError("GLOBAL_JIT_DURABLE_BOOK_UNAVAILABLE")
+    try:
+        evidence_id, row_condition, row_token, row_side, quote_raw, _stored_hash, raw_depth = row
+        quote_at = datetime.fromisoformat(str(quote_raw).replace("Z", "+00:00"))
+        if quote_at.tzinfo is None:
+            raise ValueError("naive quote")
+        quote_at = quote_at.astimezone(UTC)
+        depth = json.loads(str(raw_depth or ""))
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise ValueError("GLOBAL_JIT_DURABLE_BOOK_INVALID") from exc
+    if (
+        str(row_condition) != condition_id
+        or str(row_token) != token_id
+        or str(row_side).upper() != selected_side
+        or not str(evidence_id or "").strip()
+        or quote_at > checked_at
+        or checked_at - quote_at > max_quote_age
+        or not isinstance(depth, Mapping)
+        or not isinstance(depth.get("bids"), list)
+        or not isinstance(depth.get("asks"), list)
+        or not depth["bids"]
+        or not depth["asks"]
+    ):
+        raise ValueError("GLOBAL_JIT_DURABLE_BOOK_INVALID")
+    base_row = trade_conn.execute(
+        """
+        SELECT snapshot_id
+          FROM executable_market_snapshots
+         WHERE condition_id = ? AND selected_outcome_token_id = ?
+           AND captured_at <= ?
+         ORDER BY captured_at DESC, snapshot_id DESC
+         LIMIT 1
+        """,
+        (condition_id, token_id, quote_at.isoformat()),
+    ).fetchone()
+    base = get_snapshot(trade_conn, str(base_row[0] or "")) if base_row else None
+    if base is None:
+        raise ValueError("GLOBAL_JIT_DURABLE_METADATA_UNAVAILABLE")
+    expected_token = base.yes_token_id if selected_side == "YES" else base.no_token_id
+    status = base.tradeability_status
+    if (
+        base.condition_id != condition_id
+        or base.selected_outcome_token_id != token_id
+        or base.outcome_label != selected_side
+        or expected_token != token_id
+        or not isinstance(base.token_map_raw, Mapping)
+        or str(base.token_map_raw.get("YES") or "") != base.yes_token_id
+        or str(base.token_map_raw.get("NO") or "") != base.no_token_id
+        or not isinstance(base.neg_risk, bool)
+        or base.captured_at > quote_at
+        or quote_at > base.freshness_deadline
+        or checked_at > base.freshness_deadline
+        or base.active is not True
+        or base.closed is not False
+        or base.accepting_orders is not True
+        or base.enable_orderbook is not True
+        or status is None
+        or status.executable_allowed is not True
+        or snapshot_is_invalidated(trade_conn, base, checked_at=quote_at)
+        or snapshot_is_invalidated(trade_conn, base, checked_at=checked_at)
+        or not _book_levels_align_to_tick(depth, base.min_tick_size)
+    ):
+        raise ValueError("GLOBAL_JIT_DURABLE_METADATA_INVALID")
+    try:
+        fee_rate, _ = resolve_taker_fee_fraction(
+            fee_rate_fraction_from_details(base.fee_details)
+        )
+        fee_rate = Decimal(str(fee_rate))
+    except Exception as exc:  # noqa: BLE001 - malformed durable fee is not submit authority
+        raise ValueError("GLOBAL_JIT_DURABLE_FEE_INVALID") from exc
+    if not fee_rate.is_finite() or fee_rate < 0 or fee_rate > 1:
+        raise ValueError("GLOBAL_JIT_DURABLE_FEE_INVALID")
+    raw_book = {
+        "asset_id": token_id,
+        "bids": list(depth["bids"]),
+        "asks": list(depth["asks"]),
+        "tick_size": str(base.min_tick_size),
+        "min_order_size": str(base.min_order_size),
+        "neg_risk": base.neg_risk,
+    }
+    raw_hash = _hash_jsonish(raw_book)
+    snapshot_id = _hash_jsonish(
+        ("GLOBAL_JIT_DURABLE_CHANNEL", base.snapshot_id, evidence_id, quote_at.isoformat(), raw_hash)
+    )
+    top_bid, _ = _optional_top_book_level_decimal(raw_book, "bids")
+    top_ask, _ = _optional_top_book_level_decimal(raw_book, "asks")
+    durable_snapshot = dataclass_replace(
+        base,
+        snapshot_id=snapshot_id,
+        orderbook_top_bid=top_bid,
+        orderbook_top_ask=top_ask,
+        orderbook_depth_jsonb=_canonical_json(raw_book),
+        raw_orderbook_hash=raw_hash,
+        captured_at=quote_at,
+        freshness_deadline=min(base.freshness_deadline, quote_at + max_quote_age),
+    )
+    return raw_book, _CurrentGlobalMarketAuthority(
+        snapshot=durable_snapshot,
+        fee_rate=fee_rate,
+    )
+
+
 def _submit_current_global_sell(
     event: OpportunityEvent,
     *,
@@ -13267,32 +13408,43 @@ def _submit_current_global_sell(
                     return raw_book, datetime.now(UTC)
 
                 try:
-                    gamma = _global_current_gamma_client(timeout_seconds=timeout)
-                except Exception as exc:  # noqa: BLE001 - authority transport
-                    raise ValueError("GLOBAL_JIT_GAMMA_MARKET_UNAVAILABLE") from exc
+                    try:
+                        gamma = _global_current_gamma_client(timeout_seconds=timeout)
+                    except Exception as exc:  # noqa: BLE001 - authority transport
+                        raise ValueError("GLOBAL_JIT_GAMMA_MARKET_UNAVAILABLE") from exc
 
-                def _held_gamma_get(path, *, params=None, timeout):
-                    return _governed_global_gamma_get(
-                        gamma,
-                        path,
-                        params=params,
-                        timeout=float(timeout),
-                        priority=RequestPriority.HELD_REDUCE_ONLY,
+                    def _held_gamma_get(path, *, params=None, timeout):
+                        return _governed_global_gamma_get(
+                            gamma,
+                            path,
+                            params=params,
+                            timeout=float(timeout),
+                            priority=RequestPriority.HELD_REDUCE_ONLY,
+                        )
+
+                    market_authority = _current_global_market_authority(
+                        condition_id=str(
+                            getattr(candidate, "condition_id", "") or ""
+                        ),
+                        token_id=str(getattr(candidate, "token_id", "") or ""),
+                        side=str(getattr(candidate, "side", "") or ""),
+                        gamma_get=_held_gamma_get,
+                        clob_market_get=clob.get_held_clob_market_info,
+                        raw_book=None,
+                        captured_at_utc=None,
+                        timeout=timeout,
+                        raw_book_provider=_capture_final_sell_book,
                     )
-
-                market_authority = _current_global_market_authority(
-                    condition_id=str(
-                        getattr(candidate, "condition_id", "") or ""
-                    ),
-                    token_id=str(getattr(candidate, "token_id", "") or ""),
-                    side=str(getattr(candidate, "side", "") or ""),
-                    gamma_get=_held_gamma_get,
-                    clob_market_get=clob.get_held_clob_market_info,
-                    raw_book=None,
-                    captured_at_utc=None,
-                    timeout=timeout,
-                    raw_book_provider=_capture_final_sell_book,
-                )
+                except ValueError as rest_exc:
+                    if not _is_global_jit_authority_failure(str(rest_exc)):
+                        raise
+                    raw_book, market_authority = _durable_global_sell_market_authority(
+                        trade_conn,
+                        condition_id=str(getattr(candidate, "condition_id", "") or ""),
+                        token_id=str(getattr(candidate, "token_id", "") or ""),
+                        side=str(getattr(candidate, "side", "") or ""),
+                        submit_at=datetime.now(UTC),
+                    )
                 book_captured_at_utc = market_authority.snapshot.captured_at
                 try:
                     current_candidate = _global_sell_candidate_from_raw_book(

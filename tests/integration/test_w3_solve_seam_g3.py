@@ -33321,6 +33321,145 @@ def _jit_market_authority(candidate, *, tick, min_order_size):
     )
 
 
+def test_global_sell_durable_market_channel_authority_is_exact_and_fail_closed():
+    """A Paris-shaped full-depth carrier may replace an unavailable REST book only."""
+
+    from src.contracts.executable_market_snapshot import ExecutableTradeabilityStatus
+    from src.state.schema.execution_feasibility_evidence_schema import ensure_table
+    from src.state.snapshot_repo import (
+        init_snapshot_schema,
+        insert_snapshot,
+        record_snapshot_invalidation,
+    )
+
+    event = _global_scope_event(city="Paris", source_run_id="durable-final-sell")
+    actuation = _adapter_sell_actuation(event)
+    candidate = actuation.decision.candidate
+    now = _dt.datetime.now(_dt.timezone.utc)
+    base = _jit_market_authority(candidate, tick="0.01", min_order_size="5").snapshot
+    base = replace(
+        base,
+        captured_at=now - _dt.timedelta(milliseconds=100),
+        freshness_deadline=now + _dt.timedelta(seconds=5),
+        tradeability_status=ExecutableTradeabilityStatus(
+            accepting_orders=True,
+            clob_archived=False,
+            clob_enable_order_book=True,
+            executable_allowed=True,
+            reason="fixture",
+        ),
+    )
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    init_snapshot_schema(conn)
+    ensure_table(conn)
+    insert_snapshot(conn, base)
+    depth = {
+        "bids": [{"price": "0.60", "size": "10"}],
+        "asks": [{"price": "0.61", "size": "10"}],
+    }
+    direction = "buy_yes" if candidate.side == "YES" else "buy_no"
+    conn.execute(
+        """INSERT INTO execution_feasibility_latest VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (
+            candidate.token_id, direction, "paris-depth-evidence", "paris-event",
+            candidate.condition_id, candidate.side, now.isoformat(), "legacy-hash",
+            0.60, 0.61, json.dumps(depth), now.isoformat(), 1,
+        ),
+    )
+    raw, authority = era._durable_global_sell_market_authority(
+        conn,
+        condition_id=candidate.condition_id,
+        token_id=candidate.token_id,
+        side=candidate.side,
+        submit_at=now,
+    )
+    assert raw["asset_id"] == candidate.token_id
+    assert authority.snapshot.snapshot_id != base.snapshot_id
+    assert authority.snapshot.raw_orderbook_hash == era._hash_jsonish(raw)
+    assert authority.snapshot.captured_at == now
+
+    # An as-of quote join must not borrow metadata observed after the book.
+    later_conn = sqlite3.connect(":memory:")
+    later_conn.row_factory = sqlite3.Row
+    init_snapshot_schema(later_conn)
+    ensure_table(later_conn)
+    later_base = replace(
+        base,
+        snapshot_id="f" * 64,
+        captured_at=now + _dt.timedelta(milliseconds=100),
+        freshness_deadline=now + _dt.timedelta(seconds=5),
+    )
+    insert_snapshot(later_conn, later_base)
+    later_conn.execute(
+        """INSERT INTO execution_feasibility_latest VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (
+            candidate.token_id, direction, "later-depth-evidence", "later-event",
+            candidate.condition_id, candidate.side, now.isoformat(), "later-hash",
+            0.60, 0.61, json.dumps(depth), now.isoformat(), 1,
+        ),
+    )
+    with pytest.raises(ValueError, match="GLOBAL_JIT_DURABLE_METADATA_UNAVAILABLE"):
+        era._durable_global_sell_market_authority(
+            later_conn,
+            condition_id=candidate.condition_id,
+            token_id=candidate.token_id,
+            side=candidate.side,
+            submit_at=now + _dt.timedelta(milliseconds=200),
+        )
+    later_conn.close()
+
+    conn.execute("UPDATE execution_feasibility_latest SET direction = 'buy_no'")
+    with pytest.raises(ValueError, match="GLOBAL_JIT_DURABLE_BOOK_UNAVAILABLE"):
+        era._durable_global_sell_market_authority(
+            conn, condition_id=candidate.condition_id, token_id=candidate.token_id,
+            side=candidate.side, submit_at=now,
+        )
+    conn.execute(
+        "UPDATE execution_feasibility_latest SET direction = ?, depth_before_json = NULL",
+        (direction,),
+    )
+    with pytest.raises(ValueError, match="GLOBAL_JIT_DURABLE_BOOK_INVALID"):
+        era._durable_global_sell_market_authority(
+            conn, condition_id=candidate.condition_id, token_id=candidate.token_id,
+            side=candidate.side, submit_at=now,
+        )
+    conn.execute(
+        "UPDATE execution_feasibility_latest SET depth_before_json = ?",
+        (json.dumps({"bids": [], "asks": depth["asks"]}),),
+    )
+    with pytest.raises(ValueError, match="GLOBAL_JIT_DURABLE_BOOK_INVALID"):
+        era._durable_global_sell_market_authority(
+            conn, condition_id=candidate.condition_id, token_id=candidate.token_id,
+            side=candidate.side, submit_at=now,
+        )
+    conn.execute(
+        "UPDATE execution_feasibility_latest SET depth_before_json = ?, quote_seen_at = ?",
+        (json.dumps(depth), (now - _dt.timedelta(seconds=2)).isoformat()),
+    )
+    with pytest.raises(ValueError, match="GLOBAL_JIT_DURABLE_BOOK_INVALID"):
+        era._durable_global_sell_market_authority(
+            conn, condition_id=candidate.condition_id, token_id=candidate.token_id,
+            side=candidate.side, submit_at=now,
+        )
+    conn.execute(
+        "UPDATE execution_feasibility_latest SET quote_seen_at = ?", (now.isoformat(),)
+    )
+    record_snapshot_invalidation(
+        conn,
+        condition_id=candidate.condition_id,
+        token_id=candidate.token_id,
+        reason="tick_changed",
+        invalidated_at=now,
+    )
+    with pytest.raises(ValueError, match="GLOBAL_JIT_DURABLE_METADATA_INVALID"):
+        era._durable_global_sell_market_authority(
+            conn, condition_id=candidate.condition_id, token_id=candidate.token_id,
+            side=candidate.side, submit_at=now,
+        )
+    conn.close()
+
+
 @pytest.mark.parametrize(
     ("age_minutes", "certificate", "expected_reason"),
     (
@@ -33481,6 +33620,7 @@ def test_global_sell_jit_rejects_changed_day0_statistical_authority(monkeypatch)
     "probability_functional",
     ("LOWER_CVAR_PARAMETER_DRAWS", "POSTERIOR_PREDICTIVE_MEAN"),
 )
+@pytest.mark.parametrize("final_rest_outage", (False, True))
 @pytest.mark.parametrize(
     (
         "bid_levels",
@@ -33518,6 +33658,7 @@ def test_global_sell_adapter_bypasses_entry_lane_and_uses_reduce_only_exit(
     expected_order_type,
     expected_mode,
     required_execution_mode,
+    final_rest_outage,
 ):
     from src.data.polymarket_request_governor import RequestPriority
     from src.events.event_store import (
@@ -33525,6 +33666,7 @@ def test_global_sell_adapter_bypasses_entry_lane_and_uses_reduce_only_exit(
         GLOBAL_WINNER_SUBMIT_FENCED,
     )
     from src.state.db import init_schema
+    from src.state.schema.execution_feasibility_evidence_schema import ensure_table
     from src.state.snapshot_repo import init_snapshot_schema
 
     at = _dt.datetime(2026, 7, 13, 12, 0, tzinfo=_dt.timezone.utc)
@@ -33622,6 +33764,7 @@ def test_global_sell_adapter_bypasses_entry_lane_and_uses_reduce_only_exit(
     class Clob:
         ctf_units = 10 * 1_000_000
         book_hash = "jit-sell-hash"
+        fail_final_book = False
 
         def __init__(self, **kwargs):
             if kwargs:
@@ -33640,6 +33783,8 @@ def test_global_sell_adapter_bypasses_entry_lane_and_uses_reduce_only_exit(
             actuation_steps.append("book")
             assert timeout >= 1.0
             assert tokens == ["yes-token"]
+            if type(self).fail_final_book:
+                raise OSError("REST book unavailable")
             return {
                 "yes-token": {
                     "asset_id": "yes-token",
@@ -33700,16 +33845,29 @@ def test_global_sell_adapter_bypasses_entry_lane_and_uses_reduce_only_exit(
         assert isinstance(authority, GlobalSellExecutionAuthority)
         assert authority.actuation is actuation
         assert authority.jit_candidate.executable_sell_curve.book_hash
-        assert kwargs["global_sell_prefetched_orderbook"] == {
-            "asset_id": "yes-token",
-            "hash": Clob.book_hash,
-            "tick_size": tick,
-            "min_order_size": "5",
-            "bids": [
-                {"price": price, "size": size}
-                for price, size in bid_levels
-            ],
-        }
+        if Clob.fail_final_book:
+            assert kwargs["global_sell_prefetched_orderbook"] == {
+                "asset_id": "yes-token",
+                "tick_size": tick,
+                "min_order_size": "5",
+                "neg_risk": False,
+                "bids": [
+                    {"price": price, "size": size}
+                    for price, size in bid_levels
+                ],
+                "asks": [{"price": "0.61", "size": "10"}],
+            }
+        else:
+            assert kwargs["global_sell_prefetched_orderbook"] == {
+                "asset_id": "yes-token",
+                "hash": Clob.book_hash,
+                "tick_size": tick,
+                "min_order_size": "5",
+                "bids": [
+                    {"price": price, "size": size}
+                    for price, size in bid_levels
+                ],
+            }
         intent = kwargs["exit_intent"]
         assert intent.probability_receipt == {
             "schema_version": 1,
@@ -33792,6 +33950,7 @@ def test_global_sell_adapter_bypasses_entry_lane_and_uses_reduce_only_exit(
     conn.row_factory = sqlite3.Row
     init_schema(conn)
     init_snapshot_schema(conn)
+    ensure_table(conn)
     assert conn.execute(
         "SELECT COUNT(*) FROM opportunity_event_processing"
     ).fetchone()[0] == 0
@@ -33854,7 +34013,30 @@ def test_global_sell_adapter_bypasses_entry_lane_and_uses_reduce_only_exit(
     assert exits == []
     assert isinstance(preflight.global_jit_candidate, era._GlobalJitHandoff)
     assert preflight.global_jit_candidate.raw_book["hash"] == "jit-sell-hash"
+    if final_rest_outage:
+        # A final REST book outage may consume only fresh, exact durable depth;
+        # it remains on the same global SELL actuation rather than becoming local.
+        conn.execute(
+            """INSERT INTO execution_feasibility_latest VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                "yes-token", "buy_yes", "final-durable-depth", "event-durable-depth",
+                "condition-1", "YES", _dt.datetime.now(_dt.timezone.utc).isoformat(),
+                "prior-hash", float(bid_levels[0][0]), 0.61,
+                json.dumps(
+                    {
+                        "bids": [
+                            {"price": price, "size": size}
+                            for price, size in bid_levels
+                        ],
+                        "asks": [{"price": "0.61", "size": "10"}],
+                    }
+                ),
+                _dt.datetime.now(_dt.timezone.utc).isoformat(), 1,
+            ),
+        )
+        conn.commit()
     Clob.book_hash = "jit-sell-hash-actuation"
+    Clob.fail_final_book = final_rest_outage
     final_step_start = len(actuation_steps)
     receipt = era._submit_current_global_sell(
         event,
@@ -33888,6 +34070,7 @@ def test_global_sell_adapter_bypasses_entry_lane_and_uses_reduce_only_exit(
     assert receipt.venue_command_id == "command-1"
     assert receipt.venue_command_state == "ACKED"
     assert receipt.venue_order_type == expected_order_type
+    Clob.fail_final_book = False
     from src.events.reactor import (
         _is_global_reduce_only_exit_receipt,
         _receipt_matches_event,
