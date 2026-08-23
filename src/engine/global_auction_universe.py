@@ -1779,7 +1779,7 @@ def fetch_current_gamma_markets(
     finally:
         for future in futures:
             future.cancel()
-        pool.shutdown(wait=True, cancel_futures=True)
+        pool.shutdown(wait=False, cancel_futures=True)
     return tuple(markets), len(chunks)
 
 

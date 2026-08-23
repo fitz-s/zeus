@@ -4503,7 +4503,7 @@ def test_current_gamma_market_fetch_batches_concurrently_and_fails_closed():
         )
 
 
-def test_current_gamma_market_fetch_retains_workers_at_total_deadline(monkeypatch):
+def test_current_gamma_market_fetch_returns_before_late_workers_at_total_deadline(monkeypatch):
     import concurrent.futures
 
     real_executor = concurrent.futures.ThreadPoolExecutor
@@ -4523,10 +4523,12 @@ def test_current_gamma_market_fetch_retains_workers_at_total_deadline(monkeypatc
     arrived_chunks = []
     calls_lock = threading.Lock()
     clock = [0.0]
+    shutdown_calls = []
 
     class TrackingExecutor(real_executor):
         def shutdown(self, *args, **kwargs):
             shutdown_started.set()
+            shutdown_calls.append((args, kwargs))
             return super().shutdown(*args, **kwargs)
 
     monkeypatch.setattr(concurrent.futures, "ThreadPoolExecutor", TrackingExecutor)
@@ -4594,7 +4596,8 @@ def test_current_gamma_market_fetch_retains_workers_at_total_deadline(monkeypatc
         clock[0] = 1.0
         deadline_triggered.set()
         assert shutdown_started.wait(2.0)
-        assert not call_finished.is_set()
+        assert call_finished.wait(2.0)
+        assert not workers_finished.is_set()
     finally:
         allow_second_worker.set()
         deadline_triggered.set()
@@ -4604,6 +4607,7 @@ def test_current_gamma_market_fetch_retains_workers_at_total_deadline(monkeypatc
     caller.join(2.0)
     assert sorted(finished_chunks) == sorted(started_chunks)
     assert len(started_chunks) == 2
+    assert shutdown_calls == [((), {"wait": False, "cancel_futures": True})]
     assert len(outcome) == 1
     assert isinstance(outcome[0], ValueError)
     assert "GLOBAL_CURRENT_GAMMA_MARKETS_DEADLINE_EXCEEDED" in str(outcome[0])
