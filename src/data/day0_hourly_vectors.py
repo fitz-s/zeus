@@ -29,7 +29,9 @@ Bounded by design
 - Refresh throttled to once per DEFAULT_REFRESH_INTERVAL_S per process.
 
 Provenance: every row carries source identity (provider/model/endpoint/
-request hash), capture clock, and the model run identity open-meteo exposes.
+request hash), a local capture clock, and fetch possession clocks.  The generic
+Open-Meteo forecast response does not expose a per-model initialization/run
+cycle, so this lane never fabricates one from local fetch time.
 Temperatures are ALWAYS degC in storage (the C/F unit-mix antibody from the
 bayes_precision_fusion lane: convert at the consumption seam, never store mixed units).
 """
@@ -82,6 +84,7 @@ DEFAULT_REFRESH_MAX_CITIES = 3
 DAY0_HOURLY_BUNDLE_MAX_AGE_HOURS = 3.0
 DAY0_HOURLY_REFRESH_HEADROOM_HOURS = 1.0
 DAY0_HOURLY_BUNDLE_MAX_SKEW_MINUTES = 60.0
+DAY0_HOURLY_FORECAST_HOURS = 72
 INCOMPLETE_BUNDLE_RETRY_INTERVAL_S = 45.0
 INCOMPLETE_BUNDLE_RETRY_MAX_INTERVAL_S = DEFAULT_REFRESH_INTERVAL_S
 INCOMPLETE_BUNDLE_CRITICAL_RETRY_MAX_INTERVAL_S = 600.0
@@ -135,9 +138,15 @@ class Day0HourlyVector:
     city: str
     target_date: str
     timezone_name: str
+    # Local request/capture clock assigned by the fetcher; this is not a
+    # provider-issued forecast/observation timestamp and is not possession.
     captured_at: str
     times: tuple[str, ...]       # ISO local timestamps as served (city timezone)
     temps_c: tuple[float, ...]   # ALWAYS degC
+    # JSON provenance written only by the live fetch path.  It carries the
+    # separate fetch-start/fetch-complete possession clocks and source-run
+    # identity; rows without it cannot sponsor held probability authority.
+    source_run_meta_json: str | None = None
 
 
 @dataclass(frozen=True)
@@ -239,6 +248,205 @@ def build_request_hash(
     return "sha256:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
+def _day0_provider_run_meta(
+    *,
+    model: str,
+    model_api_id: str,
+    run: datetime,
+    available_at: datetime,
+    modified_at: datetime | None,
+    authority: str,
+    endpoint_mode: str,
+    request_params: Mapping[str, object],
+    request_hash: str,
+    fetch_started_at: datetime,
+    fetch_finished_at: datetime,
+) -> dict[str, object]:
+    """Build explicit provider-run provenance for one hourly vector."""
+
+    if modified_at is None:
+        raise ValueError("provider model metadata modification time is required")
+    return {
+        "source_run_id": f"day0_hourly:{request_hash}",
+        "provider_run_id": f"openmeteo:{model_api_id}:{run.isoformat()}",
+        "provider_source_cycle_time_utc": run.isoformat(),
+        "provider_source_available_at_utc": available_at.isoformat(),
+        "provider_source_modified_at_utc": modified_at.isoformat(),
+        "source_run_authority": authority,
+        "endpoint_mode": endpoint_mode,
+        "model": model,
+        "model_api_id": model_api_id,
+        "provider": "openmeteo",
+        "endpoint": request_params.get("endpoint"),
+        "request_params_json": json.dumps(
+            {key: value for key, value in request_params.items() if key != "endpoint"},
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+        "request_hash": request_hash,
+        "fetch_started_at": fetch_started_at.isoformat(),
+        "fetch_finished_at": fetch_finished_at.isoformat(),
+    }
+
+
+def _day0_exact_run_payloads(
+    *,
+    city: Any,
+    models: list[str],
+    decision_time: datetime,
+    timeout_s: float,
+) -> tuple[list[tuple[str, Mapping[str, object], dict[str, object]]], dict[str, object]]:
+    """Fetch one exact provider run per model, preserving the raw hourly payload.
+
+    Model metadata is read directly, never from the stale source-clock JSONL cache. The
+    raw Single Runs request is delegated to the existing BPF transport adapter. The
+    standard endpoint is only accepted when its metadata bracket proves the same run.
+    Metadata and the per-model exact requests share one bounded caller budget; a
+    single-city refresh therefore fails closed rather than extending the cycle.
+    """
+    from src.data.bayes_precision_fusion_capture import OPENMETEO_MODEL_IDS
+    from src.data.bayes_precision_fusion_download import (
+        _fetch_single_runs_hourly_payloads_batched,
+        _fetch_standard_meta_stamped_payloads,
+    )
+    from src.data.openmeteo_ecmwf_ifs9_anchor import (
+        SINGLE_RUNS_FORECAST_URL,
+        STANDARD_FORECAST_URL,
+    )
+    from src.data.openmeteo_model_updates import fetch_model_updates
+    from src.strategy.live_inference.source_clock_vnext import source_publicly_usable_at
+
+    deadline_monotonic = time.monotonic() + max(1.0, float(timeout_s))
+
+    def _remaining_budget_seconds() -> float:
+        remaining = deadline_monotonic - time.monotonic()
+        if remaining <= 0.0:
+            raise TimeoutError("DAY0_PROVIDER_RUN_BUDGET_EXHAUSTED")
+        return remaining
+
+    updates = fetch_model_updates(
+        models,
+        timeout_seconds=_remaining_budget_seconds(),
+        max_workers=max(1, min(len(models), 8)),
+    )
+    by_model = {str(update.model).strip(): update for update in updates}
+    if set(by_model) != {str(model).strip() for model in models}:
+        raise ValueError("DAY0_PROVIDER_RUN_METADATA_INCOMPLETE")
+    city_name = str(getattr(city, "name", "?") or "?")
+    location = (
+        float(getattr(city, "lat")),
+        float(getattr(city, "lon")),
+        str(getattr(city, "timezone")),
+        day0_hourly_target_dates_for_refresh(city=city, decision_time=decision_time),
+    )
+    captured_at = decision_time.astimezone(UTC).isoformat()
+    fetched: list[tuple[str, Mapping[str, object], dict[str, object]]] = []
+    request_identity: dict[str, object] = {
+        "endpoint": OPENMETEO_FORECAST_URL,
+        "city": city_name,
+        "latitude": location[0],
+        "longitude": location[1],
+        "timezone": location[2],
+        "hourly": "temperature_2m",
+        "forecast_hours": DAY0_HOURLY_FORECAST_HOURS,
+        "temperature_unit": "celsius",
+        "cell_selection": "land",
+        "models": [],
+        "runs": {},
+        "endpoint_modes": {},
+    }
+    decision_utc = decision_time.astimezone(UTC)
+    for model in models:
+        _remaining_budget_seconds()
+        model = str(model).strip()
+        update = by_model[model]
+        run = update.last_run_initialisation_time.astimezone(UTC)
+        available_at = update.last_run_availability_time.astimezone(UTC)
+        modified_at = (
+            update.last_run_modification_time.astimezone(UTC)
+            if update.last_run_modification_time is not None
+            else None
+        )
+        if (
+            run > decision_utc
+            or available_at > decision_utc
+            or decision_utc < source_publicly_usable_at(update.to_source_run_clock())
+            or modified_at is None
+        ):
+            raise ValueError(f"DAY0_PROVIDER_RUN_NOT_PUBLICLY_USABLE:{model}")
+        model_api_id = OPENMETEO_MODEL_IDS.get(model, model)
+        request_identity["models"].append(model_api_id)
+        request_identity["runs"][model] = run.isoformat()
+        fetch_started = datetime.now(UTC)
+        authority = "run_pinned_single_runs"
+        endpoint_mode = "single_runs"
+        try:
+            payloads = _fetch_single_runs_hourly_payloads_batched(
+                models=[model], locations=[location], run=run,
+                forecast_hours=DAY0_HOURLY_FORECAST_HOURS,
+                deadline_monotonic=deadline_monotonic,
+            )
+            payload = payloads[0]
+        except Exception as single_exc:
+            try:
+                payloads, transport = _fetch_standard_meta_stamped_payloads(
+                    model=model, locations=[location], run=run,
+                    source_available_at=available_at,
+                    forecast_hours=DAY0_HOURLY_FORECAST_HOURS,
+                    deadline_monotonic=deadline_monotonic,
+                )
+                payload = payloads[0]
+                run = transport.run.astimezone(UTC)
+                available_at = transport.source_available_at.astimezone(UTC)
+                modified_at = transport.modification_time.astimezone(UTC)
+                authority = "provider_meta_declared"
+                endpoint_mode = "standard_meta_stamped"
+            except Exception as standard_exc:
+                raise ValueError(
+                    f"DAY0_PROVIDER_RUN_TRANSPORT_UNAVAILABLE:{model}:"
+                    f"single={type(single_exc).__name__}:standard={type(standard_exc).__name__}"
+                ) from standard_exc
+        fetch_finished = datetime.now(UTC)
+        request_identity["endpoint_modes"][model] = endpoint_mode
+        fetched.append((model, payload, {
+            "model_api_id": model_api_id,
+            "run": run,
+            "available_at": available_at,
+            "modified_at": modified_at,
+            "authority": authority,
+            "endpoint_mode": endpoint_mode,
+            "fetch_started": fetch_started,
+            "fetch_finished": fetch_finished,
+        }))
+    request_identity_payload = {
+        **request_identity,
+        "runs": dict(sorted(request_identity["runs"].items())),
+        "models": tuple(request_identity["models"]),
+    }
+    bundle_hash = build_request_hash(
+        endpoint=OPENMETEO_FORECAST_URL, params=request_identity_payload,
+        models=models, captured_at=captured_at,
+        payload={model: payload for model, payload, _meta in fetched},
+    )
+    return ([(model, payload, _day0_provider_run_meta(
+        model=model, model_api_id=str(meta["model_api_id"]), run=meta["run"],
+        available_at=meta["available_at"], modified_at=meta["modified_at"],
+        authority=str(meta["authority"]), endpoint_mode=str(meta["endpoint_mode"]),
+        request_params={
+            **request_identity_payload,
+            "endpoint": (
+                SINGLE_RUNS_FORECAST_URL
+                if str(meta["endpoint_mode"]) == "single_runs"
+                else STANDARD_FORECAST_URL
+            ),
+            "model": model,
+                        "model_api_id": meta["model_api_id"],
+                        "run": meta["run"].isoformat()},
+        request_hash=bundle_hash, fetch_started_at=meta["fetch_started"],
+        fetch_finished_at=meta["fetch_finished"],
+    )) for model, payload, meta in fetched], request_identity_payload)
+
+
 def fetch_day0_hourly_vectors(
     city: Any,
     *,
@@ -246,38 +454,25 @@ def fetch_day0_hourly_vectors(
     now: Optional[datetime] = None,
     timeout_s: float = DEFAULT_FETCH_TIMEOUT_S,
 ) -> tuple[list[Day0HourlyVector], str]:
-    """Fetch the freshest hourly temperature curves for in-domain high-res models.
+    """Fetch exact-run hourly temperature curves for in-domain models.
 
-    One open-meteo forecast-API call per city (all models batched). degC
-    forced. Returns (vectors, request_hash) — the hash is the replayable
+    Returns (vectors, request_hash) — the hash is the replayable
     provenance identity persisted with every row (PR#404 P1: empty provenance
     identity is not acceptable for q-construction inputs). Fail-soft:
     ([], "") on any transport/shape error.
     """
-    from src.data.openmeteo_client import fetch
-
     chosen = models if models is not None else day0_hourly_models_for_city(city)
     if not chosen:
         return [], ""
+    # This is the local request/capture clock used for vector row identity;
+    # possession is the separate fetch_finished_at in source_run_meta_json.
     captured_at = (now or datetime.now(UTC)).astimezone(UTC).isoformat()
-    params = {
-        "latitude": float(getattr(city, "lat")),
-        "longitude": float(getattr(city, "lon")),
-        "hourly": "temperature_2m",
-        "models": ",".join(chosen),
-        "temperature_unit": "celsius",  # storage law: degC ALWAYS
-        "timezone": str(getattr(city, "timezone")),
-        "forecast_days": 2,
-    }
     try:
-        payload = fetch(
-            OPENMETEO_FORECAST_URL,
-            params,
-            endpoint_label=f"day0_hourly_{getattr(city, 'name', '?')}",
-            timeout=max(0.5, float(timeout_s)),
-            max_retries=1,
-            backoff_sec=0.0,
-            fast_fail_429=True,
+        fetched, _request_identity = _day0_exact_run_payloads(
+            city=city,
+            models=[str(model).strip() for model in chosen if str(model).strip()],
+            decision_time=(now or datetime.now(UTC)).astimezone(UTC),
+            timeout_s=timeout_s,
         )
     except Exception as exc:  # noqa: BLE001 — fail-soft lane
         logger.warning(
@@ -285,14 +480,19 @@ def fetch_day0_hourly_vectors(
             getattr(city, "name", "?"), type(exc).__name__, exc,
         )
         return [], ""
-    request_hash = build_request_hash(
-        endpoint=OPENMETEO_FORECAST_URL, params=params, models=chosen,
-        captured_at=captured_at, payload=payload,
-    )
+    request_hash = str(fetched[0][2].get("request_hash") or "")
+    if not request_hash:
+        return [], ""
+    vectors: list[Day0HourlyVector] = []
+    for model, payload, source_meta in fetched:
+        vectors.extend(parse_openmeteo_hourly_payload(
+            payload, city=city, models=[model], captured_at=captured_at,
+            source_run_meta_json=json.dumps(
+                source_meta, sort_keys=True, separators=(",", ":")
+            ),
+        ))
     return (
-        parse_openmeteo_hourly_payload(
-            payload, city=city, models=chosen, captured_at=captured_at,
-        ),
+        vectors,
         request_hash,
     )
 
@@ -303,6 +503,7 @@ def parse_openmeteo_hourly_payload(
     city: Any,
     models: list[str],
     captured_at: str,
+    source_run_meta_json: str | None = None,
 ) -> list[Day0HourlyVector]:
     """Parse a (possibly multi-model) open-meteo hourly payload.
 
@@ -333,6 +534,7 @@ def parse_openmeteo_hourly_payload(
             captured_at=captured_at,
             times=tuple(t for t, _ in pairs),
             temps_c=tuple(v for _, v in pairs),
+            source_run_meta_json=source_run_meta_json,
         )
 
     out: list[Day0HourlyVector] = []
@@ -423,19 +625,29 @@ def persist_day0_hourly_vectors(
                     )
                     continue
                 row_id = _vector_id(vector.model, vector.city, target_date, vector.captured_at)
+                row_endpoint = endpoint
+                try:
+                    source_meta = json.loads(str(vector.source_run_meta_json or ""))
+                    if isinstance(source_meta, Mapping) and str(
+                        source_meta.get("endpoint") or ""
+                    ).strip():
+                        row_endpoint = str(source_meta["endpoint"]).strip()
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    pass
                 cur = conn.execute(
                     """
                     INSERT OR IGNORE INTO day0_hourly_vectors (
                         vector_id, model, city, target_date, timezone_name,
                         captured_at, provider, endpoint, request_hash,
                         times_json, temps_c_json, source_run_meta_json
-                    ) VALUES (?, ?, ?, ?, ?, ?, 'openmeteo', ?, ?, ?, ?, NULL)
+                    ) VALUES (?, ?, ?, ?, ?, ?, 'openmeteo', ?, ?, ?, ?, ?)
                     """,
                     (
                         row_id, vector.model, vector.city, target_date,
-                        vector.timezone_name, vector.captured_at, endpoint,
+                        vector.timezone_name, vector.captured_at, row_endpoint,
                         request_hash, json.dumps(list(vector.times)),
                         json.dumps(list(vector.temps_c)),
+                        vector.source_run_meta_json,
                     ),
                 )
                 written += int(cur.rowcount or 0)

@@ -470,6 +470,12 @@ def test_spine_inputs_unavailable_when_source_cycle_absent():
         q_by_bin=[0.05, 0.45, 0.40, 0.10], q_lcb_by_bin=[0.02, 0.32, 0.28, 0.05],
     )
     payload = _payload(mu=20.4, sigma=1.2, members=[19.8, 20.1, 20.5, 21.0, 20.7], source_cycle=None)
+    # A Day0 local capture clock is provenance only; it cannot satisfy the
+    # provider-issued forecast-cycle requirement or reach ForecastCaseFactory.
+    payload["_edli_day0_remaining_local_capture_clock_utc"] = (
+        "2026-06-13T11:59:00+00:00"
+    )
+    assert bridge._served_predictive_inputs(payload) is None
     result = _drive(family, proofs, payload)
     assert result.selected_proof is None
     assert result.no_trade_reason.startswith(bridge.NO_TRADE_SPINE_INPUTS_UNAVAILABLE)

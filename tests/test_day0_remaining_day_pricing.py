@@ -40,6 +40,7 @@ import pytest
 from src.contracts.execution_price import ExecutionPrice as EP
 from src.data.day0_hourly_vectors import (
     Day0HourlyVector,
+    fetch_day0_hourly_vectors,
     parse_openmeteo_hourly_payload,
     persist_day0_hourly_vectors,
     read_freshest_day0_hourly_vectors,
@@ -60,6 +61,349 @@ UTC = timezone.utc
 # retention test still pins a target-day `now` so its 9-day-old "ancient" row is
 # correctly pruned and the fresh row is kept.
 PRUNE_NOW = datetime(2026, 6, 10, 12, 0, tzinfo=UTC)
+
+
+def test_live_hourly_fetch_persists_real_possession_clock_and_identity(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    import src.data.openmeteo_client as openmeteo_client
+    from src.data.openmeteo_model_updates import OpenMeteoModelUpdate
+
+    now = datetime.now(UTC)
+    target_date = now.astimezone(ZoneInfo("Europe/Paris")).date().isoformat()
+    times = [
+        f"{target_date}T{hour:02d}:00"
+        for hour in range(24)
+    ]
+    monkeypatch.setattr(
+        openmeteo_client,
+        "fetch",
+        lambda *_args, **_kwargs: {
+            "hourly": {
+                "time": times,
+                "temperature_2m_icon_d2": [20.0] * len(times),
+            }
+        },
+    )
+    monkeypatch.setattr(
+        "src.data.openmeteo_model_updates.fetch_model_updates",
+        lambda models, **_kwargs: tuple(
+            OpenMeteoModelUpdate(
+                model=model,
+                last_run_initialisation_time=now - timedelta(hours=2),
+                last_run_availability_time=now - timedelta(minutes=30),
+                last_run_modification_time=now - timedelta(minutes=25),
+            )
+            for model in models
+        ),
+    )
+    vectors, request_hash = fetch_day0_hourly_vectors(
+        _paris(),
+        models=["icon_d2"],
+        now=now,
+    )
+
+    assert request_hash.startswith("sha256:")
+    assert len(vectors) == 1
+    meta = json.loads(vectors[0].source_run_meta_json or "{}")
+    assert meta["provider"] == "openmeteo"
+    assert meta["endpoint"] == "https://single-runs-api.open-meteo.com/v1/forecast"
+    assert meta["request_hash"] == request_hash
+    assert meta["source_run_id"] == f"day0_hourly:{request_hash}"
+    assert meta["model"] == "icon_d2"
+    assert meta["model_api_id"] == "icon_d2"
+    assert meta["provider_run_id"] == (
+        f"openmeteo:icon_d2:{(now - timedelta(hours=2)).isoformat()}"
+    )
+    assert meta["source_run_authority"] == "run_pinned_single_runs"
+    assert meta["endpoint_mode"] == "single_runs"
+    assert meta["provider_source_available_at_utc"] == (
+        now - timedelta(minutes=30)
+    ).isoformat()
+    request_identity = json.loads(meta["request_params_json"])
+    assert request_identity["endpoint_modes"]["icon_d2"] == "single_runs"
+    assert request_identity["runs"]["icon_d2"] == (
+        now - timedelta(hours=2)
+    ).isoformat()
+    assert datetime.fromisoformat(meta["fetch_finished_at"]) >= datetime.fromisoformat(
+        meta["fetch_started_at"]
+    )
+    assert datetime.fromisoformat(vectors[0].captured_at) <= datetime.fromisoformat(
+        meta["fetch_started_at"]
+    )
+    assert datetime.fromisoformat(meta["fetch_finished_at"]) != datetime.fromisoformat(
+        vectors[0].captured_at
+    )
+
+    conn = _conn()
+    assert (
+        persist_day0_hourly_vectors(
+            vectors,
+            target_date=target_date,
+            conn=conn,
+            request_hash=request_hash,
+            now=now,
+        )
+        == 1
+    )
+    row = conn.execute(
+        "SELECT source_run_meta_json FROM day0_hourly_vectors"
+    ).fetchone()
+    assert json.loads(row[0]) == meta
+
+
+def test_day0_hourly_provider_run_requires_public_availability_boundary(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    import src.data.openmeteo_client as openmeteo_client
+    from src.data.openmeteo_model_updates import OpenMeteoModelUpdate
+
+    now = datetime(2026, 8, 23, 21, 0, tzinfo=UTC)
+    monkeypatch.setattr(
+        openmeteo_client,
+        "fetch",
+        lambda *_args, **_kwargs: {
+            "hourly": {
+                "time": ["2026-08-23T00:00"],
+                "temperature_2m_icon_d2": [20.0],
+            }
+        },
+    )
+    monkeypatch.setattr(
+        "src.data.openmeteo_model_updates.fetch_model_updates",
+        lambda models, **_kwargs: tuple(
+            OpenMeteoModelUpdate(
+                model=model,
+                last_run_initialisation_time=now - timedelta(hours=2),
+                last_run_availability_time=now - timedelta(minutes=5),
+                last_run_modification_time=now - timedelta(minutes=4),
+            )
+            for model in models
+        ),
+    )
+
+    vectors, request_hash = fetch_day0_hourly_vectors(
+        _paris(), models=["icon_d2"], now=now
+    )
+    assert vectors == []
+    assert request_hash == ""
+
+
+def test_day0_hourly_provider_run_requires_modification_clock(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from src.data.openmeteo_model_updates import OpenMeteoModelUpdate
+
+    now = datetime(2026, 8, 23, 21, 0, tzinfo=UTC)
+    monkeypatch.setattr(
+        "src.data.openmeteo_model_updates.fetch_model_updates",
+        lambda models, **_kwargs: tuple(
+            OpenMeteoModelUpdate(
+                model=model,
+                last_run_initialisation_time=now - timedelta(hours=2),
+                last_run_availability_time=now - timedelta(minutes=30),
+                last_run_modification_time=None,
+            )
+            for model in models
+        ),
+    )
+
+    vectors, request_hash = fetch_day0_hourly_vectors(
+        _paris(), models=["icon_d2"], now=now
+    )
+    assert vectors == []
+    assert request_hash == ""
+
+
+def test_day0_provider_run_witness_reaches_receipt_carrier(monkeypatch: pytest.MonkeyPatch):
+    """Fetch/persist/materialize/validate/receipt preserve the ECMWF run carrier."""
+    import src.data.openmeteo_client as openmeteo_client
+    from src.data.forecast_target_contract import compute_target_local_day_window_utc
+    from src.data.openmeteo_model_updates import OpenMeteoModelUpdate
+    from src.data.replacement_forecast_materializer import (
+        _day0_remaining_vector_witness,
+    )
+    import src.engine.event_reactor_adapter as era
+
+    now = datetime.now(UTC)
+    target_date = now.astimezone(ZoneInfo("Europe/Paris")).date().isoformat()
+    models = ["ecmwf_ifs", "icon_global", "ukmo_global_deterministic_10km"]
+    times = [f"{target_date}T{hour:02d}:00" for hour in range(24)]
+    monkeypatch.setattr(
+        openmeteo_client,
+        "fetch",
+        lambda *_args, **_kwargs: {
+            "hourly": {"time": times, "temperature_2m": [20.0] * len(times)}
+        },
+    )
+    monkeypatch.setattr(
+        "src.data.openmeteo_model_updates.fetch_model_updates",
+        lambda requested, **_kwargs: tuple(
+            OpenMeteoModelUpdate(
+                model=model,
+                last_run_initialisation_time=now - timedelta(hours=2),
+                last_run_availability_time=now - timedelta(minutes=30),
+                last_run_modification_time=now - timedelta(minutes=25),
+            )
+            for model in requested
+        ),
+    )
+    city = _paris()
+    monkeypatch.setattr(
+        "src.data.day0_hourly_vectors.day0_hourly_models_for_city",
+        lambda _city: models,
+    )
+    monkeypatch.setattr("src.config.runtime_cities_by_name", lambda: {"Paris": city})
+    vectors, request_hash = fetch_day0_hourly_vectors(
+        city, models=models, now=now
+    )
+    assert len(vectors) == len(models)
+    conn = sqlite3.connect(":memory:")
+    assert persist_day0_hourly_vectors(
+        vectors,
+        target_date=target_date,
+        conn=conn,
+        request_hash=request_hash,
+        now=now,
+    ) == len(models)
+    computed_at = datetime.now(UTC)
+    anchor_vector_id = conn.execute(
+        "SELECT vector_id FROM day0_hourly_vectors WHERE model = 'ecmwf_ifs'"
+    ).fetchone()[0]
+    request = SimpleNamespace(
+        city="Paris",
+        target_date=target_date,
+        city_timezone="Europe/Paris",
+        day0_observed_extreme_observation_time=(now - timedelta(minutes=10)).isoformat(),
+    )
+    witness = _day0_remaining_vector_witness(
+        conn,
+        request,
+        metric="high",
+        computed_at_utc=computed_at,
+        anchor_vector_id=anchor_vector_id,
+    )
+    assert witness is not None
+    family = SimpleNamespace(city="Paris", target_date=target_date, metric="high")
+    era._assert_day0_post_local_vector_witness(
+        witness,
+        family=family,
+        decision_time=computed_at,
+        target_end=compute_target_local_day_window_utc(
+            city_timezone="Europe/Paris",
+            target_local_date=date.fromisoformat(target_date),
+        ).end_utc,
+    )
+    receipt_authority = era._global_day0_probability_authority_payload(
+        {
+            "_edli_global_day0_binding": {
+                "posterior_id": 77,
+                "probability_base_identity": "posterior-77",
+            },
+            "_edli_q_source": "replacement_0_1",
+            "_edli_day0_q_mode": "remaining_window",
+            "probability_authority": "replacement_0_1",
+            "_edli_day0_remaining_provider_source_cycle_time_utc": witness[
+                "provider_source_cycle_time_utc"
+            ],
+            "_edli_day0_remaining_vector_witness": witness,
+        }
+    )
+    assert receipt_authority["remaining_provider_source_cycle_time_utc"] == (
+        witness["provider_source_cycle_time_utc"]
+    )
+
+
+def test_day0_exact_run_uses_one_deadline_across_models_and_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    import src.data.bayes_precision_fusion_download as download
+    from src.data.openmeteo_model_updates import OpenMeteoModelUpdate
+
+    now = datetime.now(UTC)
+    models = ["ecmwf_ifs", "icon_global"]
+    deadline_calls: list[float | None] = []
+    fallback_calls: list[float | None] = []
+    metadata_timeouts: list[float] = []
+    monkeypatch.setattr(
+        "src.data.openmeteo_model_updates.fetch_model_updates",
+        lambda requested, **kwargs: (
+            metadata_timeouts.append(float(kwargs["timeout_seconds"]))
+            or tuple(
+                OpenMeteoModelUpdate(
+                    model=model,
+                    last_run_initialisation_time=now - timedelta(hours=2),
+                    last_run_availability_time=now - timedelta(minutes=30),
+                    last_run_modification_time=now - timedelta(minutes=25),
+                )
+                for model in requested
+            )
+        ),
+    )
+
+    def single_runs(**kwargs):
+        deadline_calls.append(kwargs["deadline_monotonic"])
+        if kwargs["models"] == ["icon_global"]:
+            raise RuntimeError("force standard fallback")
+        return ({"hourly": {}},)
+
+    def standard(**kwargs):
+        fallback_calls.append(kwargs["deadline_monotonic"])
+        return (
+            ({"hourly": {}},),
+            SimpleNamespace(
+                run=kwargs["run"],
+                source_available_at=kwargs["source_available_at"],
+                modification_time=now - timedelta(minutes=25),
+            ),
+        )
+
+    monkeypatch.setattr(download, "_fetch_single_runs_hourly_payloads_batched", single_runs)
+    monkeypatch.setattr(download, "_fetch_standard_meta_stamped_payloads", standard)
+    from src.data.day0_hourly_vectors import _day0_exact_run_payloads
+
+    fetched, _identity = _day0_exact_run_payloads(
+        city=_paris(), models=models, decision_time=now, timeout_s=2.0
+    )
+    assert len(fetched) == 2
+    assert len(deadline_calls) == 2
+    assert fallback_calls and deadline_calls[0] == deadline_calls[1] == fallback_calls[0]
+    assert metadata_timeouts and 0.0 < metadata_timeouts[0] <= 2.0
+
+
+def test_day0_exact_run_budget_exhaustion_stops_before_transport(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    import src.data.day0_hourly_vectors as vectors_module
+    from src.data.openmeteo_model_updates import OpenMeteoModelUpdate
+
+    now = datetime.now(UTC)
+    transport_calls: list[object] = []
+    monotonic_values = iter((100.0, 100.1, 101.1))
+    monkeypatch.setattr(vectors_module.time, "monotonic", lambda: next(monotonic_values))
+    monkeypatch.setattr(
+        "src.data.openmeteo_model_updates.fetch_model_updates",
+        lambda requested, **_kwargs: tuple(
+            OpenMeteoModelUpdate(
+                model=model,
+                last_run_initialisation_time=now - timedelta(hours=2),
+                last_run_availability_time=now - timedelta(minutes=30),
+                last_run_modification_time=now - timedelta(minutes=25),
+            )
+            for model in requested
+        ),
+    )
+    monkeypatch.setattr(
+        "src.data.bayes_precision_fusion_download._fetch_single_runs_hourly_payloads_batched",
+        lambda **_kwargs: transport_calls.append(True),
+    )
+    from src.data.day0_hourly_vectors import _day0_exact_run_payloads
+
+    with pytest.raises(TimeoutError, match="DAY0_PROVIDER_RUN_BUDGET_EXHAUSTED"):
+        _day0_exact_run_payloads(
+            city=_paris(), models=["ecmwf_ifs"], decision_time=now, timeout_s=1.0
+        )
+    assert transport_calls == []
 
 
 def test_wu_revision_history_keeps_current_boundary_inside_probability():
@@ -1229,6 +1573,10 @@ class TestRemainingDayMembers:
             "icon_d2",
             "ecmwf_ifs",
         ]
+        assert payload["_edli_day0_remaining_local_capture_clock_utc"] == (
+            "2026-06-10T09:00:00+00:00"
+        )
+        assert "_edli_day0_remaining_source_cycle_time_utc" not in payload
 
     def test_source_clock_total_variance_subtracts_current_path_spread(self):
         import src.engine.event_reactor_adapter as era

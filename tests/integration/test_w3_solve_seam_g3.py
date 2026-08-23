@@ -36365,3 +36365,259 @@ def test_global_auction_fixture_receipt_does_not_require_canonical_lease(
     assert persist(object()) == 1
     assert conn.execute("SELECT value FROM receipt_probe").fetchone() == ("fixture",)
     conn.close()
+
+
+def test_ankara_post_local_vector_witness_accepts_exact_complete_bundle():
+    family = SimpleNamespace(
+        city="Ankara",
+        target_date="2026-08-23",
+        metric="high",
+    )
+    with pytest.raises(
+        ValueError,
+        match="GLOBAL_DAY0_POST_LOCAL_VECTOR_WITNESS_MISSING",
+    ):
+        era._assert_day0_post_local_vector_witness(
+            None,
+            family=family,
+            decision_time=_dt.datetime(
+                2026, 8, 23, 21, 49, tzinfo=_dt.timezone.utc
+            ),
+            target_end=_dt.datetime(
+                2026, 8, 23, 21, tzinfo=_dt.timezone.utc
+            ),
+        )
+    witness = {
+        "vector_id": "d0hvecmwf",
+        "vector_ids_by_model": {
+            "ecmwf_ifs": "d0hvecmwf",
+            "icon_global": "d0hvicon",
+        },
+        "expected_models": ["ecmwf_ifs", "icon_global"],
+        "actual_models": ["ecmwf_ifs", "icon_global"],
+        "capture_times_utc": [
+            "2026-08-23T20:44:52.810807+00:00",
+            "2026-08-23T20:44:52.810807+00:00",
+        ],
+        "capture_times_by_model_utc": {
+            "ecmwf_ifs": "2026-08-23T20:44:52.810807+00:00",
+            "icon_global": "2026-08-23T20:44:52.810807+00:00",
+        },
+        "fetch_started_times_by_model_utc": {
+            "ecmwf_ifs": "2026-08-23T20:44:53+00:00",
+            "icon_global": "2026-08-23T20:44:53+00:00",
+        },
+        "fetch_finished_times_by_model_utc": {
+            "ecmwf_ifs": "2026-08-23T20:45:03+00:00",
+            "icon_global": "2026-08-23T20:45:03+00:00",
+        },
+        "provider_by_model": {
+            "ecmwf_ifs": "openmeteo",
+            "icon_global": "openmeteo",
+        },
+        "endpoint_by_model": {
+            "ecmwf_ifs": "https://single-runs-api.open-meteo.com/v1/forecast",
+            "icon_global": "https://single-runs-api.open-meteo.com/v1/forecast",
+        },
+        "request_hash_by_model": {
+            "ecmwf_ifs": "sha256:ankara",
+            "icon_global": "sha256:ankara",
+        },
+        "source_run_id_by_model": {
+            "ecmwf_ifs": "day0_hourly:sha256:ankara",
+            "icon_global": "day0_hourly:sha256:ankara",
+        },
+        "provider_run_id_by_model": {
+            "ecmwf_ifs": "openmeteo:ecmwf_ifs:2026-08-23T20:00:00+00:00",
+            "icon_global": "openmeteo:icon_global:2026-08-23T20:03:00+00:00",
+        },
+        "model_api_id_by_model": {
+            "ecmwf_ifs": "ecmwf_ifs",
+            "icon_global": "icon_global",
+        },
+        "provider_source_cycle_time_by_model_utc": {
+            "ecmwf_ifs": "2026-08-23T20:00:00+00:00",
+            "icon_global": "2026-08-23T20:03:00+00:00",
+        },
+        "provider_source_available_at_by_model_utc": {
+            "ecmwf_ifs": "2026-08-23T20:30:00+00:00",
+            "icon_global": "2026-08-23T20:33:00+00:00",
+        },
+        "provider_source_modified_at_by_model_utc": {
+            "ecmwf_ifs": "2026-08-23T20:25:00+00:00",
+            "icon_global": "2026-08-23T20:28:00+00:00",
+        },
+        "source_run_authority_by_model": {
+            "ecmwf_ifs": "run_pinned_single_runs",
+            "icon_global": "run_pinned_single_runs",
+        },
+        "endpoint_mode_by_model": {
+            "ecmwf_ifs": "single_runs",
+            "icon_global": "single_runs",
+        },
+        "provider_source_cycle_time_utc": "2026-08-23T20:00:00+00:00",
+        "local_capture_clock_utc": "2026-08-23T20:44:52.810807+00:00",
+        "source_available_at_utc": "2026-08-23T20:45:03+00:00",
+        "causal_as_of_utc": "2026-08-23T21:48:05+00:00",
+        "target_end_utc": "2026-08-23T21:00:00+00:00",
+        "city": "Ankara",
+        "target_date": "2026-08-23",
+        "metric": "high",
+    }
+    era._assert_day0_post_local_vector_witness(
+        witness,
+        family=family,
+        decision_time=_dt.datetime(2026, 8, 23, 21, 49, tzinfo=_dt.timezone.utc),
+        target_end=_dt.datetime(2026, 8, 23, 21, tzinfo=_dt.timezone.utc),
+    )
+    observation_payload = {
+        "_edli_global_day0_binding": {
+            "posterior_id": 77,
+            "probability_base_identity": "posterior-77",
+        },
+        "_edli_q_source": "replacement_0_1",
+        "_edli_day0_q_mode": "remaining_window",
+        "probability_authority": "replacement_0_1",
+        "_edli_day0_remaining_models": 2,
+        "_edli_day0_remaining_model_names": witness["actual_models"],
+        "_edli_day0_remaining_source_cycle_time_utc": witness[
+            "local_capture_clock_utc"
+        ],
+        "_edli_day0_remaining_provider_source_cycle_time_utc": witness[
+            "provider_source_cycle_time_utc"
+        ],
+        "_edli_day0_remaining_capture_times_utc": witness["capture_times_utc"],
+        "_edli_day0_remaining_expected_models": witness["expected_models"],
+        "_edli_day0_remaining_vector_witness": witness,
+    }
+    receipt_authority = era._global_day0_probability_authority_payload(
+        observation_payload
+    )
+    assert receipt_authority["remaining_provider_source_cycle_time_utc"] == (
+        "2026-08-23T20:00:00+00:00"
+    )
+    assert receipt_authority["remaining_vector_witness"][
+        "provider_source_cycle_time_utc"
+    ] == "2026-08-23T20:00:00+00:00"
+
+    future = dict(witness, causal_as_of_utc="2026-08-23T22:00:00+00:00")
+    with pytest.raises(
+        ValueError,
+        match="GLOBAL_DAY0_POST_LOCAL_VECTOR_WITNESS_FUTURE",
+    ):
+        era._assert_day0_post_local_vector_witness(
+            future,
+            family=family,
+            decision_time=_dt.datetime(
+                2026, 8, 23, 21, 49, tzinfo=_dt.timezone.utc
+            ),
+            target_end=_dt.datetime(
+                2026, 8, 23, 21, tzinfo=_dt.timezone.utc
+            ),
+        )
+
+    mismatch = dict(witness, actual_models=["ecmwf_ifs"])
+    with pytest.raises(
+        ValueError,
+        match="GLOBAL_DAY0_POST_LOCAL_VECTOR_WITNESS_IDENTITY_MISMATCH",
+    ):
+        era._assert_day0_post_local_vector_witness(
+            mismatch,
+            family=family,
+            decision_time=_dt.datetime(
+                2026, 8, 23, 21, 49, tzinfo=_dt.timezone.utc
+            ),
+            target_end=_dt.datetime(
+                2026, 8, 23, 21, tzinfo=_dt.timezone.utc
+            ),
+        )
+
+    forged = copy.deepcopy(witness)
+    forged["source_run_id_by_model"]["ecmwf_ifs"] = "forged-run"
+    with pytest.raises(
+        ValueError,
+        match="GLOBAL_DAY0_POST_LOCAL_VECTOR_WITNESS_IDENTITY_MISMATCH",
+    ):
+        era._assert_day0_post_local_vector_witness(
+            forged,
+            family=family,
+            decision_time=_dt.datetime(2026, 8, 23, 21, 49, tzinfo=_dt.timezone.utc),
+            target_end=_dt.datetime(2026, 8, 23, 21, tzinfo=_dt.timezone.utc),
+        )
+
+    forged_provider = copy.deepcopy(witness)
+    forged_provider["provider_run_id_by_model"]["icon_global"] = (
+        "openmeteo:ecmwf_ifs:2026-08-23T20:03:00+00:00"
+    )
+    with pytest.raises(
+        ValueError,
+        match="GLOBAL_DAY0_POST_LOCAL_VECTOR_WITNESS_IDENTITY_MISMATCH",
+    ):
+        era._assert_day0_post_local_vector_witness(
+            forged_provider,
+            family=family,
+            decision_time=_dt.datetime(2026, 8, 23, 21, 49, tzinfo=_dt.timezone.utc),
+            target_end=_dt.datetime(2026, 8, 23, 21, tzinfo=_dt.timezone.utc),
+        )
+
+    forged_paired_identity = copy.deepcopy(witness)
+    forged_paired_identity["model_api_id_by_model"]["ecmwf_ifs"] = "forged_model"
+    forged_paired_identity["provider_run_id_by_model"]["ecmwf_ifs"] = (
+        "openmeteo:forged_model:2026-08-23T20:00:00+00:00"
+    )
+    with pytest.raises(
+        ValueError,
+        match="GLOBAL_DAY0_POST_LOCAL_VECTOR_WITNESS_IDENTITY_MISMATCH",
+    ):
+        era._assert_day0_post_local_vector_witness(
+            forged_paired_identity,
+            family=family,
+            decision_time=_dt.datetime(2026, 8, 23, 21, 49, tzinfo=_dt.timezone.utc),
+            target_end=_dt.datetime(2026, 8, 23, 21, tzinfo=_dt.timezone.utc),
+        )
+
+    inverted = copy.deepcopy(witness)
+    inverted["fetch_started_times_by_model_utc"]["ecmwf_ifs"] = (
+        "2026-08-23T20:46:00+00:00"
+    )
+    with pytest.raises(ValueError):
+        era._assert_day0_post_local_vector_witness(
+            inverted,
+            family=family,
+            decision_time=_dt.datetime(2026, 8, 23, 21, 49, tzinfo=_dt.timezone.utc),
+            target_end=_dt.datetime(2026, 8, 23, 21, tzinfo=_dt.timezone.utc),
+        )
+
+    future_fetch = copy.deepcopy(witness)
+    future_fetch["fetch_started_times_by_model_utc"]["ecmwf_ifs"] = (
+        "2026-08-23T22:00:00+00:00"
+    )
+    future_fetch["fetch_finished_times_by_model_utc"]["ecmwf_ifs"] = (
+        "2026-08-23T22:01:00+00:00"
+    )
+    with pytest.raises(ValueError):
+        era._assert_day0_post_local_vector_witness(
+            future_fetch,
+            family=family,
+            decision_time=_dt.datetime(2026, 8, 23, 21, 49, tzinfo=_dt.timezone.utc),
+            target_end=_dt.datetime(2026, 8, 23, 21, tzinfo=_dt.timezone.utc),
+        )
+
+
+def test_aviationweather_metar_without_revision_model_is_typed_unavailable():
+    with pytest.raises(
+        ValueError,
+        match="METAR_PROVISIONAL_REVISION_AUTHORITY_UNAVAILABLE",
+    ):
+        era._provisional_day0_revision_likelihood(
+            sqlite3.connect(":memory:"),
+            source="aviationweather_metar",
+            city="Ankara",
+            city_timezone="Europe/Istanbul",
+            target_date="2026-08-23",
+            temperature_metric="high",
+            decision_time=_dt.datetime(
+                2026, 8, 23, 21, 49, tzinfo=_dt.timezone.utc
+            ),
+            entry_authority=False,
+        )

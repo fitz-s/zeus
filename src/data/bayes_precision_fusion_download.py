@@ -1024,37 +1024,13 @@ def _default_live_fetch_locations_batched(
     if not locations:
         return []
     try:
-        from src.data.openmeteo_client import fetch  # noqa: PLC0415
-        from src.data.openmeteo_ecmwf_ifs9_anchor import (  # noqa: PLC0415
-            SINGLE_RUNS_FORECAST_URL,
+        payloads = _fetch_single_runs_hourly_payloads_batched(
+            models=models,
+            locations=locations,
+            run=run,
+            forecast_hours=forecast_hours,
+            deadline_monotonic=deadline_monotonic,
         )
-
-        params = {
-            "latitude": ",".join(str(latitude) for latitude, _, _, _ in locations),
-            "longitude": ",".join(str(longitude) for _, longitude, _, _ in locations),
-            "hourly": "temperature_2m",
-            "models": ",".join(OPENMETEO_MODEL_IDS.get(model, model) for model in models),
-            "run": run.strftime("%Y-%m-%dT%H:%M"),
-            "forecast_hours": forecast_hours,
-            "temperature_unit": "celsius",
-            "timezone": ",".join(timezone_name for _, _, timezone_name, _ in locations),
-            "cell_selection": BAYES_PRECISION_FUSION_CELL_SELECTION,
-        }
-        payload = fetch(
-            SINGLE_RUNS_FORECAST_URL,
-            params,
-            endpoint_label="bayes_precision_fusion_single_runs_locations_batched",
-            quota=_BPF_OPENMETEO_QUOTA_TRACKER,
-            fast_fail_429=True,
-            **_deadline_fetch_kwargs(deadline_monotonic),
-        )
-        payloads = [payload] if len(locations) == 1 and isinstance(payload, dict) else payload
-        if not isinstance(payloads, list) or len(payloads) != len(locations):
-            raise RuntimeError(
-                "Open-Meteo multi-location response count mismatch: "
-                f"expected={len(locations)} got="
-                f"{len(payloads) if isinstance(payloads, list) else type(payloads).__name__}"
-            )
         return [
             {
                 target_local_date: _parse_batched_single_runs_payload(
@@ -1146,6 +1122,61 @@ def _default_live_fetch_locations_batched(
             {target_local_date: dict(error) for target_local_date in target_local_dates}
             for _, _, _, target_local_dates in locations
         ]
+
+
+def _fetch_single_runs_hourly_payloads_batched(
+    *,
+    models: Sequence[str],
+    locations: Sequence[tuple[float, float, str, Sequence[date]]],
+    run: datetime,
+    forecast_hours: int,
+    deadline_monotonic: float | None = None,
+) -> tuple[Mapping[str, object], ...]:
+    """Fetch raw, exact-run hourly payloads using the canonical BPF transport.
+
+    This is the payload-preserving sibling of ``_default_live_fetch_locations_batched``.
+    It intentionally has no fallback or provenance reinterpretation: callers that need
+    the provider-meta-stamped standard surface must invoke the existing
+    ``_fetch_standard_meta_stamped_payloads`` helper and carry its returned authority.
+    """
+    if not models or not locations:
+        return ()
+    from src.data.openmeteo_client import fetch  # noqa: PLC0415
+    from src.data.openmeteo_ecmwf_ifs9_anchor import (  # noqa: PLC0415
+        SINGLE_RUNS_FORECAST_URL,
+    )
+
+    params = {
+        "latitude": ",".join(str(latitude) for latitude, _, _, _ in locations),
+        "longitude": ",".join(str(longitude) for _, longitude, _, _ in locations),
+        "hourly": "temperature_2m",
+        "models": ",".join(OPENMETEO_MODEL_IDS.get(model, model) for model in models),
+        "run": run.strftime("%Y-%m-%dT%H:%M"),
+        "forecast_hours": forecast_hours,
+        "temperature_unit": "celsius",
+        "timezone": ",".join(timezone_name for _, _, timezone_name, _ in locations),
+        "cell_selection": BAYES_PRECISION_FUSION_CELL_SELECTION,
+    }
+    payload = fetch(
+        SINGLE_RUNS_FORECAST_URL,
+        params,
+        endpoint_label="bayes_precision_fusion_single_runs_locations_batched",
+        quota=_BPF_OPENMETEO_QUOTA_TRACKER,
+        fast_fail_429=True,
+        **_deadline_fetch_kwargs(deadline_monotonic),
+    )
+    payloads = [payload] if len(locations) == 1 and isinstance(payload, Mapping) else payload
+    if not isinstance(payloads, Sequence) or isinstance(payloads, (str, bytes)):
+        raise RuntimeError(
+            "Open-Meteo multi-location response must be a JSON array: "
+            f"got={type(payloads).__name__}"
+        )
+    if len(payloads) != len(locations) or any(not isinstance(item, Mapping) for item in payloads):
+        raise RuntimeError(
+            "Open-Meteo multi-location response count/shape mismatch: "
+            f"expected={len(locations)} got={len(payloads)}"
+        )
+    return tuple(payloads)
 
 
 def _parse_batched_single_runs_payload(

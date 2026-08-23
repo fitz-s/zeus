@@ -22696,6 +22696,9 @@ def _actionable_payload_from_receipt(
         "_edli_day0_remaining_source_cycle_time_utc": _day0_probability_value(
             "remaining_source_cycle_time_utc"
         ),
+        "_edli_day0_remaining_provider_source_cycle_time_utc": _day0_probability_value(
+            "remaining_provider_source_cycle_time_utc"
+        ),
         "_edli_day0_remaining_capture_times_utc": _day0_probability_value(
             "remaining_capture_times_utc"
         ),
@@ -23496,6 +23499,9 @@ def _pre_submit_revalidation_payload_from_final_intent(
         "_edli_day0_remaining_model_names": payload.get("_edli_day0_remaining_model_names"),
         "_edli_day0_remaining_source_cycle_time_utc": payload.get(
             "_edli_day0_remaining_source_cycle_time_utc"
+        ),
+        "_edli_day0_remaining_provider_source_cycle_time_utc": payload.get(
+            "_edli_day0_remaining_provider_source_cycle_time_utc"
         ),
         "_edli_day0_remaining_capture_times_utc": payload.get(
             "_edli_day0_remaining_capture_times_utc"
@@ -33375,6 +33381,297 @@ def _replacement_uses_provisional_day0_conditioning(
     return isinstance(provisional, Mapping) and provisional.get("active") is True
 
 
+def _assert_day0_post_local_vector_witness(
+    witness: object,
+    *,
+    family: object,
+    decision_time: datetime,
+    target_end: datetime,
+) -> None:
+    """Validate the persisted remaining-vector authority before held readthrough."""
+    from src.data.bayes_precision_fusion_capture import OPENMETEO_MODEL_IDS
+    from src.data.openmeteo_ecmwf_ifs9_anchor import (
+        SINGLE_RUNS_FORECAST_URL,
+        STANDARD_FORECAST_URL,
+    )
+    if not isinstance(witness, Mapping):
+        raise ValueError("GLOBAL_DAY0_POST_LOCAL_VECTOR_WITNESS_MISSING")
+    expected_city = str(getattr(family, "city", "") or "").strip()
+    expected_date = str(getattr(family, "target_date", "") or "").strip()
+    expected_metric = str(getattr(family, "metric", "") or "").strip().lower()
+    vector_id = str(witness.get("vector_id") or "").strip()
+    vector_ids = witness.get("vector_ids_by_model")
+    expected_models = witness.get("expected_models")
+    actual_models = witness.get("actual_models")
+    capture_times = witness.get("capture_times_utc")
+    capture_by_model = witness.get("capture_times_by_model_utc")
+    fetch_started_by_model = witness.get("fetch_started_times_by_model_utc")
+    fetch_finished_by_model = witness.get("fetch_finished_times_by_model_utc")
+    provider_by_model = witness.get("provider_by_model")
+    endpoint_by_model = witness.get("endpoint_by_model")
+    request_hash_by_model = witness.get("request_hash_by_model")
+    source_run_id_by_model = witness.get("source_run_id_by_model")
+    provider_run_id_by_model = witness.get("provider_run_id_by_model")
+    model_api_id_by_model = witness.get("model_api_id_by_model")
+    provider_cycle_by_model = witness.get("provider_source_cycle_time_by_model_utc")
+    provider_available_by_model = witness.get(
+        "provider_source_available_at_by_model_utc"
+    )
+    provider_modified_by_model = witness.get(
+        "provider_source_modified_at_by_model_utc"
+    )
+    source_run_authority_by_model = witness.get("source_run_authority_by_model")
+    endpoint_mode_by_model = witness.get("endpoint_mode_by_model")
+    if (
+        not vector_id
+        or not isinstance(vector_ids, Mapping)
+        or not isinstance(expected_models, (list, tuple))
+        or not isinstance(actual_models, (list, tuple))
+        or not isinstance(capture_times, (list, tuple))
+        or not isinstance(capture_by_model, Mapping)
+        or not isinstance(fetch_started_by_model, Mapping)
+        or not isinstance(fetch_finished_by_model, Mapping)
+        or not isinstance(provider_by_model, Mapping)
+        or not isinstance(endpoint_by_model, Mapping)
+        or not isinstance(request_hash_by_model, Mapping)
+        or not isinstance(source_run_id_by_model, Mapping)
+        or not isinstance(provider_run_id_by_model, Mapping)
+        or not isinstance(model_api_id_by_model, Mapping)
+        or not isinstance(provider_cycle_by_model, Mapping)
+        or not isinstance(provider_available_by_model, Mapping)
+        or not isinstance(provider_modified_by_model, Mapping)
+        or not isinstance(source_run_authority_by_model, Mapping)
+        or not isinstance(endpoint_mode_by_model, Mapping)
+        or str(witness.get("city") or "").strip() != expected_city
+        or str(witness.get("target_date") or "").strip() != expected_date
+        or str(witness.get("metric") or "").strip().lower() != expected_metric
+    ):
+        raise ValueError("GLOBAL_DAY0_POST_LOCAL_VECTOR_WITNESS_INVALID")
+    expected = tuple(str(value).strip() for value in expected_models)
+    actual = tuple(str(value).strip() for value in actual_models)
+    if (
+        not expected
+        or any(not value for value in expected)
+        or any(not value for value in actual)
+        or len(expected) != len(set(expected))
+        or len(actual) != len(set(actual))
+        or set(expected) != set(actual)
+        or set(str(key).strip() for key in vector_ids) != set(actual)
+        or set(str(key).strip() for key in capture_by_model) != set(actual)
+        or set(str(key).strip() for key in fetch_started_by_model) != set(actual)
+        or set(str(key).strip() for key in fetch_finished_by_model) != set(actual)
+        or set(str(key).strip() for key in provider_by_model) != set(actual)
+        or set(str(key).strip() for key in endpoint_by_model) != set(actual)
+        or set(str(key).strip() for key in request_hash_by_model) != set(actual)
+        or set(str(key).strip() for key in source_run_id_by_model) != set(actual)
+        or set(str(key).strip() for key in provider_run_id_by_model) != set(actual)
+        or set(str(key).strip() for key in model_api_id_by_model) != set(actual)
+        or set(str(key).strip() for key in provider_cycle_by_model) != set(actual)
+        or set(str(key).strip() for key in provider_available_by_model) != set(actual)
+        or set(str(key).strip() for key in provider_modified_by_model) != set(actual)
+        or set(str(key).strip() for key in source_run_authority_by_model) != set(actual)
+        or set(str(key).strip() for key in endpoint_mode_by_model) != set(actual)
+        or len(capture_times) != len(actual)
+        or vector_id not in {str(value).strip() for value in vector_ids.values()}
+    ):
+        raise ValueError("GLOBAL_DAY0_POST_LOCAL_VECTOR_WITNESS_IDENTITY_MISMATCH")
+
+    def _utc(value: object, reason: str) -> datetime:
+        try:
+            parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        except (TypeError, ValueError) as exc:
+            raise ValueError(reason) from exc
+        if parsed.tzinfo is None:
+            raise ValueError(reason)
+        return parsed.astimezone(UTC)
+
+    decision_utc = decision_time.astimezone(UTC)
+    target_end_utc = _utc(
+        witness.get("target_end_utc"),
+        "GLOBAL_DAY0_POST_LOCAL_VECTOR_WITNESS_CLOCK_INVALID",
+    )
+    if target_end_utc != target_end.astimezone(UTC):
+        raise ValueError("GLOBAL_DAY0_POST_LOCAL_VECTOR_WITNESS_TARGET_MISMATCH")
+    causal_as_of = _utc(
+        witness.get("causal_as_of_utc"),
+        "GLOBAL_DAY0_POST_LOCAL_VECTOR_WITNESS_CLOCK_INVALID",
+    )
+    local_capture_clock = _utc(
+        witness.get("local_capture_clock_utc"),
+        "GLOBAL_DAY0_POST_LOCAL_VECTOR_WITNESS_CLOCK_INVALID",
+    )
+    source_available = _utc(
+        witness.get("source_available_at_utc"),
+        "GLOBAL_DAY0_POST_LOCAL_VECTOR_WITNESS_CLOCK_INVALID",
+    )
+    if (
+        causal_as_of > decision_utc
+        or local_capture_clock > causal_as_of
+        or source_available > causal_as_of
+        or source_available < local_capture_clock
+    ):
+        raise ValueError("GLOBAL_DAY0_POST_LOCAL_VECTOR_WITNESS_FUTURE")
+    try:
+        from src.data.day0_hourly_vectors import DAY0_HOURLY_BUNDLE_MAX_AGE_HOURS
+
+        if (
+            decision_utc - source_available
+        ).total_seconds() > float(DAY0_HOURLY_BUNDLE_MAX_AGE_HOURS) * 3600.0:
+            raise ValueError("GLOBAL_DAY0_POST_LOCAL_VECTOR_WITNESS_STALE")
+    except ImportError:
+        raise ValueError("GLOBAL_DAY0_POST_LOCAL_VECTOR_WITNESS_INVALID") from None
+
+    parsed_captures: list[datetime] = []
+    for model in actual:
+        capture = _utc(
+            capture_by_model.get(model),
+            "GLOBAL_DAY0_POST_LOCAL_VECTOR_WITNESS_CLOCK_INVALID",
+        )
+        fetch_started = _utc(
+            fetch_started_by_model.get(model),
+            "GLOBAL_DAY0_POST_LOCAL_VECTOR_WITNESS_CLOCK_INVALID",
+        )
+        fetch_finished = _utc(
+            fetch_finished_by_model.get(model),
+            "GLOBAL_DAY0_POST_LOCAL_VECTOR_WITNESS_CLOCK_INVALID",
+        )
+        provider_cycle = _utc(
+            provider_cycle_by_model.get(model),
+            "GLOBAL_DAY0_POST_LOCAL_VECTOR_WITNESS_CLOCK_INVALID",
+        )
+        provider_available = _utc(
+            provider_available_by_model.get(model),
+            "GLOBAL_DAY0_POST_LOCAL_VECTOR_WITNESS_CLOCK_INVALID",
+        )
+        provider_modified = _utc(
+            provider_modified_by_model.get(model),
+            "GLOBAL_DAY0_POST_LOCAL_VECTOR_WITNESS_CLOCK_INVALID",
+        )
+        parsed_captures.append(capture)
+        if (
+            capture > causal_as_of
+            or capture > decision_utc
+            or capture > target_end_utc
+            or capture > fetch_started
+            or fetch_started > fetch_finished
+            or fetch_finished > causal_as_of
+            or fetch_finished > decision_utc
+            or provider_cycle > provider_available
+            or provider_available > fetch_finished
+            or provider_modified > fetch_finished
+            or provider_cycle > causal_as_of
+            or provider_available > causal_as_of
+            or provider_modified > causal_as_of
+        ):
+            raise ValueError("GLOBAL_DAY0_POST_LOCAL_VECTOR_CAPTURE_AFTER_TARGET")
+        if (
+            str(vector_ids.get(model) or "").strip() == ""
+            or not str(provider_by_model.get(model) or "").strip()
+            or not str(endpoint_by_model.get(model) or "").strip()
+            or not str(request_hash_by_model.get(model) or "").strip()
+            or not str(source_run_id_by_model.get(model) or "").strip()
+            or not str(provider_run_id_by_model.get(model) or "").strip()
+            or not str(model_api_id_by_model.get(model) or "").strip()
+            or not str(source_run_authority_by_model.get(model) or "").strip()
+            or not str(endpoint_mode_by_model.get(model) or "").strip()
+            or str(provider_by_model.get(model)).strip() != "openmeteo"
+            or str(model_api_id_by_model.get(model)).strip()
+            != str(OPENMETEO_MODEL_IDS.get(model, model)).strip()
+            or str(source_run_id_by_model.get(model)).strip()
+            != f"day0_hourly:{str(request_hash_by_model.get(model)).strip()}"
+            or str(provider_run_id_by_model.get(model)).strip()
+            != f"openmeteo:{str(model_api_id_by_model.get(model)).strip()}:{provider_cycle.isoformat()}"
+            or str(source_run_authority_by_model.get(model)).strip()
+            not in {"run_pinned_single_runs", "provider_meta_declared"}
+            or str(endpoint_mode_by_model.get(model)).strip()
+            not in {"single_runs", "standard_meta_stamped"}
+            or (
+                str(endpoint_mode_by_model.get(model)).strip() == "single_runs"
+                and str(endpoint_by_model.get(model)).strip() != SINGLE_RUNS_FORECAST_URL
+            )
+            or (
+                str(endpoint_mode_by_model.get(model)).strip()
+                == "standard_meta_stamped"
+                and str(endpoint_by_model.get(model)).strip() != STANDARD_FORECAST_URL
+            )
+            or (
+                str(source_run_authority_by_model.get(model)).strip()
+                == "run_pinned_single_runs"
+                and str(endpoint_mode_by_model.get(model)).strip() != "single_runs"
+            )
+            or (
+                str(source_run_authority_by_model.get(model)).strip()
+                == "provider_meta_declared"
+                and str(endpoint_mode_by_model.get(model)).strip()
+                != "standard_meta_stamped"
+            )
+        ):
+            raise ValueError("GLOBAL_DAY0_POST_LOCAL_VECTOR_WITNESS_IDENTITY_MISMATCH")
+    list_captures = tuple(
+        _utc(value, "GLOBAL_DAY0_POST_LOCAL_VECTOR_WITNESS_CLOCK_INVALID")
+        for value in capture_times
+    )
+    if tuple(sorted(list_captures)) != tuple(sorted(parsed_captures)):
+        raise ValueError("GLOBAL_DAY0_POST_LOCAL_VECTOR_WITNESS_IDENTITY_MISMATCH")
+    if local_capture_clock != max(parsed_captures) or source_available != max(
+        _utc(value, "GLOBAL_DAY0_POST_LOCAL_VECTOR_WITNESS_CLOCK_INVALID")
+        for value in fetch_finished_by_model.values()
+    ):
+        raise ValueError("GLOBAL_DAY0_POST_LOCAL_VECTOR_WITNESS_CLOCK_MISMATCH")
+    carrier_cycle = _utc(
+        witness.get("provider_source_cycle_time_utc"),
+        "GLOBAL_DAY0_POST_LOCAL_VECTOR_WITNESS_CLOCK_INVALID",
+    )
+    ecmwf_cycle = provider_cycle_by_model.get("ecmwf_ifs")
+    if ecmwf_cycle is None or carrier_cycle != _utc(
+        ecmwf_cycle,
+        "GLOBAL_DAY0_POST_LOCAL_VECTOR_WITNESS_CLOCK_INVALID",
+    ):
+        raise ValueError("GLOBAL_DAY0_POST_LOCAL_VECTOR_WITNESS_IDENTITY_MISMATCH")
+
+
+def _provisional_day0_revision_likelihood(
+    conn: sqlite3.Connection,
+    *,
+    source: str,
+    city: str,
+    city_timezone: str,
+    target_date: str,
+    temperature_metric: str,
+    decision_time: datetime,
+    entry_authority: bool,
+) -> Mapping[str, object]:
+    """Resolve only an existing source-specific provisional revision model."""
+    from src.data.day0_observation_reader import (
+        hko_provisional_revision_likelihood,
+        wu_provisional_revision_likelihood,
+    )
+
+    provisional_source = str(source or "").strip().lower()
+    if provisional_source.startswith("hko_hourly_accumulator"):
+        return hko_provisional_revision_likelihood(
+            conn,
+            target_date=target_date,
+            temperature_metric=temperature_metric,
+            decision_time=decision_time,
+        )
+    if provisional_source.startswith("wu"):
+        return wu_provisional_revision_likelihood(
+            conn,
+            city=city,
+            timezone_name=city_timezone,
+            target_date=target_date,
+            temperature_metric=temperature_metric,
+            decision_time=decision_time,
+            # A zero-transition Jeffreys prior is intentionally reduce-only:
+            # ENTRY still requires empirical city history.
+            allow_prior_only=not entry_authority,
+        )
+    if provisional_source.startswith("aviationweather_metar"):
+        raise ValueError("METAR_PROVISIONAL_REVISION_AUTHORITY_UNAVAILABLE")
+    raise ValueError("PROVISIONAL_SOURCE_REVISION_MODEL_UNAVAILABLE")
+
+
 def _day0_replacement_conditioning(
     replacement_bundle: object,
     *,
@@ -34571,6 +34868,13 @@ def _global_day0_execution_payload(
         binding["statistical_probability_conditioning"] = dict(
             fast_residual_conditioning
         )
+    remaining_witness = (
+        conditioning.get("day0_remaining_vector_witness")
+        if isinstance(conditioning, Mapping)
+        else None
+    )
+    if isinstance(remaining_witness, Mapping):
+        binding["day0_remaining_vector_witness"] = dict(remaining_witness)
     physical_clock: dict[str, object] | None = None
     physical_probability_boundary: dict[str, object] | None = None
     if physical_fact is not None:
@@ -34681,6 +34985,20 @@ def _global_day0_execution_payload(
         "observation_context_id": "global_current_day0:" + stable_hash(binding),
         "_edli_global_day0_binding": binding,
     }
+    if isinstance(remaining_witness, Mapping):
+        payload["_edli_day0_remaining_vector_witness"] = dict(remaining_witness)
+        provider_cycle = remaining_witness.get("provider_source_cycle_time_utc")
+        if provider_cycle not in (None, ""):
+            payload["_edli_day0_remaining_provider_source_cycle_time_utc"] = provider_cycle
+        payload["_edli_day0_remaining_capture_times_utc"] = list(
+            remaining_witness.get("capture_times_utc") or ()
+        )
+        payload["_edli_day0_remaining_expected_models"] = list(
+            remaining_witness.get("expected_models") or ()
+        )
+        payload["_edli_day0_remaining_model_names"] = list(
+            remaining_witness.get("actual_models") or ()
+        )
     if physical_clock is not None:
         payload.update(
             {
@@ -34797,10 +35115,18 @@ def _global_day0_probability_authority_payload(
                 "_edli_day0_remaining_source_cycle_time_utc",
             ),
             (
+                "remaining_provider_source_cycle_time_utc",
+                "_edli_day0_remaining_provider_source_cycle_time_utc",
+            ),
+            (
                 "remaining_capture_times_utc",
                 "_edli_day0_remaining_capture_times_utc",
             ),
             ("remaining_expected_models", "_edli_day0_remaining_expected_models"),
+            (
+                "remaining_vector_witness",
+                "_edli_day0_remaining_vector_witness",
+            ),
             (
                 "current_temperature_native",
                 "_edli_day0_current_temperature_native",
@@ -36499,39 +36825,20 @@ def _prepare_current_global_probability_family(
         if day0_payload_out is not None:
             day0_payload_out.update(current_day0_payload)
         if provisional_day0_observation:
-            from src.data.day0_observation_reader import (
-                hko_provisional_revision_likelihood,
-                wu_provisional_revision_likelihood,
-            )
-
             try:
                 provisional_source = str(
                     current_day0_payload.get("settlement_source") or ""
                 ).strip().lower()
-                if provisional_source.startswith("hko_hourly_accumulator"):
-                    revision_likelihood = hko_provisional_revision_likelihood(
-                        day0_observation_conn,
-                        target_date=str(family.target_date),
-                        temperature_metric=str(family.metric),
-                        decision_time=decision_time,
-                    )
-                elif provisional_source.startswith("wu"):
-                    revision_likelihood = wu_provisional_revision_likelihood(
-                        day0_observation_conn,
-                        city=str(family.city),
-                        timezone_name=str(city.timezone),
-                        target_date=str(family.target_date),
-                        temperature_metric=str(family.metric),
-                        decision_time=decision_time,
-                        # A zero-transition Jeffreys prior is intentionally
-                        # reduce-only: it keeps existing capital observable,
-                        # while ENTRY still requires empirical city history.
-                        allow_prior_only=not entry_authority,
-                    )
-                else:
-                    raise ValueError(
-                        "PROVISIONAL_SOURCE_REVISION_MODEL_UNAVAILABLE"
-                    )
+                revision_likelihood = _provisional_day0_revision_likelihood(
+                    day0_observation_conn,
+                    source=provisional_source,
+                    city=str(family.city),
+                    city_timezone=str(city.timezone),
+                    target_date=str(family.target_date),
+                    temperature_metric=str(family.metric),
+                    decision_time=decision_time,
+                    entry_authority=entry_authority,
+                )
             except ValueError as exc:
                 if str(exc) == "HKO_PROVISIONAL_ROLLOVER_UNCONFIRMED":
                     # SCOPE: this HKO family only. DRAIN: a changed official
@@ -36540,6 +36847,10 @@ def _prepare_current_global_probability_family(
                     # world.data_version and rebuilds this family.
                     raise ValueError(
                         "GLOBAL_DAY0_PROVISIONAL_ROLLOVER_UNCONFIRMED"
+                    ) from exc
+                if str(exc) == "METAR_PROVISIONAL_REVISION_AUTHORITY_UNAVAILABLE":
+                    raise ValueError(
+                        "GLOBAL_DAY0_METAR_PROVISIONAL_REVISION_AUTHORITY_UNAVAILABLE"
                     ) from exc
                 # SCOPE: this HKO family held-position q only. DRAIN: enough
                 # causal official snapshots establish the source-specific
@@ -37004,16 +37315,27 @@ def _prepare_current_global_probability_family(
         current_day0_redecision_only
         and local_target < local_now.date()
     ):
-        raw_capture_times = payload.get(
-            "_edli_day0_remaining_capture_times_utc"
+        persisted_witness = payload.get(
+            "_edli_day0_remaining_vector_witness"
         )
-        if not isinstance(raw_capture_times, list) or not raw_capture_times:
-            raise ValueError("GLOBAL_DAY0_POST_LOCAL_VECTOR_CAPTURE_MISSING")
+        if not isinstance(persisted_witness, Mapping):
+            raise ValueError("GLOBAL_DAY0_POST_LOCAL_VECTOR_WITNESS_MISSING")
         target_end = datetime.combine(
             local_target + timedelta(days=1),
             time.min,
             tzinfo=ZoneInfo(str(city.timezone)),
         ).astimezone(UTC)
+        _assert_day0_post_local_vector_witness(
+            persisted_witness,
+            family=family,
+            decision_time=decision_time,
+            target_end=target_end,
+        )
+        raw_capture_times = payload.get(
+            "_edli_day0_remaining_capture_times_utc"
+        )
+        if not isinstance(raw_capture_times, list) or not raw_capture_times:
+            raise ValueError("GLOBAL_DAY0_POST_LOCAL_VECTOR_CAPTURE_MISSING")
         try:
             capture_times = tuple(
                 datetime.fromisoformat(str(value).replace("Z", "+00:00"))
@@ -40252,11 +40574,23 @@ def _market_analysis_from_event_snapshot(
         # §3). The same canonical accessor the calibration path uses
         # (snapshot.source_cycle_time / issue_time / payload.cycle). Absent ⇒ the bridge
         # fails closed to a typed SPINE_INPUTS_UNAVAILABLE no-trade (never decision_time).
-        _spine_source_cycle = (
-            payload.get("_edli_day0_remaining_source_cycle_time_utc")
-            if _day0_remaining_spine_mode
-            else None
-        ) or snapshot.get("source_cycle_time") or snapshot.get("issue_time") or payload.get("cycle")
+        # The generic Open-Meteo hourly response carries no provider-issued
+        # per-model initialization/run cycle.  Day0's local capture clock is
+        # provenance only and must never become ForecastCase.source_cycle.  A
+        # future provider-cycle carrier may opt in explicitly; absent that
+        # carrier _served_predictive_inputs() fails closed with the typed
+        # SOURCE_CYCLE_NOT_STASHED reason.  Do not mix a snapshot cycle from a
+        # different probability surface into the remaining-day envelope.
+        if _day0_remaining_spine_mode:
+            _spine_source_cycle = payload.get(
+                "_edli_day0_remaining_provider_source_cycle_time_utc"
+            )
+        else:
+            _spine_source_cycle = (
+                snapshot.get("source_cycle_time")
+                or snapshot.get("issue_time")
+                or payload.get("cycle")
+            )
         if _spine_source_cycle:
             payload["_edli_spine_source_cycle_time_utc"] = str(_spine_source_cycle)
     except Exception as _spine_stash_exc:  # noqa: BLE001 — Stage-0 spine is observability-only; never alter a decision
@@ -42186,7 +42520,10 @@ def _day0_remaining_day_members(
             except (TypeError, ValueError):
                 continue
         if captured_times:
-            payload["_edli_day0_remaining_source_cycle_time_utc"] = max(captured_times)
+            # Local request/capture clock only; it is not a provider forecast
+            # cycle and is intentionally excluded from qkernel source-cycle
+            # authority.
+            payload["_edli_day0_remaining_local_capture_clock_utc"] = max(captured_times)
             payload["_edli_day0_remaining_capture_times_utc"] = captured_times
         if expected_models:
             payload["_edli_day0_remaining_expected_models"] = list(expected_models)
