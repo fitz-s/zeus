@@ -1815,11 +1815,59 @@ def _latest_eligible_ensemble_input_mark(
         predicates.append("COALESCE(boundary_ambiguous, 0) = 0")
     if "contributes_to_target_extrema" in columns:
         predicates.append("COALESCE(contributes_to_target_extrema, 0) = 1")
+    if "source_run_id" in columns:
+        source_run_ref = _authority_table_ref(conn, "source_run")
+        source_run_columns = (
+            frozenset()
+            if source_run_ref is None
+            else _hwm_table_ref_columns(conn, source_run_ref)
+        )
+        required_run_columns = {
+            "source_run_id",
+            "status",
+            "completeness_status",
+            "partial_run",
+        }
+        clock_columns = tuple(
+            column
+            for column in (
+                "imported_at",
+                "fetch_finished_at",
+                "captured_at",
+                "source_available_at",
+            )
+            if column in source_run_columns
+        )
+        if (
+            source_run_ref is None
+            or not required_run_columns.issubset(source_run_columns)
+            or not clock_columns
+        ):
+            return None
+        run_clock_expr = (
+            f"source_run.{clock_columns[0]}"
+            if len(clock_columns) == 1
+            else f"COALESCE({', '.join(f'source_run.{column}' for column in clock_columns)})"
+        )
+        predicates.append(
+            f"""
+            EXISTS (
+                SELECT 1
+                  FROM {source_run_ref} AS source_run
+                 WHERE source_run.source_run_id = ensemble_snapshot.source_run_id
+                   AND source_run.status = 'SUCCESS'
+                   AND source_run.completeness_status = 'COMPLETE'
+                   AND source_run.partial_run = 0
+                   AND datetime({run_clock_expr}) <= datetime(?)
+            )
+            """
+        )
+        params.append(decision_time.astimezone(UTC).isoformat())
     try:
         row = conn.execute(
             f"""
             SELECT snapshot_id, {cycle_expr} AS source_cycle_time
-              FROM {table_ref}
+              FROM {table_ref} AS ensemble_snapshot
              WHERE {' AND '.join(predicates)}
              ORDER BY datetime({cycle_expr}) DESC,
                       datetime({available_expr}) DESC,

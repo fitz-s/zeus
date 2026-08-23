@@ -1,6 +1,6 @@
 # Created: 2026-06-06
-# Last reused/audited: 2026-08-21
-# Lifecycle: created=2026-06-06; last_reviewed=2026-08-21; last_reused=2026-08-21
+# Last reused/audited: 2026-08-22
+# Lifecycle: created=2026-06-06; last_reviewed=2026-08-22; last_reused=2026-08-22
 # Purpose: Protect DB materialization for Open-Meteo ECMWF IFS 9km + Bayes-fusion replacement live layer.
 # Reuse: Run before changing replacement forecast live/experiment write path.
 # Authority basis: Operator-directed replacement forecast simple-switch readiness.
@@ -2996,9 +2996,10 @@ def _create_target_frontier_tables(conn: sqlite3.Connection) -> None:
         CREATE TABLE source_run (
             source_run_id TEXT PRIMARY KEY,
             source_id TEXT, track TEXT, source_cycle_time TEXT,
-            source_available_at TEXT, fetch_finished_at TEXT,
+            source_available_at TEXT, fetch_finished_at TEXT, captured_at TEXT,
+            imported_at TEXT,
             expected_count INTEGER, observed_count INTEGER,
-            completeness_status TEXT, raw_payload_hash TEXT,
+            completeness_status TEXT, partial_run INTEGER, raw_payload_hash TEXT,
             manifest_hash TEXT, status TEXT, reason_code TEXT
         );
         CREATE TABLE raw_forecast_artifacts (
@@ -3017,6 +3018,7 @@ def _create_target_frontier_tables(conn: sqlite3.Connection) -> None:
             snapshot_id INTEGER PRIMARY KEY,
             city TEXT, target_date TEXT, temperature_metric TEXT,
             source_id TEXT, model_version TEXT, authority TEXT,
+            source_run_id TEXT,
             causality_status TEXT, boundary_ambiguous INTEGER,
             forecast_window_attribution_status TEXT,
             contributes_to_target_extrema INTEGER,
@@ -3028,13 +3030,17 @@ def _create_target_frontier_tables(conn: sqlite3.Connection) -> None:
         INSERT INTO source_run VALUES (
             'b0-run', 'ecmwf_open_data', 'mx2t6_high',
             '2026-06-06T00:00:00+00:00', '2026-06-06T02:00:00+00:00',
-            '2026-06-06T02:00:00+00:00', 51, 51, 'COMPLETE',
+            '2026-06-06T02:00:00+00:00', '2026-06-06T02:00:00+00:00',
+            '2026-06-06T02:00:00+00:00',
+            51, 51, 'COMPLETE', 0,
             'b0-raw', 'b0-manifest', 'SUCCESS', NULL
         );
         INSERT INTO source_run VALUES (
             'om9-run', 'openmeteo', 'ifs9_high',
             '2026-06-06T00:00:00+00:00', '2026-06-06T03:00:00+00:00',
-            '2026-06-06T03:00:00+00:00', 1, 1, 'COMPLETE',
+            '2026-06-06T03:00:00+00:00', '2026-06-06T03:00:00+00:00',
+            '2026-06-06T03:00:00+00:00',
+            1, 1, 'COMPLETE', 0,
             'om9-raw', 'om9-manifest', 'SUCCESS', NULL
         );
         INSERT INTO raw_forecast_artifacts VALUES (
@@ -3049,7 +3055,7 @@ def _create_target_frontier_tables(conn: sqlite3.Connection) -> None:
         );
         INSERT INTO ensemble_snapshots VALUES (
             101, 'Shanghai', '2026-06-07', 'high',
-            'ecmwf_open_data', 'ecmwf_ens', 'VERIFIED', 'OK', 0,
+            'ecmwf_open_data', 'ecmwf_ens', 'VERIFIED', 'b0-run', 'OK', 0,
             'FULLY_INSIDE_TARGET_LOCAL_DAY', 1,
             '2026-06-06T00:00:00+00:00', '2026-06-06T00:00:00+00:00',
             '2026-06-06T03:00:00+00:00', '2026-06-06T03:00:00+00:00',
@@ -3104,7 +3110,7 @@ def test_target_dependency_witness_is_bounded_to_exact_target_rows() -> None:
         """
         INSERT INTO ensemble_snapshots VALUES (
             102, 'Shanghai', '2026-06-07', 'high',
-            'ecmwf_open_data', 'ecmwf_ens', 'VERIFIED', 'OK', 0,
+            'ecmwf_open_data', 'ecmwf_ens', 'VERIFIED', 'b0-run', 'OK', 0,
             'FULLY_INSIDE_TARGET_LOCAL_DAY', 1,
             '2026-06-06T00:00:00+00:00', '2026-06-06T00:00:00+00:00',
             '2026-06-06T03:30:00+00:00', '2026-06-06T03:30:00+00:00',
@@ -3289,21 +3295,15 @@ def test_target_witness_detects_same_fetch_time_source_run_replacement() -> None
         """
     )
 
-    changed = cli._revalidate_target_dependency_witness(
-        conn, prepared, baseline
-    )
+    with pytest.raises(cli._TargetDependencyWitnessUnavailable):
+        cli._revalidate_target_dependency_witness(conn, prepared, baseline)
     conn.close()
-
-    assert changed != baseline
-    assert changed.source_run_states[0].fetch_finished_at == (
-        baseline.source_run_states[0].fetch_finished_at
-    )
 
 
 @pytest.mark.parametrize(
     "delete_sql,raises",
     (
-        ("DELETE FROM source_run WHERE source_run_id = 'b0-run'", False),
+        ("DELETE FROM source_run WHERE source_run_id = 'b0-run'", True),
         ("DELETE FROM raw_forecast_artifacts WHERE artifact_id = 17", True),
         ("DELETE FROM raw_model_forecasts WHERE raw_model_forecast_id = 101", True),
         ("DELETE FROM ensemble_snapshots WHERE snapshot_id = 101", True),
@@ -3378,6 +3378,95 @@ def test_shared_frontier_helpers_match_materializer_selectors() -> None:
     )
     assert snapshot is not None
     assert snapshot_id == snapshot.snapshot_id == 101
+
+
+def test_current_ensemble_requires_complete_source_run_before_probability_authority() -> None:
+    from src.data.replacement_forecast_materializer import (
+        read_current_evidence_snapshot_identity,
+    )
+    from src.data.replacement_input_hwm import latest_eligible_ensemble_input_cycle
+
+    conn = _conn()
+    _ensure_source_run_table(conn)
+    request = _request()
+
+    def write_run(
+        *, status: str, completeness: str, partial: bool, imported_at: datetime
+    ) -> None:
+        observed_count = 3 if partial else 48
+        write_source_run(
+            conn,
+            source_run_id="ens-run",
+            source_id="ecmwf_open_data",
+            track="mx2t6_high_short_horizon",
+            release_calendar_key="ecmwf_open_data:mx2t6_high:short",
+            source_cycle_time=_dt(0),
+            source_available_at=_dt(2),
+            fetch_finished_at=imported_at,
+            captured_at=imported_at,
+            imported_at=imported_at,
+            status=status,
+            completeness_status=completeness,
+            partial_run=partial,
+            expected_steps_json=list(range(3, 145, 3)),
+            observed_steps_json=list(range(3, observed_count + 1, 3)),
+            expected_count=48,
+            observed_count=observed_count,
+            data_version="ecmwf_opendata_mx2t3_local_calendar_day_max",
+        )
+
+    write_run(status="PARTIAL", completeness="PARTIAL", partial=True, imported_at=_dt(3))
+    conn.execute(
+        """
+        INSERT INTO ensemble_snapshots (
+            snapshot_id, city, target_date, temperature_metric,
+            physical_quantity, observation_field, issue_time, available_at,
+            fetch_time, lead_hours, members_json, model_version, dataset_id,
+            source_id, source_run_id, source_cycle_time, source_available_at,
+            authority, causality_status, boundary_ambiguous,
+            forecast_window_attribution_status, contributes_to_target_extrema,
+            members_unit
+        ) VALUES (
+            101, 'Shanghai', '2026-06-07', 'high',
+            'temperature_max', 'high_temp', '2026-06-06T00:00:00+00:00',
+            '2026-06-06T03:00:00+00:00', '2026-06-06T03:00:00+00:00', 24,
+            '[20.0,21.0]', 'ecmwf_ens',
+            'ecmwf_opendata_mx2t3_local_calendar_day_max', 'ecmwf_open_data',
+            'ens-run', '2026-06-06T00:00:00+00:00',
+            '2026-06-06T03:00:00+00:00', 'VERIFIED', 'OK', 0,
+            'FULLY_INSIDE_TARGET_LOCAL_DAY', 1, 'degC'
+        )
+        """
+    )
+
+    def selected() -> tuple[object | None, datetime | None]:
+        return (
+            read_current_evidence_snapshot_identity(conn, request, metric="high"),
+            latest_eligible_ensemble_input_cycle(
+                conn,
+                city=request.city,
+                target_date=request.target_date,
+                metric="high",
+                decision_time=request.computed_at,
+            ),
+        )
+
+    assert selected() == (None, None)
+
+    write_run(
+        status="SUCCESS",
+        completeness="COMPLETE",
+        partial=False,
+        imported_at=_dt(3, 30),
+    )
+    identity, cycle = selected()
+    assert identity is not None
+    assert identity.snapshot_id == 101
+    assert cycle == _dt(0)
+
+    write_run(status="SUCCESS", completeness="COMPLETE", partial=False, imported_at=_dt(5))
+    assert selected() == (None, None)
+    conn.close()
 
 
 def test_new_target_family_provider_changes_final_witness() -> None:
@@ -3509,7 +3598,7 @@ def test_final_ens_frontier_detects_absent_to_present() -> None:
         """
         INSERT INTO ensemble_snapshots VALUES (
             102, 'Shanghai', '2026-06-07', 'high',
-            'ecmwf_open_data', 'ecmwf_ens', 'VERIFIED', 'OK', 0,
+            'ecmwf_open_data', 'ecmwf_ens', 'VERIFIED', 'b0-run', 'OK', 0,
             'FULLY_INSIDE_TARGET_LOCAL_DAY', 1,
             '2026-06-06T00:00:00+00:00', '2026-06-06T00:00:00+00:00',
             '2026-06-06T03:30:00+00:00', '2026-06-06T03:30:00+00:00',
@@ -3538,7 +3627,7 @@ def test_final_ens_frontier_exact_city_update_supersedes_casefold() -> None:
         """
         INSERT INTO ensemble_snapshots VALUES (
             102, 'shanghai', '2026-06-07', 'high',
-            'ecmwf_open_data', 'ecmwf_ens', 'UNVERIFIED', 'OK', 0,
+            'ecmwf_open_data', 'ecmwf_ens', 'UNVERIFIED', 'b0-run', 'OK', 0,
             'FULLY_INSIDE_TARGET_LOCAL_DAY', 1,
             '2026-06-06T00:00:00+00:00', '2026-06-06T00:00:00+00:00',
             '2026-06-06T03:30:00+00:00', '2026-06-06T03:30:00+00:00',
@@ -3606,7 +3695,7 @@ def test_final_ens_selector_has_indexed_logarithmic_work() -> None:
             """
             INSERT INTO ensemble_snapshots VALUES (
                 ?, 'Shanghai', '2026-06-07', 'high',
-                'ecmwf_open_data', 'ecmwf_ens', 'VERIFIED', 'OK', 0,
+                'ecmwf_open_data', 'ecmwf_ens', 'VERIFIED', 'b0-run', 'OK', 0,
                 'FULLY_INSIDE_TARGET_LOCAL_DAY', 1,
                 '2026-06-06T00:00:00+00:00', '2026-06-06T00:00:00+00:00',
                 '2026-06-06T03:00:00+00:00', '2026-06-06T03:00:00+00:00',
@@ -3896,6 +3985,22 @@ def test_final_frontier_queries_use_exact_target_indexes_without_temp_sort() -> 
     )
 
     conn = _conn()
+    _ensure_source_run_table(conn)
+    write_source_run(
+        conn,
+        source_run_id="ens-run",
+        source_id="ecmwf_open_data",
+        track="mx2t6_high_short_horizon",
+        release_calendar_key="ecmwf_open_data:mx2t6_high:short",
+        source_cycle_time=_dt(0),
+        source_available_at=_dt(3),
+        fetch_finished_at=_dt(3),
+        captured_at=_dt(3),
+        imported_at=_dt(3),
+        status="SUCCESS",
+        completeness_status="COMPLETE",
+        partial_run=False,
+    )
     _ensure_replacement_identity_columns(conn)
     _ensure_replacement_frontier_indexes(conn)
     prepared = _prepared_target_frontier(101)
@@ -3917,7 +4022,7 @@ def test_final_frontier_queries_use_exact_target_indexes_without_temp_sort() -> 
             snapshot_id, city, target_date, temperature_metric, physical_quantity,
             observation_field, issue_time, available_at, fetch_time, lead_hours,
             members_json, model_version, dataset_id, source_id, source_cycle_time,
-            source_available_at, forecast_window_attribution_status,
+            source_available_at, source_run_id, forecast_window_attribution_status,
             contributes_to_target_extrema, causality_status, boundary_ambiguous,
             members_unit
         ) VALUES (101, 'Shanghai', '2026-06-07', 'high', 'temperature_max',
@@ -3925,7 +4030,7 @@ def test_final_frontier_queries_use_exact_target_indexes_without_temp_sort() -> 
                   '2026-06-06T03:00:00+00:00', '2026-06-06T03:00:00+00:00',
                   24, '[20.0,21.0]', 'ecmwf_ens', 'ens', 'ecmwf_open_data',
                   '2026-06-06T00:00:00+00:00', '2026-06-06T03:00:00+00:00',
-                  'FULLY_INSIDE_TARGET_LOCAL_DAY', 1, 'OK', 0, 'degC')
+                  'ens-run', 'FULLY_INSIDE_TARGET_LOCAL_DAY', 1, 'OK', 0, 'degC')
         """
     )
     traced: list[str] = []

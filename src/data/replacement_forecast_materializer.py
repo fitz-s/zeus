@@ -2638,18 +2638,19 @@ def _current_evidence_snapshot_row(
         carrier_cycle_dt
         - timedelta(hours=replacement_source_cycle_max_age_hours())
     ).isoformat()
-    params = (
+    params: tuple[object, ...] = (
         request.city,
         _date_text(request.target_date),
         metric,
         carrier_cycle,
         min_evidence_cycle,
         decision_at,
+        decision_at,
     )
-    query = """
+    query = f"""
         SELECT {select_sql}
-          FROM ensemble_snapshots
-         WHERE {city_predicate}
+          FROM ensemble_snapshots AS ensemble_snapshot
+         WHERE {{city_predicate}}
            AND target_date = ?
            AND temperature_metric = ?
            AND source_id = 'ecmwf_open_data'
@@ -2662,6 +2663,20 @@ def _current_evidence_snapshot_row(
            AND COALESCE(source_cycle_time, issue_time) <= ?
            AND COALESCE(source_cycle_time, issue_time) >= ?
            AND COALESCE(source_available_at, available_at) <= ?
+           AND EXISTS (
+               SELECT 1
+                 FROM source_run AS source_run
+                WHERE source_run.source_run_id = ensemble_snapshot.source_run_id
+                  AND source_run.status = 'SUCCESS'
+                  AND source_run.completeness_status = 'COMPLETE'
+                  AND source_run.partial_run = 0
+                  AND datetime(COALESCE(
+                          source_run.imported_at,
+                          source_run.fetch_finished_at,
+                          source_run.captured_at,
+                          source_run.source_available_at
+                      )) <= datetime(?)
+           )
          ORDER BY COALESCE(source_cycle_time, issue_time) DESC,
                   COALESCE(source_available_at, available_at) DESC,
                   snapshot_id DESC
