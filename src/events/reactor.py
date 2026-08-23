@@ -6877,7 +6877,6 @@ def request_global_auction_completion(
 
     caller_supplied_scope = bool(str(scope_identity or "").strip())
     already_due = _GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.is_set()
-    _GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.set()
     clean_family = tuple(
         str(value or "").strip().lower()
         if index == 2
@@ -7163,6 +7162,12 @@ def request_global_auction_completion(
                 "durable completion was not accepted"
             )
             return (False, held_request) if return_request else False
+    # SCOPE: one accepted completion wake. DRAIN: its selected global cut
+    # reaches a terminal command/receipt or remains durably queued. RESET: the
+    # terminal cut clears this token; a failed publication never owns a token.
+    # This ordering keeps a generic monitor-fairness request from becoming an
+    # ownerless in-process reservation when its durable publish fails.
+    _GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.set()
     if held_request is not None:
         _mark_exact_executable_held_sell_pending(held_request)
     return (True, held_request) if return_request else True

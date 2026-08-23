@@ -6863,6 +6863,35 @@ def test_ordinary_cancellation_reads_only_atomic_exact_signal(monkeypatch):
         _EXACT_EXECUTABLE_HELD_SELL_PENDING.clear()
 
 
+def test_generic_completion_publish_failure_cannot_leave_ownerless_token(
+    monkeypatch,
+):
+    from src.events import reactor
+    from src.runtime import reactor_wake
+
+    reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.clear()
+    monkeypatch.setattr(
+        reactor_wake,
+        "reactor_wakes_since",
+        lambda *_args, **_kwargs: (),
+    )
+    monkeypatch.setattr(
+        reactor_wake,
+        "publish_reactor_wake",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            OSError("wake directory unavailable")
+        ),
+    )
+    try:
+        assert reactor.request_global_auction_completion(
+            reason="periodic_monitor_preemption",
+            position_id="",
+        ) is False
+        assert not reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.is_set()
+    finally:
+        reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.clear()
+
+
 def test_global_selection_cancels_when_exact_publisher_arrives_after_probe_creation(
     tmp_path,
 ):
