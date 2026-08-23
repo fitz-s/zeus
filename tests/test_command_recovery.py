@@ -25327,6 +25327,25 @@ class TestRecoveryResolutionTable:
             venue_status="FILLED",
             terminal_exec_status="filled",
         )
+        # A live executor fact may coexist with the recovery-owned baseline
+        # for the same command while still carrying the submitted limit rather
+        # than the final envelope VWAP. Convergence must verify the exact fact
+        # this repair wrote, not an arbitrary same-command row.
+        log_execution_fact(
+            conn,
+            intent_id="edli-intent:cmd-001",
+            position_id="pos-001",
+            decision_id="dec-001",
+            command_id="cmd-001",
+            order_role="entry",
+            posted_at="2026-04-26T00:00:00Z",
+            filled_at="2026-04-26T00:06:00Z",
+            submitted_price=0.10,
+            fill_price=0.10,
+            shares=21.5,
+            venue_status="CONFIRMED",
+            terminal_exec_status="filled",
+        )
         envelope_id = _ensure_envelope(
             conn,
             token_id="tok-001",

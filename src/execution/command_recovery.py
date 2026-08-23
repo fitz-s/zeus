@@ -4254,6 +4254,30 @@ def _latest_unprojected_filled_entry_candidates(conn: sqlite3.Connection) -> lis
              WHERE fact.state IN ('MATCHED', 'MINED', 'CONFIRMED')
                AND CAST(COALESCE(fact.filled_size, '0') AS REAL) > 0
              GROUP BY flow_cmd.position_id
+        ),
+        command_execution_fact AS (
+            SELECT ranked.command_id, ranked.intent_id
+              FROM (
+                    SELECT ef.command_id,
+                           ef.intent_id,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY ef.command_id
+                               ORDER BY CASE
+                                   WHEN ef.intent_id = cmd.position_id || ':entry'
+                                     OR ef.intent_id = cmd.position_id || ':entry:' || cmd.command_id
+                                   THEN 0
+                                   ELSE 1
+                               END,
+                               ef.intent_id
+                           ) AS fact_rank
+                      FROM execution_fact ef
+                      JOIN venue_commands cmd
+                        ON cmd.command_id = ef.command_id
+                       AND cmd.position_id = ef.position_id
+                     WHERE ef.order_role = 'entry'
+                       AND ef.voided_at IS NULL
+                   ) ranked
+             WHERE ranked.fact_rank = 1
         )
         SELECT cmd.*,
                entry_fill.fill_fact_count AS fill_fact_count,
@@ -4288,6 +4312,8 @@ def _latest_unprojected_filled_entry_candidates(conn: sqlite3.Connection) -> lis
             ON pc.position_id = cmd.position_id
           LEFT JOIN position_fill_flow flow
             ON flow.position_id = cmd.position_id
+          LEFT JOIN command_execution_fact command_ef
+            ON command_ef.command_id = cmd.command_id
           LEFT JOIN venue_submission_envelopes env
             ON env.envelope_id = cmd.envelope_id
           LEFT JOIN executable_market_snapshots snap
@@ -4342,6 +4368,7 @@ def _latest_unprojected_filled_entry_candidates(conn: sqlite3.Connection) -> lis
                           FROM execution_fact exact_entry
                          WHERE exact_entry.position_id = cmd.position_id
                            AND exact_entry.command_id = cmd.command_id
+                           AND exact_entry.intent_id = command_ef.intent_id
                            AND exact_entry.order_role = 'entry'
                            AND exact_entry.voided_at IS NULL
                            AND lower(COALESCE(
@@ -4427,6 +4454,7 @@ def _latest_unprojected_filled_entry_candidates(conn: sqlite3.Connection) -> lis
                           FROM execution_fact exact_entry
                          WHERE exact_entry.position_id = cmd.position_id
                            AND exact_entry.command_id = cmd.command_id
+                           AND exact_entry.intent_id = command_ef.intent_id
                            AND exact_entry.order_role = 'entry'
                            AND exact_entry.voided_at IS NULL
                            AND lower(COALESCE(
@@ -6277,18 +6305,20 @@ def _append_filled_entry_projection_repair(
             conn,
             candidate=candidate,
         )
-        _log_filled_entry_trade_candidate_execution_fact(
-            conn,
-            candidate={
-                **candidate,
-                "cmd_state": candidate.get("state"),
-                "cmd_size": candidate.get("size"),
-                "cmd_price": candidate.get("price"),
-                "cmd_created_at": candidate.get("created_at"),
-                "filled_size": candidate.get("fill_filled_size"),
-                "trade_fact_id": candidate.get("source_trade_fact_id"),
-                "execution_filled_at": candidate.get("fill_observed_at"),
-            },
+        repaired_execution_intent_id = (
+            _log_filled_entry_trade_candidate_execution_fact(
+                conn,
+                candidate={
+                    **candidate,
+                    "cmd_state": candidate.get("state"),
+                    "cmd_size": candidate.get("size"),
+                    "cmd_price": candidate.get("price"),
+                    "cmd_created_at": candidate.get("created_at"),
+                    "filled_size": candidate.get("fill_filled_size"),
+                    "trade_fact_id": candidate.get("source_trade_fact_id"),
+                    "execution_filled_at": candidate.get("fill_observed_at"),
+                },
+            )
         )
         reconcile_terminal_entry_exposure_obligations(
             conn,
@@ -6323,13 +6353,14 @@ def _append_filled_entry_projection_repair(
                 """
                 SELECT shares, fill_price
                   FROM execution_fact
-                 WHERE position_id = ?
+                 WHERE intent_id = ?
+                   AND position_id = ?
                    AND command_id = ?
                    AND order_role = 'entry'
                    AND voided_at IS NULL
                  LIMIT 1
                 """,
-                (position_id, command_id),
+                (repaired_execution_intent_id, position_id, command_id),
             ).fetchone()
             if (
                 repaired is None
