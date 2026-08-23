@@ -14703,18 +14703,23 @@ def test_monitor_refresh_canonical_emit_updates_current_projection(tmp_path):
     conn.close()
 
 
-def test_incident_b32ad42_red_monitor_projection_authorizes_same_turn_exit(
+def test_incident_b32ad42_pending_exit_red_projection_actuates_same_turn_exit(
     tmp_path,
     monkeypatch,
 ):
-    """The final RED decision and projection commit as one causal cut."""
+    """Protected retry state retains fields without masking RED actuation."""
     from src.engine.lifecycle_events import (
         build_entry_canonical_write,
         build_monitor_refreshed_canonical_write,
     )
     from src.execution import exit_lifecycle
     from src.riskguard.risk_level import RiskLevel
-    from src.state.db import append_many_and_project, get_connection, init_schema
+    from src.state.db import (
+        append_many_and_project,
+        get_connection,
+        init_schema,
+        transition_phase,
+    )
     from src.state.lifecycle_manager import LifecyclePhase
 
     conn = get_connection(tmp_path / "incident-b32ad42-red-monitor.db")
@@ -14752,6 +14757,22 @@ def test_incident_b32ad42_red_monitor_projection_authorizes_same_turn_exit(
         decision_id="incident-b32ad42-entry",
     )
     append_many_and_project(conn, entry_events, entry_projection)
+    retry_at = "2026-08-21T01:02:15.735899+00:00"
+    pos.state = LifecyclePhase.PENDING_EXIT.value
+    pos.pre_exit_state = "holding"
+    pos.exit_state = "retry_pending"
+    pos.order_status = "retry_pending"
+    pos.exit_reason = "OLD_STATISTICAL_EXIT"
+    pos.exit_retry_count = 4
+    pos.next_exit_retry_at = retry_at
+    assert transition_phase(
+        conn,
+        pos,
+        event_type="EXIT_ORDER_REJECTED",
+        reason="OLD_STATISTICAL_EXIT",
+        error="statistical_exit_retry",
+        source_module="tests.test_live_safety_invariants",
+    ) is True
 
     pos.last_monitor_prob = 0.9003278024817638
     pos.last_monitor_prob_is_fresh = False
@@ -14775,7 +14796,7 @@ def test_incident_b32ad42_red_monitor_projection_authorizes_same_turn_exit(
     monitor_events, monitor_projection = build_monitor_refreshed_canonical_write(
         pos,
         sequence_no=1226,
-        phase_after=LifecyclePhase.ACTIVE.value,
+        phase_after=LifecyclePhase.PENDING_EXIT.value,
         occurred_at="2026-08-21T00:52:15.735899+00:00",
         exit_decision=decision,
         final_should_exit=True,
@@ -14785,12 +14806,21 @@ def test_incident_b32ad42_red_monitor_projection_authorizes_same_turn_exit(
     append_many_and_project(conn, monitor_events, monitor_projection)
 
     current = conn.execute(
-        "SELECT exit_reason FROM position_current WHERE position_id = ?",
+        """
+        SELECT phase, order_status, exit_reason,
+               exit_retry_count, next_exit_retry_at
+          FROM position_current
+         WHERE position_id = ?
+        """,
         (pos.trade_id,),
     ).fetchone()
     payload = json.loads(monitor_events[0]["payload_json"])
     assert payload["exit_decision_reason"] == "RED_FORCE_EXIT"
+    assert current["phase"] == LifecyclePhase.PENDING_EXIT.value
+    assert current["order_status"] == "retry_pending"
     assert current["exit_reason"] == "RED_FORCE_EXIT"
+    assert current["exit_retry_count"] == 4
+    assert current["next_exit_retry_at"] == retry_at
     assert exit_lifecycle._red_monitor_provenance_matches(payload) is True
 
     pos.exit_reason = "RED_FORCE_EXIT"
@@ -14814,9 +14844,55 @@ def test_incident_b32ad42_red_monitor_projection_authorizes_same_turn_exit(
         ),
         conn=conn,
     ) is True
-    assert 15.0 * 0.49 - 15.0 * 0.1 * 0.49 * (1.0 - 0.49) == pytest.approx(
-        6.97515
+
+    submitted = {}
+
+    class Clob:
+        @staticmethod
+        def get_order_status(_order_id):
+            return {"status": "OPEN"}
+
+    def return_pending(**kwargs):
+        submitted.update(kwargs)
+        return exit_lifecycle.OrderResult(
+            trade_id=pos.trade_id,
+            status="pending",
+            order_id="incident-b32ad42-red-sweep",
+            external_order_id="incident-b32ad42-red-sweep",
+        )
+
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "_latest_or_capture_exit_snapshot_context",
+        lambda *_args, **_kwargs: {
+            "executable_snapshot_id": "incident-b32ad42-snapshot",
+            "executable_snapshot_hash": "incident-b32ad42-hash",
+            "executable_snapshot_orderbook_top_bid": 0.49,
+            "executable_snapshot_min_order_size": 0.01,
+        },
     )
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "check_sell_collateral",
+        lambda *_args, **_kwargs: (True, ""),
+    )
+    monkeypatch.setattr(exit_lifecycle, "place_sell_order", return_pending)
+
+    outcome = exit_lifecycle.execute_exit(
+        PortfolioState(positions=[pos]),
+        pos,
+        ExitContext(
+            exit_reason="RED_FORCE_EXIT",
+            current_market_price=0.49,
+            current_market_price_is_fresh=True,
+            best_bid=0.49,
+        ),
+        clob=Clob(),
+        conn=conn,
+    )
+    assert outcome.startswith("sell_pending: order=incident-b32ad42-red-sweep")
+    assert submitted["submit_order_type"] == "FAK"
+    assert submitted["protective_sell_execution_authority"].kind == "RED_FORCE_EXIT"
     conn.close()
 
 
