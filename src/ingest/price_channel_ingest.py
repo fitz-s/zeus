@@ -146,6 +146,217 @@ class _CanonicalHeldScopeUnavailable(RuntimeError):
     """The held monitor scope cannot be read safely from canonical TRADE truth."""
 
 
+MARKET_CHANNEL_HELD_SNAPSHOT_PROACTIVE_REFRESH_SECONDS = 120.0
+
+
+def _edli_held_snapshot_debt_payload(action, *, reason: str) -> dict[str, str]:
+    return {
+        "condition_id": str(action.condition_id or ""),
+        "token_id": str(action.token_id or ""),
+        "reason": str(action.reason or ""),
+        "debt_reason": reason,
+    }
+
+
+def _edli_enqueue_held_snapshot_refresh_actions(actions) -> dict[str, object]:
+    """Queue exact held repairs without claiming their snapshot outcome succeeded."""
+
+    from src.events.triggers.market_channel_ingestor import enqueue_persistent_market_channel_action
+
+    enqueued = 0
+    unavailable: list[dict[str, str]] = []
+    for action in actions:
+        try:
+            enqueue_persistent_market_channel_action(action)
+        except Exception as exc:  # noqa: BLE001 - committed quote must retain exact debt
+            unavailable.append(
+                _edli_held_snapshot_debt_payload(
+                    action,
+                    reason=f"{type(exc).__name__}: {exc}",
+                )
+            )
+        else:
+            enqueued += 1
+    return {
+        "held_snapshot_refresh_actions_enqueued": enqueued,
+        "held_snapshot_refresh_enqueue_unavailable": unavailable,
+    }
+
+
+def _edli_held_snapshot_refresh_report(
+    trade_conn,
+    canonical_held_pairs: set[tuple[str, str]],
+    *,
+    checked_at: datetime,
+) -> dict[str, object]:
+    """Observe exact held snapshot outcomes and re-emit every unsatisfied debt.
+
+    SCOPE: each canonical ``(condition_id, held_token_id)`` pair.
+    DRAIN: the persistent market-channel queue retries accepted actions and this
+    60-second scheduler re-emits any DB-observed debt after a crash or queue loss.
+    RESET: only a later snapshot projection for the same pair that is active,
+    open, accepting orders, orderbook-enabled, and fresh beyond the proactive
+    margin clears the debt. Queue acceptance is never a RESET.
+    """
+
+    from src.contracts.executable_market_snapshot import FRESHNESS_WINDOW_DEFAULT
+    from src.events.triggers.market_channel_ingestor import MarketChannelAction
+
+    required_latest = {
+        "condition_id", "selected_outcome_token_id", "snapshot_id", "active",
+        "closed", "accepting_orders", "yes_token_id", "no_token_id", "captured_at",
+        "freshness_deadline",
+    }
+    try:
+        latest_columns = {
+            str(row[1])
+            for row in trade_conn.execute(
+                "PRAGMA table_info(executable_market_snapshot_latest)"
+            ).fetchall()
+        }
+        snapshot_columns = {
+            str(row[1])
+            for row in trade_conn.execute(
+                "PRAGMA table_info(executable_market_snapshots)"
+            ).fetchall()
+        }
+    except Exception:  # noqa: BLE001 - unreadable canonical projection is debt
+        latest_columns = set()
+        snapshot_columns = set()
+    required_snapshot = {
+        "snapshot_id", "condition_id", "selected_outcome_token_id", "enable_orderbook",
+    }
+    required_invalidation = {"condition_id", "token_id", "invalidated_at"}
+    try:
+        invalidation_columns = {
+            str(row[1])
+            for row in trade_conn.execute(
+                "PRAGMA table_info(executable_market_snapshot_invalidations)"
+            ).fetchall()
+        }
+    except Exception:  # noqa: BLE001 - unreadable invalidation authority is debt
+        invalidation_columns = set()
+    can_read = (
+        required_latest <= latest_columns
+        and required_snapshot <= snapshot_columns
+        and required_invalidation <= invalidation_columns
+    )
+    freshness_cut = checked_at + timedelta(
+        seconds=MARKET_CHANNEL_HELD_SNAPSHOT_PROACTIVE_REFRESH_SECONDS
+    )
+    fresh_pairs: list[dict[str, str]] = []
+    due_actions = []
+    due_pairs: list[dict[str, str]] = []
+    for condition_id, token_id in sorted(canonical_held_pairs):
+        reason = "snapshot_projection_unavailable"
+        row = None
+        invalidation_rows = None
+        if can_read:
+            try:
+                row = trade_conn.execute(
+                    """
+                    SELECT latest.active, latest.closed, latest.accepting_orders,
+                           latest.captured_at, latest.freshness_deadline,
+                           snapshot.enable_orderbook, latest.yes_token_id,
+                           latest.no_token_id
+                      FROM executable_market_snapshot_latest AS latest
+                      JOIN executable_market_snapshots AS snapshot
+                        ON snapshot.snapshot_id = latest.snapshot_id
+                       AND snapshot.condition_id = latest.condition_id
+                       AND snapshot.selected_outcome_token_id = latest.selected_outcome_token_id
+                     WHERE latest.condition_id = ?
+                       AND latest.selected_outcome_token_id = ?
+                    """,
+                    (condition_id, token_id),
+                ).fetchone()
+                if row is not None:
+                    invalidation_rows = trade_conn.execute(
+                        """
+                        SELECT invalidated_at
+                          FROM executable_market_snapshot_invalidations
+                         WHERE condition_id = ? OR token_id IN (?, ?, ?)
+                        """,
+                        (condition_id, token_id, row[6], row[7]),
+                    ).fetchall()
+            except Exception:  # noqa: BLE001 - exact projection read remains debt
+                row = None
+                invalidation_rows = None
+                reason = "snapshot_projection_read_failed"
+        if row is not None:
+            try:
+                captured_at = datetime.fromisoformat(
+                    str(row[3]).replace("Z", "+00:00")
+                )
+                deadline = datetime.fromisoformat(
+                    str(row[4]).replace("Z", "+00:00")
+                )
+                if captured_at.tzinfo is None or deadline.tzinfo is None:
+                    raise ValueError("naive executable snapshot timestamp")
+                captured_at = captured_at.astimezone(timezone.utc)
+                deadline = deadline.astimezone(timezone.utc)
+            except (TypeError, ValueError):
+                captured_at = None
+                deadline = None
+            if int(row[0] or 0) != 1:
+                reason = "snapshot_inactive"
+            elif int(row[1] or 0) != 0:
+                reason = "snapshot_closed"
+            elif int(row[2] if row[2] is not None else 1) != 1:
+                reason = "snapshot_not_accepting_orders"
+            elif int(row[5] or 0) != 1:
+                reason = "snapshot_orderbook_disabled"
+            elif captured_at is None or captured_at > checked_at:
+                reason = "snapshot_captured_after_as_of"
+            elif deadline is None or deadline < captured_at:
+                reason = "snapshot_invalid_freshness_window"
+            elif deadline > captured_at + FRESHNESS_WINDOW_DEFAULT:
+                reason = "snapshot_invalid_freshness_window"
+            elif deadline <= freshness_cut:
+                reason = "snapshot_freshness_due"
+            else:
+                if invalidation_rows is None:
+                    reason = "snapshot_invalidation_projection_unavailable"
+                else:
+                    invalidated = False
+                    for invalidation_row in invalidation_rows:
+                        try:
+                            invalidated_at = datetime.fromisoformat(
+                                str(invalidation_row[0]).replace("Z", "+00:00")
+                            )
+                            if invalidated_at.tzinfo is None:
+                                raise ValueError("naive invalidation timestamp")
+                            invalidated_at = invalidated_at.astimezone(timezone.utc)
+                        except (TypeError, ValueError):
+                            reason = "snapshot_invalidation_timestamp_invalid"
+                            invalidated = True
+                            break
+                        if captured_at <= invalidated_at <= checked_at:
+                            reason = "snapshot_invalidated"
+                            invalidated = True
+                            break
+                    if not invalidated:
+                        fresh_pairs.append(
+                            {"condition_id": condition_id, "token_id": token_id}
+                        )
+                        continue
+        action = MarketChannelAction(
+            refresh_snapshot=True,
+            reason="held_snapshot_due",
+            condition_id=condition_id,
+            token_id=token_id,
+        )
+        due_actions.append(action)
+        due_pairs.append(_edli_held_snapshot_debt_payload(action, reason=reason))
+    enqueue_report = _edli_enqueue_held_snapshot_refresh_actions(due_actions)
+    return {
+        "canonical_held_pair_count": len(canonical_held_pairs),
+        "held_snapshot_fresh_pairs": fresh_pairs,
+        "held_snapshot_due_pairs": due_pairs,
+        "held_snapshot_refresh_debt_actions": due_pairs,
+        **enqueue_report,
+    }
+
+
 EDLI_EVENT_DRIVEN_MODES = {
     "edli_live",
 }
@@ -3187,15 +3398,16 @@ def _edli_tokens_requiring_rest_quote_refresh(
     return [token_id for token_id in tokens if token_id not in covered], len(covered)
 
 
-def _edli_canonical_open_held_token_ids(trade_conn) -> set[str]:
-    """Return only native outcome tokens the held monitor can act on."""
+def _edli_canonical_open_held_pairs(trade_conn) -> set[tuple[str, str]]:
+    """Return only exact native held ``(condition_id, token_id)`` identities."""
 
     if trade_conn is None:
         raise _CanonicalHeldScopeUnavailable("trade_connection_missing")
     try:
         rows = trade_conn.execute(
             """
-            SELECT CASE
+            SELECT condition_id,
+                   CASE
                      WHEN lower(direction) = 'buy_no' THEN no_token_id
                      ELSE token_id
                    END AS held_token_id
@@ -3209,9 +3421,22 @@ def _edli_canonical_open_held_token_ids(trade_conn) -> set[str]:
             f"canonical_open_held_query_failed:{type(exc).__name__}"
         ) from exc
     return {
-        str(row[0]).strip()
+        (str(row[0]).strip(), str(row[1]).strip())
         for row in rows
-        if row and str(row[0] or "").strip() not in {"", "None"}
+        if (
+            row
+            and str(row[0] or "").strip() not in {"", "None"}
+            and str(row[1] or "").strip() not in {"", "None"}
+        )
+    }
+
+
+def _edli_canonical_open_held_token_ids(trade_conn) -> set[str]:
+    """Compatibility reader for callers that require only the held token set."""
+
+    return {
+        token_id
+        for _condition_id, token_id in _edli_canonical_open_held_pairs(trade_conn)
     }
 
 
@@ -3348,6 +3573,7 @@ def _edli_refresh_held_position_quote_evidence(
     from src.contracts.executable_market_snapshot import FRESHNESS_WINDOW_DEFAULT
     from src.events.event_coalescer import EventCoalescer
     from src.events.triggers.market_channel_ingestor import (
+        MarketChannelAction,
         MarketChannelIngestor,
         MarketChannelOnlineService,
         active_weather_token_metadata_for_tokens,
@@ -3374,8 +3600,8 @@ def _edli_refresh_held_position_quote_evidence(
     trade_read = get_trade_connection(write_class=None)
     try:
         try:
-            canonical_held_token_ids = set(
-                _edli_canonical_open_held_token_ids(trade_read)
+            canonical_held_pairs = set(
+                _edli_canonical_open_held_pairs(trade_read)
             )
         except _CanonicalHeldScopeUnavailable as exc:
             return {
@@ -3385,8 +3611,15 @@ def _edli_refresh_held_position_quote_evidence(
                 "canonical_held_freshness_debt_token_ids": [
                     "CANONICAL_HELD_SCOPE_UNAVAILABLE"
                 ],
+                "canonical_held_pair_count": 0,
+                "held_snapshot_fresh_pairs": [],
+                "held_snapshot_due_pairs": [],
+                "held_snapshot_refresh_debt_actions": [],
                 "held_quote_refresh_events": 0,
             }
+        canonical_held_token_ids = {
+            token_id for _condition_id, token_id in canonical_held_pairs
+        }
         held_priority_token_ids = set(
             _edli_held_position_priority_token_ids(trade_read)
         )
@@ -3399,7 +3632,14 @@ def _edli_refresh_held_position_quote_evidence(
             | exit_audit_token_ids
         )
         if not held_token_ids:
-            return {"held_priority_token_ids": 0, "held_quote_refresh_events": 0}
+            return {
+                "canonical_held_pair_count": 0,
+                "held_priority_token_ids": 0,
+                "held_quote_refresh_events": 0,
+                "held_snapshot_fresh_pairs": [],
+                "held_snapshot_due_pairs": [],
+                "held_snapshot_refresh_debt_actions": [],
+            }
         checked_at = datetime.now(timezone.utc)
         continuity_max_age = timedelta(
             milliseconds=_edli_bounded_positive_int(
@@ -3408,6 +3648,11 @@ def _edli_refresh_held_position_quote_evidence(
                 default=1000,
                 maximum=60_000,
             )
+        )
+        snapshot_refresh_report = _edli_held_snapshot_refresh_report(
+            trade_read,
+            canonical_held_pairs,
+            checked_at=checked_at,
         )
         rest_canonical_held_token_ids, canonical_ws_covered_tokens = (
             _edli_tokens_requiring_rest_quote_refresh(
@@ -3438,6 +3683,7 @@ def _edli_refresh_held_position_quote_evidence(
             return {
                 "held_priority_token_ids": len(held_token_ids),
                 "canonical_held_token_ids": len(canonical_held_token_ids),
+                "canonical_held_pair_count": len(canonical_held_pairs),
                 "canonical_held_quote_ws_covered_tokens": canonical_ws_covered_tokens,
                 "canonical_held_freshness_debt_token_ids": [],
                 "held_token_metadata": 0,
@@ -3446,6 +3692,7 @@ def _edli_refresh_held_position_quote_evidence(
                 "held_quote_refresh_attempted_tokens": 0,
                 "held_quote_refresh_events": 0,
                 "budget_skipped_tokens": 0,
+                **snapshot_refresh_report,
             }
         ordered_canonical_held_token_ids = (
             _edli_order_token_ids_by_feasibility_age(
@@ -3493,7 +3740,15 @@ def _edli_refresh_held_position_quote_evidence(
             )
             token_metadata.update(batch_metadata)
             for token_id in batch:
-                if token_id in batch_metadata:
+                metadata = batch_metadata.get(token_id)
+                is_exact_canonical_metadata = (
+                    metadata is not None
+                    and (str(metadata.condition_id), token_id) in canonical_held_pairs
+                )
+                is_residual_metadata = (
+                    metadata is not None and token_id not in canonical_held_token_ids
+                )
+                if is_exact_canonical_metadata or is_residual_metadata:
                     selected_held_token_ids.append(token_id)
                     if len(selected_held_token_ids) >= max_tokens:
                         break
@@ -3527,6 +3782,7 @@ def _edli_refresh_held_position_quote_evidence(
         return {
             "held_priority_token_ids": len(held_token_ids),
             "canonical_held_token_ids": len(canonical_held_token_ids),
+            "canonical_held_pair_count": len(canonical_held_pairs),
             "canonical_held_quote_ws_covered_tokens": canonical_ws_covered_tokens,
             "canonical_held_freshness_debt_token_ids": canonical_held_freshness_debt_token_ids,
             "held_quote_refresh_ws_covered_tokens": ws_covered_tokens,
@@ -3536,6 +3792,7 @@ def _edli_refresh_held_position_quote_evidence(
             "held_quote_refresh_deferred_tokens": max(0, len(rest_held_token_ids) - len(scanned_held_token_ids)),
             "held_quote_refresh_events": 0,
             "skipped": "no_held_token_metadata",
+            **snapshot_refresh_report,
         }
 
     ordered_metadata_tokens = [
@@ -3553,11 +3810,13 @@ def _edli_refresh_held_position_quote_evidence(
             attempted_tokens=len(ordered_metadata_tokens),
             extra={
                 "canonical_held_token_ids": len(canonical_held_token_ids),
+                "canonical_held_pair_count": len(canonical_held_pairs),
                 "canonical_held_quote_ws_covered_tokens": canonical_ws_covered_tokens,
                 "canonical_held_freshness_debt_token_ids": canonical_held_freshness_debt_token_ids,
                 "held_quote_refresh_ws_covered_tokens": ws_covered_tokens,
                 "held_quote_refresh_selected_tokens": len(selected_held_token_ids),
                 "held_quote_refresh_deferred_tokens": max(0, len(rest_held_token_ids) - len(selected_held_token_ids)),
+                **snapshot_refresh_report,
             },
         )
 
@@ -3570,6 +3829,36 @@ def _edli_refresh_held_position_quote_evidence(
 
         def _commit_quote_evidence() -> None:
             conn.commit()
+
+        def _post_commit_held_quote_actions(committed_events) -> None:
+            nonlocal snapshot_refresh_report
+            actions = []
+            for event in committed_events:
+                payload = json.loads(event.payload_json)
+                token_id = str(payload.get("token_id") or "").strip()
+                metadata = token_metadata.get(token_id)
+                if metadata is None or (metadata.condition_id, token_id) not in canonical_held_pairs:
+                    continue
+                actions.append(
+                    MarketChannelAction(
+                        refresh_snapshot=True,
+                        reason="held_rest_refresh",
+                        token_id=token_id,
+                        condition_id=metadata.condition_id,
+                    )
+                )
+            if actions:
+                wake_report = _edli_enqueue_held_snapshot_refresh_actions(
+                    actions
+                )
+                snapshot_refresh_report["held_snapshot_refresh_actions_enqueued"] = (
+                    int(snapshot_refresh_report["held_snapshot_refresh_actions_enqueued"])
+                    + int(wake_report["held_snapshot_refresh_actions_enqueued"])
+                )
+                snapshot_refresh_report["held_snapshot_refresh_enqueue_unavailable"] = [
+                    *snapshot_refresh_report["held_snapshot_refresh_enqueue_unavailable"],
+                    *wake_report["held_snapshot_refresh_enqueue_unavailable"],
+                ]
 
         # The redecision-routing decision (WHICH families to re-solve) is a decision-layer
         # concern this boundary module only WIRES IN, never inlines (R6 split).
@@ -3617,6 +3906,7 @@ def _edli_refresh_held_position_quote_evidence(
                 chunk_size=MARKET_CHANNEL_PRIORITY_QUOTE_REFRESH_CHUNK_SIZE_DEFAULT,
                 deadline_monotonic=deadline,
                 past_end_exit_refresh=True,
+                post_commit_quote_sink=_post_commit_held_quote_actions,
             )
         audit_rows = 0
         if exit_audit_token_ids.intersection(token_metadata):
@@ -3639,6 +3929,7 @@ def _edli_refresh_held_position_quote_evidence(
         result = {
             "held_priority_token_ids": len(held_token_ids),
             "canonical_held_token_ids": len(canonical_held_token_ids),
+            "canonical_held_pair_count": len(canonical_held_pairs),
             "canonical_held_quote_ws_covered_tokens": canonical_ws_covered_tokens,
             "canonical_held_freshness_debt_token_ids": canonical_held_freshness_debt_token_ids,
             "held_token_metadata": len(token_metadata),
@@ -3654,6 +3945,7 @@ def _edli_refresh_held_position_quote_evidence(
             "elapsed_seconds": elapsed_seconds,
             "budget_exhausted": elapsed_seconds >= budget,
             "budget_skipped_tokens": max(0, len(ordered_metadata_tokens) - int(written)),
+            **snapshot_refresh_report,
         }
         if service.rest_seed_backpressure_count:
             result["backpressure"] = True
@@ -3931,6 +4223,16 @@ def _edli_held_quote_refresh_cycle() -> dict:
     if not failed and canonical_debt:
         failed = True
         reason = "canonical_held_freshness_capacity_exhausted"
+    snapshot_debt = list(result.get("held_snapshot_refresh_debt_actions") or ())
+    if not failed and snapshot_debt:
+        failed = True
+        reason = "canonical_held_snapshot_refresh_debt"
+    enqueue_unavailable = list(
+        result.get("held_snapshot_refresh_enqueue_unavailable") or ()
+    )
+    if not failed and enqueue_unavailable:
+        failed = True
+        reason = "held_snapshot_refresh_enqueue_unavailable"
     if failed:
         result["scheduler_failed"] = True
         result["scheduler_failure_reason"] = reason or "held_quote_refresh_no_coverage"
@@ -4270,7 +4572,9 @@ def _edli_market_channel_ingestor_cycle() -> dict | None:
             MarketChannelOnlineService,
             RefreshSnapshotResult,
             invalidate_executable_snapshots_for_market_channel_action,
+            register_persistent_market_channel_action_sink,
             run_market_channel_service_forever,
+            unregister_persistent_market_channel_action_sink,
         )
         from src.state.db import get_trade_connection, get_world_connection
 
@@ -4504,27 +4808,36 @@ def _edli_market_channel_ingestor_cycle() -> dict | None:
                         default=5,
                         maximum=20,
                     ),
+                    max_held_refresh_actions_per_window=_edli_quote_refresh_max_tokens(
+                        edli_cfg,
+                        "market_channel_held_quote_refresh_max_tokens_per_cycle",
+                        default=MARKET_CHANNEL_HELD_QUOTE_REFRESH_MAX_TOKENS_PER_CYCLE_DEFAULT,
+                    ),
                     refresh_window_seconds=float(edli_cfg.get("market_channel_refresh_window_seconds", 60.0) or 60.0),
                     seed_first_token_ids=seed_first_token_ids,
                     depth_repair_token_ids=depth_repair_token_ids,
                     continuity_sink=_write_market_channel_continuity,
                     quote_flush_batch_size=PRICE_CHANNEL_BACKGROUND_QUOTE_FLUSH_BATCH_SIZE,
                 )
-                run_market_channel_service_forever(
-                    service,
-                    logger=logger,
-                    commit=_commit_quote,
-                    rollback=_rollback_quote,
-                    quote_write_gate=_edli_price_channel_trade_write_gate(
-                        owner="price_channel_market_quote",
-                        priority="background_recovery",
-                    ),
-                    world_event_write_gate=_edli_price_channel_world_write_gate(
-                        owner="price_channel_market_event"
-                    ),
-                    world_event_commit=_commit_world_event,
-                    world_event_rollback=_rollback_world_event,
-                )
+                register_persistent_market_channel_action_sink(service)
+                try:
+                    run_market_channel_service_forever(
+                        service,
+                        logger=logger,
+                        commit=_commit_quote,
+                        rollback=_rollback_quote,
+                        quote_write_gate=_edli_price_channel_trade_write_gate(
+                            owner="price_channel_market_quote",
+                            priority="background_recovery",
+                        ),
+                        world_event_write_gate=_edli_price_channel_world_write_gate(
+                            owner="price_channel_market_event"
+                        ),
+                        world_event_commit=_commit_world_event,
+                        world_event_rollback=_rollback_world_event,
+                    )
+                finally:
+                    unregister_persistent_market_channel_action_sink(service)
         finally:
             try:
                 feasibility_conn.close()

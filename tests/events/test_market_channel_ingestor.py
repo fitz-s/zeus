@@ -17,6 +17,7 @@ from src.events.event_coalescer import EventCoalescer
 from src.events.event_writer import EventWriter
 from src.events.triggers.market_channel_ingestor import (
     MarketChannelAction,
+    MarketChannelActionSinkUnavailable,
     MarketChannelAuthorityError,
     MarketChannelIngestor,
     MarketChannelOnlineService,
@@ -30,6 +31,9 @@ from src.events.triggers.market_channel_ingestor import (
     feasibility_evidence_from_quote,
     invalidate_executable_snapshots_for_market_channel_action,
     insert_execution_feasibility_evidence,
+    enqueue_persistent_market_channel_action,
+    register_persistent_market_channel_action_sink,
+    unregister_persistent_market_channel_action_sink,
 )
 from src.state.db import init_schema, init_schema_trade_only
 from src.strategy.live_inference.executable_cost import ExecutableCostError, quote_book_from_depth_json, executable_cost
@@ -3991,6 +3995,87 @@ def test_tick_size_change_invokes_refresh_callback():
     assert actions == [action]
 
 
+def test_persistent_action_rejects_fetch_only_service_without_false_completion():
+    _conn, writer = _conn_writer()
+    service = MarketChannelOnlineService(
+        MarketChannelIngestor(writer, active_token_ids={"token-1"}, token_metadata=_metadata()),
+        fetch_orderbook=lambda _token_id: {},
+    )
+    action = MarketChannelAction(
+        refresh_snapshot=True,
+        reason="held_rest_refresh",
+        token_id="token-1",
+        condition_id="0xcondition",
+    )
+
+    with pytest.raises(MarketChannelActionSinkUnavailable):
+        service.enqueue_persistent_refresh_action(action)
+
+    assert service.refresh_action_count == 0
+    assert service._pending_refresh_actions == {}
+
+
+def test_persistent_action_sink_queues_exact_action_with_existing_callbacks():
+    _conn, writer = _conn_writer()
+    invalidated: list[MarketChannelAction] = []
+    refreshed: list[MarketChannelAction] = []
+    service = MarketChannelOnlineService(
+        MarketChannelIngestor(writer, active_token_ids={"held-token"}, token_metadata=_metadata("held-token")),
+        invalidate_snapshot=invalidated.append,
+        refresh_snapshot=refreshed.append,
+    )
+    action = MarketChannelAction(
+        refresh_snapshot=True,
+        reason="held_rest_refresh",
+        token_id="held-token",
+        condition_id="0xcondition",
+    )
+
+    register_persistent_market_channel_action_sink(service)
+    try:
+        enqueue_persistent_market_channel_action(action)
+        assert service.wait_refresh_idle(timeout=1.0)
+    finally:
+        unregister_persistent_market_channel_action_sink(service)
+
+    assert invalidated == [action]
+    assert refreshed == [action]
+
+
+def test_rest_seed_post_commit_sink_observes_committed_quote_evidence():
+    conn, writer = _conn_writer()
+    service = MarketChannelOnlineService(
+        MarketChannelIngestor(writer, active_token_ids={"token-1"}, token_metadata=_metadata()),
+        fetch_orderbook=lambda token_id: {
+            "asset_id": token_id,
+            "market": "0xcondition",
+            "bids": [{"price": "0.48", "size": "10"}],
+            "asks": [{"price": "0.52", "size": "10"}],
+            "hash": "hash-token-1",
+        },
+    )
+    commits: list[int] = []
+    observed: list[str] = []
+
+    def commit() -> None:
+        conn.commit()
+        commits.append(1)
+
+    def after_commit(events) -> None:  # noqa: ANN001
+        assert commits == [1]
+        assert conn.execute("SELECT COUNT(*) FROM execution_feasibility_latest").fetchone()[0] == 2
+        observed.extend(json.loads(event.payload_json)["token_id"] for event in events)
+
+    assert service.seed_rest_books_in_chunks(
+        token_ids=["token-1"],
+        received_at="2026-05-24T10:00:00+00:00",
+        write_gate=nullcontext(),
+        commit=commit,
+        post_commit_quote_sink=after_commit,
+    ) == 1
+    assert observed == ["token-1"]
+
+
 def test_market_channel_successive_refresh_actions_are_not_dropped_after_invalidation():
     _conn, writer = _conn_writer()
     actions = []
@@ -4142,10 +4227,102 @@ def test_market_channel_refresh_queue_coalesces_identical_inflight_work_without_
 
     assert service.wait_refresh_idle(timeout=1.0)
     assert invalidated == [action]
-    assert refreshed == [action, action]
-    assert service.refresh_action_count == 2
+    assert refreshed == [action]
+    assert service.refresh_action_count == 1
     assert service.refresh_action_dropped_count == 0
     assert service.refresh_action_coalesced_count == 2
+
+
+def test_held_refresh_quota_drains_32_pairs_before_background_and_duplicate_reemits():
+    _conn, writer = _conn_writer()
+    attempted: list[MarketChannelAction] = []
+    service = MarketChannelOnlineService(
+        MarketChannelIngestor(writer, active_token_ids=set(), token_metadata={}),
+        invalidate_snapshot=lambda _action: None,
+        refresh_snapshot=attempted.append,
+        max_refresh_actions_per_window=1,
+        max_held_refresh_actions_per_window=32,
+        refresh_window_seconds=60.0,
+    )
+    held_actions = [
+        MarketChannelAction(
+            refresh_snapshot=True,
+            reason="held_snapshot_due",
+            condition_id=f"held-condition-{index:02d}",
+            token_id=f"held-token-{index:02d}",
+        )
+        for index in range(32)
+    ]
+    background = MarketChannelAction(
+        refresh_snapshot=True,
+        reason="tick_size_change",
+        condition_id="background-condition",
+        token_id="background-token",
+    )
+    ordinary_same_pair = MarketChannelAction(
+        refresh_snapshot=True,
+        reason="tick_size_change",
+        condition_id=held_actions[-1].condition_id,
+        token_id=held_actions[-1].token_id,
+    )
+
+    service._refresh_worker_running = True
+    service._refresh_worker_idle.clear()
+    service._enqueue_refresh_action(ordinary_same_pair)
+    for action in held_actions:
+        service._enqueue_refresh_action(action)
+    service._enqueue_refresh_action(background)
+    service._enqueue_refresh_action(background)
+    service._enqueue_refresh_action(held_actions[-1])
+    threading.Thread(target=service._drain_refresh_actions, daemon=True).start()
+
+    assert service.wait_refresh_idle(timeout=2.0)
+    assert set(attempted[:32]) == set(held_actions)
+    assert held_actions[-1] in attempted[:32]
+    assert attempted[32:] == [background]
+    assert service.held_refresh_window_action_count == 32
+    assert service.refresh_window_action_count == 1
+    assert service.refresh_action_coalesced_count == 3
+
+
+def test_deferred_33rd_held_action_does_not_block_ready_background_repair():
+    _conn, writer = _conn_writer()
+    attempted: list[MarketChannelAction] = []
+    service = MarketChannelOnlineService(
+        MarketChannelIngestor(writer, active_token_ids=set(), token_metadata={}),
+        invalidate_snapshot=lambda _action: None,
+        refresh_snapshot=attempted.append,
+        max_refresh_actions_per_window=1,
+        max_held_refresh_actions_per_window=32,
+        refresh_window_seconds=0.2,
+    )
+    held_actions = [
+        MarketChannelAction(
+            refresh_snapshot=True,
+            reason="held_snapshot_due",
+            condition_id=f"held-condition-{index:02d}",
+            token_id=f"held-token-{index:02d}",
+        )
+        for index in range(33)
+    ]
+    background = MarketChannelAction(
+        refresh_snapshot=True,
+        reason="tick_size_change",
+        condition_id="background-condition",
+        token_id="background-token",
+    )
+
+    service._refresh_worker_running = True
+    service._refresh_worker_idle.clear()
+    for action in held_actions:
+        service._enqueue_refresh_action(action)
+    service._enqueue_refresh_action(background)
+    threading.Thread(target=service._drain_refresh_actions, daemon=True).start()
+
+    assert service.wait_refresh_idle(timeout=2.0)
+    assert set(attempted[:32]) == set(held_actions[:32])
+    assert attempted[32] == background
+    assert attempted[33] == held_actions[32]
 
 
 def test_market_channel_refresh_queue_retries_deferred_work_without_reinvalidating():
