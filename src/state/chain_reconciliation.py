@@ -1915,6 +1915,54 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
         if not candidates:
             return False
 
+        # ``portfolio.ignored_tokens`` is a loader cache and may be stale or
+        # empty after restart.  A current exact settled-position suppression
+        # is canonical evidence that this terminal token must not be reborn
+        # from a wallet balance.  An unavailable/malformed current projection
+        # is equally unsafe: fail closed for this candidate rather than turn a
+        # DB read fault into active exposure.
+        if conn is not None:
+            try:
+                columns = {
+                    str(row[1])
+                    for row in conn.execute(
+                        "PRAGMA table_info(token_suppression)"
+                    ).fetchall()
+                }
+                if not {"token_id", "condition_id", "suppression_reason"} <= columns:
+                    raise RuntimeError("token_suppression current projection is unavailable")
+                suppression = conn.execute(
+                    """
+                    SELECT suppression_reason
+                      FROM token_suppression
+                     WHERE token_id = ?
+                       AND condition_id = ?
+                    """,
+                    (token_id, chain_condition_id),
+                ).fetchone()
+            except Exception as exc:
+                stats["terminal_chain_exposure_suppression_unavailable"] = (
+                    stats.get("terminal_chain_exposure_suppression_unavailable", 0) + 1
+                )
+                logger.error(
+                    "TERMINAL_CHAIN_SUPPRESSION_UNAVAILABLE: token=%s condition=%s: %s",
+                    token_id,
+                    chain_condition_id,
+                    exc,
+                )
+                return False
+            if suppression is not None:
+                suppression_reason = str(
+                    suppression["suppression_reason"]
+                    if hasattr(suppression, "keys")
+                    else suppression[0]
+                )
+                if suppression_reason == "settled_position":
+                    stats["terminal_chain_exposure_settlement_suppressed"] = (
+                        stats.get("terminal_chain_exposure_settlement_suppressed", 0) + 1
+                    )
+                    return False
+
         needs_fill_owner = len(candidates) > 1 or any(
             str(getattr(position.state, "value", position.state))
             == LifecyclePhase.ECONOMICALLY_CLOSED.value

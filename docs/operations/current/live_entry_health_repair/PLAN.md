@@ -3006,3 +3006,34 @@ publication barrier.
   REDUCE_ONLY_EXIT fails closed with the bundle's typed unavailable reason;
   focused/global Day0 tests, compilation, planning/registry checks, and exact
   live-SHA restart pass.
+
+## B137 — Preserve verified chain-mirror settlement against stale portfolio balances
+
+- Defect: a chain-mirror `VERIFIED` settlement can terminalize one exact held
+  outcome token as `settled` while a stale portfolio reload still reports that
+  losing or winning outcome-token balance.  Reconciliation must not reinterpret
+  that already-settled balance as live exposure and reopen it.
+- SCOPE: only the exact held `(condition_id, token_id)` whose chain-mirror
+  finding terminalized it as `closed_worthless`, `closed_redeemed`, or
+  `redeemable`.  No unresolved terminal row, sibling token, or unrelated
+  condition is suppressed.
+- DRAIN: the next portfolio/reconcile reload reads the current exact
+  suppression and leaves the verified settled projection terminal; an explicit
+  higher-authority settlement invalidation/correction follows the existing
+  suppression-history transition path.  A read/schema error for this exact
+  candidate fails closed and cannot resurrect exposure.
+- RESET: only that explicit higher-authority suppression-history transition
+  may replace `settled_position`; ordinary balance observations, stale
+  in-memory `ignored_tokens`, and broad terminal scans cannot clear it.
+- Files authorized: `src/state/chain_mirror_reconciler.py`,
+  `src/state/chain_reconciliation.py`, `tests/test_reconcile_chain_mirror.py`,
+  and this plan.  Forbidden: blanket terminal suppression, changing chain
+  precedence for unsuppressed false terminals, direct projection rewrites, or
+  treating this reconciliation path as ENTRY authority.
+- Acceptance: settlement append/projection and exact `settled_position`
+  suppression share one outer savepoint, so suppression failure rolls back the
+  `SETTLED` event/projection.  A realistic settlement-writer -> suppression ->
+  stale-portfolio reconciliation remains settled with no `REVIEW_REQUIRED` or
+  `terminal_chain_exposure_restored`; the existing unsuppressed false-terminal
+  restoration path remains covered.  Focused tests, compilation, planning
+  lock, and diff checks pass before any exact-SHA deployment decision.
