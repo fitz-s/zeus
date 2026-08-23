@@ -14963,6 +14963,33 @@ def test_canonical_exit_reason_is_not_overridden_without_current_red():
     assert pos.exit_reason == "OLD_STATISTICAL_EXIT"
 
 
+@pytest.mark.parametrize("canonical_exit_reason", ["", "RED_FORCE_EXIT"])
+def test_non_red_canonical_sync_clears_stale_runtime_red(canonical_exit_reason):
+    """GREEN cannot inherit emergency authority from runtime or projection."""
+    from src.engine import cycle_runtime
+
+    pos = _make_position(
+        state="pending_exit",
+        exit_state="retry_pending",
+        exit_reason="red_force_exit",
+    )
+    row = {
+        "phase": "pending_exit",
+        "order_status": "retry_pending",
+        "exit_retry_count": 2,
+        "next_exit_retry_at": "2030-01-01T00:10:00+00:00",
+        "exit_reason": canonical_exit_reason,
+    }
+
+    cycle_runtime._sync_position_from_canonical_monitor_row(
+        pos,
+        row,
+        current_riskguard_red=False,
+    )
+
+    assert pos.exit_reason == ""
+
+
 def test_monitor_refresh_preserves_chain_corrected_entry_economics(tmp_path):
     """Monitor refresh must not roll a chain-corrected position back to stale fill size/state."""
     from src.engine.lifecycle_events import (
@@ -21965,13 +21992,14 @@ def test_exit_monitor_preparation_never_spends_claim_on_cadence_diagnosis(
     active = threading.Event()
     completed = []
     watchdog_calls = []
+    monitor_kwargs = {}
     portfolio = SimpleNamespace(
         positions=[],
         daily_baseline_total=0.0,
         bankroll=0.0,
     )
 
-    monkeypatch.setattr(riskguard, "get_current_level", lambda: RiskLevel.GREEN)
+    monkeypatch.setattr(riskguard, "get_current_level", lambda: RiskLevel.RED)
     monkeypatch.setattr(
         cycle_runner,
         "get_connection",
@@ -21983,7 +22011,7 @@ def test_exit_monitor_preparation_never_spends_claim_on_cadence_diagnosis(
     monkeypatch.setattr(
         cycle_runner,
         "_execute_monitoring_phase",
-        lambda *_args, **_kwargs: (False, False),
+        lambda *_args, **kwargs: monitor_kwargs.update(kwargs) or (False, False),
     )
     monkeypatch.setattr(
         exit_lifecycle,
@@ -22022,6 +22050,7 @@ def test_exit_monitor_preparation_never_spends_claim_on_cadence_diagnosis(
     )
 
     assert result is True
+    assert monitor_kwargs["current_riskguard_red"] is True
     assert watchdog_calls == []
     assert completed == [True]
     assert not active.is_set()

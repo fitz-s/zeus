@@ -4482,8 +4482,14 @@ def _sync_position_from_canonical_monitor_row(
         # The monitor event below persists the RED handoff atomically; submit
         # still requires both current RED and that exact canonical evidence.
         pos.exit_reason = "red_force_exit"
-    elif exit_reason:
+    elif exit_reason.upper() != "RED_FORCE_EXIT":
         pos.exit_reason = exit_reason
+    else:
+        # RED is current policy, not durable economic authority.  A prior
+        # in-memory/canonical RED marker may keep an already-submitted SELL
+        # under single-flight recovery, but it cannot mint a new emergency
+        # decision after RiskGuard returns to GREEN.
+        pos.exit_reason = ""
     pos.last_monitor_prob = _finite_probability_or_none(
         _row_get(row, "last_monitor_prob")
     )
