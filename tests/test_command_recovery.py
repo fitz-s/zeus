@@ -35235,7 +35235,8 @@ def test_aged_authenticated_absence_exit_releases_pending_exit_to_fresh_redecisi
         UPDATE position_current
            SET phase = 'pending_exit', shares = 10, chain_shares = 10,
                cost_basis_usd = 5, city = 'Milan', target_date = '2026-08-23',
-               temperature_metric = 'high'
+               temperature_metric = 'high', order_id = 'ord-entry',
+               exit_retry_count = 3, next_exit_retry_at = '2026-08-23T13:00:00Z'
          WHERE position_id = 'pos-milan-exit'
         """
     )
@@ -35269,11 +35270,19 @@ def test_aged_authenticated_absence_exit_releases_pending_exit_to_fresh_redecisi
     assert summary["advanced"] >= 1
     assert _get_state(conn, "cmd-milan-exit") == "SUBMIT_REJECTED"
     current = conn.execute(
-        "SELECT phase, exit_reason FROM position_current WHERE position_id = 'pos-milan-exit'"
+        """
+        SELECT phase, order_id, order_status, exit_reason, exit_retry_count,
+               next_exit_retry_at
+          FROM position_current WHERE position_id = 'pos-milan-exit'
+        """
     ).fetchone()
     assert dict(current) == {
         "phase": "active",
+        "order_id": "ord-entry",
+        "order_status": "filled",
         "exit_reason": "SUBMIT_UNKNOWN_ABSENCE_REDECISION_REQUIRED",
+        "exit_retry_count": 0,
+        "next_exit_retry_at": None,
     }
     released = conn.execute(
         """
@@ -35293,3 +35302,71 @@ def test_aged_authenticated_absence_exit_releases_pending_exit_to_fresh_redecisi
         "temperature_metric": "high",
         "reason": "submit_unknown_authenticated_absence",
     }]
+
+
+def test_authenticated_absence_release_only_clears_exact_exit_order_id(conn, monkeypatch):
+    from src.execution import command_recovery
+
+    _insert(conn, command_id="cmd-entry", position_id="pos-exact-exit-order")
+    _advance_to_acked(conn, command_id="cmd-entry", venue_order_id="ord-entry")
+    _seed_pending_entry_projection(
+        conn,
+        command_id="cmd-entry",
+        position_id="pos-exact-exit-order",
+        order_id="ord-entry",
+    )
+    conn.execute(
+        """
+        UPDATE position_current
+           SET phase = 'pending_exit', shares = 10, chain_shares = 10,
+               cost_basis_usd = 5, city = 'Milan', target_date = '2026-08-23',
+               temperature_metric = 'high', order_id = 'ord-exact-exit',
+               exit_retry_count = 2, next_exit_retry_at = '2026-08-23T13:00:00Z'
+         WHERE position_id = 'pos-exact-exit-order'
+        """
+    )
+    _insert(
+        conn,
+        command_id="cmd-exact-exit",
+        position_id="pos-exact-exit-order",
+        intent_kind="EXIT",
+        side="SELL",
+        size=10,
+        price=0.40,
+    )
+    conn.execute(
+        "UPDATE venue_commands SET venue_order_id = 'ord-exact-exit' WHERE command_id = 'cmd-exact-exit'"
+    )
+    command = dict(conn.execute(
+        "SELECT * FROM venue_commands WHERE command_id = 'cmd-exact-exit'"
+    ).fetchone())
+    monkeypatch.setattr(
+        command_recovery,
+        "_phase_after_terminal_exit_no_fill",
+        lambda *_args, **_kwargs: "active",
+    )
+
+    assert command_recovery._release_submit_unknown_exit_after_authenticated_absence(
+        conn,
+        command=command,
+        observed_at="2026-08-23T12:00:00Z",
+        absence_proof={
+            "open_orders_query_complete": True,
+            "trades_query_complete": True,
+            "matching_open_order_count": 0,
+            "matching_trade_count": 0,
+        },
+    ) is not None
+
+    current = conn.execute(
+        """
+        SELECT order_id, order_status, exit_retry_count, next_exit_retry_at
+          FROM position_current WHERE position_id = 'pos-exact-exit-order'
+        """
+    ).fetchone()
+    assert dict(current) == {
+        "order_id": None,
+        "order_status": "filled",
+        "exit_retry_count": 0,
+        "next_exit_retry_at": None,
+    }

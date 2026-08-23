@@ -16315,12 +16315,25 @@ def _release_submit_unknown_exit_after_authenticated_absence(
     conn.execute(
         """
         UPDATE position_current
-           SET phase = ?, order_status = 'rejected',
+           SET phase = ?,
+               order_id = CASE
+                   WHEN ? != '' AND lower(COALESCE(order_id, '')) = lower(?) THEN NULL
+                   ELSE order_id
+               END,
+               order_status = 'filled',
                exit_reason = 'SUBMIT_UNKNOWN_ABSENCE_REDECISION_REQUIRED',
+               exit_retry_count = 0,
+               next_exit_retry_at = NULL,
                updated_at = ?
          WHERE position_id = ? AND phase = 'pending_exit'
         """,
-        (phase_after, observed_at, position_id),
+        (
+            phase_after,
+            str(command.get("venue_order_id") or ""),
+            str(command.get("venue_order_id") or ""),
+            observed_at,
+            position_id,
+        ),
     )
     return {
         "command_id": command_id,
