@@ -1,8 +1,8 @@
 # Created: 2026-04-26
-# Lifecycle: created=2026-04-26; last_reviewed=2026-08-22; last_reused=2026-08-22
+# Lifecycle: created=2026-04-26; last_reviewed=2026-08-23; last_reused=2026-08-23
 # Purpose: Lock INV-31 command recovery behavior plus snapshot-gated command inserts.
 # Reuse: Run when command recovery, command journal schema, or executable snapshot gating changes.
-# Last reused/audited: 2026-08-22
+# Last reused/audited: 2026-08-23
 # Authority basis: docs/operations/task_2026-04-26_execution_state_truth_p1_command_bus/implementation_plan.md u00a7P1.S4
 """INV-31 anchor tests: command recovery loop.
 
@@ -16925,10 +16925,15 @@ class TestRecoveryResolutionTable:
         ).fetchone()
         assert reduction[0] == "CAPITAL_REDUCTION_FILLED"
 
+    @pytest.mark.parametrize(
+        "latest_order_state",
+        ("PARTIALLY_MATCHED", "CANCEL_CONFIRMED"),
+    )
     def test_cancelled_partial_fill_promotes_zero_projection_and_closes_remainder(
         self,
         conn,
         mock_client,
+        latest_order_state,
     ):
         """Cancel terminates only the unfilled remainder, never confirmed exposure."""
         from src.execution.command_recovery import (
@@ -16951,7 +16956,7 @@ class TestRecoveryResolutionTable:
         _append_order_fact(
             conn,
             order_id="ord-cancelled-partial",
-            state="PARTIALLY_MATCHED",
+            state=latest_order_state,
             matched_size="4.347825",
             remaining_size="58.652175",
             source="WS_USER",
@@ -17096,6 +17101,226 @@ class TestRecoveryResolutionTable:
             "SELECT shares FROM position_current WHERE position_id = 'pos-001'"
         ).fetchone()
         assert current["shares"] == pytest.approx(5.0)
+
+    def test_cancelled_partial_terminalizer_keeps_closed_position_in_drain(
+        self,
+        conn,
+    ):
+        """Economic closure cannot strand a pre-existing cancelled remainder."""
+        from src.execution.command_recovery import (
+            _cancel_ack_terminal_partial_fact_candidates,
+        )
+        from src.state.venue_command_repo import append_event
+
+        _insert(conn, size=10.0, price=0.50)
+        _advance_to_acked(conn, venue_order_id="ord-cancelled-partial")
+        _seed_pending_entry_projection(
+            conn,
+            position_id="pos-001",
+            command_id="cmd-001",
+            order_id="ord-cancelled-partial",
+        )
+        conn.execute(
+            "UPDATE position_current SET phase = 'economically_closed' "
+            "WHERE position_id = 'pos-001'"
+        )
+        _append_order_fact(
+            conn,
+            order_id="ord-cancelled-partial",
+            state="CANCEL_CONFIRMED",
+            matched_size="4",
+            remaining_size="6",
+            source="WS_USER",
+        )
+        _append_trade_fact(
+            conn,
+            order_id="ord-cancelled-partial",
+            trade_id="trade-cancelled-partial",
+            state="CONFIRMED",
+            filled_size="4",
+            fill_price="0.50",
+            source="WS_USER",
+        )
+        append_event(
+            conn,
+            command_id="cmd-001",
+            event_type="CANCEL_REQUESTED",
+            occurred_at="2026-04-26T00:07:00Z",
+            payload={"venue_order_id": "ord-cancelled-partial"},
+        )
+        append_event(
+            conn,
+            command_id="cmd-001",
+            event_type="CANCEL_ACKED",
+            occurred_at="2026-04-26T00:08:00Z",
+            payload={"venue_order_id": "ord-cancelled-partial"},
+        )
+
+        candidates = _cancel_ack_terminal_partial_fact_candidates(conn)
+        assert [row["command_id"] for row in candidates] == ["cmd-001"]
+
+    @pytest.mark.parametrize(
+        ("chain_shares", "chain_cost_basis_usd", "expected_advanced"),
+        ((0, 0, 1), (1, 0.5, 0)),
+    )
+    def test_expired_partial_obligation_requires_zero_chain_after_full_exit(
+        self,
+        conn,
+        chain_shares,
+        chain_cost_basis_usd,
+        expected_advanced,
+    ):
+        """A fully sold terminal partial cannot keep its original BUY stake reserved."""
+        from src.execution.command_recovery import (
+            reconcile_terminal_entry_exposure_obligations,
+        )
+        from src.state.db import log_execution_fact
+        from src.state.venue_command_repo import append_event
+
+        _insert(conn, size=10.0, price=0.50)
+        _open_test_entry_obligation(conn, "cmd-001")
+        _advance_to_acked(conn, venue_order_id="ord-entry-partial")
+        _seed_pending_entry_projection(
+            conn,
+            position_id="pos-001",
+            command_id="cmd-001",
+            order_id="ord-entry-partial",
+        )
+        _append_order_fact(
+            conn,
+            order_id="ord-entry-partial",
+            state="CANCEL_CONFIRMED",
+            matched_size="4",
+            remaining_size="0",
+            source="WS_USER",
+            raw_payload_json={
+                "reason": "m5_exchange_reconcile_entry_fill_order_fact",
+                "source_module": "src.execution.exchange_reconcile",
+                "order_truth_proof_class": "TERMINAL_PARTIAL",
+                "order_truth_source_state": "CANCEL_CONFIRMED",
+            },
+        )
+        _append_trade_fact(
+            conn,
+            order_id="ord-entry-partial",
+            trade_id="trade-entry-partial",
+            state="CONFIRMED",
+            filled_size="4",
+            fill_price="0.50",
+            source="WS_USER",
+        )
+        append_event(
+            conn,
+            command_id="cmd-001",
+            event_type="PARTIAL_FILL_OBSERVED",
+            occurred_at="2026-04-26T00:06:00Z",
+            payload={"venue_order_id": "ord-entry-partial"},
+        )
+        append_event(
+            conn,
+            command_id="cmd-001",
+            event_type="EXPIRED",
+            occurred_at="2026-04-26T00:07:00Z",
+            payload={
+                "reason": "existing_terminal_remainder_order_fact",
+                "proof_class": "canonical_terminal_remainder_order_fact",
+                "venue_order_id": "ord-entry-partial",
+            },
+        )
+        log_execution_fact(
+            conn,
+            intent_id="pos-001:entry:cmd-001",
+            position_id="pos-001",
+            command_id="cmd-001",
+            order_role="entry",
+            posted_at="2026-04-26T00:02:00Z",
+            filled_at="2026-04-26T00:06:00Z",
+            submitted_price=0.50,
+            fill_price=0.50,
+            shares=4.0,
+            venue_status="PARTIAL",
+            terminal_exec_status="partial",
+        )
+
+        _insert(
+            conn,
+            command_id="cmd-exit",
+            decision_id="dec-exit",
+            intent_kind="EXIT",
+            side="SELL",
+            size=4.0,
+            price=0.60,
+            created_at="2026-04-26T00:08:00Z",
+        )
+        _advance_to_acked(
+            conn,
+            command_id="cmd-exit",
+            venue_order_id="ord-exit",
+        )
+        append_event(
+            conn,
+            command_id="cmd-exit",
+            event_type="FILL_CONFIRMED",
+            occurred_at="2026-04-26T00:09:00Z",
+            payload={
+                "venue_order_id": "ord-exit",
+                "trade_id": "trade-exit",
+                "filled_size": "4",
+                "fill_price": "0.60",
+            },
+        )
+        _append_trade_fact(
+            conn,
+            command_id="cmd-exit",
+            order_id="ord-exit",
+            trade_id="trade-exit",
+            state="CONFIRMED",
+            filled_size="4",
+            fill_price="0.60",
+            source="REST",
+        )
+        conn.execute(
+            """
+            UPDATE position_current
+               SET phase = 'economically_closed', shares = 4, cost_basis_usd = 2,
+                   size_usd = 2, entry_price = 0.5,
+                   fill_authority = 'venue_confirmed_partial',
+                   chain_state = 'chain_confirmed_zero', chain_shares = ?,
+                   chain_cost_basis_usd = ?, exit_price = 0.6,
+                   realized_pnl_usd = 0.4, order_status = 'sell_filled'
+             WHERE position_id = 'pos-001'
+            """,
+            (chain_shares, chain_cost_basis_usd),
+        )
+        sequence_no = conn.execute(
+            "SELECT COALESCE(MAX(sequence_no), 0) + 1 FROM position_events "
+            "WHERE position_id = 'pos-001'"
+        ).fetchone()[0]
+        conn.execute(
+            """
+            INSERT INTO position_events (
+                event_id, position_id, event_version, sequence_no, event_type,
+                occurred_at, phase_before, phase_after, strategy_key,
+                order_id, command_id, source_module, env, payload_json
+            ) VALUES (
+                'pos-001:exit-filled', 'pos-001', 1, ?, 'EXIT_ORDER_FILLED',
+                '2026-04-26T00:09:00Z', 'pending_exit', 'economically_closed',
+                'opening_inertia', 'ord-exit', 'cmd-exit',
+                'tests.test_command_recovery', 'live', '{}'
+            )
+            """,
+            (sequence_no,),
+        )
+
+        assert reconcile_terminal_entry_exposure_obligations(conn) == {
+            "scanned": 1,
+            "advanced": expected_advanced,
+            "stayed": 1 - expected_advanced,
+            "errors": 0,
+        }
+        assert conn.execute(
+            "SELECT status FROM entry_exposure_obligations WHERE command_id = 'cmd-001'"
+        ).fetchone()[0] == ("RESOLVED" if expected_advanced else "OPEN")
 
     @pytest.mark.parametrize(
         ("terminal_matched_size", "terminal_remaining_size"),

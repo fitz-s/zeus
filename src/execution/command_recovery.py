@@ -2299,13 +2299,22 @@ def _cancel_ack_terminal_partial_fact_candidates(
          WHERE CAST(fill.filled_size AS REAL) < CAST(cmd.size AS REAL) - 0.000000001
            AND (
                 pc.position_id IS NULL
-                OR pc.phase IN ('pending_entry', 'active', 'day0_window', 'pending_exit')
+                OR pc.phase IN (
+                    'pending_entry', 'active', 'day0_window', 'pending_exit',
+                    'economically_closed'
+                )
            )
            AND (
                 fact.fact_id IS NULL
                 OR (
                     UPPER(COALESCE(fact.state, ''))
                         IN ('LIVE', 'OPEN', 'RESTING', 'PARTIALLY_MATCHED', 'PARTIAL')
+                    AND CAST(COALESCE(fact.remaining_size, '0') AS REAL) > 0
+                )
+                OR (
+                    UPPER(COALESCE(fact.state, ''))
+                        IN ('CANCEL_CONFIRMED', 'EXPIRED', 'VENUE_WIPED')
+                    AND CAST(COALESCE(fact.matched_size, '0') AS REAL) > 0
                     AND CAST(COALESCE(fact.remaining_size, '0') AS REAL) > 0
                 )
                 OR (
@@ -9956,6 +9965,7 @@ def _terminal_partial_entry_obligation_proven(
     venue_order_id = str(command.get("venue_order_id") or "")
     if not command_id or not venue_order_id:
         return False
+    expired_remainder_event_proven = True
     if command_state == CommandState.EXPIRED.value:
         terminal_remainder_expired = conn.execute(
             """
@@ -9974,15 +9984,16 @@ def _terminal_partial_entry_obligation_proven(
             """,
             (command_id,),
         ).fetchone()
-        if terminal_remainder_expired is None:
-            return False
-        expired = _dict_row(terminal_remainder_expired)
-        if (
-            expired.get("reason") == "partial_remainder_absent_from_exchange_open_orders"
-            and expired.get("proof_class")
-            != "confirmed_fill_plus_point_order_terminal_remainder"
-        ):
-            return False
+        expired_remainder_event_proven = terminal_remainder_expired is not None
+        if terminal_remainder_expired is not None:
+            expired = _dict_row(terminal_remainder_expired)
+            if (
+                expired.get("reason")
+                == "partial_remainder_absent_from_exchange_open_orders"
+                and expired.get("proof_class")
+                != "confirmed_fill_plus_point_order_terminal_remainder"
+            ):
+                expired_remainder_event_proven = False
     if command_state == CommandState.CANCELLED.value:
         cancel_ack = conn.execute(
             """
@@ -10029,6 +10040,17 @@ def _terminal_partial_entry_obligation_proven(
             or str(order.get("source") or "") not in _LIVE_TERMINAL_ORDER_FACT_SOURCES
         ):
             return False
+    if (
+        command_state == CommandState.EXPIRED.value
+        and not expired_remainder_event_proven
+        and not reducer_terminal_partial_for_all_orders
+    ):
+        # SCOPE: this exact expired ENTRY remainder. DRAIN: either the point/open
+        # recovery appends its typed EXPIRED event, or M5 appends the stronger
+        # canonical TERMINAL_PARTIAL order fact. RESET: either proof immediately
+        # permits the same obligation reducer; neither can infer terminality from
+        # the command state alone.
+        return False
     fill_summary = _positive_fill_trade_fact_summary(
         conn,
         command_id,
@@ -10121,30 +10143,56 @@ def _terminal_partial_post_reduction_flow_absorbed(
     exit_filled = _positive_decimal_or_none(flow["exit_filled_size"])
     if entry_filled is None or exit_filled is None or exit_filled <= 0:
         return False
-    expected_residual = max(Decimal("0"), entry_filled - exit_filled)
-    if expected_residual <= 0:
-        return False
+    net_residual = entry_filled - exit_filled
     position = conn.execute(
         """
         SELECT phase, shares, cost_basis_usd, chain_state, chain_shares,
-               chain_cost_basis_usd
+               chain_cost_basis_usd, exit_price
           FROM position_current
          WHERE position_id = ?
          LIMIT 1
         """,
         (position_id,),
     ).fetchone()
-    if position is None or str(position["phase"] or "") not in {
+    if position is None:
+        return False
+    tolerance = Decimal("0.000001")
+    if abs(net_residual) <= tolerance:
+        terminal_exit = conn.execute(
+            """
+            SELECT 1
+              FROM position_events
+             WHERE position_id = ?
+               AND event_type = 'EXIT_ORDER_FILLED'
+               AND phase_after = 'economically_closed'
+             LIMIT 1
+            """,
+            (position_id,),
+        ).fetchone()
+        exit_price = _positive_decimal_or_none(position["exit_price"])
+        return (
+            str(position["phase"] or "") == "economically_closed"
+            and str(position["chain_state"] or "")
+            in {"chain_confirmed_zero", "synced"}
+            and _decimal_is_zero(position["chain_shares"])
+            and _decimal_is_zero(position["chain_cost_basis_usd"])
+            and exit_price is not None
+            and exit_price <= Decimal("1")
+            and terminal_exit is not None
+        )
+    if net_residual < 0:
+        return False
+    if str(position["phase"] or "") not in {
         "active",
         "day0_window",
         "pending_exit",
     }:
         return False
+    expected_residual = net_residual
     shares = _positive_decimal_or_none(position["shares"])
     chain_shares = _positive_decimal_or_none(position["chain_shares"])
     cost = _positive_decimal_or_none(position["cost_basis_usd"])
     chain_cost = _positive_decimal_or_none(position["chain_cost_basis_usd"])
-    tolerance = Decimal("0.000001")
     return (
         str(position["chain_state"] or "") == "synced"
         and shares is not None

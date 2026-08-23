@@ -801,6 +801,35 @@
   heartbeat, healthy scheduler log, and trading boot without the stale-sidecar
   rejection.
 
+### 2026-08-23 — terminal partial ENTRY obligations cannot become ghost capital (B150)
+
+- **Observed defect:** the current wealth witness deducted `$47.71` as entry
+  obligations even though all five owning commands were terminal and no venue
+  command remained open. Four positions had already sold their complete fills;
+  the fifth retained only its authenticated partial fill. The obligations were
+  therefore stale accounting locks, not unsettled cash or executable orders.
+- **Structural cause:** the terminalizer omitted raw `CANCEL_CONFIRMED` /
+  `EXPIRED` facts with positive matched and cancelled-remainder sizes, and
+  stopped scanning after a position became `economically_closed`. The release
+  reducer also rejected exact entry-minus-exit zero flow, so a complete SELL
+  could never prove that the old ENTRY exposure had been absorbed.
+- **Contract:** raw terminal partial facts remain command-scoped drain work even
+  after economic closure. Release still requires canonical terminal-order and
+  positive-fill proof. An open residual must exactly reproduce current synced
+  shares/cost; a zero residual must additionally prove a canonical full EXIT,
+  `economically_closed`, and zero Chain shares/cost. Command state, phase, or
+  order-list absence alone cannot release capital.
+- **SCOPE / DRAIN / RESET:** scope is one terminal ENTRY command obligation.
+  Recurring command recovery first normalizes its terminal order fact and then
+  resolves the obligation when the exact flow witness matches. Missing order,
+  fill, projection, EXIT, or Chain proof keeps only that command's obligation
+  open; the next canonical fact/projection update retries the same reducer.
+- **Acceptance:** antibodies cover both pre-reducer `PARTIALLY_MATCHED` and raw
+  `CANCEL_CONFIRMED`, economically closed candidate retention, and exact full
+  EXIT absorption. Deployment acceptance is canonical live DB evidence that
+  the five obligations advance to `RESOLVED` and the next global wealth witness
+  no longer subtracts `$47.71`; released capacity is not itself realized PnL.
+
 ### 2026-08-02 — partial EXIT realized-PnL canonical continuity (hot-fix slice)
 
 - **Scope / seam:** `src/execution/exit_lifecycle.py` emits canonical
