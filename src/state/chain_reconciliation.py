@@ -1933,30 +1933,80 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
                 "TERMINAL_CHAIN_CONDITION_UNAVAILABLE: token=%s", token_id
             )
             return False
-        exact_candidates = [
-            position
-            for position in candidates
-            if str(getattr(position, "condition_id", "") or "") == chain_condition_id
-        ]
-        if not exact_candidates:
-            stats["terminal_chain_exposure_condition_mismatch"] = (
-                stats.get("terminal_chain_exposure_condition_mismatch", 0) + 1
-            )
-            logger.error(
-                "TERMINAL_CHAIN_CONDITION_MISMATCH: token=%s chain_condition=%s",
-                token_id,
-                chain_condition_id,
-            )
-            return False
-        candidates = exact_candidates
         try:
             columns = {
+                str(row[1])
+                for row in conn.execute(
+                    "PRAGMA table_info(position_current)"
+                ).fetchall()
+            }
+            if not {
+                "position_id", "trade_id", "direction", "token_id", "no_token_id",
+                "condition_id",
+            } <= columns:
+                raise RuntimeError("position_current identity projection is unavailable")
+            canonical_candidates: list[Position] = []
+            for position in candidates:
+                position_id = str(getattr(position, "position_id", "") or "")
+                trade_id = str(getattr(position, "trade_id", "") or "")
+                if not position_id:
+                    position_id = trade_id
+                if not trade_id:
+                    trade_id = position_id
+                if not position_id or not trade_id:
+                    stats["terminal_chain_exposure_canonical_identity_unavailable"] = (
+                        stats.get("terminal_chain_exposure_canonical_identity_unavailable", 0) + 1
+                    )
+                    continue
+                canonical_rows = conn.execute(
+                    """
+                    SELECT position_id, trade_id, direction, token_id, no_token_id, condition_id
+                      FROM position_current
+                     WHERE position_id = ? OR trade_id = ?
+                    """,
+                    (position_id, trade_id),
+                ).fetchall()
+                if len(canonical_rows) != 1:
+                    stats["terminal_chain_exposure_canonical_identity_unavailable"] = (
+                        stats.get("terminal_chain_exposure_canonical_identity_unavailable", 0) + 1
+                    )
+                    continue
+                canonical = canonical_rows[0]
+                direction = str(canonical["direction"] or "").strip().lower()
+                canonical_token_id = (
+                    str(canonical["no_token_id"] or "").strip()
+                    if direction == "buy_no"
+                    else str(canonical["token_id"] or "").strip()
+                    if direction == "buy_yes"
+                    else ""
+                )
+                canonical_condition_id = str(canonical["condition_id"] or "").strip()
+                if (
+                    canonical_token_id != token_id
+                    or not canonical_condition_id
+                    or canonical_condition_id != chain_condition_id
+                ):
+                    stats["terminal_chain_exposure_condition_mismatch"] = (
+                        stats.get("terminal_chain_exposure_condition_mismatch", 0) + 1
+                    )
+                    continue
+                canonical_candidates.append(position)
+            if not canonical_candidates:
+                logger.error(
+                    "TERMINAL_CHAIN_CANONICAL_IDENTITY_MISMATCH: token=%s chain_condition=%s",
+                    token_id,
+                    chain_condition_id,
+                )
+                return False
+            candidates = canonical_candidates
+
+            suppression_columns = {
                 str(row[1])
                 for row in conn.execute(
                     "PRAGMA table_info(token_suppression)"
                 ).fetchall()
             }
-            if not {"token_id", "condition_id", "suppression_reason"} <= columns:
+            if not {"token_id", "condition_id", "suppression_reason"} <= suppression_columns:
                 raise RuntimeError("token_suppression current projection is unavailable")
             suppression = conn.execute(
                 """

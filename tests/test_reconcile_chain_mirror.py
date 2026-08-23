@@ -1000,8 +1000,8 @@ def test_terminal_restore_fails_closed_without_exact_chain_condition(trades_conn
     assert stats["terminal_chain_exposure_condition_unavailable"] == 1
 
 
-def test_unsuppressed_exact_terminal_chain_exposure_still_restores(trades_conn):
-    """The new suppression check does not weaken exact Chain-over-local repair."""
+def test_terminal_restore_uses_canonical_condition_not_stale_runtime_identity(trades_conn):
+    """The canonical exact identity, not stale runtime state, authorizes restore."""
     from src.state.chain_reconciliation import ChainPosition, reconcile as reconcile_portfolio
     from src.state.portfolio import PortfolioState, Position
 
@@ -1030,7 +1030,7 @@ def test_unsuppressed_exact_terminal_chain_exposure_still_restores(trades_conn):
                 direction="buy_yes",
                 state="voided",
                 token_id=token_id,
-                condition_id=condition_id,
+                condition_id="stale-runtime-condition",
                 shares=5.0,
                 cost_basis_usd=2.5,
                 size_usd=2.5,
@@ -1056,6 +1056,68 @@ def test_unsuppressed_exact_terminal_chain_exposure_still_restores(trades_conn):
 
     assert stale_portfolio.positions[0].state == "holding"
     assert stats["terminal_chain_exposure_restored"] == 1
+
+
+@pytest.mark.parametrize("canonical_condition_id", ["", "cond-canonical-other"])
+def test_terminal_restore_refuses_missing_or_mismatched_canonical_condition(
+    trades_conn, canonical_condition_id
+):
+    """A matching stale runtime condition cannot override canonical identity."""
+    from src.state.chain_reconciliation import ChainPosition, reconcile as reconcile_portfolio
+    from src.state.portfolio import PortfolioState, Position
+
+    position_id = "pos-canonical-condition-refusal"
+    token_id = "tok-canonical-condition-refusal"
+    chain_condition_id = "cond-canonical-exact"
+    _insert_position_current(
+        trades_conn,
+        position_id=position_id,
+        phase="voided",
+        direction="buy_yes",
+        token_id=token_id,
+        condition_id=canonical_condition_id,
+        shares=5.0,
+        cost_basis_usd=2.5,
+    )
+    stale_portfolio = PortfolioState(
+        positions=[
+            Position(
+                trade_id=position_id,
+                market_id="market-canonical-condition-refusal",
+                city="manila",
+                cluster="manila",
+                target_date="2026-07-04",
+                bin_label="33°C",
+                direction="buy_yes",
+                state="voided",
+                token_id=token_id,
+                condition_id=chain_condition_id,
+                shares=5.0,
+                cost_basis_usd=2.5,
+                size_usd=2.5,
+                entry_price=0.5,
+            )
+        ],
+        ignored_tokens=[],
+    )
+
+    stats = reconcile_portfolio(
+        stale_portfolio,
+        [
+            ChainPosition(
+                token_id=token_id,
+                condition_id=chain_condition_id,
+                size=5.0,
+                avg_price=0.5,
+                cost=2.5,
+            )
+        ],
+        conn=trades_conn,
+    )
+
+    assert stale_portfolio.positions[0].state == "voided"
+    assert stats.get("terminal_chain_exposure_restored", 0) == 0
+    assert stats["terminal_chain_exposure_condition_mismatch"] == 1
 
 
 @pytest.mark.parametrize(
