@@ -4,6 +4,23 @@ Date: 2026-07-11
 Branch: `live` (was `p2-pending-exit-restart-redecision`; renamed at main→live cutover)
 Status: active
 
+## 2026-08-23 — exact-market reconcile finding不得冻结全球资本
+
+- **实时反例：** `de9e5e204`完成24/24 held monitor coverage且probability stale为0，
+  `entries_paused=false`，但allocator仍因2个`systemic_reconcile_finding_count`进入全局
+  reduce-only。两条事实均属于同一Helsinki market：`unrecorded_trade`已有canonical
+  `venue_trade_facts`及唯一command market；`position_drift` token也由唯一ENTRY command
+  market定位，残余为0.015 non-executable dust。
+- **修复：** scope classifier允许三种subject-local finding在exact one-market canonical join
+  下局部隔离：local orphan→venue order、position drift→ENTRY token、already-recorded trade→
+  trade fact/command。缺join、歧义、collateral/nonlocal或multi-market继续SYSTEMIC。
+- **SCOPE / DRAIN / RESET：** scope是精确market_id，allocator仅拒绝该market新资本；
+  drain是现有reconcile refresh/settlement或dust变化；reset是finding resolved_at写入后下次
+  allocator refresh移除局部隔离。任何第二市场映射立即升级global fail closed。
+- **验收：** unit tests覆盖position/trade exact joins及ambiguous token；用当前live DB只读
+  replay须从`total=2, systemic=2`变为`scoped_markets=['3757041'], systemic=0`，部署后要求
+  allocator `reduce_only=false`且非该market重新进入global auction。
+
 ## 2026-08-23 — current-capital q repair不得排在bounded seed window之外
 
 - **实时反例：** `live` reload后queue有392个pending seeds，其中29个marker绑定held

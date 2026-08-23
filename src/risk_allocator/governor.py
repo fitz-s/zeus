@@ -1648,11 +1648,12 @@ def classify_reconcile_finding_scope(
     conn: Any,
     cap_policy: CapPolicy | None = None,
 ) -> ReconcileFindingScope:
-    """Classify only exactly joined local-orphan findings as market scoped.
+    """Scope subject-local findings only when canonical joins prove one market.
 
-    Other finding kinds can express cross-market accounting or collateral
-    failures and remain systemic. A local orphan is scoped only when its
-    subject venue order joins to exactly one non-empty command market.
+    Local-orphan orders join by venue order, position drift joins by token, and
+    already-recorded trade findings join through the canonical trade fact. All
+    other kinds, missing/ambiguous joins, and multi-market clusters remain
+    systemic.
     """
 
     policy = cap_policy or CapPolicy()
@@ -1669,11 +1670,15 @@ def classify_reconcile_finding_scope(
                 "PRAGMA table_info(venue_commands)"
             ).fetchall()
         }
+        trade_fact_columns = {
+            str(row[1])
+            for row in read_conn.execute(
+                "PRAGMA table_info(venue_trade_facts)"
+            ).fetchall()
+        }
         if not {"finding_id", "resolved_at"}.issubset(finding_columns):
             rows = []
-        elif not {"kind", "subject_id"}.issubset(
-            finding_columns
-        ) or not {"venue_order_id", "market_id"}.issubset(command_columns):
+        elif not {"kind", "subject_id"}.issubset(finding_columns):
             rows = [
                 {
                     "finding_id": row[0],
@@ -1690,16 +1695,37 @@ def classify_reconcile_finding_scope(
                 ).fetchall()
             ]
         else:
+            joins: list[str] = []
+            if {"venue_order_id", "market_id"}.issubset(command_columns):
+                joins.append(
+                    "(f.kind = 'local_orphan_order' "
+                    "AND vc.venue_order_id = f.subject_id)"
+                )
+            if {"token_id", "market_id", "intent_kind"}.issubset(command_columns):
+                joins.append(
+                    "(f.kind = 'position_drift' AND vc.token_id = f.subject_id "
+                    "AND UPPER(COALESCE(vc.intent_kind, '')) = 'ENTRY')"
+                )
+            if {"command_id", "market_id"}.issubset(command_columns) and {
+                "trade_id",
+                "command_id",
+            }.issubset(trade_fact_columns):
+                joins.append(
+                    "(f.kind = 'unrecorded_trade' AND EXISTS ("
+                    "SELECT 1 FROM venue_trade_facts tf "
+                    "WHERE tf.trade_id = f.subject_id "
+                    "AND tf.command_id = vc.command_id))"
+                )
+            join_sql = " OR ".join(joins) or "0"
             rows = read_conn.execute(
-                """
+                f"""
                 SELECT f.finding_id,
                        f.kind,
                        COUNT(DISTINCT NULLIF(TRIM(vc.market_id), '')) AS market_count,
                        MIN(NULLIF(TRIM(vc.market_id), '')) AS market_id
                   FROM exchange_reconcile_findings AS f
                   LEFT JOIN venue_commands AS vc
-                    ON f.kind = 'local_orphan_order'
-                   AND vc.venue_order_id = f.subject_id
+                    ON {join_sql}
                  WHERE f.resolved_at IS NULL
                  GROUP BY f.finding_id, f.kind
                 """
@@ -1709,11 +1735,11 @@ def classify_reconcile_finding_scope(
     for raw_row in rows:
         row = _row_mapping(raw_row)
         market = str(row.get("market_id") or "").strip()
-        if (
-            str(row.get("kind") or "") == "local_orphan_order"
-            and int(row.get("market_count") or 0) == 1
-            and market
-        ):
+        if str(row.get("kind") or "") in {
+            "local_orphan_order",
+            "position_drift",
+            "unrecorded_trade",
+        } and int(row.get("market_count") or 0) == 1 and market:
             scoped.append(market)
         else:
             unscopeable += 1

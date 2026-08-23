@@ -1044,7 +1044,7 @@ files:
   src/risk_allocator/governor.py:
     zone: K1_governance
     authority_role: capital_allocation_governor
-    why: R3 A2 RiskAllocator and PortfolioGovernor enforce per-market, per-event, per-resolution-window, correlated-exposure, heartbeat, WS-gap, reconciliation, unknown-side-effect, and manual kill-switch gates before executor submission (drawdown breaker retired R0-e 2026-07-08; riskguard owns realized-settled-loss circuit breaking). A local-orphan reconciliation finding joined to exactly one venue-command market is isolated to that market while unscopeable, nonlocal, or multi-market findings remain systemic; one command dispute therefore cannot freeze unrelated capital allocation.
+    why: R3 A2 RiskAllocator and PortfolioGovernor enforce per-market, per-event, per-resolution-window, correlated-exposure, heartbeat, WS-gap, reconciliation, unknown-side-effect, and manual kill-switch gates before executor submission (drawdown breaker retired R0-e 2026-07-08; riskguard owns realized-settled-loss circuit breaking). Subject-local reconciliation findings are isolated only when canonical joins prove exactly one venue-command market: local orphan by venue order, position drift by its ENTRY token, and an already-recorded trade by its canonical trade fact. Missing, ambiguous, nonlocal, collateral, or multi-market findings remain systemic; one exact-market dispute therefore cannot freeze unrelated capital allocation.
     hazards:
     - VENUS_CONTROL_ONLY
     downstream:

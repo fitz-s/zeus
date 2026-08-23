@@ -1,5 +1,5 @@
 # Created: 2026-06-22
-# Last reused/audited: 2026-08-22
+# Last reused/audited: 2026-08-23
 # Authority basis: docs/evidence/live_order_pathology/2026-06-22_governor_scope_lattice_decision.md
 #                  (frontier consult REQ-20260621-211850, Pro Extended, HIGH confidence)
 """Scope-aware governor gating: a SCOPED single-market unknown side effect triggers
@@ -394,6 +394,103 @@ def test_classify_local_orphan_reconcile_finding_by_command_market(conn):
     assert scope.scoped_markets == ("m-orphan",)
     assert scope.unscopeable_count == 0
     assert scope.systemic_count == 0
+
+
+def test_classify_position_drift_by_exact_token_market(conn):
+    _insert_review_required(
+        conn,
+        command_id="c-drift",
+        market_id="m-drift",
+        token_id="token-drift",
+    )
+    _insert_reconcile_finding(
+        conn,
+        finding_id="f-drift",
+        kind="position_drift",
+        subject_id="token-drift",
+    )
+
+    scope = classify_reconcile_finding_scope(conn, CapPolicy())
+
+    assert scope.total_count == 1
+    assert scope.scoped_markets == ("m-drift",)
+    assert scope.unscopeable_count == 0
+    assert scope.systemic_count == 0
+
+
+def test_classify_recorded_trade_finding_by_exact_command_market(conn):
+    _insert_review_required(
+        conn,
+        command_id="c-trade",
+        market_id="m-trade",
+        venue_order_id="venue-trade",
+    )
+    conn.execute(
+        """
+        INSERT INTO venue_trade_facts
+          (trade_id, venue_order_id, command_id, state, filled_size, fill_price,
+           source, observed_at, local_sequence, raw_payload_hash)
+        VALUES (?, ?, ?, 'CONFIRMED', '5', '0.42', 'REST', ?, 1, ?)
+        """,
+        ("trade-1", "venue-trade", "c-trade", NOW.isoformat(), "a" * 64),
+    )
+    _insert_reconcile_finding(
+        conn,
+        finding_id="f-trade",
+        kind="unrecorded_trade",
+        subject_id="trade-1",
+    )
+
+    scope = classify_reconcile_finding_scope(conn, CapPolicy())
+
+    assert scope.total_count == 1
+    assert scope.scoped_markets == ("m-trade",)
+    assert scope.unscopeable_count == 0
+    assert scope.systemic_count == 0
+
+
+def test_ambiguous_position_drift_market_join_remains_systemic(conn):
+    _insert_review_required(
+        conn,
+        command_id="c-drift-a",
+        market_id="m-a",
+        token_id="token-shared",
+    )
+    _insert_review_required(
+        conn,
+        command_id="c-drift-b",
+        market_id="m-b",
+        token_id="token-shared",
+    )
+    _insert_reconcile_finding(
+        conn,
+        finding_id="f-drift-ambiguous",
+        kind="position_drift",
+        subject_id="token-shared",
+    )
+
+    scope = classify_reconcile_finding_scope(conn, CapPolicy())
+
+    assert scope.total_count == 1
+    assert scope.scoped_markets == ()
+    assert scope.unscopeable_count == 1
+    assert scope.systemic_count == 1
+
+
+def test_unrecorded_trade_without_canonical_fact_remains_systemic(conn):
+    _insert_reconcile_finding(
+        conn,
+        finding_id="f-trade-unlinked",
+        kind="unrecorded_trade",
+        subject_id="trade-unlinked",
+    )
+
+    scope = classify_reconcile_finding_scope(conn, CapPolicy())
+
+    assert scope.total_count == 1
+    assert scope.scoped_markets == ()
+    assert scope.unscopeable_count == 1
+    assert scope.systemic_count == 1
 
 
 def test_nonlocal_reconcile_finding_remains_systemic(conn):
