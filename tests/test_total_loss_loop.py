@@ -1228,3 +1228,33 @@ def test_orphan_child_kernel_lock_closes_popen_bind_crash_gap(
         cwd=worktree,
         run_id="after-orphan-exit",
     )
+
+
+def test_retry_preserves_only_same_incident_branch_owned_dirty_patch(
+    cfg: dict, monkeypatch, tmp_path: Path
+) -> None:
+    branch = "test/total-loss/owned-dirty"
+
+    def capture(command, *, cwd, **_kwargs):
+        assert cwd == tmp_path.resolve()
+        if command[:3] == ["git", "branch", "--show-current"]:
+            return subprocess.CompletedProcess(command, 0, branch + "\n", "")
+        if command[:3] == ["git", "status", "--porcelain"]:
+            return subprocess.CompletedProcess(command, 0, " M src/owned.py\n", "")
+        raise AssertionError(command)
+
+    monkeypatch.setattr(loop, "_run_capture", capture)
+
+    loop._ensure_writer_worktree_branch(
+        cfg,
+        cwd=tmp_path,
+        branch=branch,
+        allow_owned_dirty=True,
+    )
+    with pytest.raises(RuntimeError, match="worktree is dirty"):
+        loop._ensure_writer_worktree_branch(
+            cfg,
+            cwd=tmp_path,
+            branch="test/total-loss/other-incident",
+            allow_owned_dirty=True,
+        )

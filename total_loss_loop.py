@@ -1789,6 +1789,7 @@ def _spawn_run(
     events: Path,
     session_id: str | None = None,
     workspace_branch: str | None = None,
+    resume_owned_workspace: bool = False,
 ) -> dict[str, Any]:
     started_at = iso()
     run_id = digest(incident_id, stage, started_at, os.getpid(), time.monotonic_ns())
@@ -1821,6 +1822,7 @@ def _spawn_run(
                     cfg,
                     cwd=cwd,
                     branch=workspace_branch,
+                    allow_owned_dirty=resume_owned_workspace,
                 )
         child = subprocess.Popen(
             wrapped,
@@ -1860,6 +1862,7 @@ def _spawn_run(
         "command": command,
         "session_id": session_id,
         "workspace_branch": workspace_branch,
+        "resume_owned_workspace": resume_owned_workspace,
         "status": "running",
     }
     run_path = runtime_dir(cfg) / "runs" / f"{run_id}.json"
@@ -2362,8 +2365,11 @@ def _retry_pending(cfg: Mapping[str, Any], running: list[dict[str, Any]]) -> lis
                     prior.get("workspace_branch")
                     or _repair_branch(cfg, incident_id)
                 ) if prior_stage in _WORKTREE_WRITE_STAGES - {"production"} else None,
+                resume_owned_workspace=(
+                    prior_stage in _WORKTREE_WRITE_STAGES - {"production"}
+                ),
             )
-        except WriterLeaseBusy:
+        except (WriterLeaseBusy, RuntimeError):
             continue
         if prior.get("repair_session_id"):
             retried["repair_session_id"] = prior["repair_session_id"]
@@ -2481,17 +2487,23 @@ def _ensure_writer_worktree_branch(
     *,
     cwd: Path,
     branch: str,
+    allow_owned_dirty: bool = False,
 ) -> None:
     """Provision the incident branch while holding the cwd writer lease."""
 
     path = cwd.resolve()
-    dirty = _run_capture(["git", "status", "--porcelain", "--untracked-files=all"], cwd=path)
-    if dirty.returncode != 0 or dirty.stdout.strip():
-        raise RuntimeError("configured repair worktree is dirty")
     current = _run_capture(["git", "branch", "--show-current"], cwd=path)
     if current.returncode != 0:
         raise RuntimeError("configured repair worktree branch is unreadable")
-    if current.stdout.strip() != branch:
+    current_branch = current.stdout.strip()
+    dirty = _run_capture(["git", "status", "--porcelain", "--untracked-files=all"], cwd=path)
+    if dirty.returncode != 0:
+        raise RuntimeError("configured repair worktree status is unreadable")
+    if dirty.stdout.strip() and not (
+        allow_owned_dirty and current_branch == branch
+    ):
+        raise RuntimeError("configured repair worktree is dirty")
+    if current_branch != branch:
         exists = _run_capture(["git", "show-ref", "--verify", "--quiet", f"refs/heads/{branch}"], cwd=ROOT)
         switch = ["git", "switch", branch] if exists.returncode == 0 else [
             "git", "switch", "-c", branch, str(cfg["delivery"]["base_branch"])
