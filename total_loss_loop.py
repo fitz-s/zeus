@@ -9,6 +9,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import shutil
 import signal
 import sqlite3
@@ -2513,6 +2514,10 @@ _PROVIDER_LIMIT_TERMS = (
     "rate limit", "too many requests", "resource exhausted",
     "exceeded quota",
 )
+_PROVIDER_LIMIT_MESSAGE = re.compile(
+    r"(?:hit|reached|exceeded)\s+(?:your\s+)?usage\s+limit"
+    r"|usage\s+limit\s+(?:reached|exceeded)"
+)
 
 
 def _parse_terminal_failure(
@@ -2574,7 +2579,9 @@ def _parse_terminal_failure(
     }
     raw = " ".join([detail_text, *linked_detail]).lower()
     provider_limit = any(code in provider_codes or code.endswith("_quota_exceeded") for code in codes)
-    provider_limit = provider_limit or any(term in raw for term in _PROVIDER_LIMIT_TERMS)
+    normalized = " ".join(raw.split())
+    provider_limit = provider_limit or any(term in normalized for term in _PROVIDER_LIMIT_TERMS)
+    provider_limit = provider_limit or bool(_PROVIDER_LIMIT_MESSAGE.search(normalized))
     retry_at = _retry_at_from_failure(failed, cfg)
     if retry_at is None:
         for error_event in reversed(linked_errors):

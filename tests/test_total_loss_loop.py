@@ -411,9 +411,9 @@ def test_rc0_turn_failed_is_failed_and_requeues_incident(cfg: dict) -> None:
     events = runtime / "runs" / "turn-failed.jsonl"
     events.parent.mkdir(parents=True, exist_ok=True)
     events.write_text(
-        json.dumps({"type": "error", "error": {"message": "usage limit reached"}})
+        json.dumps({"type": "error", "error": {"message": "You've hit your usage limit. Visit ... or try again at Aug 26th, 2026 10:37 PM."}})
         + "\n"
-        + json.dumps({"type": "turn.failed", "error": {"message": "usage limit reached"}})
+        + json.dumps({"type": "turn.failed", "error": {"message": "You've hit your usage limit. Visit ... or try again at Aug 26th, 2026 10:37 PM."}})
         + "\n"
     )
     run = {
