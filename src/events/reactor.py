@@ -7485,6 +7485,12 @@ def _global_auction_monitor_cancellation_probe(
 
         if cancelled_this_cycle:
             return True
+        if (
+            not exact_executable_held_completion
+            and _EXACT_EXECUTABLE_HELD_SELL_PENDING.is_set()
+        ):
+            cancelled_this_cycle = True
+            return True
         debt_pending = False
         if monitor_debt_pending is not None:
             try:
@@ -7680,6 +7686,12 @@ def _global_auction_completion_mode(
 _DURABLE_EXACT_HELD_COMPLETION_SEEN: set[str] = set()
 _DURABLE_EXACT_HELD_COMPLETION_LOCK = threading.Lock()
 _EXACT_EXECUTABLE_HELD_SELL_PENDING = threading.Event()
+_EXACT_EXECUTABLE_HELD_SELL_SIGNAL_LOCK = threading.Lock()
+_EXACT_EXECUTABLE_HELD_SELL_SIGNAL_REVISION = 0
+
+
+class _DurableExactHeldCompletionUnknown(RuntimeError):
+    """A strict durable signal read could not establish the current queue."""
 
 
 def _durable_exact_held_sell_completion_pending() -> bool:
@@ -7690,7 +7702,10 @@ def _durable_exact_held_sell_completion_pending() -> bool:
     return bool(exact_held_sell_completion_wake_ids(fail_on_error=True))
 
 
-def _durable_exact_held_sell_completion_requests() -> tuple[object, ...]:
+def _durable_exact_held_sell_completion_requests(
+    *,
+    strict: bool = False,
+) -> tuple[object, ...]:
     """Read the exact requests that authorize a durable fallback cut.
 
     SCOPE: current queued exact held-SELL debt only. DRAIN: each request's
@@ -7717,32 +7732,49 @@ def _durable_exact_held_sell_completion_requests() -> tuple[object, ...]:
                 if not held_sell_reauction_requests_completed((request,))
             )
         )
-    except (OSError, TypeError, ValueError):
+    except Exception as exc:  # noqa: BLE001 - strict callers need one typed unknown path.
         logging.getLogger("zeus.events.reactor").warning(
             "durable held SELL completion requests unreadable; retaining debt",
             exc_info=True,
         )
+        if strict:
+            raise _DurableExactHeldCompletionUnknown() from exc
         return ()
 
 
 def _mark_exact_executable_held_sell_pending(request: object) -> None:
     """Publish the in-process preemption signal after durable wake success."""
 
+    global _EXACT_EXECUTABLE_HELD_SELL_SIGNAL_REVISION
     if _has_exact_executable_held_sell_completion((request,)):
-        _EXACT_EXECUTABLE_HELD_SELL_PENDING.set()
+        with _EXACT_EXECUTABLE_HELD_SELL_SIGNAL_LOCK:
+            _EXACT_EXECUTABLE_HELD_SELL_SIGNAL_REVISION += 1
+            _EXACT_EXECUTABLE_HELD_SELL_PENDING.set()
 
 
 def _rehydrate_exact_executable_held_sell_pending(
-    requests: tuple[object, ...],
-) -> bool:
+    *,
+    strict: bool = False,
+    extra_requests: tuple[object, ...] = (),
+) -> tuple[bool, tuple[object, ...]]:
     """Refresh the process-local signal at a non-callback durable boundary."""
 
+    with _EXACT_EXECUTABLE_HELD_SELL_SIGNAL_LOCK:
+        revision = _EXACT_EXECUTABLE_HELD_SELL_SIGNAL_REVISION
+    try:
+        durable_requests = _durable_exact_held_sell_completion_requests(strict=strict)
+    except _DurableExactHeldCompletionUnknown:
+        with _EXACT_EXECUTABLE_HELD_SELL_SIGNAL_LOCK:
+            _EXACT_EXECUTABLE_HELD_SELL_PENDING.set()
+        raise
+    requests = tuple(dict.fromkeys((*durable_requests, *extra_requests)))
     exact = _has_exact_executable_held_sell_completion(requests)
-    if exact:
-        _EXACT_EXECUTABLE_HELD_SELL_PENDING.set()
-    else:
-        _EXACT_EXECUTABLE_HELD_SELL_PENDING.clear()
-    return exact
+    with _EXACT_EXECUTABLE_HELD_SELL_SIGNAL_LOCK:
+        if exact:
+            _EXACT_EXECUTABLE_HELD_SELL_PENDING.set()
+        elif _EXACT_EXECUTABLE_HELD_SELL_SIGNAL_REVISION == revision:
+            _EXACT_EXECUTABLE_HELD_SELL_PENDING.clear()
+        return _EXACT_EXECUTABLE_HELD_SELL_PENDING.is_set(), durable_requests
 
 
 def _held_sell_completion_cut_requests(
@@ -7964,18 +7996,26 @@ def run_edli_event_reactor_cycle(
         if not completion_wake and not committed_day0_wake:
             return False
         durable_exact_held_completion_pending = False
-    durable_exact_held_completion_requests = (
-        _durable_exact_held_sell_completion_requests()
-        if durable_exact_held_completion_pending
-        else ()
-    )
-    exact_executable_held_completion = _rehydrate_exact_executable_held_sell_pending(
+    try:
         (
-            producer_held_sell_reauction_requests
-            if completion_wake
-            else durable_exact_held_completion_requests
+            exact_executable_held_completion,
+            durable_exact_held_completion_requests,
+        ) = _rehydrate_exact_executable_held_sell_pending(
+            strict=True,
+            extra_requests=(
+                producer_held_sell_reauction_requests if completion_wake else ()
+            ),
         )
-    )
+    except _DurableExactHeldCompletionUnknown:
+        _log.warning(
+            "durable held SELL completion queue unreadable on signal rehydrate; "
+            "retaining exact preemption",
+            exc_info=True,
+        )
+        if not completion_wake and not committed_day0_wake:
+            return False
+        exact_executable_held_completion = True
+        durable_exact_held_completion_requests = ()
 
     # SCOPE: admission of the one global cut already owed after a monitor
     # handoff. DRAIN: that cut reaches the bounded in-reactor fairness probe;
@@ -8004,6 +8044,7 @@ def run_edli_event_reactor_cycle(
     held_sell_completion_cycle = bool(
         (completion_wake and producer_held_sell_reauction_requests)
         or durable_exact_held_completion_pending
+        or exact_executable_held_completion
     )
     paused_forecast_held_auction = False
 
@@ -9079,9 +9120,10 @@ def run_edli_event_reactor_cycle(
             if not requests_completed:
                 completion_wake_needs_retry = True
             else:
-                _rehydrate_exact_executable_held_sell_pending(
-                    _durable_exact_held_sell_completion_requests()
-                )
+                try:
+                    _rehydrate_exact_executable_held_sell_pending(strict=True)
+                except _DurableExactHeldCompletionUnknown:
+                    completion_wake_needs_retry = True
             terminal_no_book_completion = bool(
                 requests_completed
                 and held_sell_reauction_receipts

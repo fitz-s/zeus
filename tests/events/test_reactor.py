@@ -6796,7 +6796,7 @@ def test_active_lock_reads_exact_debt_before_skipping(monkeypatch):
     monkeypatch.setattr(
         reactor_module,
         "_durable_exact_held_sell_completion_requests",
-        lambda: calls.append("requests") or (object(),),
+        lambda **_kwargs: calls.append("requests") or (object(),),
     )
     monkeypatch.setattr(
         reactor_module,
@@ -6839,6 +6839,111 @@ def test_ordinary_cancellation_reads_only_atomic_exact_signal(monkeypatch):
         assert cancelled() is True
     finally:
         _EXACT_EXECUTABLE_HELD_SELL_PENDING.clear()
+
+
+def test_global_selection_cancels_when_exact_publisher_arrives_after_probe_creation(
+    tmp_path,
+):
+    from src.events import reactor
+
+    now = datetime.now(timezone.utc)
+    reactor._EXACT_EXECUTABLE_HELD_SELL_PENDING.clear()
+    try:
+        _, ordinary_cancelled = reactor._global_auction_monitor_cancellation_probe(
+            lambda: False,
+            exact_executable_held_completion=False,
+        )
+        assert reactor.request_global_auction_completion(
+            reason="test_probe_arrival",
+            position_id="probe-arrival-position",
+            family=("Cape Town", "2026-08-23", "high"),
+            probability_content_identity="q-probe-arrival",
+            held_token_id="probe-arrival-token",
+            held_best_bid=0.21,
+            bid_observed_at=(now - timedelta(seconds=1)).isoformat(),
+            probability_observed_at=(now - timedelta(seconds=1)).isoformat(),
+            completion_deadline_at=(now + timedelta(seconds=30)).isoformat(),
+            book_state="EXECUTABLE",
+            schema_version=4,
+            wake_path=tmp_path / "probe-arrival-wake.json",
+        )
+        assert ordinary_cancelled() is True
+
+        _, exact_cancelled = reactor._global_auction_monitor_cancellation_probe(
+            lambda: True,
+            monitor_debt_pending=lambda: True,
+            exact_executable_held_completion=True,
+        )
+        assert exact_cancelled() is False
+    finally:
+        reactor._EXACT_EXECUTABLE_HELD_SELL_PENDING.clear()
+
+
+def test_rehydrate_keeps_concurrent_publish_signal_when_old_queue_is_empty(monkeypatch):
+    from src.events import reactor
+    from src.runtime import reactor_wake
+
+    now = datetime.now(timezone.utc)
+    request = reactor_wake.make_held_sell_reauction_request(
+        position_id="concurrent-publish-position",
+        family=("Cape Town", "2026-08-23", "high"),
+        probability_content_identity="q-concurrent",
+        held_token_id="concurrent-publish-token",
+        held_best_bid=0.21,
+        bid_observed_at=(now - timedelta(seconds=1)).isoformat(),
+        probability_observed_at=(now - timedelta(seconds=1)).isoformat(),
+        completion_deadline_at=(now + timedelta(seconds=30)).isoformat(),
+        schema_version=4,
+        book_state="EXECUTABLE",
+    )
+    reactor._EXACT_EXECUTABLE_HELD_SELL_PENDING.clear()
+    monkeypatch.setattr(
+        reactor,
+        "_durable_exact_held_sell_completion_requests",
+        lambda **_kwargs: reactor._mark_exact_executable_held_sell_pending(request) or (),
+    )
+    try:
+        pending, requests = reactor._rehydrate_exact_executable_held_sell_pending(
+            strict=True
+        )
+        assert requests == ()
+        assert pending is True
+        assert reactor._EXACT_EXECUTABLE_HELD_SELL_PENDING.is_set()
+    finally:
+        reactor._EXACT_EXECUTABLE_HELD_SELL_PENDING.clear()
+
+
+def test_strict_rehydrate_failure_keeps_signal_and_blocks_ordinary_admission(monkeypatch):
+    import src.events.reactor as reactor_module
+    import src.main as main
+    from src.runtime import reactor_wake
+
+    class UnexpectedLock:
+        def locked(self):
+            pytest.fail("ordinary cycle must not reach active-lock admission")
+
+    monkeypatch.setattr(main, "_settings_section", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(
+        reactor_module,
+        "_reactor_wake_cancellation_probe",
+        lambda **_kwargs: (lambda: False),
+    )
+    monkeypatch.setattr(
+        reactor_module,
+        "_durable_exact_held_sell_completion_pending",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        reactor_wake,
+        "reactor_wakes_for_reason",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("wake read failed")),
+    )
+    reactor_module._EXACT_EXECUTABLE_HELD_SELL_PENDING.clear()
+    try:
+        assert reactor_module.run_edli_event_reactor_cycle(active_lock=UnexpectedLock()) is False
+        assert reactor_module._EXACT_EXECUTABLE_HELD_SELL_PENDING.is_set()
+    finally:
+        reactor_module._EXACT_EXECUTABLE_HELD_SELL_PENDING.clear()
 
 
 def test_exact_publish_preempts_ordinary_and_preserves_exact_turn(tmp_path):
