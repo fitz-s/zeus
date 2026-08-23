@@ -16792,6 +16792,53 @@ def _current_solve_ledger_inputs(
             trade_conn.rollback()
 
 
+def _rehydrate_held_pinned_bundle_for_actuation(
+    event: OpportunityEvent,
+    *,
+    selected: object,
+    probability_use: _CurrentProbabilityUse,
+    forecast_conn: sqlite3.Connection,
+    decision_time: datetime,
+) -> object | None:
+    """Rehydrate the monitor-pinned carrier for the selected reduce-only SELL."""
+
+    if (
+        probability_use is not _CurrentProbabilityUse.REDUCE_ONLY_EXIT
+        or event.event_type != "DAY0_EXTREME_UPDATED"
+    ):
+        return None
+    payload = _payload(event)
+    from src.data.replacement_forecast_bundle_reader import (
+        read_prior_complete_replacement_forecast_bundle,
+    )
+
+    result = read_prior_complete_replacement_forecast_bundle(
+        forecast_conn,
+        city=str(payload.get("city") or ""),
+        target_date=str(payload.get("target_date") or ""),
+        temperature_metric=str(
+            payload.get("metric") or payload.get("temperature_metric") or ""
+        ).lower(),
+        decision_time=decision_time,
+    )
+    if result.status == "BLOCKED":
+        raise ValueError(
+            "GLOBAL_ACTUATION_HELD_PINNED_CARRIER_BLOCKED:"
+            f"{result.reason_code}"
+        )
+    if not result.ok:
+        return None
+    selected_identity = str(
+        getattr(selected, "posterior_identity_hash", "") or ""
+    ).strip()
+    bundle = result.bundle
+    if not selected_identity or bundle is None:
+        raise ValueError("GLOBAL_ACTUATION_HELD_PINNED_IDENTITY_MISSING")
+    if selected_identity != str(bundle.posterior_identity_hash or "").strip():
+        raise ValueError("GLOBAL_ACTUATION_HELD_PINNED_IDENTITY_MISMATCH")
+    return bundle
+
+
 def _current_global_actuation_prepared_family(
     event: OpportunityEvent,
     *,
@@ -16810,6 +16857,13 @@ def _current_global_actuation_prepared_family(
     decision = getattr(global_actuation, "decision", None)
     candidate = getattr(decision, "candidate", None)
     probability_use = _current_probability_use_for_global_candidate(candidate)
+    pinned_complete_bundle = _rehydrate_held_pinned_bundle_for_actuation(
+        event,
+        selected=selected,
+        probability_use=probability_use,
+        forecast_conn=forecast_conn,
+        decision_time=decision_time,
+    )
     required_condition_id = str(
         getattr(candidate, "condition_id", "") or ""
     ).strip()
@@ -16842,6 +16896,7 @@ def _current_global_actuation_prepared_family(
             probability_use is _CurrentProbabilityUse.REDUCE_ONLY_EXIT
         ),
         probability_use=probability_use,
+        pinned_complete_bundle=pinned_complete_bundle,
     )
     current_witness = getattr(current, "probability_witness", None)
     probability_mismatches = (
@@ -35202,6 +35257,46 @@ def _replacement_global_probability_components(
     )
 
 
+def _held_pinned_day0_probability_components(
+    replacement_bundle: object,
+    *,
+    payload: dict[str, object],
+    family: object,
+    candidates: tuple[MarketTopologyCandidate, ...],
+    bindings: tuple[object, ...],
+) -> tuple[np.ndarray, np.ndarray, str]:
+    """Overlay only the authorized monotone Day0 boundary on a pinned carrier."""
+
+    components = _replacement_global_probability_components(
+        replacement_bundle,
+        candidates=candidates,
+        bindings=bindings,
+    )
+    if components is None:
+        raise ValueError("GLOBAL_HELD_PINNED_POSTERIOR_SIMPLEX_INVALID")
+    samples, point_q, _basis = components
+    mask = _day0_absorbing_mask(payload=payload, family=family)
+    masked_samples = np.asarray(samples, dtype=np.float64) * mask.reshape(1, -1)
+    row_totals = masked_samples.sum(axis=1)
+    if np.any(row_totals <= 0.0) or not np.isfinite(row_totals).all():
+        raise ValueError("GLOBAL_HELD_PINNED_DAY0_OBSERVATION_ELIMINATES_SUPPORT")
+    masked_samples = masked_samples / row_totals.reshape(-1, 1)
+    masked_point = np.asarray(point_q, dtype=np.float64) * mask
+    point_total = float(masked_point.sum())
+    if point_total <= 0.0 or not math.isfinite(point_total):
+        raise ValueError("GLOBAL_HELD_PINNED_DAY0_OBSERVATION_ELIMINATES_POINT")
+    masked_point = masked_point / point_total
+    payload["_edli_day0_held_pinned_mask"] = [float(value) for value in mask]
+    payload["_edli_day0_held_pinned_overlay"] = (
+        "authorized_monotone_day0_observation_v1"
+    )
+    return (
+        np.ascontiguousarray(masked_samples, dtype=np.float64),
+        np.ascontiguousarray(masked_point, dtype=np.float64),
+        _GLOBAL_DAY0_CURRENT_SETTLEMENT_SIMPLEX_BAND_BASIS,
+    )
+
+
 def _day0_remaining_global_probability_components(
     event: OpportunityEvent,
     *,
@@ -35531,6 +35626,7 @@ def _prepare_current_global_probability_family(
     raw_input_hwm_read_max_seconds: float | None = None,
     before_raw_input_hwm_read: Callable[[], float | None] | None = None,
     _force_day0_redecision_fallback: bool = False,
+    pinned_complete_bundle: object | None = None,
 ):
     """Build current simplex or exact-bin payoff authority without price dependency.
 
@@ -35607,6 +35703,18 @@ def _prepare_current_global_probability_family(
     if not isinstance(_force_day0_redecision_fallback, bool):
         raise ValueError("GLOBAL_DAY0_REDECISION_FALLBACK_POLICY_INVALID")
     entry_authority = probability_use is _CurrentProbabilityUse.ENTRY
+    if pinned_complete_bundle is not None and entry_authority:
+        raise ValueError("GLOBAL_HELD_PINNED_RECOMPUTE_ENTRY_FORBIDDEN")
+    if pinned_complete_bundle is not None and probability_use not in {
+        _CurrentProbabilityUse.HELD_MONITOR,
+        _CurrentProbabilityUse.REDUCE_ONLY_EXIT,
+    }:
+        raise ValueError("GLOBAL_HELD_PINNED_RECOMPUTE_USE_INVALID")
+    if (
+        pinned_complete_bundle is not None
+        and event.event_type != "DAY0_EXTREME_UPDATED"
+    ):
+        raise ValueError("GLOBAL_HELD_PINNED_RECOMPUTE_DAY0_ONLY")
     bundle_authority_purpose = (
         ReplacementForecastAuthorityPurpose.ENTRY
         if entry_authority
@@ -35653,7 +35761,24 @@ def _prepare_current_global_probability_family(
     physical_frontier_requires_confirmation = False
     final_daily_observation = None
     source_available_at = ""
-    bundle = None
+    bundle = pinned_complete_bundle
+    posterior_identity_hash = ""
+    dependency_hash = ""
+    posterior_config_hash = ""
+    if pinned_complete_bundle is not None:
+        posterior_identity_hash = str(
+            pinned_complete_bundle.posterior_identity_hash or ""
+        ).strip()
+        dependency_hash = str(
+            pinned_complete_bundle.dependency_hash or ""
+        ).strip()
+        posterior_config_hash = str(
+            pinned_complete_bundle.posterior_config_hash or ""
+        ).strip()
+        if not all(
+            (posterior_identity_hash, dependency_hash, posterior_config_hash)
+        ):
+            raise ValueError("GLOBAL_HELD_PINNED_POSTERIOR_IDENTITY_INCOMPLETE")
     day0_source_clock_bound_identity = ""
     current_day0_redecision_only = False
     if is_day0:
@@ -35884,6 +36009,18 @@ def _prepare_current_global_probability_family(
                     ),
                 }
             )
+            if pinned_complete_bundle is not None:
+                source_cycle_raw = str(
+                    pinned_complete_bundle.source_cycle_time or ""
+                ).strip()
+                source_available_at = str(
+                    pinned_complete_bundle.source_available_at or source_cycle_raw
+                ).strip()
+                day0_base_identity = str(
+                    pinned_complete_bundle.posterior_identity_hash or ""
+                ).strip()
+                if not day0_base_identity:
+                    raise ValueError("GLOBAL_HELD_PINNED_POSTERIOR_IDENTITY_MISSING")
         elif final_daily_observation is None:
             # Current-day held q first reuses the same source-clock bundle as
             # ENTRY so an admitted BUY is immediately monitorable on identical
@@ -36091,39 +36228,32 @@ def _prepare_current_global_probability_family(
                 probability_base_identity=day0_base_identity,
             )
         else:
+            conditioning = None
+            if pinned_complete_bundle is None and bundle is not None:
+                conditioning = _day0_replacement_conditioning(
+                    bundle,
+                    provisional=probability_conditioning_is_provisional,
+                    metric=str(family.metric),
+                    unit=str(omega.resolution.measurement_unit),
+                    decision_time=decision_time,
+                    entry_authority=entry_authority,
+                    # The source-clock observation is only a provenance
+                    # carrier when the action q is rebuilt from the current
+                    # remaining path below. Its age cannot freeze the whole
+                    # city between hourly provider publications: the
+                    # remaining-path builder prices the unobserved interval
+                    # through decision_time from the causal current-state
+                    # ledger. Direct source-clock action routes retain the
+                    # strict 15-minute gate above.
+                    allow_stale_supporting_conditioning=(
+                        remaining_path_supporting_conditioning
+                    ),
+                )
             current_day0_payload = _global_day0_execution_payload(
                 event,
                 family=family,
                 resolution=omega.resolution,
-                conditioning=(
-                    _day0_replacement_conditioning(
-                        bundle,
-                        provisional=probability_conditioning_is_provisional,
-                        metric=str(family.metric),
-                        unit=str(omega.resolution.measurement_unit),
-                        decision_time=decision_time,
-                        entry_authority=entry_authority,
-                        # The source-clock observation is only a provenance
-                        # carrier when the action q is rebuilt from the current
-                        # remaining path below. Its age cannot freeze the whole
-                        # city between hourly provider publications: the
-                        # remaining-path builder prices the unobserved interval
-                        # through decision_time from the causal current-state
-                        # ledger. Direct source-clock action routes retain the
-                        # strict 15-minute gate above.
-                        # SCOPE: current-local-day global ENTRY only.
-                        # DRAIN: the remaining-path builder must produce a
-                        # complete current simplex before this family is usable.
-                        # RESET: a missing carrier/current observation/hourly
-                        # vector/topology or failed submit reproduction blocks
-                        # this family on the same cut.
-                        allow_stale_supporting_conditioning=(
-                            remaining_path_supporting_conditioning
-                        ),
-                    )
-                    if bundle is not None
-                    else None
-                ),
+                conditioning=conditioning,
                 observation_conn=day0_observation_conn,
                 decision_time=decision_time,
                 posterior_id=(
@@ -36304,7 +36434,44 @@ def _prepare_current_global_probability_family(
     probability_authority = "replacement_current_global_probability_v1"
     components = None
     exact_yes_payoffs: tuple[tuple[str, int], ...] = ()
-    if final_daily_observation is not None:
+    if pinned_complete_bundle is not None:
+        components = _held_pinned_day0_probability_components(
+            pinned_complete_bundle,
+            payload=payload,
+            family=family,
+            candidates=family.candidates,
+            bindings=bindings,
+        )
+        probability_authority = (
+            "day0_held_same_cycle_day0_recompute_v1"
+        )
+        pinned_metadata = {
+            "probability_authority": probability_authority,
+            "q_source": "day0_held_same_cycle_day0_recompute",
+            "_edli_q_source": "day0_held_same_cycle_day0_recompute",
+            "_edli_day0_q_mode": "held_same_cycle_day0_recompute",
+            "_edli_day0_held_pinned_recompute": True,
+            "_edli_day0_held_pinned_posterior_id": int(
+                pinned_complete_bundle.posterior_id
+            ),
+            "_edli_day0_held_pinned_posterior_identity": str(
+                pinned_complete_bundle.posterior_identity_hash
+            ),
+        }
+        payload.update(pinned_metadata)
+        if day0_payload_out is not None:
+            day0_payload_out.update(pinned_metadata)
+            day0_payload_out.update(
+                {
+                    "_edli_day0_held_pinned_mask": payload.get(
+                        "_edli_day0_held_pinned_mask"
+                    ),
+                    "_edli_day0_held_pinned_overlay": payload.get(
+                        "_edli_day0_held_pinned_overlay"
+                    ),
+                }
+            )
+    elif final_daily_observation is not None:
         components = _final_daily_exact_probability_components(
             omega=omega,
             settled_extreme=final_daily_observation.settled_extreme,
@@ -36893,6 +37060,11 @@ def _prepare_current_global_probability_family(
             "_edli_day0_peak_set_sample_count",
             "_edli_day0_peak_set_probability_basis",
             "_edli_day0_peak_set_mixture_basis",
+            "_edli_day0_held_pinned_recompute",
+            "_edli_day0_held_pinned_posterior_id",
+            "_edli_day0_held_pinned_posterior_identity",
+            "_edli_day0_held_pinned_mask",
+            "_edli_day0_held_pinned_overlay",
         ):
             if key in payload:
                 day0_payload_out[key] = payload[key]
@@ -36982,7 +37154,7 @@ def _prepare_current_global_probability_family(
             ),
         }
         source_truth_identity = stable_hash(source_truth)
-        if (
+        if pinned_complete_bundle is None and (
             bundle is None
             or not provisional_day0_observation
             or probability_authority

@@ -5143,6 +5143,10 @@ def _materialize_current_global_day0_probability(
         snapshot.probability_authority
         == "day0_remaining_day_global_probability_v1"
     )
+    is_held_pinned_recompute = (
+        snapshot.probability_authority
+        == "day0_held_same_cycle_day0_recompute_v1"
+    )
     is_deterministic_bin_payoff = (
         snapshot.probability_authority == "day0_deterministic_bin_payoff_v1"
     )
@@ -5158,9 +5162,9 @@ def _materialize_current_global_day0_probability(
     ):
         selected_method = "replacement_posterior"
         probability_authority = snapshot.probability_authority
-    elif is_remaining_day:
+    elif is_remaining_day or is_held_pinned_recompute:
         selected_method = SELECTED_METHOD_DAY0_OBSERVATION_REMAINING_WINDOW
-        probability_authority = "day0_remaining_day_global_probability_v1"
+        probability_authority = snapshot.probability_authority
     elif is_deterministic_bin_payoff:
         selected_method = SELECTED_METHOD_DAY0_ABSORBING_HARD_FACT
         probability_authority = "day0_deterministic_bin_payoff_v1"
@@ -5211,6 +5215,12 @@ def _materialize_current_global_day0_probability(
             kind="deterministic_bin_payoff",
             metric=snapshot.metric,
         )
+    elif is_held_pinned_recompute:
+        _stamp_day0_remaining_window_belief(refreshed, metric=snapshot.metric)
+        _append_monitor_validation(
+            refreshed,
+            "held_same_cycle_day0_recompute:immutable_complete_carrier",
+        )
     else:
         _stamp_day0_remaining_window_belief(refreshed, metric=snapshot.metric)
     if (
@@ -5258,6 +5268,18 @@ def _materialize_current_global_day0_probability(
             ),
             "q_version": witness.q_version,
             "source_truth_identity": witness.source_truth_identity,
+            "held_pinned_recompute": bool(
+                snapshot.day0_payload.get("_edli_day0_held_pinned_recompute")
+            ),
+            "pinned_complete_posterior_id": snapshot.day0_payload.get(
+                "_edli_day0_held_pinned_posterior_id"
+            ),
+            "pinned_complete_posterior_identity": snapshot.day0_payload.get(
+                "_edli_day0_held_pinned_posterior_identity"
+            ),
+            "pinned_observation_overlay": snapshot.day0_payload.get(
+                "_edli_day0_held_pinned_overlay"
+            ),
             "band": {
                 "basis": witness.band_basis,
                 "alpha": float(witness.band_alpha),
@@ -5274,7 +5296,7 @@ def _materialize_current_global_day0_probability(
                     "_edli_day0_finite_evidence_hits_by_condition"
                 ),
             }
-            if is_remaining_day
+            if is_remaining_day or is_held_pinned_recompute
             else None,
         },
     )
@@ -5423,6 +5445,9 @@ def _build_current_global_day0_family_snapshot(
                 _CurrentProbabilityUse,
                 _prepare_current_global_probability_family,
             )
+            from src.data.replacement_forecast_bundle_reader import (
+                read_prior_complete_replacement_forecast_bundle,
+            )
 
             day0_payload: dict[str, object] = {}
             cache_metadata: dict[str, str] = {}
@@ -5431,14 +5456,30 @@ def _build_current_global_day0_family_snapshot(
                 city is not None
                 and not _target_day_has_canonical_observation(world, position)
             )
-            hwm_deadline[0] = _held_monitor_stage_deadline(
-                hwm_deadline_monotonic,
-                HELD_MONITOR_RAW_HWM_READ_MAX_SECONDS,
+            pinned_result = read_prior_complete_replacement_forecast_bundle(
+                forecasts,
+                city=str(position.city),
+                target_date=str(position.target_date),
+                temperature_metric=metric,
+                decision_time=now,
             )
-            hwm_forecasts = get_forecasts_connection_read_only(
-                deadline_monotonic=float(hwm_deadline[0]),
+            if pinned_result.status == "BLOCKED":
+                raise ValueError(
+                    "GLOBAL_HELD_PINNED_COMPLETE_POSTERIOR_BLOCKED:"
+                    f"{pinned_result.reason_code}"
+                )
+            pinned_complete_bundle = (
+                pinned_result.bundle if pinned_result.ok else None
             )
-            _begin_raw_hwm_read()
+            if pinned_complete_bundle is None:
+                hwm_deadline[0] = _held_monitor_stage_deadline(
+                    hwm_deadline_monotonic,
+                    HELD_MONITOR_RAW_HWM_READ_MAX_SECONDS,
+                )
+                hwm_forecasts = get_forecasts_connection_read_only(
+                    deadline_monotonic=float(hwm_deadline[0]),
+                )
+                _begin_raw_hwm_read()
             try:
                 prepared = _prepare_current_global_probability_family(
                     event,
@@ -5457,7 +5498,10 @@ def _build_current_global_day0_family_snapshot(
                     before_raw_input_hwm_read=_begin_raw_hwm_read,
                     raw_input_hwm_read_max_seconds=(
                         HELD_MONITOR_RAW_HWM_READ_MAX_SECONDS
+                        if pinned_complete_bundle is None
+                        else None
                     ),
+                    pinned_complete_bundle=pinned_complete_bundle,
                 )
             except ValueError as exc:
                 if (

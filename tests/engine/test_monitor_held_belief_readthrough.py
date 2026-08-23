@@ -1053,6 +1053,93 @@ def test_day0_hwm_budget_starts_at_actual_prepare_handoff(monkeypatch):
     assert observed["deadline"] == pytest.approx(12.5)
 
 
+def test_day0_pinned_complete_route_skips_raw_hwm_handoff(monkeypatch):
+    import src.data.replacement_forecast_bundle_reader as bundle_reader
+    import src.engine.event_reactor_adapter as era
+    import src.engine.monitor_refresh as mr
+    import src.state.db as db
+
+    world = _day0_event_connection()
+    forecasts = sqlite3.connect(":memory:")
+    pinned_bundle = SimpleNamespace(posterior_id="complete-00")
+    observed = {"forecast_connections": 0, "hwm_connections": 0}
+
+    class PinnedRoutePrepared(RuntimeError):
+        pass
+
+    def forecasts_connection(*, deadline_monotonic=None):
+        observed["forecast_connections"] += 1
+        if deadline_monotonic is not None:
+            observed["hwm_connections"] += 1
+        return forecasts
+
+    def prepare(*_args, **kwargs):
+        assert kwargs["pinned_complete_bundle"] is pinned_bundle
+        assert kwargs["raw_input_hwm_conn"] is None
+        assert kwargs["raw_input_hwm_read_max_seconds"] is None
+        raise PinnedRoutePrepared
+
+    monkeypatch.setattr(mr, "_canonical_condition_id", lambda _position: "condition-1")
+    monkeypatch.setattr(mr, "_target_day_has_canonical_observation", lambda *_a, **_k: False)
+    monkeypatch.setattr(db, "get_world_connection_read_only", lambda: world)
+    monkeypatch.setattr(db, "get_forecasts_connection_read_only", forecasts_connection)
+    monkeypatch.setattr(
+        bundle_reader,
+        "read_prior_complete_replacement_forecast_bundle",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            status="READY", ok=True, bundle=pinned_bundle
+        ),
+    )
+    monkeypatch.setattr(era, "_prepare_current_global_probability_family", prepare)
+
+    with pytest.raises(PinnedRoutePrepared):
+        mr._build_current_global_day0_family_snapshot(
+            _pos(),
+            trade_conn=sqlite3.connect(":memory:"),
+            decision_time=datetime(2026, 6, 12, 12, tzinfo=timezone.utc),
+            cached_snapshots=(),
+            deadline_monotonic=time.monotonic() + 2.5,
+            hwm_deadline_monotonic=time.monotonic() + 2.5,
+        )
+
+    assert observed == {"forecast_connections": 1, "hwm_connections": 0}
+
+
+def test_reduce_only_actuation_rehydrates_selected_pinned_identity(monkeypatch):
+    import src.data.replacement_forecast_bundle_reader as bundle_reader
+    import src.engine.event_reactor_adapter as era
+
+    event = SimpleNamespace(
+        event_type="DAY0_EXTREME_UPDATED",
+        payload_json=json.dumps(
+            {
+                "city": "Karachi",
+                "target_date": "2026-06-12",
+                "metric": "high",
+            }
+        ),
+    )
+    selected = SimpleNamespace(posterior_identity_hash="pinned-00-identity")
+    bundle = SimpleNamespace(posterior_identity_hash="pinned-00-identity")
+    monkeypatch.setattr(
+        bundle_reader,
+        "read_prior_complete_replacement_forecast_bundle",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            status="READY", ok=True, bundle=bundle
+        ),
+    )
+
+    rehydrated = era._rehydrate_held_pinned_bundle_for_actuation(
+        event,
+        selected=selected,
+        probability_use=era._CurrentProbabilityUse.REDUCE_ONLY_EXIT,
+        forecast_conn=sqlite3.connect(":memory:"),
+        decision_time=datetime(2026, 6, 12, 12, tzinfo=timezone.utc),
+    )
+
+    assert rehydrated is bundle
+
+
 def test_day0_prepare_file_reads_do_not_wait_on_shared_snapshot_fence(
     monkeypatch,
     tmp_path,
