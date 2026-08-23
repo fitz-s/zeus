@@ -1072,9 +1072,14 @@ def test_held_monitor_uses_fresh_local_depth_before_network(monkeypatch, tmp_pat
         condition_id="condition-local-depth",
         top_bid="0.40",
         top_ask="0.44",
+        orderbook_depth={
+            "asset_id": "yes123",
+            "bids": [{"price": "0.40", "size": "30"}],
+            "asks": [],
+        },
         captured_at=captured_at,
-        active=False,
-        executable_allowed=True,
+        active=True,
+        executable_allowed=False,
     )
 
     class NoNetworkClob:
@@ -1104,9 +1109,37 @@ def test_held_monitor_uses_fresh_local_depth_before_network(monkeypatch, tmp_pat
 
     assert quote is not None
     assert quote.best_bid == pytest.approx(0.40)
-    assert quote.best_ask == pytest.approx(0.44)
+    assert quote.best_ask is None
     assert summary["held_monitor_orderbooks_local"] == 1
     assert summary["held_monitor_orderbooks_network_requested"] == 0
+    conn.close()
+
+
+def test_local_held_monitor_prefetch_fails_closed_before_expired_deadline(tmp_path):
+    from src.engine import cycle_runtime
+    from src.state.snapshot_repo import init_snapshot_schema
+
+    conn = get_connection(tmp_path / "local-monitor-expired-deadline.db")
+    init_schema(conn)
+    init_schema_trade_only(conn)
+    init_snapshot_schema(conn)
+    pos = _position(condition_id="condition-expired-deadline")
+    summary = {}
+    deps = types.SimpleNamespace(
+        logger=types.SimpleNamespace(warning=lambda *args, **kwargs: None)
+    )
+
+    assert cycle_runtime._fresh_local_held_monitor_orderbooks(
+        conn,
+        [pos] * 18,
+        now_utc=datetime.now(timezone.utc),
+        summary=summary,
+        deps=deps,
+        deadline_monotonic=time.monotonic() - 1.0,
+    ) == {}
+    assert summary["held_monitor_orderbook_prefetch_defer_reason"] == (
+        "AUXILIARY_DEADLINE_EXPIRED"
+    )
     conn.close()
 
 
@@ -1118,11 +1151,13 @@ def test_held_monitor_uses_causal_market_channel_depth_after_snapshot_invalidati
         init_snapshot_schema,
         record_snapshot_invalidation,
     )
+    from src.state.schema.execution_feasibility_evidence_schema import ensure_table
 
     conn = get_connection(tmp_path / "market-channel-monitor-depth.db")
     init_schema(conn)
     init_schema_trade_only(conn)
     init_snapshot_schema(conn)
+    ensure_table(conn)
     checked_at = datetime(2026, 8, 23, 13, 18, 6, tzinfo=timezone.utc)
     snapshot_at = checked_at - timedelta(seconds=20)
     quote_at = checked_at - timedelta(seconds=1)
@@ -1155,15 +1190,16 @@ def test_held_monitor_uses_causal_market_channel_depth_after_snapshot_invalidati
         *,
         condition_id="condition-market-channel-depth",
         token_id="yes123",
+        update_latest=True,
     ):
         conn.execute(
             """
             INSERT INTO execution_feasibility_evidence (
                 evidence_id, event_id, condition_id, token_id,
-                outcome_label, direction, quote_seen_at,
+                    outcome_label, direction, quote_seen_at,
                 best_bid_before, best_ask_before, depth_before_json,
                 created_at, schema_version
-            ) VALUES (?, ?, ?, ?, 'YES', 'buy_yes', ?, ?, ?, ?, ?, 1)
+                ) VALUES (?, ?, ?, ?, 'YES', 'sell_yes', ?, ?, ?, ?, ?, 1)
             """,
             (
                 evidence_id,
@@ -1182,9 +1218,25 @@ def test_held_monitor_uses_causal_market_channel_depth_after_snapshot_invalidati
                 observed_at.isoformat(),
             ),
         )
+        if update_latest:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO execution_feasibility_latest (
+                    token_id, direction, evidence_id, event_id, condition_id,
+                    outcome_label, quote_seen_at, best_bid_before, best_ask_before,
+                    depth_before_json, created_at, schema_version
+                )
+                SELECT token_id, direction, evidence_id, event_id, condition_id,
+                       outcome_label, quote_seen_at, best_bid_before, best_ask_before,
+                       depth_before_json, created_at, schema_version
+                  FROM execution_feasibility_evidence
+                 WHERE evidence_id = ?
+                """,
+                (evidence_id,),
+            )
 
     insert_quote("causal-quote", quote_at, 0.07, 0.12)
-    insert_quote("future-quote", future_quote_at, 0.01, 0.03)
+    insert_quote("future-quote", future_quote_at, 0.01, 0.03, update_latest=False)
 
     _insert_executable_snapshot(
         conn,
@@ -1206,7 +1258,7 @@ def test_held_monitor_uses_causal_market_channel_depth_after_snapshot_invalidati
         ) VALUES (
             'one-sided-quote', 'event-one-sided-quote',
             'one-sided-condition', 'one-sided-token',
-            'YES', 'buy_yes', ?, NULL, 0.15, ?, ?, 1
+            'YES', 'sell_yes', ?, NULL, 0.15, ?, ?, 1
         )
         """,
         (
@@ -1219,6 +1271,46 @@ def test_held_monitor_uses_causal_market_channel_depth_after_snapshot_invalidati
             ),
             quote_at.isoformat(),
         ),
+    )
+    conn.execute(
+        """
+        INSERT OR REPLACE INTO execution_feasibility_latest (
+            token_id, direction, evidence_id, event_id, condition_id,
+            outcome_label, quote_seen_at, best_bid_before, best_ask_before,
+            depth_before_json, created_at, schema_version
+        )
+        SELECT token_id, direction, evidence_id, event_id, condition_id,
+               outcome_label, quote_seen_at, best_bid_before, best_ask_before,
+               depth_before_json, created_at, schema_version
+          FROM execution_feasibility_evidence
+         WHERE evidence_id = 'one-sided-quote'
+        """
+    )
+
+    _insert_executable_snapshot(
+        conn,
+        snapshot_id="sibling-invalidated-snapshot",
+        selected_outcome_token_id="sibling-token",
+        yes_token_id="sibling-token",
+        no_token_id="sibling-no",
+        condition_id="sibling-condition",
+        captured_at=snapshot_at,
+        executable_allowed=True,
+    )
+    insert_quote(
+        "sibling-invalidated-quote",
+        quote_at,
+        0.21,
+        0.26,
+        condition_id="sibling-condition",
+        token_id="sibling-token",
+    )
+    record_snapshot_invalidation(
+        conn,
+        condition_id=None,
+        token_id="sibling-no",
+        reason="sibling_market_channel_quote_advanced",
+        invalidated_at=quote_at + timedelta(seconds=0.5),
     )
 
     _insert_executable_snapshot(
@@ -1290,6 +1382,10 @@ def test_held_monitor_uses_causal_market_channel_depth_after_snapshot_invalidati
         condition_id="one-sided-condition",
         token_id="one-sided-token",
     )
+    sibling_invalidated_pos = _position(
+        condition_id="sibling-condition",
+        token_id="sibling-token",
+    )
     clob = NoNetworkClob()
     summary = {}
     deps = types.SimpleNamespace(
@@ -1297,13 +1393,19 @@ def test_held_monitor_uses_causal_market_channel_depth_after_snapshot_invalidati
     )
     local_books = cycle_runtime._fresh_local_held_monitor_orderbooks(
         conn,
-        [pos, stale_pos, invalidated_pos, one_sided_pos],
+        [
+            pos,
+            stale_pos,
+            invalidated_pos,
+            one_sided_pos,
+            sibling_invalidated_pos,
+        ],
         now_utc=checked_at,
         summary={},
         deps=deps,
     )
 
-    assert set(local_books) == {"yes123"}
+    assert set(local_books) == {"yes123", "one-sided-token"}
 
     cycle_runtime._prefetch_held_monitor_orderbooks(
         conn,
@@ -1534,6 +1636,7 @@ def test_local_monitor_book_rejects_blocked_future_invalidated_and_identity_mism
             no_token_id=f"{name}-no",
             condition_id=condition_id,
             captured_at=captured_at,
+            active=(name != "blocked"),
             executable_allowed=executable_allowed,
         )
         positions.append(_position(condition_id=condition_id, token_id=token_id))
