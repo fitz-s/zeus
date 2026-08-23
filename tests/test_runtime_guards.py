@@ -550,6 +550,24 @@ class _AskOnlyDay0Clob:
         return {"bids": [], "asks": [{"price": 0.001, "size": 100.0}]}
 
 
+class _EmptyDepthMonitorClob:
+    def __init__(self):
+        self.best_bid_ask_calls = 0
+        self.orderbook_calls = 0
+
+    def get_best_bid_ask(self, token_id):
+        from src.contracts.exceptions import EmptyOrderbookError
+
+        self.best_bid_ask_calls += 1
+        assert token_id == "yes123"
+        raise EmptyOrderbookError("No executable top book for yes123")
+
+    def get_orderbook(self, token_id):
+        self.orderbook_calls += 1
+        assert token_id == "yes123"
+        return {"bids": [], "asks": [], "min_order_size": "5"}
+
+
 class _TwoSidedMonitorBookClob:
     def __init__(self):
         self.best_bid_ask_calls = 0
@@ -766,7 +784,6 @@ def test_monitor_quote_uses_ask_only_canonical_book_as_typed_zero_value(tmp_path
         conn,
         clob,
         _position(
-            state="day0_window",
             condition_id="cond-canonical-monitor-ask-only",
         ),
     )
@@ -775,6 +792,63 @@ def test_monitor_quote_uses_ask_only_canonical_book_as_typed_zero_value(tmp_path
     assert quote.best_bid == pytest.approx(0.0)
     assert quote.best_ask == pytest.approx(0.001)
     assert quote.mark_price == pytest.approx(0.0)
+    assert quote.bid_ladder == ()
+    assert quote.min_order_size == pytest.approx(5.0)
+    assert quote.source_timestamp == captured_at.isoformat()
+    conn.close()
+
+
+def test_monitor_quote_uses_empty_canonical_depth_as_fresh_no_bid(tmp_path):
+    from src.engine import monitor_refresh
+    from src.state.snapshot_repo import init_snapshot_schema
+
+    conn = get_connection(tmp_path / "canonical-monitor-empty-depth.db")
+    init_schema(conn)
+    init_schema_trade_only(conn)
+    init_snapshot_schema(conn)
+    captured_at = datetime.now(timezone.utc) - timedelta(seconds=2)
+    _insert_executable_snapshot(
+        conn,
+        snapshot_id="canonical-monitor-empty-depth",
+        selected_outcome_token_id="yes123",
+        yes_token_id="yes123",
+        no_token_id="no456",
+        condition_id="cond-canonical-monitor-empty-depth",
+        top_bid="0.0001",
+        top_ask="0.0002",
+        bid_size="0",
+        ask_size="0",
+        orderbook_depth={"asset_id": "yes123", "bids": [], "asks": []},
+        captured_at=captured_at,
+        executable_allowed=False,
+    )
+    conn.commit()
+
+    class NoNetworkClob:
+        def get_orderbook(self, _token_id):
+            raise AssertionError("fresh canonical no-bid evidence must avoid network")
+
+    clob = NoNetworkClob()
+    monitor_refresh.install_monitor_orderbook_prefetch(
+        clob,
+        {},
+        attempted_token_ids=("yes123",),
+    )
+    quote = monitor_refresh.monitor_quote_refresh(
+        conn,
+        clob,
+        _position(condition_id="cond-canonical-monitor-empty-depth"),
+    )
+
+    assert quote is not None
+    assert quote.best_bid == pytest.approx(0.0)
+    assert quote.bid_size == pytest.approx(0.0)
+    assert quote.bid_ladder == ()
+    assert quote.best_ask is None
+    assert quote.ask_size == pytest.approx(0.0)
+    assert quote.mark_price == pytest.approx(0.0)
+    assert quote.min_order_size == pytest.approx(5.0)
+    assert quote.source_timestamp == captured_at.isoformat()
     conn.close()
 
 
@@ -1841,14 +1915,90 @@ def test_post_target_active_position_uses_bid_only_quote_when_asks_absent(monkey
     assert quote.mark_price == pytest.approx(0.998)
 
 
-def test_post_target_active_position_does_not_invent_bid_from_ask_only_book(monkeypatch):
+def test_post_target_active_position_keeps_ask_only_book_as_fresh_no_bid(monkeypatch):
     from src.engine import monitor_refresh
 
     monkeypatch.setattr("src.state.db.log_microstructure", lambda *args, **kwargs: None)
     pos = _position(target_date="2020-01-01")
     pos.state = "active"
 
-    assert monitor_refresh.monitor_quote_refresh(None, _AskOnlyDay0Clob(), pos) is None
+    quote = monitor_refresh.monitor_quote_refresh(None, _AskOnlyDay0Clob(), pos)
+
+    assert quote is not None
+    assert quote.best_bid == pytest.approx(0.0)
+    assert quote.bid_size == pytest.approx(0.0)
+    assert quote.bid_ladder == ()
+    assert quote.best_ask == pytest.approx(0.001)
+
+
+def test_monitor_quote_rejects_absent_or_malformed_depth(monkeypatch):
+    from src.engine import monitor_refresh
+
+    monkeypatch.setattr("src.state.db.log_microstructure", lambda *args, **kwargs: None)
+
+    class BookClob:
+        def __init__(self, book):
+            self.book = book
+
+        def get_orderbook(self, _token_id):
+            return self.book
+
+        def get_best_bid_ask(self, _token_id):
+            from src.contracts.exceptions import EmptyOrderbookError
+
+            raise EmptyOrderbookError("no current top book")
+
+    for book in (
+        None,
+        {"bids": []},
+        {"bids": (), "asks": []},
+        {"bids": [{"price": "not-a-price", "size": "5"}], "asks": []},
+    ):
+        assert monitor_refresh.monitor_quote_refresh(
+            None,
+            BookClob(book),
+            _position(target_date="2020-01-01"),
+        ) is None
+
+
+def test_refresh_position_keeps_explicit_empty_depth_fresh_without_exit(monkeypatch):
+    from src.engine import cycle_runtime, monitor_refresh
+
+    monkeypatch.setattr("src.state.db.log_microstructure", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        monitor_refresh,
+        "_detect_whale_toxicity_from_orderbook",
+        lambda *args, **kwargs: False,
+    )
+
+    def _fresh_probability(pos, *, conn, city, target_d):
+        pos.applied_validations = ["fresh_probability"]
+        return 0.60, pos, True
+
+    monkeypatch.setattr(
+        monitor_refresh,
+        "monitor_probability_refresh",
+        _fresh_probability,
+    )
+    pos = _position(state="active", target_date="2026-08-24")
+
+    edge_ctx = monitor_refresh.refresh_position(None, _EmptyDepthMonitorClob(), pos)
+    exit_context = cycle_runtime._build_exit_context(
+        pos,
+        edge_ctx,
+        hours_to_settlement=24.0,
+        ExitContext=ExitContext,
+    )
+    decision = pos.evaluate_exit(exit_context)
+
+    assert pos.last_monitor_market_price_is_fresh is True
+    assert pos.last_monitor_market_price == pytest.approx(0.0)
+    assert pos.last_monitor_best_bid == pytest.approx(0.0)
+    assert pos.last_monitor_bid_ladder == ()
+    assert exit_context.current_market_price_is_fresh is True
+    assert exit_context.best_bid == pytest.approx(0.0)
+    assert exit_context.bid_ladder == ()
+    assert decision.should_exit is False
 
 
 def test_day0_refresh_keeps_current_market_fresh_with_bid_only_book(monkeypatch):

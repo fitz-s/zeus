@@ -3280,22 +3280,7 @@ def _decision_local_hour_for_target(city, target_d: date, decision_time: datetim
     )
 
 
-def _is_position_day0_quote_eligible(pos: Position) -> bool:
-    if _position_state_value(pos) == "day0_window":
-        return True
-    city = cities_by_name.get(str(getattr(pos, "city", "") or ""))
-    if city is None:
-        return False
-    if not _city_supports_executable_day0_observation(city):
-        return False
-    try:
-        target_d = date.fromisoformat(str(getattr(pos, "target_date", "") or ""))
-    except Exception:
-        return False
-    return _is_position_target_local_day(pos, city, target_d)
-
-
-def _day0_one_sided_monitor_quote(
+def _one_sided_monitor_quote(
     conn,
     clob: PolymarketClient,
     pos: Position,
@@ -3306,30 +3291,31 @@ def _day0_one_sided_monitor_quote(
 ) -> HeldTokenMonitorQuote | None:
     if book is None and not hasattr(clob, "get_orderbook"):
         return None
-    day0_eligible = _is_position_day0_quote_eligible(pos)
     try:
         from src.data.market_scanner import _top_book_level_decimal
 
         if book is None:
             book = clob.get_orderbook(token_id)
-        best_bid = bid_size = None
-        best_ask = ask_size = None
-        try:
-            best_bid, bid_size = _top_book_level_decimal(book, "bids")
-        except Exception:  # noqa: BLE001 - one-sided books are valid day0 evidence
-            pass
-        try:
-            best_ask, ask_size = _top_book_level_decimal(book, "asks")
-        except Exception:  # noqa: BLE001 - bid-only books are valid day0 evidence
-            pass
+        # An explicit empty depth side is a current market fact, distinct from
+        # an absent or malformed book.  The monitor can carry its zero
+        # liquidation value forward, while the exit/submit boundaries still
+        # reject it as non-executable SELL authority.
+        if not isinstance(book, dict):
+            return None
+        bids = book.get("bids")
+        asks = book.get("asks")
+        if not isinstance(bids, list) or not isinstance(asks, list):
+            return None
 
-        if best_bid is None and best_ask is None:
-            return None
-        # Any current bid is executable SELL evidence for a held token; an ask
-        # is unnecessary.  The ask-only zero-bid fallback remains Day0-only,
-        # where it is explicit evidence that immediate liquidation value is 0.
-        if best_bid is None and not day0_eligible:
-            return None
+        if bids:
+            best_bid, bid_size = _top_book_level_decimal(book, "bids")
+        else:
+            best_bid = bid_size = None
+        if asks:
+            best_ask, ask_size = _top_book_level_decimal(book, "asks")
+        else:
+            best_ask = ask_size = None
+
         bid_f = float(best_bid) if best_bid is not None else 0.0
         bid_sz_f = float(bid_size) if bid_size is not None else 0.0
         ask_f = float(best_ask) if best_ask is not None else None
@@ -3338,8 +3324,6 @@ def _day0_one_sided_monitor_quote(
             ask_f = None
             ask_sz_f = 0.0
         if not np.isfinite(bid_f) or bid_f < 0.0 or not np.isfinite(bid_sz_f) or bid_sz_f < 0.0:
-            return None
-        if bid_f <= 0.0 and ask_f is None:
             return None
         source_timestamp = source_timestamp or datetime.now(timezone.utc).isoformat()
         from src.data.market_scanner import _bid_ladder_from_book
@@ -3356,7 +3340,11 @@ def _day0_one_sided_monitor_quote(
             bid_ladder=_bid_ladder_from_book(book) if isinstance(book, dict) else (),
         )
     except Exception as exc:
-        logger.debug("Day0 one-sided quote refresh failed for %s: %s", pos.trade_id, exc)
+        logger.debug(
+            "Held one-sided quote refresh failed for %s: %s",
+            pos.trade_id,
+            exc,
+        )
         return None
 
 
@@ -3430,7 +3418,7 @@ def monitor_quote_refresh(
                 bid, bid_sz = _top_book_level_decimal(book, "bids")
                 ask, ask_sz = _top_book_level_decimal(book, "asks")
             except Exception:
-                one_sided_quote = _day0_one_sided_monitor_quote(
+                one_sided_quote = _one_sided_monitor_quote(
                     conn,
                     clob,
                     pos,
@@ -3470,7 +3458,7 @@ def monitor_quote_refresh(
         )
     except Exception as e:
         if book is not None:
-            one_sided_quote = _day0_one_sided_monitor_quote(
+            one_sided_quote = _one_sided_monitor_quote(
                 conn,
                 clob,
                 pos,
