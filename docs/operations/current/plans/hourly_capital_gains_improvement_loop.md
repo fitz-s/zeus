@@ -830,6 +830,35 @@
   the five obligations advance to `RESOLVED` and the next global wealth witness
   no longer subtracts `$47.71`; released capacity is not itself realized PnL.
 
+### 2026-08-23 — a late current ENS shape must supersede its anchor-first seed (B151)
+
+- **Observed defect:** the 00Z deterministic anchor created held-family seeds at
+  06:36 while their pinned ENS baseline still named 18Z. At 07:53 the verified
+  00Z HIGH/LOW ENS runs committed and cycle-advance detected 39/25 advances,
+  but every advance was counted `already_enqueued`; zero seeds were emitted.
+  Istanbul and Moscow therefore remained excluded on stale 18Z posterior
+  authority. Cape Town retained a near-zero q but its executable bid moved from
+  5–6¢ to 3¢ before the current shape could re-decide the SELL.
+- **Structural cause:** cycle idempotency was keyed only by family and target
+  cycle. It could not distinguish an early same-cycle seed pinned to the prior
+  ENS run from a later seed backed by the just-committed ENS source_run_id.
+- **Contract:** a verified ENS commit passes its immutable source_run_id with
+  only the exact scopes contributed by that run. The old same-cycle marker may
+  be replaced only when the run belongs to the exact target cycle, the old seed
+  pins a different baseline, and no active or indeterminate request owns it.
+  Marker replacement is CAS-fenced to the exact old seed path, and the newly
+  built seed must reproduce the committed source_run_id before publication.
+- **SCOPE / DRAIN / RESET:** scope is one family/cycle marker named by one ENS
+  commit. The existing single-writer materialization queue drains the new seed;
+  posterior provenance naming that run resets the stale-HWM gate. A concurrent
+  marker owner, wrong-cycle run, unreadable seed, or mismatched built baseline
+  remains fail-closed and is retried by the existing source-run wake.
+- **Acceptance:** daemon, wrapper, exact-CAS, late-baseline, and seed-binding
+  antibodies pass. Live acceptance requires a new seed for the affected 00Z
+  held families, new 00Z posterior provenance, renewed full-book evaluation,
+  and separate command/venue/fill evidence for any selected order. This timing
+  repair is not itself realized profit.
+
 ### 2026-08-02 — partial EXIT realized-PnL canonical continuity (hot-fix slice)
 
 - **Scope / seam:** `src/execution/exit_lifecycle.py` emits canonical

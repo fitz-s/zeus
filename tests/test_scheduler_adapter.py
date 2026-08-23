@@ -1,8 +1,8 @@
-# Lifecycle: created=2026-05-24; last_reviewed=2026-08-21; last_reused=2026-08-21
+# Lifecycle: created=2026-05-24; last_reviewed=2026-08-23; last_reused=2026-08-23
 # Purpose: Current single-live scheduler set and causal executor-class assignment.
 # Reuse: Inspect docs/operations/current/plans/data_temporal_kernel/PLAN.md + the target module before relying on it.
 # Created: 2026-05-24
-# Last reused or audited: 2026-08-21
+# Last reused or audited: 2026-08-23
 # Authority basis: docs/operations/current/plans/data_temporal_kernel/PLAN.md (PR6);
 #   operator spec §7 (Scheduler adapter / executor classes).
 """PR6: registry -> scheduler executor-class assignment (pure planner, daemon wiring deferred)."""
@@ -1380,6 +1380,7 @@ def test_source_commit_reseed_triggers_share_one_manifest_snapshot(
         cfg,
         scopes=(("Paris", "2026-07-18", "high"),),
         manifest_snapshot=snapshot,
+        causal_baseline_source_run_id="ecmwf-open-data:12z",
     )
 
     assert len(load_calls) == 1
@@ -1387,6 +1388,9 @@ def test_source_commit_reseed_triggers_share_one_manifest_snapshot(
     assert trigger_calls[0][1]["manifests"] is loaded
     assert trigger_calls[1][1]["manifests"] is loaded
     assert trigger_calls[1][1]["include_missing_posterior"] is True
+    assert trigger_calls[1][1]["causal_baseline_source_run_id"] == (
+        "ecmwf-open-data:12z"
+    )
     assert trigger_calls[0][1]["computed_at"] == trigger_calls[1][1]["computed_at"]
 
 

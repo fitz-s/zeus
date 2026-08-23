@@ -1,8 +1,8 @@
 # Created: 2026-06-12
-# Last reused or audited: 2026-08-17 (causal baseline-anchor pairing for Day0 redecision;
+# Last reused or audited: 2026-08-23 (same-cycle late ENS baseline reseed;
 #   external review FINDING 2: per-family materializable-cycle
 #   gate + typed leg-artifact-missing reason)
-# Lifecycle: created=2026-06-12; last_reviewed=2026-08-17; last_reused=2026-08-17
+# Lifecycle: created=2026-06-12; last_reviewed=2026-08-23; last_reused=2026-08-23
 # Purpose: Relationship tests for consumed-cycle monotonicity and single-family BPF reseed repair.
 # Reuse: Run when replacement cycle-advance, materialization reseed, or freshness gates change.
 # Authority basis: U5 step 2a (operator regime-unification + freshness investigation 2026-06-12,
@@ -437,7 +437,13 @@ def test_cycle_advance_bounds_baseline_selection_by_selected_anchor_cycle(
         raw_dir=tmp_path,
         seed_path=tmp_path,
         computed_at=datetime(2026, 6, 12, 12, tzinfo=UTC),
-        build_seed=lambda **_kwargs: SimpleNamespace(ok=True, seed={"ready": True}),
+        build_seed=lambda **_kwargs: SimpleNamespace(
+            ok=True,
+            seed={
+                "ready": True,
+                "baseline_source_run_id": "causal-baseline",
+            },
+        ),
         latest_baseline_coverage=latest_coverage,
         market_bins=lambda *_args, **_kwargs: ({"bin": "32C"},),
         write_seed=lambda _path, payload: written.append(dict(payload)),
@@ -449,12 +455,19 @@ def test_cycle_advance_bounds_baseline_selection_by_selected_anchor_cycle(
         resolve_path=lambda path, **_kwargs: path,
         seed_name=lambda *_args, **_kwargs: "seed.json",
         expected_identity=expected_replacement_dependency_identity_by_role,
+        required_baseline_source_run_id="causal-baseline",
     )
 
     assert result == tmp_path / "seed.json"
     assert selected["not_after_source_cycle_time"] == cycle
     assert selected["as_of_time"] == datetime(2026, 6, 12, 12, tzinfo=UTC)
-    assert written == [{"ready": True, "upgrade_trigger": "newer_cycle_ingested"}]
+    assert written == [
+        {
+            "ready": True,
+            "baseline_source_run_id": "causal-baseline",
+            "upgrade_trigger": "newer_cycle_ingested",
+        }
+    ]
     conn.close()
 
 
@@ -715,6 +728,253 @@ def test_batch_cycle_advance_enqueues_day0_with_observed_extreme(
     assert marker is not None
     assert marker["seed_file"]
     assert marker["day0_observed_extreme_observation_time"] == "2026-07-03T22:00:00+00:00"
+
+
+@pytest.mark.parametrize(
+    ("owner_state", "expected_enqueued", "expected_status"),
+    (
+        (cycle_advance._Day0EnqueueOwnerRequestState.INACTIVE, 1, "CYCLE_ADVANCE_TRIGGER"),
+        (
+            cycle_advance._Day0EnqueueOwnerRequestState.ACTIVE,
+            0,
+            "CYCLE_ADVANCE_CAUSAL_BASELINE_INCOMPLETE",
+        ),
+    ),
+)
+def test_committed_ens_run_replaces_same_cycle_seed_with_older_baseline(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    owner_state: cycle_advance._Day0EnqueueOwnerRequestState,
+    expected_enqueued: int,
+    expected_status: str,
+) -> None:
+    """A late exact ENS shape must not be deduped by an anchor-first cycle marker."""
+
+    db_path = tmp_path / "forecast.db"
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    ensure_replacement_forecast_live_schema(conn)
+    cycle_advance._ensure_day0_conditioning_identity_column(conn)
+    target_cycle = datetime(2026, 8, 23, 0, tzinfo=UTC)
+    committed_run = "ecmwf_open_data:mx2t6_high:2026-08-23T00Z"
+    conn.execute(
+        "CREATE TABLE source_run (source_run_id TEXT PRIMARY KEY, source_cycle_time TEXT)"
+    )
+    conn.execute(
+        """
+        CREATE TABLE ensemble_snapshots (
+            source_run_id TEXT, city TEXT, target_date TEXT,
+            temperature_metric TEXT, source_id TEXT, model_version TEXT,
+            authority TEXT, causality_status TEXT, boundary_ambiguous INTEGER,
+            forecast_window_attribution_status TEXT,
+            contributes_to_target_extrema INTEGER
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO source_run (source_run_id, source_cycle_time) VALUES (?, ?)
+        """,
+        (committed_run, target_cycle.isoformat()),
+    )
+    conn.execute(
+        """
+        INSERT INTO ensemble_snapshots VALUES (
+            ?, 'Cape Town', '2026-08-23', 'high', 'ecmwf_open_data',
+            'ecmwf_ens', 'VERIFIED', 'OK', 0,
+            'FULLY_INSIDE_TARGET_LOCAL_DAY', 1
+        )
+        """,
+        (committed_run,),
+    )
+    old_seed = tmp_path / "seeds" / "Cape_Town.anchor-first.json"
+    old_seed.parent.mkdir()
+    old_seed.write_text(
+        json.dumps(
+            {
+                "baseline_source_run_id": (
+                    "ecmwf_open_data:mx2t6_high:2026-08-22T18Z"
+                )
+            }
+        ),
+        encoding="utf-8",
+    )
+    day0_payload = {
+        "day0_observed_extreme_c": 14.0,
+        "day0_observed_extreme_source": "aviationweather_metar",
+        "day0_observed_extreme_observation_time": "2026-08-23T07:29:21+00:00",
+        "day0_observed_extreme_sample_count": 18,
+        "day0_observed_extreme_unit": "C",
+    }
+    day0_identity = cycle_advance._day0_conditioning_identity(
+        source=day0_payload["day0_observed_extreme_source"],
+        observation_time=day0_payload[
+            "day0_observed_extreme_observation_time"
+        ],
+        observed_extreme_c=day0_payload["day0_observed_extreme_c"],
+        unit=day0_payload["day0_observed_extreme_unit"],
+    )
+    conn.execute(
+        """
+        INSERT INTO cycle_advance_enqueues (
+            enqueued_at, city, target_date, metric, consumed_cycle_time,
+            target_cycle_time, held_position, seed_file,
+            day0_observed_extreme_observation_time,
+            day0_conditioning_identity_json
+        ) VALUES ('2026-08-23T06:36:45+00:00', 'Cape Town', '2026-08-23',
+                  'high', '2026-08-22T18:00:00+00:00', ?, 1, ?, ?, ?)
+        """,
+        (
+            target_cycle.isoformat(),
+            str(old_seed),
+            day0_payload["day0_observed_extreme_observation_time"],
+            day0_identity,
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+    seed_dir = tmp_path / "seeds"
+    raw_dir = tmp_path / "raw"
+    raw_dir.mkdir()
+    built: dict[str, object] = {}
+    monkeypatch.setattr(
+        cycle_advance,
+        "freshest_materializable_cycle",
+        lambda _conn: target_cycle,
+    )
+    monkeypatch.setattr(
+        cycle_advance,
+        "scope_needs_cycle_advance",
+        lambda *args, **kwargs: {
+            "needs_advance": True,
+            "consumed_cycle": "2026-08-22T18:00:00+00:00",
+            "target_cycle": target_cycle.isoformat(),
+        },
+    )
+    monkeypatch.setattr(
+        cycle_advance,
+        "family_materializable_cycle",
+        lambda *args, **kwargs: (target_cycle, ()),
+    )
+    monkeypatch.setattr(
+        "src.data.replacement_forecast_seed_discovery._day0_observed_extreme_seed_payload",
+        lambda **kwargs: day0_payload,
+    )
+    monkeypatch.setattr(
+        cycle_advance,
+        "_day0_enqueue_owner_request_check",
+        lambda **kwargs: cycle_advance._Day0EnqueueOwnerRequestCheck(
+            owner_state,
+            (
+                "ABSENT"
+                if owner_state is cycle_advance._Day0EnqueueOwnerRequestState.INACTIVE
+                else "ACTIVE"
+            ),
+        ),
+    )
+
+    def _fake_build_seed(*args, **kwargs):
+        built.update(kwargs)
+        seed_file = Path(kwargs["output_path"])
+        seed_file.parent.mkdir(parents=True, exist_ok=True)
+        seed_file.write_text(
+            json.dumps({"baseline_source_run_id": committed_run}),
+            encoding="utf-8",
+        )
+        return seed_file
+
+    monkeypatch.setattr(
+        cycle_advance,
+        "_build_and_write_advance_seed",
+        _fake_build_seed,
+    )
+
+    report = cycle_advance.enqueue_cycle_advance_reseeds(
+        forecast_db=db_path,
+        seed_dir=seed_dir,
+        raw_manifest_dir=raw_dir,
+        computed_at=datetime(2026, 8, 23, 7, 53, tzinfo=UTC),
+        limit=1,
+        scopes=(("Cape Town", "2026-08-23", "high"),),
+        manifests=(),
+        causal_baseline_source_run_id=committed_run,
+    )
+
+    assert report["status"] == expected_status
+    assert report["seeds_enqueued"] == expected_enqueued
+    assert report["already_enqueued"] == 0
+    if owner_state is cycle_advance._Day0EnqueueOwnerRequestState.INACTIVE:
+        assert built["required_baseline_source_run_id"] == committed_run
+    else:
+        assert built == {}
+        assert report["causal_baseline_scope_failed"] == 1
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    marker = conn.execute(
+        """
+        SELECT seed_file FROM cycle_advance_enqueues
+        WHERE city='Cape Town' AND target_date='2026-08-23' AND metric='high'
+          AND target_cycle_time=?
+        """,
+        (target_cycle.isoformat(),),
+    ).fetchone()
+    conn.close()
+    assert marker is not None
+    if owner_state is cycle_advance._Day0EnqueueOwnerRequestState.INACTIVE:
+        assert marker["seed_file"] != str(old_seed)
+        assert (
+            json.loads(Path(marker["seed_file"]).read_text())["baseline_source_run_id"]
+            == committed_run
+        )
+    else:
+        assert marker["seed_file"] == str(old_seed)
+
+
+def test_same_cycle_baseline_seed_replacement_uses_exact_marker_cas() -> None:
+    """A concurrent marker owner cannot be overwritten by a stale ENS wake."""
+
+    conn = _conn()
+    cycle_advance._ensure_day0_conditioning_identity_column(conn)
+    observation_time = "2026-08-23T07:29:21+00:00"
+    identity = cycle_advance._day0_conditioning_identity(
+        source="aviationweather_metar",
+        observation_time=observation_time,
+        observed_extreme_c=14.0,
+        unit="C",
+    )
+    conn.execute(
+        """
+        INSERT INTO cycle_advance_enqueues (
+            enqueued_at, city, target_date, metric, consumed_cycle_time,
+            target_cycle_time, held_position, seed_file,
+            day0_observed_extreme_observation_time,
+            day0_conditioning_identity_json
+        ) VALUES ('2026-08-23T07:53:00+00:00', 'Cape Town', '2026-08-23',
+                  'high', '2026-08-22T18:00:00+00:00',
+                  '2026-08-23T00:00:00+00:00', 1, 'new-owner.json', ?, ?)
+        """,
+        (observation_time, identity),
+    )
+
+    assert not cycle_advance._record_enqueue(
+        conn,
+        city="Cape Town",
+        target_date="2026-08-23",
+        metric="high",
+        consumed_cycle_iso="2026-08-22T18:00:00+00:00",
+        target_cycle_iso="2026-08-23T00:00:00+00:00",
+        held_position=True,
+        seed_file="stale-wake.json",
+        day0_observed_extreme_observation_time=observation_time,
+        day0_observed_extreme_source="aviationweather_metar",
+        day0_observed_extreme_c=14.0,
+        day0_observed_extreme_unit="C",
+        superseded_seed_file="old-owner.json",
+    )
+    assert conn.execute(
+        "SELECT seed_file FROM cycle_advance_enqueues WHERE city='Cape Town'"
+    ).fetchone()[0] == "new-owner.json"
 
 
 def test_scoped_source_commit_enqueues_missing_live_posterior(

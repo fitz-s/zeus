@@ -1,5 +1,5 @@
 # Created: 2026-07-20
-# Last reused/audited: 2026-08-22
+# Last reused/audited: 2026-08-23
 # Authority basis: operator-directed DB hot-path, fault-isolation, and committed ENS wake liveness.
 
 from __future__ import annotations
@@ -284,8 +284,8 @@ def test_committed_ens_run_wakes_only_its_exact_eligible_scopes(monkeypatch) -> 
         lambda: {"forecast_db": "forecast.db"},
     )
 
-    def _enqueue(cfg, *, scopes, limit, **_kwargs):
-        captured.update(cfg=cfg, scopes=scopes, limit=limit)
+    def _enqueue(cfg, *, scopes, limit, **kwargs):
+        captured.update(cfg=cfg, scopes=scopes, limit=limit, **kwargs)
         return {"status": "CYCLE_ADVANCE_TRIGGER", "seeds_enqueued": 2}
 
     monkeypatch.setattr(production, "_enqueue_cycle_advance_reseeds_if_needed", _enqueue)
@@ -306,6 +306,7 @@ def test_committed_ens_run_wakes_only_its_exact_eligible_scopes(monkeypatch) -> 
         ("Paris", "2026-08-11", "high"),
     )
     assert captured["limit"] == 2
+    assert captured["causal_baseline_source_run_id"] == eligible[3]
 
 
 def test_opendata_commit_precedes_cycle_advance_wake(monkeypatch) -> None:
@@ -414,6 +415,7 @@ def test_current_journaled_run_carries_rows_needed_to_replay_wake(monkeypatch) -
         "CYCLE_ADVANCE_FORECAST_DB_MISSING",
         "CYCLE_ADVANCE_PLAN_BLOCKED",
         "CYCLE_ADVANCE_NO_MATERIALIZABLE_CYCLE",
+        "CYCLE_ADVANCE_CAUSAL_BASELINE_INCOMPLETE",
     ),
 )
 def test_failed_opendata_wake_remains_retryable(monkeypatch, status: str) -> None:

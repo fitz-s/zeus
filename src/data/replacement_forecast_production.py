@@ -1,5 +1,5 @@
 # Created: 2026-06-08
-# Last reused/audited: 2026-08-21
+# Last reused/audited: 2026-08-23
 # Authority basis: operator Point-1 directive 2026-06-08 — move BAYES_PRECISION_FUSION/replacement_0_1
 #   forecast PRODUCTION (raw-input download + live materialization) OFF the
 #   live-trading daemon (src/main.py) INTO the forecast-live (data) daemon. The
@@ -2888,6 +2888,7 @@ def _enqueue_cycle_advance_reseeds_if_needed(
     scopes: Sequence[tuple[str, str, str]] | None = None,
     manifest_snapshot: dict[str, object] | None = None,
     limit: int | None = None,
+    causal_baseline_source_run_id: str | None = None,
 ) -> dict[str, object] | None:
     """U5 step 2a — enqueue re-materialization seeds for active-window families whose latest
     posterior consumed a STRICTLY OLDER cycle than the freshest materializable in-universe cycle.
@@ -2924,6 +2925,7 @@ def _enqueue_cycle_advance_reseeds_if_needed(
             computed_at=computed_at,
             manifests=manifests,
             include_missing_posterior=scopes is not None,
+            causal_baseline_source_run_id=causal_baseline_source_run_id,
         )
     except Exception as exc:  # noqa: BLE001 — fail-soft: the trigger never breaks the poll
         logger.warning("cycle-advance trigger skipped (fail-soft): %s", exc)
