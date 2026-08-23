@@ -49,6 +49,8 @@ def _trade_db(path: Path) -> None:
                 best_ask_before REAL, depth_before_json TEXT, created_at TEXT,
                 schema_version INTEGER, PRIMARY KEY(token_id,direction)
             );
+            CREATE INDEX idx_execution_feasibility_evidence_token_time
+                ON execution_feasibility_evidence(token_id,quote_seen_at);
             CREATE TABLE position_events (
                 event_id TEXT PRIMARY KEY, position_id TEXT, sequence_no INTEGER,
                 event_type TEXT, occurred_at TEXT, command_id TEXT,
@@ -266,6 +268,47 @@ def test_absent_bid_is_hard_no_book_incident_without_fabricated_floor_time(cfg: 
     assert row["t_floor"] is None
 
 
+def test_velocity_uses_token_time_index_for_latest_three_quotes(cfg: dict) -> None:
+    for evidence_id, at, bid in (
+        ("velocity-1", "2026-08-22T09:00:01+00:00", 0.80),
+        ("velocity-2", "2026-08-22T09:00:02+00:00", 0.70),
+        ("velocity-3", "2026-08-22T09:00:03+00:00", 0.60),
+        ("velocity-4", "2026-08-22T09:00:04+00:00", 0.50),
+    ):
+        _quote(cfg, evidence_id, at, bid, latest=False)
+
+    with sqlite3.connect(cfg["paths"]["trades_db"]) as conn:
+        plan = conn.execute(
+            "EXPLAIN QUERY PLAN "
+            "SELECT quote_seen_at,best_bid_before "
+            "FROM execution_feasibility_evidence "
+            "WHERE token_id=? AND direction IN ('buy_yes','buy_no') "
+            "AND best_bid_before IS NOT NULL "
+            "ORDER BY quote_seen_at DESC,rowid DESC LIMIT 3",
+            ("yes-token",),
+        ).fetchall()
+        newest = conn.execute(
+            "SELECT quote_seen_at FROM execution_feasibility_evidence "
+            "WHERE token_id=? AND direction IN ('buy_yes','buy_no') "
+            "AND best_bid_before IS NOT NULL "
+            "ORDER BY quote_seen_at DESC,rowid DESC LIMIT 3",
+            ("yes-token",),
+        ).fetchall()
+        velocity, acceleration = loop._velocity(conn, "yes-token")
+
+    plan_text = " ".join(str(column) for row in plan for column in row).upper()
+    assert "USING INDEX IDX_EXECUTION_FEASIBILITY_EVIDENCE_TOKEN_TIME" in plan_text
+    assert "SCAN EXECUTION_FEASIBILITY_EVIDENCE" not in plan_text
+    assert "TEMP B-TREE" not in plan_text
+    assert [row[0] for row in newest] == [
+        "2026-08-22T09:00:04+00:00",
+        "2026-08-22T09:00:03+00:00",
+        "2026-08-22T09:00:02+00:00",
+    ]
+    assert velocity == pytest.approx(-0.10)
+    assert acceleration == pytest.approx(0.0)
+
+
 def test_depth_top_bid_overrides_conflicting_zero_scalar(cfg: dict) -> None:
     _position(cfg)
     _quote(
@@ -308,6 +351,58 @@ def test_missing_or_malformed_depth_is_not_no_bid(cfg: dict) -> None:
             "SELECT quote_status FROM position_quote_state WHERE position_id='p1'"
         ).fetchone()[0]
     assert status == "quote_incomplete"
+
+
+def test_incomplete_latest_uses_prior_authoritative_quote_for_precursor_only(cfg: dict) -> None:
+    _position(cfg)
+    _quote(cfg, "q-complete", "2026-08-22T09:00:01+00:00", 0.20, direction="sell_yes")
+    with loop.open_ro(Path(cfg["paths"]["trades_db"])) as trades:
+        position = loop.tracked_positions(trades, history_days=7)["p1"]
+        complete = dict(trades.execute(
+            "SELECT * FROM execution_feasibility_evidence WHERE evidence_id='q-complete'"
+        ).fetchone())
+    with loop.memory(cfg) as mem:
+        assert loop._observe_quote(mem, position, complete, 0.05) is None
+        mem.commit()
+    _quote(cfg, "q-incomplete", "2026-08-22T09:00:02+00:00", 0.20, direction="sell_yes")
+    with sqlite3.connect(cfg["paths"]["trades_db"]) as conn:
+        conn.execute(
+            "UPDATE execution_feasibility_evidence SET depth_before_json=NULL "
+            "WHERE evidence_id='q-incomplete'"
+        )
+        conn.execute(
+            "UPDATE execution_feasibility_latest SET depth_before_json=NULL "
+            "WHERE evidence_id='q-incomplete'"
+        )
+        plan = conn.execute(
+            "EXPLAIN QUERY PLAN "
+            "SELECT evidence_id FROM execution_feasibility_evidence "
+            "WHERE token_id=? AND direction=? AND depth_before_json IS NOT NULL "
+            "ORDER BY quote_seen_at DESC,rowid DESC LIMIT 1",
+            ("yes-token", "sell_yes"),
+        ).fetchall()
+
+    loop.detect(cfg)
+
+    plan_text = " ".join(str(column) for row in plan for column in row).upper()
+    assert "USING INDEX IDX_EXECUTION_FEASIBILITY_EVIDENCE_TOKEN_TIME" in plan_text
+    assert "SCAN EXECUTION_FEASIBILITY_EVIDENCE" not in plan_text
+    assert "TEMP B-TREE" not in plan_text
+    precursor = [row for row in _incidents(cfg) if row["kind"] == "precursor"]
+    assert len(precursor) == 1
+    assert precursor[0]["crossing_evidence_id"] == "q-complete"
+    with loop.memory(cfg) as conn:
+        state = conn.execute(
+            "SELECT quote_status,best_bid FROM position_quote_state WHERE position_id='p1'"
+        ).fetchone()
+    assert tuple(state) == ("quote_incomplete", 0.20)
+
+    _quote(cfg, "q-hard", "2026-08-22T09:00:03+00:00", 0.04, direction="sell_yes")
+    loop.detect(cfg)
+
+    hard = [row for row in _incidents(cfg) if row["kind"] == "hard"]
+    assert len(hard) == 1
+    assert hard[0]["crossing_evidence_id"] == "q-hard"
 
 
 def test_incomplete_quote_does_not_hide_following_no_bid_transition(cfg: dict) -> None:
