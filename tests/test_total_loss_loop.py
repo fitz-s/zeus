@@ -216,6 +216,30 @@ def _event(
                 json.dumps(payload or {}), phase_before, phase_after,
             ),
         )
+
+
+def _settled_full_loss(cfg: dict, *, position_id: str = "p-settled", payload: dict | None = None) -> None:
+    _position(cfg, position_id=position_id)
+    with sqlite3.connect(cfg["paths"]["trades_db"]) as conn:
+        conn.execute(
+            "UPDATE position_current SET phase='settled',realized_pnl_usd=-5.0,settled_at=? "
+            "WHERE position_id=?",
+            ("2026-08-22T10:00:00+00:00", position_id),
+        )
+    _event(
+        cfg, f"settled-{position_id}", position_id, 2, "SETTLED",
+        "2026-08-22T10:00:00+00:00", phase_before="active", phase_after="settled",
+        payload=payload or {"outcome": 0, "payout_id": f"payout-{position_id}"},
+    )
+
+
+def _command_dedup_basis(*_args, **_kwargs) -> dict:
+    return {
+        "filled_cost_basis_usd": 5.0,
+        "entry_fill_command_identity_complete": True,
+    }
+
+
 def _incidents(cfg: dict) -> list[dict]:
     with loop.memory(cfg) as conn:
         return [dict(row) for row in conn.execute("SELECT * FROM incidents ORDER BY detected_at")]
@@ -246,6 +270,220 @@ def test_crossing_below_floor_creates_one_hard_incident(cfg: dict) -> None:
     assert rows[0]["t_floor"] == "2026-08-22T09:00:02+00:00"
     assert first
     assert second == []
+
+
+def test_settlement_full_loss_is_idempotent_and_keeps_floor_fields_null(
+    cfg: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _settled_full_loss(cfg)
+    monkeypatch.setattr(loop, "_entry_execution_fill_aggregate", _command_dedup_basis)
+
+    first = loop.detect(cfg)
+    second = loop.detect(cfg)
+    rows = [row for row in _incidents(cfg) if row["kind"] == "hard"]
+    assert first and second == [] and len(rows) == 1
+    assert rows[0]["crossing_kind"] == "settlement_full_loss"
+    assert rows[0]["observed_bid"] is None
+    assert rows[0]["t_floor"] is None
+    evidence = loop.build_evidence(cfg, rows[0]["incident_id"])
+    with sqlite3.connect(evidence) as conn:
+        settled = conn.execute(
+            "SELECT settled_at FROM settlement_facts"
+        ).fetchall()
+    assert settled == [("2026-08-22T10:00:00+00:00",)]
+
+
+@pytest.mark.parametrize(
+    ("payload", "shares", "partial"),
+    [
+        ({"outcome": 1, "payout_id": "winner"}, 10.0, False),
+        ({"outcome": 0, "payout_id": "dust"}, 0.001, False),
+        ({"outcome": 0, "payout_id": "partial"}, 10.0, True),
+    ],
+)
+def test_settlement_full_loss_excludes_winner_dust_and_partial_exit(
+    cfg: dict,
+    monkeypatch: pytest.MonkeyPatch,
+    payload: dict,
+    shares: float,
+    partial: bool,
+) -> None:
+    _settled_full_loss(cfg, payload=payload)
+    with sqlite3.connect(cfg["paths"]["trades_db"]) as conn:
+        conn.execute("UPDATE position_current SET shares=?,chain_shares=?", (shares, shares))
+    if partial:
+        _event(
+            cfg, "partial-exit", "p-settled", 1, "EXIT_ORDER_FILLED",
+            "2026-08-22T09:59:00+00:00", phase_before="active", phase_after="active",
+        )
+    monkeypatch.setattr(loop, "_entry_execution_fill_aggregate", _command_dedup_basis)
+    assert not [row for row in loop.detect(cfg) if row]
+    assert _incidents(cfg) == []
+
+
+def test_retry_event_stem_is_bounded_and_not_chained(cfg: dict) -> None:
+    first = loop._bounded_retry_events(
+        cfg, incident_id="x" * 200, stage="repair_feedback"
+    )
+    second = loop._bounded_retry_events(
+        cfg, incident_id="x" * 200, stage="repair_feedback"
+    )
+    assert first == second
+    assert "retry-retry" not in first.name
+    assert len(first.name) < 100
+
+
+def test_claimed_incident_returns_to_retry_pending_on_spawn_oserror(
+    cfg: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _queue_blind_dispatch_debt(cfg, incident_id="spawn-oserror")
+    monkeypatch.setattr(loop, "current_capabilities", lambda _cfg: {"ok": True})
+    monkeypatch.setattr(loop, "_running", lambda _cfg: [])
+    monkeypatch.setattr(loop, "_retry_pending", lambda *_args: [])
+    monkeypatch.setattr(loop, "_recover_classification_debt", lambda *_args: None)
+    monkeypatch.setattr(loop, "_dispatch_repair_waiting", lambda *_args: None)
+    monkeypatch.setattr(loop, "build_evidence", lambda *_args: (_ for _ in ()).throw(OSError("disk")))
+    assert loop.dispatch(cfg) == []
+    with loop.memory(cfg) as mem:
+        row = mem.execute(
+            "SELECT status FROM incidents WHERE incident_id='spawn-oserror'"
+        ).fetchone()
+        reason = mem.execute(
+            "SELECT reason FROM incident_transitions WHERE incident_id='spawn-oserror'"
+        ).fetchone()[0]
+    assert row[0] == "retry_pending"
+    assert "spawn_persistence_failed:OSError" in reason
+
+
+def test_orphan_reconciliation_preserves_live_and_reclaims_dead(
+    cfg: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _queue_blind_dispatch_debt(cfg, incident_id="orphan-live")
+    with loop.memory(cfg) as mem:
+        mem.execute("UPDATE incidents SET status='running' WHERE incident_id='orphan-live'")
+        mem.commit()
+    run_path = Path(cfg["paths"]["runtime"]) / "runs" / "live.json"
+    loop.atomic_json(run_path, {"incident_id": "orphan-live", "run_id": "live", "pid": 123, "status": "running"})
+    monkeypatch.setattr(loop, "_pid_alive", lambda _pid: True)
+    assert loop.reconcile_orphan_incidents(cfg) == []
+    with loop.memory(cfg) as mem:
+        assert mem.execute("SELECT status FROM incidents WHERE incident_id='orphan-live'").fetchone()[0] == "running"
+    monkeypatch.setattr(loop, "_pid_alive", lambda _pid: False)
+    assert loop.reconcile_orphan_incidents(cfg) == ["orphan-live"]
+    with loop.memory(cfg) as mem:
+        assert mem.execute("SELECT status FROM incidents WHERE incident_id='orphan-live'").fetchone()[0] == "retry_pending"
+
+
+def test_dispatch_claims_hard_blind_before_repair_waiting(cfg: dict, monkeypatch: pytest.MonkeyPatch) -> None:
+    order: list[str] = []
+    monkeypatch.setattr(loop, "current_capabilities", lambda _cfg: {"ok": True})
+    monkeypatch.setattr(loop, "reconcile_orphan_incidents", lambda _cfg: [])
+    monkeypatch.setattr(loop, "_running", lambda _cfg: [])
+    monkeypatch.setattr(loop, "_retry_pending", lambda *_args: [])
+    monkeypatch.setattr(loop, "_recover_classification_debt", lambda *_args: None)
+    monkeypatch.setattr(loop, "_claim", lambda _cfg, kind: order.append(f"claim:{kind}") or (None if kind == "precursor" else {"incident_id": "hard", "kind": "hard"}))
+    monkeypatch.setattr(loop, "build_evidence", lambda *_args: Path("/tmp/evidence.db"))
+    monkeypatch.setattr(loop, "read_json", lambda *_args: {"loaded_sha": "sha"})
+    monkeypatch.setattr(loop, "_spawn_run", lambda *_args, **_kwargs: {"run_id": "hard-run"})
+    monkeypatch.setattr(loop, "_dispatch_repair_waiting", lambda *_args: order.append("repair") or None)
+    assert loop.dispatch(cfg) == ["hard"]
+    assert order.index("claim:hard") < order.index("repair")
+
+
+def test_spawn_intent_witness_blocks_reclaim_until_ambiguity_is_resolved(
+    cfg: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _queue_blind_dispatch_debt(cfg, incident_id="spawn-crash-gap")
+    with loop.memory(cfg) as mem:
+        mem.execute("UPDATE incidents SET status='running' WHERE incident_id='spawn-crash-gap'")
+        mem.commit()
+    run_id = "spawn-crash-gap-run"
+    witness_fd, witness_path = loop._acquire_spawn_witness(cfg, run_id)
+    loop._create_spawn_intent(
+        cfg, run_id=run_id, incident_id="spawn-crash-gap", stage="diagnosis",
+        witness_path=witness_path,
+    )
+    monkeypatch.setattr(loop, "_pid_alive", lambda _pid: False)
+    assert loop.reconcile_orphan_incidents(cfg) == []
+    with loop.memory(cfg) as mem:
+        assert mem.execute(
+            "SELECT status FROM incidents WHERE incident_id='spawn-crash-gap'"
+        ).fetchone()[0] == "running"
+    loop._release_spawn_witness(cfg, run_id, witness_path)
+    with loop.memory(cfg) as mem:
+        mem.execute(
+            "UPDATE spawn_intents SET created_at=? WHERE run_id=?",
+            ("2026-08-22T00:00:00+00:00", run_id),
+        )
+        mem.commit()
+    assert loop.reconcile_orphan_incidents(cfg) == ["spawn-crash-gap"]
+
+
+def test_missing_execution_fact_schema_is_typed_controller_debt(
+    cfg: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _settled_full_loss(cfg)
+    monkeypatch.setattr(
+        loop,
+        "_entry_execution_fill_aggregate",
+        lambda *_args: (_ for _ in ()).throw(
+            loop.ExecutionFactCapabilityError("execution_fact_schema_unavailable:no such table")
+        ),
+    )
+    assert loop.detect(cfg) == []
+    with loop.memory(cfg) as mem:
+        debt = mem.execute(
+            "SELECT kind,status,reason FROM controller_debt WHERE debt_id='execution_fact_schema'"
+        ).fetchone()
+    assert tuple(debt) == ("execution_fact", "blocked", "execution_fact_schema_unavailable:no such table")
+    assert _incidents(cfg) == []
+
+
+def test_settlement_basis_pending_is_retried_without_freezing_backfill_cursor(
+    cfg: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _settled_full_loss(cfg)
+    aggregate: dict | None = None
+
+    def delayed_basis(*_args, **_kwargs) -> dict | None:
+        return aggregate
+
+    monkeypatch.setattr(loop, "_entry_execution_fill_aggregate", delayed_basis)
+    assert loop.detect(cfg) == []
+    with loop.memory(cfg) as mem:
+        assert mem.execute("SELECT COUNT(*) FROM settlement_backfill_state").fetchone()[0] == 0
+        debt = mem.execute(
+            "SELECT status FROM controller_debt WHERE debt_id='settlement_basis:p-settled'"
+        ).fetchone()
+    assert debt[0] == "retry_pending"
+
+    aggregate = _command_dedup_basis()
+    created = loop.detect(cfg)
+    assert len(created) == 1
+    assert loop.detect(cfg) == []
+    assert len([row for row in _incidents(cfg) if row["kind"] == "hard"]) == 1
+
+
+def test_settlement_backfill_cursor_recovers_configured_older_loss_without_default_flood(
+    cfg: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _settled_full_loss(cfg)
+    with sqlite3.connect(cfg["paths"]["trades_db"]) as conn:
+        conn.execute(
+            "UPDATE position_current SET settled_at=?,updated_at=? WHERE position_id='p-settled'",
+            ("2026-08-01T10:00:00+00:00", "2026-08-01T10:00:00+00:00"),
+        )
+        conn.execute(
+            "UPDATE position_events SET occurred_at=? WHERE event_id='settled-p-settled'",
+            ("2026-08-01T10:00:00+00:00",),
+        )
+    monkeypatch.setattr(loop, "_entry_execution_fill_aggregate", _command_dedup_basis)
+    assert loop.detect(cfg) == []
+    cfg["loop"]["settlement_backfill_days"] = 30
+    first = loop.detect(cfg)
+    second = loop.detect(cfg)
+    assert first and second == []
+    assert len([row for row in _incidents(cfg) if row["kind"] == "hard"]) == 1
 
 
 def test_initial_quote_cursor_uses_primary_key_max_without_scan(

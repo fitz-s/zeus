@@ -27,10 +27,21 @@ ROOT = Path(__file__).resolve().parent
 CONFIG_PATH = ROOT / "total_loss_loop.toml"
 OPEN_PHASES = ("pending_entry", "active", "day0_window", "pending_exit")
 SCHEMA_VERSION = 3
+_FULL_LOSS_RATIO = 0.95
 _probe_lock = threading.Lock()
 _probe_thread: threading.Thread | None = None
 _probe_process_groups: set[int] = set()
 _writer_lease_lock_fds: dict[str, int] = {}
+_spawn_witness_fds: dict[str, int] = {}
+_SPAWN_AMBIGUITY_SECONDS = 30.0
+
+
+class ExecutionFactCapabilityError(RuntimeError):
+    """Canonical entry-fact schema is absent or too old for loss attribution."""
+
+
+class SettlementBasisPending(RuntimeError):
+    """Execution-fact schema is valid, but command-deduped basis is not ready."""
 
 
 def now() -> datetime:
@@ -238,6 +249,30 @@ CREATE TABLE IF NOT EXISTS model_runs (
     usage_json TEXT NOT NULL DEFAULT '{}',
     events_path TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS spawn_intents (
+    run_id TEXT PRIMARY KEY,
+    incident_id TEXT NOT NULL,
+    stage TEXT NOT NULL,
+    owner_pid INTEGER NOT NULL,
+    child_pid INTEGER,
+    witness_path TEXT NOT NULL,
+    state TEXT NOT NULL CHECK (state IN ('pre_spawn','child_started','persisted','failed')),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS controller_debt (
+    debt_id TEXT PRIMARY KEY,
+    kind TEXT NOT NULL,
+    status TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS settlement_backfill_state (
+    position_id TEXT PRIMARY KEY,
+    fingerprint TEXT NOT NULL,
+    completed INTEGER NOT NULL CHECK (completed IN (0,1)),
+    updated_at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS workspace_writer_leases (
     cwd TEXT PRIMARY KEY,
     run_id TEXT NOT NULL UNIQUE,
@@ -334,6 +369,47 @@ def transition(
             stamp,
         ),
     )
+
+
+def _transition_if_status(
+    conn: sqlite3.Connection,
+    incident_id: str,
+    to_stage: str,
+    *,
+    expected_status: str,
+    reason: str,
+    run_id: str | None = None,
+    status: str,
+) -> bool:
+    """CAS lifecycle transition used by crash/retry recovery paths."""
+
+    row = conn.execute(
+        "SELECT stage FROM incidents WHERE incident_id=? AND status=?",
+        (incident_id, expected_status),
+    ).fetchone()
+    if row is None:
+        return False
+    stamp = iso()
+    updated = conn.execute(
+        "UPDATE incidents SET stage=?,status=?,updated_at=? "
+        "WHERE incident_id=? AND status=?",
+        (to_stage, status, stamp, incident_id, expected_status),
+    )
+    if updated.rowcount != 1:
+        return False
+    conn.execute(
+        "INSERT INTO incident_transitions VALUES (?,?,?,?,?,?,?)",
+        (
+            digest(incident_id, row[0], to_stage, run_id, stamp),
+            incident_id,
+            str(row[0]),
+            to_stage,
+            run_id,
+            reason,
+            stamp,
+        ),
+    )
+    return True
 
 
 def meta_get(conn: sqlite3.Connection, key: str, default: str = "") -> str:
@@ -944,6 +1020,213 @@ def backfill_step(
     return created
 
 
+def _entry_execution_fill_aggregate(
+    trades: sqlite3.Connection,
+    position_id: str,
+) -> dict[str, Any] | None:
+    """Read the command-deduplicated original entry basis, fail closed on gaps."""
+
+    try:
+        from src.state.db import query_entry_execution_fill_aggregate
+    except (ImportError, ModuleNotFoundError):
+        raise ExecutionFactCapabilityError("execution_fact_schema_unavailable:import")
+    try:
+        columns = {
+            str(row[1])
+            for row in trades.execute("PRAGMA table_info(execution_fact)").fetchall()
+        }
+    except sqlite3.Error as exc:
+        raise ExecutionFactCapabilityError(
+            f"execution_fact_schema_unavailable:{exc}"
+        ) from exc
+    required = {
+        "intent_id", "position_id", "command_id", "order_role", "filled_at",
+        "posted_at", "fill_price", "shares", "terminal_exec_status", "venue_status",
+    }
+    if not required.issubset(columns):
+        missing = ",".join(sorted(required - columns))
+        raise ExecutionFactCapabilityError(
+            f"execution_fact_schema_unavailable:missing={missing}"
+        )
+    try:
+        aggregate = query_entry_execution_fill_aggregate(
+            trades, str(position_id), strict=False
+        )
+    except sqlite3.OperationalError as exc:
+        message = str(exc).lower()
+        if "no such table" in message or "no such column" in message:
+            raise ExecutionFactCapabilityError(
+                f"execution_fact_schema_unavailable:{exc}"
+            ) from exc
+        raise
+    except (KeyError, TypeError, ValueError):
+        return None
+    return dict(aggregate) if isinstance(aggregate, Mapping) else None
+
+
+def _settlement_full_loss_candidate(
+    trades: sqlite3.Connection,
+    position: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    """Return a canonical settlement-backed loss, never inventing a quote floor."""
+
+    position_id = str(position.get("position_id") or "")
+    if not position_id or not has_material_share_precision(position):
+        return None
+    terminal = trades.execute(
+        "SELECT * FROM position_events WHERE position_id=? AND event_type='SETTLED' "
+        "ORDER BY sequence_no DESC,occurred_at DESC LIMIT 1",
+        (position_id,),
+    ).fetchone()
+    if terminal is None:
+        return None
+    terminal_row = dict(terminal)
+    payload = read_json_text(str(terminal_row.get("payload_json") or "{}"))
+    # The canonical position projection is authoritative when present.  Payload
+    # fallbacks are accepted only for older projections that lack settlement_price.
+    settlement_price = _float(position.get("settlement_price"))
+    if settlement_price is None:
+        settlement_price = _float(
+            payload.get("settlement_price", payload.get("outcome"))
+        )
+    if settlement_price is None or settlement_price > 0:
+        return None
+    if any(
+        str(row[0]) == "EXIT_ORDER_FILLED"
+        for row in trades.execute(
+            "SELECT event_type FROM position_events WHERE position_id=? "
+            "AND event_type='EXIT_ORDER_FILLED' AND sequence_no < ?",
+            (position_id, terminal_row.get("sequence_no")),
+        ).fetchall()
+    ):
+        return None
+    aggregate = _entry_execution_fill_aggregate(trades, position_id)
+    if aggregate is None or aggregate.get("entry_fill_command_identity_complete") is not True:
+        raise SettlementBasisPending(
+            f"entry_fill_command_identity_pending:position_id={position_id}"
+        )
+    basis = _float(aggregate.get("filled_cost_basis_usd"))
+    realized = _float(position.get("realized_pnl_usd"))
+    if basis is None or basis <= 0 or realized is None or not math.isfinite(realized):
+        raise SettlementBasisPending(
+            f"entry_fill_basis_pending:position_id={position_id}"
+        )
+    if realized >= 0 or -realized < _FULL_LOSS_RATIO * basis:
+        return None
+    payout_identity = digest(
+        terminal_row.get("event_id"),
+        payload.get("payout_id") or payload.get("settlement_id") or "",
+        payload.get("settlement_source") or payload.get("source") or "",
+        settlement_price,
+        json.dumps(payload, sort_keys=True, separators=(",", ":")),
+    )
+    evidence_id = digest(position_id, "settlement_full_loss", payout_identity)
+    settled_at = str(terminal_row.get("occurred_at") or position.get("settled_at") or "")
+    return {
+        "position_id": position_id,
+        "evidence_id": evidence_id,
+        "event_id": str(terminal_row.get("event_id") or ""),
+        "settled_at": settled_at,
+        "settlement_price": settlement_price,
+        "payout_identity": payout_identity,
+        "payload": payload,
+        "basis": basis,
+        "realized": realized,
+    }
+
+
+def _insert_settlement_full_loss_incident(
+    mem: sqlite3.Connection,
+    position: Mapping[str, Any],
+    candidate: Mapping[str, Any],
+    *,
+    floor: float,
+) -> str | None:
+    """Persist settlement truth as a hard incident with no synthetic quote facts."""
+
+    incident_id = digest(position["position_id"], candidate["evidence_id"])
+    existing = mem.execute(
+        "SELECT incident_id FROM incidents WHERE incident_id=? OR "
+        "(position_id=? AND crossing_evidence_id=? AND kind='hard')",
+        (incident_id, position["position_id"], candidate["evidence_id"]),
+    ).fetchone()
+    if existing is not None:
+        return None
+    mem.execute(
+        "INSERT INTO incidents(incident_id,kind,position_id,crossing_evidence_id,crossing_kind,"
+        "held_token_id,held_direction,t_floor,floor_price,observed_bid,detected_at,priority,status,stage,updated_at) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,'blind',?)",
+        (
+            incident_id, "hard", position["position_id"], candidate["evidence_id"],
+            "settlement_full_loss", held_token(position), held_sell_direction(position),
+            None, floor, None, candidate["settled_at"] or iso(),
+            1_000_000_000.0, "queued", iso(),
+        ),
+    )
+    return incident_id
+
+
+def _settlement_backfill_fingerprint(position: Mapping[str, Any]) -> str:
+    return digest(
+        position.get("position_id"), position.get("settled_at"),
+        position.get("updated_at"), position.get("realized_pnl_usd"),
+        position.get("settlement_price"), position.get("shares"),
+        position.get("chain_shares"),
+    )
+
+
+def _settlement_backfill_positions(
+    cfg: Mapping[str, Any],
+    trades: sqlite3.Connection,
+    mem: sqlite3.Connection,
+    *,
+    history_days: int,
+) -> list[dict[str, Any]]:
+    loop_cfg = cfg["loop"]
+    range_days = max(
+        history_days,
+        int(loop_cfg.get("settlement_backfill_days", history_days)),
+        int(loop_cfg.get("settlement_bootstrap_days", 0)),
+        int(loop_cfg.get("backfill_history_days", 0)),
+    )
+    cutoff = iso(now() - timedelta(days=range_days))
+    limit = max(1, int(loop_cfg.get("settlement_backfill_positions_per_cycle", 32)))
+    rows = trades.execute(
+        "SELECT * FROM position_current WHERE phase='settled' "
+        "AND COALESCE(settled_at,updated_at) >= ? "
+        "ORDER BY COALESCE(settled_at,updated_at),position_id LIMIT ?",
+        (cutoff, limit * 4),
+    ).fetchall()
+    result: list[dict[str, Any]] = []
+    for raw in rows:
+        position = dict(raw)
+        terminal = trades.execute(
+            "SELECT event_id,occurred_at,payload_json FROM position_events "
+            "WHERE position_id=? AND event_type='SETTLED' "
+            "ORDER BY sequence_no DESC,occurred_at DESC LIMIT 1",
+            (position["position_id"],),
+        ).fetchone()
+        fingerprint = digest(
+            _settlement_backfill_fingerprint(position),
+            terminal[0] if terminal else "",
+            terminal[1] if terminal else "",
+            terminal[2] if terminal else "",
+        )
+        state = mem.execute(
+            "SELECT fingerprint,completed FROM settlement_backfill_state WHERE position_id=?",
+            (position["position_id"],),
+        ).fetchone()
+        if state is not None and state["completed"] and state["fingerprint"] == fingerprint:
+            continue
+        position["held_token_id"] = held_token(position)
+        position["held_sell_direction"] = held_sell_direction(position)
+        position["_settlement_backfill_fingerprint"] = fingerprint
+        result.append(position)
+        if len(result) >= limit:
+            break
+    return result
+
+
 def _velocity(
     trades: sqlite3.Connection,
     token_id: str,
@@ -1117,6 +1400,62 @@ def detect(cfg: Mapping[str, Any]) -> list[str]:
     with open_ro(Path(str(cfg["paths"]["trades_db"]))) as trades, memory(cfg) as mem:
         revalidate_blind_hard_incidents(mem, trades)
         positions = tracked_positions(trades, history_days=history_days)
+        # Settlement is an independent terminal truth path.  It must run even
+        # after quote backfill is exhausted: a settled full loss with no quote
+        # row is still dispatchable, but never gets a fabricated floor time.
+        settlement_positions = dict(positions)
+        for position in _settlement_backfill_positions(
+            cfg, trades, mem, history_days=history_days
+        ):
+            settlement_positions[str(position["position_id"])] = position
+        for position in settlement_positions.values():
+            capability_failed = False
+            try:
+                candidate = _settlement_full_loss_candidate(trades, position)
+            except ExecutionFactCapabilityError as exc:
+                capability_failed = True
+                mem.execute(
+                    "INSERT INTO controller_debt(debt_id,kind,status,reason,updated_at) "
+                    "VALUES ('execution_fact_schema','execution_fact','blocked',?,?) "
+                    "ON CONFLICT(debt_id) DO UPDATE SET status=excluded.status,"
+                    "reason=excluded.reason,updated_at=excluded.updated_at",
+                    (str(exc), iso()),
+                )
+                continue
+            except SettlementBasisPending as exc:
+                capability_failed = True
+                mem.execute(
+                    "INSERT INTO controller_debt(debt_id,kind,status,reason,updated_at) "
+                    "VALUES ('settlement_basis:' || ?, 'settlement_basis','retry_pending',?,?) "
+                    "ON CONFLICT(debt_id) DO UPDATE SET status=excluded.status,"
+                    "reason=excluded.reason,updated_at=excluded.updated_at",
+                    (str(position["position_id"]), str(exc), iso()),
+                )
+                continue
+            mem.execute(
+                "UPDATE controller_debt SET status='resolved',reason='execution_fact_schema_available',"
+                "updated_at=? WHERE debt_id='execution_fact_schema'",
+                (iso(),),
+            )
+            if candidate:
+                incident_id = _insert_settlement_full_loss_incident(
+                    mem, position, candidate, floor=floor
+                )
+                if incident_id:
+                    created.append(incident_id)
+            mem.execute(
+                "UPDATE controller_debt SET status='resolved',reason='settlement_basis_complete',"
+                "updated_at=? WHERE debt_id=?",
+                (iso(), f"settlement_basis:{position['position_id']}"),
+            )
+            fingerprint = position.get("_settlement_backfill_fingerprint")
+            if fingerprint and not capability_failed:
+                mem.execute(
+                    "INSERT INTO settlement_backfill_state(position_id,fingerprint,completed,updated_at) "
+                    "VALUES (?,?,1,?) ON CONFLICT(position_id) DO UPDATE SET "
+                    "fingerprint=excluded.fingerprint,completed=1,updated_at=excluded.updated_at",
+                    (position["position_id"], fingerprint, iso()),
+                )
         by_token: dict[str, list[dict[str, Any]]] = {}
         for position in positions.values():
             by_token.setdefault(str(position["held_token_id"]), []).append(position)
@@ -1206,6 +1545,7 @@ CREATE TABLE venue_commands(command_id TEXT PRIMARY KEY,created_at TEXT,updated_
 CREATE TABLE order_facts(fact_key TEXT PRIMARY KEY,observed_at TEXT,raw_json TEXT NOT NULL);
 CREATE TABLE trade_facts(fact_key TEXT PRIMARY KEY,observed_at TEXT,fill_price REAL,filled_size REAL,raw_json TEXT NOT NULL);
 CREATE TABLE fills(fact_key TEXT PRIMARY KEY,observed_at TEXT,price REAL,size REAL,raw_json TEXT NOT NULL);
+CREATE TABLE settlement_facts(fact_key TEXT PRIMARY KEY,settled_at TEXT NOT NULL,raw_json TEXT NOT NULL);
 CREATE TABLE daemon_health(name TEXT PRIMARY KEY,observed_at TEXT,raw_json TEXT NOT NULL);
 CREATE TABLE code_versions(name TEXT PRIMARY KEY,sha TEXT,path TEXT,observed_at TEXT);
 CREATE TABLE config_snapshot(name TEXT PRIMARY KEY,value_json TEXT NOT NULL,sha256 TEXT NOT NULL);
@@ -1336,6 +1676,15 @@ def build_evidence(cfg: Mapping[str, Any], incident_id: str) -> Path:
             row = dict(raw)
             payload = read_json_text(str(row.get("payload_json") or "{}"))
             packed = json.dumps(row, default=str)
+            if row["event_type"] == "SETTLED":
+                fact_key = digest(
+                    incident["position_id"], row.get("event_id"),
+                    payload.get("payout_id") or payload.get("settlement_id") or "",
+                )
+                out.execute(
+                    "INSERT OR REPLACE INTO settlement_facts VALUES (?,?,?)",
+                    (fact_key, row.get("occurred_at") or "", json.dumps({"event": row, "payload": payload}, default=str)),
+                )
             if row["event_type"] == "MONITOR_REFRESHED":
                 out.execute("INSERT INTO monitor_events VALUES (?,?,?)", (row["event_id"], row["occurred_at"], packed))
                 probability = _json_number(payload, ("last_monitor_prob", "p_posterior", "held_probability", "probability", "q"))
@@ -2099,6 +2448,20 @@ def _spawn_run(
         wrapped = [nice, "-n", str(int(cfg["capital_lane"].get("agent_nice", 15))), *command]
     lease_acquired = False
     lease_fd: int | None = None
+    witness_fd: int | None = None
+    witness_path = (
+        runtime_dir(cfg) / "writer-leases" / f"{run_id}.lock"
+        if writer_lease
+        else _spawn_witness_path(cfg, run_id)
+    )
+    _create_spawn_intent(
+        cfg,
+        run_id=run_id,
+        incident_id=incident_id,
+        stage=stage,
+        witness_path=witness_path,
+    )
+    child: subprocess.Popen[Any] | None = None
     try:
         if writer_lease:
             lease_fd = _acquire_writer_lease(
@@ -2115,6 +2478,8 @@ def _spawn_run(
                     branch=workspace_branch,
                     allow_owned_dirty=resume_owned_workspace,
                 )
+        else:
+            witness_fd, witness_path = _acquire_spawn_witness(cfg, run_id)
         child = subprocess.Popen(
             wrapped,
             cwd=cwd,
@@ -2123,8 +2488,10 @@ def _spawn_run(
             stdout=events_handle,
             stderr=subprocess.STDOUT,
             start_new_session=True,
-            pass_fds=(lease_fd,) if lease_fd is not None else (),
+            pass_fds=(lease_fd if lease_fd is not None else witness_fd,)
+            if (lease_fd is not None or witness_fd is not None) else (),
         )
+        _mark_spawn_child(cfg, run_id, child.pid)
         if writer_lease:
             _bind_writer_lease_child(
                 cfg,
@@ -2133,8 +2500,13 @@ def _spawn_run(
                 child_pid=child.pid,
             )
     except Exception:
+        if child is not None:
+            _terminate_process_group(child.pid)
+        _finish_spawn_intent(cfg, run_id, "failed")
         if lease_acquired:
             _release_writer_lease(cfg, cwd=cwd, run_id=run_id)
+        elif witness_fd is not None:
+            _release_spawn_witness(cfg, run_id, witness_path)
         raise
     finally:
         prompt_handle.close()
@@ -2167,6 +2539,9 @@ def _spawn_run(
                 (run_id, incident_id, stage, session_id, profile["model"], cap["reasoning_effort"], record["started_at"], "running", str(events)),
             )
             mem.commit()
+        _finish_spawn_intent(cfg, run_id, "persisted")
+        if not writer_lease and witness_fd is not None:
+            _release_spawn_witness(cfg, run_id, witness_path)
     except Exception as exc:
         _terminate_process_group(child.pid)
         failed = {
@@ -2180,8 +2555,11 @@ def _spawn_run(
             atomic_json(run_path, failed)
         except Exception:
             pass
+        _finish_spawn_intent(cfg, run_id, "failed")
         if writer_lease:
             _release_writer_lease(cfg, cwd=cwd, run_id=run_id)
+        elif witness_fd is not None:
+            _release_spawn_witness(cfg, run_id, witness_path)
         raise
     return record
 
@@ -2204,6 +2582,20 @@ def _spawn_controller_run(
     events_handle = events.open("wb")
     lease_acquired = False
     lease_fd: int | None = None
+    witness_fd: int | None = None
+    witness_path = (
+        runtime_dir(cfg) / "writer-leases" / f"{run_id}.lock"
+        if writer_lease
+        else _spawn_witness_path(cfg, run_id)
+    )
+    _create_spawn_intent(
+        cfg,
+        run_id=run_id,
+        incident_id=incident_id,
+        stage=stage,
+        witness_path=witness_path,
+    )
+    child: subprocess.Popen[Any] | None = None
     try:
         if writer_lease:
             lease_fd = _acquire_writer_lease(
@@ -2213,14 +2605,18 @@ def _spawn_controller_run(
                 stage=stage,
             )
             lease_acquired = True
+        else:
+            witness_fd, witness_path = _acquire_spawn_witness(cfg, run_id)
         child = subprocess.Popen(
             command,
             cwd=cwd,
             stdout=events_handle,
             stderr=subprocess.STDOUT,
             start_new_session=True,
-            pass_fds=(lease_fd,) if lease_fd is not None else (),
+            pass_fds=(lease_fd if lease_fd is not None else witness_fd,)
+            if (lease_fd is not None or witness_fd is not None) else (),
         )
+        _mark_spawn_child(cfg, run_id, child.pid)
         if writer_lease:
             _bind_writer_lease_child(
                 cfg,
@@ -2229,8 +2625,13 @@ def _spawn_controller_run(
                 child_pid=child.pid,
             )
     except Exception:
+        if child is not None:
+            _terminate_process_group(child.pid)
+        _finish_spawn_intent(cfg, run_id, "failed")
         if lease_acquired:
             _release_writer_lease(cfg, cwd=cwd, run_id=run_id)
+        elif witness_fd is not None:
+            _release_spawn_witness(cfg, run_id, witness_path)
         raise
     finally:
         events_handle.close()
@@ -2252,6 +2653,9 @@ def _spawn_controller_run(
     run_path = runtime_dir(cfg) / "runs" / f"{run_id}.json"
     try:
         atomic_json(run_path, record)
+        _finish_spawn_intent(cfg, run_id, "persisted")
+        if not writer_lease and witness_fd is not None:
+            _release_spawn_witness(cfg, run_id, witness_path)
     except Exception as exc:
         _terminate_process_group(child.pid)
         failed = {
@@ -2265,8 +2669,11 @@ def _spawn_controller_run(
             atomic_json(run_path, failed)
         except Exception:
             pass
+        _finish_spawn_intent(cfg, run_id, "failed")
         if writer_lease:
             _release_writer_lease(cfg, cwd=cwd, run_id=run_id)
+        elif witness_fd is not None:
+            _release_spawn_witness(cfg, run_id, witness_path)
         raise
     return record
 
@@ -2278,6 +2685,148 @@ def _running(cfg: Mapping[str, Any]) -> list[dict[str, Any]]:
         if row.get("status") == "running":
             result.append(row)
     return result
+
+
+def _spawn_witness_path(cfg: Mapping[str, Any], run_id: str) -> Path:
+    path = runtime_dir(cfg) / "spawn-witness" / f"{run_id}.lock"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _acquire_spawn_witness(cfg: Mapping[str, Any], run_id: str) -> tuple[int, Path]:
+    path = _spawn_witness_path(cfg, run_id)
+    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except Exception:
+        os.close(fd)
+        raise
+    _spawn_witness_fds[run_id] = fd
+    return fd, path
+
+
+def _release_spawn_witness(cfg: Mapping[str, Any], run_id: str, path: Path) -> None:
+    fd = _spawn_witness_fds.pop(run_id, None)
+    if fd is not None:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
+    try:
+        path.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def _create_spawn_intent(
+    cfg: Mapping[str, Any],
+    *,
+    run_id: str,
+    incident_id: str,
+    stage: str,
+    witness_path: Path,
+) -> None:
+    stamp = iso()
+    with memory(cfg) as mem:
+        mem.execute(
+            "INSERT INTO spawn_intents(run_id,incident_id,stage,owner_pid,child_pid,"
+            "witness_path,state,created_at,updated_at) VALUES (?,?,?,?,NULL,?,?,?,?)",
+            (run_id, incident_id, stage, os.getpid(), str(witness_path), "pre_spawn", stamp, stamp),
+        )
+        mem.commit()
+
+
+def _mark_spawn_child(cfg: Mapping[str, Any], run_id: str, child_pid: int) -> None:
+    with memory(cfg) as mem:
+        updated = mem.execute(
+            "UPDATE spawn_intents SET child_pid=?,state='child_started',updated_at=? "
+            "WHERE run_id=? AND state='pre_spawn'",
+            (child_pid, iso(), run_id),
+        )
+        if updated.rowcount != 1:
+            mem.rollback()
+            _terminate_process_group(child_pid)
+            raise RuntimeError("spawn intent lost before child witness bind")
+        mem.commit()
+
+
+def _finish_spawn_intent(cfg: Mapping[str, Any], run_id: str, state: str) -> None:
+    with memory(cfg) as mem:
+        mem.execute(
+            "UPDATE spawn_intents SET state=?,updated_at=? WHERE run_id=? "
+            "AND state IN ('pre_spawn','child_started')",
+            (state, iso(), run_id),
+        )
+        mem.commit()
+
+
+def reconcile_orphan_incidents(cfg: Mapping[str, Any]) -> list[str]:
+    """Reclaim only running claims with no live controller/worker witness."""
+
+    runs_by_incident: dict[str, list[tuple[Path, dict[str, Any]]]] = {}
+    for path in (runtime_dir(cfg) / "runs").glob("*.json"):
+        row = read_json(path, {})
+        if row.get("status") == "running" and row.get("incident_id"):
+            runs_by_incident.setdefault(str(row["incident_id"]), []).append((path, row))
+    reclaimed: list[str] = []
+    with memory(cfg) as mem:
+        protected_incidents: set[str] = set()
+        intents = mem.execute(
+            "SELECT * FROM spawn_intents WHERE state IN ('pre_spawn','child_started')"
+        ).fetchall()
+        for intent in intents:
+            witness_busy = _writer_lock_held(Path(str(intent["witness_path"])))
+            owner_alive = _pid_alive(intent["owner_pid"])
+            child_alive = _pid_alive(intent["child_pid"])
+            created_at = parse_time(str(intent["created_at"] or ""))
+            age = (now() - created_at).total_seconds() if created_at else 0.0
+            if witness_busy or child_alive or owner_alive or age < _SPAWN_AMBIGUITY_SECONDS:
+                protected_incidents.add(str(intent["incident_id"]))
+                continue
+            mem.execute(
+                "UPDATE spawn_intents SET state='failed',updated_at=? WHERE run_id=? "
+                "AND state IN ('pre_spawn','child_started')",
+                (iso(), str(intent["run_id"])),
+            )
+            try:
+                Path(str(intent["witness_path"])).unlink(missing_ok=True)
+            except OSError:
+                pass
+        rows = mem.execute(
+            "SELECT incident_id,stage FROM incidents WHERE status='running'"
+        ).fetchall()
+        for row in rows:
+            incident_id = str(row["incident_id"])
+            if incident_id in protected_incidents:
+                continue
+            witnesses = runs_by_incident.get(incident_id, [])
+            live = any(_pid_alive(run.get("pid")) for _, run in witnesses)
+            if live:
+                continue
+            for path, run in witnesses:
+                run["status"] = "orphaned"
+                run["completed_at"] = iso()
+                run["error"] = "orphaned_running_incident"
+                try:
+                    atomic_json(path, run)
+                except OSError:
+                    pass
+                mem.execute(
+                    "UPDATE model_runs SET status='failed',completed_at=? "
+                    "WHERE run_id=? AND status='running'",
+                    (run["completed_at"], str(run.get("run_id") or "")),
+                )
+            _transition_if_status(
+                mem,
+                incident_id,
+                str(row["stage"] or "blind"),
+                expected_status="running",
+                reason="orphaned_running_claim_reclaimed",
+                status="retry_pending",
+            )
+            reclaimed.append(incident_id)
+        mem.commit()
+    return reclaimed
 
 
 def _poll_process(pid: int) -> int | None:
@@ -2387,6 +2936,45 @@ def _retry_command(cfg: Mapping[str, Any], prior: Mapping[str, Any]) -> list[str
             output=Path(str(prior["output"])),
         )
     raise RuntimeError("cannot safely retry a total-loss run without a typed stage")
+
+
+def _bounded_retry_events(
+    cfg: Mapping[str, Any],
+    *,
+    incident_id: str,
+    stage: str,
+) -> Path:
+    """Use one bounded retry stem; never append to an already chained stem."""
+
+    token = digest("retry", incident_id, stage)
+    return runtime_dir(cfg) / "incidents" / incident_id / f"codex-{stage}-{token}.jsonl"
+
+
+def _mark_spawn_failure(
+    cfg: Mapping[str, Any],
+    incident_id: str,
+    *,
+    stage: str,
+    reason: str,
+    run_id: str | None = None,
+) -> None:
+    """Return a claimed incident to retry_pending with typed durable evidence."""
+
+    with memory(cfg) as mem:
+        row = mem.execute(
+            "SELECT status FROM incidents WHERE incident_id=?", (incident_id,)
+        ).fetchone()
+        if row is not None and str(row[0]) == "running":
+            _transition_if_status(
+                mem,
+                incident_id,
+                stage,
+                expected_status="running",
+                reason=f"spawn_persistence_failed:{reason[:180]}",
+                run_id=run_id,
+                status="retry_pending",
+            )
+            mem.commit()
 
 
 _WORKTREE_WRITE_STAGES = frozenset(
@@ -2601,7 +3189,7 @@ def _retry_pending(cfg: Mapping[str, Any], running: list[dict[str, Any]]) -> lis
     }
     with memory(cfg) as mem:
         incidents = mem.execute(
-            "SELECT incident_id,kind FROM incidents WHERE status='retry_pending' "
+            "SELECT incident_id,kind,updated_at FROM incidents WHERE status='retry_pending' "
             "ORDER BY priority DESC,updated_at"
         ).fetchall()
     launched: list[str] = []
@@ -2635,10 +3223,15 @@ def _retry_pending(cfg: Mapping[str, Any], running: list[dict[str, Any]]) -> lis
         ):
             continue
         completed_at = parse_time(str(prior.get("completed_at") or prior.get("started_at") or ""))
+        incident_updated = parse_time(str(incident["updated_at"] or ""))
+        if incident_updated is not None and (completed_at is None or incident_updated > completed_at):
+            completed_at = incident_updated
         if completed_at is not None and (now() - completed_at).total_seconds() < retry_delay:
             continue
-        retry_events = Path(str(prior["events"])).with_name(
-            f"{Path(str(prior['events'])).stem}-retry-{int(time.time())}.jsonl"
+        retry_events = _bounded_retry_events(
+            cfg,
+            incident_id=incident_id,
+            stage=prior_stage,
         )
         if prior.get("controller"):
             try:
@@ -2653,6 +3246,9 @@ def _retry_pending(cfg: Mapping[str, Any], running: list[dict[str, Any]]) -> lis
                     events=retry_events,
                 )
             except WriterLeaseBusy:
+                continue
+            except (OSError, RuntimeError) as exc:
+                _mark_spawn_failure(cfg, incident_id, stage=prior_stage, reason=f"{type(exc).__name__}:{exc}")
                 continue
             with memory(cfg) as mem:
                 transition(mem, incident_id, str(prior["stage"]), reason="retry_controller_stage", run_id=str(retried["run_id"]))
@@ -2692,7 +3288,10 @@ def _retry_pending(cfg: Mapping[str, Any], running: list[dict[str, Any]]) -> lis
                     prior_stage in _WORKTREE_WRITE_STAGES - {"production"}
                 ),
             )
-        except (WriterLeaseBusy, RuntimeError):
+        except WriterLeaseBusy:
+            continue
+        except (OSError, RuntimeError) as exc:
+            _mark_spawn_failure(cfg, incident_id, stage=prior_stage, reason=f"{type(exc).__name__}:{exc}")
             continue
         if prior.get("repair_session_id"):
             retried["repair_session_id"] = prior["repair_session_id"]
@@ -2715,6 +3314,7 @@ def _retry_pending(cfg: Mapping[str, Any], running: list[dict[str, Any]]) -> lis
 
 
 def dispatch(cfg: Mapping[str, Any]) -> list[str]:
+    reconcile_orphan_incidents(cfg)
     if current_capabilities(cfg) is None:
         ensure_capability_probe(cfg)
         return []
@@ -2731,10 +3331,6 @@ def dispatch(cfg: Mapping[str, Any]) -> list[str]:
     if launched:
         running = _running(cfg)
     _recover_classification_debt(cfg, running)
-    repair = _dispatch_repair_waiting(cfg, running)
-    if repair:
-        launched.append(repair)
-        running = _running(cfg)
     by_kind = {
         kind: sum(
             1
@@ -2750,27 +3346,43 @@ def dispatch(cfg: Mapping[str, Any]) -> list[str]:
             if incident is None:
                 break
             incident_id = str(incident["incident_id"])
-            evidence = build_evidence(cfg, incident_id)
-            incident_dir = runtime_dir(cfg) / "incidents" / incident_id
-            if not read_json(incident_dir / "manifest.json", {}).get("loaded_sha"):
-                with memory(cfg) as mem:
-                    transition(
-                        mem,
-                        incident_id,
-                        "evidence",
-                        reason="live_loaded_sha_missing",
-                        status="blocked",
-                    )
-                    mem.commit()
+            try:
+                evidence = build_evidence(cfg, incident_id)
+                incident_dir = runtime_dir(cfg) / "incidents" / incident_id
+                if not read_json(incident_dir / "manifest.json", {}).get("loaded_sha"):
+                    with memory(cfg) as mem:
+                        transition(
+                            mem,
+                            incident_id,
+                            "evidence",
+                            reason="live_loaded_sha_missing",
+                            status="blocked",
+                        )
+                        mem.commit()
+                    continue
+                output = incident_dir / "diagnosis.json"
+                events = incident_dir / "codex-diagnosis.jsonl"
+                schema = _schema_file(cfg, "diagnosis", DIAGNOSIS_SCHEMA)
+                prompt = Path(str(cfg["paths"]["prompt"])).read_text() + "\n\nBLIND PHASE: historical root memory is intentionally unavailable.\n" + f"incident_id={incident_id}\nevidence_db={evidence}\nmanifest={incident_dir / 'manifest.json'}\n"
+                command = _codex_exec_base(cfg, sandbox="read-only", cwd=ROOT, schema=schema, output=output, persistent=True)
+                _spawn_run(cfg, incident_id=incident_id, kind=kind, stage="diagnosis", command=command, cwd=ROOT, prompt=prompt, output=output, events=events)
+            except (OSError, RuntimeError, sqlite3.Error) as exc:
+                _mark_spawn_failure(
+                    cfg,
+                    incident_id,
+                    stage="blind",
+                    reason=f"{type(exc).__name__}:{exc}",
+                )
                 continue
-            output = incident_dir / "diagnosis.json"
-            events = incident_dir / "codex-diagnosis.jsonl"
-            schema = _schema_file(cfg, "diagnosis", DIAGNOSIS_SCHEMA)
-            prompt = Path(str(cfg["paths"]["prompt"])).read_text() + "\n\nBLIND PHASE: historical root memory is intentionally unavailable.\n" + f"incident_id={incident_id}\nevidence_db={evidence}\nmanifest={incident_dir / 'manifest.json'}\n"
-            command = _codex_exec_base(cfg, sandbox="read-only", cwd=ROOT, schema=schema, output=output, persistent=True)
-            _spawn_run(cfg, incident_id=incident_id, kind=kind, stage="diagnosis", command=command, cwd=ROOT, prompt=prompt, output=output, events=events)
             launched.append(incident_id)
             by_kind[kind] += 1
+    # Blind hard debt has consumed the unified hard slot before repair_waiting
+    # is considered.  This ordering is the liveness guarantee for quote-less
+    # settlement incidents.
+    running = _running(cfg)
+    repair = _dispatch_repair_waiting(cfg, running)
+    if repair:
+        launched.append(repair)
     return launched
 
 
@@ -3895,6 +4507,7 @@ def _spawn_dispatch_worker(cfg: Mapping[str, Any]) -> subprocess.Popen[Any]:
 
 def daemon(cfg: Mapping[str, Any]) -> int:
     bootstrap(cfg)
+    reconcile_orphan_incidents(cfg)
     run = runtime_dir(cfg)
     lock = (run / "loop.lock").open("w")
     try:
