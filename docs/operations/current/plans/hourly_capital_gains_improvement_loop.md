@@ -778,6 +778,29 @@
   refreshed q, and independent order/venue evidence; this correction is not by
   itself a profit claim.
 
+### 2026-08-23 — optional forecast boot catch-up cannot own daemon readiness (B149)
+
+- **Observed defect:** during the B148 live restart, `forecast-live` completed
+  schema and source-health checks but then spent more than three minutes in the
+  current-posterior boot wake's large-DB append-tail read before constructing
+  its scheduler. Its heartbeat stayed stale, so live trading correctly remained
+  `BOOT_BLOCKED` even though exact-family periodic production was the intended
+  primary lane.
+- **Contract:** scheduler construction and `scheduler_ready` heartbeat precede
+  the optional boot catch-up. The catch-up runs fail-soft on a daemon thread;
+  its slow/failing read cannot block heartbeat or the recurring one-second
+  materializer that independently republishes committed posterior wakes.
+- **SCOPE / DRAIN / RESET:** scope is only the forecast boot catch-up. A slow
+  read may consume its own daemon thread but cannot block any scheduler lane;
+  process exit releases it, and each restart starts at most one new catch-up.
+  The recurring materializer drains current exact-family work regardless of
+  catch-up completion.
+- **Acceptance:** a blocking-wake antibody proves the starter returns while the
+  worker remains blocked, and a source-order antibody proves scheduler-ready
+  heartbeat is written first. Live acceptance requires a new-SHA forecast
+  heartbeat, healthy scheduler log, and trading boot without the stale-sidecar
+  rejection.
+
 ### 2026-08-02 — partial EXIT realized-PnL canonical continuity (hot-fix slice)
 
 - **Scope / seam:** `src/execution/exit_lifecycle.py` emits canonical

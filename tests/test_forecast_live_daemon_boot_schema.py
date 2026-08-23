@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import sqlite3
+import threading
 from pathlib import Path
 
 import pytest
@@ -50,6 +51,39 @@ def test_forecast_live_boot_schema_fast_check_rejects_missing_required_column() 
         assert _forecast_boot_schema_ready(conn) is False
     finally:
         conn.close()
+
+
+def test_forecast_live_boot_wake_cannot_block_scheduler_health(monkeypatch) -> None:
+    entered = threading.Event()
+    release = threading.Event()
+
+    def blocked_boot_wake() -> None:
+        entered.set()
+        release.wait(timeout=1.0)
+
+    monkeypatch.setattr(
+        daemon,
+        "_publish_replacement_forecast_boot_wake",
+        blocked_boot_wake,
+    )
+
+    thread = daemon._start_replacement_forecast_boot_wake()
+
+    assert entered.wait(timeout=0.2)
+    assert thread.daemon is True
+    assert thread.is_alive()
+    release.set()
+    thread.join(timeout=0.2)
+    assert not thread.is_alive()
+
+
+def test_forecast_live_scheduler_ready_precedes_optional_boot_wake() -> None:
+    source = Path(daemon.__file__).read_text(encoding="utf-8")
+    main_source = source[source.index("def main() -> None:") :]
+
+    assert main_source.index(
+        '_write_forecast_live_heartbeat(status="scheduler_ready")'
+    ) < main_source.index("_start_replacement_forecast_boot_wake()")
 
 
 def test_replacement_materializer_serializes_forecast_db_writer(monkeypatch) -> None:

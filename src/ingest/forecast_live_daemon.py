@@ -19,6 +19,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
@@ -1412,6 +1413,35 @@ def _publish_replacement_forecast_boot_wake() -> object | None:
     )
 
 
+def _start_replacement_forecast_boot_wake() -> threading.Thread:
+    """Publish the optional boot catch-up without delaying scheduler health.
+
+    The catch-up scans the append tail of the large forecast DB.  It is useful
+    liveness work, but the one-second materializer already republishes committed
+    posterior wakes after startup, so this scan cannot own daemon readiness.
+    Running it on a daemon thread keeps heartbeat and exact-family production
+    live even when the read is slow; failure remains loud and fail-soft.
+    """
+
+    def publish() -> None:
+        try:
+            _publish_replacement_forecast_boot_wake()
+        except Exception:
+            logger.warning(
+                "forecast-live current-posterior boot wake failed; "
+                "periodic materialization remains active",
+                exc_info=True,
+            )
+
+    thread = threading.Thread(
+        target=publish,
+        name="forecast-live-boot-wake",
+        daemon=True,
+    )
+    thread.start()
+    return thread
+
+
 def _replacement_forecast_live_cfg() -> dict:
     """The ``replacement_forecast_live`` settings section via the shared production module's
     single config reader (one source for ``download_release_lag_hours`` /
@@ -1614,17 +1644,10 @@ def main() -> None:
 
     signal.signal(signal.SIGTERM, _graceful_shutdown)
     _source_health_probe_tick()
-    try:
-        _publish_replacement_forecast_boot_wake()
-    except Exception:
-        logger.warning(
-            "forecast-live current-posterior boot wake failed; "
-            "periodic materialization remains active",
-            exc_info=True,
-        )
     _scheduler = build_scheduler()
     jobs = [job.id for job in _scheduler.get_jobs()]
     _write_forecast_live_heartbeat(status="scheduler_ready")
+    _start_replacement_forecast_boot_wake()
     logger.info("Forecast-live scheduler ready. %d jobs: %s", len(jobs), jobs)
     try:
         _scheduler.start()
