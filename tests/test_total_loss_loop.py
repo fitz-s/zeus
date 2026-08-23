@@ -363,6 +363,79 @@ def test_settlement_aggregate_materialization_drift_is_idempotent(
     assert row_count == 1
 
 
+def test_settlement_backfill_policy_revision_replays_legacy_consolidation_once(
+    cfg: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _settled_full_loss(cfg, payload={"outcome": 0})
+    monkeypatch.setattr(loop, "_entry_execution_fill_aggregate", _command_dedup_basis)
+    with sqlite3.connect(cfg["paths"]["trades_db"]) as conn:
+        conn.row_factory = sqlite3.Row
+        position = dict(conn.execute(
+            "SELECT * FROM position_current WHERE position_id='p-settled'"
+        ).fetchone())
+        terminal = conn.execute(
+            "SELECT payload_json FROM position_events WHERE event_id='settled-p-settled'"
+        ).fetchone()
+    payload = json.loads(str(terminal[0]))
+    legacy_fingerprint = loop.digest(
+        loop.digest(
+            position.get("position_id"), position.get("settled_at"),
+            position.get("updated_at"), position.get("realized_pnl_usd"),
+            position.get("settlement_price"), position.get("shares"),
+            position.get("chain_shares"),
+        ),
+        loop._settlement_economic_identity(position, payload) or "",
+    )
+    with loop.memory(cfg) as mem:
+        mem.execute(
+            "INSERT INTO settlement_backfill_state(position_id,fingerprint,completed,updated_at) "
+            "VALUES ('p-settled',?,1,?)",
+            (legacy_fingerprint, "2026-08-22T10:00:00+00:00"),
+        )
+        for incident_id, status in (("legacy-queued", "queued"), ("legacy-running", "running")):
+            mem.execute(
+                "INSERT INTO incidents(incident_id,kind,position_id,crossing_evidence_id,crossing_kind,"
+                "held_token_id,held_direction,floor_price,detected_at,priority,status,stage,updated_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    incident_id, "hard", "p-settled", incident_id,
+                    "settlement_full_loss", "yes-token", "sell_yes", 0.05,
+                    "2026-08-22T10:00:00+00:00", 1_000_000.0, status, "blind",
+                    "2026-08-22T10:00:00+00:00",
+                ),
+            )
+        mem.commit()
+
+    assert len(loop.detect(cfg)) == 1
+    with loop.memory(cfg) as mem:
+        first = {
+            row["incident_id"]: (row["status"], row["updated_at"])
+            for row in mem.execute(
+                "SELECT incident_id,status,updated_at FROM incidents "
+                "WHERE position_id='p-settled' ORDER BY incident_id"
+            )
+        }
+        state = mem.execute(
+            "SELECT fingerprint,completed FROM settlement_backfill_state "
+            "WHERE position_id='p-settled'"
+        ).fetchone()
+    assert first["legacy-queued"][0] == "observing"
+    assert first["legacy-running"][0] == "running"
+    assert state["completed"] == 1
+    assert state["fingerprint"] != legacy_fingerprint
+
+    assert loop.detect(cfg) == []
+    with loop.memory(cfg) as mem:
+        second = {
+            row["incident_id"]: (row["status"], row["updated_at"])
+            for row in mem.execute(
+                "SELECT incident_id,status,updated_at FROM incidents "
+                "WHERE position_id='p-settled' ORDER BY incident_id"
+            )
+        }
+    assert second == first
+
+
 def test_repeated_chain_mirror_settled_events_are_exactly_once(
     cfg: dict, monkeypatch: pytest.MonkeyPatch
 ) -> None:

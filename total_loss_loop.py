@@ -30,6 +30,9 @@ CONFIG_PATH = ROOT / "total_loss_loop.toml"
 OPEN_PHASES = ("pending_entry", "active", "day0_window", "pending_exit")
 SCHEMA_VERSION = 3
 _FULL_LOSS_RATIO = 0.95
+# Bump only when a completed settlement backfill needs one bounded replay.
+# Existing rows with the prior identity are revisited once, then converge.
+_SETTLEMENT_BACKFILL_IDENTITY_POLICY_REVISION = "settlement_identity_v2"
 _probe_lock = threading.Lock()
 _probe_thread: threading.Thread | None = None
 _probe_process_groups: set[int] = set()
@@ -1253,6 +1256,7 @@ def _revise_settlement_non_loss_incidents(
 
 def _settlement_backfill_fingerprint(position: Mapping[str, Any]) -> str:
     return digest(
+        _SETTLEMENT_BACKFILL_IDENTITY_POLICY_REVISION,
         position.get("position_id"), position.get("settled_at"),
         position.get("updated_at"), position.get("realized_pnl_usd"),
         position.get("settlement_price"), position.get("shares"),
