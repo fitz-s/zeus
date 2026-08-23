@@ -6,6 +6,7 @@ import hashlib
 import json
 import logging
 import os
+import sqlite3
 import subprocess
 import sys
 import time
@@ -23,6 +24,7 @@ from src.contracts.replacement_pipeline_files import (
     validate_materialization_request,
     validate_materialization_seed,
 )
+from src.data.day0_fast_obs import FAST_LANE_ENTRY_MAX_CACHE_AGE_S
 from src.data.replacement_forecast_cycle_policy import tradeable_grade_coverage_sql
 from src.data.replacement_current_value_serving import (
     current_value_serving_schema,
@@ -1063,7 +1065,8 @@ def _cycle_advance_seed_priority_map(
     payloads: Mapping[Path, Mapping[str, object] | None] | None = None,
     *,
     trade_db: Path | str | None = None,
-) -> dict[str, tuple[int, str]]:
+    now_utc: datetime | None = None,
+) -> dict[str, tuple[float, str]]:
     """Return filename -> priority for queued materialization work.
 
     Current chain-confirmed exposure is read at claim time and dominates every
@@ -1078,6 +1081,7 @@ def _cycle_advance_seed_priority_map(
     names_by_scope: dict[tuple[str, str, str, str], set[str]] = {}
     request_time_by_name: dict[str, str] = {}
     baseline_run_by_name: dict[str, str] = {}
+    day0_observation_by_name: dict[str, datetime] = {}
     cycle_by_scope: dict[tuple[str, str, str, str], datetime] = {}
     latest_cycle_by_family: dict[tuple[str, str, str], datetime] = {}
     for path in queue_files:
@@ -1094,6 +1098,11 @@ def _cycle_advance_seed_priority_map(
         baseline_run_id = str(payload.get("baseline_source_run_id") or "").strip()
         if baseline_run_id:
             baseline_run_by_name[path.name] = baseline_run_id
+        day0_observation = _parse_utc_iso(
+            payload.get("day0_observed_extreme_observation_time")
+        )
+        if day0_observation is not None:
+            day0_observation_by_name[path.name] = day0_observation
         cycle = _parse_utc_iso(payload.get("source_cycle_time"))
         scope = (
             str(payload.get("city") or "").strip(),
@@ -1201,7 +1210,12 @@ def _cycle_advance_seed_priority_map(
         ):
             enqueue_priority[scope] = candidate
 
-    priority: dict[str, tuple[int, str]] = {}
+    priority: dict[str, tuple[float, str]] = {}
+    priority_now = now_utc or datetime.now(timezone.utc)
+    if priority_now.tzinfo is None:
+        priority_now = priority_now.replace(tzinfo=timezone.utc)
+    else:
+        priority_now = priority_now.astimezone(timezone.utc)
     scopes_with_current_baseline = {
         scope
         for scope, names in names_by_scope.items()
@@ -1232,14 +1246,39 @@ def _cycle_advance_seed_priority_map(
                 request_time = (
                     "0|" if name in current_baseline_names else "1|"
                 ) + request_time
-            priority[name] = (tier, request_time)
+            observation_time = day0_observation_by_name.get(name)
+            observation_age = (
+                None
+                if observation_time is None
+                else (priority_now - observation_time).total_seconds()
+            )
+            current_baseline = name in current_baseline_names
+            if (
+                current_baseline
+                and observation_age is not None
+                and 0.0 <= observation_age <= FAST_LANE_ENTRY_MAX_CACHE_AGE_S
+            ):
+                # A Day0 print has only a short ENTRY-authority lifetime. Keep
+                # every capital-risk/source-cycle tier intact, but within that
+                # exact tier let the newest still-actionable observation reach
+                # the single writer before timeless FIFO work. A stale-baseline
+                # sibling is never promoted by a fresh print.
+                inverse_observation_clock = (
+                    10**18 - int(observation_time.timestamp() * 1_000_000)
+                )
+                request_time = (
+                    f"{inverse_observation_clock:018d}|{request_time}"
+                )
+                priority[name] = (tier - 0.5, request_time)
+            else:
+                priority[name] = (tier, request_time)
     return priority
 
 
 def _cycle_advance_file_sort_key(
     path: Path,
-    priority: dict[str, tuple[int, str]],
-) -> tuple[int, str, str]:
+    priority: dict[str, tuple[float, str]],
+) -> tuple[float, str, str]:
     return (*priority.get(path.name, (1, "")), path.name)
 
 

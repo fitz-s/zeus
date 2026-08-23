@@ -891,6 +891,33 @@
   the later exact-baseline request sorts first on the same risk tier. Live proof
   remains a committed 00Z posterior and subsequent held-position redecision.
 
+### 2026-08-23 — spend the live Day0 observation clock before timeless FIFO (B154)
+
+- **Observed defect:** Madrid published a canonical 09:04:22 METAR and emitted
+  an exact-current-baseline HIGH transition request at 09:06:37, but the request
+  ranked 26th behind timeless same-tier FIFO work. The only writer was also
+  spending up to 30 seconds on individual timeouts; the live posterior therefore
+  still carried the 08:34 observation when a Madrid NO candidate with expected
+  EV `$4.09` reached preflight, which correctly rejected the stale conditioning.
+- **Contract:** chain-confirmed capital, newest source cycle, never-priced, held
+  marker, and current-baseline priority remain unchanged. Within one existing
+  tier, only a request whose Day0 observation is still inside the canonical
+  15-minute ENTRY window and whose baseline is current may move ahead of
+  timeless FIFO work; among those requests the newest causal observation runs
+  first. Expired observations and stale-baseline siblings retain their prior
+  order and cannot gain authority from this scheduling optimization.
+- **SCOPE / DRAIN / RESET:** scope is queue scheduling only; probability math,
+  source identity, freshness enforcement, risk, and submit authority are
+  unchanged. The single writer drains the fresh transition, materializes a new
+  posterior, and publishes the normal reactor wake. Once the observation passes
+  15 minutes it automatically loses scheduling priority; preflight continues to
+  reject any posterior that missed that window.
+- **Acceptance:** antibodies prove fresh-before-FIFO, newest-fresh-first, expired
+  no-promotion, and stale-baseline no-promotion while the B153 ordering remains
+  green. Live proof requires Madrid posterior provenance to advance to the 09:04
+  observation before expiry and a new global decision; venue ACK/fill and later
+  realized PnL remain separate evidence.
+
 ### 2026-08-02 — partial EXIT realized-PnL canonical continuity (hot-fix slice)
 
 - **Scope / seam:** `src/execution/exit_lifecycle.py` emits canonical

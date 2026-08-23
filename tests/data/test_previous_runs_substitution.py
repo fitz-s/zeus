@@ -34,7 +34,7 @@ import json
 import sqlite3
 import subprocess
 import types
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -1488,6 +1488,187 @@ def test_cycle_priority_prefers_current_same_cycle_baseline_over_older_request(
     assert queue_mod._cycle_advance_file_sort_key(
         current, priority
     ) < queue_mod._cycle_advance_file_sort_key(old, priority)
+
+
+def test_cycle_priority_spends_fresh_day0_clock_before_timeless_fifo(
+    tmp_path,
+) -> None:
+    """A still-actionable Day0 transition must reach the single writer first."""
+
+    import src.data.replacement_forecast_live_materialization_queue as queue_mod
+
+    forecast_db = tmp_path / "forecasts.db"
+    conn = sqlite3.connect(forecast_db)
+    conn.executescript(
+        """
+        CREATE TABLE cycle_advance_enqueues (
+            city TEXT, target_date TEXT, metric TEXT, target_cycle_time TEXT,
+            seed_file TEXT, held_position INTEGER, enqueued_at TEXT
+        );
+        CREATE TABLE forecast_posteriors (
+            source_id TEXT, city TEXT, target_date TEXT,
+            temperature_metric TEXT, source_cycle_time TEXT, computed_at TEXT
+        );
+        CREATE TABLE source_run (
+            source_run_id TEXT PRIMARY KEY, source_cycle_time TEXT, status TEXT
+        );
+        INSERT INTO source_run VALUES (
+            'ecmwf_open_data:mx2t6_high:2026-08-23T00Z',
+            '2026-08-23T00:00:00+00:00', 'SUCCESS'
+        );
+        """
+    )
+    conn.executemany(
+        "INSERT INTO forecast_posteriors VALUES (?, ?, ?, ?, ?, ?)",
+        [
+            (
+                queue_mod.SOURCE_ID,
+                city,
+                "2026-08-23",
+                "high",
+                "2026-08-23T00:00:00+00:00",
+                "2026-08-23T07:00:00+00:00",
+            )
+            for city in ("Timeless FIFO", "Day0 Old", "Day0 New")
+        ],
+    )
+    conn.commit()
+    conn.close()
+    fifo = tmp_path / "fifo.json"
+    day0_old = tmp_path / "day0-old.json"
+    day0_new = tmp_path / "day0-new.json"
+    common = {
+        "target_date": "2026-08-23",
+        "temperature_metric": "high",
+        "source_cycle_time": "2026-08-23T00:00:00+00:00",
+        "baseline_source_run_id": (
+            "ecmwf_open_data:mx2t6_high:2026-08-23T00Z"
+        ),
+    }
+    fifo.write_text(
+        json.dumps(
+            {
+                **common,
+                "city": "Timeless FIFO",
+                "computed_at": "2026-08-23T08:00:00+00:00",
+            }
+        ),
+        encoding="utf-8",
+    )
+    for path, city, observation_time, computed_at in (
+        (
+            day0_old,
+            "Day0 Old",
+            "2026-08-23T09:04:00+00:00",
+            "2026-08-23T09:05:00+00:00",
+        ),
+        (
+            day0_new,
+            "Day0 New",
+            "2026-08-23T09:06:00+00:00",
+            "2026-08-23T09:07:00+00:00",
+        ),
+    ):
+        path.write_text(
+            json.dumps(
+                {
+                    **common,
+                    "city": city,
+                    "computed_at": computed_at,
+                    "day0_observed_extreme_observation_time": observation_time,
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    priority = queue_mod._cycle_advance_seed_priority_map(
+        forecast_db,
+        (fifo, day0_old, day0_new),
+        now_utc=datetime(2026, 8, 23, 9, 8, tzinfo=timezone.utc),
+    )
+
+    assert priority[fifo.name][0] == 2
+    assert priority[day0_old.name][0] == 1.5
+    assert priority[day0_new.name][0] == 1.5
+    ordered = sorted(
+        (fifo, day0_old, day0_new),
+        key=lambda path: queue_mod._cycle_advance_file_sort_key(path, priority),
+    )
+    assert ordered == [day0_new, day0_old, fifo]
+
+
+def test_cycle_priority_does_not_promote_expired_or_stale_baseline_day0(
+    tmp_path,
+) -> None:
+    """Freshness priority cannot legalize expired or stale-baseline work."""
+
+    import src.data.replacement_forecast_live_materialization_queue as queue_mod
+
+    forecast_db = tmp_path / "forecasts.db"
+    conn = sqlite3.connect(forecast_db)
+    conn.executescript(
+        """
+        CREATE TABLE cycle_advance_enqueues (
+            city TEXT, target_date TEXT, metric TEXT, target_cycle_time TEXT,
+            seed_file TEXT, held_position INTEGER, enqueued_at TEXT
+        );
+        CREATE TABLE forecast_posteriors (
+            source_id TEXT, city TEXT, target_date TEXT,
+            temperature_metric TEXT, source_cycle_time TEXT, computed_at TEXT
+        );
+        CREATE TABLE source_run (
+            source_run_id TEXT PRIMARY KEY, source_cycle_time TEXT, status TEXT
+        );
+        INSERT INTO source_run VALUES (
+            'current-run', '2026-08-23T00:00:00+00:00', 'SUCCESS'
+        );
+        """
+    )
+    conn.execute(
+        "INSERT INTO forecast_posteriors VALUES (?, ?, ?, ?, ?, ?)",
+        (
+            queue_mod.SOURCE_ID,
+            "Madrid",
+            "2026-08-23",
+            "high",
+            "2026-08-23T00:00:00+00:00",
+            "2026-08-23T07:00:00+00:00",
+        ),
+    )
+    conn.commit()
+    conn.close()
+    expired = tmp_path / "expired.json"
+    stale_baseline = tmp_path / "stale-baseline.json"
+    current = tmp_path / "current.json"
+    for path, baseline, observation_time in (
+        (expired, "current-run", "2026-08-23T08:40:00+00:00"),
+        (stale_baseline, "old-run", "2026-08-23T09:09:00+00:00"),
+        (current, "current-run", "2026-08-23T09:08:00+00:00"),
+    ):
+        path.write_text(
+            json.dumps(
+                {
+                    "city": "Madrid",
+                    "target_date": "2026-08-23",
+                    "temperature_metric": "high",
+                    "source_cycle_time": "2026-08-23T00:00:00+00:00",
+                    "baseline_source_run_id": baseline,
+                    "computed_at": "2026-08-23T09:09:30+00:00",
+                    "day0_observed_extreme_observation_time": observation_time,
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    priority = queue_mod._cycle_advance_seed_priority_map(
+        forecast_db,
+        (expired, stale_baseline, current),
+        now_utc=datetime(2026, 8, 23, 9, 10, tzinfo=timezone.utc),
+    )
+
+    assert priority[expired.name][0] == 2
+    assert priority[stale_baseline.name][0] == 2
+    assert priority[current.name][0] == 1.5
 
 
 def test_cycle_priority_selects_newest_queued_source_cycle_within_tier(tmp_path) -> None:
