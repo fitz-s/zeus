@@ -7506,7 +7506,7 @@ def _global_auction_monitor_cancellation_probe(
                 debt_pending = bool(monitor_debt_pending())
             except Exception:  # noqa: BLE001 - scheduler hint failure cannot veto trading.
                 debt_pending = False
-        if completion_due_at_start:
+        if completion_due_at_start and not exact_executable_held_completion:
             # SCOPE: this one reserved global economic cut. DRAIN: monitor debt
             # may wait through the monitor's bounded handoff, but once that wait
             # becomes durable debt this replayable cut yields at its next safe
@@ -7514,7 +7514,7 @@ def _global_auction_monitor_cancellation_probe(
             # truth owns one turn and the same economic obligation runs next.
             # RESET: a non-cancelled result clears completion debt; successful
             # monitor handoff clears scheduler debt independently.
-            if not debt_pending:
+            if not debt_pending and monitor_pending is None:
                 return False
         if exact_executable_held_completion:
             # The exact request owns one bounded rebind turn.  Its historical
@@ -8743,7 +8743,6 @@ def run_edli_event_reactor_cycle(
             held_sell_completion_cycle
             or paused_forecast_held_auction
             or committed_day0_wake
-            or _GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.is_set()
         )
 
         _, _construct_monitor_cancelled = (

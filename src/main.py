@@ -94,6 +94,9 @@ _held_position_monitor_claim = threading.Lock()
 _held_position_monitor_handoff_pending = threading.Event()
 _periodic_held_position_monitor_handoff_pending = threading.Event()
 _periodic_held_position_monitor_fairness_debt = threading.Event()
+_periodic_held_position_monitor_successor_pending = threading.Event()
+_periodic_held_position_monitor_successor_lock = threading.Lock()
+_periodic_held_position_monitor_successor_generation = 0
 _held_position_monitor_canonical_debt = threading.Event()
 _held_position_monitor_recovery_requested = threading.Event()
 _held_position_monitor_recovery_worker_lock = threading.Lock()
@@ -657,7 +660,13 @@ def _defer_for_held_position_monitor(job_name: str) -> bool:
     # canonical coverage clears cadence debt.
     if (
         job_name in _HELD_POSITION_MONITOR_DEFER_JOBS
-        and _held_position_monitor_handoff_pending.is_set()
+        and (
+            _held_position_monitor_handoff_pending.is_set()
+            or (
+                job_name == "edli_event_reactor"
+                and _periodic_held_position_monitor_successor_pending.is_set()
+            )
+        )
     ):
         logger.info("%s deferred: held-position monitor reactor handoff pending", job_name)
         return True
@@ -4582,7 +4591,7 @@ def _edli_event_reactor_cycle(
         ),
         held_position_monitor_pending=(
             lambda: (
-                _periodic_held_position_monitor_handoff_pending.is_set()
+                _periodic_held_position_monitor_successor_pending.is_set()
                 or (
                     not canonical_monitor_debt_at_start
                     and monitor_entry_block is None
@@ -4632,6 +4641,7 @@ def _edli_initialize_reactor_wake_cursor() -> None:
     _day0_urgent_wake_pending.clear()
     _day0_held_monitor_preempt_requested.clear()
     _forecast_held_monitor_preempt_requested.clear()
+    _periodic_held_position_monitor_successor_pending.clear()
     with _day0_exit_monitor_attempts_lock:
         completed_wake_ids = tuple(
             wake_id
@@ -5116,6 +5126,26 @@ def _urgent_held_monitor_owner_pending() -> bool:
 def _held_monitor_preempt_generation_now() -> int:
     with _held_monitor_preempt_generation_lock:
         return _held_monitor_preempt_generation
+
+
+def _reserve_periodic_held_monitor_successor() -> int:
+    """Reserve the next reactor-free turn for one claimed full-book monitor."""
+
+    global _periodic_held_position_monitor_successor_generation
+    with _periodic_held_position_monitor_successor_lock:
+        _periodic_held_position_monitor_successor_generation += 1
+        _periodic_held_position_monitor_successor_pending.set()
+        return _periodic_held_position_monitor_successor_generation
+
+
+def _consume_periodic_held_monitor_successor(generation: int | None) -> None:
+    """Consume only the reservation owned by the monitor entering its core turn."""
+
+    if generation is None:
+        return
+    with _periodic_held_position_monitor_successor_lock:
+        if generation == _periodic_held_position_monitor_successor_generation:
+            _periodic_held_position_monitor_successor_pending.clear()
 
 
 def _record_held_monitor_preempt_request() -> None:
@@ -9411,12 +9441,16 @@ def _exit_monitor_cycle(
         _forecast_held_monitor_preempt_requested.clear()
 
     monitor_claim_released = False
+    successor_entered_core = False
+    successor_generation = None
 
     def _release_monitor_claim() -> None:
         nonlocal monitor_claim_released
         if monitor_claim_released:
             return
         monitor_claim_released = True
+        if successor_entered_core:
+            _consume_periodic_held_monitor_successor(successor_generation)
         if not urgent_fact:
             _day0_held_monitor_preempt_requested.clear()
             _periodic_held_position_monitor_handoff_pending.clear()
@@ -9441,6 +9475,14 @@ def _exit_monitor_cycle(
                 "canonical monitored exposure is empty"
             )
             return True
+
+        # SCOPE: this claimed full-book monitor generation only. DRAIN: an
+        # in-flight replayable global cut stops at its next safe checkpoint;
+        # no later generic tranche may claim the reactor before this monitor
+        # enters its core run. RESET: consume immediately before
+        # ``run_exit_monitor_cycle``; an incomplete monitor keeps canonical
+        # debt, so its next claim obtains a fresh generation.
+        successor_generation = _reserve_periodic_held_monitor_successor()
 
     # Claim exit priority before waiting. New reactor ticks defer only through
     # the handoff; monitor network work does not stop unrelated decisions.
@@ -9483,6 +9525,10 @@ def _exit_monitor_cycle(
                     _current_periodic_monitor_obligation_count()
                 )
                 if current_obligation_count == 0:
+                    # The reservation belongs to this generation and its
+                    # canonical obligation is now terminally empty.  This is
+                    # the only pre-core path allowed to consume it.
+                    _consume_periodic_held_monitor_successor(successor_generation)
                     _periodic_held_position_monitor_fairness_debt.clear()
                     _held_position_monitor_bootstrap_complete.set()
                     logger.info(
@@ -9555,6 +9601,8 @@ def _exit_monitor_cycle(
                     _periodic_preemption_requested_since_claim()
                 )
             )
+        successor_entered_core = True
+        _consume_periodic_held_monitor_successor(successor_generation)
         monitor_succeeded = run_exit_monitor_cycle(
             held_position_monitor_active=_held_position_monitor_active,
             # The callback fires immediately after the core artifact and

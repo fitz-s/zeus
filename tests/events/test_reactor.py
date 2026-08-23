@@ -6510,11 +6510,11 @@ def test_main_reactor_injects_day0_and_monitor_preemption_signals(
         assert captured["held_position_monitor_debt_pending"]() is False
         main._held_position_monitor_handoff_pending.set()
         assert captured["held_position_monitor_pending"]() is False
-        main._periodic_held_position_monitor_handoff_pending.set()
+        main._periodic_held_position_monitor_successor_pending.set()
         assert captured["held_position_monitor_pending"]() is True
         main._periodic_held_position_monitor_fairness_debt.set()
         assert captured["held_position_monitor_debt_pending"]() is True
-        main._periodic_held_position_monitor_handoff_pending.clear()
+        main._periodic_held_position_monitor_successor_pending.clear()
         main._periodic_held_position_monitor_fairness_debt.clear()
         main._held_position_monitor_handoff_pending.clear()
         main._day0_urgent_wake_pending.set()
@@ -6524,7 +6524,7 @@ def test_main_reactor_injects_day0_and_monitor_preemption_signals(
         urgent_identity[0] = "wake-new"
         assert captured["urgent_day0_pending"]() is True
     finally:
-        main._periodic_held_position_monitor_handoff_pending.clear()
+        main._periodic_held_position_monitor_successor_pending.clear()
         main._periodic_held_position_monitor_fairness_debt.clear()
         main._held_position_monitor_handoff_pending.clear()
         main._held_position_monitor_canonical_debt.clear()
@@ -6705,7 +6705,13 @@ def test_monitor_debt_repreempts_reserved_cut_until_monitor_handoff_clears(monke
         "publish_reactor_wake",
         lambda **_kwargs: None,
     )
+    monkeypatch.setattr(
+        reactor,
+        "request_global_auction_completion",
+        lambda **_kwargs: reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.set() or True,
+    )
     reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.clear()
+    reactor._EXACT_EXECUTABLE_HELD_SELL_PENDING.clear()
     try:
         due_at_start, first_probe = (
             reactor._global_auction_monitor_cancellation_probe(
@@ -6715,6 +6721,7 @@ def test_monitor_debt_repreempts_reserved_cut_until_monitor_handoff_clears(monke
         assert due_at_start is False
         assert first_probe() is True
         assert first_probe() is True
+        reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.set()
 
         due_at_start, completion_probe = (
             reactor._global_auction_monitor_cancellation_probe(
@@ -6748,6 +6755,42 @@ def test_monitor_debt_repreempts_reserved_cut_until_monitor_handoff_clears(monke
         assert reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.is_set() is False
     finally:
         reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.clear()
+        reactor._EXACT_EXECUTABLE_HELD_SELL_PENDING.clear()
+
+
+def test_late_monitor_successor_preempts_generic_completion_but_not_exact():
+    """A claimed monitor successor wins at the current global safe checkpoint."""
+    from src.events import reactor
+
+    monitor_claimed = [False]
+    reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.clear()
+    reactor._EXACT_EXECUTABLE_HELD_SELL_PENDING.clear()
+    try:
+        _, generic_cancelled = reactor._global_auction_monitor_cancellation_probe(
+            lambda: monitor_claimed[0],
+            completion_due=True,
+        )
+        assert generic_cancelled() is False
+        monitor_claimed[0] = True
+        assert generic_cancelled() is True
+        assert reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.is_set()
+
+        _, exact_cancelled = reactor._global_auction_monitor_cancellation_probe(
+            lambda: True,
+            completion_due=True,
+            exact_held_completion=True,
+            exact_executable_held_completion=True,
+        )
+        assert exact_cancelled() is False
+
+        _, no_monitor_cancelled = reactor._global_auction_monitor_cancellation_probe(
+            None,
+            completion_due=True,
+        )
+        assert no_monitor_cancelled() is False
+    finally:
+        reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.clear()
+        reactor._EXACT_EXECUTABLE_HELD_SELL_PENDING.clear()
 
 
 def test_monitor_does_not_preempt_when_completion_wake_is_not_durable(
@@ -9728,6 +9771,114 @@ def test_monitor_handoff_defers_reactor_admission_only():
             main._held_position_monitor_handoff_pending.set()
         if was_bootstrap_complete:
             main._held_position_monitor_bootstrap_complete.set()
+
+
+def test_periodic_monitor_successor_blocks_reacquire_until_core_turn(monkeypatch):
+    import src.main as main
+    from src.execution import exit_lifecycle
+    from src.riskguard import riskguard
+    from src.riskguard.risk_level import RiskLevel
+
+    observed = []
+
+    class ReactorGate:
+        def acquire(self, *, timeout):
+            observed.append(
+                (
+                    "handoff",
+                    timeout,
+                    main._periodic_held_position_monitor_successor_pending.is_set(),
+                    main._defer_for_held_position_monitor("edli_event_reactor"),
+                )
+            )
+            return True
+
+        def release(self):
+            observed.append(("release",))
+
+    def run_core(**_kwargs):
+        observed.append(
+            ("core", main._periodic_held_position_monitor_successor_pending.is_set())
+        )
+        return True
+
+    monkeypatch.setattr(main, "_edli_reactor_active_lock", ReactorGate())
+    monkeypatch.setattr(main, "_current_periodic_monitor_obligation_count", lambda: 1)
+    monkeypatch.setattr(main, "_day0_exit_monitor_priority_pending", lambda: False)
+    monkeypatch.setattr(riskguard, "get_current_level", lambda: RiskLevel.GREEN)
+    monkeypatch.setattr(exit_lifecycle, "run_exit_monitor_cycle", run_core)
+    main._held_position_monitor_handoff_pending.clear()
+    main._periodic_held_position_monitor_handoff_pending.clear()
+    main._periodic_held_position_monitor_successor_pending.clear()
+    try:
+        assert main._exit_monitor_cycle() is True
+        assert observed[0][0] == "handoff"
+        assert observed[0][2] is True
+        assert observed[0][3] is True
+        assert main._defer_for_held_position_monitor("edli_event_reactor") is False
+        assert ("core", False) in observed
+        assert not main._periodic_held_position_monitor_successor_pending.is_set()
+    finally:
+        main._held_position_monitor_handoff_pending.clear()
+        main._periodic_held_position_monitor_handoff_pending.clear()
+        main._periodic_held_position_monitor_successor_pending.clear()
+        if main._held_position_monitor_claim.locked():
+            main._held_position_monitor_claim.release()
+
+
+def test_monitor_handoff_timeout_keeps_successor_reservation(monkeypatch):
+    import src.main as main
+    from src.riskguard import riskguard
+    from src.riskguard.risk_level import RiskLevel
+
+    class BusyReactor:
+        def acquire(self, *, timeout):
+            assert timeout > 0
+            return False
+
+    monkeypatch.setattr(main, "_edli_reactor_active_lock", BusyReactor())
+    monkeypatch.setattr(main, "_current_periodic_monitor_obligation_count", lambda: 1)
+    monkeypatch.setattr(main, "_day0_exit_monitor_priority_pending", lambda: False)
+    monkeypatch.setattr(riskguard, "get_current_level", lambda: RiskLevel.GREEN)
+    main._periodic_held_position_monitor_successor_pending.clear()
+    main._periodic_held_position_monitor_fairness_debt.clear()
+    try:
+        assert main._exit_monitor_cycle() is False
+        assert main._periodic_held_position_monitor_successor_pending.is_set()
+        assert main._periodic_held_position_monitor_fairness_debt.is_set()
+        assert main._defer_for_held_position_monitor("edli_event_reactor") is True
+    finally:
+        main._periodic_held_position_monitor_successor_pending.clear()
+        main._periodic_held_position_monitor_fairness_debt.clear()
+        main._held_position_monitor_handoff_pending.clear()
+        main._periodic_held_position_monitor_handoff_pending.clear()
+        if main._held_position_monitor_claim.locked():
+            main._held_position_monitor_claim.release()
+
+
+def test_monitor_incomplete_keeps_canonical_debt_without_false_coverage(monkeypatch):
+    import src.main as main
+    from src.execution import exit_lifecycle
+    from src.riskguard import riskguard
+    from src.riskguard.risk_level import RiskLevel
+
+    monkeypatch.setattr(main, "_current_periodic_monitor_obligation_count", lambda: 1)
+    monkeypatch.setattr(main, "_day0_exit_monitor_priority_pending", lambda: False)
+    monkeypatch.setattr(riskguard, "get_current_level", lambda: RiskLevel.GREEN)
+    monkeypatch.setattr(exit_lifecycle, "run_exit_monitor_cycle", lambda **_kwargs: False)
+    main._held_position_monitor_canonical_debt.set()
+    main._periodic_held_position_monitor_successor_pending.clear()
+    try:
+        assert main._exit_monitor_cycle() is None
+        assert main._held_position_monitor_canonical_debt.is_set()
+        assert not main._periodic_held_position_monitor_successor_pending.is_set()
+    finally:
+        main._held_position_monitor_canonical_debt.clear()
+        main._periodic_held_position_monitor_successor_pending.clear()
+        main._held_position_monitor_handoff_pending.clear()
+        main._periodic_held_position_monitor_handoff_pending.clear()
+        if main._held_position_monitor_claim.locked():
+            main._held_position_monitor_claim.release()
 
 
 @pytest.mark.parametrize(
