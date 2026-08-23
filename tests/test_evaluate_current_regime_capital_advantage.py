@@ -1,5 +1,5 @@
 # Created: 2026-08-12
-# Last reused/audited: 2026-08-20
+# Last reused/audited: 2026-08-23
 # Authority: current-regime capital proof must fail closed before entry reopens.
 
 from __future__ import annotations
@@ -610,6 +610,169 @@ def test_counterfactual_evidence_counts_only_first_receipt_per_target_date():
     assert evidence["samples"][0]["decision_log_id"] == 1
     assert evidence["rejection_counts"]["duplicate_target_date"] == 1
     assert evidence["delta_log_wealth_lcb95"] is None
+    assert evidence["proof_registry_target_date_count"] == 1
+    assert evidence["proof_registry"][0]["decision_log_id"] == 1
+
+
+def test_pending_proof_registry_survives_receipt_scan_window_until_settlement():
+    forecasts = _settlement_db()
+    forecasts.execute(
+        "INSERT INTO market_events VALUES (?,?,?,?,?,?)",
+        ("condition-1", "Chicago", "2026-08-13", "high", 80, 81),
+    )
+    trades = sqlite3.connect(":memory:")
+    trades.row_factory = sqlite3.Row
+    trades.execute(
+        "CREATE TABLE decision_log (id INTEGER PRIMARY KEY,mode TEXT,"
+        "completed_at TEXT,artifact_json TEXT)"
+    )
+    summary = _proof_summary(
+        city="Chicago",
+        target_date="2026-08-13",
+        condition_id="condition-1",
+    )
+    trades.execute(
+        "INSERT INTO decision_log VALUES (1,?,?,?)",
+        (
+            "global_single_order_auction",
+            "2026-08-12T00:00:02+00:00",
+            json.dumps({"summary": summary}),
+        ),
+    )
+
+    pending = evaluator._settled_global_counterfactual_evidence(
+        trades,
+        forecasts,
+        as_of=evaluator.datetime.fromisoformat("2026-08-13T00:00:00+00:00"),
+    )
+
+    assert pending["independent_target_date_count"] == 0
+    assert pending["proof_registry_target_date_count"] == 1
+    assert pending["proof_registry"][0]["decision_log_id"] == 1
+
+    forecasts.execute(
+        "INSERT INTO settlement_outcomes VALUES (1,?,?,?,?,?,?,?,?)",
+        (
+            "Chicago",
+            "2026-08-13",
+            "high",
+            81,
+            "F",
+            "2026-08-13T20:00:00+00:00",
+            "2026-08-13T20:01:00+00:00",
+            "VERIFIED",
+        ),
+    )
+    trades.execute(
+        "INSERT INTO decision_log VALUES (20000,?,?,?)",
+        (
+            "exit_monitor",
+            "2026-08-13T23:00:00+00:00",
+            json.dumps({}),
+        ),
+    )
+    settled = evaluator._settled_global_counterfactual_evidence(
+        trades,
+        forecasts,
+        as_of=evaluator.datetime.fromisoformat("2026-08-14T00:00:00+00:00"),
+        prior_proof_registry=pending["proof_registry"],
+    )
+
+    assert settled["independent_target_date_count"] == 1
+    assert settled["samples"][0]["decision_log_id"] == 1
+    assert settled["proof_registry_target_date_count"] == 1
+
+
+def test_invalid_retained_proof_ref_cannot_abort_current_canonical_scan():
+    forecasts = _settlement_db()
+    forecasts.execute(
+        "INSERT INTO market_events VALUES (?,?,?,?,?,?)",
+        ("condition-1", "Chicago", "2026-08-13", "high", 80, 81),
+    )
+    forecasts.execute(
+        "INSERT INTO settlement_outcomes VALUES (1,?,?,?,?,?,?,?,?)",
+        (
+            "Chicago",
+            "2026-08-13",
+            "high",
+            81,
+            "F",
+            "2026-08-13T20:00:00+00:00",
+            "2026-08-13T20:01:00+00:00",
+            "VERIFIED",
+        ),
+    )
+    trades = sqlite3.connect(":memory:")
+    trades.row_factory = sqlite3.Row
+    trades.execute(
+        "CREATE TABLE decision_log (id INTEGER PRIMARY KEY,mode TEXT,"
+        "completed_at TEXT,artifact_json TEXT)"
+    )
+    summary = _proof_summary(
+        city="Chicago",
+        target_date="2026-08-13",
+        condition_id="condition-1",
+    )
+    trades.execute(
+        "INSERT INTO decision_log VALUES (1,?,?,?)",
+        (
+            "global_single_order_auction",
+            "2026-08-12T00:00:02+00:00",
+            json.dumps({"summary": summary}),
+        ),
+    )
+
+    evidence = evaluator._settled_global_counterfactual_evidence(
+        trades,
+        forecasts,
+        as_of=evaluator.datetime.fromisoformat("2026-08-14T00:00:00+00:00"),
+        prior_proof_registry=({"decision_log_id": "invalid"},),
+    )
+
+    assert evidence["independent_target_date_count"] == 1
+    assert evidence["proof_registry"][0]["decision_log_id"] == 1
+    assert evidence["rejection_counts"]["invalid literal for int() with base 10: 'invalid'"] == 1
+
+
+def test_retained_proof_registry_cannot_outlive_current_evidence_window():
+    forecasts = _settlement_db()
+    trades = sqlite3.connect(":memory:")
+    trades.row_factory = sqlite3.Row
+    trades.execute(
+        "CREATE TABLE decision_log (id INTEGER PRIMARY KEY,mode TEXT,"
+        "completed_at TEXT,artifact_json TEXT)"
+    )
+    summary = _proof_summary(
+        city="Chicago",
+        target_date="2026-08-13",
+        condition_id="condition-1",
+    )
+    trades.execute(
+        "INSERT INTO decision_log VALUES (1,?,?,?)",
+        (
+            "global_single_order_auction",
+            "2026-08-12T00:00:02+00:00",
+            json.dumps({"summary": summary}),
+        ),
+    )
+    retained = {
+        "decision_log_id": 1,
+        "proof_counterfactual_sha256": summary["proof_counterfactual_sha256"],
+        "independence_key": "2026-08-13",
+        "decision_at_utc": "2026-08-12T00:00:01+00:00",
+    }
+
+    evidence = evaluator._settled_global_counterfactual_evidence(
+        trades,
+        forecasts,
+        as_of=evaluator.datetime.fromisoformat("2026-09-17T00:00:01+00:00"),
+        prior_proof_registry=(retained,),
+    )
+
+    assert evidence["proof_registry_target_date_count"] == 0
+    assert evidence["rejection_counts"][
+        "proof decision outside current evidence window"
+    ] == 1
 
 
 def test_live_curve_requires_exact_schema_22_edli_receipt_binding():

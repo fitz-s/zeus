@@ -1164,6 +1164,17 @@ def test_capital_evidence_fail_verdict_is_a_successful_freshness_refresh(
     ]
 
 
+def test_capital_evidence_child_revalidates_prior_proof_registry():
+    from src.ingest import post_trade_capital_daemon as daemon
+
+    child = daemon._CAPITAL_EVIDENCE_CHILD_CODE
+
+    compile(child, "capital-evidence-child", "exec")
+    assert "_prior_proof_registry(artifact_path)" in child
+    assert "prior_proof_registry=" in child
+    assert "_atomic_write(artifact_path, artifact)" in child
+
+
 def test_capital_evidence_timeout_is_scheduler_failure(monkeypatch):
     from src.ingest import post_trade_capital_daemon as daemon
 

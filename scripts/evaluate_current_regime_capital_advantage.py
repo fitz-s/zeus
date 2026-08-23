@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Lifecycle: created=2026-08-12; last_reviewed=2026-08-20; last_reused=2026-08-20
+# Lifecycle: created=2026-08-12; last_reviewed=2026-08-23; last_reused=2026-08-23
 # Purpose: Grade exact current selection/probability revisions on causal capital outcomes.
 # Reuse: Run read-only against canonical WORLD/FORECAST/TRADES DBs; output is evidence, not authority.
 """Fail-closed evaluator for current-regime capital advantage.
@@ -26,7 +26,7 @@ import zlib
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from typing import Callable, Mapping
+from typing import Callable, Mapping, Sequence
 
 PROJECT_ROOT = Path(__file__).parent.parent
 if str(PROJECT_ROOT) not in sys.path:
@@ -552,25 +552,6 @@ def _realized_proof_sample(
     ):
         raise ValueError("proof winner taker execution certificate invalid")
     decision_at = _parse_aware(proof.get("decision_at_utc"))
-    settlement = _verified_settlement(
-        forecasts,
-        city=city,
-        target_date=target_date,
-        metric=metric,
-        decision_at=decision_at,
-    )
-    condition_yes = _condition_resolved_yes(
-        forecasts,
-        condition_id=condition_id,
-        city=city,
-        target_date=target_date,
-        metric=metric,
-        settlement_value=_decimal(
-            settlement["settlement_value"], "settlement_value"
-        ),
-        settlement_unit=str(settlement["settlement_unit"]),
-    )
-    token_won = condition_yes if side == "YES" else not condition_yes
     expected_growth = evaluation.get("expected_growth")
     terminal = evaluation.get("expected_terminal_wealth")
     if (
@@ -607,6 +588,25 @@ def _realized_proof_sample(
         > tolerance
     ):
         raise ValueError("proof winner after-cost terminal wealth inconsistent")
+    settlement = _verified_settlement(
+        forecasts,
+        city=city,
+        target_date=target_date,
+        metric=metric,
+        decision_at=decision_at,
+    )
+    condition_yes = _condition_resolved_yes(
+        forecasts,
+        condition_id=condition_id,
+        city=city,
+        target_date=target_date,
+        metric=metric,
+        settlement_value=_decimal(
+            settlement["settlement_value"], "settlement_value"
+        ),
+        settlement_unit=str(settlement["settlement_unit"]),
+    )
+    token_won = condition_yes if side == "YES" else not condition_yes
     payoff = win_payoff if token_won else loss_payoff
     wealth_after = win_wealth if token_won else loss_wealth
     delta_log = math.log(float(wealth_after / loss_before))
@@ -634,11 +634,54 @@ def _realized_proof_sample(
     }
 
 
+def _proof_registry_entry(
+    trades: sqlite3.Connection,
+    forecasts: sqlite3.Connection,
+    *,
+    decision_log_id: int,
+    summary: Mapping[str, object],
+) -> tuple[dict[str, object], dict[str, object] | None]:
+    """Return one causal proof ref and its settlement grade when available."""
+
+    try:
+        sample = _realized_proof_sample(
+            trades,
+            forecasts,
+            decision_log_id=decision_log_id,
+            summary=summary,
+        )
+    except ValueError as exc:
+        if str(exc) != "unique VERIFIED settlement unavailable":
+            raise
+        proof = _summary_proof(trades, decision_log_id, summary)
+        winner = proof.get("winner")
+        if not isinstance(winner, Mapping):
+            raise ValueError("proof winner unavailable") from exc
+        target_date = str(winner.get("target_date") or "").strip()
+        decision_at = _parse_aware(proof.get("decision_at_utc"))
+        if not target_date:
+            raise ValueError("proof target date unavailable") from exc
+        sample = None
+    else:
+        target_date = str(sample["independence_key"])
+        decision_at = _parse_aware(sample["decision_at_utc"])
+    ref = {
+        "decision_log_id": decision_log_id,
+        "proof_counterfactual_sha256": str(
+            summary["proof_counterfactual_sha256"]
+        ),
+        "independence_key": target_date,
+        "decision_at_utc": decision_at.isoformat(),
+    }
+    return ref, sample
+
+
 def _settled_global_counterfactual_evidence(
     trades: sqlite3.Connection,
     forecasts: sqlite3.Connection,
     *,
     as_of: datetime,
+    prior_proof_registry: Sequence[Mapping[str, object]] = (),
 ) -> dict[str, object]:
     cutoff = (as_of - timedelta(days=WINDOW_DAYS)).isoformat()
     rows = trades.execute(
@@ -650,29 +693,89 @@ def _settled_global_counterfactual_evidence(
         (*GLOBAL_AUCTION_RECEIPT_MODES, cutoff, as_of.isoformat()),
     ).fetchall()
     samples: list[dict[str, object]] = []
-    seen_target_dates: set[str] = set()
+    registry_by_target_date: dict[str, dict[str, object]] = {}
     rejection_counts: dict[str, int] = {}
+
+    def reject(reason: str) -> None:
+        rejection_counts[reason] = rejection_counts.get(reason, 0) + 1
+
+    def admit(
+        *,
+        decision_log_id: int,
+        summary: Mapping[str, object],
+        expected_ref: Mapping[str, object] | None = None,
+    ) -> None:
+        ref, sample = _proof_registry_entry(
+            trades,
+            forecasts,
+            decision_log_id=decision_log_id,
+            summary=summary,
+        )
+        if expected_ref is not None and any(
+            str(expected_ref.get(field) or "") != str(ref[field])
+            for field in (
+                "decision_log_id",
+                "proof_counterfactual_sha256",
+                "independence_key",
+                "decision_at_utc",
+            )
+        ):
+            raise ValueError("retained proof registry identity mismatch")
+        decision_at = _parse_aware(ref["decision_at_utc"])
+        if not _parse_aware(cutoff) <= decision_at <= as_of:
+            raise ValueError("proof decision outside current evidence window")
+        target_date = str(ref["independence_key"])
+        if target_date in registry_by_target_date:
+            reject("duplicate_target_date")
+            return
+        registry_by_target_date[target_date] = ref
+        if sample is not None:
+            samples.append(sample)
+
+    def retained_order(item: Mapping[str, object]) -> int:
+        try:
+            return int(item.get("decision_log_id") or 0)
+        except (TypeError, ValueError):
+            return sys.maxsize
+
+    for raw_ref in sorted(prior_proof_registry, key=retained_order):
+        try:
+            if not isinstance(raw_ref, Mapping):
+                raise ValueError("retained proof registry row invalid")
+            decision_log_id = int(raw_ref.get("decision_log_id") or 0)
+            row = trades.execute(
+                "SELECT mode,artifact_json FROM decision_log WHERE id=?",
+                (decision_log_id,),
+            ).fetchone()
+            if (
+                row is None
+                or str(row["mode"] or "") not in GLOBAL_AUCTION_RECEIPT_MODES
+            ):
+                raise ValueError("retained proof receipt unavailable")
+            artifact = json.loads(str(row["artifact_json"] or ""))
+            summary = artifact["summary"]
+            if not isinstance(summary, Mapping):
+                raise ValueError("retained proof summary invalid")
+            admit(
+                decision_log_id=decision_log_id,
+                summary=summary,
+                expected_ref=raw_ref,
+            )
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            reject(str(exc) or type(exc).__name__)
+
     for row in rows:
         try:
             artifact = json.loads(str(row["artifact_json"] or ""))
             summary = artifact["summary"]
-            sample = _realized_proof_sample(
-                trades,
-                forecasts,
+            if not isinstance(summary, Mapping):
+                raise ValueError("proof summary invalid")
+            admit(
                 decision_log_id=int(row["id"]),
                 summary=summary,
             )
-            target_date = str(sample["independence_key"])
-            if target_date in seen_target_dates:
-                rejection_counts["duplicate_target_date"] = (
-                    rejection_counts.get("duplicate_target_date", 0) + 1
-                )
-                continue
-            seen_target_dates.add(target_date)
-            samples.append(sample)
         except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
-            reason = str(exc) or type(exc).__name__
-            rejection_counts[reason] = rejection_counts.get(reason, 0) + 1
+            reject(str(exc) or type(exc).__name__)
     values = [float(row["realized_delta_log_wealth"]) for row in samples]
     mean = statistics.fmean(values) if values else None
     if len(values) >= 2:
@@ -700,6 +803,15 @@ def _settled_global_counterfactual_evidence(
         "delta_log_wealth_lcb95": lcb95,
         "lcb_method": "one-sided Student-t; conservative critical=1.699 (df=29 floor)",
         "minimum_sample_gate": MIN_INDEPENDENT_TARGET_DATES,
+        "proof_registry_role": (
+            "CURRENT_WINDOW_FIRST_ELIGIBLE_TARGET_DATE_PROOF_"
+            "REVALIDATED_FROM_CANONICAL_RECEIPT"
+        ),
+        "proof_registry_target_date_count": len(registry_by_target_date),
+        "proof_registry": [
+            registry_by_target_date[target_date]
+            for target_date in sorted(registry_by_target_date)
+        ],
         "rejection_counts": dict(sorted(rejection_counts.items())),
         "samples": samples,
     }
@@ -1469,6 +1581,7 @@ def evaluate(
     forecasts_path: Path,
     trades_path: Path,
     as_of: datetime,
+    prior_proof_registry: Sequence[Mapping[str, object]] = (),
 ) -> dict[str, object]:
     trades = _read_only(
         trades_path,
@@ -1504,6 +1617,7 @@ def evaluate(
                     trades,
                     forecasts,
                     as_of=as_of,
+                    prior_proof_registry=prior_proof_registry,
                 )
             )
         }
@@ -1608,6 +1722,23 @@ def _atomic_write(path: Path, payload: dict[str, object]) -> None:
     os.replace(temp, path)
 
 
+def _prior_proof_registry(path: Path) -> tuple[Mapping[str, object], ...]:
+    """Load only refs; every row is revalidated against canonical DB truth."""
+
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        registry = payload["settled_counterfactuals"][
+            "combined_current_global_selection"
+        ]["proof_registry"]
+    except (KeyError, OSError, TypeError, ValueError, json.JSONDecodeError):
+        return ()
+    if not isinstance(registry, list) or any(
+        not isinstance(row, Mapping) for row in registry
+    ):
+        return ()
+    return tuple(registry)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--trades", type=Path, required=True)
@@ -1617,12 +1748,14 @@ def main() -> int:
     args = parser.parse_args()
     world = args.world or args.trades.with_name("zeus-world.db")
     as_of = datetime.now(timezone.utc)
+    prior_proof_registry = _prior_proof_registry(args.artifact)
     try:
         artifact = evaluate(
             world_path=world,
             forecasts_path=args.forecasts,
             trades_path=args.trades,
             as_of=as_of,
+            prior_proof_registry=prior_proof_registry,
         )
     except (OSError, sqlite3.Error, ValueError) as exc:
         artifact = {

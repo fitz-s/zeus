@@ -1,5 +1,5 @@
 # Created: 2026-06-08
-# Last reused or audited: 2026-07-24
+# Last reused or audited: 2026-08-23
 # Authority basis: docs/reference/design_system_decomposition_plan.md
 #   §4.3 (Post-Trade Capital Lifecycle), §6 (P4 row + co-location decision),
 #   §7 (I3 commit-before-HTTP no-back-coupling; I4 ingest->P4),
@@ -103,13 +103,16 @@ _PAYOUT_OBSERVER_CHILD_EXIT_GRACE_SECONDS = 2.0
 _CAPITAL_EVIDENCE_CHILD_CODE = (
     "from datetime import datetime, timezone; "
     "from src.config import state_path; "
-    "from scripts.evaluate_current_regime_capital_advantage import evaluate, _atomic_write; "
+    "from scripts.evaluate_current_regime_capital_advantage import "
+    "evaluate, _atomic_write, _prior_proof_registry; "
+    "artifact_path = state_path('current_regime_capital_advantage.json'); "
     "artifact = evaluate("
     "world_path=state_path('zeus-world.db'), "
     "forecasts_path=state_path('zeus-forecasts.db'), "
     "trades_path=state_path('zeus_trades.db'), "
-    "as_of=datetime.now(timezone.utc)); "
-    "_atomic_write(state_path('current_regime_capital_advantage.json'), artifact)"
+    "as_of=datetime.now(timezone.utc), "
+    "prior_proof_registry=_prior_proof_registry(artifact_path)); "
+    "_atomic_write(artifact_path, artifact)"
 )
 _CAPITAL_EVIDENCE_CHILD_EXIT_GRACE_SECONDS = 2.0
 
