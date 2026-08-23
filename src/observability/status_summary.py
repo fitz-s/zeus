@@ -691,11 +691,17 @@ def _refresh_minimal_runtime_read_model_for_status(status: dict) -> bool:
         effective_bankroll_f = float(effective_bankroll)
     except (TypeError, ValueError):
         effective_bankroll_f = 0.0
-    portfolio["heat_pct"] = (
-        round((float(portfolio["total_exposure_usd"]) / effective_bankroll_f) * 100, 1)
-        if effective_bankroll_f > 0
-        else 0.0
-    )
+    if effective_bankroll_f > 0:
+        portfolio["heat_pct"] = round(
+            (float(portfolio["total_exposure_usd"]) / effective_bankroll_f) * 100,
+            1,
+        )
+        portfolio["heat_truth_status"] = "present"
+    else:
+        # A pulse may start from an empty/stale derived snapshot before wallet
+        # equity has been projected.  Unknown capital heat is not zero heat.
+        portfolio["heat_pct"] = None
+        portfolio["heat_truth_status"] = "missing_bankroll_truth"
     status["runtime"] = {
         "chain_state_counts": dict(position_view.get("chain_state_counts", {})),
         "exit_state_counts": dict(position_view.get("exit_state_counts", {})),

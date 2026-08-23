@@ -1,7 +1,7 @@
 # Created: 2026-04-19
-# Last reused/audited: 2026-08-09
-# Authority basis: Phase 10B DT-Seam Cleanup, 2026-04-29 design simplification audit F4, 2026-05-01 stale live-state artifact tracking, 2026-05-15 K1 forecast DB split status-summary false-flag repair, and 2026-08-09 terminal-partial proof convergence.
-# Lifecycle: created=2026-04-19; last_reviewed=2026-08-09; last_reused=2026-08-09
+# Last reused/audited: 2026-08-23
+# Authority basis: Phase 10B DT-Seam Cleanup, 2026-04-29 design simplification audit F4, 2026-05-01 stale live-state artifact tracking, 2026-05-15 K1 forecast DB split status-summary false-flag repair, 2026-08-09 terminal-partial proof convergence, and 2026-08-23 pulse heat truthfulness.
+# Lifecycle: created=2026-04-19; last_reviewed=2026-08-23; last_reused=2026-08-23
 # Purpose: Phase 10B "DT-Seam Cleanup" antibodies (R-CL..R-CP).
 #          Dedicated test file per critic-carol cycle-3 L2 convention.
 #          Do NOT co-locate with test_phase10a_hygiene.py.
@@ -3045,3 +3045,10 @@ class TestPhase2DExecutionCapabilityStatus:
         assert "status" not in status["portfolio"]
         assert "truth_authority" not in status["portfolio"]
         assert "refresh_error" not in status["portfolio"]
+        assert status["portfolio"]["heat_pct"] is None
+        assert status["portfolio"]["heat_truth_status"] == "missing_bankroll_truth"
+
+        status["portfolio"]["effective_bankroll"] = 200.0
+        status_summary_module._refresh_minimal_runtime_read_model_for_status(status)
+        assert status["portfolio"]["heat_pct"] == 0.0
+        assert status["portfolio"]["heat_truth_status"] == "present"
