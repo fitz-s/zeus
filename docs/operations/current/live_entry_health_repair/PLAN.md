@@ -3073,48 +3073,6 @@ publication barrier.
   compilation, planning lock, and diff checks pass before any deployment
   decision.
 
-## B139 — Reserve a bounded Day0/held materializer lane
-
-- Defect: canonical `DAY0_EXTREME_UPDATED` commits already enqueue the existing
-  replacement seed, but a single scheduler/materializer slot can keep a fresh
-  Day0 request behind a background subprocess and its 30-second timeout/retry.
-  The resulting lag is queue starvation, not an observation-to-q authority
-  shortcut.
-- Decision: classify durable request/seed files by exact family plus canonical
-  Day0 conditioning identity. Register two independent APScheduler jobs: the
-  existing `replacement_forecast_live_materialize` background callback and the
-  explicit `replacement_forecast_live_materialize_priority` callback at a
-  one-second cadence. Each callback returns the existing lane receipt; the
-  scheduler decorator maps truthful `NO_REQUESTS`/success/`FAILED` statuses to
-  its exact health row. Same identity coalesces; strictly newer Day0
-  observation identity supersedes the older pending file. Both lanes still
-  invoke the existing replacement materializer and writer lock; posterior
-  commit and family wake remain owned by the existing script.
-- SCOPE: one `(city, target_date, metric, conditioning_identity)` queue family;
-  current held exposure also qualifies its exact family for the reserved lane.
-  No source role, ENS shape, posterior formula, ENTRY authority, or settlement
-  semantics change.
-- DRAIN: priority and background lanes each claim at most one bounded request;
-  priority lock acquisition waits only briefly for the claim lock, while
-  background never consumes the reserved lane. Timeout, writer contention, and
-  missing/mixed source cycle remain durable retry/fail-closed receipts. A later
-  posterior commit publishes the existing exact-family wake.
-- RESET: successful posterior/readiness with the matching conditioning identity
-  drains that marker; a newer authorized observation creates the next identity.
-  A wake alone does not clear a pending marker, and restart recovery reclaims
-  durable request/inflight files through the same lane classifier.
-- Files authorized: `src/data/replacement_forecast_live_materialization_queue.py`,
-  `src/ingest/forecast_live_daemon.py`, `src/data/source_job_registry.py`,
-  `src/control/live_health.py`,
-  `tests/test_day0_extreme_updated_materialization_bridge.py`,
-  `tests/test_source_job_registry.py`, `tests/test_run_mode_failure_surfaces.py`,
-  and this plan.
-  Acceptance: a blocked background runner does not delay a fresh priority
-  runner; same-identity duplicate coalescing and newer-identity supersession
-  are deterministic; ordinary work progresses without priority; no posterior
-  commit/wake bypass exists; focused tests, compilation, planning, and diff
-  checks pass before deployment consideration.
-
 ## B140 — Exact held-SELL completion handoff across an active ordinary reactor
 
 - Defect: a durable exact V4 held-SELL completion request can arrive after an
@@ -3162,36 +3120,163 @@ publication barrier.
   remain green; focused tests, compilation, planning lock, and diff checks
   pass before any deployment decision.
 
+## B139 — Reserve a bounded Day0/held materializer lane
 
-- Defect: a durable exact V4 held-SELL completion request can arrive after an
-  ordinary global-auction cycle has acquired the sole reactor lock.  The new
-  request marks completion due, but an active-lock admission skip leaves the
-  ordinary cycle running until the held request's bounded deadline expires.
-- Decision: retain single-flight by never starting a second reactor.  A late
-  exact executable request is an atomic preemption signal: the ordinary cycle
-  observes it only at existing safe cancellation checkpoints, releases its
-  lock without acknowledging the durable request, and the next poll claims the
-  exact request before ordinary work.  Generic monitor-fairness completion is
-  weaker: its in-process token is armed only after its generic wake is durable;
-  a publish/read failure cannot leave an ownerless reservation that repeatedly
-  reclaims the lock while monitor debt remains.  The exact turn remains
-  reduce-only and rebinds q/book/wealth through the existing global auction;
-  terminal outcome is an owned command or typed no-executable receipt only.
-- SCOPE: admission and bounded safe-point cancellation of one active ordinary
-  reactor cycle when current durable exact V4 held-SELL debt arrives.  No
-  unrelated event claim, command, BUY/ENTRY, q, capital comparison, JIT, or
-  acknowledgement semantics change.
-- DRAIN: the active ordinary cycle reaches its next existing cancellation
-  checkpoint and releases the one active lock; the durable wake remains queued
-  and the next level-triggered poll obtains the exact-family global cut.
-- RESET: a matching durable command/terminal receipt removes the exact debt;
-  a typed no-executable receipt similarly completes only that lineage.  A
-  generic token resets when its owned wake terminalizes; failed publication
-  never sets it.  An unreadable durable queue fails closed and ordinary
-  admission stops; a new publication revision remains pending rather than
-  being cleared by an older handoff.
-- Acceptance: an ordinary locked cycle sees a late exact publication, cancels
-  at its safe callback without I/O, releases the lock, leaves the request
-  durable, and the next invocation enters the exact global completion lane.
-  Existing ordinary preservation, idempotency, and no-local-SELL antibodies
-  remain green; focused tests, compilation, planning lock, and diff checks
+- Defect: canonical `DAY0_EXTREME_UPDATED` commits already enqueue the existing
+  replacement seed, but a single scheduler/materializer slot can keep a fresh
+  Day0 request behind a background subprocess and its 30-second timeout/retry.
+  The resulting lag is queue starvation, not an observation-to-q authority
+  shortcut.
+- Decision: classify durable request/seed files by exact family plus canonical
+  Day0 conditioning identity. Register two independent APScheduler jobs: the
+  existing `replacement_forecast_live_materialize` background callback and the
+  explicit `replacement_forecast_live_materialize_priority` callback at a
+  one-second cadence. Each callback returns the existing lane receipt; the
+  scheduler decorator maps truthful `NO_REQUESTS`/success/`FAILED` statuses to
+  its exact health row. Same identity coalesces; strictly newer Day0
+  observation identity supersedes the older pending file. Both lanes still
+  invoke the existing replacement materializer and writer lock; posterior
+  commit and family wake remain owned by the existing script.
+- SCOPE: one `(city, target_date, metric, conditioning_identity)` queue family;
+  current held exposure also qualifies its exact family for the reserved lane.
+  No source role, ENS shape, posterior formula, ENTRY authority, or settlement
+  semantics change.
+- DRAIN: priority and background lanes each claim at most one bounded request;
+  priority lock acquisition waits only briefly for the claim lock, while
+  background never consumes the reserved lane. Timeout, writer contention, and
+  missing/mixed source cycle remain durable retry/fail-closed receipts. A later
+  posterior commit publishes the existing exact-family wake.
+- RESET: successful posterior/readiness with the matching conditioning identity
+  drains that marker; a newer authorized observation creates the next identity.
+  A wake alone does not clear a pending marker, and restart recovery reclaims
+  durable request/inflight files through the same lane classifier.
+- Files authorized: `src/data/replacement_forecast_live_materialization_queue.py`,
+  `src/ingest/forecast_live_daemon.py`, `src/data/source_job_registry.py`,
+  `src/control/live_health.py`,
+  `tests/test_day0_extreme_updated_materialization_bridge.py`,
+  `tests/test_source_job_registry.py`, `tests/test_run_mode_failure_surfaces.py`,
+  and this plan.
+  Acceptance: a blocked background runner does not delay a fresh priority
+  runner; same-identity duplicate coalescing and newer-identity supersession
+  are deterministic; ordinary work progresses without priority; no posterior
+  commit/wake bypass exists; focused tests, compilation, planning, and diff
+  checks pass before deployment consideration.
+
+## B141 — Persist the canonical post-local Day0 witness for held monitor
+
+- Defect: a current replacement posterior can already be committed with the
+  exact Day0 remaining vector and q, while the held-monitor readthrough still
+  rejects it because the persisted row does not carry the vector's expected
+  model set, per-model capture times, and causal as-of boundary.  This is an
+  authority-witness gap, distinct from queue scheduling and market evidence.
+- Decision: persist and restore one typed `day0_remaining_vector_witness`
+  beside the canonical posterior provenance.  The witness is keyed by the
+  exact remaining-vector identity and contains source-derived expected/actual
+  models, all vector IDs, provider/endpoint/request-hash/source-run identity,
+  forecast capture clocks, and the producer's real fetch-complete possession
+  clocks from `source_run_meta_json`.  `captured_at` is never reused as
+  availability.  Held monitor may consume q only after exact identity/model-set,
+  causal-time, and freshness validation.  Missing, future, stale, or mismatched
+  witness remains fail-closed; a capture list alone is not a fallback and no
+  market result, q, or prior is used to infer it.
+  `aviationweather_metar` remains a typed provisional-revision authority
+  unavailable path unless an existing canonical fast-residual revision witness
+  is present and causally sufficient; no new prior or source-role substitution
+  is introduced.
+- SCOPE: one exact held `(city, target_date, metric,
+  conditioning_identity)` monitor/readthrough authority.  This route is
+  HELD_MONITOR/REDUCE_ONLY only; it never authorizes ENTRY, creates seeds, or
+  changes queue ownership, source semantics, or posterior math.
+- DRAIN: the next canonical vector fetch writes possession metadata, the next
+  materialization writes the witness, and the reader/event-reactor adapter
+  validate it against the target decision window and expected vector identity
+  before exposing the already-committed q to the held monitor.  A missing or
+  invalid witness leaves the existing typed unavailable outcome and is retried
+  by the normal materialization/wake path.
+- RESET: a newer complete same-cycle posterior with its own exact witness
+  replaces the prior witness; a newer Day0 conditioning identity supersedes the
+  old one.  Any future, mismatched, invalidated, or incomplete witness resets
+  consumption to fail-closed without mutating the posterior or inferring source
+  truth.
+- Files authorized: `src/data/replacement_forecast_materializer.py`,
+  `src/engine/event_reactor_adapter.py`, the existing targeted materializer/
+  Day0 relationship tests, and this plan.  `src/events/reactor.py`, queue
+  scheduling, market quote paths, and total-loss files are out of scope.
+- Acceptance: a real three-model Ankara-shaped committed posterior with
+  q(35C)=1 and q(34C)=0 plus valid possession metadata is consumed by both held
+  sides; capture-list-present/witness-missing, prefetch-vs-availability,
+  future, provider/endpoint/hash/source-run, and identity/model-set mismatches
+  remain rejected; ENTRY remains unchanged; METAR provisional revision remains
+  typed unavailable unless canonical fast-residual evidence proves the revision.
+  Focused tests, pycompile, ruff, planning, and diff checks pass before any
+  landing decision.
+
+## B145 — Supersede stale same-cycle Day0 conditioning owners
+
+- Defect: a newer canonical `DAY0_EXTREME_UPDATED` identity may already be
+  source-available while an older same-cycle marker/seed/request owner remains
+  non-terminal.  The bridge can return `ALREADY_ENQUEUED` or
+  `CYCLE_ADVANCE_NOT_NEEDED` without proving that the old owner is progressing,
+  leaving the persisted posterior conditioned on the previous observation and
+  the held reader fail-closed until after executable liquidity disappears.
+- Decision: one canonical conditioning identity spans event, marker, seed,
+  request, posterior, and targeted wake.  A strictly newer identity atomically
+  supersedes an older owner unless the older lineage has exact, current progress
+  evidence that will produce the newer identity; an old posterior commit does
+  not keep an obsolete request alive.  Held mismatch publishes exact high-
+  priority rematerialization debt rather than merely returning an unavailable
+  q.  No market price, resolution, or settlement result participates in the
+  identity comparison.
+- SCOPE: one `(city, target_date, metric, source cycle)` Day0 conditioning
+  family and its exact lineage.  Other families, ENTRY economics, source roles,
+  posterior math, and venue execution are unchanged.
+- DRAIN: the newest event either claims a fresh seed/request or observes a
+  terminal matching posterior and wake.  Marker, seed, request, posterior, and
+  wake receipts retain the same conditioning identity so priority scheduling
+  can prove forward progress.  A held mismatch re-emits this same exact debt.
+- RESET: a matching posterior commit plus targeted wake terminalizes that
+  identity.  A newer observation supersedes it; restart reconstructs ownership
+  from durable lineage state.  `ALREADY_ENQUEUED` without matching progress is
+  never a reset.
+- Files authorized: `src/data/replacement_cycle_advance_trigger.py`, the narrow
+  Day0 source bridge only if required, existing lineage/bridge relationship
+  tests, and this plan.  Queue implementation, probability math, held execution,
+  and settlement semantics are out of scope.
+- Acceptance: a 21C posterior followed by a same-cycle 22C source event creates
+  a bounded new lineage even when the old seed is processed, request is
+  READY/INFLIGHT, or old posterior is committed; the resulting posterior and
+  targeted wake contain the exact 22C identity; the held reader recovers from
+  mismatch; unrelated identities retain concurrency and no look-ahead enters.
+
+## B144 — Make held snapshot debt an exact state machine
+
+- Defect: a snapshot inside the proactive refresh margin is currently reported
+  as unavailable even while it remains causally fresh, whereas a failed refresh
+  may be reported completed without proving an exact post-invalidation
+  projection.  Inactive markets are repeatedly invalidated, and canonical held
+  coverage is mixed with residual audit budget.
+- Decision: separate current freshness from proactive work.  Current evidence
+  remains fresh only until its unchanged canonical deadline; proactive due work
+  schedules a refresh without claiming failure.  Completion requires a new
+  exact condition/token projection after every relevant invalidation, within the
+  bounded snapshot freshness window.  Expired/invalid evidence is hard debt;
+  inactive/closed exposure is exact terminal-disposition debt and is never
+  refreshed in a loop.  Queue receipts expose accepted, coalesced, queued,
+  inflight, completed, deferred, capacity, and the oldest due deadline.
+- SCOPE: each canonical `(condition_id, held_token_id)` pair.  Historical exit
+  audit tokens retain a separate residual scope and cannot fail current held
+  coverage.
+- DRAIN: the persistent action owner retries hard/proactive work until an exact
+  post-invalidation projection is proven; settlement/reconciliation drains
+  terminal pairs.  Scheduler re-observation reconstructs debt after restart.
+- RESET: current exact projection clears hard debt; terminal lifecycle clears
+  terminal debt; enqueue acceptance alone and unrelated inserted snapshots do
+  not reset anything.
+- Files authorized: `src/ingest/price_channel_ingest.py`,
+  `src/events/triggers/market_channel_ingestor.py`, their existing focused tests,
+  and this plan.  Snapshot TTL, final JIT law, probability, and lifecycle grammar
+  are unchanged.
+- Acceptance: proactive-fresh is not stale-as-fresh or a health failure;
+  expired evidence remains hard debt; inactive pairs do not churn; inserted-zero,
+  unrelated refresh, post-invalidation mismatch, and overlong deadlines defer;
+  canonical capacity/oldest-deadline receipts remain truthful under audit load.
