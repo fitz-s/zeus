@@ -577,6 +577,7 @@ def _execute_monitoring_phase(
     held_position_monitor_budget_seconds: float | None = None,
     should_preempt_for_urgent_day0=None,
     defer_partial_orderbook_gaps: bool = False,
+    current_riskguard_red: bool = False,
 ):
     if isinstance(conn, sqlite3.Connection):
         # SCOPE: only this short-lived held-monitor connection. DRAIN:
@@ -599,6 +600,7 @@ def _execute_monitoring_phase(
         held_position_monitor_budget_seconds=held_position_monitor_budget_seconds,
         should_preempt_for_urgent_day0=should_preempt_for_urgent_day0,
         defer_partial_orderbook_gaps=defer_partial_orderbook_gaps,
+        current_riskguard_red=current_riskguard_red,
     )
 
 
@@ -901,7 +903,15 @@ def run_cycle(mode: DiscoveryMode, *, edli_event_context: dict | None = None) ->
             sweep_result["skipped_terminal"],
         )
 
-    p_dirty, t_dirty = _execute_monitoring_phase(conn, clob, portfolio, artifact, tracker, summary)
+    p_dirty, t_dirty = _execute_monitoring_phase(
+        conn,
+        clob,
+        portfolio,
+        artifact,
+        tracker,
+        summary,
+        current_riskguard_red=risk_level is RiskLevel.RED,
+    )
     portfolio_dirty = portfolio_dirty or p_dirty
     tracker_dirty = tracker_dirty or t_dirty
 

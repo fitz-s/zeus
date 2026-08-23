@@ -4451,7 +4451,12 @@ _PENDING_EXIT_ORDER_STATUSES = {
 }
 
 
-def _sync_position_from_canonical_monitor_row(pos, row) -> None:
+def _sync_position_from_canonical_monitor_row(
+    pos,
+    row,
+    *,
+    current_riskguard_red: bool = False,
+) -> None:
     """Align the runtime Position view with the canonical monitor projection.
 
     The canonical projection decides the live monitor set.  If the in-memory
@@ -4472,7 +4477,12 @@ def _sync_position_from_canonical_monitor_row(pos, row) -> None:
     next_retry = str(_row_get(row, "next_exit_retry_at", "") or "").strip()
     pos.next_exit_retry_at = next_retry or None
     exit_reason = str(_row_get(row, "exit_reason", "") or "").strip()
-    if exit_reason:
+    if current_riskguard_red:
+        # Current RiskGuard policy outranks the prior canonical exit attempt.
+        # The monitor event below persists the RED handoff atomically; submit
+        # still requires both current RED and that exact canonical evidence.
+        pos.exit_reason = "red_force_exit"
+    elif exit_reason:
         pos.exit_reason = exit_reason
     pos.last_monitor_prob = _finite_probability_or_none(
         _row_get(row, "last_monitor_prob")
@@ -4522,7 +4532,13 @@ def _sync_position_from_canonical_monitor_row(pos, row) -> None:
         pos.next_exit_retry_at = None
 
 
-def _monitoring_phase_positions(portfolio, conn=None, *, now_utc: datetime | None = None) -> list:
+def _monitoring_phase_positions(
+    portfolio,
+    conn=None,
+    *,
+    now_utc: datetime | None = None,
+    current_riskguard_red: bool = False,
+) -> list:
     """Open positions requiring exit/hold redecision.
 
     When canonical ``position_current`` is available, it owns the live monitor
@@ -4553,7 +4569,11 @@ def _monitoring_phase_positions(portfolio, conn=None, *, now_utc: datetime | Non
             pos = by_position_id.get(position_id)
             if pos is None:
                 continue
-            _sync_position_from_canonical_monitor_row(pos, row)
+            _sync_position_from_canonical_monitor_row(
+                pos,
+                row,
+                current_riskguard_red=current_riskguard_red,
+            )
             out.append(pos)
             seen.add(position_id)
         for pos in all_positions:
@@ -6469,6 +6489,7 @@ def execute_monitoring_phase(
     held_position_monitor_budget_seconds: float | None = None,
     should_preempt_for_urgent_day0: Callable[[], bool] | None = None,
     defer_partial_orderbook_gaps: bool = False,
+    current_riskguard_red: bool = False,
 ):
     from src.engine.monitor_refresh import (
         _DAY0_ZERO_PROBABILITY_EXIT_AUTHORITY_ATTR,
@@ -7205,6 +7226,7 @@ def execute_monitoring_phase(
         portfolio,
         conn=conn,
         now_utc=monitor_now_utc,
+        current_riskguard_red=current_riskguard_red,
     )
     install_monitor_day0_family_cache(clob, decision_time=monitor_now_utc)
     install_monitor_replacement_hwm_snapshot(clob, None)
@@ -7324,6 +7346,7 @@ def execute_monitoring_phase(
         portfolio,
         conn=conn,
         now_utc=monitor_now_utc,
+        current_riskguard_red=current_riskguard_red,
     )
     monitor_reservation_count = min(
         primary_reserved_position_count,
@@ -9833,12 +9856,31 @@ def execute_monitoring_phase(
                 pos.exit_divergence_score = edge_ctx.divergence_score
                 pos.exit_market_velocity_1h = edge_ctx.market_velocity_1h
                 pos.exit_forward_edge = edge_ctx.forward_edge
-                if pending_exit_monitor_only:
+                red_force_exit = (
+                    exit_trigger == "RED_FORCE_EXIT"
+                    and exit_reason == "RED_FORCE_EXIT"
+                )
+                if (
+                    pending_exit_monitor_only
+                    and not red_force_exit
+                ):
                     summary["pending_exit_exit_signal_already_in_flight"] = (
                         summary.get("pending_exit_exit_signal_already_in_flight", 0) + 1
                     )
                     portfolio_dirty = True
                     continue
+                if pending_exit_monitor_only:
+                    # RED outranks retry cooldown/monitor-only policy. The
+                    # execution boundary still rechecks current persisted RED
+                    # authority and adopts any active SELL before submitting,
+                    # so this override cannot create a duplicate order.
+                    summary["pending_exit_red_force_exit_monitor_override"] = (
+                        summary.get(
+                            "pending_exit_red_force_exit_monitor_override",
+                            0,
+                        )
+                        + 1
+                    )
                 if posterior_support_zero_direct_sell:
                     # MONITOR_REFRESHED advances ``last_monitor_at`` before the
                     # side effect.  Rebind the immutable direct-SELL proof to

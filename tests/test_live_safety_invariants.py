@@ -14707,11 +14707,10 @@ def test_incident_b32ad42_pending_exit_red_projection_actuates_same_turn_exit(
     tmp_path,
     monkeypatch,
 ):
-    """Protected retry state retains fields without masking RED actuation."""
-    from src.engine.lifecycle_events import (
-        build_entry_canonical_write,
-        build_monitor_refreshed_canonical_write,
-    )
+    """Production monitoring overrides retry cooldown and actuates RED."""
+    from src.contracts import EdgeContext, EntryMethod
+    from src.engine import cycle_runner
+    from src.engine.lifecycle_events import build_entry_canonical_write
     from src.execution import exit_lifecycle
     from src.riskguard.risk_level import RiskLevel
     from src.state.db import (
@@ -14728,13 +14727,14 @@ def test_incident_b32ad42_pending_exit_red_projection_actuates_same_turn_exit(
         "CREATE INDEX idx_position_events_position_type_sequence "
         "ON position_events(position_id, event_type, sequence_no DESC)"
     )
+    fixture_now = datetime.now(timezone.utc)
     pos = _make_position(
         trade_id="21325000-644",
         market_id="0x96914dbfe260f907aa0bb4b583783c9c728adb7b80534c3c5c3333d121132b12",
         condition_id="0x96914dbfe260f907aa0bb4b583783c9c728adb7b80534c3c5c3333d121132b12",
         city="Tel Aviv",
         cluster="Tel Aviv",
-        target_date="2026-08-22",
+        target_date=(fixture_now + timedelta(days=2)).date().isoformat(),
         bin_label="Will the highest temperature in Tel Aviv be 33°C on August 22?",
         direction="buy_no",
         unit="C",
@@ -14757,7 +14757,7 @@ def test_incident_b32ad42_pending_exit_red_projection_actuates_same_turn_exit(
         decision_id="incident-b32ad42-entry",
     )
     append_many_and_project(conn, entry_events, entry_projection)
-    retry_at = "2026-08-21T01:02:15.735899+00:00"
+    retry_at = (fixture_now + timedelta(minutes=10)).isoformat()
     pos.state = LifecyclePhase.PENDING_EXIT.value
     pos.pre_exit_state = "holding"
     pos.exit_state = "retry_pending"
@@ -14774,80 +14774,59 @@ def test_incident_b32ad42_pending_exit_red_projection_actuates_same_turn_exit(
         source_module="tests.test_live_safety_invariants",
     ) is True
 
-    pos.last_monitor_prob = 0.9003278024817638
-    pos.last_monitor_prob_is_fresh = False
-    pos.last_monitor_market_price = 0.5242838774198156
-    pos.last_monitor_market_price_is_fresh = True
-    pos.last_monitor_best_bid = 0.49
-    pos.last_monitor_best_ask = 0.55
-    pos.applied_validations = [
-        "predicted_bin_exit_law",
-        "red_force_exit",
-        "dt2_red_force_exit_sweep_actuated",
-    ]
-    decision = ExitDecision(
-        True,
-        "RED_FORCE_EXIT",
-        urgency="immediate",
-        trigger="RED_FORCE_EXIT",
-        selected_method="qkernel_spine",
-        applied_validations=pos.applied_validations,
-    )
-    monitor_events, monitor_projection = build_monitor_refreshed_canonical_write(
-        pos,
-        sequence_no=1226,
-        phase_after=LifecyclePhase.PENDING_EXIT.value,
-        occurred_at="2026-08-21T00:52:15.735899+00:00",
-        exit_decision=decision,
-        final_should_exit=True,
-        final_exit_reason="RED_FORCE_EXIT",
-        final_exit_trigger="RED_FORCE_EXIT",
-    )
-    append_many_and_project(conn, monitor_events, monitor_projection)
-
-    current = conn.execute(
-        """
-        SELECT phase, order_status, exit_reason,
-               exit_retry_count, next_exit_retry_at
-          FROM position_current
-         WHERE position_id = ?
-        """,
-        (pos.trade_id,),
-    ).fetchone()
-    payload = json.loads(monitor_events[0]["payload_json"])
-    assert payload["exit_decision_reason"] == "RED_FORCE_EXIT"
-    assert current["phase"] == LifecyclePhase.PENDING_EXIT.value
-    assert current["order_status"] == "retry_pending"
-    assert current["exit_reason"] == "RED_FORCE_EXIT"
-    assert current["exit_retry_count"] == 4
-    assert current["next_exit_retry_at"] == retry_at
-    assert exit_lifecycle._red_monitor_provenance_matches(payload) is True
-
-    pos.exit_reason = "RED_FORCE_EXIT"
+    incident_now = datetime.now(timezone.utc)
     monkeypatch.setattr(
         "src.riskguard.riskguard.get_current_level",
         lambda: RiskLevel.RED,
     )
-    assert exit_lifecycle._red_runtime_position_open(
-        conn,
-        pos,
-        require_canonical=True,
-    ) is True
-    assert exit_lifecycle._canonical_red_force_exit_provenance(conn, pos) is True
-    assert exit_lifecycle._red_force_exit_authorized(
-        pos,
-        ExitContext(
-            exit_reason="RED_FORCE_EXIT",
-            current_market_price=0.49,
-            current_market_price_is_fresh=True,
-            best_bid=0.49,
-        ),
-        conn=conn,
-    ) is True
+    monkeypatch.setattr(exit_lifecycle, "_utcnow", lambda: incident_now)
+
+    def refresh_position(_conn, _clob, position):
+        position.last_monitor_at = incident_now.isoformat()
+        position.last_monitor_prob = 0.9003278024817638
+        position.last_monitor_prob_is_fresh = True
+        position.last_monitor_edge = 0.4103278024817638
+        position.last_monitor_market_price = 0.49
+        position.last_monitor_market_price_is_fresh = True
+        position.last_monitor_best_bid = 0.49
+        position.last_monitor_best_ask = 0.55
+        position.last_monitor_market_vig = 1.04
+        return EdgeContext(
+            p_raw=np.array([]),
+            p_cal=np.array([]),
+            p_market=np.array([0.49]),
+            p_posterior=0.9003278024817638,
+            forward_edge=0.4103278024817638,
+            alpha=0.0,
+            confidence_band_upper=0.42,
+            confidence_band_lower=0.40,
+            entry_provenance=EntryMethod.QKERNEL_SPINE,
+            decision_snapshot_id="incident-b32ad42-monitor",
+            n_edges_found=1,
+            n_edges_after_fdr=1,
+            market_velocity_1h=0.0,
+            divergence_score=0.0,
+        )
+
+    monkeypatch.setattr(
+        "src.engine.monitor_refresh.refresh_position",
+        refresh_position,
+    )
 
     submitted = {}
 
     class Clob:
+        @staticmethod
+        def get_orderbook_snapshots(token_ids):
+            return {
+                token_id: {
+                    "asset_id": token_id,
+                    "bids": [{"price": "0.49", "size": "15"}],
+                    "asks": [{"price": "0.55", "size": "15"}],
+                }
+                for token_id in token_ids
+            }
+
         @staticmethod
         def get_order_status(_order_id):
             return {"status": "OPEN"}
@@ -14878,19 +14857,49 @@ def test_incident_b32ad42_pending_exit_red_projection_actuates_same_turn_exit(
     )
     monkeypatch.setattr(exit_lifecycle, "place_sell_order", return_pending)
 
-    outcome = exit_lifecycle.execute_exit(
+    summary = {"monitors": 0, "exits": 0}
+    portfolio_dirty, tracker_dirty = cycle_runner._execute_monitoring_phase(
+        conn,
+        Clob(),
         PortfolioState(positions=[pos]),
-        pos,
-        ExitContext(
-            exit_reason="RED_FORCE_EXIT",
-            current_market_price=0.49,
-            current_market_price_is_fresh=True,
-            best_bid=0.49,
-        ),
-        clob=Clob(),
-        conn=conn,
+        _monitor_test_artifact(),
+        _monitor_test_tracker(),
+        summary,
+        run_exit_preflight=False,
+        current_riskguard_red=True,
     )
-    assert outcome.startswith("sell_pending: order=incident-b32ad42-red-sweep")
+
+    monitor_row = conn.execute(
+        """
+        SELECT payload_json
+          FROM position_events
+         WHERE position_id = ? AND event_type = 'MONITOR_REFRESHED'
+         ORDER BY sequence_no DESC
+         LIMIT 1
+        """,
+        (pos.trade_id,),
+    ).fetchone()
+    assert monitor_row is not None, json.dumps(summary, default=str, sort_keys=True)
+    payload = json.loads(monitor_row["payload_json"])
+    assert payload["exit_decision_reason"] == "RED_FORCE_EXIT"
+    assert payload["exit_decision_trigger"] == "RED_FORCE_EXIT"
+    assert payload["exit_decision_should_exit"] is True
+    assert exit_lifecycle._red_monitor_provenance_matches(payload) is True
+    current = conn.execute(
+        "SELECT exit_reason, exit_retry_count, next_exit_retry_at "
+        "FROM position_current WHERE position_id = ?",
+        (pos.trade_id,),
+    ).fetchone()
+    assert current["exit_reason"] == "RED_FORCE_EXIT"
+    assert current["exit_retry_count"] == 4
+    assert current["next_exit_retry_at"] == retry_at
+    assert portfolio_dirty is True
+    assert tracker_dirty is False
+    assert summary["monitor_pending_exit_retry_cooldown_redecisions"] == 1
+    assert summary["monitor_pending_exit_phase_evaluated"] == 1
+    assert summary["pending_exit_red_force_exit_monitor_override"] == 1
+    assert "pending_exit_exit_signal_already_in_flight" not in summary
+    assert summary["exits"] == 1
     assert submitted["submit_order_type"] == "FAK"
     assert submitted["protective_sell_execution_authority"].kind == "RED_FORCE_EXIT"
     conn.close()
@@ -14926,6 +14935,32 @@ def test_monitor_hold_projection_does_not_mint_exit_reason():
     payload = json.loads(events[0]["payload_json"])
     assert payload["exit_decision_should_exit"] is False
     assert projection["exit_reason"] is None
+
+
+def test_canonical_exit_reason_is_not_overridden_without_current_red():
+    """A stale runtime RED marker cannot survive a non-RED canonical sync."""
+    from src.engine import cycle_runtime
+
+    pos = _make_position(
+        state="pending_exit",
+        exit_state="retry_pending",
+        exit_reason="red_force_exit",
+    )
+    row = {
+        "phase": "pending_exit",
+        "order_status": "retry_pending",
+        "exit_retry_count": 2,
+        "next_exit_retry_at": "2030-01-01T00:10:00+00:00",
+        "exit_reason": "OLD_STATISTICAL_EXIT",
+    }
+
+    cycle_runtime._sync_position_from_canonical_monitor_row(
+        pos,
+        row,
+        current_riskguard_red=False,
+    )
+
+    assert pos.exit_reason == "OLD_STATISTICAL_EXIT"
 
 
 def test_monitor_refresh_preserves_chain_corrected_entry_economics(tmp_path):

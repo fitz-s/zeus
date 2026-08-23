@@ -12843,6 +12843,7 @@ def run_exit_monitor_cycle(
                     ),
                     should_preempt_for_urgent_day0=should_preempt_for_urgent_day0,
                     defer_partial_orderbook_gaps=target_families is None,
+                    current_riskguard_red=risk_level is RiskLevel.RED,
                 )
                 portfolio_dirty = portfolio_dirty or monitor_portfolio_dirty
             except Exception as exc:
