@@ -324,6 +324,45 @@ def test_settlement_identity_survives_projection_and_payload_enrichment(
     assert len(rows) == 1
 
 
+def test_settlement_aggregate_materialization_drift_is_idempotent(
+    cfg: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _settled_full_loss(cfg, payload={"outcome": 0})
+    aggregate = {
+        **_command_dedup_basis(),
+        "execution_fact_command_ids": ["entry-command-before"],
+    }
+    monkeypatch.setattr(loop, "_entry_execution_fill_aggregate", lambda *_args, **_kwargs: aggregate)
+    assert len(loop.detect(cfg)) == 1
+    with loop.memory(cfg) as mem:
+        first = mem.execute(
+            "SELECT incident_id,evidence_revision FROM incidents "
+            "WHERE crossing_kind='settlement_full_loss'"
+        ).fetchone()
+    aggregate = {
+        "filled_cost_basis_usd": 4.99,
+        "entry_fill_command_identity_complete": True,
+        "execution_fact_command_ids": ["entry-command-after"],
+    }
+    with sqlite3.connect(cfg["paths"]["trades_db"]) as conn:
+        conn.execute(
+            "UPDATE position_current SET realized_pnl_usd=?,updated_at=? WHERE position_id='p-settled'",
+            (-4.99, "2026-08-22T11:00:00+00:00"),
+        )
+    assert loop.detect(cfg) == []
+    with loop.memory(cfg) as mem:
+        second = mem.execute(
+            "SELECT incident_id,evidence_revision FROM incidents "
+            "WHERE crossing_kind='settlement_full_loss'"
+        ).fetchone()
+        row_count = mem.execute(
+            "SELECT COUNT(*) FROM incidents WHERE crossing_kind='settlement_full_loss'"
+        ).fetchone()[0]
+    assert second[0] == first[0]
+    assert second[1] == first[1]
+    assert row_count == 1
+
+
 def test_repeated_chain_mirror_settled_events_are_exactly_once(
     cfg: dict, monkeypatch: pytest.MonkeyPatch
 ) -> None:

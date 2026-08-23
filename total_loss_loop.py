@@ -1142,7 +1142,7 @@ def _settlement_full_loss_candidate(
     if payout_identity is None:
         return None
     evidence_id = digest(
-        position_id, "settlement_full_loss", payout_identity, entry_identity
+        position_id, "settlement_full_loss", payout_identity
     )
     settled_at = str(terminal_row.get("occurred_at") or position.get("settled_at") or "")
     return {
@@ -1176,7 +1176,7 @@ def _insert_settlement_full_loss_incident(
     ).fetchone()
     if existing is not None:
         _consolidate_legacy_settlement_incidents(
-            mem, str(position["position_id"]), incident_id
+            mem, str(position["position_id"]), str(existing["incident_id"])
         )
         return None
     mem.execute(
