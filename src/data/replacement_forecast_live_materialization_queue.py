@@ -140,7 +140,6 @@ class _PendingMaterialization:
     request_payload: Mapping[str, object] | None
     marker_path: Path | None
     attempt_fingerprint: str | None
-    timeout_seconds: float | None = None
 
 
 @dataclass(frozen=True)
@@ -178,20 +177,14 @@ def _materialization_subprocess_timeout_seconds() -> float:
     return value
 
 
-def _run_command(
-    argv: Sequence[str], *, timeout_seconds: float | None = None
-) -> subprocess.CompletedProcess[str]:
+def _run_command(argv: Sequence[str]) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         list(argv),
         cwd=PROJECT_ROOT,
         check=False,
         capture_output=True,
         text=True,
-        timeout=(
-            _materialization_subprocess_timeout_seconds()
-            if timeout_seconds is None
-            else max(0.001, float(timeout_seconds))
-        ),
+        timeout=_materialization_subprocess_timeout_seconds(),
     )
 
 
@@ -264,7 +257,7 @@ def _run_materialization_item(
     item: _PendingMaterialization,
 ) -> subprocess.CompletedProcess[str]:
     try:
-        return _run_command(item.command, timeout_seconds=item.timeout_seconds)
+        return _run_command(item.command)
     except subprocess.TimeoutExpired as exc:
         return _timeout_result(item.command, exc)
     except Exception as exc:
@@ -2834,7 +2827,6 @@ def process_replacement_forecast_live_materialization_queue(
     runner: Runner | None = None,
     discover: bool = True,
     lane: str = MATERIALIZATION_LANE_ALL,
-    deadline_monotonic: float | None = None,
 ) -> ReplacementForecastLiveMaterializationQueueReport:
     """Process local materialization request JSON files.
 
@@ -2857,29 +2849,9 @@ def process_replacement_forecast_live_materialization_queue(
         MATERIALIZATION_LANE_BACKGROUND,
     }:
         raise ValueError(f"unknown materialization lane: {lane}")
-    remaining = (
-        None
-        if deadline_monotonic is None
-        else max(0.0, float(deadline_monotonic) - time.monotonic())
-    )
-    if remaining is not None and remaining <= 0.0:
-        return ReplacementForecastLiveMaterializationQueueReport(
-            status="NO_REQUESTS",
-            request_dir=str(request_path),
-            processed_dir=str(processed_path),
-            failed_dir=str(failed_path),
-            processed_count=0,
-            failed_count=0,
-            skipped_count=0,
-            reason_codes=("REPLACEMENT_LIVE_MATERIALIZATION_PRIORITY_DEADLINE",),
-        )
     with _queue_lock(
         request_path.parent / ".materialization_queue.lock",
-        wait_seconds=(
-            min(1.0, remaining)
-            if lane == MATERIALIZATION_LANE_PRIORITY and remaining is not None
-            else (1.0 if lane == MATERIALIZATION_LANE_PRIORITY else 0.0)
-        ),
+        wait_seconds=1.0 if lane == MATERIALIZATION_LANE_PRIORITY else 0.0,
     ) as lock_acquired:
         if not lock_acquired:
             return ReplacementForecastLiveMaterializationQueueReport(
@@ -2919,7 +2891,6 @@ def process_replacement_forecast_live_materialization_queue(
             runner=runner,
             marker_dir=request_path.parent / "blocked_attempts",
             retry_path=request_path,
-            deadline_monotonic=deadline_monotonic,
         )
     finally:
         _remove_empty_claim_batch(claim.batch_path)
@@ -2968,7 +2939,6 @@ def _process_claimed_materialization_batch(
     runner: Runner | None = None,
     marker_dir: Path | None = None,
     retry_path: Path | None = None,
-    deadline_monotonic: float | None = None,
 ) -> ReplacementForecastLiveMaterializationQueueReport:
     if not request_path.exists():
         return ReplacementForecastLiveMaterializationQueueReport(
@@ -3161,17 +3131,6 @@ def _process_claimed_materialization_batch(
                 request_payload=request_payload,
                 marker_path=marker_path,
                 attempt_fingerprint=attempt_fingerprint,
-                timeout_seconds=(
-                    None
-                    if deadline_monotonic is None
-                    else max(
-                        0.001,
-                        min(
-                            _materialization_subprocess_timeout_seconds(),
-                            deadline_monotonic - time.monotonic(),
-                        ),
-                    )
-                ),
             )
         )
     if runner is None:

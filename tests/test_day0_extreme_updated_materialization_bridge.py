@@ -2349,132 +2349,6 @@ def test_day0_priority_lane_claims_while_background_runner_is_blocked(
     assert len(reports) == 2
 
 
-def test_forecast_poll_starts_reserved_and_background_lanes_together(monkeypatch) -> None:
-    """The one-second poll owns two bounded lanes inside one scheduler turn."""
-    from src.ingest import forecast_live_daemon
-    from src.data import replacement_forecast_production
-
-    cfg = {
-        "request_dir": "/tmp/requests",
-        "seed_dir": "/tmp/seeds",
-        "inflight_dir": "/tmp/inflight",
-    }
-    started: list[str] = []
-    entered = threading.Barrier(2)
-
-    monkeypatch.setattr(
-        replacement_forecast_production,
-        "_replacement_forecast_live_materialization_queue_config",
-        lambda: cfg,
-    )
-    monkeypatch.setattr(
-        forecast_live_daemon,
-        "_replacement_forecast_queue_pending",
-        lambda _cfg, key: key in {"request_dir", "seed_dir"},
-    )
-    monkeypatch.setattr(
-        forecast_live_daemon,
-        "_replacement_forecast_inflight_pending",
-        lambda _cfg: False,
-    )
-    monkeypatch.setattr(
-        forecast_live_daemon,
-        "_MATERIALIZATION_PRIORITY_WATCH_INTERVAL_SECONDS",
-        0.001,
-    )
-    monkeypatch.setattr(
-        forecast_live_daemon,
-        "_MATERIALIZATION_PRIORITY_WATCH_MAX_SECONDS",
-        0.05,
-    )
-
-    def run_lane(_cfg, *, lane, seed_limit, deadline_monotonic=None):
-        started.append(lane)
-        if len(started) <= 2:
-            entered.wait(1.0)
-        return {"lane": lane, "seed_limit": seed_limit}
-
-    monkeypatch.setattr(
-        forecast_live_daemon,
-        "_replacement_forecast_materialize_lane",
-        run_lane,
-    )
-    forecast_live_daemon._replacement_forecast_materialize_poll_job()
-    assert set(started) == {"priority", "background"}
-    assert started.count("priority") >= 2
-
-
-def test_forecast_poll_claims_priority_arriving_during_background(
-    tmp_path, monkeypatch
-) -> None:
-    """A late Day0 request is claimed before the blocked background runner releases."""
-    from src.ingest import forecast_live_daemon
-    from src.data import replacement_forecast_production
-
-    request_dir = tmp_path / "requests"
-    seed_dir = tmp_path / "seeds"
-    inflight_dir = tmp_path / "inflight"
-    request_dir.mkdir()
-    seed_dir.mkdir()
-    inflight_dir.mkdir()
-    cfg = {
-        "request_dir": request_dir,
-        "seed_dir": seed_dir,
-        "inflight_dir": inflight_dir,
-    }
-    background_started = threading.Event()
-    release_background = threading.Event()
-    priority_started = threading.Event()
-    call_count = {"priority": 0}
-
-    monkeypatch.setattr(
-        replacement_forecast_production,
-        "_replacement_forecast_live_materialization_queue_config",
-        lambda: cfg,
-    )
-    monkeypatch.setattr(
-        forecast_live_daemon,
-        "_replacement_forecast_queue_pending",
-        lambda _cfg, key: key == "request_dir" and request_dir.glob("*.json"),
-    )
-    monkeypatch.setattr(
-        forecast_live_daemon,
-        "_replacement_forecast_inflight_pending",
-        lambda _cfg: False,
-    )
-    monkeypatch.setattr(
-        forecast_live_daemon,
-        "_MATERIALIZATION_PRIORITY_WATCH_INTERVAL_SECONDS",
-        0.01,
-    )
-    monkeypatch.setattr(
-        forecast_live_daemon,
-        "_MATERIALIZATION_PRIORITY_WATCH_MAX_SECONDS",
-        0.5,
-    )
-
-    def run_lane(_cfg, *, lane, seed_limit, deadline_monotonic=None):
-        if lane == "background":
-            background_started.set()
-            assert release_background.wait(1.0)
-        else:
-            call_count["priority"] += 1
-            if any(request_dir.glob("*.json")):
-                priority_started.set()
-        return {"lane": lane, "seed_limit": seed_limit}
-
-    monkeypatch.setattr(forecast_live_daemon, "_replacement_forecast_materialize_lane", run_lane)
-    poll_thread = threading.Thread(target=forecast_live_daemon._replacement_forecast_materialize_poll_job)
-    poll_thread.start()
-    assert background_started.wait(1.0)
-    (request_dir / "Ankara.priority.json").write_text("{}", encoding="utf-8")
-    assert priority_started.wait(1.0)
-    release_background.set()
-    poll_thread.join(2.0)
-    assert not poll_thread.is_alive()
-    assert call_count["priority"] >= 2
-
-
 def test_queue_lock_does_not_double_acquire_during_owner_publication(
     tmp_path, monkeypatch
 ) -> None:
@@ -2505,6 +2379,113 @@ def test_queue_lock_does_not_double_acquire_during_owner_publication(
     release_write.set()
     first.join(2.0)
     assert not first.is_alive()
+
+
+def test_background_block_does_not_block_independent_priority_job(monkeypatch, tmp_path) -> None:
+    """The two decorated callbacks have independent execution capacity."""
+    from src.ingest import forecast_live_daemon
+    from src.data import replacement_forecast_production
+
+    cfg = {
+        "request_dir": tmp_path / "requests",
+        "seed_dir": tmp_path / "seeds",
+        "forecast_db": tmp_path / "forecast.db",
+        "raw_manifest_dir": tmp_path / "raw",
+        "processed_dir": tmp_path / "processed",
+        "failed_dir": tmp_path / "failed",
+        "seed_processed_dir": tmp_path / "seed_processed",
+        "seed_failed_dir": tmp_path / "seed_failed",
+    }
+    for key in ("request_dir", "seed_dir", "raw_manifest_dir"):
+        Path(cfg[key]).mkdir()
+    monkeypatch.setattr(
+        replacement_forecast_production,
+        "_replacement_forecast_live_materialization_queue_config",
+        lambda: cfg,
+    )
+    background_started = threading.Event()
+    release_background = threading.Event()
+    priority_started = threading.Event()
+
+    def run_lane(_cfg, *, lane, seed_limit):
+        if lane == "background":
+            background_started.set()
+            assert release_background.wait(1.0)
+        else:
+            priority_started.set()
+        return {"lane": lane}
+
+    monkeypatch.setattr(forecast_live_daemon, "_replacement_forecast_materialize_lane", run_lane)
+    background = threading.Thread(target=forecast_live_daemon._replacement_forecast_materialize_job)
+    background.start()
+    assert background_started.wait(1.0)
+    forecast_live_daemon._replacement_forecast_priority_materialize_job()
+    assert priority_started.is_set()
+    release_background.set()
+    background.join(1.0)
+    assert not background.is_alive()
+
+
+def test_priority_job_exception_writes_failed_scheduler_health(monkeypatch, tmp_path) -> None:
+    from src.ingest import forecast_live_daemon
+    from src.data import replacement_forecast_production
+    from src.observability import scheduler_health
+
+    cfg = {"request_dir": tmp_path / "requests"}
+    cfg["request_dir"].mkdir()
+    monkeypatch.setattr(
+        replacement_forecast_production,
+        "_replacement_forecast_live_materialization_queue_config",
+        lambda: cfg,
+    )
+    health: list[tuple[str, bool, str | None]] = []
+    monkeypatch.setattr(
+        scheduler_health,
+        "_write_scheduler_health",
+        lambda job, *, failed, started=False, reason=None: health.append(
+            (job, failed, reason)
+        ),
+    )
+    monkeypatch.setattr(
+        forecast_live_daemon,
+        "_replacement_forecast_materialize_lane",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("priority boom")),
+    )
+    forecast_live_daemon._replacement_forecast_priority_materialize_job()
+    assert health[0][0] == forecast_live_daemon.REPLACEMENT_FORECAST_PRIORITY_MATERIALIZE_JOB_ID
+    assert health[-1][1] is True
+    assert "priority boom" in str(health[-1][2])
+
+
+def test_scheduler_registers_independent_background_and_priority_jobs(monkeypatch) -> None:
+    from src.ingest import forecast_live_daemon
+
+    jobs: list[tuple[object, str, dict[str, object]]] = []
+
+    class Scheduler:
+        def add_job(self, fn, trigger, **kwargs) -> None:
+            jobs.append((fn, trigger, kwargs))
+
+    monkeypatch.setattr(forecast_live_daemon, "_replacement_forecast_materialize_interval_minutes", lambda: 5)
+    monkeypatch.setattr(forecast_live_daemon, "_replacement_forecast_materialize_poll_seconds", lambda: 1)
+    forecast_live_daemon._register_replacement_forecast_production_jobs(Scheduler())
+    selected = {
+        job[2]["id"]: job
+        for job in jobs
+        if job[2]["id"]
+        in {
+            forecast_live_daemon.REPLACEMENT_FORECAST_MATERIALIZE_JOB_ID,
+            forecast_live_daemon.REPLACEMENT_FORECAST_PRIORITY_MATERIALIZE_JOB_ID,
+        }
+    }
+    assert set(selected) == {
+        forecast_live_daemon.REPLACEMENT_FORECAST_MATERIALIZE_JOB_ID,
+        forecast_live_daemon.REPLACEMENT_FORECAST_PRIORITY_MATERIALIZE_JOB_ID,
+    }
+    assert selected[forecast_live_daemon.REPLACEMENT_FORECAST_MATERIALIZE_JOB_ID][2]["max_instances"] == 1
+    assert selected[forecast_live_daemon.REPLACEMENT_FORECAST_PRIORITY_MATERIALIZE_JOB_ID][2]["max_instances"] == 1
+    assert selected[forecast_live_daemon.REPLACEMENT_FORECAST_PRIORITY_MATERIALIZE_JOB_ID][2]["seconds"] == 1
+    assert selected[forecast_live_daemon.REPLACEMENT_FORECAST_MATERIALIZE_JOB_ID][2]["executor"] != selected[forecast_live_daemon.REPLACEMENT_FORECAST_PRIORITY_MATERIALIZE_JOB_ID][2]["executor"]
 
 
 def test_day0_drained_marker_with_active_provisional_posterior_does_not_reenqueue(

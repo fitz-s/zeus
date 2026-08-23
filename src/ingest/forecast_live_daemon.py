@@ -134,17 +134,19 @@ FORECAST_LIVE_SOURCE_HEALTH_JOB_ID = "forecast_live_source_health_probe"
 # lanes. The functions themselves are live-authority gated (no-op when trade authority is off).
 REPLACEMENT_FORECAST_DOWNLOAD_JOB_ID = "replacement_forecast_download"
 REPLACEMENT_FORECAST_MATERIALIZE_JOB_ID = "replacement_forecast_live_materialize"
+REPLACEMENT_FORECAST_PRIORITY_MATERIALIZE_JOB_ID = (
+    "replacement_forecast_live_materialize_priority"
+)
 REPLACEMENT_FORECAST_DISCOVERY_JOB_ID = "replacement_forecast_live_discovery"
 REPLACEMENT_FORECAST_STARTUP_JOB_ID = "replacement_forecast_download_startup_catch_up"
 REPLACEMENT_AVAILABILITY_POLL_JOB_ID = "replacement_cycle_availability_poll"
 ANCHOR_META_CROSS_CHECK_JOB_ID = "anchor_meta_stamp_cross_check"
 REPLACEMENT_FORECAST_EXECUTOR_LANE = "replacement_production"
+REPLACEMENT_FORECAST_PRIORITY_EXECUTOR_LANE = "replacement_priority"
 # forecast_posteriors has one SQLite writer. Parallel commit subprocesses do not
 # add write throughput; they can exhaust the subprocess timeout waiting on each
 # other and permanently strand the freshest family request in failed/.
 REPLACEMENT_FORECAST_MATERIALIZE_MAX_INSTANCES = 1
-_MATERIALIZATION_PRIORITY_WATCH_INTERVAL_SECONDS = 0.5
-_MATERIALIZATION_PRIORITY_WATCH_MAX_SECONDS = 31.0
 # SEPARATE lane for the heavy download (publish-time cron + boot catch-up). The download
 # runs for tens of minutes (8 Open-Meteo models x all cities; slowed further by fail-soft
 # 400-retries on short-range models). On a SHARED max_workers=1 lane it serialized AHEAD of
@@ -1203,21 +1205,35 @@ def _replacement_forecast_materialize_job(
     limit: int | None = None,
     seed_limit: int | None = None,
 ) -> None:
-    """LIGHT seed_discovery -> seed -> materialize on already-downloaded manifests (no download).
-
-    Interval-driven; delegates to the shared production function, which is live-authority gated and
-    fail-soft."""
+    """Run one bounded background materialization lane."""
     from src.data.replacement_forecast_production import (
-        _replacement_forecast_live_materialize_cycle,
+        _replacement_forecast_live_materialization_queue_config,
     )
 
-    # Single health writer: the forecast-live scheduler wrapper owns this job's
-    # health entry. Calling the production wrapper would swallow exceptions and
-    # then let this outer wrapper overwrite FAILED with OK.
-    _replacement_forecast_live_materialize_cycle.__wrapped__(
-        discover=discover,
-        limit=limit,
-        seed_limit=seed_limit,
+    cfg = _replacement_forecast_live_materialization_queue_config()
+    _replacement_forecast_materialize_lane(
+        cfg,
+        lane="background",
+        seed_limit=(
+            max(0, int(seed_limit))
+            if seed_limit is not None
+            else max(1, int(cfg.get("poll_batch_limit") or 1))
+        ),
+    )
+
+
+@_scheduler_job(REPLACEMENT_FORECAST_PRIORITY_MATERIALIZE_JOB_ID)
+def _replacement_forecast_priority_materialize_job() -> None:
+    """Run one independent bounded Day0/held priority claim."""
+    from src.data.replacement_forecast_production import (
+        _replacement_forecast_live_materialization_queue_config,
+    )
+
+    cfg = _replacement_forecast_live_materialization_queue_config()
+    _replacement_forecast_materialize_lane(
+        cfg,
+        lane="priority",
+        seed_limit=1,
     )
 
 
@@ -1226,7 +1242,6 @@ def _replacement_forecast_materialize_lane(
     *,
     lane: str,
     seed_limit: int,
-    deadline_monotonic: float | None = None,
 ) -> dict[str, object]:
     """Run one bounded durable queue lane without sharing the background slot."""
     from src.data.replacement_forecast_live_materialization_queue import (
@@ -1247,47 +1262,10 @@ def _replacement_forecast_materialize_lane(
         limit=1,
         discover=False,
         lane=lane,
-        deadline_monotonic=deadline_monotonic,
     )
     result = report.as_dict()
     logger.info("replacement forecast materialization lane=%s report=%s", lane, result)
     return result
-
-
-def _replacement_forecast_priority_watch(
-    cfg: dict[str, object],
-    *,
-    background_done: threading.Event,
-) -> None:
-    """Claim late priority arrivals for one bounded background execution window."""
-    deadline = time.monotonic() + _MATERIALIZATION_PRIORITY_WATCH_MAX_SECONDS
-    wait_event = threading.Event()
-    while True:
-        remaining = deadline - time.monotonic()
-        if remaining <= 0.0:
-            return
-        try:
-            _replacement_forecast_materialize_lane(
-                cfg,
-                lane="priority",
-                # A seed can arrive after the poll began; never freeze this at
-                # the initial queue snapshot.
-                seed_limit=1,
-                deadline_monotonic=deadline,
-            )
-        except Exception:
-            logger.warning(
-                "replacement forecast priority watcher attempt failed",
-                exc_info=True,
-            )
-        remaining = deadline - time.monotonic()
-        if remaining <= 0.0:
-            return
-        # The background event is intentionally not a termination condition:
-        # the hard wall-clock window owns a final priority rescan independently.
-        wait_event.wait(
-            min(_MATERIALIZATION_PRIORITY_WATCH_INTERVAL_SECONDS, remaining)
-        )
 
 
 def _replacement_forecast_queue_pending(
@@ -1365,7 +1343,7 @@ def _replacement_forecast_discovery_revision(
 
 
 def _replacement_forecast_materialize_poll_job() -> None:
-    """Drain reserved Day0/held and ordinary lanes concurrently."""
+    """Compatibility one-shot for callers predating split scheduler jobs."""
 
     from src.data.replacement_forecast_production import (
         _replacement_forecast_live_materialization_queue_config,
@@ -1374,39 +1352,24 @@ def _replacement_forecast_materialize_poll_job() -> None:
     requests_pending = _replacement_forecast_queue_pending(cfg, "request_dir")
     seeds_pending = _replacement_forecast_queue_pending(cfg, "seed_dir")
     inflight_pending = _replacement_forecast_inflight_pending(cfg)
-    if not (requests_pending or seeds_pending or inflight_pending):
-        return
-    # The scheduler remains single-instance, but the queue owns two bounded
-    # internal lanes. Background work cannot consume the reserved priority lane;
-    # a fresh Day0/held request therefore starts while an old background
-    # subprocess is still within its timeout window.
-    seed_limit = 1 if seeds_pending else 0
-    background_done = threading.Event()
-
-    def run_background() -> dict[str, object]:
-        try:
-            return _replacement_forecast_materialize_lane(
-                cfg,
-                lane="background",
-                seed_limit=seed_limit,
-            )
-        finally:
-            background_done.set()
-
-    with ThreadPoolExecutor(max_workers=2, thread_name_prefix="forecast-materialize-lane") as executor:
-        futures = (
-            executor.submit(run_background),
-            executor.submit(
-                _replacement_forecast_priority_watch,
-                cfg,
-                background_done=background_done,
-            ),
+    if seeds_pending:
+        _replacement_forecast_materialize_job(
+            discover=False,
+            limit=1,
+            seed_limit=max(1, int(cfg.get("poll_batch_limit") or 1)),
         )
-        for future in futures:
-            try:
-                future.result()
-            except Exception:
-                logger.warning("replacement forecast materialization lane failed", exc_info=True)
+    elif requests_pending:
+        _replacement_forecast_materialize_job(
+            discover=False,
+            limit=1,
+            seed_limit=0,
+        )
+    elif inflight_pending:
+        _replacement_forecast_materialize_job(
+            discover=False,
+            limit=1,
+            seed_limit=0,
+        )
 
 
 @_scheduler_job(REPLACEMENT_FORECAST_DISCOVERY_JOB_ID)
@@ -1578,12 +1541,22 @@ def _register_replacement_forecast_production_jobs(
     materialize_poll_seconds = _replacement_forecast_materialize_poll_seconds()
     # Light materialize: interval (consumes already-downloaded manifests; no download).
     scheduler.add_job(  # type: ignore[attr-defined]
-        _replacement_forecast_materialize_poll_job,
+        _replacement_forecast_materialize_job,
         "interval",
         seconds=materialize_poll_seconds,
         id=REPLACEMENT_FORECAST_MATERIALIZE_JOB_ID,
         executor=REPLACEMENT_FORECAST_EXECUTOR_LANE,
         max_instances=REPLACEMENT_FORECAST_MATERIALIZE_MAX_INSTANCES,
+        coalesce=True,
+        misfire_grace_time=120,
+    )
+    scheduler.add_job(  # type: ignore[attr-defined]
+        _replacement_forecast_priority_materialize_job,
+        "interval",
+        seconds=1,
+        id=REPLACEMENT_FORECAST_PRIORITY_MATERIALIZE_JOB_ID,
+        executor=REPLACEMENT_FORECAST_PRIORITY_EXECUTOR_LANE,
+        max_instances=1,
         coalesce=True,
         misfire_grace_time=120,
     )
@@ -1617,9 +1590,11 @@ def _register_replacement_forecast_production_jobs(
     )
     logger.info(
         "replacement-forecast production jobs registered (downloads_owner=ingest_main; "
-        "materialize queue poll=%ds discovery=%dmin; lane=%s)",
-        materialize_poll_seconds, materialize_minutes,
+        "materialize background=%ds priority=1s discovery=%dmin; lanes=%s,%s)",
+        materialize_poll_seconds,
+        materialize_minutes,
         REPLACEMENT_FORECAST_EXECUTOR_LANE,
+        REPLACEMENT_FORECAST_PRIORITY_EXECUTOR_LANE,
     )
 
 
@@ -1646,12 +1621,14 @@ def build_scheduler(*, startup_run_date: datetime | None = None):
     # heartbeat or OpenData lanes. The replacement jobs are registered (after the scheduler is
     # built) on this lane.
     def _replacement_production_executor() -> dict[str, object]:
-        # Two SEPARATE single-worker lanes: the heavy download must never serialize ahead of
-        # (and starve) the light materialize that refreshes readiness — see
-        # REPLACEMENT_FORECAST_DOWNLOAD_EXECUTOR_LANE.
+        # Three separate lanes: background materialization, reserved priority
+        # materialization, and heavy download never serialize behind each other.
         return {
             REPLACEMENT_FORECAST_EXECUTOR_LANE: _APSchedulerThreadPoolExecutor(
                 max_workers=REPLACEMENT_FORECAST_MATERIALIZE_MAX_INSTANCES
+            ),
+            REPLACEMENT_FORECAST_PRIORITY_EXECUTOR_LANE: _APSchedulerThreadPoolExecutor(
+                max_workers=1
             ),
             REPLACEMENT_FORECAST_DOWNLOAD_EXECUTOR_LANE: _APSchedulerThreadPoolExecutor(max_workers=1),
         }
