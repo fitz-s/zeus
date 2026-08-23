@@ -72,7 +72,7 @@ import signal
 import subprocess
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -115,6 +115,7 @@ _CAPITAL_EVIDENCE_CHILD_CODE = (
     "_atomic_write(artifact_path, artifact)"
 )
 _CAPITAL_EVIDENCE_CHILD_EXIT_GRACE_SECONDS = 2.0
+_CAPITAL_EVIDENCE_START_DELAY_SECONDS = 75.0
 
 
 def _chain_sync_child_deadline_seconds() -> float:
@@ -591,7 +592,13 @@ def main() -> None:
         ),
         "interval", minutes=5, id="current_regime_capital_evidence",
         max_instances=1, coalesce=True,
-        next_run_time=datetime.now(timezone.utc),
+        # Harvester is intentionally immediate at boot and owns canonical
+        # settlement writes. Keep this read-heavy audit out of that startup
+        # contention window; its five-minute interval remains independent.
+        next_run_time=(
+            datetime.now(timezone.utc)
+            + timedelta(seconds=_CAPITAL_EVIDENCE_START_DELAY_SECONDS)
+        ),
     )
 
     # 60s liveness heartbeat (file-only). The heartbeat-sensor watches this file's mtime.

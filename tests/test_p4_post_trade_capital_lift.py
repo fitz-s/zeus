@@ -220,7 +220,7 @@ def test_harvester_runs_on_daemon_start_then_keeps_bounded_settlement_cadence():
     assert next_run.func.attr == "now"
 
 
-def test_capital_evidence_runs_on_start_then_keeps_five_minute_cadence():
+def test_capital_evidence_avoids_boot_writer_contention_then_keeps_cadence():
     call = _add_job_call(_P4_DAEMON, "current_regime_capital_evidence")
     assert call is not None
     keywords = {kw.arg: kw.value for kw in call.keywords if kw.arg}
@@ -231,9 +231,14 @@ def test_capital_evidence_runs_on_start_then_keeps_five_minute_cadence():
     assert isinstance(keywords.get("coalesce"), ast.Constant)
     assert keywords["coalesce"].value is True
     next_run = keywords.get("next_run_time")
-    assert isinstance(next_run, ast.Call)
-    assert isinstance(next_run.func, ast.Attribute)
-    assert next_run.func.attr == "now"
+    assert isinstance(next_run, ast.BinOp)
+    assert isinstance(next_run.op, ast.Add)
+    assert isinstance(next_run.left, ast.Call)
+    assert isinstance(next_run.left.func, ast.Attribute)
+    assert next_run.left.func.attr == "now"
+    assert isinstance(next_run.right, ast.Call)
+    assert isinstance(next_run.right.func, ast.Name)
+    assert next_run.right.func.id == "timedelta"
 
 
 def test_boot_identity_precedes_immediate_scheduler_work():
@@ -1179,6 +1184,7 @@ def test_capital_evidence_default_deadline_covers_bounded_curve_reads(monkeypatc
     from src.ingest import post_trade_capital_daemon as daemon
 
     variable = "ZEUS_POST_TRADE_CAPITAL_EVIDENCE_DEADLINE_SECONDS"
+    assert daemon._CAPITAL_EVIDENCE_START_DELAY_SECONDS == 75.0
     monkeypatch.delenv(variable, raising=False)
     assert daemon._capital_evidence_child_deadline_seconds() == 75.0
 
