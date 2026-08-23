@@ -1175,6 +1175,20 @@ def test_capital_evidence_child_revalidates_prior_proof_registry():
     assert "_atomic_write(artifact_path, artifact)" in child
 
 
+def test_capital_evidence_default_deadline_covers_bounded_curve_reads(monkeypatch):
+    from src.ingest import post_trade_capital_daemon as daemon
+
+    variable = "ZEUS_POST_TRADE_CAPITAL_EVIDENCE_DEADLINE_SECONDS"
+    monkeypatch.delenv(variable, raising=False)
+    assert daemon._capital_evidence_child_deadline_seconds() == 75.0
+
+    monkeypatch.setenv(variable, "invalid")
+    assert daemon._capital_evidence_child_deadline_seconds() == 75.0
+
+    monkeypatch.setenv(variable, "0")
+    assert daemon._capital_evidence_child_deadline_seconds() == 75.0
+
+
 def test_capital_evidence_timeout_is_scheduler_failure(monkeypatch):
     from src.ingest import post_trade_capital_daemon as daemon
 

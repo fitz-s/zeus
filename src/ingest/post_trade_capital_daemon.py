@@ -164,23 +164,26 @@ def _payout_observer_child_deadline_seconds() -> float:
 def _capital_evidence_child_deadline_seconds() -> float:
     raw = os.environ.get("ZEUS_POST_TRADE_CAPITAL_EVIDENCE_DEADLINE_SECONDS")
     if raw in (None, ""):
-        return 45.0
+        # Two independent realized-capital curves each enforce a 20-second
+        # read deadline. Preserve room for receipt validation and atomic export
+        # while staying well inside the five-minute scheduler cadence.
+        return 75.0
     try:
         value = float(raw)
     except (TypeError, ValueError):
         logger.warning(
             "Invalid ZEUS_POST_TRADE_CAPITAL_EVIDENCE_DEADLINE_SECONDS=%r; "
-            "using 45.0",
+            "using 75.0",
             raw,
         )
-        return 45.0
+        return 75.0
     if value <= 0:
         logger.warning(
             "Invalid ZEUS_POST_TRADE_CAPITAL_EVIDENCE_DEADLINE_SECONDS=%r; "
-            "using 45.0",
+            "using 75.0",
             raw,
         )
-        return 45.0
+        return 75.0
     return value
 
 
