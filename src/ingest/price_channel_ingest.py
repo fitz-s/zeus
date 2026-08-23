@@ -1279,9 +1279,12 @@ def _edli_durable_fill_bridge_candidate_ids(conn, *, limit: int) -> tuple[str, .
     never blocked behind the historical aggregate/position/command scan.
     """
     from src.events.edli_position_bridge import (
+        DISPOSITION_SETTLED_MARKET,
+        DISPOSITION_UNRECOVERABLE_MANUAL_REVIEW,
         _edli_events_table,
         edli_bridge_position_id,
         edli_bridge_position_id_legacy,
+        get_fill_bridge_disposition,
     )
 
     table = _edli_events_table(conn)
@@ -1296,19 +1299,45 @@ def _edli_durable_fill_bridge_candidate_ids(conn, *, limit: int) -> tuple[str, .
     # answer a limit=1 boot probe on append-only canonical databases.
     aggregate_rows = conn.execute(
         f"""
-        SELECT aggregate_id
-          FROM {table} INDEXED BY idx_edli_live_order_events_aggregate
-         WHERE event_type = 'UserTradeObserved'
-           AND json_extract(payload_json, '$.fill_authority_state')
+        SELECT observed.aggregate_id
+          FROM {table} AS observed
+               INDEXED BY idx_edli_live_order_events_aggregate
+         WHERE observed.event_type = 'UserTradeObserved'
+           AND json_extract(observed.payload_json, '$.fill_authority_state')
                = 'FILL_CONFIRMED'
-         GROUP BY aggregate_id
-         ORDER BY aggregate_id ASC
+           AND NOT EXISTS (
+               SELECT 1
+                 FROM {table} AS command_event
+                      INDEXED BY idx_edli_live_order_events_aggregate
+                 JOIN venue_commands AS command
+                   ON command.command_id = json_extract(
+                          command_event.payload_json,
+                          '$.execution_command_id'
+                      )
+                   OR command.decision_id = json_extract(
+                          command_event.payload_json,
+                          '$.execution_command_id'
+                      )
+                 JOIN position_current AS linked_position
+                   ON linked_position.position_id = command.position_id
+                WHERE command_event.aggregate_id = observed.aggregate_id
+                  AND command_event.event_type = 'ExecutionCommandCreated'
+                  AND command.position_id IS NOT NULL
+                  AND command.position_id != ''
+           )
+         GROUP BY observed.aggregate_id
+         ORDER BY observed.aggregate_id ASC
         """
     )
     orphan_ids: list[str] = []
     for row in aggregate_rows:
         aggregate_id = str(_row_get(row, "aggregate_id") or "")
         if not aggregate_id:
+            continue
+        if get_fill_bridge_disposition(conn, aggregate_id) in {
+            DISPOSITION_SETTLED_MARKET,
+            DISPOSITION_UNRECOVERABLE_MANUAL_REVIEW,
+        }:
             continue
         canonical_position = conn.execute(
             """
@@ -1323,31 +1352,6 @@ def _edli_durable_fill_bridge_candidate_ids(conn, *, limit: int) -> tuple[str, .
             ),
         ).fetchone()
         if canonical_position is not None:
-            continue
-        linked_position = conn.execute(
-            f"""
-            SELECT 1
-              FROM {table} ce
-              JOIN venue_commands vc
-                ON vc.command_id = json_extract(
-                       ce.payload_json,
-                       '$.execution_command_id'
-                   )
-                OR vc.decision_id = json_extract(
-                       ce.payload_json,
-                       '$.execution_command_id'
-                   )
-              JOIN position_current pc
-                ON pc.position_id = vc.position_id
-             WHERE ce.aggregate_id = ?
-               AND ce.event_type = 'ExecutionCommandCreated'
-               AND vc.position_id IS NOT NULL
-               AND vc.position_id != ''
-             LIMIT 1
-            """,
-            (aggregate_id,),
-        ).fetchone()
-        if linked_position is not None:
             continue
         orphan_ids.append(aggregate_id)
         if len(orphan_ids) >= bounded_limit:

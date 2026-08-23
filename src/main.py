@@ -9120,30 +9120,38 @@ def _edli_boot_fill_bridge_recovery() -> bool:
         bridged = 0
         try:
             from src.ingest.price_channel_ingest import (
+                FILL_BRIDGE_WRITE_TRANCHES_PER_TICK,
+                _edli_durable_fill_bridge_candidate_ids_read_only,
                 _edli_durable_fill_bridge_scan,
-                _edli_durable_fill_bridge_work_exists_read_only,
             )
 
             try:
-                bridge_work_exists = (
-                    _edli_durable_fill_bridge_work_exists_read_only()
+                candidate_aggregate_ids = (
+                    _edli_durable_fill_bridge_candidate_ids_read_only(
+                        limit=FILL_BRIDGE_WRITE_TRANCHES_PER_TICK,
+                    )
                 )
             except Exception as exc:  # noqa: BLE001
-                bridge_work_exists = True
-                logger.warning(
-                    "EDLI boot fill-bridge read-only admission failed; "
-                    "falling back to canonical recovery: %s",
+                logger.error(
+                    "EDLI boot fill-bridge bounded discovery failed; "
+                    "keeping BUY blocked for retry without taking canonical writers: %s",
                     exc,
                     exc_info=True,
                 )
-            if not bridge_work_exists:
+                return False
+            if not candidate_aggregate_ids:
                 logger.info(
                     "EDLI boot fill-bridge recovery: no orphaned confirmed fills"
                 )
                 return True
 
             bridge_conn = get_trade_connection_with_world_required(write_class="live")
-            bridged = _edli_durable_fill_bridge_scan(bridge_conn, now=now)
+            bridged = _edli_durable_fill_bridge_scan(
+                bridge_conn,
+                now=now,
+                limit=len(candidate_aggregate_ids),
+                candidate_aggregate_ids=candidate_aggregate_ids,
+            )
             bridge_conn.commit()
         finally:
             if bridge_conn is not None:
@@ -9159,6 +9167,22 @@ def _edli_boot_fill_bridge_recovery() -> bool:
             )
         else:
             logger.info("EDLI boot fill-bridge recovery: no orphaned confirmed fills")
+        try:
+            remaining = _edli_durable_fill_bridge_candidate_ids_read_only(limit=1)
+        except Exception as exc:  # noqa: BLE001
+            logger.error(
+                "EDLI boot fill-bridge completion proof failed; keeping BUY blocked "
+                "for retry without taking canonical writers: %s",
+                exc,
+                exc_info=True,
+            )
+            return False
+        if remaining:
+            logger.warning(
+                "EDLI boot fill-bridge recovery: bounded tranche complete; "
+                "orphaned fills remain for the next retry"
+            )
+            return False
         return True
     except Exception as exc:  # noqa: BLE001
         # Boot recovery is best-effort: the per-cycle durable scan is the safety

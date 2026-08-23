@@ -1,11 +1,11 @@
 # Created: 2026-06-08
-# Last reused or audited: 2026-08-05 (current-only feasibility writer/readers)
+# Last reused or audited: 2026-08-23 (bounded boot fill-bridge writer isolation)
 # Authority basis: docs/reference/design_system_decomposition_plan.md
 #   §4.2 (Price-Channel / CLOB-Fact Ingest), §6 (P3 row + co-location decision),
 #   §7 (I2 no-back-coupling: durable fill bridge + execution_feasibility_evidence),
 #   §8 Step 3 (lift the user-channel WS thread + market-channel + reconcile cycles),
 #   §9 (regression-unconstructable proof — failure-domain isolation).
-# Lifecycle: created=2026-06-08; last_reviewed=2026-08-05; last_reused=2026-08-05
+# Lifecycle: created=2026-06-08; last_reviewed=2026-08-23; last_reused=2026-08-23
 # Purpose: RELATIONSHIP TESTS for process-topology refactor STEP P3 — lift the
 #   price-channel / CLOB-fact ingest (the persistent user/market WebSocket lifecycle)
 #   out of the order daemon into its own process (com.zeus.price-channel-ingest).
@@ -551,8 +551,8 @@ def test_boot_fill_bridge_skips_cross_db_writer_when_read_only_probe_is_clean(mo
 
     monkeypatch.setattr(
         pci,
-        "_edli_durable_fill_bridge_work_exists_read_only",
-        lambda: False,
+        "_edli_durable_fill_bridge_candidate_ids_read_only",
+        lambda *, limit: (),
     )
 
     def _writer_must_not_open(*args, **kwargs):
@@ -563,8 +563,32 @@ def test_boot_fill_bridge_skips_cross_db_writer_when_read_only_probe_is_clean(mo
     main_mod._edli_boot_fill_bridge_recovery()
 
 
-def test_boot_fill_bridge_probe_uncertainty_preserves_canonical_recovery(monkeypatch):
-    """Admission uncertainty must fail toward durable recovery, never lost fills."""
+def test_boot_fill_bridge_probe_uncertainty_keeps_buy_blocked_without_writer(monkeypatch):
+    """Uncertain discovery must retry without starving held-monitor writers."""
+    import src.ingest.price_channel_ingest as pci
+    import src.main as main_mod
+    import src.state.db as db
+
+    monkeypatch.setattr(
+        pci,
+        "_edli_durable_fill_bridge_candidate_ids_read_only",
+        lambda *, limit: (_ for _ in ()).throw(RuntimeError("probe uncertain")),
+    )
+
+    def _writer_must_not_open(*args, **kwargs):
+        raise AssertionError("uncertain discovery must not take canonical writers")
+
+    monkeypatch.setattr(
+        db,
+        "get_trade_connection_with_world_required",
+        _writer_must_not_open,
+    )
+
+    assert main_mod._edli_boot_fill_bridge_recovery() is False
+
+
+def test_boot_fill_bridge_writer_consumes_only_bounded_discovered_ids(monkeypatch):
+    """Boot recovery never re-scans historical EDLI events while holding a writer."""
     import src.ingest.price_channel_ingest as pci
     import src.main as main_mod
     import src.state.db as db
@@ -580,26 +604,92 @@ def test_boot_fill_bridge_probe_uncertainty_preserves_canonical_recovery(monkeyp
             self.closed = True
 
     conn = _Conn()
+    discoveries = iter((("aggregate-a", "aggregate-b"), ()))
+    scan_calls = []
     monkeypatch.setattr(
         pci,
-        "_edli_durable_fill_bridge_work_exists_read_only",
-        lambda: (_ for _ in ()).throw(RuntimeError("probe uncertain")),
+        "_edli_durable_fill_bridge_candidate_ids_read_only",
+        lambda *, limit: next(discoveries),
     )
-    monkeypatch.setattr(
-        pci,
-        "_edli_durable_fill_bridge_scan",
-        lambda actual_conn, *, now: 0 if actual_conn is conn else -1,
-    )
+
+    def _scan(actual_conn, *, now, limit, candidate_aggregate_ids):
+        scan_calls.append((actual_conn, limit, candidate_aggregate_ids))
+        return 2
+
+    monkeypatch.setattr(pci, "_edli_durable_fill_bridge_scan", _scan)
     monkeypatch.setattr(
         db,
         "get_trade_connection_with_world_required",
         lambda *, write_class: conn,
     )
 
-    main_mod._edli_boot_fill_bridge_recovery()
+    assert main_mod._edli_boot_fill_bridge_recovery() is True
 
     assert conn.committed is True
     assert conn.closed is True
+    assert scan_calls == [(conn, 2, ("aggregate-a", "aggregate-b"))]
+
+
+def test_fill_bridge_discovery_treats_terminal_disposition_as_drained():
+    """Settled/manual-review fills cannot keep boot BUY admission pending forever."""
+    from src.events.edli_position_bridge import (
+        DISPOSITION_SETTLED_MARKET,
+        DISPOSITION_UNRECOVERABLE_MANUAL_REVIEW,
+    )
+    from src.ingest.price_channel_ingest import (
+        _edli_durable_fill_bridge_candidate_ids,
+    )
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(
+        """
+        CREATE TABLE edli_live_order_events (
+            aggregate_id TEXT NOT NULL,
+            event_sequence INTEGER NOT NULL,
+            event_type TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            occurred_at TEXT NOT NULL
+        );
+        CREATE INDEX idx_edli_live_order_events_aggregate
+            ON edli_live_order_events(aggregate_id, event_sequence);
+        CREATE TABLE position_current (position_id TEXT PRIMARY KEY);
+        CREATE TABLE venue_commands (
+            command_id TEXT PRIMARY KEY,
+            decision_id TEXT NOT NULL,
+            position_id TEXT
+        );
+        CREATE TABLE edli_fill_bridge_dispositions (
+            aggregate_id TEXT PRIMARY KEY,
+            disposition TEXT
+        );
+        """
+    )
+    confirmed = json.dumps({"fill_authority_state": "FILL_CONFIRMED"})
+    conn.executemany(
+        """
+        INSERT INTO edli_live_order_events (
+            aggregate_id, event_sequence, event_type, payload_json, occurred_at
+        ) VALUES (?, 1, 'UserTradeObserved', ?, '2026-08-23T00:00:00+00:00')
+        """,
+        (
+            ("settled", confirmed),
+            ("manual-review", confirmed),
+            ("live-orphan", confirmed),
+        ),
+    )
+    conn.executemany(
+        "INSERT INTO edli_fill_bridge_dispositions VALUES (?, ?)",
+        (
+            ("settled", DISPOSITION_SETTLED_MARKET),
+            ("manual-review", DISPOSITION_UNRECOVERABLE_MANUAL_REVIEW),
+        ),
+    )
+
+    assert _edli_durable_fill_bridge_candidate_ids(conn, limit=8) == (
+        "live-orphan",
+    )
+    conn.close()
 
 
 def test_boot_fill_bridge_recovery_does_not_block_scheduler_startup(monkeypatch):
