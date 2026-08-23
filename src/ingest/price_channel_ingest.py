@@ -4329,11 +4329,27 @@ def _edli_held_quote_refresh_cycle() -> dict:
             reason=f"{type(exc).__name__}: {exc}",
         )
         raise
-    failed, reason = _price_channel_quote_refresh_failed(
-        result,
-        token_key="held_token_metadata",
-        event_key="held_quote_refresh_events",
+    # Scheduler authority is the canonical held scope only.  Audit/backlog
+    # tokens may exhaust their bounded REST slice without invalidating a
+    # canonical pair already covered by WS or exact REST evidence.
+    failed = False
+    reason = None
+    canonical_count = int(result.get("canonical_held_pair_count") or 0)
+    canonical_ws_covered = int(
+        result.get("canonical_held_quote_ws_covered_tokens") or 0
     )
+    if canonical_count > 0 and canonical_ws_covered < canonical_count:
+        failed, reason = _price_channel_quote_refresh_failed(
+            result,
+            token_key="canonical_held_pair_count",
+            event_key="held_quote_refresh_events",
+        )
+    audit_failed, audit_reason = _price_channel_quote_refresh_failed(
+        result, token_key="held_token_metadata", event_key="held_quote_refresh_events"
+    )
+    if audit_failed:
+        result["audit_quote_refresh_degraded"] = True
+        result["audit_quote_refresh_degraded_reason"] = audit_reason
     if result.get("canonical_held_scope_unavailable"):
         failed = True
         reason = "canonical_held_scope_unavailable"
