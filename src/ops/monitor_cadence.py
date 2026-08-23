@@ -192,7 +192,13 @@ def collect_monitor_cadence_evidence(
             fresh_count += 1
         elif min_occurred_utc is not None and occurred_dt < min_occurred_utc:
             if monitor_refreshed_only:
-                stale_or_missing.append(position_evidence)
+                if _monitor_event_closed_market_pending_settlement(
+                    position_evidence,
+                    monitor_event,
+                ):
+                    settlement_recoverable.append(position_evidence.copy())
+                else:
+                    stale_or_missing.append(position_evidence)
             elif _review_required_event_is_fresh(
                 review_event,
                 now_utc=now_utc,
@@ -223,7 +229,13 @@ def collect_monitor_cadence_evidence(
                     stale_or_missing.append(position_evidence)
         elif max_age_seconds is not None and age_seconds > float(max_age_seconds):
             if monitor_refreshed_only:
-                stale_or_missing.append(position_evidence)
+                if _monitor_event_closed_market_pending_settlement(
+                    position_evidence,
+                    monitor_event,
+                ):
+                    settlement_recoverable.append(position_evidence.copy())
+                else:
+                    stale_or_missing.append(position_evidence)
             elif _review_required_event_is_fresh(
                 review_event,
                 now_utc=now_utc,

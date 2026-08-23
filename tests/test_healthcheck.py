@@ -1961,6 +1961,62 @@ def test_monitor_cadence_monitor_refreshed_only_rejects_dust_without_monitor_eve
     assert evidence["stale_or_missing_position_count"] == 1 - expected_fresh
 
 
+def test_monitor_cadence_closed_market_hold_discharges_old_monitor_only_debt(
+    tmp_path,
+):
+    from src.ops.monitor_cadence import collect_monitor_cadence_evidence
+
+    db_path = tmp_path / "zeus_trades.db"
+    now = datetime.now(timezone.utc)
+    _init_monitor_cadence_db(
+        db_path,
+        monitor_at=now - timedelta(minutes=20),
+    )
+    conn = sqlite3.connect(str(db_path))
+    conn.row_factory = sqlite3.Row
+    try:
+        conn.execute(
+            """
+            UPDATE position_events
+               SET payload_json = ?
+             WHERE event_id = 'evt-monitor'
+            """,
+            (
+                json.dumps(
+                    {
+                        "semantic_event": "MARKET_CLOSED_HOLD_TO_SETTLEMENT",
+                        "hold_reason": "MARKET_CLOSED_AWAITING_SETTLEMENT",
+                        "market_closed_error": "clob_market_info",
+                        "exit_order_submitted": False,
+                        "exit_failure": False,
+                        "applied_validations": [
+                            "MARKET_CLOSED_AWAITING_SETTLEMENT",
+                            "closed_market_hold_no_action_authority",
+                        ],
+                        "last_monitor_prob_is_fresh": False,
+                        "last_monitor_market_price_is_fresh": False,
+                    }
+                ),
+            ),
+        )
+        conn.commit()
+        evidence = collect_monitor_cadence_evidence(
+            conn,
+            now=now,
+            max_age_seconds=60.0,
+            monitor_refreshed_only=True,
+            require_fresh_inputs=False,
+        )
+    finally:
+        conn.close()
+
+    assert evidence["fresh_position_count"] == 0
+    assert evidence["stale_or_missing_position_count"] == 0
+    assert evidence["blocking_stale_position_count"] == 0
+    assert evidence["settlement_recoverable_position_count"] == 1
+    assert evidence["settlement_recoverable_positions"][0]["position_id"] == "pos-1"
+
+
 def test_monitor_cadence_status_does_not_accept_review_as_monitor_refresh(
     monkeypatch,
     tmp_path,
