@@ -339,6 +339,69 @@ def test_repeated_chain_mirror_settled_events_are_exactly_once(
     assert len(rows) == 1
 
 
+def test_stable_settlement_consolidates_legacy_duplicates_without_collateral(
+    cfg: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _settled_full_loss(cfg, payload={"outcome": 0})
+    monkeypatch.setattr(loop, "_entry_execution_fill_aggregate", _command_dedup_basis)
+    assert len(loop.detect(cfg)) == 1
+    with loop.memory(cfg) as mem:
+        for index in range(13):
+            status = "running" if index == 12 else ("queued" if index % 2 else "retry_pending")
+            mem.execute(
+                "INSERT INTO incidents(incident_id,kind,position_id,crossing_evidence_id,crossing_kind,"
+                "held_token_id,held_direction,floor_price,detected_at,priority,status,stage,updated_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    f"legacy-{index}", "hard", "p-settled", f"legacy-evidence-{index}",
+                    "settlement_full_loss", "yes-token", "sell_yes", 0.05,
+                    "2026-08-22T10:00:00+00:00", 1_000_000.0, status, "blind",
+                    "2026-08-22T10:00:00+00:00",
+                ),
+            )
+        mem.execute(
+            "INSERT INTO incidents(incident_id,kind,position_id,crossing_evidence_id,crossing_kind,"
+            "held_token_id,held_direction,floor_price,detected_at,priority,status,stage,updated_at) "
+            "VALUES ('quote-collateral','hard','p-settled','quote-evidence','below_floor',"
+            "'yes-token','sell_yes',.05,?,1,'queued','blind',?)",
+            ("2026-08-22T10:00:00+00:00", "2026-08-22T10:00:00+00:00"),
+        )
+        mem.execute(
+            "INSERT INTO incidents(incident_id,kind,position_id,crossing_evidence_id,crossing_kind,"
+            "held_token_id,held_direction,floor_price,detected_at,priority,status,stage,updated_at) "
+            "VALUES ('other-position','hard','other-position','other-evidence','settlement_full_loss',"
+            "'yes-token','sell_yes',.05,?,1,'queued','blind',?)",
+            ("2026-08-22T10:00:00+00:00", "2026-08-22T10:00:00+00:00"),
+        )
+        mem.commit()
+
+    assert loop.detect(cfg) == []
+    with loop.memory(cfg) as mem:
+        statuses = {
+            row["incident_id"]: row["status"]
+            for row in mem.execute(
+                "SELECT incident_id,status FROM incidents WHERE incident_id LIKE 'legacy-%'"
+            )
+        }
+        assert sum(status == "observing" for status in statuses.values()) == 12
+        assert statuses["legacy-12"] == "running"
+        assert mem.execute(
+            "SELECT status FROM incidents WHERE incident_id='quote-collateral'"
+        ).fetchone()[0] == "queued"
+        assert mem.execute(
+            "SELECT status FROM incidents WHERE incident_id='other-position'"
+        ).fetchone()[0] == "queued"
+        mem.execute(
+            "UPDATE incidents SET status='retry_pending' WHERE incident_id='legacy-12'"
+        )
+        mem.commit()
+    assert loop.detect(cfg) == []
+    with loop.memory(cfg) as mem:
+        assert mem.execute(
+            "SELECT status FROM incidents WHERE incident_id='legacy-12'"
+        ).fetchone()[0] == "observing"
+
+
 def test_canonical_settlement_correction_revises_existing_loss_incident(
     cfg: dict, monkeypatch: pytest.MonkeyPatch
 ) -> None:

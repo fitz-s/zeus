@@ -1173,6 +1173,9 @@ def _insert_settlement_full_loss_incident(
         (incident_id, position["position_id"], candidate["evidence_id"]),
     ).fetchone()
     if existing is not None:
+        _consolidate_legacy_settlement_incidents(
+            mem, str(position["position_id"]), incident_id
+        )
         return None
     mem.execute(
         "INSERT INTO incidents(incident_id,kind,position_id,crossing_evidence_id,crossing_kind,"
@@ -1185,7 +1188,33 @@ def _insert_settlement_full_loss_incident(
             1_000_000_000.0, "queued", iso(),
         ),
     )
+    _consolidate_legacy_settlement_incidents(
+        mem, str(position["position_id"]), incident_id
+    )
     return incident_id
+
+
+def _consolidate_legacy_settlement_incidents(
+    mem: sqlite3.Connection,
+    position_id: str,
+    canonical_id: str,
+) -> None:
+    """Stop future duplicate queueing without killing an active model run."""
+
+    rows = mem.execute(
+        "SELECT incident_id,stage,status FROM incidents WHERE position_id=? "
+        "AND crossing_kind='settlement_full_loss' AND incident_id<>? "
+        "AND status IN ('queued','retry_pending')",
+        (position_id, canonical_id),
+    ).fetchall()
+    for row in rows:
+        transition(
+            mem,
+            str(row["incident_id"]),
+            str(row["stage"]),
+            reason=f"superseded_by_stable_settlement_identity:{canonical_id}",
+            status="observing",
+        )
 
 
 def _revise_settlement_non_loss_incidents(
