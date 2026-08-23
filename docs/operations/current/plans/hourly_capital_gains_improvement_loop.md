@@ -917,6 +917,29 @@
   concurrent, and the first current Day0 request must reach a committed posterior
   without a multi-minute boot-scan stall.
 
+### 2026-08-23 — keep seed cycle boundaries on the ordered live-family index (B156)
+
+- **Observed defect:** every seed admission asked for the newest family
+  posterior through the `source_id` index and then sorted the full matching
+  history by `computed_at`. Against the 77.7 GB live forecast DB, cold random
+  table reads plus a temporary sort repeated across the inspection window
+  occupied the single materializer scheduler instance for minutes before any
+  probability subprocess could start.
+- **Contract:** cycle monotonicity compares only against the newest
+  `runtime_layer = 'live'` posterior and uses the existing
+  `idx_forecast_posteriors_runtime_layer_target` ordering. Offline rows cannot
+  advance the live boundary. The same-cycle ENS HWM remains the independent
+  second boundary.
+- **SCOPE / DRAIN / RESET:** scope is one queued city/date/metric seed. Each
+  poll reads one ordered index head per inspected family, then the normal
+  request compute/write path proceeds. A newer live posterior or eligible ENS
+  cycle changes the boundary on the next poll; missing/unreadable authority
+  preserves the existing retry behavior.
+- **Acceptance:** query plan uses the ordered live-family index with no
+  temporary ORDER BY B-tree; an offline row with a newer cycle does not
+  supersede the live boundary; targeted queue/materializer tests and a real
+  restart show bounded pre-spawn latency.
+
 ### 2026-08-23 — spend the live Day0 observation clock before timeless FIFO (B154)
 
 - **Observed defect:** Madrid published a canonical 09:04:22 METAR and emitted

@@ -283,6 +283,19 @@ def _run_materialization_batch(
 
 _LOG = logging.getLogger("zeus.replacement_live_materialization_queue")
 
+_CURRENT_LIVE_POSTERIOR_CYCLE_SQL = """
+    SELECT source_cycle_time
+    FROM forecast_posteriors
+         INDEXED BY idx_forecast_posteriors_runtime_layer_target
+    WHERE runtime_layer = 'live'
+      AND source_id = ?
+      AND city = ?
+      AND target_date = ?
+      AND temperature_metric = ?
+    ORDER BY computed_at DESC
+    LIMIT 1
+"""
+
 
 def _surface_subprocess_warnings(input_name: str, completed: "subprocess.CompletedProcess[str]") -> None:
     """ANTI-SILENT-SINK (2026-06-09): each materialization runs as a SUBPROCESS with
@@ -936,16 +949,7 @@ def _seed_source_cycle_boundary(
         try:
             conn.execute("PRAGMA query_only=ON")
             row = conn.execute(
-                """
-                SELECT source_cycle_time
-                FROM forecast_posteriors
-                WHERE source_id = ?
-                  AND city = ?
-                  AND target_date = ?
-                  AND temperature_metric = ?
-                ORDER BY computed_at DESC
-                LIMIT 1
-                """,
+                _CURRENT_LIVE_POSTERIOR_CYCLE_SQL,
                 (
                     SOURCE_ID,
                     str(seed.get("city")),

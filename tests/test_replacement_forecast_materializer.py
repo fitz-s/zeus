@@ -4974,3 +4974,90 @@ def test_boot_current_posterior_family_scan_uses_covering_index(
         ("Paris", "2026-08-23", "high"),
         ("Munich", "2026-08-23", "high"),
     )
+
+
+def test_seed_cycle_boundary_uses_ordered_live_family_index(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.data import replacement_forecast_live_materialization_queue as queue
+    from src.data import replacement_input_hwm
+
+    forecast_db = tmp_path / "forecasts.db"
+    conn = sqlite3.connect(forecast_db)
+    conn.executescript(
+        """
+        CREATE TABLE forecast_posteriors (
+            posterior_id INTEGER PRIMARY KEY,
+            source_id TEXT NOT NULL,
+            city TEXT NOT NULL,
+            target_date TEXT NOT NULL,
+            temperature_metric TEXT NOT NULL,
+            source_cycle_time TEXT NOT NULL,
+            computed_at TEXT NOT NULL,
+            runtime_layer TEXT NOT NULL,
+            q_json TEXT NOT NULL
+        );
+        CREATE INDEX idx_forecast_posteriors_runtime_layer_target
+            ON forecast_posteriors(
+                runtime_layer, city, target_date, temperature_metric, computed_at
+            );
+        """
+    )
+    conn.executemany(
+        "INSERT INTO forecast_posteriors VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            (
+                1,
+                queue.SOURCE_ID,
+                "Ankara",
+                "2026-08-23",
+                "high",
+                "2026-08-23T06:00:00+00:00",
+                "2026-08-23T08:00:00+00:00",
+                "live",
+                "x" * 100_000,
+            ),
+            (
+                2,
+                queue.SOURCE_ID,
+                "Ankara",
+                "2026-08-23",
+                "high",
+                "2026-08-23T18:00:00+00:00",
+                "2026-08-23T09:00:00+00:00",
+                "offline",
+                "y" * 100_000,
+            ),
+        ),
+    )
+    conn.commit()
+    plan = "\n".join(
+        str(row[3])
+        for row in conn.execute(
+            "EXPLAIN QUERY PLAN " + queue._CURRENT_LIVE_POSTERIOR_CYCLE_SQL,
+            (queue.SOURCE_ID, "Ankara", "2026-08-23", "high"),
+        ).fetchall()
+    )
+    conn.close()
+    monkeypatch.setattr(
+        replacement_input_hwm,
+        "latest_eligible_ensemble_input_cycle",
+        lambda *_args, **_kwargs: datetime(
+            2026, 8, 23, 12, tzinfo=timezone.utc
+        ),
+    )
+
+    boundary = queue._seed_source_cycle_boundary(
+        forecast_db=forecast_db,
+        seed={
+            "city": "Ankara",
+            "target_date": "2026-08-23",
+            "temperature_metric": "high",
+            "source_cycle_time": "2026-08-23T12:00:00+00:00",
+        },
+    )
+
+    assert boundary is None
+    assert "USING INDEX idx_forecast_posteriors_runtime_layer_target" in plan
+    assert "USE TEMP B-TREE FOR ORDER BY" not in plan
