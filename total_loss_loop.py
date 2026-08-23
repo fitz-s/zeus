@@ -2700,10 +2700,23 @@ def _provider_backoff(cfg: Mapping[str, Any]) -> dict[str, Any] | None:
     max_seconds = max(1.0, min(float(cfg["loop"].get("max_provider_backoff_seconds", 86_400)), 86_400.0))
     minimum_seconds = max(1.0, min(float(cfg["loop"].get("provider_cooldown_seconds", 300)), max_seconds))
     remaining = (retry_at - now()).total_seconds()
-    bounded_seconds = max(minimum_seconds, min(remaining, max_seconds))
-    bounded_at = now() + timedelta(seconds=bounded_seconds)
     result = dict(value)
-    if abs(remaining - bounded_seconds) > 0.5:
+    legacy = not result.get("policy_revision")
+    kind = str(result.get("kind") or "provider_rate_limit")
+    if legacy:
+        bounded_seconds = max_seconds if kind == "provider_quota_limit" else minimum_seconds
+        bounded_at = now() + timedelta(seconds=bounded_seconds)
+        result["policy_revision"] = "provider-backoff-v2"
+        result["policy_class"] = kind
+    elif remaining > max_seconds:
+        bounded_at = now() + timedelta(seconds=max_seconds)
+        result["next_retry_at"] = iso(bounded_at)
+        result["updated_at"] = iso()
+        with memory(cfg) as mem:
+            meta_set(mem, "codex_provider_backoff", json.dumps(result, sort_keys=True))
+            mem.commit()
+        return result
+    if legacy:
         result["next_retry_at"] = iso(bounded_at)
         result["updated_at"] = iso()
         with memory(cfg) as mem:
@@ -2737,6 +2750,8 @@ def _set_provider_backoff(
         "next_retry_at": iso(retry_at),
         "reason": str(failure.get("reason") or "provider_quota_limit")[:1000],
         "kind": str(failure.get("kind") or "provider_quota_limit"),
+        "policy_revision": "provider-backoff-v2",
+        "policy_class": str(failure.get("kind") or "provider_quota_limit"),
         "updated_at": iso(),
     }
     meta_set(mem, "codex_provider_backoff", json.dumps(payload, sort_keys=True))

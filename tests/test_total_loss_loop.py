@@ -11,6 +11,7 @@ import json
 import os
 import sqlite3
 import subprocess
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -591,6 +592,64 @@ def test_absolute_provider_retry_targets_are_bounded_and_past_falls_back(cfg: di
     with loop.memory(cfg) as mem:
         persisted = json.loads(loop.meta_get(mem, "codex_provider_backoff"))
     assert (loop.parse_time(persisted["next_retry_at"]) - loop.now()).total_seconds() <= 10.5
+
+
+def test_provider_backoff_reads_do_not_ratchet_and_legacy_policy_migrates_once(
+    cfg: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cfg["loop"].update(provider_cooldown_seconds=5, max_provider_backoff_seconds=60)
+    fixed = datetime(2026, 8, 23, 20, 0, 0, tzinfo=UTC)
+    monkeypatch.setattr(loop, "now", lambda: fixed)
+    with loop.memory(cfg) as mem:
+        loop.meta_set(
+            mem,
+            "codex_provider_backoff",
+            json.dumps({
+                "next_retry_at": loop.iso(fixed + timedelta(seconds=1)),
+                "kind": "provider_rate_limit",
+                "policy_revision": "provider-backoff-v2",
+            }),
+        )
+        mem.commit()
+    first = loop._provider_backoff(cfg)
+    with loop.memory(cfg) as mem:
+        raw_first = loop.meta_get(mem, "codex_provider_backoff")
+    second = loop._provider_backoff(cfg)
+    with loop.memory(cfg) as mem:
+        raw_second = loop.meta_get(mem, "codex_provider_backoff")
+    assert first == second
+    assert raw_first == raw_second
+    monkeypatch.setattr(loop, "now", lambda: fixed + timedelta(seconds=2))
+    assert loop._provider_backoff(cfg) is None
+
+    monkeypatch.setattr(loop, "now", lambda: fixed)
+    with loop.memory(cfg) as mem:
+        loop.meta_set(
+            mem,
+            "codex_provider_backoff",
+            json.dumps({
+                "next_retry_at": loop.iso(fixed + timedelta(seconds=10)),
+                "kind": "provider_quota_limit",
+            }),
+        )
+        mem.commit()
+    migrated_quota = loop._provider_backoff(cfg)
+    assert migrated_quota["policy_revision"] == "provider-backoff-v2"
+    assert loop.parse_time(migrated_quota["next_retry_at"]) == fixed + timedelta(seconds=60)
+    assert loop._provider_backoff(cfg) == migrated_quota
+
+    with loop.memory(cfg) as mem:
+        loop.meta_set(
+            mem,
+            "codex_provider_backoff",
+            json.dumps({
+                "next_retry_at": loop.iso(fixed + timedelta(seconds=60)),
+                "kind": "provider_rate_limit",
+            }),
+        )
+        mem.commit()
+    migrated_rate = loop._provider_backoff(cfg)
+    assert loop.parse_time(migrated_rate["next_retry_at"]) == fixed + timedelta(seconds=5)
 
 
 def test_launch_guard_rechecks_durable_backoff_before_each_spawn(
