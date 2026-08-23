@@ -1,4 +1,4 @@
-# Lifecycle: created=2026-08-22; last_reviewed=2026-08-22; last_reused=2026-08-22
+# Lifecycle: created=2026-08-22; last_reviewed=2026-08-23; last_reused=2026-08-23
 # Purpose: Relationship antibodies for event-time total-loss detection and evidence isolation.
 # Reuse: Run whenever detector timing, exposure lifecycle, quote persistence, or Codex orchestration changes.
 """Relationship antibodies for the event-time total-loss loop."""
@@ -69,13 +69,16 @@ def _trade_db(path: Path) -> None:
             );
             CREATE TABLE venue_trade_facts (
                 trade_fact_id INTEGER PRIMARY KEY, command_id TEXT,
+                trade_id TEXT,
                 observed_at TEXT, local_sequence INTEGER, fill_price TEXT,
                 filled_size TEXT
             );
             CREATE TABLE wallet_fill_observations (
-                id INTEGER PRIMARY KEY, token_id TEXT, observed_at TEXT,
+                id INTEGER PRIMARY KEY, token_id TEXT, trade_id TEXT, observed_at TEXT,
                 price TEXT, size TEXT
             );
+            CREATE INDEX idx_wallet_fill_observations_trade
+                ON wallet_fill_observations(trade_id);
             """
         )
 
@@ -828,6 +831,51 @@ def test_evidence_db_exposes_timeline_tables_without_copying_canonical_db(cfg: d
         } <= tables
         assert conn.execute("SELECT COUNT(*) FROM price_ticks").fetchone()[0] >= 1
     assert evidence.stat().st_size < Path(cfg["paths"]["trades_db"]).stat().st_size * 20
+
+
+def test_evidence_wallet_fills_follow_command_trade_ids_without_token_scan(
+    cfg: dict,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _position(cfg)
+    _quote(cfg, "q-low", "2026-08-22T09:00:02+00:00", 0.01)
+    incident_id = loop.detect(cfg)[0]
+    with sqlite3.connect(cfg["paths"]["trades_db"]) as conn:
+        conn.execute(
+            "INSERT INTO venue_commands VALUES (?,?,?,?,?)",
+            ("exit-command", "p1", "2026-08-22T09:00:03+00:00", "2026-08-22T09:00:03+00:00", "submitted"),
+        )
+        conn.execute(
+            "INSERT INTO venue_trade_facts VALUES (?,?,?,?,?,?,?)",
+            (1, "exit-command", "trade-match", "2026-08-22T09:00:04+00:00", 1, "0.01", "10"),
+        )
+        conn.executemany(
+            "INSERT INTO wallet_fill_observations VALUES (?,?,?,?,?,?)",
+            [
+                (1, "yes-token", "trade-match", "2026-08-22T09:00:05+00:00", "0.01", "10"),
+                (2, "yes-token", "decoy-trade", "2026-08-22T09:00:06+00:00", "0.01", "999"),
+            ],
+        )
+
+    queries: list[str] = []
+    original_open_ro = loop.open_ro
+
+    def traced_open_ro(path: Path):
+        conn = original_open_ro(path)
+        if Path(path) == Path(cfg["paths"]["trades_db"]):
+            conn.set_trace_callback(queries.append)
+        return conn
+
+    monkeypatch.setattr(loop, "open_ro", traced_open_ro)
+    evidence = loop.build_evidence(cfg, incident_id)
+
+    wallet_queries = [query for query in queries if "wallet_fill_observations" in query]
+    assert len(wallet_queries) == 1
+    assert "WHERE trade_id IN ('trade-match')" in wallet_queries[0]
+    assert "token_id" not in wallet_queries[0]
+    with sqlite3.connect(evidence) as conn:
+        rows = [json.loads(row[0]) for row in conn.execute("SELECT raw_json FROM fills")]
+    assert [row["trade_id"] for row in rows] == ["trade-match"]
 
 
 def test_codex_command_persists_primary_and_places_approval_before_exec(cfg: dict) -> None:

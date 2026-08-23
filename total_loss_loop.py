@@ -1237,6 +1237,7 @@ def build_evidence(cfg: Mapping[str, Any], incident_id: str) -> Path:
         order_facts: list[sqlite3.Row] = []
         trade_facts: list[sqlite3.Row] = []
         command_events: list[sqlite3.Row] = []
+        fills: list[sqlite3.Row] = []
         if command_ids:
             marks = ",".join("?" for _ in command_ids)
             order_facts = trades.execute(
@@ -1251,10 +1252,27 @@ def build_evidence(cfg: Mapping[str, Any], incident_id: str) -> Path:
                 f"SELECT * FROM venue_command_events WHERE command_id IN ({marks}) ORDER BY occurred_at,sequence_no LIMIT ?",
                 [*command_ids, row_limit],
             ).fetchall()
-        fills = trades.execute(
-            "SELECT * FROM wallet_fill_observations WHERE token_id=? ORDER BY observed_at LIMIT ?",
-            (incident["held_token_id"], row_limit),
-        ).fetchall()
+        trade_ids = list(dict.fromkeys(
+            trade_id
+            for row in trade_facts
+            if (trade_id := str(row["trade_id"] or "").strip())
+        ))
+        seen_fill_ids: set[int] = set()
+        for offset in range(0, len(trade_ids), 900):
+            remaining = row_limit - len(fills)
+            if remaining <= 0:
+                break
+            trade_id_batch = trade_ids[offset:offset + 900]
+            marks = ",".join("?" for _ in trade_id_batch)
+            for row in trades.execute(
+                f"SELECT * FROM wallet_fill_observations WHERE trade_id IN ({marks}) "
+                "ORDER BY observed_at,id LIMIT ?",
+                [*trade_id_batch, remaining],
+            ).fetchall():
+                if row["id"] in seen_fill_ids:
+                    continue
+                seen_fill_ids.add(row["id"])
+                fills.append(row)
     with sqlite3.connect(evidence) as out:
         out.executescript(EVIDENCE_SCHEMA)
         for key, value in incident.items():
