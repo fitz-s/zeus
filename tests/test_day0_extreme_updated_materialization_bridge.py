@@ -1,6 +1,6 @@
 # Created: 2026-07-19
-# Last reused/audited: 2026-08-20
-# Lifecycle: created=2026-07-19; last_reviewed=2026-08-20; last_reused=2026-08-20
+# Last reused/audited: 2026-08-23
+# Lifecycle: created=2026-07-19; last_reviewed=2026-08-23; last_reused=2026-08-23
 # Purpose: Prove Day0 reseed ownership and single-writer materialization ordering.
 # Reuse: Run after changing Day0 enqueue, replacement queue claims, or writer concurrency.
 # Authority basis: operator directive 2026-07-19 (Day0 is a zero-sum race against the market
@@ -44,6 +44,7 @@ import src.data.replacement_cycle_advance_trigger as cycle_advance
 import src.data.replacement_forecast_live_materialization_queue as materialization_queue
 import src.data.replacement_forecast_production as forecast_production
 import src.data.replacement_forecast_seed_discovery as seed_discovery
+import src.data.replacement_input_hwm as replacement_input_hwm
 from src.data.replacement_forecast_materializer import (
     expected_replacement_dependency_identity_by_role,
 )
@@ -145,10 +146,14 @@ def _day0_payload(observation_time: str) -> dict[str, object]:
 def _fake_build_seed_factory():
     """Stand in for the real seed builder (network/manifest-independent for this bridge unit
     test — the seed-content shape itself is covered by test_cycle_monotone_materialization.py)."""
-    calls = {"count": 0}
+    calls = {"count": 0, "manifest_cycles": []}
 
     def _fake_build_seed(_conn_arg, **kwargs):
         calls["count"] += 1
+        calls["manifest_cycles"] = [
+            str(manifest.source_cycle_time)
+            for manifest in kwargs.get("manifests", ())
+        ]
         path = Path(
             kwargs.get("output_path")
             or Path(kwargs["seed_path"]) / f"Shanghai.seed.{calls['count']}.json"
@@ -2460,6 +2465,67 @@ def test_day0_extreme_bridge_reseeds_new_observation_on_consumed_model_cycle(
     assert row["day0_observed_extreme_observation_time"] == (
         "2026-07-19T06:00:00+00:00"
     )
+
+
+def test_day0_reseed_does_not_wait_for_deterministic_cycle_ahead_of_ens(
+    tmp_path, monkeypatch
+) -> None:
+    """A new observed bound reconditions the last ENS-complete carrier now."""
+
+    db_path = _prepare_forecast_db(tmp_path)
+    consumed = datetime(2026, 7, 19, 0, tzinfo=UTC)
+    deterministic_ahead = datetime(2026, 7, 19, 6, tzinfo=UTC)
+    _insert_live_posterior(
+        db_path,
+        cycle_iso=consumed.isoformat(),
+        computed_at="2026-07-19T05:05:00+00:00",
+    )
+    manifests = (
+        SimpleNamespace(source_cycle_time=deterministic_ahead.isoformat()),
+        SimpleNamespace(source_cycle_time=consumed.isoformat()),
+    )
+    monkeypatch.setattr(
+        cycle_advance,
+        "_family_manifests_from_db",
+        lambda *args, **kwargs: manifests,
+    )
+    monkeypatch.setattr(
+        cycle_advance,
+        "family_materializable_cycle",
+        lambda *args, **kwargs: (deterministic_ahead, ()),
+    )
+    monkeypatch.setattr(
+        cycle_advance,
+        "freshest_materializable_cycle",
+        lambda _conn: deterministic_ahead,
+    )
+    monkeypatch.setattr(
+        replacement_input_hwm,
+        "latest_eligible_ensemble_input_cycle",
+        lambda *args, **kwargs: consumed,
+    )
+    fake_build_seed, calls = _fake_build_seed_factory()
+    monkeypatch.setattr(
+        cycle_advance,
+        "_build_and_write_advance_seed",
+        fake_build_seed,
+    )
+
+    report = cycle_advance.enqueue_single_family_cycle_advance_reseed(
+        forecast_db=db_path,
+        seed_dir=tmp_path / "seeds",
+        raw_manifest_dir=tmp_path / "raw",
+        city="Shanghai",
+        target_date="2026-07-19",
+        metric="high",
+        computed_at=datetime(2026, 7, 19, 6, 1, tzinfo=UTC),
+        held_position=True,
+        **_day0_payload("2026-07-19T06:00:00+00:00"),
+    )
+
+    assert report["status"] == "DAY0_OBSERVATION_ADVANCE_ENQUEUED"
+    assert report["target_cycle"] == consumed.isoformat()
+    assert calls["manifest_cycles"] == [consumed.isoformat()]
 
 
 def test_cycle_poll_catches_up_every_new_day0_identity_on_one_model_cycle(

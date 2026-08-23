@@ -1,6 +1,6 @@
 # Created: 2026-06-12
-# Last reused or audited: 2026-08-23 (same-cycle late ENS baseline reseed;
-#   per-family materializable-cycle gate + typed leg gap + loud held-family read failure)
+# Last reused or audited: 2026-08-23 (Day0 observation reseed binds the latest
+#   same-metric ENS-complete carrier; same-cycle late ENS baseline reseed)
 # Authority basis: U5 step 2a (operator regime-unification + freshness investigation 2026-06-12,
 #   docs/authority/regime_unification_2026-06-12.md §U2 + docs/evidence/freshness/
 #   2026-06-12_forecast_freshness_truth.md §Q4(b)). The U2 root fix's first half: re-materialize a
@@ -211,6 +211,59 @@ def normalize_observation_version(value: object) -> str | None:
     if parsed is None:
         return None
     return parsed.isoformat()
+
+
+def _day0_observation_reseed_cycle(
+    conn: sqlite3.Connection,
+    *,
+    city: str,
+    target_date: str,
+    metric: str,
+    consumed_cycle: datetime,
+    family_cycle: datetime,
+    decision_time: datetime,
+) -> datetime:
+    """Choose the newest ENS-complete cycle that can carry a Day0 revision.
+
+    Deterministic manifests can advance before the same-metric ENS shape. A
+    Day0 observation is an independent source clock and must not be stranded on
+    that incomplete future cycle: recondition the last complete carrier now,
+    then let normal cycle advance replace it when the newer ENS becomes
+    decision-time eligible.
+    """
+
+    from src.data.replacement_input_hwm import (  # noqa: PLC0415
+        latest_eligible_ensemble_input_cycle,
+    )
+
+    eligible_cycle = latest_eligible_ensemble_input_cycle(
+        conn,
+        city=city,
+        target_date=target_date,
+        metric=metric,
+        decision_time=decision_time,
+    )
+    if eligible_cycle is None or eligible_cycle < consumed_cycle:
+        return consumed_cycle
+    return min(family_cycle, eligible_cycle)
+
+
+def _manifests_through_cycle(
+    manifests: tuple[RawForecastArtifactManifest, ...],
+    *,
+    target_cycle: datetime,
+) -> tuple[RawForecastArtifactManifest, ...]:
+    """Exclude deterministic manifests newer than an exact carrier cycle."""
+
+    return tuple(
+        manifest
+        for manifest in manifests
+        if (
+            (manifest_cycle := _parse_cycle(manifest.source_cycle_time))
+            is not None
+            and manifest_cycle <= target_cycle
+        )
+    )
 
 
 def _day0_conditioning_identity(
@@ -2181,7 +2234,21 @@ def enqueue_single_family_cycle_advance_reseed(
                         report["status"] = "CYCLE_ADVANCE_MANIFEST_MISSING"
                         report["consumed_cycle"] = consumed_cycle_iso
                         return report
-                    target_cycle_iso = family_cycle.isoformat()
+                    consumed_cycle = consumed_cycle_dt(consumed_cycle_iso)
+                    target_cycle = _day0_observation_reseed_cycle(
+                        conn,
+                        city=city,
+                        target_date=target_date,
+                        metric=metric,
+                        consumed_cycle=consumed_cycle,
+                        family_cycle=family_cycle,
+                        decision_time=now,
+                    )
+                    target_cycle_iso = target_cycle.isoformat()
+                    day0_manifests = _manifests_through_cycle(
+                        manifests,
+                        target_cycle=target_cycle,
+                    )
                     enqueue_decision = _enqueue_decision(
                         conn,
                         city=city,
@@ -2220,7 +2287,7 @@ def enqueue_single_family_cycle_advance_reseed(
                         city=city,
                         target_date=target_date,
                         metric=metric,
-                        manifests=manifests,
+                        manifests=day0_manifests,
                         raw_dir=raw_dir,
                         seed_path=seed_path,
                         computed_at=now,

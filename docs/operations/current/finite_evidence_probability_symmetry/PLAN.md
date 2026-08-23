@@ -4,6 +4,25 @@ Date: 2026-07-11
 Branch: `live` (was `p2-pending-exit-restart-redecision`; renamed at main→live cutover)
 Status: active
 
+## 2026-08-23 — Day0 observation revision不得被不完整的future ENS cycle冻结
+
+- **实时反例：** Warsaw/Madrid/Munich 的最新settlement/physical extreme分别推进到
+  19/31/22C，但live posterior仍绑定18/30/21C。monitor正确fail closed为
+  `GLOBAL_DAY0_CONDITIONING_OBSERVATION_MISMATCH`，repair却每轮返回
+  `CYCLE_ADVANCE_NOT_NEEDED`。deterministic 06Z manifest先到、同指标eligible ENS仍为
+  00Z，旧06Z seed随后以`SOURCE_CYCLE_AWAITING_ENSEMBLE_HWM`被消费，5个held
+  positions持续失去fresh q。
+- **修复：** Day0 observation是独立source clock。reseed选择不晚于family manifest且
+  已decision-time-eligible的同metric ENS cycle；若future deterministic cycle尚无ENS，
+  立即用上一完整carrier和精确同cycle manifests重做conditioning。新ENS完整后仍由
+  normal cycle advance替换，不放宽任何mismatch/HWM/age gate。
+- **SCOPE / DRAIN / RESET：** scope是一条city/date/metric Day0 conditioning revision；
+  drain是现有single-family seed queue；reset是新posterior provenance精确消费该
+  conditioning identity。ENTRY与其他family不共享blocker，future ENS也不被伪装成完整。
+- **验收：** relationship test构造06Z deterministic/00Z eligible ENS并证明seed target与
+  manifests均保持00Z；运行完整Day0 bridge/cycle monotone suites，部署后要求5个live
+  positions的`last_monitor_prob_is_fresh`恢复且stale_count清零。
+
 ## 2026-08-23 — partial deterministic cycle不得冻结reduce-only SELL
 
 - **实时反例：** global auction反复选择正 expected-log-growth SELL，但preflight在新
