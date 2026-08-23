@@ -238,6 +238,7 @@ class ChainPositionView:
 
 
 _ALLOCATE_DUST = 0.01  # minimum size difference treated as dust, not a gap
+_CHAIN_ONLY_MATCH_SHARE_TOLERANCE = Decimal("0.0001")
 # Copilot review fix (2026-05-31, issue #1): after the chain_shares first-
 # population the old helper returned early when shares were unchanged, leaving
 # chain_seen_at permanently frozen. Re-emit the observation event when the
@@ -2102,7 +2103,7 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
             not chain_size.is_finite()
             or not local_size.is_finite()
             or chain_size <= 0
-            or chain_size != local_size
+            or abs(chain_size - local_size) > _CHAIN_ONLY_MATCH_SHARE_TOLERANCE
         ):
             return False
 

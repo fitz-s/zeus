@@ -1,4 +1,4 @@
-# Lifecycle: created=2026-05-31; last_reviewed=2026-08-11; last_reused=2026-08-11
+# Lifecycle: created=2026-05-31; last_reviewed=2026-08-23; last_reused=2026-08-23
 # Purpose: Relationship test — chain economics (chain_shares, chain_seen_at) persist
 #   to position_current for SYNCED positions and survive a fresh DB read (task #56).
 # Reuse: inspect chain_reconciliation.reconcile() else-branch + _append_canonical_chain_observation_if_available
@@ -546,6 +546,73 @@ def test_exact_synced_match_resolves_chain_only_debt_without_hiding_future_drift
         "chain_only_quarantined",
     ]
     assert [fact.token_id for fact in portfolio.chain_only_facts] == [token_id]
+
+
+@pytest.mark.parametrize(
+    ("local_size", "expected_resolved"),
+    ((5.307691, True), (5.307701, False)),
+)
+def test_projection_quantized_synced_match_resolves_chain_only_debt(
+    local_size: float,
+    expected_resolved: bool,
+) -> None:
+    """Four-decimal equivalence resolves debt, but larger drift remains open."""
+    token_id = "tok-chain-only-quantized-match"
+    condition_id = "cond-chain-only-quantized-match"
+    chain_size = 5.3076
+    with tempfile.TemporaryDirectory() as tmpdir:
+        conn = _setup_db_on_disk(os.path.join(tmpdir, "trade.db"))
+        pos = _make_position(
+            trade_id="local-chain-only-quantized-match",
+            token_id=token_id,
+            shares=local_size,
+        )
+        pos.condition_id = condition_id
+        _seed_position_current(conn, pos, chain_shares=chain_size)
+        work_id, _ = _seed_chain_only_review_debt(
+            conn,
+            token_id=token_id,
+            condition_id=condition_id,
+            size=chain_size,
+        )
+        portfolio = PortfolioState(
+            positions=[pos],
+            chain_only_facts=[
+                _chain_only_fact(
+                    token_id=token_id,
+                    condition_id=condition_id,
+                    size=chain_size,
+                )
+            ],
+            ignored_tokens=[token_id],
+        )
+        chain = ChainPosition(
+            token_id=token_id,
+            size=chain_size,
+            avg_price=0.6499,
+            cost=3.4499,
+            condition_id=condition_id,
+        )
+
+        result = reconcile(portfolio, [chain], conn=conn)
+        suppression = conn.execute(
+            "SELECT suppression_reason FROM token_suppression WHERE token_id = ?",
+            (token_id,),
+        ).fetchone()[0]
+        work_status = conn.execute(
+            "SELECT status FROM review_work_items WHERE work_id = ?",
+            (work_id,),
+        ).fetchone()[0]
+        conn.rollback()
+        conn.close()
+
+    assert result.get("chain_only_auto_resolved_match", 0) == int(expected_resolved)
+    assert suppression == (
+        CHAIN_ONLY_AUTO_RESOLVED_MATCH
+        if expected_resolved
+        else "chain_only_quarantined"
+    )
+    assert work_status == ("RESOLVED" if expected_resolved else "OPEN")
 
 
 def test_exact_multilot_aggregate_resolves_chain_only_debt_once() -> None:

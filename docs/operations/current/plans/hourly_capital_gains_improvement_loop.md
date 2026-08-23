@@ -967,6 +967,28 @@
   exact Warsaw command becoming `FILLED`, a monitored token-matching canonical
   position, and the chain-only review item draining or becoming superseded.
 
+### 2026-08-23 — chain projection precision must reset recovered exposure debt (B159)
+
+- **Observed defect:** B157 recovered the Warsaw confirmed fill as 5.307691
+  canonical shares, while the Chain position surface represented the same
+  exposure as 5.3076. Reconciliation correctly marked the position synced, but
+  chain-only suppression RESET required decimal equality, leaving the old
+  `CHAIN_ONLY_UNKNOWN_ASSET` review item OPEN for a 0.000091 representation gap.
+- **Contract:** an otherwise exact token, condition, positive-exposure, complete
+  Chain match may reset chain-only debt when aggregate local and Chain shares
+  differ by at most the existing canonical four-decimal projection tolerance
+  (`0.0001`). This tolerance is only a representation equivalence; it does not
+  authorize a fill, change position shares/cost, or hide larger drift.
+- **SCOPE / DRAIN / RESET:** scope is the automatic suppression/review cleanup
+  after canonical position materialization. The next normal Chain reconcile
+  atomically records `chain_only_auto_resolved_match` and resolves only matching
+  `CHAIN_ONLY_UNKNOWN_ASSET` work. Missing token/condition identity, nonpositive
+  exposure, incomplete Chain truth, or a larger size gap remains blocked.
+- **Acceptance:** relationship test reproduces Warsaw's 5.307691-vs-5.3076
+  shape and requires both token suppression and review item to resolve. Live
+  acceptance requires Warsaw to remain `synced` with fresh monitor probability
+  and book while its exact stale review item becomes `RESOLVED`.
+
 ### 2026-08-23 — spend the live Day0 observation clock before timeless FIFO (B154)
 
 - **Observed defect:** Madrid published a canonical 09:04:22 METAR and emitted

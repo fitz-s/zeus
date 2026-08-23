@@ -2660,8 +2660,9 @@ files:
       - resolve_position_metric(position) -> (metric, authority, source) — peer for non-rescue reads
       - LEARNING_AUTHORITY_REQUIRED = "VERIFIED" — anchor for downstream
         learning consumers that filter rescue_events reads.
-      A fresh complete exact token/aggregate match atomically appends an
-      automatic token-suppression resolution and closes only matching
+      A fresh complete token/aggregate match within the canonical four-decimal
+      share projection tolerance atomically appends an automatic
+      token-suppression resolution and closes only matching
       CHAIN_ONLY_UNKNOWN_ASSET review debt; later absence may reopen it.
     downstream:
     - src/engine/cycle_runner.py

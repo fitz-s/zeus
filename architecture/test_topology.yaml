@@ -223,7 +223,7 @@ test_trust_policy:
     tests/events/test_continuous_redecision_emit.py: {created: "2026-05-31", last_used: "2026-07-17"}
     tests/events/test_continuous_redecision_exit.py: {created: "2026-05-31", last_used: "2026-05-31"}
     tests/test_reactor_family_keying_antibody.py: {created: "2026-06-04", last_used: "2026-06-05", note: "Antibody (Fitz #4): NULL/empty condition_id sibling at the reactor family seam fails LOUD (FamilyKeyingError), never silently shrinks the MECE family"}
-    tests/test_chain_shares_persist_synced.py: {created: "2026-05-31", last_used: "2026-07-19", note: "Fresh exact local/chain token aggregate match resolves only chain-only review debt atomically; repeat is idempotent and later absence reopens."}
+    tests/test_chain_shares_persist_synced.py: {created: "2026-05-31", last_used: "2026-08-23", note: "Fresh local/chain token aggregate match within canonical four-decimal projection tolerance resolves only chain-only review debt atomically; repeat is idempotent and later absence reopens."}
     tests/state/test_inv_chain_only_review_lifecycle.py: {created: "2026-05-27", last_used: "2026-07-19", note: "Typed ChainOnlyFact review lifecycle, including automatic exact-match resolution without operator provenance."}
     tests/test_phase10a_hygiene.py: {created: "2026-04-02", last_used: "2026-07-19", note: "B071 token-suppression history/view migration preserves append-only audit metadata and upgrades reason CHECK idempotently."}
     tests/test_position_current_trade_schema_migration.py: {created: "2026-06-03", last_used: "2026-06-03"}
