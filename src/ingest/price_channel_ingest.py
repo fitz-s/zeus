@@ -2290,6 +2290,7 @@ def _edli_user_channel_reconcile_cycle() -> dict[str, object]:
     _m5_authority_deadline_check(deadline_monotonic)
 
     conn = None
+    canonical_rest_refreshed_token_ids: set[str] = set()
     try:
         with _edli_price_channel_world_write_gate(
             owner="price_channel_user_inbox"
@@ -3959,6 +3960,7 @@ def _edli_refresh_held_position_quote_evidence(
                 metadata = token_metadata.get(token_id)
                 if metadata is None or (metadata.condition_id, token_id) not in canonical_held_pairs:
                     continue
+                canonical_rest_refreshed_token_ids.add(token_id)
                 actions.append(
                     MarketChannelAction(
                         refresh_snapshot=True,
@@ -4051,7 +4053,12 @@ def _edli_refresh_held_position_quote_evidence(
             "canonical_held_token_ids": len(canonical_held_token_ids),
             "canonical_held_pair_count": len(canonical_held_pairs),
             "canonical_held_quote_ws_covered_tokens": canonical_ws_covered_tokens,
-            "canonical_held_freshness_debt_token_ids": canonical_held_freshness_debt_token_ids,
+            "canonical_held_freshness_debt_token_ids": list(dict.fromkeys([
+                *canonical_held_freshness_debt_token_ids,
+                *(token_id for token_id in rest_canonical_held_token_ids if token_id not in canonical_rest_refreshed_token_ids),
+            ])),
+            "canonical_rest_attempted_token_ids": list(rest_canonical_held_token_ids),
+            "canonical_rest_refreshed_token_ids": sorted(canonical_rest_refreshed_token_ids),
             "held_token_metadata": len(token_metadata),
             "held_quote_refresh_ws_covered_tokens": ws_covered_tokens,
             "held_quote_refresh_events": int(written),
