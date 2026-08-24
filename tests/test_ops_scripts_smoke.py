@@ -4,7 +4,7 @@
 # Reuse: asserts the FAIL-SOFT contract (a locked/empty/missing DB degrades one
 #   section to ERR, the rest still render) and that each script runs read-only
 #   against temp DBs. No live DB is touched.
-# Last reused/audited: 2026-08-21
+# Last reused/audited: 2026-08-24
 # Authority basis: operator big-direction 2026-06-12 ("大方向现在也只是添加几个文件现在做")
 """Smoke tests for scripts/zeus_status.py, deploy_live.py, generate_schema_cheatsheet.py."""
 from __future__ import annotations
@@ -4155,6 +4155,119 @@ def test_deploy_live_loaded_restart_blocks_every_open_capital_phase(
     assert ok is False
     assert "open_positions=1" in detail
     assert "pos-open" in detail
+
+
+def test_deploy_live_loaded_restart_allows_paused_current_monitor_handoff(
+    monkeypatch, tmp_path
+):
+    dl = _load("deploy_live_restart_paused_handoff", "deploy_live.py")
+    state = tmp_path / "state"
+    state.mkdir()
+    world, trade = _init_paused_entry_park_authority(state)
+    trade.execute(
+        "INSERT INTO position_current VALUES ('pos-open', 'day0_window', 7, 7, 'synced')"
+    )
+    world.commit()
+    trade.commit()
+    world.close()
+    trade.close()
+    monkeypatch.setattr(dl, "LIVE_REPO", str(tmp_path))
+    monkeypatch.setattr(
+        dl,
+        "_pre_stop_monitor_handoff_evidence",
+        lambda _trade_db: {
+            "green": True,
+            "open_position_count": 1,
+            "probability_degraded_position_count": 1,
+        },
+    )
+
+    ok, detail = dl._loaded_live_restart_obligation_gate(
+        [dl.LIVE_TRADING_LABEL],
+        live_was_loaded=True,
+    )
+
+    assert ok is True
+    assert "repair handoff verified" in detail
+    assert "durable_entries_pause=true" in detail
+    assert "probability_degraded_positions=1" in detail
+
+
+@pytest.mark.parametrize(
+    ("issue", "probability_only_count", "expected_green"),
+    (
+        ("monitor_probability_stale", 1, True),
+        ("monitor_probability_and_clob_stale", 0, False),
+    ),
+)
+def test_deploy_live_pre_stop_handoff_requires_fresh_held_quote(
+    monkeypatch, tmp_path, issue, probability_only_count, expected_green
+):
+    dl = _load(f"deploy_live_restart_handoff_{issue}", "deploy_live.py")
+    trade_db = tmp_path / "zeus_trades.db"
+    sqlite3.connect(trade_db).close()
+    evidence = {
+        "open_position_count": 1,
+        "monitored_position_ids": ["pos-open"],
+        "fresh_position_count": 0,
+        "stale_or_missing_position_count": 1,
+        "stale_or_missing_positions": [
+            {"position_id": "pos-open", "issue": issue}
+        ],
+        "blocking_stale_position_count": 1,
+        "blocking_stale_positions": [
+            {"position_id": "pos-open", "issue": issue}
+        ],
+        "quote_only_stale_position_count": 0,
+        "quote_only_stale_positions": [],
+        "probability_only_stale_position_count": probability_only_count,
+        "probability_only_stale_positions": (
+            [{"position_id": "pos-open", "issue": issue}]
+            if probability_only_count
+            else []
+        ),
+        "future_monitor_event_count": 0,
+        "non_monitor_chain_risk_position_count": 0,
+    }
+    monkeypatch.setattr(
+        dl,
+        "collect_monitor_cadence_evidence",
+        lambda *_args, **_kwargs: evidence,
+    )
+
+    handoff = dl._pre_stop_monitor_handoff_evidence(trade_db)
+
+    assert handoff["green"] is expected_green
+
+
+def test_deploy_live_loaded_restart_refuses_unpaused_monitor_handoff(
+    monkeypatch, tmp_path
+):
+    dl = _load("deploy_live_restart_unpaused_handoff", "deploy_live.py")
+    state = tmp_path / "state"
+    state.mkdir()
+    world, trade = _init_paused_entry_park_authority(state, paused=False)
+    trade.execute(
+        "INSERT INTO position_current VALUES ('pos-open', 'day0_window', 7, 7, 'synced')"
+    )
+    world.commit()
+    trade.commit()
+    world.close()
+    trade.close()
+    monkeypatch.setattr(dl, "LIVE_REPO", str(tmp_path))
+    monkeypatch.setattr(
+        dl,
+        "_pre_stop_monitor_handoff_evidence",
+        lambda _trade_db: pytest.fail("unpaused restart must refuse before handoff"),
+    )
+
+    ok, detail = dl._loaded_live_restart_obligation_gate(
+        [dl.LIVE_TRADING_LABEL],
+        live_was_loaded=True,
+    )
+
+    assert ok is False
+    assert "durable_entries_pause=false" in detail
 
 
 def test_deploy_live_loaded_restart_blocks_nonterminal_command_without_position(
