@@ -194,6 +194,28 @@ def test_noaa_adapter_replays_materialized_carrier_identity_and_samples():
         assert payload["_edli_day0_remaining_carrier_q"] == expected["q"]
         assert payload["_edli_day0_remaining_probability_samples"] == expected["samples"]
         assert payload["_edli_day0_remaining_probability_sample_count"] == 500
+        ogimet_payload = {
+            **payload,
+            "settlement_source": "ogimet_metar_llbg",
+            "evidence_finality": "MONOTONE_SETTLEMENT_BOUND",
+            "_edli_day0_physical_frontier_source": "aviationweather_metar",
+        }
+        ogimet_replay = era._day0_remaining_p_raw_vector(
+            np.asarray(future),
+            city=city,
+            settlement_semantics=SettlementSemantics.for_city(city),
+            bins=[
+                Bin(None, 30, "C", "30C or below"),
+                Bin(31, 31, "C", "31C"),
+                Bin(32, 32, "C", "32C"),
+                Bin(33, None, "C", "33C or above"),
+            ],
+            payload=ogimet_payload,
+            extra_member_sigma=0.0,
+        )
+        assert ogimet_replay.tolist() == pytest.approx(expected["q"])
+        assert ogimet_replay[-1] == pytest.approx(0.9508620689655143, abs=0.005)
+        assert ogimet_replay[-1] != pytest.approx(0.4418, abs=1e-9)
         likelihood_mismatch = dict(payload)
         likelihood_mismatch["_edli_day0_provisional_revision_likelihood"] = {
             **payload["_edli_day0_provisional_revision_likelihood"],
@@ -2573,7 +2595,7 @@ class TestRemainingDayMembers:
             "rounded_value": settlement_boundary,
             "high_so_far": settlement_boundary if metric == "high" else None,
             "low_so_far": settlement_boundary if metric == "low" else None,
-            "settlement_source": "aviationweather_metar",
+            "settlement_source": "hko_daily_api",
             "_edli_day0_probability_boundary_native": physical_boundary,
         }
         family = SimpleNamespace(
@@ -2937,7 +2959,7 @@ class TestRemainingDayMembers:
         payload = {
             "metric": "high",
             "rounded_value": 70,
-            "settlement_source": "aviationweather_metar",
+            "settlement_source": "hko_daily_api",
             "_edli_day0_peak_set_probability": 0.9079,
             "_edli_day0_peak_set_sample_count": 70,
             "_edli_day0_peak_set_probability_basis": (
@@ -2961,7 +2983,7 @@ class TestRemainingDayMembers:
             payload={
                 "metric": "high",
                 "rounded_value": 70,
-                "settlement_source": "aviationweather_metar",
+                "settlement_source": "hko_daily_api",
             },
             extra_member_sigma=0.0,
         )

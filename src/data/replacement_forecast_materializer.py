@@ -72,6 +72,12 @@ from src.state.source_run_repo import get_source_run
 UTC = timezone.utc
 
 
+def _is_noaa_preliminary_source(source: object) -> bool:
+    from src.events.day0_authority import day0_is_noaa_preliminary_source
+
+    return day0_is_noaa_preliminary_source(source)
+
+
 # ---------------------------------------------------------------------------
 # FIX 1 (2026-06-09) — explicit replacement q-mode authority.
 #
@@ -1227,7 +1233,7 @@ def _day0_noaa_preliminary_carrier(
     family-scoped failure, never permission to use a full-day Normal.
     """
     source = str(request.day0_observed_extreme_source or "").strip().lower()
-    if not source.startswith("aviationweather_metar"):
+    if not _is_noaa_preliminary_source(source):
         raise ValueError("DAY0_NOAA_PRELIMINARY_CARRIER_SOURCE_INVALID")
     observed = _day0_observed_extreme_c(request)
     if observed is None:
@@ -5788,9 +5794,9 @@ def _compute_posterior_payload(
             # asymmetric floor() preimage is used instead of the symmetric WMO one. Uniform
             # across the family (fail-loud if mixed).
             _rounding_rule = _family_rounding_rule(request.bins)
-            _noaa_preliminary_source = str(
-                request.day0_observed_extreme_source or ""
-            ).strip().lower().startswith("aviationweather_metar")
+            _noaa_preliminary_source = _is_noaa_preliminary_source(
+                request.day0_observed_extreme_source
+            )
             _day0_obs_extreme_c = (
                 None
                 if _noaa_preliminary_source
@@ -5871,10 +5877,7 @@ def _compute_posterior_payload(
             )
             if (
                 _provisional_extreme_c is not None
-                and str(request.day0_observed_extreme_source or "")
-                .strip()
-                .lower()
-                .startswith("aviationweather_metar")
+                and _is_noaa_preliminary_source(request.day0_observed_extreme_source)
             ):
                 _carrier_future, _carrier_path_sigma, _carrier_cutoff = (
                     _day0_noaa_future_vector_members(conn, request, metric=metric)
@@ -6398,10 +6401,7 @@ def _compute_posterior_payload(
     if (
         _target_local_day_has_started(request)
         and _day0_observed_extreme_c(request) is not None
-        and str(request.day0_observed_extreme_source or "")
-        .strip()
-        .lower()
-        .startswith("aviationweather_metar")
+        and _is_noaa_preliminary_source(request.day0_observed_extreme_source)
         and _day0_shared_carrier is None
     ):
         raise ValueError("DAY0_NOAA_PRELIMINARY_CARRIER_UNAVAILABLE")
@@ -6433,9 +6433,9 @@ def _compute_posterior_payload(
         == DAY0_OBSERVATION_STATE_ZERO_TARGET_DATE_OBSERVATIONS
     ):
         posterior_config["day0_observation_state"] = request.day0_observation_state
-    _posterior_noaa_preliminary_source = str(
-        request.day0_observed_extreme_source or ""
-    ).strip().lower().startswith("aviationweather_metar")
+    _posterior_noaa_preliminary_source = _is_noaa_preliminary_source(
+        request.day0_observed_extreme_source
+    )
     _posterior_day0_observed_extreme_c = (
         None
         if _posterior_noaa_preliminary_source

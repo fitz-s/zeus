@@ -33251,6 +33251,18 @@ def _conditioning_names_physical_frontier(
 
     conditioned = str(conditioning_source or "").strip().lower()
     physical = str(physical_source or "").strip().lower()
+    from src.events.day0_authority import day0_is_noaa_preliminary_source
+
+    if day0_is_noaa_preliminary_source(conditioned) and day0_is_noaa_preliminary_source(physical):
+        return True
+    if (
+        day0_is_noaa_preliminary_source(conditioned)
+        and physical.startswith("aviationweather_metar")
+    ) or (
+        day0_is_noaa_preliminary_source(physical)
+        and conditioned.startswith("aviationweather_metar")
+    ):
+        return True
     if conditioned == physical:
         return conditioned in {
             "aviationweather_metar",
@@ -33683,7 +33695,9 @@ def _provisional_day0_revision_likelihood(
             # ENTRY still requires empirical city history.
             allow_prior_only=not entry_authority,
         )
-    if provisional_source.startswith("aviationweather_metar"):
+    from src.events.day0_authority import day0_is_noaa_preliminary_source
+
+    if day0_is_noaa_preliminary_source(provisional_source):
         from src.config import runtime_cities_by_name
         from src.data.day0_observation_reader import (
             same_station_preliminary_report_survival_likelihood,
@@ -41354,16 +41368,17 @@ def _day0_remaining_p_raw_vector(
     # A NOAA preliminary peak is not an exact peak-set atom.  It must retain
     # its report-survival scenarios in the shared remaining-path carrier.
     # Only the separately typed fast-residual mixture keeps its own operator.
+    from src.events.day0_authority import (
+        DAY0_MONOTONE_SETTLEMENT_BOUND,
+        day0_is_noaa_preliminary_source,
+    )
     noaa_preliminary = (
-        finality == "PROVISIONAL_CURRENT_SNAPSHOT"
-        and str(
+        finality in {"PROVISIONAL_CURRENT_SNAPSHOT", DAY0_MONOTONE_SETTLEMENT_BOUND}
+        and day0_is_noaa_preliminary_source(
             payload.get("settlement_source")
             or payload.get("observation_source")
             or ""
         )
-        .strip()
-        .lower()
-        .startswith("aviationweather_metar")
     )
     if noaa_preliminary:
         from src.data.day0_hourly_vectors import build_day0_remaining_probability_carrier
@@ -41910,12 +41925,17 @@ def _day0_probability_boundary_scenarios_native(
             or payload.get("observation_source")
             or ""
         ).strip().lower()
-        from src.events.day0_authority import day0_evidence_finality
+        from src.events.day0_authority import (
+            DAY0_MONOTONE_SETTLEMENT_BOUND,
+            day0_evidence_finality,
+            day0_is_noaa_preliminary_source,
+        )
 
         provisional_source = day0_evidence_finality(payload)
         if (
-            source.startswith("aviationweather_metar")
-            and provisional_source == "PROVISIONAL_CURRENT_SNAPSHOT"
+            day0_is_noaa_preliminary_source(source)
+            and provisional_source
+            in {"PROVISIONAL_CURRENT_SNAPSHOT", DAY0_MONOTONE_SETTLEMENT_BOUND}
             and isinstance(likelihood, Mapping)
         ):
             try:
@@ -41928,8 +41948,9 @@ def _day0_probability_boundary_scenarios_native(
             # report does not survive, no absorbing boundary is applied.
             return ((float(default_boundary), survival), (None, 1.0 - survival))
         if (
-            source.startswith("aviationweather_metar")
-            and provisional_source == "PROVISIONAL_CURRENT_SNAPSHOT"
+            day0_is_noaa_preliminary_source(source)
+            and provisional_source
+            in {"PROVISIONAL_CURRENT_SNAPSHOT", DAY0_MONOTONE_SETTLEMENT_BOUND}
         ):
             raise ValueError("NOAA_PRELIMINARY_SURVIVAL_LIKELIHOOD_MISSING")
         return ((float(default_boundary), 1.0),)

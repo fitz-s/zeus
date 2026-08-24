@@ -114,6 +114,20 @@ def day0_probability_semantics_revision(q_version: object) -> str | None:
     return revision
 
 
+def day0_is_noaa_preliminary_source(source: object) -> bool:
+    """Return whether a current METAR print belongs to the NOAA provisional family."""
+
+    normalized = str(source or "").strip().lower()
+    return normalized.startswith(
+        (
+            "aviationweather_metar",
+            "ogimet_metar_",
+            "observation_prints:aviationweather_metar",
+            "observation_prints:ogimet_metar_",
+        )
+    )
+
+
 def day0_evidence_finality(payload: Mapping[str, object]) -> str:
     """Classify current observation evidence without conflating source and finality."""
 
