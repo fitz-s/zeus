@@ -595,6 +595,268 @@ def test_provider_backoff_suppresses_global_launch_but_detector_continues(
     assert any(row["incident_id"] == "blocked-by-provider" for row in _incidents(cfg))
 
 
+def test_hard_evidence_maintenance_is_capacity_bounded_and_prioritizes_new_active_tel_aviv(
+    cfg: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cfg["loop"].update(
+        evidence_builds_per_cycle=1,
+        evidence_build_budget_ms=5000,
+        evidence_max_bytes=1024 * 1024,
+    )
+    _position(cfg, position_id="tel-old")
+    _position(cfg, position_id="tel-new")
+    with sqlite3.connect(cfg["paths"]["trades_db"]) as conn:
+        conn.execute(
+            "UPDATE position_current SET city='Tel Aviv',updated_at=? WHERE position_id IN ('tel-old','tel-new')",
+            ("2026-08-22T12:00:00+00:00",),
+        )
+    with loop.memory(cfg) as mem:
+        for index in range(118):
+            position_id = "tel-new" if index == 0 else ("tel-old" if index == 1 else "p1")
+            detected_at = "2026-08-22T12:00:00+00:00" if index == 0 else (
+                "2026-08-22T11:00:00+00:00" if index == 1 else "2026-08-20T00:00:00+00:00"
+            )
+            mem.execute(
+                "INSERT INTO incidents(incident_id,kind,position_id,crossing_evidence_id,crossing_kind,"
+                "held_token_id,held_direction,floor_price,detected_at,priority,status,stage,updated_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    f"historical-{index:03d}", "hard", position_id, f"evidence-{index:03d}",
+                    "below_floor", "yes-token", "sell_yes", 0.05, detected_at, 1.0,
+                    "queued", "blind", detected_at,
+                ),
+            )
+        mem.commit()
+
+    built: list[str] = []
+    monkeypatch.setattr(
+        loop,
+        "build_evidence",
+        lambda _cfg, incident_id: built.append(incident_id)
+        or Path(_cfg["paths"]["runtime"]) / "incidents" / incident_id / "evidence.db",
+    )
+    monkeypatch.setattr(loop, "_evidence_pair_valid", lambda _cfg, incident_id: incident_id in built)
+
+    first = loop._capture_hard_evidence(cfg, scan_all=True)
+    assert first["built"] == ["historical-000"]
+    assert len(first["deferred"]) == 117
+    with loop.memory(cfg) as mem:
+        assert mem.execute(
+            "SELECT COUNT(*) FROM controller_debt WHERE kind='evidence_snapshot' AND status='retry_pending'"
+        ).fetchone()[0] == 117
+
+    second = loop._capture_hard_evidence(cfg, scan_all=True)
+    assert second["built"] == ["historical-001"]
+    assert built == ["historical-000", "historical-001"]
+
+
+def test_capacity_failure_consumes_attempt_and_fingerprint_defers_only_same_incident(
+    cfg: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cfg["loop"].update(evidence_builds_per_cycle=1, evidence_build_budget_ms=5000, evidence_max_bytes=1)
+    _position(cfg, position_id="large-a")
+    _position(cfg, position_id="large-b")
+    with loop.memory(cfg) as mem:
+        for index, position_id in enumerate(("large-a", "large-b")):
+            mem.execute(
+                "INSERT INTO incidents(incident_id,kind,position_id,crossing_evidence_id,crossing_kind,"
+                "held_token_id,held_direction,floor_price,detected_at,priority,status,stage,updated_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    f"large-{index}", "hard", position_id, f"large-evidence-{index}", "below_floor",
+                    "yes-token", "sell_yes", 0.05, "2026-08-22T12:00:00+00:00", 2 - index,
+                    "queued", "blind", "2026-08-22T12:00:00+00:00",
+                ),
+            )
+        mem.commit()
+
+    calls: list[str] = []
+    successful: set[str] = set()
+
+    def oversized_builder(_cfg: dict, incident_id: str) -> Path:
+        calls.append(incident_id)
+        if incident_id == "large-0":
+            raise loop.EvidenceCapacityExceeded("evidence_snapshot_oversized:bytes=61865984")
+        successful.add(incident_id)
+        return Path(_cfg["paths"]["runtime"]) / "incidents" / incident_id / "evidence.db"
+
+    monkeypatch.setattr(loop, "build_evidence", oversized_builder)
+    monkeypatch.setattr(loop, "_evidence_pair_valid", lambda _cfg, incident_id: incident_id in successful)
+    trigger_batches = [["large-0"], []]
+    monkeypatch.setattr(loop, "_detect_trigger", lambda _cfg: trigger_batches.pop(0))
+    monkeypatch.setattr(loop, "_detect_maintenance", lambda _cfg: [])
+
+    assert loop.detect(cfg) == ["large-0"]
+    assert loop._LAST_EVIDENCE_CYCLE["attempted"] == 1
+    assert calls == ["large-0"]
+    with loop.memory(cfg) as mem:
+        debt = mem.execute(
+            "SELECT reason,fingerprint,config_fingerprint,capacity_fingerprint,data_fingerprint,attempts "
+            "FROM controller_debt WHERE debt_id='evidence_snapshot:large-0'"
+        ).fetchone()
+    assert str(debt[0]).startswith("evidence_snapshot_capacity_failure:")
+    assert all(str(value) for value in debt[1:5])
+    assert debt[5] == 1
+
+    assert loop.detect(cfg) == []
+    assert loop._LAST_EVIDENCE_CYCLE["built"] == ["large-1"]
+    assert calls == ["large-0", "large-1"]
+
+
+def test_bounded_builder_installs_shared_progress_budget_before_canonical_queries(
+    cfg: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cfg["loop"].update(evidence_build_budget_ms=5000, evidence_max_bytes=8 * 1024 * 1024)
+    _position(cfg)
+    _quote(cfg, "budget-query", "2026-08-22T09:00:02+00:00", 0.01)
+    applied: list[object] = []
+    original = loop._apply_evidence_sql_budget
+
+    def traced(conn: sqlite3.Connection, budget=None) -> None:
+        applied.append(budget)
+        original(conn, budget)
+
+    monkeypatch.setattr(loop, "_apply_evidence_sql_budget", traced)
+    incident_id = loop.detect(cfg)[0]
+    assert incident_id
+    assert len(applied) >= 3
+    assert sum(item is not None for item in applied) >= 2
+
+
+def test_new_position_event_changes_data_fingerprint_and_retries_capacity_debt(
+    cfg: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cfg["loop"].update(evidence_builds_per_cycle=1, evidence_build_budget_ms=5000, evidence_max_bytes=1)
+    _position(cfg, position_id="fingerprint-position")
+    with loop.memory(cfg) as mem:
+        mem.execute(
+            "INSERT INTO incidents(incident_id,kind,position_id,crossing_evidence_id,crossing_kind,"
+            "held_token_id,held_direction,floor_price,detected_at,priority,status,stage,updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                "fingerprint-incident", "hard", "fingerprint-position", "fingerprint-evidence", "below_floor",
+                "yes-token", "sell_yes", 0.05, "2026-08-22T12:00:00+00:00", 1.0,
+                "queued", "blind", "2026-08-22T12:00:00+00:00",
+            ),
+        )
+        mem.commit()
+    calls: list[str] = []
+    failed = {"fingerprint-incident"}
+    successful: set[str] = set()
+
+    def fail_once(_cfg: dict, incident_id: str) -> Path:
+        calls.append(incident_id)
+        if incident_id in failed:
+            failed.remove(incident_id)
+            raise loop.EvidenceCapacityExceeded("evidence_snapshot_oversized:bytes=61865984")
+        successful.add(incident_id)
+        return Path(_cfg["paths"]["runtime"]) / "incidents" / incident_id / "evidence.db"
+
+    monkeypatch.setattr(loop, "build_evidence", fail_once)
+    monkeypatch.setattr(loop, "_evidence_pair_valid", lambda _cfg, incident_id: incident_id in successful)
+    loop._capture_hard_evidence(cfg, ["fingerprint-incident"])
+    assert calls == ["fingerprint-incident"]
+    with sqlite3.connect(cfg["paths"]["trades_db"]) as conn:
+        conn.execute(
+            "INSERT INTO position_events VALUES (?,?,?,?,?,?,?,?,?)",
+            (
+                "new-fingerprint-event", "fingerprint-position", 1, "MONITOR_REFRESHED",
+                "2026-08-22T12:01:00+00:00", None, json.dumps({"new": "evidence"}), "active", "active",
+            ),
+        )
+    result = loop._capture_hard_evidence(cfg, ["fingerprint-incident"])
+    assert result["built"] == ["fingerprint-incident"]
+    assert calls == ["fingerprint-incident", "fingerprint-incident"]
+
+
+def test_real_large_snapshot_hits_tiny_capacity_once_then_next_incident_advances(
+    cfg: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cfg["loop"].update(evidence_builds_per_cycle=1, evidence_build_budget_ms=15000, evidence_max_bytes=1024 * 1024)
+    _position(cfg, position_id="real-large-a")
+    _position(cfg, position_id="real-large-b")
+    _event(
+        cfg,
+        "large-monitor",
+        "real-large-a",
+        1,
+        "MONITOR_REFRESHED",
+        "2026-08-22T09:00:03+00:00",
+        phase_before="active",
+        phase_after="active",
+        payload={"blob": "x" * (59 * 1024 * 1024)},
+    )
+    with loop.memory(cfg) as mem:
+        for index, position_id in enumerate(("real-large-a", "real-large-b")):
+            mem.execute(
+                "INSERT INTO incidents(incident_id,kind,position_id,crossing_evidence_id,crossing_kind,"
+                "held_token_id,held_direction,floor_price,detected_at,priority,status,stage,updated_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    f"real-large-{index}", "hard", position_id, f"real-evidence-{index}", "below_floor",
+                    "yes-token", "sell_yes", 0.05, "2026-08-22T12:00:00+00:00", 2 - index,
+                    "queued", "blind", "2026-08-22T12:00:00+00:00",
+                ),
+            )
+        mem.commit()
+
+    calls: list[str] = []
+    original_build = loop.build_evidence
+
+    def tracked_build(local_cfg: dict, incident_id: str) -> Path:
+        calls.append(incident_id)
+        return original_build(local_cfg, incident_id)
+
+    monkeypatch.setattr(loop, "build_evidence", tracked_build)
+    trigger_batches = [["real-large-0"], []]
+    monkeypatch.setattr(loop, "_detect_trigger", lambda _cfg: trigger_batches.pop(0))
+    monkeypatch.setattr(loop, "_detect_maintenance", lambda _cfg: [])
+
+    assert loop.detect(cfg) == ["real-large-0"]
+    assert calls == ["real-large-0"]
+    with loop.memory(cfg) as mem:
+        debt = mem.execute(
+            "SELECT reason,attempts FROM controller_debt WHERE debt_id='evidence_snapshot:real-large-0'"
+        ).fetchone()
+    assert str(debt[0]).startswith("evidence_snapshot_capacity_failure:evidence_snapshot_oversized:")
+    assert debt[1] == 1
+    assert not (Path(cfg["paths"]["runtime"]) / "incidents" / "real-large-0" / "CURRENT").exists()
+
+    assert loop.detect(cfg) == []
+    assert calls == ["real-large-0", "real-large-1"]
+    assert loop._evidence_pair_valid(cfg, "real-large-1")
+
+
+def test_daemon_publishes_fresh_status_before_slow_evidence_maintenance(
+    cfg: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime = Path(cfg["paths"]["runtime"])
+    observed: list[dict] = []
+
+    def fake_bootstrap(_cfg: dict) -> dict[str, str]:
+        runtime.mkdir(parents=True, exist_ok=True)
+        return {"runtime": str(runtime)}
+
+    def slow_detect(_cfg: dict) -> list[str]:
+        payload = json.loads((runtime / "status.json").read_text())
+        observed.append(payload)
+        assert payload["alive"] is True
+        assert payload["evidence_maintenance"] == "starting"
+        (runtime / "HALT").touch()
+        return []
+
+    monkeypatch.setattr(loop, "bootstrap", fake_bootstrap)
+    monkeypatch.setattr(loop, "detect", slow_detect)
+    monkeypatch.setattr(loop, "current_capabilities", lambda _cfg: {"ready": True})
+    monkeypatch.setattr(loop, "poll_runs", lambda *_args: [])
+    monkeypatch.setattr(loop, "_running", lambda _cfg: [])
+    monkeypatch.setattr(loop, "_record_cycle_latency", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(loop.time, "sleep", lambda _seconds: None)
+
+    assert loop.daemon(cfg) == 0
+    assert observed and observed[0]["pid"] == os.getpid()
+
+
 def test_evidence_failure_debt_recovers_same_incident_without_spawn(
     cfg: dict, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2353,7 +2615,157 @@ def test_evidence_db_exposes_timeline_tables_without_copying_canonical_db(cfg: d
             "daemon_health", "code_versions", "config_snapshot",
         } <= tables
         assert conn.execute("SELECT COUNT(*) FROM price_ticks").fetchone()[0] >= 1
+    incident_dir = Path(cfg["paths"]["runtime"]) / "incidents" / incident_id
+    manifest = json.loads((incident_dir / "generations" / (incident_dir / "CURRENT").read_text().strip() / "manifest.json").read_text())
+    assert manifest["size_bytes"] == evidence.stat().st_size
+    assert manifest["capacity"]["window_days"] <= 7
     assert evidence.stat().st_size < Path(cfg["paths"]["trades_db"]).stat().st_size * 20
+
+
+def test_incomplete_generation_is_reaped_without_disturbing_current_pair(cfg: dict) -> None:
+    cfg["loop"]["evidence_generation_reap_age_seconds"] = 0
+    _position(cfg)
+    _quote(cfg, "reap-q", "2026-08-22T09:00:02+00:00", 0.01)
+    incident_id = loop.detect(cfg)[0]
+    incident_dir = Path(cfg["paths"]["runtime"]) / "incidents" / incident_id
+    incomplete = incident_dir / "generations" / "interrupted-generation"
+    incomplete.mkdir(parents=True)
+    (incomplete / ".evidence.db.tmp").write_bytes(b"partial")
+    assert loop._evidence_pair_valid(cfg, incident_id)
+    loop._capture_hard_evidence(cfg, [incident_id])
+    assert not incomplete.exists()
+    assert loop._evidence_pair_valid(cfg, incident_id)
+
+
+def test_pair_validation_uses_manifest_stat_gate_without_full_read_each_cycle(
+    cfg: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _position(cfg)
+    _quote(cfg, "pair-stat", "2026-08-22T09:00:02+00:00", 0.01)
+    incident_id = loop.detect(cfg)[0]
+    monkeypatch.setattr(Path, "read_bytes", lambda _path: pytest.fail("pair validation must not read full DB"))
+    assert loop._evidence_pair_valid(cfg, incident_id)
+
+
+def test_pair_hash_mismatch_uses_shared_deadline_and_records_typed_defer(
+    cfg: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _position(cfg)
+    _quote(cfg, "pair-timeout", "2026-08-22T09:00:02+00:00", 0.01)
+    incident_id = loop.detect(cfg)[0]
+    pair = loop._evidence_pair_paths(cfg, incident_id)
+    assert pair is not None
+    evidence = pair[0]
+    stat = evidence.stat()
+    os.utime(evidence, ns=(stat.st_atime_ns, stat.st_mtime_ns + 1))
+    with pytest.raises(loop.EvidenceCapacityExceeded, match="evidence_pair_hash_deferred"):
+        loop._evidence_pair_valid(cfg, incident_id, budget={"deadline": loop.time.monotonic() - 1})
+    os.utime(evidence, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+    assert loop._evidence_pair_valid(cfg, incident_id)
+
+
+def test_coverage_timeout_is_typed_and_never_publishes_new_current_pair(
+    cfg: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _position(cfg)
+    _quote(cfg, "coverage-timeout", "2026-08-22T09:00:02+00:00", 0.01)
+    incident_id = loop.detect(cfg)[0]
+    incident_dir = Path(cfg["paths"]["runtime"]) / "incidents" / incident_id
+    prior = (incident_dir / "CURRENT").read_text()
+    monkeypatch.setattr(
+        loop,
+        "_evidence_coverage",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            loop.EvidenceCapacityExceeded("evidence_coverage_deferred:time_budget")
+        ),
+    )
+    with pytest.raises(loop.EvidenceCapacityExceeded, match="evidence_coverage_deferred"):
+        loop.build_evidence(cfg, incident_id)
+    assert (incident_dir / "CURRENT").read_text() == prior
+    assert len(list((incident_dir / "generations").iterdir())) == 1
+    assert loop._evidence_pair_valid(cfg, incident_id)
+
+
+def test_hash_exception_cleans_orphan_generation_immediately(
+    cfg: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _position(cfg)
+    _quote(cfg, "hash-orphan", "2026-08-22T09:00:02+00:00", 0.01)
+    incident_id = loop.detect(cfg)[0]
+    incident_dir = Path(cfg["paths"]["runtime"]) / "incidents" / incident_id
+    prior = (incident_dir / "CURRENT").read_text()
+    monkeypatch.setattr(
+        loop,
+        "_stream_evidence_hash",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            loop.EvidenceCapacityExceeded("evidence_pair_hash_deferred:time_budget")
+        ),
+    )
+    with pytest.raises(loop.EvidenceCapacityExceeded, match="evidence_pair_hash_deferred"):
+        loop.build_evidence(cfg, incident_id)
+    assert (incident_dir / "CURRENT").read_text() == prior
+    assert len(list((incident_dir / "generations").iterdir())) == 1
+    assert loop._evidence_pair_valid(cfg, incident_id)
+
+
+@pytest.mark.parametrize("boundary", ("hash", "manifest"))
+def test_publish_boundaries_guard_same_budget_and_keep_old_current(
+    cfg: dict, monkeypatch: pytest.MonkeyPatch, boundary: str
+) -> None:
+    _position(cfg)
+    _quote(cfg, f"publish-{boundary}", "2026-08-22T09:00:02+00:00", 0.01)
+    incident_id = loop.detect(cfg)[0]
+    incident_dir = Path(cfg["paths"]["runtime"]) / "incidents" / incident_id
+    prior = (incident_dir / "CURRENT").read_text()
+    real_monotonic = loop.time.monotonic
+    expired = False
+
+    def monotonic() -> float:
+        return real_monotonic() + (1000.0 if expired else 0.0)
+
+    monkeypatch.setattr(loop.time, "monotonic", monotonic)
+    if boundary == "hash":
+        original_hash = loop._stream_evidence_hash
+
+        def expire_after_hash(path: Path, budget: dict) -> str:
+            nonlocal expired
+            result = original_hash(path, budget)
+            expired = True
+            return result
+
+        monkeypatch.setattr(loop, "_stream_evidence_hash", expire_after_hash)
+    else:
+        original_write_text = Path.write_text
+
+        def expire_after_manifest(path: Path, data: str, *args, **kwargs):
+            nonlocal expired
+            result = original_write_text(path, data, *args, **kwargs)
+            if path.name == ".manifest.json.tmp":
+                expired = True
+            return result
+
+        monkeypatch.setattr(Path, "write_text", expire_after_manifest)
+
+    with pytest.raises(loop.EvidenceCapacityExceeded, match="time_budget"):
+        loop.build_evidence(cfg, incident_id)
+    assert (incident_dir / "CURRENT").read_text() == prior
+    assert loop._evidence_pair_valid(cfg, incident_id)
+    assert len(list((incident_dir / "generations").iterdir())) == 1
+
+
+def test_pair_identity_sqlite_interrupt_is_typed_defer(
+    cfg: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _position(cfg)
+    _quote(cfg, "identity-timeout", "2026-08-22T09:00:02+00:00", 0.01)
+    incident_id = loop.detect(cfg)[0]
+    monkeypatch.setattr(
+        loop,
+        "_apply_evidence_sql_budget",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(sqlite3.OperationalError("interrupted")),
+    )
+    with pytest.raises(loop.EvidenceCapacityExceeded, match="evidence_pair_identity_deferred"):
+        loop._evidence_pair_valid(cfg, incident_id, budget={"deadline": loop.time.monotonic() + 1})
 
 
 def test_evidence_wallet_fills_follow_command_trade_ids_without_token_scan(

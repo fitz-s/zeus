@@ -39,6 +39,9 @@ _probe_process_groups: set[int] = set()
 _writer_lease_lock_fds: dict[str, int] = {}
 _spawn_witness_fds: dict[str, int] = {}
 _SPAWN_AMBIGUITY_SECONDS = 30.0
+_EVIDENCE_BUILD_CONTEXT: dict[str, Any] | None = None
+_LAST_EVIDENCE_CYCLE: dict[str, Any] = {}
+_EVIDENCE_HASH_CACHE: dict[tuple[str, int, int], str] = {}
 
 
 class ExecutionFactCapabilityError(RuntimeError):
@@ -302,7 +305,12 @@ CREATE TABLE IF NOT EXISTS controller_debt (
     kind TEXT NOT NULL,
     status TEXT NOT NULL,
     reason TEXT NOT NULL,
-    updated_at TEXT NOT NULL
+    updated_at TEXT NOT NULL,
+    fingerprint TEXT NOT NULL DEFAULT '',
+    config_fingerprint TEXT NOT NULL DEFAULT '',
+    capacity_fingerprint TEXT NOT NULL DEFAULT '',
+    data_fingerprint TEXT NOT NULL DEFAULT '',
+    attempts INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS settlement_backfill_state (
     position_id TEXT PRIMARY KEY,
@@ -358,6 +366,16 @@ def memory(cfg: Mapping[str, Any]) -> _ClosingConnection:
             "ALTER TABLE position_quote_state "
             "ADD COLUMN quote_status TEXT NOT NULL DEFAULT 'unknown'"
         )
+    debt_columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(controller_debt)")}
+    for name, definition in (
+        ("fingerprint", "TEXT NOT NULL DEFAULT ''"),
+        ("config_fingerprint", "TEXT NOT NULL DEFAULT ''"),
+        ("capacity_fingerprint", "TEXT NOT NULL DEFAULT ''"),
+        ("data_fingerprint", "TEXT NOT NULL DEFAULT ''"),
+        ("attempts", "INTEGER NOT NULL DEFAULT 0"),
+    ):
+        if name not in debt_columns:
+            conn.execute(f"ALTER TABLE controller_debt ADD COLUMN {name} {definition}")
     conn.execute("DROP INDEX IF EXISTS idx_incident_queue")
     conn.execute(
         "CREATE INDEX idx_incident_queue "
@@ -1689,19 +1707,22 @@ def _detect_trigger(cfg: Mapping[str, Any]) -> list[str]:
 
 
 def detect(cfg: Mapping[str, Any]) -> list[str]:
+    global _LAST_EVIDENCE_CYCLE
+    _LAST_EVIDENCE_CYCLE = {"built": [], "deferred": [], "attempted": 0, "validated": 0, "bytes": 0}
+    budget = _new_evidence_budget(cfg)
     trigger_created = _detect_trigger(cfg)
     # Both trigger connections are closed before this independent local
     # snapshot transaction begins.
-    _capture_hard_evidence(cfg, trigger_created)
+    _capture_hard_evidence(cfg, trigger_created, budget=budget)
     try:
         created = _detect_maintenance(cfg)
     except sqlite3.OperationalError as exc:
         if "interrupted" not in str(exc).lower():
             raise
-        _capture_hard_evidence(cfg, trigger_created, scan_all=True)
+        _capture_hard_evidence(cfg, trigger_created, scan_all=True, budget=budget)
         return list(dict.fromkeys(trigger_created))
     created.extend(trigger_created)
-    _capture_hard_evidence(cfg, created, scan_all=True)
+    _capture_hard_evidence(cfg, created, scan_all=True, budget=budget)
     return list(dict.fromkeys(created))
 
 
@@ -1745,7 +1766,101 @@ def _json_number(payload: Mapping[str, Any], names: Iterable[str]) -> float | No
     return None
 
 
+class EvidenceCapacityExceeded(RuntimeError):
+    """A snapshot exceeded the controller's bounded maintenance capacity."""
+
+
+def _new_evidence_budget(cfg: Mapping[str, Any]) -> dict[str, Any]:
+    settings = cfg["loop"]
+    return {
+        "remaining": max(0, int(settings.get("evidence_builds_per_cycle", 1))),
+        "deadline": time.monotonic() + max(0.001, float(settings.get("evidence_build_budget_ms", 1000))) / 1000.0,
+        "max_bytes": max(1, int(settings.get("evidence_max_bytes", 32 * 1024 * 1024))),
+        "built": 0,
+        "bytes": 0,
+    }
+
+
+def _budget_check(
+    path: Path | None = None,
+    conn: sqlite3.Connection | None = None,
+    *,
+    extra_bytes: int = 0,
+) -> None:
+    budget = _EVIDENCE_BUILD_CONTEXT
+    if budget is None:
+        return
+    if time.monotonic() >= float(budget["deadline"]):
+        raise EvidenceCapacityExceeded("evidence_snapshot_deferred:time_budget")
+    size = 0
+    if path is not None:
+        try:
+            size = path.stat().st_size
+        except OSError:
+            size = 0
+    if conn is not None:
+        try:
+            page_count = int(conn.execute("PRAGMA page_count").fetchone()[0])
+            page_size = int(conn.execute("PRAGMA page_size").fetchone()[0])
+            size = max(size, page_count * page_size)
+        except sqlite3.Error:
+            pass
+    projected = size + max(0, int(extra_bytes))
+    if projected > int(budget["max_bytes"]):
+        raise EvidenceCapacityExceeded(f"evidence_snapshot_oversized:bytes={projected}")
+    budget["bytes"] = max(int(budget.get("bytes", 0)), size)
+
+
+def _apply_evidence_sql_budget(conn: sqlite3.Connection, budget: Mapping[str, Any] | None = None) -> None:
+    budget = budget or _EVIDENCE_BUILD_CONTEXT
+    if budget is None:
+        return
+    remaining_ms = max(1, int((float(budget["deadline"]) - time.monotonic()) * 1000))
+    conn.execute(f"PRAGMA busy_timeout={remaining_ms}")
+    conn.set_progress_handler(
+        lambda: int(time.monotonic() >= float(budget["deadline"])),
+        1000,
+    )
+
+
+def _cleanup_unpublished_generation(
+    incident_dir: Path, generation_id: str, generation_dir: Path
+) -> None:
+    try:
+        current_generation = (incident_dir / "CURRENT").read_text().strip()
+    except OSError:
+        current_generation = ""
+    if current_generation != generation_id:
+        shutil.rmtree(generation_dir, ignore_errors=True)
+
+
+def _reap_incomplete_generations(cfg: Mapping[str, Any], incident_id: str) -> None:
+    incident_dir = runtime_dir(cfg) / "incidents" / incident_id
+    generations = incident_dir / "generations"
+    if not generations.is_dir():
+        return
+    pointer = ""
+    try:
+        pointer = (incident_dir / "CURRENT").read_text().strip()
+    except OSError:
+        pass
+    reap_after = max(0.0, float(cfg["loop"].get("evidence_generation_reap_age_seconds", 60)))
+    for generation_dir in generations.iterdir():
+        if not generation_dir.is_dir() or generation_dir.name == pointer:
+            continue
+        if (generation_dir / "evidence.db").is_file() and (generation_dir / "manifest.json").is_file():
+            continue
+        try:
+            age = time.time() - generation_dir.stat().st_mtime
+        except OSError:
+            continue
+        if age < reap_after:
+            continue
+        shutil.rmtree(generation_dir, ignore_errors=True)
+
+
 def _build_evidence_snapshot(cfg: Mapping[str, Any], incident_id: str) -> Path:
+    build_budget = _EVIDENCE_BUILD_CONTEXT or _new_evidence_budget(cfg)
     run = runtime_dir(cfg)
     incident_dir = run / "incidents" / incident_id
     incident_dir.mkdir(parents=True, exist_ok=True)
@@ -1762,22 +1877,26 @@ def _build_evidence_snapshot(cfg: Mapping[str, Any], incident_id: str) -> Path:
     if incident_row is None:
         raise KeyError(f"unknown incident {incident_id}")
     incident = dict(incident_row)
-    row_limit = max(1, int(cfg["loop"].get("max_evidence_rows_per_table", 250000)))
+    row_limit = max(1, int(cfg["loop"].get("evidence_max_rows", cfg["loop"].get("max_evidence_rows_per_table", 250000))))
+    window_days = min(7, max(1, int(cfg["loop"].get("evidence_window_days", 7))))
+    window_start = (parse_time(incident.get("t_floor")) or now()) - timedelta(days=window_days / 2)
+    window_end = window_start + timedelta(days=window_days)
+    _budget_check(evidence)
     with open_ro(Path(str(cfg["paths"]["trades_db"]))) as trades:
+        _apply_evidence_sql_budget(trades)
         position_row = trades.execute("SELECT * FROM position_current WHERE position_id=?", (incident["position_id"],)).fetchone()
         if position_row is None:
             raise RuntimeError("incident position missing from canonical projection")
         position = dict(position_row)
         events = list(reversed(trades.execute(
-            "SELECT * FROM position_events WHERE position_id=? "
+            "SELECT * FROM position_events WHERE position_id=? AND occurred_at BETWEEN ? AND ? "
             "ORDER BY sequence_no DESC LIMIT ?",
-            (incident["position_id"], row_limit),
+            (incident["position_id"], iso(window_start), iso(window_end), row_limit),
         ).fetchall()))
         event_times = [parse_time(str(row["occurred_at"])) for row in events]
         event_times = [value for value in event_times if value is not None]
-        floor_at = parse_time(incident.get("t_floor")) or now()
-        start = min(event_times) - timedelta(hours=1) if event_times else floor_at - timedelta(days=2)
-        end = max(now(), floor_at + timedelta(hours=6))
+        start = max(window_start, min(event_times) - timedelta(hours=1) if event_times else window_start)
+        end = min(window_end, max(start, max(event_times) + timedelta(hours=6) if event_times else window_end))
         quote_rows = trades.execute(
             """
             SELECT * FROM execution_feasibility_evidence
@@ -1791,8 +1910,8 @@ def _build_evidence_snapshot(cfg: Mapping[str, Any], incident_id: str) -> Path:
             (incident["held_token_id"],),
         ).fetchall()
         commands = trades.execute(
-            "SELECT * FROM venue_commands WHERE position_id=? ORDER BY created_at LIMIT ?",
-            (incident["position_id"], row_limit),
+            "SELECT * FROM venue_commands WHERE position_id=? AND created_at BETWEEN ? AND ? ORDER BY created_at LIMIT ?",
+            (incident["position_id"], iso(window_start), iso(window_end), row_limit),
         ).fetchall()
         command_ids = [str(row["command_id"]) for row in commands]
         order_facts: list[sqlite3.Row] = []
@@ -1834,26 +1953,32 @@ def _build_evidence_snapshot(cfg: Mapping[str, Any], incident_id: str) -> Path:
                     continue
                 seen_fill_ids.add(row["id"])
                 fills.append(row)
-    with sqlite3.connect(evidence) as out:
+    with sqlite3.connect(evidence, timeout=0.1) as out:
+        _apply_evidence_sql_budget(out)
         out.executescript(EVIDENCE_SCHEMA)
         for key, value in incident.items():
             out.execute("INSERT INTO incident VALUES (?,?)", (str(key), json.dumps(value, default=str)))
         out.execute("INSERT INTO position VALUES (?,?)", (incident["position_id"], json.dumps(position, default=str)))
         seen_quotes: set[str] = set()
         for raw in [*quote_rows, *latest]:
+            _budget_check(evidence, out)
             row = dict(raw)
             key = str(row["evidence_id"])
             if key in seen_quotes:
                 continue
             seen_quotes.add(key)
+            raw_json = json.dumps(row, default=str)
+            _budget_check(evidence, out, extra_bytes=len(raw_json.encode()))
             out.execute(
                 "INSERT INTO price_ticks VALUES (?,?,?,?,?,?,?,?)",
-                (key, row["quote_seen_at"], row.get("best_bid_before"), row.get("best_ask_before"), row.get("depth_before_json"), row.get("book_hash_before"), row.get("direction"), json.dumps(row, default=str)),
+                (key, row["quote_seen_at"], row.get("best_bid_before"), row.get("best_ask_before"), row.get("depth_before_json"), row.get("book_hash_before"), row.get("direction"), raw_json),
             )
         for raw in events:
+            _budget_check(evidence, out)
             row = dict(raw)
             payload = read_json_text(str(row.get("payload_json") or "{}"))
             packed = json.dumps(row, default=str)
+            _budget_check(evidence, out, extra_bytes=len(packed.encode()))
             if row["event_type"] == "SETTLED":
                 fact_key = digest(
                     incident["position_id"], row.get("event_id"),
@@ -1888,50 +2013,93 @@ def _build_evidence_snapshot(cfg: Mapping[str, Any], incident_id: str) -> Path:
                     )
                 out.execute("INSERT INTO exit_decisions VALUES (?,?,?,?,?)", (row["event_id"], row["occurred_at"], row["event_type"], row.get("command_id"), decision_json))
         for raw in commands:
+            _budget_check(evidence, out)
             row = dict(raw)
-            out.execute("INSERT INTO venue_commands VALUES (?,?,?,?,?)", (row["command_id"], row.get("created_at"), row.get("updated_at"), row.get("state"), json.dumps(row, default=str)))
+            raw_json = json.dumps(row, default=str)
+            _budget_check(evidence, out, extra_bytes=len(raw_json.encode()))
+            out.execute("INSERT INTO venue_commands VALUES (?,?,?,?,?)", (row["command_id"], row.get("created_at"), row.get("updated_at"), row.get("state"), raw_json))
         for raw in command_events:
+            _budget_check(evidence, out)
             row = dict(raw)
             key = f"command-event:{row['event_id']}"
-            out.execute("INSERT INTO order_facts VALUES (?,?,?)", (key, row.get("occurred_at"), json.dumps(row, default=str)))
+            raw_json = json.dumps(row, default=str)
+            _budget_check(evidence, out, extra_bytes=len(raw_json.encode()))
+            out.execute("INSERT INTO order_facts VALUES (?,?,?)", (key, row.get("occurred_at"), raw_json))
         for raw in order_facts:
+            _budget_check(evidence, out)
             row = dict(raw)
-            out.execute("INSERT INTO order_facts VALUES (?,?,?)", (f"order:{row['fact_id']}", row.get("observed_at"), json.dumps(row, default=str)))
+            raw_json = json.dumps(row, default=str)
+            _budget_check(evidence, out, extra_bytes=len(raw_json.encode()))
+            out.execute("INSERT INTO order_facts VALUES (?,?,?)", (f"order:{row['fact_id']}", row.get("observed_at"), raw_json))
         for raw in trade_facts:
+            _budget_check(evidence, out)
             row = dict(raw)
-            out.execute("INSERT INTO trade_facts VALUES (?,?,?,?,?)", (f"trade:{row['trade_fact_id']}", row.get("observed_at"), _float(row.get("fill_price")), _float(row.get("filled_size")), json.dumps(row, default=str)))
+            raw_json = json.dumps(row, default=str)
+            _budget_check(evidence, out, extra_bytes=len(raw_json.encode()))
+            out.execute("INSERT INTO trade_facts VALUES (?,?,?,?,?)", (f"trade:{row['trade_fact_id']}", row.get("observed_at"), _float(row.get("fill_price")), _float(row.get("filled_size")), raw_json))
         for raw in fills:
+            _budget_check(evidence, out)
             row = dict(raw)
-            out.execute("INSERT INTO fills VALUES (?,?,?,?,?)", (f"wallet:{row['id']}", row.get("observed_at"), _float(row.get("price")), _float(row.get("size")), json.dumps(row, default=str)))
-        _copy_source_clocks(cfg, out, position)
+            raw_json = json.dumps(row, default=str)
+            _budget_check(evidence, out, extra_bytes=len(raw_json.encode()))
+            out.execute("INSERT INTO fills VALUES (?,?,?,?,?)", (f"wallet:{row['id']}", row.get("observed_at"), _float(row.get("price")), _float(row.get("size")), raw_json))
+        _copy_source_clocks(cfg, out, position, row_limit=min(row_limit, int(cfg["loop"].get("evidence_source_rows", 1000))))
         _copy_runtime_health(out)
         _copy_versions_and_config(cfg, out)
         out.commit()
-    manifest = {
-        "schema_version": SCHEMA_VERSION,
-        "incident_id": incident_id,
-        "position_id": incident["position_id"],
-        "held_token_id": incident["held_token_id"],
-        "crossing_evidence_id": incident["crossing_evidence_id"],
-        "t_floor": incident["t_floor"],
-        "floor_price": incident["floor_price"],
-        "evidence_db": str(final_evidence),
-        "row_limit_per_table": row_limit,
-        "coverage": _evidence_coverage(evidence),
-        "loaded_sha": _active_loaded_sha(cfg),
-        "created_at": iso(),
-        "sha256": hashlib.sha256(evidence.read_bytes()).hexdigest(),
-    }
-    manifest_tmp.write_text(json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
-    os.replace(evidence, final_evidence)
-    os.replace(manifest_tmp, manifest_path)
-    pointer_tmp = incident_dir / f".CURRENT.{os.getpid()}.{time.monotonic_ns()}.tmp"
-    pointer_tmp.write_text(generation_id + "\n")
-    os.replace(pointer_tmp, incident_dir / "CURRENT")
+    _budget_check(evidence)
+    try:
+        coverage = _evidence_coverage(evidence, budget=build_budget)
+        sha256 = _stream_evidence_hash(evidence, build_budget)
+        _budget_check(evidence)
+        manifest = {
+            "schema_version": SCHEMA_VERSION,
+            "incident_id": incident_id,
+            "position_id": incident["position_id"],
+            "held_token_id": incident["held_token_id"],
+            "crossing_evidence_id": incident["crossing_evidence_id"],
+            "t_floor": incident["t_floor"],
+            "floor_price": incident["floor_price"],
+            "evidence_db": str(final_evidence),
+            "row_limit_per_table": row_limit,
+            "source_row_limit": min(row_limit, int(cfg["loop"].get("evidence_source_rows", 1000))),
+            "size_bytes": evidence.stat().st_size,
+            "evidence_mtime_ns": evidence.stat().st_mtime_ns,
+            "capacity": {
+                "max_bytes": int(build_budget.get("max_bytes", cfg["loop"].get("evidence_max_bytes", 32 * 1024 * 1024))),
+                "max_rows_per_table": row_limit,
+                "window_days": window_days,
+            },
+            "coverage": coverage,
+            "loaded_sha": _active_loaded_sha(cfg),
+            "created_at": iso(),
+            "sha256": sha256,
+        }
+    except BaseException:
+        _cleanup_unpublished_generation(incident_dir, generation_id, generation_dir)
+        raise
+    try:
+        _budget_check(evidence)
+        manifest_tmp.write_text(json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
+        _budget_check(evidence)
+        os.replace(evidence, final_evidence)
+        os.replace(manifest_tmp, manifest_path)
+        _budget_check(final_evidence)
+        pointer_tmp = incident_dir / f".CURRENT.{os.getpid()}.{time.monotonic_ns()}.tmp"
+        pointer_tmp.write_text(generation_id + "\n")
+        _budget_check(final_evidence)
+        os.replace(pointer_tmp, incident_dir / "CURRENT")
+    except BaseException:
+        _cleanup_unpublished_generation(incident_dir, generation_id, generation_dir)
+        raise
     return final_evidence
 
 
 def build_evidence(cfg: Mapping[str, Any], incident_id: str) -> Path:
+    global _EVIDENCE_BUILD_CONTEXT
+    previous_budget = _EVIDENCE_BUILD_CONTEXT
+    if previous_budget is None:
+        _EVIDENCE_BUILD_CONTEXT = _new_evidence_budget(cfg)
     try:
         return _build_evidence_snapshot(cfg, incident_id)
     except BaseException:
@@ -1940,24 +2108,234 @@ def build_evidence(cfg: Mapping[str, Any], incident_id: str) -> Path:
             for path in incident_dir.glob(pattern):
                 path.unlink(missing_ok=True)
         raise
+    finally:
+        _EVIDENCE_BUILD_CONTEXT = previous_budget
+
+
+def _run_bounded_evidence_build(
+    cfg: Mapping[str, Any], incident_id: str, budget: dict[str, Any]
+) -> Path:
+    global _EVIDENCE_BUILD_CONTEXT
+    previous = _EVIDENCE_BUILD_CONTEXT
+    _EVIDENCE_BUILD_CONTEXT = budget
+    try:
+        return build_evidence(cfg, incident_id)
+    finally:
+        _EVIDENCE_BUILD_CONTEXT = previous
 
 
 def _evidence_debt_id(incident_id: str) -> str:
     return f"evidence_snapshot:{incident_id}"
 
 
-def _record_evidence_debt(cfg: Mapping[str, Any], incident_id: str, reason: str) -> None:
+def _evidence_fingerprints(
+    cfg: Mapping[str, Any], incident_id: str, budget: Mapping[str, Any]
+) -> tuple[str, str, str, str]:
+    settings = cfg["loop"]
+    config_payload = {
+        "history_days": settings.get("history_days"),
+        "window_days": min(7, max(1, int(settings.get("evidence_window_days", 7)))),
+        "rows": int(settings.get("evidence_max_rows", settings.get("max_evidence_rows_per_table", 250000))),
+        "source_rows": int(settings.get("evidence_source_rows", 1000)),
+    }
+    capacity_payload = {
+        "builds_per_cycle": int(settings.get("evidence_builds_per_cycle", 1)),
+        "budget_ms": float(settings.get("evidence_build_budget_ms", 1000)),
+        "max_bytes": int(settings.get("evidence_max_bytes", 32 * 1024 * 1024)),
+    }
+    with memory(cfg) as mem:
+        incident = mem.execute(
+            "SELECT incident_id,position_id,crossing_evidence_id,held_token_id,evidence_revision,t_floor,detected_at "
+            "FROM incidents WHERE incident_id=?",
+            (incident_id,),
+        ).fetchone()
+    if incident is None:
+        raise KeyError(f"unknown incident {incident_id}")
+    position: Mapping[str, Any] = {}
+    fingerprint_rows = min(
+        max(1, int(settings.get("evidence_max_rows", settings.get("max_evidence_rows_per_table", 250000)))),
+        256,
+    )
+    window_days = min(7, max(1, int(settings.get("evidence_window_days", 7))))
+    floor_at = parse_time(str(incident["t_floor"] or "")) or parse_time(str(incident["detected_at"] or "")) or now()
+    window_start = floor_at - timedelta(days=window_days / 2)
+    window_end = window_start + timedelta(days=window_days)
+    canonical_rows: dict[str, list[dict[str, Any]]] = {}
+    with open_ro(Path(str(cfg["paths"]["trades_db"]))) as trades:
+        _apply_evidence_sql_budget(trades, budget)
+        row = trades.execute(
+            "SELECT position_id,phase,city,target_date,temperature_metric,token_id,updated_at "
+            "FROM position_current WHERE position_id=?",
+            (str(incident["position_id"]),),
+        ).fetchone()
+        if row is not None:
+            position = dict(row)
+        canonical_rows["events"] = [dict(row) for row in trades.execute(
+            "SELECT event_id,sequence_no,event_type,occurred_at,command_id,substr(payload_json,1,4096) AS payload_json "
+            "FROM position_events WHERE position_id=? AND occurred_at BETWEEN ? AND ? "
+            "ORDER BY sequence_no DESC LIMIT ?",
+            (str(incident["position_id"]), iso(window_start), iso(window_end), fingerprint_rows),
+        ).fetchall()]
+        canonical_rows["quotes"] = [dict(row) for row in trades.execute(
+            "SELECT evidence_id,event_id,token_id,direction,quote_seen_at,book_hash_before,best_bid_before,best_ask_before,"
+            "substr(depth_before_json,1,4096) AS depth_before_json "
+            "FROM execution_feasibility_evidence WHERE token_id=? AND quote_seen_at BETWEEN ? AND ? "
+            "ORDER BY quote_seen_at,rowid LIMIT ?",
+            (str(incident["held_token_id"]), iso(window_start), iso(window_end), fingerprint_rows),
+        ).fetchall()]
+        canonical_rows["commands"] = [dict(row) for row in trades.execute(
+            "SELECT command_id,position_id,created_at,updated_at,state FROM venue_commands "
+            "WHERE position_id=? AND created_at BETWEEN ? AND ? ORDER BY created_at LIMIT ?",
+            (str(incident["position_id"]), iso(window_start), iso(window_end), fingerprint_rows),
+        ).fetchall()]
+        command_ids = [str(row["command_id"]) for row in canonical_rows["commands"]]
+        if command_ids:
+            marks = ",".join("?" for _ in command_ids)
+            canonical_rows["command_events"] = [dict(row) for row in trades.execute(
+                f"SELECT event_id,command_id,sequence_no,event_type,occurred_at,state_after,substr(payload_json,1,4096) AS payload_json "
+                f"FROM venue_command_events WHERE command_id IN ({marks}) ORDER BY occurred_at,sequence_no LIMIT ?",
+                [*command_ids, fingerprint_rows],
+            ).fetchall()]
+            trade_facts = [dict(row) for row in trades.execute(
+                f"SELECT trade_fact_id,command_id,trade_id,observed_at,local_sequence,fill_price,filled_size "
+                f"FROM venue_trade_facts WHERE command_id IN ({marks}) ORDER BY observed_at,local_sequence LIMIT ?",
+                [*command_ids, fingerprint_rows],
+            ).fetchall()]
+            canonical_rows["trade_facts"] = trade_facts
+            trade_ids = list(dict.fromkeys(str(row["trade_id"]) for row in trade_facts if row.get("trade_id")))
+            if trade_ids:
+                trade_marks = ",".join("?" for _ in trade_ids[:900])
+                canonical_rows["fills"] = [dict(row) for row in trades.execute(
+                    f"SELECT id,trade_id,observed_at,price,size FROM wallet_fill_observations "
+                    f"WHERE trade_id IN ({trade_marks}) ORDER BY observed_at,id LIMIT ?",
+                    [*trade_ids[:900], fingerprint_rows],
+                ).fetchall()]
+    source_rows: dict[str, list[dict[str, Any]]] = {}
+    forecasts_path = Path(str(cfg["paths"]["forecasts_db"]))
+    if forecasts_path.exists():
+        with open_ro(forecasts_path) as forecasts:
+            _apply_evidence_sql_budget(forecasts, budget)
+            source_start = iso(floor_at - timedelta(days=window_days / 2))
+            source_end = iso(floor_at + timedelta(days=window_days / 2))
+            source_rows["posteriors"] = [dict(row) for row in forecasts.execute(
+                "SELECT * FROM forecast_posteriors WHERE lower(city)=lower(?) AND target_date=? AND temperature_metric=? "
+                "AND (source_available_at BETWEEN ? AND ? OR source_available_at IS NULL) "
+                "ORDER BY computed_at DESC LIMIT ?",
+                (position.get("city"), position.get("target_date"), position.get("temperature_metric"), source_start, source_end, fingerprint_rows),
+            ).fetchall()]
+            source_rows["ensembles"] = [dict(row) for row in forecasts.execute(
+                "SELECT * FROM ensemble_snapshots WHERE lower(city)=lower(?) AND target_date=? AND temperature_metric=? "
+                "AND (available_at BETWEEN ? AND ? OR available_at IS NULL) "
+                "ORDER BY available_at DESC LIMIT ?",
+                (position.get("city"), position.get("target_date"), position.get("temperature_metric"), source_start, source_end, fingerprint_rows),
+            ).fetchall()]
+    def bounded_records(rows: Mapping[str, list[dict[str, Any]]]) -> dict[str, str]:
+        return {
+            name: digest(
+                json.dumps(
+                    [json.dumps(row, sort_keys=True, default=str)[:4096] for row in values],
+                    sort_keys=True,
+                ),
+                length=32,
+            )
+            for name, values in rows.items()
+        }
+    data_payload = {
+        "incident": dict(incident),
+        "position": position,
+        "window": [iso(window_start), iso(window_end)],
+        "canonical_row_digests": bounded_records(canonical_rows),
+        "source_row_digests": bounded_records(source_rows),
+    }
+    config_fp = digest(json.dumps(config_payload, sort_keys=True, default=str), length=32)
+    capacity_fp = digest(json.dumps(capacity_payload, sort_keys=True, default=str), length=32)
+    data_fp = digest(json.dumps(data_payload, sort_keys=True, default=str), length=32)
+    fingerprint = digest(config_fp, capacity_fp, data_fp, length=32)
+    return fingerprint, config_fp, capacity_fp, data_fp
+
+
+def _evidence_identity_fingerprints(
+    cfg: Mapping[str, Any], incident_id: str
+) -> tuple[str, str, str, str]:
+    settings = cfg["loop"]
+    config_payload = {
+        "history_days": settings.get("history_days"),
+        "window_days": min(7, max(1, int(settings.get("evidence_window_days", 7)))),
+        "rows": int(settings.get("evidence_max_rows", settings.get("max_evidence_rows_per_table", 250000))),
+        "source_rows": int(settings.get("evidence_source_rows", 1000)),
+    }
+    capacity_payload = {
+        "builds_per_cycle": int(settings.get("evidence_builds_per_cycle", 1)),
+        "budget_ms": float(settings.get("evidence_build_budget_ms", 1000)),
+        "max_bytes": int(settings.get("evidence_max_bytes", 32 * 1024 * 1024)),
+    }
+    with memory(cfg) as mem:
+        incident = mem.execute(
+            "SELECT incident_id,position_id,crossing_evidence_id,held_token_id,evidence_revision,t_floor,detected_at "
+            "FROM incidents WHERE incident_id=?",
+            (incident_id,),
+        ).fetchone()
+    if incident is None:
+        raise KeyError(f"unknown incident {incident_id}")
+    with open_ro(Path(str(cfg["paths"]["trades_db"]))) as trades:
+        position_row = trades.execute(
+            "SELECT position_id,phase,city,target_date,temperature_metric,token_id,updated_at "
+            "FROM position_current WHERE position_id=?",
+            (str(incident["position_id"]),),
+        ).fetchone()
+    data_fp = digest(json.dumps({"incident": dict(incident), "position": dict(position_row) if position_row else {}}, sort_keys=True, default=str), length=32)
+    config_fp = digest(json.dumps(config_payload, sort_keys=True, default=str), length=32)
+    capacity_fp = digest(json.dumps(capacity_payload, sort_keys=True, default=str), length=32)
+    return digest(config_fp, capacity_fp, data_fp, length=32), config_fp, capacity_fp, data_fp
+
+
+def _has_capacity_failure_debt(cfg: Mapping[str, Any], incident_id: str) -> bool:
+    with memory(cfg) as mem:
+        row = mem.execute(
+            "SELECT reason FROM controller_debt WHERE debt_id=? AND status='retry_pending'",
+            (_evidence_debt_id(incident_id),),
+        ).fetchone()
+    return bool(row and str(row[0]).startswith("evidence_snapshot_capacity_failure:"))
+
+
+def _capacity_debt_matches(cfg: Mapping[str, Any], incident_id: str, fingerprint: str) -> bool:
+    with memory(cfg) as mem:
+        row = mem.execute(
+            "SELECT status,reason,fingerprint FROM controller_debt WHERE debt_id=?",
+            (_evidence_debt_id(incident_id),),
+        ).fetchone()
+    return bool(
+        row
+        and str(row[0]) == "retry_pending"
+        and str(row[1]).startswith("evidence_snapshot_capacity_failure:")
+        and str(row[2]) == fingerprint
+    )
+
+
+def _record_evidence_debt(
+    cfg: Mapping[str, Any],
+    incident_id: str,
+    reason: str,
+    *,
+    preserve_incident_state: bool = False,
+    fingerprints: tuple[str, str, str, str] | None = None,
+) -> None:
     stamp = iso()
+    fingerprint, config_fp, capacity_fp, data_fp = fingerprints or ("", "", "", "")
     with memory(cfg) as mem:
         mem.execute(
-            "INSERT INTO controller_debt(debt_id,kind,status,reason,updated_at) VALUES (?,?,?,?,?) "
-            "ON CONFLICT(debt_id) DO UPDATE SET kind=excluded.kind,status=excluded.status,reason=excluded.reason,updated_at=excluded.updated_at",
-            (_evidence_debt_id(incident_id), "evidence_snapshot", "retry_pending", reason[:1000], stamp),
+            "INSERT INTO controller_debt(debt_id,kind,status,reason,updated_at,fingerprint,config_fingerprint,capacity_fingerprint,data_fingerprint,attempts) "
+            "VALUES (?,?,?,?,?,?,?,?,?,1) "
+            "ON CONFLICT(debt_id) DO UPDATE SET kind=excluded.kind,status=excluded.status,reason=excluded.reason,updated_at=excluded.updated_at,"
+            "fingerprint=excluded.fingerprint,config_fingerprint=excluded.config_fingerprint,capacity_fingerprint=excluded.capacity_fingerprint,"
+            "data_fingerprint=excluded.data_fingerprint,attempts=controller_debt.attempts+1",
+            (_evidence_debt_id(incident_id), "evidence_snapshot", "retry_pending", reason[:1000], stamp, fingerprint, config_fp, capacity_fp, data_fp),
         )
-        mem.execute(
-            "UPDATE incidents SET stage='evidence',status=CASE WHEN status IN ('queued','retry_pending','observing') THEN 'blocked' ELSE status END,updated_at=? WHERE incident_id=?",
-            (stamp, incident_id),
-        )
+        if not preserve_incident_state:
+            mem.execute(
+                "UPDATE incidents SET stage='evidence',status=CASE WHEN status IN ('queued','retry_pending','observing') THEN 'blocked' ELSE status END,updated_at=? WHERE incident_id=?",
+                (stamp, incident_id),
+            )
         mem.commit()
 
 
@@ -1988,7 +2366,21 @@ def _evidence_pair_paths(cfg: Mapping[str, Any], incident_id: str) -> tuple[Path
     return snapshot_dir / "evidence.db", snapshot_dir / "manifest.json"
 
 
-def _evidence_pair_valid(cfg: Mapping[str, Any], incident_id: str) -> bool:
+def _stream_evidence_hash(path: Path, budget: Mapping[str, Any]) -> str:
+    digestor = hashlib.sha256()
+    with path.open("rb") as handle:
+        while True:
+            if time.monotonic() >= float(budget["deadline"]):
+                raise EvidenceCapacityExceeded("evidence_pair_hash_deferred:time_budget")
+            chunk = handle.read(1024 * 1024)
+            if not chunk:
+                return digestor.hexdigest()
+            digestor.update(chunk)
+
+
+def _evidence_pair_valid(
+    cfg: Mapping[str, Any], incident_id: str, *, budget: Mapping[str, Any] | None = None
+) -> bool:
     pair = _evidence_pair_paths(cfg, incident_id)
     if pair is None:
         return False
@@ -1998,20 +2390,60 @@ def _evidence_pair_valid(cfg: Mapping[str, Any], incident_id: str) -> bool:
         return False
     if str(manifest.get("incident_id") or "") != incident_id:
         return False
+    hash_budget = budget or _EVIDENCE_BUILD_CONTEXT or _new_evidence_budget(cfg)
     try:
         if Path(str(manifest.get("evidence_db") or "")).resolve() != evidence.resolve():
             return False
-        if hashlib.sha256(evidence.read_bytes()).hexdigest() != str(manifest.get("sha256") or ""):
+        stat = evidence.stat()
+        expected_size = int(manifest.get("size_bytes") or -1)
+        expected_mtime = int(manifest.get("evidence_mtime_ns") or -1)
+        if expected_size < 0 or expected_mtime < 0:
             return False
-        with sqlite3.connect(evidence) as conn:
+        cache_key = (str(evidence), stat.st_size, stat.st_mtime_ns)
+        expected_hash = str(manifest.get("sha256") or "")
+        cached_hash = _EVIDENCE_HASH_CACHE.get(cache_key)
+        if stat.st_size != expected_size or stat.st_mtime_ns != expected_mtime:
+            actual_hash = cached_hash or _stream_evidence_hash(evidence, hash_budget)
+            _EVIDENCE_HASH_CACHE[cache_key] = actual_hash
+            if actual_hash != expected_hash:
+                return False
+        elif cached_hash is not None and cached_hash != expected_hash:
+            return False
+        with sqlite3.connect(evidence, timeout=0.1) as conn:
+            _apply_evidence_sql_budget(conn, hash_budget)
+            _budget_check(conn=conn)
             row = conn.execute("SELECT value_json FROM incident WHERE key='incident_id'").fetchone()
         return row is not None and json.loads(str(row[0])) == incident_id
+    except sqlite3.OperationalError as exc:
+        if "interrupted" in str(exc).lower():
+            raise EvidenceCapacityExceeded("evidence_pair_identity_deferred:time_budget") from exc
+        return False
     except (OSError, sqlite3.Error, json.JSONDecodeError):
         return False
 
 
-def _capture_hard_evidence(cfg: Mapping[str, Any], incident_ids: Iterable[str] = (), *, scan_all: bool = False) -> None:
-    candidates = {str(value) for value in incident_ids if str(value)}
+def _capture_pair_valid(
+    cfg: Mapping[str, Any], incident_id: str, budget: Mapping[str, Any]
+) -> bool:
+    try:
+        return _evidence_pair_valid(cfg, incident_id, budget=budget)
+    except TypeError as exc:
+        if "budget" not in str(exc):
+            raise
+        return _evidence_pair_valid(cfg, incident_id)
+
+
+def _capture_hard_evidence(
+    cfg: Mapping[str, Any],
+    incident_ids: Iterable[str] = (),
+    *,
+    scan_all: bool = False,
+    budget: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    global _EVIDENCE_BUILD_CONTEXT, _LAST_EVIDENCE_CYCLE
+    budget = budget or _new_evidence_budget(cfg)
+    created_order = [str(value) for value in incident_ids if str(value)]
+    candidates = set(created_order)
     with memory(cfg) as mem:
         if scan_all:
             rows = mem.execute(
@@ -2023,28 +2455,159 @@ def _capture_hard_evidence(cfg: Mapping[str, Any], incident_ids: Iterable[str] =
         ).fetchall()
         candidates.update(str(row[0]).removeprefix("evidence_snapshot:") for row in debts if str(row[0]).startswith("evidence_snapshot:"))
     if not candidates:
-        return
+        return {"built": [], "deferred": [], "attempted": 0, "validated": 0, "bytes": 0}
     with memory(cfg) as mem:
-        hard = {
-            str(row[0]) for row in mem.execute(
-                "SELECT incident_id FROM incidents WHERE kind='hard' AND incident_id IN "
-                f"({','.join('?' for _ in candidates)})", tuple(candidates)
+        if scan_all:
+            rows = mem.execute(
+                "SELECT incident_id,status,position_id,detected_at FROM incidents WHERE kind='hard'"
             ).fetchall()
-        }
-    for incident_id in sorted(hard):
-        if _evidence_pair_valid(cfg, incident_id):
+        else:
+            rows = []
+            candidate_list = list(candidates)
+            for offset in range(0, len(candidate_list), 900):
+                chunk = candidate_list[offset:offset + 900]
+                rows.extend(mem.execute(
+                    "SELECT incident_id,status,position_id,detected_at FROM incidents WHERE kind='hard' AND incident_id IN "
+                    f"({','.join('?' for _ in chunk)})", tuple(chunk)
+                ).fetchall())
+    positions: dict[str, dict[str, Any]] = {}
+    try:
+        with open_ro(Path(str(cfg["paths"]["trades_db"]))) as trades:
+            _apply_evidence_sql_budget(trades, budget)
+            position_ids = list(dict.fromkeys(str(row[2]) for row in rows))
+            for offset in range(0, len(position_ids), 900):
+                chunk = position_ids[offset:offset + 900]
+                if not chunk:
+                    continue
+                for row in trades.execute(
+                    "SELECT position_id,phase,city,updated_at FROM position_current WHERE position_id IN "
+                    f"({','.join('?' for _ in chunk)})", tuple(chunk)
+                ).fetchall():
+                    positions[str(row[0])] = dict(row)
+    except (OSError, sqlite3.Error):
+        positions = {}
+    status_rank = {"queued": 0, "retry_pending": 0, "blocked": 1, "observing": 2, "running": 3}
+    open_rank = {phase: 0 for phase in OPEN_PHASES}
+    row_by_id = {str(row[0]): row for row in rows}
+    created_rank = {incident_id: index for index, incident_id in enumerate(created_order)}
+    def priority(incident_id: str) -> tuple[Any, ...]:
+        row = row_by_id[incident_id]
+        position = positions.get(str(row[2]), {})
+        detected = parse_time(str(row[3]))
+        return (
+            0 if incident_id in created_rank else 1,
+            created_rank.get(incident_id, 10**9),
+            open_rank.get(str(position.get("phase") or ""), 2),
+            0 if str(position.get("city") or "").casefold() == "tel aviv" else 1,
+            status_rank.get(str(row[1]), 9),
+            -(detected.timestamp() if detected else 0.0),
+            incident_id,
+        )
+    ordered = sorted(row_by_id, key=priority)
+    summary = {"built": [], "deferred": [], "attempted": 0, "validated": 0, "bytes": 0}
+    for incident_id in ordered:
+        _reap_incomplete_generations(cfg, incident_id)
+        try:
+            pair_valid = _capture_pair_valid(cfg, incident_id, budget)
+        except EvidenceCapacityExceeded as exc:
+            _record_evidence_debt(
+                cfg,
+                incident_id,
+                f"evidence_snapshot_capacity_failure:{exc}",
+                preserve_incident_state=incident_id not in created_rank,
+            )
+            summary["deferred"].append(incident_id)
+            continue
+        if pair_valid:
             _resolve_evidence_debt(cfg, incident_id)
             continue
+        summary["validated"] += 1
+        has_failure_debt = _has_capacity_failure_debt(cfg, incident_id)
+        if has_failure_debt and time.monotonic() >= float(budget["deadline"]):
+            summary["deferred"].append(incident_id)
+            continue
+        if not has_failure_debt and int(budget["remaining"]) <= 0:
+            fingerprints = _evidence_identity_fingerprints(cfg, incident_id)
+            _record_evidence_debt(
+                cfg,
+                incident_id,
+                "evidence_snapshot_deferred:capacity_count",
+                preserve_incident_state=incident_id not in created_rank,
+                fingerprints=fingerprints,
+            )
+            summary["deferred"].append(incident_id)
+            continue
+        if not has_failure_debt and time.monotonic() >= float(budget["deadline"]):
+            fingerprints = _evidence_identity_fingerprints(cfg, incident_id)
+            _record_evidence_debt(
+                cfg,
+                incident_id,
+                "evidence_snapshot_deferred:time_budget",
+                preserve_incident_state=incident_id not in created_rank,
+                fingerprints=fingerprints,
+            )
+            summary["deferred"].append(incident_id)
+            continue
         try:
-            build_evidence(cfg, incident_id)
-        except RuntimeError as exc:
-            if "position missing" in str(exc):
-                continue
-            _record_evidence_debt(cfg, incident_id, f"{type(exc).__name__}:{exc}")
+            fingerprints = _evidence_fingerprints(cfg, incident_id, budget)
         except Exception as exc:
-            _record_evidence_debt(cfg, incident_id, f"{type(exc).__name__}:{exc}")
+            _record_evidence_debt(
+                cfg,
+                incident_id,
+                f"{type(exc).__name__}:{exc}",
+                preserve_incident_state=incident_id not in created_rank,
+            )
+            summary["deferred"].append(incident_id)
+            continue
+        if _capacity_debt_matches(cfg, incident_id, fingerprints[0]):
+            summary["deferred"].append(incident_id)
+            continue
+        if time.monotonic() >= float(budget["deadline"]):
+            reason = "evidence_snapshot_deferred:time_budget"
+            _record_evidence_debt(
+                cfg,
+                incident_id,
+                reason,
+                preserve_incident_state=incident_id not in created_rank,
+                fingerprints=fingerprints,
+            )
+            summary["deferred"].append(incident_id)
+            continue
+        budget["remaining"] = int(budget["remaining"]) - 1
+        budget["attempted"] = int(budget.get("attempted", 0)) + 1
+        summary["attempted"] += 1
+        try:
+            _run_bounded_evidence_build(cfg, incident_id, budget)
+            budget["built"] = int(budget.get("built", 0)) + 1
+            summary["built"].append(incident_id)
+        except RuntimeError as exc:
+            if isinstance(exc, EvidenceCapacityExceeded):
+                _record_evidence_debt(
+                    cfg,
+                    incident_id,
+                    f"evidence_snapshot_capacity_failure:{exc}",
+                    preserve_incident_state=incident_id not in created_rank,
+                    fingerprints=fingerprints,
+                )
+                summary["deferred"].append(incident_id)
+                continue
+            if "position missing" in str(exc):
+                _record_evidence_debt(cfg, incident_id, f"{type(exc).__name__}:{exc}", preserve_incident_state=incident_id not in created_rank, fingerprints=fingerprints)
+                continue
+            _record_evidence_debt(cfg, incident_id, f"{type(exc).__name__}:{exc}", preserve_incident_state=incident_id not in created_rank, fingerprints=fingerprints)
+        except Exception as exc:
+            _record_evidence_debt(cfg, incident_id, f"{type(exc).__name__}:{exc}", preserve_incident_state=incident_id not in created_rank, fingerprints=fingerprints)
         else:
             _resolve_evidence_debt(cfg, incident_id)
+        finally:
+            _EVIDENCE_BUILD_CONTEXT = None
+    summary["bytes"] = int(budget.get("bytes", 0))
+    _LAST_EVIDENCE_CYCLE["built"] = list(dict.fromkeys([*_LAST_EVIDENCE_CYCLE.get("built", []), *summary["built"]]))
+    _LAST_EVIDENCE_CYCLE["deferred"] = list(dict.fromkeys([*_LAST_EVIDENCE_CYCLE.get("deferred", []), *summary["deferred"]]))
+    _LAST_EVIDENCE_CYCLE["attempted"] = int(_LAST_EVIDENCE_CYCLE.get("attempted", 0)) + int(summary["attempted"])
+    _LAST_EVIDENCE_CYCLE["validated"] = int(_LAST_EVIDENCE_CYCLE.get("validated", 0)) + int(summary["validated"])
+    _LAST_EVIDENCE_CYCLE["bytes"] = max(int(_LAST_EVIDENCE_CYCLE.get("bytes", 0)), int(summary["bytes"]))
+    return summary
 
 
 def _active_loaded_sha(cfg: Mapping[str, Any]) -> str | None:
@@ -2055,7 +2618,9 @@ def _active_loaded_sha(cfg: Mapping[str, Any]) -> str | None:
     return value or None
 
 
-def _evidence_coverage(path: Path) -> dict[str, dict[str, Any]]:
+def _evidence_coverage(
+    path: Path, *, budget: Mapping[str, Any] | None = None
+) -> dict[str, dict[str, Any]]:
     time_columns = {
         "price_ticks": "quote_seen_at",
         "probability_ticks": "occurred_at",
@@ -2067,23 +2632,33 @@ def _evidence_coverage(path: Path) -> dict[str, dict[str, Any]]:
         "fills": "observed_at",
     }
     result: dict[str, dict[str, Any]] = {}
-    with sqlite3.connect(path) as conn:
-        tables = [
-            str(row[0])
-            for row in conn.execute(
-                "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
-            )
-        ]
-        for table in tables:
-            count = int(conn.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0])
-            coverage: dict[str, Any] = {"rows": count}
-            column = time_columns.get(table)
-            if column:
-                first, last = conn.execute(
-                    f'SELECT MIN("{column}"),MAX("{column}") FROM "{table}"'
-                ).fetchone()
-                coverage.update(first_at=first, last_at=last)
-            result[table] = coverage
+    budget = budget or _EVIDENCE_BUILD_CONTEXT or {"deadline": time.monotonic() + 1.0, "max_bytes": 2**63}
+    try:
+        with sqlite3.connect(path, timeout=0.1) as conn:
+            _apply_evidence_sql_budget(conn, budget)
+            _budget_check(conn=conn)
+            tables = [
+                str(row[0])
+                for row in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
+                )
+            ]
+            for table in tables:
+                _budget_check(conn=conn)
+                count = int(conn.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0])
+                coverage: dict[str, Any] = {"rows": count}
+                column = time_columns.get(table)
+                if column:
+                    _budget_check(conn=conn)
+                    first, last = conn.execute(
+                        f'SELECT MIN("{column}"),MAX("{column}") FROM "{table}"'
+                    ).fetchone()
+                    coverage.update(first_at=first, last_at=last)
+                result[table] = coverage
+    except sqlite3.OperationalError as exc:
+        if "interrupted" in str(exc).lower():
+            raise EvidenceCapacityExceeded("evidence_coverage_deferred:time_budget") from exc
+        raise
     return result
 
 
@@ -2103,41 +2678,65 @@ def _float(value: Any) -> float | None:
     return result if math.isfinite(result) else None
 
 
-def _copy_source_clocks(cfg: Mapping[str, Any], out: sqlite3.Connection, position: Mapping[str, Any]) -> None:
+def _copy_source_clocks(
+    cfg: Mapping[str, Any],
+    out: sqlite3.Connection,
+    position: Mapping[str, Any],
+    *,
+    row_limit: int = 1000,
+) -> None:
     path = Path(str(cfg["paths"]["forecasts_db"]))
     if not path.exists():
         return
     with open_ro(path) as forecasts:
-        rows = forecasts.execute(
-            """
-            SELECT * FROM forecast_posteriors
-             WHERE lower(city)=lower(?) AND target_date=? AND temperature_metric=?
-             ORDER BY computed_at
-            """,
-            (position.get("city"), position.get("target_date"), position.get("temperature_metric")),
-        ).fetchall()
-        for raw in rows[-5000:]:
-            row = dict(raw)
-            key = f"posterior:{row['posterior_id']}"
-            out.execute(
-                "INSERT OR REPLACE INTO source_clocks VALUES (?,?,?,?,?,?)",
-                (key, row.get("source_cycle_time"), row.get("source_available_at"), row.get("computed_at"), row.get("recorded_at"), json.dumps(row, default=str)),
-            )
-        ens = forecasts.execute(
-            """
-            SELECT * FROM ensemble_snapshots
-             WHERE lower(city)=lower(?) AND target_date=? AND temperature_metric=?
-             ORDER BY available_at
-            """,
-            (position.get("city"), position.get("target_date"), position.get("temperature_metric")),
-        ).fetchall()
-        for raw in ens[-5000:]:
-            row = dict(raw)
-            key = f"ensemble:{row['snapshot_id']}"
-            out.execute(
-                "INSERT OR REPLACE INTO source_clocks VALUES (?,?,?,?,?,?)",
-                (key, row.get("source_cycle_time") or row.get("issue_time"), row.get("source_available_at") or row.get("available_at"), row.get("fetch_time"), row.get("recorded_at"), json.dumps(row, default=str)),
-            )
+        target = parse_time(f"{position.get('target_date')}T00:00:00+00:00") or now()
+        source_start = iso(target - timedelta(days=3))
+        source_end = iso(target + timedelta(days=4))
+        budget = _EVIDENCE_BUILD_CONTEXT
+        _apply_evidence_sql_budget(forecasts, budget)
+        try:
+            rows = forecasts.execute(
+                """
+                SELECT * FROM forecast_posteriors
+                 WHERE lower(city)=lower(?) AND target_date=? AND temperature_metric=?
+                   AND (source_available_at BETWEEN ? AND ? OR source_available_at IS NULL)
+                 ORDER BY computed_at DESC LIMIT ?
+                """,
+                (position.get("city"), position.get("target_date"), position.get("temperature_metric"), source_start, source_end, row_limit),
+            ).fetchall()
+            for raw in rows:
+                _budget_check(conn=out)
+                row = dict(raw)
+                key = f"posterior:{row['posterior_id']}"
+                raw_json = json.dumps(row, default=str)
+                _budget_check(conn=out, extra_bytes=len(raw_json.encode()))
+                out.execute(
+                    "INSERT OR REPLACE INTO source_clocks VALUES (?,?,?,?,?,?)",
+                    (key, row.get("source_cycle_time"), row.get("source_available_at"), row.get("computed_at"), row.get("recorded_at"), raw_json),
+                )
+            ens = forecasts.execute(
+                """
+                SELECT * FROM ensemble_snapshots
+                 WHERE lower(city)=lower(?) AND target_date=? AND temperature_metric=?
+                   AND (available_at BETWEEN ? AND ? OR available_at IS NULL)
+                 ORDER BY available_at DESC LIMIT ?
+                """,
+                (position.get("city"), position.get("target_date"), position.get("temperature_metric"), source_start, source_end, row_limit),
+            ).fetchall()
+            for raw in ens:
+                _budget_check(conn=out)
+                row = dict(raw)
+                key = f"ensemble:{row['snapshot_id']}"
+                raw_json = json.dumps(row, default=str)
+                _budget_check(conn=out, extra_bytes=len(raw_json.encode()))
+                out.execute(
+                    "INSERT OR REPLACE INTO source_clocks VALUES (?,?,?,?,?,?)",
+                    (key, row.get("source_cycle_time") or row.get("issue_time"), row.get("source_available_at") or row.get("available_at"), row.get("fetch_time"), row.get("recorded_at"), raw_json),
+                )
+        except sqlite3.OperationalError as exc:
+            if "interrupted" in str(exc).lower() and budget is not None:
+                raise EvidenceCapacityExceeded("evidence_snapshot_deferred:forecast_query_budget") from exc
+            raise
 
 
 def _copy_runtime_health(out: sqlite3.Connection) -> None:
@@ -3915,7 +4514,9 @@ def _retry_pending(cfg: Mapping[str, Any], running: list[dict[str, Any]]) -> lis
 def dispatch(cfg: Mapping[str, Any]) -> list[str]:
     reconcile_orphan_incidents(cfg)
     if _provider_backoff(cfg) is not None:
-        _capture_hard_evidence(cfg, scan_all=True)
+        # Backoff gates only provider/Codex work; bounded local evidence maintenance
+        # still runs and carries its remaining debt into the next cycle.
+        _capture_hard_evidence(cfg, scan_all=True, budget=_new_evidence_budget(cfg))
         return []
     if current_capabilities(cfg) is None:
         ensure_capability_probe(cfg)
@@ -3949,13 +4550,14 @@ def dispatch(cfg: Mapping[str, Any]) -> list[str]:
                 break
             incident_id = str(incident["incident_id"])
             try:
-                evidence = build_evidence(cfg, incident_id)
+                build_budget = _new_evidence_budget(cfg)
+                evidence = _run_bounded_evidence_build(cfg, incident_id, build_budget)
                 pair = _evidence_pair_paths(cfg, incident_id)
                 expected_evidence = pair[0] if pair is not None else None
                 if expected_evidence is None or Path(evidence) != expected_evidence:
                     _record_evidence_debt(cfg, incident_id, "evidence_snapshot_path_mismatch")
                     continue
-                if not _evidence_pair_valid(cfg, incident_id):
+                if not _capture_pair_valid(cfg, incident_id, build_budget):
                     _record_evidence_debt(cfg, incident_id, "evidence_snapshot_pair_invalid")
                     continue
                 incident_dir = runtime_dir(cfg) / "incidents" / incident_id
@@ -5171,6 +5773,24 @@ def daemon(cfg: Mapping[str, Any]) -> int:
         detector_elapsed = 0.0
         error = None
         created: list[str] = []
+        # Publish liveness before detector/evidence maintenance can touch a
+        # large historical database.  Operators can distinguish busy from dead.
+        atomic_json(
+            run / "status.json",
+            {
+                "alive": True,
+                "pid": os.getpid(),
+                "at": iso(),
+                "created": [],
+                "evidence_maintenance": "starting",
+                "evidence_built": [],
+                "evidence_deferred": [],
+                "dispatch_worker_pid": None,
+                "error": None,
+                "dispatch_error": dispatch_error,
+                "provider_backoff": _provider_backoff(cfg),
+            },
+        )
         try:
             detector_started = time.monotonic()
             created = detect(cfg)
@@ -5185,6 +5805,12 @@ def daemon(cfg: Mapping[str, Any]) -> int:
                 "pid": os.getpid(),
                 "at": iso(),
                 "created": created,
+                "evidence_maintenance": "complete" if error is None else "error",
+                "evidence_built": _LAST_EVIDENCE_CYCLE.get("built", []),
+                "evidence_deferred": _LAST_EVIDENCE_CYCLE.get("deferred", []),
+                "evidence_attempted": _LAST_EVIDENCE_CYCLE.get("attempted", 0),
+                "evidence_validated": _LAST_EVIDENCE_CYCLE.get("validated", 0),
+                "evidence_bytes": _LAST_EVIDENCE_CYCLE.get("bytes", 0),
                 "dispatch_worker_pid": (
                     dispatch_worker.pid
                     if dispatch_worker is not None and dispatch_worker.poll() is None
