@@ -670,7 +670,7 @@ def persist_day0_hourly_vectors(
 
     conn=None -> zeus-forecasts.db under db_writer_lock(LIVE) per INV-37; the
     connection is OPENED INSIDE the flock (lock-order hygiene: connection-open
-    contention stays under the same writer lock — Copilot PR#404 finding).
+    contention stays under the same writer lock — PR review PR#404 finding).
 
     request_hash is REQUIRED non-empty (PR#404 P1: rows feeding the
     remaining-day q must carry a replayable provenance identity; the table
@@ -759,7 +759,7 @@ def persist_day0_hourly_vectors(
             conn.commit()
     finally:
         # conn can be None when the connection-open itself failed inside the
-        # flock — guard so the original exception is never masked (Copilot
+        # flock — guard so the original exception is never masked (PR review
         # PR#404 finding).
         if own_conn and conn is not None:
             conn.close()

@@ -146,7 +146,7 @@ _LOW_DATA_VERSION_BY_SOURCE_FAMILY: dict[str, str] = {
     "ecmwf_opendata": "ecmwf_opendata_mn2t3_local_calendar_day_min",
 }
 
-# Source-family → physical_quantity registry (PR #85 Copilot: physical_quantity
+# Source-family → physical_quantity registry (PR #85 review: physical_quantity
 # must match the native ECMWF product — mx2t3/mn2t3 for ecmwf_opendata, not
 # mx2t6/mn2t6 which are TIGGE 6h aggregations).
 _HIGH_PHYSICAL_QUANTITY_BY_SOURCE_FAMILY: dict[str, str] = {
@@ -201,7 +201,7 @@ def physical_quantity_for_data_version(
     return None
 
 
-# Phase 2.6 hardening (2026-05-04, critic-opus BLOCKER 1): map runtime
+# Phase 2.6 hardening (2026-05-04, review BLOCKER 1): map runtime
 # source_id strings to source_family keys so live-fetch paths (where the
 # data_version isn't yet known at parse time) can populate a typed
 # data_version into ens_result. Without this, _parse_response returned

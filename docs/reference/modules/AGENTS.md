@@ -35,7 +35,7 @@ authority docs, machine manifests, current-fact surfaces, tests, or source.
 | `calibration.md` | Dense module book for Platt calibration, maturity gates, and offline evidence baseline metrics |
 | `observability.md` | Dense module book for derived operator read models and health views |
 | `types.md` | Dense module book for unit safety, market types, and observation atoms |
-| `analysis.md` | Dense module book for placeholder/derived analysis utilities |
+| `analysis.md` | Module book for the derived-analysis zone (post-settlement attribution, regret, reports) |
 | `scripts.md` | Dense module book for top-level script families and safety boundaries |
 | `tests.md` | Dense module book for law gates, relationship tests, and offline evidence/advisory families |
 | `topology_system.md` | Dense module book for machine routing, topology doctor, and manifest law |

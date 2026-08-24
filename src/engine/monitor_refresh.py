@@ -2002,7 +2002,7 @@ def _attempt_held_belief_readthrough(
         if result is None or not result.live_eligible:
             return None
         # Index the held bin by its venue range-label, exactly like load_replacement_belief.
-        from src.engine.position_belief import _match_bin  # noqa: PLC0415
+        from src.engine.position_belief import _match_bin, held_side_bounds  # noqa: PLC0415
 
         if result.q_lcb_map is None or result.q_ucb_map is None:
             return None
@@ -2018,10 +2018,7 @@ def _attempt_held_belief_readthrough(
             return None
         direction = str(getattr(pos.direction, "value", pos.direction))
         held = _held_side_probability_from_yes_bin_probability(q_yes, direction)
-        if direction == "buy_yes":
-            held_lcb, held_ucb = q_yes_lcb, q_yes_ucb
-        else:
-            held_lcb, held_ucb = 1.0 - q_yes_ucb, 1.0 - q_yes_lcb
+        held_lcb, held_ucb = held_side_bounds(q_yes_lcb, q_yes_ucb, direction)
         logger.info(
             "monitor held-belief READ-THROUGH recompute OK city=%s target_date=%s metric=%s "
             "providers=%d/%d q_held=%.4f band=[%.4f,%.4f] "
@@ -2124,13 +2121,13 @@ def _ens_result_phase2_keys(ens_result: dict) -> tuple[
 ]:
     """Extract (cycle, source_id, horizon_profile) from a live ens_result.
 
-    Phase 2.6 hardening (2026-05-04, critic-opus MAJOR 4): monitor exit
+    Phase 2.6 hardening (2026-05-04, review MAJOR 4): monitor exit
     lanes were silently loading the schema-default Platt bucket because
     get_calibrator was called WITHOUT cycle/source_id/horizon_profile
     args. This helper mirrors the evaluator's extraction logic so both
     entry and exit paths route through the same stratified bucket.
 
-    Copilot review #5 + Codex P1 #7 (2026-05-04): delegated to the shared
+    PR review finding #5 + P1 #7 (2026-05-04): delegated to the shared
     forecast_calibration_domain.derive_phase2_keys_from_ens_result helper
     so datetime issue_time and horizon_profile derivation behave the same
     way in monitor and evaluator paths.
@@ -2973,7 +2970,7 @@ def _refresh_ens_member_counting(
     # silently). Post-fix, the resolver still defaults to HIGH for
     # backward compat, but emits a DEBUG log identifying the position so
     # operators can audit silent-HIGH events.
-    # Phase 2.6 (2026-05-04, critic-opus MAJOR 4): thread Phase 2 stratification
+    # Phase 2.6 (2026-05-04, review MAJOR 4): thread Phase 2 stratification
     # axes so monitor exit calibration uses the same bucket the entry side did.
     if _monitor_q_source is not None:
         cal = None

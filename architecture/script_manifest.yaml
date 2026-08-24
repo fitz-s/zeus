@@ -992,7 +992,6 @@ scripts:
     dangerous_if_run: false
     promotion_barrier: "This script can report readiness only; it cannot authorize live deployment without the live-money-deploy-go operator gate."
   live_smoke_test.py: {class: runtime_support}
-  memory_repair_apply.py: {class: read_only_evidence, canonical_command: "python3 scripts/memory_repair_apply.py [--audit-file PATH] [--memory-dir PATH]", read_targets: [~/.claude/projects/-Users-<username>--openclaw-workspace-venus-zeus/memory_audit_*.md, ~/.claude/projects/-Users-<username>--openclaw-workspace-venus-zeus/memory/feedback_*.md, repo], write_targets: [stdout], dangerous_if_run: false, authority_scope: read_only_repair_proposer, reuse_when: "Proposing patches for STALE/DEAD MEMORY citations flagged by memory_audit.py. Prints unified-diff to stdout only; never modifies feedback_*.md files.", do_not_use_when: "Audit baseline is empty (script exits 0 gracefully) or operator hasn't reviewed proposals from a prior run.", required_tests: []}
   migrate_add_authority_column.py: {class: repair, apply_flag: "--no-dry-run", target_db: "--db", external_inputs: [ZEUS_DESTRUCTIVE_CONFIRMED]}
   migrate_cluster_to_city.py: {class: repair, apply_flag: implicit, target_db: state/zeus-world.db, unguarded_write_rationale: "Existing migration mutates calibration tables without an apply flag; manifest marks it dangerous pending hardening."}
   migrate_b070_control_overrides_to_history.py:
@@ -2579,6 +2578,148 @@ scripts:
       - tests/test_backfill_bayes_precision_fusion_history_refuses_missing_request_identity.py
       - tests/test_backfill_bayes_precision_fusion_history_is_idempotent_under_new_unique_key.py
       - tests/test_bayes_precision_fusion_no_leak_history_join.py
+
+  # --- reversal-plan tier0 item 4 (2026-08-24): non-circular scoreboard ---
+  scoreboard_panels.py:
+    class: read_only_evidence
+    lifecycle: long_lived
+    status: active
+    authority_scope: offline_no_promotion
+    read_targets: [state/zeus-world.db, state/zeus_trades.db]
+    write_targets: [stdout]
+    dry_run_default: true
+    apply_flag: null
+    target_db: null
+    external_inputs: []
+    dangerous_if_run: false
+    delete_policy: retain_until_superseded
+    reuse_when: >
+      Read the non-circular scoreboard (paired forecast proper-scores vs price,
+      price-only selection edge, execution fill quality, exit lifecycle) for
+      settled positions and executed fills. Replaces the old
+      settlement_attribution.category grader (SKILL_WIN/LUCKY_WIN/...), which
+      is circular because it grades trades against our own q instead of price
+      or settlement truth. Idempotent read-only report; safe to re-run anytime.
+    do_not_use_when: >
+      Any task needs to authorize a live decision or promote evidence to
+      canonical truth — this script's output is offline analytics only.
+    canonical_command: "python3 scripts/scoreboard_panels.py [--root PATH] [--world PATH] [--trades PATH] [--panel P1|P2|P3|P4|ALL]"
+    promotion_barrier: "Read-only analytics; cannot authorize live strategy or DB truth changes."
+    required_helpers: []
+    required_tests: [tests/scripts/test_scoreboard_panels.py]
+    unguarded_write_rationale: "No writes; opens both DBs strictly read-only via file:...?mode=ro&immutable=0 URIs; SELECT-only; prints markdown to stdout."
+
+  # --- reversal-plan tier0 item 9 (2026-08-24): market-anchored walk-forward calibrator ---
+  calibrator_walkforward_report.py:
+    class: read_only_evidence
+    lifecycle: long_lived
+    status: active
+    authority_scope: offline_no_promotion
+    read_targets: [state/zeus-world.db]
+    write_targets: [stdout]
+    dry_run_default: true
+    apply_flag: null
+    target_db: null
+    external_inputs: []
+    dangerous_if_run: false
+    delete_policy: retain_until_superseded
+    reuse_when: >
+      Read the walk-forward evaluation of the offline market-anchored residual
+      calibrator (src/calibration/market_anchored_residual.py): paired
+      log-loss of market p0 alone, raw q, and calibrated r_hat, per month and
+      per |q-p| bucket, plus the fitted beta trajectory and final frozen
+      artifact. Idempotent read-only report; safe to re-run anytime. NOT
+      wired into the live entry path — offline evidence only.
+    do_not_use_when: >
+      Any task needs to authorize a live decision, size a position, or
+      promote a calibrator artifact to a served/canonical parameter set —
+      this script's output is offline analytics only and the module it
+      reports on has no live caller.
+    canonical_command: "python3 -m scripts.calibrator_walkforward_report [--root PATH] [--world PATH] [--min-train-rows N]"
+    promotion_barrier: "Read-only analytics; cannot authorize live strategy, sizing, or DB truth changes."
+    required_helpers: []
+    required_tests: [tests/scripts/test_calibrator_walkforward_report.py, tests/calibration/test_market_anchored_residual.py]
+    unguarded_write_rationale: "No writes; opens zeus-world.db strictly read-only via file:...?mode=ro&immutable=0 URI; SELECT-only; prints markdown to stdout."
+
+  # --- reversal-plan tier0 item 7 (2026-08-24): preregistered selection-lift report ---
+  selection_lift_report.py:
+    class: read_only_evidence
+    lifecycle: long_lived
+    status: active
+    authority_scope: offline_no_promotion
+    read_targets: [state/zeus-world.db]
+    write_targets: [stdout]
+    dry_run_default: true
+    apply_flag: null
+    target_db: null
+    external_inputs: []
+    dangerous_if_run: false
+    delete_policy: retain_until_superseded
+    reuse_when: >
+      Read the preregistered Tier-0 ordinal selection-lift test report (frozen
+      docs/operations/current/plans/tier0_selection_lift_preregistration_2026-08-24.md):
+      permutation p-value, city-date and date-block bootstrap CIs (larger
+      governs), and the decision-rule verdict, over src/analysis/
+      selection_lift.py (DB-agnostic pure computation). Refuses to print a
+      p-value below 100 qualifying observations (the evaluation lock);
+      --pilot-power-check prints only report-only cluster variance instead.
+      Prints "provenance table absent — 0 observations" cleanly if Item 3's
+      candidate-set persistence table (not yet landed as of 2026-08-24) is
+      absent. Idempotent read-only report; safe to re-run anytime. NOT wired
+      into the live entry path — offline evidence only.
+    do_not_use_when: >
+      Any task needs to authorize a live decision, size a position, or treat
+      an accruing (pre-stopping-count) result as evidence — the frozen doc
+      forbids early peeks and this script enforces that by refusing to print
+      p before 100 observations. This script's output is offline analytics
+      only.
+    canonical_command: "python3 -m scripts.selection_lift_report [--root PATH] [--world PATH] [--n-perm N] [--n-boot N] [--seed N] [--pilot-power-check]"
+    promotion_barrier: "Read-only analytics; cannot authorize live strategy, sizing, or DB truth changes; refuses a p-value before the frozen stopping count."
+    required_helpers: []
+    required_tests: [tests/scripts/test_selection_lift_report.py, tests/analysis/test_selection_lift.py]
+    unguarded_write_rationale: "No writes; opens zeus-world.db strictly read-only via file:...?mode=ro&immutable=0 URI (scoreboard_panels.open_ro); SELECT-only; prints markdown to stdout."
+
+  # --- reversal-plan tier0 item 10 (2026-08-24): two-gate capital promotion evaluator ---
+  promotion_gates_report.py:
+    class: read_only_evidence
+    lifecycle: long_lived
+    status: active
+    authority_scope: offline_no_promotion
+    read_targets: [state/zeus-world.db]
+    write_targets: [stdout, state/promotion_gates_ledger.json]
+    dry_run_default: true
+    apply_flag: null
+    target_db: null
+    external_inputs: []
+    dangerous_if_run: false
+    delete_policy: retain_until_superseded
+    reuse_when: >
+      Read the two-gate capital-promotion verdict (src/analysis/
+      promotion_gates.py): GATE A prequential non-inferiority of the
+      market-anchored calibrator's r_hat vs market price p0 on paired
+      log-loss (cluster-robust city-date/date, larger governs, plus a
+      per-|q-p|-bucket no-catastrophic-degradation side condition) and
+      GATE B capital-use readiness (positive-LCB fill residual AND the
+      preregistered selection-lift test's positive-LCB branch). Also
+      documents (not wires) the single bounded Tier-1 sizing formula.
+      Idempotent for --dry-run; a formal (non---dry-run) Gate-B evaluation
+      is a ONE-SHOT alpha-spending event per preregistration_version,
+      enforced by state/promotion_gates_ledger.json — a second formal
+      evaluation is refused (use --dry-run for repeated viewing). Prints
+      "no tier0-settled sample yet" cleanly when the tier0_flagged marker
+      column is absent (true as of 2026-08-24; Tier-0 admission has no DB
+      writer yet). NOT wired into the live entry path — offline evidence
+      only.
+    do_not_use_when: >
+      Any task needs to authorize a live decision, size a position, or
+      treat a Gate A/B PASS as itself a sizing license — Gate A licenses
+      r_hat for ranking/lifecycle use only, never capital sizing; this
+      script's output is offline analytics only.
+    canonical_command: "python3 -m scripts.promotion_gates_report [--root PATH] [--world PATH] [--gate A|B|ALL] [--dry-run] [--preregistration-version V]"
+    promotion_barrier: "Read-only DB access; cannot authorize live strategy, sizing, or DB truth changes; a formal Gate-B evaluation writes only the alpha-spending ledger, never canonical truth."
+    required_helpers: []
+    required_tests: [tests/scripts/test_promotion_gates_report.py, tests/analysis/test_promotion_gates.py]
+    unguarded_write_rationale: "No DB writes; opens zeus-world.db strictly read-only via file:...?mode=ro&immutable=0 URI (scoreboard_panels.open_ro); SELECT-only. The only write is an atomic (tempfile+fsync+os.replace) append to state/promotion_gates_ledger.json recording a formal Gate-B evaluation's timestamp/sample-hash/verdict -- never a DB write, never a live decision, and --dry-run skips it entirely."
 
   # NOTE (R0-f/R0-g prepare packet, 2026-07-08; extended by the loop-build packet,
   # 2026-07-08): scripts/ops/migrate_plist_secrets.sh, scripts/ops/rotate_zeus_logs.sh,

@@ -14,7 +14,7 @@ docs/operations/repo_review_2026-05-01/INVARIANT_CITATION_DRIFT_REPAIR.md).
 
 Why test the citations
 ----------------------
-The architect / critic-opus / test-engineer reviews triple-confirmed that
+The architect / critic / test-engineer reviews triple-confirmed that
 INV-05 cited a non-existent test for at least one full review cycle. This is
 exactly the failure mode `scripts/check_invariant_test_citations.py` catches.
 Without this test gating commits, the next stale citation lands silently.

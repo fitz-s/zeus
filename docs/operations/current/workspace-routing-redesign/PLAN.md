@@ -4,7 +4,12 @@
 <!-- Last reused or audited: 2026-06-14 -->
 <!-- Authority basis: operator brief 2026-06-14 (workspace sprawl + context-management revolution); architecture/file_arrangement.yaml; .claude/hooks/{dispatch.py,registry.yaml}; scripts/{topology_doctor_docs_checks.py,zpkt.py,worktree_doctor.py}; Claude Code hooks doc (code.claude.com/docs/en/hooks). -->
 
-**Status:** DESIGN APPROVED — implementation GATED (no code until operator authorizes a build step).
+**Status:** PARTIALLY IMPLEMENTED — this header previously read "GATED (no code until operator
+authorizes a build step)" and was wrong. `.claude/hooks/dispatch.py` imports and calls
+`route_write`, and `architecture/file_arrangement.yaml` carries `enforcement: data_only` with an
+inline comment citing this plan's §5 S7 by name — S7 being the *last* step of the sequence below.
+A reader trusting the old header would conclude the routing mechanism does not exist. Treat each
+step's own status as authoritative; the sequence below was not executed in order.
 **This file dogfoods its own design:** it is a work-artifact, so it lives in its own by-work folder `docs/operations/current/workspace-routing-redesign/` with its `scope.yaml` sibling — exactly where the router (R20) would route it.
 
 ---

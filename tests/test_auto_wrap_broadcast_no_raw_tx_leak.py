@@ -121,7 +121,7 @@ def test_wrap_broadcast_does_not_leak_and_sends_once(caplog, tx_kind):
     """The broadcast path hides signed bytes and sends exactly once."""
     # Use a real private key (test key only, no funds)
     _TEST_SIGNER_KEY = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
-    _TEST_SAFE_ADDR = "0x6a096d5042cba434521E2cdb95A1fBa789a09b7f"
+    _TEST_SAFE_ADDR = "0x5AFE0000000000000000000000000000000000F1"
 
     adapter = _make_adapter(_TEST_SAFE_ADDR, _TEST_SIGNER_KEY)
     signer_eoa, sent_raw = _patch_rpc_for_wrap(adapter)
@@ -156,7 +156,7 @@ def test_wrap_calldata_approve_first_arg_is_onramp():
     )
     import eth_abi
 
-    calldata = _build_wrap_calldata("APPROVE", "0x6a096d5042cba434521E2cdb95A1fBa789a09b7f", 1_000_000)
+    calldata = _build_wrap_calldata("APPROVE", "0x5AFE0000000000000000000000000000000000F1", 1_000_000)
     assert calldata.startswith("0x095ea7b3"), f"APPROVE selector wrong: {calldata[:10]}"
     decoded = eth_abi.decode(["address", "uint256"], bytes.fromhex(calldata[10:]))
     assert decoded[0].lower() == POLYGON_COLLATERAL_ONRAMP_ADDRESS.lower(), (
@@ -181,7 +181,7 @@ def test_wrap_calldata_wrap_v2_encoding():
     )
     import eth_abi
 
-    safe_addr = "0x6a096d5042cba434521E2cdb95A1fBa789a09b7f"
+    safe_addr = "0x5AFE0000000000000000000000000000000000F1"
     calldata = _build_wrap_calldata("WRAP", safe_addr, 1_500_000)
     assert calldata.startswith("0x62355638"), f"WRAP selector wrong: {calldata[:10]}"
     decoded = eth_abi.decode(["address", "address", "uint256"], bytes.fromhex(calldata[10:]))

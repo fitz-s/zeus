@@ -207,4 +207,5 @@ constraints:
         - tests/test_gate_scope_drain_reset.py::test_day0_oracle_guard_declares_scope_drain_reset
         - tests/test_gate_scope_drain_reset.py::test_posterior_identity_check_declares_scope_drain_reset
         - tests/test_gate_scope_drain_reset.py::test_request_governor_circuit_declares_scope_drain_reset
+        - tests/test_gate_scope_drain_reset.py::test_global_batch_preemption_grace_declares_scope_drain_reset
         - tests/test_gate_scope_drain_reset.py::test_unknown_gate_site_fails_loudly_not_silently

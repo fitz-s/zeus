@@ -2581,7 +2581,7 @@ def check() -> dict:
     # Phase C-4 activation: when ZEUS_ENTRY_FORECAST_HEALTHCHECK_BLOCKERS=1,
     # entry_forecast_blockers participate in the healthy predicate. Default
     # OFF preserves the legacy "GREEN even if entry-forecast is BLOCKED"
-    # behavior. Closes the fail-OPEN seam critic-opus ATTACK 4 surfaced.
+    # behavior. Closes the fail-OPEN seam review ATTACK 4 surfaced.
     if os.environ.get("ZEUS_ENTRY_FORECAST_HEALTHCHECK_BLOCKERS") == "1":
         healthy = healthy and not bool(result.get("entry_forecast_blockers"))
 

@@ -101,7 +101,7 @@ def get_calibration_pin_config() -> dict:
                 pin["frozen_as_of"] = raw_fao
             elif isinstance(raw_fao, dict):
                 # Cycle-stratified form: {"00": "<ts>", "12": "<ts>"}
-                # PR #65 Copilot follow-up 2026-05-06: preserve None values
+                # PR #65 review follow-up 2026-05-06: preserve None values
                 # rather than stringifying. A null value for a cycle means
                 # "no pin for this cycle; default loader behaviour applies"
                 # — coercing it to the literal string "None" would corrupt
@@ -117,7 +117,7 @@ def get_calibration_pin_config() -> dict:
             # silent-drop behaviour where a list would be coerced to {}.
             if isinstance(pin_cfg.get("model_keys"), dict):
                 pin["model_keys"] = dict(pin_cfg["model_keys"])
-            # PR #82 Copilot review: load eligibility floor into cache so
+            # PR #82 review: load eligibility floor into cache so
             # _cycle_stratified_pin_eligibility_floor() reads from the shared
             # cache instead of re-opening settings.json on every call.
             floor_val = pin_cfg.get("cycle_stratified_pin_eligible_after")
@@ -143,7 +143,7 @@ def _cycle_stratified_pin_eligibility_floor() -> Optional[str]:
     cached pin config (``get_calibration_pin_config``). Returns None if the
     key is absent (legacy back-compat — no eligibility gate applied).
 
-    PR #82 Copilot review: previously re-read and re-parsed settings.json on
+    PR #82 review: previously re-read and re-parsed settings.json on
     every call, bypassing ``_PIN_CONFIG_CACHE``. Now uses the shared cache.
     """
     try:
@@ -753,7 +753,7 @@ def get_calibrator(
 ) -> tuple[Optional[ExtendedPlattCalibrator], int]:
     """Get the best available calibrator for a city+date+metric.
 
-    Phase 2 (2026-05-04, may4math.md F1 + critic-opus BLOCKER 3): added
+    Phase 2 (2026-05-04, may4math.md F1 + review BLOCKER 3): added
     cycle/source_id/horizon_profile keyword params for cycle-stratified Platt
     bucket selection. When all three are None (default), legacy behavior is
     preserved — load_platt_model hits the schema-default bucket (00z TIGGE
@@ -1026,7 +1026,7 @@ def _model_data_to_calibrator(
 ) -> "ExtendedPlattCalibrator | IdentityCalibrator":
     """Reconstruct calibrator from stored model data.
 
-    Codex P1 #6 (2026-05-04): also attach the bucket identity attrs from
+    review P1 #6 (2026-05-04): also attach the bucket identity attrs from
     load_platt_model — evaluator's transfer gate reads these via
     ``getattr(cal, '_bucket_*', None)`` to construct the actual
     calibrator_domain instead of hardcoding TIGGE.  Legacy

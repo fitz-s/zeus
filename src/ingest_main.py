@@ -3770,7 +3770,7 @@ def _drift_detector_tick():
 # via settings["uma"]["initial_lookback_blocks"]). Polygon mints ~2 blocks/sec
 # → 50 000 blocks ≈ 7h, comfortably wider than UMA's ~14h post-endDate settle
 # latency window for any single tick, but bounded so eth_getLogs does not scan
-# from genesis (PR #82 Copilot review: from_block=0 every tick scans full chain).
+# from genesis (PR #82 review: from_block=0 every tick scans full chain).
 _UMA_DEFAULT_INITIAL_LOOKBACK_BLOCKS = 50_000
 # Max blocks to advance per tick once cursor exists. Provider-friendly chunking;
 # any backlog drains over multiple ticks while keeping each request bounded.

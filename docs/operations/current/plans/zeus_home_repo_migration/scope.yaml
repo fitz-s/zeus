@@ -1,5 +1,5 @@
 id: zeus_home_repo_migration
-status: active
+status: done_except  # migration complete (daemons run from ~/zeus); residue: heartbeat-sensor plist still points at the old workspace path
 owner: agent
 frontier: []
 allowed_files:

@@ -1158,7 +1158,7 @@ def apply_canonical_schema(conn: sqlite3.Connection, *, forecast_tables: bool = 
                 horizon_profile TEXT NOT NULL DEFAULT 'full',
                 training_cutoff TEXT,
                 recorded_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')),
-                -- 2026-05-05 critic-opus Blocker 1: UNIQUE extended with
+                -- 2026-05-05 review Blocker 1: UNIQUE extended with
                 -- stratification keys so cross-cycle Platt rows do not collide
                 -- on insert. Legacy DBs must be rebuilt via
                 -- scripts/migrate_phase2_cycle_stratification.py to converge.
@@ -1313,7 +1313,7 @@ def apply_canonical_schema(conn: sqlite3.Connection, *, forecast_tables: bool = 
         # observation_instants with INV-14 identity spine (temperature_metric
         # + physical_quantity + observation_field) + training_allowed +
         # causality_status + source_role. Previously only authority +
-        # data_version + provenance_json were present. Per critic-opus P0.2
+        # data_version + provenance_json were present. Per review P0.2
         # finding C7: without these fields, Day0 features can train on
         # fallback-mixed rows (e.g., `wu_icao` canonical + `openmeteo` fallback
         # share data_version='v1'). Adding the columns unblocks the per-row

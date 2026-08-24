@@ -9,7 +9,7 @@ Covers:
     when data_version is OpenData; legacy defaults applied for TIGGE.
   * Copilot #3 — ensemble_client refuses ecmwf_open_data for ALL roles
     when ingest_class is None (not just entry_primary).
-  * Codex P1 #6 — load_platt_model returns the loaded bucket's
+  * review P1 #6 — load_platt_model returns the loaded bucket's
     identity, _model_data_to_calibrator attaches it to the calibrator
     object, and the evaluator's transfer gate constructs
     calibrator_domain from the actual bucket (not hardcoded TIGGE).
@@ -118,7 +118,7 @@ def test_load_platt_model_tigge_missing_keys_uses_legacy_defaults():
 
 def test_load_platt_model_returns_bucket_identity():
     """load_platt_model must include bucket_cycle/source_id/horizon_profile
-    /data_version in the returned dict — Codex P1 #6.
+    /data_version in the returned dict — review P1 #6.
     """
     from src.calibration.store import load_platt_model
 
@@ -198,7 +198,7 @@ def test_ensemble_client_guard_fires_for_all_roles_when_ingest_class_none():
     )
 
 
-# ---- Codex P1 #6 — transfer gate uses actual bucket domain ----------------
+# ---- review P1 #6 — transfer gate uses actual bucket domain ----------------
 
 
 _EVALUATOR_PATH = Path(__file__).resolve().parents[1] / "src" / "engine" / "evaluator.py"
@@ -252,7 +252,7 @@ def test_calibrator_object_legacy_fallback_has_none_bucket_attrs():
     assert cal._bucket_data_version is None
 
 
-# Codex P1 #6 transfer-gate ordering tests removed during PR #56 merge:
+# review P1 #6 transfer-gate ordering tests removed during PR #56 merge:
 # the Phase 2.5 calibration-transfer gate (and its hardcoded-TIGGE branch)
 # was replaced by PR #56's MarketPhaseEvidence + oracle_evidence_status
 # stack.  bucket_* attrs on the calibrator object remain useful for

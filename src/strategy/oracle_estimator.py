@@ -62,7 +62,7 @@ until the sample grows), the second wants no entries (BLACKLIST — the
 city has failed). PLAN.md §A3 OK6 ("zero-error N=12 → INSUFFICIENT_SAMPLE,
 NOT OK") is the explicit test case that pins this split. The deviation
 from the literal §5 spec was endorsed in the test contract, which is the
-authority when prose and contract disagree (CLAUDE.md "Code and docs
+authority when prose and contract disagree (AGENTS.md "Code and docs
 disagree → trust code").
 
 Thresholds (10, 0.05, 0.10, 7d) remain policy constants. Operator can

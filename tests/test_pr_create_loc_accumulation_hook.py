@@ -491,7 +491,7 @@ def test_regex_matches_inline_env_assignment() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Codex P2 fix (2026-05-09): inline bypass assignment must degrade to advisory
+# review P2 fix (2026-05-09): inline bypass assignment must degrade to advisory
 # ---------------------------------------------------------------------------
 
 

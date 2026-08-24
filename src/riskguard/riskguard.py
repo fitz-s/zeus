@@ -95,6 +95,26 @@ from src.state.strategy_tracker import load_tracker
 from src.contracts.freshness_registry import FreshnessLevel, registry as _freshness_registry
 
 logger = logging.getLogger(__name__)
+# Stuck non-GREEN visibility (2026-08-24 reversal plan item 5b): the
+# 2026-08-24 investigation found RiskGuard stuck non-GREEN explained 97.6h of
+# August silence (10/11 gaps DATA_DEGRADED, one RED) with zero alerts. These
+# thresholds turn a silent stuck level into a visible one — mirrors
+# src/main.py's BOOTSTRAP_ALERT_AFTER_SECONDS (commit d1aeeeb52, item 5a)
+# without touching the gate itself (get_current_level/tick are unchanged).
+STUCK_ALERT_AFTER_SECONDS = float(
+    os.environ.get("ZEUS_RISKGUARD_STUCK_ALERT_AFTER_SECONDS", "1800")
+)
+STUCK_ALERT_REPEAT_SECONDS = 1800.0
+# risk_state has no index on checked_at, so scanning backward to the last
+# GREEN row on a long-lived DB risks an unbounded table scan. Bound the scan
+# by row count against the indexed `id` PK instead: at the daemon's fixed
+# 60s tick cadence, 2880 rows == 48h. A run older than the cap is reported
+# with lookback_capped=True (a conservative underestimate of duration) rather
+# than paying an unbounded scan.
+STUCK_ALERT_LOOKBACK_ROWS = 2880
+STUCK_ALERT_BREADCRUMB_FILENAME = "riskguard_stuck_alert.json"
+_riskguard_stuck_alert_run_started_at: str | None = None
+_riskguard_stuck_alert_last_alert_monotonic: float | None = None
 TRAILING_LOSS_ROW_TOLERANCE_USD = 0.01
 TRAILING_LOSS_REFERENCE_STALENESS_TOLERANCE = timedelta(hours=2)
 TRAILING_LOSS_SOURCE_OK = "risk_state_history"
@@ -7050,6 +7070,211 @@ def get_current_level() -> RiskLevel:
         logger.error("RiskGuard DB error: %s. Fail-closed → RED.", e)
         return RiskLevel.RED
 
+
+# Component `<name>_level` keys persisted into a FULL tick's details_json (see
+# the `overall_level(...)` call above `INSERT INTO risk_state` in `_tick_once`).
+# NOTE (cause-detail availability finding, item 5b): `collateral_identity_level`
+# drives `level` and drives the RED `alert_halt` failed_rules payload, but is
+# NOT persisted as a details_json key anywhere in `_tick_once` — a RED driven
+# purely by collateral_identity therefore has no queryable per-row cause here.
+# `_riskguard_row_causes` falls back to `riskguard_degraded_reason`/`status`,
+# and to an explicit "cause_unavailable" marker so that gap is visible in the
+# alert/breadcrumb rather than silently reporting an empty cause list.
+_RISK_STATE_COMPONENT_LEVEL_KEYS = (
+    "brier_level",
+    "settlement_quality_level",
+    "execution_quality_level",
+    "strategy_signal_level",
+    "portfolio_consistency_level",
+    "unresolved_exposure_level",
+    "probability_semantics_level",
+    "storage_capacity_level",
+    "host_power_level",
+)
+
+
+def _riskguard_row_causes(details: dict) -> list[str]:
+    """Extract the non-GREEN component names (or degraded reason) from a risk_state row.
+
+    Full ticks persist one `<component>_level` key per driving component (see
+    `_RISK_STATE_COMPONENT_LEVEL_KEYS` above); a non-GREEN value there names the
+    check that contributed to the row's overall level. Degraded attestation rows
+    (`_persist_dependency_db_locked_attestation`, `_persist_tick_in_progress_attestation`)
+    carry only the reduced `_RISK_DETAILS_CONTRACT_KEYS` subset plus
+    `riskguard_degraded_reason` — when no component key is present, that reason
+    (or `status`) is the only cause available. If neither is present the row's
+    cause is genuinely unrecoverable from details_json (see the
+    collateral_identity gap noted above); that is reported explicitly rather
+    than as a silent empty list.
+    """
+    if not isinstance(details, dict):
+        return ["cause_unavailable"]
+    causes = [
+        key[: -len("_level")]
+        for key in _RISK_STATE_COMPONENT_LEVEL_KEYS
+        if details.get(key) not in (None, RiskLevel.GREEN.value)
+    ]
+    if causes:
+        return causes
+    reason = details.get("riskguard_degraded_reason") or details.get("status")
+    return [str(reason)] if reason else ["cause_unavailable"]
+
+
+def _riskguard_stuck_non_green_run(conn: sqlite3.Connection, *, now: datetime) -> dict:
+    """Find where the current non-GREEN risk_state run started.
+
+    Scans backward from the latest row (ORDER BY id DESC, the indexed PK)
+    bounded by STUCK_ALERT_LOOKBACK_ROWS so a long-lived DB never pays an
+    unbounded scan for a GREEN row that may not exist within any reasonable
+    window. If no GREEN row is found within the cap, the run is reported with
+    `lookback_capped=True` and its start is the oldest row seen — a
+    conservative underestimate of the true duration.
+
+    Caller must ensure the latest row is non-GREEN; called with an empty or
+    all-GREEN table this degenerately reports a zero-duration run.
+    """
+    rows = conn.execute(
+        "SELECT level, checked_at, details_json FROM risk_state "
+        "ORDER BY id DESC LIMIT ?",
+        (STUCK_ALERT_LOOKBACK_ROWS,),
+    ).fetchall()
+    if not rows:
+        return {
+            "run_started_at": now.isoformat(),
+            "elapsed_seconds": 0.0,
+            "lookback_capped": False,
+            "first_causes": [],
+            "current_causes": [],
+        }
+
+    current_causes = _riskguard_row_causes(_risk_details_from_row(rows[0]))
+    run_started_row = rows[0]
+    lookback_capped = True
+    for row in rows:
+        if RiskLevel(row["level"]) == RiskLevel.GREEN:
+            lookback_capped = False
+            break
+        run_started_row = row
+
+    run_started_at = str(run_started_row["checked_at"])
+    started_dt = datetime.fromisoformat(run_started_at.replace("Z", "+00:00"))
+    elapsed = max(0.0, (now - started_dt).total_seconds())
+    first_causes = _riskguard_row_causes(_risk_details_from_row(run_started_row))
+    return {
+        "run_started_at": run_started_at,
+        "elapsed_seconds": elapsed,
+        "lookback_capped": lookback_capped,
+        "first_causes": first_causes,
+        "current_causes": current_causes,
+    }
+
+
+def _write_riskguard_stuck_breadcrumb_atomic(payload: dict) -> None:
+    try:
+        from src.config import state_path
+
+        out_path = state_path(STUCK_ALERT_BREADCRUMB_FILENAME)
+        tmp = out_path.with_suffix(out_path.suffix + ".tmp")
+        tmp.write_text(json.dumps(payload, indent=2))
+        tmp.replace(out_path)
+    except Exception as exc:  # noqa: BLE001 - breadcrumb is best-effort.
+        logger.warning("RiskGuard stuck-state breadcrumb write failed: %s", exc)
+
+
+def maybe_alert_riskguard_stuck_non_green(level: RiskLevel) -> None:
+    """Escalate a stuck non-GREEN risk_state level from silent to visible.
+
+    SCOPE: logging + a best-effort state/riskguard_stuck_alert.json breadcrumb
+    only. This never writes a risk_state row, never changes `level`, and never
+    touches get_current_level()/tick() — it is called AFTER a tick already
+    persisted the row driving `level`. Mirrors
+    `_maybe_alert_held_position_monitor_bootstrap_stall` (src/main.py, commit
+    d1aeeeb52, item 5a).
+
+    The 2026-08-24 investigation found RiskGuard stuck non-GREEN explained
+    97.6h of August silence (10/11 gaps DATA_DEGRADED, one RED) with zero
+    alerts — one 25.6h window was 99.9% non-GREEN. This makes that state
+    visible without changing what it does.
+
+    DRAIN: below STUCK_ALERT_AFTER_SECONDS continuous duration, no-op. Past
+    it, logs `logger.error` and writes the breadcrumb at most once per
+    STUCK_ALERT_REPEAT_SECONDS. Duration is recomputed from risk_state on
+    every call (bounded backward scan, `_riskguard_stuck_non_green_run`), not
+    tracked only in memory, so a process restart mid-stall still reports the
+    correct age. RESET: recovery to GREEN clears the breadcrumb (writes a
+    `recovered_at` marker over it) so the next stuck episode starts a fresh
+    clock — the in-memory run marker changing to a different `run_started_at`
+    also resets the repeat-alert throttle immediately.
+    """
+    global _riskguard_stuck_alert_run_started_at
+    global _riskguard_stuck_alert_last_alert_monotonic
+
+    if level == RiskLevel.GREEN:
+        if _riskguard_stuck_alert_run_started_at is not None:
+            _write_riskguard_stuck_breadcrumb_atomic({
+                "recovered_at": datetime.now(timezone.utc).isoformat(),
+                "previous_run_started_at": _riskguard_stuck_alert_run_started_at,
+            })
+        _riskguard_stuck_alert_run_started_at = None
+        _riskguard_stuck_alert_last_alert_monotonic = None
+        return
+
+    now = datetime.now(timezone.utc)
+    try:
+        conn = get_connection(RISK_DB_PATH, write_class=None)
+        try:
+            run = _riskguard_stuck_non_green_run(conn, now=now)
+        finally:
+            conn.close()
+    except Exception as exc:  # noqa: BLE001 - alert path is observability-only.
+        logger.warning("RiskGuard stuck-state scan failed: %s", exc)
+        return
+
+    if run["run_started_at"] != _riskguard_stuck_alert_run_started_at:
+        # New episode (first non-GREEN tick after GREEN, or first check since
+        # process start) -- fresh clock, repeat-alert throttle resets.
+        _riskguard_stuck_alert_run_started_at = run["run_started_at"]
+        _riskguard_stuck_alert_last_alert_monotonic = None
+
+    elapsed = run["elapsed_seconds"]
+    if elapsed < STUCK_ALERT_AFTER_SECONDS:
+        return
+
+    now_monotonic = time.monotonic()
+    last_alert = _riskguard_stuck_alert_last_alert_monotonic
+    if last_alert is not None and now_monotonic - last_alert < STUCK_ALERT_REPEAT_SECONDS:
+        return
+    _riskguard_stuck_alert_last_alert_monotonic = now_monotonic
+
+    capped_note = (
+        f" [lookback capped at {STUCK_ALERT_LOOKBACK_ROWS // 60}h, true start may be earlier]"
+        if run["lookback_capped"]
+        else ""
+    )
+    logger.error(
+        "RiskGuard stuck non-GREEN %.0fs (alert threshold %.0fs): level=%s "
+        "first_causes=%s current_causes=%s run_started_at=%s%s",
+        elapsed,
+        STUCK_ALERT_AFTER_SECONDS,
+        level.value,
+        run["first_causes"],
+        run["current_causes"],
+        run["run_started_at"],
+        capped_note,
+    )
+    _write_riskguard_stuck_breadcrumb_atomic({
+        "level": level.value,
+        "run_started_at": run["run_started_at"],
+        "elapsed_seconds": elapsed,
+        "alert_after_seconds": STUCK_ALERT_AFTER_SECONDS,
+        "first_causes": run["first_causes"],
+        "current_causes": run["current_causes"],
+        "lookback_capped": run["lookback_capped"],
+        "lookback_rows": STUCK_ALERT_LOOKBACK_ROWS,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+    })
+
+
 if __name__ == "__main__":
     """Run RiskGuard as standalone process."""
     import signal
@@ -7090,6 +7315,7 @@ if __name__ == "__main__":
         try:
             level = tick()
             logger.info("Tick complete: %s", level.value)
+            maybe_alert_riskguard_stuck_non_green(level)
         except Exception as e:
             logger.error("RiskGuard tick failed: %s", e)
         time.sleep(60)

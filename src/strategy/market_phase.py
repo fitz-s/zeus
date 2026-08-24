@@ -114,7 +114,7 @@ def settlement_day_entry_utc(
     about local-calendar-day geometry, not fixed UTC intervals.
     Anchoring at ``end_of_target_utc - 24h`` would silently shift the
     boundary by ±1h on DST days and misphase decisions; caught in
-    PR #53 review (Copilot comment 3179345263).
+    PR #53 review.
     """
     sd_entry_local = datetime.combine(
         target_local_date,

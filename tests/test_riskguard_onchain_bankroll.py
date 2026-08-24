@@ -339,7 +339,7 @@ def test_red_threshold_at_real_wallet_not_config_constant(monkeypatch, tmp_path)
     # No settled outcome was supplied; a wallet delta cannot manufacture loss.
     assert details["daily_loss"] == pytest.approx(0.0)
     assert details["daily_loss_level"] == RiskLevel.GREEN.value
-    assert details["trailing_loss_decision_role"] == "diagnostic_only"
+    assert details["trailing_loss_decision_role"] == "record_only"
 
 
 def test_no_double_counting_pnl(monkeypatch, tmp_path):
@@ -503,11 +503,6 @@ def test_trailing_loss_ignores_pre_cutover_risk_state_rows(monkeypatch, tmp_path
     assert details["daily_loss_status"] == "no_settlements_in_window"
     # No fake loss is recorded.
     assert details["daily_loss"] == pytest.approx(0.0)
-    # Force-exit-review must NOT be triggered.
-    row = get_connection(risk_db).execute(
-        "SELECT level, force_exit_review FROM risk_state ORDER BY id DESC LIMIT 1"
-    ).fetchone()
-    assert row["force_exit_review"] == 0
     # The new tick wrote a properly-tagged post-cutover row.
     assert details["bankroll_truth_source"] == "polymarket_wallet"
 

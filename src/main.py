@@ -79,8 +79,10 @@ from src.runtime import bankroll_provider
 from src.state.db import (
     init_schema,
     init_schema_trade_only,
+    init_schema_family_book_evidence,
     get_world_connection,
     get_trade_connection,
+    get_family_book_evidence_connection,
     get_world_connection_read_only,
 )
 from src.state.portfolio import load_portfolio
@@ -111,6 +113,9 @@ _edli_boot_fill_bridge_recovery_thread: threading.Thread | None = None
 _EDLI_BOOT_FILL_BRIDGE_RETRY_SECONDS = 30.0
 _held_position_monitor_bootstrap_check_lock = threading.Lock()
 _held_position_monitor_bootstrap_last_check = 0.0
+_held_position_monitor_bootstrap_started_monotonic: float | None = None
+_held_position_monitor_bootstrap_started_at_utc: datetime | None = None
+_held_position_monitor_bootstrap_last_alert_monotonic: float | None = None
 _day0_urgent_wake_pending = threading.Event()
 _day0_held_monitor_preempt_requested = threading.Event()
 _forecast_held_monitor_preempt_requested = threading.Event()
@@ -180,6 +185,16 @@ _CAPITAL_RECOVERY_REACTOR_DRAIN_SECONDS = 15.0
 _EDLI_COMMAND_RECOVERY_LAST_FULL_BUCKET: int | None = None
 HELD_POSITION_MONITOR_FIRST_DELAY_SECONDS = 5.0
 HELD_POSITION_MONITOR_BOOTSTRAP_CHECK_SECONDS = 5.0
+# Bootstrap-stall visibility (2026-08-24 reversal plan item 5a): the gate below
+# is fail-closed by design (SCOPE/DRAIN/RESET at its call sites), but a stall
+# in `_promote_held_position_monitor_bootstrap_from_canonical_progress` used to
+# be silent forever — the 2026-08-18 incident locked entries reduce-only for
+# 12.1h with zero alert. These thresholds turn a silent stall into a visible
+# one without weakening the gate or force-setting the Event.
+BOOTSTRAP_ALERT_AFTER_SECONDS = float(
+    os.environ.get("ZEUS_BOOTSTRAP_ALERT_AFTER_SECONDS", "1800")
+)
+BOOTSTRAP_ALERT_REPEAT_SECONDS = 1800.0
 # The normal full-book monitor runs every 120s.  A separate 30s poll reconstructs
 # overdue work from canonical per-position MONITOR_REFRESHED events after one
 # missed tick plus 30s scheduling tolerance.  It does not create another
@@ -300,6 +315,80 @@ def _utc_run_time_after(seconds: float) -> datetime:
     return datetime.now(timezone.utc) + timedelta(seconds=seconds)
 
 
+def _maybe_alert_held_position_monitor_bootstrap_stall(
+    *,
+    now_monotonic: float,
+    open_position_count: int,
+    covered_count: int,
+    blocking_stale_count: int,
+    blocking_stale_positions: list,
+) -> None:
+    """Escalate a held-position bootstrap stall from silent to visible.
+
+    SCOPE: logging + a best-effort state breadcrumb only; never sets the
+    completion Event and never weakens the fail-closed gate above it. DRAIN:
+    the caller re-invokes this on every un-throttled promotion attempt that
+    is still not-covered; once elapsed time since the first attempt crosses
+    BOOTSTRAP_ALERT_AFTER_SECONDS this repeats at most once per
+    BOOTSTRAP_ALERT_REPEAT_SECONDS. RESET: process restart clears the
+    started/last-alert monotonic markers along with the completion Event.
+    """
+
+    global _held_position_monitor_bootstrap_last_alert_monotonic
+    started = _held_position_monitor_bootstrap_started_monotonic
+    if started is None:
+        return
+    elapsed = now_monotonic - started
+    if elapsed < BOOTSTRAP_ALERT_AFTER_SECONDS:
+        return
+    last_alert = _held_position_monitor_bootstrap_last_alert_monotonic
+    if (
+        last_alert is not None
+        and now_monotonic - last_alert < BOOTSTRAP_ALERT_REPEAT_SECONDS
+    ):
+        return
+    _held_position_monitor_bootstrap_last_alert_monotonic = now_monotonic
+    blocking_ids = [
+        str(item.get("position_id") or "")
+        for item in blocking_stale_positions
+        if item.get("position_id")
+    ]
+    logger.error(
+        "held-position monitor bootstrap stalled %.0fs (alert threshold %.0fs): "
+        "open_positions=%d covered=%d blocking_stale=%d blocking_position_ids=%s "
+        "-- entries remain reduce-only until canonical post-boot coverage completes",
+        elapsed,
+        BOOTSTRAP_ALERT_AFTER_SECONDS,
+        open_position_count,
+        covered_count,
+        blocking_stale_count,
+        blocking_ids,
+    )
+    started_at_utc = _held_position_monitor_bootstrap_started_at_utc
+    try:
+        from src.config import state_path
+
+        payload = {
+            "started_at": started_at_utc.isoformat() if started_at_utc else None,
+            "elapsed_seconds": elapsed,
+            "alert_after_seconds": BOOTSTRAP_ALERT_AFTER_SECONDS,
+            "open_position_count": open_position_count,
+            "covered_count": covered_count,
+            "blocking_stale_count": blocking_stale_count,
+            "blocking_position_ids": blocking_ids,
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+        }
+        out_path = state_path("bootstrap_stall_alert.json")
+        tmp = out_path.with_suffix(out_path.suffix + ".tmp")
+        tmp.write_text(json.dumps(payload, indent=2))
+        tmp.replace(out_path)
+    except Exception as exc:  # noqa: BLE001 - breadcrumb is best-effort.
+        logger.warning(
+            "held-position monitor bootstrap stall breadcrumb write failed: %s",
+            exc,
+        )
+
+
 def _promote_held_position_monitor_bootstrap_from_canonical_progress() -> bool:
     """Release entry work after every held position has a post-boot decision attempt.
 
@@ -309,12 +398,22 @@ def _promote_held_position_monitor_bootstrap_from_canonical_progress() -> bool:
     that exact family fail-closed until its inputs recover. Requiring fresh
     inputs here conflates those debts and turns one provider gap into a global
     reactor/recovery storm.
+
+    A stall past BOOTSTRAP_ALERT_AFTER_SECONDS is escalated via
+    ``_maybe_alert_held_position_monitor_bootstrap_stall`` (logger.error +
+    state/bootstrap_stall_alert.json breadcrumb) instead of staying silent —
+    the gate itself remains fail-closed; the alert never sets the Event.
     """
 
     global _held_position_monitor_bootstrap_last_check
+    global _held_position_monitor_bootstrap_started_monotonic
+    global _held_position_monitor_bootstrap_started_at_utc
     if _held_position_monitor_bootstrap_complete.is_set():
         return True
     now_monotonic = time.monotonic()
+    if _held_position_monitor_bootstrap_started_monotonic is None:
+        _held_position_monitor_bootstrap_started_monotonic = now_monotonic
+        _held_position_monitor_bootstrap_started_at_utc = datetime.now(timezone.utc)
     if (
         now_monotonic - _held_position_monitor_bootstrap_last_check
         < HELD_POSITION_MONITOR_BOOTSTRAP_CHECK_SECONDS
@@ -351,7 +450,7 @@ def _promote_held_position_monitor_bootstrap_from_canonical_progress() -> bool:
                 strict_future=True,
                 monitor_refreshed_only=True,
                 require_fresh_inputs=False,
-                sample_limit=0,
+                sample_limit=5,
             )
         finally:
             conn.close()
@@ -371,6 +470,16 @@ def _promote_held_position_monitor_bootstrap_from_canonical_progress() -> bool:
         required = open_count
         covered = fresh + settlement_recoverable + quote_only_stale
         if blocking_stale > 0 or covered < required:
+            _maybe_alert_held_position_monitor_bootstrap_stall(
+                now_monotonic=now_monotonic,
+                open_position_count=open_count,
+                covered_count=covered,
+                blocking_stale_count=blocking_stale,
+                blocking_stale_positions=cadence_groups.get(
+                    "blocking_stale_positions"
+                )
+                or [],
+            )
             return False
         _held_position_monitor_bootstrap_complete.set()
         logger.info(
@@ -982,6 +1091,131 @@ def assert_kelly_multiplier_within_correlated_ceiling(cfg: dict) -> None:
         )
 
 
+RISK_POLICY_ARTIFACT_PATH = Path("config/risk_policy.yaml")
+
+# live sizing.* key -> its ceiling key in config/risk_policy.yaml
+RISK_POLICY_CHECKED_LEVERS: tuple[tuple[str, str], ...] = (
+    ("kelly_multiplier", "kelly_multiplier_ceiling"),
+    ("max_correlated_pct", "max_correlated_pct_ceiling"),
+    ("max_portfolio_heat_pct", "max_portfolio_heat_pct_ceiling"),
+    ("max_single_position_pct", "max_single_position_pct_ceiling"),
+)
+
+
+def _load_risk_policy_artifact(path: Path = RISK_POLICY_ARTIFACT_PATH) -> tuple[dict, str, str]:
+    """Load the tracked, content-addressed risk-policy artifact.
+
+    Returns (parsed_mapping, policy_version, sha256_hex_of_raw_bytes).
+    Fail-closed (RuntimeError) on a missing file, unparseable YAML, a
+    non-mapping document, or a missing/empty ``policy_version`` — a risk
+    ceiling with no artifact (or an unversioned one) is ungoverned, same
+    posture as every other sizing boot guard in this module.
+    """
+    if not path.exists():
+        raise RuntimeError(
+            f"RISK_POLICY_ARTIFACT_MISSING: {path} does not exist; every "
+            f"risk-increasing sizing lever must live in a tracked, "
+            f"content-addressed policy artifact (reversal_plan_tier0 item 1b)"
+        )
+    raw_bytes = path.read_bytes()
+    sha256_hex = hashlib.sha256(raw_bytes).hexdigest()
+    import yaml  # local import: matches src/risk_allocator/governor.py::load_cap_policy idiom
+
+    try:
+        loaded = yaml.safe_load(raw_bytes.decode("utf-8"))
+    except yaml.YAMLError as exc:
+        raise RuntimeError(
+            f"RISK_POLICY_ARTIFACT_MALFORMED: {path} is not valid YAML: {exc}"
+        ) from exc
+    if not isinstance(loaded, dict):
+        raise RuntimeError(
+            f"RISK_POLICY_ARTIFACT_MALFORMED: {path} must parse to a mapping, "
+            f"got {type(loaded).__name__}"
+        )
+    policy_version = loaded.get("policy_version")
+    if not policy_version:
+        raise RuntimeError(
+            f"RISK_POLICY_ARTIFACT_MALFORMED: {path} missing non-empty "
+            f"policy_version"
+        )
+    return loaded, str(policy_version), sha256_hex
+
+
+def assert_risk_policy_artifact(
+    cfg: dict,
+    *,
+    path: Path = RISK_POLICY_ARTIFACT_PATH,
+) -> None:
+    """Fail-closed guard: no live risk-increasing sizing value may exceed its
+    ceiling in the tracked, content-addressed ``config/risk_policy.yaml``.
+
+    SCOPE: process-wide daemon boot, same pattern as
+    ``assert_kelly_multiplier_matches_governed_fraction`` /
+    ``assert_kelly_multiplier_within_correlated_ceiling`` above — this guard
+    generalizes them to every risk-increasing ``sizing.*`` lever the live
+    entry path consumes (reversal_plan_tier0 item 1b), not just
+    ``kelly_multiplier``.
+
+    DIRECTION LAW: runtime / control-plane overrides (entries_paused,
+    edge_threshold_multiplier, RiskGuard postures) may LOWER effective risk
+    freely and are never inspected here — this guard only reads ``cfg["sizing"]``
+    and the artifact, so a control-plane lever cannot trip it. Only a live
+    value EXCEEDING its artifact ceiling is a breach.
+
+    DRAIN: lower the offending ``sizing.<key>`` in the active operator config,
+    or raise the ceiling in ``config/risk_policy.yaml`` via a reviewed commit
+    (bump ``policy_version``), then restart.
+    RESET: recomputed on every boot; no strategy, side, or runtime override.
+    """
+    policy, policy_version, sha256_hex = _load_risk_policy_artifact(path)
+    logger.info(
+        "risk_policy_artifact: path=%s policy_version=%s sha256=%s",
+        path, policy_version, sha256_hex,
+    )
+
+    sizing = cfg.get("sizing") or {}
+    for live_key, ceiling_key in RISK_POLICY_CHECKED_LEVERS:
+        raw_ceiling = policy.get(ceiling_key)
+        if raw_ceiling is None or isinstance(raw_ceiling, bool) or not isinstance(raw_ceiling, (int, float)):
+            raise RuntimeError(
+                f"RISK_POLICY_ARTIFACT_MALFORMED: {ceiling_key} missing or "
+                f"non-numeric in {path}"
+            )
+        ceiling = float(raw_ceiling)
+
+        raw_live = sizing.get(live_key)
+        if raw_live is None or isinstance(raw_live, bool) or not isinstance(raw_live, (int, float)):
+            raise RuntimeError(
+                f"RISK_POLICY_BREACH: sizing.{live_key} missing or "
+                f"non-numeric; artifact ceiling {ceiling_key}={ceiling}"
+            )
+        live_value = float(raw_live)
+
+        # Fail-closed on non-finite inputs: NaN/inf bypass the ``>``
+        # comparison below the same way the corr-ceiling guard above does.
+        if not math.isfinite(live_value) or not math.isfinite(ceiling):
+            raise RuntimeError(
+                f"RISK_POLICY_BREACH (NON_FINITE): sizing.{live_key}="
+                f"{live_value}, {ceiling_key}={ceiling} — a NaN/inf value "
+                f"bypasses the ceiling comparison; both must be finite."
+            )
+
+        logger.info(
+            "risk_policy_effective_value: sizing.%s=%s ceiling(%s)=%s",
+            live_key, live_value, ceiling_key, ceiling,
+        )
+
+        if live_value > ceiling:
+            raise RuntimeError(
+                f"RISK_POLICY_BREACH: sizing.{live_key}={live_value} exceeds "
+                f"artifact ceiling {ceiling_key}={ceiling} in {path} "
+                f"(policy_version={policy_version}). Runtime/control-plane "
+                f"overrides may only LOWER risk, never raise it above the "
+                f"tracked artifact. Lower sizing.{live_key} to <= {ceiling} "
+                f"or raise {ceiling_key} via a reviewed commit."
+            )
+
+
 # ---------------------------------------------------------------------------
 # W0-T3: _run_boot_guards / _validate_boot — safe pre-restart smoke
 # (2026-06-03)
@@ -1055,6 +1289,21 @@ def _run_boot_guards(raw_cfg: dict) -> list:
         results.append(("kelly_mult_corr_ceiling", False, str(exc)))
     except Exception as exc:  # pragma: no cover
         results.append(("kelly_mult_corr_ceiling", False, f"unexpected: {exc}"))
+
+    # Guard 5: every risk-increasing sizing.* lever ≤ its tracked,
+    # content-addressed config/risk_policy.yaml ceiling (reversal_plan_tier0
+    # item 1b — generalizes guards 3/4 above beyond kelly_multiplier alone).
+    try:
+        assert_risk_policy_artifact(raw_cfg)
+        results.append((
+            "risk_policy_artifact",
+            True,
+            "all sizing.* risk-increasing levers within config/risk_policy.yaml ceilings",
+        ))
+    except RuntimeError as exc:
+        results.append(("risk_policy_artifact", False, str(exc)))
+    except Exception as exc:  # pragma: no cover
+        results.append(("risk_policy_artifact", False, f"unexpected: {exc}"))
 
     return results
 
@@ -3592,7 +3841,7 @@ def _startup_freshness_check() -> None:
       BOOT_RETRY_MAX_ATTEMPTS, then SystemExit. The boot helper handles retry
       internally and never returns an ABSENT verdict to this caller.
 
-    Codex PR #31 (P1) fix 2026-05-01: previously called
+    review PR #31 (P1) fix 2026-05-01: previously called
     evaluate_freshness_mid_run, which synthesizes ABSENT into a degraded
     all-STALE verdict. That made the `if branch == "ABSENT"` retry path here
     unreachable and silently weakened the boot safety contract — a missing
@@ -8495,6 +8744,59 @@ _trades_wal_checkpoint_cycle = _make_wal_checkpoint_cycle("trades", defer_for_mo
 _forecasts_wal_checkpoint_cycle = _make_wal_checkpoint_cycle("forecasts", defer_for_monitor=False)
 
 
+@_scheduler_job("family_book_telemetry_ingest")
+def _family_book_telemetry_ingest_cycle() -> None:
+    """book_snapshot_persistence: canonical delivery of the family-book
+    telemetry outbox runs HERE, on an ordinary scheduler job with its own
+    short-lived ``write_class="live"`` connection to the family-book EVIDENCE
+    DB (state/zeus-family-book-evidence.db) -- a physically separate file
+    from zeus_trades.db (DB split, 2026-08-19).
+
+    What actually makes this safe against the money path: the DB BOUNDARY,
+    not the guard below. family_book_states/family_book_observations used to
+    be trade-class tables, so this job's connection and the reactor's live
+    money-path connection both opened the SAME file (zeus_trades.db) and
+    contended for its single SQLite writer lock -- the guard below (yield
+    while a cycle is active) was the ONLY thing standing between an optional
+    write and the money path. After the split, this job's connection targets
+    a DIFFERENT file entirely; there is no shared writer lock left to contend
+    for, so an evidence write is now STRUCTURALLY incapable of blocking or
+    being blocked by a money-path write, independent of timing or guard
+    correctness. See ``tests/events/test_family_book_telemetry_writer.py``
+    ``TestMoneyPathYield`` for the deterministic proof (holding a write
+    transaction open on the trade DB does not delay evidence delivery at
+    all).
+
+    The guard below is kept anyway, as a COURTESY, not a safety requirement:
+    it still avoids doing optional I/O -- however cheap and non-contending --
+    while the daemon is mid-decision-cycle, matching the same idiom every
+    other periodic optional job in this daemon uses
+    (``_run_ws_gap_reconcile_if_required``, ``_run_venue_background_maintenance_once``).
+    Combined with the spool-only pending precheck (no canonical connection is
+    opened at all when there is nothing to deliver, the common case),
+    evidence delivery touches its DB only when it has work.
+
+    One bounded batch per tick; @_scheduler_job never re-raises, so an ordinary
+    SQLite/I/O failure degrades to the next tick, never to a daemon crash.
+    """
+    from src.events.family_book_telemetry_writer import outbox_has_pending, run_bounded_ingest
+
+    if _cycle_lock.locked() or _edli_reactor_active():
+        return
+    # Idle-tick fast path: decided against the PRIVATE spool, so an empty
+    # outbox never opens the evidence DB at all.
+    if not outbox_has_pending():
+        return
+
+    conn = get_family_book_evidence_connection(write_class="live")
+    try:
+        outcome = run_bounded_ingest(conn)
+        if outcome.failed or outcome.ack_failed:
+            logger.warning("family_book_telemetry_ingest: %s", outcome.reason)
+    finally:
+        conn.close()
+
+
 def _edli_bounded_positive_int(config: dict, key: str, *, default: int, maximum: int) -> int:
     try:
         value = int(config.get(key, default))
@@ -10040,6 +10342,16 @@ def main():
     init_schema_trade_only(trade_conn)
     trade_conn.close()
 
+    # book_snapshot_persistence DB split (2026-08-19): family-book evidence
+    # (family_book_states/family_book_observations) lives on its OWN file,
+    # never zeus_trades.db -- its schema must be ready before the capture
+    # worker's read-only cache-seed bootstrap or the ingest scheduler job
+    # (_family_book_telemetry_ingest_cycle) ever touch it, same as trade
+    # above.
+    fb_evidence_conn = get_family_book_evidence_connection(write_class="live")
+    init_schema_family_book_evidence(fb_evidence_conn)
+    fb_evidence_conn.close()
+
     # F109 boot-time consolidation (2026-05-17 MAJ-1).
     # Must run BEFORE any strategy gate or wallet check that reads position_current.
     # Voids oldest duplicate open-phase rows so the migration pre-flight passes.
@@ -10067,6 +10379,12 @@ def main():
             logger.info("assert_db_matches_registry: trade DB table-set matches registry")
         finally:
             _trade_conn_reg.close()
+        _fb_evidence_conn_reg = get_family_book_evidence_connection()
+        try:
+            assert_db_matches_registry(_fb_evidence_conn_reg, DBIdentity.FAMILY_BOOK_EVIDENCE)
+            logger.info("assert_db_matches_registry: family-book evidence DB table-set matches registry")
+        finally:
+            _fb_evidence_conn_reg.close()
     conn.close()
 
     # T5 MIGRATION (docs/rebuild/quarantine_excision_2026-07-11.md, deliverable
@@ -10369,6 +10687,43 @@ def main():
             coalesce=True,
         )
 
+    # book_snapshot_persistence round-5 fix Y5: start the family-book
+    # telemetry CAPTURE-side worker BEFORE reactor activation (the reactor's
+    # decision hook enqueues into it every cycle), with a blocking
+    # ready/failed handshake -- readiness = sqlite version ok + spool opened
+    # + schema ok + cache seeded + thread alive. On failure, capture is
+    # disabled TERMINALLY inside start_worker() itself (a typed counter
+    # fires; the decision thread never retries); the daemon boot itself
+    # never fails on this -- telemetry is evidence-only, never decision
+    # authority. ZEUS_FAMILY_BOOK_TELEMETRY_ENABLED=0 skips starting the
+    # worker (and, below, registering the ingest job) entirely -- the
+    # emergency guard stops BOTH capture and canonical draining, not merely
+    # new enqueues (run_bounded_ingest also re-checks the same switch on
+    # every tick, so flipping it off mid-run stops delivery immediately too).
+    _family_book_telemetry_ready = False
+    if os.environ.get("ZEUS_FAMILY_BOOK_TELEMETRY_ENABLED", "1") in ("1", "true", "True"):
+        from src.events.family_book_telemetry_writer import start_worker as _start_family_book_telemetry_worker
+
+        _fbt_readiness = _start_family_book_telemetry_worker()
+        _family_book_telemetry_ready = _fbt_readiness.ready
+        if not _fbt_readiness.ready:
+            logger.warning(
+                "family_book_telemetry: capture disabled (startup failed: %s)",
+                _fbt_readiness.reason,
+            )
+        elif not _fbt_readiness.cache_seeded:
+            # Ready, but the first observation per family this run will read as
+            # STATE_CHANGE regardless of content. Said out loud so the analysis
+            # can account for it rather than silently mis-reading the sample.
+            logger.warning(
+                "family_book_telemetry: capture worker ready, last-state cache NOT seeded "
+                "(first observation per family will label STATE_CHANGE)"
+            )
+        else:
+            logger.info("family_book_telemetry: capture worker ready")
+    else:
+        logger.info("family_book_telemetry: disabled via ZEUS_FAMILY_BOOK_TELEMETRY_ENABLED")
+
     _register_edli_live_jobs()
     # Exit-lifecycle monitoring stays in the order daemon. Chain-sync READ,
     # market/user channel ingest, substrate capture, and post-trade capital
@@ -10461,6 +10816,19 @@ def main():
         id="forecasts_wal_checkpoint", next_run_time=_utc_run_time_after(150.0),
         max_instances=1, coalesce=True,
     )
+    # book_snapshot_persistence round-5 fix Y3/Y5 (DB split 2026-08-19): bounded
+    # family-book telemetry outbox -> canonical delivery, on the daemon's own
+    # write_class="live" connection to the family-book EVIDENCE DB (see
+    # _family_book_telemetry_ingest_cycle above) -- registered only if the
+    # capture-side worker actually started (readiness handshake below); an
+    # unstarted/failed worker means an empty or absent spool, so scheduling
+    # ingest would be pure overhead.
+    if _family_book_telemetry_ready:
+        scheduler.add_job(
+            _family_book_telemetry_ingest_cycle, "interval", seconds=30,
+            id="family_book_telemetry_ingest", next_run_time=_utc_run_time_after(30.0),
+            max_instances=1, coalesce=True,
+        )
     from src.control.heartbeat_supervisor import heartbeat_cadence_seconds_from_env
     scheduler.add_job(
         _start_venue_heartbeat_loop_if_needed,
@@ -10534,6 +10902,21 @@ def main():
     except (KeyboardInterrupt, SystemExit):
         logger.info("Zeus shutting down")
         scheduler.shutdown(wait=True)  # U7: wait=True so inflight cycles commit before exit
+    finally:
+        # Round-6: try/finally, not an except-only arm. Any other exit path out
+        # of scheduler.start() (an unexpected raise) previously left the capture
+        # thread running against an otherwise-dead daemon.
+        if _family_book_telemetry_ready:
+            from src.events.family_book_telemetry_writer import (
+                drain as _drain_family_book_telemetry,
+                shutdown as _shutdown_family_book_telemetry_worker,
+            )
+
+            # Bounded drain first: envelopes already enqueued get spooled (and
+            # so survive to the next daemon's ingest) instead of dying in the
+            # in-memory queue. Bounded, because shutdown must not hang on it.
+            _drain_family_book_telemetry(timeout=2.0)
+            _shutdown_family_book_telemetry_worker()
 
 
 if __name__ == "__main__":

@@ -1,7 +1,7 @@
 # Created: 2026-07-12
 # Last reused or audited: 2026-07-12
 # Authority basis: docs/rebuild/quarantine_excision_2026-07-11.md DIQ packet
-#   (Consult adjudication, GPT-5.6 Pro, "DIQ CONDITIONAL"); supersedes
+#   (adjudication verdict "DIQ CONDITIONAL"); supersedes
 #   src/state/schema/decision_integrity_quarantine_schema.py (PR-E 2026-05-22).
 
 """fact_revocations — the owner-local fact-revocation record table.

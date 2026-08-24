@@ -1028,7 +1028,8 @@ def _seed_attribution_row(
             schema_version)
            VALUES (?,?,?,?,?,?,?,?,?,?)""",
         (
-            f"attr-{position_id}", position_id, command_id, decision_certificate_hash,
+            f"attr-{position_id}-{command_id}", position_id, command_id,
+            decision_certificate_hash,
             resolution,
             None if resolution == "ATTRIBUTED" else "no_audit_row_for_command",
             "BACKFILL", "ENTRY", "2026-06-20T00:00:00Z", 1,
@@ -1885,6 +1886,17 @@ def test_invalid_global_sell_receipt_is_reported_without_relabeling_entry_q(
 
 
 def test_LXE_multiple_entry_certificates_are_explicitly_unattributable(tmp_path) -> None:
+    """_position_decision_attribution_row's own single-hash purity gate is
+    UNCHANGED by the Bug A repair (docs/operations/current/plans/
+    reversal_plan_tier0_2026-08-24.md Item 2) — this legacy helper still
+    collapses a multi-hash position to UNATTRIBUTABLE and is retained for its
+    existing callers/tests. Bug A moved the ACTUAL grading path off this
+    function entirely: ``load_settled_positions`` now resolves every ENTRY
+    tranche via ``_resolve_aggregated_decision_q_for_position``, under which
+    this SAME two-tranche fixture grades ATTRIBUTABLE (fill-size-weighted
+    aggregate) instead of UNATTRIBUTABLE — see
+    test_bugA_multi_tranche_scale_in_position_is_attributable_end_to_end.
+    """
     from src.analysis.settlement_skill_attribution import (
         _position_decision_attribution_row,
     )
@@ -2469,3 +2481,327 @@ def test_PROV3_log_line_surfaces_discredited_stale_by_default() -> None:
     # Nothing to disclose -> no noise.
     assert "discredited" not in skill_win_rate_log_line(rate, 0)
     assert "discredited" not in skill_win_rate_log_line(rate)
+
+
+# ---------------------------------------------------------------------------
+# BUG A — multi-tranche decision certificate aggregation (2026-08-24)
+# docs/operations/current/plans/reversal_plan_tier0_2026-08-24.md Item 2.
+#
+# _position_decision_attribution_row's single-hash purity gate
+# (COUNT(DISTINCT decision_certificate_hash)=1) discarded every scale-in
+# position (>1 ENTRY tranche, each with its own individually VERIFIED
+# certificate) as UNATTRIBUTABLE — 140/304 August settled positions, 23% of
+# the book, zero exceptions. _resolve_aggregated_decision_q_for_position
+# resolves EVERY tranche independently and fill-size-weight-averages them,
+# fail-closed on any single broken/unresolvable tranche.
+# ---------------------------------------------------------------------------
+
+def _seed_venue_command_size(
+    tconn: sqlite3.Connection,
+    *,
+    command_id: str,
+    position_id: str,
+    token_id: str,
+    size: float,
+) -> None:
+    """Seed the ENTRY tranche's order size (trades.venue_commands.size), the
+    weight _tranche_fill_size resolves for multi-tranche q aggregation."""
+    tconn.execute(
+        """INSERT INTO venue_commands
+           (command_id, snapshot_id, envelope_id, position_id, decision_id,
+            idempotency_key, intent_kind, market_id, token_id, side, size,
+            price, state, created_at, updated_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (
+            command_id, f"snap-{command_id}", f"env-{command_id}", position_id,
+            f"dec-{command_id}", f"idem-{command_id}", "ENTRY", "market-1",
+            token_id, "BUY", size, 0.30, "FILLED",
+            "2026-08-01T00:00:00Z", "2026-08-01T00:00:00Z",
+        ),
+    )
+
+
+def _seed_tranche(
+    tconn: sqlite3.Connection,
+    wconn: sqlite3.Connection,
+    *,
+    position_id: str,
+    command_id: str,
+    condition_id: str,
+    token_id: str,
+    direction: str,
+    certificate_hash: str,
+    q_live: float,
+    q_lcb_5pct: float,
+    size: Optional[float],
+) -> None:
+    """One ENTRY tranche: an ATTRIBUTED attribution row + its resolvable
+    ordinary certificate + (optionally) its order size."""
+    _seed_attribution_row(
+        tconn, position_id=position_id, command_id=command_id,
+        resolution="ATTRIBUTED", decision_certificate_hash=certificate_hash,
+    )
+    if size is not None:
+        _seed_venue_command_size(
+            tconn, command_id=command_id, position_id=position_id,
+            token_id=token_id, size=size,
+        )
+    _seed_belief_certificate(
+        wconn, certificate_hash=certificate_hash, condition_id=condition_id,
+        token_id=token_id, direction=direction, q_live=q_live,
+        q_lcb_5pct=q_lcb_5pct,
+    )
+
+
+def test_bugA_aggregator_single_tranche_is_byte_identical_to_pre_fix_path(
+    tmp_path,
+) -> None:
+    """(a) A single-tranche position resolves through the new aggregator to
+    EXACTLY the same q_live/q_lcb_5pct/consumed_posterior_id a direct
+    _resolve_decision_q_from_certificate call would produce — the fix must not
+    perturb the pre-existing (and dominant) single-tranche case."""
+    from src.analysis.settlement_skill_attribution import (
+        _resolve_aggregated_decision_q_for_position,
+        _resolve_decision_q_from_certificate,
+    )
+
+    world = sqlite3.connect(tmp_path / "world.db"); init_schema(world)
+    trades_path = tmp_path / "trades.db"
+    trades = sqlite3.connect(trades_path); init_schema(trades)
+    cert_hash = "1" * 64
+    _seed_tranche(
+        trades, world, position_id="pos-single", command_id="cmd-single",
+        condition_id="cond-single", token_id="tok-single", direction="buy_no",
+        certificate_hash=cert_hash, q_live=0.72, q_lcb_5pct=0.60, size=10.0,
+    )
+    world.commit(); trades.commit(); trades.close()
+    world.execute("ATTACH DATABASE ? AS trades", (str(trades_path),))
+
+    direct = _resolve_decision_q_from_certificate(
+        world, cert_hash, condition_id="cond-single", direction="buy_no",
+        held_token_id="tok-single",
+    )
+    agg = _resolve_aggregated_decision_q_for_position(
+        world, position_id="pos-single", condition_id="cond-single",
+        direction="buy_no", held_token_id="tok-single",
+    )
+    assert agg is not None
+    assert agg["q_live"] == pytest.approx(direct["q_live"])
+    assert agg["q_lcb_5pct"] == pytest.approx(direct["q_lcb_5pct"])
+    assert agg["consumed_posterior_id"] == direct["consumed_posterior_id"]
+    assert agg["tranche_count"] == 1
+    assert agg["equal_weight_fallback"] is False
+    world.close()
+
+
+def test_bugA_three_tranche_fill_size_weighted_average(tmp_path) -> None:
+    """(b) 3 ENTRY tranches, sizes 100/50/50, q_live 0.8/0.6/0.6 ->
+    size-weighted position q_live = (0.8*100+0.6*50+0.6*50)/200 = 0.70."""
+    from src.analysis.settlement_skill_attribution import (
+        _resolve_aggregated_decision_q_for_position,
+    )
+
+    world = sqlite3.connect(tmp_path / "world.db"); init_schema(world)
+    trades_path = tmp_path / "trades.db"
+    trades = sqlite3.connect(trades_path); init_schema(trades)
+    tranches = (
+        ("cmd-a", "2" * 64, 0.8, 0.7, 100.0),
+        ("cmd-b", "3" * 64, 0.6, 0.5, 50.0),
+        ("cmd-c", "4" * 64, 0.6, 0.5, 50.0),
+    )
+    for command_id, cert_hash, q_live, q_lcb, size in tranches:
+        _seed_tranche(
+            trades, world, position_id="pos-multi", command_id=command_id,
+            condition_id="cond-multi", token_id="tok-multi", direction="buy_no",
+            certificate_hash=cert_hash, q_live=q_live, q_lcb_5pct=q_lcb, size=size,
+        )
+    world.commit(); trades.commit(); trades.close()
+    world.execute("ATTACH DATABASE ? AS trades", (str(trades_path),))
+
+    agg = _resolve_aggregated_decision_q_for_position(
+        world, position_id="pos-multi", condition_id="cond-multi",
+        direction="buy_no", held_token_id="tok-multi",
+    )
+    assert agg is not None
+    assert agg["q_live"] == pytest.approx(0.70, abs=1e-9)
+    assert agg["q_lcb_5pct"] == pytest.approx(0.60, abs=1e-9)
+    assert agg["tranche_count"] == 3
+    assert agg["equal_weight_fallback"] is False
+    assert agg["consumed_posterior_id"] is None, (
+        "no single posterior spans multiple tranches — never guessed"
+    )
+    world.close()
+
+
+def test_bugA_equal_weight_fallback_when_a_tranche_size_is_unresolvable(
+    tmp_path,
+) -> None:
+    """(c) When any tranche's fill size is unresolvable the WHOLE position
+    falls back to equal-weight (never mixes weighted and unweighted tranches),
+    and the fallback is flagged so the caller can record it honestly."""
+    from src.analysis.settlement_skill_attribution import (
+        _resolve_aggregated_decision_q_for_position,
+    )
+
+    world = sqlite3.connect(tmp_path / "world.db"); init_schema(world)
+    trades_path = tmp_path / "trades.db"
+    trades = sqlite3.connect(trades_path); init_schema(trades)
+    # Tranche 1 HAS a resolvable size; tranche 2 has none (no venue_commands row).
+    _seed_tranche(
+        trades, world, position_id="pos-fallback", command_id="cmd-sized",
+        condition_id="cond-fallback", token_id="tok-fallback", direction="buy_no",
+        certificate_hash="5" * 64, q_live=0.8, q_lcb_5pct=0.7, size=100.0,
+    )
+    _seed_tranche(
+        trades, world, position_id="pos-fallback", command_id="cmd-unsized",
+        condition_id="cond-fallback", token_id="tok-fallback", direction="buy_no",
+        certificate_hash="6" * 64, q_live=0.4, q_lcb_5pct=0.3, size=None,
+    )
+    world.commit(); trades.commit(); trades.close()
+    world.execute("ATTACH DATABASE ? AS trades", (str(trades_path),))
+
+    agg = _resolve_aggregated_decision_q_for_position(
+        world, position_id="pos-fallback", condition_id="cond-fallback",
+        direction="buy_no", held_token_id="tok-fallback",
+    )
+    assert agg is not None
+    assert agg["equal_weight_fallback"] is True
+    # Equal-weight average of 0.8 and 0.4 -> 0.6 (NOT the 100:0 size ratio).
+    assert agg["q_live"] == pytest.approx(0.6, abs=1e-9)
+    world.close()
+
+
+def test_bugA_one_unattributable_tranche_makes_whole_position_unattributable(
+    tmp_path,
+) -> None:
+    """(d) One tranche resolution != 'ATTRIBUTED' makes the WHOLE position
+    UNATTRIBUTABLE — fail-closed, no partial credit for the other tranche."""
+    from src.analysis.settlement_skill_attribution import (
+        _resolve_aggregated_decision_q_for_position,
+    )
+
+    world = sqlite3.connect(tmp_path / "world.db"); init_schema(world)
+    trades_path = tmp_path / "trades.db"
+    trades = sqlite3.connect(trades_path); init_schema(trades)
+    _seed_tranche(
+        trades, world, position_id="pos-partial", command_id="cmd-good",
+        condition_id="cond-partial", token_id="tok-partial", direction="buy_no",
+        certificate_hash="7" * 64, q_live=0.8, q_lcb_5pct=0.7, size=100.0,
+    )
+    _seed_attribution_row(
+        trades, position_id="pos-partial", command_id="cmd-bad",
+        resolution="UNATTRIBUTABLE", decision_certificate_hash=None,
+    )
+    world.commit(); trades.commit(); trades.close()
+    world.execute("ATTACH DATABASE ? AS trades", (str(trades_path),))
+
+    agg = _resolve_aggregated_decision_q_for_position(
+        world, position_id="pos-partial", condition_id="cond-partial",
+        direction="buy_no", held_token_id="tok-partial",
+    )
+    assert agg is None
+    world.close()
+
+
+def test_bugA_one_tranche_cert_fails_partial_declaration_check_unattributable(
+    tmp_path,
+) -> None:
+    """(e) One tranche's certificate fails the Bug B partial-global-declaration
+    check (untouched by this fix) -> that tranche is unresolvable -> the WHOLE
+    position is UNATTRIBUTABLE, even though the other tranche's cert is fine."""
+    from src.analysis.settlement_skill_attribution import (
+        _resolve_aggregated_decision_q_for_position,
+    )
+
+    world = sqlite3.connect(tmp_path / "world.db"); init_schema(world)
+    trades_path = tmp_path / "trades.db"
+    trades = sqlite3.connect(trades_path); init_schema(trades)
+    _seed_tranche(
+        trades, world, position_id="pos-badcert", command_id="cmd-ok",
+        condition_id="cond-badcert", token_id="tok-badcert", direction="buy_no",
+        certificate_hash="8" * 64, q_live=0.8, q_lcb_5pct=0.7, size=100.0,
+    )
+    _seed_attribution_row(
+        trades, position_id="pos-badcert", command_id="cmd-partial",
+        resolution="ATTRIBUTED", decision_certificate_hash="9" * 64,
+    )
+    _seed_venue_command_size(
+        trades, command_id="cmd-partial", position_id="pos-badcert",
+        token_id="tok-badcert", size=50.0,
+    )
+    # Partial global declaration: marker present, both receipt references absent.
+    _seed_belief_certificate(
+        world, certificate_hash="9" * 64, condition_id="cond-badcert",
+        token_id="tok-badcert", direction="buy_no", q_live=0.5, q_lcb_5pct=0.4,
+        payload_extra={
+            "qkernel_execution_economics": {
+                "global_actuation_identity": "dangling-marker",
+            },
+        },
+    )
+    world.commit(); trades.commit(); trades.close()
+    world.execute("ATTACH DATABASE ? AS trades", (str(trades_path),))
+
+    agg = _resolve_aggregated_decision_q_for_position(
+        world, position_id="pos-badcert", condition_id="cond-badcert",
+        direction="buy_no", held_token_id="tok-badcert",
+    )
+    assert agg is None
+    world.close()
+
+
+def test_bugA_multi_tranche_scale_in_position_is_attributable_end_to_end(
+    tmp_path,
+) -> None:
+    """Full wiring test through load_settled_positions: the SAME two-tranche
+    fixture that test_LXE_multiple_entry_certificates_are_explicitly_unattributable
+    proves UNATTRIBUTABLE at the legacy single-hash helper now grades
+    ATTRIBUTABLE end-to-end, with the fill-size-weighted q_live and a
+    provenance note recording the multi-tranche aggregation."""
+    world_path = str(tmp_path / "world.db")
+    fcst_path = str(tmp_path / "fcst.db")
+    trades_path = str(tmp_path / "trades.db")
+    wconn = sqlite3.connect(world_path); init_schema(wconn)
+    fconn = sqlite3.connect(fcst_path); init_schema_forecasts(fconn)
+    tconn = sqlite3.connect(trades_path); init_schema(tconn)
+    _seed_q_market_and_settlement(
+        fconn, condition_id="cond-e2e", city="Denver", target_date="2026-08-05",
+        range_low=90.0, range_high=91.0, settlement_value=87.0,  # OUT -> NO wins
+    )
+    fconn.commit(); fconn.close()
+
+    _seed_tranche(
+        tconn, wconn, position_id="pos-e2e", command_id="cmd-e2e-1",
+        condition_id="cond-e2e", token_id="tok-e2e", direction="buy_no",
+        certificate_hash="a" * 64, q_live=0.8, q_lcb_5pct=0.7, size=100.0,
+    )
+    _seed_tranche(
+        tconn, wconn, position_id="pos-e2e", command_id="cmd-e2e-2",
+        condition_id="cond-e2e", token_id="tok-e2e", direction="buy_no",
+        certificate_hash="b" * 64, q_live=0.6, q_lcb_5pct=0.5, size=100.0,
+    )
+    tconn.execute(
+        """INSERT INTO position_current
+           (position_id, phase, strategy_key, condition_id, direction,
+            token_id, no_token_id, entry_price, shares, cost_basis_usd, city,
+            target_date, temperature_metric, updated_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        ("pos-e2e", "settled", "center_buy", "cond-e2e", "buy_no",
+         "tok-e2e", "tok-e2e", 0.35, 20.0, 7.0, "Denver", "2026-08-05",
+         "high", "2026-08-04T12:00:00Z"),
+    )
+    tconn.commit(); tconn.close()
+    wconn.commit()
+    wconn.execute("ATTACH DATABASE ? AS forecasts", (fcst_path,))
+    wconn.execute("ATTACH DATABASE ? AS trades", (trades_path,))
+
+    grades = load_settled_positions(wconn)
+    assert len(grades) == 1
+    g = grades[0]
+    assert g.category != "UNATTRIBUTABLE_Q_MISSING", g.rationale
+    # (0.8*100 + 0.6*100) / 200 = 0.70.
+    assert g.q_live == pytest.approx(0.70, abs=1e-9)
+    assert g.q_lcb_5pct == pytest.approx(0.60, abs=1e-9)
+    assert "multi-tranche" in g.derivation_note
+    assert "fill-size-weighted" in g.derivation_note
+    wconn.close()

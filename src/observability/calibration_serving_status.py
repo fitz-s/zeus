@@ -34,7 +34,7 @@ def _table_exists(conn: sqlite3.Connection, schema: str, table: str) -> bool:
 def _table_ref(conn: sqlite3.Connection, table: str, *, prefer_world: bool = True) -> str | None:
     # Per-table schema preference: the canonical map lives in
     # src/observability/v2_table_schema_preference.py so calibration_serving and
-    # status_summary cannot drift (PR #210 Copilot review: keeping two
+    # status_summary cannot drift (PR #210 review: keeping two
     # independent maps in sync is brittle and would re-introduce the same
     # operator-visibility defect if one is updated without the other).
     from src.observability.v2_table_schema_preference import V2_TABLE_SCHEMA_PREFERENCE

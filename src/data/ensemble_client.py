@@ -29,7 +29,7 @@ from src.data.openmeteo_client import fetch as _fetch_openmeteo
 
 API_URL = "https://ensemble-api.open-meteo.com/v1/ensemble"
 
-# Retry config per CLAUDE.md: retry 3× with 10s backoff
+# Retry config per repo law (AGENTS.md): retry 3× with 10s backoff
 MAX_RETRIES = 3
 RETRY_BACKOFF_S = 10.0
 CACHE_TTL_SECONDS = 15 * 60
@@ -109,7 +109,7 @@ def fetch_ensemble(
 
     Returns None if all retries fail.
 
-    Phase 2.6 (2026-05-04, critic-opus BLOCKER 1): ``temperature_metric``
+    Phase 2.6 (2026-05-04, review BLOCKER 1): ``temperature_metric``
     keyword-only param ('high'|'low') threads to ``_parse_response`` so
     the returned ens_result carries a typed data_version. Without this,
     the evaluator's UNKNOWN_FORECAST_SOURCE_FAMILY gate silently skipped
@@ -119,7 +119,7 @@ def fetch_ensemble(
     source_spec = gate_source(source_id)
     gate_source_role(source_spec, role)
 
-    # Phase 3 hardening (2026-05-04, critic-opus MAJOR 6): the routing flip
+    # Phase 3 hardening (2026-05-04, review MAJOR 6): the routing flip
     # in c525e358 sent `model='ecmwf_ifs025'` to source_id `ecmwf_open_data`,
     # but this fetcher's HTTP path still calls the Open-Meteo broker
     # (line ~155). That re-introduces the training/serving skew the routing
@@ -136,7 +136,7 @@ def fetch_ensemble(
     #       at evaluator.py:1713 instead of fetch_ensemble at :1717.
     # The exec-forecast reader path already produces typed data_version
     # via the snapshot row, so it inherently can't trigger this guard.
-    # Copilot review #3 (2026-05-04): the original guard fired only when
+    # PR review finding #3 (2026-05-04): the original guard fired only when
     # role == "entry_primary", but the same Open-Meteo-broker mis-provenance
     # affects any non-entry role too — crosscheck, telemetry, and monitor
     # callers that asked for ecmwf_open_data ended up with Open-Meteo
@@ -408,7 +408,7 @@ def _parse_response(
     Open-Meteo returns ensemble members as separate keys:
     temperature_2m_member0, temperature_2m_member1, ..., temperature_2m_member50
 
-    Phase 2.6 hardening (2026-05-04, critic-opus BLOCKER 1): when
+    Phase 2.6 hardening (2026-05-04, review BLOCKER 1): when
     ``temperature_metric`` is provided AND the resolved source_id maps to a
     known source_family, populate ``data_version`` so the evaluator's
     UNKNOWN_FORECAST_SOURCE_FAMILY gate can route this snapshot to the
@@ -529,7 +529,7 @@ def validate_ensemble(
     expected_members: int | None = None,
     required_hour_indices: Sequence[int] | np.ndarray | None = None,
 ) -> bool:
-    """Validate ensemble response. Per CLAUDE.md: reject if < expected members."""
+    """Validate ensemble response. Per repo law (AGENTS.md): reject if < expected members."""
     if expected_members is None:
         expected_members = ensemble_member_count()
     if result is None:

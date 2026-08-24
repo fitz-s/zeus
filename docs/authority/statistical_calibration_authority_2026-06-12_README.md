@@ -2,7 +2,7 @@
 
 Status: ACTIVE
 
-Source: clean-room math consult REQ-20260612-174119 (zero Zeus context by operator
+Source: clean-room math consult external consult, 2026-06-12 (zero Zeus context by operator
 directive — derivations from first principles + literature only). Full text:
 statistical_calibration_authority_2026-06-12.txt. Advisory until each step's
 walk-forward gate passes locally; the gates themselves are specified in the text.

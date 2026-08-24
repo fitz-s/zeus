@@ -19,7 +19,8 @@ Zeus is a **live weather settlement-contract trading runtime** for Polymarket.
 The live forecast→edge→size path is the **replacement_forecast** chain (authority `docs/authority/replacement_final_form_2026_06_09.md`; root `AGENTS.md` probability-chain block). Cite symbols, not line numbers — lines drift.
 
 ```
-per-model walk-forward EB de-bias (bayes_precision_fusion.eb_bias, λ=n/(n+8)) → T2 Bayesian precision
+per-model RAW center, NO de-bias shift (bayes_precision_fusion_capture._raw_instrument; residual
+history feeds width/provenance only — 2026-06-18 RAW law) → T2 Bayesian precision
 fusion, Ledoit-Wolf Σ (bayes_precision_fusion.fuse_bayes_precision_posterior; bayes_fuse + shrink_cov) →
 σ_pred = max(1.0°C, √(fused.sd²+σ_resid²)) → settlement-preimage bin q
 (emos.bin_probability_settlement, q_shape fused_normal_direct) → q_lcb floor →

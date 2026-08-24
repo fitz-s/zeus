@@ -69,7 +69,7 @@ def vwmp(best_bid: float, best_ask: float,
     """Volume-Weighted Micro-Price. Spec §4.1.
 
     If total_size <= 0: raise ValueError("Illiquid market: VWMP total size is 0.")
-    Per CLAUDE.md: never use mid-price for edge calculations (VWMP required).
+    Per repo law (AGENTS.md): never use mid-price for edge calculations (VWMP required).
     """
     total = bid_size + ask_size
     if total <= 0:

@@ -19,7 +19,7 @@
 - `cert-v2-design`(opus)→ **证书 v2 envelope spec**(commit cb04f536e,设计-only)。核心最小:仅 `schema_version==2 时 payload_hash=stable_hash(identity_view(payload))` 剥离**仅** `_diagnostics` 键;`certificate_hash_for` 不动(已验 schema_version 在其 preimage 内 = discriminator hash-bound)。揪出前设计 4 真错(§3 混淆 identity/retention;freeze §4 重造 header 破坏 verifier by-name 读;`_audit_existing_payload_hash` 对 v2 break = 格式落 W2 之因;receipt schema_version 未 hash-bound)。W2 最小改 = 4 处(identity_view + 版本感知 audit + 版本感知 receipt + v2 golden vectors),无 DDL。W3 写、W5 relocate-never-summarize。authority 方向对(world=live)。
 
 **在途**
-- Consult `REQ-20260721-204133-420956`:4 锁+336 零锁写者统一 cutover 对撞(bridge-lock 增量 vs fenced big-bang;connection-factory pushdown;BULK-yield 保 K3;world 进程内锁跨进程折叠)。**GPT-5.6 Pro 深推超 60min 首个 await 窗,daemon 自身 resume 检索中(pid 27389/27390,conversation 6a6011c7),已重新 await 挂接**。答案落 `/tmp/cgc/answer_REQ-20260721-204133-420956.txt`。W5-8 fail-open connect 设计就绪(scratchpad),排此 consult 后(同处 `_connect`)。
+- Consult `external consult, 2026-07-21`:4 锁+336 零锁写者统一 cutover 对撞(bridge-lock 增量 vs fenced big-bang;connection-factory pushdown;BULK-yield 保 K3;world 进程内锁跨进程折叠)。**GPT-5.6 Pro 深推超 60min 首个 await 窗,daemon 自身 resume 检索中(pid 27389/27390,[external consult thread]),已重新 await 挂接**。答案落 `[consult answer artifact]`。W5-8 fail-open connect 设计就绪(scratchpad),排此 consult 后(同处 `_connect`)。
 
 **连接层已确认(consult 落地即可实现)**:`world_write_mutex`(scheme 4)= 进程内 threading.Lock、只跨线程、**不跨进程**;`world_write_lock` 对已开事务幂等(re-entrancy 模式);checkpoint 助手与写锁子系统正交(W5-2/3 独立)。待批:W5-2 false-green alert(`busy==0` 恒真→WARNING 死码;真信号 `checkpointed<log`)、W5-3 TRUNCATE-vs-PASSIVE 张力(需判断/consult)、W5-8 fail-open rwc(`no such table` 源)。
 
