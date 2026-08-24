@@ -3677,6 +3677,12 @@ def _record_monitor_data_degraded_attempt(
     )
     normalized_stage = str(stage or "unknown").strip().upper()[:96]
     reason = f"MONITOR_INPUTS_UNAVAILABLE:{normalized_stage}"
+    # A current q and held-side book can exist while the decision window is
+    # exhausted.  Preserve that distinction through the outer monitor outcome:
+    # it is not stale-data HOLD and it must not be collapsed into generic cycle
+    # failure by the scheduler wrapper.
+    if normalized_stage == "REFRESH_DEADLINE":
+        summary["held_monitor_failure_outcome"] = "REFRESH_DEADLINE"
     canonical_written = _emit_monitor_refreshed_canonical_if_available(
         conn,
         pos,

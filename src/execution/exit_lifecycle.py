@@ -12700,6 +12700,60 @@ def _persist_exit_monitor_artifact(
     return True, artifact_id[0]
 
 
+_MONITOR_FAILURE_OUTCOMES = frozenset(
+    {
+        "REFRESH_DEADLINE",
+        "DB_CONTENDED",
+        "VENUE_SNAPSHOT_DEBT",
+        "COVERAGE_INCOMPLETE",
+        "ARTIFACT_WRITE_DEFERRED",
+        "UNKNOWN",
+    }
+)
+
+
+def _exit_monitor_failure_outcome(summary: Mapping[str, object]) -> str:
+    """Classify an incomplete monitor without altering action authority.
+
+    The returned value crosses the scheduler boundary and the same value is
+    kept in the committed monitor artifact when one exists.  This is evidence
+    for the next bounded tranche, not a substitute for a fresh q/book or a
+    new exit decision.
+    """
+
+    explicit = str(summary.get("held_monitor_failure_outcome") or "").strip()
+    if explicit in _MONITOR_FAILURE_OUTCOMES:
+        return explicit
+    error = str(summary.get("monitoring_error") or "").lower()
+    if "database is locked" in error or "write lease" in error:
+        return "DB_CONTENDED"
+    if any(
+        marker in error
+        for marker in (
+            "order truth",
+            "account truth",
+            "venue snapshot",
+            "snapshot deadline",
+        )
+    ):
+        return "VENUE_SNAPSHOT_DEBT"
+    if "coverage" in error:
+        return "COVERAGE_INCOMPLETE"
+    if "deadline" in error:
+        return "REFRESH_DEADLINE"
+    if "artifact" in error:
+        return "ARTIFACT_WRITE_DEFERRED"
+    return "UNKNOWN"
+
+
+def _report_exit_monitor_failure(
+    outcome: str,
+    sink: Callable[[str], None] | None,
+) -> None:
+    if sink is not None:
+        sink(outcome if outcome in _MONITOR_FAILURE_OUTCOMES else "UNKNOWN")
+
+
 def run_exit_monitor_cycle(
     *,
     held_position_monitor_active: threading.Event,
@@ -12709,6 +12763,7 @@ def run_exit_monitor_cycle(
     monitor_handoff_elapsed_seconds: float = 0.0,
     target_families: Collection[tuple[str, str, str]] | None = None,
     should_preempt_for_urgent_day0: Callable[[], bool] | None = None,
+    failure_outcome_sink: Callable[[str], None] | None = None,
 ) -> bool:
     """Scheduler entrypoint (R4-b extraction from src/main.py::_exit_monitor_cycle).
 
@@ -12760,6 +12815,7 @@ def run_exit_monitor_cycle(
 
     if held_position_monitor_active.is_set() and not monitor_claimed:
         logger.warning("exit_monitor skipped: previous monitor cycle is still running")
+        _report_exit_monitor_failure("COVERAGE_INCOMPLETE", failure_outcome_sink)
         return False
     held_position_monitor_active.set()
     if monitor_deadline_monotonic is None:
@@ -12771,10 +12827,12 @@ def run_exit_monitor_cycle(
         if not math.isfinite(monitor_deadline_monotonic):
             logger.error("exit_monitor: held monitor deadline is not finite")
             mark_held_position_monitor_complete()
+            _report_exit_monitor_failure("REFRESH_DEADLINE", failure_outcome_sink)
             return False
     if monitor_deadline_monotonic <= _time_module.monotonic():
         logger.warning("exit_monitor: claim budget expired before DB acquisition")
         mark_held_position_monitor_complete()
+        _report_exit_monitor_failure("REFRESH_DEADLINE", failure_outcome_sink)
         return False
 
     preparation_started_monotonic = _time_module.monotonic()
@@ -12788,6 +12846,7 @@ def run_exit_monitor_cycle(
             "complete probability redecision"
         )
         mark_held_position_monitor_complete()
+        _report_exit_monitor_failure("REFRESH_DEADLINE", failure_outcome_sink)
         return False
 
     conn = get_connection(deadline_monotonic=preparation_deadline_monotonic)
@@ -12797,6 +12856,7 @@ def run_exit_monitor_cycle(
             "redecision reserve for the recurring retry"
         )
         mark_held_position_monitor_complete()
+        _report_exit_monitor_failure("DB_CONTENDED", failure_outcome_sink)
         return False
 
     summary: dict = {
@@ -12941,7 +13001,16 @@ def run_exit_monitor_cycle(
                 summary["monitoring_error"] = (
                     "FULL_BOOK_MONITOR_CANONICAL_COVERAGE_INCOMPLETE"
                 )
+                summary["held_monitor_failure_outcome"] = "COVERAGE_INCOMPLETE"
                 succeeded = False
+
+            # Persist the typed reason with the pass artifact before releasing
+            # the claim.  The scheduler receives the same value below, so a
+            # retry can distinguish contention from a real full-book deficit.
+            if not succeeded:
+                summary["held_monitor_failure_outcome"] = (
+                    _exit_monitor_failure_outcome(summary)
+                )
 
             artifact.completed_at = datetime.now(timezone.utc).isoformat()
 
@@ -12983,6 +13052,7 @@ def run_exit_monitor_cycle(
                 monitor_completion_marked = True
             else:
                 summary["monitoring_error"] = "MONITOR_ARTIFACT_WRITE_DEFERRED"
+                summary["held_monitor_failure_outcome"] = "ARTIFACT_WRITE_DEFERRED"
                 succeeded = False
 
     except Exception as exc:
@@ -13027,4 +13097,8 @@ def run_exit_monitor_cycle(
                 "exits": summary.get("exits", 0),
             },
         )
+    if not succeeded:
+        outcome = _exit_monitor_failure_outcome(summary)
+        summary["held_monitor_failure_outcome"] = outcome
+        _report_exit_monitor_failure(outcome, failure_outcome_sink)
     return succeeded

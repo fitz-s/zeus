@@ -187,6 +187,28 @@ HELD_POSITION_MONITOR_BOOTSTRAP_CHECK_SECONDS = 5.0
 HELD_POSITION_MONITOR_RECOVERY_INTERVAL_SECONDS = 30.0
 HELD_POSITION_MONITOR_RECOVERY_MAX_AGE_SECONDS = 150.0
 HELD_POSITION_MONITOR_RECOVERY_RETRY_SECONDS = 1.0
+# A periodic full-book claim must leave a small scheduler hand-off margin.  Its
+# work may span several bounded tranches, but no one tranche may consume the
+# next 30s tick and turn the oldest overdue position into a max-instance skip.
+HELD_POSITION_MONITOR_CLAIM_QUANTUM_GUARD_SECONDS = 1.0
+
+
+def _held_position_monitor_claim_budget_seconds(*, periodic_full_book: bool) -> float:
+    """Return one claim's bounded work budget without changing exit law."""
+
+    from src.engine.cycle_runtime import _held_position_monitor_budget_seconds
+
+    budget = _held_position_monitor_budget_seconds()
+    if not periodic_full_book:
+        return budget
+    return min(
+        budget,
+        max(
+            0.0,
+            HELD_POSITION_MONITOR_RECOVERY_INTERVAL_SECONDS
+            - HELD_POSITION_MONITOR_CLAIM_QUANTUM_GUARD_SECONDS,
+        ),
+    )
 # Fitz #5 scheduler-liveness (2026-06-08): the EDLI market-substrate warm cycle's
 # APScheduler interval. The refresh wall-clock budget
 # (ZEUS_REACTOR_REFRESH_BUDGET_SECONDS in src.data.substrate_observer) MUST be
@@ -9320,7 +9342,6 @@ def _exit_monitor_cycle(
     monitor acquires and releases the reactor boundary; network work does not
     hold that gate. The dispatcher owns both signals.
     """
-    from src.engine.cycle_runtime import _held_position_monitor_budget_seconds
     from src.execution.exit_lifecycle import (
         held_monitor_pre_artifact_reserve_seconds,
         run_exit_monitor_cycle,
@@ -9426,9 +9447,10 @@ def _exit_monitor_cycle(
     # the later network phase. Reactor handoff and all pre-monitor preparation
     # consume the same finite budget so a stalled handoff cannot shift the
     # probability/exit work beyond its advertised cadence.
-    monitor_deadline_monotonic = (
-        time.monotonic() + _held_position_monitor_budget_seconds()
+    claim_budget_seconds = _held_position_monitor_claim_budget_seconds(
+        periodic_full_book=periodic_full_book,
     )
+    monitor_deadline_monotonic = time.monotonic() + claim_budget_seconds
     def _periodic_preemption_requested_since_claim() -> bool:
         return _urgent_held_monitor_owner_pending() or (
             _held_monitor_preempt_generation_now() > preempt_generation_at_claim
@@ -9604,6 +9626,7 @@ def _exit_monitor_cycle(
             )
         successor_entered_core = True
         _consume_periodic_held_monitor_successor(successor_generation)
+        failure_outcome: list[str] = []
         monitor_succeeded = run_exit_monitor_cycle(
             held_position_monitor_active=_held_position_monitor_active,
             # The callback fires immediately after the core artifact and
@@ -9616,9 +9639,11 @@ def _exit_monitor_cycle(
             monitor_handoff_elapsed_seconds=handoff_elapsed_seconds,
             target_families=target_families,
             should_preempt_for_urgent_day0=should_preempt_for_urgent_day0,
+            failure_outcome_sink=failure_outcome.append,
         )
         if monitor_succeeded is not True:
-            raise RuntimeError("EXIT_MONITOR_CYCLE_INCOMPLETE")
+            outcome = failure_outcome[-1] if failure_outcome else "UNKNOWN"
+            raise RuntimeError(f"EXIT_MONITOR_CYCLE_INCOMPLETE:{outcome}")
         if target_families is None:
             # Canonical MONITOR_REFRESHED coverage, observed by
             # _promote_held_position_monitor_bootstrap_from_canonical_progress,
