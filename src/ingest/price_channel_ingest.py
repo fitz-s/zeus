@@ -141,6 +141,9 @@ _global_exit_audit_token_ids: set[str] = set()
 _held_quote_audit_token_ids_lock = threading.Lock()
 _held_quote_audit_token_ids: set[str] = set()
 _held_quote_sqlite_deadline_layers: dict[int, list[tuple[Callable[[], int], int, int, threading.Timer]]] = {}
+_market_channel_bootstrap_lock = threading.RLock()
+_market_channel_bootstrap_generation: str | None = None
+_market_channel_bootstrap_started_monotonic: float | None = None
 
 
 class _CanonicalHeldScopeUnavailable(RuntimeError):
@@ -182,7 +185,13 @@ def _edli_enqueue_held_snapshot_refresh_actions(actions) -> dict[str, object]:
 
     enqueued = 0
     unavailable: list[dict[str, str]] = []
+    readiness_error = _edli_market_channel_sink_readiness_error()
     for action in actions:
+        if readiness_error is not None:
+            unavailable.append(
+                _edli_held_snapshot_debt_payload(action, reason=readiness_error)
+            )
+            continue
         try:
             enqueue_persistent_market_channel_action(action)
         except Exception as exc:  # noqa: BLE001 - committed quote must retain exact debt
@@ -506,6 +515,147 @@ MARKET_CHANNEL_CANDIDATE_PRIORITY_RECENT_ROW_SCAN_MAX = 2048
 MARKET_CHANNEL_HELD_QUOTE_REFRESH_MAX_TOKENS_PER_CYCLE_DEFAULT = 32
 MARKET_CHANNEL_CANDIDATE_QUOTE_REFRESH_MAX_TOKENS_PER_CYCLE_DEFAULT = 32
 MARKET_CHANNEL_CONTINUITY_FILENAME = "market-channel-continuity.json"
+MARKET_CHANNEL_SINK_READINESS_FILENAME = "market-channel-action-sink-readiness.json"
+
+
+def _write_market_channel_sink_readiness(payload: dict[str, object]) -> None:
+    """Atomically publish the current process's persistent-action ownership."""
+
+    from src.config import state_path
+
+    target = state_path(MARKET_CHANNEL_SINK_READINESS_FILENAME)
+    proof = dict(payload)
+    proof["pid"] = os.getpid()
+    tmp = target.with_name(f".{target.name}.{os.getpid()}.tmp")
+    tmp.write_text(json.dumps(proof, sort_keys=True), encoding="utf-8")
+    tmp.replace(target)
+
+
+def _edli_begin_market_channel_bootstrap() -> str:
+    """Fence one restart bootstrap before it may register the in-process sink."""
+
+    generation = f"{os.getpid()}-{time.monotonic_ns()}"
+    with _market_channel_bootstrap_lock:
+        global _market_channel_bootstrap_generation, _market_channel_bootstrap_started_monotonic
+        _market_channel_bootstrap_generation = generation
+        _market_channel_bootstrap_started_monotonic = time.monotonic()
+        _write_market_channel_sink_readiness(
+            {
+                "schema_version": 1,
+                "generation": generation,
+                "sink_registered": False,
+                "consumer_queue_accepted": False,
+                "phase": "bootstrap_started",
+                "observed_at": datetime.now(timezone.utc).isoformat(),
+            }
+        )
+    return generation
+
+
+def _edli_market_channel_bootstrap_is_current(generation: str) -> bool:
+    with _market_channel_bootstrap_lock:
+        return generation == _market_channel_bootstrap_generation
+
+
+def _edli_publish_market_channel_bootstrap_phase(generation: str, phase: str) -> bool:
+    """Expose a typed, non-authorizing startup phase for the current generation."""
+
+    with _market_channel_bootstrap_lock:
+        if generation != _market_channel_bootstrap_generation:
+            return False
+        _write_market_channel_sink_readiness(
+            {
+                "schema_version": 1,
+                "generation": generation,
+                "sink_registered": False,
+                "consumer_queue_accepted": False,
+                "phase": phase,
+                "observed_at": datetime.now(timezone.utc).isoformat(),
+            }
+        )
+        return True
+
+
+def _edli_supersede_market_channel_bootstrap(generation: str) -> bool:
+    """Fence a late bootstrap before it can create a second persistent consumer."""
+
+    with _market_channel_bootstrap_lock:
+        global _market_channel_bootstrap_generation, _market_channel_bootstrap_started_monotonic
+        if generation != _market_channel_bootstrap_generation:
+            return False
+        _market_channel_bootstrap_generation = None
+        _market_channel_bootstrap_started_monotonic = None
+        _write_market_channel_sink_readiness(
+            {
+                "schema_version": 1,
+                "generation": generation,
+                "sink_registered": False,
+                "consumer_queue_accepted": False,
+                "phase": "registration_not_reached",
+                "observed_at": datetime.now(timezone.utc).isoformat(),
+            }
+        )
+        return True
+
+
+def _edli_market_channel_sink_readiness_error() -> str | None:
+    """Require this PID and generation; a stale sidecar is never consumer authority."""
+
+    from src.config import state_path
+
+    try:
+        payload = json.loads(
+            state_path(MARKET_CHANNEL_SINK_READINESS_FILENAME).read_text(encoding="utf-8")
+        )
+    except Exception as exc:  # noqa: BLE001 - missing readiness is fail-closed
+        return f"MarketChannelActionSinkReadinessUnavailable: {type(exc).__name__}: {exc}"
+    with _market_channel_bootstrap_lock:
+        generation = _market_channel_bootstrap_generation
+    if not isinstance(payload, dict) or payload.get("schema_version") != 1:
+        return "MarketChannelActionSinkReadinessUnavailable: invalid readiness payload"
+    if payload.get("pid") != os.getpid() or payload.get("generation") != generation:
+        return "MarketChannelActionSinkReadinessUnavailable: readiness belongs to another PID or generation"
+    if payload.get("sink_registered") is not True or payload.get("consumer_queue_accepted") is not True:
+        return "MarketChannelActionSinkReadinessUnavailable: persistent consumer is not ready"
+    return None
+
+
+def _edli_register_current_market_channel_action_sink(service, generation: str, register) -> bool:
+    """Register exactly one consumer and publish readiness in the same generation fence."""
+
+    with _market_channel_bootstrap_lock:
+        if generation != _market_channel_bootstrap_generation:
+            return False
+        register(service)
+        _write_market_channel_sink_readiness(
+            {
+                "schema_version": 1,
+                "generation": generation,
+                "sink_registered": True,
+                "consumer_queue_accepted": True,
+                "phase": "registered",
+                "registered_at": datetime.now(timezone.utc).isoformat(),
+            }
+        )
+        return True
+
+
+def _edli_unregister_current_market_channel_action_sink(service, generation: str, unregister) -> None:
+    """Withdraw the current generation atomically with its sink registration."""
+
+    with _market_channel_bootstrap_lock:
+        unregister(service)
+        if generation == _market_channel_bootstrap_generation:
+            _write_market_channel_sink_readiness(
+                {
+                    "schema_version": 1,
+                    "generation": generation,
+                    "sink_registered": False,
+                    "consumer_queue_accepted": False,
+                    "phase": "service_stopped",
+                    "observed_at": datetime.now(timezone.utc).isoformat(),
+                }
+            )
 
 
 def _write_market_channel_continuity(payload: dict[str, object]) -> None:
@@ -4839,7 +4989,10 @@ def _edli_market_channel_token_metadata_reloader(
     return _reload
 
 
-def _edli_market_channel_ingestor_cycle() -> dict | None:
+def _edli_market_channel_ingestor_cycle(
+    *,
+    bootstrap_generation: str | None = None,
+) -> dict | None:
     """EDLI market-channel online data-service bootstrap.
 
     This daemon-side job discovers active weather tokens and prepares the public
@@ -4851,6 +5004,50 @@ def _edli_market_channel_ingestor_cycle() -> dict | None:
     edli_cfg = _settings_section("edli_v1", {})
     global _edli_market_channel_thread
     if _edli_market_channel_thread is not None and _edli_market_channel_thread.is_alive():
+        readiness_error = _edli_market_channel_sink_readiness_error()
+        if readiness_error is not None:
+            with _market_channel_bootstrap_lock:
+                active_generation = _market_channel_bootstrap_generation
+                started_at = _market_channel_bootstrap_started_monotonic
+            elapsed = (
+                max(0.0, time.monotonic() - started_at)
+                if started_at is not None
+                else None
+            )
+            if (
+                active_generation is not None
+                and elapsed is not None
+                and elapsed >= 60.0
+            ):
+                _edli_supersede_market_channel_bootstrap(active_generation)
+                with _market_channel_bootstrap_lock:
+                    # The old runner may still be unwinding a blocked pre-register
+                    # operation.  Its generation fence prevents late registration.
+                    _edli_market_channel_thread = None
+                health = {
+                    "thread": "bootstrap_superseded",
+                    "bootstrap_generation": active_generation,
+                    "bootstrap_elapsed_seconds": elapsed,
+                    "sink_readiness_error": readiness_error,
+                    "scheduler_failed": True,
+                    "scheduler_failure_reason": "registration_not_reached",
+                }
+            else:
+                health = {
+                    "thread": "bootstrapping",
+                    "bootstrap_generation": active_generation,
+                    "bootstrap_elapsed_seconds": elapsed,
+                    "sink_readiness_error": readiness_error,
+                    "quote_cache_enabled": True,
+                    "fill_authority": "user_channel_or_reconcile_only",
+                }
+            _write_scheduler_health(
+                "edli_market_channel_ingestor",
+                failed=bool(health.get("scheduler_failed")),
+                reason=health.get("scheduler_failure_reason"),
+                extra=health,
+            )
+            return health
         candidate_refresh = _edli_refresh_candidate_priority_quote_evidence(
             limit=_edli_bounded_positive_int(
                 edli_cfg,
@@ -4892,6 +5089,16 @@ def _edli_market_channel_ingestor_cycle() -> dict | None:
             extra=health,
         )
         return health
+
+    if bootstrap_generation is None:
+        bootstrap_generation = _edli_begin_market_channel_bootstrap()
+    elif not _edli_market_channel_bootstrap_is_current(bootstrap_generation):
+        return {
+            "thread": "bootstrap_superseded",
+            "bootstrap_generation": bootstrap_generation,
+            "scheduler_failed": True,
+            "scheduler_failure_reason": "registration_not_reached",
+        }
 
     from src.events.triggers.market_channel_ingestor import (
         active_weather_token_metadata_for_tokens,
@@ -5028,6 +5235,13 @@ def _edli_market_channel_ingestor_cycle() -> dict | None:
             unregister_persistent_market_channel_action_sink,
         )
         from src.state.db import get_trade_connection, get_world_connection
+
+        if not _edli_market_channel_bootstrap_is_current(bootstrap_generation):
+            return
+        _edli_publish_market_channel_bootstrap_phase(
+            bootstrap_generation,
+            "runner_starting",
+        )
 
         # Quote projection and NEW_MARKET_DISCOVERED are not one logical write:
         # quotes update TRADE latest-state only, while new-market truth writes WORLD.
@@ -5286,10 +5500,17 @@ def _edli_market_channel_ingestor_cycle() -> dict | None:
                     refresh_window_seconds=float(edli_cfg.get("market_channel_refresh_window_seconds", 60.0) or 60.0),
                     seed_first_token_ids=seed_first_token_ids,
                     depth_repair_token_ids=depth_repair_token_ids,
-                    continuity_sink=_write_market_channel_continuity,
+                    continuity_sink=lambda payload: _write_market_channel_continuity(
+                        {**payload, "generation": bootstrap_generation}
+                    ),
                     quote_flush_batch_size=PRICE_CHANNEL_BACKGROUND_QUOTE_FLUSH_BATCH_SIZE,
                 )
-                register_persistent_market_channel_action_sink(service)
+                if not _edli_register_current_market_channel_action_sink(
+                    service,
+                    bootstrap_generation,
+                    register_persistent_market_channel_action_sink,
+                ):
+                    return
                 try:
                     run_market_channel_service_forever(
                         service,
@@ -5307,19 +5528,31 @@ def _edli_market_channel_ingestor_cycle() -> dict | None:
                         world_event_rollback=_rollback_world_event,
                     )
                 finally:
-                    unregister_persistent_market_channel_action_sink(service)
+                    _edli_unregister_current_market_channel_action_sink(
+                        service,
+                        bootstrap_generation,
+                        unregister_persistent_market_channel_action_sink,
+                    )
         finally:
             try:
                 feasibility_conn.close()
             finally:
                 world_conn.close()
 
-    _edli_market_channel_thread = threading.Thread(
-        target=_runner,
-        name="edli-market-channel",
-        daemon=True,
-    )
-    _edli_market_channel_thread.start()
+    with _market_channel_bootstrap_lock:
+        if not _edli_market_channel_bootstrap_is_current(bootstrap_generation):
+            return {
+                "thread": "bootstrap_superseded",
+                "bootstrap_generation": bootstrap_generation,
+                "scheduler_failed": True,
+                "scheduler_failure_reason": "registration_not_reached",
+            }
+        _edli_market_channel_thread = threading.Thread(
+            target=_runner,
+            name="edli-market-channel",
+            daemon=True,
+        )
+        _edli_market_channel_thread.start()
     health = {
         "active_weather_token_ids": len(token_ids),
         "priority_token_ids": len(priority_token_ids),
@@ -5329,6 +5562,7 @@ def _edli_market_channel_ingestor_cycle() -> dict | None:
         "seed_first_token_ids": len(seed_first_token_ids),
         "quote_cache_enabled": True,
         "fill_authority": "user_channel_or_reconcile_only",
+        "bootstrap_generation": bootstrap_generation,
         "thread": "started",
         "rest_seed_status": "polymarket_public_orderbook",
         "websocket_endpoint": "polymarket_public_market_channel",

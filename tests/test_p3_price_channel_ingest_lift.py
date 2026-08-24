@@ -33,6 +33,7 @@ import contextlib
 import fcntl
 import inspect
 import json
+import os
 import sqlite3
 import threading
 import time
@@ -261,6 +262,91 @@ def test_price_channel_daemon_records_max_instance_skip(monkeypatch) -> None:
             },
         }
     ]
+
+
+def test_market_channel_bootstrap_timeout_fences_late_worker_and_retries(monkeypatch, tmp_path) -> None:
+    from threading import Event
+
+    from src import config
+    from src.ingest import price_channel_daemon as daemon
+    from src.ingest import price_channel_ingest as lane
+
+    target = tmp_path / lane.MARKET_CHANNEL_SINK_READINESS_FILENAME
+    monkeypatch.setattr(config, "state_path", lambda _filename: target)
+    monkeypatch.setattr(daemon, "_market_channel_bootstrap_worker", None)
+    monkeypatch.setattr(daemon, "_market_channel_bootstrap_generation", None)
+    monkeypatch.setattr(daemon, "_market_channel_bootstrap_started_monotonic", None)
+    monkeypatch.setattr(lane, "_edli_market_channel_thread", None)
+    monkeypatch.setattr(lane, "_market_channel_bootstrap_generation", None)
+    monkeypatch.setattr(lane, "_market_channel_bootstrap_started_monotonic", None)
+
+    entered = Event()
+    release = Event()
+    generations: list[str] = []
+
+    def blocked_bootstrap(*, bootstrap_generation: str) -> None:
+        generations.append(bootstrap_generation)
+        entered.set()
+        release.wait(timeout=1.0)
+
+    first = daemon._market_channel_bootstrap_job(blocked_bootstrap)
+    assert first["thread"] == "bootstrap_worker_started"
+    assert entered.wait(timeout=1.0)
+    old_generation = str(first["bootstrap_generation"])
+    monkeypatch.setattr(
+        daemon,
+        "_market_channel_bootstrap_started_monotonic",
+        0.0,
+    )
+    monkeypatch.setattr(
+        daemon.time,
+        "monotonic",
+        lambda: daemon.MARKET_CHANNEL_BOOTSTRAP_DEADLINE_SECONDS + 1.0,
+    )
+
+    timed_out = daemon._market_channel_bootstrap_job(blocked_bootstrap)
+    assert timed_out["scheduler_failed"] is True
+    assert timed_out["scheduler_failure_reason"] == "registration_not_reached"
+    assert lane._edli_market_channel_bootstrap_is_current(old_generation) is False
+
+    release.set()
+    current = daemon._market_channel_bootstrap_worker
+    assert current is not None
+    current.join(timeout=1.0)
+    lane._edli_supersede_market_channel_bootstrap(generations[-1])
+
+
+def test_market_channel_sink_readiness_requires_current_pid_and_generation(monkeypatch, tmp_path) -> None:
+    from src import config
+    from src.ingest import price_channel_ingest as lane
+
+    target = tmp_path / lane.MARKET_CHANNEL_SINK_READINESS_FILENAME
+    monkeypatch.setattr(config, "state_path", lambda _filename: target)
+    monkeypatch.setattr(lane, "_market_channel_bootstrap_generation", None)
+    monkeypatch.setattr(lane, "_market_channel_bootstrap_started_monotonic", None)
+
+    generation = lane._edli_begin_market_channel_bootstrap()
+    service = object()
+    calls: list[object] = []
+    assert lane._edli_register_current_market_channel_action_sink(
+        service,
+        generation,
+        calls.append,
+    )
+    assert lane._edli_market_channel_sink_readiness_error() is None
+
+    proof = json.loads(target.read_text(encoding="utf-8"))
+    assert proof["pid"] == os.getpid()
+    assert proof["generation"] == generation
+    assert proof["sink_registered"] is True
+    assert proof["consumer_queue_accepted"] is True
+
+    proof["pid"] = os.getpid() + 1
+    target.write_text(json.dumps(proof), encoding="utf-8")
+    assert "another PID or generation" in lane._edli_market_channel_sink_readiness_error()
+
+    lane._edli_unregister_current_market_channel_action_sink(service, generation, calls.append)
+    assert calls == [service, service]
 
 
 def test_m5_authority_deadline_fails_closed_without_publishing_health(monkeypatch) -> None:
@@ -3881,6 +3967,7 @@ def test_pre_submit_book_reader_rejects_append_when_latest_side_missing():
 
 
 def test_held_position_quote_refresh_writes_feasibility_rows(monkeypatch, tmp_path):
+    from src import config
     from src.data import polymarket_client
     from src.events.triggers.market_channel_ingestor import (
         MarketChannelIngestor,
@@ -4001,7 +4088,14 @@ def test_held_position_quote_refresh_writes_feasibility_rows(monkeypatch, tmp_pa
         invalidate_snapshot=invalidated.append,
         refresh_snapshot=refreshed.append,
     )
-    register_persistent_market_channel_action_sink(persistent)
+    readiness_path = tmp_path / lane.MARKET_CHANNEL_SINK_READINESS_FILENAME
+    monkeypatch.setattr(config, "state_path", lambda _filename: readiness_path)
+    generation = lane._edli_begin_market_channel_bootstrap()
+    assert lane._edli_register_current_market_channel_action_sink(
+        persistent,
+        generation,
+        register_persistent_market_channel_action_sink,
+    )
 
     acquired = lane._candidate_quote_seed_refresh_lock.acquire(blocking=False)
     assert acquired, "candidate quote refresh must not own the held quote lane"
@@ -4010,7 +4104,11 @@ def test_held_position_quote_refresh_writes_feasibility_rows(monkeypatch, tmp_pa
     finally:
         lane._candidate_quote_seed_refresh_lock.release()
         assert persistent.wait_refresh_idle(timeout=1.0)
-        unregister_persistent_market_channel_action_sink(persistent)
+        lane._edli_unregister_current_market_channel_action_sink(
+            persistent,
+            generation,
+            unregister_persistent_market_channel_action_sink,
+        )
 
     assert result["held_priority_token_ids"] == 2
     assert result["held_token_metadata"] == 2
@@ -6111,6 +6209,7 @@ def test_market_channel_continuity_proof_is_atomically_published(monkeypatch, tm
         {
             "schema_version": 1,
             "channel": "market_channel",
+            "generation": "test-generation",
             "connected": True,
             "connected_at": "2026-07-17T03:00:00+00:00",
             "observed_at": "2026-07-17T03:00:00.500000+00:00",
@@ -6120,6 +6219,7 @@ def test_market_channel_continuity_proof_is_atomically_published(monkeypatch, tm
 
     proof = json.loads(target.read_text(encoding="utf-8"))
     assert proof["connected"] is True
+    assert proof["generation"] == "test-generation"
     assert proof["active_token_count"] == 154
     assert isinstance(proof["pid"], int) and proof["pid"] > 0
     assert not list(tmp_path.glob("*.tmp"))
