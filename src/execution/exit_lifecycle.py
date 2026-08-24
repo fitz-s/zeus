@@ -12637,8 +12637,9 @@ def _persist_exit_monitor_artifact(
     artifact,
     *,
     summary: dict,
+    deadline_monotonic: float | None = None,
 ) -> tuple[bool, int | None]:
-    """Persist the final monitor artifact without bypassing TRADE writer order."""
+    """Persist the final monitor artifact within the owning claim deadline."""
     from src.execution.executor import _canonical_trade_write_lease
     from src.state.canonical_write import commit_then_export
     from src.state.decision_chain import store_artifact
@@ -12653,7 +12654,26 @@ def _persist_exit_monitor_artifact(
 
     artifact_id: list[int | None] = [None]
 
-    def persist_once(*, owner: str, deadline_ms: int) -> None:
+    def remaining_deadline_ms(preferred_ms: int) -> int:
+        if deadline_monotonic is None:
+            return preferred_ms
+        remaining_ms = int(
+            max(0.0, float(deadline_monotonic) - _time_module.monotonic())
+            * 1_000.0
+        )
+        if remaining_ms <= 0:
+            raise WriteLeaseTimeout(
+                "exit-monitor claim deadline expired before artifact persistence"
+            )
+        return min(preferred_ms, remaining_ms)
+
+    def persist_once(*, owner: str, preferred_deadline_ms: int) -> None:
+        deadline_ms = remaining_deadline_ms(preferred_deadline_ms)
+        max_hold_ms = min(
+            _MONITOR_ARTIFACT_WRITE_LEASE_MAX_HOLD_MS,
+            deadline_ms,
+        )
+
         def db_op():
             artifact_id[0] = store_artifact(conn, artifact)
             return artifact_id[0]
@@ -12662,7 +12682,7 @@ def _persist_exit_monitor_artifact(
             conn,
             owner=owner,
             deadline_ms=deadline_ms,
-            max_hold_ms=_MONITOR_ARTIFACT_WRITE_LEASE_MAX_HOLD_MS,
+            max_hold_ms=max_hold_ms,
             priority=WritePriority.MONITOR,
         ) as lease:
             if lease is None:
@@ -12671,21 +12691,21 @@ def _persist_exit_monitor_artifact(
             with bounded_sqlite_write(
                 conn,
                 lease,
-                max_hold_ms=_MONITOR_ARTIFACT_WRITE_LEASE_MAX_HOLD_MS,
+                max_hold_ms=max_hold_ms,
             ):
                 commit_then_export(conn, db_op=db_op)
 
     try:
         persist_once(
             owner="exit_monitor_artifact",
-            deadline_ms=_MONITOR_ARTIFACT_WRITE_LEASE_DEADLINE_MS,
+            preferred_deadline_ms=_MONITOR_ARTIFACT_WRITE_LEASE_DEADLINE_MS,
         )
     except WriteLeaseTimeout as first_exc:
         summary["monitor_artifact_write_retried"] = True
         try:
             persist_once(
                 owner="exit_monitor_artifact_retry",
-                deadline_ms=_MONITOR_ARTIFACT_WRITE_RETRY_DEADLINE_MS,
+                preferred_deadline_ms=_MONITOR_ARTIFACT_WRITE_RETRY_DEADLINE_MS,
             )
         except WriteLeaseTimeout as retry_exc:
             summary["monitor_artifact_write_deferred"] = str(retry_exc)
@@ -12725,7 +12745,15 @@ def _exit_monitor_failure_outcome(summary: Mapping[str, object]) -> str:
     if explicit in _MONITOR_FAILURE_OUTCOMES:
         return explicit
     error = str(summary.get("monitoring_error") or "").lower()
-    if "database is locked" in error or "write lease" in error:
+    if any(
+        marker in error
+        for marker in (
+            "database is locked",
+            "database table is locked",
+            "database is busy",
+            "write lease",
+        )
+    ):
         return "DB_CONTENDED"
     if any(
         marker in error
@@ -13037,8 +13065,14 @@ def run_exit_monitor_cycle(
                 conn,
                 artifact,
                 summary=summary,
+                deadline_monotonic=monitor_deadline_monotonic,
             )
             if artifact_persisted:
+                # Canonical DB truth is now committed.  Release the global
+                # writer before advisory JSON exports so a slow export cannot
+                # consume the next periodic monitor quantum.
+                mark_held_position_monitor_complete()
+                monitor_completion_marked = True
                 for export_fn in (_export_portfolio, _export_tracker):
                     try:
                         export_fn()
@@ -13048,12 +13082,12 @@ def run_exit_monitor_cycle(
                             "(artifact_id=%s)",
                             _aid_box[0],
                         )
-                mark_held_position_monitor_complete()
-                monitor_completion_marked = True
             else:
                 summary["monitoring_error"] = "MONITOR_ARTIFACT_WRITE_DEFERRED"
                 summary["held_monitor_failure_outcome"] = "ARTIFACT_WRITE_DEFERRED"
                 succeeded = False
+                mark_held_position_monitor_complete()
+                monitor_completion_marked = True
 
     except Exception as exc:
         logger.error(

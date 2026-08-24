@@ -22161,7 +22161,7 @@ def test_incomplete_full_book_persists_typed_outcome_before_artifact(monkeypatch
     monkeypatch.setattr(
         exit_lifecycle,
         "_persist_exit_monitor_artifact",
-        lambda _conn, _artifact, *, summary: (
+        lambda _conn, _artifact, *, summary, deadline_monotonic: (
             persisted_summary.update(summary) or True,
             1,
         ),
@@ -22187,6 +22187,117 @@ def test_incomplete_full_book_persists_typed_outcome_before_artifact(monkeypatch
     conn.close()
 
 
+def test_artifact_retry_never_outlives_monitor_claim_deadline(monkeypatch):
+    """A late writer retry defers; it cannot consume the successor quantum."""
+    from src.execution import executor, exit_lifecycle
+    from src.state.write_coordinator import WriteLeaseTimeout
+
+    clock = [100.0]
+    attempts = []
+
+    class DeferredLease:
+        def __init__(self, deadline_ms, max_hold_ms):
+            attempts.append((deadline_ms, max_hold_ms))
+
+        def __enter__(self):
+            clock[0] += 0.25
+            raise WriteLeaseTimeout("database is busy")
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    monkeypatch.setattr(exit_lifecycle._time_module, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(
+        executor,
+        "_canonical_trade_write_lease",
+        lambda _conn, *, deadline_ms, max_hold_ms, **_kwargs: DeferredLease(
+            deadline_ms,
+            max_hold_ms,
+        ),
+    )
+
+    summary = {}
+    persisted, artifact_id = exit_lifecycle._persist_exit_monitor_artifact(
+        sqlite3.connect(":memory:"),
+        object(),
+        summary=summary,
+        deadline_monotonic=100.3,
+    )
+
+    assert persisted is False
+    assert artifact_id is None
+    assert attempts[0] == (250, 250)
+    assert 0 < attempts[1][0] <= 50
+    assert attempts[1][1] == attempts[1][0]
+    assert "database is busy" in summary["monitor_artifact_write_deferred"]
+
+
+def test_exit_monitor_releases_claim_before_slow_portfolio_export(monkeypatch):
+    """Advisory export cannot retain the sole monitor writer after DB commit."""
+    from contextlib import nullcontext
+    from types import SimpleNamespace
+
+    from src.engine import cycle_runner
+    from src.execution import exit_lifecycle
+    from src.riskguard import riskguard
+    from src.riskguard.risk_level import RiskLevel
+
+    conn = sqlite3.connect(":memory:")
+    active = threading.Event()
+    exports = []
+    portfolio = SimpleNamespace(
+        positions=[],
+        daily_baseline_total=0.0,
+        bankroll=0.0,
+    )
+
+    monkeypatch.setattr(riskguard, "get_current_level", lambda: RiskLevel.GREEN)
+    monkeypatch.setattr(cycle_runner, "get_connection", lambda **_kwargs: conn)
+    monkeypatch.setattr(cycle_runner, "load_portfolio", lambda **_kwargs: portfolio)
+    monkeypatch.setattr(cycle_runner, "get_tracker", lambda: object())
+    monkeypatch.setattr(
+        cycle_runner,
+        "_execute_monitoring_phase",
+        lambda *_args, **_kwargs: (True, False),
+    )
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "_refresh_global_allocator_for_held_position_monitor",
+        lambda *_args: {"configured": False},
+    )
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "_held_monitor_clob_client",
+        lambda: nullcontext(object()),
+    )
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "_persist_exit_monitor_artifact",
+        lambda *_args, **_kwargs: (True, 1),
+    )
+    monkeypatch.setattr(
+        cycle_runner,
+        "save_portfolio",
+        lambda *_args, **_kwargs: exports.append(active.is_set()),
+    )
+    monkeypatch.setattr(
+        "src.observability.status_summary.write_cycle_pulse",
+        lambda *_args: None,
+    )
+    monkeypatch.setattr(
+        "src.observability.scheduler_health._write_scheduler_health",
+        lambda *_args, **_kwargs: None,
+    )
+
+    assert exit_lifecycle.run_exit_monitor_cycle(
+        held_position_monitor_active=active,
+        mark_held_position_monitor_complete=active.clear,
+        monitor_deadline_monotonic=time.monotonic() + 30.0,
+    ) is True
+    assert exports == [False]
+    assert not active.is_set()
+
+
 @pytest.mark.parametrize(
     ("summary", "expected"),
     [
@@ -22203,6 +22314,8 @@ def test_incomplete_full_book_persists_typed_outcome_before_artifact(monkeypatch
             {"monitoring_error": "FULL_BOOK_MONITOR_CANONICAL_COVERAGE_INCOMPLETE"},
             "COVERAGE_INCOMPLETE",
         ),
+        ({"monitoring_error": "database table is locked"}, "DB_CONTENDED"),
+        ({"monitoring_error": "database is busy"}, "DB_CONTENDED"),
     ],
 )
 def test_exit_monitor_persists_typed_failure_outcome(summary, expected):
