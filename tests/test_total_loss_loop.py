@@ -1073,6 +1073,80 @@ def test_startup_wrong_index_contract_is_migrated_before_fast_path(
         loop._STARTUP_BUDGET = None
 
 
+def test_startup_spawn_intents_are_batch_scoped_and_eventually_drained(
+    cfg: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime = Path(cfg["paths"]["runtime"])
+    runs = runtime / "runs"
+    runs.mkdir(parents=True, exist_ok=True)
+    cfg["loop"].update(startup_run_batch_size=1, startup_maintenance_budget_ms=500)
+    with loop.memory(cfg) as mem:
+        for index in range(3153):
+            mem.execute(
+                "INSERT INTO spawn_intents(run_id,incident_id,stage,owner_pid,child_pid,witness_path,state,created_at,updated_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?)",
+                (
+                    f"historical-{index}", f"historical-incident-{index}", "blind", 1, None,
+                    str(runtime / "witness" / f"historical-{index}"), "failed",
+                    "2026-08-22T09:00:00+00:00", "2026-08-22T09:00:00+00:00",
+                ),
+            )
+        for incident_id in ("batch-incident", "later-incident"):
+            mem.execute(
+                "INSERT INTO incidents(incident_id,kind,position_id,crossing_evidence_id,crossing_kind,"
+                "held_token_id,held_direction,floor_price,detected_at,priority,status,stage,updated_at) "
+                "VALUES (?, 'hard', 'p1', ?, 'below_floor', 'yes-token', 'sell_yes', .05, ?, 1, 'running', 'blind', ?)",
+                (incident_id, f"q-{incident_id}", "2026-08-22T09:00:00+00:00", "2026-08-22T09:00:00+00:00"),
+            )
+            mem.execute(
+                "INSERT INTO spawn_intents(run_id,incident_id,stage,owner_pid,child_pid,witness_path,state,created_at,updated_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?)",
+                (
+                    f"active-{incident_id}", incident_id, "blind", os.getpid(), None,
+                    str(runtime / "witness" / incident_id), "pre_spawn",
+                    "2026-08-22T09:00:00+00:00", "2026-08-22T09:00:00+00:00",
+                ),
+            )
+        mem.commit()
+    (runs / "aaa-batch.json").write_text(
+        json.dumps({"run_id": "batch-run", "incident_id": "batch-incident", "pid": 999999, "status": "running"})
+    )
+    (runs / "zzz-later.json").write_text(
+        json.dumps({"run_id": "later-run", "incident_id": "later-incident", "pid": 999999, "status": "running"})
+    )
+    key = str(runtime.resolve())
+    loop._STARTUP_RUN_QUEUE.pop(key, None)
+    loop._STARTUP_RUN_CURSOR.pop(key, None)
+    loop._STARTUP_RUN_REMAINING.pop(key, None)
+    traces: list[str] = []
+    original_memory = loop.memory
+
+    def traced_memory(local_cfg: dict):
+        conn = original_memory(local_cfg)
+        if loop._STARTUP_BUDGET is not None:
+            conn.set_trace_callback(traces.append)
+        return conn
+
+    monkeypatch.setattr(loop, "memory", traced_memory)
+    for expected_cursor in (1, 2):
+        loop._STARTUP_BUDGET = loop._new_startup_budget(cfg)
+        try:
+            assert loop.reconcile_orphan_incidents(cfg) == []
+        finally:
+            loop._STARTUP_BUDGET = None
+        assert loop._STARTUP_RUN_CURSOR[key] == expected_cursor
+    spawn_queries = [sql for sql in traces if "FROM spawn_intents" in sql]
+    assert spawn_queries
+    assert all("incident_id IN" in sql for sql in spawn_queries)
+    with loop.memory(cfg) as mem:
+        states = mem.execute(
+            "SELECT incident_id,state FROM spawn_intents WHERE incident_id IN ('batch-incident','later-incident')"
+        ).fetchall()
+    assert {tuple(row) for row in states} == {
+        ("batch-incident", "pre_spawn"), ("later-incident", "pre_spawn")
+    }
+
+
 def test_startup_debt_fail_closed_blocks_external_dispatch_paths(
     cfg: dict, monkeypatch: pytest.MonkeyPatch
 ) -> None:
