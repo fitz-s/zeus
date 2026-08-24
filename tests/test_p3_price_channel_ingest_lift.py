@@ -4945,6 +4945,11 @@ def test_candidate_priority_quote_refresh_writes_feasibility_rows(monkeypatch, t
         return conn
 
     class FakePolymarketClient:
+        def __init__(self, *, public_request_priority=None):  # noqa: ANN001
+            from src.data.polymarket_request_governor import RequestPriority
+
+            assert public_request_priority is RequestPriority.SUBMIT_JIT
+
         def __enter__(self):
             return self
 
@@ -4979,6 +4984,135 @@ def test_candidate_priority_quote_refresh_writes_feasibility_rows(monkeypatch, t
         )
     finally:
         check.close()
+
+
+@pytest.mark.parametrize(
+    ("failure", "expected_reason"),
+    [
+        ("request", "quote_refresh_request_failed"),
+        ("timeout", "quote_refresh_budget_exhausted_no_coverage"),
+    ],
+)
+def test_candidate_quote_refresh_classifies_request_failure_separately_from_timeout(
+    monkeypatch, failure, expected_reason
+):
+    from src.data import polymarket_client
+    from src.data.polymarket_request_governor import RequestAdmissionDenied, RequestPriority
+    from src.events.triggers import market_channel_ingestor as market_ingestor
+    from src.events.triggers.market_channel_ingestor import MarketTokenMetadata
+    from src.ingest import price_channel_ingest as lane
+    from src.state import db as state_db
+
+    token_id = "candidate-token"
+    monkeypatch.setattr(lane, "_edli_candidate_priority_token_ids", lambda conn, *, limit: [token_id])
+    monkeypatch.setattr(lane, "_edli_held_position_priority_token_ids", lambda conn: set())
+    monkeypatch.setattr(lane, "_edli_open_rest_priority_token_ids", lambda conn: set())
+    monkeypatch.setattr(lane, "_edli_tokens_requiring_rest_quote_refresh", lambda *args, **kwargs: ([token_id], 0))
+    monkeypatch.setattr(lane, "_edli_order_token_ids_by_feasibility_age", lambda conn, token_ids: list(token_ids))
+    monkeypatch.setattr(
+        market_ingestor,
+        "active_weather_token_metadata_for_tokens",
+        lambda conn, *, token_ids: {
+            token_id: MarketTokenMetadata(
+                condition_id="condition-candidate",
+                token_id=token_id,
+                outcome_label="YES",
+                min_tick_size="0.01",
+                min_order_size="5",
+                neg_risk=False,
+                executable_snapshot_id="snapshot-candidate",
+                market_end_at="2099-01-01T00:00:00+00:00",
+            )
+            for token_id in token_ids
+        },
+    )
+
+    class FakeService:
+        rest_seed_backpressure_count = 0
+        rest_seed_backpressure_reason = None
+
+        def __init__(self, _ingestor, *, fetch_orderbook, **kwargs):  # noqa: ANN001, ARG002
+            self._fetch_orderbook = fetch_orderbook
+
+        def seed_rest_books_in_chunks(self, *, token_ids, **kwargs):  # noqa: ANN001, ARG002
+            try:
+                self._fetch_orderbook(next(iter(token_ids)))
+            except BaseException:
+                return 0
+            return 1
+
+    class FakePolymarketClient:
+        def __init__(self, *, public_request_priority=None):  # noqa: ANN001
+            assert public_request_priority is RequestPriority.SUBMIT_JIT
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):  # noqa: ANN001
+            return False
+
+        def get_orderbook_snapshot(self, token_id, *, timeout=None):  # noqa: ANN001
+            if failure == "request":
+                raise RequestAdmissionDenied("POLYMARKET_SCAN_LEASE_BUSY")
+            raise TimeoutError("candidate refresh deadline")
+
+    monkeypatch.setattr(market_ingestor, "MarketChannelIngestor", lambda *args, **kwargs: object())
+    monkeypatch.setattr(market_ingestor, "MarketChannelOnlineService", FakeService)
+    monkeypatch.setattr(polymarket_client, "PolymarketClient", FakePolymarketClient)
+    monkeypatch.setattr(state_db, "get_world_connection", lambda *, write_class=None: sqlite3.connect(":memory:"))
+    monkeypatch.setattr(state_db, "get_trade_connection", lambda *, write_class=None: sqlite3.connect(":memory:"))
+
+    result = lane._edli_refresh_candidate_priority_quote_evidence(
+        limit=1,
+        budget_seconds=10.0,
+    )
+    failed, reason = lane._price_channel_quote_refresh_failed(
+        result,
+        token_key="candidate_token_metadata",
+        event_key="candidate_quote_refresh_events",
+    )
+
+    assert failed is True
+    assert reason == expected_reason
+    assert result["budget_skipped_tokens"] == (0 if failure == "request" else 1)
+    if failure == "request":
+        assert result["budget_exhausted"] is False
+        assert result["candidate_quote_refresh_request_failure_count"] == 1
+        assert result["candidate_quote_refresh_request_failed_tokens"] == 1
+        assert result["candidate_quote_refresh_failure_reasons"] == {
+            token_id: "RequestAdmissionDenied: POLYMARKET_SCAN_LEASE_BUSY"
+        }
+    else:
+        assert result["budget_exhausted"] is True
+        assert result["candidate_quote_refresh_request_failure_count"] == 0
+        assert result["candidate_quote_refresh_timeout_tokens"] == [token_id]
+
+
+def test_candidate_quote_refresh_excludes_metadata_ineligible_tokens(monkeypatch):
+    from src.data import polymarket_client
+    from src.events.triggers import market_channel_ingestor as market_ingestor
+    from src.ingest import price_channel_ingest as lane
+    from src.state import db as state_db
+
+    monkeypatch.setattr(lane, "_edli_candidate_priority_token_ids", lambda conn, *, limit: ["ineligible-token"])
+    monkeypatch.setattr(lane, "_edli_held_position_priority_token_ids", lambda conn: set())
+    monkeypatch.setattr(lane, "_edli_open_rest_priority_token_ids", lambda conn: set())
+    monkeypatch.setattr(lane, "_edli_tokens_requiring_rest_quote_refresh", lambda *args, **kwargs: (["ineligible-token"], 0))
+    monkeypatch.setattr(lane, "_edli_order_token_ids_by_feasibility_age", lambda conn, token_ids: list(token_ids))
+    monkeypatch.setattr(market_ingestor, "active_weather_token_metadata_for_tokens", lambda *args, **kwargs: {})
+    monkeypatch.setattr(state_db, "get_world_connection", lambda *, write_class=None: sqlite3.connect(":memory:"))
+    monkeypatch.setattr(state_db, "get_trade_connection", lambda *, write_class=None: sqlite3.connect(":memory:"))
+    monkeypatch.setattr(
+        polymarket_client,
+        "PolymarketClient",
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError("ineligible token must not open CLOB client")),
+    )
+
+    result = lane._edli_refresh_candidate_priority_quote_evidence(limit=1, budget_seconds=10.0)
+
+    assert result["candidate_token_metadata"] == 0
+    assert result["candidate_quote_refresh_events"] == 0
+    assert result["candidate_quote_refresh_attempted_tokens"] == 0
 
 
 def test_candidate_priority_quote_refresh_backpressures_without_db_write_or_clob(monkeypatch):
@@ -5099,6 +5233,11 @@ def test_candidate_quote_refresh_caps_selected_tokens_before_metadata_and_rest_s
             return len(selected)
 
     class FakePolymarketClient:
+        def __init__(self, *, public_request_priority=None):  # noqa: ANN001
+            from src.data.polymarket_request_governor import RequestPriority
+
+            assert public_request_priority is RequestPriority.SUBMIT_JIT
+
         def __enter__(self):
             return self
 
@@ -5259,6 +5398,11 @@ def test_open_rest_priority_quote_refresh_writes_without_candidate_regret(monkey
         return conn
 
     class FakePolymarketClient:
+        def __init__(self, *, public_request_priority=None):  # noqa: ANN001
+            from src.data.polymarket_request_governor import RequestPriority
+
+            assert public_request_priority is RequestPriority.SUBMIT_JIT
+
         def __enter__(self):
             return self
 
@@ -5376,6 +5520,11 @@ def test_candidate_priority_quote_refresh_fetches_new_missing_book_gap_first(mon
     fetch_order: list[str] = []
 
     class FakePolymarketClient:
+        def __init__(self, *, public_request_priority=None):  # noqa: ANN001
+            from src.data.polymarket_request_governor import RequestPriority
+
+            assert public_request_priority is RequestPriority.SUBMIT_JIT
+
         def __enter__(self):
             return self
 

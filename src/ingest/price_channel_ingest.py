@@ -605,24 +605,45 @@ def _price_channel_clob_timeout(deadline_monotonic: float):
     )
 
 
-def _budgeted_orderbook_fetchers(clob, *, deadline_monotonic: float):
+def _budgeted_orderbook_fetchers(
+    clob,
+    *,
+    deadline_monotonic: float,
+    on_request_error: Callable[[str, BaseException], None] | None = None,
+    on_timeout: Callable[[str, BaseException], None] | None = None,
+):
     """Wrap CLOB book fetchers so every REST call consumes the caller's budget."""
 
     def _fetch_orderbook(token_id: str) -> dict:
-        return clob.get_orderbook_snapshot(
-            token_id,
-            timeout=_price_channel_clob_timeout(deadline_monotonic),
-        )
+        try:
+            return clob.get_orderbook_snapshot(
+                token_id,
+                timeout=_price_channel_clob_timeout(deadline_monotonic),
+            )
+        except TimeoutError as exc:
+            if on_timeout is not None:
+                on_timeout(str(token_id), exc)
+            raise
+        except Exception as exc:  # noqa: BLE001 - caller classifies request failures
+            if on_request_error is not None:
+                on_request_error(str(token_id), exc)
+            raise
 
     fetch_many = getattr(clob, "get_orderbook_snapshots", None)
     if fetch_many is None:
         return _fetch_orderbook, None
 
     def _fetch_orderbooks(token_ids: list[str]) -> dict[str, dict]:
-        return fetch_many(
-            token_ids,
-            timeout=_price_channel_clob_timeout(deadline_monotonic),
-        )
+        try:
+            return fetch_many(
+                token_ids,
+                timeout=_price_channel_clob_timeout(deadline_monotonic),
+            )
+        except TimeoutError as exc:
+            if on_timeout is not None:
+                for token_id in token_ids:
+                    on_timeout(str(token_id), exc)
+            raise
 
     return _fetch_orderbook, _fetch_orderbooks
 
@@ -992,6 +1013,8 @@ def _price_channel_quote_refresh_failed(
         return False, None
     if result.get("backpressure"):
         return True, str(result.get("write_backpressure_reason") or result.get("skipped") or "quote_refresh_backpressure")
+    if int(result.get("candidate_quote_refresh_request_failure_count") or 0) > 0:
+        return True, "quote_refresh_request_failed"
     if skipped_tokens > 0:
         if events > 0:
             return True, "quote_refresh_partial_coverage"
@@ -4106,6 +4129,7 @@ def _edli_refresh_candidate_priority_quote_evidence(
 
     from src.contracts.executable_market_snapshot import FRESHNESS_WINDOW_DEFAULT
     from src.data.polymarket_client import PolymarketClient
+    from src.data.polymarket_request_governor import RequestPriority
     from src.events.event_coalescer import EventCoalescer
     from src.events.triggers.market_channel_ingestor import (
         MarketChannelIngestor,
@@ -4206,6 +4230,8 @@ def _edli_refresh_candidate_priority_quote_evidence(
                 0,
                 len(ordered_candidate_token_ids) - len(selected_candidate_token_ids),
             ),
+            "candidate_token_metadata": 0,
+            "candidate_quote_refresh_attempted_tokens": 0,
             "candidate_quote_refresh_events": 0,
             "skipped": "no_candidate_token_metadata",
         }
@@ -4237,6 +4263,19 @@ def _edli_refresh_candidate_priority_quote_evidence(
         )
 
     conn = None
+    request_failures: dict[str, dict[str, object]] = {}
+    timeout_token_ids: set[str] = set()
+
+    def _record_request_failure(token_id: str, exc: BaseException) -> None:
+        detail = request_failures.setdefault(
+            str(token_id),
+            {"count": 0, "reason": f"{type(exc).__name__}: {exc}"},
+        )
+        detail["count"] = int(detail["count"]) + 1
+
+    def _record_timeout(token_id: str, _exc: BaseException) -> None:
+        timeout_token_ids.add(str(token_id))
+
     try:
         # Candidate quote projection has the same TRADE-only ownership as held
         # quotes; WORLD event emission is a separate, bounded failure domain.
@@ -4253,10 +4292,14 @@ def _edli_refresh_candidate_priority_quote_evidence(
         # concern this boundary module only WIRES IN, never inlines (R6 split).
         from src.events.price_channel_redecision_router import _edli_price_channel_redecision_sink
 
-        with PolymarketClient() as clob:
+        with PolymarketClient(
+            public_request_priority=RequestPriority.SUBMIT_JIT
+        ) as clob:
             fetch_orderbook, fetch_orderbooks = _budgeted_orderbook_fetchers(
                 clob,
                 deadline_monotonic=deadline,
+                on_request_error=_record_request_failure,
+                on_timeout=_record_timeout,
             )
             service = MarketChannelOnlineService(
                 MarketChannelIngestor(
@@ -4288,6 +4331,20 @@ def _edli_refresh_candidate_priority_quote_evidence(
                 deadline_monotonic=deadline,
             )
         elapsed_seconds = max(0.0, time.monotonic() - started_monotonic)
+        request_failure_count = sum(
+            int(detail["count"]) for detail in request_failures.values()
+        )
+        budget_exhausted = bool(timeout_token_ids) or elapsed_seconds >= deadline - started_monotonic
+        budget_skipped_tokens = (
+            max(
+                0,
+                len(ordered_metadata_tokens)
+                - int(written)
+                - len(request_failures),
+            )
+            if budget_exhausted
+            else 0
+        )
         result = {
             "candidate_priority_token_ids": len(candidate_token_ids),
             "open_rest_priority_token_ids": len(open_rest_token_ids),
@@ -4305,8 +4362,16 @@ def _edli_refresh_candidate_priority_quote_evidence(
             "budget_seconds": budget,
             "requested_budget_seconds": requested_budget,
             "elapsed_seconds": elapsed_seconds,
-            "budget_exhausted": elapsed_seconds >= budget,
-            "budget_skipped_tokens": max(0, len(ordered_metadata_tokens) - int(written)),
+            "budget_exhausted": budget_exhausted,
+            "budget_skipped_tokens": budget_skipped_tokens,
+            "candidate_quote_refresh_request_failures": request_failures,
+            "candidate_quote_refresh_request_failure_count": request_failure_count,
+            "candidate_quote_refresh_request_failed_tokens": len(request_failures),
+            "candidate_quote_refresh_failure_reasons": {
+                token_id: str(detail["reason"])
+                for token_id, detail in request_failures.items()
+            },
+            "candidate_quote_refresh_timeout_tokens": sorted(timeout_token_ids),
         }
         if service.rest_seed_backpressure_count:
             result["backpressure"] = True
