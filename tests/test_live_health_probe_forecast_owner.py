@@ -646,7 +646,7 @@ def test_live_probe_alerts_on_stale_composite_and_direct_business_failure(
     assert "LIVE_HEALTH_BUSINESS_PLANE=CYCLE_FAILED: health_cycle_timeout" in out
 
 
-def test_bounded_composite_success_keeps_daemon_process_identity(
+def test_bounded_composite_success_keeps_preexisting_daemon_status_unchanged(
     tmp_path, monkeypatch
 ):
     import src.config as config
@@ -656,15 +656,14 @@ def test_bounded_composite_success_keeps_daemon_process_identity(
     state_dir = tmp_path / "state"
     state_dir.mkdir()
     status_path = state_dir / "status_summary.json"
+    status_payload = {
+        "timestamp": "2026-08-23T00:00:00+00:00",
+        "process": {"pid": os.getpid(), "mode": "live"},
+    }
+    status_path.write_text(json.dumps(status_payload), encoding="utf-8")
+    before = status_path.read_bytes()
     child_code = (
         "import json, os; from pathlib import Path; "
-        "from src.observability.status_summary import write_cycle_pulse; "
-        "write_cycle_pulse({'mode': 'heartbeat_pulse', 'heartbeat': True}, "
-        "process_identity={'pid': int(os.environ["
-        + repr(live_health._COMPOSITE_PARENT_PID_ENV)
-        + "]), 'mode': os.environ["
-        + repr(live_health._COMPOSITE_PARENT_MODE_ENV)
-        + "]}); "
         + "state_dir = Path(os.environ["
         + repr(live_health._COMPOSITE_STATE_DIR_ENV)
         + "]); "
@@ -689,16 +688,12 @@ def test_bounded_composite_success_keeps_daemon_process_identity(
     monkeypatch.setattr(live_health, "_COMPOSITE_CHILD_CODE", child_code)
 
     main._live_health_composite_cycle.__wrapped__()
-    first_status = json.loads(status_path.read_text())
     main._live_health_composite_cycle.__wrapped__()
-    second_status = json.loads(status_path.read_text())
 
     assert json.loads(
         (state_dir / "live_health_composite.json").read_text()
     )["healthy"] is True
-    assert first_status["process"]["pid"] == os.getpid()
-    assert second_status["process"]["pid"] == os.getpid()
-    assert second_status["process"]["mode"] == "live"
+    assert status_path.read_bytes() == before
 
 
 def test_parent_non_db_pulse_starts_and_reaps_timeout_child_despite_db_lock(
@@ -716,13 +711,6 @@ def test_parent_non_db_pulse_starts_and_reaps_timeout_child_despite_db_lock(
         "import os, time; "
         f"pid_file = open({str(pid_file)!r}, 'w'); "
         "pid_file.write(str(os.getpid())); pid_file.flush(); pid_file.close(); "
-        "from src.observability.status_summary import write_cycle_pulse; "
-        "write_cycle_pulse({'mode': 'heartbeat_pulse', 'heartbeat': True}, "
-        "process_identity={'pid': int(os.environ["
-        + repr(live_health._COMPOSITE_PARENT_PID_ENV)
-        + "]), 'mode': os.environ["
-        + repr(live_health._COMPOSITE_PARENT_MODE_ENV)
-        + "]}); "
         "time.sleep(60)"
     )
     monkeypatch.setattr(config, "state_path", lambda name: state_dir / name)
@@ -757,6 +745,23 @@ def test_parent_non_db_pulse_starts_and_reaps_timeout_child_despite_db_lock(
         pass
     else:
         raise AssertionError(f"timed-out live-health child still exists: pid={child_pid}")
+    assert not (state_dir / "status_summary.json").exists()
+
+
+def test_bounded_composite_missing_status_stays_fail_closed_without_creating_it(tmp_path):
+    from src.control import live_health
+
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+
+    result = live_health.refresh_composite_live_health_bounded(
+        state_dir=state_dir,
+        timeout_seconds=20.0,
+    )
+
+    assert result["status"] == "DEGRADED"
+    assert result["surfaces"]["status_summary"]["issue"] == "STATUS_SUMMARY_MISSING"
+    assert not (state_dir / "status_summary.json").exists()
 
 
 def test_bounded_composite_timeout_reaps_child_and_allows_next_cycle(
