@@ -636,6 +636,51 @@ def test_held_quote_sqlite_deadline_restores_nested_handler_and_busy_timeout():
         conn.close()
 
 
+def test_held_quote_sqlite_deadline_cancel_race_cannot_interrupt_after_exit(monkeypatch):
+    from src.ingest import price_channel_ingest as lane
+
+    timers = []
+
+    class _ManualTimer:
+        def __init__(self, _delay, callback):
+            self.callback = callback
+            self.daemon = False
+            timers.append(self)
+
+        def start(self):
+            pass
+
+        def cancel(self):
+            pass
+
+        def fire(self):
+            self.callback()
+
+    class _TrackedConnection:
+        def __init__(self):
+            self._conn = sqlite3.connect(":memory:")
+            self.interrupts = []
+
+        def __getattr__(self, name):
+            return getattr(self._conn, name)
+
+        def interrupt(self):
+            self.interrupts.append("interrupt")
+
+    monkeypatch.setattr(lane.threading, "Timer", _ManualTimer)
+    conn = _TrackedConnection()
+    try:
+        with lane._held_quote_sqlite_deadline(
+            conn,
+            deadline_monotonic=time.monotonic() + 1.0,
+        ):
+            pass
+        timers[-1].fire()
+        assert conn.interrupts == []
+    finally:
+        conn.close()
+
+
 def test_held_quote_sqlite_deadline_interrupts_delayed_write_lock(tmp_path):
     """Busy lock waiting is bounded even though SQLite progress callbacks do not run."""
     from src.ingest import price_channel_ingest as lane

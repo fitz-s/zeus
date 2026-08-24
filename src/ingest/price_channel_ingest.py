@@ -622,7 +622,24 @@ def _held_quote_sqlite_deadline(conn, *, deadline_monotonic: float):
         (layers[-1][0], layers[-1][1]) if layers else (None, 0)
     )
     remaining_seconds = max(0.0, deadline_monotonic - time.monotonic())
-    watchdog = threading.Timer(remaining_seconds, conn.interrupt)
+    watchdog_lock = threading.Lock()
+    watchdog_state = {"active": True, "generation": object()}
+    watchdog_generation = watchdog_state["generation"]
+
+    def _watchdog_interrupt() -> None:
+        with watchdog_lock:
+            if (
+                not watchdog_state["active"]
+                or watchdog_state["generation"] is not watchdog_generation
+            ):
+                return
+            try:
+                conn.interrupt()
+            except sqlite3.ProgrammingError:
+                # Closing a connection is allowed to race an already-fired timer.
+                pass
+
+    watchdog = threading.Timer(remaining_seconds, _watchdog_interrupt)
     watchdog.daemon = True
     conn.set_progress_handler(_interrupt_at_deadline, 1_000)
     layers.append((_interrupt_at_deadline, 1_000, previous_busy_timeout, watchdog))
@@ -639,8 +656,11 @@ def _held_quote_sqlite_deadline(conn, *, deadline_monotonic: float):
             ) from exc
         raise
     finally:
-        layers.pop()
+        with watchdog_lock:
+            watchdog_state["active"] = False
+            watchdog_state["generation"] = None
         watchdog.cancel()
+        layers.pop()
         conn.set_progress_handler(previous_handler, previous_interval)
         _bound_price_channel_sqlite_wait(
             conn,
