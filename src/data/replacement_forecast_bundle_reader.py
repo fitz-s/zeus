@@ -371,7 +371,7 @@ def _latest_complete_held_continuity(
         metric=metric,
         decision_time=decision_time,
     )
-    if raw_frontier is None:
+    if raw_frontier is None or raw_frontier[0] is None:
         return _HeldContinuityStatus.BLOCKED, "REPLACEMENT_PINNED_RAW_FRONTIER_UNAVAILABLE"
     if raw_frontier[0] <= posterior_cycle:
         return _HeldContinuityStatus.RESET, "REPLACEMENT_PINNED_COMPLETE_CYCLE_RESET"
