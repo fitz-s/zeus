@@ -39,6 +39,10 @@ _probe_process_groups: set[int] = set()
 _writer_lease_lock_fds: dict[str, int] = {}
 _spawn_witness_fds: dict[str, int] = {}
 _SPAWN_AMBIGUITY_SECONDS = 30.0
+_STARTUP_BUDGET: dict[str, Any] | None = None
+_STARTUP_RUN_QUEUE: dict[str, list[Path]] = {}
+_STARTUP_RUN_CURSOR: dict[str, int] = {}
+_STARTUP_RUN_REMAINING: dict[str, bool] = {}
 _EVIDENCE_BUILD_CONTEXT: dict[str, Any] | None = None
 _LAST_EVIDENCE_CYCLE: dict[str, Any] = {}
 _EVIDENCE_HASH_CACHE: dict[tuple[str, int, int], str] = {}
@@ -50,6 +54,10 @@ class ExecutionFactCapabilityError(RuntimeError):
 
 class SettlementBasisPending(RuntimeError):
     """Execution-fact schema is valid, but command-deduped basis is not ready."""
+
+
+class StartupMaintenanceDeferred(RuntimeError):
+    """Startup maintenance exceeded its bounded slice and must resume later."""
 
 
 def now() -> datetime:
@@ -80,6 +88,43 @@ def read_json(path: Path, default: Any = None) -> Any:
         return json.loads(path.read_text())
     except (FileNotFoundError, OSError, json.JSONDecodeError):
         return default
+
+
+def _startup_read_json_file(path: Path) -> Any:
+    budget = _STARTUP_BUDGET
+    max_bytes = int(budget["max_run_json_bytes"]) if budget is not None else 2**63
+    try:
+        _startup_guard()
+        if path.stat().st_size > max_bytes:
+            raise StartupMaintenanceDeferred("startup_maintenance_deferred:file_size")
+        with path.open("rb") as handle:
+            payload = json.loads(handle.read())
+        _startup_guard()
+        return payload
+    except (OSError, json.JSONDecodeError) as exc:
+        raise StartupMaintenanceDeferred(f"startup_maintenance_deferred:file_read:{type(exc).__name__}") from exc
+
+
+def _startup_hash_file(path: Path) -> str:
+    """Hash a bounded startup input without reading it past the shared deadline."""
+    budget = _STARTUP_BUDGET
+    max_bytes = int(budget["max_run_json_bytes"]) if budget is not None else 2**63
+    try:
+        _startup_guard()
+        if path.stat().st_size > max_bytes:
+            raise StartupMaintenanceDeferred("startup_maintenance_deferred:file_size")
+        hasher = hashlib.sha256()
+        with path.open("rb") as handle:
+            while True:
+                _startup_guard()
+                chunk = handle.read(64 * 1024)
+                if not chunk:
+                    break
+                hasher.update(chunk)
+        _startup_guard()
+        return hasher.hexdigest()
+    except OSError as exc:
+        raise StartupMaintenanceDeferred(f"startup_maintenance_deferred:file_read:{type(exc).__name__}") from exc
 
 
 def atomic_json(path: Path, payload: Any) -> None:
@@ -145,7 +190,8 @@ def open_ro(path: Path) -> _ClosingConnection:
 
 
 def floor_price(cfg: Mapping[str, Any]) -> float:
-    settings = read_json(Path(str(cfg["paths"]["settings"])), None)
+    settings_path = Path(str(cfg["paths"]["settings"]))
+    settings = _startup_read_json_file(settings_path) if _STARTUP_BUDGET is not None else read_json(settings_path, None)
     if not isinstance(settings, Mapping):
         raise RuntimeError("active execution floor unavailable: settings unreadable")
     current: Any = settings
@@ -340,8 +386,12 @@ CREATE TABLE IF NOT EXISTS loop_versions (
 def memory(cfg: Mapping[str, Any]) -> _ClosingConnection:
     path = runtime_dir(cfg) / "memory.db"
     path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(path, timeout=5.0)
+    startup_timeout = 5.0
+    if _STARTUP_BUDGET is not None:
+        startup_timeout = max(0.001, float(_STARTUP_BUDGET["deadline"]) - time.monotonic())
+    conn = sqlite3.connect(path, timeout=startup_timeout)
     conn.row_factory = sqlite3.Row
+    _startup_sql_budget(conn)
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
     conn.executescript(MEMORY_SCHEMA)
@@ -2945,36 +2995,55 @@ def required_reasoning_effort(cfg: Mapping[str, Any]) -> str:
 
 def isolated_codex_home(cfg: Mapping[str, Any]) -> Path:
     home = runtime_dir(cfg) / "codex-home"
+    _startup_guard()
     home.mkdir(parents=True, exist_ok=True)
+    _startup_guard()
     home.chmod(0o700)
+    _startup_guard()
     source_home = Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex"))).expanduser().resolve()
     source_auth = source_home / "auth.json"
     target_auth = home / "auth.json"
+    _startup_guard()
     if target_auth.is_symlink() and target_auth.resolve() != source_auth:
         raise RuntimeError("isolated Codex auth link targets an unexpected file")
     if not target_auth.exists():
         if not source_auth.is_file():
             raise RuntimeError("Codex auth unavailable for isolated home")
+        _startup_guard()
         target_auth.symlink_to(source_auth)
+    _startup_guard()
     (home / "config.toml").write_text(
         "[features]\nmemories = false\nmulti_agent = true\n\n"
         "[memories]\nuse_memories = false\ngenerate_memories = false\n\n"
         "[agents]\nenabled = true\n"
     )
+    _startup_guard()
     return home
 
 
 def _run_capture(command: list[str], *, cwd: Path, env: Mapping[str, str] | None = None, timeout: int = 60, stdin: str | None = None) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        command,
-        cwd=cwd,
-        env=dict(env) if env is not None else None,
-        input=stdin,
-        text=True,
-        capture_output=True,
-        timeout=timeout,
-        check=False,
-    )
+    effective_timeout = timeout
+    if _STARTUP_BUDGET is not None:
+        _startup_guard()
+        effective_timeout = min(timeout, max(0.01, float(_STARTUP_BUDGET["deadline"]) - time.monotonic()))
+    try:
+        result = subprocess.run(
+            command,
+            cwd=cwd,
+            env=dict(env) if env is not None else None,
+            input=stdin,
+            text=True,
+            capture_output=True,
+            timeout=effective_timeout,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        if _STARTUP_BUDGET is not None:
+            raise StartupMaintenanceDeferred("startup_maintenance_deferred:subprocess_timeout") from exc
+        raise
+    if _STARTUP_BUDGET is not None:
+        _startup_guard()
+    return result
 
 
 def _run_probe_capture(
@@ -3950,20 +4019,204 @@ def _finish_spawn_intent(cfg: Mapping[str, Any], run_id: str, state: str) -> Non
         mem.commit()
 
 
+def _new_startup_budget(cfg: Mapping[str, Any]) -> dict[str, Any]:
+    settings = cfg["loop"]
+    return {
+        "deadline": time.monotonic() + max(0.01, float(settings.get("startup_maintenance_budget_ms", 250))) / 1000.0,
+        "max_run_json_bytes": max(16 * 1024, int(settings.get("startup_max_run_json_bytes", 256 * 1024))),
+        "run_batch_size": max(1, int(settings.get("startup_run_batch_size", 64))),
+    }
+
+
+def _startup_sql_budget(conn: sqlite3.Connection) -> None:
+    budget = _STARTUP_BUDGET
+    if budget is None:
+        return
+    remaining_ms = max(1, int((float(budget["deadline"]) - time.monotonic()) * 1000))
+    conn.execute(f"PRAGMA busy_timeout={remaining_ms}")
+    conn.set_progress_handler(
+        lambda: int(_STARTUP_BUDGET is not budget or time.monotonic() >= float(budget["deadline"])),
+        1000,
+    )
+
+
+def _startup_guard() -> None:
+    if _STARTUP_BUDGET is not None and time.monotonic() >= float(_STARTUP_BUDGET["deadline"]):
+        raise StartupMaintenanceDeferred("startup_maintenance_deferred:time_budget")
+
+
+def _startup_run_metadata(path: Path) -> dict[str, Any]:
+    _startup_guard()
+    budget = _STARTUP_BUDGET
+    max_bytes = int(budget["max_run_json_bytes"]) if budget is not None else 2**63
+    try:
+        size = path.stat().st_size
+        with path.open("rb") as handle:
+            if size <= max_bytes:
+                raw = handle.read()
+                _startup_guard()
+                parsed = json.loads(raw)
+                return parsed if isinstance(parsed, dict) else {}
+            head = handle.read(max_bytes // 2)
+            handle.seek(max(0, size - max_bytes // 2))
+            tail = handle.read(max_bytes // 2)
+    except (OSError, json.JSONDecodeError):
+        return {}
+    _startup_guard()
+    sample = (head + b"\n" + tail).decode("utf-8", errors="ignore")
+    metadata: dict[str, Any] = {}
+    for key in ("run_id", "incident_id", "status", "pid", "started_at"):
+        match = re.search(
+            rf'"{re.escape(key)}"\s*:\s*("(?:[^"\\]|\\.)*"|-?\d+)',
+            sample,
+        )
+        if not match:
+            continue
+        value = match.group(1)
+        try:
+            metadata[key] = json.loads(value)
+        except json.JSONDecodeError:
+            continue
+    return metadata
+
+
+def _startup_run_batch(cfg: Mapping[str, Any]) -> tuple[list[Path], int]:
+    key = str(runtime_dir(cfg).resolve())
+    if key not in _STARTUP_RUN_QUEUE:
+        _startup_guard()
+        queue: list[Path] = []
+        runs_dir = runtime_dir(cfg) / "runs"
+        try:
+            with os.scandir(runs_dir) as entries:
+                for entry in entries:
+                    _startup_guard()
+                    if entry.name.endswith(".json"):
+                        queue.append(Path(entry.path))
+        except OSError:
+            queue = []
+        _STARTUP_RUN_QUEUE[key] = queue
+        cursor = 0
+        cursor_path = runtime_dir(cfg) / "startup-cursor.json"
+        if cursor_path.is_file():
+            try:
+                checkpoint = _startup_read_json_file(cursor_path)
+            except StartupMaintenanceDeferred:
+                checkpoint = {}
+            if isinstance(checkpoint, Mapping) and int(checkpoint.get("run_count", -1)) == len(queue):
+                cursor = max(0, min(len(queue), int(checkpoint.get("cursor", 0))))
+        _STARTUP_RUN_CURSOR[key] = cursor
+    cursor = _STARTUP_RUN_CURSOR.get(key, 0)
+    batch_size = int((_STARTUP_BUDGET or {}).get("run_batch_size", 64))
+    end = min(len(_STARTUP_RUN_QUEUE[key]), cursor + batch_size)
+    return _STARTUP_RUN_QUEUE[key][cursor:end], end
+
+
+def _startup_checkpoint(cfg: Mapping[str, Any], cursor: int, remaining: bool) -> None:
+    key = str(runtime_dir(cfg).resolve())
+    queue = _STARTUP_RUN_QUEUE.get(key, [])
+    _startup_guard()
+    try:
+        atomic_json(
+            runtime_dir(cfg) / "startup-cursor.json",
+            {
+                "kind": "startup_reconcile",
+                "cursor": cursor,
+                "run_count": len(queue),
+                "remaining": remaining,
+                "updated_at": iso(),
+            },
+        )
+    except OSError as exc:
+        raise StartupMaintenanceDeferred("startup_maintenance_deferred:cursor_io") from exc
+    # The pointer replace is the commit boundary.  Do not run another deadline
+    # guard here: if the deadline expires during the tiny local replace, the
+    # in-memory cursor must advance with the durable pointer rather than report
+    # a false failure after publishing it.
+    _STARTUP_RUN_CURSOR[key] = cursor
+    _STARTUP_RUN_REMAINING[key] = remaining
+
+
+def _startup_reconcile_remaining(cfg: Mapping[str, Any]) -> bool:
+    return _STARTUP_RUN_REMAINING.get(str(runtime_dir(cfg).resolve()), False)
+
+
+def _record_startup_debt(cfg: Mapping[str, Any], reason: str, *, status: str = "retry_pending") -> None:
+    # This receipt is the durable escape hatch after a budget expires; it must
+    # still be written so the next cycle can resume instead of losing the debt.
+    atomic_json(
+        runtime_dir(cfg) / "startup-debt.json",
+        {"kind": "startup_maintenance", "status": status, "reason": reason, "updated_at": iso()},
+    )
+
+
+def _startup_debt_pending(cfg: Mapping[str, Any]) -> bool:
+    """Fail closed globally until bounded startup maintenance drains.
+
+    SCOPE: all Codex/provider dispatch for this controller runtime.
+    DRAIN: daemon startup cycles advance the durable run cursor in batches.
+    RESET: one complete reconcile pass writes startup-debt.json as resolved.
+    """
+    if _STARTUP_BUDGET is not None:
+        return True
+    payload = read_json(runtime_dir(cfg) / "startup-debt.json", {})
+    return isinstance(payload, Mapping) and str(payload.get("status") or "") == "retry_pending"
+
+
+@contextmanager
+def _startup_reconcile_memory(cfg: Mapping[str, Any]):
+    """Rollback and close a bounded reconcile transaction before deferring."""
+    try:
+        with memory(cfg) as mem:
+            try:
+                yield mem
+            except sqlite3.OperationalError as exc:
+                try:
+                    mem.rollback()
+                except sqlite3.Error:
+                    pass
+                message = str(exc).lower()
+                if _STARTUP_BUDGET is not None and (
+                    "interrupted" in message or "locked" in message
+                ):
+                    raise StartupMaintenanceDeferred(
+                        "startup_maintenance_deferred:sqlite"
+                    ) from exc
+                raise
+    except sqlite3.OperationalError as exc:
+        message = str(exc).lower()
+        if _STARTUP_BUDGET is not None and (
+            "interrupted" in message or "locked" in message
+        ):
+            raise StartupMaintenanceDeferred(
+                "startup_maintenance_deferred:sqlite"
+            ) from exc
+        raise
+
+
 def reconcile_orphan_incidents(cfg: Mapping[str, Any]) -> list[str]:
     """Reclaim only running claims with no live controller/worker witness."""
 
     runs_by_incident: dict[str, list[tuple[Path, dict[str, Any]]]] = {}
-    for path in (runtime_dir(cfg) / "runs").glob("*.json"):
-        row = read_json(path, {})
+    startup_batch: list[Path] | None = None
+    startup_batch_end = 0
+    if _STARTUP_BUDGET is not None:
+        startup_batch, startup_batch_end = _startup_run_batch(cfg)
+        run_paths = startup_batch
+    else:
+        run_paths = (runtime_dir(cfg) / "runs").glob("*.json")
+    for path in run_paths:
+        _startup_guard()
+        row = _startup_run_metadata(path) if _STARTUP_BUDGET is not None else read_json(path, {})
         if row.get("status") == "running" and row.get("incident_id"):
             runs_by_incident.setdefault(str(row["incident_id"]), []).append((path, row))
     reclaimed: list[str] = []
-    with memory(cfg) as mem:
+    with _startup_reconcile_memory(cfg) as mem:
+        _startup_guard()
         protected_incidents: set[str] = set()
         intents = mem.execute(
             "SELECT * FROM spawn_intents WHERE state IN ('pre_spawn','child_started')"
         ).fetchall()
+        _startup_guard()
         for intent in intents:
             witness_busy = _writer_lock_held(Path(str(intent["witness_path"])))
             owner_alive = _pid_alive(intent["owner_pid"])
@@ -3982,9 +4235,20 @@ def reconcile_orphan_incidents(cfg: Mapping[str, Any]) -> list[str]:
                 Path(str(intent["witness_path"])).unlink(missing_ok=True)
             except OSError:
                 pass
-        rows = mem.execute(
-            "SELECT incident_id,stage FROM incidents WHERE status='running'"
-        ).fetchall()
+        if _STARTUP_BUDGET is None:
+            rows = mem.execute(
+                "SELECT incident_id,stage FROM incidents WHERE status='running'"
+            ).fetchall()
+        elif runs_by_incident:
+            incident_ids = tuple(runs_by_incident)
+            marks = ",".join("?" for _ in incident_ids)
+            rows = mem.execute(
+                f"SELECT incident_id,stage FROM incidents WHERE status='running' AND incident_id IN ({marks})",
+                incident_ids,
+            ).fetchall()
+        else:
+            rows = []
+        _startup_guard()
         for row in rows:
             incident_id = str(row["incident_id"])
             if incident_id in protected_incidents:
@@ -4016,6 +4280,13 @@ def reconcile_orphan_incidents(cfg: Mapping[str, Any]) -> list[str]:
             )
             reclaimed.append(incident_id)
         mem.commit()
+    if _STARTUP_BUDGET is not None:
+        key = str(runtime_dir(cfg).resolve())
+        _startup_checkpoint(
+            cfg,
+            startup_batch_end,
+            startup_batch_end < len(_STARTUP_RUN_QUEUE.get(key, [])),
+        )
     return reclaimed
 
 
@@ -4512,6 +4783,8 @@ def _retry_pending(cfg: Mapping[str, Any], running: list[dict[str, Any]]) -> lis
 
 
 def dispatch(cfg: Mapping[str, Any]) -> list[str]:
+    if _startup_debt_pending(cfg):
+        return []
     reconcile_orphan_incidents(cfg)
     if _provider_backoff(cfg) is not None:
         # Backoff gates only provider/Codex work; bounded local evidence maintenance
@@ -5570,21 +5843,36 @@ def poll_runs(
     return completed
 
 
+def _bootstrap_memory_version(cfg: Mapping[str, Any]) -> None:
+    try:
+        with memory(cfg) as mem:
+            code = _run_capture(["git", "rev-parse", "HEAD"], cwd=ROOT).stdout.strip()
+            _startup_guard()
+            config_hash = _startup_hash_file(Path(str(cfg.get("_config_path") or CONFIG_PATH)))
+            _startup_guard()
+            version_id = digest(code, config_hash)
+            mem.execute(
+                "INSERT OR IGNORE INTO loop_versions(version_id,code_sha,config_hash,activated_at) VALUES (?,?,?,?)",
+                (version_id, code, config_hash, iso()),
+            )
+            mem.commit()
+    except sqlite3.OperationalError as exc:
+        if _STARTUP_BUDGET is not None:
+            raise StartupMaintenanceDeferred("startup_maintenance_deferred:memory_sqlite") from exc
+        raise
+
+
 def bootstrap(cfg: Mapping[str, Any]) -> dict[str, Any]:
     run = runtime_dir(cfg)
     for rel in ("incidents", "worktrees", "benchmarks", "logs", "runs", "schemas"):
+        _startup_guard()
         (run / rel).mkdir(parents=True, exist_ok=True)
+    _startup_guard()
     run.chmod(0o700)
+    _startup_guard()
     isolated_codex_home(cfg)
-    with memory(cfg) as mem:
-        code = _run_capture(["git", "rev-parse", "HEAD"], cwd=ROOT).stdout.strip()
-        config_hash = hashlib.sha256(Path(str(cfg.get("_config_path") or CONFIG_PATH)).read_bytes()).hexdigest()
-        version_id = digest(code, config_hash)
-        mem.execute(
-            "INSERT OR IGNORE INTO loop_versions(version_id,code_sha,config_hash,activated_at) VALUES (?,?,?,?)",
-            (version_id, code, config_hash, iso()),
-        )
-        mem.commit()
+    _startup_guard()
+    _bootstrap_memory_version(cfg)
     return {"runtime": str(run), "memory": str(run / "memory.db"), "floor": floor_price(cfg)}
 
 
@@ -5622,6 +5910,8 @@ def _record_cycle_latency(
 def dispatch_once(cfg: Mapping[str, Any]) -> list[str]:
     """Run one bounded dispatch turn without sharing the detector's process."""
 
+    if _startup_debt_pending(cfg):
+        return []
     lock = (runtime_dir(cfg) / "dispatch.lock").open("w")
     try:
         fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -5640,6 +5930,8 @@ def _dispatch_has_eligible_debt(
 ) -> bool:
     """Return whether one dispatch child can make durable progress now."""
 
+    if _startup_debt_pending(cfg):
+        return False
     if _provider_backoff(cfg) is not None:
         return False
     active_incidents = {str(row.get("incident_id") or "") for row in running}
@@ -5749,9 +6041,8 @@ def _spawn_dispatch_worker(cfg: Mapping[str, Any]) -> subprocess.Popen[Any]:
 
 
 def daemon(cfg: Mapping[str, Any]) -> int:
-    bootstrap(cfg)
-    reconcile_orphan_incidents(cfg)
     run = runtime_dir(cfg)
+    run.mkdir(parents=True, exist_ok=True)
     lock = (run / "loop.lock").open("w")
     try:
         fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -5763,6 +6054,40 @@ def daemon(cfg: Mapping[str, Any]) -> int:
         stopping = True
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
+    atomic_json(
+        run / "status.json",
+        {
+            "alive": True,
+            "pid": os.getpid(),
+            "at": iso(),
+            "phase": "startup",
+            "startup_maintenance": "starting",
+            "startup_error": None,
+            "created": [],
+            "dispatch_worker_pid": None,
+            "error": None,
+            "dispatch_error": None,
+            "provider_backoff": None,
+        },
+    )
+    global _STARTUP_BUDGET
+    startup_pending = True
+    startup_error: str | None = None
+    _STARTUP_BUDGET = _new_startup_budget(cfg)
+    try:
+        bootstrap(cfg)
+        reconcile_orphan_incidents(cfg)
+        startup_pending = _startup_reconcile_remaining(cfg)
+        if startup_pending:
+            startup_error = "startup_maintenance_deferred:batch_remaining"
+            _record_startup_debt(cfg, startup_error)
+        else:
+            _record_startup_debt(cfg, "startup_maintenance_complete", status="resolved")
+    except StartupMaintenanceDeferred as exc:
+        startup_error = str(exc)
+        _record_startup_debt(cfg, startup_error)
+    finally:
+        _STARTUP_BUDGET = None
     poll = max(0.05, float(cfg["loop"].get("poll_ms", 250)) / 1000.0)
     dispatch_worker: subprocess.Popen[Any] | None = None
     dispatch_error: str | None = None
@@ -5773,6 +6098,46 @@ def daemon(cfg: Mapping[str, Any]) -> int:
         detector_elapsed = 0.0
         error = None
         created: list[str] = []
+        atomic_json(
+            run / "status.json",
+            {
+                "alive": True,
+                "pid": os.getpid(),
+                "at": iso(),
+                "phase": "startup_maintenance" if startup_pending else "cycle",
+                "startup_maintenance": "pending" if startup_pending else "complete",
+                "startup_error": startup_error,
+                "created": [],
+                "evidence_maintenance": "starting",
+                "evidence_built": [],
+                "evidence_deferred": [],
+                "dispatch_worker_pid": None,
+                "error": None,
+                "dispatch_error": dispatch_error,
+                "provider_backoff": None,
+            },
+        )
+        if startup_pending:
+            _STARTUP_BUDGET = _new_startup_budget(cfg)
+            try:
+                bootstrap(cfg)
+                reconcile_orphan_incidents(cfg)
+                startup_pending = _startup_reconcile_remaining(cfg)
+                startup_error = (
+                    "startup_maintenance_deferred:batch_remaining"
+                    if startup_pending
+                    else None
+                )
+                _record_startup_debt(
+                    cfg,
+                    startup_error or "startup_maintenance_complete",
+                    status="retry_pending" if startup_pending else "resolved",
+                )
+            except StartupMaintenanceDeferred as exc:
+                startup_error = str(exc)
+                _record_startup_debt(cfg, startup_error)
+            finally:
+                _STARTUP_BUDGET = None
         # Publish liveness before detector/evidence maintenance can touch a
         # large historical database.  Operators can distinguish busy from dead.
         atomic_json(
@@ -5781,6 +6146,9 @@ def daemon(cfg: Mapping[str, Any]) -> int:
                 "alive": True,
                 "pid": os.getpid(),
                 "at": iso(),
+                "phase": "startup_maintenance" if startup_pending else "cycle",
+                "startup_maintenance": "pending" if startup_pending else "complete",
+                "startup_error": startup_error,
                 "created": [],
                 "evidence_maintenance": "starting",
                 "evidence_built": [],
@@ -5821,7 +6189,7 @@ def daemon(cfg: Mapping[str, Any]) -> int:
                 "provider_backoff": _provider_backoff(cfg),
             },
         )
-        if error is None:
+        if error is None and not startup_pending and not _startup_debt_pending(cfg):
             try:
                 running = _running(cfg)
                 completed = poll_runs(cfg, running)

@@ -857,6 +857,221 @@ def test_daemon_publishes_fresh_status_before_slow_evidence_maintenance(
     assert observed and observed[0]["pid"] == os.getpid()
 
 
+def test_daemon_startup_status_precedes_bounded_large_run_reconcile(
+    cfg: dict, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    runtime = Path(cfg["paths"]["runtime"])
+    runs = runtime / "runs"
+    runs.mkdir(parents=True, exist_ok=True)
+    cfg["loop"].update(startup_run_batch_size=64, startup_maintenance_budget_ms=1000)
+    with loop.memory(cfg):
+        pass
+    for index in range(3000):
+        loop.atomic_json(
+            runs / f"startup-run-{index:04d}.json",
+            {"run_id": f"run-{index}", "incident_id": f"incident-{index}", "pid": 999999, "status": "completed"},
+        )
+    read_count = {"value": 0}
+    observed: list[dict] = []
+    spawned: list[object] = []
+    original_metadata = loop._startup_run_metadata
+
+    def traced_metadata(path: Path) -> dict:
+        read_count["value"] += 1
+        return original_metadata(path)
+
+    def fake_detect(_cfg: dict) -> list[str]:
+        payload = json.loads((runtime / "status.json").read_text())
+        observed.append(payload)
+        assert payload["alive"] is True
+        assert payload["pid"] == os.getpid()
+        if len(observed) == 2:
+            (runtime / "HALT").touch()
+        return []
+
+    codex_home = tmp_path / "startup-codex-home"
+    codex_home.mkdir()
+    (codex_home / "auth.json").write_text("{}\n")
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    monkeypatch.setattr(loop, "_startup_run_metadata", traced_metadata)
+    monkeypatch.setattr(loop, "detect", fake_detect)
+    monkeypatch.setattr(loop, "_spawn_dispatch_worker", lambda _cfg: spawned.append(object()))
+    monkeypatch.setattr(loop, "_record_cycle_latency", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(loop.time, "sleep", lambda _seconds: None)
+
+    assert loop.daemon(cfg) == 0
+    assert len(observed) == 2
+    assert observed[0]["phase"] in {"startup_maintenance", "cycle"}
+    assert read_count["value"] <= 3 * cfg["loop"]["startup_run_batch_size"]
+    assert spawned == []
+    assert loop._STARTUP_RUN_CURSOR[str(runtime.resolve())] >= 2 * cfg["loop"]["startup_run_batch_size"]
+    checkpoint = json.loads((runtime / "startup-cursor.json").read_text())
+    assert checkpoint["cursor"] >= 2 * cfg["loop"]["startup_run_batch_size"]
+
+
+def test_startup_budget_bounds_real_locked_memory_subprocess_and_settings_io(
+    cfg: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with loop.memory(cfg):
+        pass
+    lock = sqlite3.connect(cfg["paths"]["runtime"] + "/memory.db", timeout=0.01)
+    lock.execute("BEGIN EXCLUSIVE")
+    loop._STARTUP_BUDGET = {"deadline": loop.time.monotonic() + 0.05, "max_run_json_bytes": 256 * 1024, "run_batch_size": 64}
+    try:
+        with pytest.raises(loop.StartupMaintenanceDeferred, match="memory_sqlite"):
+            loop.bootstrap(cfg)
+    finally:
+        loop._STARTUP_BUDGET = None
+        lock.rollback()
+        lock.close()
+
+    loop._STARTUP_BUDGET = {"deadline": loop.time.monotonic() + 0.03, "max_run_json_bytes": 256 * 1024, "run_batch_size": 64}
+    try:
+        with pytest.raises(loop.StartupMaintenanceDeferred, match="subprocess_timeout"):
+            loop._run_capture(["/bin/sh", "-c", "sleep 1"], cwd=ROOT, timeout=2)
+    finally:
+        loop._STARTUP_BUDGET = None
+
+    Path(cfg["paths"]["settings"]).write_text(json.dumps({"execution": {"absolute_live_unit_price_min": 0.05}, "padding": "x" * (300 * 1024)}))
+    loop._STARTUP_BUDGET = {"deadline": loop.time.monotonic() + 1, "max_run_json_bytes": 256 * 1024, "run_batch_size": 64}
+    try:
+        with pytest.raises(loop.StartupMaintenanceDeferred, match="file_size"):
+            loop.floor_price(cfg)
+    finally:
+        loop._STARTUP_BUDGET = None
+
+
+def test_startup_debt_fail_closed_blocks_external_dispatch_paths(
+    cfg: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    loop.atomic_json(
+        Path(cfg["paths"]["runtime"]) / "startup-debt.json",
+        {"kind": "startup_maintenance", "status": "retry_pending", "reason": "locked", "updated_at": loop.iso()},
+    )
+    monkeypatch.setattr(loop, "reconcile_orphan_incidents", lambda _cfg: pytest.fail("startup debt must gate before reconcile"))
+    monkeypatch.setattr(loop, "_spawn_run", lambda *_args, **_kwargs: pytest.fail("startup debt must prevent spawn"))
+    assert loop.dispatch(cfg) == []
+    assert loop.dispatch_once(cfg) == []
+    assert loop._dispatch_has_eligible_debt(cfg, []) is False
+
+
+def test_startup_locked_reconcile_keeps_same_batch_for_next_cycle(
+    cfg: dict, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    runtime = Path(cfg["paths"]["runtime"])
+    runs = runtime / "runs"
+    runs.mkdir(parents=True, exist_ok=True)
+    cfg["loop"].update(startup_run_batch_size=1, startup_maintenance_budget_ms=100)
+    with loop.memory(cfg) as mem:
+        mem.execute(
+            "INSERT INTO incidents(incident_id,kind,position_id,crossing_evidence_id,crossing_kind,"
+            "held_token_id,held_direction,floor_price,detected_at,priority,status,stage,updated_at) "
+            "VALUES ('startup-orphan', 'hard', 'p1', 'q1', 'below_floor', 'yes-token', 'sell_yes', .05, ?, 1, 'running', 'blind', ?)",
+            ("2026-08-22T09:00:00+00:00", "2026-08-22T09:00:00+00:00"),
+        )
+        mem.commit()
+    loop.atomic_json(
+        runs / "startup-orphan-run.json",
+        {"run_id": "startup-orphan-run", "incident_id": "startup-orphan", "pid": 999999, "status": "running"},
+    )
+    lock = sqlite3.connect(runtime / "memory.db", timeout=0.01)
+    original_bootstrap_memory = loop._bootstrap_memory_version
+    armed = {"value": False}
+
+    def arm_reconcile_lock(local_cfg: dict) -> None:
+        original_bootstrap_memory(local_cfg)
+        if not armed["value"]:
+            lock.execute("BEGIN EXCLUSIVE")
+            armed["value"] = True
+
+    monkeypatch.setattr(loop, "_bootstrap_memory_version", arm_reconcile_lock)
+    observed: list[dict] = []
+    spawned: list[object] = []
+    codex_home = tmp_path / "startup-lock-codex-home"
+    codex_home.mkdir()
+    (codex_home / "auth.json").write_text("{}\n")
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+
+    def fake_detect(_cfg: dict) -> list[str]:
+        payload = json.loads((runtime / "status.json").read_text())
+        observed.append(payload)
+        if len(observed) == 1:
+            debt = json.loads((runtime / "startup-debt.json").read_text())
+            assert payload["alive"] is True
+            assert debt["status"] == "retry_pending"
+            lock.rollback()
+            lock.close()
+        else:
+            with loop.memory(cfg) as mem:
+                status = mem.execute(
+                    "SELECT status FROM incidents WHERE incident_id='startup-orphan'"
+                ).fetchone()[0]
+            assert status == "retry_pending"
+            checkpoint = json.loads((runtime / "startup-cursor.json").read_text())
+            assert checkpoint["cursor"] == 1
+            (runtime / "HALT").touch()
+        return []
+
+    monkeypatch.setattr(loop, "detect", fake_detect)
+    monkeypatch.setattr(loop, "current_capabilities", lambda _cfg: {"ready": True})
+    monkeypatch.setattr(loop, "poll_runs", lambda *_args: [])
+    monkeypatch.setattr(loop, "_running", lambda _cfg: [])
+    monkeypatch.setattr(loop, "_dispatch_has_eligible_debt", lambda *_args: False)
+    monkeypatch.setattr(loop, "_spawn_dispatch_worker", lambda _cfg: spawned.append(object()))
+    monkeypatch.setattr(loop, "_record_cycle_latency", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(loop.time, "sleep", lambda _seconds: None)
+
+    try:
+        assert loop.daemon(cfg) == 0
+    finally:
+        if lock:
+            try:
+                lock.rollback()
+            except sqlite3.Error:
+                pass
+            lock.close()
+    assert len(observed) == 2
+    assert spawned == []
+
+
+def test_startup_checkpoint_commit_boundary_survives_deadline_race(
+    cfg: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime = Path(cfg["paths"]["runtime"])
+    runs = runtime / "runs"
+    runs.mkdir(parents=True, exist_ok=True)
+    loop.atomic_json(
+        runs / "checkpoint-race.json",
+        {"run_id": "checkpoint-race", "incident_id": "not-running", "pid": 999999, "status": "completed"},
+    )
+    with loop.memory(cfg):
+        pass
+    key = str(runtime.resolve())
+    loop._STARTUP_RUN_QUEUE.pop(key, None)
+    loop._STARTUP_RUN_CURSOR.pop(key, None)
+    loop._STARTUP_RUN_REMAINING.pop(key, None)
+    loop._STARTUP_BUDGET = {
+        "deadline": loop.time.monotonic() + 1.0,
+        "max_run_json_bytes": 256 * 1024,
+        "run_batch_size": 1,
+    }
+    original_atomic = loop.atomic_json
+
+    def advance_after_pointer_replace(path: Path, payload: dict) -> None:
+        original_atomic(path, payload)
+        if path.name == "startup-cursor.json":
+            loop._STARTUP_BUDGET["deadline"] = loop.time.monotonic() - 1.0
+
+    monkeypatch.setattr(loop, "atomic_json", advance_after_pointer_replace)
+    try:
+        assert loop.reconcile_orphan_incidents(cfg) == []
+    finally:
+        loop._STARTUP_BUDGET = None
+    checkpoint = json.loads((runtime / "startup-cursor.json").read_text())
+    assert checkpoint["cursor"] == 1
+    assert loop._STARTUP_RUN_CURSOR[key] == checkpoint["cursor"]
+
+
 def test_evidence_failure_debt_recovers_same_incident_without_spawn(
     cfg: dict, monkeypatch: pytest.MonkeyPatch
 ) -> None:
