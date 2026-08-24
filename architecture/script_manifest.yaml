@@ -2680,6 +2680,48 @@ scripts:
     required_tests: [tests/scripts/test_selection_lift_report.py, tests/analysis/test_selection_lift.py]
     unguarded_write_rationale: "No writes; opens zeus-world.db strictly read-only via file:...?mode=ro&immutable=0 URI (scoreboard_panels.open_ro); SELECT-only; prints markdown to stdout."
 
+  # --- reversal-plan tier0 item 10 (2026-08-24): two-gate capital promotion evaluator ---
+  promotion_gates_report.py:
+    class: read_only_evidence
+    lifecycle: long_lived
+    status: active
+    authority_scope: offline_no_promotion
+    read_targets: [state/zeus-world.db]
+    write_targets: [stdout, state/promotion_gates_ledger.json]
+    dry_run_default: true
+    apply_flag: null
+    target_db: null
+    external_inputs: []
+    dangerous_if_run: false
+    delete_policy: retain_until_superseded
+    reuse_when: >
+      Read the two-gate capital-promotion verdict (src/analysis/
+      promotion_gates.py): GATE A prequential non-inferiority of the
+      market-anchored calibrator's r_hat vs market price p0 on paired
+      log-loss (cluster-robust city-date/date, larger governs, plus a
+      per-|q-p|-bucket no-catastrophic-degradation side condition) and
+      GATE B capital-use readiness (positive-LCB fill residual AND the
+      preregistered selection-lift test's positive-LCB branch). Also
+      documents (not wires) the single bounded Tier-1 sizing formula.
+      Idempotent for --dry-run; a formal (non---dry-run) Gate-B evaluation
+      is a ONE-SHOT alpha-spending event per preregistration_version,
+      enforced by state/promotion_gates_ledger.json — a second formal
+      evaluation is refused (use --dry-run for repeated viewing). Prints
+      "no tier0-settled sample yet" cleanly when the tier0_flagged marker
+      column is absent (true as of 2026-08-24; Tier-0 admission has no DB
+      writer yet). NOT wired into the live entry path — offline evidence
+      only.
+    do_not_use_when: >
+      Any task needs to authorize a live decision, size a position, or
+      treat a Gate A/B PASS as itself a sizing license — Gate A licenses
+      r_hat for ranking/lifecycle use only, never capital sizing; this
+      script's output is offline analytics only.
+    canonical_command: "python3 -m scripts.promotion_gates_report [--root PATH] [--world PATH] [--gate A|B|ALL] [--dry-run] [--preregistration-version V]"
+    promotion_barrier: "Read-only DB access; cannot authorize live strategy, sizing, or DB truth changes; a formal Gate-B evaluation writes only the alpha-spending ledger, never canonical truth."
+    required_helpers: []
+    required_tests: [tests/scripts/test_promotion_gates_report.py, tests/analysis/test_promotion_gates.py]
+    unguarded_write_rationale: "No DB writes; opens zeus-world.db strictly read-only via file:...?mode=ro&immutable=0 URI (scoreboard_panels.open_ro); SELECT-only. The only write is an atomic (tempfile+fsync+os.replace) append to state/promotion_gates_ledger.json recording a formal Gate-B evaluation's timestamp/sample-hash/verdict -- never a DB write, never a live decision, and --dry-run skips it entirely."
+
   # NOTE (R0-f/R0-g prepare packet, 2026-07-08; extended by the loop-build packet,
   # 2026-07-08): scripts/ops/migrate_plist_secrets.sh, scripts/ops/rotate_zeus_logs.sh,
   # scripts/ops/db_hygiene.sh, scripts/ops/loop_guard.py, scripts/ops/loop_enable.sh,
