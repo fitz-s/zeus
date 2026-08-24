@@ -1,5 +1,5 @@
 # Created: 2026-06-11
-# Last reused or audited: 2026-08-23
+# Last reused or audited: 2026-08-24
 # Authority basis: Task #32 follow-up (operator 2026-06-11) — 没有新的就用老的 applied to fusion
 #   membership. The gem_global-only previous_runs exception (edc598b440) is generalized into the
 #   SINGLE serving authority (src/data/replacement_current_value_serving.py): a provider absent
@@ -31,10 +31,12 @@ Relationship pins:
 from __future__ import annotations
 
 import json
+import importlib.util
 import sqlite3
 import subprocess
+import sys
 import types
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -2131,90 +2133,6 @@ def test_materialization_queue_timeout_backs_off_without_blocking_other_family(
     assert retried.processed_count == 1
 
 
-def test_probability_debt_request_gets_one_bounded_backoff_rescue(
-    tmp_path, monkeypatch
-) -> None:
-    import src.data.replacement_forecast_live_materialization_queue as queue_mod
-
-    request_dir = tmp_path / "requests"
-    request_dir.mkdir()
-    now = 1_000.0
-    monkeypatch.setattr(queue_mod.time, "time", lambda: now)
-    request = {
-        "city": "London",
-        "target_date": "2026-06-25",
-        "temperature_metric": "high",
-        "source_cycle_time": "2026-06-24T12:00:00+00:00",
-        "computed_at": "2026-06-24T20:20:45+00:00",
-        "baseline_source_run_id": "b0-run",
-        "openmeteo_source_run_id": "om9-run",
-        "openmeteo_payload_json": "payload.json",
-        "precision_metadata_json": "precision.json",
-        "bins": [{"bin_id": "30C"}],
-    }
-    retry_at_ns = int((now + 600.0) * 1_000_000_000)
-    debt = request_dir / (
-        "London.2026-06-25.high.timeout"
-        f".timeout-retry-5-{retry_at_ns}.json"
-    )
-    debt.write_text(json.dumps(request), encoding="utf-8")
-    ordinary = request_dir / "Paris.2026-06-25.high.json"
-    ordinary.write_text(
-        json.dumps({**request, "city": "Paris"}),
-        encoding="utf-8",
-    )
-    monkeypatch.setattr(
-        queue_mod,
-        "_current_probability_debt_families",
-        lambda **_kwargs: frozenset({("London", "2026-06-25", "high")}),
-    )
-    spawned: list[str] = []
-
-    def runner(argv):
-        input_path = Path(argv[list(argv).index("--input-json") + 1])
-        spawned.append(input_path.name)
-        return subprocess.CompletedProcess(list(argv), 0, stdout="ok\n", stderr="")
-
-    report = queue_mod.process_replacement_forecast_live_materialization_queue(
-        request_dir=request_dir,
-        processed_dir=tmp_path / "processed",
-        failed_dir=tmp_path / "failed",
-        forecast_db=tmp_path / "forecasts.db",
-        seed_limit=0,
-        limit=1,
-        runner=runner,
-    )
-
-    assert report.processed_count == 1
-    assert spawned == [debt.name]
-    assert ordinary.exists()
-
-
-def test_probability_debt_item_uses_extended_timeout(monkeypatch, tmp_path) -> None:
-    import src.data.replacement_forecast_live_materialization_queue as queue_mod
-
-    captured: list[float | None] = []
-
-    def run(_argv, *, timeout_seconds=None):
-        captured.append(timeout_seconds)
-        return subprocess.CompletedProcess([], 0, stdout="ok\n", stderr="")
-
-    monkeypatch.setattr(queue_mod, "_run_command", run)
-    item = queue_mod._PendingMaterialization(
-        input_json=tmp_path / "London.json",
-        command=("materialize",),
-        request_payload=None,
-        marker_path=None,
-        attempt_fingerprint=None,
-        timeout_seconds=90.0,
-    )
-
-    result = queue_mod._run_materialization_item(item)
-
-    assert result.returncode == 0
-    assert captured == [90.0]
-
-
 def test_materialization_queue_default_timeout_bounds_one_family(monkeypatch) -> None:
     import src.data.replacement_forecast_live_materialization_queue as queue_mod
 
@@ -3187,6 +3105,228 @@ def test_materialization_timeout_isolated_to_its_own_request(
     assert len(tuple(request_dir.glob("B.timeout-retry-*.json"))) == 1
     assert "REPLACEMENT_LIVE_MATERIALIZATION_REQUEST_TIMEOUT" in report.reason_codes
     assert queue_mod._TIMEOUT_RETRY_DEFERRED_REASON in report.reason_codes
+
+
+def test_held_day0_timeout_retry_keeps_stage_and_preempts_unrelated_work(
+    tmp_path, monkeypatch
+) -> None:
+    """A current Day0 observation advance remains capital-protection work after timeout."""
+
+    import src.data.replacement_forecast_live_materialization_queue as queue_mod
+
+    request_dir = tmp_path / "requests"
+    request_dir.mkdir()
+    common = {
+        "target_date": "2026-07-02",
+        "temperature_metric": "high",
+        "source_cycle_time": "2026-07-02T00:00:00+00:00",
+        "computed_at": "2026-07-02T08:31:11+00:00",
+        "baseline_source_run_id": "ecmwf_open_data:mx2t6_high:2026-07-02T00Z",
+        "openmeteo_source_run_id": "openmeteo-current-targets-20260702T000000Z",
+        "openmeteo_payload_json": "payload.json",
+        "precision_metadata_json": "precision.json",
+        "bins": [{"bin_id": "30C"}],
+    }
+    held = request_dir / "Held.json"
+    held.write_text(
+        json.dumps(
+            {
+                **common,
+                "city": "Held City",
+                "upgrade_trigger": "day0_observation_advanced",
+                "day0_observed_extreme_c": 25.0,
+                "day0_observed_extreme_observation_time": "2026-07-02T08:30:00+00:00",
+                "day0_observed_extreme_source": "aviationweather_metar",
+                "day0_observed_extreme_unit": "C",
+            }
+        ),
+        encoding="utf-8",
+    )
+    (request_dir / "Unrelated.json").write_text(
+        json.dumps({**common, "city": "Unrelated City"}), encoding="utf-8"
+    )
+    monkeypatch.setattr(
+        queue_mod,
+        "_current_money_risk_scopes",
+        lambda _families, **_kwargs: frozenset({("Held City", "2026-07-02", "high")}),
+    )
+    stale_q = {"value": True}
+    monkeypatch.setattr(
+        queue_mod,
+        "_current_probability_debt_families",
+        lambda **_kwargs: (
+            frozenset({("Held City", "2026-07-02", "high")})
+            if stale_q["value"]
+            else frozenset()
+        ),
+    )
+
+    def _timeout_at_prepare(argv):
+        command = list(argv)
+        input_path = Path(command[command.index("--input-json") + 1])
+        deadline = datetime.fromisoformat(
+            command[command.index("--deadline-utc") + 1]
+        )
+        queue_mod._write_stage_receipt(
+            input_path,
+            stage="prepare_fusion",
+            deadline_at=deadline,
+        )
+        raise subprocess.TimeoutExpired(command, timeout=1.0)
+
+    first = queue_mod.process_replacement_forecast_live_materialization_queue(
+        request_dir=request_dir,
+        processed_dir=tmp_path / "processed",
+        failed_dir=tmp_path / "failed",
+        forecast_db=tmp_path / "forecasts.db",
+        raw_manifest_dir=None,
+        limit=1,
+        runner=_timeout_at_prepare,
+    )
+    retry = next(request_dir.glob("Held.timeout-retry-*.json"))
+    receipt = json.loads(queue_mod._stage_receipt_path(retry).read_text(encoding="utf-8"))
+    assert receipt["request_id"] == "Held.json"
+    assert receipt["stage"] == "prepare_fusion"
+    assert receipt["deadline_at"]
+    assert "REPLACEMENT_LIVE_MATERIALIZATION_REQUEST_TIMEOUT" in first.reason_codes
+    assert "REPLACEMENT_LIVE_MATERIALIZATION_TIMEOUT_PREPARE_FUSION" in first.reason_codes
+
+    retry_payload = json.loads(retry.read_text(encoding="utf-8"))
+    assert queue_mod._is_current_capital_protection_timeout_retry(retry, retry_payload)
+    stale_q["value"] = False
+    assert not queue_mod._is_current_capital_protection_timeout_retry(
+        retry, retry_payload
+    )
+    stale_q["value"] = True
+    _base, _attempt, retry_at = queue_mod._timeout_retry_state(retry)
+    assert retry_at is not None
+    monkeypatch.setattr(queue_mod.time, "time", lambda: retry_at - 0.001)
+    waiting_started: list[str] = []
+    waiting = queue_mod.process_replacement_forecast_live_materialization_queue(
+        request_dir=request_dir,
+        processed_dir=tmp_path / "processed",
+        failed_dir=tmp_path / "failed",
+        forecast_db=tmp_path / "forecasts.db",
+        raw_manifest_dir=None,
+        limit=1,
+        runner=lambda argv: (
+            waiting_started.append(
+                Path(argv[list(argv).index("--input-json") + 1]).name
+            )
+            or subprocess.CompletedProcess(list(argv), 0, stdout="ok\n", stderr="")
+        ),
+    )
+    assert waiting.processed_count == 1
+    assert waiting_started == ["Unrelated.json"]
+    assert queue_mod._TIMEOUT_RETRY_DEFERRED_REASON in waiting.reason_codes
+
+    monkeypatch.setattr(queue_mod.time, "time", lambda: retry_at + 0.001)
+    started: list[str] = []
+
+    def _ready(argv):
+        command = list(argv)
+        started.append(Path(command[command.index("--input-json") + 1]).name)
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            stdout=(
+                '{"status":"READY","reason_codes":[],"committed":true,'
+                '"posterior_id":42,"reactor_wake_published":true}\n'
+            ),
+            stderr="",
+        )
+
+    second = queue_mod.process_replacement_forecast_live_materialization_queue(
+        request_dir=request_dir,
+        processed_dir=tmp_path / "processed",
+        failed_dir=tmp_path / "failed",
+        forecast_db=tmp_path / "forecasts.db",
+        raw_manifest_dir=None,
+        limit=1,
+        runner=_ready,
+    )
+    assert started == [retry.name]
+    assert second.committed_posterior_count == 1
+
+
+def test_materializer_child_deadline_receipt_interrupts_sqlite_read(tmp_path) -> None:
+    """The child reports the read/prepare stage before outer timeout can erase it."""
+
+    script_path = Path(__file__).resolve().parents[2] / "scripts" / "materialize_replacement_forecast_live.py"
+    spec = importlib.util.spec_from_file_location("materialize_deadline_test", script_path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        sys.modules.pop(spec.name, None)
+
+    input_json = tmp_path / "Held.json"
+    input_json.write_text("{}", encoding="utf-8")
+    receipt = module._StageReceipt(
+        input_json,
+        datetime.now(timezone.utc) - timedelta(milliseconds=1),
+    )
+    receipt.mark("prepare_fusion")
+    conn = sqlite3.connect(":memory:")
+    receipt.install_sqlite_progress_handler(conn)
+    with pytest.raises(sqlite3.OperationalError, match="interrupted"):
+        conn.execute(
+            "WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x + 1 FROM n WHERE x < 1000000) SELECT sum(x) FROM n"
+        ).fetchone()
+    receipt.clear_sqlite_progress_handler(conn)
+    conn.close()
+    payload = json.loads(receipt.path.read_text(encoding="utf-8"))
+    assert payload["request_id"] == "Held.json"
+    assert payload["stage"] == "prepare_fusion"
+    assert payload["deadline_at"]
+
+
+def test_queue_requeues_typed_child_deadline_before_outer_timeout(tmp_path) -> None:
+    """A child-reported read deadline stays retryable instead of becoming a failed request."""
+
+    import src.data.replacement_forecast_live_materialization_queue as queue_mod
+
+    request_dir = tmp_path / "requests"
+    request_dir.mkdir()
+    request = {
+        "city": "Madrid",
+        "target_date": "2026-07-02",
+        "temperature_metric": "high",
+        "source_cycle_time": "2026-07-02T00:00:00+00:00",
+        "computed_at": "2026-07-02T08:31:11+00:00",
+        "baseline_source_run_id": "baseline",
+        "openmeteo_source_run_id": "anchor",
+        "openmeteo_payload_json": "payload.json",
+        "precision_metadata_json": "precision.json",
+        "bins": [{"bin_id": "30C"}],
+    }
+    (request_dir / "Madrid.json").write_text(json.dumps(request), encoding="utf-8")
+
+    def _defer(argv):
+        return subprocess.CompletedProcess(
+            list(argv),
+            75,
+            stdout="",
+            stderr=(
+                '{"status":"DEFERRED","reason_codes":['
+                '"REPLACEMENT_LIVE_MATERIALIZATION_DEADLINE_PREPARE_FUSION"]}\n'
+            ),
+        )
+
+    report = queue_mod.process_replacement_forecast_live_materialization_queue(
+        request_dir=request_dir,
+        processed_dir=tmp_path / "processed",
+        failed_dir=tmp_path / "failed",
+        forecast_db=tmp_path / "forecasts.db",
+        raw_manifest_dir=None,
+        limit=1,
+        runner=_defer,
+    )
+    assert not report.failed_files
+    assert "REPLACEMENT_LIVE_MATERIALIZATION_DEADLINE_PREPARE_FUSION" in report.reason_codes
+    assert len(tuple(request_dir.glob("Madrid.timeout-retry-*.json"))) == 1
 
 
 @pytest.mark.parametrize(

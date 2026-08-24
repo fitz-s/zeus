@@ -14,7 +14,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
 from typing import Callable, Mapping, Sequence
@@ -44,11 +44,6 @@ from src.data.replacement_forecast_seed_discovery import (
 
 Runner = Callable[[Sequence[str]], subprocess.CompletedProcess[str]]
 DEFAULT_MATERIALIZATION_SUBPROCESS_TIMEOUT_SECONDS = 30.0
-# One exact stale-q family protecting current capital gets enough wall time to
-# finish under ordinary SQLite contention; ordinary discovery remains bounded
-# by the global 30-second contract below.
-DEFAULT_CURRENT_CAPITAL_MATERIALIZATION_TIMEOUT_SECONDS = 90.0
-CURRENT_CAPITAL_TIMEOUT_RESCUE_MAX_PRIOR_ATTEMPTS = 5
 DEFAULT_RECENT_SUCCESS_COALESCE_SECONDS = 60.0
 # Every subprocess commits to the same SQLite forecast DB. Parallel commit
 # processes only multiply cold-page reads and writer contention. Keep one queue
@@ -67,6 +62,9 @@ _TIMEOUT_RETRY_MAX_SECONDS = 600.0
 _TIMEOUT_RETRY_DEFERRED_REASON = (
     "REPLACEMENT_LIVE_MATERIALIZATION_TIMEOUT_RETRY_DEFERRED"
 )
+_CAPITAL_PROTECTION_TIMEOUT_RETRY_SECONDS = 1.0
+_MATERIALIZATION_STAGE_RECEIPT_SUFFIX = ".stage"
+_MATERIALIZATION_CHILD_DEADLINE_SAFETY_SECONDS = 1.0
 _AWAITING_ENSEMBLE_HWM_REASON = (
     "REPLACEMENT_MATERIALIZATION_SOURCE_CYCLE_AWAITING_ENSEMBLE_HWM"
 )
@@ -145,7 +143,6 @@ class _PendingMaterialization:
     request_payload: Mapping[str, object] | None
     marker_path: Path | None
     attempt_fingerprint: str | None
-    timeout_seconds: float | None = None
 
 
 @dataclass(frozen=True)
@@ -183,54 +180,101 @@ def _materialization_subprocess_timeout_seconds() -> float:
     return value
 
 
-def _current_capital_materialization_timeout_seconds() -> float:
-    raw = os.environ.get(
-        "ZEUS_REPLACEMENT_CURRENT_CAPITAL_MATERIALIZATION_TIMEOUT_SECONDS"
-    )
-    if raw is None or str(raw).strip() == "":
-        return DEFAULT_CURRENT_CAPITAL_MATERIALIZATION_TIMEOUT_SECONDS
-    try:
-        value = float(raw)
-    except (TypeError, ValueError) as exc:
-        raise ValueError(
-            "ZEUS_REPLACEMENT_CURRENT_CAPITAL_MATERIALIZATION_TIMEOUT_SECONDS "
-            "must be numeric"
-        ) from exc
-    if value <= 0:
-        raise ValueError(
-            "ZEUS_REPLACEMENT_CURRENT_CAPITAL_MATERIALIZATION_TIMEOUT_SECONDS "
-            "must be > 0"
-        )
-    return value
-
-
-def _run_command(
-    argv: Sequence[str],
-    *,
-    timeout_seconds: float | None = None,
-) -> subprocess.CompletedProcess[str]:
+def _run_command(argv: Sequence[str]) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         list(argv),
         cwd=PROJECT_ROOT,
         check=False,
         capture_output=True,
         text=True,
-        timeout=(
-            _materialization_subprocess_timeout_seconds()
-            if timeout_seconds is None
-            else float(timeout_seconds)
-        ),
+        timeout=_materialization_subprocess_timeout_seconds(),
     )
 
 
-def _materialization_command(input_json: Path) -> tuple[str, ...]:
+def _stage_receipt_path(input_json: Path) -> Path:
+    """Keep non-authority process progress next to its durable request."""
+
+    return Path(f"{input_json}{_MATERIALIZATION_STAGE_RECEIPT_SUFFIX}")
+
+
+def _stable_request_id(input_json: Path) -> str:
+    """Preserve one identity across timeout-retry filename suffixes."""
+
+    return input_json.name.split(_TIMEOUT_RETRY_MARKER, 1)[0]
+
+
+def _write_stage_receipt(
+    input_json: Path,
+    *,
+    stage: str,
+    deadline_at: datetime,
+) -> None:
+    """Atomically expose the last known child stage without touching canonical DBs."""
+
+    target = _stage_receipt_path(input_json)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "schema_version": 1,
+        "request_id": _stable_request_id(input_json),
+        "input_json": str(input_json),
+        "stage": stage,
+        "deadline_at": deadline_at.astimezone(timezone.utc).isoformat(),
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    temporary = target.with_name(f".{target.name}.{os.getpid()}.tmp")
+    with temporary.open("w", encoding="utf-8") as handle:
+        json.dump(payload, handle, sort_keys=True, separators=(",", ":"))
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(temporary, target)
+    _fsync_directory(target.parent)
+
+
+def _read_stage_receipt(input_json: Path) -> dict[str, object] | None:
+    try:
+        payload = json.loads(_stage_receipt_path(input_json).read_text(encoding="utf-8"))
+    except (OSError, ValueError, json.JSONDecodeError):
+        return None
+    return dict(payload) if isinstance(payload, Mapping) else None
+
+
+def _move_stage_receipt(source: Path, target: Path) -> None:
+    source_receipt = _stage_receipt_path(source)
+    if not source_receipt.exists():
+        return
+    target_receipt = _stage_receipt_path(target)
+    try:
+        os.link(source_receipt, target_receipt)
+    except FileExistsError:
+        target_receipt.unlink()
+        os.link(source_receipt, target_receipt)
+    _fsync_directory(target_receipt.parent)
+    source_receipt.unlink(missing_ok=True)
+    _fsync_directory(source_receipt.parent)
+
+
+def _materialization_command(
+    input_json: Path,
+    *,
+    deadline_at: datetime,
+) -> tuple[str, ...]:
     return (
         sys.executable,
         str(PROJECT_ROOT / "scripts" / "materialize_replacement_forecast_live.py"),
         "--input-json",
         str(input_json),
+        "--deadline-utc",
+        deadline_at.astimezone(timezone.utc).isoformat(),
         "--commit",
     )
+
+
+def _child_deadline_at() -> datetime:
+    """Reserve a small handoff window before the queue's hard subprocess kill."""
+
+    timeout = _materialization_subprocess_timeout_seconds()
+    budget = max(0.1, timeout - _MATERIALIZATION_CHILD_DEADLINE_SAFETY_SECONDS)
+    return datetime.now(timezone.utc) + timedelta(seconds=budget)
 
 
 def _timeout_result(
@@ -292,9 +336,7 @@ def _run_materialization_item(
     item: _PendingMaterialization,
 ) -> subprocess.CompletedProcess[str]:
     try:
-        if item.timeout_seconds is None:
-            return _run_command(item.command)
-        return _run_command(item.command, timeout_seconds=item.timeout_seconds)
+        return _run_command(item.command)
     except subprocess.TimeoutExpired as exc:
         return _timeout_result(item.command, exc)
     except Exception as exc:
@@ -482,6 +524,12 @@ def _move_request(
         except FileExistsError:
             continue
         break
+    try:
+        _move_stage_receipt(path, target)
+    except Exception:
+        target.unlink(missing_ok=True)
+        _fsync_directory(destination_dir)
+        raise
     if terminal_receipt is not None:
         try:
             _write_seed_terminal_receipts(path, target, terminal_receipt)
@@ -1112,6 +1160,49 @@ def _request_family_scope(
     return scope if all(scope) else None
 
 
+def _is_capital_protection_timeout_retry(
+    path: Path,
+    payload: Mapping[str, object],
+    *,
+    current_probability_debt: frozenset[tuple[str, str, str]],
+) -> bool:
+    """Recognize a held Day0 state advance after its retry filename changed."""
+
+    family = (
+        str(payload.get("city") or "").strip(),
+        str(payload.get("target_date") or "").strip(),
+        str(payload.get("temperature_metric") or "").strip().lower(),
+    )
+    return (
+        _TIMEOUT_RETRY_MARKER in path.name
+        and family in current_probability_debt
+        and str(payload.get("upgrade_trigger") or "").strip()
+        == "day0_observation_advanced"
+        and _day0_conditioning_identity_key(payload) is not None
+    )
+
+
+def _is_current_capital_protection_timeout_retry(
+    path: Path,
+    payload: Mapping[str, object] | None,
+) -> bool:
+    if payload is None:
+        return False
+    family = (
+        str(payload.get("city") or "").strip(),
+        str(payload.get("target_date") or "").strip(),
+        str(payload.get("temperature_metric") or "").strip().lower(),
+    )
+    if not all(family):
+        return False
+    return (
+        family in _current_probability_debt_families()
+        and str(payload.get("upgrade_trigger") or "").strip()
+        == "day0_observation_advanced"
+        and _day0_conditioning_identity_key(payload) is not None
+    )
+
+
 def _cycle_advance_seed_priority_map(
     forecast_db: Path | str | None,
     queue_files: Sequence[Path],
@@ -1142,6 +1233,8 @@ def _cycle_advance_seed_priority_map(
     baseline_run_by_name: dict[str, str] = {}
     day0_observation_by_name: dict[str, datetime] = {}
     day0_identity_by_name: dict[str, tuple[str, str, str, str]] = {}
+    payload_by_name: dict[str, Mapping[str, object]] = {}
+    path_by_name = {path.name: path for path in queue_files}
     cycle_by_scope: dict[tuple[str, str, str, str], datetime] = {}
     latest_cycle_by_family: dict[tuple[str, str, str], datetime] = {}
     for path in queue_files:
@@ -1152,6 +1245,7 @@ def _cycle_advance_seed_priority_map(
         )
         if payload is None:
             continue
+        payload_by_name[path.name] = payload
         computed_at = _parse_utc_iso(payload.get("computed_at"))
         if computed_at is not None:
             request_time_by_name[path.name] = computed_at.isoformat()
@@ -1188,6 +1282,12 @@ def _cycle_advance_seed_priority_map(
         _current_money_risk_scopes(fam_scopes, trade_db=trade_db)
         if current_money_risk is None
         else current_money_risk & fam_scopes
+    )
+    # This is intentionally a second, claim-time read.  Exposure gives every
+    # held family ordinary priority; only a currently stale monitor q grants
+    # the retry its capital-protection tier, and a fresh q removes it.
+    current_probability_debt = (
+        _current_probability_debt_families(trade_db=trade_db) & fam_scopes
     )
     rows: list[object] = []
     current_baseline_names: set[str] = set()
@@ -1305,6 +1405,12 @@ def _cycle_advance_seed_priority_map(
         )
         tier = base_tier * 2 + int(older_queued_cycle)
         for name in names:
+            payload = payload_by_name[name]
+            capital_protection_retry = _is_capital_protection_timeout_retry(
+                path_by_name[name],
+                payload,
+                current_probability_debt=current_probability_debt,
+            )
             if priority_names is not None and (
                 fam_scope in current_money_risk
                 or name in day0_identity_by_name
@@ -1342,9 +1448,15 @@ def _cycle_advance_seed_priority_map(
                 request_time = (
                     f"{inverse_observation_clock:018d}|{request_time}"
                 )
-                priority[name] = (tier - 0.5, request_time)
+                priority[name] = (
+                    (-10.0 if capital_protection_retry else tier - 0.5),
+                    request_time,
+                )
             else:
-                priority[name] = (tier, request_time)
+                priority[name] = (
+                    (-10.0 if capital_protection_retry else tier),
+                    request_time,
+                )
     return priority
 
 
@@ -1983,6 +2095,7 @@ def _record_latest_terminal_request(
     os.replace(temporary, target)
     _fsync_directory(receipt_dir)
     input_json.unlink()
+    _stage_receipt_path(input_json).unlink(missing_ok=True)
     _fsync_directory(input_json.parent)
     return target
 
@@ -2113,6 +2226,8 @@ def _timeout_retry_state(path: Path) -> tuple[str, int, float | None]:
 def _restore_claimed_request_after_timeout(
     path: Path,
     request_path: Path,
+    *,
+    capital_protection: bool = False,
 ) -> Path:
     """Requeue one timed-out family without letting it reclaim the next poll."""
 
@@ -2120,9 +2235,13 @@ def _restore_claimed_request_after_timeout(
     base, prior_attempt, _retry_at = _timeout_retry_state(path)
     attempt = prior_attempt + 1
     exponent = min(max(0, attempt - 1), 10)
-    delay_seconds = min(
-        _TIMEOUT_RETRY_BASE_SECONDS * (2**exponent),
-        _TIMEOUT_RETRY_MAX_SECONDS,
+    delay_seconds = (
+        _CAPITAL_PROTECTION_TIMEOUT_RETRY_SECONDS
+        if capital_protection
+        else min(
+            _TIMEOUT_RETRY_BASE_SECONDS * (2**exponent),
+            _TIMEOUT_RETRY_MAX_SECONDS,
+        )
     )
     retry_ns = int((time.time() + delay_seconds) * 1_000_000_000)
     while True:
@@ -2134,6 +2253,12 @@ def _restore_claimed_request_after_timeout(
         except FileExistsError:
             retry_ns += 1
             continue
+        try:
+            _move_stage_receipt(path, target)
+        except Exception:
+            target.unlink(missing_ok=True)
+            _fsync_directory(request_path)
+            raise
         _fsync_directory(request_path)
         path.unlink()
         _fsync_directory(path.parent)
@@ -2819,22 +2944,15 @@ def _claim_replacement_forecast_live_materialization_queue_locked(
     claimable: list[Path] = []
     inflight_deferred = 0
     timeout_retry_deferred = 0
-    probability_debt = _current_probability_debt_families()
     now = time.time()
     for path in requests:
         payload = _load_request_payload_for_coalescing(path)
-        _base, attempt, retry_at = _timeout_retry_state(path)
-        # SCOPE: only an exact chain-confirmed family whose held q is currently
-        # stale, and only through its fifth prior timeout. DRAIN: one bounded
-        # current-capital subprocess gets the longer timeout below. RESET: a
-        # fresh monitor q removes the family immediately; a sixth timeout
-        # restores normal exponential backoff so one impossible family cannot
-        # monopolize the sole writer forever.
-        rescue_current_capital = (
-            _request_family_scope(payload) in probability_debt
-            and attempt <= CURRENT_CAPITAL_TIMEOUT_RESCUE_MAX_PRIOR_ATTEMPTS
-        )
-        if retry_at is not None and retry_at > now and not rescue_current_capital:
+        _base, _attempt, retry_at = _timeout_retry_state(path)
+        # Every retry remains ineligible until its durable retry_at.  A held
+        # Day0 observation-advance timeout is written with a one-second delay
+        # and then wins at claim time only while q is still stale; it never
+        # bypasses its own delay or monopolizes the single writer.
+        if retry_at is not None and retry_at > now:
             timeout_retry_deferred += 1
             continue
         key = _request_coalescing_key(payload) if payload is not None else None
@@ -3063,7 +3181,6 @@ def _process_claimed_materialization_batch(
             skipped_count=0,
             reason_codes=("REPLACEMENT_LIVE_MATERIALIZATION_QUEUE_EMPTY",),
         )
-    probability_debt = _current_probability_debt_families()
     priority = _cycle_advance_seed_priority_map(forecast_db, request_files)
     requests = tuple(
         sorted(
@@ -3086,6 +3203,8 @@ def _process_claimed_materialization_batch(
     source_cycles_awaiting_ensemble: list[str] = []
     write_deferred: list[str] = []
     timed_out_requests: list[str] = []
+    timeout_stage_reasons: list[str] = []
+    deadline_deferred_reasons: list[str] = []
     pending: list[_PendingMaterialization] = []
     marker_dir = marker_dir or request_path.parent / "blocked_attempts"
     for input_json in requests[:limit]:
@@ -3225,18 +3344,22 @@ def _process_claimed_materialization_batch(
             processed.append(str(receipt))
             unchanged_success.append(str(receipt))
             continue
+        child_deadline = _child_deadline_at()
+        _write_stage_receipt(
+            input_json,
+            stage="open_read_snapshot",
+            deadline_at=child_deadline,
+        )
         pending.append(
             _PendingMaterialization(
                 input_json=input_json,
-                command=_materialization_command(input_json),
+                command=_materialization_command(
+                    input_json,
+                    deadline_at=child_deadline,
+                ),
                 request_payload=request_payload,
                 marker_path=marker_path,
                 attempt_fingerprint=attempt_fingerprint,
-                timeout_seconds=(
-                    _current_capital_materialization_timeout_seconds()
-                    if _request_family_scope(request_payload) in probability_debt
-                    else None
-                ),
             )
         )
     if runner is None:
@@ -3266,17 +3389,30 @@ def _process_claimed_materialization_batch(
             "stderr": completed.stderr,
         }
         if timed_out:
+            stage_receipt = _read_stage_receipt(input_json)
+            stage = str((stage_receipt or {}).get("stage") or "unknown")
             try:
                 payload["timeout_seconds"] = json.loads(completed.stderr).get(
                     "timeout_seconds"
                 )
             except (TypeError, json.JSONDecodeError):
                 payload["timeout_seconds"] = None
+            timeout_reason = f"REPLACEMENT_LIVE_MATERIALIZATION_TIMEOUT_{stage.upper()}"
             payload["reason_codes"] = [
-                "REPLACEMENT_LIVE_MATERIALIZATION_REQUEST_TIMEOUT"
+                "REPLACEMENT_LIVE_MATERIALIZATION_REQUEST_TIMEOUT",
+                timeout_reason,
             ]
+            payload["stage_receipt"] = stage_receipt
+            timeout_stage_reasons.append(timeout_reason)
         result_reason_codes = _subprocess_result_reason_codes(completed)
         result_status = _subprocess_result_status(completed)
+        deadline_deferred = (
+            result_status == "DEFERRED"
+            and any(
+                reason.startswith("REPLACEMENT_LIVE_MATERIALIZATION_DEADLINE_")
+                for reason in result_reason_codes
+            )
+        )
         if completed.returncode == 0:
             if item.marker_path is not None:
                 try:
@@ -3307,12 +3443,17 @@ def _process_claimed_materialization_batch(
                     result_evidence=result_evidence,
                 )
                 processed.append(str(receipt))
-        elif timed_out:
+        elif timed_out or deadline_deferred:
             restored = _restore_claimed_request_after_timeout(
                 input_json,
                 retry_path or request_path,
+                capital_protection=_is_current_capital_protection_timeout_retry(
+                    input_json,
+                    item.request_payload,
+                ),
             )
             timed_out_requests.append(str(restored))
+            deadline_deferred_reasons.extend(result_reason_codes)
         elif (
             item.request_payload is not None
             and _STALE_DAY0_ENQUEUE_OWNER_REASON in result_reason_codes
@@ -3403,6 +3544,8 @@ def _process_claimed_materialization_batch(
             "replacement forecast materializations timed out and were deferred: count=%d",
             len(timed_out_requests),
         )
+    reasons.extend(dict.fromkeys(timeout_stage_reasons))
+    reasons.extend(dict.fromkeys(deadline_deferred_reasons))
     if failed:
         reasons.append("REPLACEMENT_LIVE_MATERIALIZATION_REQUEST_FAILED")
     if committed_posterior_count > reactor_wake_published_count:
