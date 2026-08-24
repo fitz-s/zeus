@@ -6774,6 +6774,12 @@ def init_schema_trade_only(conn: sqlite3.Connection) -> None:
     # required there).
     from src.state.schema.wallet_fill_observations_schema import ensure_table as _ensure_wallet_fill_observations_table
     _ensure_wallet_fill_observations_table(conn)
+    # reversal_plan_tier0_2026-08-24 item 3b: append-only per-auction-candidate
+    # provenance (the frozen selection-lift preregistration's data requirement).
+    # Sole writer: src.engine.global_batch_runtime._persist_tier0_candidate_set,
+    # same trade connection/transaction as the existing global auction receipt.
+    from src.state.schema.tier0_candidate_set_provenance_schema import ensure_table as _ensure_tier0_candidate_set_provenance_table
+    _ensure_tier0_candidate_set_provenance_table(conn)
     try:
         conn.execute("ALTER TABLE trade_decisions ADD COLUMN env TEXT NOT NULL DEFAULT 'live';")
     except sqlite3.OperationalError:

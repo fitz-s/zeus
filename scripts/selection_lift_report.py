@@ -4,20 +4,24 @@
 #   (FROZEN) — reversal_plan_tier0_2026-08-24.md item 7.
 """Read-only Tier-0 ordinal selection-lift report (preregistered test).
 
-ANALYTICS ONLY. Opens state/zeus-world.db strictly read-only (sqlite3 URI
+ANALYTICS ONLY. Opens state/zeus_trades.db strictly read-only (sqlite3 URI
 ``mode=ro&immutable=0``, matching scripts/scoreboard_panels.py's open_ro).
 Never writes to any DB, never authorizes a live decision.
 
 INTERFACE CONTRACT — Item 3 (decision certificate candidate-set provenance,
-reversal_plan_tier0_2026-08-24.md) had NOT landed as of 2026-08-24 when this
-script was written: `rg -n "candidate" src/state/schema/` finds no
-candidate-set persistence table, and `git log --oneline` on this branch
-shows no commit adding one. Rather than guess at Item 3's eventual shape,
-this loader is written against a documented interface contract:
+reversal_plan_tier0_2026-08-24.md) landed the table below on the TRADE DB
+(state/zeus_trades.db), not world.db: its sole writer,
+src.engine.global_batch_runtime._persist_tier0_candidate_set, shares the
+exact trade connection/transaction as the existing global auction receipt
+write (K1/INV-37 single-DB write). The ``--world`` flag below predates that
+landing (written when the table's eventual home was still undecided) and
+keeps its name for CLI/test compatibility, but its DEFAULT now points at the
+trade DB where the data actually lives; pass a different path explicitly if
+you need to point elsewhere.
 
-  Table ``tier0_candidate_set_provenance`` (name TBD by Item 3 — update
-  CANDIDATE_SET_TABLE and load_opportunity_sets() once it lands), one row
-  per considered candidate:
+  Table ``tier0_candidate_set_provenance`` — schema:
+  src/state/schema/tier0_candidate_set_provenance_schema.py — one row per
+  considered candidate:
 
     city_date_group_id TEXT  -- groups rows into one opportunity set (one
                                  live Tier-0 auction decision)
@@ -240,7 +244,15 @@ def render_report(
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", default=".", help="Repo root (DB path is relative to this).")
-    parser.add_argument("--world", default="state/zeus-world.db", help="World DB path (relative to --root).")
+    parser.add_argument(
+        "--world",
+        default="state/zeus_trades.db",
+        help=(
+            "DB path holding tier0_candidate_set_provenance, relative to --root "
+            "(flag name kept for compatibility; the table lives on the trade DB "
+            "per K1/INV-37, not world.db -- see module docstring)."
+        ),
+    )
     parser.add_argument("--n-perm", type=int, default=10000, help="Permutation count (default 10000).")
     parser.add_argument("--n-boot", type=int, default=10000, help="Bootstrap draw count (default 10000).")
     parser.add_argument("--seed", type=int, default=DEFAULT_SEED, help=f"RNG seed (default {DEFAULT_SEED}).")

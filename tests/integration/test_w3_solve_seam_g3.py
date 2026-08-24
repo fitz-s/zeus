@@ -15562,6 +15562,446 @@ def test_global_winner_binding_does_not_reapply_legacy_price_floor(monkeypatch):
         )
 
 
+def _decision_p0_test_snapshot(
+    *,
+    snapshot_id: str,
+    selected_outcome_token_id: str,
+    captured_at: _dt.datetime,
+    orderbook_top_bid: Decimal | None,
+    orderbook_top_ask: Decimal | None,
+) -> ExecutableMarketSnapshot:
+    return ExecutableMarketSnapshot(
+        snapshot_id=snapshot_id,
+        gamma_market_id="gamma-35c",
+        event_id="market-event-35c",
+        event_slug="event-35c",
+        condition_id="condition-35c",
+        question_id="question-35c",
+        yes_token_id="yes-35c",
+        no_token_id="no-35c",
+        selected_outcome_token_id=selected_outcome_token_id,
+        outcome_label="NO" if selected_outcome_token_id == "no-35c" else "YES",
+        enable_orderbook=True,
+        active=True,
+        closed=False,
+        accepting_orders=True,
+        market_start_at=None,
+        market_end_at=None,
+        market_close_at=None,
+        sports_start_at=None,
+        min_tick_size=Decimal("0.01"),
+        min_order_size=Decimal("1"),
+        fee_details=canonicalize_fee_details(
+            {"fee_rate_fraction": 0.0},
+            source="fixture",
+            token_id=selected_outcome_token_id,
+        ),
+        token_map_raw={},
+        rfqe=None,
+        neg_risk=False,
+        orderbook_top_bid=orderbook_top_bid,
+        orderbook_top_ask=orderbook_top_ask,
+        orderbook_depth_jsonb=json.dumps(
+            {
+                "bids": (
+                    [{"price": str(orderbook_top_bid), "size": "100"}]
+                    if orderbook_top_bid is not None
+                    else []
+                ),
+                "asks": (
+                    [{"price": str(orderbook_top_ask), "size": "100"}]
+                    if orderbook_top_ask is not None
+                    else []
+                ),
+            }
+        ),
+        raw_gamma_payload_hash="a" * 64,
+        raw_clob_market_info_hash="b" * 64,
+        raw_orderbook_hash="c" * 64,
+        authority_tier="CLOB",
+        captured_at=captured_at,
+        freshness_deadline=captured_at + _dt.timedelta(seconds=180),
+    )
+
+
+def test_decision_p0_reads_side_correct_top_of_book_from_sealed_snapshot():
+    """reversal_plan_tier0_2026-08-24 item 3a: decision_p0 for a BUY is the
+    venue ASK on the exact traded token, read from the SAME snapshot_id the
+    entry's economics are sealed to -- never the limit price, never a fill."""
+    conn = sqlite3.connect(":memory:")
+    init_snapshot_schema(conn)
+    at = _dt.datetime(2026, 7, 14, 16, 24, tzinfo=_dt.timezone.utc)
+    insert_snapshot(
+        conn,
+        _decision_p0_test_snapshot(
+            snapshot_id="snapshot-current",
+            selected_outcome_token_id="no-35c",
+            captured_at=at,
+            orderbook_top_bid=Decimal("0.008"),
+            orderbook_top_ask=Decimal("0.01"),
+        ),
+        capture_trigger="JIT_SUBMIT",
+    )
+
+    buy_p0, buy_source = era._decision_p0_from_book_snapshot(
+        conn,
+        snapshot_id="snapshot-current",
+        token_id="no-35c",
+        action="BUY",
+    )
+    assert buy_p0 == Decimal("0.01")
+    assert buy_source == "snapshot-current"
+
+    sell_p0, sell_source = era._decision_p0_from_book_snapshot(
+        conn,
+        snapshot_id="snapshot-current",
+        token_id="no-35c",
+        action="SELL",
+    )
+    assert sell_p0 == Decimal("0.008")
+    assert sell_source == "snapshot-current"
+
+
+def test_decision_p0_absent_when_snapshot_lacks_side_quote_or_conn_or_token():
+    """Fail-closed per item 3a: a one-sided book, a missing trade_conn, and a
+    token mismatch against the snapshot's selected_outcome_token_id must all
+    leave decision_p0 (and its source) as None -- never guessed."""
+    conn = sqlite3.connect(":memory:")
+    init_snapshot_schema(conn)
+    at = _dt.datetime(2026, 7, 14, 16, 24, tzinfo=_dt.timezone.utc)
+    insert_snapshot(
+        conn,
+        _decision_p0_test_snapshot(
+            snapshot_id="one-sided-snapshot",
+            selected_outcome_token_id="no-35c",
+            captured_at=at,
+            orderbook_top_bid=Decimal("0.008"),
+            orderbook_top_ask=None,
+        ),
+        capture_trigger="JIT_SUBMIT",
+    )
+
+    # One-sided book: no ask to lift on a BUY.
+    p0, source = era._decision_p0_from_book_snapshot(
+        conn,
+        snapshot_id="one-sided-snapshot",
+        token_id="no-35c",
+        action="BUY",
+    )
+    assert (p0, source) == (None, None)
+
+    # No trade_conn at all.
+    p0, source = era._decision_p0_from_book_snapshot(
+        None,
+        snapshot_id="one-sided-snapshot",
+        token_id="no-35c",
+        action="SELL",
+    )
+    assert (p0, source) == (None, None)
+
+    # Snapshot exists but for a different token than the one being traded.
+    p0, source = era._decision_p0_from_book_snapshot(
+        conn,
+        snapshot_id="one-sided-snapshot",
+        token_id="yes-35c",
+        action="SELL",
+    )
+    assert (p0, source) == (None, None)
+
+    # Snapshot id that was never persisted.
+    p0, source = era._decision_p0_from_book_snapshot(
+        conn,
+        snapshot_id="missing-snapshot",
+        token_id="no-35c",
+        action="BUY",
+    )
+    assert (p0, source) == (None, None)
+
+
+def test_global_candidate_decision_p0_reads_buy_ask_and_sell_bid_top_of_book():
+    """reversal_plan_tier0_2026-08-24 item 3b: per-candidate decision_p0 uses
+    the candidate's own already-sealed curve -- ascending asks ladder
+    (levels[0] = best ask) for BUY, descending bids ladder (levels[0] = best
+    bid) for SELL -- with no DB read, matching decision_p0's semantics for
+    the winner's certificate."""
+    from src.solve import solver as _solver
+
+    at = _dt.datetime(2026, 7, 14, 16, 24, tzinfo=_dt.timezone.utc)
+    buy_candidate = _global_test_buy_candidate(
+        family_key="family-buy",
+        probability_witness_identity="q-buy",
+        book_identity="buy",
+        price="0.49",
+        captured_at=at,
+        candidate_id="buy-1",
+        condition_id="condition-buy",
+        token_id="token-buy",
+    )
+    buy_p0, buy_source = _solver._global_candidate_decision_p0(
+        buy_candidate, is_sell=False
+    )
+    assert buy_p0 == Decimal("0.49")
+    assert buy_source == buy_candidate.book_snapshot_id
+
+    sell_curve = ExecutableSellCurve(
+        token_id="sell-token",
+        side="YES",
+        snapshot_id="sell-snapshot",
+        book_hash="sell-hash",
+        levels=(
+            BookLevel(price=Decimal("0.30"), size=Decimal("1")),
+            BookLevel(price=Decimal("0.40"), size=Decimal("1")),
+        ),
+        fee_model=FeeModel(fee_rate=Decimal("0")),
+        min_tick=Decimal("0.01"),
+        min_order_size=Decimal("1"),
+        quote_ttl=_dt.timedelta(seconds=30),
+    )
+    sell_candidate = GlobalSingleOrderSellCandidate(
+        candidate_id="sell-1",
+        family_key="family-sell",
+        bin_id="sell-bin",
+        condition_id="condition-sell",
+        side="YES",
+        token_id="sell-token",
+        position_id="position-sell",
+        held_shares=Decimal("1"),
+        probability_witness_identity="q-sell",
+        book_snapshot_id=sell_curve.snapshot_id,
+        book_captured_at_utc=at,
+        execution_curve_identity=executable_curve_identity(sell_curve),
+        ledger_snapshot_id="sell-ledger",
+        executable_sell_curve=sell_curve,
+        resolution_identity="sell-resolution",
+        neg_risk=False,
+        **_explicit_sell_maker_terms(sell_curve, capacity=Decimal("1")),
+    )
+    # descending-sorted: best (highest) bid first, regardless of input order.
+    sell_p0, sell_source = _solver._global_candidate_decision_p0(
+        sell_candidate, is_sell=True
+    )
+    assert sell_p0 == Decimal("0.40")
+    assert sell_source == sell_candidate.book_snapshot_id
+
+
+def test_persist_tier0_candidate_set_writes_winner_and_rejected_rows_idempotently():
+    """reversal_plan_tier0_2026-08-24 item 3b verification (c)+(d): a 3-
+    candidate auction (1 selected, 2 rejected) writes 3 rows with correct
+    flags/reasons/p0, keyed to the auction identity; replaying the same
+    persist call is idempotent (no duplicate rows).
+
+    The SELECTED and scored-then-REJECTED-SELL evaluations reuse the exact
+    coherent-economics shape from
+    test_global_auction_receipt_persists_complete_buy_sell_hold_cash_comparison
+    above (GlobalSingleOrderCandidateEvaluation.__post_init__ enforces tight
+    cross-field invariants on any evaluation carrying scores) so this test
+    exercises _persist_tier0_candidate_set against real, validated evaluation
+    shapes rather than a hand-rolled fixture that would fight the invariant.
+    """
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    decision_at = _dt.datetime(2026, 7, 14, 12, 0, tzinfo=_dt.timezone.utc)
+    win_q = 0.55
+    expected_du = (1.0 - win_q) * math.log(0.9412) + win_q * math.log(1.0612)
+    selected_terminal = ExpectedBuyTerminalWealthCertificate(
+        probability_basis="POSTERIOR_PREDICTIVE_MEAN",
+        win_probability_mean=win_q,
+        loss_probability_mean=1.0 - win_q,
+        loss_payoff_usd=Decimal("-5.88"),
+        win_payoff_usd=Decimal("6.12"),
+        wealth_after_loss_usd=Decimal("94.12"),
+        wealth_after_win_usd=Decimal("106.12"),
+        expected_delta_log_wealth=expected_du,
+        expected_ev_usd=0.72,
+    )
+    selected_growth = ExpectedGrowthComparison(
+        probability_basis="POSTERIOR_PREDICTIVE_MEAN",
+        probability_witness_identity="q-a",
+        expected_delta_log_wealth=expected_du,
+        expected_ev_usd=0.72,
+        capital_lock_hours=10.0,
+        expected_log_growth_per_hour=expected_du / 10.0,
+        expected_capital_efficiency=expected_du / 5.88,
+    )
+    rejected_sell_terminal = BinaryTerminalWealthCertificate(
+        win_probability_lcb=0.1,
+        loss_probability_ucb=0.9,
+        loss_payoff_usd=Decimal("-2.34"),
+        win_payoff_usd=Decimal("10"),
+        median_payoff_usd=Decimal("-2.34"),
+        wealth_after_loss_usd=Decimal("97.66"),
+        wealth_after_win_usd=Decimal("110"),
+        expected_value_usd=-1.106,
+    )
+    evaluations = (
+        GlobalSingleOrderCandidateEvaluation(
+            candidate_id="cand-selected",
+            family_key="family-a",
+            bin_id="bin-a",
+            condition_id="condition-a",
+            side="YES",
+            token_id="token-a",
+            action="BUY",
+            status="SELECTED",
+            shares=Decimal("12"),
+            cost_usd=Decimal("5.88"),
+            robust_delta_log_wealth=0.0,
+            robust_ev_usd=0.0,
+            capital_efficiency=0.0,
+            capital_action_mode="SETTLEMENT_LOCKED_BUY",
+            buy_sizing_mode="FRACTIONAL_TARGET",
+            resolution_at_utc=decision_at + _dt.timedelta(hours=10),
+            capital_lock_hours=10.0,
+            limit_price=Decimal("0.49"),
+            expected_fill_price_before_fee=Decimal("0.49"),
+            max_spend_usd=Decimal("5.88"),
+            current_token_shares=Decimal("0"),
+            full_kelly_target_shares=Decimal("40"),
+            fractional_kelly_target_shares=Decimal("12"),
+            expected_terminal_wealth=selected_terminal,
+            expected_growth=selected_growth,
+            decision_p0=Decimal("0.12"),
+            decision_p0_source="snapshot-a",
+        ),
+        GlobalSingleOrderCandidateEvaluation(
+            candidate_id="cand-rejected-1",
+            family_key="family-a",
+            bin_id="bin-b",
+            condition_id="condition-b",
+            side="NO",
+            token_id="token-b",
+            action="BUY",
+            status="REJECTED",
+            rejection_reason="ADMISSION_CAPITAL_EFFICIENCY_LCB_EV",
+            decision_p0=Decimal("0.08"),
+            decision_p0_source="snapshot-b",
+        ),
+        GlobalSingleOrderCandidateEvaluation(
+            candidate_id="cand-rejected-2",
+            family_key="family-c",
+            bin_id="bin-c",
+            condition_id="condition-c",
+            side="NO",
+            token_id="token-c",
+            action="SELL",
+            status="REJECTED",
+            execution_mode="MAKER_REST",
+            fill_probability=0.19,
+            fill_probability_source="test_measured_maker_fill",
+            rest_deadline_minutes=20.0,
+            position_id="position-c",
+            held_shares=Decimal("12.34"),
+            rejection_reason="NON_POSITIVE_ROBUST_OBJECTIVE",
+            shares=Decimal("12.34"),
+            cost_usd=Decimal("2.34"),
+            cash_proceeds_usd=Decimal("10"),
+            robust_delta_log_wealth=-0.01,
+            robust_ev_usd=-1.106,
+            capital_efficiency=-0.004273504273504274,
+            capital_action_mode="CONTINGENT_MAKER_REST_SELL",
+            resolution_at_utc=decision_at + _dt.timedelta(hours=30),
+            capital_lock_hours=48.0,
+            robust_log_growth_per_hour=-0.01 / 48.0,
+            limit_price=Decimal("0.80"),
+            expected_fill_price_before_fee=Decimal("0.81"),
+            terminal_wealth=rejected_sell_terminal,
+            decision_p0=None,
+            decision_p0_source=None,
+        ),
+    )
+    family_context_by_key = {
+        "family-a": {"city": "Denver", "target_date": "2026-08-01"},
+        "family-c": {"city": "Denver", "target_date": "2026-08-01"},
+    }
+    global_batch_runtime._persist_tier0_candidate_set(
+        conn,
+        evaluations=evaluations,
+        selection_epoch_identity="epoch-1",
+        decision_at_utc=decision_at,
+        family_context_by_key=family_context_by_key,
+    )
+    rows = conn.execute(
+        "SELECT * FROM tier0_candidate_set_provenance ORDER BY candidate_id"
+    ).fetchall()
+    assert len(rows) == 3
+    by_id = {row["candidate_id"]: row for row in rows}
+
+    selected = by_id["cand-selected"]
+    assert selected["selected"] == 1
+    assert selected["eligible"] == 1
+    assert selected["rejection_reason"] is None
+    assert selected["p0"] == pytest.approx(0.12)
+    assert selected["p0_source"] == "snapshot-a"
+    assert selected["market_key"] == "condition-a"
+    assert selected["lead_bucket"] == "L00_24"
+    assert selected["selection_epoch_identity"] == "epoch-1"
+    assert selected["city_date_group_id"] == "epoch-1:Denver:2026-08-01"
+
+    rejected_1 = by_id["cand-rejected-1"]
+    assert rejected_1["selected"] == 0
+    assert rejected_1["eligible"] == 0
+    assert rejected_1["rejection_reason"] == "ADMISSION_CAPITAL_EFFICIENCY_LCB_EV"
+    assert rejected_1["p0"] == pytest.approx(0.08)
+    assert rejected_1["p0_source"] == "snapshot-b"
+    # No resolution_at_utc on this bare (unscored) rejection -> not derivable.
+    assert rejected_1["lead_bucket"] is None
+
+    rejected_2 = by_id["cand-rejected-2"]
+    assert rejected_2["selected"] == 0
+    assert rejected_2["eligible"] == 0
+    assert rejected_2["p0"] is None
+    assert rejected_2["p0_source"] is None
+    # resolution_at_utc = decision_at + 30h -> L24_48.
+    assert rejected_2["lead_bucket"] == "L24_48"
+    assert rejected_2["market_key"] == "condition-c"
+
+    # Idempotent replay: same rows, no duplicates.
+    global_batch_runtime._persist_tier0_candidate_set(
+        conn,
+        evaluations=evaluations,
+        selection_epoch_identity="epoch-1",
+        decision_at_utc=decision_at,
+        family_context_by_key=family_context_by_key,
+    )
+    replayed = conn.execute(
+        "SELECT COUNT(*) FROM tier0_candidate_set_provenance"
+    ).fetchone()[0]
+    assert replayed == 3
+
+
+def test_persist_tier0_candidate_set_skips_candidates_without_city_date_context():
+    """Fail-closed: a candidate whose family_key has no resolvable
+    (city, target_date) is skipped entirely rather than written with a
+    fabricated/empty grouping key."""
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    decision_at = _dt.datetime(2026, 7, 14, 12, 0, tzinfo=_dt.timezone.utc)
+    evaluations = (
+        GlobalSingleOrderCandidateEvaluation(
+            candidate_id="cand-no-context",
+            family_key="family-unknown",
+            bin_id="bin-a",
+            condition_id="condition-a",
+            side="YES",
+            token_id="token-a",
+            action="BUY",
+            status="REJECTED",
+            rejection_reason="ADMISSION_CAPITAL_EFFICIENCY_LCB_EV",
+        ),
+    )
+    global_batch_runtime._persist_tier0_candidate_set(
+        conn,
+        evaluations=evaluations,
+        selection_epoch_identity="epoch-1",
+        decision_at_utc=decision_at,
+        family_context_by_key={},
+    )
+    row = conn.execute(
+        "SELECT COUNT(*) FROM tier0_candidate_set_provenance"
+    ).fetchone()
+    assert row[0] == 0
+
+
 @pytest.mark.parametrize(
     ("reason", "status"),
     (

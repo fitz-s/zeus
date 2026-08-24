@@ -3247,6 +3247,100 @@ def _compact_buy_rejection_group(
     }
 
 
+def _persist_tier0_candidate_set(
+    conn: sqlite3.Connection,
+    *,
+    evaluations: Sequence[object],
+    selection_epoch_identity: str,
+    decision_at_utc: datetime,
+    family_context_by_key: Mapping[str, Mapping[str, str]] | None,
+) -> None:
+    """reversal_plan_tier0_2026-08-24 item 3b: append-only per-candidate
+    provenance for one winner-producing auction cut.
+
+    Caller-gated: fires only from the mode='global_single_order_auction'
+    completed-auction write inside _store_global_auction_receipt when
+    decision.no_trade_reason is None (a real winner was selected) -- never
+    from the compact delta/duplicate persist branch of the same function,
+    which fires far more often and would blow the "~dozens/day" volume
+    budget. Same trade-DB connection and transaction as the auction receipt
+    write itself (K1/INV-37 single-DB write).
+
+    One row per evaluated candidate (selected and rejected alike), keyed by
+    (selection_epoch_identity, candidate_id) with INSERT OR IGNORE so a
+    retried persist is idempotent. A candidate whose family_key has no
+    resolvable (city, target_date) in ``family_context_by_key`` is skipped
+    entirely rather than written with a fabricated/empty grouping key --
+    fail-closed, matching decision_p0's own "never guess" law.
+    """
+
+    if not evaluations:
+        return
+    from src.calibration.lead_bucket import lead_bucket
+    from src.state.schema.tier0_candidate_set_provenance_schema import (
+        ensure_table as _ensure_tier0_candidate_set_table,
+    )
+
+    _ensure_tier0_candidate_set_table(conn)
+    context_by_key = family_context_by_key or {}
+    created_at = datetime.now(timezone.utc).isoformat()
+    decision_at_iso = decision_at_utc.isoformat()
+    rows: list[tuple[object, ...]] = []
+    for evaluation in evaluations:
+        family_key = str(getattr(evaluation, "family_key", "") or "")
+        context = context_by_key.get(family_key) or {}
+        city = str(context.get("city") or "").strip()
+        target_date = str(context.get("target_date") or "").strip()
+        if not city or not target_date:
+            continue
+        resolution_at_utc = getattr(evaluation, "resolution_at_utc", None)
+        bucket: str | None = None
+        if resolution_at_utc is not None:
+            lead_hours = (
+                resolution_at_utc - decision_at_utc
+            ).total_seconds() / 3600.0
+            if lead_hours >= 0:
+                bucket = lead_bucket(lead_hours)
+        decision_p0 = getattr(evaluation, "decision_p0", None)
+        status = str(getattr(evaluation, "status", "") or "")
+        rows.append(
+            (
+                selection_epoch_identity,
+                decision_at_iso,
+                f"{selection_epoch_identity}:{city}:{target_date}",
+                city,
+                target_date,
+                str(evaluation.candidate_id),
+                family_key,
+                str(evaluation.bin_id),
+                str(evaluation.side),
+                str(evaluation.token_id),
+                str(evaluation.action),
+                float(decision_p0) if decision_p0 is not None else None,
+                getattr(evaluation, "decision_p0_source", None),
+                bucket,
+                0 if status == "REJECTED" else 1,
+                getattr(evaluation, "rejection_reason", None),
+                1 if status == "SELECTED" else 0,
+                str(evaluation.condition_id),
+                created_at,
+            )
+        )
+    if not rows:
+        return
+    conn.executemany(
+        """
+        INSERT OR IGNORE INTO tier0_candidate_set_provenance (
+            selection_epoch_identity, decision_at_utc, city_date_group_id,
+            city, target_date, candidate_id, family_key, bin_id, side,
+            token_id, action, p0, p0_source, lead_bucket, eligible,
+            rejection_reason, selected, market_key, created_at
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        """,
+        rows,
+    )
+
+
 def _store_global_auction_receipt(
     conn,
     *,
@@ -3274,6 +3368,12 @@ def _store_global_auction_receipt(
     holding_probability_witnesses: Mapping[str, object] | None = None,
     wealth_reauction_audit: _WealthReauctionAudit | None = None,
     proof_counterfactual: Mapping[str, object] | None = None,
+    # reversal_plan_tier0_2026-08-24 item 3b: family_key -> {"city",
+    # "target_date", "metric"} for grouping the candidate-set provenance rows
+    # below into per-(city, target_date) opportunity sets. Optional/None-safe
+    # so callers that never light up Tier-0 candidate-set persistence (tests,
+    # any future caller that omits it) keep working unchanged.
+    family_context_by_key: Mapping[str, Mapping[str, str]] | None = None,
     persist_artifact: Callable[[object], int | None] | None = None,
 ) -> int | None:
     """Persist one complete auction comparison before any venue side effect."""
@@ -4330,6 +4430,19 @@ def _store_global_auction_receipt(
                 summary=receipt,
             ),
         )
+        if row_id is not None and getattr(decision, "no_trade_reason", None) is None:
+            # reversal_plan_tier0_2026-08-24 item 3b: candidate-set provenance
+            # only for a real winner, only on the full (non-delta,
+            # non-duplicate) completed-auction write -- see
+            # _persist_tier0_candidate_set docstring for the volume-control
+            # rationale.
+            _persist_tier0_candidate_set(
+                conn,
+                evaluations=evaluations,
+                selection_epoch_identity=selection_epoch_identity,
+                decision_at_utc=decision_at_utc,
+                family_context_by_key=family_context_by_key,
+            )
         if row_id is not None:
             mode = "global_single_order_auction"
             current_receipt_hash = str(receipt["receipt_hash"])
@@ -8256,6 +8369,7 @@ def process_current_global_batch(
                 holding_probability_witnesses=attempt_probabilities,
                 wealth_reauction_audit=wealth_reauction_audit,
                 proof_counterfactual=proof_counterfactual,
+                family_context_by_key=family_context_by_key,
                     persist_artifact=_global_auction_artifact_persister(
                         trade_conn,
                         work_context=work_context,
