@@ -591,6 +591,91 @@ def test_held_quote_sqlite_deadline_interrupts_a_long_statement_after_connection
         conn.close()
 
 
+def test_held_quote_sqlite_deadline_restores_nested_handler_and_busy_timeout():
+    from src.ingest import price_channel_ingest as lane
+
+    class _TrackedConnection:
+        def __init__(self):
+            self._conn = sqlite3.connect(":memory:")
+            self.progress_calls: list[tuple[object, int]] = []
+
+        def __getattr__(self, name):
+            return getattr(self._conn, name)
+
+        def set_progress_handler(self, handler, interval):
+            self.progress_calls.append((handler, interval))
+            self._conn.set_progress_handler(handler, interval)
+
+    conn = _TrackedConnection()
+    conn.execute("PRAGMA busy_timeout = 321")
+    try:
+        with lane._held_quote_sqlite_deadline(
+            conn,
+            deadline_monotonic=time.monotonic() + 1.0,
+        ):
+            outer_busy = conn.execute("PRAGMA busy_timeout").fetchone()[0]
+            with lane._held_quote_sqlite_deadline(
+                conn,
+                deadline_monotonic=time.monotonic() + 0.5,
+            ):
+                assert conn.execute("PRAGMA busy_timeout").fetchone()[0] <= outer_busy
+            assert conn.execute("PRAGMA busy_timeout").fetchone()[0] == outer_busy
+        assert conn.execute("PRAGMA busy_timeout").fetchone()[0] == 321
+        assert conn.progress_calls[0][1] == 1_000
+        assert conn.progress_calls[2][0] is conn.progress_calls[0][0]
+        assert conn.progress_calls[-1] == (None, 0)
+        with pytest.raises(RuntimeError, match="cleanup"):
+            with lane._held_quote_sqlite_deadline(
+                conn,
+                deadline_monotonic=time.monotonic() + 1.0,
+            ):
+                raise RuntimeError("cleanup")
+        assert conn.execute("PRAGMA busy_timeout").fetchone()[0] == 321
+        assert conn.progress_calls[-1] == (None, 0)
+    finally:
+        conn.close()
+
+
+def test_held_quote_sqlite_deadline_interrupts_delayed_write_lock(tmp_path):
+    """Busy lock waiting is bounded even though SQLite progress callbacks do not run."""
+    from src.ingest import price_channel_ingest as lane
+
+    db_path = tmp_path / "held-deadline.db"
+    bootstrap = sqlite3.connect(db_path)
+    bootstrap.execute("CREATE TABLE facts (value TEXT)")
+    bootstrap.commit()
+    bootstrap.close()
+    locked = Event()
+
+    def _hold_writer() -> None:
+        holder = sqlite3.connect(db_path)
+        try:
+            holder.execute("BEGIN IMMEDIATE")
+            holder.execute("INSERT INTO facts VALUES ('holder')")
+            locked.set()
+            time.sleep(0.25)
+            holder.commit()
+        finally:
+            holder.close()
+
+    holder = threading.Thread(target=_hold_writer, daemon=True)
+    holder.start()
+    assert locked.wait(timeout=1.0)
+    waiter = sqlite3.connect(db_path, timeout=5.0)
+    started = time.monotonic()
+    try:
+        with pytest.raises(TimeoutError, match="deadline elapsed during SQLite execution"):
+            with lane._held_quote_sqlite_deadline(
+                waiter,
+                deadline_monotonic=started + 0.05,
+            ):
+                waiter.execute("INSERT INTO facts VALUES ('waiter')")
+        assert time.monotonic() - started < 0.15
+    finally:
+        waiter.close()
+        holder.join(timeout=1.0)
+
+
 def test_background_quote_connection_disables_sqlite_autocheckpoint():
     from src.ingest import price_channel_ingest as lane
 

@@ -3698,7 +3698,7 @@ def test_held_quote_refresh_skips_rest_when_ws_generation_covers_all(monkeypatch
     monkeypatch.setattr(
         lane,
         "_edli_held_position_priority_token_ids",
-        lambda conn: {"yes-token", "no-token"},
+        lambda conn, **_kwargs: {"yes-token", "no-token"},
     )
     monkeypatch.setattr(lane, "_edli_canonical_open_held_pairs", lambda conn: set())
     seen = {}
@@ -4039,7 +4039,7 @@ def test_held_position_quote_refresh_backpressures_without_db_write_or_clob(monk
     monkeypatch.setattr(
         lane,
         "_edli_held_position_priority_token_ids",
-        lambda conn: ["yes-token", "no-token"],
+        lambda conn, **_kwargs: ["yes-token", "no-token"],
     )
     monkeypatch.setattr(
         lane,
@@ -4116,7 +4116,7 @@ def test_held_quote_refresh_skips_missing_metadata_tokens_to_refresh_tradeable_h
             "market_channel_held_quote_refresh_max_tokens_per_cycle": 2,
         } if name == "edli_v1" else default,
     )
-    monkeypatch.setattr(lane, "_edli_held_position_priority_token_ids", lambda conn: set(ordered))
+    monkeypatch.setattr(lane, "_edli_held_position_priority_token_ids", lambda conn, **_kwargs: set(ordered))
     monkeypatch.setattr(lane, "_edli_canonical_open_held_pairs", lambda conn: set())
     monkeypatch.setattr(lane, "_edli_order_token_ids_by_feasibility_age", lambda conn, token_ids: ordered)
 
@@ -4218,7 +4218,7 @@ def test_held_quote_refresh_caps_selected_tokens_before_metadata_and_rest_seed(m
             "market_channel_held_quote_refresh_max_tokens_per_cycle": 3,
         } if name == "edli_v1" else default,
     )
-    monkeypatch.setattr(lane, "_edli_held_position_priority_token_ids", lambda conn: set(ordered))
+    monkeypatch.setattr(lane, "_edli_held_position_priority_token_ids", lambda conn, **_kwargs: set(ordered))
     monkeypatch.setattr(lane, "_edli_canonical_open_held_pairs", lambda conn: set())
     monkeypatch.setattr(lane, "_edli_order_token_ids_by_feasibility_age", lambda conn, token_ids: ordered)
 
@@ -4318,9 +4318,9 @@ def test_held_quote_refresh_admits_all_native_held_sides_before_audit_backlog(mo
     monkeypatch.setattr(
         lane,
         "_edli_held_position_priority_token_ids",
-        lambda conn: held | audit,
+        lambda conn, **_kwargs: held | audit,
     )
-    monkeypatch.setattr(lane, "_edli_unsettled_global_exit_audit_token_ids", lambda conn: set())
+    monkeypatch.setattr(lane, "_edli_unsettled_global_exit_audit_token_ids", lambda conn, **_kwargs: set())
     monkeypatch.setattr(
         lane,
         "_edli_tokens_requiring_rest_quote_refresh",
@@ -4417,8 +4417,8 @@ def test_held_quote_refresh_binds_db_bootstrap_and_finishes_native_before_audit(
     opened_deadlines = []
     seed_calls = []
     monkeypatch.setattr(lane, "_edli_canonical_open_held_pairs", lambda conn: {("condition-native", native)})
-    monkeypatch.setattr(lane, "_edli_held_position_priority_token_ids", lambda conn: {native, audit})
-    monkeypatch.setattr(lane, "_edli_unsettled_global_exit_audit_token_ids", lambda conn: {audit})
+    monkeypatch.setattr(lane, "_edli_held_position_priority_token_ids", lambda conn, **_kwargs: {native, audit})
+    monkeypatch.setattr(lane, "_edli_unsettled_global_exit_audit_token_ids", lambda conn, **_kwargs: {audit})
     monkeypatch.setattr(lane, "_edli_tokens_requiring_rest_quote_refresh", lambda conn, tokens, **kwargs: (sorted(tokens), 0))
     monkeypatch.setattr(lane, "_edli_order_token_ids_by_feasibility_age", lambda conn, tokens: sorted(tokens))
     monkeypatch.setattr(
@@ -4542,6 +4542,67 @@ def test_held_quote_refresh_turns_canonical_sql_deadline_into_truthful_debt(monk
     )
 
     result = lane._edli_refresh_held_position_quote_evidence(budget_seconds=0.025)
+
+    assert result["canonical_held_scope_unavailable"] is True
+    assert result["canonical_held_freshness_debt_token_ids"] == [
+        "CANONICAL_HELD_SCOPE_UNAVAILABLE"
+    ]
+    monkeypatch.setattr(lane, "_edli_refresh_held_position_quote_evidence", lambda: result)
+    assert lane._edli_held_quote_refresh_cycle() is result
+    assert recorded["failed"] is True
+    assert recorded["reason"] == "canonical_held_scope_unavailable"
+
+
+def test_held_quote_readers_reraise_deadline_interrupt_instead_of_empty_scope():
+    from src.ingest import price_channel_ingest as lane
+
+    class _InterruptedConnection:
+        def execute(self, *_args, **_kwargs):
+            raise sqlite3.OperationalError("interrupted")
+
+    deadline = time.monotonic() - 0.001
+    with pytest.raises(TimeoutError, match="deadline elapsed during SQLite reader"):
+        lane._edli_held_position_priority_token_ids(
+            _InterruptedConnection(),
+            deadline_monotonic=deadline,
+        )
+    with pytest.raises(TimeoutError, match="deadline elapsed during SQLite reader"):
+        lane._edli_unsettled_global_exit_audit_token_ids(
+            _InterruptedConnection(),
+            deadline_monotonic=deadline,
+        )
+
+
+def test_held_quote_refresh_turns_priority_reader_timeout_into_canonical_debt(monkeypatch):
+    from src.ingest import price_channel_ingest as lane
+    from src.observability import scheduler_health
+    from src.state import db as state_db
+
+    recorded = {}
+    monkeypatch.setattr(
+        state_db,
+        "get_trade_connection",
+        lambda *, write_class=None, deadline_monotonic=None: sqlite3.connect(":memory:"),
+    )
+    monkeypatch.setattr(
+        lane,
+        "_edli_canonical_open_held_pairs",
+        lambda conn: {("condition-held", "held-token")},
+    )
+    monkeypatch.setattr(
+        lane,
+        "_edli_held_position_priority_token_ids",
+        lambda conn, **_kwargs: (_ for _ in ()).throw(
+            TimeoutError("price-channel held quote refresh deadline elapsed during SQLite reader")
+        ),
+    )
+    monkeypatch.setattr(
+        scheduler_health,
+        "_write_scheduler_health",
+        lambda name, **kwargs: recorded.update(name=name, **kwargs),
+    )
+
+    result = lane._edli_refresh_held_position_quote_evidence(budget_seconds=1.0)
 
     assert result["canonical_held_scope_unavailable"] is True
     assert result["canonical_held_freshness_debt_token_ids"] == [
@@ -4714,8 +4775,8 @@ def test_held_snapshot_debt_rebuilds_from_exact_snapshot_outcome_not_queue_state
         "_edli_canonical_open_held_pairs",
         lambda conn: {("condition-held", "held-token")},
     )
-    monkeypatch.setattr(lane, "_edli_held_position_priority_token_ids", lambda conn: {"held-token"})
-    monkeypatch.setattr(lane, "_edli_unsettled_global_exit_audit_token_ids", lambda conn: set())
+    monkeypatch.setattr(lane, "_edli_held_position_priority_token_ids", lambda conn, **_kwargs: {"held-token"})
+    monkeypatch.setattr(lane, "_edli_unsettled_global_exit_audit_token_ids", lambda conn, **_kwargs: set())
     # The quote is current in this WS generation. Snapshot debt must still emit.
     monkeypatch.setattr(
         lane,
@@ -4894,8 +4955,8 @@ def test_held_quote_commit_tracks_exact_native_refresh_and_rejects_audit_only_co
         "_edli_canonical_open_held_pairs",
         lambda conn: {(f"condition-{native}", native)},
     )
-    monkeypatch.setattr(lane, "_edli_held_position_priority_token_ids", lambda conn: {native, audit})
-    monkeypatch.setattr(lane, "_edli_unsettled_global_exit_audit_token_ids", lambda conn: set())
+    monkeypatch.setattr(lane, "_edli_held_position_priority_token_ids", lambda conn, **_kwargs: {native, audit})
+    monkeypatch.setattr(lane, "_edli_unsettled_global_exit_audit_token_ids", lambda conn, **_kwargs: set())
     monkeypatch.setattr(
         lane,
         "_edli_tokens_requiring_rest_quote_refresh",
@@ -4999,7 +5060,7 @@ def test_held_quote_refresh_fails_closed_when_canonical_scope_query_fails(monkey
     def _canonical_failure(conn):  # noqa: ANN001
         raise lane._CanonicalHeldScopeUnavailable("canonical_open_held_query_failed:OperationalError")
 
-    def _broad_scope(conn):  # noqa: ANN001
+    def _broad_scope(conn, **_kwargs):  # noqa: ANN001
         nonlocal broad_called
         broad_called = True
         return {"audit-token"}
@@ -5159,7 +5220,7 @@ def test_candidate_quote_refresh_classifies_request_failure_separately_from_time
 
     token_id = "candidate-token"
     monkeypatch.setattr(lane, "_edli_candidate_priority_token_ids", lambda conn, *, limit: [token_id])
-    monkeypatch.setattr(lane, "_edli_held_position_priority_token_ids", lambda conn: set())
+    monkeypatch.setattr(lane, "_edli_held_position_priority_token_ids", lambda conn, **_kwargs: set())
     monkeypatch.setattr(lane, "_edli_open_rest_priority_token_ids", lambda conn: set())
     monkeypatch.setattr(lane, "_edli_tokens_requiring_rest_quote_refresh", lambda *args, **kwargs: ([token_id], 0))
     monkeypatch.setattr(lane, "_edli_order_token_ids_by_feasibility_age", lambda conn, token_ids: list(token_ids))
@@ -5255,7 +5316,7 @@ def test_candidate_quote_refresh_excludes_metadata_ineligible_tokens(monkeypatch
     from src.state import db as state_db
 
     monkeypatch.setattr(lane, "_edli_candidate_priority_token_ids", lambda conn, *, limit: ["ineligible-token"])
-    monkeypatch.setattr(lane, "_edli_held_position_priority_token_ids", lambda conn: set())
+    monkeypatch.setattr(lane, "_edli_held_position_priority_token_ids", lambda conn, **_kwargs: set())
     monkeypatch.setattr(lane, "_edli_open_rest_priority_token_ids", lambda conn: set())
     monkeypatch.setattr(lane, "_edli_tokens_requiring_rest_quote_refresh", lambda *args, **kwargs: (["ineligible-token"], 0))
     monkeypatch.setattr(lane, "_edli_order_token_ids_by_feasibility_age", lambda conn, token_ids: list(token_ids))
@@ -5359,7 +5420,7 @@ def test_candidate_quote_refresh_caps_selected_tokens_before_metadata_and_rest_s
         } if name == "edli_v1" else default,
     )
     monkeypatch.setattr(lane, "_edli_candidate_priority_token_ids", lambda conn, *, limit: ordered)
-    monkeypatch.setattr(lane, "_edli_held_position_priority_token_ids", lambda conn: set())
+    monkeypatch.setattr(lane, "_edli_held_position_priority_token_ids", lambda conn, **_kwargs: set())
     monkeypatch.setattr(lane, "_edli_open_rest_priority_token_ids", lambda conn: set())
     monkeypatch.setattr(lane, "_edli_order_token_ids_by_feasibility_age", lambda conn, token_ids: ordered)
 
@@ -5444,7 +5505,7 @@ def test_candidate_priority_quote_refresh_budget_is_not_capped_when_held_positio
         "_edli_candidate_priority_token_ids",
         lambda conn, *, limit: ["no-token"],
     )
-    monkeypatch.setattr(lane, "_edli_held_position_priority_token_ids", lambda conn: {"held-token"})
+    monkeypatch.setattr(lane, "_edli_held_position_priority_token_ids", lambda conn, **_kwargs: {"held-token"})
     monkeypatch.setattr(lane, "_edli_open_rest_priority_token_ids", lambda conn: set())
     monkeypatch.setattr(
         lane,

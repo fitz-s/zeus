@@ -140,10 +140,27 @@ _global_exit_audit_token_ids_lock = threading.Lock()
 _global_exit_audit_token_ids: set[str] = set()
 _held_quote_audit_token_ids_lock = threading.Lock()
 _held_quote_audit_token_ids: set[str] = set()
+_held_quote_sqlite_deadline_layers: dict[int, list[tuple[Callable[[], int], int, int, threading.Timer]]] = {}
 
 
 class _CanonicalHeldScopeUnavailable(RuntimeError):
     """The held monitor scope cannot be read safely from canonical TRADE truth."""
+
+
+def _canonical_held_scope_unavailable_result(exc: BaseException) -> dict:
+    return {
+        "canonical_held_scope_unavailable": True,
+        "canonical_held_scope_reason": str(exc),
+        "canonical_held_freshness_debt_scope": "open_native_held",
+        "canonical_held_freshness_debt_token_ids": [
+            "CANONICAL_HELD_SCOPE_UNAVAILABLE"
+        ],
+        "canonical_held_pair_count": 0,
+        "held_snapshot_fresh_pairs": [],
+        "held_snapshot_due_pairs": [],
+        "held_snapshot_refresh_debt_actions": [],
+        "held_quote_refresh_events": 0,
+    }
 
 
 MARKET_CHANNEL_HELD_SNAPSHOT_PROACTIVE_REFRESH_SECONDS = 120.0
@@ -575,7 +592,7 @@ def _bound_held_quote_sqlite_wait(
         raise TimeoutError(
             "price-channel held quote refresh deadline elapsed before DB write"
         )
-    remaining_ms = int(remaining * 1000.0)
+    remaining_ms = max(1, int(remaining * 1000.0))
     _bound_price_channel_sqlite_wait(
         conn,
         timeout_ms=min(PRICE_CHANNEL_QUOTE_DB_WRITE_MAX_HOLD_MS, remaining_ms),
@@ -584,10 +601,13 @@ def _bound_held_quote_sqlite_wait(
 
 @contextlib.contextmanager
 def _held_quote_sqlite_deadline(conn, *, deadline_monotonic: float):
-    """Interrupt a held-refresh SQLite statement when its wall-clock claim expires."""
+    """Bound one held-refresh SQLite unit and restore an enclosing deadline layer."""
 
     import sqlite3
 
+    previous_busy_timeout = int(
+        conn.execute("PRAGMA busy_timeout").fetchone()[0]
+    )
     _bound_held_quote_sqlite_wait(
         conn,
         deadline_monotonic=deadline_monotonic,
@@ -596,17 +616,54 @@ def _held_quote_sqlite_deadline(conn, *, deadline_monotonic: float):
     def _interrupt_at_deadline() -> int:
         return int(time.monotonic() >= deadline_monotonic)
 
+    key = id(conn)
+    layers = _held_quote_sqlite_deadline_layers.setdefault(key, [])
+    previous_handler, previous_interval = (
+        (layers[-1][0], layers[-1][1]) if layers else (None, 0)
+    )
+    remaining_seconds = max(0.0, deadline_monotonic - time.monotonic())
+    watchdog = threading.Timer(remaining_seconds, conn.interrupt)
+    watchdog.daemon = True
     conn.set_progress_handler(_interrupt_at_deadline, 1_000)
+    layers.append((_interrupt_at_deadline, 1_000, previous_busy_timeout, watchdog))
+    watchdog.start()
     try:
         yield
     except sqlite3.OperationalError as exc:
-        if time.monotonic() >= deadline_monotonic and "interrupted" in str(exc).lower():
+        detail = str(exc).lower()
+        if time.monotonic() >= deadline_monotonic and (
+            "interrupted" in detail or "locked" in detail
+        ):
             raise TimeoutError(
                 "price-channel held quote refresh deadline elapsed during SQLite execution"
             ) from exc
         raise
     finally:
-        conn.set_progress_handler(None, 0)
+        layers.pop()
+        watchdog.cancel()
+        conn.set_progress_handler(previous_handler, previous_interval)
+        _bound_price_channel_sqlite_wait(
+            conn,
+            timeout_ms=previous_busy_timeout,
+        )
+        if not layers:
+            _held_quote_sqlite_deadline_layers.pop(key, None)
+
+
+def _reraise_held_quote_reader_deadline(
+    exc: BaseException,
+    *,
+    deadline_monotonic: float | None,
+) -> None:
+    """Do not let schema-tolerant held readers turn a deadline interrupt into no risk."""
+
+    if deadline_monotonic is None or time.monotonic() < deadline_monotonic:
+        return
+    detail = str(exc).lower()
+    if "interrupted" in detail or "locked" in detail:
+        raise TimeoutError(
+            "price-channel held quote refresh deadline elapsed during SQLite reader"
+        ) from exc
 
 
 def _price_channel_clob_timeout(deadline_monotonic: float):
@@ -2916,7 +2973,11 @@ def _edli_candidate_priority_token_ids(world_conn, *, lookback_hours: float = 48
     return list(dict.fromkeys(str(row[0]) for row in rows if row and row[0]))[:requested_limit]
 
 
-def _edli_unsettled_global_exit_audit_token_ids(trade_conn) -> set[str]:
+def _edli_unsettled_global_exit_audit_token_ids(
+    trade_conn,
+    *,
+    deadline_monotonic: float | None = None,
+) -> set[str]:
     """Sold tokens whose schema-22 EXIT still needs settlement/peak evidence.
 
     An economically closed position no longer carries exposure, but dropping its
@@ -3009,7 +3070,11 @@ def _edli_unsettled_global_exit_audit_token_ids(trade_conn) -> set[str]:
                    )
                 """
             ).fetchall()
-    except Exception:
+    except Exception as exc:
+        _reraise_held_quote_reader_deadline(
+            exc,
+            deadline_monotonic=deadline_monotonic,
+        )
         return set()
     return {
         str(row[0]).strip()
@@ -3080,7 +3145,11 @@ def _edli_append_global_exit_audit_quote_evidence(
     return trade_conn.total_changes - before
 
 
-def _edli_held_position_priority_token_ids(trade_conn) -> set[str]:
+def _edli_held_position_priority_token_ids(
+    trade_conn,
+    *,
+    deadline_monotonic: float | None = None,
+) -> set[str]:
     """Tokens for open local/chain exposure that need immediate quote evidence.
 
     Excision T-consolidations #2 investigation (docs/rebuild/quarantine_excision_2026-07-11.md):
@@ -3104,7 +3173,11 @@ def _edli_held_position_priority_token_ids(trade_conn) -> set[str]:
         has_table = trade_conn.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='position_current'"
         ).fetchone()
-    except Exception:
+    except Exception as exc:
+        _reraise_held_quote_reader_deadline(
+            exc,
+            deadline_monotonic=deadline_monotonic,
+        )
         return set()
     if not has_table:
         return set()
@@ -3147,7 +3220,11 @@ def _edli_held_position_priority_token_ids(trade_conn) -> set[str]:
             """,
             params,
         ).fetchall()
-    except Exception:
+    except Exception as exc:
+        _reraise_held_quote_reader_deadline(
+            exc,
+            deadline_monotonic=deadline_monotonic,
+        )
         return set()
     tokens: set[str] = set()
     for token_id, no_token_id in rows:
@@ -3155,7 +3232,10 @@ def _edli_held_position_priority_token_ids(trade_conn) -> set[str]:
             token = str(value or "").strip()
             if token and token != "None":
                 tokens.add(token)
-    exit_audit_tokens = _edli_unsettled_global_exit_audit_token_ids(trade_conn)
+    exit_audit_tokens = _edli_unsettled_global_exit_audit_token_ids(
+        trade_conn,
+        deadline_monotonic=deadline_monotonic,
+    )
     _edli_publish_global_exit_audit_token_ids(exit_audit_tokens)
     tokens.update(exit_audit_tokens)
     return tokens
@@ -3804,32 +3884,29 @@ def _edli_refresh_held_position_quote_evidence(
                     _edli_canonical_open_held_pairs(trade_read)
                 )
         except (_CanonicalHeldScopeUnavailable, TimeoutError) as exc:
-            return {
-                "canonical_held_scope_unavailable": True,
-                "canonical_held_scope_reason": str(exc),
-                "canonical_held_freshness_debt_scope": "open_native_held",
-                "canonical_held_freshness_debt_token_ids": [
-                    "CANONICAL_HELD_SCOPE_UNAVAILABLE"
-                ],
-                "canonical_held_pair_count": 0,
-                "held_snapshot_fresh_pairs": [],
-                "held_snapshot_due_pairs": [],
-                "held_snapshot_refresh_debt_actions": [],
-                "held_quote_refresh_events": 0,
-            }
+            return _canonical_held_scope_unavailable_result(exc)
         canonical_held_token_ids = {
             token_id for _condition_id, token_id in canonical_held_pairs
         }
-        with _held_quote_sqlite_deadline(
-            trade_read,
-            deadline_monotonic=deadline,
-        ):
-            held_priority_token_ids = set(
-                _edli_held_position_priority_token_ids(trade_read)
-            )
-            exit_audit_token_ids = set(
-                _edli_unsettled_global_exit_audit_token_ids(trade_read)
-            )
+        try:
+            with _held_quote_sqlite_deadline(
+                trade_read,
+                deadline_monotonic=deadline,
+            ):
+                held_priority_token_ids = set(
+                    _edli_held_position_priority_token_ids(
+                        trade_read,
+                        deadline_monotonic=deadline,
+                    )
+                )
+                exit_audit_token_ids = set(
+                    _edli_unsettled_global_exit_audit_token_ids(
+                        trade_read,
+                        deadline_monotonic=deadline,
+                    )
+                )
+        except TimeoutError as exc:
+            return _canonical_held_scope_unavailable_result(exc)
         held_token_ids = (
             canonical_held_token_ids
             | held_priority_token_ids
