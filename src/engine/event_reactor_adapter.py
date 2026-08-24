@@ -17197,6 +17197,7 @@ def _rehydrate_held_pinned_bundle_for_actuation(
             payload.get("metric") or payload.get("temperature_metric") or ""
         ).lower(),
         decision_time=decision_time,
+        raw_input_hwm_conn=forecast_conn,
     )
     if result.status == "BLOCKED":
         raise ValueError(
@@ -34144,6 +34145,7 @@ def _day0_replacement_conditioning(
                 "day0_remaining_carrier_future_extremes_c",
                 "day0_remaining_carrier_path_error_sigma_c",
                 "day0_remaining_carrier_probability_cutoff_utc",
+                "day0_remaining_vector_witness",
             )
             if key in provenance
         },
@@ -35403,6 +35405,7 @@ def _global_day0_execution_payload(
             "day0_remaining_carrier_path_error_sigma_c": "_edli_day0_remaining_carrier_path_error_sigma_c",
             "day0_remaining_carrier_probability_cutoff_utc": "_edli_day0_remaining_carrier_probability_cutoff_utc",
             "day0_remaining_carrier_likelihood": "_edli_day0_provisional_revision_likelihood",
+            "day0_remaining_vector_witness": "_edli_day0_remaining_vector_witness",
         }
         for source_key, payload_key in carrier_fields.items():
             if source_key in conditioning:
@@ -37155,7 +37158,40 @@ def _prepare_current_global_probability_family(
             )
         else:
             conditioning = None
-            if pinned_complete_bundle is None and bundle is not None:
+            if pinned_complete_bundle is not None:
+                pinned_provenance = (
+                    getattr(pinned_complete_bundle, "provenance_json", None) or {}
+                )
+                pinned_provisional = (
+                    pinned_provenance.get("day0_provisional_observation")
+                    if isinstance(pinned_provenance, Mapping)
+                    else None
+                )
+                if not isinstance(pinned_provisional, Mapping):
+                    raise ValueError(
+                        "GLOBAL_HELD_PINNED_PROVISIONAL_CONDITIONING_MISSING"
+                    )
+                if pinned_provisional.get("active") is not True:
+                    raise ValueError("GLOBAL_HELD_PINNED_PROVISIONAL_ACTIVE_INVALID")
+                if str(pinned_provisional.get("metric") or "").strip().lower() != str(
+                    family.metric
+                ).strip().lower():
+                    raise ValueError("GLOBAL_HELD_PINNED_PROVISIONAL_METRIC_MISMATCH")
+                if str(pinned_provisional.get("unit") or "").strip().upper() != str(
+                    omega.resolution.measurement_unit
+                ).strip().upper():
+                    raise ValueError("GLOBAL_HELD_PINNED_PROVISIONAL_UNIT_MISMATCH")
+                pinned_bundle_for_conditioning = pinned_complete_bundle
+                conditioning = _day0_replacement_conditioning(
+                    pinned_bundle_for_conditioning,
+                    provisional=True,
+                    metric=str(family.metric),
+                    unit=str(omega.resolution.measurement_unit),
+                    decision_time=decision_time,
+                    entry_authority=False,
+                    allow_stale_supporting_conditioning=True,
+                )
+            elif bundle is not None:
                 conditioning = _day0_replacement_conditioning(
                     bundle,
                     provisional=probability_conditioning_is_provisional,
@@ -37196,7 +37232,7 @@ def _prepare_current_global_probability_family(
                     or remaining_path_supporting_conditioning
                 ),
             )
-            if current_day0_redecision_only:
+            if current_day0_redecision_only or pinned_complete_bundle is not None:
                 current_day0_payload[
                     "_edli_day0_redecision_authority_scope"
                 ] = "held_exposure_current_day0_only_v1"
@@ -40761,6 +40797,7 @@ def _market_analysis_from_event_snapshot(
         else:
             p_raw = _snapshot_p_raw(
                 snapshot, family=family, bins=bins, members=members, payload=payload,
+                decision_time=decision_time,
             )
             p_cal = np.asarray(p_raw, dtype=float)
     else:
@@ -40823,6 +40860,7 @@ def _market_analysis_from_event_snapshot(
         p_raw = _snapshot_p_raw(
             snapshot, family=family, bins=bins, members=members, payload=payload,
             extra_member_sigma=day0_extra_member_sigma,
+            decision_time=decision_time,
         )
         if _day0_rd_members is not None:
             # remaining-day mode: identity calibration (see block comment above)
@@ -41594,6 +41632,7 @@ def _snapshot_p_raw(
     members: np.ndarray,
     payload: dict[str, object],
     extra_member_sigma: float = 0.0,
+    decision_time: datetime | None = None,
 ) -> np.ndarray:
     city = runtime_cities_by_name().get(family.city)
     if city is None:
@@ -41609,6 +41648,7 @@ def _snapshot_p_raw(
             bins=bins,
             payload=payload,
             extra_member_sigma=extra_member_sigma,
+            decision_time=decision_time,
         )
     else:
         arr = p_raw_vector_from_maxes(
@@ -41635,6 +41675,7 @@ def _day0_remaining_p_raw_vector(
     bins: list[Bin],
     payload: dict[str, object],
     extra_member_sigma: float,
+    decision_time: datetime | None = None,
 ) -> np.ndarray:
     """Integrate ``extreme(observed, noisy_future)`` in physical order.
 
@@ -41644,6 +41685,19 @@ def _day0_remaining_p_raw_vector(
     provisional HKO boundary is a mixture component: its causal running
     extreme constrains q only when the source snapshot survives later revision.
     """
+
+    if decision_time is None:
+        from src.events.day0_authority import day0_is_noaa_preliminary_source
+
+        source_hint = str(
+            payload.get("settlement_source")
+            or payload.get("observation_source")
+            or ""
+        )
+        if day0_is_noaa_preliminary_source(source_hint):
+            raise ValueError(
+                "DAY0_NOAA_PRELIMINARY_CARRIER_DECISION_TIME_MISSING"
+            )
 
     from src.config import ensemble_n_mc
     from src.signal.ensemble_signal import sigma_instrument_for_city
@@ -41709,7 +41763,10 @@ def _day0_remaining_p_raw_vector(
         )
     )
     if noaa_preliminary:
-        from src.data.day0_hourly_vectors import build_day0_remaining_probability_carrier
+        from src.data.day0_hourly_vectors import (
+            build_day0_remaining_probability_carrier,
+            day0_remaining_carrier_identity_inputs,
+        )
 
         required_fields = (
             ("_edli_day0_remaining_content_identity", "IDENTITY"),
@@ -41738,6 +41795,18 @@ def _day0_remaining_p_raw_vector(
             raise ValueError("DAY0_NOAA_PRELIMINARY_CARRIER_PERSISTED_FIELDS_INVALID") from exc
         if not likelihood_identity or not 0.0 < survival < 1.0:
             raise ValueError("DAY0_NOAA_PRELIMINARY_CARRIER_LIKELIHOOD_INVALID")
+        configured_station = str(getattr(city, "wu_station", "") or "").strip().upper()
+        expected_source_pair = {
+            "awc": "aviationweather_metar",
+            "ogimet": f"ogimet_metar_{configured_station.lower()}",
+        }
+        if (
+            not configured_station
+            or str(likelihood.get("station_id") or "").strip().upper()
+            != configured_station
+            or likelihood.get("source_channel_pair") != expected_source_pair
+        ):
+            raise ValueError("DAY0_NOAA_PRELIMINARY_CARRIER_SOURCE_IDENTITY_INVALID")
         try:
             payload_survival = float(
                 payload["_edli_day0_provisional_boundary_survival_probability"]
@@ -41759,6 +41828,20 @@ def _day0_remaining_p_raw_vector(
             raise ValueError("DAY0_NOAA_PRELIMINARY_CARRIER_VECTOR_INVALID") from exc
         if not np.isfinite(np.asarray(future_c, dtype=float)).all():
             raise ValueError("DAY0_NOAA_PRELIMINARY_CARRIER_VECTOR_INVALID")
+        current_native = np.asarray(members, dtype=float)
+        carrier_unit = str(getattr(city, "settlement_unit", "") or "").strip().upper()
+        if carrier_unit == "F":
+            current_c = (current_native - 32.0) * 5.0 / 9.0
+        elif carrier_unit == "C":
+            current_c = current_native
+        else:
+            raise ValueError("DAY0_NOAA_PRELIMINARY_CARRIER_UNIT_INVALID")
+        persisted_c = np.sort(np.asarray(future_c, dtype=float))
+        if not np.array_equal(
+            np.round(np.sort(current_c), decimals=12),
+            np.round(persisted_c, decimals=12),
+        ):
+            raise ValueError("DAY0_NOAA_PRELIMINARY_CARRIER_VECTOR_MISMATCH")
         try:
             persisted_q = tuple(float(value) for value in payload["_edli_day0_remaining_carrier_q"])
             persisted_samples = tuple(
@@ -41780,14 +41863,34 @@ def _day0_remaining_p_raw_vector(
             raise ValueError("DAY0_NOAA_PRELIMINARY_CARRIER_CUTOFF_INVALID") from exc
         if cutoff_time.tzinfo is None or cutoff_time.utcoffset() is None:
             raise ValueError("DAY0_NOAA_PRELIMINARY_CARRIER_CUTOFF_INVALID")
+        if (
+            decision_time is not None
+            and cutoff_time.astimezone(UTC) > decision_time.astimezone(UTC)
+        ):
+            raise ValueError("DAY0_NOAA_PRELIMINARY_CARRIER_CUTOFF_AFTER_DECISION")
+        witness = payload.get("_edli_day0_remaining_vector_witness")
+        required_witness = (
+            "vector_id",
+            "expected_models",
+            "actual_models",
+            "capture_times_by_model_utc",
+            "provider_source_cycle_time_by_model_utc",
+            "provider_source_available_at_by_model_utc",
+            "source_run_id_by_model",
+            "provider_run_id_by_model",
+            "request_hash_by_model",
+        )
+        if decision_time is not None and (
+            not isinstance(witness, Mapping) or any(
+            not witness.get(field) for field in required_witness
+            )
+        ):
+            raise ValueError("DAY0_NOAA_PRELIMINARY_CARRIER_VECTOR_WITNESS_INVALID")
         boundary_scenarios = _day0_probability_boundary_scenarios_native(
             payload,
             metric=metric,
             unit=str(getattr(city, "settlement_unit", "") or ""),
         )
-        carrier_unit = str(getattr(city, "settlement_unit", "") or "").strip().upper()
-        if carrier_unit not in {"C", "F"}:
-            raise ValueError("DAY0_NOAA_PRELIMINARY_CARRIER_UNIT_INVALID")
         native_scale = 1.0 if carrier_unit == "C" else 9.0 / 5.0
         native_offset = 0.0 if carrier_unit == "C" else 32.0
         future_native = tuple(value * native_scale + native_offset for value in future_c)
@@ -41810,12 +41913,13 @@ def _day0_remaining_p_raw_vector(
             bin_bounds_c=native_bounds,
             n_point=n_mc,
             n_samples=500,
-            identity_inputs={
-                "city": str(getattr(city, "name", "")),
-                "unit": carrier_unit,
-                "probability_cutoff_utc": witness_cutoff,
-                "preliminary_survival_identity": likelihood_identity,
-            },
+            identity_inputs=day0_remaining_carrier_identity_inputs(
+                city=str(getattr(city, "name", "")),
+                unit=carrier_unit,
+                decision_time_utc=decision_time.astimezone(UTC).isoformat(),
+                station_id=configured_station,
+                preliminary_survival_identity=likelihood_identity,
+            ),
         )
         expected_identity = str(payload["_edli_day0_remaining_content_identity"]).strip()
         if expected_identity != str(carrier["content_identity"]):
@@ -42926,6 +43030,257 @@ def _remaining_day_extremes_c_with_current_state_evidence(
     )
 
 
+def _rebuild_held_day0_shared_carrier(
+    *,
+    payload: dict[str, object],
+    family,
+    unit: str,
+    decision_time: datetime,
+    future_extremes_c: object,
+) -> None:
+    """Rebuild a held Day0 carrier from the current causal hourly vectors.
+
+    This is the A' exception: a held/reduce-only redecision may reuse the prior
+    complete source-clock bundle while a newer ENS wave is incomplete.  The
+    reusable bundle supplies the typed provisional likelihood and total source
+    sigma; the current complete hourly vectors supply the remaining path.  The
+    unresolved sigma subtracts only trajectory spread, never provider spread as
+    common error, and the existing instrument/latency floor remains in the
+    process-sigma helper.
+    """
+    if payload.get("_edli_day0_redecision_authority_scope") != (
+        "held_exposure_current_day0_only_v1"
+    ):
+        raise ValueError("DAY0_HELD_SHARED_CARRIER_AUTHORITY_REQUIRED")
+    from src.data.day0_hourly_vectors import (
+        build_day0_remaining_probability_carrier,
+        day0_remaining_carrier_identity_inputs,
+    )
+    from src.config import ensemble_n_mc
+    from src.events.day0_authority import (
+        DAY0_MONOTONE_SETTLEMENT_BOUND,
+        day0_evidence_finality,
+        day0_is_noaa_preliminary_source,
+    )
+    from src.signal.ensemble_signal import sigma_instrument_for_city
+
+    source = str(
+        payload.get("settlement_source") or payload.get("observation_source") or ""
+    ).strip().lower()
+    finality = day0_evidence_finality(payload)
+    if not day0_is_noaa_preliminary_source(source) or finality not in {
+        "PROVISIONAL_CURRENT_SNAPSHOT",
+        DAY0_MONOTONE_SETTLEMENT_BOUND,
+    }:
+        raise ValueError("DAY0_HELD_SHARED_CARRIER_SOURCE_INVALID")
+    likelihood = payload.get("_edli_day0_provisional_revision_likelihood")
+    if not isinstance(likelihood, Mapping):
+        raise ValueError("DAY0_HELD_SHARED_CARRIER_LIKELIHOOD_MISSING")
+    try:
+        likelihood_identity = str(likelihood["identity_hash"]).strip()
+        survival = float(likelihood["boundary_survival_probability"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError("DAY0_HELD_SHARED_CARRIER_LIKELIHOOD_INVALID") from exc
+    if (
+        not likelihood_identity
+        or not str(likelihood.get("semantics") or "").strip()
+        or not 0.0 < survival < 1.0
+    ):
+        raise ValueError("DAY0_HELD_SHARED_CARRIER_LIKELIHOOD_INVALID")
+    try:
+        values_c = tuple(float(value) for value in future_extremes_c)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("DAY0_HELD_SHARED_CARRIER_VECTOR_INVALID") from exc
+    if not values_c or not np.isfinite(np.asarray(values_c, dtype=float)).all():
+        raise ValueError("DAY0_HELD_SHARED_CARRIER_VECTOR_INVALID")
+    city = runtime_cities_by_name().get(str(family.city))
+    if city is None:
+        raise ValueError("DAY0_HELD_SHARED_CARRIER_CITY_INVALID")
+    configured_station = str(getattr(city, "wu_station", "") or "").strip().upper()
+    expected_source_pair = {
+        "awc": "aviationweather_metar",
+        "ogimet": f"ogimet_metar_{configured_station.lower()}",
+    }
+    if (
+        not configured_station
+        or str(likelihood.get("station_id") or "").strip().upper()
+        != configured_station
+        or likelihood.get("source_channel_pair") != expected_source_pair
+    ):
+        raise ValueError("DAY0_HELD_SHARED_CARRIER_SOURCE_IDENTITY_INVALID")
+    carrier_unit = str(unit or getattr(city, "settlement_unit", "") or "").strip().upper()
+    if carrier_unit not in {"C", "F"}:
+        raise ValueError("DAY0_HELD_SHARED_CARRIER_UNIT_INVALID")
+    native_scale = 1.0 if carrier_unit == "C" else 9.0 / 5.0
+    native_offset = 0.0 if carrier_unit == "C" else 32.0
+    values_native = tuple(value * native_scale + native_offset for value in values_c)
+    extra_sigma_native = _day0_extra_member_sigma_native(
+        payload=payload,
+        family=family,
+        unit=carrier_unit,
+        decision_time=decision_time,
+        members_native=values_native,
+    )
+    if not math.isfinite(extra_sigma_native) or extra_sigma_native < 0.0:
+        raise ValueError("DAY0_HELD_SHARED_CARRIER_SIGMA_INVALID")
+    bounds = tuple(
+        (
+            None if candidate.bin.low is None else float(candidate.bin.low),
+            None if candidate.bin.high is None else float(candidate.bin.high),
+        )
+        for candidate in family.candidates
+    )
+    boundary_scenarios = _day0_probability_boundary_scenarios_native(
+        payload,
+        metric=str(family.metric).strip().lower(),
+        unit=carrier_unit,
+    )
+    cutoff = decision_time.astimezone(UTC).isoformat()
+    carrier = build_day0_remaining_probability_carrier(
+        future_extremes_c=values_native,
+        boundary_scenarios=boundary_scenarios,
+        metric=str(family.metric).strip().lower(),
+        path_error_sigma_c=(
+            extra_sigma_native
+            if carrier_unit == "C"
+            else extra_sigma_native * 5.0 / 9.0
+        ),
+        instrument_sigma_c=float(sigma_instrument_for_city(city).to(carrier_unit).value),
+        bin_bounds_c=bounds,
+        n_point=ensemble_n_mc(),
+        n_samples=500,
+        identity_inputs=day0_remaining_carrier_identity_inputs(
+            city=str(family.city),
+            unit=carrier_unit,
+            decision_time_utc=cutoff,
+            station_id=configured_station,
+            preliminary_survival_identity=likelihood_identity,
+        ),
+    )
+    payload.update(
+        {
+            "_edli_day0_remaining_content_identity": carrier["content_identity"],
+            "_edli_day0_probability_operator": carrier["operator"],
+            "_edli_day0_remaining_carrier_q": list(carrier["q"]),
+            "_edli_day0_remaining_probability_samples": list(carrier["samples"]),
+            "_edli_day0_remaining_probability_sample_count": 500,
+            "_edli_day0_remaining_carrier_future_extremes_c": list(values_c),
+            "_edli_day0_remaining_carrier_path_error_sigma_c": (
+                extra_sigma_native
+                if carrier_unit == "C"
+                else extra_sigma_native * 5.0 / 9.0
+            ),
+            "_edli_day0_remaining_carrier_probability_cutoff_utc": cutoff,
+            "_edli_day0_held_carrier_rebuild_basis": (
+                "prior_complete_source_clock_plus_current_causal_hourly_vectors_v1"
+            ),
+            "_edli_day0_remaining_path_center_sigma_native": float(
+                np.std(np.asarray(values_native, dtype=float), ddof=0)
+            ),
+        }
+    )
+
+
+def _day0_current_vector_witness(
+    *,
+    conn: sqlite3.Connection | None,
+    vectors: object,
+    family: object,
+    expected_models: object,
+    decision_time: datetime,
+) -> dict[str, object] | None:
+    """Read the exact current vector-row provenance for replay binding."""
+    if conn is None:
+        return None
+    try:
+        from src.data.day0_hourly_vectors import _vector_id
+
+        models = tuple(str(model).strip() for model in expected_models)
+        vector_ids: dict[str, str] = {}
+        capture_by_model: dict[str, str] = {}
+        provider_by_model: dict[str, str] = {}
+        endpoint_by_model: dict[str, str] = {}
+        request_hash_by_model: dict[str, str] = {}
+        source_run_by_model: dict[str, str] = {}
+        provider_run_by_model: dict[str, str] = {}
+        provider_cycle_by_model: dict[str, str] = {}
+        provider_available_by_model: dict[str, str] = {}
+        provider_modified_by_model: dict[str, str] = {}
+        for vector in vectors:
+            model = str(getattr(vector, "model", "") or "").strip()
+            captured = str(getattr(vector, "captured_at", "") or "").strip()
+            if not model or not captured:
+                return None
+            row = conn.execute(
+                """SELECT vector_id, provider, endpoint, request_hash,
+                          source_run_meta_json
+                     FROM day0_hourly_vectors
+                    WHERE model = ? AND city = ? AND target_date = ?
+                      AND captured_at = ?
+                    LIMIT 1""",
+                (model, str(family.city), str(family.target_date), captured),
+            ).fetchone()
+            if row is None:
+                return None
+            meta = json.loads(str(row[4] or ""))
+            if not isinstance(meta, Mapping):
+                return None
+            vector_ids[model] = str(row[0] or "").strip() or _vector_id(
+                model, str(family.city), str(family.target_date), captured
+            )
+            capture_by_model[model] = captured
+            provider_by_model[model] = str(row[1] or "").strip()
+            endpoint_by_model[model] = str(row[2] or "").strip()
+            request_hash_by_model[model] = str(row[3] or "").strip()
+            source_run_by_model[model] = str(meta.get("source_run_id") or "").strip()
+            provider_run_by_model[model] = str(meta.get("provider_run_id") or "").strip()
+            provider_cycle_by_model[model] = str(
+                meta.get("provider_source_cycle_time_utc") or ""
+            ).strip()
+            provider_available_by_model[model] = str(
+                meta.get("provider_source_available_at_utc") or ""
+            ).strip()
+            provider_modified_by_model[model] = str(
+                meta.get("provider_source_modified_at_utc") or ""
+            ).strip()
+        if set(vector_ids) != set(models) or any(
+            not value
+            for mapping in (
+                vector_ids,
+                capture_by_model,
+                request_hash_by_model,
+                source_run_by_model,
+                provider_run_by_model,
+                provider_cycle_by_model,
+                provider_available_by_model,
+            )
+            for value in mapping.values()
+        ):
+            return None
+        return {
+            "vector_id": vector_ids[models[0]],
+            "vector_ids_by_model": vector_ids,
+            "expected_models": list(models),
+            "actual_models": list(vector_ids),
+            "capture_times_utc": [capture_by_model[model] for model in models],
+            "capture_times_by_model_utc": capture_by_model,
+            "provider_by_model": provider_by_model,
+            "endpoint_by_model": endpoint_by_model,
+            "request_hash_by_model": request_hash_by_model,
+            "source_run_id_by_model": source_run_by_model,
+            "provider_run_id_by_model": provider_run_by_model,
+            "provider_source_cycle_time_by_model_utc": provider_cycle_by_model,
+            "provider_source_available_at_by_model_utc": provider_available_by_model,
+            "provider_source_modified_at_by_model_utc": provider_modified_by_model,
+            "city": str(family.city),
+            "target_date": str(family.target_date),
+            "metric": str(family.metric),
+            "causal_as_of_utc": decision_time.astimezone(UTC).isoformat(),
+        }
+    except (sqlite3.Error, TypeError, ValueError, KeyError, json.JSONDecodeError):
+        return None
+
+
 def _day0_remaining_day_members(
     *,
     payload: dict[str, object],
@@ -43019,6 +43374,42 @@ def _day0_remaining_day_members(
                 payload["_edli_day0_remaining_expected_models"] = list(expected_models)
                 payload["_edli_day0_remaining_unavailable_reason"] = "incomplete_hourly_model_bundle"
             return None
+        current_vector_witness = _day0_current_vector_witness(
+            conn=forecast_conn,
+            vectors=vectors,
+            family=family,
+            expected_models=expected_models,
+            decision_time=decision_time,
+        )
+        if current_vector_witness is None:
+            payload["_edli_day0_remaining_unavailable_reason"] = (
+                "current_vector_witness_unavailable"
+            )
+            return None
+        persisted_vector_witness = payload.get(
+            "_edli_day0_remaining_vector_witness"
+        )
+        if isinstance(persisted_vector_witness, Mapping):
+            compare_fields = (
+                "vector_id",
+                "vector_ids_by_model",
+                "capture_times_utc",
+                "capture_times_by_model_utc",
+                "provider_by_model",
+                "endpoint_by_model",
+                "request_hash_by_model",
+                "source_run_id_by_model",
+                "provider_run_id_by_model",
+                "provider_source_cycle_time_by_model_utc",
+                "provider_source_available_at_by_model_utc",
+            )
+            if any(
+                persisted_vector_witness.get(field) != current_vector_witness.get(field)
+                for field in compare_fields
+            ):
+                raise ValueError("DAY0_CURRENT_VECTOR_WITNESS_MISMATCH")
+        else:
+            payload["_edli_day0_remaining_vector_witness"] = current_vector_witness
         from src.strategy.live_inference.source_clock_vnext import (
             provider_family_for_source,
         )
@@ -43089,6 +43480,19 @@ def _day0_remaining_day_members(
         payload["_edli_day0_unclamped_remaining_extrema_native"] = [
             float(value) for value in values.tolist()
         ]
+        if (
+            payload.get("_edli_day0_redecision_authority_scope")
+            == "held_exposure_current_day0_only_v1"
+            and payload.get("_edli_day0_provisional_revision_likelihood")
+            is not None
+        ):
+            _rebuild_held_day0_shared_carrier(
+                payload=payload,
+                family=family,
+                unit=unit,
+                decision_time=decision_time,
+                future_extremes_c=extremes_c,
+            )
         maturity_values = np.asarray(values, dtype=float).copy()
         probability_clock = (
             probability_time if probability_time is not None else decision_time

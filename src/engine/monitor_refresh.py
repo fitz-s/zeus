@@ -5633,7 +5633,10 @@ def _build_current_global_day0_family_snapshot(
                 )
                 _raise_if_day0_snapshot_read_deadline_elapsed(hwm_deadline[0])
                 if not hwm_handoff_started[0]:
-                    prepare_sqlite.close()
+                    # Keep the live prepare connections usable by the reader and
+                    # adapter after the HWM handoff.  HWM authority has its own
+                    # deadline-bound connection; closing the ExitStack here
+                    # invalidates ``forecasts``/``world`` before same-cut replay.
                     hwm_busy_ms = max(
                         0,
                         int((hwm_deadline[0] - time.monotonic()) * 1000.0),
@@ -5704,15 +5707,14 @@ def _build_current_global_day0_family_snapshot(
                 temperature_metric=metric,
                 decision_time=now,
             )
-            if pinned_result.status == "BLOCKED":
+            if pinned_result.status == "BLOCKED" and pinned_result.reason_code != (
+                "REPLACEMENT_RAW_INPUT_HWM_REQUIRED_RETRYABLE"
+            ):
                 raise ValueError(
                     "GLOBAL_HELD_PINNED_COMPLETE_POSTERIOR_BLOCKED:"
                     f"{pinned_result.reason_code}"
                 )
-            pinned_complete_bundle = (
-                pinned_result.bundle if pinned_result.ok else None
-            )
-            if pinned_complete_bundle is None:
+            if not pinned_result.ok:
                 hwm_deadline[0] = _held_monitor_stage_deadline(
                     hwm_deadline_monotonic,
                     HELD_MONITOR_RAW_HWM_READ_MAX_SECONDS,
@@ -5721,6 +5723,34 @@ def _build_current_global_day0_family_snapshot(
                     deadline_monotonic=float(hwm_deadline[0]),
                 )
                 _begin_raw_hwm_read()
+                pinned_result = read_prior_complete_replacement_forecast_bundle(
+                    forecasts,
+                    city=str(position.city),
+                    target_date=str(position.target_date),
+                    temperature_metric=metric,
+                    decision_time=now,
+                    raw_input_hwm_conn=hwm_forecasts,
+                    raw_input_hwm_deadline_monotonic=float(hwm_deadline[0]),
+                    raw_input_hwm_read_max_seconds=HELD_MONITOR_RAW_HWM_READ_MAX_SECONDS,
+                )
+                if pinned_result.status == "BLOCKED":
+                    raise ValueError(
+                        "GLOBAL_HELD_PINNED_COMPLETE_POSTERIOR_BLOCKED:"
+                        f"{pinned_result.reason_code}"
+                    )
+            pinned_complete_bundle = (
+                pinned_result.bundle if pinned_result.ok else None
+            )
+            if pinned_complete_bundle is None:
+                if hwm_forecasts is None:
+                    hwm_deadline[0] = _held_monitor_stage_deadline(
+                        hwm_deadline_monotonic,
+                        HELD_MONITOR_RAW_HWM_READ_MAX_SECONDS,
+                    )
+                    hwm_forecasts = get_forecasts_connection_read_only(
+                        deadline_monotonic=float(hwm_deadline[0]),
+                    )
+                    _begin_raw_hwm_read()
             try:
                 prepared = _prepare_current_global_probability_family(
                     event,

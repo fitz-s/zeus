@@ -26,6 +26,7 @@ belief_debt record makes producer failure silent.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 import threading
@@ -38,6 +39,72 @@ import numpy as np
 import pytest
 
 BIN = "Will the highest temperature in Karachi be 37°C on June 12?"
+
+
+def test_held_a_prime_tel_aviv_eleven_bin_rebuild_has_500_coherent_rows():
+    import src.engine.event_reactor_adapter as era
+    from src.types.market import Bin as MarketBin
+
+    bounds = [(None, 29)] + [
+        (value, value) for value in range(30, 39)
+    ] + [(39, None)]
+    family = SimpleNamespace(
+        city="Tel Aviv",
+        metric="high",
+        candidates=[
+            SimpleNamespace(bin=MarketBin(low, high, "C", f"bin-{index}"))
+            for index, (low, high) in enumerate(bounds)
+        ],
+    )
+    likelihood = {
+        "semantics": "same_station_preliminary_report_survival_likelihood_v1",
+        "cutoff": "2026-08-24T12:45:00+00:00",
+        "successes": [],
+        "failures": [],
+        "unconfirmed_awc_ids": [1],
+        "alpha": 0.5,
+        "beta": 0.5,
+        "station_id": "LLBG",
+        "source_channel_pair": {
+            "awc": "aviationweather_metar",
+            "ogimet": "ogimet_metar_llbg",
+        },
+    }
+    likelihood["identity_hash"] = hashlib.sha256(
+        json.dumps(likelihood, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    payload = {
+        "metric": "high",
+        "settlement_source": "aviationweather_metar",
+        "evidence_finality": "MONOTONE_SETTLEMENT_BOUND",
+        "rounded_value": 33.0,
+        "_edli_day0_redecision_authority_scope": (
+            "held_exposure_current_day0_only_v1"
+        ),
+        "_edli_day0_source_clock_predictive_sigma_native": 1.2,
+        "_edli_day0_provisional_revision_likelihood": {
+            **likelihood,
+            "boundary_survival_probability": 0.9705882352941176,
+        },
+        "_edli_day0_provisional_boundary_survival_probability": (
+            0.9705882352941176
+        ),
+    }
+    era._rebuild_held_day0_shared_carrier(
+        payload=payload,
+        family=family,
+        unit="C",
+        decision_time=datetime(2026, 8, 24, 12, 45, tzinfo=timezone.utc),
+        future_extremes_c=(28.5, 29.0, 30.5, 31.25),
+    )
+    assert len(payload["_edli_day0_remaining_carrier_q"]) == 11
+    assert payload["_edli_day0_remaining_probability_sample_count"] == 500
+    assert len(payload["_edli_day0_remaining_probability_samples"]) == 500
+    assert all(
+        sum(row) == pytest.approx(1.0)
+        for row in payload["_edli_day0_remaining_probability_samples"]
+    )
+    assert payload["_edli_day0_remaining_content_identity"]
 
 
 def _pos():
@@ -1108,15 +1175,15 @@ def test_day0_pinned_complete_route_skips_raw_hwm_handoff(monkeypatch):
 
 
 @pytest.mark.parametrize("probability_use", ["HELD_MONITOR", "REDUCE_ONLY_EXIT"])
-def test_day0_pinned_current_local_day_bypasses_hwm_with_identity_parity(
+def test_day0_pinned_current_local_day_requires_hwm_station_witness(
     monkeypatch,
     probability_use,
 ):
     """A pinned held carrier is complete on the current local day too.
 
-    The generic current replacement reader requires an HWM deadline.  A pinned
-    carrier must never reach that reader or invoke its optional HWM callback;
-    both held uses must retain the same immutable posterior identity.
+    The persisted carrier has already passed the bounded raw-input HWM and
+    station/source-pair gate.  Both held uses retain that immutable identity;
+    neither route may silently substitute an unbound local fixture.
     """
     import src.data.replacement_forecast_bundle_reader as bundle_reader
     import src.data.replacement_forecast_current_target_plan as target_plan
@@ -1141,10 +1208,10 @@ def test_day0_pinned_current_local_day_bypasses_hwm_with_identity_parity(
         ),
     )
     family = SimpleNamespace(
-        city="Testopolis",
+        city="Tel Aviv",
         target_date="2026-06-09",
         metric="high",
-        family_id="Testopolis|2026-06-09|high",
+        family_id="Tel Aviv|2026-06-09|high",
         binding_hash="family-binding",
         candidates=candidates,
     )
@@ -1156,7 +1223,7 @@ def test_day0_pinned_current_local_day_bypasses_hwm_with_identity_parity(
         "observed_extreme_native": 27.0,
         "unit": "C",
         "source": "aviationweather_metar",
-        "station_id": "TEST",
+        "station_id": "LLBG",
     }
     event = SimpleNamespace(
         event_id="event-pinned-current-day",
@@ -1164,7 +1231,7 @@ def test_day0_pinned_current_local_day_bypasses_hwm_with_identity_parity(
         causal_snapshot_id="snapshot-pinned-current-day",
         payload_json=json.dumps(
             {
-                "city": "Testopolis",
+                "city": "Tel Aviv",
                 "target_date": "2026-06-09",
                 "metric": "high",
                 "unit": "C",
@@ -1176,6 +1243,64 @@ def test_day0_pinned_current_local_day_bypasses_hwm_with_identity_parity(
             }
         ),
     )
+    likelihood = {
+        "semantics": "same_station_preliminary_report_survival_likelihood_v1",
+        "cutoff": observation_time,
+        "successes": [],
+        "failures": [],
+        "unconfirmed_awc_ids": [1],
+        "alpha": 0.5,
+        "beta": 0.5,
+        "station_id": "LLBG",
+        "source_channel_pair": {
+            "awc": "aviationweather_metar",
+            "ogimet": "ogimet_metar_llbg",
+        },
+    }
+    likelihood["identity_hash"] = hashlib.sha256(
+        json.dumps(likelihood, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    pinned_provenance = {
+        "day0_provisional_observation": {
+            "active": True,
+            "metric": "high",
+            "unit": "C",
+            "source": "aviationweather_metar",
+        },
+        "day0_preliminary_report_survival_likelihood": likelihood,
+        "day0_remaining_carrier_content_identity": "carrier-content-hash",
+        "day0_remaining_carrier_operator": "extreme_observed_then_noisy_future_v1",
+        "day0_remaining_carrier_q": [0.2, 0.8],
+        "day0_remaining_carrier_probability_samples": [[0.2, 0.8]] * 500,
+        "day0_remaining_carrier_sample_count": 500,
+        "day0_remaining_carrier_future_extremes_c": [20.0, 21.0],
+        "day0_remaining_carrier_path_error_sigma_c": 0.5,
+        "day0_remaining_carrier_probability_cutoff_utc": observation_time,
+        "day0_remaining_vector_witness": {
+            "vector_id": "vector-id-1",
+            "expected_models": ["ecmwf_ifs"],
+            "actual_models": ["ecmwf_ifs"],
+            "capture_times_by_model_utc": {"ecmwf_ifs": observation_time},
+            "provider_source_cycle_time_by_model_utc": {"ecmwf_ifs": observation_time},
+            "provider_source_available_at_by_model_utc": {"ecmwf_ifs": observation_time},
+            "source_run_id_by_model": {"ecmwf_ifs": "source-run-1"},
+            "provider_run_id_by_model": {"ecmwf_ifs": "provider-run-1"},
+            "request_hash_by_model": {"ecmwf_ifs": "request-hash-1"},
+        },
+        "bayes_precision_fusion": {
+            "current_evidence_shape": {
+                "source_cycle_time": observation_time,
+                "member_values_hash": "member-values-hash",
+            },
+            "current_value_serving": {
+                "ecmwf_ifs": {
+                    "raw_model_forecast_id": "raw-ifs-1",
+                    "served_cycle": observation_time,
+                    "captured_at": observation_time,
+                }
+            },
+        },
+    }
     pinned_bundle = SimpleNamespace(
         posterior_id=123,
         posterior_identity_hash="pinned-posterior-identity",
@@ -1183,7 +1308,7 @@ def test_day0_pinned_current_local_day_bypasses_hwm_with_identity_parity(
         posterior_config_hash="pinned-config",
         source_cycle_time="2026-06-09T00:00:00+00:00",
         source_available_at="2026-06-09T06:00:00+00:00",
-        provenance_json={},
+        provenance_json=pinned_provenance,
     )
     observed = {"hwm_callback": 0, "generic_reader": 0}
 
@@ -1221,7 +1346,14 @@ def test_day0_pinned_current_local_day_bypasses_hwm_with_identity_parity(
     monkeypatch.setattr(
         era,
         "runtime_cities_by_name",
-        lambda: {"Testopolis": SimpleNamespace(timezone="UTC", settlement_unit="C")},
+        lambda: {
+            "Tel Aviv": SimpleNamespace(
+                timezone="Asia/Jerusalem",
+                settlement_unit="C",
+                settlement_source_type="noaa",
+                wu_station="LLBG",
+            )
+        },
     )
     monkeypatch.setattr(day0_hard_fact_exit, "_final_daily_observation_extreme", lambda **_: None)
     monkeypatch.setattr(target_plan, "_latest_authorized_day0_fact", lambda *_a, **_k: fact)
@@ -1309,6 +1441,12 @@ def test_day0_pinned_current_local_day_bypasses_hwm_with_identity_parity(
     assert payload_out["_edli_day0_held_pinned_posterior_identity"] == (
         pinned_bundle.posterior_identity_hash
     )
+    assert pinned_bundle.provenance_json["day0_preliminary_report_survival_likelihood"][
+        "station_id"
+    ] == "LLBG"
+    assert len(
+        pinned_bundle.provenance_json["day0_remaining_carrier_probability_samples"]
+    ) == 500
 
 
 def test_day0_pinned_carrier_rejects_entry_authority():
