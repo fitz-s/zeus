@@ -496,6 +496,48 @@ def test_load_manifests_skips_retired_product_without_vetoing_current_inputs(
     assert loaded[0].data_version == OPENMETEO_HIGH_DATA_VERSION
 
 
+def test_load_manifests_isolates_one_truncated_file_and_retries_after_repair(
+    tmp_path: Path,
+    caplog,
+) -> None:
+    """One family-local corrupt file must not abort every family's cycle advance."""
+    import src.data.replacement_forecast_seed_discovery as discovery
+
+    raw_dir = tmp_path / "raw"
+    current_path = _write_manifest(
+        raw_dir,
+        name="current",
+        source_id="openmeteo_ecmwf_ifs_9km",
+        product_id="openmeteo_ecmwf_ifs9_deterministic_anchor_v1",
+        data_version=OPENMETEO_HIGH_DATA_VERSION,
+        metadata={},
+    )
+    broken_path = raw_dir / "broken.manifest.json"
+    broken_path.write_text("", encoding="utf-8")
+    root = raw_dir.resolve()
+    discovery._MANIFEST_CACHE.pop(root, None)
+    discovery._MANIFEST_CACHE_VERSIONS.pop(root, None)
+
+    loaded = _load_manifests(
+        raw_dir,
+        computed_at=datetime(2026, 6, 7, tzinfo=timezone.utc),
+    )
+
+    assert len(loaded) == 1
+    assert loaded[0].data_version == OPENMETEO_HIGH_DATA_VERSION
+    assert "invalid raw forecast manifest isolated" in caplog.text
+
+    repaired = json.loads(current_path.read_text(encoding="utf-8"))
+    repaired["request_url"] = "https://example.invalid/repaired"
+    broken_path.write_text(json.dumps(repaired), encoding="utf-8")
+    reloaded = _load_manifests(
+        raw_dir,
+        computed_at=datetime(2026, 6, 7, tzinfo=timezone.utc),
+    )
+
+    assert len(reloaded) == 2
+
+
 def test_load_manifests_singleflights_concurrent_inventory_scans(
     tmp_path: Path,
     monkeypatch,

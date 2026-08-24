@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import sqlite3
 import threading
 from dataclasses import dataclass
@@ -37,6 +38,7 @@ from src.state.db import _connect_read_only, _zeus_trade_db_path, get_world_conn
 
 
 UTC = timezone.utc
+_LOG = logging.getLogger("zeus.replacement_forecast_seed_discovery")
 _FORBIDDEN_TRANSCRIPT_ALIAS = "h" + "3"
 _RETIRED_MANIFEST_FIELD_SHA256 = (
     "15849366080266e6a6b07a88b389786ca87691349b0c8aa5d946ca6809c195d9"
@@ -420,6 +422,18 @@ def _load_manifests(raw_manifest_dir: Path, *, computed_at: datetime) -> tuple[R
             else:
                 try:
                     manifest = _read_manifest_with_path(path)
+                except (json.JSONDecodeError, OSError, UnicodeError) as exc:
+                    # Inventory fallback is global, but a corrupt manifest is
+                    # family-local missing truth. Isolate only that file; exact
+                    # producer-committed reads remain fail-loud in
+                    # _load_manifest_files(). A later atomic replacement changes
+                    # the signature and is retried on the next inventory scan.
+                    _LOG.warning(
+                        "invalid raw forecast manifest isolated path=%s error=%s",
+                        path,
+                        type(exc).__name__,
+                    )
+                    continue
                 except UnregisteredRawForecastArtifactIdentityError:
                     # The inventory intentionally retains immutable manifests from retired
                     # products (for example AIFS). They are not current live inputs, but one
