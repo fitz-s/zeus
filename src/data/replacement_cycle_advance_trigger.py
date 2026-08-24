@@ -1614,6 +1614,7 @@ def enqueue_cycle_advance_reseeds(
         "seed_build_failed": 0,
         "causal_baseline_scope_failed": 0,
         "retry_pending": 0,
+        "day0_identity_incomplete": 0,
         "enqueued": [],
     }
     if not forecast_db.exists():
@@ -1747,6 +1748,18 @@ def enqueue_cycle_advance_reseeds(
                 observed_extreme_c=day0_payload.get("day0_observed_extreme_c"),
                 unit=day0_payload.get("day0_observed_extreme_unit"),
             )
+            if day0_payload and day0_identity is None:
+                report["day0_identity_incomplete"] = int(
+                    report["day0_identity_incomplete"]
+                ) + 1
+                _LOG.error(
+                    "cycle-advance Day0 conditioning identity incomplete for %s/%s/%s; "
+                    "refusing NULL-identity seed",
+                    city,
+                    target_date,
+                    metric,
+                )
+                continue
             report["scopes_checked"] = int(report["scopes_checked"]) + 1
             try:
                 verdict = scope_needs_cycle_advance(
@@ -2026,8 +2039,9 @@ def enqueue_cycle_advance_reseeds(
                 superseded_seed_file=superseded_seed_file,
             )
             conn.commit()
+            published = False
             if inserted:
-                _publish_staged_cycle_advance_seed_if_owned(
+                published = _publish_staged_cycle_advance_seed_if_owned(
                     conn,
                     city=city,
                     target_date=target_date,
@@ -2035,21 +2049,18 @@ def enqueue_cycle_advance_reseeds(
                     target_cycle_iso=target_cycle_iso,
                     staged_seed_file=staged_seed_file,
                     visible_seed_file=visible_seed_file,
-                    identity=_day0_conditioning_identity(
-                        source=day0_payload.get("day0_observed_extreme_source"),
-                        observation_time=day0_observation_time,
-                        observed_extreme_c=day0_payload.get("day0_observed_extreme_c"),
-                        unit=day0_payload.get("day0_observed_extreme_unit"),
-                    ),
+                    identity=day0_identity,
                     require_identity=bool(day0_payload),
                 )
+                if not published:
+                    _discard_unpublished_cycle_advance_stage(staged_seed_file)
             else:
                 _discard_unpublished_cycle_advance_stage(staged_seed_file)
                 if causal_baseline_source_run_id:
                     report["causal_baseline_scope_failed"] = int(
                         report["causal_baseline_scope_failed"]
                     ) + 1
-            if inserted:
+            if inserted and published:
                 enqueued += 1
                 report["seeds_enqueued"] = int(report["seeds_enqueued"]) + 1
                 if missing_posterior:
@@ -2071,6 +2082,8 @@ def enqueue_cycle_advance_reseeds(
                         "seed_file": str(visible_seed_file),
                     }
                 )
+            elif inserted:
+                report["retry_pending"] = int(report["retry_pending"]) + 1
             else:
                 report["already_enqueued"] = int(report["already_enqueued"]) + 1
     finally:
@@ -2079,6 +2092,8 @@ def enqueue_cycle_advance_reseeds(
         report["status"] = "CYCLE_ADVANCE_CAUSAL_BASELINE_INCOMPLETE"
     elif int(report["retry_pending"]) > 0:
         report["status"] = "CYCLE_ADVANCE_RETRY_PENDING"
+    elif int(report["day0_identity_incomplete"]) > 0:
+        report["status"] = "CYCLE_ADVANCE_DAY0_IDENTITY_INCOMPLETE"
     return report
 
 
@@ -2149,6 +2164,15 @@ def enqueue_single_family_cycle_advance_reseed(
         "held_position": bool(held_position),
         "enqueued": False,
     }
+    day0_identity = _day0_conditioning_identity(
+        source=day0_observed_extreme_source,
+        observation_time=day0_observed_extreme_observation_time,
+        observed_extreme_c=day0_observed_extreme_c,
+        unit=day0_observed_extreme_unit,
+    )
+    if has_day0_evidence and day0_identity is None:
+        report["status"] = "DAY0_CONDITIONING_IDENTITY_INCOMPLETE"
+        return report
     if minimum_posterior_computed_at is not None:
         if (
             minimum_posterior_computed_at.tzinfo is None
@@ -2365,8 +2389,9 @@ def enqueue_single_family_cycle_advance_reseed(
                         day0_observed_extreme_unit=day0_observed_extreme_unit,
                     )
                     conn.commit()
+                    published = False
                     if inserted:
-                        _publish_staged_cycle_advance_seed_if_owned(
+                        published = _publish_staged_cycle_advance_seed_if_owned(
                             conn,
                             city=city,
                             target_date=target_date,
@@ -2374,19 +2399,18 @@ def enqueue_single_family_cycle_advance_reseed(
                             target_cycle_iso=target_cycle_iso,
                             staged_seed_file=staged_seed_file,
                             visible_seed_file=visible_seed_file,
-                            identity=_day0_conditioning_identity(
-                                source=day0_observed_extreme_source,
-                                observation_time=day0_observed_extreme_observation_time,
-                                observed_extreme_c=day0_observed_extreme_c,
-                                unit=day0_observed_extreme_unit,
-                            ),
+                            identity=day0_identity,
                             require_identity=has_day0_evidence,
                         )
+                        if not published:
+                            _discard_unpublished_cycle_advance_stage(staged_seed_file)
                     else:
                         _discard_unpublished_cycle_advance_stage(staged_seed_file)
-                    report["enqueued"] = bool(inserted)
+                    report["enqueued"] = bool(inserted and published)
                     report["status"] = (
                         "DAY0_OBSERVATION_ADVANCE_ENQUEUED"
+                        if inserted and published
+                        else "CYCLE_ADVANCE_PUBLISH_RETRY_PENDING"
                         if inserted
                         else "CYCLE_ADVANCE_ALREADY_ENQUEUED"
                     )
@@ -2617,8 +2641,9 @@ def enqueue_single_family_cycle_advance_reseed(
                 day0_observed_extreme_unit=day0_observed_extreme_unit,
             )
             conn.commit()
+            published = False
             if inserted:
-                _publish_staged_cycle_advance_seed_if_owned(
+                published = _publish_staged_cycle_advance_seed_if_owned(
                     conn,
                     city=city,
                     target_date=target_date,
@@ -2626,19 +2651,18 @@ def enqueue_single_family_cycle_advance_reseed(
                     target_cycle_iso=target_cycle_iso,
                     staged_seed_file=staged_seed_file,
                     visible_seed_file=visible_seed_file,
-                    identity=_day0_conditioning_identity(
-                        source=day0_observed_extreme_source,
-                        observation_time=day0_observed_extreme_observation_time,
-                        observed_extreme_c=day0_observed_extreme_c,
-                        unit=day0_observed_extreme_unit,
-                    ),
+                    identity=day0_identity,
                     require_identity=has_day0_evidence,
                 )
+                if not published:
+                    _discard_unpublished_cycle_advance_stage(staged_seed_file)
             else:
                 _discard_unpublished_cycle_advance_stage(staged_seed_file)
-            report["enqueued"] = bool(inserted)
+            report["enqueued"] = bool(inserted and published)
             report["status"] = (
                 "CYCLE_ADVANCE_FIRST_MATERIALIZATION_ENQUEUED"
+                if inserted and published
+                else "CYCLE_ADVANCE_PUBLISH_RETRY_PENDING"
                 if inserted
                 else "CYCLE_ADVANCE_ALREADY_ENQUEUED"
             )

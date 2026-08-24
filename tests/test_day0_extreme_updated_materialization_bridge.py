@@ -678,6 +678,25 @@ def test_day0_extreme_bridge_reseeds_for_every_conditioning_identity_change(
     assert not Path(row["seed_file"]).exists()
 
 
+def test_single_family_zero_observation_fails_before_null_identity_record(tmp_path) -> None:
+    """A Day0 state without a complete observation identity cannot report enqueue success."""
+    db_path = _prepare_forecast_db(tmp_path)
+    report = cycle_advance.enqueue_single_family_cycle_advance_reseed(
+        forecast_db=db_path,
+        seed_dir=tmp_path / "seeds",
+        raw_manifest_dir=tmp_path / "raw",
+        city="Shanghai",
+        target_date="2026-07-19",
+        metric="high",
+        day0_observation_state="OBSERVED",
+    )
+    assert report["status"] == "DAY0_CONDITIONING_IDENTITY_INCOMPLETE"
+    assert report["enqueued"] is False
+    conn = sqlite3.connect(db_path)
+    assert conn.execute("SELECT COUNT(*) FROM cycle_advance_enqueues").fetchone()[0] == 0
+    conn.close()
+
+
 def test_day0_bridge_publishes_only_the_monotonic_cas_owner(tmp_path, monkeypatch) -> None:
     """A late older bridge call cannot leave a queue-visible seed behind."""
     _prepare_forecast_db(tmp_path)
@@ -780,7 +799,7 @@ def test_newer_day0_identity_replaces_visible_drained_owner(tmp_path, monkeypatc
     )
     conn.commit()
 
-    decision = cycle_advance._enqueue_decision(
+    assert cycle_advance._already_enqueued(
         conn,
         city="Shanghai",
         target_date="2026-07-19",
@@ -1043,7 +1062,7 @@ def test_cycle_advance_recovers_committed_staging_after_publish_crash(tmp_path) 
     ) is True
     conn.commit()
 
-    assert cycle_advance._already_enqueued(
+    decision = cycle_advance._enqueue_decision(
         conn,
         city="Shanghai",
         target_date="2026-07-19",
@@ -3435,15 +3454,24 @@ def test_new_day0_revision_waits_for_legacy_pending_owner_then_replaces_it(
             "day0_observed_extreme_unit",
         )
     }
+    owner_check = cycle_advance._day0_enqueue_owner_request_check(
+        city="Shanghai",
+        target_date="2026-07-19",
+        metric="high",
+        target_cycle_iso=cycle,
+        seed_file=str(owned_seed),
+        identity=None,
+    )
+    assert owner_check.state is cycle_advance._Day0EnqueueOwnerRequestState.INDETERMINATE
 
-    assert cycle_advance._already_enqueued(
+    assert cycle_advance._enqueue_decision(
         conn,
         city="Shanghai",
         target_date="2026-07-19",
         metric="high",
         target_cycle_iso=cycle,
         **new_conditioning,
-    ) is True
+    ) is cycle_advance._CycleAdvanceEnqueueDecision.RETRY_PENDING
     marker = conn.execute(
         "SELECT seed_file, day0_conditioning_identity_json "
         "FROM cycle_advance_enqueues"
@@ -3452,14 +3480,14 @@ def test_new_day0_revision_waits_for_legacy_pending_owner_then_replaces_it(
     assert marker["day0_conditioning_identity_json"] is None
 
     pending.unlink()
-    assert cycle_advance._already_enqueued(
+    assert cycle_advance._enqueue_decision(
         conn,
         city="Shanghai",
         target_date="2026-07-19",
         metric="high",
         target_cycle_iso=cycle,
         **new_conditioning,
-    ) is False
+    ) is cycle_advance._CycleAdvanceEnqueueDecision.ADMIT
     assert conn.execute("SELECT COUNT(*) FROM cycle_advance_enqueues").fetchone()[0] == 0
     conn.close()
 
@@ -3594,7 +3622,7 @@ def test_aged_pending_day0_owner_survives_until_terminal_request_move(
     )
 
     as_of = datetime(2026, 7, 19, 5, 4, 31, tzinfo=UTC)
-    assert cycle_advance._already_enqueued(
+    decision = cycle_advance._enqueue_decision(
         conn,
         city="Shanghai",
         target_date="2026-07-19",
@@ -3607,9 +3635,10 @@ def test_aged_pending_day0_owner_survives_until_terminal_request_move(
         day0_observed_extreme_source=payload["day0_observed_extreme_source"],
         day0_observed_extreme_c=payload["day0_observed_extreme_c"],
         day0_observed_extreme_unit=payload["day0_observed_extreme_unit"],
-    ) is True
+    )
+    assert decision is cycle_advance._CycleAdvanceEnqueueDecision.ALREADY_ENQUEUED
     pending.unlink()
-    assert cycle_advance._already_enqueued(
+    assert cycle_advance._enqueue_decision(
         conn,
         city="Shanghai",
         target_date="2026-07-19",
@@ -3622,7 +3651,7 @@ def test_aged_pending_day0_owner_survives_until_terminal_request_move(
         day0_observed_extreme_source=payload["day0_observed_extreme_source"],
         day0_observed_extreme_c=payload["day0_observed_extreme_c"],
         day0_observed_extreme_unit=payload["day0_observed_extreme_unit"],
-    ) is False
+    ) is cycle_advance._CycleAdvanceEnqueueDecision.ADMIT
     conn.close()
 
 
@@ -3805,10 +3834,10 @@ def test_day0_extreme_bridge_no_observed_extreme_is_failsoft(tmp_path, monkeypat
     assert report["status"] == "DAY0_EXTREME_BRIDGE_NO_OBSERVED_EXTREME"
 
 
-def test_day0_extreme_bridge_materializes_zero_observation_state(
+def test_day0_extreme_bridge_fails_closed_for_zero_observation_state(
     tmp_path, monkeypatch
 ) -> None:
-    """A typed zero-observation fact is evidence, not an unsupported kwarg."""
+    """A zero-observation state without a conditioning identity is fail-closed."""
 
     _prepare_forecast_db(tmp_path)
     cfg = _queue_config(tmp_path)
@@ -3853,12 +3882,9 @@ def test_day0_extreme_bridge_materializes_zero_observation_state(
         held_position=False,
     )
 
-    assert report["status"] == "CYCLE_ADVANCE_FIRST_MATERIALIZATION_ENQUEUED"
-    assert report["enqueued"] is True
-    assert (
-        captured["day0_observation_state"]
-        == "zero_target_date_observations"
-    )
+    assert report["status"] == "DAY0_CONDITIONING_IDENTITY_INCOMPLETE"
+    assert report["enqueued"] is False
+    assert captured == {}
 
 
 def test_day0_extreme_bridge_config_lookup_failure_is_failsoft(monkeypatch) -> None:
