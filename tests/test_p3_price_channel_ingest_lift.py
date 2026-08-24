@@ -100,6 +100,12 @@ def test_market_channel_bootstrap_separates_entry_and_held_exit_metadata() -> No
         price_channel_ingest._edli_market_channel_token_metadata_reloader
     )
     assert "active_weather_token_metadata_from_snapshots" in reloader_source
+    cycle_source = inspect.getsource(price_channel_ingest._edli_market_channel_ingestor_cycle)
+    pre_runner = cycle_source.split("    def _runner", 1)[0]
+    assert "_connect_read_only" not in pre_runner
+    assert "get_forecasts_connection_read_only" not in pre_runner
+    assert "get_trade_connection" not in pre_runner
+    assert "_edli_complete_market_channel_bootstrap" in pre_runner
 
 
 def test_price_channel_daemon_separates_starting_status_from_ready_heartbeat() -> None:
@@ -3254,8 +3260,6 @@ def test_market_channel_token_metadata_reloader_skips_unchanged_projection(monke
     day0 = {"day0-token"}
     candidates = {"candidate-token"}
     priorities = held | open_rest | day0 | candidates
-    initial_priorities = set(priorities)
-    initial_repair = held | open_rest | candidates
     calls = {"active": 0, "entry": 0, "exit": 0, "closed": 0}
     order: list[str] = []
 
@@ -3270,19 +3274,27 @@ def test_market_channel_token_metadata_reloader_skips_unchanged_projection(monke
         def close(self):
             calls["closed"] += 1
 
+    class Metadata:
+        def __init__(self, condition_id):
+            self.condition_id = condition_id
+
     def active_metadata(_conn, *, priority_token_ids):  # noqa: ANN001
         order.append("broad_hydration")
         calls["active"] += 1
         assert set(priority_token_ids) == priorities
-        return {"active-token": object()}
+        return {"active-token": Metadata("condition-active")}
 
     def targeted_metadata(_conn, *, token_ids, purpose):  # noqa: ANN001
         calls[purpose] += 1
         if purpose == "exit":
+            order.append("held_metadata")
             assert set(token_ids) == held
         else:
             assert set(token_ids) == priorities
-        return {token_id: object() for token_id in token_ids}
+        return {
+            token_id: Metadata("condition-held" if purpose == "exit" else "condition-entry")
+            for token_id in token_ids
+        }
 
     monkeypatch.setattr(
         db,
@@ -3313,6 +3325,11 @@ def test_market_channel_token_metadata_reloader_skips_unchanged_projection(monke
         price_channel_ingest,
         "_edli_held_position_priority_token_ids",
         lambda _conn: set(held),
+    )
+    monkeypatch.setattr(
+        price_channel_ingest,
+        "_edli_canonical_open_held_pairs",
+        lambda _conn: {("condition-held", "held-token")},
     )
     monkeypatch.setattr(
         price_channel_ingest,
@@ -3353,20 +3370,21 @@ def test_market_channel_token_metadata_reloader_skips_unchanged_projection(monke
     version[0] += 1
     third = reload_token_metadata()
 
-    assert set(first.token_metadata) == {"active-token", "held-token"}
-    assert set(first.seed_first_token_ids) == initial_priorities
-    assert set(first.depth_repair_token_ids) == initial_repair
-    assert second.token_metadata is first.token_metadata
+    assert set(first.token_metadata) == {"held-token"}
+    assert set(first.seed_first_token_ids) == {"held-token"}
+    assert set(first.depth_repair_token_ids) == {"held-token"}
+    assert set(second.token_metadata) == {"active-token", "held-token"}
+    assert second.token_metadata is not first.token_metadata
     assert "day0-token" in promoted.depth_repair_token_ids
     assert "day0-token" not in demoted.depth_repair_token_ids
     assert "candidate-token-2" in priority_only.token_metadata
     assert priority_only.token_metadata is not first.token_metadata
     assert third.token_metadata is not first.token_metadata
-    assert calls == {"active": 2, "entry": 3, "exit": 5, "closed": 18}
-    assert order[0] == "sink_receipt"
+    assert calls == {"active": 2, "entry": 3, "exit": 6, "closed": 16}
+    assert order[:2] == ["sink_receipt", "held_metadata"]
     assert order.count("broad_hydration") == 2
 
-    cached = {"cached-token": object()}
+    cached = {"held-token": object(), "cached-token": object()}
     cached_reload = price_channel_ingest._edli_market_channel_token_metadata_reloader(
         initial_token_metadata=cached,
         initial_fingerprint=(
@@ -3386,7 +3404,286 @@ def test_market_channel_token_metadata_reloader_skips_unchanged_projection(monke
     assert set(cached_result.depth_repair_token_ids) == (
         held | open_rest | candidates
     )
-    assert calls == {"active": 2, "entry": 3, "exit": 5, "closed": 21}
+    assert calls == {"active": 2, "entry": 3, "exit": 6, "closed": 19}
+
+
+def test_market_channel_fast_scope_uses_canonical_pairs_not_audit_residual(monkeypatch):
+    from src.events.triggers import market_channel_ingestor
+    from src.ingest import price_channel_ingest as lane
+    from src.state import db
+
+    class Connection:
+        def set_progress_handler(self, _callback, _interval):
+            pass
+
+        def close(self):
+            pass
+
+    class Metadata:
+        def __init__(self, condition_id, token_id):
+            self.condition_id = condition_id
+            self.token_id = token_id
+
+    canonical = {
+        ("condition-a", "held-a"),
+        ("condition-b", "held-b"),
+    }
+    audit = {f"audit-{index}" for index in range(56)}
+    audit_calls: list[set[str]] = []
+    monkeypatch.setattr(db, "_connect_read_only", lambda *_a, **_k: Connection())
+    monkeypatch.setattr(db, "get_forecasts_connection_read_only", lambda **_k: Connection())
+    monkeypatch.setattr(db, "get_trade_connection", lambda **_k: Connection())
+    monkeypatch.setattr(lane, "_edli_canonical_open_held_pairs", lambda _conn: canonical)
+    monkeypatch.setattr(
+        lane,
+        "_edli_held_position_priority_token_ids",
+        lambda _conn: audit_calls.append(set(audit)) or set(audit),
+    )
+    monkeypatch.setattr(lane, "_edli_candidate_priority_token_ids", lambda *_a, **_k: [])
+    monkeypatch.setattr(lane, "_edli_open_rest_priority_token_ids", lambda *_a: set())
+    monkeypatch.setattr(lane, "_edli_current_day0_priority_token_ids", lambda *_a: ())
+    monkeypatch.setattr(lane, "_edli_priority_family_token_ids", lambda *_a: set())
+    monkeypatch.setattr(lane, "_edli_market_channel_token_metadata_fingerprint", lambda *_a: ((1, 1), (), ()))
+    monkeypatch.setattr(
+        market_channel_ingestor,
+        "active_weather_token_metadata_for_tokens",
+        lambda _conn, *, token_ids, purpose: {
+            token_id: Metadata(
+                "condition-a" if token_id == "held-a" else "condition-b", token_id
+            )
+            for token_id in token_ids
+        },
+    )
+    monkeypatch.setattr(
+        market_channel_ingestor,
+        "active_weather_token_metadata_from_snapshots",
+        lambda *_a, **_k: {},
+    )
+
+    universe = lane._edli_market_channel_token_metadata_reloader()()
+    assert set(universe.token_metadata) == {"held-a", "held-b"}
+    assert set(universe.seed_first_token_ids) == {"held-a", "held-b"}
+    assert audit_calls == []
+
+
+def test_market_channel_fast_scope_rechecks_new_held_after_empty_first_cadence(monkeypatch):
+    from src.events.triggers import market_channel_ingestor
+    from src.ingest import price_channel_ingest as lane
+    from src.state import db
+
+    class Connection:
+        def set_progress_handler(self, _callback, _interval):
+            pass
+
+        def close(self):
+            pass
+
+    class Metadata:
+        condition_id = "condition-new"
+
+    canonical: set[tuple[str, str]] = set()
+    monkeypatch.setattr(db, "_connect_read_only", lambda *_a, **_k: Connection())
+    monkeypatch.setattr(db, "get_forecasts_connection_read_only", lambda **_k: Connection())
+    monkeypatch.setattr(db, "get_trade_connection", lambda **_k: Connection())
+    monkeypatch.setattr(lane, "_edli_canonical_open_held_pairs", lambda _conn: set(canonical))
+    monkeypatch.setattr(lane, "_edli_held_position_priority_token_ids", lambda _conn: set())
+    monkeypatch.setattr(lane, "_edli_candidate_priority_token_ids", lambda *_a, **_k: [])
+    monkeypatch.setattr(lane, "_edli_open_rest_priority_token_ids", lambda *_a: set())
+    monkeypatch.setattr(lane, "_edli_current_day0_priority_token_ids", lambda *_a: ())
+    monkeypatch.setattr(lane, "_edli_priority_family_token_ids", lambda *_a: set())
+    monkeypatch.setattr(lane, "_edli_market_channel_token_metadata_fingerprint", lambda *_a: ((1, 1), (), ()))
+    monkeypatch.setattr(
+        market_channel_ingestor,
+        "active_weather_token_metadata_for_tokens",
+        lambda _conn, *, token_ids, purpose: {token_id: Metadata() for token_id in token_ids},
+    )
+    monkeypatch.setattr(
+        market_channel_ingestor,
+        "active_weather_token_metadata_from_snapshots",
+        lambda *_a, **_k: {},
+    )
+    reload_token_metadata = lane._edli_market_channel_token_metadata_reloader()
+    first = reload_token_metadata()
+    assert first.token_metadata == {}
+    canonical.add(("condition-new", "held-new"))
+    second = reload_token_metadata()
+    assert set(second.token_metadata) == {"held-new"}
+    assert set(second.seed_first_token_ids) == {"held-new"}
+
+
+def test_market_channel_first_held_tranche_does_not_open_world_or_forecasts(
+    monkeypatch,
+):
+    """Canonical held subscription cannot be blocked by unrelated DB bootstrap."""
+    from src.events.triggers import market_channel_ingestor
+    from src.ingest import price_channel_ingest as lane
+    from src.state import db
+
+    class Connection:
+        def set_progress_handler(self, _callback, _interval):
+            pass
+
+        def close(self):
+            pass
+
+    class Metadata:
+        condition_id = "condition-held"
+
+    monkeypatch.setattr(db, "get_trade_connection", lambda **_k: Connection())
+    monkeypatch.setattr(
+        db,
+        "_connect_read_only",
+        lambda *_a, **_k: (_ for _ in ()).throw(
+            AssertionError("world bootstrap must wait for held subscription")
+        ),
+    )
+    monkeypatch.setattr(
+        db,
+        "get_forecasts_connection_read_only",
+        lambda **_k: (_ for _ in ()).throw(
+            AssertionError("forecast bootstrap must wait for held subscription")
+        ),
+    )
+    monkeypatch.setattr(
+        lane,
+        "_edli_canonical_open_held_pairs",
+        lambda _conn: {("condition-held", "held-token")},
+    )
+    monkeypatch.setattr(
+        market_channel_ingestor,
+        "active_weather_token_metadata_for_tokens",
+        lambda _conn, *, token_ids, purpose: {
+            token_id: Metadata() for token_id in token_ids
+        },
+    )
+
+    universe = lane._edli_market_channel_token_metadata_reloader()()
+
+    assert set(universe.token_metadata) == {"held-token"}
+    assert set(universe.seed_first_token_ids) == {"held-token"}
+
+
+def test_market_channel_broad_partial_exit_retains_held_and_keeps_m5_debt(
+    monkeypatch,
+):
+    """Broad candidates never replace canonical held rows on partial exit refresh."""
+    from src.events.triggers import market_channel_ingestor
+    from src.ingest import price_channel_ingest as lane
+    from src.state import db
+
+    class Cursor:
+        def fetchone(self):
+            return (1,)
+
+    class Connection:
+        def set_progress_handler(self, _callback, _interval):
+            pass
+
+        def execute(self, _sql):
+            return Cursor()
+
+        def close(self):
+            pass
+
+    class Metadata:
+        def __init__(self, condition_id):
+            self.condition_id = condition_id
+
+    canonical = {("condition-held", "held-token")}
+    exit_results = iter(
+        (
+            {"held-token": Metadata("condition-held")},
+            {},
+            {"held-token": Metadata("condition-held")},
+        )
+    )
+    debt_reasons: list[str] = []
+    clear_calls: list[str] = []
+    monkeypatch.setattr(lane, "_market_channel_universe_refresh_debt", None)
+    monkeypatch.setattr(
+        lane,
+        "_edli_publish_market_channel_universe_refresh_debt",
+        lambda _generation, reason: debt_reasons.append(reason),
+    )
+    monkeypatch.setattr(
+        lane,
+        "_edli_clear_market_channel_universe_refresh_debt",
+        lambda generation: clear_calls.append(generation),
+    )
+    monkeypatch.setattr(db, "get_trade_connection", lambda **_k: Connection())
+    monkeypatch.setattr(db, "_connect_read_only", lambda *_a, **_k: Connection())
+    monkeypatch.setattr(
+        db, "get_forecasts_connection_read_only", lambda **_k: Connection()
+    )
+    monkeypatch.setattr(lane, "_edli_canonical_open_held_pairs", lambda _conn: canonical)
+    monkeypatch.setattr(lane, "_edli_held_position_priority_token_ids", lambda _conn: set())
+    monkeypatch.setattr(lane, "_edli_open_rest_priority_token_ids", lambda _conn: set())
+    monkeypatch.setattr(lane, "_edli_current_day0_priority_token_ids", lambda *_a: ())
+    monkeypatch.setattr(lane, "_edli_candidate_priority_token_ids", lambda *_a, **_k: [])
+    monkeypatch.setattr(lane, "_edli_priority_family_token_ids", lambda *_a: set())
+    monkeypatch.setattr(
+        lane,
+        "_edli_market_channel_seed_first_token_ids",
+        lambda **_k: {"held-token"},
+    )
+    monkeypatch.setattr(
+        lane,
+        "_edli_market_channel_depth_repair_token_ids",
+        lambda **_k: {"held-token"},
+    )
+    monkeypatch.setattr(
+        lane,
+        "_edli_market_channel_token_metadata_fingerprint",
+        lambda *_a: ((1, 1), (), ()),
+    )
+    monkeypatch.setattr(
+        market_channel_ingestor,
+        "active_weather_token_metadata_from_snapshots",
+        lambda *_a, **_k: {"candidate-token": Metadata("condition-candidate")},
+    )
+
+    def targeted(_conn, *, token_ids, purpose):
+        if purpose == "exit":
+            return next(exit_results)
+        return {}
+
+    monkeypatch.setattr(
+        market_channel_ingestor,
+        "active_weather_token_metadata_for_tokens",
+        targeted,
+    )
+    reload_token_metadata = lane._edli_market_channel_token_metadata_reloader()
+
+    first = reload_token_metadata()
+    second = reload_token_metadata()
+    third = reload_token_metadata()
+
+    assert set(first.token_metadata) == {"held-token"}
+    assert set(second.token_metadata) == {"held-token", "candidate-token"}
+    assert second.token_metadata["held-token"].condition_id == "condition-held"
+    assert debt_reasons == ["canonical_held_identity_coverage_missing"]
+    assert len(clear_calls) == 1
+    assert set(third.token_metadata) == {"held-token", "candidate-token"}
+
+
+def test_market_channel_canonical_identity_debt_fails_m5_for_all_typed_reasons(
+    monkeypatch,
+):
+    from src.ingest import price_channel_ingest as lane
+
+    for reason in (
+        "canonical_held_identity_unavailable",
+        "canonical_held_identity_condition_mismatch",
+        "canonical_held_identity_coverage_missing",
+    ):
+        monkeypatch.setattr(
+            lane,
+            "_market_channel_universe_refresh_debt",
+            {"reason": reason},
+        )
+        assert lane._edli_market_channel_universe_m5_failure_reason() == (
+            "canonical_held_identity"
+        )
 
 
 def test_market_channel_universe_reload_interrupts_blocked_sqlite_and_retries_next_cadence(
@@ -3558,6 +3855,7 @@ def test_market_channel_reloader_deadline_interrupts_blocked_broad_hydration(
     monkeypatch.setattr(lane, "MARKET_CHANNEL_UNIVERSE_REFRESH_DEADLINE_SECONDS", 0.1)
     monkeypatch.setattr(lane, "_edli_candidate_priority_token_ids", lambda *_a, **_k: [])
     monkeypatch.setattr(lane, "_edli_held_position_priority_token_ids", lambda *_a: set())
+    monkeypatch.setattr(lane, "_edli_canonical_open_held_pairs", lambda *_a: set())
     monkeypatch.setattr(lane, "_edli_open_rest_priority_token_ids", lambda *_a: set())
     monkeypatch.setattr(lane, "_edli_current_day0_priority_token_ids", lambda *_a: ())
     monkeypatch.setattr(lane, "_edli_priority_family_token_ids", lambda *_a: set())

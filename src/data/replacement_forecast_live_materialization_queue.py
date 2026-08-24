@@ -323,6 +323,7 @@ class _MaterializationQueueClaim:
         tuple[int, int, int, str] | None,
         tuple[int, int, int, str] | None,
     ] | None = None
+    forecast_db_path: Path | str | None = None
 
 
 @dataclass(frozen=True)
@@ -338,6 +339,7 @@ class _RequestClaimReadPlan:
     superseded: tuple[_PlannedSupersededRequest, ...]
     stale_conflict_batches: tuple[str, ...] = ()
     unknown_inflight_batches: tuple[str, ...] = ()
+    active_conflict_batches: tuple[str, ...] = ()
 
 
 def _materialization_subprocess_timeout_seconds() -> float:
@@ -1976,6 +1978,65 @@ def _request_coalescing_key(payload: Mapping[str, object]) -> tuple[str, ...] | 
     )
 
 
+def _claim_identity_witness(
+    payload: Mapping[str, object],
+) -> dict[str, tuple[str, ...]] | None:
+    """Persist the two queue identity views before a request leaves queued/."""
+
+    semantic = _request_semantic_key(payload)
+    coalescing = _request_coalescing_key(payload)
+    if semantic is None and coalescing is None:
+        return None
+    return {
+        key: value
+        for key, value in (("semantic", semantic), ("coalescing", coalescing))
+        if value is not None
+    }
+
+
+def _read_claim_identity_witnesses(
+    batch_path: Path,
+) -> dict[str, dict[str, tuple[str, ...]]]:
+    """Read durable claim identities; never trust a damaged request body over them."""
+
+    try:
+        metadata = json.loads(
+            (batch_path / _CLAIM_METADATA_NAME).read_text(encoding="utf-8")
+        )
+    except (OSError, ValueError, json.JSONDecodeError):
+        return {}
+    raw = metadata.get("identities") if isinstance(metadata, Mapping) else None
+    if not isinstance(raw, Mapping):
+        return {}
+    witnesses: dict[str, dict[str, tuple[str, ...]]] = {}
+    for name, candidate in raw.items():
+        if not isinstance(name, str) or Path(name).name != name or not isinstance(candidate, Mapping):
+            continue
+        witness = {
+            key: tuple(str(value) for value in values)
+            for key, values in candidate.items()
+            if key in {"semantic", "coalescing"}
+            and isinstance(values, list)
+            and values
+            and all(isinstance(value, str) and value for value in values)
+        }
+        if witness:
+            witnesses[name] = witness
+    return witnesses
+
+
+def _claim_identity_keys(
+    witness: Mapping[str, Sequence[str]] | None,
+) -> frozenset[tuple[str, tuple[str, ...]]]:
+    if witness is None:
+        return frozenset()
+    return frozenset(
+        (kind, tuple(values))
+        for kind, values in witness.items()
+        if kind in {"semantic", "coalescing"} and values
+    )
+
+
 def _request_freshness_key(path: Path, payload: Mapping[str, object]) -> tuple[datetime, int, str]:
     # Day0 identity is a monotone source observation clock. A later queue write
     # must not let an older observation supersede it merely because its seed was
@@ -2418,25 +2479,38 @@ def _build_request_claim_read_plan(
     """Create a no-mutation request claim plan before taking the queue flock."""
     inflight_path = request_path.parent / MATERIALIZATION_INFLIGHT_DIR_NAME
     active_keys: set[tuple[str, ...]] = set()
-    stale_batches_by_key: dict[tuple[str, ...], set[str]] = {}
+    active_batches_by_identity: dict[tuple[str, tuple[str, ...]], set[str]] = {}
+    stale_batches_by_identity: dict[tuple[str, tuple[str, ...]], set[str]] = {}
     unknown_inflight_batches: set[str] = set()
     if inflight_path.exists():
         stale_after = _materialization_subprocess_timeout_seconds() + _STALE_CLAIM_GRACE_SECONDS
         for batch_path in (path for path in inflight_path.iterdir() if path.is_dir()):
+            metadata_witnesses = _read_claim_identity_witnesses(batch_path)
             if _claim_age_seconds(batch_path) >= stale_after:
                 for path in _claim_request_files(batch_path):
                     payload = _load_request_payload_for_coalescing(path)
-                    key = _request_coalescing_key(payload) if payload is not None else None
-                    if key is not None:
-                        stale_batches_by_key.setdefault(key, set()).add(batch_path.name)
+                    witness = metadata_witnesses.get(path.name) or (
+                        _claim_identity_witness(payload) if payload is not None else None
+                    )
+                    keys = _claim_identity_keys(witness)
+                    if keys:
+                        for key in keys:
+                            stale_batches_by_identity.setdefault(key, set()).add(batch_path.name)
                     else:
                         unknown_inflight_batches.add(batch_path.name)
                 continue
             for path in _claim_request_files(batch_path):
                 payload = _load_request_payload_for_coalescing(path)
-                key = _request_coalescing_key(payload) if payload is not None else None
-                if key is not None:
-                    active_keys.add(key)
+                witness = metadata_witnesses.get(path.name) or (
+                    _claim_identity_witness(payload) if payload is not None else None
+                )
+                keys = _claim_identity_keys(witness)
+                if keys:
+                    for key in keys:
+                        active_batches_by_identity.setdefault(key, set()).add(batch_path.name)
+                    coalescing = (witness or {}).get("coalescing")
+                    if coalescing is not None:
+                        active_keys.add(coalescing)
                 else:
                     unknown_inflight_batches.add(batch_path.name)
     request_files = (
@@ -2460,8 +2534,16 @@ def _build_request_claim_read_plan(
     claimable: list[Path] = []
     inflight_deferred = 0
     timeout_retry_deferred = 0
+    identity_deferred = 0
     for path in remaining:
         payload = _load_request_payload_for_coalescing(path)
+        if payload is None or _claim_identity_witness(payload) is None:
+            # SCOPE: this unreadable queued filename only. DRAIN: the producer
+            # repairs/replaces it or an operator quarantines it. RESET: a later
+            # plan can derive both durable identities. It must never enter
+            # inflight without an owner witness.
+            identity_deferred += 1
+            continue
         _base, _attempt, retry_at = _timeout_retry_state(path)
         if retry_at is not None and retry_at > now:
             timeout_retry_deferred += 1
@@ -2472,13 +2554,26 @@ def _build_request_claim_read_plan(
             continue
         claimable.append(path)
     selected = tuple(claimable[:limit])
+    identity_targets = selected or requests[:limit]
+    selected_identity_keys = frozenset().union(
+        *(
+            _claim_identity_keys(
+                _claim_identity_witness(
+                    _load_request_payload_for_coalescing(path) or {}
+                )
+            )
+            for path in identity_targets
+        )
+    )
     stale_conflict_batches = tuple(sorted({
         batch_name
-        for path in selected
-        for batch_name in stale_batches_by_key.get(
-            _request_coalescing_key(_load_request_payload_for_coalescing(path) or {}),
-            set(),
-        )
+        for key in selected_identity_keys
+        for batch_name in stale_batches_by_identity.get(key, set())
+    }))
+    active_conflict_batches = tuple(sorted({
+        batch_name
+        for key in selected_identity_keys
+        for batch_name in active_batches_by_identity.get(key, set())
     }))
     claim = _MaterializationQueueClaim(
         request_path=request_path,
@@ -2486,24 +2581,33 @@ def _build_request_claim_read_plan(
         processed_path=processed_path,
         failed_path=failed_path,
         claimed_count=len(selected),
-        skipped_count=inflight_deferred + timeout_retry_deferred + max(len(claimable) - limit, 0),
+        skipped_count=(
+            identity_deferred + inflight_deferred + timeout_retry_deferred
+            + max(len(claimable) - limit, 0)
+        ),
         inflight_deferred_count=inflight_deferred,
         timeout_retry_deferred_count=timeout_retry_deferred,
         processed_files=(),
         failed_files=(),
         seed_processed_files=(),
         seed_failed_files=(),
-        seed_reasons=(),
+        seed_reasons=(
+            ("REPLACEMENT_LIVE_MATERIALIZATION_CLAIM_IDENTITY_DEFERRED",)
+            if identity_deferred
+            else ()
+        ),
         discovery_report=None,
         selected_files=selected,
         request_snapshot=_queue_files_snapshot(request_path),
         forecast_db_fingerprint=_claim_db_fingerprint(forecast_db),
+        forecast_db_path=forecast_db,
     )
     return _RequestClaimReadPlan(
         claim=claim,
         superseded=superseded,
         stale_conflict_batches=stale_conflict_batches,
         unknown_inflight_batches=tuple(sorted(unknown_inflight_batches)),
+        active_conflict_batches=active_conflict_batches,
     )
 
 
@@ -2741,15 +2845,22 @@ def _recover_stale_claims(
     *,
     request_path: Path,
     inflight_path: Path,
-) -> tuple[frozenset[tuple[str, ...]], int]:
+) -> tuple[frozenset[tuple[str, ...]], int, tuple[str, ...]]:
+    """Recover expired leases and classify active owners from durable witnesses.
+
+    SCOPE: every active legacy batch with no readable identity witness. DRAIN:
+    bounded stale recovery. RESET: a witness/terminal receipt, or batch removal.
+    New claims always persist their witness before moving a request.
+    """
     active_keys: set[tuple[str, ...]] = set()
     recovered = 0
+    unknown_active_batches: set[str] = set()
     stale_after = (
         _materialization_subprocess_timeout_seconds()
         + _STALE_CLAIM_GRACE_SECONDS
     )
     if not inflight_path.exists():
-        return frozenset(), 0
+        return frozenset(), 0, ()
     for batch_path in sorted(path for path in inflight_path.iterdir() if path.is_dir()):
         request_files = _claim_request_files(batch_path)
         if not request_files:
@@ -2761,15 +2872,30 @@ def _recover_stale_claims(
                 recovered += 1
             _remove_empty_claim_batch(batch_path)
             continue
+        metadata_witnesses = _read_claim_identity_witnesses(batch_path)
         for path in request_files:
             payload = _load_request_payload_for_coalescing(path)
-            key = _request_coalescing_key(payload) if payload is not None else None
-            if key is not None:
-                active_keys.add(key)
-    return frozenset(active_keys), recovered
+            witness = metadata_witnesses.get(path.name) or (
+                _claim_identity_witness(payload) if payload is not None else None
+            )
+            coalescing = (witness or {}).get("coalescing")
+            if coalescing is None:
+                unknown_active_batches.add(batch_path.name)
+            else:
+                active_keys.add(coalescing)
+    return frozenset(active_keys), recovered, tuple(sorted(unknown_active_batches))
 
 
 def _new_claim_batch(inflight_path: Path, request_files: Sequence[Path]) -> Path:
+    witnesses: dict[str, dict[str, tuple[str, ...]]] = {}
+    for path in request_files:
+        payload = _load_request_payload_for_coalescing(path)
+        witness = None if payload is None else _claim_identity_witness(payload)
+        if witness is None:
+            raise ValueError(
+                f"materialization claim requires semantic/coalescing identity: {path.name}"
+            )
+        witnesses[path.name] = witness
     inflight_path.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
     batch_path = inflight_path / f"{stamp}.pid{os.getpid()}"
@@ -2778,19 +2904,28 @@ def _new_claim_batch(inflight_path: Path, request_files: Sequence[Path]) -> Path
         suffix += 1
         batch_path = inflight_path / f"{stamp}.pid{os.getpid()}.{suffix}"
     batch_path.mkdir()
+    identities = {
+        name: {
+            kind: list(values)
+            for kind, values in witness.items()
+        }
+        for name, witness in witnesses.items()
+    }
     metadata_path = batch_path / _CLAIM_METADATA_NAME
-    metadata_path.write_text(
-        json.dumps(
+    with metadata_path.open("w", encoding="utf-8") as handle:
+        json.dump(
             {
                 "claimed_at": datetime.now(timezone.utc).isoformat(),
                 "owner_pid": os.getpid(),
                 "request_names": [path.name for path in request_files],
+                "identities": identities,
             },
+            handle,
             sort_keys=True,
             indent=2,
-        ),
-        encoding="utf-8",
-    )
+        )
+        handle.flush()
+        os.fsync(handle.fileno())
     moved: list[tuple[Path, Path]] = []
     try:
         for source in request_files:
@@ -2803,7 +2938,94 @@ def _new_claim_batch(inflight_path: Path, request_files: Sequence[Path]) -> Path
                 os.replace(claimed, source)
         _remove_empty_claim_batch(batch_path)
         raise
+    _fsync_directory(batch_path)
+    _fsync_directory(inflight_path)
+    if request_files:
+        _fsync_directory(request_files[0].parent)
     return batch_path
+
+
+def _try_claim_priority_request(
+    plan: _RequestClaimReadPlan,
+) -> _MaterializationQueueClaim | None:
+    """Atomically lease one already-planned priority identity without the broad flock.
+
+    SCOPE: one exact semantic request identity, including source cycle and Day0
+    conditioning identity. DRAIN: the child completes, or stale-claim recovery
+    returns the file after its absolute lease deadline. RESET: the durable batch
+    disappears only after the request has a terminal or retry receipt.
+    """
+
+    source = next(iter(plan.claim.selected_files), None)
+    if source is None:
+        return None
+    # Revalidate the same immutable read fence immediately before the atomic
+    # move. This is intentionally lock-free: a concurrent writer yields typed
+    # debt, never a stale priority claim and never a queue-wide wait.
+    try:
+        current_fingerprint = _claim_db_fingerprint(plan.claim.forecast_db_path)
+    except sqlite3.Error:
+        return None
+    if (
+        _queue_files_snapshot(plan.claim.request_path) != plan.claim.request_snapshot
+        or current_fingerprint != plan.claim.forecast_db_fingerprint
+    ):
+        return None
+    payload = _load_request_payload_for_coalescing(source)
+    witness = _claim_identity_witness(payload or {})
+    if witness is None:
+        return None
+    inflight_path = plan.claim.request_path.parent / MATERIALIZATION_INFLIGHT_DIR_NAME
+    inflight_path.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+    batch_path = inflight_path / f"priority.{stamp}.pid{os.getpid()}"
+    suffix = 0
+    while batch_path.exists():
+        suffix += 1
+        batch_path = inflight_path / f"priority.{stamp}.pid{os.getpid()}.{suffix}"
+    batch_path.mkdir()
+    attempt = _timeout_retry_state(source)[1] + 1
+    deadline_at = datetime.now(timezone.utc) + timedelta(
+        seconds=_materialization_subprocess_timeout_seconds()
+    )
+    metadata_path = batch_path / _CLAIM_METADATA_NAME
+    with metadata_path.open("w", encoding="utf-8") as handle:
+        json.dump(
+            {
+                "claimed_at": datetime.now(timezone.utc).isoformat(),
+                "owner_pid": os.getpid(),
+                "request_names": [source.name],
+                "identities": {
+                    source.name: {
+                        kind: list(values) for kind, values in witness.items()
+                    }
+                },
+                "priority_identity": list(witness["semantic"]),
+                "priority_coalescing_identity": list(witness["coalescing"]),
+                "attempt": attempt,
+                "stage": "claimed",
+                "deadline_at": deadline_at.isoformat(),
+            },
+            handle,
+            sort_keys=True,
+            indent=2,
+        )
+        handle.flush()
+        os.fsync(handle.fileno())
+    try:
+        os.replace(source, batch_path / source.name)
+    except FileNotFoundError:
+        _remove_empty_claim_batch(batch_path)
+        return None
+    _fsync_directory(batch_path)
+    _fsync_directory(inflight_path)
+    _fsync_directory(source.parent)
+    return replace(
+        plan.claim,
+        batch_path=batch_path,
+        claimed_count=1,
+        selected_files=(batch_path / source.name,),
+    )
 
 
 def _day0_enqueue_ownership_cursor_path(request_dir: Path) -> Path:
@@ -3319,10 +3541,35 @@ def _claim_replacement_forecast_live_materialization_queue_locked(
     lane: str = MATERIALIZATION_LANE_ALL,
 ) -> _MaterializationQueueClaim:
     inflight_path = request_path.parent / MATERIALIZATION_INFLIGHT_DIR_NAME
-    active_keys, recovered_count = _recover_stale_claims(
+    active_keys, recovered_count, unknown_active_batches = _recover_stale_claims(
         request_path=request_path,
         inflight_path=inflight_path,
     )
+    if unknown_active_batches:
+        return _MaterializationQueueClaim(
+            request_path=request_path,
+            batch_path=None,
+            processed_path=processed_path,
+            failed_path=failed_path,
+            claimed_count=0,
+            skipped_count=0,
+            inflight_deferred_count=0,
+            timeout_retry_deferred_count=0,
+            processed_files=(),
+            failed_files=(),
+            seed_processed_files=(),
+            seed_failed_files=(),
+            seed_reasons=(
+                _CLAIM_UNKNOWN_INFLIGHT_DEFERRED_REASON,
+                "REPLACEMENT_LIVE_MATERIALIZATION_LEGACY_UNKNOWN_OWNER_DRAIN_STALE_RECOVERY",
+                "REPLACEMENT_LIVE_MATERIALIZATION_LEGACY_UNKNOWN_OWNER_RESET_BATCH_REMOVED",
+                *tuple(
+                    "REPLACEMENT_LIVE_MATERIALIZATION_UNKNOWN_INFLIGHT_BATCH_" + batch_name
+                    for batch_name in unknown_active_batches
+                ),
+            ),
+            discovery_report=None,
+        )
     discovery_report: ReplacementForecastSeedDiscoveryReport | None = None
     if discover and raw_manifest_dir is not None:
         if seed_dir is None:
@@ -3390,6 +3637,7 @@ def _claim_replacement_forecast_live_materialization_queue_locked(
         forecast_db,
         request_files,
     )
+    identity_deferred = 0
     requests = tuple(
         sorted(
             (
@@ -3400,8 +3648,19 @@ def _claim_replacement_forecast_live_materialization_queue_locked(
                     priority_names=priority_names,
                     lane=lane,
                 )
+                and (payload := _load_request_payload_for_coalescing(path)) is not None
+                and _claim_identity_witness(payload) is not None
             ),
             key=lambda path: _cycle_advance_file_sort_key(path, priority),
+        )
+    )
+    identity_deferred = sum(
+        1
+        for path in request_files
+        if _lane_matches(path=path, priority_names=priority_names, lane=lane)
+        and (
+            (payload := _load_request_payload_for_coalescing(path)) is None
+            or _claim_identity_witness(payload) is None
         )
     )
     requests, superseded = _coalesce_superseded_materialization_requests(
@@ -3440,7 +3699,7 @@ def _claim_replacement_forecast_live_materialization_queue_locked(
         failed_path=failed_path,
         claimed_count=len(selected),
         skipped_count=(
-            inflight_deferred
+            identity_deferred + inflight_deferred
             + timeout_retry_deferred
             + max(len(claimable) - limit, 0)
         ),
@@ -3450,7 +3709,11 @@ def _claim_replacement_forecast_live_materialization_queue_locked(
         failed_files=(),
         seed_processed_files=tuple(seed_processed),
         seed_failed_files=tuple(seed_failed),
-        seed_reasons=tuple(seed_reasons),
+        seed_reasons=tuple(
+            (*seed_reasons,)
+            + (("REPLACEMENT_LIVE_MATERIALIZATION_CLAIM_IDENTITY_DEFERRED",)
+               if identity_deferred else ())
+        ),
         discovery_report=discovery_report,
     )
 
@@ -3574,10 +3837,10 @@ def process_replacement_forecast_live_materialization_queue(
         and read_plan is not None
         and read_plan.unknown_inflight_batches
     ):
-        # SCOPE: every priority family while an inflight batch has no trustworthy
-        # coalescing identity. DRAIN: background recovery restores stale batches;
-        # active batches remain an explicit owner debt until they finish/stale.
-        # RESET: every named batch parses to a key or leaves inflight.
+        # SCOPE: legacy inflight ownership whose request and metadata are both
+        # unidentifiable. DRAIN: bounded stale recovery restores its files.
+        # RESET: the owner writes an identity witness/terminal receipt, or the
+        # recovered batch disappears. New claims always carry identities.
         return ReplacementForecastLiveMaterializationQueueReport(
             status="DEFERRED",
             request_dir=str(request_path), processed_dir=str(processed_path),
@@ -3585,9 +3848,35 @@ def process_replacement_forecast_live_materialization_queue(
             skipped_count=0,
             reason_codes=(
                 _CLAIM_UNKNOWN_INFLIGHT_DEFERRED_REASON,
+                "REPLACEMENT_LIVE_MATERIALIZATION_LEGACY_UNKNOWN_OWNER_DRAIN_STALE_RECOVERY",
+                "REPLACEMENT_LIVE_MATERIALIZATION_LEGACY_UNKNOWN_OWNER_RESET_BATCH_REMOVED",
                 *tuple(
                     "REPLACEMENT_LIVE_MATERIALIZATION_UNKNOWN_INFLIGHT_BATCH_" + batch_name
                     for batch_name in read_plan.unknown_inflight_batches
+                ),
+            ),
+        )
+    if (
+        lane == MATERIALIZATION_LANE_PRIORITY
+        and read_plan is not None
+        and read_plan.active_conflict_batches
+    ):
+        # SCOPE: only the exact semantic identity already leased by the named
+        # batch. DRAIN: that owner writes its terminal/retry receipt or ages into
+        # stale recovery. RESET: the named batch leaves inflight. Unrelated or
+        # malformed inflight work is deliberately not a global priority veto.
+        return ReplacementForecastLiveMaterializationQueueReport(
+            status="DEFERRED",
+            request_dir=str(request_path), processed_dir=str(processed_path),
+            failed_dir=str(failed_path), processed_count=0, failed_count=0,
+            skipped_count=0,
+            reason_codes=(
+                "REPLACEMENT_LIVE_MATERIALIZATION_PRIORITY_CLAIM_DEFERRED_SAME_IDENTITY",
+                "REPLACEMENT_LIVE_MATERIALIZATION_PRIORITY_CLAIM_DRAIN_OWNER_TERMINAL_OR_STALE_RECOVERY",
+                "REPLACEMENT_LIVE_MATERIALIZATION_PRIORITY_CLAIM_RESET_BATCH_REMOVED",
+                *tuple(
+                    "REPLACEMENT_LIVE_MATERIALIZATION_PRIORITY_CLAIM_OWNER_" + batch_name
+                    for batch_name in read_plan.active_conflict_batches
                 ),
             ),
         )
@@ -3618,62 +3907,86 @@ def process_replacement_forecast_live_materialization_queue(
             ),
         )
 
-    with _queue_lock(
-        request_path.parent / ".materialization_queue.lock",
-        wait_seconds=1.0 if lane == MATERIALIZATION_LANE_PRIORITY else 0.0,
-    ) as lock_acquired:
-        if not lock_acquired:
+    claim: _MaterializationQueueClaim | None = None
+    if (
+        lane == MATERIALIZATION_LANE_PRIORITY
+        and read_plan is not None
+        and not read_plan.stale_conflict_batches
+        and read_plan.claim.selected_files
+    ):
+        # This is the money-path handoff: the single queued filename becomes a
+        # durable identity lease before background discovery/retry can consume
+        # it. It intentionally does not wait on the broad queue flock.
+        claim = _try_claim_priority_request(read_plan)
+        if claim is None:
             return ReplacementForecastLiveMaterializationQueueReport(
-                status="LOCKED",
-                request_dir=str(request_path),
-                processed_dir=str(processed_path),
-                failed_dir=str(failed_path),
-                processed_count=0,
-                failed_count=0,
+                status="DEFERRED",
+                request_dir=str(request_path), processed_dir=str(processed_path),
+                failed_dir=str(failed_path), processed_count=0, failed_count=0,
                 skipped_count=0,
-                reason_codes=("REPLACEMENT_LIVE_MATERIALIZATION_QUEUE_LOCKED",),
+                reason_codes=(
+                    "REPLACEMENT_LIVE_MATERIALIZATION_CLAIM_DEFERRED_REVALIDATION",
+                    "REPLACEMENT_LIVE_MATERIALIZATION_PRIORITY_CLAIM_DEFERRED_RACED_OWNER",
+                    "REPLACEMENT_LIVE_MATERIALIZATION_PRIORITY_CLAIM_DRAIN_OWNER_TERMINAL_OR_STALE_RECOVERY",
+                    "REPLACEMENT_LIVE_MATERIALIZATION_PRIORITY_CLAIM_RESET_BATCH_REMOVED",
+                ),
             )
-        if (
-            read_plan is not None
-            and not read_plan.unknown_inflight_batches
-            and not read_plan.stale_conflict_batches
-            and read_plan.claim.selected_files
-        ):
-            try:
-                # SCOPE: this exact queue snapshot and forecast DB identity.
-                # DRAIN: the next scheduler claim rebuilds its read plan. RESET:
-                # no change between plan and apply. A mismatch consumes nothing.
-                current_db_fingerprint = _claim_db_fingerprint(forecast_db)
-            except sqlite3.Error:
+    if claim is None:
+        with _queue_lock(
+            request_path.parent / ".materialization_queue.lock",
+            wait_seconds=1.0 if lane == MATERIALIZATION_LANE_PRIORITY else 0.0,
+        ) as lock_acquired:
+            if not lock_acquired:
                 return ReplacementForecastLiveMaterializationQueueReport(
-                    status="DEFERRED", request_dir=str(request_path),
-                    processed_dir=str(processed_path), failed_dir=str(failed_path),
-                    processed_count=0, failed_count=0, skipped_count=0,
-                    reason_codes=("REPLACEMENT_LIVE_MATERIALIZATION_CLAIM_DEFERRED_REVALIDATION",),
+                    status="LOCKED",
+                    request_dir=str(request_path),
+                    processed_dir=str(processed_path),
+                    failed_dir=str(failed_path),
+                    processed_count=0,
+                    failed_count=0,
+                    skipped_count=0,
+                    reason_codes=("REPLACEMENT_LIVE_MATERIALIZATION_QUEUE_LOCKED",),
                 )
             if (
-                _queue_files_snapshot(request_path) != read_plan.claim.request_snapshot
-                or current_db_fingerprint != read_plan.claim.forecast_db_fingerprint
+                read_plan is not None
+                and not read_plan.stale_conflict_batches
+                and read_plan.claim.selected_files
             ):
-                return ReplacementForecastLiveMaterializationQueueReport(
-                    status="DEFERRED", request_dir=str(request_path),
-                    processed_dir=str(processed_path), failed_dir=str(failed_path),
-                    processed_count=0, failed_count=0, skipped_count=0,
-                    reason_codes=("REPLACEMENT_LIVE_MATERIALIZATION_CLAIM_DEFERRED_REVALIDATION",),
+                try:
+                    # SCOPE: this exact queue snapshot and forecast DB identity.
+                    # DRAIN: the next scheduler claim rebuilds its read plan. RESET:
+                    # no change between plan and apply. A mismatch consumes nothing.
+                    current_db_fingerprint = _claim_db_fingerprint(forecast_db)
+                except sqlite3.Error:
+                    return ReplacementForecastLiveMaterializationQueueReport(
+                        status="DEFERRED", request_dir=str(request_path),
+                        processed_dir=str(processed_path), failed_dir=str(failed_path),
+                        processed_count=0, failed_count=0, skipped_count=0,
+                        reason_codes=("REPLACEMENT_LIVE_MATERIALIZATION_CLAIM_DEFERRED_REVALIDATION",),
+                    )
+                if (
+                    _queue_files_snapshot(request_path) != read_plan.claim.request_snapshot
+                    or current_db_fingerprint != read_plan.claim.forecast_db_fingerprint
+                ):
+                    return ReplacementForecastLiveMaterializationQueueReport(
+                        status="DEFERRED", request_dir=str(request_path),
+                        processed_dir=str(processed_path), failed_dir=str(failed_path),
+                        processed_count=0, failed_count=0, skipped_count=0,
+                        reason_codes=("REPLACEMENT_LIVE_MATERIALIZATION_CLAIM_DEFERRED_REVALIDATION",),
+                    )
+                claim = _apply_request_claim_read_plan(read_plan)
+            else:
+                # Discovery/seed transport and durable stale-claim recovery retain
+                # their existing single-flight path; neither is represented as a
+                # request plan until each action has an immutable apply record.
+                claim = _claim_replacement_forecast_live_materialization_queue_locked(
+                    request_path=request_path, processed_path=processed_path,
+                    failed_path=failed_path, seed_dir=seed_dir,
+                    seed_processed_dir=seed_processed_dir, seed_failed_dir=seed_failed_dir,
+                    forecast_db=forecast_db, raw_manifest_dir=raw_manifest_dir,
+                    seed_discovery_limit=seed_discovery_limit, seed_limit=seed_limit,
+                    limit=limit, discover=discover, lane=lane,
                 )
-            claim = _apply_request_claim_read_plan(read_plan)
-        else:
-            # Discovery/seed transport and durable stale-claim recovery retain
-            # their existing single-flight path; neither is represented as a
-            # request plan until each action has an immutable apply record.
-            claim = _claim_replacement_forecast_live_materialization_queue_locked(
-                request_path=request_path, processed_path=processed_path,
-                failed_path=failed_path, seed_dir=seed_dir,
-                seed_processed_dir=seed_processed_dir, seed_failed_dir=seed_failed_dir,
-                forecast_db=forecast_db, raw_manifest_dir=raw_manifest_dir,
-                seed_discovery_limit=seed_discovery_limit, seed_limit=seed_limit,
-                limit=limit, discover=discover, lane=lane,
-            )
     if claim.batch_path is None:
         return _claim_only_report(claim)
     try:
