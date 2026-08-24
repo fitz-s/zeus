@@ -35412,9 +35412,11 @@ def _global_day0_execution_payload(
                 payload[payload_key] = conditioning[source_key]
         carrier_likelihood = conditioning.get("day0_remaining_carrier_likelihood")
         if isinstance(carrier_likelihood, Mapping):
-            payload["_edli_day0_provisional_boundary_survival_probability"] = (
-                carrier_likelihood.get("boundary_survival_probability")
-            )
+            survival = carrier_likelihood.get("boundary_survival_probability")
+            # An empty/partial likelihood mapping carries no survival value;
+            # omit the key rather than projecting None (PR#505 review finding).
+            if survival is not None:
+                payload["_edli_day0_provisional_boundary_survival_probability"] = survival
     if physical_clock is not None:
         payload.update(
             {
