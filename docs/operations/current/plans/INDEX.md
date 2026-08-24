@@ -4,6 +4,7 @@ Plans under `docs/operations/current/plans/`. Rewritten 2026-07-07 against disk 
 
 | Plan | Status | Purpose |
 |------|--------|---------|
+| [`reversal_plan_tier0_2026-08-24.md`](reversal_plan_tier0_2026-08-24.md) | EXECUTING | Full-book investigation verdicts → Tier-0 research mode: entry pause (DONE), measurement repair, decision-price certificates, two-gate promotion; Item 6 blocked on operator venue-min fork. |
 | [`hourly_capital_gains_improvement_loop.md`](hourly_capital_gains_improvement_loop.md) | ACTIVE | Forward journal — the single work-state surface. Read this first. |
 | [`live_branch_workflow_2026-07-20.md`](live_branch_workflow_2026-07-20.md) | ACTIVE | `live` branch; worktree → cherry-pick/PR → live; branch hygiene. Promote binding clauses to AGENTS §5 at operator discretion. |
 | [`codex_worktree_lifecycle_repair_2026-07-28.md`](codex_worktree_lifecycle_repair_2026-07-28.md) | EXECUTING | Codex-managed worktree closeout: app-owned snapshot/remove, worker-owned thread archive, and a two-worktree completed retention cap. |
