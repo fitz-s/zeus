@@ -347,6 +347,8 @@ CREATE TABLE IF NOT EXISTS spawn_intents (
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
+CREATE INDEX IF NOT EXISTS idx_spawn_intents_incident_state
+    ON spawn_intents(incident_id,state);
 CREATE TABLE IF NOT EXISTS controller_debt (
     debt_id TEXT PRIMARY KEY,
     kind TEXT NOT NULL,
@@ -544,6 +546,14 @@ def _startup_schema_complete(conn: sqlite3.Connection) -> bool:
             columns=("status", "stage", "kind", "priority", "detected_at"),
             descending=(False, False, False, True, False),
         )
+        and _startup_index_contract(
+            conn,
+            table="spawn_intents",
+            name="idx_spawn_intents_incident_state",
+            unique=False,
+            columns=("incident_id", "state"),
+            descending=(False, False),
+        )
     )
 
 
@@ -608,6 +618,19 @@ def memory(cfg: Mapping[str, Any]) -> _ClosingConnection:
         conn.execute(
             "CREATE UNIQUE INDEX idx_incident_crossing "
             "ON incidents(position_id,crossing_evidence_id,kind)"
+        )
+    if not _startup_index_contract(
+        conn,
+        table="spawn_intents",
+        name="idx_spawn_intents_incident_state",
+        unique=False,
+        columns=("incident_id", "state"),
+        descending=(False, False),
+    ):
+        conn.execute("DROP INDEX IF EXISTS idx_spawn_intents_incident_state")
+        conn.execute(
+            "CREATE INDEX idx_spawn_intents_incident_state "
+            "ON spawn_intents(incident_id,state)"
         )
     conn.execute("DROP INDEX IF EXISTS idx_incident_queue")
     conn.execute(
@@ -4405,9 +4428,20 @@ def reconcile_orphan_incidents(cfg: Mapping[str, Any]) -> list[str]:
     with _startup_reconcile_memory(cfg) as mem:
         _startup_guard()
         protected_incidents: set[str] = set()
-        intents = mem.execute(
-            "SELECT * FROM spawn_intents WHERE state IN ('pre_spawn','child_started')"
-        ).fetchall()
+        if _STARTUP_BUDGET is None:
+            intents = mem.execute(
+                "SELECT * FROM spawn_intents WHERE state IN ('pre_spawn','child_started')"
+            ).fetchall()
+        elif runs_by_incident:
+            incident_ids = tuple(runs_by_incident)
+            marks = ",".join("?" for _ in incident_ids)
+            intents = mem.execute(
+                "SELECT * FROM spawn_intents WHERE state IN ('pre_spawn','child_started') "
+                f"AND incident_id IN ({marks})",
+                incident_ids,
+            ).fetchall()
+        else:
+            intents = []
         _startup_guard()
         for intent in intents:
             witness_busy = _writer_lock_held(Path(str(intent["witness_path"])))
