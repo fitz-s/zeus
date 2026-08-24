@@ -1,5 +1,5 @@
 # Created: 2026-07-03
-# Last reused/audited: 2026-08-18
+# Last reused/audited: 2026-08-23
 # Authority basis: current global auction, posterior-mean Fractional Kelly,
 #                  Day0 global-cut routing, and auditable SELL holding bindings
 """Current global auction, q-kernel, and live actuation integration contracts."""
@@ -4503,7 +4503,7 @@ def test_current_gamma_market_fetch_batches_concurrently_and_fails_closed():
         )
 
 
-def test_current_gamma_market_fetch_retains_workers_at_total_deadline(monkeypatch):
+def test_current_gamma_market_fetch_returns_before_late_workers_at_total_deadline(monkeypatch):
     import concurrent.futures
 
     real_executor = concurrent.futures.ThreadPoolExecutor
@@ -4523,10 +4523,12 @@ def test_current_gamma_market_fetch_retains_workers_at_total_deadline(monkeypatc
     arrived_chunks = []
     calls_lock = threading.Lock()
     clock = [0.0]
+    shutdown_calls = []
 
     class TrackingExecutor(real_executor):
         def shutdown(self, *args, **kwargs):
             shutdown_started.set()
+            shutdown_calls.append((args, kwargs))
             return super().shutdown(*args, **kwargs)
 
     monkeypatch.setattr(concurrent.futures, "ThreadPoolExecutor", TrackingExecutor)
@@ -4594,7 +4596,8 @@ def test_current_gamma_market_fetch_retains_workers_at_total_deadline(monkeypatc
         clock[0] = 1.0
         deadline_triggered.set()
         assert shutdown_started.wait(2.0)
-        assert not call_finished.is_set()
+        assert call_finished.wait(2.0)
+        assert not workers_finished.is_set()
     finally:
         allow_second_worker.set()
         deadline_triggered.set()
@@ -4604,6 +4607,7 @@ def test_current_gamma_market_fetch_retains_workers_at_total_deadline(monkeypatc
     caller.join(2.0)
     assert sorted(finished_chunks) == sorted(started_chunks)
     assert len(started_chunks) == 2
+    assert shutdown_calls == [((), {"wait": False, "cancel_futures": True})]
     assert len(outcome) == 1
     assert isinstance(outcome[0], ValueError)
     assert "GLOBAL_CURRENT_GAMMA_MARKETS_DEADLINE_EXCEEDED" in str(outcome[0])
@@ -5487,6 +5491,294 @@ def test_global_actuation_revalidates_content_then_preserves_selected_witness(
             decision_time=_dt.datetime(2026, 7, 10, 20, 0, tzinfo=_dt.timezone.utc),
         )
     assert "fields=yes_point_q" in caplog.text
+    conn.close()
+
+
+def test_day0_buy_jit_requires_entry_and_held_probability_content_equality(
+    monkeypatch,
+):
+    content = {
+        field: f"current-{field}"
+        for field in era._GLOBAL_PROBABILITY_CONTENT_FIELDS
+    }
+    selected = SimpleNamespace(
+        **content,
+        yes_point_q=np.asarray((0.2, 0.8), dtype=np.float64),
+        authority_certificate_hash="selected-cert",
+        witness_identity="selected-entry",
+    )
+    held = SimpleNamespace(
+        **content,
+        yes_point_q=np.asarray((0.2, 0.8), dtype=np.float64),
+        authority_certificate_hash="held-cert",
+        witness_identity="current-held",
+    )
+    calls: list[dict[str, object]] = []
+
+    def prepare_current(*_args, **kwargs):
+        calls.append(dict(kwargs))
+        if kwargs["probability_use"] is era._CurrentProbabilityUse.ENTRY:
+            kwargs["day0_payload_out"].update({"q_source": "day0"})
+            witness = selected
+        else:
+            witness = held
+        return bridge.PreparedGlobalFamily(
+            decision_id="current-day0",
+            probability_witness=witness,
+            candidate_seeds=(),
+        )
+
+    monkeypatch.setattr(
+        era,
+        "_prepare_current_global_probability_family",
+        prepare_current,
+    )
+    conn = sqlite3.connect(":memory:")
+    candidate = _global_test_buy_candidate(
+        family_key=str(selected.family_key),
+        probability_witness_identity=str(selected.witness_identity),
+        book_identity="selected-book",
+        price="0.40",
+        captured_at=_dt.datetime(
+            2026, 7, 10, 20, 0, tzinfo=_dt.timezone.utc
+        ),
+        condition_id="c0",
+    )
+    actuation = SimpleNamespace(
+        probability_witness=selected,
+        decision=SimpleNamespace(candidate=candidate),
+    )
+
+    rebound, payload = era._current_global_actuation_prepared_family(
+        SimpleNamespace(event_type="DAY0_EXTREME_UPDATED"),
+        global_actuation=actuation,
+        forecast_conn=conn,
+        topology_conn=conn,
+        observation_conn=conn,
+        decision_time=_dt.datetime(2026, 7, 10, 20, 0, tzinfo=_dt.timezone.utc),
+    )
+
+    assert rebound.probability_witness is selected
+    assert payload == {"q_source": "day0"}
+    assert [call["probability_use"] for call in calls] == [
+        era._CurrentProbabilityUse.ENTRY,
+        era._CurrentProbabilityUse.HELD_MONITOR,
+    ]
+    assert calls[1]["required_condition_id"] == "c0"
+    assert calls[1]["allow_partial_deterministic"] is False
+    assert calls[1]["allow_unobserved_day0_replacement"] is True
+    assert calls[1]["allow_provisional_day0_replacement"] is True
+    conn.close()
+
+
+def test_day0_buy_jit_accepts_exact_q_with_lane_specific_provenance(
+    monkeypatch,
+):
+    from src.events.day0_authority import DAY0_PROBABILITY_SEMANTICS_REVISION
+
+    content = {
+        field: f"current-{field}"
+        for field in era._GLOBAL_PROBABILITY_CONTENT_FIELDS
+    }
+    content.update(
+        {
+            "q_version": (
+                f"day0-semrev:{DAY0_PROBABILITY_SEMANTICS_REVISION}:entry"
+            ),
+            "posterior_identity_hash": "entry-posterior",
+            "source_truth_identity": "entry-source",
+        }
+    )
+    selected = SimpleNamespace(
+        **content,
+        yes_point_q=np.asarray((0.2, 0.8), dtype=np.float64),
+        authority_certificate_hash="selected-cert",
+        witness_identity="selected-entry",
+    )
+    held_content = dict(content)
+    held_content.update(
+        {
+            "q_version": (
+                f"day0-semrev:{DAY0_PROBABILITY_SEMANTICS_REVISION}:held"
+            ),
+            "posterior_identity_hash": "held-posterior",
+            "source_truth_identity": "held-source",
+        }
+    )
+    held = SimpleNamespace(
+        **held_content,
+        yes_point_q=np.asarray((0.2, 0.8), dtype=np.float64),
+        authority_certificate_hash="held-cert",
+        witness_identity="current-held",
+    )
+
+    def prepare_current(*_args, **kwargs):
+        if kwargs["probability_use"] is era._CurrentProbabilityUse.ENTRY:
+            kwargs["day0_payload_out"].update({"q_source": "day0"})
+            witness = selected
+        else:
+            witness = held
+        return bridge.PreparedGlobalFamily(
+            decision_id="current-day0",
+            probability_witness=witness,
+            candidate_seeds=(),
+        )
+
+    monkeypatch.setattr(
+        era,
+        "_prepare_current_global_probability_family",
+        prepare_current,
+    )
+    candidate = _global_test_buy_candidate(
+        family_key=str(selected.family_key),
+        probability_witness_identity=str(selected.witness_identity),
+        book_identity="selected-book",
+        price="0.40",
+        captured_at=_dt.datetime(
+            2026, 7, 10, 20, 0, tzinfo=_dt.timezone.utc
+        ),
+        condition_id="c0",
+    )
+    conn = sqlite3.connect(":memory:")
+    rebound, _payload = era._current_global_actuation_prepared_family(
+        SimpleNamespace(event_type="DAY0_EXTREME_UPDATED"),
+        global_actuation=SimpleNamespace(
+            probability_witness=selected,
+            decision=SimpleNamespace(candidate=candidate),
+        ),
+        forecast_conn=conn,
+        topology_conn=conn,
+        observation_conn=conn,
+        decision_time=_dt.datetime(
+            2026, 7, 10, 20, 0, tzinfo=_dt.timezone.utc
+        ),
+    )
+
+    assert rebound.probability_witness is selected
+    assert era._global_probability_witness_content_mismatches(held, selected) == (
+        "q_version",
+        "posterior_identity_hash",
+        "source_truth_identity",
+    )
+    assert era._global_probability_action_content_mismatches(held, selected) == ()
+    retired_content = dict(held_content)
+    retired_content["q_version"] = "day0-semrev:retired-day0-v0:held"
+    retired = SimpleNamespace(
+        **retired_content,
+        yes_point_q=np.asarray((0.2, 0.8), dtype=np.float64),
+        authority_certificate_hash="retired-cert",
+        witness_identity="retired-held",
+    )
+    assert era._global_probability_action_content_mismatches(
+        retired,
+        selected,
+    ) == ("q_version",)
+    conn.close()
+
+
+def test_day0_buy_jit_blocks_probability_use_divergence_or_unavailable_held(
+    monkeypatch,
+):
+    content = {
+        field: f"current-{field}"
+        for field in era._GLOBAL_PROBABILITY_CONTENT_FIELDS
+    }
+    selected = SimpleNamespace(
+        **content,
+        yes_point_q=np.asarray((0.2, 0.8), dtype=np.float64),
+        authority_certificate_hash="selected-cert",
+        witness_identity="selected-entry",
+    )
+    candidate = _global_test_buy_candidate(
+        family_key=str(selected.family_key),
+        probability_witness_identity=str(selected.witness_identity),
+        book_identity="selected-book",
+        price="0.40",
+        captured_at=_dt.datetime(
+            2026, 7, 10, 20, 0, tzinfo=_dt.timezone.utc
+        ),
+        condition_id="c0",
+    )
+    actuation = SimpleNamespace(
+        probability_witness=selected,
+        decision=SimpleNamespace(candidate=candidate),
+    )
+    conn = sqlite3.connect(":memory:")
+
+    def divergent(*_args, **kwargs):
+        if kwargs["probability_use"] is era._CurrentProbabilityUse.ENTRY:
+            kwargs["day0_payload_out"].update({"q_source": "day0"})
+            witness = selected
+        else:
+            witness = SimpleNamespace(
+                **content,
+                yes_point_q=np.asarray((0.7, 0.3), dtype=np.float64),
+                authority_certificate_hash="held-cert",
+                witness_identity="current-held",
+            )
+        return bridge.PreparedGlobalFamily(
+            decision_id="current-day0",
+            probability_witness=witness,
+            candidate_seeds=(),
+        )
+
+    monkeypatch.setattr(
+        era,
+        "_prepare_current_global_probability_family",
+        divergent,
+    )
+    with pytest.raises(
+        ValueError,
+        match="GLOBAL_ACTUATION_PROBABILITY_USE_DIVERGED",
+    ):
+        era._current_global_actuation_prepared_family(
+            SimpleNamespace(event_type="DAY0_EXTREME_UPDATED"),
+            global_actuation=actuation,
+            forecast_conn=conn,
+            topology_conn=conn,
+            observation_conn=conn,
+            decision_time=_dt.datetime(
+                2026, 7, 10, 20, 0, tzinfo=_dt.timezone.utc
+            ),
+        )
+
+    def unavailable(*_args, **kwargs):
+        if kwargs["probability_use"] is era._CurrentProbabilityUse.HELD_MONITOR:
+            raise ValueError("held source missing")
+        kwargs["day0_payload_out"].update({"q_source": "day0"})
+        return bridge.PreparedGlobalFamily(
+            decision_id="current-day0",
+            probability_witness=selected,
+            candidate_seeds=(),
+        )
+
+    monkeypatch.setattr(
+        era,
+        "_prepare_current_global_probability_family",
+        unavailable,
+    )
+    with pytest.raises(
+        ValueError,
+        match="GLOBAL_ACTUATION_HELD_PROBABILITY_UNAVAILABLE",
+    ):
+        era._current_global_actuation_prepared_family(
+            SimpleNamespace(event_type="DAY0_EXTREME_UPDATED"),
+            global_actuation=actuation,
+            forecast_conn=conn,
+            topology_conn=conn,
+            observation_conn=conn,
+            decision_time=_dt.datetime(
+                2026, 7, 10, 20, 0, tzinfo=_dt.timezone.utc
+            ),
+        )
+    assert era._global_preflight_block_status(
+        "GLOBAL_ACTUATION_PROBABILITY_REVALIDATION_FAILED:ValueError:"
+        "GLOBAL_ACTUATION_PROBABILITY_USE_DIVERGED"
+    ) == "CANDIDATE_BLOCKED"
+    assert era._global_preflight_block_status(
+        "GLOBAL_ACTUATION_PROBABILITY_REVALIDATION_FAILED:ValueError:"
+        "GLOBAL_ACTUATION_HELD_PROBABILITY_UNAVAILABLE"
+    ) == "CANDIDATE_BLOCKED"
     conn.close()
 
 
@@ -7623,23 +7915,31 @@ def test_current_day0_global_probability_uses_current_remaining_day_simplex(
                 {"bin_id": key, "lower_c": lower, "upper_c": upper}
                 for key, lower, upper in posterior_bins
             ],
-            "day0_conditioning": {
-                "active": True,
-                "metric": "high",
-                "source": "wu_icao_history",
-                "observation_time": "2026-07-11T17:00:00+00:00",
-                "observed_extreme_c": (69.0 - 32.0) * 5.0 / 9.0,
-                "unit": "F",
-            },
+                "day0_provisional_observation": {
+                    "active": True,
+                    "metric": "high",
+                    "source": "wu_icao_history",
+                    "observation_time": "2026-07-11T17:00:00+00:00",
+                    "observed_extreme_c": (69.0 - 32.0) * 5.0 / 9.0,
+                    "unit": "F",
+                    "support_truncation": False,
+                },
         },
         source_cycle_time="2026-07-11T00:00:00+00:00",
         source_available_at="2026-07-11T06:00:00+00:00",
     )
     replacement_bound_reads = 0
+    source_clock_available = {"value": True}
 
     def read_source_clock_bound(*_args, **_kwargs):
         nonlocal replacement_bound_reads
         replacement_bound_reads += 1
+        if not source_clock_available["value"]:
+            return SimpleNamespace(
+                ok=False,
+                bundle=None,
+                reason_code="STALE_FOR_LIVE",
+            )
         return SimpleNamespace(
             ok=True,
             bundle=source_clock_bundle,
@@ -7667,8 +7967,14 @@ def test_current_day0_global_probability_uses_current_remaining_day_simplex(
     )
 
     observed_extreme = {"value": 69.0}
+    conditioning_reads: list[Mapping[str, object] | None] = []
+    conditioning_clock_advance_permissions: list[bool] = []
 
     def current_observation_payload(*_args, **kwargs):
+        conditioning_reads.append(kwargs["conditioning"])
+        conditioning_clock_advance_permissions.append(
+            kwargs["allow_equivalent_conditioning_clock_advance"]
+        )
         base_identity = kwargs["probability_base_identity"]
         rounded = observed_extreme["value"]
         return {
@@ -7710,6 +8016,22 @@ def test_current_day0_global_probability_uses_current_remaining_day_simplex(
         era,
         "_global_day0_execution_payload",
         current_observation_payload,
+    )
+    revision_prior_permissions: list[bool] = []
+
+    def revision_likelihood(*_args, **kwargs):
+        revision_prior_permissions.append(kwargs["allow_prior_only"])
+        return {
+            "semantics": "wu_changed_payload_retraction_beta_jeffreys_v1",
+            "transition_count": 20,
+            "retraction_count": 2,
+            "projected_remaining_updates": 6,
+            "boundary_survival_probability": 0.6,
+        }
+
+    monkeypatch.setattr(
+        "src.data.day0_observation_reader.wu_provisional_revision_likelihood",
+        revision_likelihood,
     )
 
     remaining_day_calls = 0
@@ -7818,20 +8140,92 @@ def test_current_day0_global_probability_uses_current_remaining_day_simplex(
             q_lcb=0.3,
         )
     assert replacement_bound_reads == 1
+    provisional_conditioning = source_clock_bundle.provenance_json.pop(
+        "day0_provisional_observation"
+    )
+    source_clock_bundle.provenance_json["day0_conditioning"] = {
+        **provisional_conditioning,
+        "source": "aviationweather_metar",
+        "observation_time": "2026-07-11T17:50:00+00:00",
+    }
+    statistical_payload: dict[str, object] = {}
+    statistical = era._prepare_current_global_probability_family(
+        _global_day0_scope_event(city="Dallas", source_run_id="run-dallas"),
+        forecast_conn=forecast,
+        topology_conn=forecast,
+        observation_conn=observations,
+        decision_time=_dt.datetime(2026, 7, 11, 18, 0, tzinfo=_dt.timezone.utc),
+        max_age=_dt.timedelta(seconds=30),
+        day0_payload_out=statistical_payload,
+    )
+    assert statistical.probability_witness.yes_point_q.tolist() == pytest.approx(
+        [0.0, 0.2, 0.8]
+    )
+    assert conditioning_reads[-1]["source"] == "aviationweather_metar"
+    source_clock_bundle.provenance_json["day0_conditioning"] = {
+        **source_clock_bundle.provenance_json["day0_conditioning"],
+        "observation_time": "2026-07-11T17:30:00+00:00",
+    }
+    stale_support_payload: dict[str, object] = {}
+    stale_support = era._prepare_current_global_probability_family(
+        _global_day0_scope_event(city="Dallas", source_run_id="run-dallas"),
+        forecast_conn=forecast,
+        topology_conn=forecast,
+        observation_conn=observations,
+        decision_time=_dt.datetime(
+            2026, 7, 11, 18, 0, tzinfo=_dt.timezone.utc
+        ),
+        max_age=_dt.timedelta(seconds=30),
+        day0_payload_out=stale_support_payload,
+    )
+    assert stale_support.probability_witness.yes_point_q.tolist() == pytest.approx(
+        [0.0, 0.2, 0.8]
+    )
+    assert stale_support_payload["q_source"] == "day0_remaining_day"
+    assert conditioning_clock_advance_permissions[-1] is True
+    assert conditioning_reads[-1]["observation_time"] == (
+        "2026-07-11T17:30:00+00:00"
+    )
+
+    def remaining_day_unavailable(*_args, **_kwargs):
+        raise ValueError("DAY0_REMAINING_DAY_MEMBERS_UNAVAILABLE")
+
+    monkeypatch.setattr(
+        era,
+        "_day0_remaining_global_probability_components",
+        remaining_day_unavailable,
+    )
+    with pytest.raises(ValueError, match="DAY0_REMAINING_DAY_MEMBERS_UNAVAILABLE"):
+        era._prepare_current_global_probability_family(
+            _global_day0_scope_event(city="Dallas", source_run_id="run-dallas"),
+            forecast_conn=forecast,
+            topology_conn=forecast,
+            observation_conn=observations,
+            decision_time=_dt.datetime(
+                2026, 7, 11, 18, 0, tzinfo=_dt.timezone.utc
+            ),
+            max_age=_dt.timedelta(seconds=30),
+        )
+    monkeypatch.setattr(
+        era,
+        "_day0_remaining_global_probability_components",
+        remaining_day_components,
+    )
+    source_clock_bundle.provenance_json.pop("day0_conditioning")
+    source_clock_bundle.provenance_json[
+        "day0_provisional_observation"
+    ] = provisional_conditioning
     caps = {
         row[:4]: row[4]
         for row in prepared.candidate_payoff_q_lcb_caps
     }
-    bin_by_condition = {
-        binding.condition_id: binding.bin_id
-        for binding in witness.bindings
-    }
-    assert caps[
-        (witness.family_key, "c2", bin_by_condition["c2"], "YES")
-    ] == pytest.approx(0.3)
-    assert caps[
-        (witness.family_key, "c1", bin_by_condition["c1"], "NO")
-    ] == pytest.approx(0.4)
+    # Provisional WU rows carry a revision mixture; they cannot create exact
+    # deterministic payoff caps for any bin or side.
+    assert caps == {}
+    assert day0_payload[
+        "_edli_day0_provisional_boundary_survival_probability"
+    ] == pytest.approx(0.6)
+    assert revision_prior_permissions == [False, False, False, False]
     assert witness.yes_point_q.tolist() == pytest.approx([0.0, 0.2, 0.8])
     assert day0_payload["_edli_day0_source_clock_bound_posterior_identity"]
 
@@ -7850,23 +8244,61 @@ def test_current_day0_global_probability_uses_current_remaining_day_simplex(
         probability_use=era._CurrentProbabilityUse.HELD_MONITOR,
     )
     held_witness = held.probability_witness
-    assert replacement_bound_reads == 2
+    assert replacement_bound_reads == 5
     assert held_witness.yes_point_q.tolist() == pytest.approx(
         witness.yes_point_q.tolist()
     )
-    assert held_witness.q_version == witness.q_version
-    assert held_witness.source_truth_identity == witness.source_truth_identity
-    assert (
-        held_witness.probability_content_identity
-        == witness.probability_content_identity
-    )
-    assert held_payload["_edli_global_day0_binding"][
-        "probability_base_identity"
-    ] == binding["probability_base_identity"]
-    assert held_payload[
-        "_edli_day0_source_clock_bound_posterior_identity"
-    ] == day0_payload["_edli_day0_source_clock_bound_posterior_identity"]
     assert "_edli_day0_redecision_authority_scope" not in held_payload
+    assert (
+        held_payload["_edli_day0_source_clock_bound_posterior_identity"]
+        == day0_payload["_edli_day0_source_clock_bound_posterior_identity"]
+    )
+    assert held_witness.sample_matrix_identity == witness.sample_matrix_identity
+    assert held_payload[
+        "_edli_day0_provisional_boundary_survival_probability"
+    ] == pytest.approx(0.6)
+    assert revision_prior_permissions == [False, False, False, False, True]
+
+    source_clock_available["value"] = False
+    fallback_payload: dict[str, object] = {}
+    fallback = era._prepare_current_global_probability_family(
+        _global_day0_scope_event(city="Dallas", source_run_id="run-dallas"),
+        forecast_conn=forecast,
+        topology_conn=forecast,
+        observation_conn=observations,
+        decision_time=_dt.datetime(
+            2026, 7, 11, 18, 0, tzinfo=_dt.timezone.utc
+        ),
+        max_age=_dt.timedelta(seconds=30),
+        day0_payload_out=fallback_payload,
+        allow_provisional_day0_replacement=True,
+        probability_use=era._CurrentProbabilityUse.HELD_MONITOR,
+    )
+    with pytest.raises(
+        ValueError,
+        match="GLOBAL_CURRENT_REPLACEMENT_BUNDLE_BLOCKED:STALE_FOR_LIVE",
+    ):
+        era._prepare_current_global_probability_family(
+            _global_day0_scope_event(city="Dallas", source_run_id="run-dallas"),
+            forecast_conn=forecast,
+            topology_conn=forecast,
+            observation_conn=observations,
+            decision_time=_dt.datetime(
+                2026, 7, 11, 18, 0, tzinfo=_dt.timezone.utc
+            ),
+            max_age=_dt.timedelta(seconds=30),
+            allow_provisional_day0_replacement=True,
+            probability_use=era._CurrentProbabilityUse.REDUCE_ONLY_EXIT,
+        )
+    source_clock_available["value"] = True
+    assert fallback_payload["_edli_day0_redecision_authority_scope"] == (
+        "held_exposure_current_day0_only_v1"
+    )
+    assert fallback_payload[
+        "_edli_day0_provisional_boundary_survival_probability"
+    ] == pytest.approx(0.6)
+    assert fallback.posterior_id is None
+    assert revision_prior_permissions == [False, False, False, False, True, True]
 
     capture_time["value"] = "2026-07-11T17:31:00+00:00"
     recaptured_payload: dict[str, object] = {}
@@ -7889,6 +8321,15 @@ def test_current_day0_global_probability_uses_current_remaining_day_simplex(
     assert witness.probability_content_identity != (
         recaptured.probability_witness.probability_content_identity
     )
+    assert revision_prior_permissions == [
+        False,
+        False,
+        False,
+        False,
+        True,
+        True,
+        False,
+    ]
 
     missing_observations = sqlite3.connect(":memory:")
     with pytest.raises(ValueError, match="GLOBAL_DAY0_OBSERVATION_HWM_UNAVAILABLE"):
@@ -8166,6 +8607,16 @@ def test_fast_residual_day0_bundle_cannot_replace_remaining_window_q(
         era,
         "_day0_remaining_global_probability_components",
         remaining_components,
+    )
+    monkeypatch.setattr(
+        "src.data.day0_observation_reader.wu_provisional_revision_likelihood",
+        lambda *_args, **_kwargs: {
+            "semantics": "wu_changed_payload_retraction_beta_jeffreys_v1",
+            "transition_count": 20,
+            "retraction_count": 2,
+            "projected_remaining_updates": 6,
+            "boundary_survival_probability": 0.6,
+        },
     )
 
     base_event = _global_day0_scope_event(
@@ -9327,6 +9778,21 @@ def test_live_adapter_routes_each_global_truth_to_its_owner(monkeypatch, event_f
     import src.runtime.reactor_wake as reactor_wake
 
     trade = sqlite3.connect(":memory:")
+    trade.row_factory = sqlite3.Row
+    trade.executescript(
+        """
+        CREATE TABLE risk_actions (
+            action_id TEXT PRIMARY KEY,
+            strategy_key TEXT,
+            action_type TEXT,
+            value TEXT,
+            issued_at TEXT,
+            effective_until TEXT,
+            precedence INTEGER,
+            status TEXT
+        );
+        """
+    )
     forecast = sqlite3.connect(":memory:")
     topology = sqlite3.connect(":memory:")
     world = sqlite3.connect(":memory:")
@@ -9513,8 +9979,66 @@ def test_live_adapter_routes_each_global_truth_to_its_owner(monkeypatch, event_f
             action="SELL",
             position_id="position-nyc",
             token_id="token-nyc",
+            family_key="family-dallas",
+            probability_functional="POSTERIOR_PREDICTIVE_MEAN",
+            exit_authority_status="not_applicable",
         )
     ) is None
+    trade.executescript(
+        """
+        CREATE TABLE position_current (
+            position_id TEXT PRIMARY KEY,
+            strategy_key TEXT,
+            exit_reason TEXT
+        );
+        INSERT INTO position_current VALUES (
+            'position-nyc', 'forecast_qkernel_entry', 'SELL_REVERSAL'
+        );
+        """
+    )
+    trade.execute(
+        "INSERT INTO risk_actions VALUES (?,?,?,?,?,?,?,?)",
+        (
+            "gate-unproven-q",
+            "forecast_qkernel_entry",
+            "gate",
+            json.dumps(
+                {
+                    "gate": True,
+                    "probability_semantics_revisions": ["blocked-revision"],
+                }
+            ),
+            "2026-07-10T08:00:00+00:00",
+            "2026-07-10T09:00:00+00:00",
+            50,
+            "active",
+        ),
+    )
+    statistical_sell = SimpleNamespace(
+        action="SELL",
+        position_id="position-nyc",
+        token_id="token-nyc",
+        family_key="family-dallas",
+        probability_functional="POSTERIOR_PREDICTIVE_MEAN",
+        exit_authority_status="not_applicable",
+    )
+    assert exact_completion_policy(statistical_sell) is None
+    proof_policy = captured["proof_candidate_policy_rejection_resolver"]
+    assert proof_policy(statistical_sell) is None
+    assert exact_completion_policy(
+        SimpleNamespace(
+            **{
+                **vars(statistical_sell),
+                "probability_functional": "DETERMINISTIC_PAYOFF",
+                "exit_authority_status": "deterministic",
+            }
+        )
+    ) is None
+    trade.execute(
+        "UPDATE position_current SET exit_reason='RED_FORCE_EXIT' "
+        "WHERE position_id='position-nyc'"
+    )
+    assert exact_completion_policy(statistical_sell) is None
     assert exact_completion_policy(
         SimpleNamespace(
             action="SELL",
@@ -9522,6 +10046,8 @@ def test_live_adapter_routes_each_global_truth_to_its_owner(monkeypatch, event_f
             token_id="token-unrelated",
         )
     ) == "GLOBAL_EXACT_HELD_COMPLETION_OTHER_POSITION"
+    trade.execute("DELETE FROM risk_actions")
+    trade.execute("DROP TABLE position_current")
     with pytest.raises(
         ValueError,
         match="GLOBAL_EXACT_HELD_COMPLETION_SCOPE_UNRESERVED",
@@ -9643,6 +10169,10 @@ def test_live_adapter_routes_each_global_truth_to_its_owner(monkeypatch, event_f
         action="SELL",
         family_key="family-dallas",
         side="YES",
+        position_id="position-nyc",
+        token_id="token-nyc",
+        probability_functional="POSTERIOR_PREDICTIVE_MEAN",
+        exit_authority_status="not_applicable",
     )
     assert policy(low_price) == "entries_paused:test_containment"
     assert policy(live_floor) == "entries_paused:test_containment"
@@ -11818,6 +12348,56 @@ def test_reduce_only_book_tokens_never_widen_incomplete_family_topology():
         held_by_family,
         ("other-token", "held-token", "held-token"),
     ) == ("held-token",)
+
+
+def test_reduce_only_family_delta_requires_an_exact_held_token_scope():
+    held = SimpleNamespace(
+        family_key="held-family",
+        bindings=(
+            SimpleNamespace(
+                bin_id="held-bin",
+                condition_id="held-condition",
+                yes_token_id="held-token",
+                no_token_id="held-no-token",
+            ),
+        ),
+    )
+    unrelated = SimpleNamespace(
+        family_key="other-family",
+        bindings=(
+            SimpleNamespace(
+                bin_id="other-bin",
+                condition_id="other-condition",
+                yes_token_id="other-token",
+                no_token_id="other-no-token",
+            ),
+        ),
+    )
+    held_without_bindings = SimpleNamespace(
+        family_key="held-family",
+        bindings=(),
+    )
+    held_by_family = {
+        "held-family": {"held-token"},
+        "other-family": {"other-token"},
+    }
+    authorized = frozenset({"held-token"})
+
+    assert era._global_reduce_only_capture_tokens(
+        {"held-family": held},
+        held_by_family,
+        authorized,
+    ) == ("held-token",)
+    assert era._global_reduce_only_capture_tokens(
+        {"other-family": unrelated},
+        held_by_family,
+        authorized,
+    ) == ()
+    assert era._global_reduce_only_capture_tokens(
+        {"held-family": held_without_bindings},
+        held_by_family,
+        authorized,
+    ) == ()
 
 
 def test_speculative_topology_fills_snapshot_gap_from_complete_receipt():
@@ -14875,6 +15455,9 @@ def test_global_winner_binding_does_not_reapply_legacy_price_floor(monkeypatch):
     assert cert["global_auction_receipt"] == (
         actuation.auction_receipt_ref.as_payload()
     )
+    assert cert["global_selection_revision"] == (
+        global_batch_runtime.CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION
+    )
     assert captured["global_execution_mode"] == "TAKER_LIMIT"
     assert captured["cost"] == 0.027666
     assert captured["current_candidate_cap"] == pytest.approx(0.42)
@@ -14885,6 +15468,16 @@ def test_global_winner_binding_does_not_reapply_legacy_price_floor(monkeypatch):
     assert qkernel_current_state_identity_hash(captured) != (
         qkernel_current_state_identity_hash(
             {**captured, "global_current_token_shares": "31"}
+        )
+    )
+    assert qkernel_current_state_identity_hash(captured) != (
+        qkernel_current_state_identity_hash(
+            {
+                **captured,
+                "global_selection_revision": (
+                    "global_single_order_posterior_mean_expected_growth_v1"
+                ),
+            }
         )
     )
 
@@ -14967,6 +15560,446 @@ def test_global_winner_binding_does_not_reapply_legacy_price_floor(monkeypatch):
             forecast_conn=object(),
             decision_time=at,
         )
+
+
+def _decision_p0_test_snapshot(
+    *,
+    snapshot_id: str,
+    selected_outcome_token_id: str,
+    captured_at: _dt.datetime,
+    orderbook_top_bid: Decimal | None,
+    orderbook_top_ask: Decimal | None,
+) -> ExecutableMarketSnapshot:
+    return ExecutableMarketSnapshot(
+        snapshot_id=snapshot_id,
+        gamma_market_id="gamma-35c",
+        event_id="market-event-35c",
+        event_slug="event-35c",
+        condition_id="condition-35c",
+        question_id="question-35c",
+        yes_token_id="yes-35c",
+        no_token_id="no-35c",
+        selected_outcome_token_id=selected_outcome_token_id,
+        outcome_label="NO" if selected_outcome_token_id == "no-35c" else "YES",
+        enable_orderbook=True,
+        active=True,
+        closed=False,
+        accepting_orders=True,
+        market_start_at=None,
+        market_end_at=None,
+        market_close_at=None,
+        sports_start_at=None,
+        min_tick_size=Decimal("0.01"),
+        min_order_size=Decimal("1"),
+        fee_details=canonicalize_fee_details(
+            {"fee_rate_fraction": 0.0},
+            source="fixture",
+            token_id=selected_outcome_token_id,
+        ),
+        token_map_raw={},
+        rfqe=None,
+        neg_risk=False,
+        orderbook_top_bid=orderbook_top_bid,
+        orderbook_top_ask=orderbook_top_ask,
+        orderbook_depth_jsonb=json.dumps(
+            {
+                "bids": (
+                    [{"price": str(orderbook_top_bid), "size": "100"}]
+                    if orderbook_top_bid is not None
+                    else []
+                ),
+                "asks": (
+                    [{"price": str(orderbook_top_ask), "size": "100"}]
+                    if orderbook_top_ask is not None
+                    else []
+                ),
+            }
+        ),
+        raw_gamma_payload_hash="a" * 64,
+        raw_clob_market_info_hash="b" * 64,
+        raw_orderbook_hash="c" * 64,
+        authority_tier="CLOB",
+        captured_at=captured_at,
+        freshness_deadline=captured_at + _dt.timedelta(seconds=180),
+    )
+
+
+def test_decision_p0_reads_side_correct_top_of_book_from_sealed_snapshot():
+    """reversal_plan_tier0_2026-08-24 item 3a: decision_p0 for a BUY is the
+    venue ASK on the exact traded token, read from the SAME snapshot_id the
+    entry's economics are sealed to -- never the limit price, never a fill."""
+    conn = sqlite3.connect(":memory:")
+    init_snapshot_schema(conn)
+    at = _dt.datetime(2026, 7, 14, 16, 24, tzinfo=_dt.timezone.utc)
+    insert_snapshot(
+        conn,
+        _decision_p0_test_snapshot(
+            snapshot_id="snapshot-current",
+            selected_outcome_token_id="no-35c",
+            captured_at=at,
+            orderbook_top_bid=Decimal("0.008"),
+            orderbook_top_ask=Decimal("0.01"),
+        ),
+        capture_trigger="JIT_SUBMIT",
+    )
+
+    buy_p0, buy_source = era._decision_p0_from_book_snapshot(
+        conn,
+        snapshot_id="snapshot-current",
+        token_id="no-35c",
+        action="BUY",
+    )
+    assert buy_p0 == Decimal("0.01")
+    assert buy_source == "snapshot-current"
+
+    sell_p0, sell_source = era._decision_p0_from_book_snapshot(
+        conn,
+        snapshot_id="snapshot-current",
+        token_id="no-35c",
+        action="SELL",
+    )
+    assert sell_p0 == Decimal("0.008")
+    assert sell_source == "snapshot-current"
+
+
+def test_decision_p0_absent_when_snapshot_lacks_side_quote_or_conn_or_token():
+    """Fail-closed per item 3a: a one-sided book, a missing trade_conn, and a
+    token mismatch against the snapshot's selected_outcome_token_id must all
+    leave decision_p0 (and its source) as None -- never guessed."""
+    conn = sqlite3.connect(":memory:")
+    init_snapshot_schema(conn)
+    at = _dt.datetime(2026, 7, 14, 16, 24, tzinfo=_dt.timezone.utc)
+    insert_snapshot(
+        conn,
+        _decision_p0_test_snapshot(
+            snapshot_id="one-sided-snapshot",
+            selected_outcome_token_id="no-35c",
+            captured_at=at,
+            orderbook_top_bid=Decimal("0.008"),
+            orderbook_top_ask=None,
+        ),
+        capture_trigger="JIT_SUBMIT",
+    )
+
+    # One-sided book: no ask to lift on a BUY.
+    p0, source = era._decision_p0_from_book_snapshot(
+        conn,
+        snapshot_id="one-sided-snapshot",
+        token_id="no-35c",
+        action="BUY",
+    )
+    assert (p0, source) == (None, None)
+
+    # No trade_conn at all.
+    p0, source = era._decision_p0_from_book_snapshot(
+        None,
+        snapshot_id="one-sided-snapshot",
+        token_id="no-35c",
+        action="SELL",
+    )
+    assert (p0, source) == (None, None)
+
+    # Snapshot exists but for a different token than the one being traded.
+    p0, source = era._decision_p0_from_book_snapshot(
+        conn,
+        snapshot_id="one-sided-snapshot",
+        token_id="yes-35c",
+        action="SELL",
+    )
+    assert (p0, source) == (None, None)
+
+    # Snapshot id that was never persisted.
+    p0, source = era._decision_p0_from_book_snapshot(
+        conn,
+        snapshot_id="missing-snapshot",
+        token_id="no-35c",
+        action="BUY",
+    )
+    assert (p0, source) == (None, None)
+
+
+def test_global_candidate_decision_p0_reads_buy_ask_and_sell_bid_top_of_book():
+    """reversal_plan_tier0_2026-08-24 item 3b: per-candidate decision_p0 uses
+    the candidate's own already-sealed curve -- ascending asks ladder
+    (levels[0] = best ask) for BUY, descending bids ladder (levels[0] = best
+    bid) for SELL -- with no DB read, matching decision_p0's semantics for
+    the winner's certificate."""
+    from src.solve import solver as _solver
+
+    at = _dt.datetime(2026, 7, 14, 16, 24, tzinfo=_dt.timezone.utc)
+    buy_candidate = _global_test_buy_candidate(
+        family_key="family-buy",
+        probability_witness_identity="q-buy",
+        book_identity="buy",
+        price="0.49",
+        captured_at=at,
+        candidate_id="buy-1",
+        condition_id="condition-buy",
+        token_id="token-buy",
+    )
+    buy_p0, buy_source = _solver._global_candidate_decision_p0(
+        buy_candidate, is_sell=False
+    )
+    assert buy_p0 == Decimal("0.49")
+    assert buy_source == buy_candidate.book_snapshot_id
+
+    sell_curve = ExecutableSellCurve(
+        token_id="sell-token",
+        side="YES",
+        snapshot_id="sell-snapshot",
+        book_hash="sell-hash",
+        levels=(
+            BookLevel(price=Decimal("0.30"), size=Decimal("1")),
+            BookLevel(price=Decimal("0.40"), size=Decimal("1")),
+        ),
+        fee_model=FeeModel(fee_rate=Decimal("0")),
+        min_tick=Decimal("0.01"),
+        min_order_size=Decimal("1"),
+        quote_ttl=_dt.timedelta(seconds=30),
+    )
+    sell_candidate = GlobalSingleOrderSellCandidate(
+        candidate_id="sell-1",
+        family_key="family-sell",
+        bin_id="sell-bin",
+        condition_id="condition-sell",
+        side="YES",
+        token_id="sell-token",
+        position_id="position-sell",
+        held_shares=Decimal("1"),
+        probability_witness_identity="q-sell",
+        book_snapshot_id=sell_curve.snapshot_id,
+        book_captured_at_utc=at,
+        execution_curve_identity=executable_curve_identity(sell_curve),
+        ledger_snapshot_id="sell-ledger",
+        executable_sell_curve=sell_curve,
+        resolution_identity="sell-resolution",
+        neg_risk=False,
+        **_explicit_sell_maker_terms(sell_curve, capacity=Decimal("1")),
+    )
+    # descending-sorted: best (highest) bid first, regardless of input order.
+    sell_p0, sell_source = _solver._global_candidate_decision_p0(
+        sell_candidate, is_sell=True
+    )
+    assert sell_p0 == Decimal("0.40")
+    assert sell_source == sell_candidate.book_snapshot_id
+
+
+def test_persist_tier0_candidate_set_writes_winner_and_rejected_rows_idempotently():
+    """reversal_plan_tier0_2026-08-24 item 3b verification (c)+(d): a 3-
+    candidate auction (1 selected, 2 rejected) writes 3 rows with correct
+    flags/reasons/p0, keyed to the auction identity; replaying the same
+    persist call is idempotent (no duplicate rows).
+
+    The SELECTED and scored-then-REJECTED-SELL evaluations reuse the exact
+    coherent-economics shape from
+    test_global_auction_receipt_persists_complete_buy_sell_hold_cash_comparison
+    above (GlobalSingleOrderCandidateEvaluation.__post_init__ enforces tight
+    cross-field invariants on any evaluation carrying scores) so this test
+    exercises _persist_tier0_candidate_set against real, validated evaluation
+    shapes rather than a hand-rolled fixture that would fight the invariant.
+    """
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    decision_at = _dt.datetime(2026, 7, 14, 12, 0, tzinfo=_dt.timezone.utc)
+    win_q = 0.55
+    expected_du = (1.0 - win_q) * math.log(0.9412) + win_q * math.log(1.0612)
+    selected_terminal = ExpectedBuyTerminalWealthCertificate(
+        probability_basis="POSTERIOR_PREDICTIVE_MEAN",
+        win_probability_mean=win_q,
+        loss_probability_mean=1.0 - win_q,
+        loss_payoff_usd=Decimal("-5.88"),
+        win_payoff_usd=Decimal("6.12"),
+        wealth_after_loss_usd=Decimal("94.12"),
+        wealth_after_win_usd=Decimal("106.12"),
+        expected_delta_log_wealth=expected_du,
+        expected_ev_usd=0.72,
+    )
+    selected_growth = ExpectedGrowthComparison(
+        probability_basis="POSTERIOR_PREDICTIVE_MEAN",
+        probability_witness_identity="q-a",
+        expected_delta_log_wealth=expected_du,
+        expected_ev_usd=0.72,
+        capital_lock_hours=10.0,
+        expected_log_growth_per_hour=expected_du / 10.0,
+        expected_capital_efficiency=expected_du / 5.88,
+    )
+    rejected_sell_terminal = BinaryTerminalWealthCertificate(
+        win_probability_lcb=0.1,
+        loss_probability_ucb=0.9,
+        loss_payoff_usd=Decimal("-2.34"),
+        win_payoff_usd=Decimal("10"),
+        median_payoff_usd=Decimal("-2.34"),
+        wealth_after_loss_usd=Decimal("97.66"),
+        wealth_after_win_usd=Decimal("110"),
+        expected_value_usd=-1.106,
+    )
+    evaluations = (
+        GlobalSingleOrderCandidateEvaluation(
+            candidate_id="cand-selected",
+            family_key="family-a",
+            bin_id="bin-a",
+            condition_id="condition-a",
+            side="YES",
+            token_id="token-a",
+            action="BUY",
+            status="SELECTED",
+            shares=Decimal("12"),
+            cost_usd=Decimal("5.88"),
+            robust_delta_log_wealth=0.0,
+            robust_ev_usd=0.0,
+            capital_efficiency=0.0,
+            capital_action_mode="SETTLEMENT_LOCKED_BUY",
+            buy_sizing_mode="FRACTIONAL_TARGET",
+            resolution_at_utc=decision_at + _dt.timedelta(hours=10),
+            capital_lock_hours=10.0,
+            limit_price=Decimal("0.49"),
+            expected_fill_price_before_fee=Decimal("0.49"),
+            max_spend_usd=Decimal("5.88"),
+            current_token_shares=Decimal("0"),
+            full_kelly_target_shares=Decimal("40"),
+            fractional_kelly_target_shares=Decimal("12"),
+            expected_terminal_wealth=selected_terminal,
+            expected_growth=selected_growth,
+            decision_p0=Decimal("0.12"),
+            decision_p0_source="snapshot-a",
+        ),
+        GlobalSingleOrderCandidateEvaluation(
+            candidate_id="cand-rejected-1",
+            family_key="family-a",
+            bin_id="bin-b",
+            condition_id="condition-b",
+            side="NO",
+            token_id="token-b",
+            action="BUY",
+            status="REJECTED",
+            rejection_reason="ADMISSION_CAPITAL_EFFICIENCY_LCB_EV",
+            decision_p0=Decimal("0.08"),
+            decision_p0_source="snapshot-b",
+        ),
+        GlobalSingleOrderCandidateEvaluation(
+            candidate_id="cand-rejected-2",
+            family_key="family-c",
+            bin_id="bin-c",
+            condition_id="condition-c",
+            side="NO",
+            token_id="token-c",
+            action="SELL",
+            status="REJECTED",
+            execution_mode="MAKER_REST",
+            fill_probability=0.19,
+            fill_probability_source="test_measured_maker_fill",
+            rest_deadline_minutes=20.0,
+            position_id="position-c",
+            held_shares=Decimal("12.34"),
+            rejection_reason="NON_POSITIVE_ROBUST_OBJECTIVE",
+            shares=Decimal("12.34"),
+            cost_usd=Decimal("2.34"),
+            cash_proceeds_usd=Decimal("10"),
+            robust_delta_log_wealth=-0.01,
+            robust_ev_usd=-1.106,
+            capital_efficiency=-0.004273504273504274,
+            capital_action_mode="CONTINGENT_MAKER_REST_SELL",
+            resolution_at_utc=decision_at + _dt.timedelta(hours=30),
+            capital_lock_hours=48.0,
+            robust_log_growth_per_hour=-0.01 / 48.0,
+            limit_price=Decimal("0.80"),
+            expected_fill_price_before_fee=Decimal("0.81"),
+            terminal_wealth=rejected_sell_terminal,
+            decision_p0=None,
+            decision_p0_source=None,
+        ),
+    )
+    family_context_by_key = {
+        "family-a": {"city": "Denver", "target_date": "2026-08-01"},
+        "family-c": {"city": "Denver", "target_date": "2026-08-01"},
+    }
+    global_batch_runtime._persist_tier0_candidate_set(
+        conn,
+        evaluations=evaluations,
+        selection_epoch_identity="epoch-1",
+        decision_at_utc=decision_at,
+        family_context_by_key=family_context_by_key,
+    )
+    rows = conn.execute(
+        "SELECT * FROM tier0_candidate_set_provenance ORDER BY candidate_id"
+    ).fetchall()
+    assert len(rows) == 3
+    by_id = {row["candidate_id"]: row for row in rows}
+
+    selected = by_id["cand-selected"]
+    assert selected["selected"] == 1
+    assert selected["eligible"] == 1
+    assert selected["rejection_reason"] is None
+    assert selected["p0"] == pytest.approx(0.12)
+    assert selected["p0_source"] == "snapshot-a"
+    assert selected["market_key"] == "condition-a"
+    assert selected["lead_bucket"] == "L00_24"
+    assert selected["selection_epoch_identity"] == "epoch-1"
+    assert selected["city_date_group_id"] == "epoch-1:Denver:2026-08-01"
+
+    rejected_1 = by_id["cand-rejected-1"]
+    assert rejected_1["selected"] == 0
+    assert rejected_1["eligible"] == 0
+    assert rejected_1["rejection_reason"] == "ADMISSION_CAPITAL_EFFICIENCY_LCB_EV"
+    assert rejected_1["p0"] == pytest.approx(0.08)
+    assert rejected_1["p0_source"] == "snapshot-b"
+    # No resolution_at_utc on this bare (unscored) rejection -> not derivable.
+    assert rejected_1["lead_bucket"] is None
+
+    rejected_2 = by_id["cand-rejected-2"]
+    assert rejected_2["selected"] == 0
+    assert rejected_2["eligible"] == 0
+    assert rejected_2["p0"] is None
+    assert rejected_2["p0_source"] is None
+    # resolution_at_utc = decision_at + 30h -> L24_48.
+    assert rejected_2["lead_bucket"] == "L24_48"
+    assert rejected_2["market_key"] == "condition-c"
+
+    # Idempotent replay: same rows, no duplicates.
+    global_batch_runtime._persist_tier0_candidate_set(
+        conn,
+        evaluations=evaluations,
+        selection_epoch_identity="epoch-1",
+        decision_at_utc=decision_at,
+        family_context_by_key=family_context_by_key,
+    )
+    replayed = conn.execute(
+        "SELECT COUNT(*) FROM tier0_candidate_set_provenance"
+    ).fetchone()[0]
+    assert replayed == 3
+
+
+def test_persist_tier0_candidate_set_skips_candidates_without_city_date_context():
+    """Fail-closed: a candidate whose family_key has no resolvable
+    (city, target_date) is skipped entirely rather than written with a
+    fabricated/empty grouping key."""
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    decision_at = _dt.datetime(2026, 7, 14, 12, 0, tzinfo=_dt.timezone.utc)
+    evaluations = (
+        GlobalSingleOrderCandidateEvaluation(
+            candidate_id="cand-no-context",
+            family_key="family-unknown",
+            bin_id="bin-a",
+            condition_id="condition-a",
+            side="YES",
+            token_id="token-a",
+            action="BUY",
+            status="REJECTED",
+            rejection_reason="ADMISSION_CAPITAL_EFFICIENCY_LCB_EV",
+        ),
+    )
+    global_batch_runtime._persist_tier0_candidate_set(
+        conn,
+        evaluations=evaluations,
+        selection_epoch_identity="epoch-1",
+        decision_at_utc=decision_at,
+        family_context_by_key={},
+    )
+    row = conn.execute(
+        "SELECT COUNT(*) FROM tier0_candidate_set_provenance"
+    ).fetchone()
+    assert row[0] == 0
 
 
 @pytest.mark.parametrize(
@@ -15124,6 +16157,11 @@ def test_global_winner_binding_does_not_reapply_legacy_price_floor(monkeypatch):
         ),
         (
             "risk_allocator_pre_submit_blocked: unknown_side_effect_same_market",
+            "CANDIDATE_BLOCKED",
+        ),
+        (
+            "LIVE_INFERENCE_INPUTS_MISSING:"
+            "GLOBAL_DAY0_FAST_OBSERVATION_ENTRY_STALE",
             "CANDIDATE_BLOCKED",
         ),
         (
@@ -15534,12 +16572,21 @@ def test_global_preflight_jit_worse_curve_replaces_and_reauctions(monkeypatch):
     assert isinstance(stable.global_jit_candidate, era._GlobalJitHandoff)
 
 
-@pytest.mark.parametrize("execution_mode", ("TAKER_LIMIT", "MAKER_REST"))
 @pytest.mark.parametrize("side", ("YES", "NO"))
-def test_global_preflight_jit_allows_settlement_hold_but_maker_requires_exit_depth(
+@pytest.mark.parametrize(
+    ("execution_mode", "bid_price", "expected_accepted"),
+    (
+        ("TAKER_LIMIT", "0.04", False),
+        ("TAKER_LIMIT", "0.05", True),
+        ("MAKER_REST", "0.04", False),
+    ),
+)
+def test_global_preflight_jit_requires_exit_depth_for_statistical_settlement_hold(
     monkeypatch,
     execution_mode,
     side,
+    bid_price,
+    expected_accepted,
 ):
     event = _global_scope_event(city="Alpha", source_run_id="run-a")
     at = _dt.datetime(2026, 8, 10, 20, 5, tzinfo=_dt.timezone.utc)
@@ -15592,7 +16639,7 @@ def test_global_preflight_jit_allows_settlement_hold_but_maker_requires_exit_dep
         resolution_identity="resolution-a",
         neg_risk=False,
         native_bid_levels=(
-            BookLevel(price=Decimal("0.04"), size=Decimal("100")),
+            BookLevel(price=Decimal(bid_price), size=Decimal("100")),
         ),
         **maker_terms,
     )
@@ -15649,13 +16696,13 @@ def test_global_preflight_jit_allows_settlement_hold_but_maker_requires_exit_dep
         book_quote_provider=lambda token_id: {
             "asset_id": token_id,
             "hash": "jit-book-a",
-            "bids": [{"price": "0.04", "size": "100"}],
+            "bids": [{"price": bid_price, "size": "100"}],
             "asks": [{"price": "0.07", "size": "100"}],
         },
     )
 
-    assert checked.proof_accepted is (execution_mode == "TAKER_LIMIT")
-    if execution_mode == "TAKER_LIMIT":
+    assert checked.proof_accepted is expected_accepted
+    if expected_accepted:
         assert isinstance(checked.global_jit_candidate, era._GlobalJitHandoff)
     else:
         assert checked.reason.startswith(
@@ -18962,6 +20009,7 @@ def test_market_channel_continuity_cut_requires_current_matching_daemon(
     checked_at = _dt.datetime(2026, 7, 17, 0, 20, tzinfo=_dt.timezone.utc)
     proof_path = tmp_path / "market-channel-continuity.json"
     heartbeat_path = tmp_path / "daemon-heartbeat-price-channel-ingest.json"
+    readiness_path = tmp_path / "market-channel-action-sink-readiness.json"
     proof_path.write_text(
         json.dumps(
             {
@@ -18975,6 +20023,19 @@ def test_market_channel_continuity_cut_requires_current_matching_daemon(
                     checked_at - _dt.timedelta(milliseconds=200)
                 ).isoformat(),
                 "pid": 42,
+                "generation": "42-current",
+            }
+        ),
+        encoding="utf-8",
+    )
+    readiness_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "pid": 42,
+                "generation": "42-current",
+                "sink_registered": True,
+                "consumer_queue_accepted": True,
             }
         ),
         encoding="utf-8",
@@ -19016,6 +20077,33 @@ def test_market_channel_continuity_cut_requires_current_matching_daemon(
         checked_at=checked_at,
         max_age=_dt.timedelta(minutes=3),
     ) is None
+
+    heartbeat_path.write_text(
+        json.dumps(
+            {
+                "daemon": "price-channel-ingest",
+                "alive_at": checked_at.isoformat(),
+                "pid": 42,
+            }
+        ),
+        encoding="utf-8",
+    )
+    readiness = json.loads(readiness_path.read_text(encoding="utf-8"))
+    readiness["generation"] = "prior-generation"
+    readiness_path.write_text(json.dumps(readiness), encoding="utf-8")
+    assert era._market_channel_continuity_cut(
+        checked_at=checked_at,
+        max_age=_dt.timedelta(minutes=3),
+    ) is None
+    readiness["generation"] = "42-current"
+    readiness["consumer_queue_accepted"] = False
+    readiness_path.write_text(json.dumps(readiness), encoding="utf-8")
+    assert era._market_channel_continuity_cut(
+        checked_at=checked_at,
+        max_age=_dt.timedelta(minutes=3),
+    ) is None
+    readiness["consumer_queue_accepted"] = True
+    readiness_path.write_text(json.dumps(readiness), encoding="utf-8")
 
     heartbeat_path.write_text(
         json.dumps(
@@ -24578,12 +25666,14 @@ def test_global_batch_held_fallback_disables_buy_but_keeps_family_in_auction(
         captured_at_utc=decision_at,
         posterior_identity_hash="run-a",
         witness_identity="held-q",
+        probability_content_identity="held-q-content",
         q_version="held-q-version",
         family_binding_identity="held-binding",
         sample_matrix_identity="held-samples",
         band_alpha=0.05,
         band_basis="lower-tail",
     )
+    held_prepared = SimpleNamespace(probability_witness=witness)
     obligation = global_batch_runtime._CurrentHeldObligation(
         position_id="held-position",
         family_key=family_key,
@@ -24679,6 +25769,7 @@ def test_global_batch_held_fallback_disables_buy_but_keeps_family_in_auction(
         )
 
         selected_kwargs.update(kwargs)
+        selected_kwargs["prepared_by_event"] = _args[0]
         return PreparedGlobalAuctionResult(
             decision=GlobalSingleOrderDecision(
                 shares=Decimal("0"),
@@ -24719,7 +25810,7 @@ def test_global_batch_held_fallback_disables_buy_but_keeps_family_in_auction(
             False,
             item.event_id,
             item.causal_snapshot_id,
-            prepared_global_family=SimpleNamespace(probability_witness=witness),
+            prepared_global_family=held_prepared,
         ),
         actuate_winner=lambda *_: pytest.fail("cash-dominant auction must not actuate"),
         stamp_receipt=lambda receipt: receipt,
@@ -24741,6 +25832,116 @@ def test_global_batch_held_fallback_disables_buy_but_keeps_family_in_auction(
     assert result.held_sell_completion_cut.outcome == "CAPITAL_REJECTED"
     assert result.held_sell_completion_cut.holding_coverage == (coverage,)
 
+    if entry_only_reason.endswith("FamilyAuthorityUnavailable:test"):
+        entry_witness = SimpleNamespace(
+            **{
+                **vars(witness),
+                "witness_identity": "entry-q",
+                "probability_content_identity": "entry-q-content",
+            }
+        )
+        entry_prepared = SimpleNamespace(probability_witness=entry_witness)
+        held_prepare_calls = []
+        selected_kwargs.clear()
+        stored_kwargs.clear()
+        global_batch_runtime.process_current_global_batch(
+            (event,),
+            decision_time=decision_at,
+            world_conn=object(),
+            forecast_conn=object(),
+            trade_conn=object(),
+            payload_reader=lambda item: json.loads(item.payload_json),
+            prepare_event=lambda item, _at: EventSubmissionReceipt(
+                False,
+                item.event_id,
+                item.causal_snapshot_id,
+                prepared_global_family=entry_prepared,
+            ),
+            prepare_held_event=lambda item, _at: (
+                held_prepare_calls.append(item.event_id)
+                or EventSubmissionReceipt(
+                    False,
+                    item.event_id,
+                    item.causal_snapshot_id,
+                    prepared_global_family=held_prepared,
+                )
+            ),
+            actuate_winner=lambda *_: pytest.fail(
+                "cash-dominant auction must not actuate"
+            ),
+            stamp_receipt=lambda receipt: receipt,
+            venue_submit_count=lambda: 0,
+            current_execution=lambda *_: object(),
+            current_time_provider=lambda: decision_at,
+            portfolio_state_provider=lambda: object(),
+        )
+
+        assert held_prepare_calls == [event.event_id]
+        assert list(selected_kwargs["prepared_by_event"].values()) == [
+            held_prepared
+        ]
+        assert selected_kwargs["buy_disabled_family_keys"] == frozenset(
+            {family_key}
+        )
+        assert stored_kwargs["buy_disabled_reason_by_family"] == {
+            family_key: "GLOBAL_HELD_ENTRY_PROBABILITY_CONTENT_DIVERGED"
+        }
+
+        same_entry = bridge.PreparedGlobalFamily(
+            decision_id="entry-decision",
+            probability_witness=witness,
+            candidate_seeds=("entry-seed",),
+            day0_exit_authority_status="unavailable",
+            day0_exit_authority_reason="entry-authority",
+            sell_action_authority_identity="entry-sell-authority",
+        )
+        same_held = bridge.PreparedGlobalFamily(
+            decision_id="held-decision",
+            probability_witness=witness,
+            candidate_seeds=(),
+            day0_exit_authority_status="immature",
+            day0_exit_authority_reason="held-current-authority",
+            sell_action_authority_identity="held-sell-authority",
+        )
+        selected_kwargs.clear()
+        stored_kwargs.clear()
+        global_batch_runtime.process_current_global_batch(
+            (event,),
+            decision_time=decision_at,
+            world_conn=object(),
+            forecast_conn=object(),
+            trade_conn=object(),
+            payload_reader=lambda item: json.loads(item.payload_json),
+            prepare_event=lambda item, _at: EventSubmissionReceipt(
+                False,
+                item.event_id,
+                item.causal_snapshot_id,
+                prepared_global_family=same_entry,
+            ),
+            prepare_held_event=lambda item, _at: EventSubmissionReceipt(
+                False,
+                item.event_id,
+                item.causal_snapshot_id,
+                prepared_global_family=same_held,
+            ),
+            actuate_winner=lambda *_: pytest.fail(
+                "cash-dominant auction must not actuate"
+            ),
+            stamp_receipt=lambda receipt: receipt,
+            venue_submit_count=lambda: 0,
+            current_execution=lambda *_: object(),
+            current_time_provider=lambda: decision_at,
+            portfolio_state_provider=lambda: object(),
+        )
+
+        merged = next(iter(selected_kwargs["prepared_by_event"].values()))
+        assert merged.candidate_seeds == same_entry.candidate_seeds
+        assert merged.day0_exit_authority_status == "immature"
+        assert merged.day0_exit_authority_reason == "held-current-authority"
+        assert merged.sell_action_authority_identity == "held-sell-authority"
+        assert selected_kwargs["buy_disabled_family_keys"] == frozenset()
+        assert stored_kwargs["buy_disabled_reason_by_family"] == {}
+
     selected_kwargs.clear()
     stored_kwargs.clear()
     global_batch_runtime.process_current_global_batch(
@@ -24760,7 +25961,7 @@ def test_global_batch_held_fallback_disables_buy_but_keeps_family_in_auction(
             False,
             item.event_id,
             item.causal_snapshot_id,
-            prepared_global_family=SimpleNamespace(probability_witness=witness),
+            prepared_global_family=held_prepared,
         ),
         actuate_winner=lambda *_: pytest.fail(
             "book-omitted held family must not actuate"
@@ -26179,6 +27380,131 @@ def test_live_adapter_sell_preflight_skips_entry_checks_and_survives_monitor_han
     )
 
 
+def test_live_adapter_does_not_turn_entry_capital_gate_into_forced_hold(
+    monkeypatch,
+):
+    captured = {}
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "process_current_global_batch",
+        lambda events, **kwargs: captured.update(kwargs)
+        or SimpleNamespace(events=tuple(events)),
+    )
+    monkeypatch.setattr(
+        era,
+        "_global_preflight_candidate_receipt",
+        lambda _submit, *, event, **_kwargs: EventSubmissionReceipt(
+            False,
+            event.event_id,
+            event.causal_snapshot_id,
+            reason="GLOBAL_SELL_PREFLIGHT_STABLE",
+            proof_accepted=True,
+        ),
+    )
+    trade = sqlite3.connect(":memory:")
+    trade.row_factory = sqlite3.Row
+    trade.executescript(
+        """
+        CREATE TABLE position_current (
+            position_id TEXT PRIMARY KEY,
+            strategy_key TEXT,
+            exit_reason TEXT
+        );
+        CREATE TABLE risk_actions (
+            action_id TEXT PRIMARY KEY,
+            strategy_key TEXT,
+            action_type TEXT,
+            value TEXT,
+            issued_at TEXT,
+            effective_until TEXT,
+            precedence INTEGER,
+            status TEXT
+        );
+        INSERT INTO position_current VALUES (
+            'position-1', 'forecast_qkernel_entry', 'SELL_REVERSAL'
+        );
+        """
+    )
+    adapter = era.event_bound_live_adapter_from_trade_conn(
+        trade,
+        get_current_level=lambda: era.RiskLevel.GREEN,
+        forecast_conn=sqlite3.connect(":memory:"),
+        topology_conn=sqlite3.connect(":memory:"),
+        calibration_conn=sqlite3.connect(":memory:"),
+    )
+    event = _global_scope_event(city="Alpha", source_run_id="run-a")
+    decision_at = _dt.datetime.now(_dt.timezone.utc)
+    adapter.process_global_batch((event,), decision_at)
+    candidate = SimpleNamespace(
+        action="SELL",
+        family_key="family-alpha",
+        position_id="position-1",
+        token_id="token-1",
+        probability_functional="POSTERIOR_PREDICTIVE_MEAN",
+        exit_authority_status="not_applicable",
+    )
+    actuation = SimpleNamespace(
+        actuation_identity="actuation-1",
+        wealth_witness_identity="wealth-1",
+        decision=SimpleNamespace(candidate=candidate),
+    )
+    authority = global_batch_runtime.GlobalPreflightAuthority(
+        probability_manifest=(("family-alpha", "q-1"),),
+        book_epoch_identity="book-1",
+        book_economics_manifest=(("family-alpha", "book-1"),),
+        wealth_witness_identity="wealth-1",
+        actuation_deadline=decision_at + _dt.timedelta(seconds=30),
+    )
+    stable = captured["preflight_winner"](
+        event,
+        actuation,
+        decision_at,
+        authority,
+    )
+    assert stable.status == "STABLE"
+
+    trade.execute(
+        "INSERT INTO risk_actions VALUES (?,?,?,?,?,?,?,?)",
+        (
+            "gate-unproven-q",
+            "forecast_qkernel_entry",
+            "gate",
+            json.dumps(
+                {
+                    "gate": True,
+                    "probability_semantics_revisions": ["blocked-revision"],
+                }
+            ),
+            (decision_at - _dt.timedelta(minutes=1)).isoformat(),
+            (decision_at + _dt.timedelta(minutes=10)).isoformat(),
+            50,
+            "active",
+        ),
+    )
+    still_stable = captured["preflight_winner"](
+        event,
+        actuation,
+        decision_at + _dt.timedelta(seconds=1),
+        authority,
+    )
+    assert still_stable.status == "STABLE"
+    monkeypatch.setattr(
+        era,
+        "_global_actuation_current_wealth_block_reason",
+        lambda *_args, **_kwargs: "TEST_STOP_AFTER_SELL_POLICY",
+    )
+    receipt = captured["actuate_preflighted_winner"].consume(
+        event,
+        actuation,
+        decision_at + _dt.timedelta(seconds=1),
+        still_stable.binding_token,
+        authority,
+    )
+    assert receipt.submitted is False
+    assert receipt.venue_call_started is False
+    assert receipt.reason == "TEST_STOP_AFTER_SELL_POLICY"
+
+
 def test_live_adapter_preflight_transports_rejected_entry_evidence(monkeypatch):
     captured = {}
     rejected = EventSubmissionReceipt(
@@ -26919,6 +28245,14 @@ def test_global_batch_claims_unpaged_cut_time_winner_and_continues_actuation(
             (
                 "GLOBAL_CURRENT_PROBABILITY_PREPARE_FAILED:"
                 "FamilyAuthorityUnavailable:"
+                "GLOBAL_DAY0_PROVISIONAL_OBSERVATION_NOT_EXECUTION_AUTHORITY"
+            ),
+            True,
+        ),
+        (
+            (
+                "GLOBAL_CURRENT_PROBABILITY_PREPARE_FAILED:"
+                "FamilyAuthorityUnavailable:"
                 "GLOBAL_DAY0_CONDITIONING_OBSERVATION_MISMATCH"
             ),
             True,
@@ -27072,6 +28406,10 @@ def test_global_batch_excludes_typed_current_q_ineligible_family(
                     )
                 if "FAST_OBSERVATION_ENTRY_STALE" in ineligible_reason:
                     raise ValueError("GLOBAL_DAY0_FAST_OBSERVATION_ENTRY_STALE")
+                if "PROVISIONAL_OBSERVATION_NOT_EXECUTION" in ineligible_reason:
+                    raise ValueError(
+                        "GLOBAL_DAY0_PROVISIONAL_OBSERVATION_NOT_EXECUTION_AUTHORITY"
+                    )
                 if "CONDITIONING_OBSERVATION_MISMATCH" in ineligible_reason:
                     raise ValueError("GLOBAL_DAY0_CONDITIONING_OBSERVATION_MISMATCH")
                 if "PROVISIONAL_REVISION_LIKELIHOOD" in ineligible_reason:
@@ -28843,6 +30181,12 @@ def test_global_batch_falls_through_family_local_preflight_block(
             "SELL",
         ),
         (
+            "LIVE_INFERENCE_INPUTS_MISSING:"
+            "GLOBAL_DAY0_FAST_OBSERVATION_ENTRY_STALE",
+            "BUY",
+            "SELL",
+        ),
+        (
             "FDR_REJECTED:event_type=DAY0_EXTREME_UPDATED:"
             "attempted=22:selected_post_fdr=0:alpha=0.100000",
             "BUY",
@@ -28926,6 +30270,9 @@ def test_global_batch_candidate_block_keeps_sibling_eligible(
                 "LIVE_ENTRY_PROBABILITY_AUTHORITY_UNQUALIFIED:"
             ),
         )
+    ) or reason == (
+        "LIVE_INFERENCE_INPUTS_MISSING:"
+        "GLOBAL_DAY0_FAST_OBSERVATION_ENTRY_STALE"
     )
     candidate_b = SimpleNamespace(
         candidate_id="candidate-b",
@@ -32343,6 +33690,8 @@ def _adapter_sell_actuation(
     witness = SimpleNamespace(
         family_key="Alpha|2026-07-14|high",
         witness_identity="probability-1",
+        probability_content_identity="probability-content-1",
+        source_truth_identity="source-truth-1",
         family_binding_identity="family-binding-1",
         sample_matrix_identity="sample-matrix-1",
         q_version="q-version-1",
@@ -32451,6 +33800,145 @@ def _jit_market_authority(candidate, *, tick, min_order_size):
         snapshot=snapshot,
         fee_rate=curve.fee_model.fee_rate,
     )
+
+
+def test_global_sell_durable_market_channel_authority_is_exact_and_fail_closed():
+    """A Paris-shaped full-depth carrier may replace an unavailable REST book only."""
+
+    from src.contracts.executable_market_snapshot import ExecutableTradeabilityStatus
+    from src.state.schema.execution_feasibility_evidence_schema import ensure_table
+    from src.state.snapshot_repo import (
+        init_snapshot_schema,
+        insert_snapshot,
+        record_snapshot_invalidation,
+    )
+
+    event = _global_scope_event(city="Paris", source_run_id="durable-final-sell")
+    actuation = _adapter_sell_actuation(event)
+    candidate = actuation.decision.candidate
+    now = _dt.datetime.now(_dt.timezone.utc)
+    base = _jit_market_authority(candidate, tick="0.01", min_order_size="5").snapshot
+    base = replace(
+        base,
+        captured_at=now - _dt.timedelta(milliseconds=100),
+        freshness_deadline=now + _dt.timedelta(seconds=5),
+        tradeability_status=ExecutableTradeabilityStatus(
+            accepting_orders=True,
+            clob_archived=False,
+            clob_enable_order_book=True,
+            executable_allowed=True,
+            reason="fixture",
+        ),
+    )
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    init_snapshot_schema(conn)
+    ensure_table(conn)
+    insert_snapshot(conn, base)
+    depth = {
+        "bids": [{"price": "0.60", "size": "10"}],
+        "asks": [{"price": "0.61", "size": "10"}],
+    }
+    direction = "buy_yes" if candidate.side == "YES" else "buy_no"
+    conn.execute(
+        """INSERT INTO execution_feasibility_latest VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (
+            candidate.token_id, direction, "paris-depth-evidence", "paris-event",
+            candidate.condition_id, candidate.side, now.isoformat(), "legacy-hash",
+            0.60, 0.61, json.dumps(depth), now.isoformat(), 1,
+        ),
+    )
+    raw, authority = era._durable_global_sell_market_authority(
+        conn,
+        condition_id=candidate.condition_id,
+        token_id=candidate.token_id,
+        side=candidate.side,
+        submit_at=now,
+    )
+    assert raw["asset_id"] == candidate.token_id
+    assert authority.snapshot.snapshot_id != base.snapshot_id
+    assert authority.snapshot.raw_orderbook_hash == era._hash_jsonish(raw)
+    assert authority.snapshot.captured_at == now
+
+    # An as-of quote join must not borrow metadata observed after the book.
+    later_conn = sqlite3.connect(":memory:")
+    later_conn.row_factory = sqlite3.Row
+    init_snapshot_schema(later_conn)
+    ensure_table(later_conn)
+    later_base = replace(
+        base,
+        snapshot_id="f" * 64,
+        captured_at=now + _dt.timedelta(milliseconds=100),
+        freshness_deadline=now + _dt.timedelta(seconds=5),
+    )
+    insert_snapshot(later_conn, later_base)
+    later_conn.execute(
+        """INSERT INTO execution_feasibility_latest VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (
+            candidate.token_id, direction, "later-depth-evidence", "later-event",
+            candidate.condition_id, candidate.side, now.isoformat(), "later-hash",
+            0.60, 0.61, json.dumps(depth), now.isoformat(), 1,
+        ),
+    )
+    with pytest.raises(ValueError, match="GLOBAL_JIT_DURABLE_METADATA_UNAVAILABLE"):
+        era._durable_global_sell_market_authority(
+            later_conn,
+            condition_id=candidate.condition_id,
+            token_id=candidate.token_id,
+            side=candidate.side,
+            submit_at=now + _dt.timedelta(milliseconds=200),
+        )
+    later_conn.close()
+
+    conn.execute("UPDATE execution_feasibility_latest SET direction = 'buy_no'")
+    with pytest.raises(ValueError, match="GLOBAL_JIT_DURABLE_BOOK_UNAVAILABLE"):
+        era._durable_global_sell_market_authority(
+            conn, condition_id=candidate.condition_id, token_id=candidate.token_id,
+            side=candidate.side, submit_at=now,
+        )
+    conn.execute(
+        "UPDATE execution_feasibility_latest SET direction = ?, depth_before_json = NULL",
+        (direction,),
+    )
+    with pytest.raises(ValueError, match="GLOBAL_JIT_DURABLE_BOOK_INVALID"):
+        era._durable_global_sell_market_authority(
+            conn, condition_id=candidate.condition_id, token_id=candidate.token_id,
+            side=candidate.side, submit_at=now,
+        )
+    conn.execute(
+        "UPDATE execution_feasibility_latest SET depth_before_json = ?",
+        (json.dumps({"bids": [], "asks": depth["asks"]}),),
+    )
+    with pytest.raises(ValueError, match="GLOBAL_JIT_DURABLE_BOOK_INVALID"):
+        era._durable_global_sell_market_authority(
+            conn, condition_id=candidate.condition_id, token_id=candidate.token_id,
+            side=candidate.side, submit_at=now,
+        )
+    conn.execute(
+        "UPDATE execution_feasibility_latest SET depth_before_json = ?, quote_seen_at = ?",
+        (json.dumps(depth), (now - _dt.timedelta(seconds=2)).isoformat()),
+    )
+    with pytest.raises(ValueError, match="GLOBAL_JIT_DURABLE_BOOK_INVALID"):
+        era._durable_global_sell_market_authority(
+            conn, condition_id=candidate.condition_id, token_id=candidate.token_id,
+            side=candidate.side, submit_at=now,
+        )
+    conn.execute(
+        "UPDATE execution_feasibility_latest SET quote_seen_at = ?", (now.isoformat(),)
+    )
+    record_snapshot_invalidation(
+        conn,
+        condition_id=candidate.condition_id,
+        token_id=candidate.token_id,
+        reason="tick_changed",
+        invalidated_at=now,
+    )
+    with pytest.raises(ValueError, match="GLOBAL_JIT_DURABLE_METADATA_INVALID"):
+        era._durable_global_sell_market_authority(
+            conn, condition_id=candidate.condition_id, token_id=candidate.token_id,
+            side=candidate.side, submit_at=now,
+        )
+    conn.close()
 
 
 @pytest.mark.parametrize(
@@ -32613,6 +34101,7 @@ def test_global_sell_jit_rejects_changed_day0_statistical_authority(monkeypatch)
     "probability_functional",
     ("LOWER_CVAR_PARAMETER_DRAWS", "POSTERIOR_PREDICTIVE_MEAN"),
 )
+@pytest.mark.parametrize("final_rest_outage", (False, True))
 @pytest.mark.parametrize(
     (
         "bid_levels",
@@ -32650,6 +34139,7 @@ def test_global_sell_adapter_bypasses_entry_lane_and_uses_reduce_only_exit(
     expected_order_type,
     expected_mode,
     required_execution_mode,
+    final_rest_outage,
 ):
     from src.data.polymarket_request_governor import RequestPriority
     from src.events.event_store import (
@@ -32657,6 +34147,7 @@ def test_global_sell_adapter_bypasses_entry_lane_and_uses_reduce_only_exit(
         GLOBAL_WINNER_SUBMIT_FENCED,
     )
     from src.state.db import init_schema
+    from src.state.schema.execution_feasibility_evidence_schema import ensure_table
     from src.state.snapshot_repo import init_snapshot_schema
 
     at = _dt.datetime(2026, 7, 13, 12, 0, tzinfo=_dt.timezone.utc)
@@ -32754,6 +34245,7 @@ def test_global_sell_adapter_bypasses_entry_lane_and_uses_reduce_only_exit(
     class Clob:
         ctf_units = 10 * 1_000_000
         book_hash = "jit-sell-hash"
+        fail_final_book = False
 
         def __init__(self, **kwargs):
             if kwargs:
@@ -32772,6 +34264,8 @@ def test_global_sell_adapter_bypasses_entry_lane_and_uses_reduce_only_exit(
             actuation_steps.append("book")
             assert timeout >= 1.0
             assert tokens == ["yes-token"]
+            if type(self).fail_final_book:
+                raise OSError("REST book unavailable")
             return {
                 "yes-token": {
                     "asset_id": "yes-token",
@@ -32832,21 +34326,52 @@ def test_global_sell_adapter_bypasses_entry_lane_and_uses_reduce_only_exit(
         assert isinstance(authority, GlobalSellExecutionAuthority)
         assert authority.actuation is actuation
         assert authority.jit_candidate.executable_sell_curve.book_hash
-        assert kwargs["global_sell_prefetched_orderbook"] == {
-            "asset_id": "yes-token",
-            "hash": Clob.book_hash,
-            "tick_size": tick,
-            "min_order_size": "5",
-            "bids": [
-                {"price": price, "size": size}
-                for price, size in bid_levels
-            ],
-        }
+        if Clob.fail_final_book:
+            assert kwargs["global_sell_prefetched_orderbook"] == {
+                "asset_id": "yes-token",
+                "tick_size": tick,
+                "min_order_size": "5",
+                "neg_risk": False,
+                "bids": [
+                    {"price": price, "size": size}
+                    for price, size in bid_levels
+                ],
+                "asks": [{"price": "0.61", "size": "10"}],
+            }
+        else:
+            assert kwargs["global_sell_prefetched_orderbook"] == {
+                "asset_id": "yes-token",
+                "hash": Clob.book_hash,
+                "tick_size": tick,
+                "min_order_size": "5",
+                "bids": [
+                    {"price": price, "size": size}
+                    for price, size in bid_levels
+                ],
+            }
         intent = kwargs["exit_intent"]
+        assert intent.probability_receipt == {
+            "schema_version": 1,
+            "selected_method": "global_single_order_auction",
+            "probability_authority": "current_global_probability_witness",
+            "probability_functional": probability_functional,
+            "held_side_probability": pytest.approx(0.30),
+            "q_version": "q-version-1",
+            "probability_witness_identity": "probability-1",
+            "probability_content_identity": "probability-content-1",
+            "source_truth_identity": "source-truth-1",
+        }
         assert type(intent.global_sell_receipt_closure) is GlobalSellReceiptClosure
         assert intent.global_sell_receipt_closure.receipt_ref is actuation.auction_receipt_ref
         assert intent.capital_certificate["global_auction_receipt"] == (
             actuation.auction_receipt_ref.as_payload()
+        )
+        assert intent.capital_certificate["q_version"] == "q-version-1"
+        assert intent.capital_certificate["probability_content_identity"] == (
+            "probability-content-1"
+        )
+        assert intent.capital_certificate["source_truth_identity"] == (
+            "source-truth-1"
         )
         assert intent.exact_limit_price == pytest.approx(expected_limit)
         assert intent.shares == pytest.approx(5.0)
@@ -32906,6 +34431,7 @@ def test_global_sell_adapter_bypasses_entry_lane_and_uses_reduce_only_exit(
     conn.row_factory = sqlite3.Row
     init_schema(conn)
     init_snapshot_schema(conn)
+    ensure_table(conn)
     assert conn.execute(
         "SELECT COUNT(*) FROM opportunity_event_processing"
     ).fetchone()[0] == 0
@@ -32968,7 +34494,30 @@ def test_global_sell_adapter_bypasses_entry_lane_and_uses_reduce_only_exit(
     assert exits == []
     assert isinstance(preflight.global_jit_candidate, era._GlobalJitHandoff)
     assert preflight.global_jit_candidate.raw_book["hash"] == "jit-sell-hash"
+    if final_rest_outage:
+        # A final REST book outage may consume only fresh, exact durable depth;
+        # it remains on the same global SELL actuation rather than becoming local.
+        conn.execute(
+            """INSERT INTO execution_feasibility_latest VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                "yes-token", "buy_yes", "final-durable-depth", "event-durable-depth",
+                "condition-1", "YES", _dt.datetime.now(_dt.timezone.utc).isoformat(),
+                "prior-hash", float(bid_levels[0][0]), 0.61,
+                json.dumps(
+                    {
+                        "bids": [
+                            {"price": price, "size": size}
+                            for price, size in bid_levels
+                        ],
+                        "asks": [{"price": "0.61", "size": "10"}],
+                    }
+                ),
+                _dt.datetime.now(_dt.timezone.utc).isoformat(), 1,
+            ),
+        )
+        conn.commit()
     Clob.book_hash = "jit-sell-hash-actuation"
+    Clob.fail_final_book = final_rest_outage
     final_step_start = len(actuation_steps)
     receipt = era._submit_current_global_sell(
         event,
@@ -33002,6 +34551,7 @@ def test_global_sell_adapter_bypasses_entry_lane_and_uses_reduce_only_exit(
     assert receipt.venue_command_id == "command-1"
     assert receipt.venue_command_state == "ACKED"
     assert receipt.venue_order_type == expected_order_type
+    Clob.fail_final_book = False
     from src.events.reactor import (
         _is_global_reduce_only_exit_receipt,
         _receipt_matches_event,
@@ -34536,8 +36086,11 @@ def test_alpha_shadow_freezes_exact_global_proof_winner_without_money():
     assert events[0].q_live == pytest.approx(0.90)
     assert events[0].hypothetical_fill_price == pytest.approx(0.20)
     envelope = json.loads(events[0].envelope_json)
-    assert envelope["schema_version"] == 2
+    assert envelope["schema_version"] == 3
     assert envelope["decision_law_id"] == "executable_min_order_capital_gain_v2"
+    assert envelope["global_selection_revision"] == (
+        global_batch_runtime.CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION
+    )
     assert envelope["selection_rule"].endswith(
         "posterior_mean_expected_growth_winner_v3"
     )
@@ -34652,9 +36205,6 @@ def test_alpha_shadow_freezes_exact_global_proof_winner_without_money():
         f"posterior-{family_a}": (
             global_batch_runtime.CURRENT_EVIDENCE_SEMANTICS_REVISION
         ),
-        f"posterior-{family_b}": (
-            global_batch_runtime.STALE_ENSEMBLE_ABSOLUTE_DISAGREEMENT_SEMANTICS_REVISION
-        ),
     }
     qkernel_events = global_batch_runtime._market_relative_alpha_shadow_events(
         selected=SimpleNamespace(
@@ -34702,8 +36252,10 @@ def test_alpha_shadow_freezes_exact_global_proof_winner_without_money():
         event.rejection_reason
         == "MARKET_RELATIVE_ALPHA_SHADOW:forecast_qkernel_entry"
         and event.event_id.startswith(
-            "market-relative-alpha-shadow-v4-global-winner:"
+            "market-relative-alpha-shadow-v6-city-date-cluster:"
         )
+        and global_batch_runtime.CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION
+        in event.event_id
         for event in qkernel_events
     )
     stale_events = global_batch_runtime._market_relative_alpha_shadow_events(
@@ -34739,12 +36291,7 @@ def test_alpha_shadow_freezes_exact_global_proof_winner_without_money():
         },
         strategy_keys=("forecast_qkernel_entry",),
     )
-    assert len(stale_events) == 1
-    assert json.loads(stale_events[0].envelope_json)[
-        "probability_semantics_revision"
-    ] == (
-        global_batch_runtime.STALE_ENSEMBLE_ABSOLUTE_DISAGREEMENT_SEMANTICS_REVISION
-    )
+    assert stale_events == ()
     missing_posterior_witnesses = {
         family_key: SimpleNamespace(
             **{
@@ -34789,6 +36336,39 @@ def test_alpha_shadow_freezes_exact_global_proof_winner_without_money():
 
     conn = sqlite3.connect(":memory:")
     ensure_table(conn)
+    beta_events = global_batch_runtime._day0_market_relative_alpha_shadow_events(
+        selected=SimpleNamespace(
+            decision=SimpleNamespace(candidate_evaluations=evaluations)
+        ),
+        proof_selected=proof_for(evaluations[1]),
+        probability_witnesses={
+            family_a: witness(family_a, 0.90),
+            family_b: witness(family_b, 0.80),
+        },
+        book_epoch=SimpleNamespace(
+            assets=assets,
+            witness_identity="book-epoch-beta",
+        ),
+        family_context_by_key={
+            family_a: {
+                "city": "Alpha",
+                "target_date": "2026-08-11",
+                "metric": "high",
+            },
+            family_b: {
+                "city": "Beta",
+                "target_date": "2026-08-11",
+                "metric": "low",
+            },
+        },
+        selection_epoch_identity="selection-epoch-beta",
+        selection_cut_at_utc=at + _dt.timedelta(seconds=1),
+        decision_at_utc=at + _dt.timedelta(seconds=1),
+    )
+    assert len(beta_events) == 1
+    assert beta_events[0].city == "Beta"
+    assert beta_events[0].target_date == events[0].target_date
+    assert beta_events[0].event_id != events[0].event_id
     first = global_batch_runtime._record_day0_market_relative_alpha_shadows(
         conn, events
     )
@@ -34799,12 +36379,18 @@ def test_alpha_shadow_freezes_exact_global_proof_winner_without_money():
     assert conn.execute(
         "SELECT COUNT(*) FROM no_trade_regret_events"
     ).fetchone()[0] == 1
+    global_batch_runtime._record_day0_market_relative_alpha_shadows(
+        conn, beta_events
+    )
+    assert conn.execute(
+        "SELECT COUNT(*) FROM no_trade_regret_events"
+    ).fetchone()[0] == 2
     global_batch_runtime._record_market_relative_alpha_shadows(
         conn, qkernel_events
     )
     assert conn.execute(
         "SELECT COUNT(*) FROM no_trade_regret_events"
-    ).fetchone()[0] == 2
+    ).fetchone()[0] == 3
 
     exit_at = at + _dt.timedelta(hours=1)
     wealth = SimpleNamespace(
@@ -34867,6 +36453,9 @@ def test_alpha_shadow_freezes_exact_global_proof_winner_without_money():
     assert exits[0].regret_bucket == "EXECUTABLE_GAIN_LOCKED"
     exit_envelope = json.loads(exits[0].envelope_json)
     assert exit_envelope["decision_law_id"].endswith("sell-over-hold-v1")
+    assert exit_envelope["global_selection_revision"] == (
+        global_batch_runtime.CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION
+    )
     assert Decimal(exit_envelope["locked_gain_usd"]) >= Decimal("0.05")
     assert Decimal(exit_envelope["sell_over_hold_usd"]) >= Decimal("0.05")
     assert exit_envelope["full_depth_executable"] is True
@@ -34942,7 +36531,7 @@ def test_alpha_shadow_freezes_exact_global_proof_winner_without_money():
     assert first_exit == second_exit
     assert conn.execute(
         "SELECT COUNT(*) FROM no_trade_regret_events"
-    ).fetchone()[0] == 3
+    ).fetchone()[0] == 4
     conn.close()
 
 
@@ -35257,3 +36846,259 @@ def test_global_auction_fixture_receipt_does_not_require_canonical_lease(
     assert persist(object()) == 1
     assert conn.execute("SELECT value FROM receipt_probe").fetchone() == ("fixture",)
     conn.close()
+
+
+def test_ankara_post_local_vector_witness_accepts_exact_complete_bundle():
+    family = SimpleNamespace(
+        city="Ankara",
+        target_date="2026-08-23",
+        metric="high",
+    )
+    with pytest.raises(
+        ValueError,
+        match="GLOBAL_DAY0_POST_LOCAL_VECTOR_WITNESS_MISSING",
+    ):
+        era._assert_day0_post_local_vector_witness(
+            None,
+            family=family,
+            decision_time=_dt.datetime(
+                2026, 8, 23, 21, 49, tzinfo=_dt.timezone.utc
+            ),
+            target_end=_dt.datetime(
+                2026, 8, 23, 21, tzinfo=_dt.timezone.utc
+            ),
+        )
+    witness = {
+        "vector_id": "d0hvecmwf",
+        "vector_ids_by_model": {
+            "ecmwf_ifs": "d0hvecmwf",
+            "icon_global": "d0hvicon",
+        },
+        "expected_models": ["ecmwf_ifs", "icon_global"],
+        "actual_models": ["ecmwf_ifs", "icon_global"],
+        "capture_times_utc": [
+            "2026-08-23T20:44:52.810807+00:00",
+            "2026-08-23T20:44:52.810807+00:00",
+        ],
+        "capture_times_by_model_utc": {
+            "ecmwf_ifs": "2026-08-23T20:44:52.810807+00:00",
+            "icon_global": "2026-08-23T20:44:52.810807+00:00",
+        },
+        "fetch_started_times_by_model_utc": {
+            "ecmwf_ifs": "2026-08-23T20:44:53+00:00",
+            "icon_global": "2026-08-23T20:44:53+00:00",
+        },
+        "fetch_finished_times_by_model_utc": {
+            "ecmwf_ifs": "2026-08-23T20:45:03+00:00",
+            "icon_global": "2026-08-23T20:45:03+00:00",
+        },
+        "provider_by_model": {
+            "ecmwf_ifs": "openmeteo",
+            "icon_global": "openmeteo",
+        },
+        "endpoint_by_model": {
+            "ecmwf_ifs": "https://single-runs-api.open-meteo.com/v1/forecast",
+            "icon_global": "https://single-runs-api.open-meteo.com/v1/forecast",
+        },
+        "request_hash_by_model": {
+            "ecmwf_ifs": "sha256:ankara",
+            "icon_global": "sha256:ankara",
+        },
+        "source_run_id_by_model": {
+            "ecmwf_ifs": "day0_hourly:sha256:ankara",
+            "icon_global": "day0_hourly:sha256:ankara",
+        },
+        "provider_run_id_by_model": {
+            "ecmwf_ifs": "openmeteo:ecmwf_ifs:2026-08-23T20:00:00+00:00",
+            "icon_global": "openmeteo:icon_global:2026-08-23T20:03:00+00:00",
+        },
+        "model_api_id_by_model": {
+            "ecmwf_ifs": "ecmwf_ifs",
+            "icon_global": "icon_global",
+        },
+        "provider_source_cycle_time_by_model_utc": {
+            "ecmwf_ifs": "2026-08-23T20:00:00+00:00",
+            "icon_global": "2026-08-23T20:03:00+00:00",
+        },
+        "provider_source_available_at_by_model_utc": {
+            "ecmwf_ifs": "2026-08-23T20:30:00+00:00",
+            "icon_global": "2026-08-23T20:33:00+00:00",
+        },
+        "provider_source_modified_at_by_model_utc": {
+            "ecmwf_ifs": "2026-08-23T20:25:00+00:00",
+            "icon_global": "2026-08-23T20:28:00+00:00",
+        },
+        "source_run_authority_by_model": {
+            "ecmwf_ifs": "run_pinned_single_runs",
+            "icon_global": "run_pinned_single_runs",
+        },
+        "endpoint_mode_by_model": {
+            "ecmwf_ifs": "single_runs",
+            "icon_global": "single_runs",
+        },
+        "provider_source_cycle_time_utc": "2026-08-23T20:00:00+00:00",
+        "local_capture_clock_utc": "2026-08-23T20:44:52.810807+00:00",
+        "source_available_at_utc": "2026-08-23T20:45:03+00:00",
+        "causal_as_of_utc": "2026-08-23T21:48:05+00:00",
+        "target_end_utc": "2026-08-23T21:00:00+00:00",
+        "city": "Ankara",
+        "target_date": "2026-08-23",
+        "metric": "high",
+    }
+    era._assert_day0_post_local_vector_witness(
+        witness,
+        family=family,
+        decision_time=_dt.datetime(2026, 8, 23, 21, 49, tzinfo=_dt.timezone.utc),
+        target_end=_dt.datetime(2026, 8, 23, 21, tzinfo=_dt.timezone.utc),
+    )
+    observation_payload = {
+        "_edli_global_day0_binding": {
+            "posterior_id": 77,
+            "probability_base_identity": "posterior-77",
+        },
+        "_edli_q_source": "replacement_0_1",
+        "_edli_day0_q_mode": "remaining_window",
+        "probability_authority": "replacement_0_1",
+        "_edli_day0_remaining_models": 2,
+        "_edli_day0_remaining_model_names": witness["actual_models"],
+        "_edli_day0_remaining_source_cycle_time_utc": witness[
+            "local_capture_clock_utc"
+        ],
+        "_edli_day0_remaining_provider_source_cycle_time_utc": witness[
+            "provider_source_cycle_time_utc"
+        ],
+        "_edli_day0_remaining_capture_times_utc": witness["capture_times_utc"],
+        "_edli_day0_remaining_expected_models": witness["expected_models"],
+        "_edli_day0_remaining_vector_witness": witness,
+    }
+    receipt_authority = era._global_day0_probability_authority_payload(
+        observation_payload
+    )
+    assert receipt_authority["remaining_provider_source_cycle_time_utc"] == (
+        "2026-08-23T20:00:00+00:00"
+    )
+    assert receipt_authority["remaining_vector_witness"][
+        "provider_source_cycle_time_utc"
+    ] == "2026-08-23T20:00:00+00:00"
+
+    future = dict(witness, causal_as_of_utc="2026-08-23T22:00:00+00:00")
+    with pytest.raises(
+        ValueError,
+        match="GLOBAL_DAY0_POST_LOCAL_VECTOR_WITNESS_FUTURE",
+    ):
+        era._assert_day0_post_local_vector_witness(
+            future,
+            family=family,
+            decision_time=_dt.datetime(
+                2026, 8, 23, 21, 49, tzinfo=_dt.timezone.utc
+            ),
+            target_end=_dt.datetime(
+                2026, 8, 23, 21, tzinfo=_dt.timezone.utc
+            ),
+        )
+
+    mismatch = dict(witness, actual_models=["ecmwf_ifs"])
+    with pytest.raises(
+        ValueError,
+        match="GLOBAL_DAY0_POST_LOCAL_VECTOR_WITNESS_IDENTITY_MISMATCH",
+    ):
+        era._assert_day0_post_local_vector_witness(
+            mismatch,
+            family=family,
+            decision_time=_dt.datetime(
+                2026, 8, 23, 21, 49, tzinfo=_dt.timezone.utc
+            ),
+            target_end=_dt.datetime(
+                2026, 8, 23, 21, tzinfo=_dt.timezone.utc
+            ),
+        )
+
+    forged = copy.deepcopy(witness)
+    forged["source_run_id_by_model"]["ecmwf_ifs"] = "forged-run"
+    with pytest.raises(
+        ValueError,
+        match="GLOBAL_DAY0_POST_LOCAL_VECTOR_WITNESS_IDENTITY_MISMATCH",
+    ):
+        era._assert_day0_post_local_vector_witness(
+            forged,
+            family=family,
+            decision_time=_dt.datetime(2026, 8, 23, 21, 49, tzinfo=_dt.timezone.utc),
+            target_end=_dt.datetime(2026, 8, 23, 21, tzinfo=_dt.timezone.utc),
+        )
+
+    forged_provider = copy.deepcopy(witness)
+    forged_provider["provider_run_id_by_model"]["icon_global"] = (
+        "openmeteo:ecmwf_ifs:2026-08-23T20:03:00+00:00"
+    )
+    with pytest.raises(
+        ValueError,
+        match="GLOBAL_DAY0_POST_LOCAL_VECTOR_WITNESS_IDENTITY_MISMATCH",
+    ):
+        era._assert_day0_post_local_vector_witness(
+            forged_provider,
+            family=family,
+            decision_time=_dt.datetime(2026, 8, 23, 21, 49, tzinfo=_dt.timezone.utc),
+            target_end=_dt.datetime(2026, 8, 23, 21, tzinfo=_dt.timezone.utc),
+        )
+
+    forged_paired_identity = copy.deepcopy(witness)
+    forged_paired_identity["model_api_id_by_model"]["ecmwf_ifs"] = "forged_model"
+    forged_paired_identity["provider_run_id_by_model"]["ecmwf_ifs"] = (
+        "openmeteo:forged_model:2026-08-23T20:00:00+00:00"
+    )
+    with pytest.raises(
+        ValueError,
+        match="GLOBAL_DAY0_POST_LOCAL_VECTOR_WITNESS_IDENTITY_MISMATCH",
+    ):
+        era._assert_day0_post_local_vector_witness(
+            forged_paired_identity,
+            family=family,
+            decision_time=_dt.datetime(2026, 8, 23, 21, 49, tzinfo=_dt.timezone.utc),
+            target_end=_dt.datetime(2026, 8, 23, 21, tzinfo=_dt.timezone.utc),
+        )
+
+    inverted = copy.deepcopy(witness)
+    inverted["fetch_started_times_by_model_utc"]["ecmwf_ifs"] = (
+        "2026-08-23T20:46:00+00:00"
+    )
+    with pytest.raises(ValueError):
+        era._assert_day0_post_local_vector_witness(
+            inverted,
+            family=family,
+            decision_time=_dt.datetime(2026, 8, 23, 21, 49, tzinfo=_dt.timezone.utc),
+            target_end=_dt.datetime(2026, 8, 23, 21, tzinfo=_dt.timezone.utc),
+        )
+
+    future_fetch = copy.deepcopy(witness)
+    future_fetch["fetch_started_times_by_model_utc"]["ecmwf_ifs"] = (
+        "2026-08-23T22:00:00+00:00"
+    )
+    future_fetch["fetch_finished_times_by_model_utc"]["ecmwf_ifs"] = (
+        "2026-08-23T22:01:00+00:00"
+    )
+    with pytest.raises(ValueError):
+        era._assert_day0_post_local_vector_witness(
+            future_fetch,
+            family=family,
+            decision_time=_dt.datetime(2026, 8, 23, 21, 49, tzinfo=_dt.timezone.utc),
+            target_end=_dt.datetime(2026, 8, 23, 21, tzinfo=_dt.timezone.utc),
+        )
+
+
+def test_aviationweather_metar_without_revision_model_is_typed_unavailable():
+    with pytest.raises(
+        ValueError,
+        match="METAR_PROVISIONAL_REVISION_AUTHORITY_UNAVAILABLE",
+    ):
+        era._provisional_day0_revision_likelihood(
+            sqlite3.connect(":memory:"),
+            source="aviationweather_metar",
+            city="Ankara",
+            city_timezone="Europe/Istanbul",
+            target_date="2026-08-23",
+            temperature_metric="high",
+            decision_time=_dt.datetime(
+                2026, 8, 23, 21, 49, tzinfo=_dt.timezone.utc
+            ),
+            entry_authority=False,
+        )

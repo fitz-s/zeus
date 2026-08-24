@@ -1,7 +1,7 @@
 # Created: 2026-04-27
-# Last reused/audited: 2026-08-12
-# Lifecycle: created=2026-04-27; last_reviewed=2026-08-12; last_reused=2026-08-12
-# Authority basis: first-principles same-position incremental fill aggregation
+# Last reused/audited: 2026-08-22
+# Lifecycle: created=2026-04-27; last_reviewed=2026-08-22; last_reused=2026-08-22
+# Authority basis: first-principles command-scoped entry/exit fill aggregation
 # Purpose: R3 M5 exchange reconciliation sweep antibodies.
 # Reuse: Run when exchange_reconcile, venue facts, findings, heartbeat/cutover reconciliation, or operator finding resolution changes.
 """R3 M5 exchange-reconciliation findings and trade-fact tests."""
@@ -122,6 +122,8 @@ class FakeAdapterWithoutFreshness:
 
 
 class FakeM5AdapterWithPointOrders(FakeM5Adapter):
+    authenticated_point_reads_are_complete = True
+
     def __init__(self, *, orders_by_id=None, open_orders=None, trades=None, positions=None):
         super().__init__(open_orders=open_orders, trades=trades, positions=positions)
         self.orders_by_id = orders_by_id or {}
@@ -3192,7 +3194,7 @@ def test_late_confirmed_exit_trade_leg_respects_close_intent_and_aggregates_once
     ).fetchone()["phase"] == "economically_closed"
     assert conn.execute(
         "SELECT shares, fill_price FROM execution_fact WHERE intent_id = ?",
-        (f"{with_intent['position_id']}:exit",),
+        (f"{with_intent['position_id']}:exit:{with_intent['command_id']}",),
     ).fetchone()[:] == pytest.approx((4.0, 0.25))
     # The canonical command aggregate promotes the terminal transition once;
     # re-observing either leg cannot append a duplicate confirmation.
@@ -5403,7 +5405,7 @@ def test_confirmed_exit_trade_economically_closes_active_position_projection(con
         """
         SELECT filled_at, fill_price, shares, venue_status, terminal_exec_status, command_id
           FROM execution_fact
-         WHERE intent_id = 'pos-exit-confirmed:exit'
+         WHERE intent_id = 'pos-exit-confirmed:exit:cmd-exit-confirmed'
         """
     ).fetchone()
     assert dict(fact) == {
@@ -5667,7 +5669,7 @@ def test_chain_zero_authenticated_full_exit_closes_stale_residual_once(
     }
     fact = conn.execute(
         "SELECT shares, fill_price FROM execution_fact WHERE intent_id = ?",
-        (f"{position_id}:exit",),
+        (f"{position_id}:exit:{command_id}",),
     ).fetchone()
     assert dict(fact) == {
         "shares": 60.0,
@@ -5922,7 +5924,7 @@ def test_recorded_confirmed_exit_trade_repair_hook_economically_closes_projectio
         """
         SELECT filled_at, fill_price, shares, venue_status, terminal_exec_status, command_id
           FROM execution_fact
-         WHERE intent_id = 'pos-exit-recorded-confirmed:exit'
+         WHERE intent_id = 'pos-exit-recorded-confirmed:exit:cmd-recorded-exit-confirmed'
         """
     ).fetchone()
     assert dict(fact) == {
@@ -6518,7 +6520,7 @@ def test_recorded_nonfinal_full_exit_trade_terminalizes_command_without_economic
             """
             SELECT COUNT(*)
               FROM execution_fact
-             WHERE intent_id = 'pos-exit-recorded-matched:exit'
+             WHERE intent_id = 'pos-exit-recorded-matched:exit:cmd-recorded-exit-matched'
                AND terminal_exec_status = 'filled'
             """
         ).fetchone()[0]
@@ -6732,7 +6734,7 @@ def test_full_size_nonconfirmed_exit_trade_leaves_actionable_finality_finding(co
             """
             SELECT COUNT(*)
               FROM execution_fact
-             WHERE intent_id = 'pos-exit-finality-wait:exit'
+             WHERE intent_id = 'pos-exit-finality-wait:exit:cmd-exit-finality-wait'
                AND terminal_exec_status = 'filled'
             """
         ).fetchone()[0]
@@ -6771,7 +6773,7 @@ def test_full_size_nonconfirmed_exit_trade_leaves_actionable_finality_finding(co
         """
         SELECT command_id, filled_at, fill_price, shares, venue_status, terminal_exec_status
           FROM execution_fact
-         WHERE intent_id = 'pos-exit-finality-wait:exit'
+         WHERE intent_id = 'pos-exit-finality-wait:exit:cmd-exit-finality-wait'
         """
     ).fetchone()
     assert dict(execution) == {
@@ -8268,6 +8270,81 @@ def test_fresh_reconcile_snapshot_captures_typed_point_order_absence():
 
     assert "point_orders" in snapshot.captured_surfaces
     assert snapshot.adapter.get_order("missing-order") is None
+    assert snapshot.adapter.venue_reads_are_complete is True
+    assert snapshot.adapter.point_order_reads["missing-order"] == {
+        "query_complete": True,
+        "authenticated_absent": True,
+        "identity_match": False,
+    }
+
+
+def test_fresh_reconcile_snapshot_raw_none_is_not_absence_authority():
+    from src.execution.exchange_reconcile import fresh_reconcile_snapshot
+
+    class Adapter:
+        @staticmethod
+        def get_open_orders():
+            return []
+
+        @staticmethod
+        def get_order(_order_id):
+            return None
+
+        @staticmethod
+        def get_trades():
+            return []
+
+        @staticmethod
+        def get_positions():
+            return []
+
+    snapshot = fresh_reconcile_snapshot(
+        Adapter(),
+        observed_at=NOW,
+        trade_order_ids={"unknown-order"},
+    )
+
+    assert snapshot.adapter.venue_reads_are_complete is False
+    assert snapshot.adapter.authenticated_point_reads_are_complete is False
+    assert snapshot.adapter.point_order_reads["unknown-order"] == {
+        "query_complete": False,
+        "authenticated_absent": False,
+        "identity_match": False,
+    }
+
+
+def test_fresh_reconcile_snapshot_untrusted_matching_payload_is_not_point_authority():
+    from src.execution.exchange_reconcile import fresh_reconcile_snapshot
+
+    class Adapter:
+        @staticmethod
+        def get_open_orders():
+            return []
+
+        @staticmethod
+        def get_order(order_id):
+            return order(order_id, status="CANCELED", size_matched="0")
+
+        @staticmethod
+        def get_trades():
+            return []
+
+        @staticmethod
+        def get_positions():
+            return []
+
+    snapshot = fresh_reconcile_snapshot(
+        Adapter(),
+        observed_at=NOW,
+        trade_order_ids={"shaped-but-untrusted"},
+    )
+
+    assert snapshot.adapter.venue_reads_are_complete is False
+    assert snapshot.adapter.point_order_reads["shaped-but-untrusted"] == {
+        "query_complete": False,
+        "authenticated_absent": False,
+        "identity_match": False,
+    }
 
 
 def test_fresh_reconcile_snapshot_keeps_unknown_point_order_failure_fail_closed():
@@ -9155,8 +9232,11 @@ def test_unresolved_position_drift_refresh_resolves_late_confirmed_entry_without
         observed_at=NOW,
     )
 
-    assert result["status"] == "resolved"
+    # The two targeted debts clear, but the failed canonical entry projection
+    # records a new blocking finding; the refresh must not report global green.
+    assert result["status"] == "blocked"
     assert result["remaining"] == 0
+    assert result["all_remaining"] == 1
     resolved = conn.execute(
         "SELECT resolution, resolved_by FROM exchange_reconcile_findings WHERE finding_id = ?",
         (stale.finding_id,),
@@ -9241,7 +9321,11 @@ def test_unresolved_reconcile_refresh_resolves_unrecorded_trade_without_position
         observed_at=NOW,
     )
 
-    assert result["status"] == "resolved"
+    # Linking this trade clears the requested finding, while the missing
+    # canonical entry projection remains a distinct blocker.
+    assert result["status"] == "blocked"
+    assert result["remaining"] == 0
+    assert result["all_remaining"] == 1
     resolved = conn.execute(
         "SELECT resolution, resolved_by FROM exchange_reconcile_findings WHERE finding_id = ?",
         (stale.finding_id,),
@@ -9258,6 +9342,815 @@ def test_unresolved_reconcile_refresh_resolves_unrecorded_trade_without_position
         """
     ).fetchone()
     assert latest[:] == ("CONFIRMED", "7", "0.42")
+
+
+def test_unresolved_refresh_drains_review_required_local_orphan_atomically(conn):
+    from src.execution.exchange_reconcile import record_finding, refresh_unresolved_reconcile_findings
+    from src.state.venue_command_repo import append_event
+
+    position_id = "pos-refresh-local-orphan"
+    command_id = "cmd-refresh-local-orphan"
+    order_id = "ord-refresh-local-orphan"
+    seed_position_baseline(conn, position_id=position_id, order_id="prior-filled-order")
+    conn.execute(
+        "UPDATE position_current SET phase='day0_window', shares=9, chain_shares=9, "
+        "cost_basis_usd=4.5, order_id='prior-filled-order', updated_at=? WHERE position_id=?",
+        (NOW.isoformat(), position_id),
+    )
+    seed_command(
+        conn,
+        command_id=command_id,
+        venue_order_id=order_id,
+        position_id=position_id,
+        state="ACKED",
+        size=10,
+        price=0.5,
+    )
+    conn.execute(
+        "UPDATE venue_commands SET idempotency_key=? WHERE command_id=?",
+        ("a" * 32, command_id),
+    )
+    append_resting_order_fact(conn, command_id=command_id, venue_order_id=order_id)
+    append_event(
+        conn,
+        command_id=command_id,
+        event_type="CANCEL_REQUESTED",
+        occurred_at=(NOW + timedelta(seconds=1)).isoformat(),
+        payload={"venue_order_id": order_id},
+    )
+    append_event(
+        conn,
+        command_id=command_id,
+        event_type="CANCEL_FAILED",
+        occurred_at=(NOW + timedelta(seconds=2)).isoformat(),
+        payload={
+            "reason": "order can't be found - already canceled or matched",
+            "cancel_outcome": {"orderID": order_id, "errorMessage": "already canceled or matched"},
+        },
+    )
+    finding = record_finding(
+        conn,
+        kind="local_orphan_order",
+        subject_id=order_id,
+        context="ws_gap",
+        evidence={
+            "reason": "local_open_order_absent_from_exchange_open_orders",
+            "trade_enumeration_available": True,
+        },
+        recorded_at=NOW + timedelta(seconds=3),
+    )
+
+    result = refresh_unresolved_reconcile_findings(
+        FakeM5AdapterWithPointOrders(
+            orders_by_id={
+                order_id: order(
+                    order_id,
+                    status="CANCELED",
+                    size_matched="0",
+                    original_size="10",
+                    side="BUY",
+                    asset_id=YES_TOKEN,
+                    price="0.5",
+                )
+            },
+            open_orders=[],
+            trades=[],
+            positions=[position(token_id=YES_TOKEN, size="9")],
+        ),
+        conn,
+        observed_at=NOW + timedelta(seconds=4),
+    )
+
+    command = conn.execute("SELECT state FROM venue_commands WHERE command_id=?", (command_id,)).fetchone()
+    current = conn.execute(
+        "SELECT phase, shares, chain_shares, cost_basis_usd, order_id FROM position_current WHERE position_id=?",
+        (position_id,),
+    ).fetchone()
+    resolved = conn.execute(
+        "SELECT resolution FROM exchange_reconcile_findings WHERE finding_id=?",
+        (finding.finding_id,),
+    ).fetchone()
+    terminal = conn.execute(
+        "SELECT state, matched_size, remaining_size FROM venue_order_facts "
+        "WHERE command_id=? ORDER BY local_sequence DESC LIMIT 1",
+        (command_id,),
+    ).fetchone()
+    assert result["status"] == "resolved"
+    assert command["state"] == "EXPIRED"
+    assert current[:] == ("day0_window", 9.0, 9.0, 4.5, "prior-filled-order")
+    assert resolved["resolution"] == "command_recovery_already_canceled_terminal_no_fill"
+    assert terminal[:] == ("CANCEL_CONFIRMED", "0", "0")
+
+
+@pytest.mark.parametrize(
+    "command_state",
+    [
+        "SUBMITTING",
+        "UNKNOWN",
+        "SUBMIT_UNKNOWN_SIDE_EFFECT",
+        "ACKED",
+        "POST_ACKED",
+        "CANCEL_PENDING",
+    ],
+)
+@pytest.mark.parametrize("point_response", ["terminal", "raw_none"])
+def test_unresolved_refresh_acked_local_orphan_requires_typed_point_truth(
+    conn,
+    command_state,
+    point_response,
+):
+    from src.execution.exchange_reconcile import record_finding, refresh_unresolved_reconcile_findings
+
+    suffix = f"{command_state.lower()}-{point_response}"
+    position_id = f"pos-refresh-{suffix}"
+    command_id = f"cmd-refresh-{suffix}"
+    order_id = f"ord-refresh-{suffix}"
+    seed_position_baseline(conn, position_id=position_id, order_id="prior-filled-order")
+    conn.execute(
+        "UPDATE position_current SET phase='active', shares=9, chain_shares=9, "
+        "cost_basis_usd=4.5, order_id='prior-filled-order', updated_at=? WHERE position_id=?",
+        (NOW.isoformat(), position_id),
+    )
+    seed_command(
+        conn,
+        command_id=command_id,
+        venue_order_id=order_id,
+        position_id=position_id,
+        state="ACKED",
+        size=10,
+        price=0.5,
+    )
+    if command_state != "ACKED":
+        conn.execute(
+            "UPDATE venue_commands SET state=? WHERE command_id=?",
+            (command_state, command_id),
+        )
+    append_resting_order_fact(conn, command_id=command_id, venue_order_id=order_id)
+    finding = record_finding(
+        conn,
+        kind="local_orphan_order",
+        subject_id=order_id,
+        context="ws_gap",
+        evidence={"reason": "local_open_order_absent", "trade_enumeration_available": True},
+        recorded_at=NOW,
+    )
+    orders = (
+        {
+            order_id: order(
+                order_id,
+                status="CANCELED",
+                size_matched="0",
+                original_size="10",
+                side="BUY",
+                asset_id=YES_TOKEN,
+                price="0.5",
+            )
+        }
+        if point_response == "terminal"
+        else {}
+    )
+
+    result = refresh_unresolved_reconcile_findings(
+        FakeM5AdapterWithPointOrders(
+            orders_by_id=orders,
+            open_orders=[],
+            trades=[],
+            positions=[position(token_id=YES_TOKEN, size="9")],
+        ),
+        conn,
+        observed_at=NOW + timedelta(seconds=1),
+    )
+
+    observed_command_state = conn.execute(
+        "SELECT state FROM venue_commands WHERE command_id=?",
+        (command_id,),
+    ).fetchone()["state"]
+    finding_row = conn.execute(
+        "SELECT resolved_at FROM exchange_reconcile_findings WHERE finding_id=?",
+        (finding.finding_id,),
+    ).fetchone()
+    if point_response == "terminal":
+        assert result["status"] == "resolved"
+        assert observed_command_state == "EXPIRED"
+        assert finding_row["resolved_at"] is not None
+    else:
+        assert result["status"] == "blocked"
+        assert observed_command_state == command_state
+        assert finding_row["resolved_at"] is None
+
+
+@pytest.mark.parametrize("position_phase", ["active", "day0_window"])
+def test_unresolved_refresh_acked_exit_terminal_no_fill_releases_redecision(
+    conn,
+    position_phase,
+):
+    from src.execution.exchange_reconcile import record_finding, refresh_unresolved_reconcile_findings
+
+    position_id = f"pos-refresh-exit-{position_phase}"
+    command_id = f"cmd-refresh-exit-{position_phase}"
+    order_id = f"ord-refresh-exit-{position_phase}"
+    seed_position_baseline(conn, position_id=position_id, order_id="entry-order")
+    conn.execute(
+        "UPDATE position_current SET phase=?, shares=9, chain_shares=9, "
+        "cost_basis_usd=4.5, order_id='entry-order', updated_at=? WHERE position_id=?",
+        (position_phase, NOW.isoformat(), position_id),
+    )
+    seed_command(
+        conn,
+        command_id=command_id,
+        venue_order_id=order_id,
+        position_id=position_id,
+        token_id=YES_TOKEN,
+        side="SELL",
+        state="ACKED",
+        size=9,
+        price=0.5,
+        exit_close_position=True,
+    )
+    append_resting_order_fact(conn, command_id=command_id, venue_order_id=order_id)
+    finding = record_finding(
+        conn,
+        kind="local_orphan_order",
+        subject_id=order_id,
+        context="ws_gap",
+        evidence={"reason": "local_open_order_absent", "trade_enumeration_available": True},
+        recorded_at=NOW,
+    )
+    before_events = conn.execute(
+        "SELECT COUNT(*) FROM position_events WHERE position_id=?",
+        (position_id,),
+    ).fetchone()[0]
+
+    result = refresh_unresolved_reconcile_findings(
+        FakeM5AdapterWithPointOrders(
+            orders_by_id={
+                order_id: order(
+                    order_id,
+                    status="CANCELED",
+                    size_matched="0",
+                    original_size="9",
+                    side="SELL",
+                    asset_id=YES_TOKEN,
+                    price="0.5",
+                )
+            },
+            open_orders=[],
+            trades=[],
+            positions=[position(token_id=YES_TOKEN, size="9")],
+        ),
+        conn,
+        observed_at=NOW + timedelta(seconds=1),
+    )
+
+    assert result["status"] == "resolved"
+    assert conn.execute(
+        "SELECT state FROM venue_commands WHERE command_id=?",
+        (command_id,),
+    ).fetchone()["state"] == "EXPIRED"
+    assert conn.execute(
+        "SELECT phase,shares,order_id,exit_reason FROM position_current WHERE position_id=?",
+        (position_id,),
+    ).fetchone()[:] == (
+        position_phase,
+        9.0,
+        "entry-order",
+        "EXIT_ORDER_TERMINAL_NO_FILL_RELEASED",
+    )
+    assert conn.execute(
+        "SELECT COUNT(*) FROM position_events WHERE position_id=?",
+        (position_id,),
+    ).fetchone()[0] == before_events + 1
+    assert conn.execute(
+        "SELECT resolved_at FROM exchange_reconcile_findings WHERE finding_id=?",
+        (finding.finding_id,),
+    ).fetchone()["resolved_at"] is not None
+
+
+def test_exact_terminal_no_fill_projects_terminal_entry_zero_exposure(conn):
+    from src.execution.command_recovery import _terminalize_exact_local_orphan_no_fill
+    from src.execution.exchange_reconcile import fresh_reconcile_snapshot, record_finding
+    from src.venue.response_contracts import VenueOrderNotFound
+
+    position_id = "pos-terminal-entry-zero"
+    command_id = "cmd-terminal-entry-zero"
+    order_id = "ord-terminal-entry-zero"
+    seed_position_baseline(conn, position_id=position_id, order_id=order_id)
+    seed_command(
+        conn,
+        command_id=command_id,
+        venue_order_id=order_id,
+        position_id=position_id,
+        state="ACKED",
+    )
+    conn.execute(
+        "UPDATE venue_commands SET state='SUBMIT_REJECTED' WHERE command_id=?",
+        (command_id,),
+    )
+    finding = record_finding(
+        conn,
+        kind="local_orphan_order",
+        subject_id=order_id,
+        context="ws_gap",
+        evidence={"reason": "authenticated_submit_absence"},
+        recorded_at=NOW,
+    )
+
+    class AuthenticatedAbsentAdapter(FakeM5Adapter):
+        def get_order(self, queried_order_id):
+            raise VenueOrderNotFound(queried_order_id)
+
+    snapshot = fresh_reconcile_snapshot(
+        AuthenticatedAbsentAdapter(open_orders=[], trades=[], positions=[]),
+        observed_at=NOW + timedelta(seconds=1),
+        trade_order_ids={order_id},
+    )
+    command = dict(
+        conn.execute(
+            "SELECT * FROM venue_commands WHERE command_id=?",
+            (command_id,),
+        ).fetchone()
+    )
+
+    assert _terminalize_exact_local_orphan_no_fill(
+        conn,
+        command=command,
+        client=snapshot.adapter,
+        append_terminal_event=False,
+        resolution="test_terminal_entry_zero",
+    ) == "advanced"
+    assert conn.execute(
+        "SELECT phase,shares,cost_basis_usd FROM position_current WHERE position_id=?",
+        (position_id,),
+    ).fetchone()[:] == ("voided", 0.0, 0.0)
+    assert conn.execute(
+        "SELECT state FROM venue_commands WHERE command_id=?",
+        (command_id,),
+    ).fetchone()["state"] == "SUBMIT_REJECTED"
+    assert conn.execute(
+        "SELECT resolved_at FROM exchange_reconcile_findings WHERE finding_id=?",
+        (finding.finding_id,),
+    ).fetchone()["resolved_at"] is not None
+
+
+def test_exact_terminal_no_fill_rolls_back_fact_event_projection_and_finding(
+    conn,
+    monkeypatch,
+):
+    import src.execution.command_recovery as recovery
+    from src.execution.exchange_reconcile import fresh_reconcile_snapshot, record_finding
+
+    position_id = "pos-terminal-rollback"
+    command_id = "cmd-terminal-rollback"
+    order_id = "ord-terminal-rollback"
+    seed_position_baseline(conn, position_id=position_id, order_id=order_id)
+    seed_command(
+        conn,
+        command_id=command_id,
+        venue_order_id=order_id,
+        position_id=position_id,
+        state="ACKED",
+    )
+    append_resting_order_fact(conn, command_id=command_id, venue_order_id=order_id)
+    finding = record_finding(
+        conn,
+        kind="local_orphan_order",
+        subject_id=order_id,
+        context="ws_gap",
+        evidence={"reason": "atomicity_probe"},
+        recorded_at=NOW,
+    )
+    snapshot = fresh_reconcile_snapshot(
+        FakeM5AdapterWithPointOrders(
+            orders_by_id={
+                order_id: order(order_id, status="CANCELED", size_matched="0")
+            },
+            open_orders=[],
+            trades=[],
+            positions=[],
+        ),
+        observed_at=NOW + timedelta(seconds=1),
+        trade_order_ids={order_id},
+    )
+    command = dict(
+        conn.execute(
+            "SELECT * FROM venue_commands WHERE command_id=?",
+            (command_id,),
+        ).fetchone()
+    )
+    before_fact_count = conn.execute(
+        "SELECT COUNT(*) FROM venue_order_facts WHERE command_id=?",
+        (command_id,),
+    ).fetchone()[0]
+    before_event_count = conn.execute(
+        "SELECT COUNT(*) FROM venue_command_events WHERE command_id=?",
+        (command_id,),
+    ).fetchone()[0]
+    monkeypatch.setattr(
+        recovery,
+        "_append_entry_order_voided_projection",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("projection failed")),
+    )
+
+    with pytest.raises(RuntimeError, match="projection failed"):
+        recovery._terminalize_exact_local_orphan_no_fill(
+            conn,
+            command=command,
+            client=snapshot.adapter,
+            append_terminal_event=True,
+            resolution="test_atomic_rollback",
+        )
+
+    assert conn.execute(
+        "SELECT COUNT(*) FROM venue_order_facts WHERE command_id=?",
+        (command_id,),
+    ).fetchone()[0] == before_fact_count
+    assert conn.execute(
+        "SELECT COUNT(*) FROM venue_command_events WHERE command_id=?",
+        (command_id,),
+    ).fetchone()[0] == before_event_count
+    assert conn.execute(
+        "SELECT state FROM venue_commands WHERE command_id=?",
+        (command_id,),
+    ).fetchone()["state"] == "ACKED"
+    assert conn.execute(
+        "SELECT resolved_at FROM exchange_reconcile_findings WHERE finding_id=?",
+        (finding.finding_id,),
+    ).fetchone()["resolved_at"] is None
+
+
+def test_exact_terminal_no_fill_rechecks_late_positive_trade_inside_savepoint(
+    conn,
+    monkeypatch,
+):
+    import src.execution.command_recovery as recovery
+    from src.execution.exchange_reconcile import fresh_reconcile_snapshot, record_finding
+
+    position_id = "pos-terminal-late-trade"
+    command_id = "cmd-terminal-late-trade"
+    order_id = "ord-terminal-late-trade"
+    seed_position_baseline(conn, position_id=position_id, order_id=order_id)
+    seed_command(
+        conn,
+        command_id=command_id,
+        venue_order_id=order_id,
+        position_id=position_id,
+        state="ACKED",
+    )
+    append_resting_order_fact(conn, command_id=command_id, venue_order_id=order_id)
+    finding = record_finding(
+        conn,
+        kind="local_orphan_order",
+        subject_id=order_id,
+        context="ws_gap",
+        evidence={"reason": "late_trade_race"},
+        recorded_at=NOW,
+    )
+    snapshot = fresh_reconcile_snapshot(
+        FakeM5AdapterWithPointOrders(
+            orders_by_id={order_id: order(order_id, status="CANCELED", size_matched="0")},
+            open_orders=[],
+            trades=[],
+            positions=[],
+        ),
+        observed_at=NOW + timedelta(seconds=1),
+        trade_order_ids={order_id},
+    )
+    command = dict(
+        conn.execute(
+            "SELECT * FROM venue_commands WHERE command_id=?",
+            (command_id,),
+        ).fetchone()
+    )
+    calls = 0
+
+    def trade_count_after_snapshot(_conn, _command_id):
+        nonlocal calls
+        calls += 1
+        return 0 if calls == 1 else 1
+
+    monkeypatch.setattr(recovery, "_trade_fact_count", trade_count_after_snapshot)
+
+    with pytest.raises(
+        recovery.PositiveOrderFactContradictionError,
+        match="truth_changed_before_terminal_write",
+    ):
+        recovery._terminalize_exact_local_orphan_no_fill(
+            conn,
+            command=command,
+            client=snapshot.adapter,
+            append_terminal_event=True,
+            resolution="test_late_trade_race",
+        )
+
+    assert conn.execute(
+        "SELECT COUNT(*) FROM venue_order_facts WHERE command_id=?",
+        (command_id,),
+    ).fetchone()[0] == 1
+    assert conn.execute(
+        "SELECT state FROM venue_commands WHERE command_id=?",
+        (command_id,),
+    ).fetchone()["state"] == "ACKED"
+    assert conn.execute(
+        "SELECT resolved_at FROM exchange_reconcile_findings WHERE finding_id=?",
+        (finding.finding_id,),
+    ).fetchone()["resolved_at"] is None
+
+
+@pytest.mark.parametrize(
+    ("intent_kind", "side"),
+    [("ENTRY", "SELL"), ("EXIT", "BUY")],
+)
+def test_exact_terminal_no_fill_rejects_malformed_intent_side_pair(
+    conn,
+    intent_kind,
+    side,
+):
+    from src.execution.command_recovery import _terminalize_exact_local_orphan_no_fill
+    from src.execution.exchange_reconcile import fresh_reconcile_snapshot, record_finding
+
+    suffix = f"{intent_kind.lower()}-{side.lower()}"
+    position_id = f"pos-malformed-{suffix}"
+    command_id = f"cmd-malformed-{suffix}"
+    order_id = f"ord-malformed-{suffix}"
+    seed_position_baseline(conn, position_id=position_id, order_id="entry-order")
+    conn.execute(
+        "UPDATE position_current SET phase='active',shares=9,chain_shares=9,cost_basis_usd=4.5 "
+        "WHERE position_id=?",
+        (position_id,),
+    )
+    seed_command(
+        conn,
+        command_id=command_id,
+        venue_order_id=order_id,
+        position_id=position_id,
+        state="ACKED",
+    )
+    conn.execute(
+        "UPDATE venue_commands SET intent_kind=?,side=? WHERE command_id=?",
+        (intent_kind, side, command_id),
+    )
+    append_resting_order_fact(conn, command_id=command_id, venue_order_id=order_id)
+    finding = record_finding(
+        conn,
+        kind="local_orphan_order",
+        subject_id=order_id,
+        context="ws_gap",
+        evidence={"reason": "malformed_intent_side"},
+        recorded_at=NOW,
+    )
+    snapshot = fresh_reconcile_snapshot(
+        FakeM5AdapterWithPointOrders(
+            orders_by_id={order_id: order(order_id, status="CANCELED", size_matched="0")},
+            open_orders=[],
+            trades=[],
+            positions=[],
+        ),
+        observed_at=NOW + timedelta(seconds=1),
+        trade_order_ids={order_id},
+    )
+    command = dict(
+        conn.execute(
+            "SELECT * FROM venue_commands WHERE command_id=?",
+            (command_id,),
+        ).fetchone()
+    )
+
+    assert _terminalize_exact_local_orphan_no_fill(
+        conn,
+        command=command,
+        client=snapshot.adapter,
+        append_terminal_event=True,
+        resolution="test_malformed_pair",
+    ) == "stayed"
+    assert conn.execute(
+        "SELECT resolved_at FROM exchange_reconcile_findings WHERE finding_id=?",
+        (finding.finding_id,),
+    ).fetchone()["resolved_at"] is None
+
+
+def test_unresolved_refresh_resolves_reappeared_open_local_orphan_without_mutation(conn):
+    from src.execution.exchange_reconcile import record_finding, refresh_unresolved_reconcile_findings
+
+    command_id = "cmd-refresh-reappeared"
+    order_id = "ord-refresh-reappeared"
+    seed_command(conn, command_id=command_id, venue_order_id=order_id, state="ACKED")
+    append_resting_order_fact(conn, command_id=command_id, venue_order_id=order_id)
+    finding = record_finding(
+        conn,
+        kind="local_orphan_order",
+        subject_id=order_id,
+        context="ws_gap",
+        evidence={"reason": "local_open_order_absent", "trade_enumeration_available": True},
+        recorded_at=NOW,
+    )
+
+    result = refresh_unresolved_reconcile_findings(
+        FakeM5Adapter(open_orders=[order(order_id, status="LIVE")], trades=[], positions=[]),
+        conn,
+        observed_at=NOW + timedelta(seconds=1),
+    )
+
+    assert result["status"] == "resolved"
+    assert conn.execute(
+        "SELECT state FROM venue_commands WHERE command_id=?", (command_id,)
+    ).fetchone()["state"] == "ACKED"
+    assert conn.execute(
+        "SELECT resolution FROM exchange_reconcile_findings WHERE finding_id=?",
+        (finding.finding_id,),
+    ).fetchone()["resolution"] == "local_orphan_order_reappeared_open"
+
+
+def test_unresolved_refresh_terminal_command_reappeared_open_stays_blocked(conn):
+    from src.execution.exchange_reconcile import record_finding, refresh_unresolved_reconcile_findings
+
+    command_id = "cmd-refresh-terminal-reappeared"
+    order_id = "ord-refresh-terminal-reappeared"
+    seed_command(conn, command_id=command_id, venue_order_id=order_id, state="ACKED")
+    conn.execute(
+        "UPDATE venue_commands SET state='EXPIRED' WHERE command_id=?",
+        (command_id,),
+    )
+    append_resting_order_fact(conn, command_id=command_id, venue_order_id=order_id)
+    finding = record_finding(
+        conn,
+        kind="local_orphan_order",
+        subject_id=order_id,
+        context="ws_gap",
+        evidence={"reason": "terminal_command_reappeared"},
+        recorded_at=NOW,
+    )
+
+    result = refresh_unresolved_reconcile_findings(
+        FakeM5Adapter(open_orders=[order(order_id, status="LIVE")], trades=[], positions=[]),
+        conn,
+        observed_at=NOW + timedelta(seconds=1),
+    )
+
+    assert result["status"] == "blocked"
+    assert conn.execute(
+        "SELECT resolved_at FROM exchange_reconcile_findings WHERE finding_id=?",
+        (finding.finding_id,),
+    ).fetchone()["resolved_at"] is None
+    assert conn.execute(
+        "SELECT state FROM venue_commands WHERE command_id=?",
+        (command_id,),
+    ).fetchone()["state"] == "EXPIRED"
+
+
+def test_unresolved_refresh_keeps_duplicate_local_orphan_identity_fail_closed(conn):
+    from src.execution.exchange_reconcile import record_finding, refresh_unresolved_reconcile_findings
+
+    command_id = "cmd-refresh-duplicate-orphan"
+    order_id = "ord-refresh-duplicate-orphan"
+    seed_command(conn, command_id=command_id, venue_order_id=order_id, state="ACKED")
+    append_resting_order_fact(conn, command_id=command_id, venue_order_id=order_id)
+    finding = record_finding(
+        conn,
+        kind="local_orphan_order",
+        subject_id=order_id,
+        context="ws_gap",
+        evidence={"reason": "duplicate-a", "trade_enumeration_available": True},
+        recorded_at=NOW,
+    )
+    conn.execute(
+        "INSERT INTO exchange_reconcile_findings "
+        "(finding_id,kind,subject_id,context,evidence_json,recorded_at) "
+        "SELECT ?,kind,subject_id,'periodic',?,? FROM exchange_reconcile_findings "
+        "WHERE finding_id=?",
+        (
+            f"{finding.finding_id}-duplicate",
+            json.dumps({"reason": "duplicate-b", "trade_enumeration_available": True}),
+            (NOW + timedelta(microseconds=1)).isoformat(),
+            finding.finding_id,
+        ),
+    )
+
+    result = refresh_unresolved_reconcile_findings(
+        FakeM5Adapter(open_orders=[order(order_id, status="LIVE")], trades=[], positions=[]),
+        conn,
+        observed_at=NOW + timedelta(seconds=1),
+    )
+
+    assert result["status"] == "blocked"
+    assert result["remaining"] == 2
+    assert conn.execute(
+        "SELECT COUNT(*) FROM exchange_reconcile_findings "
+        "WHERE subject_id=? AND resolved_at IS NULL",
+        (order_id,),
+    ).fetchone()[0] == 2
+    assert conn.execute(
+        "SELECT state FROM venue_commands WHERE command_id=?", (command_id,)
+    ).fetchone()["state"] == "ACKED"
+
+
+@pytest.mark.parametrize("position_phase", ["settled", "active"])
+def test_unresolved_refresh_resolves_authenticated_absent_terminal_exit_finding(
+    conn,
+    position_phase,
+):
+    from src.execution.exchange_reconcile import record_finding, refresh_unresolved_reconcile_findings
+
+    position_id = "pos-refresh-terminal-exit"
+    command_id = "cmd-refresh-terminal-exit"
+    order_id = "ord-refresh-terminal-exit"
+    seed_position_baseline(conn, position_id=position_id, order_id=order_id)
+    conn.execute(
+        "UPDATE position_current SET phase=?, shares=13, chain_shares=13, "
+        "cost_basis_usd=5.33, settled_at=?, updated_at=? WHERE position_id=?",
+        (position_phase, NOW.isoformat(), NOW.isoformat(), position_id),
+    )
+    seed_command(
+        conn,
+        command_id=command_id,
+        venue_order_id=order_id,
+        position_id=position_id,
+        token_id="terminal-exit-token",
+        side="SELL",
+        state="ACKED",
+        size=13,
+        price=0.41,
+        exit_close_position=True,
+    )
+    occurred_at = (NOW + timedelta(seconds=1)).isoformat()
+    sequence = conn.execute(
+        "SELECT MAX(sequence_no)+1 FROM venue_command_events WHERE command_id=?",
+        (command_id,),
+    ).fetchone()[0]
+    conn.execute(
+        "UPDATE venue_commands SET state='SUBMIT_REJECTED', updated_at=? WHERE command_id=?",
+        (occurred_at, command_id),
+    )
+    conn.execute(
+        "INSERT INTO venue_command_events(event_id,command_id,sequence_no,event_type,occurred_at,payload_json,state_after) "
+        "VALUES (?,?,?,'SUBMIT_REJECTED',?,?,'SUBMIT_REJECTED')",
+        (
+            "event-refresh-terminal-exit",
+            command_id,
+            sequence,
+            occurred_at,
+            json.dumps(
+                {
+                    "reason": "safe_replay_permitted_no_order_found",
+                    "safe_replay_permitted": True,
+                    "lookup_method": "authenticated_venue_absence",
+                    "venue_absence_proof": {
+                        "source": "authenticated_clob_user_read",
+                        "owner_scope": "authenticated_funder",
+                        "command_id": command_id,
+                        "venue_order_id": order_id,
+                        "open_orders_query_complete": True,
+                        "trades_query_complete": True,
+                        "point_order_query_complete": True,
+                        "point_order_absent": True,
+                        "matching_open_order_count": 0,
+                        "matching_trade_count": 0,
+                    },
+                },
+                sort_keys=True,
+            ),
+        ),
+    )
+    finding = record_finding(
+        conn,
+        kind="local_orphan_order",
+        subject_id=order_id,
+        context="ws_gap",
+        evidence={"reason": "local_open_order_absent", "trade_enumeration_available": True},
+        recorded_at=NOW + timedelta(seconds=2),
+    )
+    event_count = conn.execute(
+        "SELECT COUNT(*) FROM position_events WHERE position_id=?", (position_id,)
+    ).fetchone()[0]
+
+    class AuthenticatedAbsentAdapter(FakeM5Adapter):
+        def get_order(self, queried_order_id):
+            from src.venue.response_contracts import VenueOrderNotFound
+
+            raise VenueOrderNotFound(queried_order_id)
+
+    result = refresh_unresolved_reconcile_findings(
+        AuthenticatedAbsentAdapter(open_orders=[], trades=[], positions=[]),
+        conn,
+        observed_at=NOW + timedelta(seconds=3),
+    )
+
+    assert result["status"] == "resolved"
+    assert conn.execute(
+        "SELECT resolution FROM exchange_reconcile_findings WHERE finding_id=?",
+        (finding.finding_id,),
+    ).fetchone()["resolution"] == "command_recovery_authenticated_submit_absence"
+    assert conn.execute(
+        "SELECT phase,shares,chain_shares FROM position_current WHERE position_id=?",
+        (position_id,),
+    ).fetchone()[:] == (position_phase, 13.0, 13.0)
+    assert conn.execute(
+        "SELECT COUNT(*) FROM position_events WHERE position_id=?", (position_id,)
+    ).fetchone()[0] == event_count + (1 if position_phase == "active" else 0)
+    assert conn.execute(
+        "SELECT state,matched_size,remaining_size FROM venue_order_facts "
+        "WHERE command_id=? ORDER BY local_sequence DESC LIMIT 1",
+        (command_id,),
+    ).fetchone()[:] == ("VENUE_WIPED", "0", "0")
 
 
 def test_unresolved_position_drift_refresh_resolves_pending_exit_offset_after_latch_clear(conn):

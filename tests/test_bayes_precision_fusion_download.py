@@ -1,5 +1,5 @@
 # Created: 2026-06-08
-# Lifecycle: created=2026-06-08; last_reviewed=2026-08-18; last_reused=2026-08-18
+# Lifecycle: created=2026-06-08; last_reviewed=2026-08-21; last_reused=2026-08-21
 # Purpose: Regression tests for BPF raw forecast download and persistence semantics.
 # Reuse: Run when changing Bayes precision fusion raw-input capture or scheduler health.
 # Authority basis: BAYES_PRECISION_FUSION_SPEC.md §6 F1 (raw capture: previous_runs + single_runs ->
@@ -889,6 +889,46 @@ def test_source_clock_download_reuses_one_multi_location_response(
     assert report["single_runs_location_batch_count"] == 1
     assert report["single_runs_location_count"] == 2
     assert report["single_runs_location_target_date_count"] == 2
+
+
+def test_source_clock_high_only_target_does_not_refetch_absent_low_sibling(
+    tmp_path, monkeypatch
+) -> None:
+    import src.data.bayes_precision_fusion_download as dl
+
+    db = _forecast_db(tmp_path)
+    calls: list[object] = []
+
+    def _locations(**kwargs):
+        calls.append(kwargs["locations"])
+        return [
+            {
+                target_date: {"ecmwf_ifs": (22.0, 10.0)}
+                for target_date in location[3]
+            }
+            for location in kwargs["locations"]
+        ]
+
+    monkeypatch.setattr(dl, "_default_live_fetch_locations_batched", _locations)
+    monkeypatch.setattr(dl, "_read_source_clock_single_runs_requests", lambda **_kwargs: {})
+    kwargs = {
+        "forecast_db": db,
+        "cycle": datetime(2026, 6, 8, 0, tzinfo=UTC),
+        "targets": _two_city_targets(),
+        "models": ("ecmwf_ifs",),
+        "include_previous_runs": False,
+        "prune_after": False,
+        "allow_single_runs_fallback": False,
+    }
+
+    first = dl.download_bayes_precision_fusion_extra_raw_inputs(**kwargs)
+    second = dl.download_bayes_precision_fusion_extra_raw_inputs(**kwargs)
+
+    assert first["written_row_count"] == 2
+    assert second["written_row_count"] == 0
+    assert len(calls) == 1
+    assert _count(db, endpoint="single_runs", metric="high") == 2
+    assert _count(db, endpoint="single_runs", metric="low") == 0
 
 
 def test_source_clock_download_reuses_city_payload_across_target_dates(

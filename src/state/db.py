@@ -343,18 +343,17 @@ def _connect(
         raise
 
 
-def connect_existing_trade_db_without_journal_bootstrap(
+def _connect_existing_db_without_journal_bootstrap(
     db_path: Path,
 ) -> sqlite3.Connection:
-    """Open an existing trade DB for one latency-critical canonical write.
+    """Open an existing canonical DB without repeating journal bootstrap.
 
-    The normal factory ensures WAL mode and is the default for every runtime
-    owner.  A signed-order identity is persisted after its command transaction
-    has committed but immediately before venue POST.  Repeating
-    ``PRAGMA journal_mode=WAL`` at that boundary can itself contend for the WAL
-    writer lock before the caller's write retry is active.  This narrow helper
-    opens only an existing file, installs the canonical busy handler and
-    connection functions, and deliberately leaves journal mode unchanged.
+    The normal factory establishes WAL and remains the default. Latency-critical
+    writers that already own an explicit bounded transaction retry must not run
+    ``PRAGMA journal_mode=WAL`` before that retry: even when WAL is already set,
+    SQLite can wait on an unrelated writer for the connection-wide busy timeout.
+    This helper therefore requires an existing file and leaves journal mode
+    unchanged while preserving the canonical connection functions and timeout.
     """
 
     path = db_path.resolve(strict=True)
@@ -376,6 +375,26 @@ def connect_existing_trade_db_without_journal_bootstrap(
     except BaseException:
         conn.close()
         raise
+
+
+def connect_existing_trade_db_without_journal_bootstrap(
+    db_path: Path,
+) -> sqlite3.Connection:
+    """Open an existing trade DB for one latency-critical canonical write."""
+
+    return _connect_existing_db_without_journal_bootstrap(db_path)
+
+
+def connect_existing_forecasts_db_without_journal_bootstrap() -> sqlite3.Connection:
+    """Open the existing forecast DB for an explicitly bounded live write.
+
+    The replacement materializer performs its own short ``BEGIN IMMEDIATE``
+    retry after lock-free probability computation. Skipping only the redundant
+    journal-mode bootstrap keeps that bound effective while an atomic bulk
+    source ingest owns the WAL writer.
+    """
+
+    return _connect_existing_db_without_journal_bootstrap(ZEUS_FORECASTS_DB_PATH)
 
 
 def _connect_read_only(
@@ -2086,7 +2105,7 @@ def assert_schema_epoch_not_mixed(
 # CI hook scripts/check_schema_version.py diffs the sqlite_master hash of
 # a fresh-init DB against tests/state/_schema_pinned_hash.txt and fails
 # the PR if SCHEMA_VERSION did not change in lockstep.
-SCHEMA_VERSION = 44  # 2026-07-28: registered compact discovery snapshot journal; full executable evidence remains unchanged. Prior: 43 = T2b settlement/observation authority literal repair.
+SCHEMA_VERSION = 45  # 2026-08-24: tier0_candidate_set_provenance (per-auction candidate-set provenance for the preregistered selection-lift test, reversal_plan_tier0 item 3b). Prior: 44 = compact discovery snapshot journal.
 
 
 # ---------------------------------------------------------------------------
@@ -6895,6 +6914,12 @@ def init_schema_trade_only(conn: sqlite3.Connection) -> None:
     # required there).
     from src.state.schema.wallet_fill_observations_schema import ensure_table as _ensure_wallet_fill_observations_table
     _ensure_wallet_fill_observations_table(conn)
+    # reversal_plan_tier0_2026-08-24 item 3b: append-only per-auction-candidate
+    # provenance (the frozen selection-lift preregistration's data requirement).
+    # Sole writer: src.engine.global_batch_runtime._persist_tier0_candidate_set,
+    # same trade connection/transaction as the existing global auction receipt.
+    from src.state.schema.tier0_candidate_set_provenance_schema import ensure_table as _ensure_tier0_candidate_set_provenance_table
+    _ensure_tier0_candidate_set_provenance_table(conn)
     try:
         conn.execute("ALTER TABLE trade_decisions ADD COLUMN env TEXT NOT NULL DEFAULT 'live';")
     except sqlite3.OperationalError:
@@ -10497,6 +10522,7 @@ def log_execution_fact(
     venue_status: str | None = None,
     terminal_exec_status: str | None = None,
     clear_fill_fields: bool = False,
+    clear_voided_at: bool = False,
     posterior_id: int | None = None,
     decision_law_id: str | None = None,
 ) -> dict:
@@ -10512,6 +10538,15 @@ def log_execution_fact(
 
     if order_role not in {"entry", "exit"}:
         raise ValueError(f"execution_fact order_role must be entry/exit, got {order_role!r}")
+
+    # One venue command is one immutable execution atom. Exit lifecycle intent
+    # exists before a command and legitimately uses ``position:exit``; once a
+    # command exists, retaining that position-level key lets a later retry
+    # overwrite the earlier command's fill, price, latency, and decision link.
+    # Entry producers already use command-scoped identities for incremental
+    # fills. Apply the same identity law centrally to every exit writer.
+    if order_role == "exit" and command_id not in (None, ""):
+        intent_id = f"{position_id}:exit:{command_id}"
 
     # H2_E2E: posterior_id is an additive column; legacy DBs that have not yet run
     # the ALTER may lack it. Guard so the write stays robust either way (when the
@@ -10532,7 +10567,11 @@ def log_execution_fact(
     ).fetchone()
 
     stored_posted_at = posted_at or (current["posted_at"] if current else None)
-    stored_voided_at = voided_at or (current["voided_at"] if current else None)
+    stored_voided_at = (
+        None
+        if clear_voided_at
+        else voided_at or (current["voided_at"] if current else None)
+    )
     stored_submitted_price = submitted_price if submitted_price is not None else (current["submitted_price"] if current else None)
     stored_venue_status = venue_status if venue_status not in (None, "") else (current["venue_status"] if current else None)
     stored_terminal_status = terminal_exec_status if terminal_exec_status not in (None, "") else (current["terminal_exec_status"] if current else None)
@@ -10949,6 +10988,7 @@ def log_execution_report(conn: sqlite3.Connection, pos, result, *, decision_id: 
         venue_status=str(getattr(result, "venue_status", "") or getattr(pos, "order_status", "") or status or "") or None,
         terminal_exec_status=terminal_exec_status,
         clear_fill_fields=clear_fill_fields,
+        clear_voided_at=fill_has_finality,
         decision_law_id="predicted_bin_ev_v1",
     )
 
@@ -14470,6 +14510,7 @@ def log_exit_lifecycle_event(
             venue_status=str(payload.get("status") or status or "") or None,
             terminal_exec_status=terminal_exec_status,
             clear_fill_fields=not exit_has_fill_finality,
+            clear_voided_at=exit_has_fill_finality,
             decision_law_id="predicted_bin_ev_v1",
         )
 

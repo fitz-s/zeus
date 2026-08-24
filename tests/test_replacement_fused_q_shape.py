@@ -1,11 +1,12 @@
 # Created: 2026-06-09
-# Last reused or audited: 2026-07-23
+# Last reused or audited: 2026-08-19
 # Authority basis: docs/authority/replacement_final_form_2026_06_09.md
 """Current-evidence predictive-shape authority antibodies."""
 from __future__ import annotations
 
 import math
 import statistics
+from types import SimpleNamespace
 
 import pytest
 
@@ -175,6 +176,9 @@ def test_aligned_ensemble_center_preserves_within_between_decomposition() -> Non
 
     assert shape.ensemble_center_delta_c == pytest.approx(0.0, abs=1e-12)
     assert shape.predictive_sigma_c == pytest.approx(0.4085217065969294)
+    assert mod._fusion_current_evidence_shape_has_live_authority(
+        SimpleNamespace(current_evidence_shape=shape.as_payload())
+    ) is True
 
 
 def test_stale_shape_reuse_preserves_raw_members_and_center_disagreement() -> None:
@@ -216,6 +220,9 @@ def test_stale_shape_reuse_preserves_raw_members_and_center_disagreement() -> No
         == STALE_ENSEMBLE_ABSOLUTE_DISAGREEMENT_SEMANTICS_REVISION
     )
     assert shape.between_cohort_status == BETWEEN_COHORT_STATUS_SIMULTANEOUS_PROVEN
+    assert mod._fusion_current_evidence_shape_has_live_authority(
+        SimpleNamespace(current_evidence_shape=shape.as_payload())
+    ) is False
 
 
 def _shape_for_cycle_gate(

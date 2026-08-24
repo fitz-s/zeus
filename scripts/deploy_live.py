@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Lifecycle: created=2026-06-12; last_reviewed=2026-08-06; last_reused=2026-08-06
+# Lifecycle: created=2026-06-12; last_reviewed=2026-08-24; last_reused=2026-08-24
 # Purpose: make live daemon restarts SAFE — refuse `launchctl kickstart` while the LIVE
 #   checkout's runtime surface is uncommitted/unpushed, and require live restart preflight
 #   before booting the trading daemon.
@@ -74,7 +74,7 @@ from src.ops.edli_queue import (
 )
 from src.ops.monitor_cadence import (
     collect_monitor_cadence_evidence,
-    monitor_cadence_blocking_evidence,
+    monitor_restart_blocking_evidence,
 )
 from src.state.db import query_control_override_state
 from src.control.runtime_code_plane import is_runtime_code_path
@@ -534,7 +534,7 @@ def _wait_for_post_start_monitor_cadence(
     launched_after: datetime,
     timeout_seconds: float = LIVE_MONITOR_CADENCE_VERIFY_TIMEOUT_SECONDS,
 ) -> tuple[bool, str]:
-    """Wait until every held position has a fresh decision after this boot.
+    """Wait until every held position has a current attempt after this boot.
 
     Chain reconciliation can refresh ``position_current.updated_at`` without any
     exit/hold decision.  The deployment gate and the restart-guard reset must use
@@ -543,9 +543,12 @@ def _wait_for_post_start_monitor_cadence(
 
     SCOPE: this deploy invocation's entry pause, across canonical open exposure.
     DRAIN: recurring held monitoring emits fresh ``MONITOR_REFRESHED`` evidence
-    for every open position within the configured three-cycle contract.
-    RESET: zero stale/missing and zero future monitor events after the launch
-    floor; any newly opened or stale position restores the wait.
+    for every open position within the configured three-cycle contract. A typed
+    post-boot probability-degraded attempt is restart coverage when its held-side
+    CLOB is fresh; runtime family admission remains blocked until probability
+    authority recovers. RESET: zero restart-blocking/future evidence after the
+    launch floor; any newly opened, unevaluated, or CLOB-blind position restores
+    the wait.
     """
 
     trade_db = Path(_require_live_repo()) / "state" / "zeus_trades.db"
@@ -599,15 +602,18 @@ def _wait_for_post_start_monitor_cadence(
                     )
                 else:
                     fresh_count = int(cadence["fresh_position_count"])
-                    cadence_groups = monitor_cadence_blocking_evidence(cadence)
+                    cadence_groups = monitor_restart_blocking_evidence(cadence)
                     blocking_count = int(
-                        cadence_groups["blocking_stale_position_count"]
+                        cadence_groups["restart_blocking_stale_position_count"]
+                    )
+                    probability_degraded_count = int(
+                        cadence_groups["probability_only_stale_position_count"]
                     )
                     quote_only_count = int(
                         cadence_groups["quote_only_stale_position_count"]
                     )
                     stale_or_missing = list(
-                        cadence_groups["blocking_stale_positions"]
+                        cadence_groups["restart_blocking_stale_positions"]
                     )
                     held_position_ids = tuple(
                         str(value or "").strip()
@@ -647,6 +653,7 @@ def _wait_for_post_start_monitor_cadence(
                             "post-start monitor cadence verified: "
                             f"fresh_positions={fresh_count} "
                             f"open_positions={open_count} full_book=true"
+                            f" probability_degraded_positions={probability_degraded_count}"
                             f"{auction_detail}",
                         )
                     if blocking_count == 0 and quote_only_count > 0:
@@ -847,10 +854,10 @@ def _paused_entry_backlog_is_expected_parked(
     return (
         True,
         "post-start EDLI queue expected parked: "
-        "durable_entries_paused=true monitor_fresh_inputs=verified "
+        "durable_entries_paused=true monitor_restart_coverage=verified "
         "canonical_unresolved_positions=0 "
         "nonterminal_sell_commands=0 held_sell_global_auction_debt=0 "
-        "stale_processing=0 post_start_freshness=verified "
+        "stale_processing=0 post_start_monitor_coverage=verified "
         f"claimable_pending={int(queue.get('claimable_pending_count') or 0)}",
     )
 
@@ -967,6 +974,221 @@ def _canonical_unresolved_position_count(trade_db: Path) -> int:
             conn.close()
         except UnboundLocalError:
             pass
+
+
+def _canonical_live_restart_obligations(trade_db: Path) -> dict[str, object]:
+    """Return capital obligations that make a loaded-daemon restart unsafe.
+
+    A healthy open position is not an error, but it still needs uninterrupted
+    probability and exit monitoring. Likewise, a non-terminal venue command
+    can fill while the process is absent. This is deliberately stricter than
+    ``_canonical_unresolved_position_count``.
+    """
+
+    from src.execution.command_bus import TERMINAL_STATES
+
+    if not trade_db.exists():
+        raise RuntimeError("LIVE_RESTART_TRADE_DB_MISSING")
+    try:
+        conn = sqlite3.connect(f"file:{trade_db}?mode=ro", uri=True, timeout=2.0)
+        position_columns = _sqlite_table_columns(conn, "position_current")
+        if not {"position_id", "phase"}.issubset(position_columns):
+            raise RuntimeError("LIVE_RESTART_POSITION_PROJECTION_UNREADABLE")
+        command_columns = _sqlite_table_columns(conn, "venue_commands")
+        if not {"command_id", "state"}.issubset(command_columns):
+            raise RuntimeError("LIVE_RESTART_COMMAND_PROJECTION_UNREADABLE")
+
+        open_phases = ("pending_entry", "active", "day0_window", "pending_exit")
+        phase_placeholders = ", ".join("?" for _ in open_phases)
+        position_ids = tuple(
+            str(row[0])
+            for row in conn.execute(
+                f"""
+                SELECT position_id
+                  FROM position_current
+                 WHERE LOWER(COALESCE(phase, '')) IN ({phase_placeholders})
+                 ORDER BY position_id
+                """,
+                open_phases,
+            ).fetchall()
+        )
+
+        terminal_states = sorted(
+            {state.value for state in TERMINAL_STATES} | {"CANCELED", "FAILED"}
+        )
+        terminal_placeholders = ", ".join("?" for _ in terminal_states)
+        command_ids = tuple(
+            str(row[0])
+            for row in conn.execute(
+                f"""
+                SELECT command_id
+                  FROM venue_commands
+                 WHERE UPPER(COALESCE(state, '')) NOT IN ({terminal_placeholders})
+                 ORDER BY command_id
+                """,
+                tuple(terminal_states),
+            ).fetchall()
+        )
+        return {
+            "open_position_count": len(position_ids),
+            "open_position_ids": position_ids[:10],
+            "nonterminal_command_count": len(command_ids),
+            "nonterminal_command_ids": command_ids[:10],
+        }
+    except sqlite3.Error as exc:
+        raise RuntimeError("LIVE_RESTART_CANONICAL_OBLIGATIONS_UNREADABLE") from exc
+    finally:
+        try:
+            conn.close()
+        except UnboundLocalError:
+            pass
+
+
+def _pre_stop_monitor_handoff_evidence(trade_db: Path) -> dict[str, object]:
+    """Prove the loaded daemon just covered every held position and quote.
+
+    Probability-only degradation is admissible because this handoff exists to
+    deploy a probability repair.  Missing or stale held-side CLOB evidence is
+    never admissible: the replacement process must inherit a recently observed
+    executable state, not a blind portfolio.
+    """
+
+    now = datetime.now(timezone.utc)
+    try:
+        conn = sqlite3.connect(f"file:{trade_db}?mode=ro", uri=True, timeout=2.0)
+        conn.row_factory = sqlite3.Row
+        cadence = collect_monitor_cadence_evidence(
+            conn,
+            now=now,
+            max_age_seconds=LIVE_MONITOR_CADENCE_CONTRACT_SECONDS,
+            monitor_refreshed_only=True,
+            require_fresh_inputs=True,
+            sample_limit=10,
+        )
+    except (RuntimeError, sqlite3.Error) as exc:
+        return {
+            "green": False,
+            "reason": f"pre_stop_monitor_evidence_unreadable:{type(exc).__name__}",
+        }
+    finally:
+        try:
+            conn.close()
+        except UnboundLocalError:
+            pass
+
+    groups = monitor_restart_blocking_evidence(cadence)
+    open_count = int(cadence.get("open_position_count") or 0)
+    monitored_ids = tuple(
+        str(value or "").strip()
+        for value in cadence.get("monitored_position_ids", ())
+    )
+    probability_degraded_count = int(
+        groups.get("probability_only_stale_position_count") or 0
+    )
+    restart_blocking_count = int(
+        groups.get("restart_blocking_stale_position_count") or 0
+    )
+    quote_only_count = int(groups.get("quote_only_stale_position_count") or 0)
+    fresh_count = int(cadence.get("fresh_position_count") or 0)
+    identity_complete = (
+        len(monitored_ids) == open_count
+        and all(monitored_ids)
+        and len(set(monitored_ids)) == len(monitored_ids)
+    )
+    green = bool(
+        open_count > 0
+        and identity_complete
+        and int(cadence.get("non_monitor_chain_risk_position_count") or 0) == 0
+        and int(cadence.get("future_monitor_event_count") or 0) == 0
+        and restart_blocking_count == 0
+        and quote_only_count == 0
+        and fresh_count + probability_degraded_count == open_count
+    )
+    return {
+        "green": green,
+        "open_position_count": open_count,
+        "monitored_position_ids": monitored_ids,
+        "fresh_position_count": fresh_count,
+        "probability_degraded_position_count": probability_degraded_count,
+        "restart_blocking_position_count": restart_blocking_count,
+        "quote_only_stale_position_count": quote_only_count,
+        "sample": groups.get("restart_blocking_stale_positions", []),
+    }
+
+
+def _loaded_live_restart_obligation_gate(
+    labels: list[str],
+    *,
+    live_was_loaded: bool,
+) -> tuple[bool, str]:
+    """Refuse to create a monitoring blackout over live capital.
+
+    SCOPE: a requested restart that would stop an already-loaded live-trading
+    daemon. DRAIN: venue commands reach terminal states; open positions require
+    a pre-existing durable entry pause plus complete recent monitor/held-quote
+    handoff evidence. RESET: the next invocation re-reads WORLD pause and TRADE
+    obligations/evidence; missing, stale, or quote-blind evidence refuses.
+    Bootstrapping an already-absent daemon remains allowed because it restores
+    monitoring rather than interrupting it.
+    """
+
+    if LIVE_TRADING_LABEL not in labels:
+        return True, "live restart obligation gate not required for this daemon"
+    if not live_was_loaded:
+        return True, "live restart obligation gate permits absent-daemon recovery"
+    trade_db = Path(_require_live_repo()) / "state" / "zeus_trades.db"
+    try:
+        obligations = _canonical_live_restart_obligations(trade_db)
+    except RuntimeError as exc:
+        return False, f"canonical live restart obligations unreadable: {exc}"
+    open_count = int(obligations["open_position_count"])
+    command_count = int(obligations["nonterminal_command_count"])
+    if command_count:
+        return (
+            False,
+            "loaded live-trading restart would interrupt capital monitoring: "
+            f"open_positions={open_count} "
+            f"nonterminal_commands={command_count} "
+            f"position_sample={list(obligations['open_position_ids'])} "
+            f"command_sample={list(obligations['nonterminal_command_ids'])}",
+        )
+    if open_count:
+        world_db = Path(_require_live_repo()) / "state" / "zeus-world.db"
+        try:
+            pause_state = _durable_entries_pause_state(world_db)
+        except RuntimeError as exc:
+            return False, f"loaded live-trading repair handoff pause unreadable: {exc}"
+        if pause_state.get("entries_paused") is not True:
+            return (
+                False,
+                "loaded live-trading restart would interrupt capital monitoring: "
+                f"open_positions={open_count} durable_entries_pause=false "
+                f"position_sample={list(obligations['open_position_ids'])}",
+            )
+        handoff = _pre_stop_monitor_handoff_evidence(trade_db)
+        if (
+            handoff.get("green") is not True
+            or int(handoff.get("open_position_count") or 0) != open_count
+        ):
+            return (
+                False,
+                "loaded live-trading repair handoff is not current: "
+                f"open_positions={open_count} evidence={handoff}",
+            )
+        return (
+            True,
+            "loaded live-trading repair handoff verified: "
+            f"open_positions={open_count} nonterminal_commands=0 "
+            "durable_entries_pause=true "
+            "full_book_recent_held_quotes=true "
+            "probability_degraded_positions="
+            f"{int(handoff.get('probability_degraded_position_count') or 0)}",
+        )
+    return (
+        True,
+        "loaded live-trading restart obligation gate verified: "
+        "open_positions=0 nonterminal_commands=0",
+    )
 
 
 def _durable_entries_pause_state(world_db: Path) -> dict[str, object]:
@@ -2015,6 +2237,15 @@ def _cmd_restart_locked(args: argparse.Namespace) -> int:
         if includes_live_trading
         else False
     )
+    obligation_ok, obligation_detail = _loaded_live_restart_obligation_gate(
+        labels,
+        live_was_loaded=live_was_loaded_before,
+    )
+    if not obligation_ok:
+        print("REFUSING to restart — live capital still requires continuous monitoring:")
+        print(obligation_detail)
+        return 1
+    print(obligation_detail)
     expected_live_sha = head_sha(short=False) if includes_live_trading else ""
 
     pause_ok, pause_detail = _pause_entries_with_stuck_live_recovery(
@@ -2078,6 +2309,19 @@ def _cmd_restart_locked(args: argparse.Namespace) -> int:
         # reload/identity waits created multi-minute MONITOR_REFRESHED blackouts
         # during which Day0 evidence and executable bids could both move.  The
         # process-absent window starts only after every prerequisite is ready.
+        if live_was_loaded_before:
+            handoff_ok, handoff_detail = _loaded_live_restart_obligation_gate(
+                labels,
+                live_was_loaded=True,
+            )
+            if not handoff_ok:
+                print(
+                    "REFUSING to stop live-trading — capital handoff changed "
+                    "during prerequisite reload:"
+                )
+                print(handoff_detail)
+                return 1
+            print(f"pre-stop {handoff_detail}")
         ok, detail = _stop_label(LIVE_TRADING_LABEL)
         if ok:
             print(detail)

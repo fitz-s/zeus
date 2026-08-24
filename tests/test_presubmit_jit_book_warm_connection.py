@@ -22,6 +22,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 from datetime import datetime, timedelta, timezone
 
@@ -261,6 +262,30 @@ def test_jit_book_provider_uses_continuity_proven_incremental_depth(
                 "connected_at": connected_at.isoformat(),
                 "observed_at": now.isoformat(),
                 "active_token_count": 1,
+                "pid": os.getpid(),
+                "generation": "test-generation",
+            }
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / "market-channel-action-sink-readiness.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "pid": os.getpid(),
+                "generation": "test-generation",
+                "sink_registered": True,
+                "consumer_queue_accepted": True,
+            }
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / "daemon-heartbeat-price-channel-ingest.json").write_text(
+        json.dumps(
+            {
+                "daemon": "price-channel-ingest",
+                "pid": os.getpid(),
+                "alive_at": now.isoformat(),
             }
         ),
         encoding="utf-8",
@@ -332,6 +357,30 @@ def test_jit_book_provider_rejects_prior_generation_channel_depth(monkeypatch, t
                 "connected_at": connected_at.isoformat(),
                 "observed_at": now.isoformat(),
                 "active_token_count": 1,
+                "pid": os.getpid(),
+                "generation": "test-generation",
+            }
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / "market-channel-action-sink-readiness.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "pid": os.getpid(),
+                "generation": "test-generation",
+                "sink_registered": True,
+                "consumer_queue_accepted": True,
+            }
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / "daemon-heartbeat-price-channel-ingest.json").write_text(
+        json.dumps(
+            {
+                "daemon": "price-channel-ingest",
+                "pid": os.getpid(),
+                "alive_at": now.isoformat(),
             }
         ),
         encoding="utf-8",

@@ -374,6 +374,7 @@ def grade_position(
     large_factor: float = LARGE_FACTOR,
     fees: Optional[float] = None,
     filled_size: Optional[float] = None,
+    q_provenance_note: Optional[str] = None,
 ) -> SkillGrade:
     """Grade ONE settled position into a skill category.
 
@@ -393,6 +394,10 @@ def grade_position(
     (data-provenance gap: the executor does not persist q_live on the projection).
     Falling back to the posterior keeps the MISCALIBRATED ratio computable from
     the genuine system belief. q_live (when present) takes precedence.
+
+    q_provenance_note: caller-supplied provenance text for how q_live/q_lcb_5pct
+    were derived (e.g. multi-tranche aggregation + weighting fidelity). Appended
+    to derivation_note verbatim; None adds nothing.
     """
     # --- Quantity 1 derivations ---
     # Our P(settle in bin): prefer the captured fill-row q_live; fall back to the
@@ -460,6 +465,8 @@ def grade_position(
     note = LARGE_FACTOR_DERIVATION + (
         f" freshness_budget={freshness_budget_hours:.1f}h."
     )
+    if q_provenance_note:
+        note += " " + q_provenance_note
 
     # --- UNATTRIBUTABLE gate (evaluated FIRST) ---
     # The skill authority is the IMMUTABLE decision-q certificate (q_live). When
@@ -745,6 +752,185 @@ def _resolve_cert_hash_for_position(
         return None
     h = str(cert_hash or "").strip()
     return h or None
+
+
+# ---------------------------------------------------------------------------
+# Bug A repair (2026-08-24): multi-tranche decision-q aggregation.
+# docs/operations/current/plans/reversal_plan_tier0_2026-08-24.md Item 2.
+# _position_decision_attribution_row's single-hash purity gate (COUNT(DISTINCT
+# decision_certificate_hash)=1) discarded every position built from more than one
+# ENTRY tranche (scale-in) even when each tranche carried its own individually
+# VERIFIED certificate — 140/304 August settled positions, 23% of the book, with
+# zero exceptions. The functions below resolve EVERY exact ENTRY tranche
+# independently and aggregate; _position_decision_attribution_row itself is left
+# untouched (still used for its own direct callers/tests) and is no longer on the
+# grading path.
+# ---------------------------------------------------------------------------
+
+
+def _entry_tranche_rows(
+    world_conn: sqlite3.Connection,
+    position_id: str,
+) -> Optional[list[tuple[str, Optional[str], Optional[str]]]]:
+    """Every exact ENTRY position_decision_attribution row for a position.
+
+    A position with more than one row is a scale-in: each row is one ENTRY
+    tranche with its own command_id and (usually) its own certificate hash.
+    Returns (resolution, decision_certificate_hash, command_id) per row, ordered
+    by command_id for determinism. None when the table/attachment is absent or
+    unreadable, or the position has zero ENTRY rows — the legacy
+    (condition_id, direction) bridge is never consulted here, matching
+    _resolve_cert_hash_for_position's contract.
+    """
+    try:
+        rows = world_conn.execute(
+            """
+            SELECT resolution, decision_certificate_hash, command_id
+            FROM trades.position_decision_attribution
+            WHERE position_id = ? AND intent_kind = 'ENTRY'
+            ORDER BY command_id
+            """,
+            (position_id,),
+        ).fetchall()
+    except sqlite3.Error:
+        return None
+    if not rows:
+        return None
+    return [
+        (
+            str(resolution),
+            (str(cert_hash) if cert_hash is not None else None),
+            (str(command_id) if command_id is not None else None),
+        )
+        for resolution, cert_hash, command_id in rows
+    ]
+
+
+def _tranche_fill_size(
+    world_conn: sqlite3.Connection,
+    command_id: Optional[str],
+) -> Optional[float]:
+    """The ENTRY tranche's order size (trades.venue_commands.size), used as the
+    fill-size weight in multi-tranche q aggregation. None when the command_id is
+    absent or the size is unresolvable/non-positive — the caller then falls back
+    to equal-weight for the whole position rather than mix weighted and
+    unweighted tranches.
+    """
+    cid = str(command_id or "").strip()
+    if not cid:
+        return None
+    try:
+        row = world_conn.execute(
+            "SELECT size FROM trades.venue_commands WHERE command_id = ?",
+            (cid,),
+        ).fetchone()
+    except sqlite3.Error:
+        return None
+    if row is None or row[0] is None:
+        return None
+    try:
+        size = float(row[0])
+    except (TypeError, ValueError):
+        return None
+    return size if size > 0.0 else None
+
+
+def _resolve_aggregated_decision_q_for_position(
+    world_conn: sqlite3.Connection,
+    *,
+    position_id: Optional[str],
+    condition_id: Optional[str],
+    direction: Optional[str],
+    held_token_id: Optional[str],
+) -> Optional[dict]:
+    """Resolve the position-level decision-q across every ENTRY tranche.
+
+    Fail-closed exactly like the single-hash path it replaces: attributable iff
+    EVERY ENTRY row for the position is resolution='ATTRIBUTED' with a non-empty
+    hash AND every one of those hashes resolves a valid certificate q via
+    _resolve_decision_q_from_certificate. One broken, UNATTRIBUTABLE, or
+    unresolvable tranche makes the WHOLE position UNATTRIBUTABLE_Q_MISSING —
+    partial attribution is never partial credit.
+
+    q_live / q_lcb_5pct are the FILL-SIZE-WEIGHTED average across tranches
+    (trades.venue_commands.size by command_id). When any tranche's size is
+    unresolvable the whole position falls back to EQUAL-WEIGHT
+    (equal_weight_fallback=True in the result) rather than silently present a
+    partial weighting as size-weighted. q_lcb_5pct is aggregated the same way
+    when every tranche carries one, else left None.
+
+    A single-tranche position (the common case, and every position before this
+    fix) resolves byte-identically to the pre-fix single-hash path: one row, one
+    cert, weighting is moot, consumed_posterior_id is that cert's own. A
+    multi-tranche position's consumed_posterior_id is left None (never guessed
+    across tranches) — the caller's unconsumed-cycle staleness check then simply
+    falls through to the age-vs-budget test, which still applies.
+
+    Returns None when the position is unattributable.
+    """
+    rows = _entry_tranche_rows(world_conn, position_id)
+    if not rows:
+        return None
+    cid = str(condition_id or "").strip()
+    dirn = str(direction or "").strip()
+    token = str(held_token_id or "").strip()
+    if not cid or not dirn or not token:
+        return None
+
+    tranches: list[tuple[float, Optional[float], Optional[str], Optional[float]]] = []
+    for resolution, cert_hash, command_id in rows:
+        if resolution != "ATTRIBUTED":
+            return None
+        h = str(cert_hash or "").strip()
+        if not h:
+            return None
+        cert_q = _resolve_decision_q_from_certificate(
+            world_conn, h, condition_id=cid, direction=dirn, held_token_id=token,
+        )
+        if cert_q is None:
+            return None
+        size = _tranche_fill_size(world_conn, command_id)
+        tranches.append(
+            (cert_q["q_live"], cert_q["q_lcb_5pct"], cert_q["consumed_posterior_id"], size)
+        )
+
+    if len(tranches) == 1:
+        q_live, q_lcb, consumed_posterior_id, _size = tranches[0]
+        return {
+            "q_live": q_live,
+            "q_lcb_5pct": q_lcb,
+            "consumed_posterior_id": consumed_posterior_id,
+            "tranche_count": 1,
+            "equal_weight_fallback": False,
+        }
+
+    equal_weight_fallback = any(size is None for _, _, _, size in tranches)
+    weights = (
+        [1.0] * len(tranches)
+        if equal_weight_fallback
+        else [size for _, _, _, size in tranches]
+    )
+    total_weight = sum(weights)
+    if total_weight <= 0.0:
+        return None
+    q_live_agg = sum(
+        q * w for (q, _, _, _), w in zip(tranches, weights)
+    ) / total_weight
+    if all(qlcb is not None for _, qlcb, _, _ in tranches):
+        q_lcb_agg = sum(
+            qlcb * w for (_, qlcb, _, _), w in zip(tranches, weights)
+        ) / total_weight
+    else:
+        q_lcb_agg = None
+
+    return {
+        "q_live": q_live_agg,
+        "q_lcb_5pct": q_lcb_agg,
+        # No single consumed posterior spans multiple tranches — never guessed.
+        "consumed_posterior_id": None,
+        "tranche_count": len(tranches),
+        "equal_weight_fallback": equal_weight_fallback,
+    }
 
 
 def _resolve_audit_fees_for_position(
@@ -1282,13 +1468,6 @@ def load_settled_positions(
         filled_size = shares
         q_live = None       # not stored on position_current — cert is the authority
         q_lcb_5pct = None
-        # Decision-q authority is the permanent ENTRY attribution link (written at
-        # command creation or exact command-id backfill). Missing/ambiguous rows
-        # are terminal for q attribution; the legacy audit bridge is ancillary P&L
-        # only and is never consulted here.
-        decision_certificate_hash = _resolve_cert_hash_for_position(
-            world_conn, position_id, condition_id, direction
-        )
         # world_grade_pnl_usd input (LX-E packet, 2026-07-13): fees are not stored
         # on position_current at all — resolved from the SAME (condition_id,
         # direction) edli_live_profit_audit lookup the pre-LX-E writeback used.
@@ -1334,20 +1513,36 @@ def load_settled_positions(
         except ValueError:
             continue
 
-        # --- Decision-q AUTHORITY: exact ENTRY attribution -> cert -> receipt ---
-        # The ancillary audit row is never a q authority. Missing/invalid
-        # attribution, certificate, or schema21 receipt leaves q unknown.
-        cert_q = _resolve_decision_q_from_certificate(
+        # --- Decision-q AUTHORITY: every exact ENTRY tranche -> cert -> receipt ---
+        # The ancillary audit row is never a q authority. Bug A repair (2026-08-24,
+        # docs/operations/current/plans/reversal_plan_tier0_2026-08-24.md Item 2):
+        # a position may carry MULTIPLE ENTRY tranches (scale-in); each is resolved
+        # and fill-size-weight-averaged, never collapsed by a single-hash purity
+        # gate. Missing/invalid attribution on ANY tranche, or an unresolvable
+        # certificate/schema21 receipt on ANY tranche, leaves the WHOLE position's
+        # q unknown (fail-closed, no partial credit).
+        agg_q = _resolve_aggregated_decision_q_for_position(
             world_conn,
-            decision_certificate_hash,
+            position_id=position_id,
             condition_id=condition_id,
             direction=direction,
             held_token_id=(no_token_id if direction == "buy_no" else token_id),
         )
-        if cert_q is not None:
-            q_live = cert_q["q_live"]
-            q_lcb_5pct = cert_q["q_lcb_5pct"]
-            consumed_posterior_id = cert_q["consumed_posterior_id"]
+        q_provenance_note: Optional[str] = None
+        if agg_q is not None:
+            q_live = agg_q["q_live"]
+            q_lcb_5pct = agg_q["q_lcb_5pct"]
+            consumed_posterior_id = agg_q["consumed_posterior_id"]
+            if agg_q["tranche_count"] > 1:
+                weighting = (
+                    "equal-weight fallback (a tranche fill size was unresolvable)"
+                    if agg_q["equal_weight_fallback"]
+                    else "fill-size-weighted"
+                )
+                q_provenance_note = (
+                    f"multi-tranche decision-q: {agg_q['tranche_count']} ENTRY "
+                    f"certificates aggregated ({weighting})."
+                )
         else:
             # No resolvable immutable decision-q. Do NOT fall back to the
             # column value when the cert is unresolvable — without the cert the
@@ -1420,6 +1615,7 @@ def load_settled_positions(
             fresher_cycle_existed_at_decision=fresher_existed,
             fees=fees,
             filled_size=float(filled_size) if filled_size is not None else None,
+            q_provenance_note=q_provenance_note,
         )
         out.append(grade)
 

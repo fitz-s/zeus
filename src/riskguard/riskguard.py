@@ -6,7 +6,7 @@ and emits durable risk actions into zeus.db when the canonical table exists.
 Graduated response: GREEN → YELLOW → ORANGE → RED.
 
 # Created: (pre-audit)
-# Last reused or audited: 2026-08-18
+# Last reused or audited: 2026-08-19
 # Authority basis: connection-leak audit 2026-05-10 — 51 open zeus-world.db-wal
 #   handles observed on PID 18538. Root cause: tick() and tick_with_portfolio()
 #   opened zeus_conn / risk_conn without try/finally, so any exception in the
@@ -14,6 +14,9 @@ Graduated response: GREEN → YELLOW → ORANGE → RED.
 #   try/finally to guarantee conn.close() on every exit path.
 #   2026-05-17 live lock remediation: trade/world metric lock loss degrades to
 #   a fresh DATA_DEGRADED risk_state row, not stale RED force-exit.
+#   2026-08-19 Day0 revision admission: an established Day0 strategy whose
+#   current probability semantics lacks causal capital proof is revision-gated
+#   before BUY while its no-money shadow continues to drain evidence.
 #   2026-06-08 thepath/audit-realign iron #4/#6 fix: (1) init_risk_db re-applies
 #   busy_timeout after executescript (Fitz #5 strip-trap); (2) lock-attestation
 #   FAILS CONSERVATIVE — max(previous_level, DATA_DEGRADED), never re-stamps a
@@ -32,6 +35,7 @@ import math
 import os
 import shutil
 import sqlite3
+import subprocess
 import sys
 import time
 from collections.abc import Mapping
@@ -39,8 +43,12 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
 from src.config import settings, get_mode
+from src.contracts.global_auction_receipt import (
+    CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION,
+)
 from src.data.replacement_forecast_cycle_policy import (
     CURRENT_EVIDENCE_SEMANTICS_REVISION,
+    LIVE_CURRENT_EVIDENCE_SEMANTICS_REVISIONS,
     STALE_ENSEMBLE_ABSOLUTE_DISAGREEMENT_SEMANTICS_REVISION,
     _current_evidence_shape,
     current_evidence_shape_semantics_mismatch,
@@ -87,6 +95,26 @@ from src.state.strategy_tracker import load_tracker
 from src.contracts.freshness_registry import FreshnessLevel, registry as _freshness_registry
 
 logger = logging.getLogger(__name__)
+# Stuck non-GREEN visibility (2026-08-24 reversal plan item 5b): the
+# 2026-08-24 investigation found RiskGuard stuck non-GREEN explained 97.6h of
+# August silence (10/11 gaps DATA_DEGRADED, one RED) with zero alerts. These
+# thresholds turn a silent stuck level into a visible one — mirrors
+# src/main.py's BOOTSTRAP_ALERT_AFTER_SECONDS (commit d1aeeeb52, item 5a)
+# without touching the gate itself (get_current_level/tick are unchanged).
+STUCK_ALERT_AFTER_SECONDS = float(
+    os.environ.get("ZEUS_RISKGUARD_STUCK_ALERT_AFTER_SECONDS", "1800")
+)
+STUCK_ALERT_REPEAT_SECONDS = 1800.0
+# risk_state has no index on checked_at, so scanning backward to the last
+# GREEN row on a long-lived DB risks an unbounded table scan. Bound the scan
+# by row count against the indexed `id` PK instead: at the daemon's fixed
+# 60s tick cadence, 2880 rows == 48h. A run older than the cap is reported
+# with lookback_capped=True (a conservative underestimate of duration) rather
+# than paying an unbounded scan.
+STUCK_ALERT_LOOKBACK_ROWS = 2880
+STUCK_ALERT_BREADCRUMB_FILENAME = "riskguard_stuck_alert.json"
+_riskguard_stuck_alert_run_started_at: str | None = None
+_riskguard_stuck_alert_last_alert_monotonic: float | None = None
 TRAILING_LOSS_ROW_TOLERANCE_USD = 0.01
 TRAILING_LOSS_REFERENCE_STALENESS_TOLERANCE = timedelta(hours=2)
 TRAILING_LOSS_SOURCE_OK = "risk_state_history"
@@ -113,6 +141,189 @@ _RISKGUARD_OPEN_RUNTIME_STATES = frozenset({
 _STORAGE_ENTRY_MIN_FREE_BYTES_DEFAULT = 64 * 1024**3
 _STORAGE_ENTRY_MIN_FREE_RATIO_DEFAULT = 0.10
 _disk_usage = shutil.disk_usage
+
+_POWER_RUNWAY_YELLOW_MINUTES_DEFAULT = 60.0
+_POWER_RUNWAY_ORANGE_MINUTES_DEFAULT = 30.0
+_POWER_RUNWAY_RED_MINUTES_DEFAULT = 15.0
+_POWER_PERCENT_YELLOW_DEFAULT = 20
+_POWER_PERCENT_ORANGE_DEFAULT = 10
+_POWER_PERCENT_RED_DEFAULT = 5
+
+
+def _pmset_battery_status() -> str:
+    completed = subprocess.run(
+        ["pmset", "-g", "batt"],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=2.0,
+    )
+    return completed.stdout
+
+
+def host_power_runway_snapshot(raw_status: str | None = None) -> dict[str, object]:
+    """Classify whether the live host can retain execution authority.
+
+    SCOPE: YELLOW blocks new entries, ORANGE permits only favorable reduction,
+    and RED activates the existing portfolio-wide reduce-only sweep. DRAIN:
+    RiskGuard re-reads macOS power truth every 60 seconds while the host is
+    awake. RESET: AC power, or Battery Power above every configured runway and
+    percentage watermark, returns GREEN on the next tick.
+    """
+
+    if raw_status is None and (get_mode() != "live" or sys.platform != "darwin"):
+        return {
+            "level": RiskLevel.GREEN.value,
+            "status": "NOT_APPLICABLE",
+            "reason": None,
+            "source": "non_live_or_non_darwin_host",
+        }
+
+    power_config = settings["riskguard"]
+    try:
+        yellow_minutes = float(
+            power_config.get(
+                "power_runway_yellow_minutes",
+                _POWER_RUNWAY_YELLOW_MINUTES_DEFAULT,
+            )
+        )
+        orange_minutes = float(
+            power_config.get(
+                "power_runway_orange_minutes",
+                _POWER_RUNWAY_ORANGE_MINUTES_DEFAULT,
+            )
+        )
+        red_minutes = float(
+            power_config.get(
+                "power_runway_red_minutes",
+                _POWER_RUNWAY_RED_MINUTES_DEFAULT,
+            )
+        )
+        yellow_percent = int(
+            power_config.get(
+                "power_percent_yellow",
+                _POWER_PERCENT_YELLOW_DEFAULT,
+            )
+        )
+        orange_percent = int(
+            power_config.get(
+                "power_percent_orange",
+                _POWER_PERCENT_ORANGE_DEFAULT,
+            )
+        )
+        red_percent = int(
+            power_config.get("power_percent_red", _POWER_PERCENT_RED_DEFAULT)
+        )
+        if not (
+            math.isfinite(yellow_minutes)
+            and math.isfinite(orange_minutes)
+            and math.isfinite(red_minutes)
+            and yellow_minutes > orange_minutes > red_minutes > 0.0
+            and 100 >= yellow_percent > orange_percent > red_percent >= 0
+        ):
+            raise ValueError("power runway watermarks are not strictly ordered")
+    except (TypeError, ValueError) as exc:
+        return {
+            "level": RiskLevel.DATA_DEGRADED.value,
+            "status": "CONFIG_INVALID",
+            "reason": f"{type(exc).__name__}:{exc}",
+            "source": "pmset",
+        }
+
+    try:
+        status = raw_status if raw_status is not None else _pmset_battery_status()
+    except (OSError, subprocess.SubprocessError) as exc:
+        return {
+            "level": RiskLevel.DATA_DEGRADED.value,
+            "status": "POWER_TRUTH_UNAVAILABLE",
+            "reason": f"{type(exc).__name__}:{exc}",
+            "source": "pmset",
+        }
+
+    lines = [line.strip() for line in str(status).splitlines() if line.strip()]
+    source = ""
+    if lines and "'" in lines[0]:
+        source = lines[0].split("'", 2)[1].strip()
+    battery_line = next((line for line in lines[1:] if "%" in line), "")
+    try:
+        percent_text = next(
+            part.strip().removesuffix("%")
+            for part in battery_line.split(";")
+            if part.strip().endswith("%")
+        )
+        percent = int(percent_text.rsplit(None, 1)[-1])
+    except (StopIteration, TypeError, ValueError):
+        percent = None
+
+    remaining_minutes: float | None = None
+    for part in battery_line.split(";"):
+        token = part.strip()
+        if " remaining" not in token:
+            continue
+        clock = token.split(" remaining", 1)[0].strip()
+        if ":" not in clock:
+            continue
+        hours_text, minutes_text = clock.split(":", 1)
+        try:
+            remaining_minutes = int(hours_text) * 60.0 + int(minutes_text)
+        except ValueError:
+            remaining_minutes = None
+        break
+
+    if source == "AC Power":
+        return {
+            "level": RiskLevel.GREEN.value,
+            "status": "AC_POWER",
+            "reason": None,
+            "source": "pmset",
+            "power_source": source,
+            "battery_percent": percent,
+            "remaining_minutes": remaining_minutes,
+        }
+    if source != "Battery Power" or percent is None:
+        return {
+            "level": RiskLevel.DATA_DEGRADED.value,
+            "status": "POWER_TRUTH_INVALID",
+            "reason": "POWER_SOURCE_OR_PERCENT_UNREADABLE",
+            "source": "pmset",
+            "power_source": source or None,
+            "battery_percent": percent,
+            "remaining_minutes": remaining_minutes,
+        }
+
+    level = RiskLevel.GREEN
+    reason = None
+    if percent <= red_percent or (
+        remaining_minutes is not None and remaining_minutes <= red_minutes
+    ):
+        level = RiskLevel.RED
+        reason = "HOST_EXECUTION_RUNWAY_CRITICAL"
+    elif percent <= orange_percent or (
+        remaining_minutes is not None and remaining_minutes <= orange_minutes
+    ):
+        level = RiskLevel.ORANGE
+        reason = "HOST_EXECUTION_RUNWAY_SEVERE"
+    elif percent <= yellow_percent or (
+        remaining_minutes is not None and remaining_minutes <= yellow_minutes
+    ):
+        level = RiskLevel.YELLOW
+        reason = "HOST_EXECUTION_RUNWAY_LOW"
+
+    return {
+        "level": level.value,
+        "status": "BATTERY_POWER",
+        "reason": reason,
+        "source": "pmset",
+        "power_source": source,
+        "battery_percent": percent,
+        "remaining_minutes": remaining_minutes,
+        "yellow_minutes": yellow_minutes,
+        "orange_minutes": orange_minutes,
+        "red_minutes": red_minutes,
+        "yellow_percent": yellow_percent,
+        "orange_percent": orange_percent,
+        "red_percent": red_percent,
+    }
 
 
 def storage_capacity_snapshot(path=None) -> dict[str, object]:
@@ -1816,10 +2027,7 @@ def _bind_qkernel_probability_semantics(
     """
 
     output = [dict(row) for row in rows]
-    accepted_revisions = {
-        CURRENT_EVIDENCE_SEMANTICS_REVISION,
-        STALE_ENSEMBLE_ABSOLUTE_DISAGREEMENT_SEMANTICS_REVISION,
-    }
+    accepted_revisions = set(LIVE_CURRENT_EVIDENCE_SEMANTICS_REVISIONS)
     qkernel_rows = [
         row
         for row in output
@@ -2411,10 +2619,7 @@ def _settled_market_relative_alpha_shadow_rows(
         expected_revisions = {DAY0_PROBABILITY_SEMANTICS_REVISION}
         expected_source_status = "current_day0_probability_authority"
     elif strategy_key == "forecast_qkernel_entry":
-        expected_revisions = {
-            CURRENT_EVIDENCE_SEMANTICS_REVISION,
-            STALE_ENSEMBLE_ABSOLUTE_DISAGREEMENT_SEMANTICS_REVISION,
-        }
+        expected_revisions = set(LIVE_CURRENT_EVIDENCE_SEMANTICS_REVISIONS)
         expected_source_status = "current_qkernel_probability_authority"
     else:
         raise ValueError("market-relative alpha shadow strategy is not canonical")
@@ -2521,13 +2726,19 @@ def _settled_market_relative_alpha_shadow_rows(
         if envelope.get("decision_law_id") != "executable_min_order_capital_gain_v2":
             block("superseded_decision_law")
             continue
+        if (
+            envelope.get("global_selection_revision")
+            != CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION
+        ):
+            block("global_selection_revision_mismatch")
+            continue
         revision_identity_ready = (
             day0_probability_semantics_revision(q_version) == revision
             if strategy_key == "day0_nowcast_entry"
             else bool(q_version and posterior_identity_hash)
         )
         if (
-            envelope.get("schema_version") != 2
+            envelope.get("schema_version") != 3
             or envelope.get("strategy_key") != strategy_key
             or envelope.get("selection_rule")
             != (
@@ -2782,6 +2993,9 @@ def _settled_market_relative_alpha_shadow_rows(
                     "probability_semantics_revisions"
                 ],
                 "decision_law_id": "executable_min_order_capital_gain_v2",
+                "global_selection_revision": (
+                    CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION
+                ),
                 "settled_at": settled_at.isoformat(),
                 "entry_market_benchmark_ready": True,
                 "entry_market_benchmark": row["market"],
@@ -2809,9 +3023,9 @@ def _settled_market_relative_alpha_shadow_rows(
                     * row["min_order_size"]
                 ),
                 "evidence_source": (
-                    "no_trade_regret_events_day0_shadow_v2"
+                    "no_trade_regret_events_day0_shadow_v3"
                     if strategy_key == "day0_nowcast_entry"
-                    else "no_trade_regret_events_qkernel_shadow_v2"
+                    else "no_trade_regret_events_qkernel_shadow_v3"
                 ),
             }
         )
@@ -2911,8 +3125,10 @@ def _live_realized_capital_curve(
     hybrid close, never as if the full entry were held to settlement. Gross
     canonical P&L is reduced by the frozen fee schedule because venue facts
     may omit fees.
-    This retrospective curve never supplies entry admission for either strategy;
-    current causal alpha and the normal executable economics/risk stack do.
+    This retrospective curve never licenses entry for either strategy. Day0's
+    revision-scoped probation guard may consume it only to bound an unproven
+    revision to one sequential in-flight probe; current causal alpha and the
+    normal executable economics/risk stack remain the positive authority.
     """
 
     if strategy_key not in {"day0_nowcast_entry", "forecast_qkernel_entry"}:
@@ -2996,10 +3212,19 @@ def _live_realized_capital_curve(
         status.update(status="capital_truth_unavailable", error=type(exc).__name__)
         return status
 
+    execution_fact_has_intent_id = "intent_id" in {
+        str(row[1])
+        for row in conn.execute("PRAGMA table_info(execution_fact)").fetchall()
+    }
+    execution_intent_select = (
+        "ef.intent_id" if execution_fact_has_intent_id else "NULL"
+    )
+
     entry_rows = conn.execute(
         "SELECT pc.position_id,pc.phase,pc.city,pc.target_date,"
         "pc.temperature_metric,pc.cost_basis_usd,pc.realized_pnl_usd,"
-        "vc.command_id,vc.q_version,ef.fill_price,ef.shares,ef.filled_at,"
+        f"vc.command_id,{execution_intent_select},vc.q_version,"
+        "ef.fill_price,ef.shares,ef.filled_at,"
         "vse.post_only,vse.fee_details_json,pc.shares,"
         "EXISTS(SELECT 1 FROM venue_commands AS exit_vc "
         "JOIN execution_fact AS exit_ef ON exit_ef.command_id=exit_vc.command_id "
@@ -3042,24 +3267,45 @@ def _live_realized_capital_curve(
                 "metric": str(raw[4] or ""),
                 "projection_cost_basis_usd": raw[5],
                 "projection_realized_pnl_usd": raw[6],
-                "projection_shares": raw[14],
-                "has_filled_exit": bool(raw[15]),
+                "projection_shares": raw[15],
+                "has_filled_exit": bool(raw[16]),
                 "entries": [],
             },
         )
         position["entries"].append(
             {
                 "command_id": str(raw[7] or ""),
-                "q_version": str(raw[8] or ""),
-                "fill_price": raw[9],
-                "shares": raw[10],
-                "filled_at": str(raw[11] or ""),
-                "post_only": raw[12],
-                "fee_details_json": raw[13],
+                "intent_id": str(raw[8] or ""),
+                "q_version": str(raw[9] or ""),
+                "fill_price": raw[10],
+                "shares": raw[11],
+                "filled_at": str(raw[12] or ""),
+                "post_only": raw[13],
+                "fee_details_json": raw[14],
             }
         )
 
     for position in positions.values():
+        position_id = str(position["position_id"])
+        baseline_id = f"{position_id}:entry"
+
+        def intent_priority(entry: Mapping[str, object]) -> int:
+            command_id = str(entry["command_id"] or "")
+            intent_id = str(entry["intent_id"] or "")
+            if intent_id == baseline_id:
+                return 0
+            if intent_id == f"{baseline_id}:{command_id}":
+                return 1
+            return 2
+
+        canonical_priority_by_command: dict[str, int] = {}
+        for entry in position["entries"]:
+            command_id = str(entry["command_id"] or "")
+            priority = intent_priority(entry)
+            canonical_priority_by_command[command_id] = min(
+                priority,
+                canonical_priority_by_command.get(command_id, priority),
+            )
         deduped: dict[str, dict[str, object]] = {}
         conflict = False
         for entry in position["entries"]:
@@ -3067,6 +3313,9 @@ def _live_realized_capital_curve(
             incumbent = deduped.get(command_id)
             if not command_id:
                 conflict = True
+                continue
+            priority = intent_priority(entry)
+            if priority != canonical_priority_by_command[command_id]:
                 continue
             if incumbent is None:
                 deduped[command_id] = entry
@@ -3473,8 +3722,8 @@ def _global_winner_certificate_q(
     payload_json: object,
     *,
     strategy_key: str,
-) -> tuple[float, float, float] | None:
-    """Return frozen q, target shares, and max spend for one winner."""
+) -> tuple[float, float, float, str] | None:
+    """Return frozen q, size, spend, and selection law for one winner."""
 
     try:
         payload = json.loads(str(payload_json or ""))
@@ -3485,6 +3734,9 @@ def _global_winner_certificate_q(
         max_spend = float(economics["global_max_spend_usd"])
         expected_growth = float(economics["global_expected_delta_log_wealth"])
         expected_ev = float(economics["global_expected_ev_usd"])
+        selection_revision = str(
+            economics["global_selection_revision"]
+        ).strip()
     except (KeyError, TypeError, ValueError, json.JSONDecodeError):
         return None
     if not isinstance(payload, Mapping) or not isinstance(economics, Mapping):
@@ -3507,6 +3759,7 @@ def _global_winner_certificate_q(
         or not actuation_id
         or not epoch_id
         or not winner_event_id
+        or not selection_revision
         or str(receipt.get("winner_candidate_id") or "") != candidate_id
         or str(receipt.get("winner_actuation_identity") or "") != actuation_id
         or str(receipt.get("selection_epoch_identity") or "") != epoch_id
@@ -3522,7 +3775,7 @@ def _global_winner_certificate_q(
         or expected_ev <= 0.0
     ):
         return None
-    return q, target_shares, max_spend
+    return q, target_shares, max_spend, selection_revision
 
 
 def _bind_actual_global_capital_evidence(
@@ -3621,6 +3874,7 @@ def _bind_actual_global_capital_evidence(
         position_id: [] for position_id in candidates
     }
     invalid: set[str] = set()
+    explicitly_blocked: set[str] = set()
     ids = sorted(candidates)
     for start in range(0, len(ids), 500):
         chunk = ids[start : start + 500]
@@ -3683,7 +3937,17 @@ def _bind_actual_global_capital_evidence(
             ):
                 invalid.add(position_id)
                 continue
-            q, _certified_target_shares, certified_max_spend = certificate
+            (
+                q,
+                _certified_target_shares,
+                certified_max_spend,
+                selection_revision,
+            ) = certificate
+            if selection_revision != CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION:
+                block("global_selection_revision_mismatch")
+                invalid.add(position_id)
+                explicitly_blocked.add(position_id)
+                continue
             if min_price * min_shares > certified_max_spend + 0.011:
                 invalid.add(position_id)
                 continue
@@ -3699,13 +3963,17 @@ def _bind_actual_global_capital_evidence(
     for position_id in sorted(candidates):
         parts = command_parts.get(position_id, [])
         if position_id in invalid or not parts:
-            block("global_certificate_identity_incomplete")
+            if position_id not in explicitly_blocked:
+                block("global_certificate_identity_incomplete")
             continue
         total_shares = sum(shares for _q, shares in parts)
         composite_q = sum(q * shares for q, shares in parts) / total_shares
         capital = capital_by_position.get(position_id)
         binding: dict[str, object] = {
             "p_posterior": composite_q,
+            "global_selection_revision": (
+                CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION
+            ),
             "capital_gain_proof_ready": False,
             "capital_evidence_source": "actual_global_winner_fill",
         }
@@ -3797,7 +4065,10 @@ def _market_relative_alpha_evidence(
         evaluated_at = evaluated_at.replace(tzinfo=timezone.utc)
     not_before = evaluated_at - timedelta(days=window_days)
 
-    cohorts: dict[tuple[str, tuple[str, ...]], dict[tuple[str, str], dict]] = {}
+    cohorts: dict[
+        tuple[str, str, tuple[str, ...]],
+        dict[tuple[str, str], dict],
+    ] = {}
     missing_benchmark_count = 0
     for row in rows:
         if str(row.get("strategy") or "").strip() != strategy_key:
@@ -3847,7 +4118,14 @@ def _market_relative_alpha_evidence(
                 if str(revision).strip()
             )
         )
-        cohort_key = (decision_law_id, revisions)
+        global_selection_revision = str(
+            row.get("global_selection_revision") or ""
+        ).strip()
+        cohort_key = (
+            decision_law_id,
+            global_selection_revision,
+            revisions,
+        )
         # Sibling bins and HIGH/LOW from one city-date share weather,
         # observation, and market-information shocks.  Different cities are
         # distinct settlement claims; collapsing them by calendar date alone
@@ -3888,7 +4166,11 @@ def _market_relative_alpha_evidence(
             cluster_rows[evidence_cluster] = candidate
 
     cohort_evidence: list[dict[str, object]] = []
-    for (decision_law_id, revisions), cluster_rows in sorted(cohorts.items()):
+    for (
+        decision_law_id,
+        global_selection_revision,
+        revisions,
+    ), cluster_rows in sorted(cohorts.items()):
         log_model_over_market = 0.0
         for row in cluster_rows.values():
             q = min(max(float(row["q"]), 1e-12), 1.0 - 1e-12)
@@ -3932,6 +4214,7 @@ def _market_relative_alpha_evidence(
         cohort_evidence.append(
             {
                 "decision_law_id": decision_law_id,
+                "global_selection_revision": global_selection_revision,
                 "probability_semantics_revisions": list(revisions),
                 "independent_cluster_count": len(cluster_rows),
                 "candidate_count": sum(
@@ -3940,6 +4223,8 @@ def _market_relative_alpha_evidence(
                     if str(row.get("strategy") or "").strip() == strategy_key
                     and str(row.get("decision_law_id") or "").strip()
                     == decision_law_id
+                    and str(row.get("global_selection_revision") or "").strip()
+                    == global_selection_revision
                     and tuple(sorted(row.get("probability_semantics_revisions") or ()))
                     == revisions
                     and row.get("entry_market_benchmark_ready", False)
@@ -3961,17 +4246,26 @@ def _market_relative_alpha_evidence(
             }
         )
 
-    rejected = [cohort for cohort in cohort_evidence if cohort["rejected"]]
-    validated = [cohort for cohort in cohort_evidence if cohort["validated"]]
+    current_cohorts = [
+        cohort
+        for cohort in cohort_evidence
+        if cohort["global_selection_revision"]
+        == CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION
+    ]
+    rejected = [cohort for cohort in current_cohorts if cohort["rejected"]]
+    validated = [cohort for cohort in current_cohorts if cohort["validated"]]
     return {
         "strategy_key": strategy_key,
+        "global_selection_revision": (
+            CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION
+        ),
         "status": (
             "rejected"
             if rejected
             else (
                 "validated"
                 if validated
-                else ("inconclusive" if cohort_evidence else "no_evidence")
+                else ("inconclusive" if current_cohorts else "no_evidence")
             )
         ),
         "rejection_evalue": rejection_evalue,
@@ -4002,6 +4296,11 @@ def _qkernel_market_relative_alpha_evidence(
     )
     cohorts = []
     for cohort in evidence["cohorts"]:
+        if (
+            cohort.get("global_selection_revision")
+            != CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION
+        ):
+            continue
         projected = dict(cohort)
         projected.pop("model_over_market_evalue", None)
         projected.pop("validated", None)
@@ -4013,6 +4312,7 @@ def _qkernel_market_relative_alpha_evidence(
             else ("ok" if cohorts else "no_evidence")
         ),
         "rejection_evalue": evidence["rejection_evalue"],
+        "global_selection_revision": evidence["global_selection_revision"],
         "window_days": evidence["window_days"],
         "evaluated_at": evidence["evaluated_at"],
         "rejected": evidence["rejected"],
@@ -4029,11 +4329,12 @@ def _market_relative_alpha_gate_reason(
 ) -> str | None:
     """Return the licensed revisions' missing capital-proof gate reason.
 
-    SCOPE: only the strategy and exact probability-semantics revisions named by
-    ``semantics_binding``. DRAIN: settled, walk-forward model-vs-market capital
-    evidence is refreshed every RiskGuard tick. RESET: a revision disappears
-    from the reason when it attains the required e-value and positive realized-
-    capital proof; a new revision starts its own cohort.
+    SCOPE: only the strategy, exact global-selection revision, and exact
+    probability-semantics revisions named by ``semantics_binding``. DRAIN:
+    settled, walk-forward model-vs-market capital evidence is refreshed every
+    RiskGuard tick. RESET: a revision disappears from the reason when it attains
+    the required e-value and positive realized-capital proof under the current
+    selector; either revision change starts its own cohort.
     """
 
     if semantics_binding.get("status") != "ok":
@@ -4061,6 +4362,8 @@ def _market_relative_alpha_gate_reason(
         if isinstance(cohort, Mapping)
         and cohort.get("decision_law_id")
         == "executable_min_order_capital_gain_v2"
+        and cohort.get("global_selection_revision")
+        == CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION
         and (
             not target_revisions
             or bool(
@@ -4144,6 +4447,7 @@ def _market_relative_alpha_gate_reason(
         f"required={required_evalue},"
         f"clusters={clusters},"
         "law=executable_min_order_capital_gain_v2,"
+        f"selection_revision={CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION},"
         f"revision={revision_label}"
         ")"
     )
@@ -4179,6 +4483,8 @@ def _market_relative_alpha_unproven_revisions(
         if isinstance(cohort, Mapping)
         and cohort.get("decision_law_id")
         == "executable_min_order_capital_gain_v2"
+        and cohort.get("global_selection_revision")
+        == CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION
         and cohort.get("validated") is True
         for revision in cohort.get("probability_semantics_revisions", [])
         if str(revision).strip()
@@ -4204,6 +4510,8 @@ def _market_relative_alpha_rejected_revisions(
         if isinstance(cohort, Mapping)
         and cohort.get("decision_law_id")
         == "executable_min_order_capital_gain_v2"
+        and cohort.get("global_selection_revision")
+        == CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION
         and cohort.get("rejected") is True
         for revision in cohort.get("probability_semantics_revisions", [])
         if str(revision).strip()
@@ -4234,6 +4542,79 @@ def _market_relative_alpha_rejection_gate_reason(
         required_evalue=required_evalue,
     )
     return reason, revisions
+
+
+def _day0_revision_probation_gate_reason(
+    semantics_binding: Mapping[str, object],
+    causal_alpha_evidence: Mapping[str, object],
+    capital_curve: Mapping[str, object],
+) -> tuple[str | None, tuple[str, ...]]:
+    """Bound an unproven Day0 revision to one in-flight capital probe.
+
+    SCOPE: only the exact current Day0 probability revision. DRAIN: the existing
+    monitor/exit/settlement lanes close the in-flight position while the
+    no-money counterfactual lane keeps accumulating exact-selector evidence.
+    RESET: validated same-revision capital evidence removes the bound; before
+    validation, one positive realized probe permits the next sequential probe,
+    while nonpositive or degraded capital truth keeps entry gated. A new
+    probability revision starts its own empty probation cohort.
+    """
+
+    if semantics_binding.get("status") != "ok":
+        return None, ()
+    revision = str(semantics_binding.get("current_revision") or "").strip()
+    if not revision:
+        return None, ()
+    if revision not in _market_relative_alpha_unproven_revisions(
+        semantics_binding,
+        causal_alpha_evidence,
+    ):
+        return None, ()
+
+    curve_revision = str(
+        capital_curve.get("probability_semantics_revision") or ""
+    ).strip()
+    status = str(capital_curve.get("status") or "").strip()
+    try:
+        open_positions = int(capital_curve.get("open_position_count") or 0)
+        realized_positions = int(
+            capital_curve.get("realized_position_count") or 0
+        )
+        blocked_positions = int(
+            capital_curve.get("blocked_position_count") or 0
+        )
+        net_pnl = float(capital_curve.get("net_realized_pnl_usd") or 0.0)
+    except (TypeError, ValueError):
+        status = "capital_truth_degraded"
+        open_positions = realized_positions = blocked_positions = 0
+        net_pnl = 0.0
+
+    if (
+        curve_revision != revision
+        or blocked_positions > 0
+        or status in {"capital_truth_degraded", "capital_truth_unavailable"}
+    ):
+        reason = (
+            "day0_revision_probation_truth_degraded("
+            f"status={status or 'missing'},blocked={blocked_positions},"
+            f"revision={revision})"
+        )
+        return reason, (revision,)
+    if open_positions > 0:
+        reason = (
+            "day0_revision_probation_in_flight("
+            f"open={open_positions},realized={realized_positions},"
+            f"revision={revision})"
+        )
+        return reason, (revision,)
+    if realized_positions > 0 and (not math.isfinite(net_pnl) or net_pnl <= 0.0):
+        reason = (
+            "day0_revision_probation_nonpositive("
+            f"realized={realized_positions},net_pnl_usd={net_pnl:.6f},"
+            f"revision={revision})"
+        )
+        return reason, (revision,)
+    return None, ()
 
 
 # Below this many settled observations a per-strategy Brier score is noise,
@@ -4592,7 +4973,12 @@ def _sync_riskguard_strategy_gate_actions(
     def _scope_covers_reason(reason: str, revisions: set[str]) -> bool:
         if reason.startswith("brier_degraded("):
             return True
-        if reason.startswith("market_relative_alpha_unproven("):
+        if reason.startswith(
+            (
+                "market_relative_alpha_unproven(",
+                "day0_revision_probation_",
+            )
+        ):
             marker = ",revision="
             if marker not in reason or not reason.endswith(")"):
                 return False
@@ -5053,6 +5439,8 @@ def _persist_dependency_db_locked_attestation(exc: sqlite3.OperationalError) -> 
     only the metrics refresh degraded. If no full attestation is fresh, degrade
     to DATA_DEGRADED.
     """
+    host_power = host_power_runway_snapshot()
+    host_power_level = RiskLevel(str(host_power["level"]))
     now = datetime.now(timezone.utc)
     now_ts = now.isoformat()
     risk_conn = get_connection(RISK_DB_PATH, write_class="live")
@@ -5096,6 +5484,11 @@ def _persist_dependency_db_locked_attestation(exc: sqlite3.OperationalError) -> 
                 "previous_full_risk_checked_at": previous_full["checked_at"],
                 "conservative_floor_applied": False,
             }
+        stored_level = level
+        level = overall_level(level, host_power_level)
+        details["host_power_level"] = host_power_level.value
+        details["host_power"] = host_power
+        details["host_power_floor_applied"] = level is not stored_level
         risk_conn.execute(
             """
             INSERT INTO risk_state (level, brier, accuracy, win_rate, details_json, checked_at)
@@ -5128,6 +5521,8 @@ def _persist_tick_in_progress_attestation() -> None:
     tick. Rows written here are not full metrics and are never accepted by
     _latest_fresh_full_risk_row; they expire through the normal freshness floor.
     """
+    host_power = host_power_runway_snapshot()
+    host_power_level = RiskLevel(str(host_power["level"]))
     now = datetime.now(timezone.utc)
     risk_conn = get_connection(RISK_DB_PATH, write_class="live")
     try:
@@ -5135,6 +5530,8 @@ def _persist_tick_in_progress_attestation() -> None:
         previous_full = _latest_fresh_full_risk_row(risk_conn, now=now)
         if previous_full is None:
             return
+        previous_level = RiskLevel(str(previous_full["level"]))
+        level = overall_level(previous_level, host_power_level)
         details = {
             **_risk_details_contract_from_full_row(previous_full),
             "status": "metrics_in_progress_previous_risk_level_preserved",
@@ -5142,6 +5539,9 @@ def _persist_tick_in_progress_attestation() -> None:
             "full_metrics_status": "in_progress_previous_fresh_level_preserved",
             "previous_full_risk_level": previous_full["level"],
             "previous_full_risk_checked_at": previous_full["checked_at"],
+            "host_power_level": host_power_level.value,
+            "host_power": host_power,
+            "host_power_floor_applied": level is not previous_level,
         }
         risk_conn.execute(
             """
@@ -5149,7 +5549,7 @@ def _persist_tick_in_progress_attestation() -> None:
             VALUES (?, NULL, NULL, NULL, ?, ?)
             """,
             (
-                previous_full["level"],
+                level.value,
                 json.dumps(details),
                 now.isoformat(),
             ),
@@ -5204,6 +5604,8 @@ def _tick_once() -> RiskLevel:
     # attestation row can be written), the short busy_timeout, and the WAL-leak
     # fix are all preserved.
     # Relationship test: tests/riskguard/test_no_network_io_under_conn.py.
+    host_power = host_power_runway_snapshot()
+    host_power_level = RiskLevel(str(host_power["level"]))
     bankroll_of_record = _bankroll_of_record_for_riskguard()
 
     try:
@@ -5262,13 +5664,16 @@ def _tick_once() -> RiskLevel:
             if previous_full is not None:
                 details["previous_full_risk_level"] = previous_full["level"]
                 details["previous_full_risk_checked_at"] = previous_full["checked_at"]
+            level = overall_level(RiskLevel.DATA_DEGRADED, host_power_level)
+            details["host_power_level"] = host_power_level.value
+            details["host_power"] = host_power
             risk_conn.execute(
                 """
                 INSERT INTO risk_state (level, brier, accuracy, win_rate, details_json, checked_at)
                 VALUES (?, NULL, NULL, NULL, ?, ?)
                 """,
                 (
-                    RiskLevel.DATA_DEGRADED.value,
+                    level.value,
                     json.dumps(details),
                     now_ts,
                 ),
@@ -5278,7 +5683,7 @@ def _tick_once() -> RiskLevel:
                 "RiskGuard tick fail-closed: bankroll truth unavailable "
                 "(no fresh collateral snapshot and no direct wallet value)",
             )
-            return RiskLevel.DATA_DEGRADED
+            return level
 
         current_bankroll_usd = float(bankroll_of_record.value_usd)
         settlement_scan_rows = query_authoritative_settlement_rows(
@@ -5408,19 +5813,21 @@ def _tick_once() -> RiskLevel:
                 required_evalue=market_relative_alpha_evalue,
             )
         )
-        (
-            qkernel_market_relative_alpha_gate_reason,
-            qkernel_market_relative_alpha_gate_revisions,
-        ) = _market_relative_alpha_rejection_gate_reason(
-            probability_semantics_binding,
-            qkernel_market_relative_alpha_gate_evidence,
-            required_evalue=market_relative_alpha_evalue,
+        qkernel_market_relative_alpha_gate_reason = (
+            _market_relative_alpha_gate_reason(
+                probability_semantics_binding,
+                qkernel_market_relative_alpha_gate_evidence,
+                required_evalue=market_relative_alpha_evalue,
+            )
         )
-        qkernel_market_relative_alpha_unproven_revisions = (
+        qkernel_market_relative_alpha_gate_revisions = (
             _market_relative_alpha_unproven_revisions(
                 probability_semantics_binding,
                 qkernel_market_relative_alpha_gate_evidence,
             )
+        )
+        qkernel_market_relative_alpha_unproven_revisions = (
+            qkernel_market_relative_alpha_gate_revisions
         )
         (
             day0_market_relative_alpha_shadow_rows,
@@ -5469,6 +5876,17 @@ def _tick_once() -> RiskLevel:
         )
         day0_market_relative_alpha_gate_required = (
             day0_market_relative_alpha_gate_reason is not None
+        )
+        (
+            day0_revision_probation_gate_reason,
+            day0_revision_probation_gate_revisions,
+        ) = _day0_revision_probation_gate_reason(
+            day0_probability_semantics_binding,
+            day0_market_relative_alpha_evidence,
+            day0_live_realized_capital_curve,
+        )
+        day0_revision_probation_gate_required = (
+            day0_revision_probation_gate_reason is not None
         )
         probability_identity_ready_count = sum(
             bool(row.get("probability_identity_ready", False))
@@ -5618,11 +6036,13 @@ def _tick_once() -> RiskLevel:
         recommended_control_reasons: dict[str, list[str]] = {}
         recommended_strategy_gate_reasons: dict[str, list[str]] = {}
         recommended_strategy_gate_scopes: dict[str, set[str]] = {}
-        # Current q/book/wealth economics are the decision authority. Walk-forward
-        # market-relative evidence remains revision-bound, but missing or
-        # inconclusive history cannot create an absorbing no-entry state: doing
-        # so prevents the fills that can ever settle that evidence. Only direct
-        # rejection of the same executable capital law emits an alpha gate.
+        # Qkernel retains its existing pretrade-proof gate. Day0 bootstraps one
+        # exact current q/book/wealth probe per revision; while that probe is
+        # unresolved, or after its realized capital is nonpositive, the same
+        # revision is gated until exact-selector counterfactual evidence validates
+        # it. Every ordinary source, price, Brier, Kelly, global-ranking, and
+        # submit-time JIT boundary stays cumulative; held monitoring and exits
+        # remain outside this entry policy.
         probability_semantics_level = RiskLevel.GREEN
         if probability_semantics_binding.get("status") == "unavailable":
             probability_semantics_level = RiskLevel.DATA_DEGRADED
@@ -5661,6 +6081,15 @@ def _tick_once() -> RiskLevel:
                 recommended_strategy_gate_scopes.setdefault(
                     strategy, set()
                 ).update(revisions)
+        if day0_revision_probation_gate_reason is not None:
+            _append_reason(
+                recommended_strategy_gate_reasons,
+                "day0_nowcast_entry",
+                day0_revision_probation_gate_reason,
+            )
+            recommended_strategy_gate_scopes.setdefault(
+                "day0_nowcast_entry", set()
+            ).update(day0_revision_probation_gate_revisions)
         degraded_brier_strategies = brier_verdict_breakdown.get(
             "degraded_strategies", {}
         )
@@ -5820,7 +6249,10 @@ def _tick_once() -> RiskLevel:
                     ["forecast_qkernel_entry"],
                 )
             )
-        if day0_market_relative_alpha_gate_required:
+        if (
+            day0_market_relative_alpha_gate_required
+            or day0_revision_probation_gate_required
+        ):
             day0_market_relative_alpha_gate_confirmation = (
                 _confirm_active_durable_strategy_gates(
                     zeus_conn,
@@ -5838,7 +6270,10 @@ def _tick_once() -> RiskLevel:
                 (
                     "day0_nowcast_entry",
                     day0_market_relative_alpha_gate_confirmation,
-                    day0_market_relative_alpha_gate_required,
+                    (
+                        day0_market_relative_alpha_gate_required
+                        or day0_revision_probation_gate_required
+                    ),
                 ),
             )
             if required
@@ -6077,6 +6512,7 @@ def _tick_once() -> RiskLevel:
             unresolved_exposure_level,
             probability_semantics_level,
             storage_capacity_level,
+            host_power_level,
         )
 
         risk_conn.execute("""
@@ -6129,7 +6565,7 @@ def _tick_once() -> RiskLevel:
                     qkernel_market_relative_alpha_unproven_revisions
                 ),
                 "market_relative_alpha_admission_role": (
-                    "revision_scoped_rejection_gate"
+                    "revision_scoped_pretrade_proof_gate"
                 ),
                 "qkernel_market_relative_alpha_shadow": (
                     qkernel_market_relative_alpha_shadow_status
@@ -6151,6 +6587,12 @@ def _tick_once() -> RiskLevel:
                 ),
                 "day0_market_relative_alpha_gate_reason": (
                     day0_market_relative_alpha_gate_reason
+                ),
+                "day0_revision_probation_gate_required": (
+                    day0_revision_probation_gate_required
+                ),
+                "day0_revision_probation_gate_reason": (
+                    day0_revision_probation_gate_reason
                 ),
                 "day0_market_relative_alpha_observation": (
                     day0_market_relative_alpha_observation
@@ -6178,6 +6620,8 @@ def _tick_once() -> RiskLevel:
                 "unresolved_exposure_level": unresolved_exposure_level.value,
                 "storage_capacity_level": storage_capacity_level.value,
                 "storage_capacity": storage_capacity,
+                "host_power_level": host_power_level.value,
+                "host_power": host_power,
                 "daily_loss_level": daily_loss_level.value,
                 "weekly_loss_level": weekly_loss_level.value,
                 "trailing_loss_decision_role": "record_only",
@@ -6510,6 +6954,8 @@ def tick_with_portfolio(portfolio: PortfolioState) -> RiskLevel:
     Connection discipline: both connections closed in finally so exceptions
     never leave dangling handles (same leak fix as tick(), 2026-05-10).
     """
+    host_power = host_power_runway_snapshot()
+    host_power_level = RiskLevel(str(host_power["level"]))
     risk_conn = get_connection(RISK_DB_PATH, write_class="live")
     zeus_conn = _get_runtime_trade_connection()
     try:
@@ -6541,6 +6987,7 @@ def tick_with_portfolio(portfolio: PortfolioState) -> RiskLevel:
             RiskLevel.GREEN,
             collateral_identity_level,
             storage_capacity_level,
+            host_power_level,
         )
 
         return level
@@ -6623,6 +7070,211 @@ def get_current_level() -> RiskLevel:
         logger.error("RiskGuard DB error: %s. Fail-closed → RED.", e)
         return RiskLevel.RED
 
+
+# Component `<name>_level` keys persisted into a FULL tick's details_json (see
+# the `overall_level(...)` call above `INSERT INTO risk_state` in `_tick_once`).
+# NOTE (cause-detail availability finding, item 5b): `collateral_identity_level`
+# drives `level` and drives the RED `alert_halt` failed_rules payload, but is
+# NOT persisted as a details_json key anywhere in `_tick_once` — a RED driven
+# purely by collateral_identity therefore has no queryable per-row cause here.
+# `_riskguard_row_causes` falls back to `riskguard_degraded_reason`/`status`,
+# and to an explicit "cause_unavailable" marker so that gap is visible in the
+# alert/breadcrumb rather than silently reporting an empty cause list.
+_RISK_STATE_COMPONENT_LEVEL_KEYS = (
+    "brier_level",
+    "settlement_quality_level",
+    "execution_quality_level",
+    "strategy_signal_level",
+    "portfolio_consistency_level",
+    "unresolved_exposure_level",
+    "probability_semantics_level",
+    "storage_capacity_level",
+    "host_power_level",
+)
+
+
+def _riskguard_row_causes(details: dict) -> list[str]:
+    """Extract the non-GREEN component names (or degraded reason) from a risk_state row.
+
+    Full ticks persist one `<component>_level` key per driving component (see
+    `_RISK_STATE_COMPONENT_LEVEL_KEYS` above); a non-GREEN value there names the
+    check that contributed to the row's overall level. Degraded attestation rows
+    (`_persist_dependency_db_locked_attestation`, `_persist_tick_in_progress_attestation`)
+    carry only the reduced `_RISK_DETAILS_CONTRACT_KEYS` subset plus
+    `riskguard_degraded_reason` — when no component key is present, that reason
+    (or `status`) is the only cause available. If neither is present the row's
+    cause is genuinely unrecoverable from details_json (see the
+    collateral_identity gap noted above); that is reported explicitly rather
+    than as a silent empty list.
+    """
+    if not isinstance(details, dict):
+        return ["cause_unavailable"]
+    causes = [
+        key[: -len("_level")]
+        for key in _RISK_STATE_COMPONENT_LEVEL_KEYS
+        if details.get(key) not in (None, RiskLevel.GREEN.value)
+    ]
+    if causes:
+        return causes
+    reason = details.get("riskguard_degraded_reason") or details.get("status")
+    return [str(reason)] if reason else ["cause_unavailable"]
+
+
+def _riskguard_stuck_non_green_run(conn: sqlite3.Connection, *, now: datetime) -> dict:
+    """Find where the current non-GREEN risk_state run started.
+
+    Scans backward from the latest row (ORDER BY id DESC, the indexed PK)
+    bounded by STUCK_ALERT_LOOKBACK_ROWS so a long-lived DB never pays an
+    unbounded scan for a GREEN row that may not exist within any reasonable
+    window. If no GREEN row is found within the cap, the run is reported with
+    `lookback_capped=True` and its start is the oldest row seen — a
+    conservative underestimate of the true duration.
+
+    Caller must ensure the latest row is non-GREEN; called with an empty or
+    all-GREEN table this degenerately reports a zero-duration run.
+    """
+    rows = conn.execute(
+        "SELECT level, checked_at, details_json FROM risk_state "
+        "ORDER BY id DESC LIMIT ?",
+        (STUCK_ALERT_LOOKBACK_ROWS,),
+    ).fetchall()
+    if not rows:
+        return {
+            "run_started_at": now.isoformat(),
+            "elapsed_seconds": 0.0,
+            "lookback_capped": False,
+            "first_causes": [],
+            "current_causes": [],
+        }
+
+    current_causes = _riskguard_row_causes(_risk_details_from_row(rows[0]))
+    run_started_row = rows[0]
+    lookback_capped = True
+    for row in rows:
+        if RiskLevel(row["level"]) == RiskLevel.GREEN:
+            lookback_capped = False
+            break
+        run_started_row = row
+
+    run_started_at = str(run_started_row["checked_at"])
+    started_dt = datetime.fromisoformat(run_started_at.replace("Z", "+00:00"))
+    elapsed = max(0.0, (now - started_dt).total_seconds())
+    first_causes = _riskguard_row_causes(_risk_details_from_row(run_started_row))
+    return {
+        "run_started_at": run_started_at,
+        "elapsed_seconds": elapsed,
+        "lookback_capped": lookback_capped,
+        "first_causes": first_causes,
+        "current_causes": current_causes,
+    }
+
+
+def _write_riskguard_stuck_breadcrumb_atomic(payload: dict) -> None:
+    try:
+        from src.config import state_path
+
+        out_path = state_path(STUCK_ALERT_BREADCRUMB_FILENAME)
+        tmp = out_path.with_suffix(out_path.suffix + ".tmp")
+        tmp.write_text(json.dumps(payload, indent=2))
+        tmp.replace(out_path)
+    except Exception as exc:  # noqa: BLE001 - breadcrumb is best-effort.
+        logger.warning("RiskGuard stuck-state breadcrumb write failed: %s", exc)
+
+
+def maybe_alert_riskguard_stuck_non_green(level: RiskLevel) -> None:
+    """Escalate a stuck non-GREEN risk_state level from silent to visible.
+
+    SCOPE: logging + a best-effort state/riskguard_stuck_alert.json breadcrumb
+    only. This never writes a risk_state row, never changes `level`, and never
+    touches get_current_level()/tick() — it is called AFTER a tick already
+    persisted the row driving `level`. Mirrors
+    `_maybe_alert_held_position_monitor_bootstrap_stall` (src/main.py, commit
+    d1aeeeb52, item 5a).
+
+    The 2026-08-24 investigation found RiskGuard stuck non-GREEN explained
+    97.6h of August silence (10/11 gaps DATA_DEGRADED, one RED) with zero
+    alerts — one 25.6h window was 99.9% non-GREEN. This makes that state
+    visible without changing what it does.
+
+    DRAIN: below STUCK_ALERT_AFTER_SECONDS continuous duration, no-op. Past
+    it, logs `logger.error` and writes the breadcrumb at most once per
+    STUCK_ALERT_REPEAT_SECONDS. Duration is recomputed from risk_state on
+    every call (bounded backward scan, `_riskguard_stuck_non_green_run`), not
+    tracked only in memory, so a process restart mid-stall still reports the
+    correct age. RESET: recovery to GREEN clears the breadcrumb (writes a
+    `recovered_at` marker over it) so the next stuck episode starts a fresh
+    clock — the in-memory run marker changing to a different `run_started_at`
+    also resets the repeat-alert throttle immediately.
+    """
+    global _riskguard_stuck_alert_run_started_at
+    global _riskguard_stuck_alert_last_alert_monotonic
+
+    if level == RiskLevel.GREEN:
+        if _riskguard_stuck_alert_run_started_at is not None:
+            _write_riskguard_stuck_breadcrumb_atomic({
+                "recovered_at": datetime.now(timezone.utc).isoformat(),
+                "previous_run_started_at": _riskguard_stuck_alert_run_started_at,
+            })
+        _riskguard_stuck_alert_run_started_at = None
+        _riskguard_stuck_alert_last_alert_monotonic = None
+        return
+
+    now = datetime.now(timezone.utc)
+    try:
+        conn = get_connection(RISK_DB_PATH, write_class=None)
+        try:
+            run = _riskguard_stuck_non_green_run(conn, now=now)
+        finally:
+            conn.close()
+    except Exception as exc:  # noqa: BLE001 - alert path is observability-only.
+        logger.warning("RiskGuard stuck-state scan failed: %s", exc)
+        return
+
+    if run["run_started_at"] != _riskguard_stuck_alert_run_started_at:
+        # New episode (first non-GREEN tick after GREEN, or first check since
+        # process start) -- fresh clock, repeat-alert throttle resets.
+        _riskguard_stuck_alert_run_started_at = run["run_started_at"]
+        _riskguard_stuck_alert_last_alert_monotonic = None
+
+    elapsed = run["elapsed_seconds"]
+    if elapsed < STUCK_ALERT_AFTER_SECONDS:
+        return
+
+    now_monotonic = time.monotonic()
+    last_alert = _riskguard_stuck_alert_last_alert_monotonic
+    if last_alert is not None and now_monotonic - last_alert < STUCK_ALERT_REPEAT_SECONDS:
+        return
+    _riskguard_stuck_alert_last_alert_monotonic = now_monotonic
+
+    capped_note = (
+        f" [lookback capped at {STUCK_ALERT_LOOKBACK_ROWS // 60}h, true start may be earlier]"
+        if run["lookback_capped"]
+        else ""
+    )
+    logger.error(
+        "RiskGuard stuck non-GREEN %.0fs (alert threshold %.0fs): level=%s "
+        "first_causes=%s current_causes=%s run_started_at=%s%s",
+        elapsed,
+        STUCK_ALERT_AFTER_SECONDS,
+        level.value,
+        run["first_causes"],
+        run["current_causes"],
+        run["run_started_at"],
+        capped_note,
+    )
+    _write_riskguard_stuck_breadcrumb_atomic({
+        "level": level.value,
+        "run_started_at": run["run_started_at"],
+        "elapsed_seconds": elapsed,
+        "alert_after_seconds": STUCK_ALERT_AFTER_SECONDS,
+        "first_causes": run["first_causes"],
+        "current_causes": run["current_causes"],
+        "lookback_capped": run["lookback_capped"],
+        "lookback_rows": STUCK_ALERT_LOOKBACK_ROWS,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+    })
+
+
 if __name__ == "__main__":
     """Run RiskGuard as standalone process."""
     import signal
@@ -6663,6 +7315,7 @@ if __name__ == "__main__":
         try:
             level = tick()
             logger.info("Tick complete: %s", level.value)
+            maybe_alert_riskguard_stuck_non_green(level)
         except Exception as e:
             logger.error("RiskGuard tick failed: %s", e)
         time.sleep(60)

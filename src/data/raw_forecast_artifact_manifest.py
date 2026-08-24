@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import sqlite3
+import time
 from collections import Counter, defaultdict
 from dataclasses import asdict, dataclass, field, fields, replace
 from datetime import datetime, timezone
@@ -334,7 +336,20 @@ def audit_raw_forecast_artifact_inventory(
 def write_manifest(manifest: RawForecastArtifactManifest, target_path: Path | str) -> None:
     target = Path(target_path)
     target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(json.dumps(manifest.to_dict(), indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    temporary = target.with_name(
+        f".{target.name}.{os.getpid()}.{time.time_ns()}.tmp"
+    )
+    try:
+        temporary.write_text(
+            json.dumps(manifest.to_dict(), indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        os.replace(temporary, target)
+    finally:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
 
 
 def read_manifest(path: Path | str) -> RawForecastArtifactManifest:

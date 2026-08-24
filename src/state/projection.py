@@ -424,6 +424,14 @@ _MONITOR_REFRESH_PROTECTED_PENDING_EXIT_COLUMNS = frozenset(
 )
 
 
+def _preserve_pending_exit_column(projection: dict, column: str) -> bool:
+    return not (
+        column == "exit_reason"
+        and projection.get("_canonical_event_type") == "MONITOR_REFRESHED"
+        and str(projection.get("exit_reason") or "").upper() == "RED_FORCE_EXIT"
+    )
+
+
 def _preserve_existing_pending_exit_authority(
     conn: sqlite3.Connection,
     projection: dict,
@@ -461,7 +469,8 @@ def _preserve_existing_pending_exit_authority(
     ):
         merged = dict(projection)
         for column in selected:
-            merged[column] = current[column]
+            if _preserve_pending_exit_column(projection, column):
+                merged[column] = current[column]
         return merged
     return projection
 
@@ -541,7 +550,8 @@ def _preserve_existing_monitor_refresh_authority(
         in _MONITOR_REFRESH_PROTECTED_PENDING_EXIT_STATUSES
     ):
         for column in pending_exit_guard_columns:
-            merged[column] = current[column]
+            if _preserve_pending_exit_column(projection, column):
+                merged[column] = current[column]
     if _has_positive_chain_observation(merged) and str(
         merged.get("chain_state") or ""
     ) in {"", "unknown", "local_only"}:

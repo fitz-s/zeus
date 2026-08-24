@@ -1,6 +1,6 @@
 # Created: 2026-04-26
-# Last reused/audited: 2026-08-10
-# Lifecycle: created=2026-04-26; last_reviewed=2026-08-10; last_reused=2026-08-10
+# Last reused/audited: 2026-08-20
+# Lifecycle: created=2026-04-26; last_reviewed=2026-08-20; last_reused=2026-08-20
 # Purpose: Lock venue command journal invariants, transitions, recovery, and U1 snapshot gate.
 # Reuse: Run when venue_command_repo, command schema, or executable snapshot gate changes.
 # Authority basis: command-bus INV-28/NC-18 plus schema-21 global receipt closure;
@@ -660,6 +660,7 @@ class TestGlobalSellReceiptClosure:
             size=10.0,
             price=0.5,
             created_at="2026-08-09T00:00:00Z",
+            q_version=kwargs.pop("q_version", "q-global-sell"),
             global_sell_receipt_closure=closure,
             **kwargs,
         )
@@ -701,7 +702,8 @@ class TestGlobalSellReceiptClosure:
             "global_sell_receipt_closure"
         ]
         assert conn.execute(
-            "SELECT COUNT(*) FROM venue_commands WHERE command_id = ?",
+            "SELECT COUNT(*) FROM venue_commands "
+            "WHERE command_id = ? AND q_version = 'q-global-sell'",
             ("cmd-global-sell-closure",),
         ).fetchone()[0] == 1
         assert GlobalSellReceiptClosure.from_payload(
@@ -759,12 +761,33 @@ class TestGlobalSellReceiptClosure:
             size=10.0,
             price=0.5,
             created_at="2026-08-09T00:00:00Z",
+            q_version="q-global-sell",
             global_sell_receipt_closure=closure,
         )
         assert conn.execute(
             "SELECT COUNT(*) FROM venue_commands WHERE command_id = ?",
             ("cmd-global-sell-persisted",),
         ).fetchone()[0] == 1
+
+    def test_closure_missing_q_version_rejected_atomically(self, conn):
+        ref = _insert_global_auction_receipt(conn)
+        closure = _global_sell_closure(ref)
+        with pytest.raises(
+            ValueError,
+            match="global SELL venue command requires non-empty q_version",
+        ):
+            self._insert_closure_command(
+                conn,
+                closure=closure,
+                command_id="cmd-global-sell-no-q",
+                idempotency_key="idem-global-sell-no-q",
+                q_version=None,
+            )
+        self._assert_zero_rows(
+            conn,
+            command_id="cmd-global-sell-no-q",
+            envelope_id="pre-submit:cmd-global-sell-no-q",
+        )
 
     def test_closure_rejects_string_post_only_and_accepts_sqlite_zero(self, conn):
         ref = _insert_global_auction_receipt(conn)
@@ -2096,6 +2119,94 @@ class TestAppendEventStateTransitionIsGrammarChecked:
                      occurred_at="2026-04-26T00:02:00Z")
         assert get_command(conn, "cmd-001")["state"] == "UNKNOWN"
 
+    @pytest.mark.parametrize(
+        ("event_type", "expected_state"),
+        [
+            ("PARTIAL_FILL_OBSERVED", "PARTIAL"),
+            ("FILL_CONFIRMED", "FILLED"),
+        ],
+    )
+    @pytest.mark.parametrize("submit_state", ["SUBMITTING", "POSTING"])
+    def test_side_effect_crossed_submit_accepts_stronger_venue_fill_evidence(
+        self, conn, event_type, expected_state, submit_state
+    ):
+        from src.state.venue_command_repo import append_event, get_command
+
+        _insert(conn)
+        if submit_state == "SUBMITTING":
+            append_event(
+                conn,
+                command_id="cmd-001",
+                event_type="SUBMIT_REQUESTED",
+                occurred_at="2026-04-26T00:01:00Z",
+                payload=_valid_execution_capability_payload(),
+            )
+        else:
+            for event in ("SNAPSHOT_BOUND", "SIGNED_PERSISTED", "POSTING"):
+                append_event(
+                    conn,
+                    command_id="cmd-001",
+                    event_type=event,
+                    occurred_at="2026-04-26T00:01:00Z",
+                )
+        assert get_command(conn, "cmd-001")["state"] == submit_state
+        append_event(
+            conn,
+            command_id="cmd-001",
+            event_type=event_type,
+            occurred_at="2026-04-26T00:02:00Z",
+            payload={"source": "WS_USER", "venue_order_id": "ord-001"},
+        )
+
+        assert get_command(conn, "cmd-001")["state"] == expected_state
+
+    @pytest.mark.parametrize(
+        ("fill_event", "fill_state"),
+        [
+            ("PARTIAL_FILL_OBSERVED", "PARTIAL"),
+            ("FILL_CONFIRMED", "FILLED"),
+        ],
+    )
+    def test_submit_ack_after_fill_preserves_stronger_fill_state(
+        self, conn, fill_event, fill_state
+    ):
+        from src.state.venue_command_repo import append_event, get_command
+
+        _insert(conn)
+        append_event(
+            conn,
+            command_id="cmd-001",
+            event_type="SUBMIT_REQUESTED",
+            occurred_at="2026-04-26T00:01:00Z",
+            payload=_valid_execution_capability_payload(),
+        )
+        append_event(
+            conn,
+            command_id="cmd-001",
+            event_type=fill_event,
+            occurred_at="2026-04-26T00:02:00Z",
+            payload={"source": "WS_USER", "trade_fact_id": 4154},
+        )
+        append_event(
+            conn,
+            command_id="cmd-001",
+            event_type="SUBMIT_ACKED",
+            occurred_at="2026-04-26T00:03:00Z",
+            payload={"venue_order_id": "ord-late-ack"},
+        )
+
+        command = get_command(conn, "cmd-001")
+        assert command["state"] == fill_state
+        assert command["venue_order_id"] == "ord-late-ack"
+        assert [
+            row[0]
+            for row in conn.execute(
+                "SELECT event_type FROM venue_command_events "
+                "WHERE command_id = ? ORDER BY sequence_no",
+                ("cmd-001",),
+            ).fetchall()
+        ] == ["INTENT_CREATED", "SUBMIT_REQUESTED", fill_event, "SUBMIT_ACKED"]
+
     def test_acked_to_partial(self, conn):
         from src.state.venue_command_repo import append_event, get_command
         _insert(conn)
@@ -2215,13 +2326,11 @@ class TestAppendEventStateTransitionIsGrammarChecked:
         ("INTENT_CREATED", "CANCEL_ACKED", []),
         ("INTENT_CREATED", "EXPIRED", []),
         ("INTENT_CREATED", "PARTIAL_FILL_OBSERVED", []),
-        # From SUBMITTING: SUBMIT_ACKED, SUBMIT_REJECTED, SUBMIT_UNKNOWN,
-        # CANCEL_REQUESTED, REVIEW_REQUIRED, EXPIRED are legal; others illegal.
+        # From SUBMITTING: submit outcomes, authenticated fill evidence,
+        # cancel/review/expiry are legal; unrelated events remain illegal.
         # NOTE: SUBMITTING->EXPIRED was legalized by bb74e650c
         # ("restore redecision freshness flow") and is no longer illegal.
         ("SUBMITTING", "INTENT_CREATED", ["SUBMIT_REQUESTED"]),
-        ("SUBMITTING", "FILL_CONFIRMED", ["SUBMIT_REQUESTED"]),
-        ("SUBMITTING", "PARTIAL_FILL_OBSERVED", ["SUBMIT_REQUESTED"]),
         ("SUBMITTING", "CANCEL_ACKED", ["SUBMIT_REQUESTED"]),
         # From ACKED: fill/cancel/expire/review legal; submit events illegal
         ("ACKED", "SUBMIT_REQUESTED", ["SUBMIT_REQUESTED", "SUBMIT_ACKED"]),
@@ -2229,7 +2338,8 @@ class TestAppendEventStateTransitionIsGrammarChecked:
         ("ACKED", "SUBMIT_REJECTED", ["SUBMIT_REQUESTED", "SUBMIT_ACKED"]),
         ("ACKED", "SUBMIT_UNKNOWN", ["SUBMIT_REQUESTED", "SUBMIT_ACKED"]),
         ("ACKED", "CANCEL_ACKED", ["SUBMIT_REQUESTED", "SUBMIT_ACKED"]),
-        # From FILLED: only REVIEW_REQUIRED legal
+        # From FILLED: late submit ACK preserves fill truth; unrelated submit,
+        # cancel, and duplicate full-fill events remain illegal.
         ("FILLED", "SUBMIT_REQUESTED",
          ["SUBMIT_REQUESTED", "SUBMIT_ACKED", "FILL_CONFIRMED"]),
         ("FILLED", "CANCEL_REQUESTED",

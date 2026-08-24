@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-# Lifecycle: created=2026-06-18; last_reviewed=2026-08-06; last_reused=2026-08-06
+# Lifecycle: created=2026-06-18; last_reviewed=2026-08-21; last_reused=2026-08-21
 # Purpose: Read-only preflight before restarting the live trading daemon.
 # Reuse: Run immediately before loading com.zeus.live-trading or python -m src.main.
 # Created: 2026-06-18
-# Last reused or audited: 2026-08-06
+# Last reused or audited: 2026-08-21
 # Authority basis: Zeus live-money restart proof gates in AGENTS.md.
 """Read-only live restart preflight.
 
@@ -623,14 +623,25 @@ def _qlcb_reliability_artifact_check() -> CheckResult:
             {"error": str(exc)},
         )
     status = str(evidence.get("status") or "")
-    ok = status == "ACTIVE_VALID"
+    active = evidence.get("active") is True
+    cell_count = int(evidence.get("cell_count") or 0)
+    active_valid = status == "ACTIVE_VALID" and active and cell_count > 0
+    inert_safe = (
+        status in {"ABSENT_ALLOWED", "STALE_SEMANTICS", "ACTIVE_INVALID"}
+        and not active
+        and cell_count == 0
+    )
+    ok = active_valid or inert_safe
+    evidence["serving_mode"] = (
+        "ACTIVE_VALIDATED_BOUND" if active_valid else "INERT_CURRENT_Q_BOUND"
+    )
     return CheckResult(
         "qlcb_reliability_artifact",
         ok,
         (
-            "qLCB reliability artifact is active-valid"
+            "qLCB reliability guard has coherent serving authority"
             if ok
-            else "qLCB reliability artifact is not active-valid for live restart"
+            else "qLCB reliability guard state is internally inconsistent"
         ),
         evidence,
     )

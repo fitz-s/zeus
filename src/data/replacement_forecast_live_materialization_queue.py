@@ -6,13 +6,16 @@ import hashlib
 import json
 import logging
 import os
+import fcntl
+import sqlite3
 import subprocess
 import sys
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
-from dataclasses import dataclass
-from datetime import datetime, timezone
+from dataclasses import dataclass, replace
+from datetime import datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
 from typing import Callable, Mapping, Sequence
@@ -23,6 +26,7 @@ from src.contracts.replacement_pipeline_files import (
     validate_materialization_request,
     validate_materialization_seed,
 )
+from src.data.day0_fast_obs import FAST_LANE_ENTRY_MAX_CACHE_AGE_S
 from src.data.replacement_forecast_cycle_policy import tradeable_grade_coverage_sql
 from src.data.replacement_current_value_serving import (
     current_value_serving_schema,
@@ -40,14 +44,191 @@ from src.data.replacement_forecast_seed_discovery import (
 
 
 Runner = Callable[[Sequence[str]], subprocess.CompletedProcess[str]]
-DEFAULT_MATERIALIZATION_SUBPROCESS_TIMEOUT_SECONDS = 240.0
-DEFAULT_MATERIALIZATION_MAX_WORKERS = 4
+DEFAULT_MATERIALIZATION_SUBPROCESS_TIMEOUT_SECONDS = 30.0
+DEFAULT_RECENT_SUCCESS_COALESCE_SECONDS = 60.0
+# Every subprocess commits to the same SQLite forecast DB. Parallel commit
+# processes only multiply cold-page reads and writer contention. Keep one queue
+# owner and one DB writer, but bound one pathological family to 30 seconds so it
+# cannot stop current-q production for every other city.
+DEFAULT_MATERIALIZATION_MAX_WORKERS = 1
+MATERIALIZATION_LANE_ALL = "all"
+MATERIALIZATION_LANE_PRIORITY = "priority"
+MATERIALIZATION_LANE_BACKGROUND = "background"
 MATERIALIZATION_INFLIGHT_DIR_NAME = "inflight"
 _CLAIM_METADATA_NAME = "_claim.json"
 _STALE_CLAIM_GRACE_SECONDS = 30.0
+_TIMEOUT_RETRY_MARKER = ".timeout-retry-"
+_TIMEOUT_RETRY_BASE_SECONDS = 60.0
+_TIMEOUT_RETRY_MAX_SECONDS = 600.0
+_TIMEOUT_RETRY_DEFERRED_REASON = (
+    "REPLACEMENT_LIVE_MATERIALIZATION_TIMEOUT_RETRY_DEFERRED"
+)
+_CAPITAL_PROTECTION_TIMEOUT_RETRY_SECONDS = 1.0
+_CAPITAL_PROTECTION_TIMEOUT_RETRY_MAX_ATTEMPTS = 3
+_CAPITAL_PROTECTION_TIMEOUT_RETRY_MAX_ELAPSED_SECONDS = 75.0
+_MATERIALIZATION_STAGE_RECEIPT_SUFFIX = ".stage"
+_MATERIALIZATION_CHILD_DEADLINE_SAFETY_SECONDS = 1.0
+_AWAITING_ENSEMBLE_HWM_REASON = (
+    "REPLACEMENT_MATERIALIZATION_SOURCE_CYCLE_AWAITING_ENSEMBLE_HWM"
+)
+_AWAITING_ENSEMBLE_HWM_STATUS = (
+    "DEFERRED_SOURCE_CYCLE_AWAITING_ENSEMBLE_HWM"
+)
 _DAY0_ENQUEUE_OWNERSHIP_CURSOR_NAME = ".replacement-day0-enqueue.cursor"
 _DAY0_ENQUEUE_OWNERSHIP_INSPECTION_MULTIPLIER = 4
 _DAY0_ENQUEUE_OWNERSHIP_MIN_INSPECTIONS = 8
+_MATERIALIZATION_CLAIM_DEADLINE_SECONDS = 10.0
+_CLAIM_READ_DEFERRED_REASON = "REPLACEMENT_LIVE_MATERIALIZATION_CLAIM_DEFERRED_READ_DEADLINE"
+_CLAIM_STALE_RECOVERY_DEFERRED_REASON = (
+    "REPLACEMENT_LIVE_MATERIALIZATION_CLAIM_DEFERRED_STALE_RECOVERY"
+)
+_CLAIM_UNKNOWN_INFLIGHT_DEFERRED_REASON = (
+    "REPLACEMENT_LIVE_MATERIALIZATION_CLAIM_DEFERRED_UNKNOWN_INFLIGHT_SCOPE"
+)
+
+
+class _ClaimReadDeadlineExceeded(RuntimeError):
+    """The pre-claim read tranche spent its fixed wall-clock budget."""
+
+
+@dataclass
+class _ClaimReadDeadline:
+    deadline_monotonic: float
+    generation: threading.Event
+    timers: list[threading.Timer]
+
+
+_claim_read_local = threading.local()
+
+
+def _active_claim_read_deadline() -> _ClaimReadDeadline | None:
+    return getattr(_claim_read_local, "deadline", None)
+
+
+@contextmanager
+def _claim_read_deadline_guard():
+    """Bound pre-claim SQLite reads and fence stale watchdog callbacks.
+
+    SCOPE: one pre-claim snapshot. DRAIN: timeout returns DEFERRED before the
+    queue flock is acquired. RESET: the next scheduler tick creates a new
+    generation.
+    """
+    current = _ClaimReadDeadline(
+        deadline_monotonic=time.monotonic() + _MATERIALIZATION_CLAIM_DEADLINE_SECONDS,
+        generation=threading.Event(),
+        timers=[],
+    )
+    _claim_read_local.deadline = current
+    try:
+        yield current
+        if time.monotonic() >= current.deadline_monotonic:
+            raise _ClaimReadDeadlineExceeded()
+    finally:
+        current.generation.set()
+        for timer in current.timers:
+            timer.cancel()
+        _claim_read_local.deadline = None
+
+
+def _queue_read_only_connection(db_path: Path) -> sqlite3.Connection:
+    """Open a claim-bound readonly connection with VM and pager-read deadlines."""
+    from src.state.db import _connect_read_only  # noqa: PLC0415
+
+    current = _active_claim_read_deadline()
+    deadline = None if current is None else current.deadline_monotonic
+    conn = _connect_read_only(db_path, deadline_monotonic=deadline)
+    if current is None:
+        return conn
+
+    def _progress() -> int:
+        return int(time.monotonic() >= current.deadline_monotonic)
+
+    def _interrupt() -> None:
+        if not current.generation.is_set():
+            try:
+                conn.interrupt()
+            except sqlite3.Error:
+                pass
+
+    conn.set_progress_handler(_progress, 1_000)
+    remaining = max(0.0, current.deadline_monotonic - time.monotonic())
+    timer = threading.Timer(remaining, _interrupt)
+    timer.daemon = True
+    try:
+        timer.start()
+    except BaseException:
+        # A watchdog which never started cannot fence this connection.  Close
+        # it before re-raising so a later generation cannot inherit a live read.
+        conn.close()
+        raise
+    current.timers.append(timer)
+    return conn
+
+
+def _raise_if_claim_read_expired() -> None:
+    current = _active_claim_read_deadline()
+    if current is not None and time.monotonic() >= current.deadline_monotonic:
+        raise _ClaimReadDeadlineExceeded()
+
+
+def _queue_files_snapshot(directory: Path) -> tuple[tuple[str, int, int, str], ...]:
+    """Return an exact, content-addressed queue snapshot for the apply fence."""
+    if not directory.exists():
+        return ()
+    snapshot: list[tuple[str, int, int, str]] = []
+    for path in sorted(directory.glob("*.json"), key=lambda item: item.name):
+        if not path.is_file():
+            continue
+        payload = path.read_bytes()
+        stat = path.stat()
+        snapshot.append((path.name, stat.st_mtime_ns, stat.st_size, hashlib.sha256(payload).hexdigest()))
+    return tuple(snapshot)
+
+
+def _sqlite_file_identity(path: Path) -> tuple[int, int, int, str] | None:
+    """Bounded identity that catches WAL-only commits across connections."""
+    try:
+        stat = path.stat()
+        with path.open("rb") as handle:
+            head = handle.read(4_096)
+            if stat.st_size > 4_096:
+                handle.seek(max(0, stat.st_size - 4_096))
+                tail = handle.read(4_096)
+            else:
+                tail = b""
+    except FileNotFoundError:
+        return None
+    return (
+        stat.st_size,
+        stat.st_mtime_ns,
+        stat.st_ctime_ns,
+        hashlib.sha256(head + tail).hexdigest(),
+    )
+
+
+def _claim_db_fingerprint(
+    db_path: Path | str | None,
+) -> tuple[int, tuple[int, int, int, str] | None, tuple[int, int, int, str] | None] | None:
+    """Read the exact DB identity without waiting for a writer.
+
+    SQLite ``data_version`` is diagnostic only across fresh connections. The
+    bounded main+WAL identities are the apply fence: commits can append solely
+    to ``-wal`` while leaving the main DB mtime and size unchanged.
+    """
+    if db_path is None:
+        return None
+    path = Path(db_path)
+    if not path.exists():
+        return None
+    conn = _queue_read_only_connection(path)
+    try:
+        conn.execute("PRAGMA busy_timeout=0")
+        data_version = int(conn.execute("PRAGMA data_version").fetchone()[0])
+        return (data_version, _sqlite_file_identity(path), _sqlite_file_identity(
+            Path(f"{path}-wal")
+        ))
+    finally:
+        conn.close()
 
 
 class _Day0EnqueueOwnership(str, Enum):
@@ -128,12 +309,35 @@ class _MaterializationQueueClaim:
     claimed_count: int
     skipped_count: int
     inflight_deferred_count: int
+    timeout_retry_deferred_count: int
     processed_files: tuple[str, ...]
     failed_files: tuple[str, ...]
     seed_processed_files: tuple[str, ...]
     seed_failed_files: tuple[str, ...]
     seed_reasons: tuple[str, ...]
     discovery_report: ReplacementForecastSeedDiscoveryReport | None
+    selected_files: tuple[Path, ...] = ()
+    request_snapshot: tuple[tuple[str, int, int, str], ...] = ()
+    forecast_db_fingerprint: tuple[
+        int,
+        tuple[int, int, int, str] | None,
+        tuple[int, int, int, str] | None,
+    ] | None = None
+
+
+@dataclass(frozen=True)
+class _PlannedSupersededRequest:
+    path: Path
+    payload: Mapping[str, object]
+    superseded_by: str
+
+
+@dataclass(frozen=True)
+class _RequestClaimReadPlan:
+    claim: _MaterializationQueueClaim
+    superseded: tuple[_PlannedSupersededRequest, ...]
+    stale_conflict_batches: tuple[str, ...] = ()
+    unknown_inflight_batches: tuple[str, ...] = ()
 
 
 def _materialization_subprocess_timeout_seconds() -> float:
@@ -164,14 +368,105 @@ def _run_command(argv: Sequence[str]) -> subprocess.CompletedProcess[str]:
     )
 
 
-def _materialization_command(input_json: Path) -> tuple[str, ...]:
+def _stage_receipt_path(input_json: Path) -> Path:
+    """Keep non-authority process progress next to its durable request."""
+
+    return Path(f"{input_json}{_MATERIALIZATION_STAGE_RECEIPT_SUFFIX}")
+
+
+def _stable_request_id(input_json: Path) -> str:
+    """Preserve one identity across timeout-retry filename suffixes."""
+
+    name = input_json.name
+    if _TIMEOUT_RETRY_MARKER not in name:
+        return name
+    return f"{name.split(_TIMEOUT_RETRY_MARKER, 1)[0]}{input_json.suffix}"
+
+
+def _write_stage_receipt(
+    input_json: Path,
+    *,
+    stage: str,
+    deadline_at: datetime,
+) -> None:
+    """Atomically expose the last known child stage without touching canonical DBs."""
+
+    payload = {
+        "schema_version": 1,
+        "request_id": _stable_request_id(input_json),
+        "input_json": str(input_json),
+        "stage": stage,
+        "deadline_at": deadline_at.astimezone(timezone.utc).isoformat(),
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    _write_stage_receipt_payload(input_json, payload)
+
+
+def _write_stage_receipt_payload(
+    input_json: Path,
+    payload: Mapping[str, object],
+) -> None:
+    """Atomically rewrite one receipt against its current request pathname."""
+
+    target = _stage_receipt_path(input_json)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    current = dict(payload)
+    current.update(
+        {
+            "schema_version": 1,
+            "request_id": _stable_request_id(input_json),
+            "input_json": str(input_json),
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+    )
+    temporary = target.with_name(f".{target.name}.{os.getpid()}.tmp")
+    with temporary.open("w", encoding="utf-8") as handle:
+        json.dump(current, handle, sort_keys=True, separators=(",", ":"))
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(temporary, target)
+    _fsync_directory(target.parent)
+
+
+def _read_stage_receipt(input_json: Path) -> dict[str, object] | None:
+    try:
+        payload = json.loads(_stage_receipt_path(input_json).read_text(encoding="utf-8"))
+    except (OSError, ValueError, json.JSONDecodeError):
+        return None
+    return dict(payload) if isinstance(payload, Mapping) else None
+
+
+def _move_stage_receipt(source: Path, target: Path) -> None:
+    payload = _read_stage_receipt(source)
+    if payload is None:
+        return
+    _write_stage_receipt_payload(target, payload)
+    _stage_receipt_path(source).unlink(missing_ok=True)
+    _fsync_directory(source.parent)
+
+
+def _materialization_command(
+    input_json: Path,
+    *,
+    deadline_at: datetime,
+) -> tuple[str, ...]:
     return (
         sys.executable,
         str(PROJECT_ROOT / "scripts" / "materialize_replacement_forecast_live.py"),
         "--input-json",
         str(input_json),
+        "--deadline-utc",
+        deadline_at.astimezone(timezone.utc).isoformat(),
         "--commit",
     )
+
+
+def _child_deadline_at() -> datetime:
+    """Reserve a small handoff window before the queue's hard subprocess kill."""
+
+    timeout = _materialization_subprocess_timeout_seconds()
+    budget = max(0.1, timeout - _MATERIALIZATION_CHILD_DEADLINE_SAFETY_SECONDS)
+    return datetime.now(timezone.utc) + timedelta(seconds=budget)
 
 
 def _timeout_result(
@@ -262,6 +557,19 @@ def _run_materialization_batch(
 
 
 _LOG = logging.getLogger("zeus.replacement_live_materialization_queue")
+
+_CURRENT_LIVE_POSTERIOR_CYCLE_SQL = """
+    SELECT source_cycle_time
+    FROM forecast_posteriors
+         INDEXED BY idx_forecast_posteriors_runtime_layer_target
+    WHERE runtime_layer = 'live'
+      AND source_id = ?
+      AND city = ?
+      AND target_date = ?
+      AND temperature_metric = ?
+    ORDER BY computed_at DESC
+    LIMIT 1
+"""
 
 
 def _surface_subprocess_warnings(input_name: str, completed: "subprocess.CompletedProcess[str]") -> None:
@@ -408,6 +716,12 @@ def _move_request(
         except FileExistsError:
             continue
         break
+    try:
+        _move_stage_receipt(path, target)
+    except Exception:
+        target.unlink(missing_ok=True)
+        _fsync_directory(destination_dir)
+        raise
     if terminal_receipt is not None:
         try:
             _write_seed_terminal_receipts(path, target, terminal_receipt)
@@ -466,93 +780,40 @@ def _write_sidecar(path: Path, payload: dict[str, object]) -> None:
     )
 
 
-def _read_lock_holder_pid(lock_path: Path) -> int | None:
-    """Parse ``pid=<n>`` from a queue lock file; None if missing/unreadable/garbled."""
-    try:
-        content = lock_path.read_text(encoding="utf-8", errors="replace")
-    except (FileNotFoundError, OSError):
-        return None
-    marker = "pid="
-    idx = content.find(marker)
-    if idx < 0:
-        return None
-    digits = ""
-    for ch in content[idx + len(marker):]:
-        if ch.isdigit():
-            digits += ch
-        else:
-            break
-    return int(digits) if digits else None
-
-
-def _pid_is_alive(pid: int) -> bool:
-    """True iff a process with this PID currently exists (signal-0 liveness probe)."""
-    if pid <= 0:
-        return False
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        # Exists but owned by another user — still a live holder.
-        return True
-    return True
-
-
-def _archive_stale_lock(lock_path: Path, *, holder_pid: int | None) -> Path | None:
-    """Move an orphaned lock into ``archived_stale_locks/`` (audit trail; never silent-delete)."""
-    qdir = lock_path.parent / "archived_stale_locks"
-    qdir.mkdir(parents=True, exist_ok=True)
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    pid_tag = holder_pid if holder_pid is not None else "unknown"
-    dest = qdir / f"{lock_path.name.lstrip('.')}.{stamp}.pid{pid_tag}"
-    try:
-        os.replace(lock_path, dest)
-        return dest
-    except FileNotFoundError:
-        return None  # another acquirer cleared it first — fine
-
-
 @contextmanager
-def _queue_lock(lock_path: Path):
-    """Exclusive single-writer lock for the materialization queue, with STALE-LOCK SELF-HEAL.
-
-    ANTIBODY (rules 5 + 3 — make the orphaned-lock stall UNCONSTRUCTABLE): the lock is released
-    only by this contextmanager's ``finally`` unlink. A holder process SIGKILL'd mid-run skips
-    ``finally`` entirely, so its lock file would block every future acquirer FOREVER (the ~12h
-    live stall: materializer dark -> readiness expired -> reactor READINESS_EXPIRED -> zero
-    trades). On ``FileExistsError`` we now probe the recorded holder PID: a DEAD (or
-    unparseable) holder means the lock is orphaned, so we archive it for audit and steal the
-    lock by retrying the exclusive create once; a genuinely ALIVE holder still blocks (no
-    concurrent double-run). ``fd`` stays None on the blocked path, so we never unlink a live
-    holder's lock.
-    """
+def _queue_lock(lock_path: Path, *, wait_seconds: float = 0.0):
+    """Acquire a persistent pathname lock whose ownership is the kernel flock."""
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     fd: int | None = None
+    deadline = time.monotonic() + max(0.0, float(wait_seconds))
     try:
-        try:
-            fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-        except FileExistsError:
-            holder_pid = _read_lock_holder_pid(lock_path)
-            if holder_pid is not None and _pid_is_alive(holder_pid):
-                yield False
-                return
-            _archive_stale_lock(lock_path, holder_pid=holder_pid)
+        fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR)
+        while True:
             try:
-                fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-            except FileExistsError:
-                # Lost a race to another acquirer that grabbed the freed lock first.
-                yield False
-                return
-        os.write(fd, f"pid={os.getpid()} acquired_at={datetime.now(timezone.utc).isoformat()}\n".encode("utf-8"))
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    yield False
+                    return
+                time.sleep(min(0.01, max(0.0, deadline - time.monotonic())))
+        os.ftruncate(fd, 0)
+        os.lseek(fd, 0, os.SEEK_SET)
+        os.write(
+            fd,
+            f"pid={os.getpid()} acquired_at={datetime.now(timezone.utc).isoformat()}\n".encode(
+                "utf-8"
+            ),
+        )
+        os.fsync(fd)
         yield True
     finally:
         if fd is not None:
-            os.close(fd)
             try:
-                lock_path.unlink()
-            except FileNotFoundError:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+            except OSError:
                 pass
+            os.close(fd)
 
 
 def _load_seed_json(path: Path) -> dict[str, object]:
@@ -643,10 +904,8 @@ def _upgrade_day0_seed_has_current_enqueue_ownership(
     db_path = Path(forecast_db)
     if not db_path.exists():
         return _Day0EnqueueOwnershipCheck(_Day0EnqueueOwnership.INDETERMINATE)
-    from src.state.db import _connect  # noqa: PLC0415
-
     try:
-        conn = _connect(db_path, write_class="live")
+        conn = _queue_read_only_connection(db_path)
         try:
             conn.execute("PRAGMA query_only=ON")
             columns = {
@@ -703,6 +962,8 @@ def _upgrade_day0_seed_has_current_enqueue_ownership(
             )
         finally:
             conn.close()
+    except _ClaimReadDeadlineExceeded:
+        raise
     except Exception:
         return _Day0EnqueueOwnershipCheck(_Day0EnqueueOwnership.INDETERMINATE)
 
@@ -710,12 +971,10 @@ def _upgrade_day0_seed_has_current_enqueue_ownership(
 def _seed_already_covered(*, forecast_db: Path | str | None, seed: dict[str, object]) -> bool:
     if forecast_db is None:
         return False
-    from src.state.db import _connect
-
     db_path = Path(forecast_db)
     if not db_path.exists():
         return False
-    conn = _connect(db_path, write_class="live")
+    conn = _queue_read_only_connection(db_path)
     try:
         conn.execute("PRAGMA query_only=ON")
         tables = {
@@ -887,43 +1146,34 @@ def _parse_utc_iso(value: object) -> datetime | None:
     return parsed.astimezone(timezone.utc)
 
 
-def _seed_source_cycle_regresses_current_posterior(
+def _seed_source_cycle_boundary(
     *,
     forecast_db: Path | str | None,
     seed: dict[str, object],
-) -> bool:
-    """True when this seed is older than the family's latest materialized posterior.
+) -> tuple[str, str] | None:
+    """Return a proven posterior/ENS cycle boundary for this seed, if any.
 
     The materializer's monotone consumed-cycle guard remains the final authority.
-    This queue-side check only prevents a seed that is already known to be
-    unconstructable from spending a subprocess slot every cycle.
+    This queue-side check prevents work already known to be below current truth,
+    or above the newest decision-time eligible same-cycle ENS shape, from
+    spending the single subprocess slot. An unreadable HWM returns ``None`` and
+    preserves the original materializer path.
     """
 
     if forecast_db is None:
-        return False
+        return None
     request_cycle = _parse_utc_iso(seed.get("source_cycle_time"))
     if request_cycle is None:
-        return False
+        return None
     db_path = Path(forecast_db)
     if not db_path.exists():
-        return False
-    from src.state.db import _connect
-
+        return None
     try:
-        conn = _connect(db_path, write_class="live")
+        conn = _queue_read_only_connection(db_path)
         try:
             conn.execute("PRAGMA query_only=ON")
             row = conn.execute(
-                """
-                SELECT source_cycle_time
-                FROM forecast_posteriors
-                WHERE source_id = ?
-                  AND city = ?
-                  AND target_date = ?
-                  AND temperature_metric = ?
-                ORDER BY computed_at DESC
-                LIMIT 1
-                """,
+                _CURRENT_LIVE_POSTERIOR_CYCLE_SQL,
                 (
                     SOURCE_ID,
                     str(seed.get("city")),
@@ -931,15 +1181,33 @@ def _seed_source_cycle_regresses_current_posterior(
                     str(seed.get("temperature_metric")),
                 ),
             ).fetchone()
+            from src.data.replacement_input_hwm import (  # noqa: PLC0415
+                latest_eligible_ensemble_input_cycle,
+            )
+
+            latest_ensemble_cycle = latest_eligible_ensemble_input_cycle(
+                conn,
+                city=str(seed.get("city")),
+                target_date=str(seed.get("target_date")),
+                metric=str(seed.get("temperature_metric")),
+                decision_time=datetime.now(timezone.utc),
+            )
         finally:
             conn.close()
+    except _ClaimReadDeadlineExceeded:
+        raise
     except Exception:
-        return False
-    if row is None:
-        return False
-    current_raw = row["source_cycle_time"] if hasattr(row, "keys") else row[0]
-    current_cycle = _parse_utc_iso(current_raw)
-    return current_cycle is not None and request_cycle < current_cycle
+        return None
+    if row is not None:
+        current_raw = row["source_cycle_time"] if hasattr(row, "keys") else row[0]
+        current_cycle = _parse_utc_iso(current_raw)
+        if current_cycle is not None and request_cycle < current_cycle:
+            return "current_posterior", current_cycle.isoformat()
+    if latest_ensemble_cycle is not None and request_cycle < latest_ensemble_cycle:
+        return "current_ensemble_hwm", latest_ensemble_cycle.isoformat()
+    if latest_ensemble_cycle is not None and request_cycle > latest_ensemble_cycle:
+        return "awaiting_current_ensemble_hwm", latest_ensemble_cycle.isoformat()
+    return None
 
 
 def _write_request(path: Path, payload: dict[str, object]) -> None:
@@ -998,20 +1266,31 @@ def _current_money_risk_scopes(
 
     if not fam_scopes:
         return frozenset()
+    return _current_money_risk_families(trade_db=trade_db) & fam_scopes
+
+
+def _current_money_risk_families(
+    *,
+    trade_db: Path | str | None = None,
+) -> frozenset[tuple[str, str, str]]:
+    """Return every chain-confirmed family whose probability protects capital."""
+
     try:
         from src.data.replacement_cycle_advance_trigger import (  # noqa: PLC0415
             _held_position_families,
         )
-        from src.state.db import _connect_read_only, _zeus_trade_db_path  # noqa: PLC0415
+        from src.state.db import _zeus_trade_db_path  # noqa: PLC0415
 
         db_path = Path(trade_db) if trade_db is not None else _zeus_trade_db_path()
         if not db_path.exists():
             return frozenset()
-        conn = _connect_read_only(db_path)
+        conn = _queue_read_only_connection(db_path)
         try:
-            return frozenset(_held_position_families(conn) & fam_scopes)
+            return frozenset(_held_position_families(conn))
         finally:
             conn.close()
+    except _ClaimReadDeadlineExceeded:
+        raise
     except Exception as exc:  # noqa: BLE001 - priority loss is loud, queue still drains
         _LOG.error(
             "replacement materialization current-exposure priority read failed; "
@@ -1021,12 +1300,120 @@ def _current_money_risk_scopes(
         return frozenset()
 
 
+def _current_probability_debt_families(
+    *,
+    trade_db: Path | str | None = None,
+) -> frozenset[tuple[str, str, str]]:
+    """Return current-capital families whose held probability is not fresh."""
+
+    held = _current_money_risk_families(trade_db=trade_db)
+    if not held:
+        return frozenset()
+    try:
+        from src.state.db import _zeus_trade_db_path  # noqa: PLC0415
+
+        db_path = Path(trade_db) if trade_db is not None else _zeus_trade_db_path()
+        conn = _queue_read_only_connection(db_path)
+        try:
+            rows = conn.execute(
+                """
+                SELECT city, target_date, LOWER(temperature_metric)
+                  FROM position_current
+                 WHERE phase IN ('pending_entry', 'active', 'day0_window', 'pending_exit')
+                   AND COALESCE(last_monitor_prob_is_fresh, 0) <> 1
+                """
+            ).fetchall()
+        finally:
+            conn.close()
+    except _ClaimReadDeadlineExceeded:
+        raise
+    except Exception as exc:  # noqa: BLE001 - unknown debt keeps ordinary timeout law
+        _LOG.error(
+            "replacement materialization probability-debt read failed; "
+            "retaining ordinary timeout/backoff: %s",
+            exc,
+        )
+        return frozenset()
+    stale = frozenset(
+        (str(row[0] or ""), str(row[1] or ""), str(row[2] or ""))
+        for row in rows
+    )
+    return held & stale
+
+
+def _request_family_scope(
+    payload: Mapping[str, object] | None,
+) -> tuple[str, str, str] | None:
+    if payload is None:
+        return None
+    scope = (
+        str(payload.get("city") or "").strip(),
+        str(payload.get("target_date") or "").strip(),
+        str(payload.get("temperature_metric") or "").strip().lower(),
+    )
+    return scope if all(scope) else None
+
+
+def _is_capital_protection_timeout_retry(
+    path: Path,
+    payload: Mapping[str, object],
+    *,
+    current_probability_debt: frozenset[tuple[str, str, str]],
+) -> bool:
+    """Recognize a held Day0 state advance after its retry filename changed."""
+
+    _base, attempt, _retry_at = _timeout_retry_state(path)
+    within_budget, _first_timeout = _capital_protection_timeout_budget(
+        path,
+        attempt=attempt,
+        now=datetime.now(timezone.utc),
+    )
+    family = (
+        str(payload.get("city") or "").strip(),
+        str(payload.get("target_date") or "").strip(),
+        str(payload.get("temperature_metric") or "").strip().lower(),
+    )
+    return (
+        _TIMEOUT_RETRY_MARKER in path.name
+        and within_budget
+        and family in current_probability_debt
+        and str(payload.get("upgrade_trigger") or "").strip()
+        == "day0_observation_advanced"
+        and _day0_conditioning_identity_key(payload) is not None
+    )
+
+
+def _is_current_capital_protection_timeout_retry(
+    path: Path,
+    payload: Mapping[str, object] | None,
+) -> bool:
+    if payload is None:
+        return False
+    family = (
+        str(payload.get("city") or "").strip(),
+        str(payload.get("target_date") or "").strip(),
+        str(payload.get("temperature_metric") or "").strip().lower(),
+    )
+    if not all(family):
+        return False
+    return (
+        family in _current_probability_debt_families()
+        and str(payload.get("upgrade_trigger") or "").strip()
+        == "day0_observation_advanced"
+        and _day0_conditioning_identity_key(payload) is not None
+    )
+
+
 def _cycle_advance_seed_priority_map(
     forecast_db: Path | str | None,
     queue_files: Sequence[Path],
+    payloads: Mapping[Path, Mapping[str, object] | None] | None = None,
     *,
     trade_db: Path | str | None = None,
-) -> dict[str, tuple[int, str]]:
+    now_utc: datetime | None = None,
+    current_money_risk: frozenset[tuple[str, str, str]] | None = None,
+    priority_names: set[str] | None = None,
+) -> dict[str, tuple[float, str]]:
     """Return filename -> priority for queued materialization work.
 
     Current chain-confirmed exposure is read at claim time and dominates every
@@ -1037,12 +1424,43 @@ def _cycle_advance_seed_priority_map(
     at risk in the family.
     """
     if not queue_files:
+        if priority_names is not None:
+            priority_names.clear()
         return {}
+    if priority_names is not None:
+        priority_names.clear()
     names_by_scope: dict[tuple[str, str, str, str], set[str]] = {}
+    request_time_by_name: dict[str, str] = {}
+    baseline_run_by_name: dict[str, str] = {}
+    day0_observation_by_name: dict[str, datetime] = {}
+    day0_identity_by_name: dict[str, tuple[str, str, str, str]] = {}
+    payload_by_name: dict[str, Mapping[str, object]] = {}
+    path_by_name = {path.name: path for path in queue_files}
+    cycle_by_scope: dict[tuple[str, str, str, str], datetime] = {}
+    latest_cycle_by_family: dict[tuple[str, str, str], datetime] = {}
     for path in queue_files:
-        payload = _load_request_payload_for_coalescing(path)
+        payload = (
+            payloads[path]
+            if payloads is not None and path in payloads
+            else _load_request_payload_for_coalescing(path)
+        )
         if payload is None:
             continue
+        payload_by_name[path.name] = payload
+        computed_at = _parse_utc_iso(payload.get("computed_at"))
+        if computed_at is not None:
+            request_time_by_name[path.name] = computed_at.isoformat()
+        baseline_run_id = str(payload.get("baseline_source_run_id") or "").strip()
+        if baseline_run_id:
+            baseline_run_by_name[path.name] = baseline_run_id
+        day0_observation = _parse_utc_iso(
+            payload.get("day0_observed_extreme_observation_time")
+        )
+        if day0_observation is not None:
+            day0_observation_by_name[path.name] = day0_observation
+        day0_identity = _day0_conditioning_identity_key(payload)
+        if day0_identity is not None:
+            day0_identity_by_name[path.name] = day0_identity
         cycle = _parse_utc_iso(payload.get("source_cycle_time"))
         scope = (
             str(payload.get("city") or "").strip(),
@@ -1052,20 +1470,32 @@ def _cycle_advance_seed_priority_map(
         )
         if all(scope):
             names_by_scope.setdefault(scope, set()).add(path.name)
+            if cycle is not None:
+                cycle_by_scope[scope] = cycle
+                family = scope[:3]
+                latest = latest_cycle_by_family.get(family)
+                if latest is None or cycle > latest:
+                    latest_cycle_by_family[family] = cycle
     if not names_by_scope:
         return {}
     fam_scopes = frozenset(scope[:3] for scope in names_by_scope)
-    current_money_risk = _current_money_risk_scopes(
-        fam_scopes,
-        trade_db=trade_db,
+    current_money_risk = (
+        _current_money_risk_scopes(fam_scopes, trade_db=trade_db)
+        if current_money_risk is None
+        else current_money_risk & fam_scopes
+    )
+    # This is intentionally a second, claim-time read.  Exposure gives every
+    # held family ordinary priority; only a currently stale monitor q grants
+    # the retry its capital-protection tier, and a fresh q removes it.
+    current_probability_debt = (
+        _current_probability_debt_families(trade_db=trade_db) & fam_scopes
     )
     rows: list[object] = []
+    current_baseline_names: set[str] = set()
     never_priced_scopes: frozenset[tuple[str, str, str]] = frozenset()
     if forecast_db is not None and Path(forecast_db).exists():
         try:
-            from src.state.db import _connect_read_only  # noqa: PLC0415
-
-            conn = _connect_read_only(Path(forecast_db))
+            conn = _queue_read_only_connection(Path(forecast_db))
             try:
                 scopes = tuple(names_by_scope)
                 for offset in range(0, len(scopes), 200):
@@ -1096,8 +1526,41 @@ def _cycle_advance_seed_priority_map(
                 never_priced_scopes = _cycle_advance_never_priced_scopes(
                     conn, fam_scopes
                 )
+                baseline_run_ids = tuple(dict.fromkeys(baseline_run_by_name.values()))
+                if baseline_run_ids:
+                    try:
+                        placeholders = ", ".join("?" for _ in baseline_run_ids)
+                        run_rows = conn.execute(
+                            f"""
+                            SELECT source_run_id, source_cycle_time, status
+                              FROM source_run
+                             WHERE source_run_id IN ({placeholders})
+                            """,
+                            baseline_run_ids,
+                        ).fetchall()
+                        current_cycle_by_run = {
+                            str(row[0]): _parse_utc_iso(row[1])
+                            for row in run_rows
+                            if str(row[2] or "").upper() == "SUCCESS"
+                        }
+                        for scope, names in names_by_scope.items():
+                            scope_cycle = cycle_by_scope.get(scope)
+                            if scope_cycle is None:
+                                continue
+                            current_baseline_names.update(
+                                name
+                                for name in names
+                                if current_cycle_by_run.get(
+                                    baseline_run_by_name.get(name, "")
+                                )
+                                == scope_cycle
+                            )
+                    except sqlite3.Error:
+                        pass
             finally:
                 conn.close()
+        except _ClaimReadDeadlineExceeded:
+            raise
         except Exception:  # noqa: BLE001 - priority is best-effort; queue must still drain
             pass
 
@@ -1112,29 +1575,145 @@ def _cycle_advance_seed_priority_map(
         ):
             enqueue_priority[scope] = candidate
 
-    priority: dict[str, tuple[int, str]] = {}
+    priority: dict[str, tuple[float, str]] = {}
+    priority_now = now_utc or datetime.now(timezone.utc)
+    if priority_now.tzinfo is None:
+        priority_now = priority_now.replace(tzinfo=timezone.utc)
+    else:
+        priority_now = priority_now.astimezone(timezone.utc)
+    scopes_with_current_baseline = {
+        scope
+        for scope, names in names_by_scope.items()
+        if any(name in current_baseline_names for name in names)
+    }
     for scope, names in names_by_scope.items():
         fam_scope = scope[:3]
         held_marker, enqueued_at = enqueue_priority.get(scope, (False, ""))
         if fam_scope in current_money_risk:
-            tier = -2
+            base_tier = -2
         elif fam_scope in never_priced_scopes:
-            tier = -1
+            base_tier = -1
         elif held_marker:
-            tier = 0
+            base_tier = 0
         else:
-            tier = 1
-        value = (tier, enqueued_at)
+            base_tier = 1
+        scope_cycle = cycle_by_scope.get(scope)
+        latest_cycle = latest_cycle_by_family.get(fam_scope)
+        older_queued_cycle = (
+            scope_cycle is not None
+            and latest_cycle is not None
+            and scope_cycle < latest_cycle
+        )
+        tier = base_tier * 2 + int(older_queued_cycle)
         for name in names:
-            priority[name] = value
+            payload = payload_by_name[name]
+            capital_protection_retry = _is_capital_protection_timeout_retry(
+                path_by_name[name],
+                payload,
+                current_probability_debt=current_probability_debt,
+            )
+            if priority_names is not None and (
+                fam_scope in current_money_risk
+                or name in day0_identity_by_name
+            ):
+                # The Day0 conditioning identity is part of the durable request
+                # semantic key. A held family without Day0 evidence is still
+                # reserved by current chain-confirmed exposure; ordinary work
+                # cannot consume this slot.
+                priority_names.add(name)
+            request_time = request_time_by_name.get(name) or enqueued_at
+            if scope in scopes_with_current_baseline:
+                request_time = (
+                    "0|" if name in current_baseline_names else "1|"
+                ) + request_time
+            observation_time = day0_observation_by_name.get(name)
+            observation_age = (
+                None
+                if observation_time is None
+                else (priority_now - observation_time).total_seconds()
+            )
+            current_baseline = name in current_baseline_names
+            if (
+                current_baseline
+                and observation_age is not None
+                and 0.0 <= observation_age <= FAST_LANE_ENTRY_MAX_CACHE_AGE_S
+            ):
+                # A Day0 print has only a short ENTRY-authority lifetime. Keep
+                # every capital-risk/source-cycle tier intact, but within that
+                # exact tier let the newest still-actionable observation reach
+                # the single writer before timeless FIFO work. A stale-baseline
+                # sibling is never promoted by a fresh print.
+                inverse_observation_clock = (
+                    10**18 - int(observation_time.timestamp() * 1_000_000)
+                )
+                request_time = (
+                    f"{inverse_observation_clock:018d}|{request_time}"
+                )
+                priority[name] = (
+                    (-10.0 if capital_protection_retry else tier - 0.5),
+                    request_time,
+                )
+            else:
+                priority[name] = (
+                    (-10.0 if capital_protection_retry else tier),
+                    request_time,
+                )
     return priority
 
 
 def _cycle_advance_file_sort_key(
     path: Path,
-    priority: dict[str, tuple[int, str]],
-) -> tuple[int, str, str]:
+    priority: dict[str, tuple[float, str]],
+) -> tuple[float, str, str]:
     return (*priority.get(path.name, (1, "")), path.name)
+
+
+def _lane_matches(*, path: Path, priority_names: set[str], lane: str) -> bool:
+    if lane not in {
+        MATERIALIZATION_LANE_ALL,
+        MATERIALIZATION_LANE_PRIORITY,
+        MATERIALIZATION_LANE_BACKGROUND,
+    }:
+        raise ValueError(f"unknown materialization lane: {lane}")
+    if lane == MATERIALIZATION_LANE_ALL:
+        return True
+    is_priority = path.name in priority_names
+    return is_priority if lane == MATERIALIZATION_LANE_PRIORITY else not is_priority
+
+
+def _priority_map_with_names(
+    forecast_db: Path | str | None,
+    queue_files: Sequence[Path],
+    payloads: Mapping[Path, Mapping[str, object] | None] | None = None,
+    *,
+    current_money_risk: frozenset[tuple[str, str, str]] | None = None,
+) -> tuple[dict[str, tuple[float, str]], set[str]]:
+    """Call the classifier while keeping compatibility with narrow test doubles."""
+    priority_names: set[str] = set()
+    try:
+        priority = _cycle_advance_seed_priority_map(
+            forecast_db,
+            queue_files,
+            payloads,
+            current_money_risk=current_money_risk,
+            priority_names=priority_names,
+        )
+    except TypeError as exc:
+        if not any(
+            name in str(exc)
+            for name in ("priority_names", "current_money_risk")
+        ):
+            raise
+        priority = _cycle_advance_seed_priority_map(
+            forecast_db,
+            queue_files,
+            payloads,
+        )
+        for path in queue_files:
+            payload = payloads.get(path) if payloads is not None else _load_request_payload_for_coalescing(path)
+            if payload is not None and _day0_conditioning_identity_key(payload) is not None:
+                priority_names.add(path.name)
+    return priority, priority_names
 
 
 # POISON-PILL IMMUNITY (2026-06-10): the materializer subprocess accesses these keys
@@ -1171,11 +1750,20 @@ _BLOCKED_INPUT_RECEIPT_REASON = (
 _UNCHANGED_BLOCKED_SEED_SKIP_REASON = (
     "REPLACEMENT_LIVE_MATERIALIZATION_SEED_UNCHANGED_BLOCKED_INPUT"
 )
+_UNCHANGED_SUCCESS_SKIP_REASON = (
+    "REPLACEMENT_LIVE_MATERIALIZATION_REQUEST_RECENT_UNCHANGED_SUCCESS"
+)
 _STALE_DAY0_ENQUEUE_OWNER_REASON = "STALE_DAY0_ENQUEUE_OWNER"
 _STALE_DAY0_OWNER_SUPERSEDED_REASON = (
     "REPLACEMENT_LIVE_MATERIALIZATION_REQUEST_SUPERSEDED_BY_DAY0_OWNER"
 )
 _WRITE_DEFERRED_REASON = "REPLACEMENT_FORECAST_WRITE_DEFERRED"
+_TRANSIENT_READ_RETRY_REASON = (
+    "REPLACEMENT_LIVE_MATERIALIZATION_TRANSIENT_READ_RETRY_DEFERRED"
+)
+_TRANSIENT_BLOCK_RETRY_REASONS = frozenset(
+    {"REPLACEMENT_MATERIALIZATION_DAY0_FRONTIER_LEDGER_READ_FAILED"}
+)
 _ATTEMPT_CLOCK_FIELDS = frozenset({"computed_at", "expires_at"})
 _ATTEMPT_INPUT_PATH_FIELDS = (
     "openmeteo_payload_json",
@@ -1343,8 +1931,58 @@ def _request_semantic_key(payload: Mapping[str, object]) -> tuple[str, ...] | No
     return tuple(values)
 
 
+def _day0_conditioning_identity_key(
+    payload: Mapping[str, object],
+) -> tuple[str, str, str, str] | None:
+    """Return the durable family + Day0 conditioning identity, if present."""
+    semantic_key = _request_semantic_key(payload)
+    if semantic_key is None:
+        return None
+    identity = next(
+        (
+            value.split("=", 1)[1]
+            for value in semantic_key
+            if value.startswith(_DAY0_CONDITIONING_IDENTITY_KEY + "=")
+        ),
+        None,
+    )
+    if identity is None:
+        return None
+    return (
+        semantic_key[0],
+        semantic_key[1],
+        semantic_key[2],
+        identity,
+    )
+
+
+def _request_coalescing_key(payload: Mapping[str, object]) -> tuple[str, ...] | None:
+    """Coalesce one Day0 family across monotone observation identities.
+
+    Ordinary requests retain their complete semantic key. Day0 requests use the
+    same source-cycle/input scope without the observation identity, so a newer
+    authorized observation supersedes the older request while same-identity
+    duplicates still coalesce. This only changes queue transport; the seed and
+    replacement materializer remain the authority for the resulting posterior.
+    """
+    semantic_key = _request_semantic_key(payload)
+    if semantic_key is None:
+        return None
+    if _day0_conditioning_identity_key(payload) is None:
+        return ("ordinary", *semantic_key)
+    return (
+        "day0",
+        *(value for value in semantic_key if not value.startswith(_DAY0_CONDITIONING_IDENTITY_KEY + "=")),
+    )
+
+
 def _request_freshness_key(path: Path, payload: Mapping[str, object]) -> tuple[datetime, int, str]:
-    computed_at = _parse_utc_iso(payload.get("computed_at"))
+    # Day0 identity is a monotone source observation clock. A later queue write
+    # must not let an older observation supersede it merely because its seed was
+    # computed later.
+    computed_at = _parse_utc_iso(
+        payload.get("day0_observed_extreme_observation_time")
+    ) or _parse_utc_iso(payload.get("computed_at"))
     if computed_at is None:
         computed_at = datetime.min.replace(tzinfo=timezone.utc)
     try:
@@ -1380,9 +2018,7 @@ def _blocked_attempt_fingerprint(
     if computed_at is None:
         return None
     try:
-        from src.state.db import _connect  # noqa: PLC0415
-
-        conn = _connect(db_path, write_class=None)
+        conn = _queue_read_only_connection(db_path)
         try:
             conn.execute("PRAGMA query_only=ON")
             missing_sources = _source_clock_missing_configured_sources(conn, payload)
@@ -1403,6 +2039,8 @@ def _blocked_attempt_fingerprint(
             )
         finally:
             conn.close()
+    except _ClaimReadDeadlineExceeded:
+        raise
     except Exception:  # noqa: BLE001 - unknown watermark must retry, never suppress work
         return None
     file_revisions: dict[str, tuple[int, int] | None] = {}
@@ -1490,6 +2128,70 @@ def _blocked_attempt_state(
     return marker_path, fingerprint, marker.get("attempt_fingerprint") == fingerprint
 
 
+def _recent_success_coalesce_seconds() -> float:
+    raw = os.environ.get("ZEUS_REPLACEMENT_RECENT_SUCCESS_COALESCE_SECONDS")
+    if raw is None or not str(raw).strip():
+        return DEFAULT_RECENT_SUCCESS_COALESCE_SECONDS
+    try:
+        value = float(raw)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            "ZEUS_REPLACEMENT_RECENT_SUCCESS_COALESCE_SECONDS must be numeric"
+        ) from exc
+    if value < 0:
+        raise ValueError(
+            "ZEUS_REPLACEMENT_RECENT_SUCCESS_COALESCE_SECONDS must be >= 0"
+        )
+    return value
+
+
+def _terminal_receipt_path(
+    receipt_dir: Path,
+    request_payload: Mapping[str, object],
+) -> Path:
+    city = str(request_payload.get("city") or "unknown").replace(" ", "_")
+    target_date = str(request_payload.get("target_date") or "unknown")
+    metric = str(request_payload.get("temperature_metric") or "unknown").lower()
+    return receipt_dir / f"{city}.{target_date}.{metric}.json"
+
+
+def _recent_unchanged_success(
+    *,
+    processed_path: Path,
+    request_payload: Mapping[str, object],
+    attempt_fingerprint: str | None,
+    now: datetime | None = None,
+) -> bool:
+    """Whether an exact-input success is still inside the fixed coalescing window."""
+
+    window_seconds = _recent_success_coalesce_seconds()
+    if attempt_fingerprint is None or window_seconds <= 0:
+        return False
+    receipt_path = _terminal_receipt_path(
+        processed_path.parent / "succeeded_latest",
+        request_payload,
+    )
+    try:
+        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    if not isinstance(receipt, Mapping) or receipt.get("status") != "SUCCEEDED":
+        return False
+    evidence = receipt.get("result_evidence")
+    if not isinstance(evidence, Mapping):
+        return False
+    if evidence.get("committed_posterior") is not True:
+        return False
+    if evidence.get("attempt_fingerprint") != attempt_fingerprint:
+        return False
+    succeeded_at = _parse_utc_iso(receipt.get("recorded_at"))
+    if succeeded_at is None:
+        return False
+    current = now or datetime.now(timezone.utc)
+    age_seconds = (current - succeeded_at).total_seconds()
+    return 0 <= age_seconds < window_seconds
+
+
 def _write_blocked_attempt_marker(
     *,
     marker_path: Path | None,
@@ -1535,6 +2237,21 @@ def _subprocess_result_reason_codes(completed: subprocess.CompletedProcess[str])
     return ()
 
 
+def _subprocess_result_status(completed: subprocess.CompletedProcess[str]) -> str | None:
+    for stream in (completed.stdout or "", completed.stderr or ""):
+        for line in reversed(stream.splitlines()):
+            try:
+                payload = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(payload, Mapping):
+                continue
+            status = payload.get("status")
+            if status not in (None, ""):
+                return str(status).upper()
+    return None
+
+
 def _record_latest_terminal_request(
     input_json: Path,
     *,
@@ -1558,10 +2275,7 @@ def _record_latest_terminal_request(
         receipt_dir,
         durable_ancestor=processed_path.parent,
     )
-    city = str(request_payload.get("city") or "unknown").replace(" ", "_")
-    target_date = str(request_payload.get("target_date") or "unknown")
-    metric = str(request_payload.get("temperature_metric") or "unknown").lower()
-    target = receipt_dir / f"{city}.{target_date}.{metric}.json"
+    target = _terminal_receipt_path(receipt_dir, request_payload)
     temporary = receipt_dir / f".{target.name}.{os.getpid()}.tmp"
     witness = request_payload.get("day0_enqueue_owner_witness")
     receipt = {
@@ -1588,6 +2302,7 @@ def _record_latest_terminal_request(
     os.replace(temporary, target)
     _fsync_directory(receipt_dir)
     input_json.unlink()
+    _stage_receipt_path(input_json).unlink(missing_ok=True)
     _fsync_directory(input_json.parent)
     return target
 
@@ -1614,7 +2329,7 @@ def _coalesce_superseded_materialization_requests(
         payload = _load_request_payload_for_coalescing(path)
         if payload is None:
             continue
-        key = _request_semantic_key(payload)
+        key = _request_coalescing_key(payload)
         if key is None:
             continue
         keys[path] = key
@@ -1650,6 +2365,180 @@ def _coalesce_superseded_materialization_requests(
         )
         superseded.append(str(receipt))
     return tuple(remaining), tuple(superseded)
+
+
+def _plan_superseded_materialization_requests(
+    requests: Sequence[Path],
+) -> tuple[tuple[Path, ...], tuple[_PlannedSupersededRequest, ...]]:
+    """Read-only counterpart to request coalescing for the claim preflight."""
+    keys: dict[Path, tuple[str, ...]] = {}
+    payloads: dict[Path, Mapping[str, object]] = {}
+    newest_by_key: dict[tuple[str, ...], tuple[tuple[datetime, int, str], Path]] = {}
+    for path in requests:
+        payload = _load_request_payload_for_coalescing(path)
+        if payload is None:
+            continue
+        key = _request_coalescing_key(payload)
+        if key is None:
+            continue
+        keys[path] = key
+        payloads[path] = payload
+        freshness = _request_freshness_key(path, payload)
+        current = newest_by_key.get(key)
+        if current is None or freshness > current[0]:
+            newest_by_key[key] = (freshness, path)
+
+    keepers = {path for _freshness, path in newest_by_key.values()}
+    remaining: list[Path] = []
+    superseded: list[_PlannedSupersededRequest] = []
+    for path in requests:
+        key = keys.get(path)
+        if key is None or path in keepers:
+            remaining.append(path)
+            continue
+        superseded.append(
+            _PlannedSupersededRequest(
+                path=path,
+                payload=payloads[path],
+                superseded_by=newest_by_key[key][1].name,
+            )
+        )
+    return tuple(remaining), tuple(superseded)
+
+
+def _build_request_claim_read_plan(
+    *,
+    request_path: Path,
+    processed_path: Path,
+    failed_path: Path,
+    forecast_db: Path | str | None,
+    limit: int,
+    lane: str,
+) -> _RequestClaimReadPlan:
+    """Create a no-mutation request claim plan before taking the queue flock."""
+    inflight_path = request_path.parent / MATERIALIZATION_INFLIGHT_DIR_NAME
+    active_keys: set[tuple[str, ...]] = set()
+    stale_batches_by_key: dict[tuple[str, ...], set[str]] = {}
+    unknown_inflight_batches: set[str] = set()
+    if inflight_path.exists():
+        stale_after = _materialization_subprocess_timeout_seconds() + _STALE_CLAIM_GRACE_SECONDS
+        for batch_path in (path for path in inflight_path.iterdir() if path.is_dir()):
+            if _claim_age_seconds(batch_path) >= stale_after:
+                for path in _claim_request_files(batch_path):
+                    payload = _load_request_payload_for_coalescing(path)
+                    key = _request_coalescing_key(payload) if payload is not None else None
+                    if key is not None:
+                        stale_batches_by_key.setdefault(key, set()).add(batch_path.name)
+                    else:
+                        unknown_inflight_batches.add(batch_path.name)
+                continue
+            for path in _claim_request_files(batch_path):
+                payload = _load_request_payload_for_coalescing(path)
+                key = _request_coalescing_key(payload) if payload is not None else None
+                if key is not None:
+                    active_keys.add(key)
+                else:
+                    unknown_inflight_batches.add(batch_path.name)
+    request_files = (
+        tuple(path for path in request_path.glob("*.json") if path.is_file())
+        if request_path.exists()
+        else ()
+    )
+    priority, priority_names = _priority_map_with_names(forecast_db, request_files)
+    requests = tuple(
+        sorted(
+            (
+                path
+                for path in request_files
+                if _lane_matches(path=path, priority_names=priority_names, lane=lane)
+            ),
+            key=lambda path: _cycle_advance_file_sort_key(path, priority),
+        )
+    )
+    remaining, superseded = _plan_superseded_materialization_requests(requests)
+    now = time.time()
+    claimable: list[Path] = []
+    inflight_deferred = 0
+    timeout_retry_deferred = 0
+    for path in remaining:
+        payload = _load_request_payload_for_coalescing(path)
+        _base, _attempt, retry_at = _timeout_retry_state(path)
+        if retry_at is not None and retry_at > now:
+            timeout_retry_deferred += 1
+            continue
+        key = _request_coalescing_key(payload) if payload is not None else None
+        if key is not None and key in active_keys:
+            inflight_deferred += 1
+            continue
+        claimable.append(path)
+    selected = tuple(claimable[:limit])
+    stale_conflict_batches = tuple(sorted({
+        batch_name
+        for path in selected
+        for batch_name in stale_batches_by_key.get(
+            _request_coalescing_key(_load_request_payload_for_coalescing(path) or {}),
+            set(),
+        )
+    }))
+    claim = _MaterializationQueueClaim(
+        request_path=request_path,
+        batch_path=None,
+        processed_path=processed_path,
+        failed_path=failed_path,
+        claimed_count=len(selected),
+        skipped_count=inflight_deferred + timeout_retry_deferred + max(len(claimable) - limit, 0),
+        inflight_deferred_count=inflight_deferred,
+        timeout_retry_deferred_count=timeout_retry_deferred,
+        processed_files=(),
+        failed_files=(),
+        seed_processed_files=(),
+        seed_failed_files=(),
+        seed_reasons=(),
+        discovery_report=None,
+        selected_files=selected,
+        request_snapshot=_queue_files_snapshot(request_path),
+        forecast_db_fingerprint=_claim_db_fingerprint(forecast_db),
+    )
+    return _RequestClaimReadPlan(
+        claim=claim,
+        superseded=superseded,
+        stale_conflict_batches=stale_conflict_batches,
+        unknown_inflight_batches=tuple(sorted(unknown_inflight_batches)),
+    )
+
+
+def _apply_request_claim_read_plan(
+    plan: _RequestClaimReadPlan,
+) -> _MaterializationQueueClaim:
+    """Apply only already-classified request moves while flock ownership is held."""
+    claim = plan.claim
+    processed: list[str] = []
+    for item in plan.superseded:
+        receipt = _record_latest_terminal_request(
+            item.path,
+            processed_path=claim.processed_path,
+            request_payload=item.payload,
+            receipt_dir_name="superseded_latest",
+            status="SKIPPED_SUPERSEDED_REQUEST",
+            reason_codes=(
+                "REPLACEMENT_LIVE_MATERIALIZATION_REQUEST_SUPERSEDED_BY_NEWER_DUPLICATE",
+            ),
+            result_evidence={
+                "request_validated": False,
+                "subprocess_spawned": False,
+                "superseded_by": item.superseded_by,
+            },
+        )
+        processed.append(str(receipt))
+    batch_path = (
+        _new_claim_batch(
+            claim.request_path.parent / MATERIALIZATION_INFLIGHT_DIR_NAME,
+            claim.selected_files,
+        )
+        if claim.selected_files
+        else None
+    )
+    return replace(claim, batch_path=batch_path, processed_files=tuple(processed))
 
 
 def _claim_request_files(batch_path: Path) -> tuple[Path, ...]:
@@ -1697,6 +2586,144 @@ def _restore_claimed_request(path: Path, request_path: Path, batch_name: str) ->
         return target
 
 
+def _timeout_retry_state(path: Path) -> tuple[str, int, float | None]:
+    """Return the stable stem, attempt count, and retry wall clock."""
+
+    stem = path.stem
+    if _TIMEOUT_RETRY_MARKER not in stem:
+        return stem, 0, None
+    base, encoded = stem.rsplit(_TIMEOUT_RETRY_MARKER, 1)
+    try:
+        attempt_raw, retry_ns_raw = encoded.split("-", 1)
+        attempt = int(attempt_raw)
+        retry_ns = int(retry_ns_raw)
+    except (TypeError, ValueError):
+        return stem, 0, None
+    if not base or attempt <= 0 or retry_ns <= 0:
+        return stem, 0, None
+    return base, attempt, retry_ns / 1_000_000_000.0
+
+
+def _capital_protection_timeout_budget(
+    path: Path,
+    *,
+    attempt: int,
+    now: datetime,
+) -> tuple[bool, datetime]:
+    """Return whether the exact stale-q retry still owns its urgent budget."""
+
+    receipt = _read_stage_receipt(path) or {}
+    first_timeout = _parse_utc_iso(
+        receipt.get("capital_protection_first_timeout_at")
+    )
+    if first_timeout is None:
+        first_timeout = now
+    elapsed_seconds = max(0.0, (now - first_timeout).total_seconds())
+    return (
+        attempt <= _CAPITAL_PROTECTION_TIMEOUT_RETRY_MAX_ATTEMPTS
+        and elapsed_seconds <= _CAPITAL_PROTECTION_TIMEOUT_RETRY_MAX_ELAPSED_SECONDS,
+        first_timeout,
+    )
+
+
+def _record_capital_protection_timeout_retry(
+    path: Path,
+    *,
+    attempt: int,
+    first_timeout: datetime,
+    urgent: bool,
+) -> None:
+    """Persist retry-budget evidence beside, never inside, canonical truth."""
+
+    receipt = _read_stage_receipt(path) or {
+        "stage": "unknown",
+        "deadline_at": None,
+    }
+    receipt.update(
+        {
+            "capital_protection_first_timeout_at": first_timeout.astimezone(
+                timezone.utc
+            ).isoformat(),
+            "capital_protection_timeout_attempt": attempt,
+            "capital_protection_retry_tier": "urgent" if urgent else "ordinary",
+        }
+    )
+    _write_stage_receipt_payload(path, receipt)
+
+
+def _clear_capital_protection_timeout_retry(path: Path) -> None:
+    """A fresh q ends the stale-q retry epoch instead of carrying its budget."""
+
+    receipt = _read_stage_receipt(path)
+    if receipt is None:
+        return
+    if not any(key.startswith("capital_protection_") for key in receipt):
+        return
+    for key in tuple(receipt):
+        if key.startswith("capital_protection_"):
+            receipt.pop(key, None)
+    _write_stage_receipt_payload(path, receipt)
+
+
+def _restore_claimed_request_after_timeout(
+    path: Path,
+    request_path: Path,
+    *,
+    capital_protection: bool = False,
+) -> Path:
+    """Requeue one timed-out family without letting it reclaim the next poll."""
+
+    request_path.mkdir(parents=True, exist_ok=True)
+    base, prior_attempt, _retry_at = _timeout_retry_state(path)
+    attempt = prior_attempt + 1
+    now_seconds = time.time()
+    now = datetime.fromtimestamp(now_seconds, timezone.utc)
+    urgent_retry = False
+    if capital_protection:
+        urgent_retry, first_timeout = _capital_protection_timeout_budget(
+            path,
+            attempt=attempt,
+            now=now,
+        )
+        _record_capital_protection_timeout_retry(
+            path,
+            attempt=attempt,
+            first_timeout=first_timeout,
+            urgent=urgent_retry,
+        )
+    else:
+        _clear_capital_protection_timeout_retry(path)
+    exponent = min(max(0, attempt - 1), 10)
+    delay_seconds = (
+        _CAPITAL_PROTECTION_TIMEOUT_RETRY_SECONDS
+        if urgent_retry
+        else min(
+            _TIMEOUT_RETRY_BASE_SECONDS * (2**exponent),
+            _TIMEOUT_RETRY_MAX_SECONDS,
+        )
+    )
+    retry_ns = int((now_seconds + delay_seconds) * 1_000_000_000)
+    while True:
+        target = request_path / (
+            f"{base}{_TIMEOUT_RETRY_MARKER}{attempt}-{retry_ns}{path.suffix}"
+        )
+        try:
+            os.link(path, target)
+        except FileExistsError:
+            retry_ns += 1
+            continue
+        try:
+            _move_stage_receipt(path, target)
+        except Exception:
+            target.unlink(missing_ok=True)
+            _fsync_directory(request_path)
+            raise
+        _fsync_directory(request_path)
+        path.unlink()
+        _fsync_directory(path.parent)
+        return target
+
+
 def _remove_empty_claim_batch(batch_path: Path) -> None:
     if _claim_request_files(batch_path):
         return
@@ -1736,7 +2763,7 @@ def _recover_stale_claims(
             continue
         for path in request_files:
             payload = _load_request_payload_for_coalescing(path)
-            key = _request_semantic_key(payload) if payload is not None else None
+            key = _request_coalescing_key(payload) if payload is not None else None
             if key is not None:
                 active_keys.add(key)
     return frozenset(active_keys), recovered
@@ -1784,6 +2811,33 @@ def _day0_enqueue_ownership_cursor_path(request_dir: Path) -> Path:
     return request_dir.parent / _DAY0_ENQUEUE_OWNERSHIP_CURSOR_NAME
 
 
+def _current_money_risk_seed_prefixes(
+    families: frozenset[tuple[str, str, str]],
+) -> tuple[str, ...]:
+    """Encode current-capital families in the exact canonical seed-name shape."""
+
+    return tuple(
+        f"{city.replace('/', '_').replace(' ', '_')}.{target_date}.{metric}."
+        for city, target_date, metric in families
+    )
+
+
+def _prioritize_current_money_risk_seed_files(
+    paths: Sequence[Path],
+    families: frozenset[tuple[str, str, str]],
+) -> tuple[Path, ...]:
+    """Stable-partition seed names before the bounded JSON/DB inspection window."""
+
+    prefixes = _current_money_risk_seed_prefixes(families)
+    if not prefixes:
+        return tuple(paths)
+    held: list[Path] = []
+    other: list[Path] = []
+    for path in paths:
+        (held if path.name.startswith(prefixes) else other).append(path)
+    return (*held, *other)
+
+
 def _read_day0_enqueue_ownership_cursor(cursor_path: Path) -> str | None:
     """Read a prior filename cursor; malformed sidecars safely restart the rotation."""
     try:
@@ -1828,6 +2882,107 @@ def _rotate_seed_snapshot_after_cursor(seeds: Sequence[Path], cursor: str | None
     return snapshot
 
 
+def _coalesce_superseded_materialization_seeds(
+    seeds: Sequence[Path],
+    *,
+    processed_path: Path,
+    forecast_db: Path | str | None,
+) -> tuple[
+    tuple[Path, ...],
+    tuple[str, ...],
+    dict[Path, Mapping[str, object] | None],
+    dict[Path, tuple[str, str] | None],
+]:
+    """Keep the newest valid seed for each existing request semantic key."""
+    keys: dict[Path, tuple[str, ...]] = {}
+    payloads: dict[Path, Mapping[str, object]] = {}
+    payload_cache: dict[Path, Mapping[str, object] | None] = {}
+    cycle_boundary_cache: dict[Path, tuple[str, str] | None] = {}
+    newest_by_key: dict[tuple[str, ...], tuple[tuple[datetime, int, str], Path]] = {}
+    for path in seeds:
+        payload = _load_request_payload_for_coalescing(path)
+        payload_cache[path] = payload
+        if payload is None:
+            continue
+        try:
+            validate_materialization_seed(payload)
+        except ContractViolation:
+            continue
+        if (
+            payload.get("cycle_advance_enqueue_owner") is True
+            and payload.get("day0_observed_extreme_observation_time") is not None
+        ):
+            # The durable cycle owner must remain visible until its exact
+            # request/inflight witness is resolved. Request-level Day0 files
+            # still coalesce newer identities; producer-owned seeds retain the
+            # existing marker recovery contract.
+            continue
+        if payload.get("upgrade_trigger") or payload.get("cycle_advance_enqueue_owner") is True:
+            try:
+                cycle_boundary = _seed_source_cycle_boundary(
+                    forecast_db=forecast_db,
+                    seed=dict(payload),
+                )
+            except _ClaimReadDeadlineExceeded:
+                raise
+            except Exception:  # noqa: BLE001 - JIT boundary remains authoritative
+                cycle_boundary = None
+            cycle_boundary_cache[path] = cycle_boundary
+            if (
+                cycle_boundary is not None
+                and cycle_boundary[0] == "awaiting_current_ensemble_hwm"
+            ):
+                # The producer's durable marker owns this exact queue path. Moving
+                # it as a duplicate would make the producer believe its debt was
+                # consumed and publish it again while ENS is still unavailable.
+                # Retain every pre-existing owner during the bounded wait; after
+                # the HWM reaches equality normal coalescing/action resumes.
+                continue
+        request_key = _request_coalescing_key(payload)
+        if request_key is None:
+            continue
+        key = request_key + (
+            "seed_upgrade_trigger=" + str(payload.get("upgrade_trigger") or ""),
+            "cycle_advance_enqueue_owner="
+            + str(payload.get("cycle_advance_enqueue_owner") is True),
+        )
+        keys[path] = key
+        payloads[path] = payload
+        freshness = _request_freshness_key(path, payload)
+        current = newest_by_key.get(key)
+        if current is None or freshness > current[0]:
+            newest_by_key[key] = (freshness, path)
+
+    keepers = {path for _freshness, path in newest_by_key.values()}
+    remaining: list[Path] = []
+    superseded: list[str] = []
+    for path in seeds:
+        key = keys.get(path)
+        if key is None or path in keepers:
+            remaining.append(path)
+            continue
+        newest_path = newest_by_key[key][1]
+        moved = _move_request(path, processed_path)
+        _write_sidecar(
+            moved,
+            {
+                "status": "SKIPPED_SUPERSEDED_SEED",
+                "reason_codes": [
+                    "REPLACEMENT_LIVE_MATERIALIZATION_SEED_SUPERSEDED_BY_NEWER_DUPLICATE"
+                ],
+                "request_written": False,
+                "superseded_by": newest_path.name,
+            },
+        )
+        superseded.append(str(moved))
+    return (
+        tuple(remaining),
+        tuple(superseded),
+        payload_cache,
+        cycle_boundary_cache,
+    )
+
+
 def _prepare_seed_requests(
     *,
     seed_dir: Path | str | None,
@@ -1836,6 +2991,7 @@ def _prepare_seed_requests(
     request_dir: Path,
     forecast_db: Path | str | None,
     limit: int,
+    lane: str = MATERIALIZATION_LANE_ALL,
 ) -> tuple[list[str], list[str], list[str]]:
     if seed_dir is None:
         return [], [], []
@@ -1858,6 +3014,11 @@ def _prepare_seed_requests(
         raw_snapshot,
         _read_day0_enqueue_ownership_cursor(cursor_path),
     )
+    current_money_risk = _current_money_risk_families()
+    prioritized_raw_snapshot = _prioritize_current_money_risk_seed_files(
+        rotated_raw_snapshot,
+        current_money_risk,
+    )
     # Cursor rotation and the inspection bound apply before JSON/DB priority work. The window's
     # raw boundary advances even when priority/actionable work stops early, so retained entries
     # make deterministic progress across passes without unbounded queue-lock I/O.
@@ -1866,11 +3027,39 @@ def _prepare_seed_requests(
         actionable_limit * _DAY0_ENQUEUE_OWNERSHIP_INSPECTION_MULTIPLIER,
         _DAY0_ENQUEUE_OWNERSHIP_MIN_INSPECTIONS,
     )
-    raw_window = rotated_raw_snapshot[:inspection_cap]
-    priority = _cycle_advance_seed_priority_map(forecast_db, raw_window)
+    raw_window = prioritized_raw_snapshot[:inspection_cap]
+    (
+        coalesced_window,
+        superseded_seeds,
+        seed_payloads,
+        seed_cycle_boundaries,
+    ) = _coalesce_superseded_materialization_seeds(
+        raw_window,
+        processed_path=processed_path,
+        forecast_db=forecast_db,
+    )
+    processed.extend(superseded_seeds)
+    if superseded_seeds:
+        reasons.append(
+            "REPLACEMENT_LIVE_MATERIALIZATION_SEED_SUPERSEDED_BY_NEWER_DUPLICATE"
+        )
+    priority, priority_names = _priority_map_with_names(
+        forecast_db,
+        coalesced_window,
+        seed_payloads,
+        current_money_risk=current_money_risk,
+    )
     seeds = tuple(
         sorted(
-            raw_window,
+            (
+                path
+                for path in coalesced_window
+                if _lane_matches(
+                    path=path,
+                    priority_names=priority_names,
+                    lane=lane,
+                )
+            ),
             key=lambda path: _cycle_advance_file_sort_key(path, priority),
         )
     )
@@ -1942,16 +3131,41 @@ def _prepare_seed_requests(
             # capturable-family-superset) transition). A consumed failure can
             # atomically reclaim that marker, while this terminal unchanged-input
             # receipt remains a no-retry witness — so this bypass cannot loop.
-            if _seed_source_cycle_regresses_current_posterior(
-                forecast_db=forecast_db, seed=seed
+            cycle_boundary = seed_cycle_boundaries.get(seed_json)
+            if seed_json not in seed_cycle_boundaries:
+                cycle_boundary = _seed_source_cycle_boundary(
+                    forecast_db=forecast_db, seed=seed
+                )
+            if (
+                cycle_boundary is not None
+                and cycle_boundary[0] == "awaiting_current_ensemble_hwm"
             ):
+                # SCOPE: this exact city/date/metric seed. DRAIN: the same file
+                # is reconsidered on the one-second queue cadence and becomes
+                # actionable when its same-cycle ENS HWM arrives. RESET: the
+                # JIT boundary returns None at equality. Retaining the producer-
+                # owned seed also keeps discovery/cycle/fusion deduplication
+                # active; terminally moving it would let every producer recreate
+                # the same unmaterializable debt on its next poll.
+                reasons.append(_AWAITING_ENSEMBLE_HWM_REASON)
+                continue
+            if cycle_boundary is not None:
+                regression_basis, current_cycle = cycle_boundary
+                reason_code = (
+                    "REPLACEMENT_MATERIALIZATION_SOURCE_CYCLE_BELOW_INPUT_HWM"
+                    if regression_basis == "current_ensemble_hwm"
+                    else "REPLACEMENT_MATERIALIZATION_SOURCE_CYCLE_REGRESSION"
+                )
                 moved = _move_request(seed_json, processed_path)
                 _write_sidecar(
                     moved,
                     {
                         "status": "SKIPPED_SOURCE_CYCLE_REGRESSION",
-                        "reason_codes": ["REPLACEMENT_MATERIALIZATION_SOURCE_CYCLE_REGRESSION"],
+                        "reason_codes": [reason_code],
                         "request_written": False,
+                        "regression_basis": regression_basis,
+                        "request_source_cycle_time": seed.get("source_cycle_time"),
+                        "current_cycle_time": current_cycle,
                     },
                 )
                 processed.append(str(moved))
@@ -2058,6 +3272,8 @@ def _prepare_seed_requests(
             )
             processed.append(str(moved))
             actionable_count += 1
+        except _ClaimReadDeadlineExceeded:
+            raise
         except Exception as exc:
             moved = _move_request(seed_json, failed_path)
             _write_sidecar(
@@ -2100,6 +3316,7 @@ def _claim_replacement_forecast_live_materialization_queue_locked(
     seed_limit: int | None,
     limit: int,
     discover: bool,
+    lane: str = MATERIALIZATION_LANE_ALL,
 ) -> _MaterializationQueueClaim:
     inflight_path = request_path.parent / MATERIALIZATION_INFLIGHT_DIR_NAME
     active_keys, recovered_count = _recover_stale_claims(
@@ -2114,14 +3331,18 @@ def _claim_replacement_forecast_live_materialization_queue_locked(
             )
         if forecast_db is None:
             raise ValueError("forecast_db and raw_manifest_dir must be configured together")
-        discovery_report = discover_replacement_forecast_materialization_seeds(
-            forecast_db=forecast_db,
-            raw_manifest_dir=raw_manifest_dir,
-            seed_dir=seed_dir,
-            request_dir=request_path,
-            inflight_dir=inflight_path,
-            limit=int(seed_discovery_limit or seed_limit or limit),
-        )
+        try:
+            discovery_report = discover_replacement_forecast_materialization_seeds(
+                forecast_db=forecast_db,
+                raw_manifest_dir=raw_manifest_dir,
+                seed_dir=seed_dir,
+                request_dir=request_path,
+                inflight_dir=inflight_path,
+                limit=int(seed_discovery_limit or seed_limit or limit),
+            )
+        except sqlite3.OperationalError:
+            _raise_if_claim_read_expired()
+            raise
     seed_batch_limit = limit if seed_limit is None else int(seed_limit)
     if seed_batch_limit < 0:
         raise ValueError("seed_limit must not be negative")
@@ -2133,6 +3354,7 @@ def _claim_replacement_forecast_live_materialization_queue_locked(
             request_dir=request_path,
             forecast_db=forecast_db,
             limit=seed_batch_limit,
+            lane=lane,
         )
     else:
         seed_processed, seed_failed, seed_reasons = [], [], [
@@ -2155,6 +3377,7 @@ def _claim_replacement_forecast_live_materialization_queue_locked(
             claimed_count=0,
             skipped_count=0,
             inflight_deferred_count=0,
+            timeout_retry_deferred_count=0,
             processed_files=(),
             failed_files=(),
             seed_processed_files=tuple(seed_processed),
@@ -2163,10 +3386,21 @@ def _claim_replacement_forecast_live_materialization_queue_locked(
             discovery_report=discovery_report,
         )
 
-    priority = _cycle_advance_seed_priority_map(forecast_db, request_files)
+    priority, priority_names = _priority_map_with_names(
+        forecast_db,
+        request_files,
+    )
     requests = tuple(
         sorted(
-            request_files,
+            (
+                path
+                for path in request_files
+                if _lane_matches(
+                    path=path,
+                    priority_names=priority_names,
+                    lane=lane,
+                )
+            ),
             key=lambda path: _cycle_advance_file_sort_key(path, priority),
         )
     )
@@ -2176,9 +3410,19 @@ def _claim_replacement_forecast_live_materialization_queue_locked(
     )
     claimable: list[Path] = []
     inflight_deferred = 0
+    timeout_retry_deferred = 0
+    now = time.time()
     for path in requests:
         payload = _load_request_payload_for_coalescing(path)
-        key = _request_semantic_key(payload) if payload is not None else None
+        _base, _attempt, retry_at = _timeout_retry_state(path)
+        # Every retry remains ineligible until its durable retry_at.  A held
+        # Day0 observation-advance timeout is written with a one-second delay
+        # and then wins at claim time only while q is still stale; it never
+        # bypasses its own delay or monopolizes the single writer.
+        if retry_at is not None and retry_at > now:
+            timeout_retry_deferred += 1
+            continue
+        key = _request_coalescing_key(payload) if payload is not None else None
         if key is not None and key in active_keys:
             inflight_deferred += 1
         else:
@@ -2195,8 +3439,13 @@ def _claim_replacement_forecast_live_materialization_queue_locked(
         processed_path=processed_path,
         failed_path=failed_path,
         claimed_count=len(selected),
-        skipped_count=inflight_deferred + max(len(claimable) - limit, 0),
+        skipped_count=(
+            inflight_deferred
+            + timeout_retry_deferred
+            + max(len(claimable) - limit, 0)
+        ),
         inflight_deferred_count=inflight_deferred,
+        timeout_retry_deferred_count=timeout_retry_deferred,
         processed_files=tuple(superseded),
         failed_files=(),
         seed_processed_files=tuple(seed_processed),
@@ -2214,7 +3463,11 @@ def _claim_only_report(
     reasons = list(claim.seed_reasons)
     if claim.inflight_deferred_count:
         reasons.append("REPLACEMENT_LIVE_MATERIALIZATION_REQUEST_INFLIGHT")
-    if claim.skipped_count > claim.inflight_deferred_count:
+    if claim.timeout_retry_deferred_count:
+        reasons.append(_TIMEOUT_RETRY_DEFERRED_REASON)
+    if claim.skipped_count > (
+        claim.inflight_deferred_count + claim.timeout_retry_deferred_count
+    ):
         reasons.append("REPLACEMENT_LIVE_MATERIALIZATION_QUEUE_LIMIT_REACHED")
     if processed or failed:
         reasons.append("REPLACEMENT_LIVE_MATERIALIZATION_QUEUE_PROCESSED")
@@ -2258,6 +3511,7 @@ def process_replacement_forecast_live_materialization_queue(
     limit: int = 10,
     runner: Runner | None = None,
     discover: bool = True,
+    lane: str = MATERIALIZATION_LANE_ALL,
 ) -> ReplacementForecastLiveMaterializationQueueReport:
     """Process local materialization request JSON files.
 
@@ -2265,8 +3519,9 @@ def process_replacement_forecast_live_materialization_queue(
     markets, submit orders, edit current facts, or write settlement/trade tables.
     Each request is handed to the same CLI used by manual dry runs so the
     precision guard, product identity, and forecast-class schema rules stay in
-    one path. The queue lock covers only seed preparation, deduplication, and an
-    atomic move into a recoverable inflight batch; family compute runs outside it.
+    one path. Read planning happens before the queue flock under one absolute
+    deadline. The flock then revalidates the plan and performs only atomic queue
+    moves into a recoverable inflight batch; family compute runs outside it.
     """
 
     request_path = Path(request_dir)
@@ -2274,7 +3529,99 @@ def process_replacement_forecast_live_materialization_queue(
     failed_path = Path(failed_dir)
     if limit <= 0:
         raise ValueError("limit must be positive")
-    with _queue_lock(request_path.parent / ".materialization_queue.lock") as lock_acquired:
+    if lane not in {
+        MATERIALIZATION_LANE_ALL,
+        MATERIALIZATION_LANE_PRIORITY,
+        MATERIALIZATION_LANE_BACKGROUND,
+    }:
+        raise ValueError(f"unknown materialization lane: {lane}")
+    # The money-path priority consumer owns already-published requests.  Its
+    # plan is deliberately separate from discovery/seed transport: no preflight
+    # action may move, write, or terminally consume a request.
+    # The daemon passes ``seed_dir`` and ``seed_limit=1`` even to the priority
+    # job. Published held requests still outrank that seed tranche: planning
+    # them first prevents a blocked seed-reader from pinning the only consumer.
+    request_only = (
+        lane == MATERIALIZATION_LANE_PRIORITY
+        or seed_dir is None
+        or seed_limit == 0
+    )
+    read_plan: _RequestClaimReadPlan | None = None
+    if request_only:
+        try:
+            with _claim_read_deadline_guard():
+                read_plan = _build_request_claim_read_plan(
+                    request_path=request_path,
+                    processed_path=processed_path,
+                    failed_path=failed_path,
+                    forecast_db=forecast_db,
+                    limit=limit,
+                    lane=lane,
+                )
+        except _ClaimReadDeadlineExceeded:
+            return ReplacementForecastLiveMaterializationQueueReport(
+                status="DEFERRED",
+                request_dir=str(request_path),
+                processed_dir=str(processed_path),
+                failed_dir=str(failed_path),
+                processed_count=0,
+                failed_count=0,
+                skipped_count=0,
+                reason_codes=(_CLAIM_READ_DEFERRED_REASON,),
+            )
+    if (
+        lane == MATERIALIZATION_LANE_PRIORITY
+        and read_plan is not None
+        and read_plan.unknown_inflight_batches
+    ):
+        # SCOPE: every priority family while an inflight batch has no trustworthy
+        # coalescing identity. DRAIN: background recovery restores stale batches;
+        # active batches remain an explicit owner debt until they finish/stale.
+        # RESET: every named batch parses to a key or leaves inflight.
+        return ReplacementForecastLiveMaterializationQueueReport(
+            status="DEFERRED",
+            request_dir=str(request_path), processed_dir=str(processed_path),
+            failed_dir=str(failed_path), processed_count=0, failed_count=0,
+            skipped_count=0,
+            reason_codes=(
+                _CLAIM_UNKNOWN_INFLIGHT_DEFERRED_REASON,
+                *tuple(
+                    "REPLACEMENT_LIVE_MATERIALIZATION_UNKNOWN_INFLIGHT_BATCH_" + batch_name
+                    for batch_name in read_plan.unknown_inflight_batches
+                ),
+            ),
+        )
+    if (
+        lane == MATERIALIZATION_LANE_PRIORITY
+        and read_plan is not None
+        and read_plan.stale_conflict_batches
+    ):
+        return ReplacementForecastLiveMaterializationQueueReport(
+            status="DEFERRED",
+            request_dir=str(request_path),
+            processed_dir=str(processed_path),
+            failed_dir=str(failed_path),
+            processed_count=0,
+            failed_count=0,
+            skipped_count=0,
+            # SCOPE: only selected coalescing keys intersecting these stale
+            # batches. DRAIN: the background queue cadence owns bounded stale
+            # restore. RESET: its restore removes the named batch, letting the
+            # next priority plan claim the held request.
+            reason_codes=(
+                _CLAIM_STALE_RECOVERY_DEFERRED_REASON,
+                "REPLACEMENT_LIVE_MATERIALIZATION_STALE_RECOVERY_DRAIN_BACKGROUND_QUEUE_CADENCE",
+                *tuple(
+                    "REPLACEMENT_LIVE_MATERIALIZATION_STALE_BATCH_" + batch_name
+                    for batch_name in read_plan.stale_conflict_batches
+                ),
+            ),
+        )
+
+    with _queue_lock(
+        request_path.parent / ".materialization_queue.lock",
+        wait_seconds=1.0 if lane == MATERIALIZATION_LANE_PRIORITY else 0.0,
+    ) as lock_acquired:
         if not lock_acquired:
             return ReplacementForecastLiveMaterializationQueueReport(
                 status="LOCKED",
@@ -2286,20 +3633,47 @@ def process_replacement_forecast_live_materialization_queue(
                 skipped_count=0,
                 reason_codes=("REPLACEMENT_LIVE_MATERIALIZATION_QUEUE_LOCKED",),
             )
-        claim = _claim_replacement_forecast_live_materialization_queue_locked(
-            request_path=request_path,
-            processed_path=processed_path,
-            failed_path=failed_path,
-            seed_dir=seed_dir,
-            seed_processed_dir=seed_processed_dir,
-            seed_failed_dir=seed_failed_dir,
-            forecast_db=forecast_db,
-            raw_manifest_dir=raw_manifest_dir,
-            seed_discovery_limit=seed_discovery_limit,
-            seed_limit=seed_limit,
-            limit=limit,
-            discover=discover,
-        )
+        if (
+            read_plan is not None
+            and not read_plan.unknown_inflight_batches
+            and not read_plan.stale_conflict_batches
+            and read_plan.claim.selected_files
+        ):
+            try:
+                # SCOPE: this exact queue snapshot and forecast DB identity.
+                # DRAIN: the next scheduler claim rebuilds its read plan. RESET:
+                # no change between plan and apply. A mismatch consumes nothing.
+                current_db_fingerprint = _claim_db_fingerprint(forecast_db)
+            except sqlite3.Error:
+                return ReplacementForecastLiveMaterializationQueueReport(
+                    status="DEFERRED", request_dir=str(request_path),
+                    processed_dir=str(processed_path), failed_dir=str(failed_path),
+                    processed_count=0, failed_count=0, skipped_count=0,
+                    reason_codes=("REPLACEMENT_LIVE_MATERIALIZATION_CLAIM_DEFERRED_REVALIDATION",),
+                )
+            if (
+                _queue_files_snapshot(request_path) != read_plan.claim.request_snapshot
+                or current_db_fingerprint != read_plan.claim.forecast_db_fingerprint
+            ):
+                return ReplacementForecastLiveMaterializationQueueReport(
+                    status="DEFERRED", request_dir=str(request_path),
+                    processed_dir=str(processed_path), failed_dir=str(failed_path),
+                    processed_count=0, failed_count=0, skipped_count=0,
+                    reason_codes=("REPLACEMENT_LIVE_MATERIALIZATION_CLAIM_DEFERRED_REVALIDATION",),
+                )
+            claim = _apply_request_claim_read_plan(read_plan)
+        else:
+            # Discovery/seed transport and durable stale-claim recovery retain
+            # their existing single-flight path; neither is represented as a
+            # request plan until each action has an immutable apply record.
+            claim = _claim_replacement_forecast_live_materialization_queue_locked(
+                request_path=request_path, processed_path=processed_path,
+                failed_path=failed_path, seed_dir=seed_dir,
+                seed_processed_dir=seed_processed_dir, seed_failed_dir=seed_failed_dir,
+                forecast_db=forecast_db, raw_manifest_dir=raw_manifest_dir,
+                seed_discovery_limit=seed_discovery_limit, seed_limit=seed_limit,
+                limit=limit, discover=discover, lane=lane,
+            )
     if claim.batch_path is None:
         return _claim_only_report(claim)
     try:
@@ -2319,7 +3693,11 @@ def process_replacement_forecast_live_materialization_queue(
     reasons = [*claim.seed_reasons, *batch_report.reason_codes]
     if claim.inflight_deferred_count:
         reasons.append("REPLACEMENT_LIVE_MATERIALIZATION_REQUEST_INFLIGHT")
-    if claim.skipped_count > claim.inflight_deferred_count:
+    if claim.timeout_retry_deferred_count:
+        reasons.append(_TIMEOUT_RETRY_DEFERRED_REASON)
+    if claim.skipped_count > (
+        claim.inflight_deferred_count + claim.timeout_retry_deferred_count
+    ):
         reasons.append("REPLACEMENT_LIVE_MATERIALIZATION_QUEUE_LIMIT_REACHED")
     if claim.processed_files:
         reasons.append(
@@ -2396,8 +3774,16 @@ def _process_claimed_materialization_batch(
     processed: list[str] = list(superseded)
     failed: list[str] = []
     unchanged_blocked: list[str] = []
+    unchanged_success: list[str] = []
     stale_day0_superseded: list[str] = []
+    source_cycle_regressions: list[str] = []
+    source_cycles_awaiting_ensemble: list[str] = []
     write_deferred: list[str] = []
+    timed_out_requests: list[str] = []
+    timeout_stage_reasons: list[str] = []
+    deadline_deferred_reasons: list[str] = []
+    transient_read_retries: list[str] = []
+    transient_read_reason_codes: set[str] = set()
     pending: list[_PendingMaterialization] = []
     marker_dir = marker_dir or request_path.parent / "blocked_attempts"
     for input_json in requests[:limit]:
@@ -2428,6 +3814,67 @@ def _process_claimed_materialization_batch(
             failed.append(str(moved))
             continue
         request_payload = _load_request_payload_for_coalescing(input_json)
+        cycle_boundary = (
+            _seed_source_cycle_boundary(
+                forecast_db=forecast_db,
+                seed=dict(request_payload),
+            )
+            if request_payload is not None
+            else None
+        )
+        if (
+            request_payload is not None
+            and cycle_boundary is not None
+            and cycle_boundary[0] == "awaiting_current_ensemble_hwm"
+        ):
+            boundary_basis, current_cycle = cycle_boundary
+            receipt = _record_latest_terminal_request(
+                input_json,
+                processed_path=processed_path,
+                request_payload=request_payload,
+                receipt_dir_name="blocked_latest",
+                status=_AWAITING_ENSEMBLE_HWM_STATUS,
+                reason_codes=(_AWAITING_ENSEMBLE_HWM_REASON,),
+                result_evidence={
+                    "request_validated": True,
+                    "subprocess_spawned": False,
+                    "boundary_basis": boundary_basis,
+                    "request_source_cycle_time": request_payload.get(
+                        "source_cycle_time"
+                    ),
+                    "current_ensemble_cycle_time": current_cycle,
+                },
+            )
+            processed.append(str(receipt))
+            source_cycles_awaiting_ensemble.append(str(receipt))
+            continue
+        if request_payload is not None and cycle_boundary is not None:
+            regression_basis, current_cycle = cycle_boundary
+            reason_code = (
+                "REPLACEMENT_MATERIALIZATION_SOURCE_CYCLE_BELOW_INPUT_HWM"
+                if regression_basis == "current_ensemble_hwm"
+                else "REPLACEMENT_MATERIALIZATION_SOURCE_CYCLE_REGRESSION"
+            )
+            receipt = _record_latest_terminal_request(
+                input_json,
+                processed_path=processed_path,
+                request_payload=request_payload,
+                receipt_dir_name="superseded_latest",
+                status="SKIPPED_SOURCE_CYCLE_REGRESSION",
+                reason_codes=(reason_code,),
+                result_evidence={
+                    "request_validated": True,
+                    "subprocess_spawned": False,
+                    "regression_basis": regression_basis,
+                    "request_source_cycle_time": request_payload.get(
+                        "source_cycle_time"
+                    ),
+                    "current_cycle_time": current_cycle,
+                },
+            )
+            processed.append(str(receipt))
+            source_cycle_regressions.append(str(receipt))
+            continue
         marker_path, attempt_fingerprint, unchanged = (
             _blocked_attempt_state(
                 marker_dir=marker_dir,
@@ -2450,10 +3897,45 @@ def _process_claimed_materialization_batch(
             processed.append(str(receipt))
             unchanged_blocked.append(str(receipt))
             continue
+        # SCOPE: one exact city/date/metric request whose successful posterior
+        # commit and current input fingerprint are both proven. DRAIN: the fixed
+        # window is measured from the original success, so duplicate arrivals do
+        # not extend it. RESET: any input/logic revision or window expiry spawns
+        # the normal materializer immediately. This coalesces no probability fact.
+        if request_payload is not None and _recent_unchanged_success(
+            processed_path=processed_path,
+            request_payload=request_payload,
+            attempt_fingerprint=attempt_fingerprint,
+        ):
+            receipt = _record_latest_terminal_request(
+                input_json,
+                processed_path=processed_path,
+                request_payload=request_payload,
+                receipt_dir_name="success_coalesced_latest",
+                status="SKIPPED_RECENT_UNCHANGED_SUCCESS",
+                reason_codes=(_UNCHANGED_SUCCESS_SKIP_REASON,),
+                result_evidence={
+                    "request_validated": True,
+                    "subprocess_spawned": False,
+                    "attempt_fingerprint": attempt_fingerprint,
+                },
+            )
+            processed.append(str(receipt))
+            unchanged_success.append(str(receipt))
+            continue
+        child_deadline = _child_deadline_at()
+        _write_stage_receipt(
+            input_json,
+            stage="open_read_snapshot",
+            deadline_at=child_deadline,
+        )
         pending.append(
             _PendingMaterialization(
                 input_json=input_json,
-                command=_materialization_command(input_json),
+                command=_materialization_command(
+                    input_json,
+                    deadline_at=child_deadline,
+                ),
                 request_payload=request_payload,
                 marker_path=marker_path,
                 attempt_fingerprint=attempt_fingerprint,
@@ -2486,16 +3968,34 @@ def _process_claimed_materialization_batch(
             "stderr": completed.stderr,
         }
         if timed_out:
+            stage_receipt = _read_stage_receipt(input_json)
+            stage = str((stage_receipt or {}).get("stage") or "unknown")
             try:
                 payload["timeout_seconds"] = json.loads(completed.stderr).get(
                     "timeout_seconds"
                 )
             except (TypeError, json.JSONDecodeError):
                 payload["timeout_seconds"] = None
+            timeout_reason = f"REPLACEMENT_LIVE_MATERIALIZATION_TIMEOUT_{stage.upper()}"
             payload["reason_codes"] = [
-                "REPLACEMENT_LIVE_MATERIALIZATION_REQUEST_TIMEOUT"
+                "REPLACEMENT_LIVE_MATERIALIZATION_REQUEST_TIMEOUT",
+                timeout_reason,
             ]
+            payload["stage_receipt"] = stage_receipt
+            timeout_stage_reasons.append(timeout_reason)
         result_reason_codes = _subprocess_result_reason_codes(completed)
+        result_status = _subprocess_result_status(completed)
+        deadline_deferred = (
+            result_status == "DEFERRED"
+            and any(
+                reason.startswith("REPLACEMENT_LIVE_MATERIALIZATION_DEADLINE_")
+                for reason in result_reason_codes
+            )
+        )
+        transient_block = any(
+            reason in _TRANSIENT_BLOCK_RETRY_REASONS
+            for reason in result_reason_codes
+        )
         if completed.returncode == 0:
             if item.marker_path is not None:
                 try:
@@ -2507,6 +4007,15 @@ def _process_claimed_materialization_batch(
                 _write_sidecar(moved, payload)
                 processed.append(str(moved))
             else:
+                result_evidence: dict[str, object] = {
+                    "returncode": int(completed.returncode),
+                    "committed_posterior": committed,
+                    "reactor_wake_published": wake_published,
+                }
+                if item.attempt_fingerprint is not None:
+                    result_evidence["attempt_fingerprint"] = (
+                        item.attempt_fingerprint
+                    )
                 receipt = _record_latest_terminal_request(
                     input_json,
                     processed_path=processed_path,
@@ -2514,13 +4023,26 @@ def _process_claimed_materialization_batch(
                     receipt_dir_name="succeeded_latest",
                     status="SUCCEEDED",
                     reason_codes=result_reason_codes,
-                    result_evidence={
-                        "returncode": int(completed.returncode),
-                        "committed_posterior": committed,
-                        "reactor_wake_published": wake_published,
-                    },
+                    result_evidence=result_evidence,
                 )
                 processed.append(str(receipt))
+        elif timed_out or deadline_deferred or transient_block:
+            restored = _restore_claimed_request_after_timeout(
+                input_json,
+                retry_path or request_path,
+                capital_protection=_is_current_capital_protection_timeout_retry(
+                    input_json,
+                    item.request_payload,
+                ),
+            )
+            if transient_block:
+                transient_read_retries.append(str(restored))
+                transient_read_reason_codes.update(
+                    set(result_reason_codes) & _TRANSIENT_BLOCK_RETRY_REASONS
+                )
+            else:
+                timed_out_requests.append(str(restored))
+                deadline_deferred_reasons.extend(result_reason_codes)
         elif (
             item.request_payload is not None
             and _STALE_DAY0_ENQUEUE_OWNER_REASON in result_reason_codes
@@ -2542,7 +4064,10 @@ def _process_claimed_materialization_batch(
             stale_day0_superseded.append(str(receipt))
         elif (
             item.request_payload is not None
-            and _UNCHANGED_BLOCKED_REASON in result_reason_codes
+            and (
+                result_status == "BLOCKED"
+                or _UNCHANGED_BLOCKED_REASON in result_reason_codes
+            )
         ):
             try:
                 _write_blocked_attempt_marker(
@@ -2583,14 +4108,44 @@ def _process_claimed_materialization_batch(
         reasons.append("REPLACEMENT_LIVE_MATERIALIZATION_REQUEST_SUPERSEDED_BY_NEWER_DUPLICATE")
     if unchanged_blocked:
         reasons.append(_UNCHANGED_BLOCKED_SKIP_REASON)
+    if unchanged_success:
+        reasons.append(_UNCHANGED_SUCCESS_SKIP_REASON)
     if stale_day0_superseded:
         reasons.append(_STALE_DAY0_OWNER_SUPERSEDED_REASON)
+    if source_cycle_regressions:
+        reasons.append("REPLACEMENT_MATERIALIZATION_SOURCE_CYCLE_REGRESSION")
+    if source_cycles_awaiting_ensemble:
+        reasons.append(_AWAITING_ENSEMBLE_HWM_REASON)
     if write_deferred:
         reasons.append(_WRITE_DEFERRED_REASON)
         _LOG.warning(
             "replacement forecast writes deferred by transient contention: count=%d",
             len(write_deferred),
         )
+    if timed_out_requests:
+        reasons.extend(
+            (
+                "REPLACEMENT_LIVE_MATERIALIZATION_REQUEST_TIMEOUT",
+                _TIMEOUT_RETRY_DEFERRED_REASON,
+            )
+        )
+        _LOG.warning(
+            "replacement forecast materializations timed out and were deferred: count=%d",
+            len(timed_out_requests),
+        )
+    if transient_read_retries:
+        reasons.extend(
+            (
+                _TRANSIENT_READ_RETRY_REASON,
+                *sorted(transient_read_reason_codes),
+            )
+        )
+        _LOG.warning(
+            "replacement forecast transient reads deferred for bounded retry: count=%d",
+            len(transient_read_retries),
+        )
+    reasons.extend(dict.fromkeys(timeout_stage_reasons))
+    reasons.extend(dict.fromkeys(deadline_deferred_reasons))
     if failed:
         reasons.append("REPLACEMENT_LIVE_MATERIALIZATION_REQUEST_FAILED")
     if committed_posterior_count > reactor_wake_published_count:

@@ -71,6 +71,16 @@ _HELD_MONITOR_CLOB_CLIENT_FACTORY = None
 _HELD_MONITOR_CLOB_CLIENT_LOCK = threading.Lock()
 GLOBAL_SELL_REAUCTION_COMPLETION_DEADLINE_SECONDS = 30.0
 HELD_SELL_REAUCTION_CLASSIFICATION_IO_MAX_SECONDS = 0.75
+_MONITOR_ARTIFACT_WRITE_LEASE_DEADLINE_MS = 250
+_MONITOR_ARTIFACT_WRITE_LEASE_MAX_HOLD_MS = 500
+_MONITOR_ARTIFACT_WRITE_RETRY_DEADLINE_MS = 5_000
+
+# Status is derived observability, never monitor-claim work. One daemon-owned
+# drain coalesces completed monitor summaries so an unhealthy status read model
+# cannot consume APScheduler's single exit-monitor instance indefinitely.
+_EXIT_MONITOR_STATUS_PULSE_LOCK = threading.Lock()
+_EXIT_MONITOR_STATUS_PULSE_PENDING: dict[str, object] | None = None
+_EXIT_MONITOR_STATUS_PULSE_IN_FLIGHT = False
 
 
 class GlobalSellSnapshotReauctionDebtStatus(str, Enum):
@@ -2275,6 +2285,258 @@ class ExitIntent:
     day0_active: bool | None = None
 
 
+@dataclass(frozen=True)
+class ProtectiveSellExecutionAuthority:
+    """Immutable RED/hard-fact authority for one fresh FAK reduce-only SELL."""
+
+    kind: str
+    position_id: str
+    token_id: str
+    shares: str
+    snapshot_id: str
+    snapshot_hash: str
+    best_bid: str
+    semantic_event_id: str
+    semantic_payload_sha256: str
+    authority_identity: str
+
+    def __post_init__(self) -> None:
+        if self.kind not in {"RED_FORCE_EXIT", "DAY0_HARD_FACT_BIN_DEAD"}:
+            raise ValueError("protective sell kind invalid")
+        if not all((
+            self.position_id,
+            self.token_id,
+            self.snapshot_id,
+            self.snapshot_hash,
+            self.semantic_event_id,
+            self.semantic_payload_sha256,
+        )):
+            raise ValueError("protective sell identity incomplete")
+        shares = Decimal(self.shares)
+        bid = Decimal(self.best_bid)
+        if shares <= 0 or not LIVE_ORDER_MIN_UNIT_PRICE <= bid <= LIVE_ORDER_MAX_UNIT_PRICE:
+            raise ValueError("protective sell economics invalid")
+        if self.authority_identity != _protective_sell_authority_identity(
+            kind=self.kind,
+            position_id=self.position_id,
+            token_id=self.token_id,
+            shares=self.shares,
+            snapshot_id=self.snapshot_id,
+            snapshot_hash=self.snapshot_hash,
+            best_bid=self.best_bid,
+            semantic_event_id=self.semantic_event_id,
+            semantic_payload_sha256=self.semantic_payload_sha256,
+        ):
+            raise ValueError("protective sell authority identity invalid")
+
+
+def _protective_sell_authority_identity(**material: object) -> str:
+    return hashlib.sha256(
+        json.dumps(material, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+
+
+def _build_protective_sell_execution_authority(
+    *,
+    kind: str,
+    position: Position,
+    token_id: str,
+    shares: float,
+    snapshot_context: Mapping[str, object],
+    conn: sqlite3.Connection,
+) -> ProtectiveSellExecutionAuthority:
+    semantic = _protective_sell_semantic_receipt(
+        conn,
+        position_id=str(position.trade_id),
+        token_id=str(token_id),
+        shares=shares,
+        kind=kind,
+    )
+    if semantic is None:
+        raise ValueError("protective sell semantic authority unavailable")
+    semantic_event_id, semantic_payload_sha256 = semantic
+    material = {
+        "kind": kind,
+        "position_id": str(position.trade_id),
+        "token_id": str(token_id),
+        "shares": str(Decimal(str(shares))),
+        "snapshot_id": str(snapshot_context.get("executable_snapshot_id") or ""),
+        "snapshot_hash": str(snapshot_context.get("executable_snapshot_hash") or ""),
+        "best_bid": str(Decimal(str(snapshot_context["executable_snapshot_orderbook_top_bid"]))),
+        "semantic_event_id": semantic_event_id,
+        "semantic_payload_sha256": semantic_payload_sha256,
+    }
+    return ProtectiveSellExecutionAuthority(
+        **material,
+        authority_identity=_protective_sell_authority_identity(**material),
+    )
+
+
+def _protective_sell_execution_authority_error(
+    authority: object | None,
+    *,
+    conn: sqlite3.Connection,
+    trade_id: str,
+    token_id: str,
+    shares: float,
+    limit_price: float,
+    snapshot_id: str,
+    snapshot_hash: str,
+) -> str | None:
+    """Independently bind protective FAK authority to canonical snapshot truth."""
+    if type(authority) is not ProtectiveSellExecutionAuthority:
+        return "protective_sell_execution_authority_invalid"
+    try:
+        authority.__post_init__()
+    except (InvalidOperation, TypeError, ValueError):
+        return "protective_sell_execution_authority_invalid"
+    if (
+        authority.position_id != trade_id
+        or authority.token_id != token_id
+        or Decimal(authority.shares) != Decimal(str(shares))
+        or Decimal(authority.best_bid) != Decimal(str(limit_price))
+        or authority.snapshot_id != snapshot_id
+        or authority.snapshot_hash != snapshot_hash
+    ):
+        return "protective_sell_execution_authority_binding_mismatch"
+    semantic = _protective_sell_semantic_receipt(
+        conn,
+        position_id=trade_id,
+        token_id=token_id,
+        shares=shares,
+        kind=authority.kind,
+        event_id=authority.semantic_event_id,
+    )
+    if semantic != (
+        authority.semantic_event_id,
+        authority.semantic_payload_sha256,
+    ):
+        return "protective_sell_semantic_authority_superseded"
+    from src.state.snapshot_repo import get_snapshot
+
+    snapshot = get_snapshot(conn, snapshot_id)
+    if snapshot is None:
+        return "protective_sell_execution_snapshot_missing"
+    try:
+        snapshot_superseded = (
+            snapshot.executable_snapshot_hash != snapshot_hash
+            or snapshot.selected_outcome_token_id != token_id
+            or Decimal(str(snapshot.orderbook_top_bid)) != Decimal(authority.best_bid)
+            or snapshot.freshness_deadline is None
+            or snapshot.freshness_deadline < _utcnow()
+        )
+    except (InvalidOperation, TypeError, ValueError):
+        snapshot_superseded = True
+    if snapshot_superseded:
+        return "protective_sell_execution_snapshot_superseded"
+    return None
+
+
+def _protective_sell_semantic_receipt(
+    conn: sqlite3.Connection,
+    *,
+    position_id: str,
+    token_id: str,
+    shares: float,
+    kind: str,
+    event_id: str | None = None,
+) -> tuple[str, str] | None:
+    """Bind a protective order to exact canonical semantic exit evidence."""
+    try:
+        row = conn.execute(
+            """SELECT event_id, sequence_no, source_module, env, decision_id,
+                      phase_after, payload_json
+                 FROM position_events
+                WHERE position_id=? AND event_type='EXIT_INTENT'
+                  AND (? IS NULL OR event_id=?)
+                ORDER BY sequence_no DESC LIMIT 1""",
+            (position_id, event_id, event_id),
+        ).fetchone()
+        current = conn.execute(
+            """SELECT phase, direction, token_id, no_token_id, shares,
+                      chain_shares, chain_state
+                 FROM position_current WHERE position_id=? LIMIT 1""",
+            (position_id,),
+        ).fetchone()
+    except sqlite3.Error:
+        return None
+    if row is None or current is None:
+        return None
+    if (
+        str(row["source_module"] or "") != "src.execution.exit_lifecycle"
+        or str(row["env"] or "") != "live"
+        or str(row["phase_after"] or "") in _RED_TERMINAL_PHASES
+        or str(current["phase"] or "") in _RED_TERMINAL_PHASES
+    ):
+        return None
+    try:
+        payload_text = str(row["payload_json"] or "")
+        payload = json.loads(payload_text)
+        requested = _positive_decimal(payload.get("exit_intent_shares"))
+        requested_now = _positive_decimal(shares)
+        canonical_shares = _positive_decimal(
+            current["chain_shares"]
+            if current["chain_shares"] not in (None, "")
+            else current["shares"]
+        )
+    except (TypeError, ValueError):
+        return None
+    direction = str(current["direction"] or "")
+    canonical_token = str(
+        current["token_id"] if direction == "buy_yes" else current["no_token_id"]
+    )
+    if (
+        not isinstance(payload, Mapping)
+        or str(payload.get("exit_intent_token_id") or "") != token_id
+        or canonical_token != token_id
+        or requested is None
+        or requested_now is None
+        or canonical_shares is None
+        or requested != requested_now
+        or requested_now > canonical_shares
+        or not str(row["decision_id"] or "")
+        or str(payload.get("exit_intent_decision_id") or "")
+        != str(row["decision_id"] or "")
+    ):
+        return None
+    reason = str(payload.get("exit_intent_reason") or "")
+    if kind == "RED_FORCE_EXIT":
+        if reason.upper() != _RED_FORCE_EXIT:
+            return None
+        try:
+            from src.riskguard.risk_level import RiskLevel
+            from src.riskguard.riskguard import get_current_level
+
+            if get_current_level() is not RiskLevel.RED:
+                return None
+        except Exception:
+            return None
+    elif kind == "DAY0_HARD_FACT_BIN_DEAD":
+        receipt = payload.get("exit_intent_probability_receipt")
+        if (
+            not reason.startswith("DAY0_HARD_FACT_BIN_DEAD")
+            or not isinstance(receipt, Mapping)
+            or receipt.get("probability_authority") != "day0_absorbing_hard_fact"
+            or not isinstance(receipt.get("hard_fact_evidence"), Mapping)
+        ):
+            return None
+    else:
+        return None
+    try:
+        terminal = conn.execute(
+            """SELECT 1 FROM position_events
+                WHERE position_id=? AND sequence_no>? AND phase_after IN (
+                    'economically_closed','settled','voided','admin_closed'
+                ) LIMIT 1""",
+            (position_id, int(row["sequence_no"])),
+        ).fetchone()
+    except sqlite3.Error:
+        return None
+    if terminal is not None:
+        return None
+    return str(row["event_id"]), hashlib.sha256(payload_text.encode()).hexdigest()
+
+
 @dataclass
 class ExitExecutionEvidence:
     """Facts observed at the executor/venue boundary for one exit attempt."""
@@ -2771,6 +3033,7 @@ def place_sell_order(
     marketable_sell_certificate_identity: str = "",
     marketable_sell_execution_authority: object | None = None,
     global_sell_execution_authority: object | None = None,
+    protective_sell_execution_authority: object | None = None,
     execution_authority_deadline_utc: str = "",
     global_sell_receipt_closure: GlobalSellReceiptClosure | None = None,
 ) -> OrderResult:
@@ -2800,6 +3063,7 @@ def place_sell_order(
         marketable_sell_certificate_identity=marketable_sell_certificate_identity,
         marketable_sell_execution_authority=marketable_sell_execution_authority,
         global_sell_execution_authority=global_sell_execution_authority,
+        protective_sell_execution_authority=protective_sell_execution_authority,
         execution_authority_deadline_utc=execution_authority_deadline_utc,
         global_sell_receipt_closure=global_sell_receipt_closure,
     )
@@ -4823,11 +5087,12 @@ def _red_force_exit_authorized(
     *,
     conn: sqlite3.Connection | None = None,
 ) -> bool:
-    """Authorize RED from current RED or an exact, still-open RED handoff.
+    """Authorize the emergency exemption only from current RED plus provenance.
 
-    The current risk level authorizes a new sweep. Once the sweep's exact
-    decision is canonical, a later RiskGuard read must not revoke that exit
-    obligation. Caller strings alone never grant the emergency exemption.
+    A persisted RED handoff remains audit/lifecycle truth, but it cannot make a
+    later GREEN decision use emergency submit authority. Once RED clears, the
+    ordinary live SELL path requires a current global capital comparison.
+    Caller strings alone never grant the emergency exemption.
     """
 
     if (
@@ -4838,9 +5103,15 @@ def _red_force_exit_authorized(
         return False
     if not _red_runtime_position_open(conn, position, require_canonical=False):
         return False
-    # Both current RED and a persisted handoff must prove canonical live
-    # provenance.  The later RiskLevel read is therefore never an authority
-    # downgrade or a row-missing fallback.
+    try:
+        from src.riskguard.risk_level import RiskLevel
+        from src.riskguard.riskguard import get_current_level
+
+        if get_current_level() is not RiskLevel.RED:
+            return False
+    except Exception:  # noqa: BLE001 — unreadable current risk cannot grant an exemption.
+        return False
+    # Current RED and the persisted handoff are cumulative requirements.
     return _canonical_red_force_exit_provenance(conn, position)
 
 
@@ -5810,6 +6081,13 @@ def _record_exit_intent_before_execution_gates(
     """
 
     _mark_pending_exit(position)
+    # The semantic intent being persisted is the current exit authority.  A
+    # prior retry/RED reason on the mutable position must not outrank it in the
+    # canonical event payload or projection.
+    if str(getattr(position, "exit_reason", "") or "").casefold() != str(
+        exit_intent.reason or ""
+    ).casefold():
+        position.exit_reason = exit_intent.reason
     position.exit_state = "exit_intent"
     position.order_status = "exit_intent"
     active_order_id = str(getattr(position, "last_exit_order_id", "") or "")
@@ -5922,6 +6200,12 @@ def _dual_write_canonical_pending_exit_if_available(
     """
     from src.state.db import transition_phase
 
+    event_payload = dict(extra_payload or {})
+    # The explicit reason belongs to this event.  The mutable position carries
+    # the current economic exit authority and may intentionally differ during
+    # retry/reprice bookkeeping.
+    event_payload["exit_reason"] = reason
+
     return transition_phase(
         conn,
         position,
@@ -5929,7 +6213,7 @@ def _dual_write_canonical_pending_exit_if_available(
         reason=reason,
         error=error,
         source_module="src.execution.exit_lifecycle",
-        extra_payload=extra_payload,
+        extra_payload=event_payload,
         decision_id=decision_id,
     )
 
@@ -6032,6 +6316,16 @@ def execute_exit(
         exit_context,
         conn=conn,
     )
+    is_hard_fact_force_exit = bool(
+        not is_red_force_exit
+        and str(exit_context.exit_reason or "").startswith("DAY0_HARD_FACT_BIN_DEAD")
+        and _hard_fact_sell_authority_valid(
+            position,
+            hard_fact_authority,
+            conn=conn,
+            now=_utcnow(),
+        )
+    )
     if is_red_force_exit:
         active_exit = _active_exit_sell_for_lock(
             conn,
@@ -6081,9 +6375,10 @@ def execute_exit(
                 conn=conn,
             )
             return "exit_blocked: market_closed_hold_to_settlement"
-        retry_reason = f"{exit_context.exit_reason or 'EXIT'} [INCOMPLETE_CONTEXT]"
-        _mark_exit_retry(position, reason=retry_reason, error="missing_current_market_price", conn=conn)
-        return "exit_blocked: incomplete_context"
+        if not is_red_force_exit and not is_hard_fact_force_exit:
+            retry_reason = f"{exit_context.exit_reason or 'EXIT'} [INCOMPLETE_CONTEXT]"
+            _mark_exit_retry(position, reason=retry_reason, error="missing_current_market_price", conn=conn)
+            return "exit_blocked: incomplete_context"
     if not exit_context.current_market_price_is_fresh:
         if _exit_context_is_after_settlement_or_market_closed(exit_context):
             if not is_red_force_exit:
@@ -6094,9 +6389,10 @@ def execute_exit(
                     conn=conn,
                 )
                 return "exit_blocked: market_closed_hold_to_settlement"
-        retry_reason = f"{exit_context.exit_reason or 'EXIT'} [STALE_MARKET_PRICE]"
-        _mark_exit_retry(position, reason=retry_reason, error="stale_current_market_price", conn=conn)
-        return "exit_blocked: stale_market_price"
+        if not is_red_force_exit and not is_hard_fact_force_exit:
+            retry_reason = f"{exit_context.exit_reason or 'EXIT'} [STALE_MARKET_PRICE]"
+            _mark_exit_retry(position, reason=retry_reason, error="stale_current_market_price", conn=conn)
+            return "exit_blocked: stale_market_price"
 
     # Live path: sell order lifecycle
     return _execute_live_exit(
@@ -6108,6 +6404,7 @@ def execute_exit(
         conn=conn,
         execution_evidence=execution_evidence,
         is_red_force_exit=is_red_force_exit,
+        is_hard_fact_force_exit=is_hard_fact_force_exit,
         global_sell_authority=global_sell_authority,
         branchwise_sell_authority=branchwise_sell_authority,
         hard_fact_authority=hard_fact_authority,
@@ -6127,6 +6424,7 @@ def _execute_live_exit(
     conn: sqlite3.Connection | None,
     execution_evidence: ExitExecutionEvidence | None,
     is_red_force_exit: bool,
+    is_hard_fact_force_exit: bool = False,
     global_sell_authority: GlobalSellExecutionAuthority | None = None,
     branchwise_sell_authority: BranchwiseDominantSellAuthority | None = None,
     hard_fact_authority: object | None = None,
@@ -6196,6 +6494,7 @@ def _execute_live_exit(
     }
     hard_fact_authorized = bool(
         live_non_red
+        and is_hard_fact_force_exit
         and str(exit_intent.reason or "").startswith("DAY0_HARD_FACT_BIN_DEAD")
         and _hard_fact_sell_authority_valid(
             position,
@@ -6335,6 +6634,69 @@ def _execute_live_exit(
                 error=snapshot_error,
             )
         return "exit_blocked: executable_snapshot_error"
+    protective_sell_authority: ProtectiveSellExecutionAuthority | None = None
+    protective_kind = (
+        "RED_FORCE_EXIT"
+        if is_red_force_exit
+        else "DAY0_HARD_FACT_BIN_DEAD"
+        if hard_fact_authorized
+        else ""
+    )
+    protective_bid = _positive_decimal(
+        snapshot_context.get("executable_snapshot_orderbook_top_bid")
+    )
+    if (
+        protective_kind
+        and protective_bid is not None
+        and LIVE_ORDER_MIN_UNIT_PRICE <= protective_bid <= LIVE_ORDER_MAX_UNIT_PRICE
+    ):
+        try:
+            protective_sell_authority = _build_protective_sell_execution_authority(
+                kind=protective_kind,
+                position=position,
+                token_id=token_id,
+                shares=exit_intent.shares,
+                snapshot_context=snapshot_context,
+                conn=conn,
+            )
+        except (InvalidOperation, TypeError, ValueError) as exc:
+            authority_reason = (
+                f"{exit_context.exit_reason} [PROTECTIVE_AUTHORITY_ERROR]"
+            )
+            authority_error = (
+                "protective_sell_execution_authority_unavailable:"
+                f"{type(exc).__name__}:{str(exc)[:400]}"
+            )
+            _mark_exit_retry(
+                position,
+                reason=authority_reason,
+                error=authority_error,
+                conn=conn,
+            )
+            if conn is not None:
+                log_pending_exit_recovery_event(
+                    conn,
+                    position,
+                    event_type="EXIT_ORDER_REJECTED",
+                    reason=authority_reason,
+                    error=authority_error,
+                )
+                log_exit_retry_event(
+                    conn,
+                    position,
+                    reason=authority_reason,
+                    error=authority_error,
+                )
+            return "exit_blocked: protective_authority_unavailable"
+        # The monitor quote proves the semantic decision; FC-03 submit truth is
+        # the freshly captured snapshot.  Protective exits cross only that bid.
+        exit_intent = replace(
+            exit_intent,
+            current_market_price=float(protective_bid),
+            best_bid=float(protective_bid),
+            exact_limit_price=float(protective_bid),
+            submit_order_type="FAK",
+        )
     if live_non_red:
         if global_authorized:
             authority_error = _global_sell_capital_certificate_error(
@@ -6730,6 +7092,7 @@ def _execute_live_exit(
             global_sell_execution_authority=(
                 global_sell_authority if global_authorized else None
             ),
+            protective_sell_execution_authority=protective_sell_authority,
             global_sell_receipt_closure=(
                 exit_intent.global_sell_receipt_closure
                 if global_authorized
@@ -7868,6 +8231,7 @@ def _log_partial_exit_execution_fact(
         shares=float(Decimal(str(filled_shares))),
         venue_status=status or "PARTIAL",
         terminal_exec_status=status or "PARTIAL",
+        clear_voided_at=True,
         command_id=_exit_command_id_for_order(conn, position, order_id),
         decision_law_id="predicted_bin_ev_v1",
     )
@@ -12180,7 +12544,24 @@ def _full_book_monitor_completed_canonical_coverage(
         or ()
         if str(value).strip()
     }
-    completed_ids = (canonical_ids - no_action_authority_ids) | discharged_ids
+    non_executable_dust_ids = {
+        str(value).strip()
+        for value in summary.get(
+            "held_monitor_non_executable_dust_position_ids",
+            (),
+        )
+        or ()
+        if str(value).strip()
+    }
+    # A current fresh venue minimum can prove one exact residual impossible to
+    # express as a SELL.  That position keeps its independent health alarm and
+    # recurring monitor, but it cannot make unrelated families inherit an
+    # unresettable full-book debt.  SCOPE: canonical no-action rows that are
+    # also current-proven dust. DRAIN: the normal recurring monitor and
+    # settlement continue for that position. RESET: a changed current minimum
+    # omits the dust identity and restores ordinary action-authority debt.
+    unresolved_no_action_ids = no_action_authority_ids - non_executable_dust_ids
+    completed_ids = (canonical_ids - unresolved_no_action_ids) | discharged_ids
     return (
         int(summary.get("held_monitor_candidates") or 0) == len(candidate_ids)
         and candidate_ids.issubset(completed_ids)
@@ -12258,6 +12639,222 @@ def held_monitor_pre_artifact_reserve_seconds() -> float:
     return 2.0 * float(HELD_MONITOR_PRIMARY_BELIEF_READ_MAX_SECONDS)
 
 
+def _persist_exit_monitor_artifact(
+    conn: sqlite3.Connection,
+    artifact,
+    *,
+    summary: dict,
+    deadline_monotonic: float | None = None,
+) -> tuple[bool, int | None]:
+    """Persist the final monitor artifact within the owning claim deadline."""
+    from src.execution.executor import _canonical_trade_write_lease
+    from src.state.canonical_write import commit_then_export
+    from src.state.decision_chain import store_artifact
+    from src.state.write_coordinator import (
+        WriteLeaseTimeout,
+        WritePriority,
+        bounded_sqlite_write,
+    )
+
+    if conn.in_transaction:
+        raise RuntimeError("EXIT_MONITOR_ARTIFACT_REQUIRES_CLEAN_TRANSACTION")
+
+    artifact_id: list[int | None] = [None]
+
+    def remaining_deadline_ms(preferred_ms: int) -> int:
+        if deadline_monotonic is None:
+            return preferred_ms
+        remaining_ms = int(
+            max(0.0, float(deadline_monotonic) - _time_module.monotonic())
+            * 1_000.0
+        )
+        if remaining_ms <= 0:
+            raise WriteLeaseTimeout(
+                "exit-monitor claim deadline expired before artifact persistence"
+            )
+        return min(preferred_ms, remaining_ms)
+
+    def persist_once(*, owner: str, preferred_deadline_ms: int) -> None:
+        deadline_ms = remaining_deadline_ms(preferred_deadline_ms)
+        max_hold_ms = min(
+            _MONITOR_ARTIFACT_WRITE_LEASE_MAX_HOLD_MS,
+            deadline_ms,
+        )
+
+        def db_op():
+            artifact_id[0] = store_artifact(conn, artifact)
+            return artifact_id[0]
+
+        with _canonical_trade_write_lease(
+            conn,
+            owner=owner,
+            deadline_ms=deadline_ms,
+            max_hold_ms=max_hold_ms,
+            priority=WritePriority.MONITOR,
+        ) as lease:
+            if lease is None:
+                commit_then_export(conn, db_op=db_op)
+                return
+            with bounded_sqlite_write(
+                conn,
+                lease,
+                max_hold_ms=max_hold_ms,
+            ):
+                commit_then_export(conn, db_op=db_op)
+
+    try:
+        persist_once(
+            owner="exit_monitor_artifact",
+            preferred_deadline_ms=_MONITOR_ARTIFACT_WRITE_LEASE_DEADLINE_MS,
+        )
+    except WriteLeaseTimeout as first_exc:
+        summary["monitor_artifact_write_retried"] = True
+        try:
+            persist_once(
+                owner="exit_monitor_artifact_retry",
+                preferred_deadline_ms=_MONITOR_ARTIFACT_WRITE_RETRY_DEADLINE_MS,
+            )
+        except WriteLeaseTimeout as retry_exc:
+            summary["monitor_artifact_write_deferred"] = str(retry_exc)
+            logger.warning(
+                "exit_monitor artifact write deferred after bounded retry: "
+                "first=%s retry=%s",
+                first_exc,
+                retry_exc,
+            )
+            return False, None
+
+    return True, artifact_id[0]
+
+
+_MONITOR_FAILURE_OUTCOMES = frozenset(
+    {
+        "REFRESH_DEADLINE",
+        "DB_CONTENDED",
+        "VENUE_SNAPSHOT_DEBT",
+        "COVERAGE_INCOMPLETE",
+        "ARTIFACT_WRITE_DEFERRED",
+        "UNKNOWN",
+    }
+)
+
+
+def _exit_monitor_failure_outcome(summary: Mapping[str, object]) -> str:
+    """Classify an incomplete monitor without altering action authority.
+
+    The returned value crosses the scheduler boundary and the same value is
+    kept in the committed monitor artifact when one exists.  This is evidence
+    for the next bounded tranche, not a substitute for a fresh q/book or a
+    new exit decision.
+    """
+
+    explicit = str(summary.get("held_monitor_failure_outcome") or "").strip()
+    if explicit in _MONITOR_FAILURE_OUTCOMES:
+        return explicit
+    error = str(summary.get("monitoring_error") or "").lower()
+    if any(
+        marker in error
+        for marker in (
+            "database is locked",
+            "database table is locked",
+            "database is busy",
+            "write lease",
+        )
+    ):
+        return "DB_CONTENDED"
+    if any(
+        marker in error
+        for marker in (
+            "order truth",
+            "account truth",
+            "venue snapshot",
+            "snapshot deadline",
+        )
+    ):
+        return "VENUE_SNAPSHOT_DEBT"
+    if "coverage" in error:
+        return "COVERAGE_INCOMPLETE"
+    if "deadline" in error:
+        return "REFRESH_DEADLINE"
+    if "artifact" in error:
+        return "ARTIFACT_WRITE_DEFERRED"
+    return "UNKNOWN"
+
+
+def _report_exit_monitor_failure(
+    outcome: str,
+    sink: Callable[[str], None] | None,
+) -> None:
+    if sink is not None:
+        sink(outcome if outcome in _MONITOR_FAILURE_OUTCOMES else "UNKNOWN")
+
+
+def _schedule_exit_monitor_status_pulse(summary: Mapping[str, object]) -> None:
+    """Drain the latest completed full-book monitor pulse off the scheduler slot.
+
+    The canonical artifact and monitor-claim release have already happened when
+    this runs. SCOPE: derived status projection only. DRAIN: one daemon thread
+    serializes pulses and retains at most the newest pending summary. RESET:
+    when the status writer returns and no newer pulse arrived, the in-flight
+    marker clears. A blocked pulse cannot retain the next monitor scheduler
+    instance or its capital-protection claim.
+    """
+
+    global _EXIT_MONITOR_STATUS_PULSE_IN_FLIGHT
+    global _EXIT_MONITOR_STATUS_PULSE_PENDING
+
+    try:
+        from src.observability.status_summary import write_cycle_pulse
+    except Exception:  # noqa: BLE001 - observability cannot retain exit cadence.
+        logger.exception("exit_monitor status pulse import failed in advisory drain")
+        return
+
+    with _EXIT_MONITOR_STATUS_PULSE_LOCK:
+        _EXIT_MONITOR_STATUS_PULSE_PENDING = dict(summary)
+        if _EXIT_MONITOR_STATUS_PULSE_IN_FLIGHT:
+            return
+        _EXIT_MONITOR_STATUS_PULSE_IN_FLIGHT = True
+
+    def _drain() -> None:
+        global _EXIT_MONITOR_STATUS_PULSE_IN_FLIGHT
+        global _EXIT_MONITOR_STATUS_PULSE_PENDING
+
+        completed_normally = False
+        try:
+            while True:
+                with _EXIT_MONITOR_STATUS_PULSE_LOCK:
+                    payload = _EXIT_MONITOR_STATUS_PULSE_PENDING
+                    _EXIT_MONITOR_STATUS_PULSE_PENDING = None
+                    if payload is None:
+                        _EXIT_MONITOR_STATUS_PULSE_IN_FLIGHT = False
+                        completed_normally = True
+                        return
+                try:
+                    write_cycle_pulse(payload)
+                except Exception:  # noqa: BLE001 - derived status must not pin exit cadence.
+                    logger.exception("exit_monitor status pulse failed in advisory drain")
+        finally:
+            if not completed_normally:
+                with _EXIT_MONITOR_STATUS_PULSE_LOCK:
+                    _EXIT_MONITOR_STATUS_PULSE_PENDING = None
+                    _EXIT_MONITOR_STATUS_PULSE_IN_FLIGHT = False
+
+    try:
+        worker = threading.Thread(
+            target=_drain,
+            name="exit-monitor-status-pulse",
+            daemon=True,
+        )
+        worker.start()
+    except BaseException as exc:
+        with _EXIT_MONITOR_STATUS_PULSE_LOCK:
+            _EXIT_MONITOR_STATUS_PULSE_PENDING = None
+            _EXIT_MONITOR_STATUS_PULSE_IN_FLIGHT = False
+        logger.exception("exit_monitor status pulse drain failed to start")
+        if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+            raise
+
+
 def run_exit_monitor_cycle(
     *,
     held_position_monitor_active: threading.Event,
@@ -12267,6 +12864,7 @@ def run_exit_monitor_cycle(
     monitor_handoff_elapsed_seconds: float = 0.0,
     target_families: Collection[tuple[str, str, str]] | None = None,
     should_preempt_for_urgent_day0: Callable[[], bool] | None = None,
+    failure_outcome_sink: Callable[[str], None] | None = None,
 ) -> bool:
     """Scheduler entrypoint (R4-b extraction from src/main.py::_exit_monitor_cycle).
 
@@ -12304,9 +12902,7 @@ def run_exit_monitor_cycle(
     )
     from src.engine.cycle_runtime import _held_position_monitor_budget_seconds
     from src.observability.scheduler_health import _write_scheduler_health
-    from src.state.canonical_write import commit_then_export
     from src.state.decision_chain import CycleArtifact
-    from src.state.decision_chain import store_artifact
     from src.riskguard.risk_level import RiskLevel
     from src.riskguard.riskguard import get_current_level
 
@@ -12320,6 +12916,7 @@ def run_exit_monitor_cycle(
 
     if held_position_monitor_active.is_set() and not monitor_claimed:
         logger.warning("exit_monitor skipped: previous monitor cycle is still running")
+        _report_exit_monitor_failure("COVERAGE_INCOMPLETE", failure_outcome_sink)
         return False
     held_position_monitor_active.set()
     if monitor_deadline_monotonic is None:
@@ -12331,10 +12928,12 @@ def run_exit_monitor_cycle(
         if not math.isfinite(monitor_deadline_monotonic):
             logger.error("exit_monitor: held monitor deadline is not finite")
             mark_held_position_monitor_complete()
+            _report_exit_monitor_failure("REFRESH_DEADLINE", failure_outcome_sink)
             return False
     if monitor_deadline_monotonic <= _time_module.monotonic():
         logger.warning("exit_monitor: claim budget expired before DB acquisition")
         mark_held_position_monitor_complete()
+        _report_exit_monitor_failure("REFRESH_DEADLINE", failure_outcome_sink)
         return False
 
     preparation_started_monotonic = _time_module.monotonic()
@@ -12348,6 +12947,7 @@ def run_exit_monitor_cycle(
             "complete probability redecision"
         )
         mark_held_position_monitor_complete()
+        _report_exit_monitor_failure("REFRESH_DEADLINE", failure_outcome_sink)
         return False
 
     conn = get_connection(deadline_monotonic=preparation_deadline_monotonic)
@@ -12357,6 +12957,7 @@ def run_exit_monitor_cycle(
             "redecision reserve for the recurring retry"
         )
         mark_held_position_monitor_complete()
+        _report_exit_monitor_failure("DB_CONTENDED", failure_outcome_sink)
         return False
 
     summary: dict = {
@@ -12472,6 +13073,7 @@ def run_exit_monitor_cycle(
                     ),
                     should_preempt_for_urgent_day0=should_preempt_for_urgent_day0,
                     defer_partial_orderbook_gaps=target_families is None,
+                    current_riskguard_red=risk_level is RiskLevel.RED,
                 )
                 portfolio_dirty = portfolio_dirty or monitor_portfolio_dirty
             except Exception as exc:
@@ -12500,7 +13102,16 @@ def run_exit_monitor_cycle(
                 summary["monitoring_error"] = (
                     "FULL_BOOK_MONITOR_CANONICAL_COVERAGE_INCOMPLETE"
                 )
+                summary["held_monitor_failure_outcome"] = "COVERAGE_INCOMPLETE"
                 succeeded = False
+
+            # Persist the typed reason with the pass artifact before releasing
+            # the claim.  The scheduler receives the same value below, so a
+            # retry can distinguish contention from a real full-book deficit.
+            if not succeeded:
+                summary["held_monitor_failure_outcome"] = (
+                    _exit_monitor_failure_outcome(summary)
+                )
 
             artifact.completed_at = datetime.now(timezone.utc).isoformat()
 
@@ -12510,10 +13121,6 @@ def run_exit_monitor_cycle(
             # must not keep fresh held-position redecision blocked after this
             # monitor artifact is durable.
             _aid_box: list = [None]
-
-            def _db_op():
-                _aid_box[0] = store_artifact(conn, artifact)
-                return _aid_box[0]
 
             def _export_portfolio():
                 if portfolio_dirty and target_families is None:
@@ -12527,13 +13134,33 @@ def run_exit_monitor_cycle(
                 if tracker_dirty:
                     save_tracker(tracker)
 
-            commit_then_export(
+            artifact_persisted, _aid_box[0] = _persist_exit_monitor_artifact(
                 conn,
-                db_op=_db_op,
-                json_exports=[_export_portfolio, _export_tracker],
+                artifact,
+                summary=summary,
+                deadline_monotonic=monitor_deadline_monotonic,
             )
-            mark_held_position_monitor_complete()
-            monitor_completion_marked = True
+            if artifact_persisted:
+                # Canonical DB truth is now committed.  Release the global
+                # writer before advisory JSON exports so a slow export cannot
+                # consume the next periodic monitor quantum.
+                mark_held_position_monitor_complete()
+                monitor_completion_marked = True
+                for export_fn in (_export_portfolio, _export_tracker):
+                    try:
+                        export_fn()
+                    except Exception:  # noqa: BLE001 - canonical DB is durable.
+                        logger.exception(
+                            "exit_monitor JSON export failed after artifact commit "
+                            "(artifact_id=%s)",
+                            _aid_box[0],
+                        )
+            else:
+                summary["monitoring_error"] = "MONITOR_ARTIFACT_WRITE_DEFERRED"
+                summary["held_monitor_failure_outcome"] = "ARTIFACT_WRITE_DEFERRED"
+                succeeded = False
+                mark_held_position_monitor_complete()
+                monitor_completion_marked = True
 
     except Exception as exc:
         logger.error(
@@ -12557,16 +13184,13 @@ def run_exit_monitor_cycle(
     # (open orders, risk, portfolio, capability) -> it reflects REAL current state,
     # never a hardcoded healthy value. Non-fatal: a pulse failure must not abort the
     # chain-sync job. Authority: fix/edli-stage-readiness-2026-05-31 (status_summary).
+    outcome = None
+    if not succeeded:
+        outcome = _exit_monitor_failure_outcome(summary)
+        summary["held_monitor_failure_outcome"] = outcome
+
     if target_families is None:
-        try:
-            from src.observability.status_summary import write_cycle_pulse
-            write_cycle_pulse(summary)
-        except Exception as exc:
-            logger.error(
-                "exit_monitor: status pulse failed (non-fatal): %s",
-                exc,
-                exc_info=True,
-            )
+        _schedule_exit_monitor_status_pulse(summary)
 
         _write_scheduler_health(
             "exit_monitor",
@@ -12577,4 +13201,6 @@ def run_exit_monitor_cycle(
                 "exits": summary.get("exits", 0),
             },
         )
+    if outcome is not None:
+        _report_exit_monitor_failure(outcome, failure_outcome_sink)
     return succeeded

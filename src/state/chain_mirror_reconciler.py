@@ -48,6 +48,7 @@ from __future__ import annotations
 import json
 import logging
 import math
+import secrets
 import sqlite3
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -294,6 +295,38 @@ def classify_local_position(
     settlement_key = (row.city, row.target_date, row.temperature_metric)
     settlement = settlement_by_key.get(settlement_key)
     market_resolved = settlement is not None and settlement.authority == "VERIFIED"
+
+    # A token id alone is not enough to bind chain evidence to a canonical
+    # position: token reuse/malformed payloads must not authorize a settlement
+    # or a chain-size write for another condition.  Keep the typed finding
+    # non-writing so the next complete, exact chain read can decide it.
+    if chain_fact is not None:
+        local_condition_id = str(row.condition_id or "").strip()
+        chain_condition_id = str(chain_fact.condition_id or "").strip()
+        if not local_condition_id or not chain_condition_id:
+            return MirrorFinding(
+                classification=UNGRADEABLE,
+                position_id=row.position_id,
+                asset=held_token,
+                writes=False,
+                details={
+                    "reason": "chain_condition_identity_missing",
+                    "local_condition_id": local_condition_id,
+                    "chain_condition_id": chain_condition_id,
+                },
+            )
+        if local_condition_id != chain_condition_id:
+            return MirrorFinding(
+                classification=UNGRADEABLE,
+                position_id=row.position_id,
+                asset=held_token,
+                writes=False,
+                details={
+                    "reason": "chain_condition_identity_mismatch",
+                    "local_condition_id": local_condition_id,
+                    "chain_condition_id": chain_condition_id,
+                },
+            )
 
     if chain_fact is None:
         # Held token absent from the chain snapshot.
@@ -1077,7 +1110,7 @@ def _apply_settlement_finding(
     this reuses that primitive directly instead of the pending_exit-only
     transition_phase() / harvester Position-object builder.
     """
-    from src.state.db import append_many_and_project
+    from src.state.db import append_many_and_project, record_token_suppression
     from src.state.lifecycle_manager import LifecyclePhase, fold_lifecycle_phase
     from src.state.projection import CANONICAL_POSITION_CURRENT_COLUMNS
 
@@ -1267,7 +1300,51 @@ def _apply_settlement_finding(
             "chain-mirror settlement_price out of [0.0, 1.0] payout band: "
             f"position_id={position_id!r} settlement_price={_settlement_price_check!r}"
         )
-    append_many_and_project(conn, [event], projection)
+    held_token_id = str(finding.asset or "").strip()
+    condition_id = str(current["condition_id"] or "").strip()
+    if not held_token_id or not condition_id:
+        raise ValueError(
+            "chain-mirror settlement suppression requires exact condition/token "
+            f"identity: position_id={position_id!r} "
+            f"condition_id={condition_id!r} token_id={held_token_id!r}"
+        )
+
+    # A settled projection and the exact suppression that prevents a stale
+    # wallet balance from reopening it are one truth transition.  The nested
+    # suppression writer composes with this outer savepoint; any failure must
+    # leave neither a SETTLED event/projection nor an orphan suppression.
+    savepoint = f"sp_chain_mirror_settlement_{secrets.token_hex(6)}"
+    conn.execute(f"SAVEPOINT {savepoint}")
+    try:
+        append_many_and_project(conn, [event], projection)
+        suppression_result = record_token_suppression(
+            conn,
+            token_id=held_token_id,
+            condition_id=condition_id,
+            suppression_reason="settled_position",
+            source_module="src.state.chain_mirror_reconciler",
+            evidence={
+                "position_id": position_id,
+                "chain_mirror_classification": finding.classification,
+                "settlement_authority": "VERIFIED",
+                "settlement_source": finding.details.get("settlement_source"),
+                "settlement_value": finding.details.get("settlement_value"),
+                "winning_bin": finding.details.get("winning_bin"),
+                "chain_absent": bool(finding.details.get("chain_absent")),
+                "chain_state_after": chain_state_after,
+                "occurred_at": occurred_at,
+            },
+        )
+        if suppression_result.get("status") != "written":
+            raise RuntimeError(
+                "chain-mirror settlement suppression was not written: "
+                f"position_id={position_id!r} result={suppression_result!r}"
+            )
+        conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+    except Exception:
+        conn.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
+        conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+        raise
 
 
 def apply_size_correction_finding(

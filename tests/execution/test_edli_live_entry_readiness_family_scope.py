@@ -1,5 +1,5 @@
 # Created: 2026-07-25
-# Last reused or audited: 2026-08-02
+# Last reused or audited: 2026-08-24
 # Authority basis: 7-day production block-event audit (32,763 blocking
 #   instances, 20.97h/7d global entry admission blocked, worst episode
 #   7h17m) -- the composite live-block string
@@ -539,3 +539,39 @@ def test_readiness_block_preserves_genuinely_global_freshness_reasons(
     assert global_reason is not None
     assert "EDLI_STAGE_SOURCE_HEALTH_MISSING" in global_reason
     assert family_reasons == {}
+
+
+def test_readiness_block_samples_freshness_clock_at_each_file_read(
+    tmp_path, monkeypatch, _fresh_readiness_files
+):
+    """Slow DB admission cannot make a concurrently newer pulse look future-dated."""
+
+    world_db = _make_world_db(tmp_path)
+    monkeypatch.setattr(
+        main_mod,
+        "_settings_section",
+        lambda name, default=None: {"world_db": world_db}
+        if name == "state"
+        else default,
+    )
+    observed_now_args: list[object] = []
+
+    def _freshness_probe(*, name, path, max_age_seconds, now=None):
+        del name, path, max_age_seconds
+        observed_now_args.append(now)
+        return []
+
+    monkeypatch.setattr(
+        main_mod,
+        "_edli_stage_fresh_file_reasons",
+        _freshness_probe,
+    )
+    source_health_path, status_summary_path = _fresh_readiness_files
+
+    global_reason, family_reasons = main_mod._edli_live_entry_readiness_block(
+        _edli_cfg(source_health_path, status_summary_path)
+    )
+
+    assert global_reason is None
+    assert family_reasons == {}
+    assert observed_now_args == [None, None]

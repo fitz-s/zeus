@@ -171,6 +171,15 @@ def _json_mapping(value: object, *, field_name: str) -> Mapping[str, Any]:
     return parsed
 
 
+def _decorrelated_providers_complete(provenance: Mapping[str, Any]) -> bool:
+    """Read the materializer's canonical nested completeness verdict."""
+
+    fusion = provenance.get("bayes_precision_fusion")
+    return isinstance(fusion, Mapping) and fusion.get(
+        "decorrelated_providers_complete"
+    ) is True
+
+
 def _normalize_probability_map(value: Mapping[str, Any], *, field_name: str, require_sum: bool = True) -> dict[str, float]:
     if not value:
         raise ValueError(f"{field_name} must not be empty")
@@ -811,6 +820,10 @@ def read_replacement_forecast_bundle(
                         posterior_source_cycle_time=row_map["source_cycle_time"],
                         posterior_computed_at=row_map["computed_at"],
                         posterior_provenance=provenance,
+                        held_redecision=(
+                            authority_purpose
+                            is ReplacementForecastAuthorityPurpose.HELD_REDECISION
+                        ),
                     )
                     if (
                         hwm_deadline is not None
@@ -853,3 +866,357 @@ def read_replacement_forecast_bundle(
         posterior_config_hash=str(row_map["posterior_config_hash"]),
     )
     return ReplacementForecastBundleReadResult(READY_STATUS, "REPLACEMENT_POSTERIOR_READY", bundle)
+
+
+def _pinned_readiness_for_posterior(
+    row: Mapping[str, Any],
+    *,
+    posterior_id: int,
+) -> ReplacementForecastReadinessDecision:
+    """Build an in-memory certificate that binds the exact immutable row.
+
+    This is intentionally not a readiness-state read: the live readiness pointer may
+    already have advanced to an incomplete newer cycle.  The existing bundle reader
+    still validates every intrinsic row contract against this certificate.
+    """
+
+    dependencies = _json_mapping(
+        row.get("dependency_source_run_ids_json"),
+        field_name="dependency_source_run_ids_json",
+    )
+    source_available_at = str(row.get("source_available_at") or "").strip()
+    data_version = str(row.get("data_version") or "").strip()
+    dependency_rows = []
+    for role in ("baseline_b0", "openmeteo_ifs9_anchor"):
+        dependency_rows.append(
+            {
+                "role": role,
+                "source_id": SOURCE_ID,
+                "product_id": PRODUCT_ID,
+                "data_version": data_version,
+                "source_run_id": dependencies.get(role),
+                "source_available_at": source_available_at,
+                "status": READY_STATUS,
+            }
+        )
+    dependency_rows.append(
+        {
+            "role": "soft_anchor_posterior",
+            "source_id": SOURCE_ID,
+            "product_id": PRODUCT_ID,
+            "data_version": data_version,
+            "source_run_id": str(row.get("posterior_identity_hash") or ""),
+            "source_available_at": source_available_at,
+            "status": READY_STATUS,
+            "posterior_id": posterior_id,
+        }
+    )
+    return ReplacementForecastReadinessDecision(
+        readiness_id=f"pinned-posterior:{posterior_id}",
+        status=READY_STATUS,
+        reason_codes=("REPLACEMENT_PINNED_COMPLETE_POSTERIOR",),
+        dependency_json={"dependencies": dependency_rows},
+        provenance_json=_json_mapping(
+            row.get("provenance_json"),
+            field_name="provenance_json",
+        ),
+        # Intrinsic source-cycle age below is the real expiry for a pinned row;
+        # the readiness value object nevertheless requires a non-null timestamp.
+        expires_at=datetime.max.replace(tzinfo=timezone.utc),
+        source_id=SOURCE_ID,
+        product_id=PRODUCT_ID,
+    )
+
+
+def read_pinned_replacement_forecast_bundle(
+    conn: sqlite3.Connection,
+    *,
+    posterior_id: int,
+    city: str,
+    target_date: date | str,
+    temperature_metric: str,
+    decision_time: datetime | str,
+    current_bin_topology_hash: str | None = None,
+    authority_purpose: ReplacementForecastAuthorityPurpose = (
+        ReplacementForecastAuthorityPurpose.HELD_REDECISION
+    ),
+) -> ReplacementForecastBundleReadResult:
+    """Read one exact immutable posterior for held-only Day0 recomputation.
+
+    The exact row is validated by the ordinary no-bypass reader, but readiness and
+    raw-input HWM are deliberately not re-read: this route is only for an existing
+    held/reduce-only position while a newer cycle is incomplete.  ENTRY cannot call
+    this function, and no producer or queue state is touched.
+    """
+
+    if authority_purpose is not ReplacementForecastAuthorityPurpose.HELD_REDECISION:
+        return ReplacementForecastBundleReadResult(
+            "BLOCKED",
+            "REPLACEMENT_PINNED_HELD_AUTHORITY_REQUIRED",
+        )
+    try:
+        posterior_id = int(posterior_id)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("REPLACEMENT_PINNED_POSTERIOR_ID_INVALID") from exc
+    if posterior_id <= 0:
+        raise ValueError("REPLACEMENT_PINNED_POSTERIOR_ID_INVALID")
+    metric = _metric(temperature_metric)
+    target_date_text = _date_text(target_date)
+    data_version = _data_version_for_metric(metric)
+    row = conn.execute(
+        """
+        SELECT * FROM forecast_posteriors
+        WHERE posterior_id = ?
+          AND city = ?
+          AND target_date = ?
+          AND temperature_metric = ?
+          AND source_id = ?
+          AND product_id = ?
+          AND data_version = ?
+          AND training_allowed = 0
+          AND runtime_layer = ?
+        LIMIT 1
+        """,
+        (
+            posterior_id,
+            city,
+            target_date_text,
+            metric,
+            SOURCE_ID,
+            PRODUCT_ID,
+            data_version,
+            LIVE_RUNTIME_LAYER,
+        ),
+    ).fetchone()
+    if row is None:
+        return ReplacementForecastBundleReadResult(
+            "BLOCKED",
+            "REPLACEMENT_PINNED_POSTERIOR_MISSING",
+        )
+    row_map = dict(row)
+    provenance = _json_mapping(
+        row_map.get("provenance_json"),
+        field_name="provenance_json",
+    )
+    if not _decorrelated_providers_complete(provenance):
+        return ReplacementForecastBundleReadResult(
+            "BLOCKED",
+            "REPLACEMENT_PINNED_POSTERIOR_NOT_COMPLETE",
+        )
+    readiness = _pinned_readiness_for_posterior(
+        row_map,
+        posterior_id=posterior_id,
+    )
+    return read_replacement_forecast_bundle(
+        conn,
+        baseline_bundle=None,
+        readiness=readiness,
+        city=city,
+        target_date=target_date_text,
+        temperature_metric=metric,
+        decision_time=decision_time,
+        require_baseline_bundle=False,
+        current_bin_topology_hash=current_bin_topology_hash,
+        enforce_raw_input_hwm=False,
+        authority_purpose=authority_purpose,
+    )
+
+
+def read_prior_complete_replacement_forecast_bundle(
+    conn: sqlite3.Connection,
+    *,
+    city: str,
+    target_date: date | str,
+    temperature_metric: str,
+    decision_time: datetime | str,
+    current_bin_topology_hash: str | None = None,
+    authority_purpose: ReplacementForecastAuthorityPurpose = (
+        ReplacementForecastAuthorityPurpose.HELD_REDECISION
+    ),
+) -> ReplacementForecastBundleReadResult:
+    """Select the prior complete carrier only across a newer incomplete wave.
+
+    A newer complete row returns ``NOT_APPLICABLE`` so the caller resets to the
+    ordinary current-cycle path.  A missing/invalid prior carrier remains blocked;
+    it is never replaced with a stale or mixed-clock source.
+    """
+
+    if authority_purpose is not ReplacementForecastAuthorityPurpose.HELD_REDECISION:
+        return ReplacementForecastBundleReadResult(
+            "BLOCKED",
+            "REPLACEMENT_PINNED_HELD_AUTHORITY_REQUIRED",
+        )
+    metric = _metric(temperature_metric)
+    target_date_text = _date_text(target_date)
+    data_version = _data_version_for_metric(metric)
+    decision_utc = _parse_utc(
+        decision_time.isoformat()
+        if isinstance(decision_time, datetime)
+        else str(decision_time),
+        field_name="decision_time",
+    )
+    decision_iso = decision_utc.isoformat()
+    scope_params = (
+        city,
+        target_date_text,
+        metric,
+        SOURCE_ID,
+        PRODUCT_ID,
+        data_version,
+        LIVE_RUNTIME_LAYER,
+        decision_iso,
+        decision_iso,
+        decision_iso,
+    )
+    try:
+        frontier = conn.execute(
+            """
+            SELECT posterior_id, source_cycle_time, source_available_at,
+                   computed_at, provenance_json
+              FROM forecast_posteriors
+             WHERE city = ?
+               AND target_date = ?
+               AND temperature_metric = ?
+               AND source_id = ?
+               AND product_id = ?
+               AND data_version = ?
+               AND training_allowed = 0
+               AND runtime_layer = ?
+               AND datetime(source_cycle_time) <= datetime(?)
+               AND datetime(source_available_at) <= datetime(?)
+               AND datetime(computed_at) <= datetime(?)
+             ORDER BY source_cycle_time DESC, computed_at DESC, posterior_id DESC
+             LIMIT 1
+            """,
+            scope_params,
+        ).fetchone()
+    except sqlite3.OperationalError as exc:
+        if "no such table" not in str(exc).lower():
+            raise
+        return ReplacementForecastBundleReadResult(
+            "NOT_APPLICABLE",
+            "REPLACEMENT_PINNED_POSTERIOR_SCHEMA_UNAVAILABLE",
+        )
+    if frontier is None:
+        return ReplacementForecastBundleReadResult(
+            "NOT_APPLICABLE",
+            "REPLACEMENT_PINNED_NO_POSTERIOR_WAVE",
+        )
+    latest = dict(frontier)
+    try:
+        latest_cycle = _parse_utc(
+            str(latest.get("source_cycle_time") or ""),
+            field_name="source_cycle_time",
+        )
+        _latest_computed = _parse_utc(
+            str(latest.get("computed_at") or ""),
+            field_name="computed_at",
+        )
+        latest_id = int(latest["posterior_id"])
+    except (KeyError, TypeError, ValueError):
+        return ReplacementForecastBundleReadResult(
+            "BLOCKED",
+            "REPLACEMENT_PINNED_FRONTIER_CLOCK_INVALID",
+        )
+    latest_provenance = _json_mapping(
+        latest.get("provenance_json"),
+        field_name="provenance_json",
+    )
+    if _decorrelated_providers_complete(latest_provenance):
+        return ReplacementForecastBundleReadResult(
+            "NOT_APPLICABLE",
+            "REPLACEMENT_PINNED_COMPLETE_CYCLE_RESET",
+        )
+    try:
+        candidate = conn.execute(
+            """
+            SELECT posterior_id, source_cycle_time, source_available_at,
+                   computed_at, provenance_json
+              FROM forecast_posteriors
+             WHERE city = ?
+               AND target_date = ?
+               AND temperature_metric = ?
+               AND source_id = ?
+               AND product_id = ?
+               AND data_version = ?
+               AND training_allowed = 0
+               AND runtime_layer = ?
+               AND datetime(source_cycle_time) <= datetime(?)
+               AND datetime(source_available_at) <= datetime(?)
+               AND datetime(computed_at) <= datetime(?)
+               AND json_extract(provenance_json, '$.replacement_q_mode') = 'FUSED_NORMAL_FULL'
+               AND json_extract(provenance_json, '$.capture_status') = 'FULL_CURRENT'
+               AND json_extract(
+                     provenance_json,
+                     '$.bayes_precision_fusion.decorrelated_providers_complete'
+                   ) = 1
+               AND (
+                     source_cycle_time < ?
+                  OR (source_cycle_time = ? AND computed_at < ?)
+                  OR (source_cycle_time = ? AND computed_at = ? AND posterior_id < ?)
+               )
+             ORDER BY source_cycle_time DESC, computed_at DESC, posterior_id DESC
+             LIMIT 1
+            """,
+            scope_params
+            + (
+                latest.get("source_cycle_time"),
+                latest.get("source_cycle_time"),
+                latest.get("computed_at"),
+                latest.get("source_cycle_time"),
+                latest.get("computed_at"),
+                latest_id,
+            ),
+        ).fetchone()
+    except sqlite3.OperationalError as exc:
+        if "no such table" not in str(exc).lower():
+            raise
+        return ReplacementForecastBundleReadResult(
+            "NOT_APPLICABLE",
+            "REPLACEMENT_PINNED_POSTERIOR_SCHEMA_UNAVAILABLE",
+        )
+    if candidate is None:
+        return ReplacementForecastBundleReadResult(
+            "NOT_APPLICABLE",
+            "REPLACEMENT_PINNED_COMPLETE_CARRIER_MISSING",
+        )
+    candidate = dict(candidate)
+    if not _decorrelated_providers_complete(
+        _json_mapping(candidate.get("provenance_json"), field_name="provenance_json")
+    ):
+        return ReplacementForecastBundleReadResult(
+            "BLOCKED",
+            "REPLACEMENT_PINNED_COMPLETE_CARRIER_INVALID",
+        )
+    try:
+        candidate_cycle = _parse_utc(
+            str(candidate.get("source_cycle_time") or ""),
+            field_name="source_cycle_time",
+        )
+    except ValueError:
+        return ReplacementForecastBundleReadResult(
+            "BLOCKED",
+            "REPLACEMENT_PINNED_COMPLETE_CYCLE_INVALID",
+        )
+    if candidate_cycle >= latest_cycle:
+        return ReplacementForecastBundleReadResult(
+            "NOT_APPLICABLE",
+            "REPLACEMENT_PINNED_COMPLETE_CYCLE_RESET",
+        )
+    result = read_pinned_replacement_forecast_bundle(
+        conn,
+        posterior_id=int(candidate["posterior_id"]),
+        city=city,
+        target_date=target_date_text,
+        temperature_metric=metric,
+        decision_time=decision_time,
+        current_bin_topology_hash=current_bin_topology_hash,
+        authority_purpose=authority_purpose,
+    )
+    if result.ok:
+        return ReplacementForecastBundleReadResult(
+            READY_STATUS,
+            "REPLACEMENT_PINNED_COMPLETE_POSTERIOR_READY",
+            result.bundle,
+        )
+    return result

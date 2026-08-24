@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from datetime import date, datetime, timezone
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -32,6 +32,7 @@ from src.data.replacement_forecast_materializer import (
     _build_fused_q_bounds,
     _build_scaled_normal_uniform_q,
     _day0_remaining_center_delta_c,
+    _day0_remaining_vector_witness,
 )
 from tests.test_replacement_forecast_materializer import (
     _TemperatureBin,
@@ -68,15 +69,17 @@ def _insert_vector(
     target_date: str = _TARGET,
     timezone_name: str = "Europe/Helsinki",
     model: str = "ecmwf_ifs",
+    source_run_meta_json: str | None = None,
 ) -> None:
     times = [f"{target_date}T{h:02d}:00" for h in range(len(temps))]
     conn.execute(
         "INSERT INTO day0_hourly_vectors (vector_id, model, city, target_date, "
-        "timezone_name, captured_at, endpoint, request_hash, times_json, temps_c_json) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "timezone_name, captured_at, endpoint, request_hash, times_json, temps_c_json, "
+        "source_run_meta_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
             vector_id, model, city, target_date, timezone_name, captured_at,
             "test-endpoint", "test-hash", json.dumps(times), json.dumps(temps),
+            source_run_meta_json,
         ),
     )
 
@@ -88,6 +91,193 @@ def _stub_request(city: str = "Helsinki", target_date: str = _TARGET):
 
 def _utc(hour: int, minute: int = 0, day: int = 18) -> datetime:
     return datetime(2026, 7, day, hour, minute, tzinfo=UTC)
+
+
+def test_day0_remaining_vector_witness_preserves_exact_model_and_clock_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    conn = _vector_conn()
+    _insert_vector(
+        conn,
+        vector_id="v-ecmwf",
+        model="ecmwf_ifs",
+        city="Ankara",
+        target_date="2026-08-23",
+        timezone_name="Europe/Istanbul",
+        captured_at="2026-08-23T20:44:52.810807+00:00",
+    )
+    _insert_vector(
+        conn,
+        vector_id="v-icon",
+        model="icon_global",
+        city="Ankara",
+        target_date="2026-08-23",
+        timezone_name="Europe/Istanbul",
+        captured_at="2026-08-23T20:44:52.810807+00:00",
+    )
+    _insert_vector(
+        conn,
+        vector_id="v-ukmo",
+        model="ukmo_global_deterministic_10km",
+        city="Ankara",
+        target_date="2026-08-23",
+        timezone_name="Europe/Istanbul",
+        captured_at="2026-08-23T20:44:52.810807+00:00",
+    )
+    def _source_meta(model_api_id: str, cycle: str) -> str:
+        return json.dumps(
+            {
+                "source_run_id": "day0_hourly:test-hash",
+                "fetch_started_at": "2026-08-23T20:44:53+00:00",
+                "fetch_finished_at": "2026-08-23T20:45:03+00:00",
+                "provider": "openmeteo",
+                "endpoint": "https://single-runs-api.open-meteo.com/v1/forecast",
+                "request_hash": "test-hash",
+                "model_api_id": model_api_id,
+                "provider_run_id": f"openmeteo:{model_api_id}:{cycle}",
+                "provider_source_cycle_time_utc": cycle,
+                "provider_source_available_at_utc": "2026-08-23T20:30:00+00:00",
+                "provider_source_modified_at_utc": "2026-08-23T20:25:00+00:00",
+                "source_run_authority": "run_pinned_single_runs",
+                "endpoint_mode": "single_runs",
+            }
+        )
+    source_meta_by_vector = {
+        "v-ecmwf": _source_meta("ecmwf_ifs", "2026-08-23T20:00:00+00:00"),
+        "v-icon": _source_meta("icon_global", "2026-08-23T20:03:00+00:00"),
+        "v-ukmo": _source_meta(
+            "ukmo_global_deterministic_10km", "2026-08-23T20:06:00+00:00"
+        ),
+    }
+    for vector_id, meta in source_meta_by_vector.items():
+        conn.execute(
+            "UPDATE day0_hourly_vectors SET endpoint = ?, source_run_meta_json = ? "
+            "WHERE vector_id = ?",
+            ("https://single-runs-api.open-meteo.com/v1/forecast", meta, vector_id),
+        )
+    source_meta = source_meta_by_vector["v-ecmwf"]
+    vectors = [
+        SimpleNamespace(model="ecmwf_ifs", captured_at="2026-08-23T20:44:52.810807+00:00"),
+        SimpleNamespace(model="icon_global", captured_at="2026-08-23T20:44:52.810807+00:00"),
+        SimpleNamespace(
+            model="ukmo_global_deterministic_10km",
+            captured_at="2026-08-23T20:44:52.810807+00:00",
+        ),
+    ]
+    city = SimpleNamespace(name="Ankara", lat=39.9, lon=32.8)
+    monkeypatch.setattr(
+        "src.config.runtime_cities_by_name",
+        lambda: {"Ankara": city},
+    )
+    monkeypatch.setattr(
+        "src.data.day0_hourly_vectors.day0_hourly_models_for_city",
+        lambda _city: [
+            "ecmwf_ifs",
+            "icon_global",
+            "ukmo_global_deterministic_10km",
+        ],
+    )
+    monkeypatch.setattr(
+        "src.data.day0_hourly_vectors.read_freshest_day0_hourly_vectors",
+        lambda **_kwargs: vectors,
+    )
+    request = SimpleNamespace(
+        city="Ankara",
+        target_date="2026-08-23",
+        city_timezone="Europe/Istanbul",
+        day0_observed_extreme_observation_time="2026-08-23T20:55:10+00:00",
+        computed_at="2026-08-23T21:48:05+00:00",
+    )
+
+    witness = _day0_remaining_vector_witness(
+        conn,
+        request,
+        metric="high",
+        computed_at_utc=datetime(2026, 8, 23, 21, 48, 5, tzinfo=UTC),
+        anchor_vector_id="v-ecmwf",
+    )
+
+    assert witness is not None
+    assert witness["vector_id"] == "v-ecmwf"
+    assert witness["expected_models"] == [
+        "ecmwf_ifs",
+        "icon_global",
+        "ukmo_global_deterministic_10km",
+    ]
+    assert witness["actual_models"] == [
+        "ecmwf_ifs",
+        "icon_global",
+        "ukmo_global_deterministic_10km",
+    ]
+    assert witness["vector_ids_by_model"] == {
+        "ecmwf_ifs": "v-ecmwf",
+        "icon_global": "v-icon",
+        "ukmo_global_deterministic_10km": "v-ukmo",
+    }
+    assert witness["capture_times_by_model_utc"]["ecmwf_ifs"] == (
+        "2026-08-23T20:44:52.810807+00:00"
+    )
+    assert witness["causal_as_of_utc"] == "2026-08-23T21:48:05+00:00"
+    assert witness["source_available_at_utc"] == "2026-08-23T20:45:03+00:00"
+    assert witness["provider_source_cycle_time_utc"] == "2026-08-23T20:00:00+00:00"
+    assert witness["provider_run_id_by_model"]["icon_global"] == (
+        "openmeteo:icon_global:2026-08-23T20:03:00+00:00"
+    )
+    assert witness["source_run_authority_by_model"]["ecmwf_ifs"] == (
+        "run_pinned_single_runs"
+    )
+
+    bad_meta = json.loads(source_meta)
+    bad_meta["source_run_id"] = "forged-run"
+    conn.execute(
+        "UPDATE day0_hourly_vectors SET source_run_meta_json = ?",
+        (json.dumps(bad_meta),),
+    )
+    assert (
+        _day0_remaining_vector_witness(
+            conn,
+            request,
+            metric="high",
+            computed_at_utc=datetime(2026, 8, 23, 21, 48, 5, tzinfo=UTC),
+            anchor_vector_id="v-ecmwf",
+        )
+        is None
+    )
+    forged_provider_identity = json.loads(source_meta)
+    forged_provider_identity["model_api_id"] = "forged_model"
+    forged_provider_identity["provider_run_id"] = (
+        "openmeteo:forged_model:2026-08-23T20:00:00+00:00"
+    )
+    conn.execute(
+        "UPDATE day0_hourly_vectors SET source_run_meta_json = ? WHERE vector_id = ?",
+        (json.dumps(forged_provider_identity), "v-ecmwf"),
+    )
+    assert (
+        _day0_remaining_vector_witness(
+            conn,
+            request,
+            metric="high",
+            computed_at_utc=datetime(2026, 8, 23, 21, 48, 5, tzinfo=UTC),
+            anchor_vector_id="v-ecmwf",
+        )
+        is None
+    )
+    bad_meta["source_run_id"] = "day0_hourly:test-hash"
+    bad_meta["fetch_started_at"] = "2026-08-23T20:46:00+00:00"
+    conn.execute(
+        "UPDATE day0_hourly_vectors SET source_run_meta_json = ?",
+        (json.dumps(bad_meta),),
+    )
+    assert (
+        _day0_remaining_vector_witness(
+            conn,
+            request,
+            metric="high",
+            computed_at_utc=datetime(2026, 8, 23, 21, 48, 5, tzinfo=UTC),
+            anchor_vector_id="v-ecmwf",
+        )
+        is None
+    )
 
 
 # ---------------------------------------------------------------------------

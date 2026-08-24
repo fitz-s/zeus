@@ -1,6 +1,6 @@
 # Created: 2026-06-06
-# Last reused/audited: 2026-08-03
-# Lifecycle: created=2026-06-06; last_reviewed=2026-08-03; last_reused=2026-08-03
+# Last reused/audited: 2026-08-23
+# Lifecycle: created=2026-06-06; last_reviewed=2026-08-23; last_reused=2026-08-23
 # Purpose: Protect DB materialization for Open-Meteo ECMWF IFS 9km + Bayes-fusion replacement live layer.
 # Reuse: Run before changing replacement forecast live/experiment write path.
 # Authority basis: Operator-directed replacement forecast simple-switch readiness.
@@ -203,7 +203,13 @@ def _bins() -> tuple[_TemperatureBin, ...]:
     )
 
 
-def _install_live_fusion(monkeypatch: pytest.MonkeyPatch, *, complete: bool = True) -> None:
+def _install_live_fusion(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    complete: bool = True,
+    shape_lag_hours: float = 0.0,
+) -> None:
+    members = tuple(25.0 + (index - 25) * 0.02 for index in range(51))
     override = _BayesPrecisionFusionFusionOverride(
         anchor_value_c=25.0,
         anchor_sigma_c=0.35,
@@ -222,6 +228,25 @@ def _install_live_fusion(monkeypatch: pytest.MonkeyPatch, *, complete: bool = Tr
         decorrelated_providers_served=5 if complete else 4,
         decorrelated_providers_expected=5,
         current_value_serving={"ecmwf_ifs9": {"served_via": "single_runs"}},
+        current_evidence_shape={
+            "snapshot_id": 9001,
+            "shape_hash": "test-current-shape",
+            "semantics_revision": (
+                materializer_mod.CURRENT_EVIDENCE_SEMANTICS_REVISION
+                if shape_lag_hours == 0.0
+                else materializer_mod.STALE_ENSEMBLE_ABSOLUTE_DISAGREEMENT_SEMANTICS_REVISION
+            ),
+            "source_cycle_time": (
+                _dt(0) - timedelta(hours=shape_lag_hours)
+            ).isoformat(),
+            "source_available_at": _dt(1).isoformat(),
+            "shape_lag_hours": shape_lag_hours,
+            "stale_shape_reused": shape_lag_hours > 0.0,
+            "translation_applied": False,
+            "member_count": len(members),
+            "between_cohort_status": "SIMULTANEOUS_PROVEN",
+        },
+        current_evidence_members_c=members,
     )
     monkeypatch.setattr(materializer_mod, "_replacement_bayes_precision_fusion_override", lambda *args, **kwargs: override)
 
@@ -1013,6 +1038,20 @@ def test_materializer_writes_certified_bootstrap_bounds(monkeypatch: pytest.Monk
         assert q_lcb[key] <= point <= q_ucb[key]
     assert not any(str(key).startswith(("buy_no:", "no:")) for key in q_lcb)
     assert provenance["q_lcb_json_role"] == "fused_center_bootstrap_lcb"
+
+
+def test_materializer_does_not_publish_stale_ensemble_as_live_probability(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    conn = _conn()
+    _install_live_fusion(monkeypatch, shape_lag_hours=6.0)
+
+    result = materialize_replacement_forecast_live(conn, _request())
+
+    assert result.ok is False
+    assert "CAPTURE:CURRENT_EVIDENCE_NOT_LIVE" in result.reason_codes
+    assert conn.execute("SELECT COUNT(*) FROM forecast_posteriors").fetchone()[0] == 0
+    assert conn.execute("SELECT COUNT(*) FROM readiness_state").fetchone()[0] == 0
 
 
 def test_prepared_materialization_keeps_compute_read_only(
@@ -1894,7 +1933,8 @@ def test_materializer_hko_provisional_observation_does_not_truncate_support(
     q_lcb = json.loads(row["q_lcb_json"])
     provenance = json.loads(row["provenance_json"])
     assert q["cool"] > 0.0
-    assert q_lcb["cool"] > 0.0
+    assert q_lcb["cool"] >= 0.0
+    assert provenance["day0_provisional_observation"]["support_truncation"] is False
     assert provenance["q_shape"] == "fused_normal_direct"
     assert "day0_conditioning" not in provenance
     assert provenance["day0_provisional_observation"] == {
@@ -2191,6 +2231,34 @@ def test_materialize_script_attaches_world_observations_read_only(
     conn.close()
 
 
+def test_materializer_connection_skips_journal_bootstrap_behind_bulk_writer(
+    tmp_path, monkeypatch
+) -> None:
+    import src.state.db as state_db
+
+    forecast_path = tmp_path / "forecasts.db"
+    bootstrap = sqlite3.connect(forecast_path)
+    assert bootstrap.execute("PRAGMA journal_mode=WAL").fetchone()[0] == "wal"
+    bootstrap.execute("CREATE TABLE source_rows (value INTEGER NOT NULL)")
+    bootstrap.commit()
+    bootstrap.execute("BEGIN IMMEDIATE")
+    bootstrap.execute("INSERT INTO source_rows VALUES (1)")
+    monkeypatch.setattr(state_db, "ZEUS_FORECASTS_DB_PATH", forecast_path)
+
+    started = time.monotonic()
+    materializer = (
+        state_db.connect_existing_forecasts_db_without_journal_bootstrap()
+    )
+    elapsed = time.monotonic() - started
+    try:
+        assert elapsed < 0.5
+        assert materializer.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
+    finally:
+        materializer.close()
+        bootstrap.rollback()
+        bootstrap.close()
+
+
 def test_materialize_script_batch_reuses_connection_and_wakes_each_commit(
     tmp_path, monkeypatch, capsys
 ) -> None:
@@ -2210,8 +2278,8 @@ def test_materialize_script_batch_reuses_connection_and_wakes_each_commit(
     conn = _Connection()
     monkeypatch.setattr(
         state_db,
-        "get_forecasts_connection",
-        lambda **_kwargs: conn,
+        "connect_existing_forecasts_db_without_journal_bootstrap",
+        lambda: conn,
     )
     monkeypatch.setattr(cli, "_attach_world_read_only", lambda _conn: None)
 
@@ -2299,8 +2367,8 @@ def test_materialize_script_batch_prepares_schema_before_first_input_error(
     conn = _Connection()
     monkeypatch.setattr(
         state_db,
-        "get_forecasts_connection",
-        lambda **_kwargs: conn,
+        "connect_existing_forecasts_db_without_journal_bootstrap",
+        lambda: conn,
     )
     monkeypatch.setattr(cli, "_attach_world_read_only", lambda _conn: None)
 
@@ -2643,6 +2711,32 @@ def test_materialize_writer_contention_exhaustion_is_retryable(
     holder.close()
 
 
+def test_forecast_writer_lock_never_blocks_outside_bounded_retry(monkeypatch) -> None:
+    import scripts.materialize_replacement_forecast_live as cli
+    import src.state.db_writer_lock as lock_mod
+    from src.state.db import ZEUS_FORECASTS_DB_PATH
+
+    observed: dict[str, object] = {}
+
+    @contextmanager
+    def nonblocking_lock(db_path, write_class, *, blocking=True):
+        observed.update(
+            db_path=db_path,
+            write_class=write_class,
+            blocking=blocking,
+        )
+        yield
+
+    monkeypatch.setattr(lock_mod, "db_writer_lock", nonblocking_lock)
+
+    with cli._forecast_writer_lock():
+        pass
+
+    assert observed["db_path"] == ZEUS_FORECASTS_DB_PATH
+    assert observed["write_class"] is lock_mod.WriteClass.LIVE
+    assert observed["blocking"] is False
+
+
 def test_materialize_transaction_body_busy_is_retryable() -> None:
     import scripts.materialize_replacement_forecast_live as cli
 
@@ -2902,9 +2996,10 @@ def _create_target_frontier_tables(conn: sqlite3.Connection) -> None:
         CREATE TABLE source_run (
             source_run_id TEXT PRIMARY KEY,
             source_id TEXT, track TEXT, source_cycle_time TEXT,
-            source_available_at TEXT, fetch_finished_at TEXT,
+            source_available_at TEXT, fetch_finished_at TEXT, captured_at TEXT,
+            imported_at TEXT,
             expected_count INTEGER, observed_count INTEGER,
-            completeness_status TEXT, raw_payload_hash TEXT,
+            completeness_status TEXT, partial_run INTEGER, raw_payload_hash TEXT,
             manifest_hash TEXT, status TEXT, reason_code TEXT
         );
         CREATE TABLE raw_forecast_artifacts (
@@ -2923,6 +3018,7 @@ def _create_target_frontier_tables(conn: sqlite3.Connection) -> None:
             snapshot_id INTEGER PRIMARY KEY,
             city TEXT, target_date TEXT, temperature_metric TEXT,
             source_id TEXT, model_version TEXT, authority TEXT,
+            source_run_id TEXT,
             causality_status TEXT, boundary_ambiguous INTEGER,
             forecast_window_attribution_status TEXT,
             contributes_to_target_extrema INTEGER,
@@ -2934,13 +3030,17 @@ def _create_target_frontier_tables(conn: sqlite3.Connection) -> None:
         INSERT INTO source_run VALUES (
             'b0-run', 'ecmwf_open_data', 'mx2t6_high',
             '2026-06-06T00:00:00+00:00', '2026-06-06T02:00:00+00:00',
-            '2026-06-06T02:00:00+00:00', 51, 51, 'COMPLETE',
+            '2026-06-06T02:00:00+00:00', '2026-06-06T02:00:00+00:00',
+            '2026-06-06T02:00:00+00:00',
+            51, 51, 'COMPLETE', 0,
             'b0-raw', 'b0-manifest', 'SUCCESS', NULL
         );
         INSERT INTO source_run VALUES (
             'om9-run', 'openmeteo', 'ifs9_high',
             '2026-06-06T00:00:00+00:00', '2026-06-06T03:00:00+00:00',
-            '2026-06-06T03:00:00+00:00', 1, 1, 'COMPLETE',
+            '2026-06-06T03:00:00+00:00', '2026-06-06T03:00:00+00:00',
+            '2026-06-06T03:00:00+00:00',
+            1, 1, 'COMPLETE', 0,
             'om9-raw', 'om9-manifest', 'SUCCESS', NULL
         );
         INSERT INTO raw_forecast_artifacts VALUES (
@@ -2955,7 +3055,7 @@ def _create_target_frontier_tables(conn: sqlite3.Connection) -> None:
         );
         INSERT INTO ensemble_snapshots VALUES (
             101, 'Shanghai', '2026-06-07', 'high',
-            'ecmwf_open_data', 'ecmwf_ens', 'VERIFIED', 'OK', 0,
+            'ecmwf_open_data', 'ecmwf_ens', 'VERIFIED', 'b0-run', 'OK', 0,
             'FULLY_INSIDE_TARGET_LOCAL_DAY', 1,
             '2026-06-06T00:00:00+00:00', '2026-06-06T00:00:00+00:00',
             '2026-06-06T03:00:00+00:00', '2026-06-06T03:00:00+00:00',
@@ -3010,7 +3110,7 @@ def test_target_dependency_witness_is_bounded_to_exact_target_rows() -> None:
         """
         INSERT INTO ensemble_snapshots VALUES (
             102, 'Shanghai', '2026-06-07', 'high',
-            'ecmwf_open_data', 'ecmwf_ens', 'VERIFIED', 'OK', 0,
+            'ecmwf_open_data', 'ecmwf_ens', 'VERIFIED', 'b0-run', 'OK', 0,
             'FULLY_INSIDE_TARGET_LOCAL_DAY', 1,
             '2026-06-06T00:00:00+00:00', '2026-06-06T00:00:00+00:00',
             '2026-06-06T03:30:00+00:00', '2026-06-06T03:30:00+00:00',
@@ -3195,21 +3295,15 @@ def test_target_witness_detects_same_fetch_time_source_run_replacement() -> None
         """
     )
 
-    changed = cli._revalidate_target_dependency_witness(
-        conn, prepared, baseline
-    )
+    with pytest.raises(cli._TargetDependencyWitnessUnavailable):
+        cli._revalidate_target_dependency_witness(conn, prepared, baseline)
     conn.close()
-
-    assert changed != baseline
-    assert changed.source_run_states[0].fetch_finished_at == (
-        baseline.source_run_states[0].fetch_finished_at
-    )
 
 
 @pytest.mark.parametrize(
     "delete_sql,raises",
     (
-        ("DELETE FROM source_run WHERE source_run_id = 'b0-run'", False),
+        ("DELETE FROM source_run WHERE source_run_id = 'b0-run'", True),
         ("DELETE FROM raw_forecast_artifacts WHERE artifact_id = 17", True),
         ("DELETE FROM raw_model_forecasts WHERE raw_model_forecast_id = 101", True),
         ("DELETE FROM ensemble_snapshots WHERE snapshot_id = 101", True),
@@ -3284,6 +3378,95 @@ def test_shared_frontier_helpers_match_materializer_selectors() -> None:
     )
     assert snapshot is not None
     assert snapshot_id == snapshot.snapshot_id == 101
+
+
+def test_current_ensemble_requires_complete_source_run_before_probability_authority() -> None:
+    from src.data.replacement_forecast_materializer import (
+        read_current_evidence_snapshot_identity,
+    )
+    from src.data.replacement_input_hwm import latest_eligible_ensemble_input_cycle
+
+    conn = _conn()
+    _ensure_source_run_table(conn)
+    request = _request()
+
+    def write_run(
+        *, status: str, completeness: str, partial: bool, imported_at: datetime
+    ) -> None:
+        observed_count = 3 if partial else 48
+        write_source_run(
+            conn,
+            source_run_id="ens-run",
+            source_id="ecmwf_open_data",
+            track="mx2t6_high_short_horizon",
+            release_calendar_key="ecmwf_open_data:mx2t6_high:short",
+            source_cycle_time=_dt(0),
+            source_available_at=_dt(2),
+            fetch_finished_at=imported_at,
+            captured_at=imported_at,
+            imported_at=imported_at,
+            status=status,
+            completeness_status=completeness,
+            partial_run=partial,
+            expected_steps_json=list(range(3, 145, 3)),
+            observed_steps_json=list(range(3, observed_count + 1, 3)),
+            expected_count=48,
+            observed_count=observed_count,
+            data_version="ecmwf_opendata_mx2t3_local_calendar_day_max",
+        )
+
+    write_run(status="PARTIAL", completeness="PARTIAL", partial=True, imported_at=_dt(3))
+    conn.execute(
+        """
+        INSERT INTO ensemble_snapshots (
+            snapshot_id, city, target_date, temperature_metric,
+            physical_quantity, observation_field, issue_time, available_at,
+            fetch_time, lead_hours, members_json, model_version, dataset_id,
+            source_id, source_run_id, source_cycle_time, source_available_at,
+            authority, causality_status, boundary_ambiguous,
+            forecast_window_attribution_status, contributes_to_target_extrema,
+            members_unit
+        ) VALUES (
+            101, 'Shanghai', '2026-06-07', 'high',
+            'temperature_max', 'high_temp', '2026-06-06T00:00:00+00:00',
+            '2026-06-06T03:00:00+00:00', '2026-06-06T03:00:00+00:00', 24,
+            '[20.0,21.0]', 'ecmwf_ens',
+            'ecmwf_opendata_mx2t3_local_calendar_day_max', 'ecmwf_open_data',
+            'ens-run', '2026-06-06T00:00:00+00:00',
+            '2026-06-06T03:00:00+00:00', 'VERIFIED', 'OK', 0,
+            'FULLY_INSIDE_TARGET_LOCAL_DAY', 1, 'degC'
+        )
+        """
+    )
+
+    def selected() -> tuple[object | None, datetime | None]:
+        return (
+            read_current_evidence_snapshot_identity(conn, request, metric="high"),
+            latest_eligible_ensemble_input_cycle(
+                conn,
+                city=request.city,
+                target_date=request.target_date,
+                metric="high",
+                decision_time=request.computed_at,
+            ),
+        )
+
+    assert selected() == (None, None)
+
+    write_run(
+        status="SUCCESS",
+        completeness="COMPLETE",
+        partial=False,
+        imported_at=_dt(3, 30),
+    )
+    identity, cycle = selected()
+    assert identity is not None
+    assert identity.snapshot_id == 101
+    assert cycle == _dt(0)
+
+    write_run(status="SUCCESS", completeness="COMPLETE", partial=False, imported_at=_dt(5))
+    assert selected() == (None, None)
+    conn.close()
 
 
 def test_new_target_family_provider_changes_final_witness() -> None:
@@ -3415,7 +3598,7 @@ def test_final_ens_frontier_detects_absent_to_present() -> None:
         """
         INSERT INTO ensemble_snapshots VALUES (
             102, 'Shanghai', '2026-06-07', 'high',
-            'ecmwf_open_data', 'ecmwf_ens', 'VERIFIED', 'OK', 0,
+            'ecmwf_open_data', 'ecmwf_ens', 'VERIFIED', 'b0-run', 'OK', 0,
             'FULLY_INSIDE_TARGET_LOCAL_DAY', 1,
             '2026-06-06T00:00:00+00:00', '2026-06-06T00:00:00+00:00',
             '2026-06-06T03:30:00+00:00', '2026-06-06T03:30:00+00:00',
@@ -3444,7 +3627,7 @@ def test_final_ens_frontier_exact_city_update_supersedes_casefold() -> None:
         """
         INSERT INTO ensemble_snapshots VALUES (
             102, 'shanghai', '2026-06-07', 'high',
-            'ecmwf_open_data', 'ecmwf_ens', 'UNVERIFIED', 'OK', 0,
+            'ecmwf_open_data', 'ecmwf_ens', 'UNVERIFIED', 'b0-run', 'OK', 0,
             'FULLY_INSIDE_TARGET_LOCAL_DAY', 1,
             '2026-06-06T00:00:00+00:00', '2026-06-06T00:00:00+00:00',
             '2026-06-06T03:30:00+00:00', '2026-06-06T03:30:00+00:00',
@@ -3469,6 +3652,31 @@ def test_final_ens_frontier_exact_city_update_supersedes_casefold() -> None:
     assert current_id == 102
 
 
+def test_existing_frontier_indexes_require_no_live_ddl() -> None:
+    """A normal posterior write must not wait on an already-complete schema."""
+
+    conn = sqlite3.connect(":memory:")
+    _create_target_frontier_tables(conn)
+    _ensure_replacement_frontier_indexes(conn)
+
+    def deny_index_ddl(
+        action: int,
+        _arg1: str | None,
+        _arg2: str | None,
+        _database: str | None,
+        _trigger: str | None,
+    ) -> int:
+        if action == sqlite3.SQLITE_CREATE_INDEX:
+            return sqlite3.SQLITE_DENY
+        return sqlite3.SQLITE_OK
+
+    conn.set_authorizer(deny_index_ddl)
+    try:
+        _ensure_replacement_frontier_indexes(conn)
+    finally:
+        conn.close()
+
+
 def test_final_ens_selector_has_indexed_logarithmic_work() -> None:
     """Canonical exact/folded target selectors must not scan their target range."""
     from src.data.replacement_forecast_materializer import (
@@ -3487,7 +3695,7 @@ def test_final_ens_selector_has_indexed_logarithmic_work() -> None:
             """
             INSERT INTO ensemble_snapshots VALUES (
                 ?, 'Shanghai', '2026-06-07', 'high',
-                'ecmwf_open_data', 'ecmwf_ens', 'VERIFIED', 'OK', 0,
+                'ecmwf_open_data', 'ecmwf_ens', 'VERIFIED', 'b0-run', 'OK', 0,
                 'FULLY_INSIDE_TARGET_LOCAL_DAY', 1,
                 '2026-06-06T00:00:00+00:00', '2026-06-06T00:00:00+00:00',
                 '2026-06-06T03:00:00+00:00', '2026-06-06T03:00:00+00:00',
@@ -3777,6 +3985,22 @@ def test_final_frontier_queries_use_exact_target_indexes_without_temp_sort() -> 
     )
 
     conn = _conn()
+    _ensure_source_run_table(conn)
+    write_source_run(
+        conn,
+        source_run_id="ens-run",
+        source_id="ecmwf_open_data",
+        track="mx2t6_high_short_horizon",
+        release_calendar_key="ecmwf_open_data:mx2t6_high:short",
+        source_cycle_time=_dt(0),
+        source_available_at=_dt(3),
+        fetch_finished_at=_dt(3),
+        captured_at=_dt(3),
+        imported_at=_dt(3),
+        status="SUCCESS",
+        completeness_status="COMPLETE",
+        partial_run=False,
+    )
     _ensure_replacement_identity_columns(conn)
     _ensure_replacement_frontier_indexes(conn)
     prepared = _prepared_target_frontier(101)
@@ -3798,7 +4022,7 @@ def test_final_frontier_queries_use_exact_target_indexes_without_temp_sort() -> 
             snapshot_id, city, target_date, temperature_metric, physical_quantity,
             observation_field, issue_time, available_at, fetch_time, lead_hours,
             members_json, model_version, dataset_id, source_id, source_cycle_time,
-            source_available_at, forecast_window_attribution_status,
+            source_available_at, source_run_id, forecast_window_attribution_status,
             contributes_to_target_extrema, causality_status, boundary_ambiguous,
             members_unit
         ) VALUES (101, 'Shanghai', '2026-06-07', 'high', 'temperature_max',
@@ -3806,7 +4030,7 @@ def test_final_frontier_queries_use_exact_target_indexes_without_temp_sort() -> 
                   '2026-06-06T03:00:00+00:00', '2026-06-06T03:00:00+00:00',
                   24, '[20.0,21.0]', 'ecmwf_ens', 'ens', 'ecmwf_open_data',
                   '2026-06-06T00:00:00+00:00', '2026-06-06T03:00:00+00:00',
-                  'FULLY_INSIDE_TARGET_LOCAL_DAY', 1, 'OK', 0, 'degC')
+                  'ens-run', 'FULLY_INSIDE_TARGET_LOCAL_DAY', 1, 'OK', 0, 'degC')
         """
     )
     traced: list[str] = []
@@ -4655,3 +4879,185 @@ def test_materialize_script_fails_closed_without_precision_metadata(tmp_path) ->
     payload = json.loads(result.stderr)
     assert payload["status"] == "ERROR"
     assert "precision_metadata_json" in payload["error"]
+
+
+def test_boot_current_posterior_family_scan_uses_covering_index(
+    tmp_path: Path,
+) -> None:
+    from src.data import replacement_forecast_production as production
+
+    forecast_db = tmp_path / "forecasts.db"
+    conn = sqlite3.connect(forecast_db)
+    conn.executescript(
+        """
+        CREATE TABLE forecast_posteriors (
+            posterior_id INTEGER PRIMARY KEY,
+            city TEXT NOT NULL,
+            target_date TEXT NOT NULL,
+            temperature_metric TEXT NOT NULL,
+            computed_at TEXT NOT NULL,
+            runtime_layer TEXT NOT NULL,
+            training_allowed INTEGER NOT NULL,
+            q_json TEXT NOT NULL
+        );
+        CREATE INDEX idx_forecast_posteriors_runtime_layer_target
+            ON forecast_posteriors(
+                runtime_layer, city, target_date, temperature_metric, computed_at
+            );
+        """
+    )
+    conn.executemany(
+        "INSERT INTO forecast_posteriors VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            (
+                1,
+                "Paris",
+                "2026-08-23",
+                "high",
+                "2026-08-23T09:00:00+00:00",
+                "live",
+                0,
+                "x" * 100_000,
+            ),
+            (
+                2,
+                "Munich",
+                "2026-08-23",
+                "high",
+                "2026-08-23T09:01:00+00:00",
+                "live",
+                0,
+                "y" * 100_000,
+            ),
+            (
+                3,
+                "Paris",
+                "2026-08-23",
+                "high",
+                "2026-08-23T09:02:00+00:00",
+                "live",
+                0,
+                "z" * 100_000,
+            ),
+            (
+                4,
+                "Experiment",
+                "2026-08-23",
+                "high",
+                "2026-08-23T09:03:00+00:00",
+                "experiment",
+                1,
+                "e" * 100_000,
+            ),
+        ),
+    )
+    plan = tuple(
+        str(row[3])
+        for row in conn.execute(
+            "EXPLAIN QUERY PLAN "
+            + production._CURRENT_POSTERIOR_FAMILY_SCAN_SQL,
+            (100,),
+        )
+    )
+    conn.commit()
+    conn.close()
+
+    assert any(
+        "USING COVERING INDEX idx_forecast_posteriors_runtime_layer_target"
+        in detail
+        for detail in plan
+    )
+    assert production._current_forecast_posterior_families(
+        {"forecast_db": str(forecast_db)},
+        limit=2,
+    ) == (
+        ("Paris", "2026-08-23", "high"),
+        ("Munich", "2026-08-23", "high"),
+    )
+
+
+def test_seed_cycle_boundary_uses_ordered_live_family_index(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.data import replacement_forecast_live_materialization_queue as queue
+    from src.data import replacement_input_hwm
+
+    forecast_db = tmp_path / "forecasts.db"
+    conn = sqlite3.connect(forecast_db)
+    conn.executescript(
+        """
+        CREATE TABLE forecast_posteriors (
+            posterior_id INTEGER PRIMARY KEY,
+            source_id TEXT NOT NULL,
+            city TEXT NOT NULL,
+            target_date TEXT NOT NULL,
+            temperature_metric TEXT NOT NULL,
+            source_cycle_time TEXT NOT NULL,
+            computed_at TEXT NOT NULL,
+            runtime_layer TEXT NOT NULL,
+            q_json TEXT NOT NULL
+        );
+        CREATE INDEX idx_forecast_posteriors_runtime_layer_target
+            ON forecast_posteriors(
+                runtime_layer, city, target_date, temperature_metric, computed_at
+            );
+        """
+    )
+    conn.executemany(
+        "INSERT INTO forecast_posteriors VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            (
+                1,
+                queue.SOURCE_ID,
+                "Ankara",
+                "2026-08-23",
+                "high",
+                "2026-08-23T06:00:00+00:00",
+                "2026-08-23T08:00:00+00:00",
+                "live",
+                "x" * 100_000,
+            ),
+            (
+                2,
+                queue.SOURCE_ID,
+                "Ankara",
+                "2026-08-23",
+                "high",
+                "2026-08-23T18:00:00+00:00",
+                "2026-08-23T09:00:00+00:00",
+                "offline",
+                "y" * 100_000,
+            ),
+        ),
+    )
+    conn.commit()
+    plan = "\n".join(
+        str(row[3])
+        for row in conn.execute(
+            "EXPLAIN QUERY PLAN " + queue._CURRENT_LIVE_POSTERIOR_CYCLE_SQL,
+            (queue.SOURCE_ID, "Ankara", "2026-08-23", "high"),
+        ).fetchall()
+    )
+    conn.close()
+    monkeypatch.setattr(
+        replacement_input_hwm,
+        "latest_eligible_ensemble_input_cycle",
+        lambda *_args, **_kwargs: datetime(
+            2026, 8, 23, 12, tzinfo=timezone.utc
+        ),
+    )
+
+    boundary = queue._seed_source_cycle_boundary(
+        forecast_db=forecast_db,
+        seed={
+            "city": "Ankara",
+            "target_date": "2026-08-23",
+            "temperature_metric": "high",
+            "source_cycle_time": "2026-08-23T12:00:00+00:00",
+        },
+    )
+
+    assert boundary is None
+    assert "USING INDEX idx_forecast_posteriors_runtime_layer_target" in plan
+    assert "USE TEMP B-TREE FOR ORDER BY" not in plan

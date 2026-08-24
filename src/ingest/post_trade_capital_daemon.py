@@ -1,5 +1,5 @@
 # Created: 2026-06-08
-# Last reused or audited: 2026-07-24
+# Last reused or audited: 2026-08-23
 # Authority basis: docs/reference/design_system_decomposition_plan.md
 #   §4.3 (Post-Trade Capital Lifecycle), §6 (P4 row + co-location decision),
 #   §7 (I3 commit-before-HTTP no-back-coupling; I4 ingest->P4),
@@ -22,6 +22,8 @@ used to bundle with exit monitoring:
   - ``payout_observer_cycle``      (10-min; LX-T1 read-only ConditionalTokens
     payout observation, ``src.ingest.payout_observer`` — NOT a
     cascade-liveness required poller, not on the settlement-grading path)
+  - current-regime capital evidence (5-min; canonical DB read-only evaluator,
+    atomic observational artifact refresh, never order authority)
 
 All cycle bodies live in ``src.execution.post_trade_capital`` (payout_observer_cycle
 lives in ``src.ingest.payout_observer`` instead — it is a read-only chain observer,
@@ -70,7 +72,7 @@ import signal
 import subprocess
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -98,6 +100,23 @@ _PAYOUT_OBSERVER_CHILD_CODE = (
     "payout_observer_cycle()"
 )
 _PAYOUT_OBSERVER_CHILD_EXIT_GRACE_SECONDS = 2.0
+_CAPITAL_EVIDENCE_CHILD_CODE = (
+    "from datetime import datetime, timezone; "
+    "from src.config import state_path; "
+    "from scripts.evaluate_current_regime_capital_advantage import "
+    "evaluate, _atomic_write, _prior_proof_registry; "
+    "artifact_path = state_path('current_regime_capital_advantage.json'); "
+    "artifact = evaluate("
+    "world_path=state_path('zeus-world.db'), "
+    "forecasts_path=state_path('zeus-forecasts.db'), "
+    "trades_path=state_path('zeus_trades.db'), "
+    "as_of=datetime.now(timezone.utc), "
+    "prior_proof_registry=_prior_proof_registry(artifact_path)); "
+    "_atomic_write(artifact_path, artifact)"
+)
+_CAPITAL_EVIDENCE_CHILD_EXIT_GRACE_SECONDS = 2.0
+_CAPITAL_EVIDENCE_START_DELAY_SECONDS = 75.0
+_CAPITAL_EVIDENCE_READ_BUSY_TIMEOUT_MS = 5_000
 
 
 def _chain_sync_child_deadline_seconds() -> float:
@@ -141,6 +160,32 @@ def _payout_observer_child_deadline_seconds() -> float:
             raw,
         )
         return 240.0
+    return value
+
+
+def _capital_evidence_child_deadline_seconds() -> float:
+    raw = os.environ.get("ZEUS_POST_TRADE_CAPITAL_EVIDENCE_DEADLINE_SECONDS")
+    if raw in (None, ""):
+        # Two independent realized-capital curves each enforce a 20-second
+        # read deadline. Preserve room for receipt validation and atomic export
+        # while staying well inside the five-minute scheduler cadence.
+        return 75.0
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        logger.warning(
+            "Invalid ZEUS_POST_TRADE_CAPITAL_EVIDENCE_DEADLINE_SECONDS=%r; "
+            "using 75.0",
+            raw,
+        )
+        return 75.0
+    if value <= 0:
+        logger.warning(
+            "Invalid ZEUS_POST_TRADE_CAPITAL_EVIDENCE_DEADLINE_SECONDS=%r; "
+            "using 75.0",
+            raw,
+        )
+        return 75.0
     return value
 
 
@@ -303,6 +348,60 @@ def _payout_observer_isolated() -> None:
         raise RuntimeError(
             f"payout observer child failed with exit_code={result.returncode}"
         )
+
+
+def _current_regime_capital_evidence_isolated() -> dict[str, object]:
+    """Refresh strict after-cost evidence without coupling it to order runtime."""
+
+    from src.config import state_path
+
+    started_at = datetime.now(timezone.utc)
+    deadline = _capital_evidence_child_deadline_seconds()
+    timeout = deadline + _CAPITAL_EVIDENCE_CHILD_EXIT_GRACE_SECONDS
+    child_env = os.environ.copy()
+    child_env["ZEUS_DB_BUSY_TIMEOUT_MS"] = str(
+        _CAPITAL_EVIDENCE_READ_BUSY_TIMEOUT_MS
+    )
+    try:
+        result = subprocess.run(
+            [sys.executable, "-c", _CAPITAL_EVIDENCE_CHILD_CODE],
+            cwd=Path(__file__).resolve().parents[2],
+            check=False,
+            timeout=timeout,
+            env=child_env,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(
+            f"capital evidence child exceeded {timeout:.1f}s and was killed"
+        ) from exc
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"capital evidence child failed with exit_code={result.returncode}"
+        )
+
+    artifact_path = state_path("current_regime_capital_advantage.json")
+    try:
+        artifact = json.loads(artifact_path.read_text(encoding="utf-8"))
+        evaluated_at = datetime.fromisoformat(
+            str(artifact["evaluated_at"]).replace("Z", "+00:00")
+        )
+    except (KeyError, OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise RuntimeError("capital evidence child produced no valid artifact") from exc
+    if evaluated_at.tzinfo is None:
+        evaluated_at = evaluated_at.replace(tzinfo=timezone.utc)
+    if (
+        artifact.get("artifact_role")
+        != "OBSERVATIONAL_EVIDENCE_NOT_ORDER_AUTHORITY"
+        or artifact.get("verdict") not in {"PASS", "FAIL"}
+        or evaluated_at < started_at
+    ):
+        raise RuntimeError("capital evidence child produced stale or invalid evidence")
+    logger.info(
+        "current-regime capital evidence refreshed: verdict=%s evaluated_at=%s",
+        artifact["verdict"],
+        artifact["evaluated_at"],
+    )
+    return artifact
 
 
 def _assert_cascade_liveness_contract(scheduler) -> None:
@@ -492,6 +591,20 @@ def main() -> None:
         _scheduler_job("payout_observer")(_payout_observer_isolated),
         "interval", minutes=10, id="payout_observer",
         max_instances=1, coalesce=True,
+    )
+    _scheduler.add_job(
+        _scheduler_job("current_regime_capital_evidence")(
+            _current_regime_capital_evidence_isolated
+        ),
+        "interval", minutes=5, id="current_regime_capital_evidence",
+        max_instances=1, coalesce=True,
+        # Harvester is intentionally immediate at boot and owns canonical
+        # settlement writes. Keep this read-heavy audit out of that startup
+        # contention window; its five-minute interval remains independent.
+        next_run_time=(
+            datetime.now(timezone.utc)
+            + timedelta(seconds=_CAPITAL_EVIDENCE_START_DELAY_SECONDS)
+        ),
     )
 
     # 60s liveness heartbeat (file-only). The heartbeat-sensor watches this file's mtime.

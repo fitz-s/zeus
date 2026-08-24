@@ -1,5 +1,5 @@
 # Created: 2026-06-08
-# Last reused/audited: 2026-07-28
+# Last reused/audited: 2026-08-23
 # Authority basis: operator Point-1 directive 2026-06-08 — move BAYES_PRECISION_FUSION/replacement_0_1
 #   forecast PRODUCTION (raw-input download + live materialization) OFF the
 #   live-trading daemon (src/main.py) INTO the forecast-live (data) daemon. The
@@ -744,11 +744,14 @@ def _download_replacement_forecast_current_targets_if_needed(
     max_wall_clock_seconds: float | None = None,
     required_scopes: Sequence[tuple[str, str, str]] | None = None,
     quota_critical: bool = False,
+    quota_priority: bool = False,
 ) -> dict[str, object] | None:
     forecast_db = cfg.get("forecast_db")
     output_dir = cfg.get("download_output_dir") or cfg.get("raw_manifest_dir")
     if forecast_db is None or output_dir is None:
         raise ValueError("replacement current-target download requires forecast_db and raw_manifest_dir/download_output_dir")
+    if quota_critical and quota_priority:
+        raise ValueError("current-target quota lane must be critical or priority, not both")
     from scripts.download_replacement_forecast_current_targets import (
         download_current_target_openmeteo_inputs,
     )
@@ -817,7 +820,6 @@ def _download_replacement_forecast_current_targets_if_needed(
             if missing_critical_scopes is None:
                 raise RuntimeError("critical current-target anchor coverage unreadable")
             if not missing_critical_scopes:
-                _close_current_target_bucket_pool()
                 return {
                     "status": "CURRENT_TARGET_CRITICAL_SCOPES_ALREADY_COVERED",
                     "available_cycle": available_cycle.isoformat(),
@@ -890,6 +892,13 @@ def _download_replacement_forecast_current_targets_if_needed(
             # above. DRAIN: this bounded raw-anchor call and its existing manifest
             # commit. RESET: context exit; every later call re-proves current phase.
             quota_context = quota_tracker.critical_lane()
+        elif quota_priority:
+            from src.data.openmeteo_quota import quota_tracker  # noqa: PLC0415
+
+            # SCOPE: probe-resolved source-clock anchor capture only. DRAIN: the
+            # bounded exact-cycle target wave commits manifests, then the next poll
+            # re-counts residual scopes. RESET: context exit or zero residual gaps.
+            quota_context = quota_tracker.priority_lane()
         with quota_context:
             result = download_current_target_openmeteo_inputs(
                 forecast_db=Path(str(forecast_db)),
@@ -920,12 +929,19 @@ def _download_replacement_forecast_current_targets_if_needed(
                 fetch_workers=int(cfg.get("source_clock_fanout_workers") or 4),
                 bucket_reader_pool=bucket_pool,
                 quota_critical=quota_critical,
+                quota_priority=quota_priority,
                 **download_kwargs,
             )
     except Exception:
         _close_current_target_bucket_pool(cycle)
         raise
-    if not bool(result.get("timeboxed_incomplete")):
+    # A scoped held-capital slice shares the cycle pool with the broad downloader.
+    # Completing that local slice does not prove the broad cycle is complete; closing
+    # here discards the broad slice's partially decoded hourly points and makes every
+    # later timebox restart from zero. Only the unscoped broad owner may close on local
+    # completion. Cycle rollover, broad coverage, exceptions, and process exit retain
+    # their existing cleanup paths.
+    if required_scopes is None and not bool(result.get("timeboxed_incomplete")):
         _close_current_target_bucket_pool(cycle)
     result.setdefault("available_cycle", available_cycle.isoformat())
     result.setdefault(
@@ -2560,6 +2576,28 @@ def _per_leg_downloaded_cycle(forecast_db: Path, source_id: str) -> datetime | N
         return None
 
 
+def _current_target_anchor_gap_count(
+    forecast_db: Path,
+    cycle: datetime,
+) -> int | None:
+    """Return exact-cycle current-target anchor gaps (None = unreadable -> retry)."""
+
+    if not forecast_db.exists():
+        return 0
+    try:
+        from src.data.replacement_forecast_current_target_plan import (  # noqa: PLC0415
+            build_replacement_forecast_current_target_plan,
+        )
+
+        plan = build_replacement_forecast_current_target_plan(
+            forecast_db,
+            required_openmeteo_source_cycle_time=cycle,
+        )
+        return int(plan.missing_openmeteo_manifest_count)
+    except Exception:
+        return None
+
+
 def _replacement_cycle_availability_poll_if_needed(
     cfg: dict[str, object],
     *,
@@ -2590,13 +2628,27 @@ def _replacement_cycle_availability_poll_if_needed(
 
     now = datetime.now(timezone.utc)
     availability = resolve_provider_anchor_cycle_availability(now)
-    anchor_have = _per_leg_downloaded_cycle(Path(str(forecast_db)), "openmeteo_ecmwf_ifs_9km")
+    forecast_db_path = Path(str(forecast_db))
+    anchor_have = _per_leg_downloaded_cycle(forecast_db_path, "openmeteo_ecmwf_ifs_9km")
     newest_anchor_published = next((a.cycle for a in availability if a.anchor_available), None)
+    anchor_missing_scope_count = (
+        _current_target_anchor_gap_count(forecast_db_path, newest_anchor_published)
+        if newest_anchor_published is not None
+        else 0
+    )
+    anchor_cycle_advanced = (
+        newest_anchor_published is not None
+        and (anchor_have is None or newest_anchor_published > anchor_have)
+    )
 
     fetch_anchor_cycle = (
         newest_anchor_published
         if newest_anchor_published is not None
-        and (anchor_have is None or newest_anchor_published > anchor_have)
+        and (
+            anchor_cycle_advanced
+            or anchor_missing_scope_count is None
+            or anchor_missing_scope_count > 0
+        )
         else None
     )
     report: dict[str, object] = {
@@ -2609,6 +2661,7 @@ def _replacement_cycle_availability_poll_if_needed(
             else None
         ),
         "anchor_downloaded_cycle": anchor_have.isoformat() if anchor_have else None,
+        "anchor_missing_scope_count": anchor_missing_scope_count,
         "legs_fetched": [],
     }
     try:
@@ -2645,8 +2698,10 @@ def _replacement_cycle_availability_poll_if_needed(
                 write_db=True,
                 release_lag_hours=float(cfg.get("download_release_lag_hours") or 14.0),
                 anchor_sigma_c=float(cfg.get("download_anchor_sigma_c") or 3.0),
-                include_covered=True,
+                include_covered=anchor_cycle_advanced,
+                missing_manifests_only=not anchor_cycle_advanced,
                 fetch_workers=int(cfg.get("source_clock_fanout_workers") or 4),
+                quota_priority=True,
             )
             report["legs_fetched"].append({"leg": leg, "cycle": cycle.isoformat()})  # type: ignore[union-attr]
         except Exception as exc:  # noqa: BLE001 — anchor fail-soft; next tick retries
@@ -2833,6 +2888,7 @@ def _enqueue_cycle_advance_reseeds_if_needed(
     scopes: Sequence[tuple[str, str, str]] | None = None,
     manifest_snapshot: dict[str, object] | None = None,
     limit: int | None = None,
+    causal_baseline_source_run_id: str | None = None,
 ) -> dict[str, object] | None:
     """U5 step 2a — enqueue re-materialization seeds for active-window families whose latest
     posterior consumed a STRICTLY OLDER cycle than the freshest materializable in-universe cycle.
@@ -2869,6 +2925,7 @@ def _enqueue_cycle_advance_reseeds_if_needed(
             computed_at=computed_at,
             manifests=manifests,
             include_missing_posterior=scopes is not None,
+            causal_baseline_source_run_id=causal_baseline_source_run_id,
         )
     except Exception as exc:  # noqa: BLE001 — fail-soft: the trigger never breaks the poll
         logger.warning("cycle-advance trigger skipped (fail-soft): %s", exc)
@@ -3164,12 +3221,34 @@ def _run_replacement_forecast_live_materialization_queue_once(
     return report
 
 
+_CURRENT_POSTERIOR_FAMILY_SCAN_SQL = """
+    SELECT city,
+           target_date,
+           temperature_metric,
+           MAX(computed_at) AS latest_computed_at,
+           MAX(posterior_id) AS latest_posterior_id
+      FROM forecast_posteriors
+           INDEXED BY idx_forecast_posteriors_runtime_layer_target
+     WHERE runtime_layer = 'live'
+     GROUP BY city, target_date, temperature_metric
+     ORDER BY latest_computed_at DESC, latest_posterior_id DESC
+     LIMIT ?
+"""
+
+
 def _current_forecast_posterior_families(
     cfg: dict[str, object],
     *,
     limit: int = 100,
 ) -> tuple[tuple[str, str, str], ...]:
-    """Return current live families from the append tail, newest compute first."""
+    """Return current live families from the covering index, newest first.
+
+    This is boot catch-up scope only; it never grants probability authority.
+    Live materialization writes ``training_allowed=0`` by contract, while every
+    woken family is re-read and re-authorized downstream.  Keeping the query on
+    the runtime-layer covering index avoids decoding the table's large q/provenance
+    payloads after a cold daemon restart.
+    """
 
     raw_path = cfg.get("forecast_db")
     if not raw_path:
@@ -3183,46 +3262,20 @@ def _current_forecast_posterior_families(
 
         conn = _connect_read_only(path)
         family_limit = max(1, min(int(limit), 100))
-        cursor: int | None = None
-        scanned = 0
-        latest: dict[tuple[str, str, str], tuple[str, int]] = {}
-        while len(latest) < family_limit and scanned < 5_000:
-            cursor_filter = " AND rowid < ?" if cursor is not None else ""
-            params: tuple[object, ...] = (cursor, 256) if cursor is not None else (256,)
-            rows = conn.execute(
-                f"""
-                SELECT rowid,
-                       city,
-                       target_date,
-                       temperature_metric,
-                       computed_at
-                  FROM forecast_posteriors NOT INDEXED
-                 WHERE runtime_layer = 'live'
-                   AND training_allowed = 0
-                   {cursor_filter}
-                 ORDER BY rowid DESC
-                 LIMIT ?
-                """,
-                params,
-            ).fetchall()
-            if not rows:
-                break
-            scanned += len(rows)
-            cursor = int(rows[-1][0])
-            for row in rows:
-                family = (
-                    str(row[1] or "").strip(),
-                    str(row[2] or "").strip(),
-                    str(row[3] or "").strip(),
-                )
-                if all(family) and family not in latest:
-                    latest[family] = (str(row[4] or ""), int(row[0]))
-        ordered = sorted(
-            latest,
-            key=lambda family: (latest[family][0], latest[family][1]),
-            reverse=True,
-        )
-        return tuple(ordered[:family_limit])
+        rows = conn.execute(
+            _CURRENT_POSTERIOR_FAMILY_SCAN_SQL,
+            (family_limit,),
+        ).fetchall()
+        families: list[tuple[str, str, str]] = []
+        for row in rows:
+            family = (
+                str(row[0] or "").strip(),
+                str(row[1] or "").strip(),
+                str(row[2] or "").strip(),
+            )
+            if all(family):
+                families.append(family)
+        return tuple(families)
     except (OSError, sqlite3.Error, TypeError, ValueError):
         return ()
     finally:

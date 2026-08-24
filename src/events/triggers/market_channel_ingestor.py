@@ -85,6 +85,10 @@ class MarketChannelAuthorityError(ValueError):
     pass
 
 
+class MarketChannelActionSinkUnavailable(MarketChannelAuthorityError):
+    """No long-lived market-channel runner can own an exact snapshot repair."""
+
+
 @dataclass(frozen=True)
 class MarketChannelAction:
     refresh_snapshot: bool = False
@@ -857,7 +861,6 @@ class MarketChannelIngestor:
             for row in rows
             if str(row.get("token_id") or "") in append_tokens
             and str(row.get("direction") or "").startswith("buy_")
-            and row.get("depth_before_json") not in {None, ""}
         ]
         if audit_rows:
             insert_execution_feasibility_evidence_batch(
@@ -1704,9 +1707,13 @@ class MarketChannelOnlineService:
     connected: bool = False
     gap_start: str | None = None
     refresh_action_count: int = 0
+    refresh_action_completed_count: int = 0
+    refresh_action_deferred_count: int = 0
     refresh_action_dropped_count: int = 0
     refresh_window_action_count: int = 0
     max_refresh_actions_per_window: int = 5
+    held_refresh_window_action_count: int = 0
+    max_held_refresh_actions_per_window: int = 32
     refresh_window_seconds: float = 60.0
     seed_first_token_ids: Iterable[str] = field(default_factory=tuple)
     depth_repair_token_ids: Iterable[str] | None = None
@@ -1718,6 +1725,11 @@ class MarketChannelOnlineService:
     rest_seed_backpressure_reason: str | None = None
     _connected_at: str | None = None
     _refresh_window_start: datetime | None = None
+    _held_refresh_window_keys: set[tuple[str, str]] = field(
+        default_factory=set,
+        init=False,
+        repr=False,
+    )
     _current_generation_depth_tokens: set[str] = field(default_factory=set)
     _missing_depth_tokens: set[str] = field(
         default_factory=set,
@@ -1905,6 +1917,7 @@ class MarketChannelOnlineService:
         deadline_monotonic: float | None = None,
         pre_captured_books: dict[str, dict] | None = None,
         past_end_exit_refresh: bool = False,
+        post_commit_quote_sink: Callable[[tuple[OpportunityEvent, ...]], None] | None = None,
     ) -> int:
         """Fetch REST books off-lock and commit evidence in bounded chunks.
 
@@ -1999,6 +2012,10 @@ class MarketChannelOnlineService:
                         )
                         if commit is not None:
                             commit()
+                    if post_commit_quote_sink is not None and committed_quotes:
+                        post_commit_quote_sink(
+                            tuple(quote.event for quote in committed_quotes)
+                        )
                     self.ingestor.finalize_prepared_quote_events(committed_quotes)
                     self.ingestor.flush_deferred_market_event_sink()
                 except BaseException as exc:
@@ -3208,6 +3225,18 @@ class MarketChannelOnlineService:
             previous = queued or inflight
             if previous is not None:
                 self.refresh_action_coalesced_count += 1
+                if queued is not None and (
+                    self._is_held_refresh_action(action)
+                    and not self._is_held_refresh_action(queued.action)
+                ):
+                    self._pending_refresh_actions[key] = _PendingRefreshAction(
+                        action=action,
+                        generation=queued.generation,
+                        invalidated=queued.invalidated,
+                        retry_count=queued.retry_count,
+                        not_before_monotonic=queued.not_before_monotonic,
+                    )
+                return
             self._refresh_action_generation += 1
             self._pending_refresh_actions[key] = _PendingRefreshAction(
                 action=action,
@@ -3230,6 +3259,31 @@ class MarketChannelOnlineService:
                 daemon=True,
             ).start()
 
+    @staticmethod
+    def _is_held_refresh_action(action: MarketChannelAction) -> bool:
+        return str(action.reason or "") in {
+            "held_snapshot_due",
+            "held_rest_refresh",
+        }
+
+    def enqueue_persistent_refresh_action(self, action: MarketChannelAction) -> None:
+        """Accept an exact repair only when this long-lived service owns both steps.
+
+        A short-lived REST quote writer has fetchers but no invalidation/capture
+        callbacks.  Treating that shape as a completed refresh loses the durable
+        invalidation-to-exact-refresh chain, so it is intentionally rejected.
+        """
+
+        if not action.refresh_snapshot:
+            raise MarketChannelAuthorityError("persistent action must refresh snapshot")
+        if not str(action.condition_id or "").strip() or not str(action.token_id or "").strip():
+            raise MarketChannelAuthorityError("persistent action requires exact condition_id and token_id")
+        if self.invalidate_snapshot is None or self.refresh_snapshot is None:
+            raise MarketChannelActionSinkUnavailable(
+                "persistent market-channel action requires invalidate and refresh callbacks"
+            )
+        self._enqueue_refresh_action(action)
+
     def _drain_refresh_actions(self) -> None:
         while True:
             with self._refresh_worker_lock:
@@ -3237,14 +3291,29 @@ class MarketChannelOnlineService:
                     self._refresh_worker_running = False
                     self._refresh_worker_idle.set()
                     return
-                key, pending = min(
-                    self._pending_refresh_actions.items(),
-                    key=lambda item: (
-                        item[1].not_before_monotonic,
-                        item[1].generation,
-                    ),
-                )
-                wait_seconds = pending.not_before_monotonic - time.monotonic()
+                now_monotonic = time.monotonic()
+                runnable = [
+                    item
+                    for item in self._pending_refresh_actions.items()
+                    if item[1].not_before_monotonic <= now_monotonic
+                ]
+                if runnable:
+                    key, pending = min(
+                        runnable,
+                        key=lambda item: (
+                            not self._is_held_refresh_action(item[1].action),
+                            item[1].generation,
+                        ),
+                    )
+                else:
+                    key, pending = min(
+                        self._pending_refresh_actions.items(),
+                        key=lambda item: (
+                            item[1].not_before_monotonic,
+                            item[1].generation,
+                        ),
+                    )
+                wait_seconds = pending.not_before_monotonic - now_monotonic
                 if wait_seconds <= 0.0:
                     self._pending_refresh_actions.pop(key)
                     self._inflight_refresh_actions[key] = pending
@@ -3264,6 +3333,10 @@ class MarketChannelOnlineService:
                 status = "deferred"
             with self._refresh_worker_lock:
                 self._inflight_refresh_actions.pop(key, None)
+                if status == "deferred":
+                    self.refresh_action_deferred_count += 1
+                else:
+                    self.refresh_action_completed_count += 1
             if status != "deferred":
                 continue
             retry_count = pending.retry_count + 1
@@ -3331,6 +3404,20 @@ class MarketChannelOnlineService:
     def wait_refresh_idle(self, timeout: float | None = None) -> bool:
         return self._refresh_worker_idle.wait(timeout)
 
+    def refresh_action_receipt(self) -> dict[str, int]:
+        """Expose exact queue state without granting ENTRY authority."""
+
+        with self._refresh_worker_lock:
+            return {
+                "queued_exact_actions": len(self._pending_refresh_actions),
+                "inflight_exact_actions": len(self._inflight_refresh_actions),
+                "completed_exact_actions": self.refresh_action_completed_count,
+                "deferred_exact_actions": self.refresh_action_deferred_count,
+                "coalesced_exact_actions": self.refresh_action_coalesced_count,
+                "max_held_actions_per_window": self.max_held_refresh_actions_per_window,
+                "max_background_actions_per_window": self.max_refresh_actions_per_window,
+            }
+
     def _attempt_refresh_action(
         self,
         pending: _PendingRefreshAction,
@@ -3354,11 +3441,37 @@ class MarketChannelOnlineService:
         ):
             self._refresh_window_start = now
             self.refresh_window_action_count = 0
-        if self.refresh_window_action_count >= max(1, self.max_refresh_actions_per_window):
-            assert self._refresh_window_start is not None
-            window_deadline = self._refresh_window_start + timedelta(
-                seconds=max(1.0, self.refresh_window_seconds)
+            self.held_refresh_window_action_count = 0
+            self._held_refresh_window_keys.clear()
+        is_held = self._is_held_refresh_action(action)
+        held_key = self._refresh_action_key(action)
+        assert self._refresh_window_start is not None
+        next_window = self._refresh_window_start + timedelta(
+            seconds=max(1.0, self.refresh_window_seconds)
+        )
+        if is_held and held_key in self._held_refresh_window_keys:
+            pending = _PendingRefreshAction(
+                action=pending.action,
+                generation=pending.generation,
+                invalidated=pending.invalidated,
+                retry_count=pending.retry_count,
+                not_before_monotonic=max(
+                    pending.not_before_monotonic,
+                    time.monotonic() + max(0.0, (next_window - now).total_seconds()),
+                ),
             )
+            return "deferred", pending
+        action_count = (
+            self.held_refresh_window_action_count
+            if is_held
+            else self.refresh_window_action_count
+        )
+        max_actions = (
+            self.max_held_refresh_actions_per_window
+            if is_held
+            else self.max_refresh_actions_per_window
+        )
+        if action_count >= max(1, max_actions):
             pending = _PendingRefreshAction(
                 action=action,
                 generation=pending.generation,
@@ -3367,11 +3480,15 @@ class MarketChannelOnlineService:
                 not_before_monotonic=max(
                     pending.not_before_monotonic,
                     time.monotonic()
-                    + max(0.0, (window_deadline - now).total_seconds()),
+                    + max(0.0, (next_window - now).total_seconds()),
                 ),
             )
             return "deferred", pending
-        self.refresh_window_action_count += 1
+        if is_held:
+            self.held_refresh_window_action_count += 1
+            self._held_refresh_window_keys.add(held_key)
+        else:
+            self.refresh_window_action_count += 1
         self.refresh_action_count += 1
         if self.refresh_snapshot is not None:
             try:
@@ -3385,6 +3502,18 @@ class MarketChannelOnlineService:
                 )
                 return "deferred", pending
             if result == "deferred":
+                if is_held:
+                    pending = _PendingRefreshAction(
+                        action=pending.action,
+                        generation=pending.generation,
+                        invalidated=pending.invalidated,
+                        retry_count=pending.retry_count,
+                        not_before_monotonic=max(
+                            pending.not_before_monotonic,
+                            time.monotonic()
+                            + max(0.0, (next_window - now).total_seconds()),
+                        ),
+                    )
                 return "deferred", pending
             if result not in {None, "completed"}:
                 raise ValueError(f"invalid refresh snapshot result: {result!r}")
@@ -3401,6 +3530,69 @@ class MarketChannelOnlineService:
             )
         )
         return status
+
+
+_persistent_action_sink_lock = threading.RLock()
+_persistent_action_sink: MarketChannelOnlineService | None = None
+
+
+def register_persistent_market_channel_action_sink(
+    service: MarketChannelOnlineService,
+) -> None:
+    """Register the one long-lived owner of invalidate-then-refresh actions."""
+
+    if service.invalidate_snapshot is None or service.refresh_snapshot is None:
+        raise MarketChannelActionSinkUnavailable(
+            "persistent market-channel action requires invalidate and refresh callbacks"
+        )
+    global _persistent_action_sink
+    with _persistent_action_sink_lock:
+        if _persistent_action_sink not in (None, service):
+            raise MarketChannelActionSinkUnavailable(
+                "another persistent market-channel action sink is already registered"
+            )
+        _persistent_action_sink = service
+
+
+def unregister_persistent_market_channel_action_sink(
+    service: MarketChannelOnlineService,
+) -> None:
+    """Remove only the caller's registration during long-lived runner teardown."""
+
+    global _persistent_action_sink
+    with _persistent_action_sink_lock:
+        if _persistent_action_sink is service:
+            _persistent_action_sink = None
+
+
+def enqueue_persistent_market_channel_action(action: MarketChannelAction) -> None:
+    """Queue an exact action on the persistent owner or reject it without loss."""
+
+    with _persistent_action_sink_lock:
+        service = _persistent_action_sink
+        if service is None:
+            raise MarketChannelActionSinkUnavailable(
+                "no persistent market-channel action sink is registered"
+            )
+        service.enqueue_persistent_refresh_action(action)
+
+
+def persistent_market_channel_action_receipt() -> dict[str, int]:
+    """Return the registered persistent consumer's truthful queue receipt."""
+
+    with _persistent_action_sink_lock:
+        service = _persistent_action_sink
+        if service is None:
+            return {
+                "queued_exact_actions": 0,
+                "inflight_exact_actions": 0,
+                "completed_exact_actions": 0,
+                "deferred_exact_actions": 0,
+                "coalesced_exact_actions": 0,
+                "max_held_actions_per_window": 0,
+                "max_background_actions_per_window": 0,
+            }
+        return service.refresh_action_receipt()
 
 
 def run_market_channel_service_forever(

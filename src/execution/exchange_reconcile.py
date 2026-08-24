@@ -253,16 +253,37 @@ def fresh_reconcile_snapshot(
     open_order_ids = {_order_id(item) for item in captured["open_orders"] if _order_id(item)}
     missing_local_order_ids = sorted(local_order_ids - open_order_ids)
     get_order = getattr(adapter, "get_order", None)
+    point_reader_authenticated = bool(
+        getattr(adapter, "authenticated_point_reads_are_complete", False)
+        or getattr(get_order, "authenticated_point_reads_are_complete", False)
+    )
+    point_order_reads: dict[str, dict[str, Any]] = {}
     if callable(get_order) and missing_local_order_ids:
         point_orders: dict[str, Any] = {}
         for order_id in missing_local_order_ids:
             try:
-                point_orders[order_id] = get_order(order_id)
+                value = get_order(order_id)
             except VenueOrderNotFound:
-                # Authenticated 404 is exact absence, not surface failure. Keep
-                # the order in the immutable snapshot with a None value so the
-                # reconcile law can combine absence with trades/positions.
                 point_orders[order_id] = None
+                point_order_reads[order_id] = {
+                    "query_complete": True,
+                    "authenticated_absent": True,
+                    "identity_match": False,
+                }
+                continue
+            point_orders[order_id] = value
+            identity_match = bool(
+                point_reader_authenticated
+                and value is not None
+                and _order_id(value) == order_id
+            )
+            point_order_reads[order_id] = {
+                # A raw None is not authenticated absence.  The live adapter's
+                # typed VenueOrderNotFound exception is the absence contract.
+                "query_complete": identity_match,
+                "authenticated_absent": False,
+                "identity_match": identity_match,
+            }
         captured["point_orders"] = point_orders
     for surface, method in (("trades", "get_trades"), ("positions", "get_positions")):
         fn = getattr(adapter, method, None)
@@ -287,7 +308,41 @@ def fresh_reconcile_snapshot(
         surface: {"ok": True, "fresh": True, "captured_at": observed.isoformat()}
         for surface in captured
     }
+    if "point_orders" in freshness and not all(
+        bool(read.get("query_complete")) for read in point_order_reads.values()
+    ):
+        freshness["point_orders"]["ok"] = False
     snapshot = SimpleNamespace(read_freshness=freshness)
+    # SCOPE: only this immutable account snapshot. DRAIN: the next M5 refresh
+    # re-captures every requested order. RESET: any missing surface or point
+    # read makes completeness false and command recovery stays fail-closed.
+    snapshot.venue_reads_are_complete = bool(
+        "trades" in captured
+        and not unavailable
+        and (
+            not missing_local_order_ids
+            or (
+                "point_orders" in captured
+                and set(point_order_reads) == set(missing_local_order_ids)
+                and all(
+                    bool(read.get("query_complete"))
+                    and (
+                        bool(read.get("authenticated_absent"))
+                        or bool(read.get("identity_match"))
+                    )
+                    for read in point_order_reads.values()
+                )
+            )
+        )
+    )
+    snapshot.authenticated_point_reads_are_complete = bool(
+        missing_local_order_ids
+        and set(point_order_reads) == set(missing_local_order_ids)
+        and all(bool(read.get("query_complete")) for read in point_order_reads.values())
+    )
+    snapshot.point_order_reads = {
+        order_id: dict(read) for order_id, read in point_order_reads.items()
+    }
     snapshot.get_open_orders = lambda: list(captured["open_orders"])
     if "point_orders" in captured:
         snapshot.get_order = lambda order_id: captured["point_orders"].get(str(order_id))
@@ -366,7 +421,7 @@ def refresh_unresolved_reconcile_findings(
     observed_at: datetime | str | None = None,
     context: ReconcileContext = "ws_gap",
 ) -> dict[str, Any]:
-    """Refresh only already-open position-drift findings from fresh venue truth.
+    """Refresh already-open, subject-scoped findings from fresh venue truth.
 
     This is intentionally narrower than ``run_reconcile_sweep``.  When the WS
     latch has already cleared, risk can still remain reduce-only because late
@@ -378,21 +433,48 @@ def refresh_unresolved_reconcile_findings(
     _validate_context(context)
     init_exchange_reconcile_schema(conn)
     observed = _coerce_dt(observed_at)
+    handled_kinds = {"position_drift", "unrecorded_trade", "local_orphan_order"}
+    initial_finding_ids = {
+        finding.finding_id
+        for finding in list_unresolved_findings(conn)
+        if finding.kind in handled_kinds
+    }
     # Foreign-wallet ghost findings are resolvable from local evidence alone (no venue
     # read): run the migration pass here too so the kill switch clears on the next
     # 1-minute refresh instead of waiting for the next full ws-gap sweep.
     foreign_resolved = _resolve_foreign_wallet_ghost_findings(conn, observed_at=observed)
     foreign_resolved += _resolve_operator_acknowledged_ghost_findings(conn, observed_at=observed)
+    from src.execution.command_recovery import (
+        reconcile_local_orphan_finding_commands,
+        reconcile_proven_no_side_effect_local_orphan_findings,
+        reconcile_stale_terminal_no_fill_findings,
+    )
     token_ids = _unresolved_position_drift_tokens(conn)
     trade_ids = _unresolved_unrecorded_trade_ids(conn)
-    if not token_ids and not trade_ids:
+    local_orphan_order_ids = _unresolved_local_orphan_order_ids(conn)
+    if not token_ids and not trade_ids and not local_orphan_order_ids:
+        all_remaining_findings = list_unresolved_findings(conn)
+        remaining_findings = [
+            finding
+            for finding in all_remaining_findings
+            if finding.finding_id in initial_finding_ids
+        ]
         return {
-            "status": "not_required",
-            "resolved": foreign_resolved,
-            "remaining": len(list_unresolved_findings(conn)),
+            "status": "blocked" if all_remaining_findings else "not_required",
+            "resolved": len(
+                initial_finding_ids
+                - {finding.finding_id for finding in remaining_findings}
+            ),
+            "remaining": len(remaining_findings),
+            "all_remaining": len(all_remaining_findings),
+            "foreign_or_operator_resolved": foreign_resolved,
         }
 
-    order_ids = _local_order_ids_for_tokens(conn, token_ids) | _order_ids_for_unrecorded_trade_findings(conn)
+    order_ids = (
+        _local_order_ids_for_tokens(conn, token_ids)
+        | _order_ids_for_unrecorded_trade_findings(conn)
+        | frozenset(local_orphan_order_ids)
+    )
     snapshot = fresh_reconcile_snapshot(
         adapter,
         observed_at=observed,
@@ -402,7 +484,9 @@ def refresh_unresolved_reconcile_findings(
         return {
             "status": "blocked",
             "reason": "trades_read_unavailable",
-            "subject_count": len(token_ids) + len(trade_ids),
+            "subject_count": (
+                len(token_ids) + len(trade_ids) + len(local_orphan_order_ids)
+            ),
             "captured_surfaces": list(snapshot.captured_surfaces),
             "unavailable_surfaces": list(snapshot.unavailable_surfaces),
         }
@@ -410,7 +494,9 @@ def refresh_unresolved_reconcile_findings(
         return {
             "status": "blocked",
             "reason": "positions_read_unavailable",
-            "subject_count": len(token_ids) + len(trade_ids),
+            "subject_count": (
+                len(token_ids) + len(trade_ids) + len(local_orphan_order_ids)
+            ),
             "captured_surfaces": list(snapshot.captured_surfaces),
             "unavailable_surfaces": list(snapshot.unavailable_surfaces),
         }
@@ -489,7 +575,26 @@ def refresh_unresolved_reconcile_findings(
         observed_at=observed,
         live_tick_scope=True,
     )
-    before_remaining = _unresolved_position_drift_count(conn, token_ids) + _unresolved_trade_count(conn, trade_ids)
+    reappeared_summary = _resolve_reappeared_local_orphan_findings(
+        conn,
+        open_order_ids={
+            order_id
+            for order_id in (
+                _order_id(item) for item in snapshot.adapter.get_open_orders()
+            )
+            if order_id
+        },
+        observed_at=observed,
+    )
+    local_orphan_summary = reconcile_local_orphan_finding_commands(
+        conn,
+        snapshot.adapter,
+    )
+    proven_absence_summary = reconcile_proven_no_side_effect_local_orphan_findings(
+        conn,
+        snapshot.adapter,
+    )
+    stale_terminal_summary = reconcile_stale_terminal_no_fill_findings(conn)
     if token_ids:
         _resolve_position_drift_tokens_from_current_truth(
             conn,
@@ -498,18 +603,43 @@ def refresh_unresolved_reconcile_findings(
             open_orders=snapshot.adapter.get_open_orders(),
             observed_at=observed,
         )
-    remaining = _unresolved_position_drift_count(conn, token_ids) + _unresolved_trade_count(conn, trade_ids)
-    resolved = max(0, before_remaining - remaining)
+    all_remaining_findings = list_unresolved_findings(conn)
+    remaining_findings = [
+        finding
+        for finding in all_remaining_findings
+        if finding.finding_id in initial_finding_ids
+    ]
+    remaining = len(remaining_findings)
+    resolved = len(
+        initial_finding_ids
+        - {finding.finding_id for finding in remaining_findings}
+    )
     return {
-        "status": "resolved" if remaining == 0 and not new_findings else "blocked",
-        "reason": "reconcile_finding_refresh_complete" if remaining == 0 else "reconcile_findings_remain",
-        "subject_count": len(token_ids) + len(trade_ids),
+        "status": (
+            "resolved"
+            if not all_remaining_findings and not new_findings
+            else "blocked"
+        ),
+        "reason": (
+            "reconcile_finding_refresh_complete"
+            if not all_remaining_findings and not new_findings
+            else "reconcile_findings_remain"
+        ),
+        "subject_count": (
+            len(token_ids) + len(trade_ids) + len(local_orphan_order_ids)
+        ),
         "resolved": resolved,
         "remaining": remaining,
+        "all_remaining": len(all_remaining_findings),
         "new_findings": len(new_findings),
         "captured_surfaces": list(snapshot.captured_surfaces),
         "unavailable_surfaces": list(snapshot.unavailable_surfaces),
         "repair_summary": repair_summary,
+        "local_orphan_summary": local_orphan_summary,
+        "reappeared_local_orphan_summary": reappeared_summary,
+        "stale_terminal_summary": stale_terminal_summary,
+        "proven_absence_summary": proven_absence_summary,
+        "foreign_or_operator_resolved": foreign_resolved,
     }
 
 
@@ -3348,6 +3478,127 @@ def _unresolved_unrecorded_trade_ids(conn: sqlite3.Connection) -> tuple[str, ...
     return tuple(str(row["subject_id"]) for row in rows)
 
 
+def _unresolved_local_orphan_order_ids(
+    conn: sqlite3.Connection,
+) -> tuple[str, ...]:
+    rows = conn.execute(
+        """
+        SELECT DISTINCT subject_id
+          FROM exchange_reconcile_findings
+         WHERE kind = 'local_orphan_order'
+           AND resolved_at IS NULL
+           AND TRIM(COALESCE(subject_id, '')) != ''
+         ORDER BY subject_id
+        """
+    ).fetchall()
+    return tuple(str(row["subject_id"]) for row in rows)
+
+
+def _resolve_reappeared_local_orphan_findings(
+    conn: sqlite3.Connection,
+    *,
+    open_order_ids: set[str],
+    observed_at: datetime,
+) -> dict[str, int]:
+    """Clear only exact orphan findings disproved by a fresh open-order read."""
+
+    summary = {"scanned": 0, "resolved": 0}
+    if not open_order_ids:
+        return summary
+    selected = tuple(sorted(open_order_ids))
+    placeholders = ", ".join("?" for _ in selected)
+    rows = conn.execute(
+        f"""
+        SELECT finding.finding_id,
+               finding.subject_id AS venue_order_id,
+               MIN(cmd.command_id) AS command_id
+          FROM exchange_reconcile_findings finding
+          JOIN venue_commands cmd
+            ON cmd.venue_order_id = finding.subject_id
+         WHERE finding.kind = 'local_orphan_order'
+           AND finding.resolved_at IS NULL
+           AND finding.subject_id IN ({placeholders})
+           AND cmd.state IN (
+                'ACKED', 'PARTIAL', 'CANCEL_PENDING', 'UNKNOWN',
+                'SUBMIT_UNKNOWN_SIDE_EFFECT', 'REVIEW_REQUIRED'
+           )
+           AND (
+                SELECT COUNT(*)
+                  FROM venue_commands owner
+                 WHERE owner.venue_order_id = finding.subject_id
+           ) = 1
+         GROUP BY finding.subject_id
+        HAVING COUNT(DISTINCT finding.finding_id) = 1
+           AND COUNT(DISTINCT cmd.command_id) = 1
+         ORDER BY MIN(finding.recorded_at), MIN(finding.finding_id)
+        """,
+        selected,
+    ).fetchall()
+    summary["scanned"] = len(rows)
+    for row in rows:
+        resolved = _resolve_local_orphan_finding_with_exact_owner(
+            conn,
+            finding_id=str(row["finding_id"]),
+            command_id=str(row["command_id"]),
+            venue_order_id=str(row["venue_order_id"]),
+            observed_at=observed_at,
+        )
+        summary["resolved"] += int(resolved)
+    return summary
+
+
+def _resolve_local_orphan_finding_with_exact_owner(
+    conn: sqlite3.Connection,
+    *,
+    finding_id: str,
+    command_id: str,
+    venue_order_id: str,
+    observed_at: datetime,
+) -> bool:
+    """CAS one reappeared finding only while its command owner stays unique."""
+
+    cursor = conn.execute(
+        """
+        UPDATE exchange_reconcile_findings
+           SET resolved_at = ?,
+               resolution = 'local_orphan_order_reappeared_open',
+               resolved_by = 'src.execution.exchange_reconcile'
+         WHERE finding_id = ?
+           AND kind = 'local_orphan_order'
+           AND subject_id = ?
+           AND resolved_at IS NULL
+           AND (
+                SELECT COUNT(*)
+                  FROM venue_commands owner
+                 WHERE owner.venue_order_id = ?
+                   AND owner.command_id = ?
+           ) = 1
+           AND (
+                SELECT COUNT(*)
+                  FROM venue_commands owner
+                 WHERE owner.venue_order_id = ?
+           ) = 1
+           AND (
+                SELECT COUNT(*)
+                  FROM exchange_reconcile_findings sibling
+                 WHERE sibling.kind = 'local_orphan_order'
+                   AND sibling.subject_id = ?
+                   AND sibling.resolved_at IS NULL
+           ) = 1
+        """,
+        (
+            observed_at.isoformat(),
+            finding_id,
+            venue_order_id,
+            venue_order_id,
+            command_id,
+            venue_order_id,
+            venue_order_id,
+        ),
+    )
+    return cursor.rowcount == 1
+
+
 def _unresolved_position_drift_count(
     conn: sqlite3.Connection,
     token_ids: tuple[str, ...] | frozenset[str] | set[str],
@@ -5424,6 +5675,7 @@ def _ensure_entry_fill_position_event(
     authoritative_market_metadata: Mapping[str, Any] | None = None,
     context: ReconcileContext = "periodic",
     defer_identity_finding_until_rollback: bool = False,
+    decision_log_id: int | None = None,
 ) -> None:
     if str(command.get("intent_kind") or "").upper() != "ENTRY":
         return
@@ -5539,6 +5791,10 @@ def _ensure_entry_fill_position_event(
         command_id=str(command.get("command_id") or ""),
         fallback_filled_size=filled_size,
         fallback_fill_price=fill_price,
+        fallback_is_final_submission_envelope=(
+            str(command.get("entry_fill_economics_authority") or "")
+            == "final_submission_envelope"
+        ),
     )
     if fill_economics is None:
         return
@@ -5982,6 +6238,16 @@ def _ensure_entry_fill_position_event(
             for event in events:
                 if event.get("event_type") == "ENTRY_ORDER_FILLED":
                     event["command_id"] = command_id
+    if decision_log_id is not None:
+        if isinstance(decision_log_id, bool) or int(decision_log_id) <= 0:
+            raise ValueError("entry fill decision_log_id must be a positive integer")
+        for event in events:
+            if event.get("event_type") != "ENTRY_ORDER_FILLED":
+                continue
+            raw_payload = event.get("payload_json")
+            payload = _json_mapping(raw_payload)
+            payload["decision_log_id"] = int(decision_log_id)
+            event["payload_json"] = json.dumps(payload, default=str, sort_keys=True)
     _apply_entry_fill_projection_and_execution_fact(
         conn,
         events=events,
@@ -6003,6 +6269,7 @@ def _entry_fill_economics_for_command(
     command_id: str,
     fallback_filled_size: str,
     fallback_fill_price: str,
+    fallback_is_final_submission_envelope: bool = False,
 ) -> tuple[Decimal, Decimal, Decimal] | None:
     """Aggregate latest authoritative trade facts for an entry command."""
 
@@ -6053,6 +6320,18 @@ def _entry_fill_economics_for_command(
         cost_basis += filled * price
     fallback_shares = _positive_decimal_or_none(fallback_filled_size)
     fallback_price = _positive_decimal_or_none(fallback_fill_price)
+    if (
+        fallback_is_final_submission_envelope
+        and fallback_shares is not None
+        and fallback_price is not None
+        and shares > Decimal("0")
+        and abs(fallback_shares - shares) <= Decimal("0.000001")
+    ):
+        return (
+            fallback_shares,
+            fallback_price,
+            fallback_shares * fallback_price,
+        )
     if shares > Decimal("0") and cost_basis > Decimal("0"):
         if (
             fallback_shares is not None
@@ -6468,9 +6747,13 @@ def _exit_fill_materialization_is_current(
         SELECT position_id, command_id, order_role, filled_at, fill_price,
                shares, venue_status, terminal_exec_status
           FROM execution_fact
-         WHERE intent_id = ?
+         WHERE position_id = ?
+           AND command_id = ?
+           AND order_role = 'exit'
+         ORDER BY COALESCE(filled_at, posted_at, '') DESC, intent_id DESC
+         LIMIT 1
         """,
-        (f"{position_id}:exit",),
+        (position_id, str(command.get("command_id") or "")),
     ).fetchone()
     if fact is None:
         return False
@@ -6699,6 +6982,7 @@ def _apply_exit_fill_projection_and_execution_fact(
             shares=_float_or_none(shares),
             venue_status="FILLED",
             terminal_exec_status="filled",
+            clear_voided_at=True,
             decision_law_id="predicted_bin_ev_v1",
         )
         conn.execute(f"RELEASE SAVEPOINT {sp_name}")

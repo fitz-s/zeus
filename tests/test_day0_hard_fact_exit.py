@@ -1,5 +1,5 @@
 # Created: 2026-06-10
-# Last reused or audited: 2026-08-11
+# Last reused or audited: 2026-08-20
 # Authority basis: alpha-clock realignment plus adversarial review MUST-FIX
 #   #1 (hard-fact bin-death exit lane, buy_yes kill + buy_no symmetric lane),
 #   #3-wiring (resting-order cancel), #4 (METAR plausibility bound), #5 (day0
@@ -40,19 +40,13 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-_RETIRED_RAW_CANCEL_TEST = pytest.mark.skip(
-    reason=(
-        "B94 retired wallet-scan/raw-cancel behavior; production replacement "
-        "is covered by journal-backed C3 tests"
-    )
-)
-
 from src.execution.day0_hard_fact_exit import (
     HardFactEvidence,
     HardFactVerdict,
     _final_daily_observation_extreme,
     _hko_rounded_extremes,
     _reset_wu_memo_for_tests,
+    _wu_hard_fact_evidence,
     _wu_rounded_extremes,
     cancel_day0_dead_bin_resting_entries,
     day0_entry_bin_still_alive,
@@ -66,6 +60,13 @@ from src.data.day0_oracle_anomaly import (
     _reset_registry_for_tests,
     flag_day0_oracle_anomaly,
     metar_held_counts,
+)
+
+_RETIRED_RAW_CANCEL_TEST = pytest.mark.skip(
+    reason=(
+        "B94 retired wallet-scan/raw-cancel behavior; production replacement "
+        "is covered by journal-backed C3 tests"
+    )
 )
 
 UTC = timezone.utc
@@ -138,6 +139,13 @@ def _paris():
     return SimpleNamespace(
         name="Paris", timezone="Europe/Paris", settlement_unit="C",
         wu_station="LFPB", settlement_source_type="wu_icao",
+    )
+
+
+def _seoul():
+    return SimpleNamespace(
+        name="Seoul", timezone="Asia/Seoul", settlement_unit="C",
+        wu_station="RKSI", settlement_source_type="wu_icao",
     )
 
 
@@ -478,7 +486,7 @@ def test_post_local_day_future_final_row_is_not_decision_time_authority():
     assert final is None
 
 
-def test_post_local_day_complete_wu_hours_and_following_day_are_final():
+def test_post_local_day_complete_wu_hours_are_not_daily_observations_final():
     conn = _final_wu_hourly_observation_conn()
     conn.execute("ATTACH DATABASE ':memory:' AS world")
     conn.execute(
@@ -495,11 +503,7 @@ def test_post_local_day_complete_wu_hours_and_following_day_are_final():
         conn=conn,
     )
 
-    assert final is not None
-    assert final.raw_extreme == pytest.approx(35.4)
-    assert final.settled_extreme == 35.0
-    assert final.source == "wu_icao_history:following_day_observed"
-    assert final.station_id == "LFPB"
+    assert final is None
 
 
 @pytest.mark.parametrize(
@@ -538,7 +542,7 @@ def test_post_local_day_complete_noaa_hours_are_final(
     ("2026-03-29", "2026-10-25"),
     ids=("dst-23-hours", "dst-25-hours"),
 )
-def test_post_local_day_complete_hourly_dst_day_is_final(target_date):
+def test_post_local_day_complete_wu_dst_hours_are_not_final(target_date):
     conn = _final_wu_hourly_observation_conn(
         city="Paris",
         timezone_name="Europe/Paris",
@@ -560,8 +564,7 @@ def test_post_local_day_complete_hourly_dst_day_is_final(target_date):
         conn=conn,
     )
 
-    assert final is not None
-    assert final.source == "wu_icao_history:following_day_observed"
+    assert final is None
 
 
 @pytest.mark.parametrize(
@@ -756,6 +759,136 @@ class TestVerdictMatrix:
 # ===========================================================================
 
 class TestSourceDiscipline:
+    @staticmethod
+    def _seoul_fast_hard_fact_conn(*, station: str = "RKSI"):
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        conn.executescript(
+            """
+            CREATE TABLE observation_prints (
+                id INTEGER PRIMARY KEY,
+                city TEXT NOT NULL,
+                station_id TEXT NOT NULL,
+                source_channel TEXT NOT NULL,
+                publish_ts_utc TEXT NOT NULL,
+                value_native REAL NOT NULL,
+                unit TEXT NOT NULL,
+                fetched_at_utc TEXT NOT NULL,
+                raw_report TEXT NOT NULL
+            );
+            CREATE TABLE opportunity_events (
+                event_id TEXT PRIMARY KEY,
+                event_type TEXT NOT NULL,
+                observed_at TEXT NOT NULL,
+                available_at TEXT NOT NULL,
+                received_at TEXT NOT NULL,
+                payload_json TEXT NOT NULL
+            );
+            """
+        )
+        conn.executemany(
+            "INSERT INTO observation_prints VALUES (?,?,?,?,?,?,?,?,?)",
+            (
+                (
+                    1, "Seoul", "RKSI", "aviationweather_metar",
+                    "2026-08-19T02:04:27+00:00", 28.0, "C",
+                    "2026-08-19T02:04:36.132652+00:00",
+                    "METAR RKSI 190200Z 28005KT 9999 FEW020 28/24 Q1004",
+                ),
+                (
+                    2, "Seoul", "RKSI", "aviationweather_metar",
+                    "2026-08-19T02:34:24+00:00", 29.0, "C",
+                    "2026-08-19T02:34:29.695596+00:00",
+                    "METAR RKSI 190230Z 28005KT 9999 FEW020 29/24 Q1004",
+                ),
+            ),
+        )
+        payload = {
+            "city": "Seoul",
+            "target_date": "2026-08-19",
+            "metric": "high",
+            "settlement_source": "aviationweather_metar",
+            "settlement_source_type": "wu_icao",
+            "station_id": station,
+            "observation_time": "2026-08-19T02:30:00+00:00",
+            "observation_available_at": "2026-08-19T02:34:24+00:00",
+            "raw_value": 29.0,
+            "rounded_value": 29,
+            "high_so_far": 29.0,
+            "low_so_far": 26.0,
+            "metar_margin_units_applied": 0.0,
+            "source_authorized_status": "AUTHORIZED",
+            "source_match_status": "MATCH",
+            "station_match_status": "MATCH",
+            "local_date_status": "MATCH",
+            "dst_status": "UNAMBIGUOUS",
+            "metric_match_status": "MATCH",
+            "rounding_status": "MATCH",
+            "live_authority_status": "live",
+            "evidence_finality": "MONOTONE_SETTLEMENT_BOUND",
+        }
+        conn.execute(
+            "INSERT INTO opportunity_events VALUES (?,?,?,?,?,?)",
+            (
+                "edli_evt_" + "8" * 64,
+                "DAY0_EXTREME_UPDATED",
+                "2026-08-19T02:30:00+00:00",
+                "2026-08-19T02:34:24+00:00",
+                "2026-08-19T02:34:24.249291+00:00",
+                json.dumps(payload, sort_keys=True),
+            ),
+        )
+        future_payload = dict(payload, raw_value=30.0, rounded_value=30)
+        conn.execute(
+            "INSERT INTO opportunity_events VALUES (?,?,?,?,?,?)",
+            (
+                "edli_evt_" + "9" * 64,
+                "DAY0_EXTREME_UPDATED",
+                "2026-08-19T02:30:00+00:00",
+                "2026-08-19T02:34:24+00:00",
+                "2026-08-19T02:48:01.164597+00:00",
+                json.dumps(future_payload, sort_keys=True),
+            ),
+        )
+        return conn
+
+    def test_seoul_fast_event_is_statistical_not_wu_settlement_finality(self):
+        """A fast same-station print cannot create exact WU payoff authority."""
+
+        conn = self._seoul_fast_hard_fact_conn()
+        verdict = evaluate_hard_fact_exit(
+            position=_position(
+                trade_id="58448a4b-383",
+                city="Seoul",
+                target_date="2026-08-19",
+                bin_label="28°C on August 19?",
+                direction="buy_yes",
+                temperature_metric="high",
+            ),
+            city=_seoul(),
+            now=datetime(2026, 8, 19, 2, 34, 30, tzinfo=UTC),
+            world_conn=conn,
+            durable_only=True,
+        )
+
+        assert verdict is None
+
+    def test_fast_scalar_or_unbound_event_cannot_authorize_hard_fact(self):
+        conn = self._seoul_fast_hard_fact_conn(station="NOT_RKSI")
+        verdict = evaluate_hard_fact_exit(
+            position=_position(
+                city="Seoul",
+                target_date="2026-08-19",
+                bin_label="28°C on August 19?",
+            ),
+            city=_seoul(),
+            now=datetime(2026, 8, 19, 2, 34, 30, tzinfo=UTC),
+            world_conn=conn,
+            durable_only=True,
+        )
+
+        assert verdict is None
+
     def test_hko_provisional_current_extrema_abstain_from_hard_fact(self, monkeypatch):
         monkeypatch.setattr(
             "src.execution.day0_hard_fact_exit._hko_rounded_extremes",
@@ -1091,10 +1224,8 @@ class TestSourceDiscipline:
         _add_generated_payload_provenance(conn)
         return conn
 
-    def test_durable_observation_instants_low_structural_win_drives_hold(self, monkeypatch):
-        """Paris regression: verified WU-hourly rows showed low 18C before the
-        monitor tried to sell a 19C buy_no. The durable rows must be a hard fact
-        source even when WU live API / METAR memo are cold."""
+    def test_durable_wu_hourly_low_is_provisional_not_structural_hold(self, monkeypatch):
+        """WU hourly values can retract and therefore cannot force q=1 hold."""
         monkeypatch.setattr(
             "src.execution.day0_hard_fact_exit._wu_rounded_extremes",
             lambda city, target_date, now: (_ for _ in ()).throw(AssertionError("WU API must not be called")),
@@ -1135,13 +1266,7 @@ class TestSourceDiscipline:
             now=datetime(2026, 6, 20, 4, 2, 40, tzinfo=UTC),
             world_conn=conn,
         )
-        assert verdict is not None
-        assert verdict.action == "HOLD_STRUCTURAL_WIN"
-        assert verdict.rounded_extreme == pytest.approx(18.0)
-        assert verdict.source == "wu_icao_history"
-        belief = hard_fact_monitor_belief(verdict=verdict, direction="buy_no")
-        assert belief is not None
-        assert belief.held_side_prob == pytest.approx(1.0)
+        assert verdict is None
 
     def test_durable_fractional_extreme_is_settlement_rounded_before_verdict(self, monkeypatch):
         """M-8 (audit 2026-07-18): a sub-degree durable running extreme must pass
@@ -1166,13 +1291,13 @@ class TestSourceDiscipline:
         )
         # 26.4 rounds to 26 -> extreme INSIDE the held bin -> not a hard fact
         assert verdict is None
-        # but a genuinely-beyond fractional value still kills: 26.6 -> 27 > 26
+        # A later WU 26.6 print is still provisional, not an exact kill.
         conn.execute("UPDATE observation_instants SET running_max = 26.6")
         verdict = evaluate_hard_fact_exit(
             position=_position(bin_label="26°C on June 10?"),
             city=_tokyo(), now=NOW, world_conn=conn,
         )
-        assert verdict is not None and verdict.action == "EXIT_DEAD_BIN"
+        assert verdict is None
 
     def test_durable_observation_instants_respects_local_date_and_now_floor(self, monkeypatch):
         """The durable lane must not repeat the UTC-date floor bug: target_date is
@@ -2655,8 +2780,8 @@ class TestTupleConnectionTopology:
         assert _resolve_order_bin_identity(conn, "tok-dead-yes") is None
 
 
-def test_station_bound_durable_wu_evidence_structurally_wins_shenzhen_shape(monkeypatch):
-    """A WU record proves a generic 28C NO win only when it names ZGSZ."""
+def test_station_bound_durable_wu_evidence_does_not_force_shenzhen_hold(monkeypatch):
+    """A same-station WU hourly row is valid evidence but not finality."""
     _set_metar_memo(monkeypatch, None)
     verdict = evaluate_hard_fact_exit(
         position=_position(
@@ -2667,14 +2792,7 @@ def test_station_bound_durable_wu_evidence_structurally_wins_shenzhen_shape(monk
         world_conn=_hard_fact_observation_conn(station_id="ZGSZ"),
     )
 
-    assert verdict is not None
-    assert verdict.action == "HOLD_STRUCTURAL_WIN"
-    assert verdict.rounded_extreme == pytest.approx(29.0)
-    assert verdict.evidence is not None
-    assert verdict.evidence.station_id == "ZGSZ"
-    assert verdict.evidence.raw_extreme == pytest.approx(28.6)
-    assert verdict.evidence.rounded_extreme == pytest.approx(29.0)
-    assert verdict.evidence.is_complete_for(_shenzhen())
+    assert verdict is None
 
 
 @pytest.mark.parametrize(
@@ -2810,7 +2928,7 @@ def test_direct_wu_missing_raw_payload_hash_never_authorizes_hard_fact(monkeypat
     assert verdict is None
 
 
-def test_direct_and_durable_combine_preserves_authentic_payload_identities(monkeypatch):
+def test_direct_and_durable_evidence_preserves_authentic_payload_identities(monkeypatch):
     direct_hash = "b" * 64
     monkeypatch.setattr(
         "src.execution.day0_hard_fact_exit._wu_rounded_extremes",
@@ -2830,26 +2948,23 @@ def test_direct_and_durable_combine_preserves_authentic_payload_identities(monke
         ),
     )
 
-    verdict = evaluate_hard_fact_exit(
-        position=_position(
-            city="Shenzhen", target_date="2026-06-10",
-            bin_label="28°C on June 10?", direction="buy_no",
-            temperature_metric="high",
-        ),
+    evidence = _wu_hard_fact_evidence(
         city=_shenzhen(),
+        target_date="2026-06-10",
+        metric="high",
         now=NOW,
         world_conn=_hard_fact_observation_conn(station_id="ZGSZ"),
+        durable_only=False,
     )
 
-    assert verdict is not None
-    assert verdict.evidence is not None
-    assert verdict.evidence.payload_identity == direct_hash
-    assert verdict.evidence.contributor_payload_identities == (
+    assert evidence is not None
+    assert evidence.payload_identity == direct_hash
+    assert evidence.contributor_payload_identities == (
         direct_hash,
         RAW_PAYLOAD_HASH,
     )
-    assert verdict.evidence.source_identity.startswith("wu-hard-fact:")
-    assert verdict.evidence.is_complete_for(_shenzhen())
+    assert evidence.source_identity.startswith("wu-hard-fact:")
+    assert evidence.is_complete_for(_shenzhen())
 
 
 def test_station_mismatch_is_not_hard_fact_authority(monkeypatch):

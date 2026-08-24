@@ -1,4 +1,4 @@
-# Lifecycle: created=2026-06-12; last_reviewed=2026-08-12; last_reused=2026-08-12
+# Lifecycle: created=2026-06-12; last_reviewed=2026-08-19; last_reused=2026-08-19
 # Purpose: Prove held-position probability authority, freshness, and compact decision lineage.
 # Reuse: pytest tests/engine/test_position_belief_authority.py
 # Authority basis: settlement-losses incident 2026-06-12 (Karachi position:
@@ -49,7 +49,6 @@ from src.engine.position_belief import (
     ReplacementBelief,
     _latest_live_input_cycle,
     _observed_running_extreme_native,
-    held_side_bounds,
     load_replacement_belief,
 )
 from src.data.replacement_forecast_cycle_policy import (
@@ -210,7 +209,7 @@ def _insert(db_path, *, posterior_id, computed_at, q, city="Karachi",
     conn.close()
 
 
-def test_stale_absolute_disagreement_remains_held_monitor_authority(forecasts_db):
+def test_stale_absolute_disagreement_is_not_held_monitor_authority(forecasts_db):
     _insert(
         forecasts_db,
         posterior_id="stale-shape-held-monitor",
@@ -235,8 +234,7 @@ def test_stale_absolute_disagreement_remains_held_monitor_authority(forecasts_db
         now=NOW,
     )
 
-    assert belief is not None
-    assert belief.held_side_prob == pytest.approx(0.242)
+    assert belief is None
 
 
 @pytest.mark.parametrize("provenance_json", (None, "{}", "[]", "{malformed"))
@@ -363,33 +361,94 @@ def _load(db_path, *, direction="buy_no", bin_label=BIN, now=NOW, **kw):
     )
 
 
-class TestHeldSideBounds:
-    """``held_side_bounds`` is the single blessed complement site (K1 authority)
-    both ``load_replacement_belief`` and monitor_refresh's read-through
-    recompute now call. Pin it against the two call sites' pre-extraction
-    inline formulas so the numeric behavior is provably unchanged."""
-
-    def test_buy_yes_passes_bounds_through_unchanged(self):
-        lcb, ucb = held_side_bounds(0.2, 0.7, "buy_yes")
-        assert (lcb, ucb) == (0.2, 0.7)
-
-    def test_buy_no_crosses_bounds_with_order_reversal(self):
-        q_yes_lcb, q_yes_ucb = 0.2, 0.7
-        lcb, ucb = held_side_bounds(q_yes_lcb, q_yes_ucb, "buy_no")
-        # Pre-extraction inline formula from both call sites:
-        #   held_lcb = 1.0 - q_yes_ucb; held_ucb = 1.0 - q_yes_lcb
-        assert (lcb, ucb) == (1.0 - q_yes_ucb, 1.0 - q_yes_lcb)
-
-    def test_accepts_direction_enum_like_object_via_value_attribute(self):
-        class _Direction:
-            value = "buy_no"
-
-        lcb, ucb = held_side_bounds(0.2, 0.7, _Direction())
-        assert (lcb, ucb) == (1.0 - 0.7, 1.0 - 0.2)
-
-    def test_rejects_unrecognized_direction(self):
-        with pytest.raises(ValueError):
-            held_side_bounds(0.2, 0.7, "buy_maybe")
+def _install_live_readiness_binding(
+    db_path: str,
+    *,
+    city: str,
+    target_date: str,
+    posterior_id: int,
+    computed_at: datetime,
+    expires_at: datetime,
+) -> None:
+    conn = sqlite3.connect(db_path)
+    for ddl in (
+        "ALTER TABLE forecast_posteriors ADD COLUMN product_id TEXT",
+        "ALTER TABLE forecast_posteriors ADD COLUMN data_version TEXT",
+        "ALTER TABLE forecast_posteriors ADD COLUMN training_allowed INTEGER",
+        "ALTER TABLE forecast_posteriors ADD COLUMN source_available_at TEXT",
+    ):
+        conn.execute(ddl)
+    conn.execute(
+        """
+        UPDATE forecast_posteriors
+           SET product_id = 'openmeteo_ecmwf_ifs9_bayes_fusion_v1',
+               data_version = 'openmeteo_ecmwf_ifs9_bayes_fusion_high_v1',
+               training_allowed = 0,
+               source_available_at = computed_at
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE readiness_state (
+            readiness_id TEXT PRIMARY KEY,
+            scope_type TEXT,
+            strategy_key TEXT,
+            source_id TEXT,
+            data_version TEXT,
+            city TEXT,
+            target_local_date TEXT,
+            temperature_metric TEXT,
+            status TEXT,
+            computed_at TEXT,
+            expires_at TEXT,
+            dependency_json TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX idx_readiness_state_strategy_family_latest
+            ON readiness_state(
+                strategy_key, city, target_local_date, temperature_metric,
+                computed_at DESC, readiness_id DESC
+            )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO readiness_state VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "ready-1",
+            "strategy",
+            "openmeteo_ecmwf_ifs9_bayes_fusion",
+            LIVE_REPLACEMENT_POSTERIOR_SOURCE_ID,
+            "openmeteo_ecmwf_ifs9_bayes_fusion_high_v1",
+            city,
+            target_date,
+            "high",
+            "READY",
+            computed_at.isoformat(),
+            expires_at.isoformat(),
+            json.dumps(
+                {
+                    "dependencies": [
+                        {
+                            "role": "soft_anchor_posterior",
+                            "source_id": LIVE_REPLACEMENT_POSTERIOR_SOURCE_ID,
+                            "product_id": "openmeteo_ecmwf_ifs9_bayes_fusion_v1",
+                            "data_version": "openmeteo_ecmwf_ifs9_bayes_fusion_high_v1",
+                            "status": "READY",
+                            "source_available_at": computed_at.isoformat(),
+                            "posterior_id": posterior_id,
+                        }
+                    ]
+                }
+            ),
+        ),
+    )
+    conn.commit()
+    conn.close()
 
 
 class TestLoadReplacementBelief:
@@ -688,6 +747,79 @@ class TestLoadReplacementBelief:
         assert belief.posterior_id == "new"
         assert belief.q_yes_bin == pytest.approx(0.30)
         assert belief.runtime_layer == "live"
+
+    def test_live_readiness_binds_exact_held_posterior_before_append_history(
+        self, forecasts_db
+    ):
+        future_target = "2026-06-13"
+        _insert(
+            forecasts_db,
+            posterior_id=101,
+            computed_at=(NOW - timedelta(hours=2)).isoformat(),
+            q={BIN: 0.20},
+            target_date=future_target,
+        )
+        _insert(
+            forecasts_db,
+            posterior_id=102,
+            computed_at=(NOW - timedelta(hours=1)).isoformat(),
+            q={BIN: 0.80},
+            target_date=future_target,
+        )
+        _install_live_readiness_binding(
+            forecasts_db,
+            city="Karachi",
+            target_date=future_target,
+            posterior_id=101,
+            computed_at=NOW - timedelta(minutes=30),
+            expires_at=NOW + timedelta(hours=1),
+        )
+
+        belief = load_replacement_belief(
+            city="Karachi",
+            target_date=future_target,
+            temperature_metric="high",
+            bin_label=BIN,
+            direction="buy_yes",
+            now=NOW,
+            db_path=forecasts_db,
+        )
+
+        assert belief is not None
+        assert belief.posterior_id == "101"
+        assert belief.q_yes_bin == pytest.approx(0.20)
+
+    def test_expired_live_readiness_cannot_authorize_held_probability(
+        self, forecasts_db
+    ):
+        future_target = "2026-06-13"
+        _insert(
+            forecasts_db,
+            posterior_id=201,
+            computed_at=(NOW - timedelta(hours=1)).isoformat(),
+            q={BIN: 0.20},
+            target_date=future_target,
+        )
+        _install_live_readiness_binding(
+            forecasts_db,
+            city="Karachi",
+            target_date=future_target,
+            posterior_id=201,
+            computed_at=NOW - timedelta(minutes=30),
+            expires_at=NOW - timedelta(seconds=1),
+        )
+
+        belief = load_replacement_belief(
+            city="Karachi",
+            target_date=future_target,
+            temperature_metric="high",
+            bin_label=BIN,
+            direction="buy_yes",
+            now=NOW,
+            db_path=forecasts_db,
+        )
+
+        assert belief is None
 
     def test_newer_non_live_row_cannot_override_live_runtime_layer(self, forecasts_db):
         _insert(

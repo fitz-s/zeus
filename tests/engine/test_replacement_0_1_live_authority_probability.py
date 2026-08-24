@@ -866,6 +866,130 @@ def test_global_provisional_day0_rejects_observation_advance_after_bundle_read(
     observations.close()
 
 
+def test_provisional_identity_uses_statistical_conditioning_not_settlement_bound() -> None:
+    provisional = {
+        "active": True,
+        "source": "wu_api+same_station_fast_tail",
+        "observation_time": "2026-08-22T02:00:56+00:00",
+        "observed_extreme_c": 31.0,
+        "support_truncation": False,
+    }
+    bundle = SimpleNamespace(
+        provenance_json={"day0_provisional_observation": provisional}
+    )
+    payload = {
+        "metric": "high",
+        "settlement_source": "wu_icao_history",
+        "observation_time": "2026-08-22T01:00:00+00:00",
+        "high_so_far": 29.0,
+        "settlement_unit": "C",
+        "_edli_global_day0_binding": {
+            "statistical_probability_conditioning": {
+                **provisional,
+                "metric": "high",
+                "unit": "C",
+            }
+        },
+    }
+
+    adapter._assert_provisional_day0_replacement_bundle(bundle, payload)
+
+    payload["_edli_global_day0_binding"]["statistical_probability_conditioning"] = {
+        **provisional,
+        "metric": "high",
+        "unit": "C",
+        "observed_extreme_c": 30.0,
+    }
+    with pytest.raises(
+        ValueError,
+        match="GLOBAL_DAY0_PROVISIONAL_POSTERIOR_IDENTITY_MISMATCH",
+    ):
+        adapter._assert_provisional_day0_replacement_bundle(bundle, payload)
+
+
+def test_provisional_local_proof_preserves_global_statistical_conditioning(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    conditioning = {
+        "active": True,
+        "source": "wu_api+same_station_fast_tail",
+        "observation_time": "2026-08-22T02:24:13+00:00",
+        "observed_extreme_c": 14.0,
+        "support_truncation": False,
+        "metric": "low",
+        "unit": "C",
+    }
+    bundle = SimpleNamespace(
+        posterior_id=374802,
+        provenance_json={"day0_provisional_observation": conditioning},
+    )
+    payload = {
+        "city": "London",
+        "target_date": "2026-08-22",
+        "metric": "low",
+        "settlement_source": "wu_icao_history",
+        "observation_time": "2026-08-22T02:00:00+00:00",
+        "low_so_far": 15.0,
+        "settlement_unit": "C",
+        "_edli_global_day0_binding": {
+            "statistical_probability_conditioning": conditioning,
+        },
+    }
+    event = SimpleNamespace(event_type="DAY0_EXTREME_UPDATED")
+    family = SimpleNamespace(city="London", target_date="2026-08-22", metric="low")
+    expected = ({"condition": 0.8}, {}, {}, {}, {})
+    observed_conditionings = []
+
+    monkeypatch.setattr(
+        adapter,
+        "runtime_cities_by_name",
+        lambda: {"London": SimpleNamespace(settlement_unit="C")},
+    )
+
+    def replacement(**kwargs):
+        assert kwargs["payload"]["_edli_global_day0_binding"][
+            "statistical_probability_conditioning"
+        ] == conditioning
+        kwargs["payload"]["_edli_spine_posterior_id"] = bundle.posterior_id
+        kwargs["payload"]["_edli_spine_posterior_identity_hash"] = "posterior-current"
+        kwargs["provenance_capture"]["replacement_bundle"] = bundle
+        return expected
+
+    monkeypatch.setattr(
+        adapter,
+        "_replacement_authority_probability_and_fdr_proof",
+        replacement,
+    )
+
+    def current_observation(*_args, **kwargs):
+        observed_conditionings.append(kwargs["conditioning"])
+        return {
+            **payload,
+            "_edli_global_day0_binding": {
+                "statistical_probability_conditioning": kwargs["conditioning"],
+                "posterior_id": bundle.posterior_id,
+            },
+        }
+
+    monkeypatch.setattr(
+        adapter,
+        "_global_day0_execution_payload",
+        current_observation,
+    )
+
+    assert adapter._live_yes_probabilities(
+        event=event,
+        payload=payload,
+        family=family,
+        conn=sqlite3.connect(":memory:"),
+        calibration_conn=sqlite3.connect(":memory:"),
+        native_costs={},
+        decision_time=datetime(2026, 8, 22, 2, 30, tzinfo=timezone.utc),
+        provenance_capture={},
+    ) == expected
+    assert observed_conditionings == [conditioning]
+
+
 def test_replacement_yes_lcb_ignores_aifs_provenance_fallback() -> None:
     bundle = SimpleNamespace(
         q_lcb=None,

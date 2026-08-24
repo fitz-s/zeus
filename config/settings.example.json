@@ -175,7 +175,13 @@
     "max_drawdown_pct": 0.2,
     "staleness_hours": 6,
     "storage_entry_min_free_bytes": 68719476736,
-    "storage_entry_min_free_ratio": 0.1
+    "storage_entry_min_free_ratio": 0.1,
+    "power_runway_yellow_minutes": 60,
+    "power_runway_orange_minutes": 30,
+    "power_runway_red_minutes": 15,
+    "power_percent_yellow": 20,
+    "power_percent_orange": 10,
+    "power_percent_red": 5
   },
   "execution": {
     "order_type": "limit_only",
@@ -186,6 +192,8 @@
     "cancel_if_not_filled": true
   },
   "feature_flags": {
+    "TIER0_RESEARCH_MODE": false,
+    "_TIER0_RESEARCH_MODE_note": "reversal_plan_tier0_2026-08-24 item 6: default OFF (identical to pre-Tier-0 behavior). When true, src.strategy.tier0_policy gates every new ENTRY to price<0.25, taker-only, one-per-(city,target_date)-cluster, flat smallest-venue-legal stake; the global entries_paused override still supersedes this unconditionally. Activation additionally requires plan item 3 (true p0 certificate provenance) per the release checklist in the plan doc -- not enforced in code."
   },
   "ops": {
     "posterior_staleness_alert_hours": 12.0,

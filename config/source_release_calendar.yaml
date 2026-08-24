@@ -45,8 +45,12 @@ entries:
         safe_fetch:
           default_lag_minutes: 285
         full_horizon_live_authorization: false
-        live_authorization: false
-        reason: 06/18 cycles cannot cover full configured future horizon
+        # ECMWF direct ENS output exists at 06/18 through 144h. Zeus fetches
+        # only 3..144h under the live 5-day market cap, so this profile covers
+        # the complete executable target horizon despite its upstream "short"
+        # name. Keeping it non-live would force a stale 00/12 ENS shape onto a
+        # fresh 06/18 provider center and remove all probability authority.
+        live_authorization: true
   - calendar_id: ecmwf_open_data_mn2t6_low
     source_id: ecmwf_open_data
     track: mn2t6_low
@@ -92,8 +96,9 @@ entries:
         safe_fetch:
           default_lag_minutes: 285
         full_horizon_live_authorization: false
-        live_authorization: false
-        reason: 06/18 cycles cannot cover full configured future horizon
+        # Symmetric with HIGH: the complete Zeus live horizon is 144h even
+        # though ECMWF names 06/18 a short cycle.
+        live_authorization: true
   - calendar_id: openmeteo_previous_runs_best_match
     source_id: openmeteo_previous_runs
     track: best_match

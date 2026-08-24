@@ -115,41 +115,19 @@ def edli_bridge_position_id_legacy(aggregate_id: str) -> str:
 def _edli_events_table(conn: sqlite3.Connection) -> str:
     """Resolve the schema-qualified name of the EDLI events table.
 
-    Production historically intended the world copy to be authoritative, but
-    live cutovers have also written current aggregates to trade-main while
-    leaving a stale world ghost. Pick the freshest available event table so
-    confirmed fills are bridged back into the same active aggregate stream.
+    ``edli_live_order_events`` is WORLD-owned.  A trade-main copy may still be
+    present as a legacy archived ghost, but runtime freshness cannot promote it
+    back to authority.  Prefer the attached WORLD table without scanning either
+    append-only stream; use main only for single-DB fixtures or recovery before
+    WORLD is attached.
     """
-    candidates: list[str] = []
-    if _table_exists(conn, "edli_live_order_events"):
-        candidates.append("edli_live_order_events")
     try:
         attached = {row[1] for row in conn.execute("PRAGMA database_list").fetchall()}
     except sqlite3.Error:
         attached = set()
     if "world" in attached and _table_exists(conn, "edli_live_order_events", schema="world"):
-        candidates.append("world.edli_live_order_events")
-    if not candidates:
-        return "edli_live_order_events"
-    if len(candidates) == 1:
-        return candidates[0]
-
-    def _latest_occurred_at(table: str) -> str:
-        try:
-            row = conn.execute(
-                f"SELECT MAX(occurred_at) AS max_occurred_at FROM {table}"
-            ).fetchone()
-        except sqlite3.Error:
-            return ""
-        if row is None:
-            return ""
-        try:
-            value = row["max_occurred_at"] if isinstance(row, sqlite3.Row) else row[0]
-        except (IndexError, KeyError):
-            return ""
-        return str(value or "")
-
-    return max(candidates, key=lambda table: (_latest_occurred_at(table), table))
+        return "world.edli_live_order_events"
+    return "edli_live_order_events"
 
 
 def _table_exists(conn: sqlite3.Connection, table: str, *, schema: str = "main") -> bool:

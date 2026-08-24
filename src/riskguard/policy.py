@@ -166,6 +166,58 @@ def resolve_strategy_policy(
     )
 
 
+def active_probability_revision_capital_gate_action_ids(
+    conn: sqlite3.Connection,
+    strategy_key: str,
+    now: datetime,
+    *,
+    probability_semantics_revision: str | None,
+) -> tuple[str, ...]:
+    """Return exact automated proof gates applying to one probability revision.
+
+    Entry controls such as ``pause_entries`` intentionally do not participate:
+    this authority is consumed by every statistical capital action, including a
+    reduce-only SELL, while deterministic/RED exits remain independent.  A
+    missing revision matches a scoped gate fail-closed because the action cannot
+    prove that it belongs to a different evidence cohort.
+    """
+
+    strategy = str(strategy_key or "").strip()
+    if not strategy:
+        raise ValueError("strategy_key is required")
+    revision = str(probability_semantics_revision or "").strip()
+    action_ids: list[str] = []
+    for row in _select_rows(_load_risk_actions(conn, strategy, _normalize_datetime(now))):
+        if str(row["action_type"] or "") != "gate":
+            continue
+        raw = str(row["value"] or "").strip()
+        if not raw.startswith("{"):
+            continue
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise ValueError("malformed probability revision capital gate") from exc
+        if not isinstance(payload, dict) or payload.get("gate") is not True:
+            continue
+        revisions = payload.get("probability_semantics_revisions")
+        if revisions is None:
+            continue
+        if not isinstance(revisions, list):
+            raise ValueError("probability revision capital gate scope is invalid")
+        scoped = frozenset(
+            str(value).strip() for value in revisions if str(value).strip()
+        )
+        if not scoped:
+            raise ValueError("probability revision capital gate scope is empty")
+        if revision and revision not in scoped:
+            continue
+        action_id = str(row["action_id"] or "").strip()
+        if not action_id:
+            raise ValueError("probability revision capital gate action id is missing")
+        action_ids.append(action_id)
+    return tuple(sorted(action_ids))
+
+
 def _normalize_datetime(value: datetime) -> datetime:
     if value.tzinfo is None:
         return value.replace(tzinfo=timezone.utc)

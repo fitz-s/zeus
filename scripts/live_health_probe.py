@@ -36,6 +36,7 @@ ROOT = str(
 SNAPSHOT_FILE = "/tmp/zeus_health_snapshot.json"
 FORECAST_LIVE_HEARTBEAT = "state/forecast-live-heartbeat.json"
 FORECAST_LIVE_STALE_SECONDS = 300
+LIVE_HEALTH_COMPOSITE_STALE_SECONDS = 6 * 60
 DEFAULT_EXPECTED_REF = ""
 MATERIAL_CODE_PLANE_DIRTY_PREFIXES = (
     "architecture/",
@@ -1080,8 +1081,6 @@ def _classify_alerts(report, ss_age):
             or "ENTRY_PROBABILITY_EVIDENCE_UNHEALTHY"
         )
     for surface in DIRECT_HEAD_LIVE_HEALTH_SURFACES:
-        if surface == "business_plane":
-            continue
         direct_surface = report.get(surface, {})
         if direct_surface.get("ok") is False:
             alerts.append(
@@ -1092,6 +1091,13 @@ def _classify_alerts(report, ss_age):
     if status_process.get("ok") is False:
         alerts.append(status_process.get("issue") or "STATUS_SUMMARY_PROCESS_CONTRACT")
     composite = report.get("live_health_composite") or {}
+    composite_age = None
+    if isinstance(composite, dict):
+        composite_epoch = _parse_iso_epoch(composite.get("computed_at"))
+        if composite_epoch is not None:
+            composite_age = max(0, int(time.time() - composite_epoch))
+    if composite_age is not None and composite_age > LIVE_HEALTH_COMPOSITE_STALE_SECONDS:
+        alerts.append(f"LIVE_HEALTH_COMPOSITE_STALE={composite_age}s")
     if composite and "error" not in composite:
         surfaces = composite.get("surfaces") if isinstance(composite.get("surfaces"), dict) else {}
         missing_surfaces = [
@@ -1111,7 +1117,9 @@ def _classify_alerts(report, ss_age):
                 continue
             detail = surfaces.get(surface) if isinstance(surfaces, dict) else None
             issue = detail.get("issue") if isinstance(detail, dict) else None
-            alerts.append(f"LIVE_HEALTH_{surface.upper()}={issue or 'DEGRADED'}")
+            alert = f"LIVE_HEALTH_{surface.upper()}={issue or 'DEGRADED'}"
+            if alert not in alerts:
+                alerts.append(alert)
         if not failing:
             alerts.append("LIVE_HEALTH_COMPOSITE_DEGRADED")
     if ss_age is not None and ss_age > 2700:

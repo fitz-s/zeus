@@ -422,6 +422,9 @@ def main() -> int:
             "guard_semantic_version": EXPECTED_GUARD_SEMANTIC_VERSION,
             "center_method_version": EXPECTED_CENTER_METHOD_VERSION,
             "band_semantic_version": EXPECTED_BAND_SEMANTIC_VERSION,
+            # This builder reconstructs the legacy raw-diagonal probability
+            # world. It must not claim the source-clock current-evidence
+            # revision merely because the runtime imports that revision.
             "corpus_authority": CORPUS_AUTHORITY,
             "built_at": "2026-06-24",
             "n_predictions": int(ctr["n_predictions"]),

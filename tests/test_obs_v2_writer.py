@@ -1,6 +1,6 @@
 # Created: 2026-04-21
-# Lifecycle: created=2026-04-21; last_reviewed=2026-07-23; last_reused=2026-07-23
-# Last reused/audited: 2026-07-23
+# Lifecycle: created=2026-04-21; last_reviewed=2026-08-20; last_reused=2026-08-20
+# Last reused/audited: 2026-08-20
 # Authority basis: plan v3 antibodies A1/A2; P1 obs_v2 provenance identity packet;
 #                  2026-05-20 live tick payload hash material-extrema repair.
 # Purpose: Pin observation_instants writer provenance and source-role semantics.
@@ -625,9 +625,8 @@ def test_insert_rows_does_not_regress_latest_report_temperature(mem_db):
     assert reason == "payload_hash_mismatch"
 
 
-def test_insert_rows_quarantines_changed_temperature_at_same_report_time(mem_db):
-    """A corrected value at one report timestamp is a revision, not a causal
-    current-state advance."""
+def test_insert_rows_applies_newer_wu_correction_at_same_report_time(mem_db):
+    """A later WU payload may correct one already-published report value."""
     original = _make_row(
         temp_current=33.0,
         provenance_json=_valid_provenance(
@@ -652,7 +651,76 @@ def test_insert_rows_quarantines_changed_temperature_at_same_report_time(mem_db)
     (temp_current,) = mem_db.execute(
         "SELECT temp_current FROM observation_instants"
     ).fetchone()
-    assert temp_current == 33.0
+    assert temp_current == 32.0
+    assert mem_db.execute(
+        "SELECT reason FROM observation_revisions"
+    ).fetchone() == ("payload_hash_mismatch_source_revision_applied",)
+
+
+def test_newer_wu_payload_applies_downward_source_revision(mem_db):
+    """Shenzhen 2026-08-20 antibody: WU corrected the same 12:00 report
+    from 31C to 29C.  The current row must follow the newer provider payload;
+    preserving the first-seen maximum created a false exact NO probability."""
+
+    original = _make_row(
+        city="Shenzhen",
+        target_date="2026-08-20",
+        station_id="ZGSZ",
+        timezone_name="Asia/Shanghai",
+        local_hour=12.0,
+        local_timestamp="2026-08-20T12:00:00+08:00",
+        utc_timestamp="2026-08-20T04:00:00+00:00",
+        utc_offset_minutes=480,
+        temp_unit="C",
+        temp_current=31.0,
+        running_max=31.0,
+        running_min=31.0,
+        observation_count=1,
+        imported_at="2026-08-20T04:41:04+00:00",
+        provenance_json=_valid_provenance(
+            station_id="ZGSZ",
+            payload_hash="sha256:" + "a" * 64,
+            latest_raw_ts="2026-08-20T04:00:00+00:00",
+            latest_temp=31.0,
+        ),
+    )
+    corrected = _make_row(
+        city="Shenzhen",
+        target_date="2026-08-20",
+        station_id="ZGSZ",
+        timezone_name="Asia/Shanghai",
+        local_hour=12.0,
+        local_timestamp="2026-08-20T12:00:00+08:00",
+        utc_timestamp="2026-08-20T04:00:00+00:00",
+        utc_offset_minutes=480,
+        temp_unit="C",
+        temp_current=29.0,
+        running_max=29.0,
+        running_min=29.0,
+        observation_count=1,
+        imported_at="2026-08-20T06:04:10+00:00",
+        provenance_json=_valid_provenance(
+            station_id="ZGSZ",
+            payload_hash="sha256:" + "b" * 64,
+            latest_raw_ts="2026-08-20T04:00:00+00:00",
+            latest_temp=29.0,
+        ),
+    )
+
+    assert insert_rows(mem_db, [original]) == 1
+    assert insert_rows(mem_db, [corrected]) == 0
+
+    current = mem_db.execute(
+        "SELECT temp_current, running_max, running_min, provenance_json "
+        "FROM observation_instants"
+    ).fetchone()
+    assert current[:3] == (29.0, 29.0, 29.0)
+    provenance = json.loads(current[3])
+    assert provenance["payload_hash"] == "sha256:" + "b" * 64
+    assert provenance["revised_from"]["running_max"] == 31.0
+    assert mem_db.execute(
+        "SELECT reason FROM observation_revisions"
+    ).fetchone() == ("payload_hash_mismatch_source_revision_applied",)
 
 
 def test_insert_rows_widens_running_min_when_incoming_is_lower(mem_db):

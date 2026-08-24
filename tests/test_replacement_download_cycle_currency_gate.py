@@ -1,6 +1,6 @@
 # Created: 2026-06-09
-# Last reused or audited: 2026-08-18
-# Lifecycle: created=2026-06-09; last_reviewed=2026-08-18; last_reused=2026-08-18
+# Last reused or audited: 2026-08-21
+# Lifecycle: created=2026-06-09; last_reviewed=2026-08-21; last_reused=2026-08-21
 # Purpose: Prove current-target anchor cycle currency and scoped quota authority.
 # Reuse: Run for replacement current-target download, source-clock, or quota-lane changes.
 # Authority basis: 2026-06-09 anchor-lag root cause (/tmp/anchor_lag_report.md, verified against
@@ -260,6 +260,50 @@ def test_rotation_cursor_normalizes_when_same_cycle_universe_shrinks(
         "cycle": cycle.isoformat(),
         "next_start": 0,
         "generation": 43,
+    }
+
+
+def test_timeboxed_zero_complete_targets_keeps_rotation_for_point_cache_progress(
+    tmp_path: Path,
+) -> None:
+    import scripts.download_replacement_forecast_current_targets as dl
+
+    cycle = AVAILABLE_CYCLE.replace(hour=5)
+    state_path = tmp_path / "rotation.json"
+    state_path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "cycle": cycle.isoformat(),
+                "next_start": 2,
+                "generation": 7,
+            }
+        )
+    )
+    _, start, row_count, generation, state_token = dl._rotate_current_target_rows(
+        [
+            _TargetRow(city, "2026-06-10", "high", False, True)
+            for city in ("Amsterdam", "Ankara", "Atlanta")
+        ],
+        cycle=cycle,
+        state_path=state_path,
+    )
+
+    assert start == 2
+    assert dl._advance_current_target_rotation(
+        cycle=cycle,
+        row_count=row_count,
+        attempted_count=0,
+        incomplete=True,
+        state_path=state_path,
+        expected_generation=generation,
+        expected_state_token=state_token,
+    ) == (2, True)
+    assert json.loads(state_path.read_text()) == {
+        "version": 1,
+        "cycle": cycle.isoformat(),
+        "next_start": 2,
+        "generation": 8,
     }
 
 
@@ -1601,6 +1645,21 @@ def test_covered_critical_scope_does_not_rewrite_anchor(
     conn.close()
     calls: list = []
     _wire(monkeypatch, plan=_PlanStub(ready=False), calls=calls)
+    import src.data.replacement_forecast_production as production
+
+    class _Pool:
+        close_count = 0
+
+        def close(self):
+            self.close_count += 1
+
+    pool = _Pool()
+    production._close_current_target_bucket_pool()
+    monkeypatch.setattr(
+        "src.data.openmeteo_ecmwf_ifs9_bucket_transport.BucketPointReaderPool",
+        lambda: pool,
+    )
+    assert production._current_target_bucket_pool(AVAILABLE_CYCLE) is pool
     monkeypatch.setattr(
         "src.data.replacement_forecast_seed_discovery.held_position_family_priorities",
         lambda: {scope: 0},
@@ -1616,6 +1675,8 @@ def test_covered_critical_scope_does_not_rewrite_anchor(
     assert report["target_count"] == 1
     assert report["written_manifest_count"] == 0
     assert calls == []
+    assert pool.close_count == 0
+    production._close_current_target_bucket_pool()
 
 
 def test_all_null_critical_raw_does_not_mask_missing_anchor(
@@ -1774,6 +1835,74 @@ def test_critical_quota_context_propagates_into_anchor_worker(
     assert observed == [True]
 
 
+def test_current_target_quota_lanes_are_mutually_exclusive(tmp_path) -> None:
+    import src.data.replacement_forecast_production as prod
+
+    with pytest.raises(ValueError, match="critical or priority"):
+        prod._download_replacement_forecast_current_targets_if_needed(
+            {
+                "forecast_db": tmp_path / "forecasts.db",
+                "download_output_dir": tmp_path / "raw",
+            },
+            quota_critical=True,
+            quota_priority=True,
+        )
+
+
+def test_priority_quota_context_propagates_into_anchor_worker(
+    monkeypatch,
+) -> None:
+    import scripts.download_replacement_forecast_current_targets as dl
+    from src.data.openmeteo_ecmwf_ifs9_anchor import build_anchor_request
+
+    class _Tracker:
+        def __init__(self) -> None:
+            self.local = threading.local()
+
+        @contextmanager
+        def priority_lane(self):
+            self.local.priority = True
+            try:
+                yield
+            finally:
+                self.local.priority = False
+
+        def is_priority(self) -> bool:
+            return bool(getattr(self.local, "priority", False))
+
+    tracker = _Tracker()
+    observed: list[bool] = []
+    monkeypatch.setattr(dl, "quota_tracker", tracker)
+    monkeypatch.setattr(dl, "fetch_openmeteo_ifs9_model_meta", lambda **_kwargs: {})
+    monkeypatch.setattr(dl, "validate_openmeteo_ecmwf_ifs9_meta_window", lambda *_args: {})
+    monkeypatch.setattr(
+        dl,
+        "fetch_openmeteo_ecmwf_ifs9_anchor_payload_standard_unstamped",
+        lambda *_args, **_kwargs: (
+            observed.append(tracker.is_priority())
+            or _anchor_payload("2026-08-21")
+        ),
+    )
+    request = build_anchor_request(
+        latitude=32.8998,
+        longitude=-97.0403,
+        run="2026-08-21T12:00:00+00:00",
+        timezone_name="America/Chicago",
+    )
+
+    payloads, failures = dl._fetch_meta_stamped_anchor_wave(
+        {("Dallas", "2026-08-21"): request},
+        max_workers=1,
+        deadline_monotonic=None,
+        client=object(),
+        quota_priority=True,
+    )
+
+    assert failures == {}
+    assert tuple(payloads) == (("Dallas", "2026-08-21"),)
+    assert observed == [True]
+
+
 def test_current_target_budget_starts_after_probe_and_plan(tmp_path, monkeypatch) -> None:
     db = _make_db(tmp_path, {
         "ecmwf_aifs_ens": STALE_CYCLE_ISO,
@@ -1876,6 +2005,80 @@ def test_timeboxed_current_target_slices_reuse_cycle_bucket_pool(
     assert calls[0]["bucket_reader_pool"] is pool
     assert calls[1]["bucket_reader_pool"] is pool
     assert pool.close_count == 1
+
+
+def test_scoped_success_does_not_discard_broad_timebox_bucket_pool(
+    tmp_path, monkeypatch
+) -> None:
+    db = _make_db(tmp_path, {
+        "ecmwf_aifs_ens": STALE_CYCLE_ISO,
+        "openmeteo_ecmwf_ifs_9km": STALE_CYCLE_ISO,
+    })
+    calls: list[dict[str, object]] = []
+    pools: list[object] = []
+    import scripts.download_replacement_forecast_current_targets as dl
+    import src.data.replacement_forecast_current_target_plan as plan_mod
+    import src.data.replacement_forecast_production as production
+
+    class _Pool:
+        close_count = 0
+
+        def read(self, _uri, _index):
+            return 0.0
+
+        def close(self):
+            self.close_count += 1
+
+    def _new_pool():
+        pool = _Pool()
+        pools.append(pool)
+        return pool
+
+    production._close_current_target_bucket_pool()
+    monkeypatch.setattr(
+        production, "_probe_resolved_available_cycle", lambda: AVAILABLE_CYCLE
+    )
+    monkeypatch.setattr(
+        plan_mod,
+        "build_replacement_forecast_current_target_plan",
+        lambda *_args, **_kwargs: _PlanStub(
+            ready=False,
+            missing_openmeteo_manifest_count=1,
+        ),
+    )
+    monkeypatch.setattr(
+        "src.data.openmeteo_ecmwf_ifs9_bucket_transport.BucketPointReaderPool",
+        _new_pool,
+    )
+
+    def _download(**kwargs):
+        calls.append(kwargs)
+        return {
+            "status": "CURRENT_TARGET_RAW_INPUTS_DOWNLOADED",
+            "timeboxed_incomplete": len(calls) != 2,
+        }
+
+    monkeypatch.setattr(dl, "download_current_target_raw_inputs", _download)
+
+    broad_first = _download_replacement_forecast_current_targets_if_needed(
+        _cfg(db, tmp_path), max_wall_clock_seconds=5.0
+    )
+    scoped = _download_replacement_forecast_current_targets_if_needed(
+        _cfg(db, tmp_path),
+        max_wall_clock_seconds=5.0,
+        required_scopes=(("London", "2026-06-10", "high"),),
+    )
+    broad_second = _download_replacement_forecast_current_targets_if_needed(
+        _cfg(db, tmp_path), max_wall_clock_seconds=5.0
+    )
+
+    assert broad_first["timeboxed_incomplete"] is True
+    assert scoped["timeboxed_incomplete"] is False
+    assert broad_second["timeboxed_incomplete"] is True
+    assert len(pools) == 1
+    assert all(call["bucket_reader_pool"] is pools[0] for call in calls)
+    assert pools[0].close_count == 0
+    production._close_current_target_bucket_pool()
 
 
 def test_cycle_change_closes_timeboxed_pool_before_zero_budget_return(
@@ -2335,6 +2538,73 @@ def test_direct_downloader_batches_run_pinned_anchor_locations(
     assert report["manifest_count"] == 2
     assert report["downloaded"]["openmeteo_transport_fetch_count"] == 2
     assert report["downloaded"]["openmeteo_single_runs_location_batch_count"] == 1
+
+
+def test_exhausted_metered_quota_goes_directly_to_bucket_rung(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    import scripts.download_replacement_forecast_current_targets as dl
+
+    rows = tuple(
+        _TargetRow(
+            city=city,
+            target_date="2026-06-10",
+            temperature_metric="high",
+            covered=False,
+            missing_openmeteo_manifest=True,
+        )
+        for city in ("London", "Paris")
+    )
+    plan = _PlanStub(ready=False, rows=rows)
+    bucket_calls: list[dict[str, object]] = []
+    monkeypatch.setattr(dl.quota_tracker, "can_call", lambda: False)
+    monkeypatch.setattr(dl, "_single_runs_public_for_request", lambda _request: True)
+    monkeypatch.setattr(
+        dl,
+        "_fetch_run_pinned_anchor_wave",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("exhausted quota must skip run-pinned wave")
+        ),
+    )
+    monkeypatch.setattr(
+        dl,
+        "_fetch_meta_stamped_anchor_wave",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("exhausted quota must skip meta-stamped wave")
+        ),
+    )
+
+    def _bucket(**kwargs):
+        assert kwargs["meta_wave_failure"] is not None
+        bucket_calls.append(kwargs)
+        return (
+            _anchor_payload(),
+            {
+                "openmeteo_endpoint": "bucket",
+                "run_authority": "bucket_partial_run_test",
+            },
+        )
+
+    monkeypatch.setattr(dl, "_resolve_anchor_payload", _bucket)
+    report = dl.download_current_target_raw_inputs(
+        forecast_db=tmp_path / "forecasts.db",
+        output_dir=tmp_path / "raw",
+        cycle=AVAILABLE_CYCLE,
+        limit=None,
+        write_db=False,
+        release_lag_hours=14.0,
+        anchor_sigma_c=3.0,
+        include_covered=True,
+        precomputed_plan=plan,
+        max_wall_clock_seconds=5.0,
+        quota_priority=True,
+    )
+
+    assert report["downloaded"]["openmeteo_metered_quota_available"] is False
+    assert report["manifest_count"] == 2
+    assert len(bucket_calls) == 2
+    assert {call["bucket_read_workers"] for call in bucket_calls} == {4}
 
 
 def test_timebox_commits_ready_wave_payloads_before_deferring_unresolved(

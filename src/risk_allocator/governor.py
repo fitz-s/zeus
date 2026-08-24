@@ -119,11 +119,13 @@ class GovernorState:
     m5_reconcile_required: bool = False
     risk_level: RiskLevel = RiskLevel.GREEN
     unknown_side_effect_markets: tuple[str, ...] = ()
+    reconcile_finding_markets: tuple[str, ...] = ()
     # Scope lattice (additive): count of unknown side effects classified SYSTEMIC
     # — either unscopeable (cannot bind to a single market, fail closed) or spanning
     # >= systemic_market_count_limit distinct markets. Only SYSTEMIC unknowns trip
     # the GLOBAL reduce_only latch; SCOPED unknowns isolate via unknown_side_effect_markets.
     systemic_unknown_side_effect_count: int = 0
+    systemic_reconcile_finding_count: int = 0
     manual_reason: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
@@ -136,9 +138,11 @@ class GovernorState:
             "unknown_side_effect_count": self.unknown_side_effect_count,
             "reconcile_finding_count": self.reconcile_finding_count,
             "systemic_unknown_side_effect_count": self.systemic_unknown_side_effect_count,
+            "systemic_reconcile_finding_count": self.systemic_reconcile_finding_count,
             "kill_switch_armed": self.kill_switch_armed,
             "risk_level": self.risk_level.value,
             "unknown_side_effect_markets": list(self.unknown_side_effect_markets),
+            "reconcile_finding_markets": list(self.reconcile_finding_markets),
             "manual_reason": self.manual_reason,
         }
 
@@ -326,6 +330,16 @@ class RiskAllocator:
                 reason="unknown_side_effect_same_market",
                 reduce_only=reduce_only,
             )
+        if market in set(governor_state.reconcile_finding_markets):
+            # SCOPE: only the exact market joined to an unresolved local-orphan
+            # finding. DRAIN: command recovery/reconcile resolves that finding.
+            # RESET: resolved_at removes the market on the next allocator refresh.
+            return replace(
+                capacity,
+                allowed=False,
+                reason="reconcile_finding_same_market",
+                reduce_only=reduce_only,
+            )
         if self.reduce_only_mode_active(governor_state) and not reduce_only:
             return replace(
                 capacity,
@@ -426,8 +440,12 @@ class RiskAllocator:
         # any ws_gap_active flag.
         if governor_state.ws_gap_active and governor_state.ws_gap_seconds > self.cap_policy.ws_gap_seconds_limit:
             return True
-        # Reconcile findings are always systemic (common-path accounting failure).
-        if governor_state.reconcile_finding_count > 0:
+        # SCOPE: only systemic or unscopeable reconciliation evidence freezes
+        # global entry. A local orphan joined to one command market is isolated
+        # by entry_capacity above while its worst-case command exposure remains
+        # in the allocator. DRAIN: recovery/reconcile resolves the finding.
+        # RESET: the next refresh recomputes both scoped and systemic counts.
+        if _systemic_reconcile_finding_present(governor_state):
             return True
         # Scope lattice: only SYSTEMIC unknown side effects trip the GLOBAL latch.
         # SCOPED single-market unknowns isolate via unknown_side_effect_markets
@@ -735,14 +753,14 @@ def refresh_global_allocator(
     policy = cap_policy or load_cap_policy()
     allocator = RiskAllocator.from_position_lots(conn, policy)
     scope = classify_unknown_side_effect_scope(conn, policy)
-    finding_count = count_open_reconcile_findings(conn)
+    finding_scope = classify_reconcile_finding_scope(conn, policy)
     governor = get_global_governor(policy)
     governor_state = governor.update_state(
         ledger,
         heartbeat,
         ws_status,
         unknown_count=scope.total_count,
-        finding_count=finding_count,
+        finding_count=finding_scope.total_count,
     )
     # Scope lattice: list scoped markets for per-market isolation (line-186 path),
     # and publish the systemic count so only SYSTEMIC unknowns trip the GLOBAL latch.
@@ -750,6 +768,8 @@ def refresh_global_allocator(
         governor_state,
         unknown_side_effect_markets=tuple(scope.scoped_markets),
         systemic_unknown_side_effect_count=scope.systemic_count,
+        reconcile_finding_markets=tuple(finding_scope.scoped_markets),
+        systemic_reconcile_finding_count=finding_scope.systemic_count,
     )
     configure_global_allocator(allocator, governor_state)
     return summary()
@@ -1581,6 +1601,20 @@ class UnknownSideEffectScope:
         return self.systemic_count > 0
 
 
+@dataclass(frozen=True)
+class ReconcileFindingScope:
+    """Scope unresolved reconciliation findings without globalizing one market."""
+
+    total_count: int
+    scoped_markets: tuple[str, ...]
+    unscopeable_count: int
+    systemic_count: int
+
+    @property
+    def is_systemic(self) -> bool:
+        return self.systemic_count > 0
+
+
 def classify_unknown_side_effect_scope(conn: Any, cap_policy: CapPolicy | None = None) -> UnknownSideEffectScope:
     """Classify unresolved unknown side effects into SCOPED vs SYSTEMIC.
 
@@ -1610,6 +1644,119 @@ def classify_unknown_side_effect_scope(conn: Any, cap_policy: CapPolicy | None =
     )
 
 
+def classify_reconcile_finding_scope(
+    conn: Any,
+    cap_policy: CapPolicy | None = None,
+) -> ReconcileFindingScope:
+    """Scope subject-local findings only when canonical joins prove one market.
+
+    Local-orphan orders join by venue order, position drift joins by token, and
+    already-recorded trade findings join through the canonical trade fact. All
+    other kinds, missing/ambiguous joins, and multi-market clusters remain
+    systemic.
+    """
+
+    policy = cap_policy or CapPolicy()
+    with _named_sqlite_rows(conn) as read_conn:
+        finding_columns = {
+            str(row[1])
+            for row in read_conn.execute(
+                "PRAGMA table_info(exchange_reconcile_findings)"
+            ).fetchall()
+        }
+        command_columns = {
+            str(row[1])
+            for row in read_conn.execute(
+                "PRAGMA table_info(venue_commands)"
+            ).fetchall()
+        }
+        trade_fact_columns = {
+            str(row[1])
+            for row in read_conn.execute(
+                "PRAGMA table_info(venue_trade_facts)"
+            ).fetchall()
+        }
+        if not {"finding_id", "resolved_at"}.issubset(finding_columns):
+            rows = []
+        elif not {"kind", "subject_id"}.issubset(finding_columns):
+            rows = [
+                {
+                    "finding_id": row[0],
+                    "kind": "",
+                    "market_count": 0,
+                    "market_id": None,
+                }
+                for row in read_conn.execute(
+                    """
+                    SELECT finding_id
+                      FROM exchange_reconcile_findings
+                     WHERE resolved_at IS NULL
+                    """
+                ).fetchall()
+            ]
+        else:
+            joins: list[str] = []
+            if {"venue_order_id", "market_id"}.issubset(command_columns):
+                joins.append(
+                    "(f.kind = 'local_orphan_order' "
+                    "AND vc.venue_order_id = f.subject_id)"
+                )
+            if {"token_id", "market_id", "intent_kind"}.issubset(command_columns):
+                joins.append(
+                    "(f.kind = 'position_drift' AND vc.token_id = f.subject_id "
+                    "AND UPPER(COALESCE(vc.intent_kind, '')) = 'ENTRY')"
+                )
+            if {"command_id", "market_id"}.issubset(command_columns) and {
+                "trade_id",
+                "command_id",
+            }.issubset(trade_fact_columns):
+                joins.append(
+                    "(f.kind = 'unrecorded_trade' AND EXISTS ("
+                    "SELECT 1 FROM venue_trade_facts tf "
+                    "WHERE tf.trade_id = f.subject_id "
+                    "AND tf.command_id = vc.command_id))"
+                )
+            join_sql = " OR ".join(joins) or "0"
+            rows = read_conn.execute(
+                f"""
+                SELECT f.finding_id,
+                       f.kind,
+                       COUNT(DISTINCT NULLIF(TRIM(vc.market_id), '')) AS market_count,
+                       MIN(NULLIF(TRIM(vc.market_id), '')) AS market_id
+                  FROM exchange_reconcile_findings AS f
+                  LEFT JOIN venue_commands AS vc
+                    ON {join_sql}
+                 WHERE f.resolved_at IS NULL
+                 GROUP BY f.finding_id, f.kind
+                """
+            ).fetchall()
+    scoped: list[str] = []
+    unscopeable = 0
+    for raw_row in rows:
+        row = _row_mapping(raw_row)
+        market = str(row.get("market_id") or "").strip()
+        if str(row.get("kind") or "") in {
+            "local_orphan_order",
+            "position_drift",
+            "unrecorded_trade",
+        } and int(row.get("market_count") or 0) == 1 and market:
+            scoped.append(market)
+        else:
+            unscopeable += 1
+    total = len(rows)
+    scoped_markets = tuple(sorted(set(scoped)))
+    cross_market_systemic = (
+        len(scoped_markets) >= int(policy.systemic_market_count_limit)
+    )
+    systemic_count = total if cross_market_systemic else unscopeable
+    return ReconcileFindingScope(
+        total_count=total,
+        scoped_markets=scoped_markets,
+        unscopeable_count=unscopeable,
+        systemic_count=systemic_count,
+    )
+
+
 def _systemic_unknown_present(governor_state: GovernorState) -> bool:
     """Return True when GovernorState carries SYSTEMIC unknown side effects.
 
@@ -1626,6 +1773,16 @@ def _systemic_unknown_present(governor_state: GovernorState) -> bool:
     # Unknown(s) present. If at least one market is scoped, treat as SCOPED
     # (isolated per-market). If NO scope evidence accompanies the count, fail closed.
     return not governor_state.unknown_side_effect_markets
+
+
+def _systemic_reconcile_finding_present(
+    governor_state: GovernorState,
+) -> bool:
+    if governor_state.systemic_reconcile_finding_count > 0:
+        return True
+    if governor_state.reconcile_finding_count <= 0:
+        return False
+    return not governor_state.reconcile_finding_markets
 
 
 def count_open_reconcile_findings(conn: Any) -> int:

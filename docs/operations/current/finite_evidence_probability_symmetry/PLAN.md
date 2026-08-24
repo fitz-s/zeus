@@ -4,6 +4,76 @@ Date: 2026-07-11
 Branch: `live` (was `p2-pending-exit-restart-redecision`; renamed at main→live cutover)
 Status: active
 
+## 2026-08-23 — exact-market reconcile finding不得冻结全球资本
+
+- **实时反例：** `de9e5e204`完成24/24 held monitor coverage且probability stale为0，
+  `entries_paused=false`，但allocator仍因2个`systemic_reconcile_finding_count`进入全局
+  reduce-only。两条事实均属于同一Helsinki market：`unrecorded_trade`已有canonical
+  `venue_trade_facts`及唯一command market；`position_drift` token也由唯一ENTRY command
+  market定位，残余为0.015 non-executable dust。
+- **修复：** scope classifier允许三种subject-local finding在exact one-market canonical join
+  下局部隔离：local orphan→venue order、position drift→ENTRY token、already-recorded trade→
+  trade fact/command。缺join、歧义、collateral/nonlocal或multi-market继续SYSTEMIC。
+- **SCOPE / DRAIN / RESET：** scope是精确market_id，allocator仅拒绝该market新资本；
+  drain是现有reconcile refresh/settlement或dust变化；reset是finding resolved_at写入后下次
+  allocator refresh移除局部隔离。任何第二市场映射立即升级global fail closed。
+- **验收：** unit tests覆盖position/trade exact joins及ambiguous token；用当前live DB只读
+  replay须从`total=2, systemic=2`变为`scoped_markets=['3757041'], systemic=0`，部署后要求
+  allocator `reduce_only=false`且非该market重新进入global auction。
+
+## 2026-08-23 — current-capital q repair不得排在bounded seed window之外
+
+- **实时反例：** `live` reload后queue有392个pending seeds，其中29个marker绑定held
+  families。实现先按alphabetical cursor截取bounded raw window，再在窗口内部读取
+  chain-confirmed exposure；因此文档声称的held priority无法越过窗口边界，22个持仓虽被
+  monitor扫描，仍有15个缺fresh probability，restart guard正确保持entries paused。
+- **修复：** 每个queue pass只读一次current held family集合，并用canonical seed filename
+  shape在JSON/DB inspection前stable-partition当前资本；随后原有cycle/Day0/ownership排序
+  继续生效。ordinary backlog仍通过同一durable cursor推进，inspection cap与single writer
+  不变。
+- **SCOPE / DRAIN / RESET：** scope仅是seed inspection order，不改变probability、price、
+  Kelly或submit authority；drain是现有1-second queue poll；reset是held seed转为request并
+  commit新posterior，持仓退出后下一次claim-time exposure read自动移除其优先级。
+- **验收：** 100个alphabetically earlier普通seed加一个tail held seed、`limit=1`时必须先
+  build held request且不读取全backlog；再跑queue/Day0/cycle suites，并以live posterior
+  conditioning、`last_monitor_prob_is_fresh`和restart guard复验。
+
+## 2026-08-23 — Day0 observation revision不得被不完整的future ENS cycle冻结
+
+- **实时反例：** Warsaw/Madrid/Munich 的最新settlement/physical extreme分别推进到
+  19/31/22C，但live posterior仍绑定18/30/21C。monitor正确fail closed为
+  `GLOBAL_DAY0_CONDITIONING_OBSERVATION_MISMATCH`，repair却每轮返回
+  `CYCLE_ADVANCE_NOT_NEEDED`。deterministic 06Z manifest先到、同指标eligible ENS仍为
+  00Z，旧06Z seed随后以`SOURCE_CYCLE_AWAITING_ENSEMBLE_HWM`被消费，5个held
+  positions持续失去fresh q。
+- **修复：** Day0 observation是独立source clock。reseed选择不晚于family manifest且
+  已decision-time-eligible的同metric ENS cycle；若future deterministic cycle尚无ENS，
+  立即用上一完整carrier和精确同cycle manifests重做conditioning。新ENS完整后仍由
+  normal cycle advance替换，不放宽任何mismatch/HWM/age gate。
+- **SCOPE / DRAIN / RESET：** scope是一条city/date/metric Day0 conditioning revision；
+  drain是现有single-family seed queue；reset是新posterior provenance精确消费该
+  conditioning identity。ENTRY与其他family不共享blocker，future ENS也不被伪装成完整。
+- **验收：** relationship test构造06Z deterministic/00Z eligible ENS并证明seed target与
+  manifests均保持00Z；运行完整Day0 bridge/cycle monotone suites，部署后要求5个live
+  positions的`last_monitor_prob_is_fresh`恢复且stale_count清零。
+
+## 2026-08-23 — partial deterministic cycle不得冻结reduce-only SELL
+
+- **实时反例：** global auction反复选择正 expected-log-growth SELL，但preflight在新
+  deterministic raw/artifact 06Z先于同周期ENS到达时，以
+  `REPLACEMENT_RAW_INPUT_HWM`全局拒绝。完整00Z bundle仍在绝对age horizon内，且
+  `HELD_REDECISION`已经是独立于ENTRY的typed authority purpose。
+- **修复：** ENTRY继续对任一新raw input严格fail closed。只有
+  `HELD_REDECISION`可在最新decision-time-eligible ENS cycle仍等于已消费shape cycle、
+  rich consumed-row identity完整时保留上一完整bundle；同周期late row、新ENS、identity
+  fault、HWM read loss或绝对过期继续拒绝。该例外只允许释放已有资本，不授权BUY。
+- **SCOPE / DRAIN / RESET：** scope是exact family的reduce-only held redecision；drain是
+  normal materializer在同周期eligible ENS提交后生成新bundle；reset是ENS frontier推进，
+  此时旧bundle对ENTRY与HELD同时失效。其他family继续参与全局比较。
+- **验收：** bundle-reader antibodies同时证明raw-model与anchor-artifact partial wave下
+  ENTRY blocked/HELD ready，以及newer complete ENS下两者均blocked；随后运行完整reader
+  suite、planning-lock/registry/compile/diff gates，并以live preflight与venue receipt独立复验。
+
 ## 2026-08-18 Early exit plus residual settlement is a hybrid capital route
 
 The forward capital audit treated the last lifecycle event as the entire

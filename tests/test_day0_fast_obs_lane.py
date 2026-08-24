@@ -1,6 +1,6 @@
 # Created: 2026-06-10
-# Last reused/audited: 2026-08-08
-# Lifecycle: created=2026-06-10; last_reviewed=2026-08-08; last_reused=2026-08-08
+# Last reused/audited: 2026-08-21
+# Lifecycle: created=2026-06-10; last_reviewed=2026-08-21; last_reused=2026-08-21
 # Authority basis: operator green-light 2026-06-10 items A/C/E (free METAR fast
 #   lane, live-obs hook wiring, WU-vs-METAR oracle anomaly guard); day0
 #   first-principles review /tmp/day0_first_principles_review.md §6.2;
@@ -3393,13 +3393,13 @@ class TestMutexNoHttpSplit:
         reactor_module.run_edli_day0_hourly_refresh_cycle(trading_lane_active=True)
         reactor_module.run_edli_day0_hourly_refresh_cycle(trading_lane_active=True)
 
-        assert calls == [["A", "B", "C"], ["D", "E", "A"]]
-        assert reactor_module._DAY0_HOURLY_REFRESH_CURSOR == 1
+        assert calls == [["A", "B", "C"], ["B", "C", "D"]]
+        assert reactor_module._DAY0_HOURLY_REFRESH_CURSOR == 2
 
-    def test_hourly_refresh_due_held_bundle_owns_bounded_critical_cut(
+    def test_hourly_refresh_due_held_bundle_preserves_discovery_progress(
         self, monkeypatch
     ):
-        """Discovery cannot displace held capital near its strict bundle cliff."""
+        """One failed held bundle cannot starve every discovery probability."""
         import src.config as config_module
         import src.main  # load settings consumers before replacing the config singleton
         from src.events import reactor as reactor_module
@@ -3460,8 +3460,8 @@ class TestMutexNoHttpSplit:
         reactor_module.run_edli_day0_hourly_refresh_cycle(trading_lane_active=True)
 
         assert calls == [
-            {"selected": ["A", "B", "C"], "critical": 3, "priority": 0},
-            {"selected": ["D", "E", "A"], "critical": 3, "priority": 0},
+            {"selected": ["A", "B", "F"], "critical": 2, "priority": 1},
+            {"selected": ["B", "C", "G"], "critical": 2, "priority": 1},
         ]
 
     def test_hourly_refresh_preserves_full_missing_authority_priority_prefix(

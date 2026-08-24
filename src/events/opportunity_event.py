@@ -202,7 +202,10 @@ def make_opportunity_event(
     payload_obj = dataclasses.asdict(payload) if dataclasses.is_dataclass(payload) else payload
     payload_json = canonical_json(payload_obj)
     digest = payload_hash(payload_obj)
-    idem = stable_idempotency_key(event_type, entity_key, source, available_at, digest)
+    identity_parts = (event_type, entity_key, source, available_at, digest)
+    if event_type == "DAY0_EXTREME_UPDATED" and causal_snapshot_id:
+        identity_parts += (causal_snapshot_id,)
+    idem = stable_idempotency_key(*identity_parts)
     event_id = stable_event_id(idem)
     return OpportunityEvent(
         event_id=event_id,

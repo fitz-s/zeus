@@ -1,5 +1,5 @@
 # Created: prior; restructured 2026-05-01
-# Last reused or audited: 2026-08-14
+# Last reused or audited: 2026-08-21
 # Authority basis: architect D1 (ECMWF throttle), AGENTS.md money path
 #   Prior: PLAN docs/operations/task_2026-05-11_ecmwf_download_replacement/PLAN.md
 #   ECMWF Open Data has ~6-8h latency (vs. TIGGE's 48h public embargo) so it
@@ -49,6 +49,7 @@ import json
 import logging
 import math
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -218,6 +219,202 @@ TRACKS: dict[str, dict] = {
 SOURCE_ID = "ecmwf_open_data"
 FORECAST_SOURCE_ROLE = "entry_primary"
 MODEL_VERSION = "ecmwf_open_data"
+
+# Keep the current and immediately preceding UTC calendar days available for
+# restart/redecode. Older raw GRIBs are recoverable from ECMWF, but only after
+# their exact cycle+track has durable COMPLETE source-run evidence and an equal
+# count of VERIFIED canonical snapshots.
+_RAW_RETENTION_CALENDAR_DAYS = 2
+_RAW_STEP_NAME = re.compile(
+    r"^\.(?P<date>\d{8})_(?P<hour>\d{2})z_step\d{3}_"
+    r"(?P<param>mx2t3|mn2t3)_ens51\.grib2$"
+)
+_RAW_CONCAT_NAME = re.compile(
+    r"^open_ens_(?P<date>\d{8})_(?P<hour>\d{2})z_steps_.*_params_"
+    r"(?P<param>mx2t3|mn2t3)\.grib2$"
+)
+_RAW_PARAM_AUTHORITY = {
+    "mx2t3": ("mx2t6_high", "high"),
+    "mn2t3": ("mn2t6_low", "low"),
+}
+
+
+@dataclass(frozen=True)
+class _RawRetentionPlan:
+    root: Path
+    files: tuple[Path, ...]
+    eligible_group_count: int
+    retained_group_count: int
+    unrecognized_file_count: int
+    planned_bytes: int
+
+
+def _raw_file_identity(path: Path) -> tuple[str, int, str] | None:
+    match = _RAW_STEP_NAME.fullmatch(path.name) or _RAW_CONCAT_NAME.fullmatch(path.name)
+    if match is None:
+        return None
+    hour = int(match.group("hour"))
+    if hour not in {0, 6, 12, 18}:
+        return None
+    return match.group("date"), hour, match.group("param")
+
+
+def _plan_decoded_open_data_raw_retention(
+    conn,
+    *,
+    raw_root: Path,
+    reference_date: date,
+    retention_days: int = _RAW_RETENTION_CALENDAR_DAYS,
+) -> _RawRetentionPlan:
+    """Plan deletion only for raw groups reproduced by canonical DB truth.
+
+    Planning happens after the canonical commit while the forecasts connection
+    is still authoritative. Applying the plan happens after releasing the BULK
+    writer lock so multi-gigabyte filesystem cleanup cannot stall probability
+    writers. Unknown files and symlinks are never candidates.
+    """
+    if retention_days < 2:
+        raise ValueError("OpenData raw retention must keep at least two calendar days")
+    root = raw_root / "raw" / "ecmwf_open_ens" / "ecmwf"
+    if not root.exists() or root.is_symlink() or not root.is_dir():
+        return _RawRetentionPlan(root, (), 0, 0, 0, 0)
+
+    cutoff = reference_date - timedelta(days=retention_days - 1)
+    groups: dict[tuple[str, int, str], list[Path]] = {}
+    blocked_groups: set[tuple[str, int, str]] = set()
+    unrecognized = 0
+    for day_dir in sorted(root.iterdir()):
+        if day_dir.is_symlink() or not day_dir.is_dir():
+            continue
+        try:
+            day = datetime.strptime(day_dir.name, "%Y%m%d").date()
+        except ValueError:
+            continue
+        if day >= cutoff:
+            continue
+        for candidate in day_dir.iterdir():
+            identity = _raw_file_identity(candidate)
+            if identity is None or identity[0] != day_dir.name:
+                if candidate.name.endswith(".grib2"):
+                    unrecognized += 1
+                continue
+            if candidate.is_symlink() or not candidate.is_file():
+                blocked_groups.add(identity)
+                continue
+            groups.setdefault(identity, []).append(candidate)
+
+    planned: list[Path] = []
+    eligible_groups = 0
+    retained_groups = 0
+    for (day_text, hour, param), paths in sorted(groups.items()):
+        identity = (day_text, hour, param)
+        if identity in blocked_groups:
+            retained_groups += 1
+            continue
+        track, metric = _RAW_PARAM_AUTHORITY[param]
+        source_run_id = (
+            f"{SOURCE_ID}:{track}:"
+            f"{datetime.strptime(day_text, '%Y%m%d').date().isoformat()}T{hour:02d}Z"
+        )
+        source_run = conn.execute(
+            """
+            SELECT status, completeness_status, partial_run,
+                   expected_count, observed_count
+              FROM source_run
+             WHERE source_run_id = ? AND source_id = ?
+            """,
+            (source_run_id, SOURCE_ID),
+        ).fetchone()
+        if source_run is None:
+            retained_groups += 1
+            continue
+        expected = source_run["expected_count"]
+        observed = source_run["observed_count"]
+        source_complete = (
+            source_run["status"] == "SUCCESS"
+            and source_run["completeness_status"] == "COMPLETE"
+            and int(source_run["partial_run"]) == 0
+            and expected is not None
+            and observed is not None
+            and int(expected) > 0
+            and int(expected) == int(observed)
+        )
+        if not source_complete:
+            retained_groups += 1
+            continue
+        snapshot_proof = conn.execute(
+            """
+            SELECT COUNT(*) AS snapshot_count,
+                   SUM(CASE WHEN authority = 'VERIFIED' THEN 1 ELSE 0 END)
+                       AS verified_count
+              FROM ensemble_snapshots
+             WHERE source_run_id = ?
+               AND source_id = ?
+               AND temperature_metric = ?
+            """,
+            (source_run_id, SOURCE_ID, metric),
+        ).fetchone()
+        snapshot_count = int(snapshot_proof["snapshot_count"] or 0)
+        verified_count = int(snapshot_proof["verified_count"] or 0)
+        if snapshot_count != int(observed) or verified_count != snapshot_count:
+            retained_groups += 1
+            continue
+        eligible_groups += 1
+        planned.extend(paths)
+
+    return _RawRetentionPlan(
+        root=root,
+        files=tuple(sorted(planned)),
+        eligible_group_count=eligible_groups,
+        retained_group_count=retained_groups,
+        unrecognized_file_count=unrecognized,
+        planned_bytes=sum(path.stat().st_size for path in planned),
+    )
+
+
+def _apply_decoded_open_data_raw_retention(plan: _RawRetentionPlan) -> dict[str, object]:
+    """Apply a proof-built plan without recursion or symlink traversal."""
+    deleted_files = 0
+    deleted_bytes = 0
+    errors: list[str] = []
+    parents: set[Path] = set()
+    if plan.root.is_symlink():
+        errors.append("raw_root_became_symlink")
+    else:
+        for path in plan.files:
+            parents.add(path.parent)
+            if path.parent.parent != plan.root:
+                errors.append(f"path_outside_raw_root:{path}")
+                continue
+            try:
+                if path.parent.is_symlink() or path.is_symlink() or not path.is_file():
+                    errors.append(f"path_changed:{path}")
+                    continue
+                size = path.stat().st_size
+                path.unlink()
+                deleted_files += 1
+                deleted_bytes += size
+            except FileNotFoundError:
+                continue
+            except OSError as exc:
+                errors.append(f"{path}:{type(exc).__name__}")
+        for parent in sorted(parents):
+            try:
+                parent.rmdir()
+            except OSError:
+                pass
+    status = "ERROR" if errors else ("APPLIED" if plan.files else "NO_ELIGIBLE_RAW")
+    return {
+        "status": status,
+        "eligible_group_count": plan.eligible_group_count,
+        "retained_group_count": plan.retained_group_count,
+        "unrecognized_file_count": plan.unrecognized_file_count,
+        "planned_file_count": len(plan.files),
+        "planned_bytes": plan.planned_bytes,
+        "deleted_file_count": deleted_files,
+        "deleted_bytes": deleted_bytes,
+        "errors": errors[:10],
+    }
 
 # ECMWF Open Data is replicated across multiple mirrors. AWS is fastest but
 # returns S3 SlowDown when byte-range requests burst. Google rejects multi-range
@@ -1978,6 +2175,8 @@ def collect_open_ens_cycle(
         "producer_readiness_deleted": 0,
         "source_run_deleted": 0,
     }
+    retention_plan: _RawRetentionPlan | None = None
+    retention_summary: dict[str, object] = {"status": "NOT_PLANNED"}
     with _lock_ctx:
         # ECMWF hang antibody #3 (2026-05-13) — boundary INFO logs at every
         # transition inside the BULK lock so the next 12h hang has a log
@@ -2141,9 +2340,28 @@ def collect_open_ens_cycle(
                 status,
                 int((time.monotonic() - _ingest_t0) * 1000),
             )
+            try:
+                retention_plan = _plan_decoded_open_data_raw_retention(
+                    conn,
+                    raw_root=paths.raw_root,
+                    reference_date=now.date(),
+                )
+            except Exception as exc:  # noqa: BLE001 - retention must fail closed
+                retention_summary = {
+                    "status": "PLAN_ERROR",
+                    "error": f"{type(exc).__name__}:{exc}",
+                }
+                logger.warning("ecmwf_open_data raw retention plan failed: %s", exc)
         finally:
             if own_conn:
                 conn.close()
+
+    # Large raw files are removed only after the canonical transaction commits
+    # and the BULK writer lock is released. A retention failure never changes
+    # the already-truthful source-run result or blocks the next probability job.
+    if retention_plan is not None:
+        retention_summary = _apply_decoded_open_data_raw_retention(retention_plan)
+        logger.info("ecmwf_open_data raw_retention=%s", retention_summary)
 
     stages = [
         *stages,
@@ -2167,6 +2385,7 @@ def collect_open_ens_cycle(
         "download_path": str(output_path),
         "snapshots_inserted": int(summary.get("written", 0)),
         "snapshots_skipped": int(summary.get("skipped", 0)),
+        "raw_retention": retention_summary,
         **authority_summary,
         "stages": stages,
     }

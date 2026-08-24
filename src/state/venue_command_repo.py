@@ -117,6 +117,8 @@ _TRANSITIONS: dict[tuple[str, str], str] = {
     ("POSTING", "SUBMIT_UNKNOWN"):             "UNKNOWN",
     ("POSTING", "SUBMIT_TIMEOUT_UNKNOWN"):     "SUBMIT_UNKNOWN_SIDE_EFFECT",
     ("POSTING", "CLOSED_MARKET_UNKNOWN"):      "SUBMIT_UNKNOWN_SIDE_EFFECT",
+    ("POSTING", "PARTIAL_FILL_OBSERVED"):       "PARTIAL",
+    ("POSTING", "FILL_CONFIRMED"):              "FILLED",
     ("POSTING", "CANCEL_REQUESTED"):           "CANCEL_PENDING",
     ("POSTING", "REVIEW_REQUIRED"):            "REVIEW_REQUIRED",
     ("POST_ACKED", "SUBMIT_ACKED"):            "ACKED",
@@ -132,6 +134,11 @@ _TRANSITIONS: dict[tuple[str, str], str] = {
     ("SUBMITTING", "SUBMIT_UNKNOWN"):         "UNKNOWN",
     ("SUBMITTING", "SUBMIT_TIMEOUT_UNKNOWN"): "SUBMIT_UNKNOWN_SIDE_EFFECT",
     ("SUBMITTING", "CLOSED_MARKET_UNKNOWN"):  "SUBMIT_UNKNOWN_SIDE_EFFECT",
+    # A venue fill is stronger evidence than the submit ACK that may have been
+    # lost when the process crossed the SDK side-effect boundary.  Preserve
+    # the observed fill instead of stranding the command in SUBMITTING.
+    ("SUBMITTING", "PARTIAL_FILL_OBSERVED"):   "PARTIAL",
+    ("SUBMITTING", "FILL_CONFIRMED"):          "FILLED",
     ("SUBMITTING", "CANCEL_REQUESTED"):       "CANCEL_PENDING",
     ("SUBMITTING", "EXPIRED"):                "EXPIRED",
     ("SUBMITTING", "REVIEW_REQUIRED"):        "REVIEW_REQUIRED",
@@ -164,6 +171,10 @@ _TRANSITIONS: dict[tuple[str, str], str] = {
     ("SUBMIT_UNKNOWN_SIDE_EFFECT", "REVIEW_REQUIRED"):       "REVIEW_REQUIRED",
 
     # from PARTIAL
+    # User-channel fill evidence can beat the synchronous SDK return back to
+    # this process.  A later submit ACK binds its order identity but cannot
+    # downgrade the already-observed exposure.
+    ("PARTIAL", "SUBMIT_ACKED"):              "PARTIAL",
     ("PARTIAL", "PARTIAL_FILL_OBSERVED"):     "PARTIAL",
     ("PARTIAL", "FILL_CONFIRMED"):            "FILLED",
     ("PARTIAL", "CANCEL_REQUESTED"):          "CANCEL_PENDING",
@@ -171,6 +182,7 @@ _TRANSITIONS: dict[tuple[str, str], str] = {
     ("PARTIAL", "REVIEW_REQUIRED"):           "REVIEW_REQUIRED",
 
     # from FILLED
+    ("FILLED", "SUBMIT_ACKED"):               "FILLED",
     ("FILLED", "PARTIAL_FILL_OBSERVED"):      "PARTIAL",
     ("FILLED", "REVIEW_REQUIRED"):            "REVIEW_REQUIRED",
 
@@ -1413,7 +1425,8 @@ def insert_command(
 
     q_version (SCH-W1.2-ORDER-STATE): the forecast_posteriors.posterior_identity_hash
     of the q this command's decision was made against, write-once at creation.
-    Required for live-mode ENTRY commands at this repo boundary; nullable only for
+    Required for live-mode ENTRY commands and every globally-ranked SELL carrying
+    a GlobalSellReceiptClosure at this repo boundary; nullable only for other
     non-entry commands, offline fixtures/replay, and the repository-owned typed
     reconciliation creation helpers. Never re-stamped after insert.
 
@@ -1463,6 +1476,13 @@ def insert_command(
         and _strict_live_entry_q_version_required()
     ):
         raise ValueError("ENTRY venue command requires non-empty q_version")
+    if global_sell_receipt_closure is not None and q_version_value is None:
+        # SCOPE: only this globally-ranked SELL command. DRAIN: its receipt
+        # closure is rejected before command/envelope persistence, allowing the
+        # auction to re-decide. RESET: a complete current witness supplies q.
+        raise ValueError(
+            "global SELL venue command requires non-empty q_version"
+        )
     _assert_snapshot_gate(
         conn,
         snapshot_id=snapshot_id_value,

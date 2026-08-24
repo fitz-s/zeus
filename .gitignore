@@ -168,6 +168,7 @@ raw/**/*.h5
 # ----------------------------------------------------------------------
 .omx/
 .omc/
+/.total_loss/
 .claude/baton_state.json
 .claude/settings.local.json
 .claude/**/logs/

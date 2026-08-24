@@ -1,4 +1,4 @@
-# Lifecycle: created=2026-06-18; last_reviewed=2026-08-03; last_reused=2026-08-12
+# Lifecycle: created=2026-06-18; last_reviewed=2026-08-21; last_reused=2026-08-21
 # Purpose: Regression tests for read-only live restart preflight risk classification.
 # Reuse: pytest tests/test_check_live_restart_preflight.py
 # Authority basis: AGENTS.md live-money restart proof gates.
@@ -95,6 +95,7 @@ def _qlcb_meta() -> dict[str, object]:
         "guard_semantic_version": guard_mod.EXPECTED_GUARD_SEMANTIC_VERSION,
         "center_method_version": guard_mod.EXPECTED_CENTER_METHOD_VERSION,
         "band_semantic_version": guard_mod.EXPECTED_BAND_SEMANTIC_VERSION,
+        "probability_semantics_revision": guard_mod.CURRENT_EVIDENCE_SEMANTICS_REVISION,
         "corpus_authority": guard_mod.EXPECTED_CORPUS_AUTHORITY,
     }
 
@@ -4824,6 +4825,7 @@ def test_preflight_qlcb_check_uses_preflight_state_dir(monkeypatch, tmp_path):
 
     assert result.ok is True
     assert result.evidence["status"] == "ACTIVE_VALID"
+    assert result.evidence["serving_mode"] == "ACTIVE_VALIDATED_BOUND"
     assert result.evidence["path"] == str(state_dir / "qlcb_oof_reliability.json")
 
 
@@ -4857,7 +4859,7 @@ def test_preflight_does_not_reintroduce_retired_single_leg_family_veto(monkeypat
     )
 
 
-def test_preflight_blocks_absent_qlcb_artifact(monkeypatch, tmp_path):
+def test_preflight_accepts_absent_inert_qlcb_artifact(monkeypatch, tmp_path):
     trade_db, forecast_db, state_dir = _patch_paths(monkeypatch, tmp_path)
     trade = _init_trade_db(trade_db)
     forecasts = _init_forecast_db(forecast_db)
@@ -4881,13 +4883,13 @@ def test_preflight_blocks_absent_qlcb_artifact(monkeypatch, tmp_path):
 
     result = preflight.evaluate()
 
-    assert result["ok"] is False
     qlcb = next(c for c in result["checks"] if c["name"] == "qlcb_reliability_artifact")
-    assert qlcb["ok"] is False
+    assert qlcb["ok"] is True
     assert qlcb["evidence"]["status"] == "ABSENT_ALLOWED"
+    assert qlcb["evidence"]["serving_mode"] == "INERT_CURRENT_Q_BOUND"
 
 
-def test_preflight_blocks_present_invalid_qlcb_artifact(monkeypatch, tmp_path):
+def test_preflight_accepts_present_invalid_inert_qlcb_artifact(monkeypatch, tmp_path):
     trade_db, forecast_db, state_dir = _patch_paths(monkeypatch, tmp_path)
     trade = _init_trade_db(trade_db)
     forecasts = _init_forecast_db(forecast_db)
@@ -4911,13 +4913,13 @@ def test_preflight_blocks_present_invalid_qlcb_artifact(monkeypatch, tmp_path):
 
     result = preflight.evaluate()
 
-    assert result["ok"] is False
     qlcb = next(c for c in result["checks"] if c["name"] == "qlcb_reliability_artifact")
-    assert qlcb["ok"] is False
+    assert qlcb["ok"] is True
     assert qlcb["evidence"]["status"] == "ACTIVE_INVALID"
+    assert qlcb["evidence"]["serving_mode"] == "INERT_CURRENT_Q_BOUND"
 
 
-def test_preflight_blocks_shape_valid_stale_qlcb_artifact(monkeypatch, tmp_path):
+def test_preflight_accepts_shape_valid_stale_inert_qlcb_artifact(monkeypatch, tmp_path):
     trade_db, forecast_db, state_dir = _patch_paths(monkeypatch, tmp_path)
     trade = _init_trade_db(trade_db)
     forecasts = _init_forecast_db(forecast_db)
@@ -4953,10 +4955,10 @@ def test_preflight_blocks_shape_valid_stale_qlcb_artifact(monkeypatch, tmp_path)
 
     result = preflight.evaluate()
 
-    assert result["ok"] is False
     qlcb = next(c for c in result["checks"] if c["name"] == "qlcb_reliability_artifact")
-    assert qlcb["ok"] is False
+    assert qlcb["ok"] is True
     assert qlcb["evidence"]["status"] == "STALE_SEMANTICS"
+    assert qlcb["evidence"]["serving_mode"] == "INERT_CURRENT_Q_BOUND"
 
 
 def _init_sidecar_surfaces(conn, *, now: datetime):

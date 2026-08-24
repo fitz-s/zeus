@@ -1024,37 +1024,13 @@ def _default_live_fetch_locations_batched(
     if not locations:
         return []
     try:
-        from src.data.openmeteo_client import fetch  # noqa: PLC0415
-        from src.data.openmeteo_ecmwf_ifs9_anchor import (  # noqa: PLC0415
-            SINGLE_RUNS_FORECAST_URL,
+        payloads = _fetch_single_runs_hourly_payloads_batched(
+            models=models,
+            locations=locations,
+            run=run,
+            forecast_hours=forecast_hours,
+            deadline_monotonic=deadline_monotonic,
         )
-
-        params = {
-            "latitude": ",".join(str(latitude) for latitude, _, _, _ in locations),
-            "longitude": ",".join(str(longitude) for _, longitude, _, _ in locations),
-            "hourly": "temperature_2m",
-            "models": ",".join(OPENMETEO_MODEL_IDS.get(model, model) for model in models),
-            "run": run.strftime("%Y-%m-%dT%H:%M"),
-            "forecast_hours": forecast_hours,
-            "temperature_unit": "celsius",
-            "timezone": ",".join(timezone_name for _, _, timezone_name, _ in locations),
-            "cell_selection": BAYES_PRECISION_FUSION_CELL_SELECTION,
-        }
-        payload = fetch(
-            SINGLE_RUNS_FORECAST_URL,
-            params,
-            endpoint_label="bayes_precision_fusion_single_runs_locations_batched",
-            quota=_BPF_OPENMETEO_QUOTA_TRACKER,
-            fast_fail_429=True,
-            **_deadline_fetch_kwargs(deadline_monotonic),
-        )
-        payloads = [payload] if len(locations) == 1 and isinstance(payload, dict) else payload
-        if not isinstance(payloads, list) or len(payloads) != len(locations):
-            raise RuntimeError(
-                "Open-Meteo multi-location response count mismatch: "
-                f"expected={len(locations)} got="
-                f"{len(payloads) if isinstance(payloads, list) else type(payloads).__name__}"
-            )
         return [
             {
                 target_local_date: _parse_batched_single_runs_payload(
@@ -1146,6 +1122,61 @@ def _default_live_fetch_locations_batched(
             {target_local_date: dict(error) for target_local_date in target_local_dates}
             for _, _, _, target_local_dates in locations
         ]
+
+
+def _fetch_single_runs_hourly_payloads_batched(
+    *,
+    models: Sequence[str],
+    locations: Sequence[tuple[float, float, str, Sequence[date]]],
+    run: datetime,
+    forecast_hours: int,
+    deadline_monotonic: float | None = None,
+) -> tuple[Mapping[str, object], ...]:
+    """Fetch raw, exact-run hourly payloads using the canonical BPF transport.
+
+    This is the payload-preserving sibling of ``_default_live_fetch_locations_batched``.
+    It intentionally has no fallback or provenance reinterpretation: callers that need
+    the provider-meta-stamped standard surface must invoke the existing
+    ``_fetch_standard_meta_stamped_payloads`` helper and carry its returned authority.
+    """
+    if not models or not locations:
+        return ()
+    from src.data.openmeteo_client import fetch  # noqa: PLC0415
+    from src.data.openmeteo_ecmwf_ifs9_anchor import (  # noqa: PLC0415
+        SINGLE_RUNS_FORECAST_URL,
+    )
+
+    params = {
+        "latitude": ",".join(str(latitude) for latitude, _, _, _ in locations),
+        "longitude": ",".join(str(longitude) for _, longitude, _, _ in locations),
+        "hourly": "temperature_2m",
+        "models": ",".join(OPENMETEO_MODEL_IDS.get(model, model) for model in models),
+        "run": run.strftime("%Y-%m-%dT%H:%M"),
+        "forecast_hours": forecast_hours,
+        "temperature_unit": "celsius",
+        "timezone": ",".join(timezone_name for _, _, timezone_name, _ in locations),
+        "cell_selection": BAYES_PRECISION_FUSION_CELL_SELECTION,
+    }
+    payload = fetch(
+        SINGLE_RUNS_FORECAST_URL,
+        params,
+        endpoint_label="bayes_precision_fusion_single_runs_locations_batched",
+        quota=_BPF_OPENMETEO_QUOTA_TRACKER,
+        fast_fail_429=True,
+        **_deadline_fetch_kwargs(deadline_monotonic),
+    )
+    payloads = [payload] if len(locations) == 1 and isinstance(payload, Mapping) else payload
+    if not isinstance(payloads, Sequence) or isinstance(payloads, (str, bytes)):
+        raise RuntimeError(
+            "Open-Meteo multi-location response must be a JSON array: "
+            f"got={type(payloads).__name__}"
+        )
+    if len(payloads) != len(locations) or any(not isinstance(item, Mapping) for item in payloads):
+        raise RuntimeError(
+            "Open-Meteo multi-location response count/shape mismatch: "
+            f"expected={len(locations)} got={len(payloads)}"
+        )
+    return tuple(payloads)
 
 
 def _parse_batched_single_runs_payload(
@@ -1902,6 +1933,7 @@ def download_bayes_precision_fusion_extra_raw_inputs(
         ] = defaultdict(dict)
         for (city, target_date), city_targets in target_groups:
             ref = city_targets[0]
+            required_metrics = {target.metric for target in city_targets}
             if (
                 not _model_in_domain(
                     model,
@@ -1928,7 +1960,7 @@ def download_bayes_precision_fusion_extra_raw_inputs(
                     source_cycle_time=request_cycle_iso,
                     endpoint="single_runs",
                 )
-                for metric in ("high", "low")
+                for metric in required_metrics
             ):
                 single_success_models.add(model)
                 continue
@@ -2080,6 +2112,7 @@ def download_bayes_precision_fusion_extra_raw_inputs(
             # their real public run so one Open-Meteo request never mixes 06Z and 12Z identities.
             single_models_by_run: dict[datetime, list[str]] = defaultdict(list)
             single_request_by_model: dict[str, _SourceClockSingleRunsRequest] = {}
+            required_metrics = {target.metric for target in city_targets}
             for model in all_models:
                 if not _model_in_domain(model, lat=ref.latitude, lon=ref.longitude, lead_days=int(ref.lead_days)):
                     domain_excluded.append(f"{model}:{city}")
@@ -2108,9 +2141,10 @@ def download_bayes_precision_fusion_extra_raw_inputs(
                 if not allow_single_runs_fallback and fast_fail_key in single_fast_transport_failed:
                     dropped.append(f"{model}:single_runs_fast_transport_cached_drop")
                     continue
-                # R1+R2 skip: check both metrics already persisted for this (model,city,date,cycle).
+                # R1+R2 skip: check every metric in the current target family. An absent
+                # non-market sibling must not keep a successful batch permanently incomplete.
                 metrics_needed = [
-                    met for met in ("high", "low")
+                    met for met in required_metrics
                     if not _has_persisted_row(
                         model=model,
                         city=city,

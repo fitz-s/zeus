@@ -28,6 +28,20 @@ def test_every_scheduled_job_is_registered() -> None:
     assert not missing, f"scheduled jobs missing from registry: {sorted(missing)}"
 
 
+def test_replacement_materializer_registry_matches_registered_callbacks() -> None:
+    from src.data.source_job_registry import JOB_REGISTRY
+
+    background = JOB_REGISTRY["replacement_forecast_live_materialize"]
+    priority = JOB_REGISTRY["replacement_forecast_live_materialize_priority"]
+    assert background.owner_daemon == priority.owner_daemon == "forecast_live_daemon"
+    assert background.callable_ref == "_replacement_forecast_materialize_job"
+    assert priority.callable_ref == "_replacement_forecast_priority_materialize_job"
+    assert background.registry_built is False
+    assert priority.registry_built is False
+    assert "background" in background.notes
+    assert "1-second cadence" in priority.notes
+
+
 def test_inventory_check_passes() -> None:
     """The --check CLI returns 0 when the registry covers every scheduled job."""
     from scripts.data_collection_inventory import cmd_check

@@ -1,7 +1,7 @@
 """Runtime guard and live-cycle wiring tests."""
-# Lifecycle: created=2026-04-28; last_reviewed=2026-08-15; last_reused=2026-08-15
+# Lifecycle: created=2026-04-28; last_reviewed=2026-08-23; last_reused=2026-08-23
 # Created: 2026-04-28
-# Last reused/audited: 2026-08-15
+# Last reused/audited: 2026-08-23
 # Authority basis: docs/archive/2026-Q2/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md; task_2026-04-28_contamination_remediation Batch G; Phase 1B ENS snapshot persistence; Phase 1D forecast source policy; PR #56 MarketPhaseEvidence sidecar propagation; Wave26 explicit position env authority; task.md B3 exit executable snapshot identity; docs/operations/task_2026-05-21_live_side_effect_risk_boundaries/task.md P1-2 cluster projection; docs/archive/2026-Q2/task_2026-05-22_crosscheck_valid_window/CROSSCHECK_VALID_WINDOW_PLAN.md.
 #                  2026-08-15 economic-ready recent-exit hotfix.
 # Purpose: Lock runtime guard and live-cycle wiring contracts.
@@ -23,6 +23,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 
 import numpy as np
 import pytest
@@ -549,6 +550,24 @@ class _AskOnlyDay0Clob:
         return {"bids": [], "asks": [{"price": 0.001, "size": 100.0}]}
 
 
+class _EmptyDepthMonitorClob:
+    def __init__(self):
+        self.best_bid_ask_calls = 0
+        self.orderbook_calls = 0
+
+    def get_best_bid_ask(self, token_id):
+        from src.contracts.exceptions import EmptyOrderbookError
+
+        self.best_bid_ask_calls += 1
+        assert token_id == "yes123"
+        raise EmptyOrderbookError("No executable top book for yes123")
+
+    def get_orderbook(self, token_id):
+        self.orderbook_calls += 1
+        assert token_id == "yes123"
+        return {"bids": [], "asks": [], "min_order_size": "5"}
+
+
 class _TwoSidedMonitorBookClob:
     def __init__(self):
         self.best_bid_ask_calls = 0
@@ -677,6 +696,7 @@ def test_monitor_quote_uses_fresh_exact_canonical_book_after_failed_batch(tmp_pa
             "asks": [],
         },
         captured_at=captured_at,
+        executable_allowed=False,
     )
     conn.commit()
 
@@ -694,6 +714,7 @@ def test_monitor_quote_uses_fresh_exact_canonical_book_after_failed_batch(tmp_pa
         state="day0_window",
         condition_id="cond-canonical-monitor-fallback",
     )
+    setattr(pos, "_zeus_held_monitor_deadline_monotonic", time.monotonic() + 0.2)
 
     quote = monitor_refresh.monitor_quote_refresh(conn, clob, pos)
 
@@ -709,10 +730,713 @@ def test_monitor_quote_uses_fresh_exact_canonical_book_after_failed_batch(tmp_pa
         def get_orderbook(self, _token_id):
             raise ValueError("malformed adapter response")
 
-    assert (
-        monitor_refresh.monitor_quote_refresh(conn, ProgrammingFailureClob(), pos)
-        is None
+    recovered = monitor_refresh.monitor_quote_refresh(
+        conn,
+        ProgrammingFailureClob(),
+        pos,
     )
+    assert recovered is not None
+    assert recovered.best_bid == pytest.approx(0.999)
+    conn.close()
+
+
+def test_monitor_quote_uses_ask_only_canonical_book_as_typed_zero_value(tmp_path):
+    from src.engine import monitor_refresh
+    from src.state.snapshot_repo import init_snapshot_schema
+
+    conn = get_connection(tmp_path / "canonical-monitor-ask-only.db")
+    init_schema(conn)
+    init_schema_trade_only(conn)
+    init_snapshot_schema(conn)
+    captured_at = datetime.now(timezone.utc) - timedelta(seconds=2)
+    _insert_executable_snapshot(
+        conn,
+        snapshot_id="canonical-monitor-ask-only",
+        selected_outcome_token_id="yes123",
+        yes_token_id="yes123",
+        no_token_id="no456",
+        condition_id="cond-canonical-monitor-ask-only",
+        top_bid="0.0001",
+        top_ask="0.001",
+        bid_size="0",
+        ask_size="38",
+        orderbook_depth={
+            "asset_id": "yes123",
+            "bids": [],
+            "asks": [{"price": "0.001", "size": "38"}],
+        },
+        captured_at=captured_at,
+        executable_allowed=False,
+    )
+    conn.commit()
+
+    class NoNetworkClob:
+        def get_orderbook(self, _token_id):
+            raise AssertionError("ask-only canonical evidence must avoid network")
+
+    clob = NoNetworkClob()
+    monitor_refresh.install_monitor_orderbook_prefetch(
+        clob,
+        {},
+        attempted_token_ids=("yes123",),
+    )
+    quote = monitor_refresh.monitor_quote_refresh(
+        conn,
+        clob,
+        _position(
+            condition_id="cond-canonical-monitor-ask-only",
+        ),
+    )
+
+    assert quote is not None
+    assert quote.best_bid == pytest.approx(0.0)
+    assert quote.best_ask == pytest.approx(0.001)
+    assert quote.mark_price == pytest.approx(0.0)
+    assert quote.bid_ladder == ()
+    assert quote.full_depth_action_authority is True
+    assert quote.min_order_size == pytest.approx(5.0)
+    assert quote.source_timestamp == captured_at.isoformat()
+    conn.close()
+
+
+def test_monitor_quote_uses_empty_canonical_depth_as_fresh_no_bid(tmp_path):
+    from src.engine import monitor_refresh
+    from src.state.snapshot_repo import init_snapshot_schema
+
+    conn = get_connection(tmp_path / "canonical-monitor-empty-depth.db")
+    init_schema(conn)
+    init_schema_trade_only(conn)
+    init_snapshot_schema(conn)
+    captured_at = datetime.now(timezone.utc) - timedelta(seconds=2)
+    _insert_executable_snapshot(
+        conn,
+        snapshot_id="canonical-monitor-empty-depth",
+        selected_outcome_token_id="yes123",
+        yes_token_id="yes123",
+        no_token_id="no456",
+        condition_id="cond-canonical-monitor-empty-depth",
+        top_bid="0.0001",
+        top_ask="0.0002",
+        bid_size="0",
+        ask_size="0",
+        orderbook_depth={"asset_id": "yes123", "bids": [], "asks": []},
+        captured_at=captured_at,
+        executable_allowed=False,
+    )
+    conn.commit()
+
+    class NoNetworkClob:
+        def get_orderbook(self, _token_id):
+            raise AssertionError("fresh canonical no-bid evidence must avoid network")
+
+    clob = NoNetworkClob()
+    monitor_refresh.install_monitor_orderbook_prefetch(
+        clob,
+        {},
+        attempted_token_ids=("yes123",),
+    )
+    quote = monitor_refresh.monitor_quote_refresh(
+        conn,
+        clob,
+        _position(condition_id="cond-canonical-monitor-empty-depth"),
+    )
+
+    assert quote is not None
+    assert quote.best_bid == pytest.approx(0.0)
+    assert quote.bid_size == pytest.approx(0.0)
+    assert quote.bid_ladder == ()
+    assert quote.best_ask is None
+    assert quote.ask_size == pytest.approx(0.0)
+    assert quote.mark_price == pytest.approx(0.0)
+    assert quote.min_order_size == pytest.approx(5.0)
+    assert quote.source_timestamp == captured_at.isoformat()
+    conn.close()
+
+
+def _insert_latest_no_bid_witness(
+    conn,
+    *,
+    evidence_id: str,
+    condition_id: str,
+    token_id: str,
+    direction: str,
+    quote_seen_at: datetime,
+    best_bid=None,
+    best_ask=0.001,
+    depth=None,
+):
+    outcome_label = "YES" if direction.endswith("yes") else "NO"
+    append_direction = direction.replace("sell_", "buy_", 1)
+    conn.execute(
+        """
+        INSERT INTO execution_feasibility_evidence (
+            evidence_id, event_id, condition_id, token_id, outcome_label,
+            direction, quote_seen_at, best_bid_before, best_ask_before,
+            depth_before_json, created_at, schema_version
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+        """,
+        (
+            evidence_id,
+            f"event-{evidence_id}",
+            condition_id,
+            token_id,
+            outcome_label,
+            append_direction,
+            quote_seen_at.isoformat(),
+            best_bid,
+            best_ask,
+            None if depth is None else json.dumps(depth),
+            quote_seen_at.isoformat(),
+        ),
+    )
+    conn.execute(
+        """
+        INSERT INTO execution_feasibility_latest (
+            token_id, direction, evidence_id, event_id, condition_id,
+            outcome_label, quote_seen_at, best_bid_before, best_ask_before,
+            depth_before_json, created_at, schema_version
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, 1)
+        """,
+        (
+            token_id,
+            direction,
+            f"sell-latest-{evidence_id}",
+            f"event-{evidence_id}",
+            condition_id,
+            outcome_label,
+            quote_seen_at.isoformat(),
+            best_bid,
+            best_ask,
+            quote_seen_at.isoformat(),
+        ),
+    )
+
+
+def test_monitor_quote_uses_fresh_exact_bba_no_bid_witness_without_snapshot(tmp_path):
+    from src.engine import monitor_refresh
+    from src.state.schema.execution_feasibility_evidence_schema import ensure_table
+
+    conn = get_connection(tmp_path / "monitor-bba-no-bid.db")
+    ensure_table(conn)
+    quote_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+    _insert_latest_no_bid_witness(
+        conn,
+        evidence_id="bba-no-bid",
+        condition_id="condition-bba-no-bid",
+        token_id="yes123",
+        direction="sell_yes",
+        quote_seen_at=quote_at,
+    )
+    conn.commit()
+
+    class NoNetworkClob:
+        def get_orderbook(self, _token_id):
+            raise AssertionError("fresh no-bid BBA witness must avoid network")
+
+    clob = NoNetworkClob()
+    monitor_refresh.install_monitor_orderbook_prefetch(
+        clob,
+        {},
+        attempted_token_ids=("yes123",),
+    )
+    quote = monitor_refresh.monitor_quote_refresh(
+        conn,
+        clob,
+        _position(condition_id="condition-bba-no-bid"),
+    )
+
+    assert quote is not None
+    assert quote.best_bid == pytest.approx(0.0)
+    assert quote.bid_size == pytest.approx(0.0)
+    assert quote.bid_ladder == ()
+    assert quote.best_ask == pytest.approx(0.001)
+    assert quote.ask_size == pytest.approx(0.0)
+    assert quote.source_timestamp == quote_at.isoformat()
+    assert quote.full_depth_action_authority is False
+
+    conn.execute(
+        "UPDATE execution_feasibility_latest SET event_id = 'mismatched-append' "
+        "WHERE token_id = 'yes123' AND direction = 'sell_yes'"
+    )
+    conn.commit()
+    assert monitor_refresh._fresh_canonical_monitor_no_bid_witness(
+        conn,
+        _position(condition_id="condition-bba-no-bid"),
+        "yes123",
+    ) is None
+    conn.close()
+
+
+@pytest.mark.parametrize(
+    ("best_bid", "expected_bid"),
+    ((None, 0.0), ("0", 0.0), ("0.001", 0.001), ("0.04", 0.04), ("0.05", 0.05)),
+)
+def test_monitor_bba_witness_preserves_price_but_not_full_depth_authority(
+    tmp_path,
+    best_bid,
+    expected_bid,
+):
+    from src.engine import monitor_refresh
+    from src.events.triggers.market_channel_ingestor import (
+        MarketChannelIngestor,
+        MarketTokenMetadata,
+    )
+    from src.state.schema.execution_feasibility_evidence_schema import ensure_table
+
+    conn = get_connection(tmp_path / "monitor-bba-producer-contract.db")
+    ensure_table(conn)
+    ingestor = MarketChannelIngestor(
+        None,
+        feasibility_conn=conn,
+        active_token_ids={"yes123"},
+        token_metadata={
+            "yes123": MarketTokenMetadata(
+                condition_id="condition-producer-bba",
+                token_id="yes123",
+                outcome_label="YES",
+                min_tick_size="0.01",
+                min_order_size="5",
+                neg_risk=False,
+                executable_snapshot_id="snapshot-producer-bba",
+            )
+        },
+        append_evidence_token_ids=lambda: {"yes123"},
+    )
+    quote_at = datetime.now(timezone.utc).replace(microsecond=0)
+    event = ingestor._bba_event(
+        {
+            "event_type": "best_bid_ask",
+            "asset_id": "yes123",
+            "market": "condition-producer-bba",
+            "timestamp": quote_at.isoformat(),
+            "best_bid": best_bid,
+            "best_ask": "0.001",
+            "hash": "producer-bba-no-bid",
+        },
+        received_at=quote_at.isoformat(),
+    )
+    assert event is not None
+    ingestor.write_prepared_quote_events(ingestor.prepare_quote_events((event,)))
+    conn.commit()
+
+    latest = conn.execute(
+        "SELECT evidence_id FROM execution_feasibility_latest "
+        "WHERE token_id = 'yes123' AND direction = 'sell_yes'"
+    ).fetchone()
+    appended = conn.execute(
+        "SELECT evidence_id FROM execution_feasibility_evidence "
+        "WHERE token_id = 'yes123' AND direction = 'buy_yes'"
+    ).fetchone()
+    assert latest is not None and appended is not None
+    assert latest[0] != appended[0]
+
+    class NoNetworkClob:
+        def get_orderbook(self, _token_id):
+            raise AssertionError("producer BBA no-bid witness must avoid network")
+
+    clob = NoNetworkClob()
+    monitor_refresh.install_monitor_orderbook_prefetch(
+        clob,
+        {},
+        attempted_token_ids=("yes123",),
+    )
+    quote = monitor_refresh.monitor_quote_refresh(
+        conn,
+        clob,
+        _position(condition_id="condition-producer-bba"),
+    )
+    assert quote is not None
+    assert quote.best_bid == pytest.approx(expected_bid)
+    assert quote.best_ask == pytest.approx(0.001)
+    assert quote.full_depth_action_authority is False
+
+    pos = _position(condition_id="condition-producer-bba")
+    monitor_refresh.refresh_exact_zero_position(conn, clob, pos)
+    assert pos.last_monitor_market_price_is_fresh is True
+    assert pos.last_monitor_best_bid == pytest.approx(expected_bid)
+    assert getattr(
+        pos,
+        monitor_refresh._HELD_MONITOR_FULL_DEPTH_ACTION_AUTHORITY_ATTR,
+    ) is False
+    pos._monitor_probability_receipt = {
+        "probability_content_identity": "current-q-content",
+        "computed_at": quote.source_timestamp,
+    }
+    assert cycle_runtime._monitor_global_sell_request_context(
+        pos,
+        types.SimpleNamespace(best_bid=quote.best_bid),
+    )["book_state"] == "NO_EXECUTABLE_BOOK"
+
+    conn.execute(
+        "UPDATE execution_feasibility_evidence SET best_ask_before = 0.002 "
+        "WHERE token_id = 'yes123' AND direction = 'buy_yes'"
+    )
+    conn.commit()
+    assert monitor_refresh._fresh_canonical_monitor_no_bid_witness(
+        conn,
+        _position(condition_id="condition-producer-bba"),
+        "yes123",
+    ) is None
+
+    conn.execute(
+        "DELETE FROM execution_feasibility_evidence "
+        "WHERE token_id = 'yes123' AND direction = 'buy_yes'"
+    )
+    conn.commit()
+    assert monitor_refresh._fresh_canonical_monitor_no_bid_witness(
+        conn,
+        _position(condition_id="condition-producer-bba"),
+        "yes123",
+    ) is None
+    conn.close()
+
+
+@pytest.mark.parametrize("bid", (0.001, 0.04, 0.05))
+def test_bba_only_monitor_truth_cannot_emit_exit_intent(monkeypatch, bid):
+    """RELATIONSHIP: fresh BBA prices are monitor truth, never SELL authority."""
+
+    from src.engine import monitor_refresh
+
+    pos = _position(trade_id="bba-only-in-band", state="holding")
+    quote = monitor_refresh.HeldTokenMonitorQuote(
+        token_id="yes123",
+        best_bid=bid,
+        best_ask=0.06,
+        bid_size=0.0,
+        ask_size=0.0,
+        mark_price=bid,
+        source_timestamp="2026-08-23T19:05:00+00:00",
+        full_depth_action_authority=False,
+    )
+
+    def _refresh_position(_conn, _clob, refreshed_pos):
+        refreshed_pos.last_monitor_at = quote.source_timestamp
+        refreshed_pos.last_monitor_market_price = quote.mark_price
+        refreshed_pos.last_monitor_market_price_is_fresh = True
+        refreshed_pos.last_monitor_best_bid = quote.best_bid
+        refreshed_pos.last_monitor_best_ask = quote.best_ask
+        refreshed_pos.last_monitor_bid_size = quote.bid_size
+        refreshed_pos.last_monitor_prob = 0.0
+        refreshed_pos.last_monitor_prob_is_fresh = True
+        refreshed_pos.last_monitor_edge = -quote.mark_price
+        setattr(
+            refreshed_pos,
+            monitor_refresh._HELD_MONITOR_FULL_DEPTH_ACTION_AUTHORITY_ATTR,
+            quote.full_depth_action_authority,
+        )
+        return types.SimpleNamespace(
+            p_market=np.array([quote.mark_price]),
+            p_posterior=0.0,
+            divergence_score=0.0,
+            market_velocity_1h=0.0,
+            forward_edge=-quote.mark_price,
+            confidence_band_lower=-quote.mark_price,
+            confidence_band_upper=-quote.mark_price,
+        )
+
+    monkeypatch.setattr("src.engine.monitor_refresh.refresh_position", _refresh_position)
+    monkeypatch.setattr(
+        Position,
+        "evaluate_exit",
+        lambda self, _ctx: ExitDecision(
+            True,
+            "TEST_SELL",
+            urgency="immediate",
+            trigger="TEST_SELL",
+            selected_method=self.selected_method or self.entry_method,
+            applied_validations=list(self.applied_validations),
+        ),
+    )
+    monkeypatch.setattr(
+        "src.execution.exit_lifecycle.build_exit_intent",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("BBA-only monitor truth must not create EXIT_INTENT")
+        ),
+    )
+    monkeypatch.setattr(
+        "src.execution.exit_lifecycle.execute_exit",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("BBA-only monitor truth must not submit a command")
+        ),
+    )
+    monkeypatch.setattr(
+        "src.events.reactor.request_global_auction_completion",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError(
+                "BBA-only monitor truth must not request executable global SELL"
+            )
+        ),
+    )
+
+    artifact = CycleArtifact(
+        mode="opening_hunt",
+        started_at="2026-08-23T19:05:00Z",
+    )
+    summary = {"monitors": 0, "exits": 0}
+    cycle_runtime.execute_monitoring_phase(
+        conn=None,
+        clob=types.SimpleNamespace(),
+        portfolio=PortfolioState(positions=[pos]),
+        artifact=artifact,
+        tracker=StrategyTracker(),
+        summary=summary,
+        deps=_monitor_chain_deps(
+            datetime(2026, 8, 23, 19, 5, tzinfo=timezone.utc)
+        ),
+        run_exit_preflight=False,
+    )
+
+    assert summary["exits"] == 0
+    assert artifact.monitor_results[0].should_exit is False
+    assert artifact.monitor_results[0].exit_reason == "NO_EXECUTABLE_SELL_BOOK_HOLD"
+
+
+def test_full_depth_in_band_monitor_quote_is_global_sell_eligible():
+    from src.engine import monitor_refresh
+
+    pos = _position()
+    quote = monitor_refresh._one_sided_monitor_quote(
+        None,
+        types.SimpleNamespace(),
+        pos,
+        "yes123",
+        book={
+            "bids": [{"price": "0.05", "size": "10"}],
+            "asks": [{"price": "0.06", "size": "10"}],
+        },
+        source_timestamp="2026-08-23T19:05:00+00:00",
+    )
+    assert quote is not None
+    assert quote.full_depth_action_authority is True
+    pos.last_monitor_at = quote.source_timestamp
+    pos.last_monitor_best_bid = quote.best_bid
+    pos._monitor_probability_receipt = {
+        "probability_content_identity": "current-q-content",
+        "computed_at": quote.source_timestamp,
+    }
+    setattr(
+        pos,
+        monitor_refresh._HELD_MONITOR_FULL_DEPTH_ACTION_AUTHORITY_ATTR,
+        quote.full_depth_action_authority,
+    )
+    assert cycle_runtime._monitor_global_sell_request_context(
+        pos,
+        types.SimpleNamespace(best_bid=quote.best_bid),
+    )["book_state"] == "EXECUTABLE"
+
+
+@pytest.mark.parametrize(
+    ("payload_authority", "expected_book_state"),
+    (
+        (False, "NO_EXECUTABLE_BOOK"),
+        (True, "EXECUTABLE"),
+        (None, "NO_EXECUTABLE_BOOK"),
+    ),
+)
+def test_monitor_payload_rehydrates_explicit_full_depth_authority_only(
+    payload_authority,
+    expected_book_state,
+):
+    pos = _position()
+    row = {
+        "phase": "active",
+        "order_status": "",
+        "exit_retry_count": 0,
+        "next_exit_retry_at": "",
+        "exit_reason": "",
+        "last_monitor_prob": 0.5,
+        "last_monitor_prob_is_fresh": 1,
+        "last_monitor_market_price_is_fresh": 1,
+        "last_monitor_best_bid": 0.05,
+        "last_monitor_event_occurred_at": "2026-08-23T19:05:00+00:00",
+        "last_monitor_event_payload_json": json.dumps(
+            (
+                {"held_sell_full_depth_action_authority": payload_authority}
+                if payload_authority is not None
+                else {}
+            )
+        ),
+        "shares": pos.shares,
+        "chain_shares": pos.chain_shares,
+    }
+    cycle_runtime._sync_position_from_canonical_monitor_row(pos, row)
+    pos.last_monitor_at = "2026-08-23T19:05:00+00:00"
+    pos._monitor_probability_receipt = {
+        "probability_content_identity": "current-q-content",
+        "computed_at": "2026-08-23T19:05:00+00:00",
+    }
+    assert cycle_runtime._monitor_global_sell_request_context(
+        pos,
+        types.SimpleNamespace(best_bid=0.05),
+    )["book_state"] == expected_book_state
+
+
+def test_bba_no_bid_witness_rejects_noncausal_or_incomplete_rows(tmp_path):
+    from src.engine import monitor_refresh
+    from src.state.schema.execution_feasibility_evidence_schema import ensure_table
+
+    conn = get_connection(tmp_path / "monitor-bba-no-bid-rejections.db")
+    ensure_table(conn)
+    checked_at = datetime.now(timezone.utc)
+    cases = (
+        ("both-null", "sell_yes", checked_at - timedelta(seconds=1), None, None, None),
+        (
+            "negative-bid",
+            "sell_yes",
+            checked_at - timedelta(seconds=1),
+            -0.01,
+            0.02,
+            None,
+        ),
+        ("stale", "sell_yes", checked_at - timedelta(minutes=5), 0.04, 0.05, None),
+        ("future", "sell_yes", checked_at + timedelta(seconds=1), 0.04, 0.05, None),
+        (
+            "bad-depth",
+            "sell_yes",
+            checked_at - timedelta(seconds=1),
+            None,
+            0.001,
+            {"bids": [], "asks": "bad"},
+        ),
+        (
+            "wrong-direction",
+            "sell_no",
+            checked_at - timedelta(seconds=1),
+            None,
+            0.001,
+            None,
+        ),
+    )
+    for name, direction, quote_at, bid, ask, depth in cases:
+        _insert_latest_no_bid_witness(
+            conn,
+            evidence_id=f"no-bid-{name}",
+            condition_id=f"condition-{name}",
+            token_id=f"token-{name}",
+            direction=direction,
+            quote_seen_at=quote_at,
+            best_bid=bid,
+            best_ask=ask,
+            depth=depth,
+        )
+    conn.commit()
+
+    for name, *_ in cases:
+        assert monitor_refresh._fresh_canonical_monitor_no_bid_witness(
+            conn,
+            _position(condition_id=f"condition-{name}"),
+            f"token-{name}",
+            now_utc=checked_at,
+        ) is None
+
+    conn.close()
+
+
+def test_multi_position_bba_no_bid_witnesses_complete_monitor_quote_contexts(tmp_path):
+    from src.engine import monitor_refresh
+    from src.state.schema.execution_feasibility_evidence_schema import ensure_table
+
+    conn = get_connection(tmp_path / "monitor-bba-no-bid-multi.db")
+    ensure_table(conn)
+    quote_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+    _insert_latest_no_bid_witness(
+        conn,
+        evidence_id="yes-no-bid",
+        condition_id="condition-yes-no-bid",
+        token_id="yes123",
+        direction="sell_yes",
+        quote_seen_at=quote_at,
+    )
+    _insert_latest_no_bid_witness(
+        conn,
+        evidence_id="no-empty-depth",
+        condition_id="condition-no-empty-depth",
+        token_id="no456",
+        direction="sell_no",
+        quote_seen_at=quote_at,
+        best_ask=None,
+        depth={"bids": [], "asks": []},
+    )
+    conn.commit()
+
+    class NoNetworkClob:
+        def get_orderbook(self, _token_id):
+            raise AssertionError("no-bid witness must complete monitor context")
+
+    clob = NoNetworkClob()
+    monitor_refresh.install_monitor_orderbook_prefetch(
+        clob,
+        {},
+        attempted_token_ids=("yes123", "no456"),
+    )
+    positions = (
+        _position(condition_id="condition-yes-no-bid"),
+        _position(
+            condition_id="condition-no-empty-depth",
+            direction="buy_no",
+        ),
+    )
+    quotes = [
+        monitor_refresh.monitor_quote_refresh(conn, clob, pos)
+        for pos in positions
+    ]
+
+    assert all(quote is not None for quote in quotes)
+    assert [quote.best_bid for quote in quotes] == [0.0, 0.0]
+    assert [quote.bid_ladder for quote in quotes] == [(), ()]
+    conn.close()
+
+
+@pytest.mark.parametrize("durable_state", ("missing", "stale", "future", "invalidated"))
+def test_monitor_quote_tries_network_when_durable_book_is_unusable(
+    tmp_path,
+    durable_state,
+):
+    from src.engine import monitor_refresh
+    from src.state.snapshot_repo import init_snapshot_schema, record_snapshot_invalidation
+
+    conn = get_connection(tmp_path / f"canonical-monitor-{durable_state}.db")
+    init_schema(conn)
+    init_schema_trade_only(conn)
+    init_snapshot_schema(conn)
+    now_utc = datetime.now(timezone.utc)
+    condition_id = f"cond-canonical-monitor-{durable_state}"
+    if durable_state != "missing":
+        captured_at = now_utc - timedelta(minutes=2)
+        if durable_state == "future":
+            captured_at = now_utc + timedelta(seconds=5)
+        _insert_executable_snapshot(
+            conn,
+            snapshot_id=f"canonical-monitor-{durable_state}",
+            selected_outcome_token_id="yes123",
+            yes_token_id="yes123",
+            no_token_id="no456",
+            condition_id=condition_id,
+            captured_at=captured_at,
+        )
+        conn.commit()
+        if durable_state == "invalidated":
+            record_snapshot_invalidation(
+                conn,
+                condition_id=condition_id,
+                token_id="yes123",
+                reason="test_market_channel_change",
+                invalidated_at=now_utc - timedelta(seconds=1),
+            )
+
+    clob = _TwoSidedMonitorBookClob()
+    quote = monitor_refresh.monitor_quote_refresh(
+        conn,
+        clob,
+        _position(
+            state="day0_window",
+            condition_id=condition_id,
+        ),
+    )
+
+    assert quote is not None
+    assert quote.best_bid == pytest.approx(0.40)
+    assert clob.orderbook_calls == 1
     conn.close()
 
 
@@ -758,7 +1482,7 @@ def test_canonical_monitor_book_prefers_fresher_independent_commit(tmp_path):
         top_bid="0.55",
         top_ask="0.57",
         captured_at=new_at,
-        active=False,
+        active=True,
         executable_allowed=True,
     )
     writer.commit()
@@ -822,16 +1546,6 @@ def test_canonical_monitor_book_rejects_stale_invalidated_and_wrong_token(tmp_pa
         captured_at=fresh_at,
         accepting_orders=False,
     )
-    _insert_executable_snapshot(
-        conn,
-        snapshot_id="canonical-monitor-explicitly-blocked",
-        selected_outcome_token_id="blocked-token",
-        yes_token_id="blocked-token",
-        no_token_id="blocked-no",
-        condition_id="cond-canonical-monitor-explicitly-blocked",
-        captured_at=fresh_at,
-        executable_allowed=False,
-    )
     conn.commit()
     record_snapshot_invalidation(
         conn,
@@ -856,10 +1570,6 @@ def test_canonical_monitor_book_rejects_stale_invalidated_and_wrong_token(tmp_pa
         condition_id="cond-canonical-monitor-not-accepting",
         token_id="closed-token",
     )
-    explicitly_blocked_pos = _position(
-        condition_id="cond-canonical-monitor-explicitly-blocked",
-        token_id="blocked-token",
-    )
 
     assert conn.in_transaction
 
@@ -868,15 +1578,6 @@ def test_canonical_monitor_book_rejects_stale_invalidated_and_wrong_token(tmp_pa
             conn,
             invalidated_pos,
             "yes123",
-            now_utc=now_utc,
-        )
-        is None
-    )
-    assert (
-        monitor_refresh._fresh_canonical_monitor_orderbook(
-            conn,
-            explicitly_blocked_pos,
-            "blocked-token",
             now_utc=now_utc,
         )
         is None
@@ -980,9 +1681,14 @@ def test_held_monitor_uses_fresh_local_depth_before_network(monkeypatch, tmp_pat
         condition_id="condition-local-depth",
         top_bid="0.40",
         top_ask="0.44",
+        orderbook_depth={
+            "asset_id": "yes123",
+            "bids": [{"price": "0.40", "size": "30"}],
+            "asks": [],
+        },
         captured_at=captured_at,
-        active=False,
-        executable_allowed=True,
+        active=True,
+        executable_allowed=False,
     )
 
     class NoNetworkClob:
@@ -1012,9 +1718,451 @@ def test_held_monitor_uses_fresh_local_depth_before_network(monkeypatch, tmp_pat
 
     assert quote is not None
     assert quote.best_bid == pytest.approx(0.40)
-    assert quote.best_ask == pytest.approx(0.44)
+    assert quote.best_ask is None
     assert summary["held_monitor_orderbooks_local"] == 1
     assert summary["held_monitor_orderbooks_network_requested"] == 0
+    conn.close()
+
+
+def test_local_held_monitor_prefetch_fails_closed_before_expired_deadline(tmp_path):
+    from src.engine import cycle_runtime
+    from src.state.snapshot_repo import init_snapshot_schema
+
+    conn = get_connection(tmp_path / "local-monitor-expired-deadline.db")
+    init_schema(conn)
+    init_schema_trade_only(conn)
+    init_snapshot_schema(conn)
+    pos = _position(condition_id="condition-expired-deadline")
+    summary = {}
+    deps = types.SimpleNamespace(
+        logger=types.SimpleNamespace(warning=lambda *args, **kwargs: None)
+    )
+
+    assert cycle_runtime._fresh_local_held_monitor_orderbooks(
+        conn,
+        [pos] * 18,
+        now_utc=datetime.now(timezone.utc),
+        summary=summary,
+        deps=deps,
+        deadline_monotonic=time.monotonic() - 1.0,
+    ) == {}
+    assert summary["held_monitor_orderbook_prefetch_defer_reason"] == (
+        "AUXILIARY_DEADLINE_EXPIRED"
+    )
+    conn.close()
+
+
+def test_held_monitor_uses_causal_market_channel_depth_after_snapshot_invalidation(
+    tmp_path,
+):
+    from src.engine import cycle_runtime, monitor_refresh
+    from src.state.snapshot_repo import (
+        init_snapshot_schema,
+        record_snapshot_invalidation,
+    )
+    from src.state.schema.execution_feasibility_evidence_schema import ensure_table
+
+    conn = get_connection(tmp_path / "market-channel-monitor-depth.db")
+    init_schema(conn)
+    init_schema_trade_only(conn)
+    init_snapshot_schema(conn)
+    ensure_table(conn)
+    checked_at = datetime(2026, 8, 23, 13, 18, 6, tzinfo=timezone.utc)
+    snapshot_at = checked_at - timedelta(seconds=20)
+    quote_at = checked_at - timedelta(seconds=1)
+    future_quote_at = checked_at + timedelta(seconds=1)
+    _insert_executable_snapshot(
+        conn,
+        snapshot_id="market-channel-monitor-depth",
+        selected_outcome_token_id="yes123",
+        yes_token_id="yes123",
+        no_token_id="no123",
+        condition_id="condition-market-channel-depth",
+        top_bid="0.11",
+        top_ask="0.16",
+        captured_at=snapshot_at,
+        executable_allowed=True,
+    )
+    record_snapshot_invalidation(
+        conn,
+        condition_id="condition-market-channel-depth",
+        token_id="yes123",
+        reason="market_channel_quote_advanced",
+        invalidated_at=quote_at - timedelta(seconds=1),
+    )
+
+    def insert_quote(
+        evidence_id,
+        observed_at,
+        bid,
+        ask,
+        *,
+        condition_id="condition-market-channel-depth",
+        token_id="yes123",
+        update_latest=True,
+    ):
+        conn.execute(
+            """
+            INSERT INTO execution_feasibility_evidence (
+                evidence_id, event_id, condition_id, token_id,
+                    outcome_label, direction, quote_seen_at,
+                best_bid_before, best_ask_before, depth_before_json,
+                created_at, schema_version
+                ) VALUES (?, ?, ?, ?, 'YES', 'sell_yes', ?, ?, ?, ?, ?, 1)
+            """,
+            (
+                evidence_id,
+                f"event-{evidence_id}",
+                condition_id,
+                token_id,
+                observed_at.isoformat(),
+                bid,
+                ask,
+                json.dumps(
+                    {
+                        "bids": [{"price": str(bid), "size": "50"}],
+                        "asks": [{"price": str(ask), "size": "40"}],
+                    }
+                ),
+                observed_at.isoformat(),
+            ),
+        )
+        if update_latest:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO execution_feasibility_latest (
+                    token_id, direction, evidence_id, event_id, condition_id,
+                    outcome_label, quote_seen_at, best_bid_before, best_ask_before,
+                    depth_before_json, created_at, schema_version
+                )
+                SELECT token_id, direction, evidence_id, event_id, condition_id,
+                       outcome_label, quote_seen_at, best_bid_before, best_ask_before,
+                       depth_before_json, created_at, schema_version
+                  FROM execution_feasibility_evidence
+                 WHERE evidence_id = ?
+                """,
+                (evidence_id,),
+            )
+
+    insert_quote("causal-quote", quote_at, 0.07, 0.12)
+    insert_quote("future-quote", future_quote_at, 0.01, 0.03, update_latest=False)
+
+    _insert_executable_snapshot(
+        conn,
+        snapshot_id="one-sided-tradeability",
+        selected_outcome_token_id="one-sided-token",
+        yes_token_id="one-sided-token",
+        no_token_id="one-sided-no",
+        condition_id="one-sided-condition",
+        captured_at=quote_at,
+        executable_allowed=True,
+    )
+    conn.execute(
+        """
+        INSERT INTO execution_feasibility_evidence (
+            evidence_id, event_id, condition_id, token_id,
+            outcome_label, direction, quote_seen_at,
+            best_bid_before, best_ask_before, depth_before_json,
+            created_at, schema_version
+        ) VALUES (
+            'one-sided-quote', 'event-one-sided-quote',
+            'one-sided-condition', 'one-sided-token',
+            'YES', 'sell_yes', ?, NULL, 0.15, ?, ?, 1
+        )
+        """,
+        (
+            quote_at.isoformat(),
+            json.dumps(
+                {
+                    "bids": [],
+                    "asks": [{"price": "0.15", "size": "40"}],
+                }
+            ),
+            quote_at.isoformat(),
+        ),
+    )
+    conn.execute(
+        """
+        INSERT OR REPLACE INTO execution_feasibility_latest (
+            token_id, direction, evidence_id, event_id, condition_id,
+            outcome_label, quote_seen_at, best_bid_before, best_ask_before,
+            depth_before_json, created_at, schema_version
+        )
+        SELECT token_id, direction, evidence_id, event_id, condition_id,
+               outcome_label, quote_seen_at, best_bid_before, best_ask_before,
+               depth_before_json, created_at, schema_version
+          FROM execution_feasibility_evidence
+         WHERE evidence_id = 'one-sided-quote'
+        """
+    )
+
+    _insert_executable_snapshot(
+        conn,
+        snapshot_id="sibling-invalidated-snapshot",
+        selected_outcome_token_id="sibling-token",
+        yes_token_id="sibling-token",
+        no_token_id="sibling-no",
+        condition_id="sibling-condition",
+        captured_at=snapshot_at,
+        executable_allowed=True,
+    )
+    insert_quote(
+        "sibling-invalidated-quote",
+        quote_at,
+        0.21,
+        0.26,
+        condition_id="sibling-condition",
+        token_id="sibling-token",
+    )
+    record_snapshot_invalidation(
+        conn,
+        condition_id=None,
+        token_id="sibling-no",
+        reason="sibling_market_channel_quote_advanced",
+        invalidated_at=quote_at + timedelta(seconds=0.5),
+    )
+
+    _insert_executable_snapshot(
+        conn,
+        snapshot_id="stale-tradeability",
+        selected_outcome_token_id="stale-token",
+        yes_token_id="stale-token",
+        no_token_id="stale-no",
+        condition_id="stale-condition",
+        captured_at=checked_at - timedelta(minutes=1),
+        executable_allowed=True,
+    )
+    insert_quote(
+        "fresh-quote-stale-tradeability",
+        quote_at,
+        0.20,
+        0.25,
+        condition_id="stale-condition",
+        token_id="stale-token",
+    )
+
+    _insert_executable_snapshot(
+        conn,
+        snapshot_id="pre-invalidation-quote",
+        selected_outcome_token_id="invalidated-token",
+        yes_token_id="invalidated-token",
+        no_token_id="invalidated-no",
+        condition_id="invalidated-condition",
+        captured_at=snapshot_at,
+        executable_allowed=True,
+    )
+    insert_quote(
+        "pre-invalidation-quote",
+        checked_at - timedelta(seconds=5),
+        0.30,
+        0.35,
+        condition_id="invalidated-condition",
+        token_id="invalidated-token",
+    )
+    record_snapshot_invalidation(
+        conn,
+        condition_id="invalidated-condition",
+        token_id="invalidated-token",
+        reason="newer_market_channel_quote",
+        invalidated_at=checked_at - timedelta(seconds=2),
+    )
+    conn.commit()
+
+    class NoNetworkClob:
+        def get_orderbook_snapshots(self, _token_ids):
+            raise AssertionError("fresh market-channel depth must suppress batch HTTP")
+
+        def get_orderbook(self, _token_id):
+            raise AssertionError("fresh market-channel depth must suppress singular HTTP")
+
+    pos = _position(
+        condition_id="condition-market-channel-depth",
+        token_id="yes123",
+    )
+    stale_pos = _position(
+        condition_id="stale-condition",
+        token_id="stale-token",
+    )
+    invalidated_pos = _position(
+        condition_id="invalidated-condition",
+        token_id="invalidated-token",
+    )
+    one_sided_pos = _position(
+        condition_id="one-sided-condition",
+        token_id="one-sided-token",
+    )
+    sibling_invalidated_pos = _position(
+        condition_id="sibling-condition",
+        token_id="sibling-token",
+    )
+    clob = NoNetworkClob()
+    summary = {}
+    deps = types.SimpleNamespace(
+        logger=types.SimpleNamespace(warning=lambda *args, **kwargs: None)
+    )
+    local_books = cycle_runtime._fresh_local_held_monitor_orderbooks(
+        conn,
+        [
+            pos,
+            stale_pos,
+            invalidated_pos,
+            one_sided_pos,
+            sibling_invalidated_pos,
+        ],
+        now_utc=checked_at,
+        summary={},
+        deps=deps,
+    )
+
+    assert set(local_books) == {"yes123", "one-sided-token"}
+
+    cycle_runtime._prefetch_held_monitor_orderbooks(
+        conn,
+        clob,
+        [pos],
+        summary,
+        now_utc=checked_at,
+        deps=deps,
+    )
+    quote = monitor_refresh.monitor_quote_refresh(conn, clob, pos)
+
+    assert quote is not None
+    assert quote.best_bid == pytest.approx(0.07)
+    assert quote.best_ask == pytest.approx(0.12)
+    assert quote.bid_ladder == ((0.07, 50.0),)
+    assert summary["held_monitor_orderbooks_market_channel"] == 1
+    assert summary["held_monitor_orderbooks_network_requested"] == 0
+    conn.close()
+
+
+def test_exit_monitor_artifact_retries_under_trade_writer_serialization(monkeypatch):
+    from src.execution import executor, exit_lifecycle
+    from src.state import write_coordinator
+    from src.state.decision_chain import CycleArtifact
+    from src.state.write_coordinator import WriteLeaseTimeout, WritePriority
+
+    conn = sqlite3.connect(":memory:")
+    conn.execute(
+        """
+        CREATE TABLE decision_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            mode TEXT,
+            started_at TEXT,
+            completed_at TEXT,
+            artifact_json TEXT,
+            timestamp TEXT,
+            env TEXT
+        )
+        """
+    )
+    attempts = []
+    bounded_attempts = []
+    canonical_lease = object()
+
+    class LeaseAttempt:
+        def __init__(self, owner):
+            self.owner = owner
+
+        def __enter__(self):
+            attempts.append(self.owner)
+            if len(attempts) == 1:
+                raise WriteLeaseTimeout("held quote refresh owns writer")
+            return canonical_lease
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    def lease(_conn, *, owner, deadline_ms, max_hold_ms, priority):
+        assert deadline_ms > 0
+        assert max_hold_ms > 0
+        assert priority is WritePriority.MONITOR
+        return LeaseAttempt(owner)
+
+    class BoundedWrite:
+        def __enter__(self):
+            bounded_attempts.append(canonical_lease)
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    monkeypatch.setattr(executor, "_canonical_trade_write_lease", lease)
+    monkeypatch.setattr(
+        write_coordinator,
+        "bounded_sqlite_write",
+        lambda actual_conn, actual_lease, *, max_hold_ms: BoundedWrite(),
+    )
+    summary = {}
+    artifact = CycleArtifact(
+        mode="exit_monitor",
+        started_at="2026-08-23T14:04:21+00:00",
+        completed_at="2026-08-23T14:07:40+00:00",
+        summary=summary,
+    )
+
+    persisted, artifact_id = exit_lifecycle._persist_exit_monitor_artifact(
+        conn,
+        artifact,
+        summary=summary,
+    )
+    assert persisted is True
+    assert artifact_id == 1
+    assert attempts == ["exit_monitor_artifact", "exit_monitor_artifact_retry"]
+    assert bounded_attempts == [canonical_lease]
+    assert summary["monitor_artifact_write_retried"] is True
+    assert conn.execute("SELECT COUNT(*) FROM decision_log").fetchone()[0] == 1
+    assert conn.in_transaction is False
+    conn.close()
+
+
+def test_exit_monitor_artifact_reports_bounded_defer_without_partial_row(monkeypatch):
+    from src.execution import executor, exit_lifecycle
+    from src.state.decision_chain import CycleArtifact
+    from src.state.write_coordinator import WriteLeaseTimeout
+
+    conn = sqlite3.connect(":memory:")
+    conn.execute(
+        """
+        CREATE TABLE decision_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            mode TEXT,
+            started_at TEXT,
+            completed_at TEXT,
+            artifact_json TEXT,
+            timestamp TEXT,
+            env TEXT
+        )
+        """
+    )
+
+    class DeferredLease:
+        def __enter__(self):
+            raise WriteLeaseTimeout("writer remains busy")
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    monkeypatch.setattr(
+        executor,
+        "_canonical_trade_write_lease",
+        lambda *args, **kwargs: DeferredLease(),
+    )
+    summary = {}
+    persisted, artifact_id = exit_lifecycle._persist_exit_monitor_artifact(
+        conn,
+        CycleArtifact(
+            mode="exit_monitor",
+            started_at="2026-08-23T14:04:21+00:00",
+            completed_at="2026-08-23T14:07:40+00:00",
+            summary=summary,
+        ),
+        summary=summary,
+    )
+
+    assert persisted is False
+    assert artifact_id is None
+    assert "writer remains busy" in summary["monitor_artifact_write_deferred"]
+    assert conn.execute("SELECT COUNT(*) FROM decision_log").fetchone()[0] == 0
+    assert conn.in_transaction is False
     conn.close()
 
 
@@ -1044,6 +2192,24 @@ def test_monitor_snapshot_tradeability_requires_normalized_authority_or_legacy_n
         accepting_orders=accepting_orders,
         tradeability_status_json=status,
     ) is expected
+
+
+@pytest.mark.parametrize(
+    ("active", "closed", "accepting_orders"),
+    ((False, False, 1), (True, True, 1), (True, False, 0)),
+)
+def test_held_monitor_evidence_rejects_non_open_or_non_accepting_snapshot(
+    active,
+    closed,
+    accepting_orders,
+):
+    from src.engine.monitor_refresh import _monitor_snapshot_has_held_exit_evidence
+
+    assert not _monitor_snapshot_has_held_exit_evidence(
+        active=active,
+        closed=closed,
+        accepting_orders=accepting_orders,
+    )
 
 
 def test_local_monitor_book_rejects_blocked_future_invalidated_and_identity_mismatch(
@@ -1079,6 +2245,7 @@ def test_local_monitor_book_rejects_blocked_future_invalidated_and_identity_mism
             no_token_id=f"{name}-no",
             condition_id=condition_id,
             captured_at=captured_at,
+            active=(name != "blocked"),
             executable_allowed=executable_allowed,
         )
         positions.append(_position(condition_id=condition_id, token_id=token_id))
@@ -1283,14 +2450,90 @@ def test_post_target_active_position_uses_bid_only_quote_when_asks_absent(monkey
     assert quote.mark_price == pytest.approx(0.998)
 
 
-def test_post_target_active_position_does_not_invent_bid_from_ask_only_book(monkeypatch):
+def test_post_target_active_position_keeps_ask_only_book_as_fresh_no_bid(monkeypatch):
     from src.engine import monitor_refresh
 
     monkeypatch.setattr("src.state.db.log_microstructure", lambda *args, **kwargs: None)
     pos = _position(target_date="2020-01-01")
     pos.state = "active"
 
-    assert monitor_refresh.monitor_quote_refresh(None, _AskOnlyDay0Clob(), pos) is None
+    quote = monitor_refresh.monitor_quote_refresh(None, _AskOnlyDay0Clob(), pos)
+
+    assert quote is not None
+    assert quote.best_bid == pytest.approx(0.0)
+    assert quote.bid_size == pytest.approx(0.0)
+    assert quote.bid_ladder == ()
+    assert quote.best_ask == pytest.approx(0.001)
+
+
+def test_monitor_quote_rejects_absent_or_malformed_depth(monkeypatch):
+    from src.engine import monitor_refresh
+
+    monkeypatch.setattr("src.state.db.log_microstructure", lambda *args, **kwargs: None)
+
+    class BookClob:
+        def __init__(self, book):
+            self.book = book
+
+        def get_orderbook(self, _token_id):
+            return self.book
+
+        def get_best_bid_ask(self, _token_id):
+            from src.contracts.exceptions import EmptyOrderbookError
+
+            raise EmptyOrderbookError("no current top book")
+
+    for book in (
+        None,
+        {"bids": []},
+        {"bids": (), "asks": []},
+        {"bids": [{"price": "not-a-price", "size": "5"}], "asks": []},
+    ):
+        assert monitor_refresh.monitor_quote_refresh(
+            None,
+            BookClob(book),
+            _position(target_date="2020-01-01"),
+        ) is None
+
+
+def test_refresh_position_keeps_explicit_empty_depth_fresh_without_exit(monkeypatch):
+    from src.engine import cycle_runtime, monitor_refresh
+
+    monkeypatch.setattr("src.state.db.log_microstructure", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        monitor_refresh,
+        "_detect_whale_toxicity_from_orderbook",
+        lambda *args, **kwargs: False,
+    )
+
+    def _fresh_probability(pos, *, conn, city, target_d):
+        pos.applied_validations = ["fresh_probability"]
+        return 0.60, pos, True
+
+    monkeypatch.setattr(
+        monitor_refresh,
+        "monitor_probability_refresh",
+        _fresh_probability,
+    )
+    pos = _position(state="active", target_date="2026-08-24")
+
+    edge_ctx = monitor_refresh.refresh_position(None, _EmptyDepthMonitorClob(), pos)
+    exit_context = cycle_runtime._build_exit_context(
+        pos,
+        edge_ctx,
+        hours_to_settlement=24.0,
+        ExitContext=ExitContext,
+    )
+    decision = pos.evaluate_exit(exit_context)
+
+    assert pos.last_monitor_market_price_is_fresh is True
+    assert pos.last_monitor_market_price == pytest.approx(0.0)
+    assert pos.last_monitor_best_bid == pytest.approx(0.0)
+    assert pos.last_monitor_bid_ladder == ()
+    assert exit_context.current_market_price_is_fresh is True
+    assert exit_context.best_bid == pytest.approx(0.0)
+    assert exit_context.bid_ladder == ()
+    assert decision.should_exit is False
 
 
 def test_day0_refresh_keeps_current_market_fresh_with_bid_only_book(monkeypatch):
@@ -13569,6 +14812,7 @@ def test_orange_risk_exits_favorable_position_through_monitor_lifecycle(monkeypa
         refreshed_pos.last_monitor_market_price_is_fresh = True
         refreshed_pos.last_monitor_best_bid = 0.42
         refreshed_pos.last_monitor_best_ask = 0.43
+        refreshed_pos._zeus_held_monitor_full_depth_action_authority = True
         refreshed_pos.last_monitor_prob = 0.62
         refreshed_pos.last_monitor_prob_is_fresh = True
         refreshed_pos.last_monitor_edge = 0.21

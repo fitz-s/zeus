@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.zeus.total-loss-loop</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>ZEUS_REPO_PLACEHOLDER/.venv/bin/python</string>
+		<string>ZEUS_REPO_PLACEHOLDER/total_loss_loop.py</string>
+		<string>daemon</string>
+	</array>
+	<key>WorkingDirectory</key>
+	<string>ZEUS_REPO_PLACEHOLDER</string>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>PYTHONPATH</key>
+		<string>ZEUS_REPO_PLACEHOLDER</string>
+		<key>PYTHONSAFEPATH</key>
+		<string>1</string>
+		<key>PATH</key>
+		<string>ZEUS_HOME_PLACEHOLDER/.npm-global/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+		<key>TERM</key>
+		<string>xterm-256color</string>
+	</dict>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<dict>
+		<key>SuccessfulExit</key>
+		<false/>
+	</dict>
+	<key>ThrottleInterval</key>
+	<integer>1</integer>
+	<key>StandardOutPath</key>
+	<string>ZEUS_REPO_PLACEHOLDER/.total_loss/logs/controller.log</string>
+	<key>StandardErrorPath</key>
+	<string>ZEUS_REPO_PLACEHOLDER/.total_loss/logs/controller.err</string>
+</dict>
+</plist>

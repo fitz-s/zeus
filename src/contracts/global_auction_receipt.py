@@ -13,6 +13,12 @@ from typing import Any, Mapping
 
 GLOBAL_AUCTION_RECEIPT_SCHEMA_VERSION = 22
 GLOBAL_AUCTION_RECEIPT_SUPPORTED_SCHEMA_VERSIONS = frozenset({21, 22})
+# Capital evidence must never mix receipts produced by different feasible-set,
+# comparison, or sizing laws.  This identity is shared by the auction writer,
+# decision certificate, shadow grader, and RiskGuard cohorting boundary.
+CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION = (
+    "global_single_order_posterior_mean_expected_growth_v2"
+)
 GLOBAL_AUCTION_RECEIPT_MODES = frozenset(
     {
         "global_single_order_auction",

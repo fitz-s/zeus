@@ -6,8 +6,11 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 
 import pytest
+
+import src.data.raw_forecast_artifact_manifest as manifest_module
 
 from src.data.openmeteo_ecmwf_ifs9_anchor import HIGH_DATA_VERSION, PRODUCT_ID, SOURCE_ID
 from src.data.raw_forecast_artifact_manifest import (
@@ -59,3 +62,31 @@ def test_read_manifest_rejects_unknown_top_level_fields(tmp_path) -> None:
 
     with pytest.raises(ValueError, match="unsupported fields"):
         read_manifest(path)
+
+
+def test_write_manifest_never_exposes_a_truncated_target_on_replace_failure(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    path = tmp_path / "manifest.json"
+    original = _manifest(tmp_path)
+    write_manifest(original, path)
+    original_bytes = path.read_bytes()
+
+    def fail_replace(source, target) -> None:
+        assert target == path
+        assert path.read_bytes() == original_bytes
+        assert read_manifest(source).request_url == "https://example.invalid/replacement"
+        raise OSError("simulated replace failure")
+
+    monkeypatch.setattr(manifest_module.os, "replace", fail_replace)
+    replacement = replace(
+        original,
+        request_url="https://example.invalid/replacement",
+    )
+
+    with pytest.raises(OSError, match="simulated replace failure"):
+        write_manifest(replacement, path)
+
+    assert path.read_bytes() == original_bytes
+    assert tuple(tmp_path.glob("*.tmp")) == ()

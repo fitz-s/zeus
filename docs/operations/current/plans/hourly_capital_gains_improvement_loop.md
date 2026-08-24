@@ -5,6 +5,133 @@
 
 ## 现状(forward)
 
+### 2026-08-22 B142 — supporting clock例外必须原子穿过current-observation seam
+- **实时反例:** B140加载后的首个完整production auction覆盖174 families、82 eligible、1869 candidates；旧`GLOBAL_DAY0_FAST_OBSERVATION_ENTRY_STALE`降为0，但16个family随即在下一层变成`GLOBAL_DAY0_CONDITIONING_OBSERVATION_TIME_MISMATCH`。说明age gate已修，调用者却仍以ENTRY身份禁止same-extreme clock advance，supporting carrier与current observation ledger之间形成第二个非原子断层。
+- **修复:** 对同一个current-local-day global remaining-path ENTRY布尔authority，同时允许stale supporting age与same-extreme conditioning clock advance。action state始终取current named source，carrier clock lag进入binding；remaining-path builder仍必须产生current simplex。任何extreme值、unit、named source、station、decision-time causality、topology或submit JIT content不一致继续拒绝；direct source-clock action route保持严格。Day0 semantics升v8。
+- **SCOPE / DRAIN / RESET:** scope仍是exact current-day global ENTRY family，且只在remaining-path q enabled时生效。drain是current observation + remaining trajectories重建并在submit重现；reset为值/source/clock不可调和或builder/JIT失败，立即回到family-scoped fail closed，不影响其他城市或held SELL。
+- **验收:** end-to-end antibody必须证明caller对30分钟前same-extreme supporting carrier同时传入age与clock两项permission，并继续用remaining q；helper默认strict与changed-value rejection不变。live要求time-mismatch计数下降、eligible family恢复；订单/fill/settlement/strict资本曲线另行证明。
+
+### 2026-08-22 B141 — 单一terminal-review证据缺口不得阻断全局restart
+- **实时反例:** B140标准deploy在command `736b13b34fee4f89`的restart preflight失败，entry guard持续armed。该20-share GTC在point order上matched 19.998533，但当时authenticated CONFIRMED trade facts仅覆盖4.858533；`REVIEW_REQUIRED`边界正确等待其余legs，authenticated recovery却尝试追加普通`PARTIAL_FILL_OBSERVED`清除review，被terminal-partial validator正确拒绝并升级为deploy-wide error。稍后其余facts到达后同command已原子投影FILLED，证明这是局部evidence ordering而非未知venue side effect。
+- **修复:** `REVIEW_REQUIRED`的authenticated cumulative facts若仍未达到BUY completion tolerance，只返回`stayed`；不追加command event、不投影position、不清除review。完整confirmed legs到达后仍走既有`review_cleared_confirmed_fill`原子路径；真正terminal short fill仍只能由既有terminal-order recovery携带`terminal_partial_order_fact`三项proof清除。
+- **SCOPE / DRAIN / RESET:** scope是一个exact ENTRY command的terminal-review boundary。drain为trade ingestion补齐command-bound CONFIRMED legs，或terminal-order lane证明真实short fill；reset为下一recovery pass重新聚合facts并只在完整/typed proof时推进。其他commands、held monitor和SELL不被该局部等待阻断。
+- **验收:** antibody复现20 requested、4.858533 confirmed prefix、MATCHED review，要求`scanned=1/stayed=1/errors=0`、零新command/position event；原完整41-share review-clearance抗体继续advanced。landing后重跑标准restart，必须guard reset且完整global entry auction恢复。
+
+### 2026-08-22 B140 — supporting observation时钟不得冻结current remaining-path q
+- **实时反例:** 11:46Z完整global auction覆盖176个family，仅101 eligible；75个拒绝中50个为`GLOBAL_DAY0_FAST_OBSERVATION_ENTRY_STALE`。同一时刻source-clock ingest健康，城市最新METAR多为16–58分钟前，说明15分钟门槛把正常的小时级发布间隔误判为整个action q过期，而不是发现scheduler停摆。
+- **结构性根因与修复:** global Day0 action q随后会从canonical current-temperature ledger、完整hourly trajectories、remaining conditional error与observation-latency floor重建到decision time；source-clock conditioning在此仅是bound/provenance carrier。仅对本地目标日的global ENTRY允许该supporting clock超过15分钟，且仍必须成功构造完整current remaining-day simplex。direct source-clock action路径、缺carrier/current observation/vector/topology、invalid clock与submit JIT不一致继续fail closed；Day0 semantics升为v7，防止与旧realized cohort混池。
+- **SCOPE / DRAIN / RESET:** scope是一个current-local-day global ENTRY family的supporting-conditioning age检查，不改变q math、market ranking、Kelly或venue price。drain是同一cut完成remaining-path builder并经submit-time exact reproduction；reset是任一必需输入缺失/无效、remaining builder失败或路径不再使用current remaining q，此时原严格门槛立即恢复。
+- **验收:** integration antibody证明30分钟前supporting conditioning仍由current remaining simplex定价，同时remaining vectors不可用时仍零候选；direct helper原15分钟抗体不变。部署后先看stale拒绝数下降与eligible family恢复，再独立看global winner、venue fill、settlement与strict evaluator；候选恢复不是资本盈利证明。
+
+### 2026-08-21 B137 — ENS尚未发布的future-cycle request不得消耗sole materializer
+- **实时反例:** 磁盘/RiskGuard恢复后，global scope 195 families仅4个entry-authoritative，171个因旧00Z carrier跨过24h进入`REPLACEMENT_STALENESS_RED_ENTRY_ISOLATED`。18Z deterministic providers已到，但18Z OpenData ENS两track每5分钟仍是48/48 `NOT_RELEASED`；queue仍把18Z requests启动subprocess，然后统一以`CAPTURE:CURRENT_EVIDENCE_NOT_LIVE`失败，使唯一writer在无法构造同same-cycle shape时做重复计算。
+- **修复:** 复用现有decision-time eligible ENS HWM读取；seed/request的source cycle若严格高于该family当前ENS HWM，在request build/subprocess前写`DEFERRED_SOURCE_CYCLE_AWAITING_ENSEMBLE_HWM` typed receipt并移出本轮队列。不生q、不使用旧shape、不改HWM/read-time或same-cycle probability law；ENS提交后原cycle-advance publisher重新生成request。
+- **SCOPE / DRAIN / RESET:** scope是exact city/date/metric future-of-ENS request的subprocess admission。drain是零spawn terminal/deferred receipt释放sole slot，同时保留完整request/ENS cycle evidence。reset是eligible ENS HWM追上request cycle；新seed正常build/spawn。HWM不可读时fail-open走原materializer，不把unknown当not-released。
+- **验收:** antibody固定12Z ENS HWM+18Z request，要求零runner调用、typed receipt含12Z→18Z证据；request=ENS cycle与HWM读取不可用仍走原路。targeted queue tests、compile/ruff/registry/diff通过后landing；live要求ahead-of-ENS receipt出现、committed=0时subprocess消耗下降，且18Z ENS COMPLETE后立即恢复committed posteriors/global eligible families。
+
+### 2026-08-21 B136 — decoded ECMWF raw cache不得再次锁死全局资本分配
+- **实时反例:** 最新global auction的fresh families全部在最终allocator被`reduce_only_mode_active`reject；RiskGuard所有交易组件均GREEN，唯一隐藏驱动是OpenData raw GRIB增长到130GB，使磁盘仅76.0GB/7.64% free，违反64GiB与10%的较高者。安全回收已有canonical COMPLETE+VERIFIED证明且无open handle的20260813–20260818 raw后，free恢复到164.5GB/16.54%，RiskGuard自动reset为GREEN；随后一轮真实比较70个proposals，不再是全局故障性无订单。
+- **修复:** 每次OpenData canonical commit后，仅对严格`YYYYMMDD` raw目录中早于当前与前一calendar day的exact cycle+parameter组生成retention plan。每组必须有对应`source_run` SUCCESS/COMPLETE/non-partial/expected=observed>0，且`ensemble_snapshots` exact source_run的全部rows均VERIFIED且count相等，才在释放DB writer lock后删除该组raw files；未知文件、symlink、不完整证明或删除异常一律保留。
+- **SCOPE / DRAIN / RESET:** scope仅为可重下载的OpenData raw GRIB cache，不删canonical DB/decoded JSON，不改q、source selection或order law。drain是成功canonical commit后的有界proof query与按cycle/param原子文件集回收，且不持有DB writer lock删大文件。reset是任一proof欠缺/不一致时立即停止该组删除；当前与前一day永久保留供重启/redecode。
+- **验收:** antibodies证明complete+verified旧组被删、recent组保留，partial/missing/disputed/count mismatch/symlink均fail closed；targeted tests、compile/ruff/registry/diff通过后landing并restart forecast-live。live要求retention receipt/log可见、free ratio仍>10%、RiskGuard仍GREEN、global auction仍广泛比较候选；订单与资本利得仍由venue/settlement/strict evaluator独立证明。
+
+### 2026-08-21 B135 — identical successful posterior不得独占sole materializer
+- **实时反例:** restart后writer持续生成12Z posterior，但最近87次写入仅覆盖12个target；Chengdu/Shanghai两个target占42次。逐行核对显示同target连续rows的`q_json`、`provenance_json`与`dependency_hash`完全相同，仅`computed_at`变化造成新identity；182个active family仍落后于ensemble HWM，sole subprocess被无新信息的重复成功占用。
+- **修复:** 每次成功receipt记录materializer现有的exact request/current-input/logic fingerprint。后续同family请求仅在原成功后的固定60秒窗口内、`committed_posterior=true`且fingerprint完全相同时零subprocess coalesce；成功receipt不被skip覆盖，因此重复请求不能滑动延长窗口。新provider/ENS/Day0 observation/input file/logic revision或窗口到期立即走原materializer，q与posterior identity law不变。
+- **SCOPE / DRAIN / RESET:** scope是一个city/date/metric的recent exact-input duplicate，不生成或修改probability。drain是写有界`success_coalesced_latest` receipt并释放sole worker给其它family；reset是fingerprint变化或从原成功时间起60秒到期。fingerprint不可证明、旧receipt无commit proof或future/invalid time均正常spawn。
+- **验收:** antibody要求首次commit、第二次同fingerprint零spawn且原成功时间不变、fingerprint改变立即再次commit、60秒边界不滑动；完整queue suite、ruff/compile/registry/diff通过后landing。live要求recent posterior的unique-target/row比显著上升、HWM rejected family下降并恢复global candidate evaluation；订单与资本证明仍由独立global receipt/venue/strict evaluator决定。
+
+### 2026-08-21 B134 — probability degradation不得成为deploy-wide无reset暂停
+- **实时反例:** live-trading从`c6cf171d2`重启到`8a2168e07`时，7/7持仓均在新进程下数秒内写入`MONITOR_REFRESHED`且held-side CLOB fresh；但Day0 hourly provider quota为9500/9500，probability不可刷新。runtime已按exact held family阻断BUY，deploy wait与control-plane restart guard却再次要求`require_fresh_inputs=true`，因此全局`deploy_live_restart_guard`永不解除，所有其它family也无订单。
+- **修复:** canonical monitor evidence保留严格stale分类，并新增仅用于restart proof的typed子集：`issue=monitor_probability_stale`且CLOB fresh的post-boot attempt证明新runtime已评估该持仓。它只从deploy/restart blocking中扣除；普通monitor cadence、held exit authority与runtime family entry gate仍把probability loss视为blocking。CLOB stale、两者皆stale、invalid probability、缺event、future event与legacy evidence继续fail closed。
+- **SCOPE / DRAIN / RESET:** scope仅是本次deploy的全局暂停；不产生概率、订单或退出authority。drain为每个current exposure写post-boot typed monitor attempt，并证明runtime SHA/queue；reset为缺attempt/CLOB或出现新持仓时重新关闭restart proof。外部probability恢复只解除对应family runtime gate，不再是deploy pause的reset前提。
+- **验收:** monitor restart helper、control-plane CAS proof与deploy post-start wait三者语义一致；抗体证明probability-only degraded通过restart proof、quote-only仍需complete held auction、unknown/legacy仍阻断。targeted tests、ruff/compile/registry/diff通过后landing并重跑标准deploy，要求guard reset、entries pause解除、全局receipt继续生成；资本评估仍独立FAIL直到真实after-cost证据转正。
+
+### 2026-08-21 B133 — scoped held完成不得清空broad timebox的cycle cache
+- **实时反例:** B132恢复12Z materializer后，source-clock日志仍连续报告broad `10/10 unattempted`。B130的pool确实由production跨tick持有，B131也保持同一target；但同一poll中的held/critical scope完成或已覆盖时会关闭共享cycle pool，清空broad target已经成功解码的小时点，下一tick只能从零重来。
+- **修复:** exact-cycle bucket pool仍由source cycle唯一拥有；显式`required_scopes`只拥有自己的下载结果，不拥有共享pool生命周期。scoped成功/已覆盖不再关闭pool；只有unscoped broad完成、cycle rollover、异常或进程退出关闭。概率、admission、source cycle、target ordering与quota law不变。
+- **SCOPE / DRAIN / RESET:** scope仅是同cycle bucket reader/value cache生命周期。drain为broad timeboxed retries持续复用已解码点直到完整target写manifest；reset为broad完成、cycle前移、异常或进程退出。抗体执行broad-timeout→scoped-success→broad-timeout，要求三次同一pool且中间零close；原有broad完成close与cycle-change close抗体继续成立。
+- **验收:** cycle-currency targeted suite、compile/ruff/registry/diff通过后landing；live要求held完成之后broad `unattempted_target_count`仍在有限ticks内下降、exact-cycle gap低于241，并观察HWM family继续减少。未达到前不把0订单解释为资本最优。
+
+### 2026-08-21 B132 — pre-spawn淘汰低于当前ENS HWM的旧request
+- **实时反例:** 12Z Miami LOW request自23:06Z等待时，唯一materializer在23:09Z启动Manila 00Z request；latest auction同时把182个family明确判为`REPLACEMENT_RAW_INPUT_HWM`。现有JIT只在同family已经存在更新posterior时终止旧request；若新posterior尚未生成，已知低于12Z ENS HWM的00Z request仍占用sole writer并产出不可交易q。
+- **修复:** shared HWM模块公开decision-time eligible ENS cycle读取；seed与request在写request/启动subprocess前同时比较current posterior与current ENS HWM。request cycle低于任一者即terminal `SKIPPED_SOURCE_CYCLE_REGRESSION`、`subprocess_spawned=false`；ENS HWM路径记录typed reason、request/current cycle。HWM读取不可用时queue optimization fail-soft，最终materializer/read-time HWM仍是fail-closed authority。
+- **SCOPE / DRAIN / RESET:** scope是exact city/date/metric request；不改变q、target、cycle选择或writer count。drain为旧request写terminal receipt后移出queue，释放slot给新cycle；reset为request cycle追上eligible ENS HWM，正常启动。抗体固定无新posterior但存在12Z ensemble snapshot、00Z request，要求零subprocess并记录00Z→12Z evidence。
+- **验收:** previous-runs priority/regression tests、queue suite、compile/ruff/registry/diff通过后landing；live要求`REPLACEMENT_MATERIALIZATION_SOURCE_CYCLE_BELOW_INPUT_HWM` receipts出现、00/06Z subprocess减少、Miami等12Z request完成，并随后观察auction HWM/eligible变化。
+
+### 2026-08-21 B131 — zero-completion timeout保持同一target直到point cache收敛
+- **实时反例:** B130 live后单次held wave可完成/跳过1个scope，但连续broad report仍为`10/10 unattempted`。代码核对证明timeboxed target即使`processed_target_count=0`也被rotation强制`+1`；下一tick换了city/grid index，B130缓存的同城24小时点值无法复用，真实跨tick收敛语义被rotation打断。
+- **修复:** incomplete wave只有在至少一个完整target已processed时才按该数量前移；零完整target保持当前rotation start，复用per-cycle point cache继续同一payload。完成后仍正常前移，canonical reuse与non-admissible skip也仍计入processed，因此不破坏全局公平覆盖。
+- **SCOPE / DRAIN / RESET:** scope仅是同cycle动态target universe的cursor advance，不改变target ordering、admission、source truth或q。drain为同一target的成功point值累积至完整payload后`processed_target_count=1`并前移；reset为target完成、cycle变化或异常关闭pool。抗体固定`start=2/attempted=0/incomplete=true`并要求持久化start仍为2、generation递增，证明CAS有效但不丢progress。
+- **验收:** currency rotation/timeout tests、B130 bucket tests、compile/ruff/registry/diff通过后立即landing；live必须看到同一broad wave在有限ticks内`unattempted`下降并产生新manifest，否则继续追踪而不宣称恢复。
+
+### 2026-08-21 B130 — bucket hourly objects有界并行，解除串行24步收敛停滞
+- **实时反例:** B129 live已证明quota false时metered waves零消耗并进入bucket，但连续production report仍为held `0/6`、broad `0/10` attempted；一个新pool的单城raw resolver在12秒与25秒均未完成，且cache约10分钟只新增2个对象。根因是每个local-day payload按24个独立hourly OM对象串行读取，而deadline只能在不可中断的单次read之后检查，persistent pool虽最终可热却无法满足快速概率链。
+- **修复:** raw bucket payload对不同valid-time对象使用现有`fetch_workers`的有界fanout（上限8）；每个URI仍由独立pooled reader读取，pool以锁保护reader map，并在同一cycle内缓存已成功解码的`(URI, grid index)`值，使timeboxed重试从上次原子进度继续而非重复解码前缀。结果按valid-time确定性重排，只有全部exact-run timestep成功后才组装payload并进入原manifest/DB/materializer链；任一timeout/non-finite仍零payload。
+- **SCOPE / DRAIN / RESET:** scope仅是一个已通过run/city/valid-time admission的raw bucket payload内部I/O调度；不改变target、cycle、whitelist、downscaled路径、q或market比较。drain为最多8个独立valid-time read并行完成后原子组装；reset为本次调用结束或per-cycle pool在complete/cycle-change/exception时关闭。抗体用barrier证明四个distinct valid-times真正并发，同时输出时间与温度仍严格按valid-time排序。
+- **验收:** barrier与wiring抗体、compile/ruff/registry/diff通过；真实Denver 12Z/24-hour读取在production同款10秒deadline与同一pool下为`timeout 10.79s → timeout 10.63s → complete 6.77s/24 samples`，证明跨tick单调收敛。landing后live仍必须观察bucket-qualified manifest写入、exact-cycle gap下降、HWM rejection下降与global eligible恢复；仅有更快read或进程健康不算资本证明。
+
+### 2026-08-21 B129 — quota耗尽时直接走独立bucket，不先浪费deadline
+- **实时反例:** 22:34Z global auction `0/197` probability eligible、0 candidates，全部由12Z ENS相对00/06Z consumed posterior的HWM supersession拒绝；provider quota=9500。当前 downloader每个10秒wave仍先尝试必败的run-pinned与meta-stamped API，日志随后显示8/10 targets unattempted，独立S3 bucket几乎拿不到deadline。
+- **已有当前真相:** bucket `in_progress`与`latest`均明确声明12Z completed，145个valid hours；54个settlement cities中34个在严格cross-check raw whitelist。bucket不绕过概率或城市精度法：不在whitelist的20城仍拒绝，所需local-day任一时刻缺失仍拒绝。
+- **修复:** downloader在正确quota lane内先只读`can_call()`；metered quota不可用时不调用run-pinned/meta waves，为每个city/date注入同一typed quota refusal并直接进入既有bucket rung。production持久化的per-cycle `BucketPointReaderPool`跨timeboxed ticks保留reader/cache，初次24小时对象读取可渐进变热；任何成功payload仍走原materializable、precision、manifest与DB验证。
+- **SCOPE / DRAIN / RESET:** scope是当前download wave的metered transport选择，不改变target、cycle、q或whitelist。drain是bucket manifest/point read→canonical manifest→materialization；reset为quota恢复，下一tick重新优先metered rungs。抗体证明quota false时两个API wave零调用、bucket per-city执行且manifest正常产生。
+- **验收:** targeted currency/bucket tests、compile/ruff/freshness通过；live quota=9500时报告`openmeteo_metered_quota_available=false`，bucket-qualified城市manifest/HWM开始收敛，非qualified城市保持fail-closed。
+
+### 2026-08-21 B128 — 终止成功但永不收敛的 multi-location quota循环
+- **实时反例:** canonical quota ledger显示 day_count=9500；`bayes_precision_fusion_single_runs_locations_batched`单独消耗5762（60.7%），其中priority下6个 request key累计267次、locations计费5553。transport多数成功，但 exact-cycle anchor仍缺248 scopes，说明quota被成功重抓而非新coverage消耗。
+- **结构性根因:** BPF target universe可以只含HIGH或只含LOW；location fast path与普通 batched path却固定要求`("high","low")`都已持久化才skip。fetch后 writer只为实际`city_targets`写行，因此不存在的 sibling metric永远不会出现，同一成功batch每poll重抓。
+- **修复与边界:** completion/metrics_needed改为当前 city/date实际 target metrics集合；HIGH-only在HIGH exact-cycle行存在后立即complete，LOW同理，双metric仍要求两者。不制造非市场 sibling、不改变model/q math、cycle identity或transport失败重试。SCOPE是model×city×date×实际metric；DRAIN为一次成功persist；RESET为新cycle或新metric target出现。
+- **验收:** HIGH-only连续运行两次只发一次multi-location请求、第二次written=0且不伪造LOW；完整BPF suite、compile/ruff/freshness通过。live在UTC reset后同 request key attempts不再线性增长，quota用于residual anchor/BPF新coverage。
+
+### 2026-08-21 B127 — 把 residual drain 接到真正的 data-ingest owner
+- **实时反例:** B126 landing/restart后，forecast-live registry证明旧 `_replacement_cycle_availability_poll_if_needed` 已明确不再调度；真实 owner是 `src.ingest_main._replacement_availability_poll_tick`。新 live 日志仍出现 ordinary anchor `priority=maintenance reason=day_limit=9500/8500`，证明仅修共享旧 wrapper不能改变生产。该 owner还会在 source cursor无更新时直接返回，使 bounded首 wave后残余 scope只能等慢 maintenance。
+- **结构性修复:** production current-target helper新增互斥 `quota_priority` authority并传到 downloader各 transport。真实 data-ingest owner的 ECMWF source-clock broad anchor与 committed ordinary partitions显式使用 priority；source clock无更新时先只读测量 probe-resolved exact-cycle gaps，零 gap保持轻量，正 gap/不可读才触发一个 bounded residual wave并发布 reseeds。
+- **SCOPE / DRAIN / RESET:** scope 是 data-ingest的 ECMWF anchor current-target path；critical held scope仍优先且不与 priority叠加。drain由15秒 owner tick逐次旋转，single-download lock隔离并发；reset为 exact-cycle gap归零或 provider cycle推进。provider daily hard cap不变，今日9500用尽时只能证明 priority routing与持续重试，不能证明 gap下降。
+- **验收:** unchanged-clock residual、source-update broad anchor、source-commit ordinary partition、quota lane互斥和现有 scheduler suites通过；deploy后日志不再把该路径标为 maintenance，并在UTC quota reset后观察 `anchor_missing_scope_count`单调下降、HWM rejection下降。
+
+### 2026-08-21 B126 — exact-cycle anchor coverage逐 scope排空
+- **实时反例:** 12Z/06Z ENS 已提交且203个 family被 HWM拒绝；availability poll 对新 cycle只下载 `limit=10` 个 scope，然后 `_per_leg_downloaded_cycle=MAX(source_cycle_time)` 已等于 published cycle，后续 poll把其余约205个 scope误判为 current并永久停取。日志同时显示 source-clock anchor以 maintenance quota运行，未使用 quota模块明确保留的 source-clock tranche。
+- **结构性修复:** 每个 poll对 probe-resolved published cycle构建 exact-cycle current-target plan；只要任一 scope缺 anchor manifest，即使全局 MAX 已前进也继续用 durable rotation下载 residual。新 cycle首次 wave可包含全部目标；后续 wave仅选 missing manifests。availability anchor标记 `quota_priority`，并将 priority context显式传播进 metadata、run-pinned与 worker-thread transport，避免 thread-local在 executor边界丢失。
+- **SCOPE / DRAIN / RESET:** scope 是 published cycle × current city/date/metric manifest，不触碰 q math、market comparison或 order law；drain每次 bounded poll最多处理 config limit并由 durable rotation继续；reset是 exact-cycle gap归零或 provider cycle推进。gap probe不可读时fail-open重试，不把全局 MAX当完整性证明。provider hard daily cap仍保留，修复不绕过限额。
+- **验收:** partial-cycle residual、worker-thread priority、availability与currency suites、compile/ruff/diff/planning通过后 landing；live 应在 quota允许时连续看到 `anchor_missing_scope_count`下降并随后 HWM rejection下降。hard cap耗尽期间只证明正确重试/限流，不能声称概率链已恢复。
+
+### 2026-08-21 B125 — newest source cycle 优先并在 subprocess 前二次单调校验
+- **实时反例:** 当天 12Z/06Z ensemble snapshots 到达后，latest auction 仅 `1/221` family eligible，203 个被 raw-input HWM拒绝；其中 111 个 latest=12Z但 posterior仍消费00Z、85 个 latest=06Z但仍消费00Z、7 个 latest=12Z但消费06Z。materializer仍持续 commit且0 failures，证明活跃 writer正在生成过期 cycle q。current requests 同时含 00Z=37、06Z=10、12Z=11；现有排序不区分同 family source cycle，且仅在 seed admission检查 cycle regression，request 等待期间 posterior前进后不会 pre-spawn重检。
+- **结构性修复:** chain-money/never-priced/held/plain authority classes不变；每类拆成 newest queued source cycle 与 older cycle相邻 subtiers，再按 request自身 computed_at FIFO。newest cycle先更新 posterior；任何等待后已落后于该 family current posterior 的 request在 subprocess前写 terminal superseded receipt，不启动 materializer。旧 cycle不能再次占用 writer或成为最新 q。
+- **SCOPE / DRAIN / RESET:** scope 是 exact city/date/metric request及其 queued/current source-cycle order；drain每 poll重算 queued max cycle并在 pre-spawn读取 current posterior，older request终止后自然移出；reset是更新 cycle request到达或 current posterior未前进，此时 request仍正常验证/执行。不改变 HWM、freshness、Day0 owner、probability math或 single-writer count。
+- **验收:** newest-cycle priority与 JIT regression两项抗体、现有 priority/queue/Day0 suites、compile/ruff/diff/planning通过后 landing；live 需看到 source-cycle-regression terminal reason、12Z/06Z q先于00Z backlog、HWM rejection下降，且没有 posterior cycle倒退、failed_count保持0。
+
+### 2026-08-21 B124 — 同 priority tier 使用 request 自身时间，禁止历史 marker 冒充年龄
+- **实时反例:** B123 把 280 个 requests 暴露给全局排序后，当前 top-40 仍有 31 个是 auction 已 eligible family，仅 4 个 HWM、5 个 identity-missing。全部 request 被分在 tier 1；排序 secondary key 来自 scope/cycle 上任意历史 `cycle_advance_enqueues.enqueued_at`，所以 `computed_at=11:32` 的新 eligible fusion refresh 可继承 `07:45` marker并排在真正 `computed_at=07:50` 的 HWM repair前。最近 30 个成功 materialization 全是已 eligible family，且 successive auction 的坏 family set未变化，证明旧 marker 时间正在误导唯一 writer。
+- **结构性修复:** chain-confirmed exposure / never-priced / held-marker 仍只决定 tier；同 tier secondary key改为每个 request 自身 causal `computed_at`，仅在 payload无合法 computed_at时才回退历史 enqueue time。不同 producer 的新 request不再继承同 scope旧 marker的虚假年龄；真正等待最久的 current repair先用 writer。
+- **SCOPE / DRAIN / RESET:** scope 仅 request sort secondary key，不改变 tier、ownership、validity、q math、subprocess count或 DB writer。drain 每个 poll对当前 request snapshot重算，最老 request执行后自然移出；reset是更早 current request到达或更高 tier出现，下一 tranche立即重新排序。抗体固定两个均已priced tier-1 scope：marker较早但 request较新的 eligible refresh必须排在 request自身更老的 lagged repair之后。
+- **验收:** priority/queue/Day0 tests与compile/ruff/diff/planning通过后 landing；live top-ranked request应从 eligible refresh转向 missing/mismatch/HWM repair，successive auction至少出现坏 family resolution或eligible上升，且 `failed_count=0`、single writer不变。
+
+### 2026-08-21 B123 — seed admission breadth 与 SQLite writer concurrency 解耦
+- **实时反例:** B122 后最新 global auction 仅 `122/263` family 有 current probability；40 个因 Day0 posterior identity missing、11 个 mismatch、65 个 raw-input HWM lag 被排除。把 family identity 反向映射到 canonical seed queue 后，50/51 个 Day0 identity family 与 64/65 个 HWM family 已有 ownership=`CURRENT` 的 queued seed，等待中位数约 2.1–3.3 小时。config 明确提供 `poll_batch_limit=8`、`seed_limit=80`，但 daemon 把 seed admission 也压到 `DEFAULT_MATERIALIZATION_MAX_WORKERS=1`；未 admission 的 current work因此无法进入 request-level global held/never-priced priority sort。
+- **结构性修复:** 每 poll admission 使用 configured bounded micro-batch 8，将 current seeds 转成可全局排序/coalesce 的 requests；actual claim `limit` 仍由 `DEFAULT_MATERIALIZATION_MAX_WORKERS=1` 限定，所以每 poll 至多一个 subprocess、一个 SQLite writer。request backlog 每个 worker tranche 重新读取 chain-confirmed held exposure并全局排序，不会冻结 8-request stale priority tranche。
+- **SCOPE / DRAIN / RESET:** scope 仅 forecast seed-to-request admission，不改变 probability math、freshness、owner fence、request validation或 writer count。drain 每秒最多 admission 8、execute 1，held/never-priced work在下一 worker tranche可抢占；reset 在 seed queue empty 时自然回到 `seed_limit=0`，config seed limit仍由 production wrapper硬上界。scheduler 抗体固定 request pending/seed pending 两条分支均为 `limit=1, seed_limit=8`，inflight-only仍为0。
+- **验收:** scheduler + queue/Day0 regression、compile/ruff/diff、registry/planning gate通过后 hot-fix landing；live 必须看到单 writer不变、request queue获得 bounded burst、seed backlog快速转移、global probability eligible上升或 identity/HWM排除下降。资本评估器仍必须独立证明 realized gain，吞吐改善不等于盈利证明。
+
+### 2026-08-21 B122 — exact duplicate seed 在唯一 writer 前合并
+- **实时反例:** 使用与 daemon 相同的 absolute canonical paths 复核后，当前 seed ownership 为全 `CURRENT`，排除了 stale-owner 假设；真实队列仍有 319 个文件。按生产 request 已有的 semantic key（city/date/metric/source cycle/baseline + OpenMeteo run IDs/完整 Day0 conditioning identity）分组，一次 8-file cursor rotation 可证明 39 个较旧 seed 被同 key 的更新 `computed_at` seed 严格取代。现有 coalescing 位于 request 阶段，但 `seed_limit=1` 使 duplicate seeds 在不同 poll 单独进入 request 并逐个 materialize，旧 q 因此消耗唯一 SQLite writer、延后当前 q 与 global market comparison。
+- **结构性修复:** 在同一 bounded 8-file seed window 内复用既有 semantic key 与 freshness order，并把 `upgrade_trigger`、`cycle_advance_enqueue_owner` 作为 seed producer authority 加入等价关系；只将 full seed contract 合法且完整 key 相同的旧 seed写为 terminal superseded receipt。不同 trigger 不合并，Day0 cycle-owner seeds 无论 marker 当前是否可读都留给原 exact ownership fence，Day0 observation/source/extreme/unit、provider run、source cycle 或 scope 任一不同也不合并，malformed seed 留给原精确失败路径。coalescing 不占 materialization limit，同 poll 仍只产生至多一个 request/一个 subprocess/一个 DB writer。
+- **SCOPE / DRAIN / RESET:** scope 是当前 raw window 内 exact-key duplicate seed；drain 每秒 poll、每轮最多 8 个文件，旧 seed 终止后 newest keeper 使用原 worker slot；reset 来自 key 或 freshness 不再满足严格取代关系，此时两者都保留并各自进入正常验证。抗体固定 `limit=1` 下 older/newer duplicate seeds 只 build newer、旧 seed留审计 receipt、newer request 继续生成。
+- **验收:** focused seed/request coalescing 与 materialization queue suite、compile/ruff/diff、source/test registry、planning lock通过后 hot-fix landing；live 必须出现 seed superseded reason、`seed_processed_count>1` 同时 `committed_posterior_count=1`、`failed_count=0`，并以 successive global-auction identity coverage而非单点 side-effect-free EV 判定资本链改善。
+
+### 2026-08-21 B121 — globally-ranked EXIT 的概率 revision 与命令原子绑定
+- **实时反例:** 过去 24 小时 17 个 filled EXIT 的 `venue_commands.q_version` 全为空；其中 9 个只能经 decision-certificate attribution 间接找回决策，8 个旧仓仍不可归因。最新 Mexico City global SELL 也缺 q-version，证明断层仍在当前统一竞价路径，不是单纯历史数据问题。同期 global capital basis 从约 `$466.99` 降到 `$450.98`；因此不能以局部 realized PnL 掩盖逐单审计缺口。
+- **结构性修复:** submit-time probability content 已与 selection witness 精确复核后，global SELL `ExitIntent` 同时携带 `q_version`、probability witness/content identity 与 source-truth identity；相同字段进入 capital certificate。`venue_command_repo` 对带 typed `GlobalSellReceiptClosure` 的 SELL 强制 non-empty q-version，并在 command/envelope/event 任一写入前原子拒绝缺失 identity。RED/legacy/recovery 等非 global statistical paths 不被误加同一约束。
+- **SCOPE / DRAIN / RESET:** scope 仅为一个 globally-ranked SELL candidate/command。缺失 identity 时该候选不提交；complete auction 可在下一 cut 重新比较其余 BUY/SELL/HOLD/CASH。reset 只能由下一次 current probability witness 产生完整四元 identity，不能回填旧订单或用 entry belief 替代 current held belief。
+- **验收:** integration antibody 证明 ranking witness 精确进入 `ExitIntent.probability_receipt` 与 capital certificate；command-journal antibody 证明 closure+q 原子持久化、closure-without-q 零行回滚。focused integration、venue journal、compile、diff、planning-lock 通过后 hot-fix landing；live 只以未来 globally-ranked EXIT command 的 non-empty q-version 与 exact receipt closure 作为生产证据，不修改或粉饰旧亏损。
+
+### 2026-08-21 B120 — global proof evidence 按 city-date 原子持久化
+- **实时反例:** current-law side-effect-free auction 在同一 target date 先后选择了独立城市（Aug-21 Lucknow/Tel Aviv；Aug-22 Helsinki/Singapore），但 `NoTradeRegretEvent.event_id` 只绑定 strategy/revision/target_date。唯一约束因此每天只保留一个城市；RiskGuard 后续虽按 `(city,target_date)` 聚类，仍永远收不到同日其余独立城市，令 automated alpha gate 的 forward settlement drain 人为失速。
+- **结构性修复:** entry shadow event revision 升为 city-date-cluster identity；同一城市日期的 sibling bins 与 HIGH/LOW 继续幂等去重，不同城市在同一日期可各自落一份 exact global-winner certificate。exit-shadow reader 同时接受既有 v5 和新 v6 证书；不改 probability、ranking、Kelly、RiskGuard threshold 或 venue actuation。
+- **SCOPE / DRAIN / RESET:** scope 仅是 no-money capital-proof persistence identity。drain 仍由每轮完整 global proof winner 写入及未来 verified settlement/qualified early-exit grading完成；reset 仍由 RiskGuard 当前 revision cohort 达到 model-over-market e-value 与正 hypothetical realized capital proof。任何缺 current q/book/full-fill/positive ΔlogW/EV 的候选不写证书。
+- **验收:** antibody 必须证明同一 target date 的两个不同城市各落一行、同一 city-date 重放仍幂等，并覆盖 v5/v6 exit-reader compatibility；focused integration、RiskGuard settlement joins、compile、diff、planning-lock 通过后才 hot-fix landing。live reload 后以新 v6 canonical rows、城市覆盖与 gate evidence count 验证，不把 shadow EV 冒充真实资本利得。
+
 ### 2026-08-13 B105 — canonical held-monitor debt 由持续 worker 排空
 - **实时反例:** live `6977d34c` 有 26 个 blocking-stale held positions；30 秒 `exit_monitor_recovery` scheduler job 同步运行最长 75 秒的 full-book monitor，`max_instances=1` 因而持续丢 tick。SQLite interruption、reactor handoff 或 preparation deadline 失败后，债务只能再等 scheduler，最老 `MONITOR_REFRESHED` 已超过 25 分钟。entry fail-closed 正确阻止 BUY，但 held redecision 全书失明。
 - **结构性修复:** scheduler job 只读取 canonical cadence evidence 并幂等 dispatch；一个 daemon recovery worker 复用原 process-wide monitor claim，失败后立即从 DB 重建债务并持续重驱。它不增加 writer 并发、不放宽 150 秒、不改变 probability/edge/exit law，也不允许 quote-only 或 stale q/CLOB 清债。
@@ -355,6 +482,539 @@
 - DB 里的仓位/结算/成交是 live 账本,不在未经明确授权下删改。
 
 （历史分析已按操作员指令清除;需要旧内容从 git history 取。）
+
+### 2026-08-21 — pre-persistence future-of-ENS recovery suppression (B138)
+
+- **Observed defect:** after a newer deterministic cycle arrived before its
+  same-cycle ENS shape, recovery discovery repeatedly wrote the same
+  city-date-metric seeds. The queue correctly consumed them without spawning a
+  materializer, but the next discovery pass recreated them, spending the
+  bounded seed tranche and filesystem/receipt budget while current probability
+  coverage was already scarce.
+- **Contract:** recovery discovery applies the queue's exact family/cycle ENS
+  boundary before seed persistence. A deterministic cycle ahead of the newest
+  decision-time-eligible ENS is not written. Direct cycle-advance or fusion-
+  upgrade seeds remain pending in place at the queue JIT boundary instead of
+  being terminally moved and recreated; their presence preserves producer
+  deduplication. While the boundary is active, consumer-side duplicate
+  coalescing also preserves every exact producer-owned path so it cannot detach
+  a durable marker and trigger republish churn. Unknown boundary state fails
+  open. Once ENS advances, equality resets the defer and normal coalescing plus
+  materialization proceed immediately; probability math and HWM authority do
+  not change.
+- **Acceptance:** a recovery-discovery antibody proves future-of-ENS input
+  yields zero seed files and a typed reason; existing discovery and queue JIT
+  tests remain green. Production acceptance is cessation of repeated deferred
+  seed churn, a stable bounded pending set before ENS, and current-cycle
+  posterior generation from those retained seeds after ENS commit. Rollback is
+  the B138 hot-fix commits.
+
+### 2026-08-22 — Day0 v5 bootstrap without a missing-history blanket gate (B139)
+
+- **Observed defect:** after 18Z probability recovery, the exact global proof
+  solve selected a current Day0 v5 BUY with positive posterior-mean EV,
+  delta-log-wealth, and confidence-cost margin, while the live solve rejected
+  every Day0 BUY solely because the new revision had zero settled shadow
+  clusters. The no-money shadow could eventually drain the gate after future
+  settlements, but the blanket wait discarded the current time-sensitive
+  positive-capital opportunity despite complete decision-time evidence.
+- **Contract:** qkernel keeps its pretrade proof gate while its current live
+  after-cost curve is nonpositive. Day0 v5 missing or inconclusive shadow
+  history remains observable but does not gate; only an explicitly rejected
+  cohort bound to the same probability revision, current global selector, and
+  executable capital law emits the existing revision-scoped gate. Source and
+  quote freshness, Brier rejection, absolute price band, expected EV/log
+  growth, Kelly, global ranking, and submit-time JIT checks remain cumulative.
+- **SCOPE / DRAIN / RESET:** scope is Day0 v5 risk-increasing BUY admission;
+  SELL/HOLD/CASH and qkernel policy are unchanged. Shadow and realized
+  settlement evidence continue to drain each RiskGuard tick. A direct
+  market-over-model rejection reaches the existing e-value threshold and
+  resets the revision to gated; a new semantics revision owns a new cohort.
+- **Acceptance:** a no-evidence Day0 cohort produces observation telemetry and
+  no gate, while a directly rejected Day0 cohort still produces the exact
+  revision-scoped gate; qkernel missing proof remains gated. Focused RiskGuard
+  tests and live risk-action expiry precede any order claim. Capital success
+  still requires venue facts, settlements, and the strict evaluator.
+
+### 2026-08-22 — fast-residual probability identity survives JIT reconstruction (B140)
+
+- **Observed defect:** after B139 expired the Day0 blanket gate, the global
+  auction repeatedly selected a positive-capital Singapore NO candidate, but
+  preflight alternated between probability supersession and
+  `GLOBAL_DAY0_PROVISIONAL_POSTERIOR_IDENTITY_MISMATCH`. The canonical posterior
+  and 31C fast observation were unchanged across the failed attempts.
+- **Root cause:** the replacement posterior correctly bound the composite
+  same-station fast conditioning (31C), while local proof reconstruction kept
+  deterministic payoff truth on the slower WU settlement channel (29C). It then
+  compared that settlement payload back to the statistical posterior identity,
+  making the two deliberately distinct truth planes appear contradictory.
+- **Contract:** when a current Day0 binding carries validated
+  `statistical_probability_conditioning`, provisional posterior identity uses
+  that Celsius conditioning tuple. The top-level payload remains settlement
+  truth, and `_global_day0_execution_payload` must still reproduce the fast
+  value, unit, station, and causal clock from current canonical evidence before
+  the tuple can reach this check. Without the typed nested conditioning, the
+  existing top-level identity rule remains unchanged and fail closed.
+- **SCOPE / DRAIN / RESET:** scope is one provisional fast-residual family's
+  proof reconstruction and JIT preflight. The next current probability build
+  drains it by re-reading both settlement and physical facts; a changed fast
+  value/clock or malformed conditioning resets to the existing mismatch/no-trade
+  result. No quote, price band, sizing, risk, settlement, or venue gate changes.
+- **Acceptance:** a slower 29C settlement payload paired with its validated 31C
+  statistical conditioning matches the 31C posterior; changing that nested
+  conditioning still raises the exact identity mismatch. Focused probability
+  tests and live preflight receipts precede any order or profit claim.
+
+### 2026-08-22 — statistical Day0 certificates do not claim absorbing truth (B141)
+
+- **Observed defect:** B140 reached a stable preflight for a globally selected
+  Shenzhen LOW NO candidate (5 shares, $3.306875 cost, q_mean 0.778, expected EV
+  +$0.658792), but final certificate construction rejected the order because WU
+  intraday evidence was provisional rather than absorbing.
+- **Root cause:** live entry authority already accepts the typed current
+  `day0_remaining_day_global_probability_v1` statistical simplex, but the
+  certificate parent builder routed every non-replacement Day0 probability
+  through the deterministic `DAY0_AUTHORITY` + `ABSORBING_BOUNDARY` seam. That
+  mislabeled probability evidence as settlement certainty and blocked the same
+  statistical action the global optimizer had lawfully selected.
+- **Contract:** the exact `day0_remaining_day` statistical authority carries no
+  deterministic source parents. Its current observation, remaining trajectory,
+  probability witness, qkernel economics, and submit-time JIT validation remain
+  mandatory. `day0_deterministic_bin_payoff` continues to require absorbing
+  evidence and fails closed on provisional WU/HKO truth.
+- **SCOPE / DRAIN / RESET:** scope is final certificate construction for one
+  typed remaining-day statistical candidate. Each auction/JIT build drains by
+  reconstructing its current probability and executable economics; a malformed
+  authority pair, changed witness, or nonpositive economics remains rejected.
+  Deterministic hard-fact authority is unchanged.
+- **Acceptance:** the exact statistical authority returns no hard-fact parents;
+  the same provisional payload relabeled as deterministic still raises
+  `DAY0_SOURCE_PARENT_AUTHORITY_BLOCKED`. Focused certificate and global JIT
+  tests, then live command/venue receipts, precede any capital-gain claim.
+
+### 2026-08-22 — preserve global conditioning through local proof (B142)
+
+- **Observed defect:** after B141, complete auctions recovered to 107 eligible
+  families / 2730 candidates, but London LOW repeatedly failed provisional
+  posterior identity despite an unchanged current 14C fast-residual bundle.
+- **Root cause:** global JIT had already bound and validated the statistical
+  conditioning, but `_live_yes_probabilities` overwrote it with a fresh
+  `conditioning=None` settlement-only payload before loading the replacement
+  bundle. That discarded B140's exact identity at the local-proof compatibility
+  seam and guaranteed another mismatch.
+- **Contract:** when final global preflight supplies `_edli_global_day0_binding`,
+  local proof keeps it until the current replacement bundle is loaded. It then
+  extracts that bundle's typed provisional conditioning and reproduces it through
+  `_global_day0_execution_payload`, which rechecks the current station value,
+  unit, causal clock, settlement boundary, and 15-minute entry freshness. A path
+  without the global binding retains the prior settlement-first fail-closed flow.
+- **SCOPE / DRAIN / RESET:** scope is provisional global-winner local-proof
+  compatibility only. The same submit preflight drains through a current bundle
+  and current observation read; changed/missing/stale conditioning resets to the
+  existing no-trade reason. Ranking, q, price, Kelly, risk, and venue boundaries
+  are unchanged.
+- **Acceptance:** the local proof calls current-observation reconstruction once
+  with the exact bundle conditioning, never first with `None`; focused identity
+  and global JIT tests plus live command/venue facts are required before any
+  order or profit claim.
+
+### 2026-08-22 — statistical Day0 parent policy is atomic through verification (B143)
+
+- **Observed defect:** after B142 produced repeatable stable preflight for the
+  globally selected Shenzhen LOW NO candidate, certificate verification still
+  rejected it before venue submission for missing `DAY0_AUTHORITY` and
+  `ABSORBING_BOUNDARY` parents.
+- **Root cause:** B141 fixed the parent builder, but the downstream verifier only
+  recognized `replacement_0_1` as statistical Day0 authority. It misclassified
+  the exact `day0_remaining_day` +
+  `day0_remaining_day_global_probability_v1` pair as deterministic, creating a
+  module seam where a valid certificate graph could never verify.
+- **Contract:** the verifier recognizes only that exact typed remaining-day pair
+  as statistical and requires its `FORECAST_AUTHORITY` + `CALIBRATION` parents.
+  Conflicting or incomplete q-source fields fail that predicate. Deterministic
+  Day0 continues to require both hard-fact parents before payload validation.
+- **SCOPE / DRAIN / RESET:** scope is one Day0 actionable certificate graph at
+  final command construction. Every new JIT graph drains through current
+  forecast, calibration, probability, quote, Kelly, and risk parents; any
+  malformed authority pair resets to the deterministic fail-closed path. No
+  ranking, q, sizing, price-band, risk, venue, or settlement rule changes.
+- **Acceptance:** a fully typed remaining-day graph verifies without absorbing
+  parents, while a deterministic graph missing them is rejected. Focused
+  certificate and global-JIT tests, then live command/venue facts, are required
+  before any order or profit claim.
+
+### 2026-08-22 — statistical Day0 source context reaches the executor (B144)
+
+- **Observed defect:** after B143, stable global preflight repeatedly reached
+  `FinalExecutionIntent`, but the executor rejected the selected statistical
+  Day0 order as `forecast_role_not_entry_primary:day0_base_distribution` with
+  missing ensemble member/run clocks.
+- **Root cause:** removing false deterministic parents in B141 made the final
+  source-context bridge take its generic no-Day0-parent branch. That branch
+  passed only the base forecast certificate and dropped the already-verified
+  statistical Day0 observation/probability authority at the module boundary.
+- **Contract:** a Day0 actionable graph without deterministic parents must carry
+  a valid typed Day0 probability authority and live observation contract into a
+  `day0_observed_probability` executor context. The context binds the exact
+  qkernel probability identity, observation clocks, raw provenance, and base
+  forecast certificate without claiming absorbing settlement truth. Ordinary
+  forecast and deterministic hard-fact contexts are unchanged.
+- **SCOPE / DRAIN / RESET:** scope is only `FinalExecutionIntent` source-context
+  construction for one verified statistical Day0 winner. Each JIT attempt drains
+  by reconstructing and validating the actionable probability/observation
+  payload; missing provenance, clocks, qkernel identity, or typed authority
+  resets to a pre-venue rejection. Price, q, global ranking, sizing, Kelly,
+  collateral, venue, and settlement checks are unchanged.
+- **Acceptance:** a typed statistical remaining-day actionable payload with no
+  absorbing parents produces a zero-error `DecisionSourceContext`; malformed
+  statistical payloads still fail before command persistence. Live
+  command/venue/portfolio facts remain required before any profit claim.
+
+### 2026-08-22 — held-family probability authority is atomic with the global cut (B145)
+
+- **Observed defect:** Lucknow HIGH 31C NO filled 5.75 shares at 0.68 from an
+  ENTRY point q of about 0.799. The first held monitor then produced current
+  HELD q about 0.509 against an executable 0.67 bid, but every global SELL cut
+  rejected the action as `NON_POSITIVE_EXPECTED_OBJECTIVE` because it continued
+  pricing the held payoff at the ENTRY q.
+- **Root cause:** `process_current_global_batch` invoked the HELD probability
+  preparer only when ENTRY preparation failed. A held family whose ENTRY
+  witness remained constructible therefore used that witness for BUY, SELL,
+  HOLD, and CASH even when the independently current HELD witness had different
+  probability content.
+- **Contract:** every held family with a HELD preparer evaluates both authority
+  scopes. Equal probability content retains ENTRY candidate seeds but rebinds
+  the temporal SELL authority from HELD preparation. Divergent content selects
+  the HELD witness and disables BUY for that family; missing HELD authority or
+  missing content identity fails the family closed. The held-only witness may
+  release existing capital but cannot authorize new risk.
+- **SCOPE / DRAIN / RESET:** scope is one held family inside one immutable global
+  selection epoch. The next current cut drains by rebuilding ENTRY and HELD
+  witnesses; exact content equality restores BUY eligibility, while closure of
+  the holding removes the HELD obligation. No price, fee, depth, wealth, Kelly,
+  RiskGuard, venue, or settlement gate is weakened.
+- **Acceptance:** a held family with divergent ENTRY/HELD content reaches the
+  selector with HELD q and a typed BUY-disabled reason; equal content preserves
+  ENTRY seeds and uses HELD temporal SELL authority. Focused integration tests,
+  live receipts, command events, venue fills, and realized/settled capital
+  evidence remain separate proof lines; no open position is profit proof.
+
+### 2026-08-22 — Day0 BUY must be monitor-stable before venue I/O (B146)
+
+- **Observed defect:** after B145 made Lucknow's held action consume HELD q, the
+  exact live round trip exposed the upstream inconsistency: BUY filled 5.75 NO
+  at 0.68 from ENTRY q about 0.799, then current HELD q about 0.50 authorized a
+  0.67 SELL. Gross realized PnL was -0.06; the strict evaluator remains FAIL.
+- **Contract:** at JIT/pre-submit, every selected Day0 BUY rebuilds both current
+  ENTRY and immediate HELD_MONITOR probability witnesses for the exact family
+  and condition. Their complete probability content, including the point
+  simplex, must match. Missing HELD authority or any divergence rejects the BUY
+  before venue I/O; no HELD-only evidence is promoted into entry authority.
+- **SCOPE / DRAIN / RESET:** scope is the exact selected Day0 BUY candidate.
+  Candidate-local fallthrough lets independent current actions continue to
+  compete against CASH in the same cut. A later recurring cut rebuilds both
+  witnesses and exact equality restores eligibility. Price, fees, depth,
+  wealth, Kelly, RiskGuard, collateral, settlement, and SELL authority remain
+  unchanged.
+- **Acceptance:** focused antibodies prove equal content proceeds and preserves
+  the selected immutable witness; q-content divergence and unavailable HELD
+  truth both return candidate-local no-submit reasons. Deployment and any later
+  order still require separate current SHA/process/DB/receipt/venue evidence;
+  this gate prevents one demonstrated loss mechanism but is not profit proof.
+
+### 2026-08-22 — zero-revision WU history cannot blind held capital (B147)
+
+- **Observed defect:** Chengdu HIGH 30C YES retained 22 chain shares and fresh
+  executable quotes, but at least 14 consecutive monitor cycles lacked fresh q
+  with `GLOBAL_DAY0_PROVISIONAL_REVISION_LIKELIHOOD_UNAVAILABLE`. Canonical WU
+  hourly data was complete for the prior seven target dates and current day;
+  the bounded `observation_revisions` slice had zero changed-payload rows.
+- **Root cause:** the WU revision model uses a Jeffreys-Beta posterior but
+  rejected `transition_count == 0` before evaluating its mathematically defined
+  zero-observation prior. Because unchanged hourly ingestion does not create a
+  revision row, this fail-closed gate had no source-driven reset before final
+  daily truth and left existing capital unpriceable.
+- **Contract:** ENTRY still requires empirical city-specific changed-payload
+  history. HELD_MONITOR and REDUCE_ONLY_EXIT may evaluate the identical
+  Jeffreys model at its zero-observation prior, with explicit prior-only
+  semantics and denominator basis serialized into q content. It remains a
+  statistical simplex and can never create deterministic payoff support.
+- **SCOPE / DRAIN / RESET:** scope is WU provisional held/reduce-only q for one
+  family with an existing exposure. The normal monitor cycle immediately drains
+  by rebuilding q from current observation, source-clock forecast, and the
+  prior-only revision witness; the first empirical changed-payload transition
+  automatically replaces the prior-only basis. ENTRY never consumes this
+  relaxation, so missing empirical history cannot open new risk.
+- **Acceptance:** tests prove zero-history ENTRY still raises, explicit
+  prior-only produces a finite `0 < survival < 1`, and the adapter passes that
+  permission only for HELD_MONITOR. `DAY0_PROBABILITY_SEMANTICS_REVISION` moves
+  to v6 so settlement attribution cannot pool old and new conditional laws.
+  Live acceptance requires Chengdu `last_monitor_prob_is_fresh=1`, complete
+  exit-monitor receipts, and independent command/venue evidence for any action.
+
+### 2026-08-23 — quarantined WU conflicts cannot become probability retractions (B148)
+
+- **Observed defect:** Shanghai HIGH 30C YES remained on fresh HOLD q about
+  0.17 after the canonical WU hourly surface had observed 31C, while its
+  executable bid had fallen to zero. In the seven-day likelihood window, all
+  five counted downward transitions were `payload_hash_mismatch` rows that the
+  observation writer quarantined and did not apply to canonical state. Seoul,
+  Singapore, and Tokyo showed the same contamination class.
+- **Contract:** the WU provisional-boundary likelihood admits only writer-applied
+  changed-payload transitions. Quarantined identity/clock conflicts remain
+  disagreement evidence and cannot be counted as a state transition or
+  boundary retraction. The admitted/excluded counts and denominator basis are
+  serialized into probability content, and Day0 semantics advances to v9.
+- **SCOPE / DRAIN / RESET:** scope is each WU provisional Day0 family. The next
+  recurring materialization/monitor cut rebuilds q from the bounded applied
+  revision slice. A later writer-applied source revision automatically enters
+  the same likelihood; rejected payloads never do. ENTRY still requires an
+  empirical applied-transition history, while held/reduce-only may use the
+  explicit zero-observation prior.
+- **Acceptance:** a frozen Shanghai-shaped antibody proves 143 applied widening
+  transitions plus 24 quarantined conflicts (five downward) yield zero admitted
+  retractions, 24 exclusions, and boundary survival about 0.9668 instead of the
+  contaminated about 0.7232. Deployment still requires live SHA/process/DB,
+  refreshed q, and independent order/venue evidence; this correction is not by
+  itself a profit claim.
+
+### 2026-08-23 — optional forecast boot catch-up cannot own daemon readiness (B149)
+
+- **Observed defect:** during the B148 live restart, `forecast-live` completed
+  schema and source-health checks but then spent more than three minutes in the
+  current-posterior boot wake's large-DB append-tail read before constructing
+  its scheduler. Its heartbeat stayed stale, so live trading correctly remained
+  `BOOT_BLOCKED` even though exact-family periodic production was the intended
+  primary lane.
+- **Contract:** scheduler construction and `scheduler_ready` heartbeat precede
+  the optional boot catch-up. The catch-up runs fail-soft on a daemon thread;
+  its slow/failing read cannot block heartbeat or the recurring one-second
+  materializer that independently republishes committed posterior wakes.
+- **SCOPE / DRAIN / RESET:** scope is only the forecast boot catch-up. A slow
+  read may consume its own daemon thread but cannot block any scheduler lane;
+  process exit releases it, and each restart starts at most one new catch-up.
+  The recurring materializer drains current exact-family work regardless of
+  catch-up completion.
+- **Acceptance:** a blocking-wake antibody proves the starter returns while the
+  worker remains blocked, and a source-order antibody proves scheduler-ready
+  heartbeat is written first. Live acceptance requires a new-SHA forecast
+  heartbeat, healthy scheduler log, and trading boot without the stale-sidecar
+  rejection.
+
+### 2026-08-23 — terminal partial ENTRY obligations cannot become ghost capital (B150)
+
+- **Observed defect:** the current wealth witness deducted `$47.71` as entry
+  obligations even though all five owning commands were terminal and no venue
+  command remained open. Four positions had already sold their complete fills;
+  the fifth retained only its authenticated partial fill. The obligations were
+  therefore stale accounting locks, not unsettled cash or executable orders.
+- **Structural cause:** the terminalizer omitted raw `CANCEL_CONFIRMED` /
+  `EXPIRED` facts with positive matched and cancelled-remainder sizes, and
+  stopped scanning after a position became `economically_closed`. The release
+  reducer also rejected exact entry-minus-exit zero flow, so a complete SELL
+  could never prove that the old ENTRY exposure had been absorbed.
+- **Contract:** raw terminal partial facts remain command-scoped drain work even
+  after economic closure. Release still requires canonical terminal-order and
+  positive-fill proof. An open residual must exactly reproduce current synced
+  shares/cost; a zero residual must additionally prove a canonical full EXIT,
+  `economically_closed`, and zero Chain shares/cost. Command state, phase, or
+  order-list absence alone cannot release capital.
+- **SCOPE / DRAIN / RESET:** scope is one terminal ENTRY command obligation.
+  Recurring command recovery first normalizes its terminal order fact and then
+  resolves the obligation when the exact flow witness matches. Missing order,
+  fill, projection, EXIT, or Chain proof keeps only that command's obligation
+  open; the next canonical fact/projection update retries the same reducer.
+- **Acceptance:** antibodies cover both pre-reducer `PARTIALLY_MATCHED` and raw
+  `CANCEL_CONFIRMED`, economically closed candidate retention, and exact full
+  EXIT absorption. Deployment acceptance is canonical live DB evidence that
+  the five obligations advance to `RESOLVED` and the next global wealth witness
+  no longer subtracts `$47.71`; released capacity is not itself realized PnL.
+
+### 2026-08-23 — a late current ENS shape must supersede its anchor-first seed (B151)
+
+- **Observed defect:** the 00Z deterministic anchor created held-family seeds at
+  06:36 while their pinned ENS baseline still named 18Z. At 07:53 the verified
+  00Z HIGH/LOW ENS runs committed and cycle-advance detected 39/25 advances,
+  but every advance was counted `already_enqueued`; zero seeds were emitted.
+  Istanbul and Moscow therefore remained excluded on stale 18Z posterior
+  authority. Cape Town retained a near-zero q but its executable bid moved from
+  5–6¢ to 3¢ before the current shape could re-decide the SELL.
+- **Structural cause:** cycle idempotency was keyed only by family and target
+  cycle. It could not distinguish an early same-cycle seed pinned to the prior
+  ENS run from a later seed backed by the just-committed ENS source_run_id.
+- **Contract:** a verified ENS commit passes its immutable source_run_id with
+  only the exact scopes contributed by that run. The old same-cycle marker may
+  be replaced only when the run belongs to the exact target cycle, the old seed
+  pins a different baseline, and no active or indeterminate request owns it.
+  Marker replacement is CAS-fenced to the exact old seed path, and the newly
+  built seed must reproduce the committed source_run_id before publication.
+- **SCOPE / DRAIN / RESET:** scope is one family/cycle marker named by one ENS
+  commit. The existing single-writer materialization queue drains the new seed;
+  posterior provenance naming that run resets the stale-HWM gate. A concurrent
+  marker owner, wrong-cycle run, unreadable seed, or mismatched built baseline
+  remains fail-closed and is retried by the existing source-run wake.
+- **Acceptance:** daemon, wrapper, exact-CAS, late-baseline, and seed-binding
+  antibodies pass. Live acceptance requires a new seed for the affected 00Z
+  held families, new 00Z posterior provenance, renewed full-book evaluation,
+  and separate command/venue/fill evidence for any selected order. This timing
+  repair is not itself realized profit.
+
+### 2026-08-23 — committed ENS wake cannot lose every queue-lock race (B152)
+
+- **Observed defect:** after B151 deployment, exact live replay over all eleven
+  held HIGH scopes returned `INDETERMINATE` for 11/11. The one-second
+  materialization poll held its claim lock while preparing a large legacy
+  backlog, so every non-blocking owner scan lost the same lock race and emitted
+  zero current-cycle seeds.
+- **Contract:** only committed-ENS causal owner checks wait, for at most 120
+  seconds, to obtain the existing queue lock and perform the same exact
+  read-only request/inflight scan. Other Day0 checks preserve their non-blocking
+  behavior. The deadline remains fail-closed; active and indeterminate owners
+  still cannot be replaced.
+- **Acceptance:** an antibody makes the first lock attempt busy and the second
+  successful, then proves the exact absent owner becomes `INACTIVE`. Live
+  acceptance remains new 00Z seed, posterior provenance, held redecision, and
+  separate venue evidence for any order.
+
+### 2026-08-23 — current same-cycle baseline precedes anchor-first FIFO (B153)
+
+- **Observed defect:** B152 emitted eleven exact 00Z held seeds, but the request
+  queue selected older 00Z-cycle requests whose baseline still named 18Z because
+  same-tier FIFO used only `computed_at`. Those requests consumed the bounded
+  workers and reproduced `CAPTURE:CURRENT_EVIDENCE_NOT_LIVE` before the exact
+  00Z requests could run.
+- **Contract:** within one family and source cycle only, a request whose baseline
+  source run is canonical `SUCCESS` at that exact cycle precedes stale-baseline
+  siblings. Held-family, never-priced, and newest-cycle tiers remain unchanged;
+  ordinary FIFO remains unchanged when no exact current baseline is present.
+- **Acceptance:** an antibody gives the stale request an earlier clock and proves
+  the later exact-baseline request sorts first on the same risk tier. Live proof
+  remains a committed 00Z posterior and subsequent held-position redecision.
+
+### 2026-08-23 — keep forecast restart catch-up off posterior payload pages (B155)
+
+- **Observed defect:** after a forecast-live restart, the optional boot-wake
+  thread scanned `forecast_posteriors NOT INDEXED`. The live DB was 77.7 GB and
+  each row carried large q/provenance JSON; a process stack sample showed the
+  boot thread reading SQLite overflow pages while the only materialization
+  worker waited in subprocess polling. The one-second poll then skipped for
+  minutes under `max_instances=1`, even though B154 had correctly ranked the
+  fresh Ankara Day0 request first.
+- **Contract:** boot catch-up is a family-scope wake only, never probability or
+  submit authority. Read current live family identities from the existing
+  runtime-layer covering index, group to the newest family occurrence, and let
+  the ordinary reactor re-read every probability/book/wealth fact. Do not decode
+  q/provenance payloads and do not add a schema/index migration to the live DB.
+- **SCOPE / DRAIN / RESET:** scope is forecast-live restart catch-up only;
+  steady-state materialization, posterior math, canonical DB writes, and order
+  authority are unchanged. The covering query drains once at boot and publishes
+  at most 100 family hints. A later restart reconstructs the hints from current
+  indexed rows; failure remains fail-soft because committed materializations
+  publish their own exact wakes.
+- **Acceptance:** SQLite query-plan antibody must prove `USING COVERING INDEX`;
+  a live read-only probe must return 100 families from the 77.7 GB DB in bounded
+  time. After forecast-live restart, heartbeat and materialization must remain
+  concurrent, and the first current Day0 request must reach a committed posterior
+  without a multi-minute boot-scan stall.
+
+### 2026-08-23 — keep seed cycle boundaries on the ordered live-family index (B156)
+
+- **Observed defect:** every seed admission asked for the newest family
+  posterior through the `source_id` index and then sorted the full matching
+  history by `computed_at`. Against the 77.7 GB live forecast DB, cold random
+  table reads plus a temporary sort repeated across the inspection window
+  occupied the single materializer scheduler instance for minutes before any
+  probability subprocess could start.
+- **Contract:** cycle monotonicity compares only against the newest
+  `runtime_layer = 'live'` posterior and uses the existing
+  `idx_forecast_posteriors_runtime_layer_target` ordering. Offline rows cannot
+  advance the live boundary. The same-cycle ENS HWM remains the independent
+  second boundary.
+- **SCOPE / DRAIN / RESET:** scope is one queued city/date/metric seed. Each
+  poll reads one ordered index head per inspected family, then the normal
+  request compute/write path proceeds. A newer live posterior or eligible ENS
+  cycle changes the boundary on the next poll; missing/unreadable authority
+  preserves the existing retry behavior.
+- **Acceptance:** query plan uses the ordered live-family index with no
+  temporary ORDER BY B-tree; an offline row with a newer cycle does not
+  supersede the live boundary; targeted queue/materializer tests and a real
+  restart show bounded pre-spawn latency.
+
+### 2026-08-23 — confirmed fill projection outranks monitor bootstrap (B157)
+
+- **Observed defect:** Warsaw BUY command `d8a93f3f1e4e4b23` returned a matched
+  FOK without a trade id and correctly entered `REVIEW_REQUIRED`. The fill
+  synchronizer later persisted one authenticated `CONFIRMED` trade fact, but
+  the command-recovery scheduler still deferred every minute behind held-monitor
+  bootstrap. Its blocker classifier counted only commands already projected as
+  `FILLED`, so the real 5.307691-share Chain exposure remained absent from
+  `position_current` and appeared as a chain-only unknown asset.
+- **Contract:** a recent `REVIEW_REQUIRED` ENTRY with a bound order and an exact
+  authenticated confirmed trade is unprojected capital exposure, identical in
+  priority to an unprojected `FILLED` command. It contributes to global
+  projection debt before any generic monitor-bootstrap deferral. The existing
+  command-bound recovery remains the sole writer and must still prove order id,
+  token, positive fill economics, limit compliance, and complete fill size.
+- **SCOPE / DRAIN / RESET:** scope is only confirmed command-bound entry exposure
+  missing its canonical position/event/execution projection. The 60-second
+  recovery live tick drains the exact durable fact without new venue I/O, while
+  taking the existing bounded reactor handoff. A `FILLED` command plus matching
+  positive `position_current`, `ENTRY_ORDER_FILLED`, and `execution_fact` clears
+  the blocker; ordinary historical recovery continues yielding to the monitor.
+- **Acceptance:** one blocker antibody reproduces the matched-submit/no-trade-id
+  shape and requires `projection_count = 1`; one scheduler antibody proves that
+  this projection debt bypasses generic monitor deferral. Live acceptance is the
+  exact Warsaw command becoming `FILLED`, a monitored token-matching canonical
+  position, and the chain-only review item draining or becoming superseded.
+
+### 2026-08-23 — chain projection precision must reset recovered exposure debt (B159)
+
+- **Observed defect:** B157 recovered the Warsaw confirmed fill as 5.307691
+  canonical shares, while the Chain position surface represented the same
+  exposure as 5.3076. Reconciliation correctly marked the position synced, but
+  chain-only suppression RESET required decimal equality, leaving the old
+  `CHAIN_ONLY_UNKNOWN_ASSET` review item OPEN for a 0.000091 representation gap.
+- **Contract:** an otherwise exact token, condition, positive-exposure, complete
+  Chain match may reset chain-only debt when aggregate local and Chain shares
+  differ by at most the existing canonical four-decimal projection tolerance
+  (`0.0001`). This tolerance is only a representation equivalence; it does not
+  authorize a fill, change position shares/cost, or hide larger drift.
+- **SCOPE / DRAIN / RESET:** scope is the automatic suppression/review cleanup
+  after canonical position materialization. The next normal Chain reconcile
+  atomically records `chain_only_auto_resolved_match` and resolves only matching
+  `CHAIN_ONLY_UNKNOWN_ASSET` work. Missing token/condition identity, nonpositive
+  exposure, incomplete Chain truth, or a larger size gap remains blocked.
+- **Acceptance:** relationship test reproduces Warsaw's 5.307691-vs-5.3076
+  shape and requires both token suppression and review item to resolve. Live
+  acceptance requires Warsaw to remain `synced` with fresh monitor probability
+  and book while its exact stale review item becomes `RESOLVED`.
+
+### 2026-08-23 — spend the live Day0 observation clock before timeless FIFO (B154)
+
+- **Observed defect:** Madrid published a canonical 09:04:22 METAR and emitted
+  an exact-current-baseline HIGH transition request at 09:06:37, but the request
+  ranked 26th behind timeless same-tier FIFO work. The only writer was also
+  spending up to 30 seconds on individual timeouts; the live posterior therefore
+  still carried the 08:34 observation when a Madrid NO candidate with expected
+  EV `$4.09` reached preflight, which correctly rejected the stale conditioning.
+- **Contract:** chain-confirmed capital, newest source cycle, never-priced, held
+  marker, and current-baseline priority remain unchanged. Within one existing
+  tier, only a request whose Day0 observation is still inside the canonical
+  15-minute ENTRY window and whose baseline is current may move ahead of
+  timeless FIFO work; among those requests the newest causal observation runs
+  first. Expired observations and stale-baseline siblings retain their prior
+  order and cannot gain authority from this scheduling optimization.
+- **SCOPE / DRAIN / RESET:** scope is queue scheduling only; probability math,
+  source identity, freshness enforcement, risk, and submit authority are
+  unchanged. The single writer drains the fresh transition, materializes a new
+  posterior, and publishes the normal reactor wake. Once the observation passes
+  15 minutes it automatically loses scheduling priority; preflight continues to
+  reject any posterior that missed that window.
+- **Acceptance:** antibodies prove fresh-before-FIFO, newest-fresh-first, expired
+  no-promotion, and stale-baseline no-promotion while the B153 ordering remains
+  green. Live proof requires Madrid posterior provenance to advance to the 09:04
+  observation before expiry and a new global decision; venue ACK/fill and later
+  realized PnL remain separate evidence.
 
 ### 2026-08-02 — partial EXIT realized-PnL canonical continuity (hot-fix slice)
 

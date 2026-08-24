@@ -1,5 +1,5 @@
 # Created: 2026-08-12
-# Last reused/audited: 2026-08-13
+# Last reused/audited: 2026-08-23
 # Authority: current-regime capital proof must fail closed before entry reopens.
 
 from __future__ import annotations
@@ -407,7 +407,7 @@ def test_proof_sample_uses_verified_settlement_and_after_cost_terminal_wealth():
     )
 
 
-def test_bounded_latest_causal_semantics_is_current_capital_evidence():
+def test_stale_ensemble_semantics_cannot_be_current_capital_evidence():
     forecasts = _settlement_db()
     forecasts.execute(
         "INSERT INTO market_events VALUES (?,?,?,?,?,?)",
@@ -442,16 +442,13 @@ def test_bounded_latest_causal_semantics_is_current_capital_evidence():
         summary
     )
 
-    sample = evaluator._realized_proof_sample(
-        sqlite3.connect(":memory:"),
-        forecasts,
-        decision_log_id=18,
-        summary=summary,
-    )
-
-    assert sample["probability_semantics_revision"] == (
-        evaluator.STALE_ENSEMBLE_ABSOLUTE_DISAGREEMENT_SEMANTICS_REVISION
-    )
+    with pytest.raises(ValueError, match="identity/semantics invalid"):
+        evaluator._realized_proof_sample(
+            sqlite3.connect(":memory:"),
+            forecasts,
+            decision_log_id=18,
+            summary=summary,
+        )
 
 
 def test_maker_counterfactual_without_fill_path_cannot_prove_capital_gain():
@@ -613,15 +610,183 @@ def test_counterfactual_evidence_counts_only_first_receipt_per_target_date():
     assert evidence["samples"][0]["decision_log_id"] == 1
     assert evidence["rejection_counts"]["duplicate_target_date"] == 1
     assert evidence["delta_log_wealth_lcb95"] is None
+    assert evidence["proof_registry_target_date_count"] == 1
+    assert evidence["proof_registry"][0]["decision_log_id"] == 1
+
+
+def test_pending_proof_registry_survives_receipt_scan_window_until_settlement():
+    forecasts = _settlement_db()
+    forecasts.execute(
+        "INSERT INTO market_events VALUES (?,?,?,?,?,?)",
+        ("condition-1", "Chicago", "2026-08-13", "high", 80, 81),
+    )
+    trades = sqlite3.connect(":memory:")
+    trades.row_factory = sqlite3.Row
+    trades.execute(
+        "CREATE TABLE decision_log (id INTEGER PRIMARY KEY,mode TEXT,"
+        "completed_at TEXT,artifact_json TEXT)"
+    )
+    summary = _proof_summary(
+        city="Chicago",
+        target_date="2026-08-13",
+        condition_id="condition-1",
+    )
+    trades.execute(
+        "INSERT INTO decision_log VALUES (1,?,?,?)",
+        (
+            "global_single_order_auction",
+            "2026-08-12T00:00:02+00:00",
+            json.dumps({"summary": summary}),
+        ),
+    )
+
+    pending = evaluator._settled_global_counterfactual_evidence(
+        trades,
+        forecasts,
+        as_of=evaluator.datetime.fromisoformat("2026-08-13T00:00:00+00:00"),
+    )
+
+    assert pending["independent_target_date_count"] == 0
+    assert pending["proof_registry_target_date_count"] == 1
+    assert pending["proof_registry"][0]["decision_log_id"] == 1
+
+    forecasts.execute(
+        "INSERT INTO settlement_outcomes VALUES (1,?,?,?,?,?,?,?,?)",
+        (
+            "Chicago",
+            "2026-08-13",
+            "high",
+            81,
+            "F",
+            "2026-08-13T20:00:00+00:00",
+            "2026-08-13T20:01:00+00:00",
+            "VERIFIED",
+        ),
+    )
+    trades.execute(
+        "INSERT INTO decision_log VALUES (20000,?,?,?)",
+        (
+            "exit_monitor",
+            "2026-08-13T23:00:00+00:00",
+            json.dumps({}),
+        ),
+    )
+    settled = evaluator._settled_global_counterfactual_evidence(
+        trades,
+        forecasts,
+        as_of=evaluator.datetime.fromisoformat("2026-08-14T00:00:00+00:00"),
+        prior_proof_registry=pending["proof_registry"],
+    )
+
+    assert settled["independent_target_date_count"] == 1
+    assert settled["samples"][0]["decision_log_id"] == 1
+    assert settled["proof_registry_target_date_count"] == 1
+
+
+def test_invalid_retained_proof_ref_cannot_abort_current_canonical_scan():
+    forecasts = _settlement_db()
+    forecasts.execute(
+        "INSERT INTO market_events VALUES (?,?,?,?,?,?)",
+        ("condition-1", "Chicago", "2026-08-13", "high", 80, 81),
+    )
+    forecasts.execute(
+        "INSERT INTO settlement_outcomes VALUES (1,?,?,?,?,?,?,?,?)",
+        (
+            "Chicago",
+            "2026-08-13",
+            "high",
+            81,
+            "F",
+            "2026-08-13T20:00:00+00:00",
+            "2026-08-13T20:01:00+00:00",
+            "VERIFIED",
+        ),
+    )
+    trades = sqlite3.connect(":memory:")
+    trades.row_factory = sqlite3.Row
+    trades.execute(
+        "CREATE TABLE decision_log (id INTEGER PRIMARY KEY,mode TEXT,"
+        "completed_at TEXT,artifact_json TEXT)"
+    )
+    summary = _proof_summary(
+        city="Chicago",
+        target_date="2026-08-13",
+        condition_id="condition-1",
+    )
+    trades.execute(
+        "INSERT INTO decision_log VALUES (1,?,?,?)",
+        (
+            "global_single_order_auction",
+            "2026-08-12T00:00:02+00:00",
+            json.dumps({"summary": summary}),
+        ),
+    )
+
+    evidence = evaluator._settled_global_counterfactual_evidence(
+        trades,
+        forecasts,
+        as_of=evaluator.datetime.fromisoformat("2026-08-14T00:00:00+00:00"),
+        prior_proof_registry=({"decision_log_id": "invalid"},),
+    )
+
+    assert evidence["independent_target_date_count"] == 1
+    assert evidence["proof_registry"][0]["decision_log_id"] == 1
+    assert evidence["rejection_counts"]["invalid literal for int() with base 10: 'invalid'"] == 1
+
+
+def test_retained_proof_registry_cannot_outlive_current_evidence_window():
+    forecasts = _settlement_db()
+    trades = sqlite3.connect(":memory:")
+    trades.row_factory = sqlite3.Row
+    trades.execute(
+        "CREATE TABLE decision_log (id INTEGER PRIMARY KEY,mode TEXT,"
+        "completed_at TEXT,artifact_json TEXT)"
+    )
+    summary = _proof_summary(
+        city="Chicago",
+        target_date="2026-08-13",
+        condition_id="condition-1",
+    )
+    trades.execute(
+        "INSERT INTO decision_log VALUES (1,?,?,?)",
+        (
+            "global_single_order_auction",
+            "2026-08-12T00:00:02+00:00",
+            json.dumps({"summary": summary}),
+        ),
+    )
+    retained = {
+        "decision_log_id": 1,
+        "proof_counterfactual_sha256": summary["proof_counterfactual_sha256"],
+        "independence_key": "2026-08-13",
+        "decision_at_utc": "2026-08-12T00:00:01+00:00",
+    }
+
+    evidence = evaluator._settled_global_counterfactual_evidence(
+        trades,
+        forecasts,
+        as_of=evaluator.datetime.fromisoformat("2026-09-17T00:00:01+00:00"),
+        prior_proof_registry=(retained,),
+    )
+
+    assert evidence["proof_registry_target_date_count"] == 0
+    assert evidence["rejection_counts"][
+        "proof decision outside current evidence window"
+    ] == 1
 
 
 def test_live_curve_requires_exact_schema_22_edli_receipt_binding():
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
+    events_conn = sqlite3.connect(":memory:")
+    events_conn.row_factory = sqlite3.Row
     conn.executescript(
-        "CREATE TABLE venue_commands (position_id TEXT,intent_kind TEXT,decision_id TEXT);"
-        "CREATE TABLE edli_live_order_events (aggregate_id TEXT,event_type TEXT,payload_json TEXT);"
+        "CREATE TABLE venue_commands (command_id TEXT,position_id TEXT,intent_kind TEXT,decision_id TEXT);"
         "CREATE TABLE decision_log (id INTEGER PRIMARY KEY,mode TEXT,artifact_json TEXT);"
+    )
+    events_conn.execute(
+        "CREATE TABLE edli_live_order_events "
+        "(aggregate_id TEXT,event_type TEXT,payload_json TEXT)"
     )
     summary = _proof_summary(
         city="Chicago",
@@ -655,12 +820,15 @@ def test_live_curve_requires_exact_schema_22_edli_receipt_binding():
         winner_actuation_identity=summary["winner_actuation_identity"],
         selection_epoch_identity=summary["selection_epoch_identity"],
     )
-    conn.execute("INSERT INTO venue_commands VALUES ('position-1','ENTRY','cmd-1')")
     conn.execute(
+        "INSERT INTO venue_commands VALUES "
+        "('venue-cmd-1','position-1','ENTRY','cmd-1')"
+    )
+    events_conn.execute(
         "INSERT INTO edli_live_order_events VALUES ('aggregate-1','ExecutionCommandCreated',?)",
         (json.dumps({"execution_command_id": "cmd-1"}),),
     )
-    conn.execute(
+    events_conn.execute(
         "INSERT INTO edli_live_order_events VALUES ('aggregate-1','PreSubmitRevalidated',?)",
         (json.dumps({"global_auction_receipt": receipt.as_payload()}),),
     )
@@ -675,12 +843,113 @@ def test_live_curve_requires_exact_schema_22_edli_receipt_binding():
                 }
             ]
         },
+        events_conn=events_conn,
     )
 
     assert bound["selection_revision_bound"] is True
     assert bound["realized_position_count"] == 1
     assert bound["net_realized_pnl_usd"] == 1.0
     assert bound["curve"][0]["global_auction_decision_log_id"] == 1
+
+
+def test_live_curve_binds_every_increment_across_selection_epochs():
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    events_conn = sqlite3.connect(":memory:")
+    events_conn.row_factory = sqlite3.Row
+    conn.executescript(
+        "CREATE TABLE venue_commands (command_id TEXT,position_id TEXT,"
+        "intent_kind TEXT,decision_id TEXT);"
+        "CREATE TABLE decision_log (id INTEGER PRIMARY KEY,mode TEXT,artifact_json TEXT);"
+    )
+    events_conn.execute(
+        "CREATE TABLE edli_live_order_events "
+        "(aggregate_id TEXT,event_type TEXT,payload_json TEXT)"
+    )
+    epoch_ids = []
+    for index in (1, 2):
+        summary = _proof_summary(
+            city="Chicago",
+            target_date="2026-08-13",
+            condition_id=f"condition-{index}",
+        )
+        summary.update(
+            winner_event_id=f"event-{index}",
+            winner_candidate_id=f"candidate-{index}",
+            winner_actuation_identity=f"actuation-{index}",
+            selection_epoch_identity=f"epoch-{index}",
+        )
+        summary["execution_binding_hash"] = global_auction_execution_binding_hash(
+            summary
+        )
+        summary["artifact_summary_hash"] = global_auction_artifact_summary_hash(
+            summary
+        )
+        conn.execute(
+            "INSERT INTO decision_log VALUES (?,?,?)",
+            (
+                index,
+                "global_single_order_auction",
+                json.dumps({"summary": summary}),
+            ),
+        )
+        receipt = GlobalAuctionReceiptRef(
+            decision_log_id=index,
+            decision_log_mode="global_single_order_auction",
+            receipt_hash=summary["receipt_hash"],
+            execution_binding_hash=summary["execution_binding_hash"],
+            artifact_summary_hash=summary["artifact_summary_hash"],
+            schema_version=22,
+            winner_event_id=summary["winner_event_id"],
+            winner_candidate_id=summary["winner_candidate_id"],
+            winner_actuation_identity=summary["winner_actuation_identity"],
+            selection_epoch_identity=summary["selection_epoch_identity"],
+        )
+        conn.execute(
+            "INSERT INTO venue_commands VALUES (?,?,?,?)",
+            (f"venue-cmd-{index}", "position-1", "ENTRY", f"cmd-{index}"),
+        )
+        events_conn.execute(
+            "INSERT INTO edli_live_order_events VALUES (?,?,?)",
+            (
+                f"aggregate-{index}",
+                "ExecutionCommandCreated",
+                json.dumps({"execution_command_id": f"cmd-{index}"}),
+            ),
+        )
+        events_conn.execute(
+            "INSERT INTO edli_live_order_events VALUES (?,?,?)",
+            (
+                f"aggregate-{index}",
+                "PreSubmitRevalidated",
+                json.dumps({"global_auction_receipt": receipt.as_payload()}),
+            ),
+        )
+        epoch_ids.append(summary["selection_epoch_identity"])
+
+    bound = evaluator._bind_live_curve_to_global_revision(
+        conn,
+        {
+            "curve": [
+                {
+                    "position_id": "position-1",
+                    "capital_committed_usd": 4.0,
+                    "net_realized_pnl_usd": 1.0,
+                }
+            ]
+        },
+        events_conn=events_conn,
+    )
+
+    assert bound["realized_position_count"] == 1
+    row = bound["curve"][0]
+    assert row["global_auction_receipt_count"] == 2
+    assert row["global_selection_epoch_identity"] is None
+    assert row["global_selection_epoch_identities"] == epoch_ids
+    assert {
+        binding["venue_command_id"]
+        for binding in row["global_auction_receipts"]
+    } == {"venue-cmd-1", "venue-cmd-2"}
 
 
 def test_exact_global_exit_is_ungraded_until_settlement_then_compared_with_hold():

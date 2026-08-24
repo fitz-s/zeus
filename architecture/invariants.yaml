@@ -1147,10 +1147,11 @@ invariants:
         - tests/test_gate_scope_drain_reset.py::test_day0_oracle_guard_declares_scope_drain_reset
         - tests/test_gate_scope_drain_reset.py::test_posterior_identity_check_declares_scope_drain_reset
         - tests/test_gate_scope_drain_reset.py::test_request_governor_circuit_declares_scope_drain_reset
+        - tests/test_gate_scope_drain_reset.py::test_global_batch_preemption_grace_declares_scope_drain_reset
         - tests/test_gate_scope_drain_reset.py::test_unknown_gate_site_fails_loudly_not_silently
       negative_constraints: [NC-24]
     capability_tags: [K2_runtime, live_venue_submit, probability_authority]
     relationship_tests:
       - tests/test_gate_scope_drain_reset.py
-    basis: AGENTS.md root INV-47 (commit 7125dc633); six same-night live incidents 2026-07-25/26
+    basis: AGENTS.md root INV-47 (commit 7125dc633); six same-night live incidents 2026-07-25/26; global_batch_preemption_grace site added per auction_collapse_repair_design_2026-08-24.md (TYPE C bounded-revalidation counter, reversal_plan_tier0_2026-08-24.md item 5b)
     added: 2026-07-26

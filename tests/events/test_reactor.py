@@ -1,6 +1,6 @@
 # Created: 2026-05-24
-# Last reused/audited: 2026-08-13
-# Lifecycle: created=2026-05-24; last_reviewed=2026-08-13; last_reused=2026-08-13
+# Last reused/audited: 2026-08-22
+# Lifecycle: created=2026-05-24; last_reviewed=2026-08-22; last_reused=2026-08-22
 # Authority basis: EDLI v1 implementation prompt §13 event reactor no-bypass contract.
 from __future__ import annotations
 
@@ -44,6 +44,7 @@ from src.events.reactor import (
     ReactorResult,
     TERMINAL_MONEY_PATH_REASONS,
     TRANSIENT_MONEY_PATH_REASONS,
+    _EXACT_EXECUTABLE_HELD_SELL_PENDING,
     _EXECUTABLE_SNAPSHOT_RETRY,
     _POST_SUBMIT_WORLD_WRITE_LOCK_RETRY,
     _build_day0_posterior_redecision_events,
@@ -2974,6 +2975,23 @@ def test_global_not_selected_is_terminal_for_completed_epoch(caplog):
     assert not any("UNKNOWN money-path reason" in row.message for row in caplog.records)
 
 
+@pytest.mark.parametrize(
+    "reason",
+    (
+        "GLOBAL_WINNER_CLAIM_FENCE_LOST:event_id=winner-carrier",
+        "global_increment_binding:wealth_economic_identity_superseded",
+    ),
+)
+def test_stale_global_winner_carrier_is_terminal_for_fresh_reset(caplog, reason):
+    reason_base = reason.partition(":")[0]
+
+    with caplog.at_level(logging.ERROR, logger="zeus.events.reactor"):
+        assert reason_base in TERMINAL_MONEY_PATH_REASONS
+        assert _is_transient_money_path_reason(reason) is False
+
+    assert not any("UNKNOWN money-path reason" in row.message for row in caplog.records)
+
+
 def test_global_no_reduce_only_family_is_terminal_for_completed_cut(caplog):
     reason = "GLOBAL_AUCTION_NO_REDUCE_ONLY_FAMILY"
 
@@ -5015,6 +5033,74 @@ def test_paused_forecast_selection_scans_large_queue_once(tmp_path, monkeypatch)
     assert calls == 1
 
 
+def test_concurrent_wake_readers_singleflight_one_cold_queue_refresh(
+    tmp_path,
+    monkeypatch,
+):
+    from src.runtime import reactor_wake
+
+    path = tmp_path / "wake.json"
+    queue_dir = reactor_wake._wake_queue_dir(path)
+    queue_dir.mkdir(parents=True)
+    wake_count = 128
+    for index in range(wake_count):
+        wake = reactor_wake.ReactorWake(
+            wake_id=f"wake-{index:04d}",
+            published_at=(
+                datetime(2026, 8, 20, tzinfo=timezone.utc)
+                + timedelta(microseconds=index)
+            ).isoformat(),
+            source="singleflight-antibody",
+            reason="forecast_posterior_advanced",
+        )
+        reactor_wake._atomic_write_wake(
+            queue_dir / f"{index:020d}-{wake.wake_id}.json",
+            wake,
+        )
+
+    with reactor_wake._WAKE_QUEUE_CACHE_LOCK:
+        reactor_wake._WAKE_QUEUE_CACHE.pop(queue_dir, None)
+        reactor_wake._WAKE_QUEUE_REVISIONS.pop(queue_dir, None)
+        reactor_wake._WAKE_QUEUE_REFRESH_LOCKS.pop(queue_dir, None)
+
+    original_read = reactor_wake._read_reactor_wake_path
+    read_count = 0
+    count_lock = threading.Lock()
+
+    def counted_read(*args, **kwargs):
+        nonlocal read_count
+        with count_lock:
+            read_count += 1
+        time.sleep(0.001)
+        return original_read(*args, **kwargs)
+
+    monkeypatch.setattr(reactor_wake, "_read_reactor_wake_path", counted_read)
+    reader_count = 6
+    barrier = threading.Barrier(reader_count)
+    results: list[int] = []
+    errors: list[BaseException] = []
+
+    def read_queue() -> None:
+        try:
+            barrier.wait()
+            results.append(
+                len(reactor_wake._queued_wakes(path, fail_on_error=True))
+            )
+        except BaseException as exc:  # noqa: BLE001 - thread failures re-raised below.
+            errors.append(exc)
+
+    threads = [threading.Thread(target=read_queue) for _ in range(reader_count)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=5.0)
+
+    assert not errors
+    assert all(not thread.is_alive() for thread in threads)
+    assert results == [wake_count] * reader_count
+    assert read_count == wake_count
+
+
 def test_exact_held_sell_debt_preempts_older_generic_completion_marker(tmp_path):
     """A failed broad fairness cut cannot head-of-line block exact held capital."""
     from src.runtime import reactor_wake
@@ -5414,6 +5500,7 @@ def _global_batch_probe_reactor(
     incomplete=False,
     next_claim_event=None,
     held_sell_completion_cut=None,
+    economic_cut_completed=False,
 ):
     bound_claims = {"generations": {}, "attempt_counts": {}}
 
@@ -5465,6 +5552,7 @@ def _global_batch_probe_reactor(
             venue_submit_count=0,
             next_claim_event=next_claim_event,
             held_sell_completion_cut=held_sell_completion_cut,
+            economic_cut_completed=economic_cut_completed,
         )
 
     observations.update(direct_submit_calls=0, batch_calls=0)
@@ -5506,6 +5594,100 @@ def test_reactor_carries_immutable_held_sell_cut_from_global_batch_result():
     )
 
     assert result.global_held_sell_completion_cuts == [cut]
+
+
+def test_exact_held_sell_completion_runs_global_cut_with_empty_event_queue():
+    _conn, store = _store()
+    observations: dict[str, object] = {}
+    cut = _held_sell_completion_result(
+        position_id="held-empty-cut",
+        token_id="token-held-empty-cut",
+        probability_content_identity="q-held-empty-cut",
+        outcome="INCOMPLETE",
+    ).global_held_sell_completion_cuts[0]
+    reactor = _global_batch_probe_reactor(
+        store,
+        observations,
+        held_sell_completion_cut=cut,
+    )
+    reactor._submit.requires_empty_global_completion_cut = True
+
+    result = reactor.process_pending(
+        decision_time=_DT_VENUE_OPEN,
+        limit=1,
+    )
+
+    assert observations["batch_calls"] == 1
+    assert observations["batch_event_ids"] == ()
+    assert result.global_held_sell_completion_cuts == [cut]
+
+
+def test_empty_event_queue_without_exact_completion_remains_noop():
+    _conn, store = _store()
+    observations: dict[str, object] = {}
+    reactor = _global_batch_probe_reactor(store, observations)
+
+    result = reactor.process_pending(
+        decision_time=_DT_VENUE_OPEN,
+        limit=1,
+    )
+
+    assert observations["batch_calls"] == 0
+    assert result.global_held_sell_completion_cuts == []
+
+
+def test_generic_monitor_completion_runs_one_empty_global_no_trade_cut():
+    """A durable generic wake earns one global HOLD/CASH comparison, not a ratchet."""
+    _conn, store = _store()
+    observations: dict[str, object] = {}
+    reactor = _global_batch_probe_reactor(
+        store,
+        observations,
+        economic_cut_completed=True,
+    )
+
+    result = reactor.process_pending(
+        decision_time=_DT_VENUE_OPEN,
+        limit=1,
+        allow_empty_global_completion=True,
+    )
+
+    assert observations["batch_calls"] == 1
+    assert observations["batch_event_ids"] == ()
+    assert observations["direct_submit_calls"] == 0
+    assert result.global_auction_completed_non_cancelled == 1
+
+
+def test_nonempty_unclaimed_queue_cannot_spend_empty_completion_authority(
+    monkeypatch,
+):
+    _conn, store = _store()
+    observations: dict[str, object] = {}
+    event = _forecast_event("held-nonempty-unclaimed", target_date="2026-05-25")
+    store.insert_or_ignore(event)
+    reactor = _global_batch_probe_reactor(store, observations)
+    reactor._submit.requires_empty_global_completion_cut = True
+    monkeypatch.setattr(
+        reactor,
+        "_process_event_unit",
+        lambda *_args, **_kwargs: None,
+    )
+
+    epoch = reactor._process_global_event_batch(
+        (event,),
+        decision_time=_DT_VENUE_OPEN,
+        result=ReactorResult(),
+        budget=None,
+        cycle_start=time.monotonic(),
+        remaining=1,
+        already_charged_event_ids=frozenset(),
+        cancelled=lambda: False,
+        allow_empty_global_completion=False,
+    )
+
+    assert observations["batch_calls"] == 0
+    assert epoch.claimed_event_ids == frozenset()
+    assert epoch.auction_completed_non_cancelled is False
 
 
 def _terminal_surfaces(conn: sqlite3.Connection, event_id: str) -> dict[str, int]:
@@ -5643,7 +5825,7 @@ def test_global_batch_stops_claiming_when_cycle_is_cancelled():
     ) == 2
 
 
-def test_process_pending_cancellation_includes_monitor_debt_except_exact_completion():
+def test_process_pending_cancellation_includes_monitor_debt_for_protected_completion():
     def any_urgent():
         return False
 
@@ -5656,18 +5838,22 @@ def test_process_pending_cancellation_includes_monitor_debt_except_exact_complet
         urgent_wake_pending=any_urgent,
         urgent_day0_pending=day0_urgent,
     ) is None
-    assert _process_pending_cancelled(
+    fast_path_cancelled = _process_pending_cancelled(
         committed_day0_wake=False,
         producer_fast_path=True,
         urgent_wake_pending=any_urgent,
         urgent_day0_pending=day0_urgent,
-    ) is day0_urgent
-    assert _process_pending_cancelled(
+    )
+    assert fast_path_cancelled is not None
+    assert fast_path_cancelled() is True
+    ordinary_wake_cancelled = _process_pending_cancelled(
         committed_day0_wake=False,
         producer_fast_path=False,
         urgent_wake_pending=any_urgent,
         urgent_day0_pending=day0_urgent,
-    ) is any_urgent
+    )
+    assert ordinary_wake_cancelled is not None
+    assert ordinary_wake_cancelled() is False
 
     debt_pending = [False]
     cancelled = _process_pending_cancelled(
@@ -5681,25 +5867,71 @@ def test_process_pending_cancellation_includes_monitor_debt_except_exact_complet
     assert cancelled() is False
     debt_pending[0] = True
     assert cancelled() is True
-    assert _process_pending_cancelled(
+    exact_cancelled = _process_pending_cancelled(
         committed_day0_wake=False,
         producer_fast_path=False,
         urgent_wake_pending=any_urgent,
         urgent_day0_pending=day0_urgent,
         held_position_monitor_debt_pending=lambda: True,
         exact_held_completion=True,
-    ) is any_urgent
+    )
+    assert exact_cancelled is not None
+    assert exact_cancelled() is True
+    executable_exact_cancelled = _process_pending_cancelled(
+        committed_day0_wake=False,
+        producer_fast_path=False,
+        urgent_wake_pending=any_urgent,
+        urgent_day0_pending=day0_urgent,
+        held_position_monitor_debt_pending=lambda: True,
+        exact_held_completion=True,
+        exact_executable_held_completion=True,
+    )
+    assert executable_exact_cancelled is not None
+    assert executable_exact_cancelled() is False
+    ordinary_cancelled = _process_pending_cancelled(
+        committed_day0_wake=False,
+        producer_fast_path=False,
+        urgent_wake_pending=any_urgent,
+        urgent_day0_pending=day0_urgent,
+        exact_held_completion=False,
+    )
+    assert ordinary_cancelled is not None
+    assert ordinary_cancelled() is False
+    _EXACT_EXECUTABLE_HELD_SELL_PENDING.set()
+    try:
+        assert ordinary_cancelled() is True
+    finally:
+        _EXACT_EXECUTABLE_HELD_SELL_PENDING.clear()
+    protected_exact = _process_pending_cancelled(
+        committed_day0_wake=False,
+        producer_fast_path=False,
+        urgent_wake_pending=any_urgent,
+        urgent_day0_pending=day0_urgent,
+        exact_held_completion=True,
+    )
+    assert protected_exact is any_urgent
+    assert protected_exact() is False
+    protected_day0 = _process_pending_cancelled(
+        committed_day0_wake=True,
+        producer_fast_path=True,
+        urgent_wake_pending=any_urgent,
+        urgent_day0_pending=day0_urgent,
+        exact_held_completion=False,
+    )
+    assert protected_day0 is None
     assert _held_position_monitor_preemption_pending(
         lambda: False,
         lambda: True,
     ) is True
-    assert _process_pending_cancelled(
+    day0_cancelled = _process_pending_cancelled(
         committed_day0_wake=True,
         producer_fast_path=True,
         urgent_wake_pending=any_urgent,
         urgent_day0_pending=day0_urgent,
         held_position_monitor_debt_pending=lambda: True,
-    ) is None
+    )
+    assert day0_cancelled is not None
+    assert day0_cancelled() is True
 
 
 def test_monitor_debt_preempts_global_batch_and_leaves_queue_retryable():
@@ -5787,8 +6019,40 @@ def test_monitor_debt_yields_before_runtime_setup_and_releases_reactor_lock(
         reactor_module._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.clear()
 
 
-def test_reserved_monitor_completion_reaches_runtime_setup_under_monitor_pressure(
+def test_unreadable_exact_completion_debt_aborts_ordinary_reactor_admission(
     monkeypatch,
+):
+    import src.events.reactor as reactor_module
+    import src.main as main
+    import src.state.db as db
+
+    monkeypatch.setattr(main, "_defer_for_held_position_monitor", lambda _job: False)
+    monkeypatch.setattr(
+        reactor_module,
+        "_durable_exact_held_sell_completion_pending",
+        lambda: (_ for _ in ()).throw(OSError("unreadable")),
+    )
+    monkeypatch.setattr(
+        db,
+        "get_world_connection",
+        lambda: pytest.fail("unreadable exact debt must abort before DB setup"),
+    )
+
+    lock = threading.Lock()
+    assert reactor_module.run_edli_event_reactor_cycle(active_lock=lock) is False
+    assert not lock.locked()
+
+
+@pytest.mark.parametrize(
+    "producer_wake_reason",
+    (
+        "held_sell_global_auction_completion_requested",
+        "day0_extreme_event_committed",
+    ),
+)
+def test_unreadable_exact_completion_debt_preserves_committed_producer_cycle(
+    monkeypatch,
+    producer_wake_reason,
 ):
     import src.events.reactor as reactor_module
     import src.main as main
@@ -5796,16 +6060,15 @@ def test_reserved_monitor_completion_reaches_runtime_setup_under_monitor_pressur
     from src.riskguard import riskguard
     from src.riskguard.risk_level import RiskLevel
 
-    class RuntimeSetupReached(RuntimeError):
+    class ProtectedProducerReachedDbSetup(Exception):
         pass
 
-    monkeypatch.setattr(main, "_settings_section", lambda *_args, **_kwargs: {})
-    monkeypatch.setattr(main, "_defer_for_held_position_monitor", lambda _job: True)
+    monkeypatch.setattr(main, "_defer_for_held_position_monitor", lambda _job: False)
     monkeypatch.setattr(riskguard, "get_current_level", lambda: RiskLevel.GREEN)
     monkeypatch.setattr(
         reactor_module,
         "_durable_exact_held_sell_completion_pending",
-        lambda: False,
+        lambda: (_ for _ in ()).throw(OSError("unreadable")),
     )
     monkeypatch.setattr(
         reactor_module,
@@ -5815,18 +6078,186 @@ def test_reserved_monitor_completion_reaches_runtime_setup_under_monitor_pressur
     monkeypatch.setattr(
         db,
         "get_world_connection",
-        lambda: (_ for _ in ()).throw(RuntimeSetupReached()),
+        lambda: (_ for _ in ()).throw(ProtectedProducerReachedDbSetup()),
     )
 
-    reactor_module._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.set()
+    lock = threading.Lock()
+    with pytest.raises(ProtectedProducerReachedDbSetup):
+        reactor_module.run_edli_event_reactor_cycle(
+            active_lock=lock,
+            producer_wake_reason=producer_wake_reason,
+        )
+    assert not lock.locked()
+
+
+@pytest.mark.parametrize(
+    ("completion_due", "exact_held_completion"),
+    ((True, False), (False, True)),
+)
+def test_reserved_or_exact_completion_yields_for_unresolved_monitor_debt(
+    monkeypatch,
+    completion_due,
+    exact_held_completion,
+):
+    import src.events.reactor as reactor_module
+    import src.main as main
+    import src.state.db as db
+    from src.riskguard import riskguard
+    from src.riskguard.risk_level import RiskLevel
+
+    monkeypatch.setattr(main, "_settings_section", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(main, "_defer_for_held_position_monitor", lambda _job: False)
+    monkeypatch.setattr(riskguard, "get_current_level", lambda: RiskLevel.GREEN)
+    monkeypatch.setattr(
+        reactor_module,
+        "_durable_exact_held_sell_completion_pending",
+        lambda: exact_held_completion,
+    )
+    monkeypatch.setattr(
+        reactor_module,
+        "_durable_exact_held_sell_completion_requests",
+        lambda **_kwargs: (),
+    )
+    monkeypatch.setattr(
+        db,
+        "get_world_connection",
+        lambda: pytest.fail("monitor debt must yield before runtime DB setup"),
+    )
+    reservations: list[tuple[str, str]] = []
+
+    def reserve_completion(**kwargs):
+        reservations.append((kwargs["reason"], kwargs["position_id"]))
+        reactor_module._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.set()
+        return True
+
+    monkeypatch.setattr(
+        reactor_module,
+        "request_global_auction_completion",
+        reserve_completion,
+    )
+
+    reactor_module._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.clear()
+    if completion_due:
+        reactor_module._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.set()
+    lock = threading.Lock()
     try:
-        with pytest.raises(RuntimeSetupReached):
-            reactor_module.run_edli_event_reactor_cycle(
-                active_lock=threading.Lock(),
-                held_position_monitor_debt_pending=lambda: True,
-            )
+        assert reactor_module.run_edli_event_reactor_cycle(
+            active_lock=lock,
+            held_position_monitor_debt_pending=lambda: True,
+        ) is False
+        assert reservations == [("periodic_monitor_preemption", "")]
+        assert reactor_module._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.is_set()
+        assert not lock.locked()
     finally:
         reactor_module._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.clear()
+
+
+def test_generic_completion_cannot_reacquire_before_monitor_successor(
+    monkeypatch,
+):
+    """A level-triggered generic wake must not leapfrog durable monitor debt."""
+    import src.events.reactor as reactor_module
+    import src.main as main
+    import src.state.db as db
+
+    defer_calls: list[str] = []
+    monkeypatch.setattr(main, "_settings_section", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(
+        main,
+        "_defer_for_held_position_monitor",
+        lambda job: defer_calls.append(job) or True,
+    )
+    monkeypatch.setattr(
+        reactor_module,
+        "_durable_exact_held_sell_completion_pending",
+        lambda: False,
+    )
+    monkeypatch.setattr(
+        reactor_module,
+        "_rehydrate_exact_executable_held_sell_pending",
+        lambda **_kwargs: (False, ()),
+    )
+    monkeypatch.setattr(
+        db,
+        "get_world_connection",
+        lambda: pytest.fail("generic completion must yield before DB setup"),
+    )
+
+    lock = threading.Lock()
+    reactor_module._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.set()
+    try:
+        assert reactor_module.run_edli_event_reactor_cycle(active_lock=lock) is False
+        assert defer_calls == ["edli_event_reactor"]
+        assert not lock.locked()
+    finally:
+        reactor_module._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.clear()
+
+
+def test_exact_executable_completion_bypasses_monitor_debt_before_setup(
+    monkeypatch,
+):
+    import src.events.reactor as reactor_module
+    import src.main as main
+    import src.state.db as db
+    from src.riskguard import riskguard
+    from src.riskguard.risk_level import RiskLevel
+    from src.runtime.reactor_wake import make_held_sell_reauction_request
+
+    class SetupReached(RuntimeError):
+        pass
+
+    request = make_held_sell_reauction_request(
+        position_id="buenos-aires-exact-completion",
+        family=("Buenos Aires", "2026-08-23", "low"),
+        probability_content_identity="q-buenos-aires-exact-completion",
+        held_token_id="buenos-aires-exact-token",
+        held_best_bid=0.18,
+        bid_observed_at="2026-08-23T12:00:00+00:00",
+        probability_observed_at="2026-08-23T12:00:00+00:00",
+        completion_deadline_at="2026-08-23T12:00:30+00:00",
+        schema_version=4,
+        book_state="EXECUTABLE",
+    )
+    monkeypatch.setattr(main, "_settings_section", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(main, "_defer_for_held_position_monitor", lambda _job: False)
+    monkeypatch.setattr(riskguard, "get_current_level", lambda: RiskLevel.GREEN)
+    monkeypatch.setattr(
+        reactor_module,
+        "_durable_exact_held_sell_completion_pending",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        reactor_module,
+        "_durable_exact_held_sell_completion_requests",
+        lambda **_kwargs: (request,),
+    )
+    monkeypatch.setattr(
+        "src.runtime.reactor_wake.v4_held_sell_reauction_request_is_queued",
+        lambda _request: True,
+    )
+    monkeypatch.setattr(
+        reactor_module,
+        "_has_exact_executable_held_sell_completion",
+        lambda _requests: True,
+    )
+    monkeypatch.setattr(
+        reactor_module,
+        "_paused_entry_wake_should_park",
+        lambda **_kwargs: False,
+    )
+    monkeypatch.setattr(
+        db,
+        "get_world_connection",
+        lambda: (_ for _ in ()).throw(SetupReached()),
+    )
+
+    lock = threading.Lock()
+    with pytest.raises(SetupReached):
+        reactor_module.run_edli_event_reactor_cycle(
+            active_lock=lock,
+            held_position_monitor_debt_pending=lambda: True,
+        )
+    assert not lock.locked()
 
 
 @pytest.mark.parametrize("preemption", (False, True), ids=("deadline", "monitor"))
@@ -6079,11 +6510,11 @@ def test_main_reactor_injects_day0_and_monitor_preemption_signals(
         assert captured["held_position_monitor_debt_pending"]() is False
         main._held_position_monitor_handoff_pending.set()
         assert captured["held_position_monitor_pending"]() is False
-        main._periodic_held_position_monitor_handoff_pending.set()
+        main._periodic_held_position_monitor_successor_pending.set()
         assert captured["held_position_monitor_pending"]() is True
         main._periodic_held_position_monitor_fairness_debt.set()
         assert captured["held_position_monitor_debt_pending"]() is True
-        main._periodic_held_position_monitor_handoff_pending.clear()
+        main._periodic_held_position_monitor_successor_pending.clear()
         main._periodic_held_position_monitor_fairness_debt.clear()
         main._held_position_monitor_handoff_pending.clear()
         main._day0_urgent_wake_pending.set()
@@ -6093,7 +6524,7 @@ def test_main_reactor_injects_day0_and_monitor_preemption_signals(
         urgent_identity[0] = "wake-new"
         assert captured["urgent_day0_pending"]() is True
     finally:
-        main._periodic_held_position_monitor_handoff_pending.clear()
+        main._periodic_held_position_monitor_successor_pending.clear()
         main._periodic_held_position_monitor_fairness_debt.clear()
         main._held_position_monitor_handoff_pending.clear()
         main._held_position_monitor_canonical_debt.clear()
@@ -6261,7 +6692,7 @@ def test_day0_completed_ownership_marker_clears_on_listener_restart():
         main._day0_exit_monitor_attempts.clear()
 
 
-def test_monitor_preempts_once_then_next_auction_must_complete(monkeypatch):
+def test_monitor_debt_repreempts_reserved_cut_until_monitor_handoff_clears(monkeypatch):
     from types import SimpleNamespace
 
     from src.events import reactor
@@ -6274,7 +6705,13 @@ def test_monitor_preempts_once_then_next_auction_must_complete(monkeypatch):
         "publish_reactor_wake",
         lambda **_kwargs: None,
     )
+    monkeypatch.setattr(
+        reactor,
+        "request_global_auction_completion",
+        lambda **_kwargs: reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.set() or True,
+    )
     reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.clear()
+    reactor._EXACT_EXECUTABLE_HELD_SELL_PENDING.clear()
     try:
         due_at_start, first_probe = (
             reactor._global_auction_monitor_cancellation_probe(
@@ -6284,6 +6721,7 @@ def test_monitor_preempts_once_then_next_auction_must_complete(monkeypatch):
         assert due_at_start is False
         assert first_probe() is True
         assert first_probe() is True
+        reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.set()
 
         due_at_start, completion_probe = (
             reactor._global_auction_monitor_cancellation_probe(
@@ -6292,9 +6730,19 @@ def test_monitor_preempts_once_then_next_auction_must_complete(monkeypatch):
             )
         )
         assert due_at_start is True
-        assert completion_probe() is False
+        assert completion_probe() is True
+        pending[0] = False
+        assert completion_probe() is True
+        due_after_handoff, post_handoff_probe = (
+            reactor._global_auction_monitor_cancellation_probe(
+                lambda: pending[0],
+                monitor_debt_pending=lambda: pending[0],
+            )
+        )
+        assert due_after_handoff is True
+        assert post_handoff_probe() is False
         reactor._settle_global_auction_monitor_fairness(
-            completion_due_at_start=due_at_start,
+            completion_due_at_start=due_after_handoff,
             result=SimpleNamespace(
                 processed=1,
                 proof_accepted=1,
@@ -6307,6 +6755,42 @@ def test_monitor_preempts_once_then_next_auction_must_complete(monkeypatch):
         assert reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.is_set() is False
     finally:
         reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.clear()
+        reactor._EXACT_EXECUTABLE_HELD_SELL_PENDING.clear()
+
+
+def test_late_monitor_successor_preempts_generic_completion_but_not_exact():
+    """A claimed monitor successor wins at the current global safe checkpoint."""
+    from src.events import reactor
+
+    monitor_claimed = [False]
+    reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.clear()
+    reactor._EXACT_EXECUTABLE_HELD_SELL_PENDING.clear()
+    try:
+        _, generic_cancelled = reactor._global_auction_monitor_cancellation_probe(
+            lambda: monitor_claimed[0],
+            completion_due=True,
+        )
+        assert generic_cancelled() is False
+        monitor_claimed[0] = True
+        assert generic_cancelled() is True
+        assert reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.is_set()
+
+        _, exact_cancelled = reactor._global_auction_monitor_cancellation_probe(
+            lambda: True,
+            completion_due=True,
+            exact_held_completion=True,
+            exact_executable_held_completion=True,
+        )
+        assert exact_cancelled() is False
+
+        _, no_monitor_cancelled = reactor._global_auction_monitor_cancellation_probe(
+            None,
+            completion_due=True,
+        )
+        assert no_monitor_cancelled() is False
+    finally:
+        reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.clear()
+        reactor._EXACT_EXECUTABLE_HELD_SELL_PENDING.clear()
 
 
 def test_monitor_does_not_preempt_when_completion_wake_is_not_durable(
@@ -6328,7 +6812,7 @@ def test_monitor_does_not_preempt_when_completion_wake_is_not_durable(
     assert cancellation_probe() is False
 
 
-def test_monitor_fairness_debt_does_not_cancel_reserved_completion(
+def test_monitor_fairness_debt_cancels_but_preserves_reserved_completion(
     monkeypatch,
 ):
     from src.events import reactor
@@ -6348,11 +6832,446 @@ def test_monitor_fairness_debt_does_not_cancel_reserved_completion(
             )
         )
         assert due_at_start is True
-        assert cancellation_probe() is False
-        assert cancellation_probe() is False
+        assert cancellation_probe() is True
+        assert cancellation_probe() is True
         assert reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.is_set()
     finally:
         reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.clear()
+
+
+def test_exact_executable_held_sell_completion_keeps_its_global_turn(monkeypatch):
+    from src.events import reactor
+    from src.runtime.reactor_wake import make_held_sell_reauction_request
+
+    request = make_held_sell_reauction_request(
+        position_id="exact-completion-position",
+        family=("Cape Town", "2026-08-23", "high"),
+        probability_content_identity="q-exact-completion",
+        held_token_id="exact-completion-token",
+        held_best_bid=0.21,
+        bid_observed_at="2026-08-23T12:00:00+00:00",
+        probability_observed_at="2026-08-23T12:00:00+00:00",
+        completion_deadline_at="2026-08-23T12:00:30+00:00",
+        schema_version=4,
+        book_state="EXECUTABLE",
+    )
+
+    monkeypatch.setattr(
+        reactor,
+        "request_global_auction_completion",
+        lambda **_kwargs: pytest.fail("exact executable turn must not re-arm monitor debt"),
+    )
+    reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.clear()
+    try:
+        due_at_start, cancellation_probe = (
+            reactor._global_auction_monitor_cancellation_probe(
+                lambda: True,
+                monitor_debt_pending=lambda: True,
+                completion_due=True,
+                exact_held_completion=True,
+                exact_executable_held_completion=True,
+            )
+        )
+        assert due_at_start is True
+        assert cancellation_probe() is False
+        assert cancellation_probe() is False
+    finally:
+        reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.clear()
+
+
+def test_active_lock_reads_exact_debt_before_skipping(monkeypatch):
+    import src.events.reactor as reactor_module
+    import src.main as main
+    from src.runtime import reactor_wake
+
+    calls = []
+    request = reactor_wake.make_held_sell_reauction_request(
+        position_id="active-lock-priority-position",
+        family=("Cape Town", "2026-08-23", "high"),
+        probability_content_identity="q-active-lock-priority",
+        held_token_id="active-lock-priority-token",
+        held_best_bid=0.21,
+        bid_observed_at="2026-08-23T12:00:00+00:00",
+        probability_observed_at="2026-08-23T12:00:00+00:00",
+        completion_deadline_at="2026-08-23T12:00:30+00:00",
+        schema_version=4,
+        book_state="EXECUTABLE",
+    )
+
+    class HeldLock:
+        def locked(self):
+            return True
+
+    monkeypatch.setattr(main, "_settings_section", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(
+        main,
+        "_defer_for_held_position_monitor",
+        lambda _job: pytest.fail("exact signal must bypass monitor defer"),
+    )
+    monkeypatch.setattr(
+        reactor_module,
+        "_reactor_wake_cancellation_probe",
+        lambda **_kwargs: (lambda: False),
+    )
+    monkeypatch.setattr(
+        reactor_module,
+        "_durable_exact_held_sell_completion_pending",
+        lambda: calls.append("pending") or True,
+    )
+    monkeypatch.setattr(
+        reactor_module,
+        "_durable_exact_held_sell_completion_requests",
+        lambda **_kwargs: calls.append("requests") or (request,),
+    )
+    monkeypatch.setattr(
+        reactor_module,
+        "_has_exact_executable_held_sell_completion",
+        lambda _requests: calls.append("eligible") or True,
+    )
+    monkeypatch.setattr(
+        reactor_wake,
+        "v4_held_sell_reauction_request_is_queued",
+        lambda candidate: candidate == request,
+    )
+
+    _EXACT_EXECUTABLE_HELD_SELL_PENDING.clear()
+    try:
+        assert reactor_module.run_edli_event_reactor_cycle(active_lock=HeldLock()) is False
+        assert calls == ["pending", "requests", "eligible"]
+        assert _EXACT_EXECUTABLE_HELD_SELL_PENDING.is_set()
+    finally:
+        _EXACT_EXECUTABLE_HELD_SELL_PENDING.clear()
+
+
+def test_ordinary_cancellation_reads_only_atomic_exact_signal(monkeypatch):
+    import src.events.reactor as reactor
+    from src.runtime import reactor_wake
+
+    monkeypatch.setattr(
+        reactor,
+        "_durable_exact_held_sell_completion_pending",
+        lambda: pytest.fail("callback must not read durable queue"),
+    )
+    monkeypatch.setattr(
+        reactor_wake,
+        "_read_reactor_wake_path",
+        lambda *_args, **_kwargs: pytest.fail("callback must not read wake files"),
+    )
+    cancelled = _process_pending_cancelled(
+        committed_day0_wake=False,
+        producer_fast_path=False,
+        urgent_wake_pending=lambda: False,
+        urgent_day0_pending=None,
+    )
+    _EXACT_EXECUTABLE_HELD_SELL_PENDING.set()
+    try:
+        assert cancelled is not None
+        assert cancelled() is True
+    finally:
+        _EXACT_EXECUTABLE_HELD_SELL_PENDING.clear()
+
+
+def test_generic_completion_publish_failure_cannot_leave_ownerless_token(
+    monkeypatch,
+):
+    from src.events import reactor
+    from src.runtime import reactor_wake
+
+    reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.clear()
+    monkeypatch.setattr(
+        reactor_wake,
+        "reactor_wakes_since",
+        lambda *_args, **_kwargs: (),
+    )
+    monkeypatch.setattr(
+        reactor_wake,
+        "publish_reactor_wake",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            OSError("wake directory unavailable")
+        ),
+    )
+    try:
+        assert reactor.request_global_auction_completion(
+            reason="periodic_monitor_preemption",
+            position_id="",
+        ) is False
+        assert not reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.is_set()
+    finally:
+        reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.clear()
+
+
+def test_global_selection_cancels_when_exact_publisher_arrives_after_probe_creation(
+    tmp_path,
+):
+    from src.events import reactor
+
+    now = datetime.now(timezone.utc)
+    reactor._EXACT_EXECUTABLE_HELD_SELL_PENDING.clear()
+    try:
+        _, ordinary_cancelled = reactor._global_auction_monitor_cancellation_probe(
+            lambda: False,
+            exact_executable_held_completion=False,
+        )
+        assert reactor.request_global_auction_completion(
+            reason="test_probe_arrival",
+            position_id="probe-arrival-position",
+            family=("Cape Town", "2026-08-23", "high"),
+            probability_content_identity="q-probe-arrival",
+            held_token_id="probe-arrival-token",
+            held_best_bid=0.21,
+            bid_observed_at=(now - timedelta(seconds=1)).isoformat(),
+            probability_observed_at=(now - timedelta(seconds=1)).isoformat(),
+            completion_deadline_at=(now + timedelta(seconds=30)).isoformat(),
+            book_state="EXECUTABLE",
+            schema_version=4,
+            wake_path=tmp_path / "probe-arrival-wake.json",
+        )
+        assert ordinary_cancelled() is True
+
+        _, exact_cancelled = reactor._global_auction_monitor_cancellation_probe(
+            lambda: True,
+            monitor_debt_pending=lambda: True,
+            exact_executable_held_completion=True,
+        )
+        assert exact_cancelled() is False
+    finally:
+        reactor._EXACT_EXECUTABLE_HELD_SELL_PENDING.clear()
+
+
+def test_rehydrate_keeps_concurrent_publish_signal_when_old_queue_is_empty(monkeypatch):
+    from src.events import reactor
+    from src.runtime import reactor_wake
+
+    now = datetime.now(timezone.utc)
+    request = reactor_wake.make_held_sell_reauction_request(
+        position_id="concurrent-publish-position",
+        family=("Cape Town", "2026-08-23", "high"),
+        probability_content_identity="q-concurrent",
+        held_token_id="concurrent-publish-token",
+        held_best_bid=0.21,
+        bid_observed_at=(now - timedelta(seconds=1)).isoformat(),
+        probability_observed_at=(now - timedelta(seconds=1)).isoformat(),
+        completion_deadline_at=(now + timedelta(seconds=30)).isoformat(),
+        schema_version=4,
+        book_state="EXECUTABLE",
+    )
+    reactor._EXACT_EXECUTABLE_HELD_SELL_PENDING.clear()
+    monkeypatch.setattr(
+        reactor,
+        "_durable_exact_held_sell_completion_requests",
+        lambda **_kwargs: reactor._mark_exact_executable_held_sell_pending(request) or (),
+    )
+    try:
+        pending, requests = reactor._rehydrate_exact_executable_held_sell_pending(
+            strict=True
+        )
+        assert requests == ()
+        assert pending is True
+        assert reactor._EXACT_EXECUTABLE_HELD_SELL_PENDING.is_set()
+    finally:
+        reactor._EXACT_EXECUTABLE_HELD_SELL_PENDING.clear()
+
+
+@pytest.mark.parametrize("lineage_state", ("missing", "mismatched_latest"))
+def test_rehydrate_does_not_signal_unqueued_v4_lineage(monkeypatch, lineage_state):
+    from src.events import reactor
+    from src.runtime import reactor_wake
+
+    now = datetime.now(timezone.utc)
+    request = reactor_wake.make_held_sell_reauction_request(
+        position_id=f"{lineage_state}-lineage-position",
+        family=("Cape Town", "2026-08-23", "high"),
+        probability_content_identity=f"q-{lineage_state}-lineage",
+        held_token_id=f"{lineage_state}-lineage-token",
+        held_best_bid=0.21,
+        bid_observed_at=(now - timedelta(seconds=1)).isoformat(),
+        probability_observed_at=(now - timedelta(seconds=1)).isoformat(),
+        completion_deadline_at=(now + timedelta(seconds=30)).isoformat(),
+        schema_version=4,
+        book_state="EXECUTABLE",
+    )
+    monkeypatch.setattr(
+        reactor,
+        "_durable_exact_held_sell_completion_requests",
+        lambda **_kwargs: (request,),
+    )
+    monkeypatch.setattr(
+        reactor_wake,
+        "v4_held_sell_reauction_request_is_queued",
+        lambda _request: False,
+    )
+    reactor._EXACT_EXECUTABLE_HELD_SELL_PENDING.clear()
+    try:
+        pending, durable_requests = reactor._rehydrate_exact_executable_held_sell_pending(
+            strict=True
+        )
+        assert durable_requests == (request,)
+        assert pending is False
+        assert not reactor._EXACT_EXECUTABLE_HELD_SELL_PENDING.is_set()
+    finally:
+        reactor._EXACT_EXECUTABLE_HELD_SELL_PENDING.clear()
+
+
+def test_strict_rehydrate_queue_read_failure_keeps_signal(monkeypatch):
+    from src.events import reactor
+    from src.runtime import reactor_wake
+
+    now = datetime.now(timezone.utc)
+    request = reactor_wake.make_held_sell_reauction_request(
+        position_id="queue-read-failure-position",
+        family=("Cape Town", "2026-08-23", "high"),
+        probability_content_identity="q-queue-read-failure",
+        held_token_id="queue-read-failure-token",
+        held_best_bid=0.21,
+        bid_observed_at=(now - timedelta(seconds=1)).isoformat(),
+        probability_observed_at=(now - timedelta(seconds=1)).isoformat(),
+        completion_deadline_at=(now + timedelta(seconds=30)).isoformat(),
+        schema_version=4,
+        book_state="EXECUTABLE",
+    )
+    monkeypatch.setattr(
+        reactor,
+        "_durable_exact_held_sell_completion_requests",
+        lambda **_kwargs: (request,),
+    )
+    monkeypatch.setattr(
+        reactor_wake,
+        "v4_held_sell_reauction_request_is_queued",
+        lambda _request: (_ for _ in ()).throw(OSError("lineage read failed")),
+    )
+    reactor._EXACT_EXECUTABLE_HELD_SELL_PENDING.clear()
+    try:
+        with pytest.raises(reactor._DurableExactHeldCompletionUnknown):
+            reactor._rehydrate_exact_executable_held_sell_pending(strict=True)
+        assert reactor._EXACT_EXECUTABLE_HELD_SELL_PENDING.is_set()
+        ordinary_cancelled = _process_pending_cancelled(
+            committed_day0_wake=False,
+            producer_fast_path=False,
+            urgent_wake_pending=lambda: False,
+            urgent_day0_pending=None,
+        )
+        assert ordinary_cancelled is not None
+        assert ordinary_cancelled() is True
+    finally:
+        reactor._EXACT_EXECUTABLE_HELD_SELL_PENDING.clear()
+
+
+def test_strict_rehydrate_failure_keeps_signal_and_blocks_ordinary_admission(monkeypatch):
+    import src.events.reactor as reactor_module
+    import src.main as main
+    from src.runtime import reactor_wake
+
+    class UnexpectedLock:
+        def locked(self):
+            pytest.fail("ordinary cycle must not reach active-lock admission")
+
+    monkeypatch.setattr(main, "_settings_section", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(
+        reactor_module,
+        "_reactor_wake_cancellation_probe",
+        lambda **_kwargs: (lambda: False),
+    )
+    monkeypatch.setattr(
+        reactor_module,
+        "_durable_exact_held_sell_completion_pending",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        reactor_wake,
+        "reactor_wakes_for_reason",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("wake read failed")),
+    )
+    reactor_module._EXACT_EXECUTABLE_HELD_SELL_PENDING.clear()
+    try:
+        assert reactor_module.run_edli_event_reactor_cycle(active_lock=UnexpectedLock()) is False
+        assert reactor_module._EXACT_EXECUTABLE_HELD_SELL_PENDING.is_set()
+    finally:
+        reactor_module._EXACT_EXECUTABLE_HELD_SELL_PENDING.clear()
+
+
+def test_exact_publish_preempts_ordinary_and_preserves_exact_turn(tmp_path):
+    import src.events.reactor as reactor
+    from src.runtime import reactor_wake
+
+    now = datetime.now(timezone.utc)
+    common = dict(
+        position_id="atomic-signal-position",
+        family=("Cape Town", "2026-08-23", "high"),
+        probability_content_identity="q-current",
+        held_token_id="atomic-signal-token",
+        bid_observed_at=(now - timedelta(seconds=1)).isoformat(),
+        probability_observed_at=(now - timedelta(seconds=1)).isoformat(),
+        completion_deadline_at=(now + timedelta(seconds=30)).isoformat(),
+        wake_path=tmp_path / "atomic-signal-wake.json",
+    )
+
+    _EXACT_EXECUTABLE_HELD_SELL_PENDING.clear()
+    try:
+        accepted, request = reactor.request_global_auction_completion(
+            reason="test_atomic_signal",
+            held_best_bid=0.21,
+            book_state="EXECUTABLE",
+            schema_version=4,
+            return_request=True,
+            **common,
+        )
+        assert accepted is True
+        assert request is not None
+        assert reactor_wake.v4_held_sell_reauction_request_is_queued(
+            request,
+            path=common["wake_path"],
+        )
+        assert _EXACT_EXECUTABLE_HELD_SELL_PENDING.is_set()
+        ordinary_cancelled = _process_pending_cancelled(
+            committed_day0_wake=False,
+            producer_fast_path=False,
+            urgent_wake_pending=lambda: False,
+            urgent_day0_pending=None,
+        )
+        lock = threading.Lock()
+        assert lock.acquire()
+        try:
+            assert ordinary_cancelled is not None
+            assert ordinary_cancelled() is True
+        finally:
+            lock.release()
+        assert lock.acquire(blocking=False)
+        lock.release()
+        exact_cancelled = _process_pending_cancelled(
+            committed_day0_wake=False,
+            producer_fast_path=False,
+            urgent_wake_pending=lambda: False,
+            urgent_day0_pending=None,
+            held_position_monitor_debt_pending=lambda: True,
+            exact_held_completion=True,
+            exact_executable_held_completion=True,
+        )
+        assert exact_cancelled is not None
+        assert exact_cancelled() is False
+    finally:
+        _EXACT_EXECUTABLE_HELD_SELL_PENDING.clear()
+
+    for index, invalid in enumerate((
+        {"schema_version": 3},
+        {"held_best_bid": None},
+        {"held_best_bid": 0.96},
+        {"probability_observed_at": (now - timedelta(seconds=31)).isoformat()},
+    )):
+        _EXACT_EXECUTABLE_HELD_SELL_PENDING.clear()
+        reactor.request_global_auction_completion(
+            **{
+                **common,
+                "reason": "test_atomic_signal_invalid",
+                "held_best_bid": 0.21,
+                "book_state": "EXECUTABLE",
+                "schema_version": 4,
+                "position_id": f"atomic-signal-invalid-{index}",
+                "held_token_id": f"atomic-signal-invalid-token-{index}",
+                "wake_path": tmp_path / f"atomic-signal-invalid-{index}.json",
+                **invalid,
+            },
+        )
+        assert not _EXACT_EXECUTABLE_HELD_SELL_PENDING.is_set()
 
 
 def test_monitor_fairness_debt_reserves_completion_before_cancelling(
@@ -8667,6 +9586,22 @@ def test_day0_cancellation_does_not_discharge_monitor_fairness_debt():
         reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.clear()
 
 
+def test_generic_no_trade_completion_discharges_monitor_fairness_debt():
+    from types import SimpleNamespace
+
+    from src.events import reactor
+
+    reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.set()
+    try:
+        assert reactor._settle_global_auction_monitor_fairness(
+            completion_due_at_start=True,
+            result=SimpleNamespace(global_auction_completed_non_cancelled=1),
+        )
+        assert not reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.is_set()
+    finally:
+        reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.clear()
+
+
 def test_new_fact_supersession_does_not_discharge_monitor_fairness_debt():
     from types import SimpleNamespace
 
@@ -8729,6 +9664,7 @@ def test_exact_v4_no_book_completion_discharges_monitor_fairness_debt():
             completion_due_at_start=True,
             result=SimpleNamespace(global_auction_completed_non_cancelled=0),
             terminal_no_book_completion=True,
+            exact_held_completion=True,
         )
         assert not reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.is_set()
     finally:
@@ -8758,6 +9694,67 @@ def test_pre_submit_rejection_cannot_discharge_monitor_fairness_debt():
         reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.clear()
 
 
+def test_generic_no_trade_cannot_clear_unfinished_exact_v4_completion():
+    from types import SimpleNamespace
+
+    from src.events import reactor
+
+    reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.set()
+    try:
+        assert not reactor._settle_global_auction_monitor_fairness(
+            completion_due_at_start=True,
+            result=SimpleNamespace(global_auction_completed_non_cancelled=1),
+            exact_held_completion=True,
+            exact_completion_terminal=False,
+        )
+        assert reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.is_set()
+    finally:
+        reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.clear()
+
+
+def test_exact_v4_receipt_persist_failure_cannot_clear_completion_token(
+    monkeypatch,
+):
+    from types import SimpleNamespace
+
+    from src.events import reactor
+
+    request = object()
+    receipt = object()
+    persisted: list[tuple[object, ...]] = []
+    monkeypatch.setattr(
+        reactor,
+        "_held_sell_reauction_receipts_from_global_cut",
+        lambda **_kwargs: (receipt,),
+    )
+    receipts, matching_receipts_persisted, requests_completed = (
+        reactor._persist_exact_held_sell_completion_receipts(
+            requests=(request,),
+            result=SimpleNamespace(),
+            persist_receipts=lambda values: persisted.append(values) or False,
+            requests_completed=lambda values: values == (request,),
+        )
+    )
+    assert receipts == (receipt,)
+    assert persisted == [(receipt,)]
+    assert requests_completed is True
+    assert matching_receipts_persisted is False
+
+    reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.set()
+    try:
+        assert not reactor._settle_global_auction_monitor_fairness(
+            completion_due_at_start=True,
+            result=SimpleNamespace(global_auction_completed_non_cancelled=1),
+            exact_held_completion=True,
+            exact_completion_terminal=(
+                matching_receipts_persisted and requests_completed
+            ),
+        )
+        assert reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.is_set()
+    finally:
+        reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.clear()
+
+
 def test_monitor_handoff_defers_reactor_admission_only():
     import src.main as main
 
@@ -8774,6 +9771,114 @@ def test_monitor_handoff_defers_reactor_admission_only():
             main._held_position_monitor_handoff_pending.set()
         if was_bootstrap_complete:
             main._held_position_monitor_bootstrap_complete.set()
+
+
+def test_periodic_monitor_successor_blocks_reacquire_until_core_turn(monkeypatch):
+    import src.main as main
+    from src.execution import exit_lifecycle
+    from src.riskguard import riskguard
+    from src.riskguard.risk_level import RiskLevel
+
+    observed = []
+
+    class ReactorGate:
+        def acquire(self, *, timeout):
+            observed.append(
+                (
+                    "handoff",
+                    timeout,
+                    main._periodic_held_position_monitor_successor_pending.is_set(),
+                    main._defer_for_held_position_monitor("edli_event_reactor"),
+                )
+            )
+            return True
+
+        def release(self):
+            observed.append(("release",))
+
+    def run_core(**_kwargs):
+        observed.append(
+            ("core", main._periodic_held_position_monitor_successor_pending.is_set())
+        )
+        return True
+
+    monkeypatch.setattr(main, "_edli_reactor_active_lock", ReactorGate())
+    monkeypatch.setattr(main, "_current_periodic_monitor_obligation_count", lambda: 1)
+    monkeypatch.setattr(main, "_day0_exit_monitor_priority_pending", lambda: False)
+    monkeypatch.setattr(riskguard, "get_current_level", lambda: RiskLevel.GREEN)
+    monkeypatch.setattr(exit_lifecycle, "run_exit_monitor_cycle", run_core)
+    main._held_position_monitor_handoff_pending.clear()
+    main._periodic_held_position_monitor_handoff_pending.clear()
+    main._periodic_held_position_monitor_successor_pending.clear()
+    try:
+        assert main._exit_monitor_cycle() is True
+        assert observed[0][0] == "handoff"
+        assert observed[0][2] is True
+        assert observed[0][3] is True
+        assert main._defer_for_held_position_monitor("edli_event_reactor") is False
+        assert ("core", False) in observed
+        assert not main._periodic_held_position_monitor_successor_pending.is_set()
+    finally:
+        main._held_position_monitor_handoff_pending.clear()
+        main._periodic_held_position_monitor_handoff_pending.clear()
+        main._periodic_held_position_monitor_successor_pending.clear()
+        if main._held_position_monitor_claim.locked():
+            main._held_position_monitor_claim.release()
+
+
+def test_monitor_handoff_timeout_keeps_successor_reservation(monkeypatch):
+    import src.main as main
+    from src.riskguard import riskguard
+    from src.riskguard.risk_level import RiskLevel
+
+    class BusyReactor:
+        def acquire(self, *, timeout):
+            assert timeout > 0
+            return False
+
+    monkeypatch.setattr(main, "_edli_reactor_active_lock", BusyReactor())
+    monkeypatch.setattr(main, "_current_periodic_monitor_obligation_count", lambda: 1)
+    monkeypatch.setattr(main, "_day0_exit_monitor_priority_pending", lambda: False)
+    monkeypatch.setattr(riskguard, "get_current_level", lambda: RiskLevel.GREEN)
+    main._periodic_held_position_monitor_successor_pending.clear()
+    main._periodic_held_position_monitor_fairness_debt.clear()
+    try:
+        assert main._exit_monitor_cycle() is False
+        assert main._periodic_held_position_monitor_successor_pending.is_set()
+        assert main._periodic_held_position_monitor_fairness_debt.is_set()
+        assert main._defer_for_held_position_monitor("edli_event_reactor") is True
+    finally:
+        main._periodic_held_position_monitor_successor_pending.clear()
+        main._periodic_held_position_monitor_fairness_debt.clear()
+        main._held_position_monitor_handoff_pending.clear()
+        main._periodic_held_position_monitor_handoff_pending.clear()
+        if main._held_position_monitor_claim.locked():
+            main._held_position_monitor_claim.release()
+
+
+def test_monitor_incomplete_keeps_canonical_debt_without_false_coverage(monkeypatch):
+    import src.main as main
+    from src.execution import exit_lifecycle
+    from src.riskguard import riskguard
+    from src.riskguard.risk_level import RiskLevel
+
+    monkeypatch.setattr(main, "_current_periodic_monitor_obligation_count", lambda: 1)
+    monkeypatch.setattr(main, "_day0_exit_monitor_priority_pending", lambda: False)
+    monkeypatch.setattr(riskguard, "get_current_level", lambda: RiskLevel.GREEN)
+    monkeypatch.setattr(exit_lifecycle, "run_exit_monitor_cycle", lambda **_kwargs: False)
+    main._held_position_monitor_canonical_debt.set()
+    main._periodic_held_position_monitor_successor_pending.clear()
+    try:
+        assert main._exit_monitor_cycle() is None
+        assert main._held_position_monitor_canonical_debt.is_set()
+        assert not main._periodic_held_position_monitor_successor_pending.is_set()
+    finally:
+        main._held_position_monitor_canonical_debt.clear()
+        main._periodic_held_position_monitor_successor_pending.clear()
+        main._held_position_monitor_handoff_pending.clear()
+        main._periodic_held_position_monitor_handoff_pending.clear()
+        if main._held_position_monitor_claim.locked():
+            main._held_position_monitor_claim.release()
 
 
 @pytest.mark.parametrize(
@@ -11017,6 +12122,31 @@ def test_stale_global_target_with_venue_attempt_cannot_reclaim_or_refence(
         ).fetchone()
     ) == (first_generation, first_attempt, GLOBAL_WINNER_TARGETED_CLAIM)
 
+    # This immutable carrier is recovery-owned and must terminalize instead of
+    # reacquiring its fence.  A fresh causal carrier is the reset and can own the
+    # next command fence without replaying the old venue-attempt identity.
+    store.mark_processed(target.event_id, processed_at=clock[0])
+    fresh_source = _forecast_event(
+        "attempted-reclaim-fresh-source",
+        target_date="2026-05-25",
+    )
+    fresh = _next_claim_carrier(
+        fresh_source,
+        targeted_at=datetime.fromisoformat(clock[0]),
+        economic_identity="attempted-reclaim-fresh-economics",
+        payload=json.loads(fresh_source.payload_json),
+    )
+    assert fresh.event_id != target.event_id
+    assert store.prioritize_global_winner(fresh)
+    assert store.claim(fresh.event_id, claimed_at=clock[0])
+    fresh_attempt = store.attempt_count(fresh.event_id)
+    _fence_global_target_claim_before_command(
+        conn,
+        fresh,
+        claimed_at=clock[0],
+        attempt_count=fresh_attempt,
+    )
+
 
 def test_fenced_global_target_without_command_requeues_for_retry_and_boot():
     from src.engine.event_reactor_adapter import (
@@ -11047,6 +12177,7 @@ def test_fenced_global_target_without_command_requeues_for_retry_and_boot():
         target.event_id,
         claimed_at=claimed_at,
         attempt_count=attempt_count,
+        not_before="2026-05-24T18:01:00+00:00",
         last_error="GLOBAL_SELL_EXECUTION_FAILED",
     )
     assert tuple(
@@ -11055,7 +12186,11 @@ def test_fenced_global_target_without_command_requeues_for_retry_and_boot():
             "FROM opportunity_event_processing WHERE consumer_name=? AND event_id=?",
             (store.consumer_name, target.event_id),
         ).fetchone()
-    ) == ("pending", None, GLOBAL_WINNER_TARGETED_CLAIM)
+    ) == (
+        "pending",
+        "2026-05-24T18:01:00+00:00",
+        GLOBAL_WINNER_TARGETED_CLAIM,
+    )
 
     assert store.claim(
         target.event_id,

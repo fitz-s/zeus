@@ -283,3 +283,215 @@ def test_breach_is_real_when_kelly_mult_above_ceiling():
         f"load-bearing): Σ={total:.4f} should exceed ceiling={ceiling:.4f} when "
         f"kelly_multiplier(0.5) > max_correlated_pct(0.25)"
     )
+
+
+# ── Item 1b: tracked, content-addressed risk-policy artifact ────────────────
+# Authority basis: docs/operations/current/plans/reversal_plan_tier0_2026-08-24.md
+#   item 1b. The Aug 1-3 defect (kelly_multiplier=0.25 in UNTRACKED
+#   config/settings.json) was fixed by pinning ONE constant
+#   (GOVERNED_KELLY_MULTIPLIER, guards above). This section covers the
+#   generalization: EVERY risk-increasing sizing.* lever the live entry path
+#   consumes (kelly_multiplier, max_correlated_pct, max_portfolio_heat_pct,
+#   max_single_position_pct) must not exceed its ceiling in the tracked
+#   config/risk_policy.yaml, verified at every boot.
+
+import hashlib
+
+REAL_RISK_POLICY_PATH = "config/risk_policy.yaml"
+
+# Mirrors config/settings.example.json::sizing exactly — the governed
+# operating point, which is also every ceiling in config/risk_policy.yaml.
+_AT_CEILING_SIZING = {
+    "kelly_multiplier": 0.125,
+    "max_correlated_pct": 0.25,
+    "max_portfolio_heat_pct": 0.5,
+    "max_single_position_pct": 0.1,
+}
+
+
+def _sizing_cfg(**overrides):
+    sizing = dict(_AT_CEILING_SIZING)
+    sizing.update(overrides)
+    return {"sizing": sizing}
+
+
+def _write_policy(tmp_path, **overrides):
+    policy = {
+        "policy_version": "1",
+        "kelly_multiplier_ceiling": 0.125,
+        "max_correlated_pct_ceiling": 0.25,
+        "max_portfolio_heat_pct_ceiling": 0.5,
+        "max_single_position_pct_ceiling": 0.1,
+    }
+    policy.update(overrides)
+    import yaml
+
+    path = tmp_path / "risk_policy.yaml"
+    path.write_text(yaml.safe_dump(policy))
+    return path
+
+
+def test_risk_policy_passes_when_all_values_at_ceiling(tmp_path):
+    from src.main import assert_risk_policy_artifact
+
+    policy_path = _write_policy(tmp_path)
+    assert_risk_policy_artifact(_sizing_cfg(), path=policy_path)
+
+
+def test_risk_policy_breaches_when_kelly_multiplier_above_ceiling(tmp_path):
+    """settings.json kelly_multiplier above the artifact ceiling -> fail closed."""
+    from src.main import assert_risk_policy_artifact
+
+    policy_path = _write_policy(tmp_path)
+    with pytest.raises(RuntimeError, match="RISK_POLICY_BREACH"):
+        assert_risk_policy_artifact(
+            _sizing_cfg(kelly_multiplier=0.25), path=policy_path
+        )
+
+
+@pytest.mark.parametrize(
+    "live_key,ceiling_key",
+    [
+        ("kelly_multiplier", "kelly_multiplier_ceiling"),
+        ("max_correlated_pct", "max_correlated_pct_ceiling"),
+        ("max_portfolio_heat_pct", "max_portfolio_heat_pct_ceiling"),
+        ("max_single_position_pct", "max_single_position_pct_ceiling"),
+    ],
+)
+def test_risk_policy_breaches_per_lever(tmp_path, live_key, ceiling_key):
+    """Every checked lever independently breaches when raised above its
+    own ceiling — not just kelly_multiplier."""
+    from src.main import assert_risk_policy_artifact
+
+    policy_path = _write_policy(tmp_path)
+    ceiling = _AT_CEILING_SIZING[live_key]
+    with pytest.raises(RuntimeError, match=f"RISK_POLICY_BREACH.*{live_key}"):
+        assert_risk_policy_artifact(
+            _sizing_cfg(**{live_key: ceiling * 2}), path=policy_path
+        )
+
+
+def test_risk_policy_artifact_missing_fails_closed(tmp_path):
+    from src.main import assert_risk_policy_artifact
+
+    missing_path = tmp_path / "does_not_exist.yaml"
+    with pytest.raises(RuntimeError, match="RISK_POLICY_ARTIFACT_MISSING"):
+        assert_risk_policy_artifact(_sizing_cfg(), path=missing_path)
+
+
+def test_risk_policy_artifact_missing_ceiling_fails_closed(tmp_path):
+    """A ceiling key absent from the artifact is a malformed artifact, not a
+    silent pass-through."""
+    from src.main import assert_risk_policy_artifact
+
+    policy_path = tmp_path / "risk_policy.yaml"
+    policy_path.write_text("policy_version: '1'\nkelly_multiplier_ceiling: 0.125\n")
+    with pytest.raises(RuntimeError, match="RISK_POLICY_ARTIFACT_MALFORMED"):
+        assert_risk_policy_artifact(_sizing_cfg(), path=policy_path)
+
+
+def test_risk_policy_artifact_missing_policy_version_fails_closed(tmp_path):
+    from src.main import assert_risk_policy_artifact
+
+    policy = {
+        "kelly_multiplier_ceiling": 0.125,
+        "max_correlated_pct_ceiling": 0.25,
+        "max_portfolio_heat_pct_ceiling": 0.5,
+        "max_single_position_pct_ceiling": 0.1,
+    }
+    import yaml
+
+    policy_path = tmp_path / "risk_policy.yaml"
+    policy_path.write_text(yaml.safe_dump(policy))
+    with pytest.raises(RuntimeError, match="RISK_POLICY_ARTIFACT_MALFORMED"):
+        assert_risk_policy_artifact(_sizing_cfg(), path=policy_path)
+
+
+def test_risk_policy_fires_on_nan_live_value(tmp_path):
+    from src.main import assert_risk_policy_artifact
+
+    policy_path = _write_policy(tmp_path)
+    with pytest.raises(RuntimeError, match="RISK_POLICY_BREACH"):
+        assert_risk_policy_artifact(
+            _sizing_cfg(kelly_multiplier=float("nan")), path=policy_path
+        )
+
+
+def test_risk_policy_artifact_hash_and_version_logged(tmp_path, caplog):
+    """policy_version + sha256 must be logged at every boot (audit trail)."""
+    import logging
+
+    from src.main import assert_risk_policy_artifact
+
+    policy_path = _write_policy(tmp_path)
+    expected_sha256 = hashlib.sha256(policy_path.read_bytes()).hexdigest()
+
+    with caplog.at_level(logging.INFO, logger="zeus"):
+        assert_risk_policy_artifact(_sizing_cfg(), path=policy_path)
+
+    all_messages = [r.getMessage() for r in caplog.records]
+    artifact_records = [m for m in all_messages if "risk_policy_artifact:" in m]
+    assert artifact_records, f"expected a risk_policy_artifact log record; got: {all_messages}"
+    logged = artifact_records[0]
+    assert "policy_version=1" in logged
+    assert f"sha256={expected_sha256}" in logged
+
+    logged_keys = {m for m in all_messages if "risk_policy_effective_value:" in m}
+    for live_key, _ in [
+        ("kelly_multiplier", None),
+        ("max_correlated_pct", None),
+        ("max_portfolio_heat_pct", None),
+        ("max_single_position_pct", None),
+    ]:
+        assert any(f"sizing.{live_key}=" in msg for msg in logged_keys), (
+            f"expected an effective-value log line for sizing.{live_key}; got: {logged_keys}"
+        )
+
+
+def test_risk_policy_lowering_override_does_not_trip_guard(tmp_path):
+    """DIRECTION LAW: a runtime/control-plane lever that only LOWERS effective
+    risk must never trip this guard. The guard only reads cfg["sizing"], so a
+    control-plane override living under an unrelated top-level key is
+    structurally invisible to it — this proves that by construction."""
+    from src.main import assert_risk_policy_artifact
+
+    policy_path = _write_policy(tmp_path)
+    cfg = _sizing_cfg(
+        kelly_multiplier=0.05,
+        max_correlated_pct=0.1,
+        max_portfolio_heat_pct=0.2,
+        max_single_position_pct=0.02,
+    )
+    # Simulate a control-plane tightening override coexisting in the same
+    # raw config dict — must not affect the sizing-only guard.
+    cfg["control_plane"] = {"edge_threshold_multiplier": 3.0, "entries_paused": True}
+    assert_risk_policy_artifact(cfg, path=policy_path)
+
+
+def test_risk_policy_artifact_registered_in_run_boot_guards_passes():
+    """End-to-end against the REAL committed config/risk_policy.yaml."""
+    from src.main import _run_boot_guards
+
+    results = _run_boot_guards(_sizing_cfg())
+    names = {r[0]: r for r in results}
+    assert "risk_policy_artifact" in names, (
+        f"guard not registered in _run_boot_guards; got: {sorted(names)}"
+    )
+    assert names["risk_policy_artifact"][1] is True, (
+        f"governed sizing config must pass against the real artifact; got: "
+        f"{names['risk_policy_artifact']}"
+    )
+
+
+def test_risk_policy_artifact_registered_in_run_boot_guards_fails():
+    """End-to-end against the REAL committed config/risk_policy.yaml: a
+    breaching live value must fail the wired guard, not just the bare
+    function."""
+    from src.main import _run_boot_guards
+
+    results = _run_boot_guards(_sizing_cfg(max_single_position_pct=0.5))
+    names = {r[0]: r for r in results}
+    assert names["risk_policy_artifact"][1] is False, (
+        f"breaching config must fail the guard; got: {names['risk_policy_artifact']}"
+    )
+    assert "RISK_POLICY_BREACH" in names["risk_policy_artifact"][2]

@@ -3,7 +3,7 @@
 **Status:** Live replacement probability law. Runtime rows use `forecast_posteriors.runtime_layer='live'`; no second row-authority label or alternate runtime layer exists.
 **Supersedes:** `BAYES_PRECISION_FUSION_SPEC.md` (deleted).  
 **Created:** 2026-06-09  
-**Last audited:** 2026-08-19 (Day0 remaining-path point q separates conditional path error from the immutable full-day source-clock width; the carrier and confidence bound remain mandatory)
+**Last audited:** 2026-08-24 (Day0 remaining paths are possession-bound to coherent provider runs; the provider-run-bound operator starts v10 capital attribution and does not pool older v9 fills)
 **Authority basis:** Commits 140d75ff6d · 6860f00a21 · edc598b440 · 94b584cc3f · 49492f1528 · 2b6936d3b5 · 9c594c9fc3 · df8199ef8e · e80c101c4c · 8541bc93cd · 8f20d39863 · a70436d478 · a1c2163e46 plus June 18 live-runtime cleanup. Historical experiment reports remain evidence only; they do not define the live execution layer.
 
 ---
@@ -101,7 +101,8 @@ deployment-SHA freshness rule.
 The older walk-forward residual width is offline historical evidence only and
 is absent from runtime probability construction.
 
-**2026-07-25 correction — bounded reuse of a stale-but-coherent ENS shape.**
+**2026-07-25 historical correction — bounded reuse of a stale-but-coherent ENS
+shape (superseded for live authority on 2026-08-19).**
 Measured cost of the pre-addendum same-cycle-only rule: new scopes waited a mean
 14.6h (p50 6.8h) for the slow ENS-baseline leg while every other instrument was
 already fresh, costing 0.24–0.41°C of avoidable center error at scope-open
@@ -142,6 +143,33 @@ addendum does not widen it, and carries no sigma age-inflation term of its own
 (a walk-forward-fitted `γ_g · age/6` term, per the consult's EMOS-like scale, is
 deferred to a separate calibration slice).
 
+**2026-08-19 correction — same-cycle target-specific ENS is required for live
+probability authority.** Seven-day decision-time certificates showed that the
+cross-clock construction above systematically overstated exact-bin `NO`
+probabilities: 13 independent city-date clusters committed $70.91 and realized
+-$38.69, while the executable market beat the model by an e-value of 15,585.68.
+The defect is structural: `μ* - mean(X_old)` mixes forecast evolution with
+uncertainty and is not a sample from the carrier-time settlement distribution.
+Inflating `σ_pred` by that term spreads probability away from central discrete
+bins and manufactures apparent `NO` edge.
+
+Therefore a shaped certificate has live entry, held-position statistical
+redecision, and coverage authority only when all of the following hold:
+
+```
+shape_lag_hours == 0
+stale_shape_reused in {absent, false}
+semantics_revision == CURRENT_EVIDENCE_SEMANTICS_REVISION
+translation_applied == false
+```
+
+`stale_ensemble_absolute_disagreement_v2` remains an immutable offline and
+walk-forward evidence identity. It cannot authorize a live BUY, a statistical
+SELL/HOLD decision, no-money admission evidence, or suppress rematerialization
+of the missing same-cycle shape. Missing same-cycle ENS is DATA_DEGRADED for the
+family and fails closed until the normal materialization loop writes current
+evidence.
+
 ### 1e. q construction — fused-N-direct (commit 8541bc93cd)
 
 Flag `replacement_0_1_fused_q_shape_enabled = true`. Fail-closed to soft-anchor q on key-set mismatch or any construction error.
@@ -170,18 +198,23 @@ the source-clock full-day extreme:
 provider_path_s = remaining_extreme(
     condition(hourly_path_s, current_temperature, observation_time)
 )
-future_s        = provider_path_s + instrument_error + observation_latency_error
+path_spread²    = Var_s(provider_path_s)
+unresolved²     = max(sigma_pred² - path_spread², 0)
+path_error²     = max(unresolved², instrument_latency_floor²)
+future_s        = provider_path_s + Normal(0, path_error)
 final_s         = extreme(observed_running_boundary, future_s)
 ```
 
 The provider-path distribution carries current provider disagreement and the
-explicit remaining diurnal shape. Instrument and observation-latency errors are
-applied once before the physical max/min. The source-clock `sigma_pred` remains
-mandatory immutable carrier and confidence-bound evidence, but it describes the
-unconditional full-day extreme and must not be injected again as symmetric
-temperature noise on the conditional remaining paths. Doing so mixes two random
-variables, double-counts uncertainty, and mechanically depresses every exact-bin
-YES probability into anti-modal NO probability.
+explicit remaining diurnal shape. It does not carry the error shared by all
+deterministic provider paths. The current provider-path center variance is
+therefore removed from the source-clock total predictive variance; only the
+unresolved remainder is applied as conditional path error. Instrument and
+observation-latency uncertainty is an irreducible floor. This decomposition
+prevents both failure modes: deleting common forecast error makes exact-bin q
+overconfident, while injecting the full `sigma_pred` into every path counts
+provider disagreement twice. The error is applied once before the physical
+max/min.
 
 The source-clock posterior, finite-member/moment band, topology, and causal
 identity remain bound into the Day0 witness and are reproduced at submit. A
@@ -190,6 +223,56 @@ not permission to fall back to historical residual width, an unbound path set,
 or a market-price anchor. Any change to this conditional operator increments
 `DAY0_PROBABILITY_SEMANTICS_REVISION`, so settlement attribution never pools the
 new law with an older realized-capital record.
+
+The possession-bound provider-run cutover is such a change. It prevents local
+capture clocks or mixed provider runs from entering one remaining-path witness,
+and is identified as the v10 Day0 probability cohort. Realized v9 fills remain
+historical evidence; they cannot reject or validate v10. RiskGuard may reject
+v10 only from later decision-time v10 q/book witnesses joined to verified
+settlements under the current global selector.
+
+The source-clock observation clock is supporting provenance when the global
+action q is rebuilt from the current remaining-path random variable. Its age
+alone must not suppress statistical ENTRY between normal provider publications:
+the remaining-path builder prices the unresolved interval from the latest causal
+current-state ledger through decision time. This exception exists only when that
+builder produces a complete current simplex. Missing carrier identity, current
+observation, hourly trajectories, topology, or submit-time equality still fails
+closed. Any route that uses the source-clock posterior itself as action q retains
+the strict fast-observation ENTRY freshness contract.
+
+That exception is atomic across both conditioning seams: when the named current
+source and supporting carrier clocks differ while preserving the same physical
+extreme, the global remaining-path route binds current action state and records
+the carrier-clock lag instead of rejecting ENTRY. The values, unit, named source,
+station identity, decision-time causality, and current action-q content remain
+exact; a changed extreme or a carrier clock that cannot be reconciled to its
+named current source still blocks. Direct source-clock action routes do not
+receive this clock-advance permission.
+
+WU changed-payload revision history is a statistical modifier, not settlement
+truth. Only a revision the observation writer applied to canonical state enters
+the Jeffreys-Beta transition denominator. A quarantined payload mismatch did
+not move current truth and therefore cannot be relabeled as a boundary
+retraction inside q. When one city has zero applied changed-payload transitions
+in the bounded causal lookback, new capital remains ineligible: ENTRY may not
+substitute an empirical likelihood. Existing capital must remain re-decidable,
+so HELD_MONITOR and REDUCE_ONLY_EXIT may use the same Jeffreys-Beta model at its
+zero-observation prior. The applied-revision or prior-only basis is serialized
+into the probability content and a new Day0 semantics revision; it never
+creates deterministic payoff support and cannot pass the ENTRY/HELD equality
+gate for a history-free BUY.
+
+For a Day0 BUY that has already passed current ENTRY authority, the immediate
+HELD_MONITOR gate compares the facts that can change that fixed action's
+economics: witness type, Day0 semantics revision, family/token bindings,
+resolution/topology, probability band, sample matrix, and point simplex. Both
+witnesses retain their own immutable source/posterior/certificate identities;
+those lane-specific provenance hashes may differ only when all action-q content
+above is exact. Any sample, point, topology, band, binding, witness-type, or
+semantics-revision change remains a candidate-local fail-closed divergence.
+This exception cannot legalize the history-free WU prior: ENTRY still fails
+before equality is evaluated, while the prior remains held/reduce-only.
 
 ### 1f. Finite current-evidence tail limit
 

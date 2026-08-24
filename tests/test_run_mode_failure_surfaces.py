@@ -7090,6 +7090,30 @@ def test_bpf_capture_failed_yields_forecast_pipeline_degraded(tmp_path: Path) ->
     )
 
 
+def test_priority_materializer_failed_yields_forecast_pipeline_degraded(
+    tmp_path: Path,
+) -> None:
+    sd = tmp_path
+    _setup_healthy_state(sd)
+    health_path = sd / "scheduler_jobs_health.json"
+    scheduler = json.loads(health_path.read_text())
+    scheduler["replacement_forecast_live_materialize_priority"] = {
+        "status": "FAILED",
+        "last_failure_reason": "priority lane failed",
+        "last_run_at": _now_iso(-5),
+    }
+    _write(health_path, scheduler)
+
+    result = compute_composite_live_health(state_dir=sd)
+
+    assert result["healthy"] is False
+    assert result["status"] == "DEGRADED"
+    assert "forecast_pipeline" in result["failing_surfaces"]
+    assert "replacement_forecast_live_materialize_priority" in (
+        result["surfaces"]["forecast_pipeline"]["issue"] or ""
+    )
+
+
 # ---------------------------------------------------------------------------
 # T2: status_summary stale → DEGRADED
 # ---------------------------------------------------------------------------
@@ -8352,6 +8376,67 @@ def test_systemic_capital_recovery_keeps_priority_during_held_monitor(monkeypatc
     assert calls == ["live_tick"]
 
 
+def test_confirmed_fill_projection_bypasses_monitor_bootstrap_defer(monkeypatch) -> None:
+    """Unprojected authenticated exposure outranks monitor bootstrap deferral."""
+    import threading
+
+    import src.execution.command_recovery as command_recovery
+    import src.main as main_module
+    import src.state.db as state_db
+    from src.execution.command_recovery import CapitalBlockingCommandScope
+
+    class FakeConn:
+        def close(self) -> None:
+            return None
+
+    calls: list[str] = []
+    defer_calls: list[str] = []
+    main_module._capital_recovery_handoff_pending.clear()
+    monkeypatch.setattr(main_module, "get_mode", lambda: "live")
+    monkeypatch.setattr(main_module, "_consume_live_control_commands", lambda: None)
+    monkeypatch.setattr(
+        main_module,
+        "_defer_for_held_position_monitor",
+        lambda job: defer_calls.append(job) or True,
+    )
+    monkeypatch.setattr(main_module, "_held_position_monitor_active", threading.Event())
+    monkeypatch.setattr(
+        main_module,
+        "_held_position_monitor_canonical_debt",
+        threading.Event(),
+    )
+    monkeypatch.setattr(main_module, "_edli_command_recovery_full_bucket", lambda: 17)
+    monkeypatch.setattr(main_module, "_EDLI_COMMAND_RECOVERY_LAST_FULL_BUCKET", 17)
+    monkeypatch.setattr(state_db, "get_trade_connection_read_only", FakeConn)
+    monkeypatch.setattr(
+        command_recovery,
+        "capital_blocking_command_count",
+        lambda _conn: 1,
+    )
+    monkeypatch.setattr(
+        command_recovery,
+        "capital_blocking_command_scope",
+        lambda _conn: CapitalBlockingCommandScope(
+            total_count=1,
+            scoped_markets=(),
+            unscopeable_count=0,
+            projection_count=1,
+        ),
+    )
+    monkeypatch.setattr(
+        command_recovery,
+        "reconcile_unresolved_commands",
+        lambda **kwargs: calls.append(str(kwargs.get("scope")))
+        or {"scanned": 1, "advanced": 0},
+    )
+
+    main_module._edli_command_recovery_cycle.__wrapped__()
+
+    assert calls == ["live_tick"]
+    assert defer_calls == []
+    assert not main_module._capital_recovery_handoff_pending.is_set()
+
+
 def test_capital_cancel_recovery_reserves_reactor_then_resets(monkeypatch) -> None:
     """Only the capital fast pass owns the reactor fairness handoff."""
     import src.execution.command_recovery as command_recovery
@@ -9045,6 +9130,129 @@ def test_reactor_bootstrap_rejects_bad_evidence_without_blocking_reduce_only(
     finally:
         main_module._held_position_monitor_active.clear()
         main_module._held_position_monitor_bootstrap_complete.clear()
+
+
+def test_reactor_bootstrap_stall_alerts_once_per_repeat_window_without_setting_event(
+    monkeypatch,
+    caplog,
+) -> None:
+    """A held-position bootstrap stall must escalate from silent to visible.
+
+    2026-08-18 incident (reversal plan item 5a): the promotion function
+    returned False forever with zero alert, locking entries reduce-only for
+    12.1h. Past BOOTSTRAP_ALERT_AFTER_SECONDS this must emit exactly one
+    logger.error per BOOTSTRAP_ALERT_REPEAT_SECONDS window (not once per
+    call) and write a breadcrumb with the blocking position ids -- and the
+    alert path must never set the fail-closed completion Event itself.
+    """
+
+    from datetime import datetime, timezone
+
+    import src.main as main_module
+    import src.ops.monitor_cadence as cadence_module
+    import src.state.db as db_module
+
+    class ReadOnlyConnection:
+        def close(self) -> None:
+            pass
+
+    evidence = {
+        "open_position_count": 2,
+        "fresh_position_count": 0,
+        "future_monitor_event_count": 0,
+        "settlement_recoverable_position_count": 0,
+        "stale_or_missing_position_count": 2,
+        "blocking_stale_position_count": 2,
+        "blocking_stale_positions": [
+            {"position_id": "pos-a"},
+            {"position_id": "pos-b"},
+        ],
+        "quote_only_stale_position_count": 0,
+        "quote_only_stale_positions": [],
+    }
+
+    main_module._held_position_monitor_bootstrap_complete.clear()
+    main_module._held_position_monitor_bootstrap_last_check = 0.0
+    main_module._held_position_monitor_bootstrap_started_monotonic = None
+    main_module._held_position_monitor_bootstrap_started_at_utc = None
+    main_module._held_position_monitor_bootstrap_last_alert_monotonic = None
+    monkeypatch.setitem(
+        main_module._BOOT_STATE,
+        "ts",
+        datetime(2026, 7, 26, 9, 0, tzinfo=timezone.utc),
+    )
+    monkeypatch.setattr(db_module, "get_trade_connection_read_only", ReadOnlyConnection)
+    monkeypatch.setattr(
+        cadence_module,
+        "collect_monitor_cadence_evidence",
+        lambda *_args, **_kwargs: evidence,
+    )
+    clock = {"t": 0.0}
+    monkeypatch.setattr(main_module.time, "monotonic", lambda: clock["t"])
+
+    try:
+        with caplog.at_level(logging.ERROR, logger="zeus"):
+            # First attempt: starts the clock, far below the alert threshold.
+            assert (
+                main_module._promote_held_position_monitor_bootstrap_from_canonical_progress()
+                is False
+            )
+            assert (
+                main_module._held_position_monitor_bootstrap_started_monotonic
+                == 0.0
+            )
+            assert not caplog.records
+
+            # Cross the alert threshold: exactly one logger.error + breadcrumb.
+            clock["t"] = main_module.BOOTSTRAP_ALERT_AFTER_SECONDS + 10.0
+            main_module._held_position_monitor_bootstrap_last_check = 0.0
+            assert (
+                main_module._promote_held_position_monitor_bootstrap_from_canonical_progress()
+                is False
+            )
+            assert main_module._held_position_monitor_bootstrap_complete.is_set() is False
+            alert_records = [
+                r for r in caplog.records if r.levelno == logging.ERROR
+            ]
+            assert len(alert_records) == 1
+            assert "bootstrap stalled" in alert_records[0].message
+
+            from src.config import state_path
+
+            breadcrumb_path = state_path("bootstrap_stall_alert.json")
+            assert breadcrumb_path.exists()
+            payload = json.loads(breadcrumb_path.read_text())
+            assert payload["blocking_stale_count"] == 2
+            assert sorted(payload["blocking_position_ids"]) == ["pos-a", "pos-b"]
+            assert payload["open_position_count"] == 2
+            assert payload["started_at"] is not None
+
+            # Still within the repeat window: no second alert, same call count.
+            caplog.clear()
+            clock["t"] += 5.0
+            main_module._held_position_monitor_bootstrap_last_check = 0.0
+            assert (
+                main_module._promote_held_position_monitor_bootstrap_from_canonical_progress()
+                is False
+            )
+            assert not [r for r in caplog.records if r.levelno == logging.ERROR]
+
+            # Past the repeat window: exactly one more alert.
+            caplog.clear()
+            clock["t"] += main_module.BOOTSTRAP_ALERT_REPEAT_SECONDS + 1.0
+            main_module._held_position_monitor_bootstrap_last_check = 0.0
+            assert (
+                main_module._promote_held_position_monitor_bootstrap_from_canonical_progress()
+                is False
+            )
+            second_alerts = [r for r in caplog.records if r.levelno == logging.ERROR]
+            assert len(second_alerts) == 1
+    finally:
+        main_module._held_position_monitor_bootstrap_complete.clear()
+        main_module._held_position_monitor_bootstrap_last_check = 0.0
+        main_module._held_position_monitor_bootstrap_started_monotonic = None
+        main_module._held_position_monitor_bootstrap_started_at_utc = None
+        main_module._held_position_monitor_bootstrap_last_alert_monotonic = None
 
 
 def test_reactor_bootstrap_completes_vacuously_without_open_held_positions(
@@ -11174,6 +11382,28 @@ def test_full_book_monitor_success_requires_complete_canonical_coverage() -> Non
         },
         open_position_count=4,
     )
+    assert _full_book_monitor_completed_canonical_coverage(
+        {
+            "monitors": 4,
+            "held_monitor_candidates": 4,
+            "held_monitor_candidate_position_ids": ["p1", "p2", "p3", "p4"],
+            "held_monitor_canonical_position_ids": ["p1", "p2", "p3", "p4"],
+            "held_monitor_no_action_authority_position_ids": ["p4"],
+            "held_monitor_non_executable_dust_position_ids": ["p4"],
+        },
+        open_position_count=4,
+    )
+    assert not _full_book_monitor_completed_canonical_coverage(
+        {
+            "monitors": 4,
+            "held_monitor_candidates": 4,
+            "held_monitor_candidate_position_ids": ["p1", "p2", "p3", "p4"],
+            "held_monitor_canonical_position_ids": ["p1", "p2", "p3"],
+            "held_monitor_no_action_authority_position_ids": ["p4"],
+            "held_monitor_non_executable_dust_position_ids": ["p4"],
+        },
+        open_position_count=4,
+    )
     assert not _full_book_monitor_completed_canonical_coverage(
         {
             "monitors": 4,
@@ -11515,7 +11745,7 @@ def test_canonical_monitor_debt_runs_exact_held_sell_completion(
     assert fairness_debt.is_set() is True
 
 
-def test_reactor_poll_does_not_promote_canonical_family_debt_to_exact_only_queue(
+def test_reactor_poll_keeps_canonical_family_debt_ordinary_without_exact_debt(
     monkeypatch,
 ) -> None:
     import src.main as main_module
@@ -11557,8 +11787,10 @@ def test_reactor_poll_does_not_promote_canonical_family_debt_to_exact_only_queue
     monkeypatch.setattr(
         wake_module,
         "exact_held_sell_completion_wake_ids",
-        lambda **_kwargs: pytest.fail(
-            "family-scoped canonical debt must not require exact-only selection"
+        lambda **kwargs: (
+            frozenset()
+            if kwargs == {"fail_on_error": True}
+            else pytest.fail("exact debt discovery must fail closed")
         ),
     )
     monkeypatch.setattr(
@@ -11571,15 +11803,16 @@ def test_reactor_poll_does_not_promote_canonical_family_debt_to_exact_only_queue
     assert reads == [
         {
             "exclude_wake_ids": frozenset({"exact-held-sell"}),
-            "prefer_exact_held_sell": False,
             "prefer_forecast_carrier_progress": False,
             "fail_on_error": False,
         }
     ]
 
 
-def test_reactor_poll_keeps_fairness_debt_exact_only(
+@pytest.mark.parametrize("fairness_blocked", [False, True])
+def test_reactor_poll_prioritizes_exact_debt_with_or_without_fairness(
     monkeypatch,
+    fairness_blocked,
 ) -> None:
     import src.main as main_module
     import src.runtime.reactor_wake as wake_module
@@ -11587,7 +11820,8 @@ def test_reactor_poll_keeps_fairness_debt_exact_only(
     fairness_debt = type(
         main_module._periodic_held_position_monitor_fairness_debt
     )()
-    fairness_debt.set()
+    if fairness_blocked:
+        fairness_debt.set()
     reads: list[dict] = []
     monkeypatch.setattr(
         main_module,
@@ -11605,7 +11839,7 @@ def test_reactor_poll_keeps_fairness_debt_exact_only(
         lambda **kwargs: (
             frozenset({"exact-held-sell"})
             if kwargs == {"fail_on_error": True}
-            else pytest.fail("fairness selection must use the fail-closed reader")
+            else pytest.fail("exact debt discovery used the wrong failure policy")
         ),
     )
     monkeypatch.setattr(
@@ -11637,6 +11871,162 @@ def test_reactor_poll_keeps_fairness_debt_exact_only(
             "fail_on_error": True,
         }
     ]
+
+
+@pytest.mark.parametrize("fairness_blocked", [False, True])
+def test_reactor_poll_does_not_run_ordinary_work_when_exact_debt_is_unreadable(
+    monkeypatch,
+    fairness_blocked,
+) -> None:
+    import src.main as main_module
+    import src.runtime.reactor_wake as wake_module
+
+    fairness_debt = type(
+        main_module._periodic_held_position_monitor_fairness_debt
+    )()
+    if fairness_blocked:
+        fairness_debt.set()
+    reads: list[dict] = []
+    monkeypatch.setattr(
+        main_module,
+        "_defer_for_held_position_monitor",
+        lambda _job: False,
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_periodic_held_position_monitor_fairness_debt",
+        fairness_debt,
+    )
+    monkeypatch.setattr(
+        wake_module,
+        "exact_held_sell_completion_wake_ids",
+        lambda **_kwargs: (_ for _ in ()).throw(OSError("unreadable")),
+    )
+    monkeypatch.setattr(
+        wake_module,
+        "read_reactor_wake",
+        lambda **kwargs: reads.append(kwargs) or None,
+    )
+
+    assert main_module._edli_reactor_wake_poll_once() is False
+    assert reads == []
+
+
+def test_exact_held_sell_wake_bypasses_monitor_defer_and_retries_after_lock_release(
+    monkeypatch,
+) -> None:
+    import src.main as main_module
+    import src.runtime.reactor_wake as wake_module
+
+    request = wake_module.make_held_sell_reauction_request(
+        position_id="milan-exact-position",
+        family=("Milan", "2026-08-23", "high"),
+        probability_content_identity="q-milan-exact",
+        held_token_id="milan-exact-token",
+        held_best_bid=0.21,
+        bid_observed_at="2026-08-23T12:00:00+00:00",
+        probability_observed_at="2026-08-23T12:00:00+00:00",
+        completion_deadline_at="2026-08-23T12:00:30+00:00",
+        schema_version=4,
+        book_state="EXECUTABLE",
+    )
+    wake = wake_module.ReactorWake(
+        "wake-milan-exact",
+        "2026-08-23T12:00:00+00:00",
+        "held_position_monitor",
+        wake_module.GLOBAL_AUCTION_COMPLETION_WAKE_REASON,
+        forecast_families=(request.family,),
+        held_sell_reauction_requests=(request,),
+    )
+
+    class Gate:
+        locked_now = True
+
+        def locked(self) -> bool:
+            return self.locked_now
+
+    gate = Gate()
+    defer_calls: list[str] = []
+    cycle_calls: list[dict] = []
+    monkeypatch.setattr(
+        main_module,
+        "_defer_for_held_position_monitor",
+        lambda job: defer_calls.append(job) or True,
+    )
+    monkeypatch.setattr(
+        wake_module,
+        "exact_held_sell_completion_wake_ids",
+        lambda **kwargs: (
+            frozenset({wake.wake_id})
+            if kwargs == {"fail_on_error": True}
+            else pytest.fail("exact wake ids must use fail_on_error")
+        ),
+    )
+    monkeypatch.setattr(wake_module, "read_reactor_wake", lambda **_kwargs: wake)
+    monkeypatch.setattr(wake_module, "coalescible_reactor_wakes", lambda _wake: (wake,))
+    monkeypatch.setattr(
+        wake_module,
+        "held_sell_reauction_requests_completed",
+        lambda _requests: False,
+    )
+    monkeypatch.setattr(main_module, "_exit_monitor_excluded_wake_ids", lambda: frozenset())
+    monkeypatch.setattr(
+        main_module, "_collateral_authority_wake_backoff_ids", lambda: frozenset()
+    )
+    monkeypatch.setattr(
+        main_module, "_paused_forecast_carrier_priority_allowed", lambda **_kwargs: False
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_periodic_held_position_monitor_fairness_debt",
+        type(main_module._periodic_held_position_monitor_fairness_debt)(),
+    )
+    monkeypatch.setattr(main_module, "_edli_reactor_active_lock", gate)
+    monkeypatch.setattr(
+        main_module,
+        "_edli_event_reactor_cycle",
+        lambda **kwargs: cycle_calls.append(kwargs) or True,
+    )
+    monkeypatch.setattr(main_module, "_edli_last_reactor_wake_id", None)
+
+    assert main_module._edli_reactor_wake_poll_once() is False
+    assert defer_calls == []
+    assert cycle_calls == []
+
+    gate.locked_now = False
+    assert main_module._edli_reactor_wake_poll_once() is False
+    assert cycle_calls == [
+        {
+            "producer_wake_reason": wake.reason,
+            "producer_wake_ids": (wake.wake_id,),
+            "producer_wake_published_at": wake.published_at,
+            "producer_wake_event_ids": (),
+            "producer_wake_families": wake.forecast_families,
+            "allow_paused_forecast_snapshot_completion": False,
+            "producer_held_sell_reauction_requests": (request,),
+        }
+    ]
+
+
+def test_reactor_poll_defers_ordinary_work_after_exact_debt_read(monkeypatch) -> None:
+    import src.main as main_module
+    import src.runtime.reactor_wake as wake_module
+
+    reads: list[dict] = []
+    monkeypatch.setattr(
+        wake_module,
+        "exact_held_sell_completion_wake_ids",
+        lambda **kwargs: frozenset() if kwargs == {"fail_on_error": True} else None,
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_defer_for_held_position_monitor",
+        lambda job: job == "edli_event_reactor",
+    )
+    monkeypatch.setattr(wake_module, "read_reactor_wake", lambda **kwargs: reads.append(kwargs))
+
+    assert main_module._edli_reactor_wake_poll_once() is False
+    assert reads == []
 
 
 def test_reactor_wrapper_keeps_existing_canonical_debt_family_scoped(

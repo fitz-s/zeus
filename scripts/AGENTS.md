@@ -65,6 +65,7 @@ Only list durable entry points here; use the manifest for the full catalog.
 |--------|---------|
 | `topology_doctor.py` | Compiled topology/digest/health checks |
 | `check_daemon_heartbeat.py` | Daemon heartbeat staleness check |
+| `watch_full_loss_investigation.py` | Read-only canonical full-loss detector, isolated incident/root-cause memory, and ephemeral Codex investigation dispatcher |
 | `venus_sensing_report.py` | Venus sensing report, including daemon-independent source-contract watch |
 | `backfill_tigge_snapshot_p_raw.py` | Replay-compatible TIGGE `p_raw_json` materialization |
 | `watch_source_contract.py` | Polymarket settlement source-contract monitor, city source-block writer, and conversion-history reporter |
@@ -114,3 +115,7 @@ Only list durable entry points here; use the manifest for the full catalog.
 | `zeus_blocks.py` | Zeus block state read_only_inspection; reads and reports current block conditions (created 2026-05-04) |
 | `doc_citation_lint.py` | Citation-rot detector for Zeus docs; scans .md/.py/.yaml/.json for broken doc references per SCAFFOLD §4 FM-01/FM-04 (created 2026-05-17) |
 | `pr_monitor.py` | Canonical PR monitor; single source of filter logic for Monitor tool armed after gh pr create; 7 filter contracts pinned by tests/test_pr_monitor.py (created 2026-05-17) |
+| `scoreboard_panels.py` | Read-only non-circular scoreboard: paired forecast proper-scores vs price, price-only selection edge, execution fill quality, exit lifecycle (created 2026-08-24, reversal-plan tier0 item 4) |
+| `calibrator_walkforward_report.py` | Read-only walk-forward report for the offline market-anchored residual calibrator (`src/calibration/market_anchored_residual.py`): paired log-loss of market p0 / raw q / calibrated r_hat, beta trajectory, final frozen artifact; not wired into the live entry path (created 2026-08-24, reversal-plan tier0 item 9) |
+| `selection_lift_report.py` | Read-only preregistered Tier-0 ordinal selection-lift report (`src/analysis/selection_lift.py`): permutation p-value, city-date/date-block bootstrap CIs (larger governs), decision-rule verdict; refuses a p-value below 100 observations (evaluation lock), `--pilot-power-check` prints report-only variance instead; prints "provenance table absent — 0 observations" cleanly until Item 3's candidate-set table lands (created 2026-08-24, reversal-plan tier0 item 7) |
+| `promotion_gates_report.py` | Read-only two-gate capital-promotion evaluator (`src/analysis/promotion_gates.py`): Gate A non-inferiority of calibrated r_hat vs market price (cluster-robust, catastrophic-degradation side condition), Gate B capital-use readiness (fill-residual LCB AND selection-lift positive branch); documents the bounded Tier-1 sizing formula (not wired); a formal Gate-B run is a one-shot alpha-spending ledger event, `--dry-run` for repeated viewing (created 2026-08-24, reversal-plan tier0 item 10) |

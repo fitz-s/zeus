@@ -30,11 +30,16 @@ DAY0_LIVE_AUTHORITY_MATCHES = {
 DAY0_REMAINING_DAY_Q_SOURCE = "day0_remaining_day"
 DAY0_REMAINING_DAY_Q_MODE = "remaining_day"
 DAY0_REMAINING_DAY_GLOBAL_AUTHORITY = "day0_remaining_day_global_probability_v1"
+DAY0_HELD_PINNED_RECOMPUTE_Q_SOURCE = "day0_held_same_cycle_day0_recompute"
+DAY0_HELD_PINNED_RECOMPUTE_Q_MODE = "held_same_cycle_day0_recompute"
+DAY0_HELD_PINNED_RECOMPUTE_GLOBAL_AUTHORITY = (
+    "day0_held_same_cycle_day0_recompute_v1"
+)
 # Settlement learning must grade the probability mechanism that actually
 # authorized a fill.  Increment this when the Day0 probability construction
-# changes; the value is stamped into every live ENTRY q_version.
+# changes; the value is stamped into every live Day0 q_version.
 DAY0_PROBABILITY_SEMANTICS_REVISION = (
-    "day0_conditional_remaining_path_error_no_marginal_peak_v3"
+    "day0_provider_run_bound_total_variance_minus_path_spread_wu_revision_clock_v10"
 )
 _DAY0_SEMANTIC_Q_VERSION_PREFIX = "day0-semrev:"
 DAY0_DETERMINISTIC_BIN_PAYOFF_Q_SOURCE = "day0_deterministic_bin_payoff"
@@ -123,6 +128,19 @@ def day0_evidence_finality(payload: Mapping[str, object]) -> str:
     # contaminated payload. HKO explicitly revises intraday snapshots.
     if source.startswith("hko_hourly_accumulator"):
         return DAY0_PROVISIONAL_CURRENT_SNAPSHOT
+    # WU weather markets resolve from the web product's Daily Observations
+    # table.  The same-station historical hourly API is a different product
+    # and its current-day values may be revised before venue resolution.  A
+    # Shenzhen 2026-08-20 receipt observed 31C here while Polymarket resolved
+    # the WU Daily Observations contract to 30C.  Therefore no WU intraday or
+    # completed-hourly carrier is a pathwise settlement bound.  It remains
+    # statistical evidence, never exact q=0/1 authority.
+    if (
+        source == "wu"
+        or source.startswith("wu_")
+        or source.startswith("observation_prints:wu")
+    ):
+        return DAY0_PROVISIONAL_CURRENT_SNAPSHOT
     # This composite names WU settlement truth plus a noisy same-station fast
     # print. The broad ``wu_*`` rule below must not turn that statistical
     # residual likelihood into a deterministic settlement boundary.
@@ -131,11 +149,9 @@ def day0_evidence_finality(payload: Mapping[str, object]) -> str:
     if source == "hko_daily_api" or source.startswith("hko_daily_api_"):
         return DAY0_FINAL_DAILY_SETTLEMENT
     monotone_source = (
-        source == "wu"
-        or source.startswith("wu_")
-        or source.startswith("ogimet_metar_")
-        or source in {"aviationweather_metar", "same_station_fast_tail"}
-        or source.startswith("observation_prints:wu")
+        source.startswith("ogimet_metar_")
+        or source.startswith("aviationweather_metar")
+        or source.startswith("same_station_fast_tail")
         or source.startswith("observation_prints:ogimet_metar_")
         or source.startswith("observation_prints:aviationweather_metar")
     )
@@ -1222,6 +1238,10 @@ def assert_live_day0_probability_authority(
         raise Day0AuthorityError("day0 hard-fact calibration cannot authorize entry probability")
 
     q_source = _first_text(payload, block, "_edli_q_source", "day0_q_source", "q_source")
+    if q_source == DAY0_HELD_PINNED_RECOMPUTE_Q_SOURCE:
+        raise Day0AuthorityError(
+            "held pinned Day0 recompute is reduce-only and cannot authorize ENTRY"
+        )
     if q_source in DAY0_REPLACEMENT_GLOBAL_AUTHORITIES_BY_Q_SOURCE:
         _assert_replacement_global_day0_probability_authority(
             payload,

@@ -1,6 +1,6 @@
 # Created: 2026-07-25
-# Last reused or audited: 2026-08-17
-# Lifecycle: created=2026-07-25; last_reviewed=2026-08-17; last_reused=2026-08-17
+# Last reused or audited: 2026-08-19
+# Lifecycle: created=2026-07-25; last_reviewed=2026-08-19; last_reused=2026-08-19
 # Authority basis: 7-day production block-event audit -- one stuck EDLI order
 #   was blocking new-entry BUY admission for every family (32,763 blocking
 #   instances, 20.97h/7d). This narrows the adapter-level gate
@@ -194,7 +194,6 @@ def test_unresolved_day0_statistical_buy_is_removed_before_capital_ranking():
     "revision",
     (
         era.CURRENT_EVIDENCE_SEMANTICS_REVISION,
-        era.STALE_ENSEMBLE_ABSOLUTE_DISAGREEMENT_SEMANTICS_REVISION,
         DAY0_PROBABILITY_SEMANTICS_REVISION,
     ),
 )
@@ -205,6 +204,15 @@ def test_unresolved_day0_current_statistical_witness_reaches_capital_ranking(
         day0_payoff_truth="unresolved",
         probability_semantics_revision=revision,
     ) is None
+
+
+def test_unresolved_day0_stale_ensemble_witness_is_removed_before_ranking():
+    assert era._day0_unresolved_entry_probability_rejection_reason(
+        day0_payoff_truth="unresolved",
+        probability_semantics_revision=(
+            era.STALE_ENSEMBLE_ABSOLUTE_DISAGREEMENT_SEMANTICS_REVISION
+        ),
+    ) == "GLOBAL_DAY0_UNRESOLVED_ENTRY_PROBABILITY_UNCALIBRATED"
 
 
 def test_day0_entry_containment_preserves_hard_facts_and_non_day0_candidates():

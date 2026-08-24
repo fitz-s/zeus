@@ -1,8 +1,9 @@
 # Created: 2026-06-10
-# Last reused or audited: 2026-08-12
+# Last reused or audited: 2026-08-19
 # Authority basis: operator staleness/cycle-physics directive 2026-06-10 (bounded re-materialization
 #   staleness gate at materialization, fail-closed; cycle-phase provenance treats all standard
-#   00Z/06Z/12Z/18Z cycles as live-eligible synoptic).
+#   00Z/06Z/12Z/18Z cycles as live-eligible synoptic); 2026-08-19 causal
+#   capital evidence retirement of cross-clock stale ENS probability authority.
 """Relationship tests across the materializer's input->DB-write boundary for cycle policy.
 
 Two cross-module invariants are pinned here (Fitz: relationship tests, not function tests):
@@ -156,7 +157,8 @@ def test_current_evidence_semantics_is_probability_identity_and_coverage() -> No
     assert current_evidence_shape_semantics_mismatch(stale) is True
     assert current_evidence_shape_semantics_mismatch({}) is False
     assert current_evidence_shape_has_entry_authority(current) is True
-    assert current_evidence_shape_has_entry_authority(stale_reused) is True
+    assert current_evidence_shape_has_entry_authority(stale_reused) is False
+    assert current_evidence_shape_has_held_authority(stale_reused) is False
 
     clause = tradeable_grade_coverage_sql(
         posterior_columns={"q_lcb_json", "q_ucb_json", "provenance_json"},
@@ -168,7 +170,7 @@ def test_current_evidence_semantics_is_probability_identity_and_coverage() -> No
     assert "current_evidence_shape.translation_applied" in clause
     assert "current_evidence_shape.shape_lag_hours" in clause
     assert CURRENT_EVIDENCE_SEMANTICS_REVISION in clause
-    assert STALE_ENSEMBLE_ABSOLUTE_DISAGREEMENT_SEMANTICS_REVISION in clause
+    assert STALE_ENSEMBLE_ABSOLUTE_DISAGREEMENT_SEMANTICS_REVISION not in clause
     assert "ensemble_center_scenarios_v2" not in clause
     assert "ensemble_anomaly_transport_v2" not in clause
 
@@ -251,9 +253,9 @@ def test_current_evidence_semantics_is_probability_identity_and_coverage() -> No
         malformed_shapes.append(malformed)
     assert is_tradeable(current) is True
     assert is_tradeable(omitted_stale) is True
-    assert is_tradeable(stale_reused) is True
-    assert is_tradeable(stale_at_bound) is True
-    assert current_evidence_shape_has_entry_authority(stale_at_bound) is True
+    assert is_tradeable(stale_reused) is False
+    assert is_tradeable(stale_at_bound) is False
+    assert current_evidence_shape_has_entry_authority(stale_at_bound) is False
     assert is_tradeable(stale_over_bound) is False
     assert current_evidence_shape_has_entry_authority(stale_over_bound) is False
     assert is_tradeable(negative_lag) is False

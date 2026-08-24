@@ -1,9 +1,9 @@
 # Created: 2026-03-31
-# Lifecycle: created=2026-03-31; last_reviewed=2026-08-18; last_reused=2026-08-18
+# Lifecycle: created=2026-03-31; last_reviewed=2026-08-22; last_reused=2026-08-22
 # Purpose: Lock live-money safety invariants across fill, exit, chain, and P&L flows.
 # Reuse: Run for execution finality, live exit, chain reconciliation, and safety invariant changes.
-# Last reused/audited: 2026-08-18
-# Authority basis: finite-evidence single-q global SELL ownership; price-band parity hot-fix
+# Last reused/audited: 2026-08-22
+# Authority basis: incident b32ad42ae26a0650 RED exit event/projection atomicity
 """Live safety invariant tests: relationship tests, not function tests.
 
 These verify cross-module relationships that prevent ghost positions,
@@ -6709,6 +6709,8 @@ def test_pending_exit_backoff_exhausted_reenters_redecision_when_still_held(monk
         ("EDGE_REVERSAL", False, True, "blocked", True, False),
         ("SELL_REVERSAL", False, True, "direct", False, True),
         ("EDGE_REVERSAL", False, True, "dust", False, False),
+        ("EDGE_REVERSAL", False, True, "sub_precision", False, False),
+        ("EDGE_REVERSAL", False, True, "no_book", False, False),
     ),
 )
 def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_red(
@@ -6742,10 +6744,22 @@ def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_
         entered_at="2026-07-14T17:00:00+00:00",
         order_posted_at="2026-07-14T16:59:00+00:00",
         fill_authority=FILL_AUTHORITY_VENUE_CONFIRMED_FULL,
-        shares=3.0 if outcome == "dust" else 500.0,
-        shares_filled=3.0 if outcome == "dust" else 500.0,
+        shares=(
+            3.0
+            if outcome == "dust"
+            else 0.002221
+            if outcome == "sub_precision"
+            else 500.0
+        ),
+        shares_filled=(
+            3.0
+            if outcome == "dust"
+            else 0.002221
+            if outcome == "sub_precision"
+            else 500.0
+        ),
         chain_state="synced",
-        chain_shares=500.0,
+        chain_shares=0.002221 if outcome == "sub_precision" else 500.0,
         token_id="paris-yes",
         no_token_id="paris-no",
         condition_id="0x" + "5a" * 32,
@@ -6765,9 +6779,13 @@ def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_
         position.last_monitor_edge = -0.50 if posterior_support_zero else -0.40
         position.last_monitor_market_price = 0.50
         position.last_monitor_market_price_is_fresh = True
-        position.last_monitor_best_bid = 0.49
+        position.last_monitor_best_bid = 0.0 if outcome == "no_book" else 0.49
         position.last_monitor_best_ask = 0.50
-        position.last_monitor_at = "2026-07-14T18:00:00+00:00"
+        position.last_monitor_at = (
+            "2026-07-14T17:59:59+00:00"
+            if posterior_support_zero
+            else "2026-07-14T18:00:00+00:00"
+        )
         setattr(
             position,
             monitor_refresh._HELD_MONITOR_MIN_ORDER_SIZE_ATTR,
@@ -7004,7 +7022,7 @@ def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_
 
     monitor_now = (
         (lambda: datetime.now(timezone.utc))
-        if outcome == "dust"
+        if outcome in {"dust", "sub_precision"}
         else (lambda: datetime(2026, 7, 14, 18, 0, tzinfo=timezone.utc))
     )
 
@@ -7051,7 +7069,7 @@ def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_
         assert conn.execute(
             "SELECT COUNT(*) FROM venue_commands WHERE intent_kind = 'EXIT'"
         ).fetchone()[0] == 0
-    elif outcome == "dust":
+    elif outcome in {"dust", "sub_precision"}:
         assert summary["monitor_statistical_sell_dust_holds"] == 1
         assert summary["exits"] == 0
         assert results[0].should_exit is False
@@ -7060,6 +7078,18 @@ def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_
         assert "fresh_snapshot_sub_minimum_dust_hold" in pos.applied_validations
         assert execute_calls == []
         assert auction_completion_requests == []
+        if outcome == "sub_precision":
+            assert "below sell share precision 0.01" in results[0].exit_reason
+    elif outcome == "no_book":
+        assert summary["monitor_statistical_sell_no_book_holds"] == 1
+        assert summary["exits"] == 0
+        assert results[0].should_exit is False
+        assert results[0].exit_reason == "NO_EXECUTABLE_SELL_BOOK_HOLD"
+        assert "current_sell_book_not_executable" in pos.applied_validations
+        assert auction_completion_requests == []
+        assert published_requests == []
+        assert reserved_requests == []
+        assert execute_calls == []
     elif outcome in {"blocked", "request_failed"}:
         completion_accepted = request_accepted and not malformed_request
         assert summary.get("monitor_sells_delegated_to_global_auction", 0) == 0
@@ -7245,6 +7275,10 @@ def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_
                 pos.applied_validations
             )
             assert execute_authorities[0] is not None
+            assert execute_authorities[0].probability_observed_at == (
+                "2026-07-14T18:00:00+00:00"
+            )
+            assert execute_authorities[0].probability_observed_at == pos.last_monitor_at
         else:
             assert execute_authorities == [None]
         assert execute_calls == [pos]
@@ -14669,6 +14703,293 @@ def test_monitor_refresh_canonical_emit_updates_current_projection(tmp_path):
     conn.close()
 
 
+def test_incident_b32ad42_pending_exit_red_projection_actuates_same_turn_exit(
+    tmp_path,
+    monkeypatch,
+):
+    """Production monitoring overrides retry cooldown and actuates RED."""
+    from src.contracts import EdgeContext, EntryMethod
+    from src.engine import cycle_runner
+    from src.engine.lifecycle_events import build_entry_canonical_write
+    from src.execution import exit_lifecycle
+    from src.riskguard.risk_level import RiskLevel
+    from src.state.db import (
+        append_many_and_project,
+        get_connection,
+        init_schema,
+        transition_phase,
+    )
+    from src.state.lifecycle_manager import LifecyclePhase
+
+    conn = get_connection(tmp_path / "incident-b32ad42-red-monitor.db")
+    init_schema(conn)
+    conn.execute(
+        "CREATE INDEX idx_position_events_position_type_sequence "
+        "ON position_events(position_id, event_type, sequence_no DESC)"
+    )
+    fixture_now = datetime.now(timezone.utc)
+    pos = _make_position(
+        trade_id="21325000-644",
+        market_id="0x96914dbfe260f907aa0bb4b583783c9c728adb7b80534c3c5c3333d121132b12",
+        condition_id="0x96914dbfe260f907aa0bb4b583783c9c728adb7b80534c3c5c3333d121132b12",
+        city="Tel Aviv",
+        cluster="Tel Aviv",
+        target_date=(fixture_now + timedelta(days=2)).date().isoformat(),
+        bin_label="Will the highest temperature in Tel Aviv be 33°C on August 22?",
+        direction="buy_no",
+        unit="C",
+        size_usd=5.55,
+        shares=15.0,
+        cost_basis_usd=5.55,
+        entry_price=0.37,
+        strategy_key="forecast_qkernel_entry",
+        entry_method="qkernel_spine",
+        chain_state="synced",
+        chain_shares=15.0,
+        token_id="39140315509755399623283379877984014754091934066691703608348835448373343017660",
+        no_token_id="87169765848404993777794114769282164404205005719760912351823087747451493596913",
+        entered_at="2026-08-20T11:00:08.981000+00:00",
+        order_status="filled",
+    )
+    entry_events, entry_projection = build_entry_canonical_write(
+        pos,
+        phase_after=LifecyclePhase.ACTIVE.value,
+        decision_id="incident-b32ad42-entry",
+    )
+    append_many_and_project(conn, entry_events, entry_projection)
+    retry_at = (fixture_now + timedelta(minutes=10)).isoformat()
+    pos.state = LifecyclePhase.PENDING_EXIT.value
+    pos.pre_exit_state = "holding"
+    pos.exit_state = "retry_pending"
+    pos.order_status = "retry_pending"
+    pos.exit_reason = "OLD_STATISTICAL_EXIT"
+    pos.exit_retry_count = 4
+    pos.next_exit_retry_at = retry_at
+    assert transition_phase(
+        conn,
+        pos,
+        event_type="EXIT_ORDER_REJECTED",
+        reason="OLD_STATISTICAL_EXIT",
+        error="statistical_exit_retry",
+        source_module="tests.test_live_safety_invariants",
+    ) is True
+
+    incident_now = datetime.now(timezone.utc)
+    monkeypatch.setattr(
+        "src.riskguard.riskguard.get_current_level",
+        lambda: RiskLevel.RED,
+    )
+    monkeypatch.setattr(exit_lifecycle, "_utcnow", lambda: incident_now)
+
+    def refresh_position(_conn, _clob, position):
+        position.last_monitor_at = incident_now.isoformat()
+        position.last_monitor_prob = 0.9003278024817638
+        position.last_monitor_prob_is_fresh = True
+        position.last_monitor_edge = 0.4103278024817638
+        position.last_monitor_market_price = 0.49
+        position.last_monitor_market_price_is_fresh = True
+        position.last_monitor_best_bid = 0.49
+        position.last_monitor_best_ask = 0.55
+        position.last_monitor_market_vig = 1.04
+        return EdgeContext(
+            p_raw=np.array([]),
+            p_cal=np.array([]),
+            p_market=np.array([0.49]),
+            p_posterior=0.9003278024817638,
+            forward_edge=0.4103278024817638,
+            alpha=0.0,
+            confidence_band_upper=0.42,
+            confidence_band_lower=0.40,
+            entry_provenance=EntryMethod.QKERNEL_SPINE,
+            decision_snapshot_id="incident-b32ad42-monitor",
+            n_edges_found=1,
+            n_edges_after_fdr=1,
+            market_velocity_1h=0.0,
+            divergence_score=0.0,
+        )
+
+    monkeypatch.setattr(
+        "src.engine.monitor_refresh.refresh_position",
+        refresh_position,
+    )
+
+    submitted = {}
+
+    class Clob:
+        @staticmethod
+        def get_orderbook_snapshots(token_ids):
+            return {
+                token_id: {
+                    "asset_id": token_id,
+                    "bids": [{"price": "0.49", "size": "15"}],
+                    "asks": [{"price": "0.55", "size": "15"}],
+                }
+                for token_id in token_ids
+            }
+
+        @staticmethod
+        def get_order_status(_order_id):
+            return {"status": "OPEN"}
+
+    def return_pending(**kwargs):
+        submitted.update(kwargs)
+        return exit_lifecycle.OrderResult(
+            trade_id=pos.trade_id,
+            status="pending",
+            order_id="incident-b32ad42-red-sweep",
+            external_order_id="incident-b32ad42-red-sweep",
+        )
+
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "_latest_or_capture_exit_snapshot_context",
+        lambda *_args, **_kwargs: {
+            "executable_snapshot_id": "incident-b32ad42-snapshot",
+            "executable_snapshot_hash": "incident-b32ad42-hash",
+            "executable_snapshot_orderbook_top_bid": 0.49,
+            "executable_snapshot_min_order_size": 0.01,
+        },
+    )
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "check_sell_collateral",
+        lambda *_args, **_kwargs: (True, ""),
+    )
+    monkeypatch.setattr(exit_lifecycle, "place_sell_order", return_pending)
+
+    summary = {"monitors": 0, "exits": 0}
+    portfolio_dirty, tracker_dirty = cycle_runner._execute_monitoring_phase(
+        conn,
+        Clob(),
+        PortfolioState(positions=[pos]),
+        _monitor_test_artifact(),
+        _monitor_test_tracker(),
+        summary,
+        run_exit_preflight=False,
+        current_riskguard_red=True,
+    )
+
+    monitor_row = conn.execute(
+        """
+        SELECT payload_json
+          FROM position_events
+         WHERE position_id = ? AND event_type = 'MONITOR_REFRESHED'
+         ORDER BY sequence_no DESC
+         LIMIT 1
+        """,
+        (pos.trade_id,),
+    ).fetchone()
+    assert monitor_row is not None, json.dumps(summary, default=str, sort_keys=True)
+    payload = json.loads(monitor_row["payload_json"])
+    assert payload["exit_decision_reason"] == "RED_FORCE_EXIT"
+    assert payload["exit_decision_trigger"] == "RED_FORCE_EXIT"
+    assert payload["exit_decision_should_exit"] is True
+    assert exit_lifecycle._red_monitor_provenance_matches(payload) is True
+    current = conn.execute(
+        "SELECT exit_reason, exit_retry_count, next_exit_retry_at "
+        "FROM position_current WHERE position_id = ?",
+        (pos.trade_id,),
+    ).fetchone()
+    assert current["exit_reason"] == "RED_FORCE_EXIT"
+    assert current["exit_retry_count"] == 4
+    assert current["next_exit_retry_at"] == retry_at
+    assert portfolio_dirty is True
+    assert tracker_dirty is False
+    assert summary["monitor_pending_exit_retry_cooldown_redecisions"] == 1
+    assert summary["monitor_pending_exit_phase_evaluated"] == 1
+    assert summary["pending_exit_red_force_exit_monitor_override"] == 1
+    assert "pending_exit_exit_signal_already_in_flight" not in summary
+    assert summary["exits"] == 1
+    assert submitted["submit_order_type"] == "FAK"
+    assert submitted["protective_sell_execution_authority"].kind == "RED_FORCE_EXIT"
+    conn.close()
+
+
+def test_monitor_hold_projection_does_not_mint_exit_reason():
+    """A profitable HOLD receipt remains non-actuating canonical evidence."""
+    from src.engine.lifecycle_events import build_monitor_refreshed_canonical_write
+    from src.state.lifecycle_manager import LifecyclePhase
+
+    pos = _make_position(
+        trade_id="nearby-profitable-hold",
+        strategy_key="forecast_qkernel_entry",
+        entered_at="2026-08-21T00:00:00+00:00",
+        exit_reason="",
+    )
+    decision = ExitDecision(
+        False,
+        "CI_OVERLAP_HOLD",
+        trigger="CI_OVERLAP_HOLD",
+        applied_validations=["replacement_posterior"],
+    )
+    events, projection = build_monitor_refreshed_canonical_write(
+        pos,
+        sequence_no=4,
+        phase_after=LifecyclePhase.ACTIVE.value,
+        exit_decision=decision,
+        final_should_exit=False,
+        final_exit_reason="CI_OVERLAP_HOLD",
+        final_exit_trigger="CI_OVERLAP_HOLD",
+    )
+
+    payload = json.loads(events[0]["payload_json"])
+    assert payload["exit_decision_should_exit"] is False
+    assert projection["exit_reason"] is None
+
+
+def test_canonical_exit_reason_is_not_overridden_without_current_red():
+    """A stale runtime RED marker cannot survive a non-RED canonical sync."""
+    from src.engine import cycle_runtime
+
+    pos = _make_position(
+        state="pending_exit",
+        exit_state="retry_pending",
+        exit_reason="red_force_exit",
+    )
+    row = {
+        "phase": "pending_exit",
+        "order_status": "retry_pending",
+        "exit_retry_count": 2,
+        "next_exit_retry_at": "2030-01-01T00:10:00+00:00",
+        "exit_reason": "OLD_STATISTICAL_EXIT",
+    }
+
+    cycle_runtime._sync_position_from_canonical_monitor_row(
+        pos,
+        row,
+        current_riskguard_red=False,
+    )
+
+    assert pos.exit_reason == "OLD_STATISTICAL_EXIT"
+
+
+@pytest.mark.parametrize("canonical_exit_reason", ["", "RED_FORCE_EXIT"])
+def test_non_red_canonical_sync_clears_stale_runtime_red(canonical_exit_reason):
+    """GREEN cannot inherit emergency authority from runtime or projection."""
+    from src.engine import cycle_runtime
+
+    pos = _make_position(
+        state="pending_exit",
+        exit_state="retry_pending",
+        exit_reason="red_force_exit",
+    )
+    row = {
+        "phase": "pending_exit",
+        "order_status": "retry_pending",
+        "exit_retry_count": 2,
+        "next_exit_retry_at": "2030-01-01T00:10:00+00:00",
+        "exit_reason": canonical_exit_reason,
+    }
+
+    cycle_runtime._sync_position_from_canonical_monitor_row(
+        pos,
+        row,
+        current_riskguard_red=False,
+    )
+
+    assert pos.exit_reason == ""
+
+
 def test_monitor_refresh_preserves_chain_corrected_entry_economics(tmp_path):
     """Monitor refresh must not roll a chain-corrected position back to stale fill size/state."""
     from src.engine.lifecycle_events import (
@@ -17880,6 +18201,46 @@ def test_day0_separated_zero_q_sells_before_static_edge_threshold_strands_leg(
     )
 
 
+def test_fresh_negative_edge_mints_exit_intent_before_execution():
+    """Fresh causal q plus held bid produces an explicit, all-share exit intent."""
+    from src.execution.exit_lifecycle import build_exit_intent
+
+    pos = _make_position(
+        trade_id="fresh-negative-edge",
+        direction="buy_no",
+        entry_price=0.34,
+        shares=5.2,
+        cost_basis_usd=1.768,
+    )
+    context = ExitContext(
+        fresh_prob=0.0,
+        fresh_prob_is_fresh=True,
+        current_market_price=0.08,
+        current_market_price_is_fresh=True,
+        best_bid=0.08,
+        best_ask=0.11,
+        hours_to_settlement=10.0,
+        position_state="day0_window",
+        day0_active=True,
+        day0_exit_authority_status="mature",
+        day0_exit_authority_reason="test_mature_negative_edge",
+        entry_posterior=0.999999999,
+        entry_ci=(0.93, 1.0),
+        current_ci=(0.0, 0.0),
+    )
+
+    decision = pos.evaluate_exit(context)
+    assert decision.should_exit is True
+    intent = build_exit_intent(
+        pos,
+        replace(context, exit_reason=decision.reason),
+    )
+    assert intent.trade_id == pos.trade_id
+    assert intent.token_id == pos.no_token_id
+    assert intent.shares == pytest.approx(pos.effective_shares)
+    assert intent.best_bid == pytest.approx(0.08)
+
+
 @pytest.mark.parametrize("direction", ["buy_yes", "buy_no"])
 def test_day0_low_price_high_expected_value_remains_a_hold(direction):
     """Low price alone cannot liquidate a fresh high-value held claim."""
@@ -20158,6 +20519,73 @@ def test_monitor_degraded_attempt_is_not_an_economic_hold_decision():
     assert payload["exit_decision_trigger"] == "MONITOR_INPUTS_UNAVAILABLE"
 
 
+def test_monitor_deadline_preserves_current_axes_without_decision_authority(monkeypatch):
+    """A completed refresh remains observable even when decision time expires."""
+    from src.engine import cycle_runtime
+
+    position = _make_position(trade_id="monitor-deadline-current-axes")
+    position.last_monitor_prob = 0.91
+    position.last_monitor_prob_is_fresh = True
+    position.last_monitor_edge = 0.41
+    position.last_monitor_market_price = 0.50
+    position.last_monitor_market_price_is_fresh = True
+    emitted = []
+    results = []
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_emit_monitor_refreshed_canonical_if_available",
+        lambda *_args, **kwargs: emitted.append(kwargs) or True,
+    )
+    artifact = type(
+        "Artifact",
+        (),
+        {"add_monitor_result": lambda self, result: results.append(result)},
+    )()
+    summary = {"monitors": 0}
+
+    assert cycle_runtime._record_monitor_data_degraded_attempt(
+        None,
+        position,
+        artifact=artifact,
+        deps=_monitor_test_deps("test_monitor_deadline_current_axes"),
+        summary=summary,
+        stage="refresh_deadline",
+        preserve_current_attempt_axes=True,
+    ) is True
+
+    assert position.last_monitor_prob_is_fresh is True
+    assert position.last_monitor_market_price_is_fresh is True
+    assert position.last_monitor_edge is None
+    assert results[0].fresh_prob == pytest.approx(0.91)
+    assert results[0].fresh_edge is None
+    assert emitted[0]["decision_unavailable_reason"] == (
+        "MONITOR_INPUTS_UNAVAILABLE:REFRESH_DEADLINE"
+    )
+    assert summary["monitors"] == 1
+
+
+def test_monitor_cadence_rejects_fresh_axes_without_completed_decision():
+    """Fresh q/book cannot turn a deadline event into a completed redecision."""
+    from src.ops.monitor_cadence import _monitor_event_fresh_input_issue
+
+    payload = {
+        "last_monitor_prob": 0.91,
+        "last_monitor_prob_is_fresh": True,
+        "last_monitor_market_price": 0.50,
+        "last_monitor_market_price_is_fresh": True,
+        "exit_decision_available": False,
+    }
+    event = {"payload_json": json.dumps(payload)}
+
+    assert _monitor_event_fresh_input_issue(event) == (
+        "monitor_exit_decision_unavailable"
+    )
+    payload["last_monitor_market_price"] = None
+    payload["last_monitor_market_price_is_fresh"] = False
+    event["payload_json"] = json.dumps(payload)
+    assert _monitor_event_fresh_input_issue(event) == "monitor_clob_stale"
+
+
 def test_incomplete_exit_context_is_not_persisted_as_economic_hold(monkeypatch):
     from src.engine import cycle_runtime
 
@@ -20299,6 +20727,76 @@ def test_quote_incomplete_exit_preserves_current_probability_axis(monkeypatch):
     assert summary["monitor_incomplete_exit_context"] == 1
     assert summary["monitors"] == 1
     assert summary["held_monitor_no_action_authority_position_ids"] == [
+        position.trade_id
+    ]
+
+
+def test_quote_incomplete_current_dust_is_scoped_from_full_book_debt(monkeypatch):
+    """Current-proven dust remains no-action without poisoning sibling cadence."""
+    from src.engine import cycle_runtime
+    from src.execution import exit_lifecycle
+
+    position = _make_position(
+        trade_id="monitor-quote-incomplete-current-dust",
+        state="pending_exit",
+        chain_state="synced",
+        shares=0.002221,
+        chain_shares=0.002221,
+        exit_state="backoff_exhausted",
+        order_status="backoff_exhausted",
+    )
+    emitted = []
+
+    def refresh(*_args):
+        context = _monitor_test_edge_context(position)
+        position.last_monitor_market_price_is_fresh = False
+        position.last_monitor_best_bid = None
+        return context
+
+    monkeypatch.setattr("src.engine.monitor_refresh.refresh_position", refresh)
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "_is_non_executable_dust_hold",
+        lambda *_args, **_kwargs: True,
+    )
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "release_backoff_exhausted_pending_exit_for_redecision",
+        lambda *_args, **_kwargs: False,
+    )
+    monkeypatch.setattr(
+        Position,
+        "evaluate_exit",
+        lambda *_args, **_kwargs: ExitDecision(
+            False,
+            "EVIDENCE_UNAVAILABLE",
+            trigger="EVIDENCE_UNAVAILABLE",
+            applied_validations=["evidence_unavailable_third_state"],
+        ),
+    )
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_emit_monitor_refreshed_canonical_if_available",
+        lambda *_args, **kwargs: emitted.append(kwargs) or True,
+    )
+    summary = {"monitors": 0, "exits": 0}
+
+    cycle_runtime.execute_monitoring_phase(
+        None,
+        object(),
+        _make_portfolio(position),
+        _monitor_test_artifact(),
+        _monitor_test_tracker(),
+        summary,
+        deps=_monitor_test_deps("test_quote_incomplete_current_dust"),
+        run_exit_preflight=False,
+    )
+
+    assert len(emitted) == 1
+    assert summary["held_monitor_no_action_authority_position_ids"] == [
+        position.trade_id
+    ]
+    assert summary["held_monitor_non_executable_dust_position_ids"] == [
         position.trade_id
     ]
 
@@ -21490,6 +21988,7 @@ def test_exit_monitor_db_bootstrap_uses_preparation_cutoff(monkeypatch):
 
     observed_deadlines = []
     completed = []
+    outcomes = []
     active = threading.Event()
     monkeypatch.setattr(exit_lifecycle._time_module, "monotonic", lambda: 10.0)
     monkeypatch.setattr(riskguard, "get_current_level", lambda: RiskLevel.GREEN)
@@ -21508,12 +22007,502 @@ def test_exit_monitor_db_bootstrap_uses_preparation_cutoff(monkeypatch):
             completed.append(True),
         ),
         monitor_deadline_monotonic=85.0,
+        failure_outcome_sink=outcomes.append,
     )
 
     assert result is False
     assert observed_deadlines == [pytest.approx(15.0)]
     assert completed == [True]
     assert not active.is_set()
+    assert outcomes == ["DB_CONTENDED"]
+
+
+def test_periodic_monitor_claim_never_crosses_scheduler_quantum(monkeypatch):
+    """A slow full-book tranche yields before APScheduler can skip its successor."""
+    from src import main
+    from src.engine import cycle_runtime
+
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_held_position_monitor_budget_seconds",
+        lambda: 75.0,
+    )
+
+    periodic_budget = main._held_position_monitor_claim_budget_seconds(
+        periodic_full_book=True,
+    )
+    assert periodic_budget == pytest.approx(
+        main.HELD_POSITION_MONITOR_RECOVERY_INTERVAL_SECONDS
+        - main.HELD_POSITION_MONITOR_CLAIM_QUANTUM_GUARD_SECONDS
+    )
+    assert main._held_position_monitor_claim_budget_seconds(
+        periodic_full_book=False,
+    ) == pytest.approx(75.0)
+
+
+def test_periodic_monitor_deadline_releases_claim_for_successor(monkeypatch):
+    """A full-book boundary return cannot turn the successor tick into a skip."""
+    from src import main
+    from src.execution import exit_lifecycle
+    from src.riskguard import riskguard
+    from src.riskguard.risk_level import RiskLevel
+
+    clock = [100.0]
+    deadlines = []
+    releases = []
+
+    class Claim:
+        def release(self):
+            releases.append(clock[0])
+
+    class Reactor:
+        def acquire(self, *, timeout):
+            assert timeout > 0.0
+            return True
+
+        def release(self):
+            return None
+
+    def run_at_boundary(**kwargs):
+        deadline = kwargs["monitor_deadline_monotonic"]
+        deadlines.append(deadline)
+        assert deadline == pytest.approx(
+            clock[0]
+            + main.HELD_POSITION_MONITOR_RECOVERY_INTERVAL_SECONDS
+            - main.HELD_POSITION_MONITOR_CLAIM_QUANTUM_GUARD_SECONDS
+        )
+        clock[0] = deadline
+        kwargs["mark_held_position_monitor_complete"]()
+        return True
+
+    monkeypatch.setattr(main.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(main, "_held_position_monitor_claim", Claim())
+    monkeypatch.setattr(main, "_held_position_monitor_active", threading.Event())
+    monkeypatch.setattr(main, "_edli_reactor_active_lock", Reactor())
+    monkeypatch.setattr(
+        main,
+        "_acquire_held_monitor_claim",
+        lambda **_kwargs: (True, 0),
+    )
+    monkeypatch.setattr(main, "_current_periodic_monitor_obligation_count", lambda: 1)
+    monkeypatch.setattr(main, "_reserve_periodic_held_monitor_successor", lambda: 1)
+    monkeypatch.setattr(
+        main,
+        "_consume_periodic_held_monitor_successor",
+        lambda _g: None,
+    )
+    monkeypatch.setattr(main, "_urgent_held_monitor_preemption_pending", lambda: False)
+    monkeypatch.setattr(main, "_periodic_exit_monitor_should_yield", lambda _p: False)
+    monkeypatch.setattr(main, "_urgent_held_monitor_owner_pending", lambda: False)
+    monkeypatch.setattr(main, "_held_monitor_preempt_generation_now", lambda: 0)
+    monkeypatch.setattr(riskguard, "get_current_level", lambda: RiskLevel.GREEN)
+    monkeypatch.setattr(exit_lifecycle, "run_exit_monitor_cycle", run_at_boundary)
+
+    assert main._exit_monitor_cycle() is True
+    assert not main._held_position_monitor_active.is_set()
+    assert main._exit_monitor_cycle() is True
+    assert len(deadlines) == 2
+    assert len(releases) == 2
+
+
+def test_incomplete_full_book_persists_typed_outcome_before_artifact(monkeypatch):
+    """Canonical artifact and scheduler retry receive the same coverage failure."""
+    from contextlib import nullcontext
+    from types import SimpleNamespace
+
+    from src.engine import cycle_runner
+    from src.execution import exit_lifecycle
+    from src.riskguard import riskguard
+    from src.riskguard.risk_level import RiskLevel
+
+    conn = sqlite3.connect(":memory:")
+    active = threading.Event()
+    outcomes = []
+    persisted_summary = {}
+    pulse_payloads = []
+    portfolio = SimpleNamespace(
+        positions=[SimpleNamespace(trade_id="oldest-overdue")],
+        daily_baseline_total=0.0,
+        bankroll=0.0,
+    )
+
+    monkeypatch.setattr(riskguard, "get_current_level", lambda: RiskLevel.GREEN)
+    monkeypatch.setattr(cycle_runner, "get_connection", lambda **_kwargs: conn)
+    monkeypatch.setattr(cycle_runner, "load_portfolio", lambda **_kwargs: portfolio)
+    monkeypatch.setattr(cycle_runner, "get_tracker", lambda: object())
+    def incomplete_monitor(
+        _conn,
+        _clob,
+        _portfolio,
+        _artifact,
+        _tracker,
+        summary,
+        **_kwargs,
+    ):
+        summary.update(
+            held_monitor_candidate_position_ids=["oldest-overdue"],
+            held_monitor_canonical_position_ids=[],
+            held_monitor_discharged_position_ids=[],
+            held_monitor_no_action_authority_position_ids=[],
+            held_monitor_non_executable_dust_position_ids=[],
+        )
+        return False, False
+
+    monkeypatch.setattr(cycle_runner, "_execute_monitoring_phase", incomplete_monitor)
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "_refresh_global_allocator_for_held_position_monitor",
+        lambda *_args: {"configured": False},
+    )
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "_held_monitor_clob_client",
+        lambda: nullcontext(object()),
+    )
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "_persist_exit_monitor_artifact",
+        lambda _conn, _artifact, *, summary, deadline_monotonic: (
+            persisted_summary.update(summary) or True,
+            1,
+        ),
+    )
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "_schedule_exit_monitor_status_pulse",
+        lambda payload: pulse_payloads.append(dict(payload)),
+    )
+    monkeypatch.setattr(
+        "src.observability.scheduler_health._write_scheduler_health",
+        lambda *_args, **_kwargs: None,
+    )
+
+    assert exit_lifecycle.run_exit_monitor_cycle(
+        held_position_monitor_active=active,
+        mark_held_position_monitor_complete=active.clear,
+        monitor_deadline_monotonic=time.monotonic() + 30.0,
+        failure_outcome_sink=outcomes.append,
+    ) is False
+    assert persisted_summary["held_monitor_failure_outcome"] == "COVERAGE_INCOMPLETE"
+    assert pulse_payloads[-1]["held_monitor_failure_outcome"] == "COVERAGE_INCOMPLETE"
+    assert outcomes == ["COVERAGE_INCOMPLETE"]
+    assert not active.is_set()
+    conn.close()
+
+
+def test_artifact_retry_never_outlives_monitor_claim_deadline(monkeypatch):
+    """A late writer retry defers; it cannot consume the successor quantum."""
+    from src.execution import executor, exit_lifecycle
+    from src.state.write_coordinator import WriteLeaseTimeout
+
+    clock = [100.0]
+    attempts = []
+
+    class DeferredLease:
+        def __init__(self, deadline_ms, max_hold_ms):
+            attempts.append((deadline_ms, max_hold_ms))
+
+        def __enter__(self):
+            clock[0] += 0.25
+            raise WriteLeaseTimeout("database is busy")
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    monkeypatch.setattr(exit_lifecycle._time_module, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(
+        executor,
+        "_canonical_trade_write_lease",
+        lambda _conn, *, deadline_ms, max_hold_ms, **_kwargs: DeferredLease(
+            deadline_ms,
+            max_hold_ms,
+        ),
+    )
+
+    summary = {}
+    persisted, artifact_id = exit_lifecycle._persist_exit_monitor_artifact(
+        sqlite3.connect(":memory:"),
+        object(),
+        summary=summary,
+        deadline_monotonic=100.3,
+    )
+
+    assert persisted is False
+    assert artifact_id is None
+    assert attempts[0] == (250, 250)
+    assert 0 < attempts[1][0] <= 50
+    assert attempts[1][1] == attempts[1][0]
+    assert "database is busy" in summary["monitor_artifact_write_deferred"]
+
+
+def test_exit_monitor_releases_claim_before_slow_portfolio_export(monkeypatch):
+    """Advisory export cannot retain the sole monitor writer after DB commit."""
+    from contextlib import nullcontext
+    from types import SimpleNamespace
+
+    from src.engine import cycle_runner
+    from src.execution import exit_lifecycle
+    from src.riskguard import riskguard
+    from src.riskguard.risk_level import RiskLevel
+
+    conn = sqlite3.connect(":memory:")
+    active = threading.Event()
+    exports = []
+    portfolio = SimpleNamespace(
+        positions=[],
+        daily_baseline_total=0.0,
+        bankroll=0.0,
+    )
+
+    monkeypatch.setattr(riskguard, "get_current_level", lambda: RiskLevel.GREEN)
+    monkeypatch.setattr(cycle_runner, "get_connection", lambda **_kwargs: conn)
+    monkeypatch.setattr(cycle_runner, "load_portfolio", lambda **_kwargs: portfolio)
+    monkeypatch.setattr(cycle_runner, "get_tracker", lambda: object())
+    monkeypatch.setattr(
+        cycle_runner,
+        "_execute_monitoring_phase",
+        lambda *_args, **_kwargs: (True, False),
+    )
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "_refresh_global_allocator_for_held_position_monitor",
+        lambda *_args: {"configured": False},
+    )
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "_held_monitor_clob_client",
+        lambda: nullcontext(object()),
+    )
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "_persist_exit_monitor_artifact",
+        lambda *_args, **_kwargs: (True, 1),
+    )
+    monkeypatch.setattr(
+        cycle_runner,
+        "save_portfolio",
+        lambda *_args, **_kwargs: exports.append(active.is_set()),
+    )
+    monkeypatch.setattr(
+        "src.observability.status_summary.write_cycle_pulse",
+        lambda *_args: None,
+    )
+    monkeypatch.setattr(
+        "src.observability.scheduler_health._write_scheduler_health",
+        lambda *_args, **_kwargs: None,
+    )
+
+    assert exit_lifecycle.run_exit_monitor_cycle(
+        held_position_monitor_active=active,
+        mark_held_position_monitor_complete=active.clear,
+        monitor_deadline_monotonic=time.monotonic() + 30.0,
+    ) is True
+    assert exports == [False]
+    assert not active.is_set()
+
+
+def test_exit_monitor_returns_while_status_pulse_drain_is_blocked(monkeypatch):
+    """A slow derived status pulse cannot occupy the next monitor scheduler slot."""
+    from contextlib import nullcontext
+    from types import SimpleNamespace
+
+    from src.engine import cycle_runner
+    from src.execution import exit_lifecycle
+    from src.observability import scheduler_health, status_summary
+    from src.riskguard import riskguard
+    from src.riskguard.risk_level import RiskLevel
+
+    conn = sqlite3.connect(":memory:")
+    active = threading.Event()
+    pulse_started = threading.Event()
+    release_pulse = threading.Event()
+    pulse_finished = threading.Event()
+    portfolio = SimpleNamespace(
+        positions=[],
+        daily_baseline_total=0.0,
+        bankroll=0.0,
+    )
+
+    def blocked_pulse(_summary):
+        pulse_started.set()
+        assert release_pulse.wait(timeout=1.0)
+        pulse_finished.set()
+
+    monkeypatch.setattr(riskguard, "get_current_level", lambda: RiskLevel.GREEN)
+    monkeypatch.setattr(cycle_runner, "get_connection", lambda **_kwargs: conn)
+    monkeypatch.setattr(cycle_runner, "load_portfolio", lambda **_kwargs: portfolio)
+    monkeypatch.setattr(cycle_runner, "get_tracker", lambda: object())
+    monkeypatch.setattr(
+        cycle_runner,
+        "_execute_monitoring_phase",
+        lambda *_args, **_kwargs: (False, False),
+    )
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "_refresh_global_allocator_for_held_position_monitor",
+        lambda *_args: {"configured": False},
+    )
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "_held_monitor_clob_client",
+        lambda: nullcontext(object()),
+    )
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "_persist_exit_monitor_artifact",
+        lambda *_args, **_kwargs: (True, 1),
+    )
+    monkeypatch.setattr(status_summary, "write_cycle_pulse", blocked_pulse)
+    monkeypatch.setattr(
+        scheduler_health,
+        "_write_scheduler_health",
+        lambda *_args, **_kwargs: None,
+    )
+
+    try:
+        assert exit_lifecycle.run_exit_monitor_cycle(
+            held_position_monitor_active=active,
+            mark_held_position_monitor_complete=active.clear,
+            monitor_deadline_monotonic=time.monotonic() + 30.0,
+        ) is True
+        assert pulse_started.wait(timeout=1.0)
+        assert not active.is_set()
+    finally:
+        release_pulse.set()
+        assert pulse_finished.wait(timeout=1.0)
+        conn.close()
+
+
+def test_exit_monitor_status_pulse_start_failure_resets_for_retry(monkeypatch):
+    """A failed advisory-thread start cannot strand the coalescing marker."""
+    from src.execution import exit_lifecycle
+    from src.observability import status_summary
+
+    captured = []
+
+    class ConstructionFails:
+        def __init__(self, **_kwargs):
+            raise RuntimeError("thread construction refused")
+
+    class StartFails:
+        def __init__(self, **_kwargs):
+            pass
+
+        def start(self):
+            raise RuntimeError("thread start refused")
+
+    class InlineThread:
+        def __init__(self, *, target, **_kwargs):
+            self._target = target
+
+        def start(self):
+            self._target()
+
+    with exit_lifecycle._EXIT_MONITOR_STATUS_PULSE_LOCK:
+        assert not exit_lifecycle._EXIT_MONITOR_STATUS_PULSE_IN_FLIGHT
+        assert exit_lifecycle._EXIT_MONITOR_STATUS_PULSE_PENDING is None
+    monkeypatch.setattr(status_summary, "write_cycle_pulse", captured.append)
+    monkeypatch.setattr(exit_lifecycle.threading, "Thread", ConstructionFails)
+    exit_lifecycle._schedule_exit_monitor_status_pulse({"attempt": 0})
+
+    with exit_lifecycle._EXIT_MONITOR_STATUS_PULSE_LOCK:
+        assert not exit_lifecycle._EXIT_MONITOR_STATUS_PULSE_IN_FLIGHT
+        assert exit_lifecycle._EXIT_MONITOR_STATUS_PULSE_PENDING is None
+
+    monkeypatch.setattr(exit_lifecycle.threading, "Thread", StartFails)
+
+    exit_lifecycle._schedule_exit_monitor_status_pulse({"attempt": 1})
+
+    with exit_lifecycle._EXIT_MONITOR_STATUS_PULSE_LOCK:
+        assert not exit_lifecycle._EXIT_MONITOR_STATUS_PULSE_IN_FLIGHT
+        assert exit_lifecycle._EXIT_MONITOR_STATUS_PULSE_PENDING is None
+
+    monkeypatch.setattr(
+        status_summary,
+        "write_cycle_pulse",
+        lambda _payload: (_ for _ in ()).throw(SystemExit(7)),
+    )
+    monkeypatch.setattr(exit_lifecycle.threading, "Thread", InlineThread)
+    with pytest.raises(SystemExit):
+        exit_lifecycle._schedule_exit_monitor_status_pulse({"attempt": 3})
+    with exit_lifecycle._EXIT_MONITOR_STATUS_PULSE_LOCK:
+        assert not exit_lifecycle._EXIT_MONITOR_STATUS_PULSE_IN_FLIGHT
+        assert exit_lifecycle._EXIT_MONITOR_STATUS_PULSE_PENDING is None
+
+    monkeypatch.setattr(status_summary, "write_cycle_pulse", captured.append)
+    exit_lifecycle._schedule_exit_monitor_status_pulse({"attempt": 2})
+
+    assert captured == [{"attempt": 2}]
+    with exit_lifecycle._EXIT_MONITOR_STATUS_PULSE_LOCK:
+        assert not exit_lifecycle._EXIT_MONITOR_STATUS_PULSE_IN_FLIGHT
+        assert exit_lifecycle._EXIT_MONITOR_STATUS_PULSE_PENDING is None
+
+
+def test_exit_monitor_status_pulse_coalesces_concurrent_updates(monkeypatch):
+    """One blocked pulse drains only the latest subsequent monitor summary."""
+    from src.execution import exit_lifecycle
+    from src.observability import status_summary
+
+    started = threading.Event()
+    release_first = threading.Event()
+    delivered_latest = threading.Event()
+    payloads = []
+
+    def pulse(payload):
+        payloads.append(dict(payload))
+        if payload["generation"] == 1:
+            started.set()
+            assert release_first.wait(timeout=1.0)
+        elif payload["generation"] == 3:
+            delivered_latest.set()
+
+    with exit_lifecycle._EXIT_MONITOR_STATUS_PULSE_LOCK:
+        assert not exit_lifecycle._EXIT_MONITOR_STATUS_PULSE_IN_FLIGHT
+        assert exit_lifecycle._EXIT_MONITOR_STATUS_PULSE_PENDING is None
+    monkeypatch.setattr(status_summary, "write_cycle_pulse", pulse)
+
+    try:
+        exit_lifecycle._schedule_exit_monitor_status_pulse({"generation": 1})
+        assert started.wait(timeout=1.0)
+        exit_lifecycle._schedule_exit_monitor_status_pulse({"generation": 2})
+        exit_lifecycle._schedule_exit_monitor_status_pulse({"generation": 3})
+        release_first.set()
+        assert delivered_latest.wait(timeout=1.0)
+        for _ in range(100):
+            with exit_lifecycle._EXIT_MONITOR_STATUS_PULSE_LOCK:
+                if not exit_lifecycle._EXIT_MONITOR_STATUS_PULSE_IN_FLIGHT:
+                    break
+            time.sleep(0.01)
+        assert payloads == [{"generation": 1}, {"generation": 3}]
+    finally:
+        release_first.set()
+
+
+@pytest.mark.parametrize(
+    ("summary", "expected"),
+    [
+        (
+            {"held_monitor_failure_outcome": "REFRESH_DEADLINE"},
+            "REFRESH_DEADLINE",
+        ),
+        ({"monitoring_error": "database is locked"}, "DB_CONTENDED"),
+        (
+            {"monitoring_error": "ORDER_TRUTH_INCOMPLETE: snapshot deadline"},
+            "VENUE_SNAPSHOT_DEBT",
+        ),
+        (
+            {"monitoring_error": "FULL_BOOK_MONITOR_CANONICAL_COVERAGE_INCOMPLETE"},
+            "COVERAGE_INCOMPLETE",
+        ),
+        ({"monitoring_error": "database table is locked"}, "DB_CONTENDED"),
+        ({"monitoring_error": "database is busy"}, "DB_CONTENDED"),
+    ],
+)
+def test_exit_monitor_persists_typed_failure_outcome(summary, expected):
+    """Scheduler retries must retain the causal failure class, not generic bool."""
+    from src.execution import exit_lifecycle
+
+    assert exit_lifecycle._exit_monitor_failure_outcome(summary) == expected
 
 
 def test_exit_monitor_preparation_never_spends_claim_on_cadence_diagnosis(
@@ -21534,13 +22523,14 @@ def test_exit_monitor_preparation_never_spends_claim_on_cadence_diagnosis(
     active = threading.Event()
     completed = []
     watchdog_calls = []
+    monitor_kwargs = {}
     portfolio = SimpleNamespace(
         positions=[],
         daily_baseline_total=0.0,
         bankroll=0.0,
     )
 
-    monkeypatch.setattr(riskguard, "get_current_level", lambda: RiskLevel.GREEN)
+    monkeypatch.setattr(riskguard, "get_current_level", lambda: RiskLevel.RED)
     monkeypatch.setattr(
         cycle_runner,
         "get_connection",
@@ -21552,7 +22542,7 @@ def test_exit_monitor_preparation_never_spends_claim_on_cadence_diagnosis(
     monkeypatch.setattr(
         cycle_runner,
         "_execute_monitoring_phase",
-        lambda *_args, **_kwargs: (False, False),
+        lambda *_args, **kwargs: monitor_kwargs.update(kwargs) or (False, False),
     )
     monkeypatch.setattr(
         exit_lifecycle,
@@ -21591,6 +22581,7 @@ def test_exit_monitor_preparation_never_spends_claim_on_cadence_diagnosis(
     )
 
     assert result is True
+    assert monitor_kwargs["current_riskguard_red"] is True
     assert watchdog_calls == []
     assert completed == [True]
     assert not active.is_set()
@@ -22655,8 +23646,8 @@ def test_blocked_global_debt_lineage_preserves_eight_primary_refreshes(
     conn.close()
 
 
-def test_monitor_refresh_deadline_defers_before_canonical_emit(monkeypatch):
-    """A refresh that consumes its claim budget cannot append stale monitor truth."""
+def test_monitor_refresh_deadline_preserves_current_refresh_without_decision(monkeypatch):
+    """A completed refresh survives its decision deadline but cannot authorize action."""
     from src.engine import cycle_runtime
 
     position = _make_position(
@@ -22666,6 +23657,7 @@ def test_monitor_refresh_deadline_defers_before_canonical_emit(monkeypatch):
     )
     clock = [0.0]
     canonical_emits = []
+    results = []
     monkeypatch.setattr(cycle_runtime.time, "monotonic", lambda: clock[0])
     monkeypatch.setattr(
         cycle_runtime,
@@ -22681,7 +23673,7 @@ def test_monitor_refresh_deadline_defers_before_canonical_emit(monkeypatch):
     monkeypatch.setattr(
         cycle_runtime,
         "_emit_monitor_refreshed_canonical_if_available",
-        lambda *_args, **_kwargs: canonical_emits.append(True),
+        lambda *_args, **kwargs: canonical_emits.append(kwargs) or True,
     )
     monkeypatch.setattr(
         Position,
@@ -22694,7 +23686,11 @@ def test_monitor_refresh_deadline_defers_before_canonical_emit(monkeypatch):
         None,
         object(),
         _make_portfolio(position),
-        _monitor_test_artifact(),
+        type(
+            "Artifact",
+            (),
+            {"add_monitor_result": lambda self, result: results.append(result)},
+        )(),
         _monitor_test_tracker(),
         summary,
         deps=_monitor_test_deps("refresh_deadline_before_canonical_emit"),
@@ -22702,9 +23698,16 @@ def test_monitor_refresh_deadline_defers_before_canonical_emit(monkeypatch):
         held_position_monitor_budget_seconds=6.0,
     )
 
-    assert canonical_emits == [True]
-    assert summary["monitor_canonical_write_failed"] == 1
-    assert summary["monitors"] == 0
+    assert len(canonical_emits) == 1
+    assert canonical_emits[0]["decision_unavailable_reason"] == (
+        "MONITOR_INPUTS_UNAVAILABLE:REFRESH_DEADLINE"
+    )
+    assert position.last_monitor_prob_is_fresh is True
+    assert position.last_monitor_market_price_is_fresh is True
+    assert position.last_monitor_edge is None
+    assert results[0].fresh_prob == pytest.approx(0.61)
+    assert results[0].fresh_edge is None
+    assert summary["monitors"] == 1
     assert summary["held_monitor_defer_reason"] == "MONITOR_DEADLINE_EXPIRED_AFTER_REFRESH"
     assert summary["held_monitor_deadline_deferred_positions"] == 1
     assert summary["held_monitor_primary_belief_deferred_position_ids"] == [

@@ -1,6 +1,6 @@
 # Created: 2026-03-30
-# Last reused/audited: 2026-08-10
-# Lifecycle: created=2026-03-30; last_reviewed=2026-08-10; last_reused=2026-08-10
+# Last reused/audited: 2026-08-21
+# Lifecycle: created=2026-03-30; last_reviewed=2026-08-21; last_reused=2026-08-21
 # Purpose: Protect DB schema bootstrap contracts, daily revision-history DDL, and fact-smoke authority labels.
 # Reuse: Audit touched schema assertions and high-sensitivity skip metadata before closeout.
 # Authority basis: P2 4.4.A2 daily observation revision-history schema packet; Wave16 object-meaning fact-smoke authority repair; PR90 latest-event env authority review fix; 2026-05-16 live-continuous Phase B event-status boundary; 2026-07-09 portfolio-loader event-spine read indexes.
@@ -3771,6 +3771,45 @@ def test_log_exit_attempt_clears_stale_nonfinal_exit_fill_telemetry(tmp_path):
     assert fact["venue_status"] == "placed"
     assert fact["terminal_exec_status"] == "placed"
     assert summary["execution"]["avg_fill_quality"] is None
+
+
+def test_exit_execution_facts_are_command_scoped_and_append_only(tmp_path):
+    from src.state.db import log_execution_fact
+
+    db_path = tmp_path / "test.db"
+    conn = get_connection(db_path)
+    init_schema(conn)
+    _create_execution_fact_table(conn)
+
+    for command_id, price in (("exit-command-1", 0.61), ("exit-command-2", 0.73)):
+        log_execution_fact(
+            conn,
+            intent_id="atomic-exit:exit",
+            position_id="atomic-exit",
+            command_id=command_id,
+            order_role="exit",
+            filled_at=f"2026-08-21T00:00:0{1 if price < 0.7 else 2}+00:00",
+            fill_price=price,
+            shares=5.0,
+            venue_status="FILLED",
+            terminal_exec_status="filled",
+        )
+    conn.commit()
+
+    rows = conn.execute(
+        """
+        SELECT intent_id, command_id, fill_price
+          FROM execution_fact
+         WHERE position_id = 'atomic-exit' AND order_role = 'exit'
+         ORDER BY command_id
+        """
+    ).fetchall()
+    conn.close()
+
+    assert [tuple(row) for row in rows] == [
+        ("atomic-exit:exit:exit-command-1", "exit-command-1", 0.61),
+        ("atomic-exit:exit:exit-command-2", "exit-command-2", 0.73),
+    ]
 
 
 def test_log_execution_report_clears_stale_missing_status_fill_authority(tmp_path):

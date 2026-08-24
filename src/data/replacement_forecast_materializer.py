@@ -36,6 +36,7 @@ from src.data.replacement_forecast_cycle_policy import (
     STALE_ENSEMBLE_ABSOLUTE_DISAGREEMENT_SEMANTICS_REVISION,
     TRADEABLE_GRADE_QLCB_BASIS,
     classify_cycle_phase,
+    current_evidence_shape_has_entry_authority,
     cycle_age_outside_bound,
     replacement_source_cycle_max_age_hours,
 )
@@ -96,6 +97,9 @@ REPLACEMENT_CAPTURE_STATUS_FULL_CURRENT = "FULL_CURRENT"
 REPLACEMENT_CAPTURE_STATUS_PARTIAL_CURRENT = "PARTIAL_CURRENT"
 REPLACEMENT_CAPTURE_STATUS_STALE_HISTORY_ONLY = "STALE_HISTORY_ONLY"
 REPLACEMENT_CAPTURE_STATUS_DB_READ_ERROR = "DB_READ_ERROR"
+REPLACEMENT_CAPTURE_STATUS_CURRENT_EVIDENCE_NOT_LIVE = (
+    "CURRENT_EVIDENCE_NOT_LIVE"
+)
 REPLACEMENT_LIVE_POSTERIOR_REQUIREMENTS_NOT_MET = "REPLACEMENT_LIVE_POSTERIOR_REQUIREMENTS_NOT_MET"
 STALE_DAY0_ENQUEUE_OWNER = "STALE_DAY0_ENQUEUE_OWNER"
 
@@ -496,6 +500,25 @@ def _ensure_replacement_frontier_indexes(conn: sqlite3.Connection) -> None:
         raise RuntimeError(
             "REPLACEMENT_FRONTIER_INDEX_BOOTSTRAP_REQUIRES_AUTOCOMMIT"
         )
+    existing_indexes = {
+        str(row[0])
+        for row in conn.execute(
+            """
+            SELECT name
+              FROM sqlite_master
+             WHERE type = 'index'
+               AND name IN (
+                    'idx_forecast_posteriors_source_family_frontier',
+                    'idx_raw_model_forecasts_target_model_frontier',
+                    'idx_raw_model_forecasts_target_frontier',
+                    'idx_ensemble_snapshots_replacement_exact_frontier',
+                    'idx_ensemble_snapshots_replacement_casefold_frontier'
+               )
+            """
+        ).fetchall()
+    }
+    if len(existing_indexes) == 5:
+        return
     posterior_columns = _table_columns(conn, "forecast_posteriors")
     if {
         "source_id",
@@ -1185,6 +1208,264 @@ def _day0_remaining_center_delta_c(
         return max(0.0, float(delta)), vector_id, hours_remaining
     except Exception:
         return 0.0, None, None
+
+
+def _day0_remaining_vector_witness(
+    conn: sqlite3.Connection,
+    request: ReplacementForecastMaterializeRequest,
+    *,
+    metric: str,
+    computed_at_utc: datetime,
+    anchor_vector_id: str | None,
+) -> dict[str, object] | None:
+    """Persist the exact source witness consumed by the remaining-day path.
+
+    The posterior stores q, but the held post-local reader also needs proof of
+    which complete hourly-vector bundle supplied that q.  Re-read the existing
+    canonical vector selector at the materialization cut; never infer model
+    identity from q or from the market.  Any incomplete/mixed/future bundle is
+    intentionally returned as unavailable so the monitor remains fail-closed.
+    """
+    if not anchor_vector_id or not _target_local_day_has_started(
+        request, computed_at=computed_at_utc
+    ):
+        return None
+    observation_time = _day0_observed_extreme_time(request)
+    if observation_time is None or observation_time > computed_at_utc:
+        return None
+    try:
+        from src.config import runtime_cities_by_name
+        from src.data.day0_hourly_vectors import (
+            DAY0_HOURLY_BUNDLE_MAX_SKEW_MINUTES,
+            day0_hourly_models_for_city,
+            read_freshest_day0_hourly_vectors,
+        )
+
+        city = runtime_cities_by_name().get(request.city)
+        if city is None:
+            return None
+        expected_models = tuple(
+            str(model).strip()
+            for model in day0_hourly_models_for_city(city)
+            if str(model).strip()
+        )
+        if not expected_models:
+            return None
+        vectors = read_freshest_day0_hourly_vectors(
+            city=request.city,
+            target_date=_date_text(request.target_date),
+            now=computed_at_utc,
+            expected_models=expected_models,
+            require_expected=True,
+            max_bundle_skew_minutes=DAY0_HOURLY_BUNDLE_MAX_SKEW_MINUTES,
+            remaining_window_start=observation_time,
+            require_complete_remaining_window=True,
+            conn=conn,
+        )
+        actual_models = tuple(str(vector.model).strip() for vector in vectors)
+        if (
+            not vectors
+            or set(actual_models) != set(expected_models)
+            or len(actual_models) != len(set(actual_models))
+        ):
+            return None
+        target_end = compute_target_local_day_window_utc(
+            city_timezone=request.city_timezone,
+            target_local_date=date.fromisoformat(_date_text(request.target_date)),
+        ).end_utc
+        capture_times: list[str] = []
+        capture_times_by_model: dict[str, str] = {}
+        fetch_started_times_by_model: dict[str, str] = {}
+        fetch_finished_times_by_model: dict[str, str] = {}
+        provider_run_ids: dict[str, str] = {}
+        model_api_ids: dict[str, str] = {}
+        provider_cycles: dict[str, str] = {}
+        provider_available_times: dict[str, str] = {}
+        provider_modified_times: dict[str, str] = {}
+        source_run_authorities: dict[str, str] = {}
+        endpoint_modes: dict[str, str] = {}
+        vector_ids: dict[str, str] = {}
+        providers: dict[str, str] = {}
+        endpoints: dict[str, str] = {}
+        request_hashes: dict[str, str] = {}
+        source_run_ids: dict[str, str] = {}
+        from src.data.bayes_precision_fusion_capture import OPENMETEO_MODEL_IDS
+        from src.data.openmeteo_ecmwf_ifs9_anchor import (
+            SINGLE_RUNS_FORECAST_URL,
+            STANDARD_FORECAST_URL,
+        )
+        for vector in vectors:
+            captured = _to_utc(vector.captured_at, field_name="day0_vector.captured_at")
+            if captured > computed_at_utc:
+                return None
+            row = conn.execute(
+                """
+                SELECT vector_id, provider, endpoint, request_hash,
+                       source_run_meta_json
+                  FROM day0_hourly_vectors
+                 WHERE model = ? AND city = ? AND target_date = ?
+                   AND captured_at = ?
+                 LIMIT 1
+                """,
+                (
+                    str(vector.model),
+                    request.city,
+                    _date_text(request.target_date),
+                    str(vector.captured_at),
+                ),
+            ).fetchone()
+            if row is None or not str(row[0] or "").strip():
+                return None
+            model = str(vector.model).strip()
+            provider = str(row[1] or "").strip()
+            endpoint = str(row[2] or "").strip()
+            request_hash = str(row[3] or "").strip()
+            try:
+                source_meta = json.loads(str(row[4] or ""))
+                if not isinstance(source_meta, Mapping):
+                    return None
+                fetch_started = _to_utc(
+                    source_meta["fetch_started_at"],
+                    field_name="day0_vector.fetch_started_at",
+                )
+                fetch_finished = _to_utc(
+                    source_meta["fetch_finished_at"],
+                    field_name="day0_vector.fetch_finished_at",
+                )
+                provider_cycle = _to_utc(
+                    source_meta["provider_source_cycle_time_utc"],
+                    field_name="day0_vector.provider_source_cycle_time_utc",
+                )
+                provider_available = _to_utc(
+                    source_meta["provider_source_available_at_utc"],
+                    field_name="day0_vector.provider_source_available_at_utc",
+                )
+                provider_modified = _to_utc(
+                    source_meta["provider_source_modified_at_utc"],
+                    field_name="day0_vector.provider_source_modified_at_utc",
+                )
+            except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+                return None
+            source_run_id = str(source_meta.get("source_run_id") or "").strip()
+            expected_source_run_id = f"day0_hourly:{request_hash}"
+            model_api_id = str(source_meta.get("model_api_id") or "").strip()
+            provider_run_id = str(source_meta.get("provider_run_id") or "").strip()
+            source_run_authority = str(source_meta.get("source_run_authority") or "").strip()
+            endpoint_mode = str(source_meta.get("endpoint_mode") or "").strip()
+            expected_provider_run_id = (
+                f"openmeteo:{model_api_id}:{provider_cycle.isoformat()}"
+            )
+            canonical_model_api_id = str(
+                OPENMETEO_MODEL_IDS.get(model, model)
+            ).strip()
+            expected_endpoint_mode = {
+                "run_pinned_single_runs": "single_runs",
+                "provider_meta_declared": "standard_meta_stamped",
+            }.get(source_run_authority)
+            expected_endpoint = {
+                "single_runs": SINGLE_RUNS_FORECAST_URL,
+                "standard_meta_stamped": STANDARD_FORECAST_URL,
+            }.get(endpoint_mode)
+            if (
+                not provider
+                or not endpoint
+                or not request_hash
+                or not source_run_id
+                or not model_api_id
+                or not provider_run_id
+                or not source_run_authority
+                or not endpoint_mode
+                or str(source_meta.get("provider") or "").strip() != provider
+                or provider != "openmeteo"
+                or str(source_meta.get("endpoint") or "").strip() != endpoint
+                or str(source_meta.get("request_hash") or "").strip() != request_hash
+                or source_run_id != expected_source_run_id
+                or source_run_authority
+                not in {"run_pinned_single_runs", "provider_meta_declared"}
+                or endpoint_mode
+                not in {"single_runs", "standard_meta_stamped"}
+                or model_api_id != canonical_model_api_id
+                or expected_endpoint_mode != endpoint_mode
+                or expected_endpoint != endpoint
+                or provider_run_id != expected_provider_run_id
+                or provider_cycle > provider_available
+                or provider_available > fetch_finished
+                or provider_modified > fetch_finished
+                or captured > fetch_started
+                or fetch_started > fetch_finished
+                or fetch_finished < captured
+                or fetch_finished > computed_at_utc
+                or provider_cycle > computed_at_utc
+                or provider_available > computed_at_utc
+                or provider_modified > computed_at_utc
+            ):
+                return None
+            vector_ids[model] = str(row[0]).strip()
+            capture_iso = captured.isoformat()
+            capture_times.append(capture_iso)
+            capture_times_by_model[model] = capture_iso
+            fetch_started_times_by_model[model] = fetch_started.isoformat()
+            fetch_finished_times_by_model[model] = fetch_finished.isoformat()
+            providers[model] = provider
+            endpoints[model] = endpoint
+            request_hashes[model] = request_hash
+            source_run_ids[model] = source_run_id
+            provider_run_ids[model] = provider_run_id
+            model_api_ids[model] = model_api_id
+            provider_cycles[model] = provider_cycle.isoformat()
+            provider_available_times[model] = provider_available.isoformat()
+            provider_modified_times[model] = provider_modified.isoformat()
+            source_run_authorities[model] = source_run_authority
+            endpoint_modes[model] = endpoint_mode
+        anchor_row = conn.execute(
+            "SELECT model FROM day0_hourly_vectors WHERE vector_id = ? LIMIT 1",
+            (str(anchor_vector_id),),
+        ).fetchone()
+        if (
+            anchor_row is None
+            or str(anchor_row[0] or "").strip() not in vector_ids
+            or vector_ids[str(anchor_row[0]).strip()] != str(anchor_vector_id)
+        ):
+            return None
+        carrier_cycle = provider_cycles.get("ecmwf_ifs")
+        if not carrier_cycle:
+            return None
+        source_cycle = max(capture_times)
+        source_available_at = max(fetch_finished_times_by_model.values())
+        return {
+            "vector_id": str(anchor_vector_id),
+            "vector_ids_by_model": vector_ids,
+            "expected_models": list(expected_models),
+            "actual_models": list(actual_models),
+            "capture_times_utc": capture_times,
+            "capture_times_by_model_utc": capture_times_by_model,
+            "fetch_started_times_by_model_utc": fetch_started_times_by_model,
+            "fetch_finished_times_by_model_utc": fetch_finished_times_by_model,
+            "provider_by_model": providers,
+            "endpoint_by_model": endpoints,
+            "request_hash_by_model": request_hashes,
+            "source_run_id_by_model": source_run_ids,
+            "provider_run_id_by_model": provider_run_ids,
+            "model_api_id_by_model": model_api_ids,
+            "provider_source_cycle_time_by_model_utc": provider_cycles,
+            "provider_source_available_at_by_model_utc": provider_available_times,
+            "provider_source_modified_at_by_model_utc": provider_modified_times,
+            "source_run_authority_by_model": source_run_authorities,
+            "endpoint_mode_by_model": endpoint_modes,
+            # The qkernel carrier is the explicit ECMWF IFS provider run.  Other
+            # model clocks remain first-class per-model witness fields above.
+            "provider_source_cycle_time_utc": carrier_cycle,
+            # Local request/capture clock, not a provider-issued forecast cycle.
+            "local_capture_clock_utc": source_cycle,
+            "source_available_at_utc": source_available_at,
+            "causal_as_of_utc": computed_at_utc.isoformat(),
+            "target_end_utc": target_end.isoformat(),
+            "metric": str(metric).strip().lower(),
+            "city": request.city,
+            "target_date": _date_text(request.target_date),
+        }
+    except Exception:
+        return None
 
 
 def _day0_observed_extreme_time(request: ReplacementForecastMaterializeRequest) -> datetime | None:
@@ -2226,8 +2507,9 @@ class _CurrentEvidenceShape:
     center_sigma_c: float
     shape_hash: str
     # Stale-shape provenance: shape_lag_hours is carrier_cycle_time -
-    # source_cycle_time in hours. A bounded older shape may be reused, but its
-    # raw members remain finite evidence and are never translated.
+    # source_cycle_time in hours. A bounded older shape may be constructed for
+    # offline evidence, but cannot be published as live probability authority;
+    # its raw members remain finite evidence and are never translated.
     # ens_center_delta_raw_c is the signed mu_t - member_mean witness.
     shape_lag_hours: float
     translation_applied: bool
@@ -2614,18 +2896,19 @@ def _current_evidence_snapshot_row(
         carrier_cycle_dt
         - timedelta(hours=replacement_source_cycle_max_age_hours())
     ).isoformat()
-    params = (
+    params: tuple[object, ...] = (
         request.city,
         _date_text(request.target_date),
         metric,
         carrier_cycle,
         min_evidence_cycle,
         decision_at,
+        decision_at,
     )
-    query = """
+    query = f"""
         SELECT {select_sql}
-          FROM ensemble_snapshots
-         WHERE {city_predicate}
+          FROM ensemble_snapshots AS ensemble_snapshot
+         WHERE {{city_predicate}}
            AND target_date = ?
            AND temperature_metric = ?
            AND source_id = 'ecmwf_open_data'
@@ -2638,6 +2921,20 @@ def _current_evidence_snapshot_row(
            AND COALESCE(source_cycle_time, issue_time) <= ?
            AND COALESCE(source_cycle_time, issue_time) >= ?
            AND COALESCE(source_available_at, available_at) <= ?
+           AND EXISTS (
+               SELECT 1
+                 FROM source_run AS source_run
+                WHERE source_run.source_run_id = ensemble_snapshot.source_run_id
+                  AND source_run.status = 'SUCCESS'
+                  AND source_run.completeness_status = 'COMPLETE'
+                  AND source_run.partial_run = 0
+                  AND datetime(COALESCE(
+                          source_run.imported_at,
+                          source_run.fetch_finished_at,
+                          source_run.captured_at,
+                          source_run.source_available_at
+                      )) <= datetime(?)
+           )
          ORDER BY COALESCE(source_cycle_time, issue_time) DESC,
                   COALESCE(source_available_at, available_at) DESC,
                   snapshot_id DESC
@@ -2769,6 +3066,19 @@ def _read_current_evidence_shape(
         )
     except (json.JSONDecodeError, sqlite3.Error, TypeError, ValueError):
         return None
+
+
+def _fusion_current_evidence_shape_has_live_authority(
+    fusion: object,
+) -> bool:
+    """Apply the shared live shape law at the producer commit boundary."""
+
+    shape = getattr(fusion, "current_evidence_shape", None)
+    if not isinstance(shape, Mapping):
+        return False
+    return current_evidence_shape_has_entry_authority(
+        {"bayes_precision_fusion": {"current_evidence_shape": shape}}
+    )
 
 
 def served_predictive_sigma_c(sigma_realized_c: float, *, floor_c: float = 1.0) -> float:
@@ -5312,6 +5622,7 @@ def _compute_posterior_payload(
     _day0_center_delta_c: float = 0.0
     _day0_center_vector_id: str | None = None
     _day0_center_hours_remaining: float | None = None
+    _day0_remaining_witness: dict[str, object] | None = None
     _fast_residual_likelihood: object | None = None
     _fast_residual_likelihood_payload: dict[str, object] | None = None
     if (
@@ -5459,6 +5770,43 @@ def _compute_posterior_payload(
                         _mu_anchor -= _day0_center_delta_c
                     else:
                         _mu_anchor += _day0_center_delta_c
+                _day0_remaining_witness = _day0_remaining_vector_witness(
+                    conn,
+                    request,
+                    metric=metric,
+                    computed_at_utc=_to_utc(
+                        request.computed_at,
+                        field_name="computed_at",
+                    ),
+                    anchor_vector_id=_day0_center_vector_id,
+                )
+            elif _provisional_extreme_c is not None:
+                # Provisional observations do not license the center correction,
+                # but the same canonical vector identity is still required to
+                # reconstruct a held post-local q.
+                (
+                    _unused_delta,
+                    _day0_center_vector_id,
+                    _day0_center_hours_remaining,
+                ) = _day0_remaining_center_delta_c(
+                    conn,
+                    request,
+                    metric=metric,
+                    computed_at_utc=_to_utc(
+                        request.computed_at,
+                        field_name="computed_at",
+                    ),
+                )
+                _day0_remaining_witness = _day0_remaining_vector_witness(
+                    conn,
+                    request,
+                    metric=metric,
+                    computed_at_utc=_to_utc(
+                        request.computed_at,
+                        field_name="computed_at",
+                    ),
+                    anchor_vector_id=_day0_center_vector_id,
+                )
             # The settlement σ-floor (city|season|metric) lookup is IMPURE (config + season) and is read
             # ONCE here, then threaded into the pure q builder for BOTH the global and the city carriers
             # (same physical dispersion). It sets the floor provenance fields exactly as before.
@@ -5920,8 +6268,13 @@ def _compute_posterior_payload(
     # DB_READ_ERROR is reserved for an explicit DB read failure surfaced by the capture reader; the
     # override layer is fail-soft (returns None) so at this seam an absent override reads as
     # STALE_HISTORY_ONLY (the live gate rejects it via BAYES_PRECISION_FUSION_CAPTURE_MISSING regardless).
+    current_shape_live = _fusion_current_evidence_shape_has_live_authority(
+        bayes_precision_fusion_override
+    )
     if bayes_precision_fusion_override is None:
         capture_status = REPLACEMENT_CAPTURE_STATUS_STALE_HISTORY_ONLY
+    elif not current_shape_live:
+        capture_status = REPLACEMENT_CAPTURE_STATUS_CURRENT_EVIDENCE_NOT_LIVE
     elif bayes_precision_fusion_override.decorrelated_providers_complete:
         capture_status = REPLACEMENT_CAPTURE_STATUS_FULL_CURRENT
     else:
@@ -5929,7 +6282,7 @@ def _compute_posterior_payload(
     # CYCLE-PHASE PROVENANCE. 00/06/12/18Z are live runtime cycles; this tag is provenance only,
     # never a live/experiment switch.
     cycle_phase = classify_cycle_phase(_to_utc(request.source_cycle_time, field_name="source_cycle_time"))
-    live_layer = _replacement_is_live_layer(
+    live_layer = current_shape_live and _replacement_is_live_layer(
         replacement_q_mode=replacement_q_mode,
         q_lcb_map=q_lcb_map,
         q_ucb_map=q_ucb_map,
@@ -6156,6 +6509,10 @@ def _compute_posterior_payload(
             provenance_payload["day0_remaining_center_delta_c"] = float(_day0_center_delta_c)
             provenance_payload["day0_remaining_vector_id"] = _day0_center_vector_id
             provenance_payload["day0_remaining_hours"] = _day0_center_hours_remaining
+        if _day0_remaining_witness is not None:
+            provenance_payload["day0_remaining_vector_witness"] = (
+                _day0_remaining_witness
+            )
     elif _posterior_day0_provisional_extreme_c is not None:
         provenance_payload["day0_provisional_observation"] = {
             "active": True,
@@ -6185,6 +6542,10 @@ def _compute_posterior_payload(
                 provenance_payload["day0_remaining_hours"] = (
                     _day0_center_hours_remaining
                 )
+        if _day0_remaining_witness is not None:
+            provenance_payload["day0_remaining_vector_witness"] = (
+                _day0_remaining_witness
+            )
     # Task #32: honest re-materialization provenance ON THE POSTERIOR. The first threading
     # placed this only on the anchor provenance dict — but the anchor INSERT is OR-IGNOREd on a
     # same-cycle re-materialization (the existing anchor row wins), so the note never surfaced.

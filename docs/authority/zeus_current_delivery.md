@@ -204,6 +204,24 @@ Treat post-close success as separate advancement permission.
 - permanent risk re-enable after a safety-triggered pause
 - expansion of command vocabulary that affects live control
 
+Narrow automated-repair exception: the repo-local total-loss incident
+controller may cut over an already-merged repair without a second human timing
+decision only when executable code independently verifies every transition:
+
+1. exact GitHub PR head and merge receipts;
+2. clean `live` checkout and `ff-only` advancement to an origin revision that
+   contains that merge;
+3. the existing `scripts/deploy_live.py` preflight and restart gates;
+4. exact loaded SHA equal to the fast-forwarded live SHA;
+5. fresh main heartbeat and complete open-position monitor cadence; and
+6. the configured production observation window with no same-root recurrence.
+
+An LLM result, prose report, nullable SHA, skipped check, dirty tree, failed
+receipt, migration, command-vocabulary change, or risk re-enable cannot use
+this exception. Any failed condition stops at its durable incident stage and
+preserves the human gate. This exception delegates timing only; it does not
+weaken runtime, merge, deploy, or evidence law.
+
 ### 8.2 Team Mode
 
 Team mode is allowed only when:

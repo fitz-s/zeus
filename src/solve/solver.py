@@ -3395,6 +3395,19 @@ class GlobalSingleOrderCandidateEvaluation:
     sell_point_counterfactual: GlobalSellPointCounterfactual | None = None
     buy_minimum_marketable_repair: GlobalBuyMinimumMarketableRepair | None = None
     buy_rejection_economics: GlobalAnyBuyRejectionEconomics | None = None
+    # reversal_plan_tier0_2026-08-24 item 3b: decision-time EXPLICIT p0 for
+    # THIS candidate (same semantics as the winner's decision_p0 on the
+    # actionable trade certificate — src.engine.event_reactor_adapter.
+    # _decision_p0_from_book_snapshot) — the side-correct top-of-book price
+    # this candidate was scored against. For BUY this is
+    # executable_cost_curve.levels[0].price (ascending-sorted asks ladder,
+    # best ask first); for SELL it is executable_sell_curve.levels[0].price
+    # (descending-sorted bids ladder, best bid first). Both curves are
+    # non-empty by construction (__post_init__ fail-closed), so this is
+    # always populated once the candidate itself exists -- provenance only,
+    # never a gate input here.
+    decision_p0: Decimal | None = None
+    decision_p0_source: str | None = None
 
     def __post_init__(self) -> None:
         if (
@@ -4243,6 +4256,33 @@ class GlobalSingleOrderDecision:
             )
 
 
+def _global_candidate_decision_p0(
+    candidate: "GlobalSingleOrderAnyCandidate",
+    *,
+    is_sell: bool,
+) -> tuple[Decimal | None, str | None]:
+    """Side-correct top-of-book price this candidate was scored against.
+
+    reversal_plan_tier0_2026-08-24 item 3b — same p0 semantics as the winner's
+    decision_p0 (event_reactor_adapter._decision_p0_from_book_snapshot), but
+    read in-memory from the candidate's own already-sealed curve rather than
+    a fresh DB lookup (zero extra queries; every evaluated candidate, selected
+    or rejected, already carries its own curve). BUY prices against
+    executable_cost_curve (asks ladder, ascending sorted, levels[0] = best
+    ask); SELL prices against executable_sell_curve (bids ladder, descending
+    sorted, levels[0] = best bid). Both curves are non-empty by construction
+    (their own __post_init__ is fail-closed on an empty ladder), so this
+    never has to guess or fall back to the limit price.
+    """
+
+    curve = (
+        candidate.executable_sell_curve if is_sell else candidate.executable_cost_curve
+    )
+    if curve is None or not curve.levels:
+        return None, None
+    return curve.levels[0].price, candidate.book_snapshot_id
+
+
 def _global_candidate_evaluations(
     candidates: Sequence[GlobalSingleOrderAnyCandidate],
     *,
@@ -4272,6 +4312,9 @@ def _global_candidate_evaluations(
         action: Literal["BUY", "SELL"] = "SELL" if is_sell else "BUY"
         position_id = candidate.position_id if is_sell else None
         held_shares = candidate.held_shares if is_sell else Decimal("0")
+        candidate_decision_p0, candidate_decision_p0_source = (
+            _global_candidate_decision_p0(candidate, is_sell=is_sell)
+        )
         score = scored_by_id.get(candidate.candidate_id)
         if score is None:
             reason = rejections.get(candidate.candidate_id) or default_rejection
@@ -4316,6 +4359,8 @@ def _global_candidate_evaluations(
                     buy_rejection_economics=rejected_buy_by_id.get(
                         candidate.candidate_id
                     ),
+                    decision_p0=candidate_decision_p0,
+                    decision_p0_source=candidate_decision_p0_source,
                 )
             )
             continue
@@ -4390,6 +4435,8 @@ def _global_candidate_evaluations(
                 buy_minimum_marketable_repair=(
                     score.buy_minimum_marketable_repair
                 ),
+                decision_p0=candidate_decision_p0,
+                decision_p0_source=candidate_decision_p0_source,
             )
         )
     return tuple(evaluations)

@@ -1,5 +1,8 @@
 # Created: 2026-07-19
-# Last reused/audited: 2026-07-30
+# Last reused/audited: 2026-08-23
+# Lifecycle: created=2026-07-19; last_reviewed=2026-08-23; last_reused=2026-08-23
+# Purpose: Prove Day0 reseed ownership and single-writer materialization ordering.
+# Reuse: Run after changing Day0 enqueue, replacement queue claims, or writer concurrency.
 # Authority basis: operator directive 2026-07-19 (Day0 is a zero-sum race against the market
 #   book) + docs/evidence/upstream_physical_2026_07_17/day0_latency_chain_measurement.md (the
 #   measured bottleneck is the ~40-min SCHEDULED posterior recompute cadence, HOP 2b p50 39.9 min
@@ -41,6 +44,7 @@ import src.data.replacement_cycle_advance_trigger as cycle_advance
 import src.data.replacement_forecast_live_materialization_queue as materialization_queue
 import src.data.replacement_forecast_production as forecast_production
 import src.data.replacement_forecast_seed_discovery as seed_discovery
+import src.data.replacement_input_hwm as replacement_input_hwm
 from src.data.replacement_forecast_materializer import (
     expected_replacement_dependency_identity_by_role,
 )
@@ -142,10 +146,14 @@ def _day0_payload(observation_time: str) -> dict[str, object]:
 def _fake_build_seed_factory():
     """Stand in for the real seed builder (network/manifest-independent for this bridge unit
     test — the seed-content shape itself is covered by test_cycle_monotone_materialization.py)."""
-    calls = {"count": 0}
+    calls = {"count": 0, "manifest_cycles": []}
 
     def _fake_build_seed(_conn_arg, **kwargs):
         calls["count"] += 1
+        calls["manifest_cycles"] = [
+            str(manifest.source_cycle_time)
+            for manifest in kwargs.get("manifests", ())
+        ]
         path = Path(
             kwargs.get("output_path")
             or Path(kwargs["seed_path"]) / f"Shanghai.seed.{calls['count']}.json"
@@ -267,7 +275,7 @@ def _multiprocess_forecast_materialization_owner(
     exact_retry_started,
     release,
 ) -> None:
-    """Drain only inside the forecast-live owner under its existing four-worker cap."""
+    """Drain only inside the forecast-live owner under its single-writer cap."""
 
     exact_path = Path(seed_file)
 
@@ -497,7 +505,8 @@ def test_day0_extreme_bridge_enqueues_exactly_one_seed_and_dedups_same_observati
 def test_day0_ingest_process_only_publishes_seed_for_bounded_forecast_owner(
     tmp_path,
 ) -> None:
-    """Two live owners still expose only forecast-live's four materialization workers."""
+    """Two live owners still expose only forecast-live's single DB writer."""
+    assert materialization_queue.DEFAULT_MATERIALIZATION_MAX_WORKERS == 1
     _prepare_forecast_db(tmp_path)
     cfg = _queue_config(tmp_path)
     ctx = multiprocessing.get_context("spawn")
@@ -669,6 +678,25 @@ def test_day0_extreme_bridge_reseeds_for_every_conditioning_identity_change(
     assert not Path(row["seed_file"]).exists()
 
 
+def test_single_family_zero_observation_fails_before_null_identity_record(tmp_path) -> None:
+    """A Day0 state without a complete observation identity cannot report enqueue success."""
+    db_path = _prepare_forecast_db(tmp_path)
+    report = cycle_advance.enqueue_single_family_cycle_advance_reseed(
+        forecast_db=db_path,
+        seed_dir=tmp_path / "seeds",
+        raw_manifest_dir=tmp_path / "raw",
+        city="Shanghai",
+        target_date="2026-07-19",
+        metric="high",
+        day0_observation_state="OBSERVED",
+    )
+    assert report["status"] == "DAY0_CONDITIONING_IDENTITY_INCOMPLETE"
+    assert report["enqueued"] is False
+    conn = sqlite3.connect(db_path)
+    assert conn.execute("SELECT COUNT(*) FROM cycle_advance_enqueues").fetchone()[0] == 0
+    conn.close()
+
+
 def test_day0_bridge_publishes_only_the_monotonic_cas_owner(tmp_path, monkeypatch) -> None:
     """A late older bridge call cannot leave a queue-visible seed behind."""
     _prepare_forecast_db(tmp_path)
@@ -726,6 +754,198 @@ def test_day0_bridge_publishes_only_the_monotonic_cas_owner(tmp_path, monkeypatc
     assert row["day0_observed_extreme_observation_time"] == (
         "2026-07-19T05:00:00.900000+00:00"
     )
+
+
+def test_newer_day0_identity_replaces_visible_drained_owner(tmp_path, monkeypatch) -> None:
+    """A visible 21C seed with no live owner cannot suppress a newer 22C identity."""
+    db_path = _prepare_forecast_db(tmp_path)
+    cfg = _queue_config(tmp_path)
+    monkeypatch.setattr(
+        forecast_production,
+        "_replacement_forecast_live_materialization_queue_config",
+        lambda: cfg,
+    )
+    cycle = "2026-07-19T00:00:00+00:00"
+    old_payload = _day0_payload("2026-07-19T05:00:00+00:00")
+    new_payload = {
+        **old_payload,
+        "day0_observed_extreme_observation_time": "2026-07-19T05:01:00+00:00",
+        "day0_observed_extreme_c": 22.0,
+    }
+    old_seed = Path(cfg["seed_dir"]) / "visible-21c.json"
+    old_seed.parent.mkdir(parents=True)
+    old_seed.write_text("old-21c", encoding="utf-8")
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    assert cycle_advance._record_enqueue(
+        conn,
+        city="Shanghai",
+        target_date="2026-07-19",
+        metric="high",
+        consumed_cycle_iso="NO_LIVE_POSTERIOR",
+        target_cycle_iso=cycle,
+        held_position=True,
+        seed_file=str(old_seed),
+        reason="MISSING_LIVE_POSTERIOR",
+        **{
+            key: old_payload[key]
+            for key in (
+                "day0_observed_extreme_observation_time",
+                "day0_observed_extreme_source",
+                "day0_observed_extreme_c",
+                "day0_observed_extreme_unit",
+            )
+        },
+    )
+    conn.commit()
+
+    decision = cycle_advance._enqueue_decision(
+        conn,
+        city="Shanghai",
+        target_date="2026-07-19",
+        metric="high",
+        target_cycle_iso=cycle,
+        **{
+            key: new_payload[key]
+            for key in (
+                "day0_observed_extreme_observation_time",
+                "day0_observed_extreme_source",
+                "day0_observed_extreme_c",
+                "day0_observed_extreme_unit",
+            )
+        },
+    )
+    assert decision is cycle_advance._CycleAdvanceEnqueueDecision.ADMIT
+    assert conn.execute("SELECT COUNT(*) FROM cycle_advance_enqueues").fetchone()[0] == 0
+
+    new_seed = Path(cfg["seed_dir"]) / "visible-22c.json"
+    assert cycle_advance._record_enqueue(
+        conn,
+        city="Shanghai",
+        target_date="2026-07-19",
+        metric="high",
+        consumed_cycle_iso="NO_LIVE_POSTERIOR",
+        target_cycle_iso=cycle,
+        held_position=True,
+        seed_file=str(new_seed),
+        reason="DAY0_OBSERVATION_ADVANCED",
+        **{
+            key: new_payload[key]
+            for key in (
+                "day0_observed_extreme_observation_time",
+                "day0_observed_extreme_source",
+                "day0_observed_extreme_c",
+                "day0_observed_extreme_unit",
+            )
+        },
+    )
+    conn.commit()
+    marker = conn.execute(
+        "SELECT seed_file, day0_conditioning_identity_json FROM cycle_advance_enqueues"
+    ).fetchone()
+    assert marker["seed_file"] == str(new_seed)
+    assert marker["day0_conditioning_identity_json"] == cycle_advance._day0_conditioning_identity(
+        source=new_payload["day0_observed_extreme_source"],
+        observation_time=new_payload["day0_observed_extreme_observation_time"],
+        observed_extreme_c=new_payload["day0_observed_extreme_c"],
+        unit=new_payload["day0_observed_extreme_unit"],
+    )
+    conn.close()
+
+
+def test_old_day0_writer_cannot_publish_after_identity_cas_replacement(tmp_path) -> None:
+    """A late 21C writer cannot expose its seed after the marker moves to 22C."""
+    db_path = _prepare_forecast_db(tmp_path)
+    seed_dir = tmp_path / "seeds"
+    cycle = "2026-07-19T00:00:00+00:00"
+    old_payload = _day0_payload("2026-07-19T05:00:00+00:00")
+    new_payload = {**old_payload, "day0_observed_extreme_c": 22.0}
+    old_identity = cycle_advance._day0_conditioning_identity(
+        source=old_payload["day0_observed_extreme_source"],
+        observation_time=old_payload["day0_observed_extreme_observation_time"],
+        observed_extreme_c=old_payload["day0_observed_extreme_c"],
+        unit=old_payload["day0_observed_extreme_unit"],
+    )
+    assert old_identity is not None
+    old_stage, old_seed = cycle_advance._staged_cycle_advance_seed_paths(
+        seed_path=seed_dir,
+        city="Shanghai",
+        target_date="2026-07-19",
+        metric="high",
+        computed_at=datetime(2026, 7, 19, 5, 1, tzinfo=UTC),
+        seed_name=lambda *_args, **_kwargs: "old.json",
+    )
+    old_stage.parent.mkdir(parents=True)
+    old_stage.write_text("old-21c", encoding="utf-8")
+    conn = sqlite3.connect(db_path)
+    assert cycle_advance._record_enqueue(
+        conn,
+        city="Shanghai",
+        target_date="2026-07-19",
+        metric="high",
+        consumed_cycle_iso="NO_LIVE_POSTERIOR",
+        target_cycle_iso=cycle,
+        held_position=True,
+        seed_file=str(old_seed),
+        **{
+            key: old_payload[key]
+            for key in (
+                "day0_observed_extreme_observation_time",
+                "day0_observed_extreme_source",
+                "day0_observed_extreme_c",
+                "day0_observed_extreme_unit",
+            )
+        },
+    )
+    conn.commit()
+    assert cycle_advance._delete_missing_owned_cycle_advance_marker(
+        conn,
+        city="Shanghai",
+        target_date="2026-07-19",
+        metric="high",
+        target_cycle_iso=cycle,
+        seed_file=str(old_seed),
+        identity=old_identity,
+        exact_identity=True,
+    )
+    new_seed = seed_dir / "new.enqueue-owner.json"
+    assert cycle_advance._record_enqueue(
+        conn,
+        city="Shanghai",
+        target_date="2026-07-19",
+        metric="high",
+        consumed_cycle_iso="NO_LIVE_POSTERIOR",
+        target_cycle_iso=cycle,
+        held_position=True,
+        seed_file=str(new_seed),
+        **{
+            key: new_payload[key]
+            for key in (
+                "day0_observed_extreme_observation_time",
+                "day0_observed_extreme_source",
+                "day0_observed_extreme_c",
+                "day0_observed_extreme_unit",
+            )
+        },
+    )
+    conn.commit()
+
+    assert not cycle_advance._publish_staged_cycle_advance_seed_if_owned(
+        conn,
+        city="Shanghai",
+        target_date="2026-07-19",
+        metric="high",
+        target_cycle_iso=cycle,
+        staged_seed_file=old_stage,
+        visible_seed_file=old_seed,
+        identity=old_identity,
+        require_identity=True,
+    )
+    assert not old_seed.exists()
+    assert conn.execute(
+        "SELECT seed_file FROM cycle_advance_enqueues"
+    ).fetchone()[0] == str(new_seed)
+    conn.close()
 
 
 def test_cycle_advance_loser_never_deletes_the_winner_seed(tmp_path) -> None:
@@ -986,6 +1206,71 @@ def test_cycle_advance_reclaims_missing_non_day0_owned_stage_without_posterior(
     )
     assert retry["enqueued"] is True
     assert Path(str(retry["seed_file"])).is_file()
+
+
+def test_single_family_cycle_advance_preserves_retry_pending_decision(
+    tmp_path, monkeypatch
+) -> None:
+    db_path = _prepare_forecast_db(tmp_path)
+    monkeypatch.setattr(
+        cycle_advance,
+        "family_materializable_cycle",
+        lambda *args, **kwargs: (datetime(2026, 7, 19, 0, tzinfo=UTC), ()),
+    )
+    monkeypatch.setattr(
+        cycle_advance,
+        "_enqueue_decision",
+        lambda *args, **kwargs: cycle_advance._CycleAdvanceEnqueueDecision.RETRY_PENDING,
+    )
+
+    report = cycle_advance.enqueue_single_family_cycle_advance_reseed(
+        forecast_db=db_path,
+        seed_dir=tmp_path / "seeds",
+        raw_manifest_dir=tmp_path / "raw",
+        city="Shanghai",
+        target_date="2026-07-19",
+        metric="high",
+        computed_at=datetime(2026, 7, 19, 5, 2, tzinfo=UTC),
+    )
+
+    assert report["status"] == "CYCLE_ADVANCE_RETRY_PENDING"
+    assert report["enqueued"] is False
+
+
+def test_cycle_advance_batch_surfaces_retry_pending_as_non_success(
+    tmp_path, monkeypatch
+) -> None:
+    db_path = _prepare_forecast_db(tmp_path)
+    cycle = datetime(2026, 7, 19, 0, tzinfo=UTC)
+    monkeypatch.setattr(cycle_advance, "freshest_materializable_cycle", lambda _conn: cycle)
+    monkeypatch.setattr(
+        cycle_advance,
+        "family_materializable_cycle",
+        lambda *args, **kwargs: (cycle, ()),
+    )
+    monkeypatch.setattr(
+        seed_discovery,
+        "_day0_observed_extreme_seed_payload",
+        lambda **_kwargs: _day0_payload("2026-07-19T05:00:00+00:00"),
+    )
+    monkeypatch.setattr(
+        cycle_advance,
+        "_enqueue_decision",
+        lambda *args, **kwargs: cycle_advance._CycleAdvanceEnqueueDecision.RETRY_PENDING,
+    )
+
+    report = cycle_advance.enqueue_cycle_advance_reseeds(
+        forecast_db=db_path,
+        seed_dir=tmp_path / "seeds",
+        raw_manifest_dir=tmp_path / "raw",
+        computed_at=datetime(2026, 7, 19, 5, 2, tzinfo=UTC),
+        limit=1,
+        scopes=(("Shanghai", "2026-07-19", "high"),),
+        manifests=(),
+    )
+
+    assert report["retry_pending"] == 1, report
+    assert report["status"] == "CYCLE_ADVANCE_RETRY_PENDING"
 
 
 def test_cycle_advance_keeps_missing_non_day0_owned_stage_when_posterior_covers(tmp_path) -> None:
@@ -1510,10 +1795,10 @@ def test_queue_defers_current_day0_upgrade_seed_when_marker_read_is_transient(
         "build_replacement_forecast_materialization_request",
         unexpected_builder,
     )
-    original_connect = state_db._connect
+    original_connect = state_db._connect_read_only
     monkeypatch.setattr(
         state_db,
-        "_connect",
+        "_connect_read_only",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(sqlite3.OperationalError("locked")),
     )
     processed, failed, reasons = materialization_queue._prepare_seed_requests(
@@ -1532,7 +1817,7 @@ def test_queue_defers_current_day0_upgrade_seed_when_marker_read_is_transient(
     assert not tuple((tmp_path / "requests").glob("*.json"))
     assert reasons == ["REPLACEMENT_MATERIALIZATION_DAY0_ENQUEUE_OWNER_INDETERMINATE"]
 
-    monkeypatch.setattr(state_db, "_connect", original_connect)
+    monkeypatch.setattr(state_db, "_connect_read_only", original_connect)
     built: list[Mapping[str, object]] = []
 
     def ready_builder(payload, **_kwargs):
@@ -1828,7 +2113,9 @@ def test_queue_scans_past_indeterminate_day0_prefix_without_starving_current_see
     conn.commit()
     conn.close()
     monkeypatch.setattr(
-        materialization_queue, "_cycle_advance_seed_priority_map", lambda *_args: {}
+        materialization_queue,
+        "_cycle_advance_seed_priority_map",
+        lambda *_args, **_kwargs: {},
     )
     built: list[Mapping[str, object]] = []
 
@@ -2152,8 +2439,8 @@ def test_day0_conditioning_marker_allows_same_time_revisions_but_never_regresses
     assert row["seed_file"] == str(tmp_path / "same-time-3.json")
 
 
-def test_day0_request_coalescing_keeps_distinct_conditioning_identities(tmp_path) -> None:
-    """The request drain cannot discard a fresh Day0 condition as a duplicate cycle."""
+def test_day0_request_coalescing_supersedes_older_conditioning_identity(tmp_path) -> None:
+    """A newer monotone Day0 identity supersedes an older pending request."""
     base = {
         "city": "Shanghai",
         "target_date": "2026-07-19",
@@ -2180,8 +2467,283 @@ def test_day0_request_coalescing_keeps_distinct_conditioning_identities(tmp_path
         (first, second), processed_path=tmp_path / "processed"
     )
 
-    assert set(remaining) == {first, second}
-    assert superseded == ()
+    assert remaining == (second,)
+    assert len(superseded) == 1
+
+
+def test_day0_priority_lane_claims_while_background_runner_is_blocked(
+    tmp_path, monkeypatch
+) -> None:
+    """Reserved Day0 capacity starts without waiting for a background timeout."""
+    request_dir = tmp_path / "requests"
+    processed_dir = tmp_path / "processed"
+    failed_dir = tmp_path / "failed"
+    request_dir.mkdir()
+    ordinary = {
+        "city": "Oslo",
+        "target_date": "2026-07-19",
+        "temperature_metric": "high",
+        "source_cycle_time": "2026-07-19T00:00:00+00:00",
+        "baseline_source_run_id": "baseline:0",
+        "openmeteo_source_run_id": "openmeteo:0",
+    }
+    priority = {
+        **ordinary,
+        "city": "Ankara",
+        "day0_observed_extreme_source": "wu_icao_history",
+        "day0_observed_extreme_observation_time": "2026-07-19T05:00:00+00:00",
+        "day0_observed_extreme_c": 35.0,
+        "day0_observed_extreme_unit": "C",
+    }
+    ordinary_path = request_dir / "ordinary.json"
+    priority_path = request_dir / "priority.json"
+    ordinary_path.write_text(json.dumps(ordinary), encoding="utf-8")
+    priority_path.write_text(json.dumps(priority), encoding="utf-8")
+    monkeypatch.setattr(
+        materialization_queue,
+        "_validate_request_payload",
+        lambda _path: (True, "", ""),
+    )
+    background_started = threading.Event()
+    release_background = threading.Event()
+    priority_started = threading.Event()
+
+    def runner(command):
+        path = Path(command[-2])
+        if path.name == ordinary_path.name:
+            background_started.set()
+            assert release_background.wait(2.0)
+        else:
+            priority_started.set()
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    reports: list[object] = []
+    background_thread = threading.Thread(
+        target=lambda: reports.append(
+            materialization_queue.process_replacement_forecast_live_materialization_queue(
+                request_dir=request_dir,
+                processed_dir=processed_dir,
+                failed_dir=failed_dir,
+                forecast_db=None,
+                seed_dir=None,
+                limit=1,
+                runner=runner,
+                discover=False,
+                lane=materialization_queue.MATERIALIZATION_LANE_BACKGROUND,
+            )
+        )
+    )
+    background_thread.start()
+    assert background_started.wait(1.0)
+    priority_thread = threading.Thread(
+        target=lambda: reports.append(
+            materialization_queue.process_replacement_forecast_live_materialization_queue(
+                request_dir=request_dir,
+                processed_dir=processed_dir,
+                failed_dir=failed_dir,
+                forecast_db=None,
+                seed_dir=None,
+                limit=1,
+                runner=runner,
+                discover=False,
+                lane=materialization_queue.MATERIALIZATION_LANE_PRIORITY,
+            )
+        )
+    )
+    priority_thread.start()
+    assert priority_started.wait(1.0)
+    release_background.set()
+    background_thread.join(2.0)
+    priority_thread.join(2.0)
+    assert not background_thread.is_alive()
+    assert not priority_thread.is_alive()
+    assert len(reports) == 2
+
+
+def test_queue_lock_does_not_double_acquire_during_owner_publication(
+    tmp_path, monkeypatch
+) -> None:
+    """A second lane cannot steal a just-created empty lock."""
+    lock_path = tmp_path / "materialization_queue.lock"
+    original_write = materialization_queue.os.write
+    write_entered = threading.Event()
+    release_write = threading.Event()
+    second_acquired: list[bool] = []
+
+    def blocked_write(fd, payload):
+        write_entered.set()
+        assert release_write.wait(1.0)
+        return original_write(fd, payload)
+
+    monkeypatch.setattr(materialization_queue.os, "write", blocked_write)
+
+    def first_owner() -> None:
+        with materialization_queue._queue_lock(lock_path) as acquired:
+            assert acquired
+
+    first = threading.Thread(target=first_owner)
+    first.start()
+    assert write_entered.wait(1.0)
+    with materialization_queue._queue_lock(lock_path) as acquired:
+        second_acquired.append(acquired)
+    assert second_acquired == [False]
+    release_write.set()
+    first.join(2.0)
+    assert not first.is_alive()
+
+
+def test_background_block_does_not_block_independent_priority_job(monkeypatch, tmp_path) -> None:
+    """The two decorated callbacks have independent execution capacity."""
+    from src.ingest import forecast_live_daemon
+    from src.data import replacement_forecast_production
+
+    cfg = {
+        "request_dir": tmp_path / "requests",
+        "seed_dir": tmp_path / "seeds",
+        "forecast_db": tmp_path / "forecast.db",
+        "raw_manifest_dir": tmp_path / "raw",
+        "processed_dir": tmp_path / "processed",
+        "failed_dir": tmp_path / "failed",
+        "seed_processed_dir": tmp_path / "seed_processed",
+        "seed_failed_dir": tmp_path / "seed_failed",
+    }
+    for key in ("request_dir", "seed_dir", "raw_manifest_dir"):
+        Path(cfg[key]).mkdir()
+    monkeypatch.setattr(
+        replacement_forecast_production,
+        "_replacement_forecast_live_materialization_queue_config",
+        lambda: cfg,
+    )
+    background_started = threading.Event()
+    release_background = threading.Event()
+    priority_started = threading.Event()
+
+    def run_lane(_cfg, *, lane, seed_limit):
+        if lane == "background":
+            background_started.set()
+            assert release_background.wait(1.0)
+        else:
+            priority_started.set()
+        return {"lane": lane}
+
+    monkeypatch.setattr(forecast_live_daemon, "_replacement_forecast_materialize_lane", run_lane)
+    background = threading.Thread(target=forecast_live_daemon._replacement_forecast_materialize_job)
+    background.start()
+    assert background_started.wait(1.0)
+    forecast_live_daemon._replacement_forecast_priority_materialize_job()
+    assert priority_started.is_set()
+    release_background.set()
+    background.join(1.0)
+    assert not background.is_alive()
+
+
+def test_priority_job_exception_writes_failed_scheduler_health(monkeypatch, tmp_path) -> None:
+    from src.ingest import forecast_live_daemon
+    from src.data import replacement_forecast_production
+    from src.observability import scheduler_health
+
+    cfg = {"request_dir": tmp_path / "requests"}
+    cfg["request_dir"].mkdir()
+    monkeypatch.setattr(
+        replacement_forecast_production,
+        "_replacement_forecast_live_materialization_queue_config",
+        lambda: cfg,
+    )
+    health: list[tuple[str, bool, str | None]] = []
+    monkeypatch.setattr(
+        scheduler_health,
+        "_write_scheduler_health",
+        lambda job, *, failed, started=False, reason=None: health.append(
+            (job, failed, reason)
+        ),
+    )
+    monkeypatch.setattr(
+        forecast_live_daemon,
+        "_replacement_forecast_materialize_lane",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("priority boom")),
+    )
+    forecast_live_daemon._replacement_forecast_priority_materialize_job()
+    assert health[0][0] == forecast_live_daemon.REPLACEMENT_FORECAST_PRIORITY_MATERIALIZE_JOB_ID
+    assert health[-1][1] is True
+    assert "priority boom" in str(health[-1][2])
+
+
+def test_materialize_callbacks_return_lane_receipts_and_truthful_status_health(
+    monkeypatch, tmp_path
+) -> None:
+    from src.ingest import forecast_live_daemon
+    from src.data import replacement_forecast_production
+    from src.observability import scheduler_health
+
+    cfg = {"request_dir": tmp_path / "requests"}
+    cfg["request_dir"].mkdir()
+    monkeypatch.setattr(
+        replacement_forecast_production,
+        "_replacement_forecast_live_materialization_queue_config",
+        lambda: cfg,
+    )
+    health: list[tuple[str, bool, str | None]] = []
+    monkeypatch.setattr(
+        scheduler_health,
+        "_write_scheduler_health",
+        lambda job, *, failed, started=False, reason=None: health.append(
+            (job, failed, reason)
+        ),
+    )
+
+    def report(_cfg, *, lane, seed_limit):
+        if lane == "background":
+            return {"status": "FAILED", "error": "background report"}
+        return {"status": "NO_REQUESTS"}
+
+    monkeypatch.setattr(forecast_live_daemon, "_replacement_forecast_materialize_lane", report)
+    background_receipt = forecast_live_daemon._replacement_forecast_materialize_job()
+    priority_receipt = forecast_live_daemon._replacement_forecast_priority_materialize_job()
+
+    assert background_receipt["status"] == "FAILED"
+    assert priority_receipt["status"] == "NO_REQUESTS"
+    final_health = {}
+    for job, failed, reason in health:
+        final_health[job] = (failed, reason)
+    assert final_health[forecast_live_daemon.REPLACEMENT_FORECAST_MATERIALIZE_JOB_ID] == (
+        True,
+        "failed: background report",
+    )
+    assert final_health[forecast_live_daemon.REPLACEMENT_FORECAST_PRIORITY_MATERIALIZE_JOB_ID] == (
+        False,
+        None,
+    )
+
+
+def test_scheduler_registers_independent_background_and_priority_jobs(monkeypatch) -> None:
+    from src.ingest import forecast_live_daemon
+
+    jobs: list[tuple[object, str, dict[str, object]]] = []
+
+    class Scheduler:
+        def add_job(self, fn, trigger, **kwargs) -> None:
+            jobs.append((fn, trigger, kwargs))
+
+    monkeypatch.setattr(forecast_live_daemon, "_replacement_forecast_materialize_interval_minutes", lambda: 5)
+    monkeypatch.setattr(forecast_live_daemon, "_replacement_forecast_materialize_poll_seconds", lambda: 1)
+    forecast_live_daemon._register_replacement_forecast_production_jobs(Scheduler())
+    selected = {
+        job[2]["id"]: job
+        for job in jobs
+        if job[2]["id"]
+        in {
+            forecast_live_daemon.REPLACEMENT_FORECAST_MATERIALIZE_JOB_ID,
+            forecast_live_daemon.REPLACEMENT_FORECAST_PRIORITY_MATERIALIZE_JOB_ID,
+        }
+    }
+    assert set(selected) == {
+        forecast_live_daemon.REPLACEMENT_FORECAST_MATERIALIZE_JOB_ID,
+        forecast_live_daemon.REPLACEMENT_FORECAST_PRIORITY_MATERIALIZE_JOB_ID,
+    }
+    assert selected[forecast_live_daemon.REPLACEMENT_FORECAST_MATERIALIZE_JOB_ID][2]["max_instances"] == 1
+    assert selected[forecast_live_daemon.REPLACEMENT_FORECAST_PRIORITY_MATERIALIZE_JOB_ID][2]["max_instances"] == 1
+    assert selected[forecast_live_daemon.REPLACEMENT_FORECAST_PRIORITY_MATERIALIZE_JOB_ID][2]["seconds"] == 1
+    assert selected[forecast_live_daemon.REPLACEMENT_FORECAST_MATERIALIZE_JOB_ID][2]["executor"] != selected[forecast_live_daemon.REPLACEMENT_FORECAST_PRIORITY_MATERIALIZE_JOB_ID][2]["executor"]
 
 
 def test_day0_drained_marker_with_active_provisional_posterior_does_not_reenqueue(
@@ -2391,6 +2953,67 @@ def test_day0_extreme_bridge_reseeds_new_observation_on_consumed_model_cycle(
     assert row["day0_observed_extreme_observation_time"] == (
         "2026-07-19T06:00:00+00:00"
     )
+
+
+def test_day0_reseed_does_not_wait_for_deterministic_cycle_ahead_of_ens(
+    tmp_path, monkeypatch
+) -> None:
+    """A new observed bound reconditions the last ENS-complete carrier now."""
+
+    db_path = _prepare_forecast_db(tmp_path)
+    consumed = datetime(2026, 7, 19, 0, tzinfo=UTC)
+    deterministic_ahead = datetime(2026, 7, 19, 6, tzinfo=UTC)
+    _insert_live_posterior(
+        db_path,
+        cycle_iso=consumed.isoformat(),
+        computed_at="2026-07-19T05:05:00+00:00",
+    )
+    manifests = (
+        SimpleNamespace(source_cycle_time=deterministic_ahead.isoformat()),
+        SimpleNamespace(source_cycle_time=consumed.isoformat()),
+    )
+    monkeypatch.setattr(
+        cycle_advance,
+        "_family_manifests_from_db",
+        lambda *args, **kwargs: manifests,
+    )
+    monkeypatch.setattr(
+        cycle_advance,
+        "family_materializable_cycle",
+        lambda *args, **kwargs: (deterministic_ahead, ()),
+    )
+    monkeypatch.setattr(
+        cycle_advance,
+        "freshest_materializable_cycle",
+        lambda _conn: deterministic_ahead,
+    )
+    monkeypatch.setattr(
+        replacement_input_hwm,
+        "latest_eligible_ensemble_input_cycle",
+        lambda *args, **kwargs: consumed,
+    )
+    fake_build_seed, calls = _fake_build_seed_factory()
+    monkeypatch.setattr(
+        cycle_advance,
+        "_build_and_write_advance_seed",
+        fake_build_seed,
+    )
+
+    report = cycle_advance.enqueue_single_family_cycle_advance_reseed(
+        forecast_db=db_path,
+        seed_dir=tmp_path / "seeds",
+        raw_manifest_dir=tmp_path / "raw",
+        city="Shanghai",
+        target_date="2026-07-19",
+        metric="high",
+        computed_at=datetime(2026, 7, 19, 6, 1, tzinfo=UTC),
+        held_position=True,
+        **_day0_payload("2026-07-19T06:00:00+00:00"),
+    )
+
+    assert report["status"] == "DAY0_OBSERVATION_ADVANCE_ENQUEUED"
+    assert report["target_cycle"] == consumed.isoformat()
+    assert calls["manifest_cycles"] == [consumed.isoformat()]
 
 
 def test_cycle_poll_catches_up_every_new_day0_identity_on_one_model_cycle(
@@ -2742,14 +3365,15 @@ def test_new_day0_revision_waits_for_exact_inflight_owner_then_replaces_it(
         encoding="utf-8",
     )
 
-    assert cycle_advance._already_enqueued(
+    decision = cycle_advance._enqueue_decision(
         conn,
         city="Shanghai",
         target_date="2026-07-19",
         metric="high",
         target_cycle_iso=cycle,
         **new_conditioning,
-    ) is True
+    )
+    assert decision is cycle_advance._CycleAdvanceEnqueueDecision.RETRY_PENDING
     marker = conn.execute(
         "SELECT seed_file, day0_conditioning_identity_json "
         "FROM cycle_advance_enqueues"
@@ -2758,14 +3382,14 @@ def test_new_day0_revision_waits_for_exact_inflight_owner_then_replaces_it(
     assert marker["day0_conditioning_identity_json"] == old_identity
 
     claimed_request.unlink()
-    assert cycle_advance._already_enqueued(
+    assert cycle_advance._enqueue_decision(
         conn,
         city="Shanghai",
         target_date="2026-07-19",
         metric="high",
         target_cycle_iso=cycle,
         **new_conditioning,
-    ) is False
+    ) is cycle_advance._CycleAdvanceEnqueueDecision.ADMIT
     assert conn.execute("SELECT COUNT(*) FROM cycle_advance_enqueues").fetchone()[0] == 0
     conn.close()
 
@@ -2830,15 +3454,24 @@ def test_new_day0_revision_waits_for_legacy_pending_owner_then_replaces_it(
             "day0_observed_extreme_unit",
         )
     }
+    owner_check = cycle_advance._day0_enqueue_owner_request_check(
+        city="Shanghai",
+        target_date="2026-07-19",
+        metric="high",
+        target_cycle_iso=cycle,
+        seed_file=str(owned_seed),
+        identity=None,
+    )
+    assert owner_check.state is cycle_advance._Day0EnqueueOwnerRequestState.INDETERMINATE
 
-    assert cycle_advance._already_enqueued(
+    assert cycle_advance._enqueue_decision(
         conn,
         city="Shanghai",
         target_date="2026-07-19",
         metric="high",
         target_cycle_iso=cycle,
         **new_conditioning,
-    ) is True
+    ) is cycle_advance._CycleAdvanceEnqueueDecision.RETRY_PENDING
     marker = conn.execute(
         "SELECT seed_file, day0_conditioning_identity_json "
         "FROM cycle_advance_enqueues"
@@ -2847,14 +3480,14 @@ def test_new_day0_revision_waits_for_legacy_pending_owner_then_replaces_it(
     assert marker["day0_conditioning_identity_json"] is None
 
     pending.unlink()
-    assert cycle_advance._already_enqueued(
+    assert cycle_advance._enqueue_decision(
         conn,
         city="Shanghai",
         target_date="2026-07-19",
         metric="high",
         target_cycle_iso=cycle,
         **new_conditioning,
-    ) is False
+    ) is cycle_advance._CycleAdvanceEnqueueDecision.ADMIT
     assert conn.execute("SELECT COUNT(*) FROM cycle_advance_enqueues").fetchone()[0] == 0
     conn.close()
 
@@ -2989,7 +3622,7 @@ def test_aged_pending_day0_owner_survives_until_terminal_request_move(
     )
 
     as_of = datetime(2026, 7, 19, 5, 4, 31, tzinfo=UTC)
-    assert cycle_advance._already_enqueued(
+    decision = cycle_advance._enqueue_decision(
         conn,
         city="Shanghai",
         target_date="2026-07-19",
@@ -3002,9 +3635,10 @@ def test_aged_pending_day0_owner_survives_until_terminal_request_move(
         day0_observed_extreme_source=payload["day0_observed_extreme_source"],
         day0_observed_extreme_c=payload["day0_observed_extreme_c"],
         day0_observed_extreme_unit=payload["day0_observed_extreme_unit"],
-    ) is True
+    )
+    assert decision is cycle_advance._CycleAdvanceEnqueueDecision.ALREADY_ENQUEUED
     pending.unlink()
-    assert cycle_advance._already_enqueued(
+    assert cycle_advance._enqueue_decision(
         conn,
         city="Shanghai",
         target_date="2026-07-19",
@@ -3017,7 +3651,7 @@ def test_aged_pending_day0_owner_survives_until_terminal_request_move(
         day0_observed_extreme_source=payload["day0_observed_extreme_source"],
         day0_observed_extreme_c=payload["day0_observed_extreme_c"],
         day0_observed_extreme_unit=payload["day0_observed_extreme_unit"],
-    ) is False
+    ) is cycle_advance._CycleAdvanceEnqueueDecision.ADMIT
     conn.close()
 
 
@@ -3037,6 +3671,21 @@ def test_day0_owner_config_read_failure_is_indeterminate_and_retains_marker(
         lambda: (_ for _ in ()).throw(RuntimeError("config unavailable")),
     )
 
+    decision = cycle_advance._enqueue_decision(
+        conn,
+        city="Shanghai",
+        target_date="2026-07-19",
+        metric="high",
+        target_cycle_iso=cycle,
+        as_of=datetime(2026, 7, 19, 6, tzinfo=UTC),
+        day0_observed_extreme_observation_time=str(
+            payload["day0_observed_extreme_observation_time"]
+        ),
+        day0_observed_extreme_source=str(payload["day0_observed_extreme_source"]),
+        day0_observed_extreme_c=float(payload["day0_observed_extreme_c"]),
+        day0_observed_extreme_unit=str(payload["day0_observed_extreme_unit"]),
+    )
+    assert decision is cycle_advance._CycleAdvanceEnqueueDecision.RETRY_PENDING
     assert _missing_day0_owner_is_retained(conn, payload=payload, cycle=cycle) is True
     assert _fetch_enqueue_row(db_path)["seed_file"] == str(seed_file)
     assert (
@@ -3185,10 +3834,10 @@ def test_day0_extreme_bridge_no_observed_extreme_is_failsoft(tmp_path, monkeypat
     assert report["status"] == "DAY0_EXTREME_BRIDGE_NO_OBSERVED_EXTREME"
 
 
-def test_day0_extreme_bridge_materializes_zero_observation_state(
+def test_day0_extreme_bridge_fails_closed_for_zero_observation_state(
     tmp_path, monkeypatch
 ) -> None:
-    """A typed zero-observation fact is evidence, not an unsupported kwarg."""
+    """A zero-observation state without a conditioning identity is fail-closed."""
 
     _prepare_forecast_db(tmp_path)
     cfg = _queue_config(tmp_path)
@@ -3233,12 +3882,13 @@ def test_day0_extreme_bridge_materializes_zero_observation_state(
         held_position=False,
     )
 
-    assert report["status"] == "CYCLE_ADVANCE_FIRST_MATERIALIZATION_ENQUEUED"
-    assert report["enqueued"] is True
-    assert (
-        captured["day0_observation_state"]
-        == "zero_target_date_observations"
-    )
+    assert report["status"] == "DAY0_CONDITIONING_IDENTITY_INCOMPLETE"
+    assert report["enqueued"] is False
+    assert captured == {}
+    # No retry is safe without a fresh complete identity; the next event must supply one.
+    assert cycle_advance._day0_bridge_status_retryable(
+        "DAY0_CONDITIONING_IDENTITY_INCOMPLETE"
+    ) is False
 
 
 def test_day0_extreme_bridge_config_lookup_failure_is_failsoft(monkeypatch) -> None:
@@ -3574,7 +4224,7 @@ def test_async_bridge_retries_transient_failure_without_new_event(monkeypatch) -
     def _materialize(**kwargs):
         attempts.append(kwargs)
         if len(attempts) == 1:
-            return {"status": "CYCLE_ADVANCE_FAILSOFT_SKIPPED"}
+            return {"status": "CYCLE_ADVANCE_PUBLISH_RETRY_PENDING"}
         return {"status": "TEST_DONE"}
 
     monkeypatch.setattr(
@@ -3597,4 +4247,13 @@ def test_async_bridge_retries_transient_failure_without_new_event(monkeypatch) -
     assert len(attempts) == 2
     assert cycle_advance._day0_bridge_status_retryable(
         "CYCLE_ADVANCE_FORECAST_DB_MISSING"
+    ) is True
+    assert cycle_advance._day0_bridge_status_retryable(
+        "CYCLE_ADVANCE_RETRY_PENDING"
+    ) is True
+    assert cycle_advance._day0_bridge_status_retryable(
+        "CYCLE_ADVANCE_PUBLISH_RETRY_PENDING"
+    ) is True
+    assert cycle_advance._day0_bridge_status_retryable(
+        "SAME_CYCLE_RECOMPUTE_RETRY_PENDING"
     ) is True

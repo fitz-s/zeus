@@ -1,0 +1,130 @@
+# Created: 2026-08-24
+# Authority basis: reversal_plan_tier0_2026-08-24.md item 1b — the Aug 1-3
+#   defect (kelly_multiplier=0.25 lived in UNTRACKED config/settings.json;
+#   a same-week commit deleted all multiplicative dampeners; result -$642 in
+#   2 days at unchanged q) was fixed by pinning ONE constant
+#   (src/main.py::GOVERNED_KELLY_MULTIPLIER). The consult's requirement is
+#   broader: every risk-INCREASING sizing value the live entry path consumes
+#   must live in a TRACKED, content-addressed policy artifact — this file —
+#   with a boot guard that fails closed on any live value exceeding its
+#   ceiling here.
+#
+# DIRECTION LAW (load-bearing — do not weaken):
+#   Runtime / control-plane overrides (entries_paused, edge_threshold_multiplier,
+#   RiskGuard postures, etc — see src/control/control_plane.py) may LOWER
+#   effective risk at any time without touching this file. They may NEVER
+#   raise risk above the ceilings pinned here. The boot guard
+#   (src/main.py::assert_risk_policy_artifact) only rejects a LIVE value that
+#   EXCEEDS its ceiling; it never rejects a lower value, and it does not
+#   inspect control-plane state at all (control-plane levers are structurally
+#   outside this file's cfg["sizing"] scope, so they cannot trip this guard).
+#
+# CONTENT ADDRESSING: the boot guard computes sha256 over this file's raw
+# bytes and logs `policy_version` + the hash + every checked effective value
+# at every boot (see assert_risk_policy_artifact). Bump `policy_version` on
+# any ceiling change so the log trail shows exactly which artifact version
+# governed a given boot.
+#
+# CEILINGS BELOW mirror config/settings.example.json::sizing's current
+# operator-governed values exactly (raising a live value above its template
+# default is, by definition, an attempt to exceed the governed ceiling).
+#
+# LEVERS DELIBERATELY NOT PINNED HERE (documented, not silently omitted):
+#   - sizing.max_city_pct: loaded into RiskLimits/sizing_defaults() but
+#     src/strategy/risk_limits.py::check_position_allowed does not consume it
+#     as a blocker, and no other live entry-path caller reads it — a declared,
+#     currently-dead field. Add a ceiling here the day something in the live
+#     entry path starts consuming it.
+#   - src/strategy/kelly.py::GLOBAL_KELLY_FRACTION: a hardcoded source
+#     constant (currently 1.0), not a runtime/config knob — changing it
+#     requires a reviewed git commit, which is itself tracked and
+#     content-addressed (the commit SHA). Out of scope for a config-file
+#     ceiling; if it is ever made config-driven, pin it here first.
+#   - sizing.min_order_usd: a FLOOR, not a risk-increasing ceiling — raising
+#     it makes the minimum trade bigger (more restrictive), lowering it makes
+#     entries easier to reject-past, not risk-amplifying in the sense this
+#     artifact governs.
+
+policy_version: "3"
+
+# Base fractional-Kelly cap (src/strategy/kelly.py::kelly_size mult).
+# Mirrors src/main.py::GOVERNED_KELLY_MULTIPLIER (1/8) — that guard is an
+# EXACT match; this ceiling is a <= bound so a future operator-approved
+# lowering of kelly_multiplier does not also require editing this file.
+kelly_multiplier_ceiling: 0.125
+
+# Correlated-exposure pressure denominator (src/events/money_path_adapters.py
+# corr_pressure = corr_committed / (max_correlated_pct * B)). Raising this
+# value REDUCES corr pressure and therefore INCREASES effective Kelly size —
+# risk-increasing lever. Also the RHS of the existing relational guard
+# src/main.py::assert_kelly_multiplier_within_correlated_ceiling, which only
+# checks kelly_multiplier <= max_correlated_pct; it does not ceiling
+# max_correlated_pct itself. This artifact closes that gap.
+max_correlated_pct_ceiling: 0.25
+
+# Raw-heat pressure denominator (src/events/money_path_adapters.py
+# raw_pressure = raw_committed / (max_portfolio_heat_pct * B)) and the
+# src/engine/cycle_runner.py exposure_gate_hit observability threshold.
+# Raising this value reduces raw-heat pressure — risk-increasing lever.
+max_portfolio_heat_pct_ceiling: 0.5
+
+# Hard per-trade upper-bound clip on the sized stake
+# (src/events/money_path_adapters.py: size_usd = min(size_usd,
+# max_single_position_pct * sizing_bankroll); same ceiling reconciled in
+# src/engine/event_reactor_adapter.py and
+# src/engine/global_single_order_auction.py). Raising this value directly
+# raises the largest single stake the live entry path can place.
+max_single_position_pct_ceiling: 0.1
+
+# ---------------------------------------------------------------------------
+# reversal_plan_tier0_2026-08-24 item 6 — Tier-0 live research mode ceilings.
+# NOT part of RISK_POLICY_CHECKED_LEVERS / assert_risk_policy_artifact: these
+# are not sizing.* values an existing lever could exceed, and Tier-0 is a
+# strictly NARROWING gate layered on top of the pre-Tier-0 path (cheaper-only,
+# taker-only, one-per-cluster, flat-stake) — it can only make an entry harder
+# to admit and its stake smaller, never larger. Read directly by
+# src/strategy/tier0_policy.py::load_tier0_risk_ceilings (see that module's
+# docstring for why it does not reuse assert_risk_policy_artifact's loader).
+# Direction law still applies: these are ceilings, never lowered implicitly.
+# ---------------------------------------------------------------------------
+tier0:
+  # Aggregate open cost (max-loss) of open Tier-0 positions may not exceed
+  # this fraction of conservative settled bankroll.
+  aggregate_open_loss_pct_ceiling: 0.02
+  # Cumulative Tier-0 realized drawdown from Tier-0 start equity that fails
+  # closed (pauses entries via the control plane) — see
+  # src/strategy/tier0_policy.py::check_tier0_drawdown_kill.
+  drawdown_kill_pct: 0.10
+  # Episode selector for the durable start-equity seed (control_overrides
+  # override_id "tier0:start_equity:epoch:<epoch>", trades DB). The seed is
+  # written ONCE per epoch and reused across restarts (including a flag
+  # off->on flip, since the flag itself is boot-time-fixed and toggling it
+  # already requires a restart). Bump this via a reviewed commit to force a
+  # fresh Tier-0 episode (new start-equity baseline, new drawdown clock) —
+  # e.g. after manually investigating a drawdown-kill breach and resuming.
+  # See src/strategy/tier0_policy.py::tier0_start_equity_override_id.
+  epoch: 1
+
+# ---------------------------------------------------------------------------
+# reversal_plan_tier0_2026-08-24 item 10 — single bounded Tier-1 ceilings.
+# NOT part of RISK_POLICY_CHECKED_LEVERS / assert_risk_policy_artifact (same
+# reasoning as tier0: above, these are not sizing.* values an existing lever
+# could exceed). Mirrors src/analysis/promotion_gates.py's
+# TIER1_PER_POSITION_FRACTION_CEILING / TIER1_CONSERVATIVE_MULTIPLIER
+# constants — this file is the tracked, content-addressed copy a future
+# live-wiring step would read; that module has no DB/config access of its
+# own and does not read this file. Tier-1 sizing itself
+# (tier1_sizing_fraction) is NOT wired into the live entry path as of this
+# commit — activation requires promotion Gate A AND Gate B to both PASS
+# (src/analysis/promotion_gates.py), which they do not as of this commit
+# (Gate A: q_cal parity-at-best per item 9's live verdict; Gate B: no
+# tier0-settled sample yet).
+# ---------------------------------------------------------------------------
+tier1:
+  # Hard per-trade upper-bound clip on the Tier-1 sizing fraction f
+  # (f = min(this, 0.25*max[0,(r_L-p_fill)/(1-p_fill)])) — 25bp, per the
+  # plan's "Key consult corrections adopted" verbatim formula.
+  per_position_fraction_ceiling: 0.0025
+  # Aggregate unsettled Tier-1 exposure ceiling, per the plan's "Two gates +
+  # one bounded Tier 1: ... aggregate unsettled <=3%" correction.
+  aggregate_open_loss_pct_ceiling: 0.03

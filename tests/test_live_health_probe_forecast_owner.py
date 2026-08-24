@@ -1,8 +1,8 @@
-# Lifecycle: created=2026-05-15; last_reviewed=2026-07-11; last_reused=2026-07-11
+# Lifecycle: created=2026-05-15; last_reviewed=2026-08-23; last_reused=2026-08-23
 # Purpose: Lock forecast-live as the canonical forecast owner for live health alerts.
 # Reuse: Run when live_health_probe process/heartbeat classification or forecast-live launch ownership changes.
 # Created: 2026-05-15
-# Last reused or audited: 2026-07-11
+# Last reused or audited: 2026-08-23
 # Authority basis: docs/archive/2026-Q2/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md; docs/archive/2026-Q2/task_2026-05-16_live_continuous_run_package/LIVE_CONTINUOUS_RUN_PACKAGE_PLAN.md Phase C; 2026-05-17 volatile runtime-artifact code-plane contract.
 
 from __future__ import annotations
@@ -175,6 +175,9 @@ def _healthy_state(root: Path) -> None:
             "cycle": {
                 "mode": "opening_hunt",
                 "risk_level": "GREEN",
+                "candidates": 1,
+                "no_trades": 1,
+                "top_no_trade_reasons": {"fixture_no_trade": 1},
                 "ws_user_channel": {"connected": True, "subscription_state": "SUBSCRIBED"},
                 "block_registry": [],
             },
@@ -561,6 +564,9 @@ def test_live_probe_alerts_on_degraded_business_plane_composite(
     module = _load_module()
     root = tmp_path / "zeus"
     _healthy_state(root)
+    status = json.loads((root / "state" / "status_summary.json").read_text())
+    status["cycle"].update({"failed": True, "failure_reason": "health_cycle_timeout"})
+    _write_json(root / "state" / "status_summary.json", status)
     _write_json(
         root / "state" / "live_health_composite.json",
         {
@@ -592,8 +598,224 @@ def test_live_probe_alerts_on_degraded_business_plane_composite(
 
     out = capsys.readouterr().out
     assert out.startswith("ALERT")
-    assert "LIVE_HEALTH_BUSINESS_PLANE=CYCLE_IN_PROGRESS_NO_COMPLETED_AT" in out
+    assert "LIVE_HEALTH_BUSINESS_PLANE=CYCLE_FAILED: health_cycle_timeout" in out
     assert "flags=all_healthy" not in out
+
+
+def test_live_probe_alerts_on_stale_composite_and_direct_business_failure(
+    tmp_path, monkeypatch, capsys
+):
+    module = _load_module()
+    root = tmp_path / "zeus"
+    _healthy_state(root)
+    status = json.loads((root / "state" / "status_summary.json").read_text())
+    status["cycle"].update({"failed": True, "failure_reason": "health_cycle_timeout"})
+    _write_json(root / "state" / "status_summary.json", status)
+    surfaces = {
+        surface: {"ok": True, "issue": None}
+        for surface in module.REQUIRED_LIVE_HEALTH_SURFACES
+    }
+    _write_json(
+        root / "state" / "live_health_composite.json",
+        {
+            "healthy": True,
+            "status": "HEALTHY",
+            "computed_at": "2026-01-01T00:00:00+00:00",
+            "failing_surfaces": [],
+            "surfaces": surfaces,
+        },
+    )
+    _configure(
+        module,
+        monkeypatch,
+        root,
+        tmp_path / "snapshot.json",
+        {
+            "src.main": [101],
+            "src.ingest.forecast_live_daemon": [202],
+            "src.ingest_main": [404],
+            "src.riskguard": [303],
+        },
+    )
+
+    module.main()
+
+    out = capsys.readouterr().out
+    assert out.startswith("ALERT")
+    assert "LIVE_HEALTH_COMPOSITE_STALE=" in out
+    assert "LIVE_HEALTH_BUSINESS_PLANE=CYCLE_FAILED: health_cycle_timeout" in out
+
+
+def test_bounded_composite_success_keeps_preexisting_daemon_status_unchanged(
+    tmp_path, monkeypatch
+):
+    import src.config as config
+    from src.control import live_health
+    import src.main as main
+
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    status_path = state_dir / "status_summary.json"
+    status_payload = {
+        "timestamp": "2026-08-23T00:00:00+00:00",
+        "process": {"pid": os.getpid(), "mode": "live"},
+    }
+    status_path.write_text(json.dumps(status_payload), encoding="utf-8")
+    before = status_path.read_bytes()
+    child_code = (
+        "import json, os; from pathlib import Path; "
+        + "state_dir = Path(os.environ["
+        + repr(live_health._COMPOSITE_STATE_DIR_ENV)
+        + "]); "
+        "state_dir.mkdir(parents=True, exist_ok=True); "
+        "(state_dir / 'live_health_composite.json').write_text(json.dumps("
+        "{'healthy': True, 'status': 'HEALTHY', "
+        "'computed_at': '2026-08-23T00:00:00+00:00', "
+        "'failing_surfaces': [], 'surfaces': {}}))"
+    )
+    monkeypatch.setattr(config, "state_path", lambda name: state_dir / name)
+    monkeypatch.setattr(main, "_status_summary_refresh_can_defer", lambda: True)
+    monkeypatch.setattr(
+        main,
+        "_defer_for_held_position_monitor",
+        lambda _name: False,
+    )
+    monkeypatch.setattr(
+        main,
+        "_defer_for_active_entry_reactor",
+        lambda _name: False,
+    )
+    monkeypatch.setattr(live_health, "_COMPOSITE_CHILD_CODE", child_code)
+
+    main._live_health_composite_cycle.__wrapped__()
+    main._live_health_composite_cycle.__wrapped__()
+
+    assert json.loads(
+        (state_dir / "live_health_composite.json").read_text()
+    )["healthy"] is True
+    assert status_path.read_bytes() == before
+
+
+def test_parent_non_db_pulse_starts_and_reaps_timeout_child_despite_db_lock(
+    tmp_path, monkeypatch
+):
+    import time
+
+    import src.config as config
+    from src.control import live_health
+    import src.main as main
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    pid_file = tmp_path / "live_health_locked_child_pid.txt"
+    child_code = (
+        "import os, time; "
+        f"pid_file = open({str(pid_file)!r}, 'w'); "
+        "pid_file.write(str(os.getpid())); pid_file.flush(); pid_file.close(); "
+        "time.sleep(60)"
+    )
+    monkeypatch.setattr(config, "state_path", lambda name: state_dir / name)
+    monkeypatch.setattr(main, "_status_summary_refresh_can_defer", lambda: False)
+    monkeypatch.setattr(main, "_defer_for_held_position_monitor", lambda _name: False)
+    monkeypatch.setattr(main, "_defer_for_active_entry_reactor", lambda _name: False)
+    monkeypatch.setattr(live_health, "_COMPOSITE_CHILD_CODE", child_code)
+    bounded_refresh = live_health.refresh_composite_live_health_bounded
+    monkeypatch.setattr(
+        live_health,
+        "refresh_composite_live_health_bounded",
+        lambda **kwargs: bounded_refresh(timeout_seconds=0.5, **kwargs),
+    )
+    conn = sqlite3.connect(state_dir / "zeus_trades.db")
+    try:
+        conn.execute("BEGIN EXCLUSIVE")
+        started = time.monotonic()
+        try:
+            main._live_health_composite_cycle.__wrapped__()
+        except RuntimeError as exc:
+            assert str(exc) == "COMPOSITE_COMPUTE_TIMEOUT:0.5s"
+        else:
+            raise AssertionError("slow child unexpectedly completed")
+        assert time.monotonic() - started < 2.0
+    finally:
+        conn.close()
+
+    child_pid = int(pid_file.read_text())
+    try:
+        os.kill(child_pid, 0)
+    except ProcessLookupError:
+        pass
+    else:
+        raise AssertionError(f"timed-out live-health child still exists: pid={child_pid}")
+    assert not (state_dir / "status_summary.json").exists()
+
+
+def test_bounded_composite_missing_status_stays_fail_closed_without_creating_it(tmp_path):
+    from src.control import live_health
+
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+
+    result = live_health.refresh_composite_live_health_bounded(
+        state_dir=state_dir,
+        timeout_seconds=20.0,
+    )
+
+    assert result["status"] == "DEGRADED"
+    assert result["surfaces"]["status_summary"]["issue"] == "STATUS_SUMMARY_MISSING"
+    assert not (state_dir / "status_summary.json").exists()
+
+
+def test_bounded_composite_timeout_reaps_child_and_allows_next_cycle(
+    tmp_path, monkeypatch
+):
+    from src.control import live_health
+
+    assert live_health.COMPOSITE_COMPUTE_TIMEOUT_SECONDS == 45.0
+    state_dir = tmp_path / "state"
+    _write_json(
+        state_dir / "live_health_composite.json",
+        {
+            "healthy": True,
+            "status": "HEALTHY",
+            "computed_at": "2026-01-01T00:00:00+00:00",
+            "failing_surfaces": [],
+            "surfaces": {},
+        },
+    )
+    pid_file = tmp_path / "live_health_child_pids.txt"
+    child_code = (
+        "import os, time; "
+        f"pid_file = open({str(pid_file)!r}, 'a'); "
+        "pid_file.write(str(os.getpid()) + '\\n'); "
+        "pid_file.flush(); pid_file.close(); time.sleep(60)"
+    )
+    monkeypatch.setattr(live_health, "_COMPOSITE_CHILD_CODE", child_code)
+
+    errors = []
+    for _ in range(2):
+        try:
+            live_health.refresh_composite_live_health_bounded(
+                state_dir=state_dir,
+                timeout_seconds=0.5,
+            )
+        except RuntimeError as exc:
+            errors.append(str(exc))
+
+    assert errors == ["COMPOSITE_COMPUTE_TIMEOUT:0.5s"] * 2
+    pids = [int(value) for value in pid_file.read_text().splitlines()]
+    assert len(pids) == 2
+    assert pids[0] != pids[1]
+    for pid in pids:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            pass
+        else:
+            raise AssertionError(f"timed-out live-health child still exists: pid={pid}")
+    receipt = json.loads((state_dir / "live_health_composite.json").read_text())
+    assert receipt["healthy"] is False
+    assert receipt["status"] == "DEGRADED"
+    assert receipt["failing_surfaces"] == ["composite_compute"]
+    assert receipt["surfaces"]["composite_compute"]["issue"] == "COMPOSITE_COMPUTE_TIMEOUT:0.5s"
 
 
 def test_live_probe_direct_head_forecast_bridge_overrides_stale_composite_ok(

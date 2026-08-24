@@ -1,5 +1,5 @@
 # Created: 2026-05-24
-# Last reused/audited: 2026-08-10
+# Last reused/audited: 2026-08-20
 # Authority basis: EDLI v1 implementation prompt §9 Day0 trigger availability and hard-fact gates.
 from __future__ import annotations
 
@@ -65,7 +65,7 @@ def _observation(**overrides):
     return base
 
 
-def test_wu_fast_residual_source_is_statistical_not_absorbing() -> None:
+def test_wu_current_and_fast_residual_sources_are_statistical_not_absorbing() -> None:
     assert (
         day0_evidence_finality({"settlement_source": "aviationweather_metar"})
         == DAY0_MONOTONE_SETTLEMENT_BOUND
@@ -73,6 +73,12 @@ def test_wu_fast_residual_source_is_statistical_not_absorbing() -> None:
     assert (
         day0_evidence_finality(
             {"settlement_source": DAY0_WU_FAST_RESIDUAL_SOURCE}
+        )
+        == DAY0_PROVISIONAL_CURRENT_SNAPSHOT
+    )
+    assert (
+        day0_evidence_finality(
+            {"settlement_source": "wu_icao_history"}
         )
         == DAY0_PROVISIONAL_CURRENT_SNAPSHOT
     )
@@ -173,7 +179,7 @@ def test_day0_event_uses_observation_available_at():
     assert event.available_at == "2026-05-24T18:07:00+00:00"
     assert sem.calls == [74.2]
     assert json.loads(event.payload_json)["evidence_finality"] == (
-        "MONOTONE_SETTLEMENT_BOUND"
+        "PROVISIONAL_CURRENT_SNAPSHOT"
     )
 
 

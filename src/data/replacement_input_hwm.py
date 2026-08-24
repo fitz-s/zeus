@@ -1,5 +1,5 @@
 # Created: 2026-07-02
-# Last reused/audited: 2026-08-01
+# Last reused/audited: 2026-08-23
 # Authority basis: architecture/invariants.yaml
 #   section 1 row "q_version + input HWMs (A1)".
 """Shared read-time raw-input high-water-mark (HWM) lag check.
@@ -1263,6 +1263,7 @@ def _exact_current_value_serving_lag(
     decision_time: datetime,
     posterior_computed_at: datetime | None,
     provenance: Mapping[str, object],
+    held_complete_bundle_continuity: bool = False,
 ) -> tuple[bool, str | None, datetime | None]:
     """Check rich current-value provenance against each model's latest row.
 
@@ -1416,13 +1417,20 @@ def _exact_current_value_serving_lag(
         )
 
     if newer_cycle_changes:
-        # Freshness asks whether the posterior consumed every current input it
-        # claims to use, not whether enough peers have arrived to materialize a
-        # replacement yet.  Waiting for a coherent cohort here would brand an
-        # exactly superseded provider row current and, after the scalar carrier
-        # check is correctly demoted to telemetry, fail open.  The materializer
-        # may still wait for its complete probability shape; held redecision
-        # remains honestly stale until that producer commits a new posterior.
+        if held_complete_bundle_continuity:
+            # HELD CONTINUITY CONTRACT
+            # SCOPE: this family's reduce-only held redecision; ENTRY remains
+            # strict on every newer deterministic row.
+            # DRAIN: the normal materializer consumes the newer raw cohort only
+            # after its same-cycle eligible ENS shape becomes available.
+            # RESET: a newer eligible ENS cycle ends continuity and makes the
+            # previous complete bundle stale for held redecision too.
+            anchor = consumed.get("ecmwf_ifs")
+            return True, None, anchor[1] if anchor is not None else None
+        # ENTRY freshness asks whether the posterior consumed every current
+        # input it claims to use, not whether enough peers have arrived to
+        # materialize a replacement yet.  The held-only branch above is the
+        # narrow capital-release exception while the ENS frontier is unchanged.
         model, latest_id, consumed_id, current_cycle, consumed_cycle = (
             newer_cycle_changes[0]
         )
@@ -1815,11 +1823,59 @@ def _latest_eligible_ensemble_input_mark(
         predicates.append("COALESCE(boundary_ambiguous, 0) = 0")
     if "contributes_to_target_extrema" in columns:
         predicates.append("COALESCE(contributes_to_target_extrema, 0) = 1")
+    if "source_run_id" in columns:
+        source_run_ref = _authority_table_ref(conn, "source_run")
+        source_run_columns = (
+            frozenset()
+            if source_run_ref is None
+            else _hwm_table_ref_columns(conn, source_run_ref)
+        )
+        required_run_columns = {
+            "source_run_id",
+            "status",
+            "completeness_status",
+            "partial_run",
+        }
+        clock_columns = tuple(
+            column
+            for column in (
+                "imported_at",
+                "fetch_finished_at",
+                "captured_at",
+                "source_available_at",
+            )
+            if column in source_run_columns
+        )
+        if (
+            source_run_ref is None
+            or not required_run_columns.issubset(source_run_columns)
+            or not clock_columns
+        ):
+            return None
+        run_clock_expr = (
+            f"source_run.{clock_columns[0]}"
+            if len(clock_columns) == 1
+            else f"COALESCE({', '.join(f'source_run.{column}' for column in clock_columns)})"
+        )
+        predicates.append(
+            f"""
+            EXISTS (
+                SELECT 1
+                  FROM {source_run_ref} AS source_run
+                 WHERE source_run.source_run_id = ensemble_snapshot.source_run_id
+                   AND source_run.status = 'SUCCESS'
+                   AND source_run.completeness_status = 'COMPLETE'
+                   AND source_run.partial_run = 0
+                   AND datetime({run_clock_expr}) <= datetime(?)
+            )
+            """
+        )
+        params.append(decision_time.astimezone(UTC).isoformat())
     try:
         row = conn.execute(
             f"""
             SELECT snapshot_id, {cycle_expr} AS source_cycle_time
-              FROM {table_ref}
+              FROM {table_ref} AS ensemble_snapshot
              WHERE {' AND '.join(predicates)}
              ORDER BY datetime({cycle_expr}) DESC,
                       datetime({available_expr}) DESC,
@@ -1845,6 +1901,26 @@ def _latest_eligible_ensemble_input_mark(
     return (snapshot_id, cycle) if cycle is not None else None
 
 
+def latest_eligible_ensemble_input_cycle(
+    conn: sqlite3.Connection,
+    *,
+    city: str,
+    target_date: object,
+    metric: str,
+    decision_time: datetime,
+) -> datetime | None:
+    """Newest decision-time-eligible ENS cycle for pre-materialization admission."""
+
+    mark = _latest_eligible_ensemble_input_mark(
+        conn,
+        city=city,
+        target_date=target_date,
+        metric=metric,
+        decision_time=decision_time,
+    )
+    return None if mark is None else mark[1]
+
+
 def _replacement_live_input_lag_reason(
     conn: sqlite3.Connection,
     *,
@@ -1855,7 +1931,10 @@ def _replacement_live_input_lag_reason(
     posterior_source_cycle_time: object,
     posterior_computed_at: object | None = None,
     posterior_provenance: Mapping[str, object] | None = None,
+    held_redecision: bool = False,
 ) -> str | None:
+    if not isinstance(held_redecision, bool):
+        raise TypeError("held_redecision must be bool")
     posterior_cycle = _parse_source_cycle_utc(posterior_source_cycle_time)
     if posterior_cycle is None:
         return f"posterior_source_cycle_unparseable={posterior_source_cycle_time!s}"
@@ -1890,6 +1969,7 @@ def _replacement_live_input_lag_reason(
         metric=metric,
         decision_time=decision_time,
     )
+    held_complete_bundle_continuity = False
     if latest_ensemble_mark is not None:
         latest_snapshot_id, latest_ensemble_cycle = latest_ensemble_mark
         if consumed_ensemble_cycle is None:
@@ -1909,6 +1989,11 @@ def _replacement_live_input_lag_reason(
                 f"consumed_ensemble_cycle={consumed_ensemble_cycle.isoformat()}:"
                 f"lag_h={lag_hours:.2f}"
             )
+        held_complete_bundle_continuity = bool(
+            held_redecision
+            and latest_ensemble_cycle == consumed_ensemble_cycle
+            and _provenance_has_current_value_serving(provenance)
+        )
     rich_used_input_provenance = _provenance_has_current_value_serving(provenance)
     exact_serving_checked = False
     if rich_used_input_provenance:
@@ -1924,6 +2009,7 @@ def _replacement_live_input_lag_reason(
             decision_time=decision_time,
             posterior_computed_at=posterior_computed,
             provenance=provenance,
+            held_complete_bundle_continuity=held_complete_bundle_continuity,
         )
         if exact_serving_lag is not None:
             return exact_serving_lag
@@ -1955,7 +2041,11 @@ def _replacement_live_input_lag_reason(
         if exact_anchor_cycle is None:
             return "basis=openmeteo_anchor_artifact_provenance_unverifiable"
         artifact_reference_cycle = exact_anchor_cycle
-    if artifact_cycle is not None and artifact_cycle > artifact_reference_cycle:
+    if (
+        artifact_cycle is not None
+        and artifact_cycle > artifact_reference_cycle
+        and not held_complete_bundle_continuity
+    ):
         lag_hours = (
             artifact_cycle - artifact_reference_cycle
         ).total_seconds() / 3600.0
@@ -2057,8 +2147,14 @@ def replacement_live_input_lag_reason(
     posterior_source_cycle_time: object,
     posterior_computed_at: object | None = None,
     posterior_provenance: Mapping[str, object] | None = None,
+    held_redecision: bool = False,
 ) -> str | None:
-    """Return lag/absence state, or a dedicated blocker for transient read loss."""
+    """Return lag/absence state, or a dedicated blocker for transient read loss.
+
+    ``held_redecision`` permits only last-complete-bundle continuity while the
+    eligible ENS frontier is unchanged.  It does not weaken ENTRY or any other
+    identity, causality, same-cycle-late-input, read-loss, or age check.
+    """
 
     try:
         return _replacement_live_input_lag_reason(
@@ -2070,6 +2166,7 @@ def replacement_live_input_lag_reason(
             posterior_source_cycle_time=posterior_source_cycle_time,
             posterior_computed_at=posterior_computed_at,
             posterior_provenance=posterior_provenance,
+            held_redecision=held_redecision,
         )
     except ReplacementInputHwmReadUnavailable as exc:
         # A retryable SQLite failure is UNKNOWN authority, never honest absence.

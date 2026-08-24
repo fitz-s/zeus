@@ -23,6 +23,7 @@ The load-bearing cross-module RELATIONSHIPS verified here:
 from __future__ import annotations
 
 import time
+import threading
 from datetime import date, datetime, timedelta, timezone
 
 import pytest
@@ -50,9 +51,11 @@ UTC = timezone.utc
 def test_bucket_point_reader_pool_reuses_valid_time_reader_and_closes() -> None:
     opened: list[tuple[str, str]] = []
     readers: list[object] = []
+    slices: list[tuple] = []
 
     class _Variable:
         def __getitem__(self, key):
+            slices.append(key)
             return [[float(key[1].start)]]
 
     class _Reader:
@@ -73,6 +76,7 @@ def test_bucket_point_reader_pool_reuses_valid_time_reader_and_closes() -> None:
 
     with BucketPointReaderPool(cache_dir="cache", open_reader=_open) as read:
         assert read("s3://bucket/hour-1.om", 11) == 11.0
+        assert read("s3://bucket/hour-1.om", 11) == 11.0
         assert read("s3://bucket/hour-1.om", 12) == 12.0
         assert read("s3://bucket/hour-2.om", 13) == 13.0
 
@@ -80,6 +84,7 @@ def test_bucket_point_reader_pool_reuses_valid_time_reader_and_closes() -> None:
         ("s3://bucket/hour-1.om", "cache"),
         ("s3://bucket/hour-2.om", "cache"),
     ]
+    assert len(slices) == 3
     assert all(reader.closed for reader in readers)
 
 
@@ -155,6 +160,49 @@ def test_bucket_payload_stops_after_current_timestep_when_deadline_expires(
         )
 
     assert len(reads) == 1
+
+
+def test_bucket_payload_reads_distinct_valid_times_in_bounded_parallel_order(
+    monkeypatch,
+) -> None:
+    import src.data.openmeteo_ecmwf_ifs9_bucket_transport as bucket
+
+    run = datetime(2026, 6, 11, 0, tzinfo=UTC)
+    needed = tuple(run + timedelta(hours=h) for h in range(4))
+    manifest = _manifest(run=run, valid_times=list(needed))
+    point = type(
+        "_Point",
+        (),
+        {
+            "flat_index": 1,
+            "grid_latitude": 39.9,
+            "grid_longitude_east": 116.4,
+            "nearest_distance_km": 0.0,
+        },
+    )()
+    monkeypatch.setattr(bucket, "map_lat_lon_to_o1280_index", lambda *_args: point)
+    all_started = threading.Barrier(len(needed))
+
+    def _concurrent_read(uri: str, _index: int) -> float:
+        all_started.wait(timeout=1.0)
+        stem = uri.rsplit("/", 1)[-1].removesuffix(".om")
+        return float(datetime.strptime(stem, "%Y-%m-%dT%H%M").hour)
+
+    result = fetch_bucket_anchor_payload(
+        latitude=39.9,
+        longitude=116.4,
+        run=run,
+        timezone_name="UTC",
+        needed_valid_times=needed,
+        manifest=manifest,
+        read_point=_concurrent_read,
+        read_workers=4,
+    )
+
+    assert result.payload["hourly"]["time"] == [
+        vt.strftime("%Y-%m-%dT%H:%M") for vt in needed
+    ]
+    assert result.payload["hourly"]["temperature_2m"] == [0.0, 1.0, 2.0, 3.0]
 
 
 def test_admission_refuses_when_one_needed_timestep_missing() -> None:

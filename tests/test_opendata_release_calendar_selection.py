@@ -1,6 +1,6 @@
 # Created: 2026-05-03
-# Last reused/audited: 2026-05-03
-# Authority basis: docs/operations/task_2026-05-02_live_entry_data_contract/PLAN_v4.md Phase 5A Open Data source-run selection contract.
+# Last reused/audited: 2026-08-19
+# Authority basis: docs/operations/task_2026-05-02_live_entry_data_contract/PLAN_v4.md Phase 5A + live_entry_health_repair B125.
 """Open Data producer source-run selection contract tests."""
 
 from __future__ import annotations
@@ -21,15 +21,16 @@ def test_opendata_no_longer_exposes_default_cycle_selector() -> None:
     assert not hasattr(ecmwf_open_data, "_default_cycle")
 
 
-def test_opendata_selection_skips_06z_for_full_horizon_at_1400() -> None:
+def test_opendata_selection_uses_safe_06z_for_complete_live_horizon() -> None:
     decision, metadata = ecmwf_open_data._select_cycle_for_track(
         track="mx2t6_high",
         now_utc=_utc(14),
     )
 
     assert decision is FetchDecision.FETCH_ALLOWED
-    assert metadata["selected_cycle_time"] == _utc(0)
-    assert metadata["horizon_profile"] == "full"
+    assert metadata["selected_cycle_time"] == _utc(6)
+    assert metadata["horizon_profile"] == "short"
+    assert metadata["live_authorization"] is True
 
 
 def test_opendata_selection_uses_12z_after_full_horizon_release() -> None:

@@ -472,7 +472,7 @@ _REVISION_INSERT_SQL = """
         ?
     )
 """
-_UPDATE_WIDENED_SQL = """
+_UPDATE_CURRENT_SQL = """
     UPDATE observation_instants
     SET temp_current = ?, running_max = ?, running_min = ?, observation_count = ?,
         provenance_json = ?, imported_at = ?
@@ -597,6 +597,7 @@ def _normalize_material_value(column: str, value: Any) -> Any:
             # data matches; without stripping it, every re-fetch of a
             # once-widened cell trips the hash-reuse guard forever.
             parsed.pop("widened_from", None)
+            parsed.pop("revised_from", None)
         return parsed
     return value
 
@@ -688,6 +689,45 @@ def _monotone_widening(existing: dict[str, Any], incoming: dict[str, Any]) -> bo
     return True
 
 
+def _wu_source_revision_supersedes(
+    existing: dict[str, Any], incoming: dict[str, Any]
+) -> bool:
+    """True when a later WU fetch corrects the same source-hour bucket.
+
+    WU's historical endpoint can revise a previously published report in
+    either direction.  Treating an observed maximum as append-only preserved a
+    Shenzhen 31C print after the provider had corrected that same report to
+    29C.  Current decision truth must follow the latest causal provider
+    payload; the immutable revision table preserves the displaced view.
+    """
+
+    if str(incoming.get("source") or "") != "wu_icao_history":
+        return False
+    for column in set(_INSERT_COLUMNS) - _WIDENING_VARIABLE_COLUMNS:
+        if _normalize_material_value(
+            column, existing.get(column)
+        ) != _normalize_material_value(column, incoming.get(column)):
+            return False
+    try:
+        existing_imported = datetime.fromisoformat(
+            str(existing.get("imported_at") or "").replace("Z", "+00:00")
+        )
+        incoming_imported = datetime.fromisoformat(
+            str(incoming.get("imported_at") or "").replace("Z", "+00:00")
+        )
+        existing_provenance = json.loads(existing.get("provenance_json") or "{}")
+        incoming_provenance = json.loads(incoming.get("provenance_json") or "{}")
+        existing_latest = datetime.fromisoformat(
+            str(existing_provenance["latest_raw_ts"]).replace("Z", "+00:00")
+        )
+        incoming_latest = datetime.fromisoformat(
+            str(incoming_provenance["latest_raw_ts"]).replace("Z", "+00:00")
+        )
+    except (KeyError, TypeError, ValueError):
+        return False
+    return incoming_imported > existing_imported and incoming_latest >= existing_latest
+
+
 def _widened_provenance_json(existing: dict[str, Any], incoming: dict[str, Any]) -> str:
     """Incoming provenance plus a ``widened_from`` receipt of what it replaced.
 
@@ -717,6 +757,29 @@ def _widened_provenance_json(existing: dict[str, Any], incoming: dict[str, Any])
         "payload_hash": _payload_hash_from_provenance(existing.get("provenance_json")),
     }
     return _json_dumps(merged)
+
+
+def _revised_provenance_json(existing: dict[str, Any], incoming: dict[str, Any]) -> str:
+    """Incoming WU provenance plus the exact provider view it superseded."""
+
+    try:
+        revised = json.loads(incoming.get("provenance_json") or "{}")
+        previous = json.loads(existing.get("provenance_json") or "{}")
+    except (TypeError, ValueError):
+        return str(incoming.get("provenance_json") or "{}")
+    if not isinstance(revised, dict) or not isinstance(previous, dict):
+        return str(incoming.get("provenance_json") or "{}")
+    revised = dict(revised)
+    revised["revised_from"] = {
+        "temp_current": existing.get("temp_current"),
+        "latest_raw_ts": previous.get("latest_raw_ts"),
+        "running_max": existing.get("running_max"),
+        "running_min": existing.get("running_min"),
+        "observation_count": existing.get("observation_count"),
+        "imported_at": existing.get("imported_at"),
+        "payload_hash": _payload_hash_from_provenance(existing.get("provenance_json")),
+    }
+    return _json_dumps(revised)
 
 
 def _fetch_existing(
@@ -794,9 +857,14 @@ def insert_rows(conn: sqlite3.Connection, rows: Iterable[ObsV2Row]) -> int:
       ``widened_from`` so time-of-knowledge stays reconstructable. The event
       is ALSO recorded in ``observation_revisions`` (audit trail intact) with
       reason ``payload_hash_mismatch_monotone_widening_applied``.
-    - Anything else (a value that would make the bucket LESS extreme, or an
-      identity mismatch) keeps the original fail-closed behavior: recorded in
-      ``observation_revisions``, current row NOT overwritten.
+    - WU SOURCE REVISION: an otherwise identical bucket with a newer causal
+      fetch and non-regressing raw-report clock supersedes the current row in
+      either direction. The displaced view remains in
+      ``observation_revisions`` with reason
+      ``payload_hash_mismatch_source_revision_applied``.
+    - Anything else (an older fetch or identity mismatch) keeps the original
+      fail-closed behavior: recorded in ``observation_revisions``, current row
+      NOT overwritten.
 
     Returns
     -------
@@ -855,7 +923,7 @@ def insert_rows(conn: sqlite3.Connection, rows: Iterable[ObsV2Row]) -> int:
 
             if _monotone_widening(existing, row_dict):
                 conn.execute(
-                    _UPDATE_WIDENED_SQL,
+                    _UPDATE_CURRENT_SQL,
                     (
                         row_dict["temp_current"],
                         row_dict["running_max"],
@@ -873,6 +941,29 @@ def insert_rows(conn: sqlite3.Connection, rows: Iterable[ObsV2Row]) -> int:
                     existing_payload_hash=existing_payload_hash,
                     incoming_payload_hash=incoming_payload_hash,
                     reason="payload_hash_mismatch_monotone_widening_applied",
+                )
+                continue
+
+            if _wu_source_revision_supersedes(existing, row_dict):
+                conn.execute(
+                    _UPDATE_CURRENT_SQL,
+                    (
+                        row_dict["temp_current"],
+                        row_dict["running_max"],
+                        row_dict["running_min"],
+                        row_dict["observation_count"],
+                        _revised_provenance_json(existing, row_dict),
+                        row_dict["imported_at"],
+                        existing["id"],
+                    ),
+                )
+                _insert_revision(
+                    conn,
+                    existing=existing,
+                    incoming=row_dict,
+                    existing_payload_hash=existing_payload_hash,
+                    incoming_payload_hash=incoming_payload_hash,
+                    reason="payload_hash_mismatch_source_revision_applied",
                 )
                 continue
 

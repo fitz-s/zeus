@@ -1,5 +1,5 @@
 # Created: 2026-06-30
-# Last reused/audited: 2026-08-17
+# Last reused/audited: 2026-08-22
 # Authority basis: live-money qkernel submit authority and canonical selection-fact persistence.
 
 from __future__ import annotations
@@ -39,7 +39,10 @@ from src.riskguard.risk_level import RiskLevel
 from src.contracts.executable_cost_curve import BookLevel, ExecutableCostCurve, FeeModel
 from src.contracts.execution_price import ExecutionPrice
 from src.contracts.execution_intent import DecisionSourceContext
-from src.contracts.global_auction_receipt import GlobalAuctionReceiptRef
+from src.contracts.global_auction_receipt import (
+    CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION,
+    GlobalAuctionReceiptRef,
+)
 from src.contracts.strategy_capital_allocation import STRATEGY_LOG_UTILITY_BASIS
 from src.decision_kernel import claims
 from src.decision_kernel.canonicalization import stable_hash
@@ -210,6 +213,9 @@ def _global_current_qkernel_cert(*, side: str = "YES") -> dict:
         global_auction_receipt=_global_receipt_payload(),
         global_economic_identity="global-economic-1",
         global_optimum_semantics="CUT_TIME_GLOBAL_OPTIMUM",
+        global_selection_revision=(
+            CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION
+        ),
         global_candidate_id="global-candidate-1",
         global_execution_mode="TAKER_LIMIT",
         global_bin_id="bin-1",
@@ -2358,6 +2364,19 @@ def test_global_current_state_rejects_resealed_missing_execution_mode():
     ) == "current_state:global_execution_mode"
 
 
+def test_global_current_state_rejects_superseded_selection_revision():
+    cert = _global_current_qkernel_cert(side="NO")
+    cert["global_selection_revision"] = (
+        "global_single_order_posterior_mean_expected_growth_v1"
+    )
+    _seal_current_qkernel_cert(cert)
+
+    assert era.qkernel_global_current_state_rejection_reason(
+        cert,
+        direction="buy_no",
+    ) == "global_selection_revision"
+
+
 def test_global_taker_action_fresh_revalidation_never_downgrades_to_maker():
     cert = dict(
         _global_current_qkernel_cert(side="NO"),
@@ -2776,8 +2795,12 @@ def test_global_current_entry_feasibility_proof_observes_through_only_automated_
     candidate = SimpleNamespace(
         action="BUY",
         side="YES",
+        execution_mode="TAKER_LIMIT",
         executable_cost_curve=SimpleNamespace(
             levels=(SimpleNamespace(price=Decimal("0.30")),)
+        ),
+        economic_cost_curve=SimpleNamespace(
+            levels=(SimpleNamespace(price=Decimal("0.29")),)
         ),
         native_bid_levels=(SimpleNamespace(price=Decimal("0.29")),),
     )
@@ -2790,6 +2813,12 @@ def test_global_current_entry_feasibility_proof_observes_through_only_automated_
         era,
         "_entry_strategy_policy_blocks_live_submit",
         lambda *_args, **_kwargs: reason[0],
+    )
+    market_alpha_only = [False]
+    monkeypatch.setattr(
+        era,
+        "_risk_action_gate_is_market_alpha_only",
+        lambda *_args, **_kwargs: market_alpha_only[0],
     )
 
     kwargs = {
@@ -2804,6 +2833,35 @@ def test_global_current_entry_feasibility_proof_observes_through_only_automated_
         candidate,
         **kwargs,
         observe_through_automated_risk_gate=True,
+    ) is None
+    candidate.execution_mode = "MAKER_REST"
+    candidate.side = "NO"
+    market_alpha_only[0] = True
+    assert era._global_current_entry_feasibility_rejection_reason(
+        candidate, **kwargs
+    ) is None
+
+    candidate.execution_mode = "TAKER_LIMIT"
+    candidate.side = "YES"
+    market_alpha_only[0] = False
+    reason[0] = (
+        "STRATEGY_POLICY_GATED:forecast_qkernel_entry:"
+        "sources=risk_action:gate"
+    )
+    assert era._global_current_entry_feasibility_rejection_reason(
+        candidate, **kwargs
+    ) == reason[0]
+    candidate.execution_mode = "MAKER_REST"
+    assert era._global_current_entry_feasibility_rejection_reason(
+        candidate, **kwargs
+    ) == reason[0]
+    market_alpha_only[0] = True
+    assert era._global_current_entry_feasibility_rejection_reason(
+        candidate, **kwargs
+    ) == reason[0]
+    candidate.side = "NO"
+    assert era._global_current_entry_feasibility_rejection_reason(
+        candidate, **kwargs
     ) is None
 
     reason[0] = (
@@ -4449,6 +4507,47 @@ def _day0_payload(**overrides) -> dict:
     return payload
 
 
+def test_statistical_day0_probability_does_not_require_absorbing_source_parents():
+    event = SimpleNamespace(event_type="DAY0_EXTREME_UPDATED")
+    decision_time = datetime(2026, 8, 22, 2, 21, tzinfo=timezone.utc)
+    statistical = _day0_payload(
+        probability_authority="day0_remaining_day_global_probability_v1",
+        q_source="day0_remaining_day",
+        _edli_q_source="day0_remaining_day",
+        settlement_source="wu_icao_history",
+    )
+
+    assert (
+        era._day0_live_source_parent_certificates(
+            event=event,
+            payload=statistical,
+            base_certs=(),
+            decision_time=decision_time,
+        )
+        == ()
+    )
+
+    deterministic = _day0_payload(
+        probability_authority="day0_deterministic_bin_payoff_v1",
+        q_source="day0_deterministic_bin_payoff",
+        _edli_q_source="day0_deterministic_bin_payoff",
+        settlement_source="wu_icao_history",
+    )
+    with pytest.raises(
+        ValueError,
+        match=(
+            "DAY0_SOURCE_PARENT_AUTHORITY_BLOCKED:"
+            "day0 evidence is not absorbing:PROVISIONAL_CURRENT_SNAPSHOT"
+        ),
+    ):
+        era._day0_live_source_parent_certificates(
+            event=event,
+            payload=deterministic,
+            base_certs=(),
+            decision_time=decision_time,
+        )
+
+
 def test_live_entry_day0_observation_does_not_qualify_remaining_probability():
     payload = _day0_payload(
         **_day0_probability_fields(),
@@ -5820,6 +5919,127 @@ def test_day0_final_intent_source_context_binds_observation_and_base_forecast():
     assert ctx is not None
     assert ctx.posterior_identity_hash == payload["raw_payload_hash"]
     assert ctx.integrity_errors() == ()
+
+
+def test_statistical_day0_final_intent_context_is_not_base_forecast_only():
+    decision_time = datetime(2026, 7, 1, 21, tzinfo=timezone.utc)
+    observation = {
+        "city": "Chicago",
+        "target_date": "2026-07-01",
+        "metric": "high",
+        "settlement_source": "wu_icao_history",
+        "station_id": "KORD",
+        "configured_station_id": "KORD",
+        "raw_payload_sha256": "a" * 64,
+        "observation_time": "2026-07-01T20:51:00+00:00",
+        "observation_available_at": "2026-07-01T20:55:56+00:00",
+    }
+    forecast = build_certificate(
+        certificate_type=claims.FORECAST_AUTHORITY,
+        semantic_key="forecast:statistical-day0-base",
+        claim_type=claims.FORECAST_AUTHORITY,
+        mode="LIVE",
+        decision_time=decision_time,
+        source_available_at=decision_time,
+        agent_received_at=decision_time,
+        persisted_at=decision_time,
+        payload={
+            "source_id": "replacement_raw_second_moment",
+            "forecast_source_id": "replacement_raw_second_moment",
+            "model_family": "replacement_raw_second_moment",
+            "forecast_issue_time": "2026-07-01T06:00:00+00:00",
+            "forecast_fetch_time": "2026-07-01T06:20:00+00:00",
+            "forecast_available_at": "2026-07-01T06:20:00+00:00",
+            "raw_payload_hash": "b" * 64,
+            "posterior_identity_hash": "qv-day0-base-001",
+            "degradation_level": "OK",
+            "forecast_source_role": "day0_base_distribution",
+            "authority_tier": "FORECAST",
+            "decision_time": decision_time.isoformat(),
+            "decision_time_status": "OK",
+            "polymarket_end_anchor_source": "gamma_explicit",
+            "zeus_submit_intent_time": "2026-07-01T21:00:01+00:00",
+            "venue_ack_time": "2026-07-01T21:00:02+00:00",
+        },
+        authority_id="test",
+        authority_version="v1",
+        algorithm_id="test",
+        algorithm_version="v1",
+    )
+    transform = {
+        "yes_lcb_by_condition": {"condition-1": 0.6},
+        "no_lcb_by_condition": {"condition-1": 0.2},
+        "mask": [1.0],
+    }
+    actionable = {
+        **observation,
+        "day0_observation_provenance_hash": stable_hash(observation),
+        "event_type": "DAY0_EXTREME_UPDATED",
+        "source_match_status": "MATCH",
+        "local_date_status": "MATCH",
+        "station_match_status": "MATCH",
+        "dst_status": "UNAMBIGUOUS",
+        "metric_match_status": "MATCH",
+        "rounding_status": "MATCH",
+        "source_authorized_status": "AUTHORIZED",
+        "live_authority_status": "live",
+        "raw_value": 20.0,
+        "rounded_value": 20,
+        "probability_authority": "day0_remaining_day_global_probability_v1",
+        "q_source": "day0_remaining_day",
+        "_edli_q_source": "day0_remaining_day",
+        "_edli_day0_q_mode": "remaining_day",
+        "_edli_day0_remaining_models": 3,
+        "_edli_day0_lcb_transform": transform,
+        "day0_probability_authority": {
+            "probability_authority": (
+                "day0_remaining_day_global_probability_v1"
+            ),
+            "q_source": "day0_remaining_day",
+            "q_mode": "remaining_day",
+            "remaining_models": 3,
+            "rounded_value": 20,
+            "observation_time": observation["observation_time"],
+            "observation_available_at": observation[
+                "observation_available_at"
+            ],
+            "lcb_transform": transform,
+        },
+        "direction": "buy_yes",
+        "condition_id": "condition-1",
+        "q_live": 0.7,
+        "q_lcb_5pct": 0.6,
+        "qkernel_execution_economics": {
+            "current_state_identity_hash": "c" * 64,
+        },
+    }
+
+    payload = _final_intent_decision_source_context_payload(
+        event=SimpleNamespace(event_type="DAY0_EXTREME_UPDATED"),
+        forecast_authority=forecast,
+        day0_source_certs=(),
+        actionable_payload=actionable,
+    )
+    context = DecisionSourceContext.from_forecast_context(payload)
+
+    assert payload["forecast_source_role"] == "day0_observed_probability"
+    assert payload["authority_tier"] == "DAY0_OBSERVATION"
+    assert payload["day0_probability_identity"] == "c" * 64
+    assert context is not None
+    assert context.integrity_errors() == ()
+
+    malformed = dict(actionable)
+    malformed["q_source"] = "day0_deterministic_bin_payoff"
+    with pytest.raises(
+        ValueError,
+        match="DAY0_STATISTICAL_DECISION_SOURCE_CONTEXT_INVALID",
+    ):
+        _final_intent_decision_source_context_payload(
+            event=SimpleNamespace(event_type="DAY0_EXTREME_UPDATED"),
+            forecast_authority=forecast,
+            day0_source_certs=(),
+            actionable_payload=malformed,
+        )
 
 
 @pytest.mark.parametrize(

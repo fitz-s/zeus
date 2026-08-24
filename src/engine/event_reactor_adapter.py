@@ -185,6 +185,7 @@ from src.contracts.day0_payoff_truth import (
 from src.contracts.execution_intent import ExecutableCostBasis
 from src.contracts.execution_price import ExecutionPrice, ExecutionPriceContractError
 from src.contracts.global_auction_receipt import (
+    CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION,
     GlobalAuctionReceiptRef,
     GlobalSellReceiptClosure,
 )
@@ -251,6 +252,7 @@ from src.engine.event_bound_final_intent import (
 from src.data import replacement_input_hwm as _replacement_input_hwm
 from src.data.replacement_forecast_cycle_policy import (
     CURRENT_EVIDENCE_SEMANTICS_REVISION,
+    LIVE_CURRENT_EVIDENCE_SEMANTICS_REVISIONS,
     STALE_ENSEMBLE_ABSOLUTE_DISAGREEMENT_SEMANTICS_REVISION,
     _current_evidence_shape,
     current_evidence_shape_semantics_mismatch,
@@ -291,6 +293,7 @@ from src.config import (
     edge_n_bootstrap,
     runtime_cities_by_name,
     settings,
+    tier0_research_mode_enabled,
 )
 from src.contracts.position_truth import CURRENT_MONEY_RISK_CHAIN_STATES
 from src.contracts.settlement_semantics import SettlementSemantics
@@ -348,6 +351,27 @@ from src.calibration.emos import (
 
 _GLOBAL_AUCTION_WORK_CUT_SECONDS = 45.0
 
+# TYPE C bounded-revalidation counter (docs/operations/current/plans/
+# auction_collapse_repair_design_2026-08-24.md §1.3). A global batch
+# generation survives up to this many non-day0/non-fill supersessions
+# within the grace window below before _epoch_superseded reverts to
+# immediate-abort (today's behavior). day0_extreme_event_committed and
+# position_fill_projected are hard vetoes and never consult this budget --
+# see _global_batch_preemption_grace_reasons_excluded_from_grace below.
+GLOBAL_AUCTION_PREEMPTION_GRACE_MAX_SUPERSESSIONS = int(
+    os.environ.get("ZEUS_GLOBAL_AUCTION_PREEMPTION_GRACE_MAX_SUPERSESSIONS", "3")
+)
+GLOBAL_AUCTION_PREEMPTION_GRACE_WINDOW_SECONDS = float(
+    os.environ.get("ZEUS_GLOBAL_AUCTION_PREEMPTION_GRACE_WINDOW_SECONDS", "300")
+)
+# Both reasons are genuinely cross-family authoritative (a Day0 extreme or a
+# fill changes the correct answer for every family's capital/probability
+# context, not just the family that produced the wake) and cheap to
+# re-derive -- never coalesced regardless of grace budget.
+_GLOBAL_AUCTION_PREEMPTION_GRACE_HARD_VETO_REASONS = frozenset(
+    {"day0_extreme_event_committed", "position_fill_projected"}
+)
+
 
 UTC = timezone.utc
 
@@ -393,6 +417,7 @@ _GLOBAL_PROBABILITY_CACHEABLE_INELIGIBLE_REASONS = frozenset(
         "GLOBAL_DAY0_FAST_OBSERVATION_ENTRY_STALE",
         "GLOBAL_DAY0_PHYSICAL_FRONTIER_NOT_SETTLEMENT_CONFIRMED",
         "GLOBAL_DAY0_PROVISIONAL_OBSERVATION_NOT_ENTRY_AUTHORITY",
+        "GLOBAL_DAY0_PROVISIONAL_OBSERVATION_NOT_EXECUTION_AUTHORITY",
         "GLOBAL_DAY0_PROVISIONAL_POSTERIOR_IDENTITY_MISMATCH",
         "GLOBAL_DAY0_PROVISIONAL_POSTERIOR_IDENTITY_MISSING",
         "GLOBAL_DAY0_PROVISIONAL_ROLLOVER_UNCONFIRMED",
@@ -420,6 +445,7 @@ _GLOBAL_PROBABILITY_FAMILY_UNAVAILABLE_REASONS = frozenset(
         "GLOBAL_DAY0_FAST_OBSERVATION_ENTRY_STALE",
         "GLOBAL_DAY0_PHYSICAL_FRONTIER_NOT_SETTLEMENT_CONFIRMED",
         "GLOBAL_DAY0_PROVISIONAL_OBSERVATION_NOT_ENTRY_AUTHORITY",
+        "GLOBAL_DAY0_PROVISIONAL_OBSERVATION_NOT_EXECUTION_AUTHORITY",
         "GLOBAL_DAY0_PROVISIONAL_POSTERIOR_IDENTITY_MISMATCH",
         "GLOBAL_DAY0_PROVISIONAL_POSTERIOR_IDENTITY_MISSING",
         "GLOBAL_DAY0_PROVISIONAL_ROLLOVER_UNCONFIRMED",
@@ -1524,6 +1550,30 @@ def _global_reduce_only_book_tokens(
     )
 
 
+def _global_reduce_only_capture_tokens(
+    probabilities: Mapping[str, object],
+    held_tokens_by_family: Mapping[str, set[str]],
+    authorized_tokens: frozenset[str],
+) -> tuple[str, ...]:
+    """Return the exact held tokens represented by one probability slice."""
+
+    represented: set[str] = set()
+    for raw_family_key, witness in probabilities.items():
+        family_key = str(raw_family_key or "").strip()
+        held = held_tokens_by_family.get(family_key, set())
+        if not held:
+            continue
+        for binding in tuple(getattr(witness, "bindings", ()) or ()):
+            for raw_token in (
+                getattr(binding, "yes_token_id", ""),
+                getattr(binding, "no_token_id", ""),
+            ):
+                token = str(raw_token or "").strip()
+                if token in held and token in authorized_tokens:
+                    represented.add(token)
+    return tuple(sorted(represented))
+
+
 def _global_book_exact_retry_facts(
     missing_tokens: tuple[str, ...],
     retry_books: Mapping[str, Mapping[str, object]],
@@ -2574,7 +2624,12 @@ def _market_channel_continuity_cut(
     checked_at: datetime,
     max_age: timedelta,
 ) -> tuple[datetime, datetime] | None:
-    """Return the live WS generation cut when both proof files agree."""
+    """Return the live WS generation cut only when all ownership receipts agree.
+
+    SCOPE: the price-channel daemon PID/generation named by all three sidecars.
+    DRAIN: the daemon republishes continuity and readiness while the consumer runs.
+    RESET: receipt withdrawal, PID change, or generation mismatch rejects this cut.
+    """
 
     if checked_at.tzinfo is None or max_age <= timedelta(0):
         return None
@@ -2591,14 +2646,25 @@ def _market_channel_continuity_cut(
                 encoding="utf-8"
             )
         )
+        readiness = json.loads(
+            state_path("market-channel-action-sink-readiness.json").read_text(
+                encoding="utf-8"
+            )
+        )
         if (
             not isinstance(proof, Mapping)
             or not isinstance(heartbeat, Mapping)
+            or not isinstance(readiness, Mapping)
             or proof.get("schema_version") != 1
+            or readiness.get("schema_version") != 1
             or proof.get("channel") != "market_channel"
             or proof.get("connected") is not True
             or heartbeat.get("daemon") != "price-channel-ingest"
             or int(proof.get("pid") or 0) != int(heartbeat.get("pid") or -1)
+            or int(proof.get("pid") or 0) != int(readiness.get("pid") or -1)
+            or proof.get("generation") != readiness.get("generation")
+            or readiness.get("sink_registered") is not True
+            or readiness.get("consumer_queue_accepted") is not True
         ):
             return None
         connected_at = datetime.fromisoformat(
@@ -5957,6 +6023,52 @@ def _event_bound_effective_live_quality_floors(
     }
 
 
+def _risk_action_gate_is_market_alpha_only(
+    conn: sqlite3.Connection | None,
+    strategy_key: str,
+    probability_semantics_revision: str,
+) -> bool:
+    """Identify the revision gate that measures alpha, not data/risk failure."""
+
+    if conn is None:
+        return False
+    try:
+        from src.riskguard.policy import (
+            active_probability_revision_capital_gate_action_ids,
+        )
+
+        action_ids = active_probability_revision_capital_gate_action_ids(
+            conn,
+            strategy_key,
+            datetime.now(timezone.utc),
+            probability_semantics_revision=probability_semantics_revision,
+        )
+        reasons = []
+        for action_id in action_ids:
+            row = conn.execute(
+                "SELECT reason FROM risk_actions WHERE action_id=? LIMIT 1",
+                (action_id,),
+            ).fetchone()
+            if row is None:
+                return False
+            try:
+                reasons.append(str(row["reason"] or ""))
+            except (IndexError, KeyError, TypeError):
+                reasons.append(str(row[0] or ""))
+    except Exception:  # noqa: BLE001 - ambiguity preserves the gate
+        return False
+    components = tuple(
+        component.strip()
+        for reason in reasons
+        for component in reason.split("|")
+        if component.strip()
+    )
+    return bool(action_ids and components) and all(
+        component.startswith("market_relative_alpha_unproven(")
+        for component in components
+    )
+
+
 def _global_current_entry_feasibility_rejection_reason(
     candidate: object,
     *,
@@ -6051,19 +6163,45 @@ def _global_current_entry_feasibility_rejection_reason(
                         )
                     )
                 strategy_block = strategy_policy_cache[policy_cache_key]
-            if (
-                observe_through_automated_risk_gate
-                and strategy_block is not None
+            strategy_sources = (strategy_block or "").partition("sources=")[2]
+            risk_gate_sources = {
+                source.strip()
+                for source in strategy_sources.split(",")
+                if strategy_block is not None and source.strip()
+            }
+            automated_gate_visible = (
+                strategy_block is not None
                 and strategy_block.startswith("STRATEGY_POLICY_GATED:")
-                and "risk_action:gate"
-                in strategy_block.partition("sources=")[2].split(",")
+                and "risk_action:gate" in risk_gate_sources
+            )
+            maker_gate_is_atomic = (
+                execution_mode == "MAKER_REST"
+                and side == "NO"
+                and "risk_action:gate" in risk_gate_sources
+                and risk_gate_sources
+                <= {"manual_override:gate", "risk_action:gate"}
+                and _risk_action_gate_is_market_alpha_only(
+                    strategy_policy_conn,
+                    normalized_strategy,
+                    candidate_revision,
+                )
+            )
+            if automated_gate_visible and (
+                observe_through_automated_risk_gate or maker_gate_is_atomic
             ):
                 # The proof solve is side-effect-free and shares the exact live
-                # q/book/wealth cut.  Let it expose the economic frontier hidden
-                # by an automated performance gate without weakening live
-                # selection.  A restrictive manual gate never carries the
-                # risk_action source because it locks the field first, so it
-                # remains authoritative here.
+                # q/book/wealth cut, so it may expose the economic frontier hidden
+                # by an automated performance gate. Live NO maker-rest proposals
+                # are also atomic: they remain contingent on a fill, already
+                # require an exitable seed, and the submit-time JIT gate requires
+                # full selected-share pre-cliff liquidation capacity. SCOPE: only
+                # this NO maker proposal escapes an automated revision gate. A
+                # permissive manual gate remains in StrategyPolicy.sources as
+                # provenance but cannot lock the deny field; a restrictive manual
+                # gate locks it and prevents the risk-action source from appearing.
+                # YES, taker, and restrictive manual gates stay. DRAIN: RiskGuard
+                # keeps grading the exact revision. RESET: a validated/expired gate
+                # restores ordinary strategy admission.
                 strategy_block = None
             if strategy_block is not None:
                 return strategy_block
@@ -7205,11 +7343,9 @@ def _day0_unresolved_entry_probability_rejection_reason(
     from src.events.day0_authority import DAY0_PROBABILITY_SEMANTICS_REVISION
 
     revision = str(probability_semantics_revision or "").strip()
-    if revision in {
-        DAY0_PROBABILITY_SEMANTICS_REVISION,
-        CURRENT_EVIDENCE_SEMANTICS_REVISION,
-        STALE_ENSEMBLE_ABSOLUTE_DISAGREEMENT_SEMANTICS_REVISION,
-    }:
+    if revision == DAY0_PROBABILITY_SEMANTICS_REVISION or (
+        revision in LIVE_CURRENT_EVIDENCE_SEMANTICS_REVISIONS
+    ):
         return None
     return "GLOBAL_DAY0_UNRESOLVED_ENTRY_PROBABILITY_UNCALIBRATED"
 
@@ -7285,6 +7421,33 @@ def event_bound_live_adapter_from_trade_conn(
         str,
         tuple[str, str, dict[tuple[str, str], str | None]],
     ] = {}
+    # reversal_plan_tier0_2026-08-24 item 6: Tier-0's diversification unit is
+    # the (city, target_date) CLUSTER, coarser than family_key (which also
+    # partitions by metric — weather_family_id(city, target_date, metric)).
+    # Populated alongside _global_entry_policy_by_family from the SAME event
+    # payload, zero extra queries; consumed only by _current_entry_candidate_policy
+    # below when tier0_research_mode is on.
+    _global_entry_cluster_by_family: dict[str, tuple[str, str]] = {}
+    # Same-cycle "pending" cluster occupancy. Tier-0 forbids MAKER_REST
+    # (taker-only), so there is no multi-cycle resting order to track — held
+    # positions (runtime-open) already cover every prior-cycle Tier-0 fill.
+    # This set closes the one remaining race: two candidates for the SAME
+    # (city, target_date) both evaluated within this one batch. Populated
+    # only on a real (non-proof-only) admit inside
+    # _current_entry_candidate_policy below.
+    _tier0_admitted_clusters_this_cycle: set[tuple[str, str]] = set()
+    # reversal_plan_tier0_2026-08-24 item 6 follow-up: once-per-cycle (here,
+    # NOT per candidate) start-equity seed + drawdown-kill check. See
+    # src/engine/tier0_drawdown_hook.py for the full implementation and
+    # storage-choice rationale — split into its own module to keep this
+    # already-large, concurrently-edited file's touch to one call.
+    if tier0_research_mode_enabled():
+        from src.engine.tier0_drawdown_hook import tier0_seed_and_check_drawdown_kill
+
+        tier0_seed_and_check_drawdown_kill(
+            trade_conn,
+            bankroll_usd_provider=bankroll_usd_provider,
+        )
     _global_entry_probability_revision_by_family: dict[str, str | None] = {}
     _global_claim_generations: Mapping[str, str] = {}
     _global_claim_attempt_counts: Mapping[str, int] = {}
@@ -7357,6 +7520,22 @@ def event_bound_live_adapter_from_trade_conn(
         if (wake_id := str(raw_wake_id or "").strip())
     )
     _global_batch_urgent_wake_revision = [reactor_urgent_wake_revision()]
+    # TYPE C bounded-revalidation counter state
+    # (docs/operations/current/plans/auction_collapse_repair_design_2026-08-24.md §1.3).
+    # SCOPE: this exact global-batch generation -- same lifetime/creation
+    # point as _global_batch_urgent_wake_revision above, which is this
+    # codebase's own definition of "one generation" for epoch-supersession
+    # bookkeeping.
+    # DRAIN: both boxes are recreated (reset to zero) the moment a fresh
+    # generation opens, i.e. every time this closure body runs again -- a
+    # generation that completes cleanly or one that aborts both hand the
+    # NEXT generation a full grace budget.
+    # RESET: once the budget in _consult_preemption_grace is exhausted
+    # (count or wall-clock window, whichever binds first), every remaining
+    # call within THIS generation reverts to immediate-abort (today's
+    # behavior).
+    _global_batch_grace_supersession_count = [0]
+    _global_batch_grace_window_started_monotonic = [_time.monotonic()]
 
     # INV-K7 reservation ledger: closure-held, fresh per reactor cycle. FIX B
     # (2026-06-05): rollback-aware so a candidate rejected downstream of Kelly is
@@ -7435,6 +7614,10 @@ def event_bound_live_adapter_from_trade_conn(
                 or ""
             ).strip(),
             day0_truth_by_bin_side,
+        )
+        _global_entry_cluster_by_family[family_key] = (
+            str(payload.get("city") or "").strip(),
+            str(payload.get("target_date") or "").strip(),
         )
         _global_entry_probability_revision_by_family[family_key] = (
             _prepared_global_probability_semantics_revision(
@@ -8268,6 +8451,46 @@ def event_bound_live_adapter_from_trade_conn(
                 entry_submit_suppression_reason,
             )
 
+        def _consult_preemption_grace(*, reasons: tuple[str, ...]) -> bool:
+            """Return True to coalesce (suppress) this supersession within the
+            bounded TYPE C grace budget; False to abort immediately (today's
+            behavior). See auction_collapse_repair_design_2026-08-24.md §1.3
+            and the SCOPE/DRAIN/RESET comment on the grace state boxes above.
+
+            A hard-veto reason present in ``reasons`` (day0/fill, see
+            _GLOBAL_AUCTION_PREEMPTION_GRACE_HARD_VETO_REASONS) always aborts
+            immediately -- never coalesced. Nothing here weakens TYPE A: the
+            JIT re-fetch gates (book/probability/price, event_reactor_adapter
+            GLOBAL_BUY_JIT_MAKER_WITNESS_SUPERSEDED / GLOBAL_ACTUATION_
+            PROBABILITY_SUPERSEDED / LIVE_UNIT_PRICE_OUT_OF_BOUNDS) still
+            re-derive their own freshness truth independently at actuation
+            regardless of this decision -- a batch that used its full grace
+            budget is still caught there before any venue effect.
+            """
+            if set(reasons) & _GLOBAL_AUCTION_PREEMPTION_GRACE_HARD_VETO_REASONS:
+                return False
+            elapsed = (
+                _time.monotonic() - _global_batch_grace_window_started_monotonic[0]
+            )
+            if elapsed > GLOBAL_AUCTION_PREEMPTION_GRACE_WINDOW_SECONDS:
+                return False
+            if (
+                _global_batch_grace_supersession_count[0]
+                >= GLOBAL_AUCTION_PREEMPTION_GRACE_MAX_SUPERSESSIONS
+            ):
+                return False
+            _global_batch_grace_supersession_count[0] += 1
+            logging.getLogger(__name__).info(
+                "global batch preemption churn suppressed: generation=%s "
+                "count=%d/%d elapsed_s=%.3f suppressed_reasons=%s",
+                _global_batch_wake_cutoff,
+                _global_batch_grace_supersession_count[0],
+                GLOBAL_AUCTION_PREEMPTION_GRACE_MAX_SUPERSESSIONS,
+                elapsed,
+                ",".join(sorted(set(reasons))),
+            )
+            return True
+
         def _epoch_superseded() -> bool:
             current = reactor_urgent_wake_revision()
             if (
@@ -8321,6 +8544,9 @@ def event_bound_live_adapter_from_trade_conn(
                     ):
                         _global_batch_urgent_wake_revision[0] = current
                         return False
+                    if _consult_preemption_grace(reasons=(marker_reason,)):
+                        _global_batch_urgent_wake_revision[0] = current
+                        return False
                     return True
                 _global_batch_urgent_wake_revision[0] = current
                 return False
@@ -8329,6 +8555,12 @@ def event_bound_live_adapter_from_trade_conn(
                 day0_urgent_batch=day0_urgent_batch,
                 delta_scope_family_keys=delta_scope_family_keys,
             ):
+                _global_batch_urgent_wake_revision[0] = current
+                return False
+            pending_wake_reasons = tuple(
+                str(getattr(wake, "reason", "") or "") for wake in pending_wakes
+            )
+            if _consult_preemption_grace(reasons=pending_wake_reasons):
                 _global_batch_urgent_wake_revision[0] = current
                 return False
             return True
@@ -8688,15 +8920,15 @@ def event_bound_live_adapter_from_trade_conn(
                 )
                 if not identity_matches or not ttl_ok:
                     jit_handoff = None
+            decision = getattr(actuation, "decision", None)
+            candidate = getattr(decision, "candidate", None)
+            action = str(getattr(candidate, "action", "") or "").upper()
             receipt = _global_preflight_candidate_receipt(
                 _submit_inner,
                 event=event,
                 actuation=actuation,
                 decision_time=at,
             )
-            decision = getattr(actuation, "decision", None)
-            candidate = getattr(decision, "candidate", None)
-            action = str(getattr(candidate, "action", "") or "").upper()
             sell_preflight = (
                 action == "SELL"
                 or str(receipt.reason or "").startswith("GLOBAL_SELL_")
@@ -9591,25 +9823,10 @@ def event_bound_live_adapter_from_trade_conn(
                     else None
                 )
                 expected_tokens = (
-                    tuple(
-                        sorted(
-                            {
-                                token_id
-                                for witness in bound_probabilities.values()
-                                for binding in tuple(
-                                    getattr(witness, "bindings", ()) or ()
-                                )
-                                for token_id in (
-                                    str(
-                                        getattr(binding, "yes_token_id", "") or ""
-                                    ).strip(),
-                                    str(
-                                        getattr(binding, "no_token_id", "") or ""
-                                    ).strip(),
-                                )
-                                if token_id in reduce_only_book_tokens
-                            }
-                        )
+                    _global_reduce_only_capture_tokens(
+                        bound_probabilities,
+                        held_tokens_by_family,
+                        reduce_only_book_tokens,
                     )
                     if reduce_only_book_tokens is not None
                     else _global_book_prefetch_tokens(bound_probabilities)
@@ -10432,6 +10649,25 @@ def event_bound_live_adapter_from_trade_conn(
                 )
                 if _urgent_book_preemption("after_delta_metadata"):
                     return probabilities, None
+                if (
+                    reduce_only_book_tokens is not None
+                    and _global_reduce_only_capture_tokens(
+                        probability_delta,
+                        held_tokens_by_family,
+                        reduce_only_book_tokens,
+                    )
+                    == ()
+                ):
+                    # SCOPE: this family-delta lost every exact held-token
+                    # binding; it cannot authorize any reduce-only book I/O.
+                    # DRAIN: retain the held SELL debt for the next recurring
+                    # metadata/book cut. RESET: a current binding restores a
+                    # non-empty exact token scope. Never widen empty to None.
+                    logging.getLogger(__name__).warning(
+                        "global reduce-only family delta lost exact held-token "
+                        "scope; returning an empty executable cut"
+                    )
+                    return {}, None
                 bound_probabilities.update(probability_delta)
                 prefetched = _complete_current_prefetch(
                     probability_delta,
@@ -10644,6 +10880,12 @@ def event_bound_live_adapter_from_trade_conn(
                     str(getattr(candidate, "token_id", "") or "").strip(),
                 ) not in exact_completion_sell_keys:
                     return "GLOBAL_EXACT_HELD_COMPLETION_OTHER_POSITION"
+                # A revision-performance gate is entry authority, not permission
+                # to retain risk.  Statistical SELL still needs the current full
+                # probability witness and must beat HOLD on the shared global
+                # posterior-mean objective; deterministic and RED exits keep their
+                # own stricter authorities.  Blocking this risk-reducing proposal
+                # would force the exact failure cohort to settle at zero.
                 return None
             # The proof solve has no actuator and therefore may ignore only
             # admission state whose own recovery needs current economic
@@ -10687,6 +10929,52 @@ def event_bound_live_adapter_from_trade_conn(
             )
             if day0_probability_reason is not None:
                 return day0_probability_reason
+            # reversal_plan_tier0_2026-08-24 item 6: price cap, taker-only, and
+            # one-per-(city,target_date)-cluster admission. NOOP when the flag
+            # is off. The aggregate open-loss ceiling and the flat-stake size
+            # are NOT decided here — they need the exact venue min_order_size
+            # and freshest portfolio state, both only available at the sizing
+            # chokepoint further down this adapter (search
+            # "TIER0_FLAT_MICRO_STAKE"); this gate only needs to be cheap and
+            # typed, and price/mode/cluster admissibility never depends on
+            # sizing-time facts.
+            if tier0_research_mode_enabled():
+                from src.engine.global_batch_runtime import (
+                    _current_held_weather_families,
+                )
+                from src.strategy.tier0_policy import (
+                    tier0_cluster_occupied_rejection_reason,
+                    tier0_execution_mode_rejection_reason,
+                    tier0_price_rejection_reason,
+                )
+
+                _tier0_cluster_key = _global_entry_cluster_by_family.get(
+                    family_key, ("", "")
+                )
+                _tier0_price = getattr(candidate, "limit_price", None)
+                tier0_reason = tier0_price_rejection_reason(
+                    execution_price=_tier0_price,
+                    limit_price=_tier0_price,
+                )
+                if tier0_reason is None:
+                    tier0_reason = tier0_execution_mode_rejection_reason(
+                        execution_mode=getattr(candidate, "execution_mode", None),
+                    )
+                if tier0_reason is None:
+                    _tier0_occupied_clusters = frozenset(
+                        (held_city, held_target_date)
+                        for held_city, held_target_date, _held_metric in (
+                            _current_held_weather_families(trade_conn)
+                        )
+                    ) | _tier0_admitted_clusters_this_cycle
+                    tier0_reason = tier0_cluster_occupied_rejection_reason(
+                        cluster_key=_tier0_cluster_key,
+                        occupied_clusters=_tier0_occupied_clusters,
+                    )
+                if tier0_reason is not None:
+                    return tier0_reason
+                if not proof_only:
+                    _tier0_admitted_clusters_this_cycle.add(_tier0_cluster_key)
             try:
                 strategy_key = _event_bound_strategy_key(
                     event_type=event_type,
@@ -10870,6 +11158,14 @@ def event_bound_live_adapter_from_trade_conn(
     _submit._live_ack_count = _live_ack_count  # type: ignore[attr-defined]
     _submit.prepare_global_event = _prepare_global_event  # type: ignore[attr-defined]
     _submit.process_global_batch = _process_global_batch  # type: ignore[attr-defined]
+    # SCOPE: this adapter's exact held-SELL completion requests only. DRAIN:
+    # the reactor runs one global SELL/HOLD/CASH cut even when no ordinary
+    # OpportunityEvent is pending. RESET: the immutable request receives its
+    # terminal receipt or remains durable for the next wake; an empty request
+    # set keeps the ordinary empty-queue no-op.
+    _submit.requires_empty_global_completion_cut = bool(  # type: ignore[attr-defined]
+        held_sell_reauction_requests
+    )
     _submit.bind_global_claim_generations = (  # type: ignore[attr-defined]
         _bind_global_claim_generations
     )
@@ -12938,6 +13234,192 @@ def _global_sell_held_probability(candidate: object, witness: object) -> float:
     return float(samples.mean())
 
 
+def _global_sell_probability_receipt(
+    *,
+    candidate: object,
+    witness: object,
+    held_side_probability: float,
+) -> dict[str, object]:
+    """Bind the exact ranked probability witness into the EXIT command path."""
+
+    q_version = str(getattr(witness, "q_version", "") or "").strip()
+    witness_identity = str(
+        getattr(witness, "witness_identity", "") or ""
+    ).strip()
+    content_identity = str(
+        getattr(witness, "probability_content_identity", "") or ""
+    ).strip()
+    source_truth_identity = str(
+        getattr(witness, "source_truth_identity", "") or ""
+    ).strip()
+    if not all(
+        (
+            q_version,
+            witness_identity,
+            content_identity,
+            source_truth_identity,
+        )
+    ):
+        # SCOPE: only this selected SELL lacks an atomic probability-to-command
+        # identity. DRAIN: the same cut excludes it and re-auctions remaining
+        # actions. RESET: the next cut rebuilds a complete current witness.
+        raise ValueError("GLOBAL_SELL_PROBABILITY_RECEIPT_INCOMPLETE")
+    return {
+        "schema_version": 1,
+        "selected_method": "global_single_order_auction",
+        "probability_authority": "current_global_probability_witness",
+        "probability_functional": str(
+            getattr(candidate, "probability_functional", "") or ""
+        ),
+        "held_side_probability": float(held_side_probability),
+        "q_version": q_version,
+        "probability_witness_identity": witness_identity,
+        "probability_content_identity": content_identity,
+        "source_truth_identity": source_truth_identity,
+    }
+
+
+def _durable_global_sell_market_authority(
+    trade_conn: sqlite3.Connection,
+    *,
+    condition_id: str,
+    token_id: str,
+    side: str,
+    submit_at: datetime,
+    max_quote_age: timedelta = timedelta(seconds=1),
+) -> tuple[dict[str, object], _CurrentGlobalMarketAuthority]:
+    """Hydrate one final SELL book from current durable market-channel truth.
+
+    This is a fail-closed REST-outage fallback, not a projection hint.  It
+    accepts only the exact canonical buy-side carrier for the selected token
+    and seals its depth into a new immutable JIT snapshot before command use.
+    """
+
+    from src.contracts.executable_market_snapshot import fee_rate_fraction_from_details
+    from src.contracts.fee_authority import resolve_taker_fee_fraction
+    from src.data.market_scanner import _canonical_json, _optional_top_book_level_decimal
+    from src.state.snapshot_repo import get_snapshot, snapshot_is_invalidated
+
+    if submit_at.tzinfo is None or max_quote_age <= timedelta(0):
+        raise ValueError("GLOBAL_JIT_DURABLE_BOOK_CLOCK_INVALID")
+    checked_at = submit_at.astimezone(UTC)
+    selected_side = str(side or "").strip().upper()
+    expected_direction = {"YES": "buy_yes", "NO": "buy_no"}.get(selected_side)
+    if not expected_direction or not condition_id or not token_id:
+        raise ValueError("GLOBAL_JIT_DURABLE_BOOK_IDENTITY_INVALID")
+    row = trade_conn.execute(
+        """
+        SELECT evidence_id, condition_id, token_id, outcome_label, quote_seen_at,
+               book_hash_before, depth_before_json
+          FROM execution_feasibility_latest
+         WHERE token_id = ? AND condition_id = ? AND outcome_label = ?
+           AND direction = ?
+        """,
+        (token_id, condition_id, selected_side, expected_direction),
+    ).fetchone()
+    if row is None:
+        raise ValueError("GLOBAL_JIT_DURABLE_BOOK_UNAVAILABLE")
+    try:
+        evidence_id, row_condition, row_token, row_side, quote_raw, _stored_hash, raw_depth = row
+        quote_at = datetime.fromisoformat(str(quote_raw).replace("Z", "+00:00"))
+        if quote_at.tzinfo is None:
+            raise ValueError("naive quote")
+        quote_at = quote_at.astimezone(UTC)
+        depth = json.loads(str(raw_depth or ""))
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise ValueError("GLOBAL_JIT_DURABLE_BOOK_INVALID") from exc
+    if (
+        str(row_condition) != condition_id
+        or str(row_token) != token_id
+        or str(row_side).upper() != selected_side
+        or not str(evidence_id or "").strip()
+        or quote_at > checked_at
+        or checked_at - quote_at > max_quote_age
+        or not isinstance(depth, Mapping)
+        or not isinstance(depth.get("bids"), list)
+        or not isinstance(depth.get("asks"), list)
+        or not depth["bids"]
+        or not depth["asks"]
+    ):
+        raise ValueError("GLOBAL_JIT_DURABLE_BOOK_INVALID")
+    base_row = trade_conn.execute(
+        """
+        SELECT snapshot_id
+          FROM executable_market_snapshots
+         WHERE condition_id = ? AND selected_outcome_token_id = ?
+           AND captured_at <= ?
+         ORDER BY captured_at DESC, snapshot_id DESC
+         LIMIT 1
+        """,
+        (condition_id, token_id, quote_at.isoformat()),
+    ).fetchone()
+    base = get_snapshot(trade_conn, str(base_row[0] or "")) if base_row else None
+    if base is None:
+        raise ValueError("GLOBAL_JIT_DURABLE_METADATA_UNAVAILABLE")
+    expected_token = base.yes_token_id if selected_side == "YES" else base.no_token_id
+    status = base.tradeability_status
+    if (
+        base.condition_id != condition_id
+        or base.selected_outcome_token_id != token_id
+        or base.outcome_label != selected_side
+        or expected_token != token_id
+        or not isinstance(base.token_map_raw, Mapping)
+        or str(base.token_map_raw.get("YES") or "") != base.yes_token_id
+        or str(base.token_map_raw.get("NO") or "") != base.no_token_id
+        or not isinstance(base.neg_risk, bool)
+        or base.captured_at > quote_at
+        or quote_at > base.freshness_deadline
+        or checked_at > base.freshness_deadline
+        or base.active is not True
+        or base.closed is not False
+        or base.accepting_orders is not True
+        or base.enable_orderbook is not True
+        or status is None
+        or status.executable_allowed is not True
+        or snapshot_is_invalidated(trade_conn, base, checked_at=quote_at)
+        or snapshot_is_invalidated(trade_conn, base, checked_at=checked_at)
+        or not _book_levels_align_to_tick(depth, base.min_tick_size)
+    ):
+        raise ValueError("GLOBAL_JIT_DURABLE_METADATA_INVALID")
+    try:
+        fee_rate, _ = resolve_taker_fee_fraction(
+            fee_rate_fraction_from_details(base.fee_details)
+        )
+        fee_rate = Decimal(str(fee_rate))
+    except Exception as exc:  # noqa: BLE001 - malformed durable fee is not submit authority
+        raise ValueError("GLOBAL_JIT_DURABLE_FEE_INVALID") from exc
+    if not fee_rate.is_finite() or fee_rate < 0 or fee_rate > 1:
+        raise ValueError("GLOBAL_JIT_DURABLE_FEE_INVALID")
+    raw_book = {
+        "asset_id": token_id,
+        "bids": list(depth["bids"]),
+        "asks": list(depth["asks"]),
+        "tick_size": str(base.min_tick_size),
+        "min_order_size": str(base.min_order_size),
+        "neg_risk": base.neg_risk,
+    }
+    raw_hash = _hash_jsonish(raw_book)
+    snapshot_id = _hash_jsonish(
+        ("GLOBAL_JIT_DURABLE_CHANNEL", base.snapshot_id, evidence_id, quote_at.isoformat(), raw_hash)
+    )
+    top_bid, _ = _optional_top_book_level_decimal(raw_book, "bids")
+    top_ask, _ = _optional_top_book_level_decimal(raw_book, "asks")
+    durable_snapshot = dataclass_replace(
+        base,
+        snapshot_id=snapshot_id,
+        orderbook_top_bid=top_bid,
+        orderbook_top_ask=top_ask,
+        orderbook_depth_jsonb=_canonical_json(raw_book),
+        raw_orderbook_hash=raw_hash,
+        captured_at=quote_at,
+        freshness_deadline=min(base.freshness_deadline, quote_at + max_quote_age),
+    )
+    return raw_book, _CurrentGlobalMarketAuthority(
+        snapshot=durable_snapshot,
+        fee_rate=fee_rate,
+    )
+
+
 def _submit_current_global_sell(
     event: OpportunityEvent,
     *,
@@ -13107,32 +13589,43 @@ def _submit_current_global_sell(
                     return raw_book, datetime.now(UTC)
 
                 try:
-                    gamma = _global_current_gamma_client(timeout_seconds=timeout)
-                except Exception as exc:  # noqa: BLE001 - authority transport
-                    raise ValueError("GLOBAL_JIT_GAMMA_MARKET_UNAVAILABLE") from exc
+                    try:
+                        gamma = _global_current_gamma_client(timeout_seconds=timeout)
+                    except Exception as exc:  # noqa: BLE001 - authority transport
+                        raise ValueError("GLOBAL_JIT_GAMMA_MARKET_UNAVAILABLE") from exc
 
-                def _held_gamma_get(path, *, params=None, timeout):
-                    return _governed_global_gamma_get(
-                        gamma,
-                        path,
-                        params=params,
-                        timeout=float(timeout),
-                        priority=RequestPriority.HELD_REDUCE_ONLY,
+                    def _held_gamma_get(path, *, params=None, timeout):
+                        return _governed_global_gamma_get(
+                            gamma,
+                            path,
+                            params=params,
+                            timeout=float(timeout),
+                            priority=RequestPriority.HELD_REDUCE_ONLY,
+                        )
+
+                    market_authority = _current_global_market_authority(
+                        condition_id=str(
+                            getattr(candidate, "condition_id", "") or ""
+                        ),
+                        token_id=str(getattr(candidate, "token_id", "") or ""),
+                        side=str(getattr(candidate, "side", "") or ""),
+                        gamma_get=_held_gamma_get,
+                        clob_market_get=clob.get_held_clob_market_info,
+                        raw_book=None,
+                        captured_at_utc=None,
+                        timeout=timeout,
+                        raw_book_provider=_capture_final_sell_book,
                     )
-
-                market_authority = _current_global_market_authority(
-                    condition_id=str(
-                        getattr(candidate, "condition_id", "") or ""
-                    ),
-                    token_id=str(getattr(candidate, "token_id", "") or ""),
-                    side=str(getattr(candidate, "side", "") or ""),
-                    gamma_get=_held_gamma_get,
-                    clob_market_get=clob.get_held_clob_market_info,
-                    raw_book=None,
-                    captured_at_utc=None,
-                    timeout=timeout,
-                    raw_book_provider=_capture_final_sell_book,
-                )
+                except ValueError as rest_exc:
+                    if not _is_global_jit_authority_failure(str(rest_exc)):
+                        raise
+                    raw_book, market_authority = _durable_global_sell_market_authority(
+                        trade_conn,
+                        condition_id=str(getattr(candidate, "condition_id", "") or ""),
+                        token_id=str(getattr(candidate, "token_id", "") or ""),
+                        side=str(getattr(candidate, "side", "") or ""),
+                        submit_at=datetime.now(UTC),
+                    )
                 book_captured_at_utc = market_authority.snapshot.captured_at
                 try:
                     current_candidate = _global_sell_candidate_from_raw_book(
@@ -13305,6 +13798,11 @@ def _submit_current_global_sell(
                 candidate,
                 getattr(global_actuation, "probability_witness", None),
             )
+            probability_receipt = _global_sell_probability_receipt(
+                candidate=candidate,
+                witness=getattr(global_actuation, "probability_witness", None),
+                held_side_probability=held_q,
+            )
             state_raw = getattr(position, "state", "")
             position_state = str(getattr(state_raw, "value", state_raw) or "")
             best_bid = float(current_candidate.executable_sell_curve.levels[0].price)
@@ -13405,6 +13903,7 @@ def _submit_current_global_sell(
                 fresh_prob=held_q,
                 fresh_prob_is_fresh=True,
                 position_state=position_state,
+                probability_receipt=probability_receipt,
                 capital_certificate={
                     "action": "SELL",
                     "position_id": str(getattr(position, "trade_id", "") or ""),
@@ -13422,6 +13921,13 @@ def _submit_current_global_sell(
                     "probability_witness_identity": str(
                         getattr(candidate, "probability_witness_identity", "") or ""
                     ),
+                    "probability_content_identity": probability_receipt[
+                        "probability_content_identity"
+                    ],
+                    "q_version": probability_receipt["q_version"],
+                    "source_truth_identity": probability_receipt[
+                        "source_truth_identity"
+                    ],
                     "sell_probability_functional": str(
                         getattr(candidate, "probability_functional", "") or ""
                     ),
@@ -13817,6 +14323,13 @@ def _global_preflight_block_status(reason: str) -> str:
         # while the next cut retries this token with fresh chain truth.
         return "CANDIDATE_BLOCKED"
     if reason.startswith(
+        "GLOBAL_STATISTICAL_SELL_PROBABILITY_REVISION_UNPROVEN:"
+    ):
+        # The evidence gate scopes one strategy+probability revision. Exclude
+        # only this posterior-driven SELL; deterministic/RED exits and every
+        # independent family remain comparable in the same frozen cut.
+        return "CANDIDATE_BLOCKED"
+    if reason.startswith(
         (
             "GLOBAL_SELL_LEGAL_PRICE_UNAVAILABLE:",
             "GLOBAL_SELL_LEGAL_MAKER_PRICE_UNAVAILABLE:",
@@ -13861,6 +14374,17 @@ def _global_preflight_block_status(reason: str) -> str:
         # complete epoch here would let an impossible entry starve an executable
         # qualified BUY or reduce-only SELL.
         return "CANDIDATE_BLOCKED"
+    if reason == (
+        "LIVE_INFERENCE_INPUTS_MISSING:"
+        "GLOBAL_DAY0_FAST_OBSERVATION_ENTRY_STALE"
+    ):
+        # SCOPE: stale fast-observation truth invalidates only new BUY entry in
+        # this Day0 family; it does not invalidate that family's reduce-only
+        # SELL or any independent family. DRAIN: the batch excludes every BUY
+        # in this family and immediately re-ranks the same frozen cut. RESET:
+        # the next recurring cut rebuilds fast-observation truth from current
+        # source evidence and may admit the family again.
+        return "CANDIDATE_BLOCKED"
     if reason.startswith(
         (
             "FDR_REJECTED:",
@@ -13874,6 +14398,17 @@ def _global_preflight_block_status(reason: str) -> str:
         # These reject the selected action, not the current q/book/wealth epoch.
         # Exclude that exact action and let the complete auction compare its
         # remaining candidates with CASH.
+        return "CANDIDATE_BLOCKED"
+    if reason.endswith(
+        (
+            "GLOBAL_ACTUATION_HELD_PROBABILITY_UNAVAILABLE",
+            "GLOBAL_ACTUATION_PROBABILITY_USE_DIVERGED",
+        )
+    ):
+        # ENTRY remains the authority for opening risk, but a Day0 BUY is not
+        # executable when its immediate HELD monitor cannot reproduce the same
+        # probability content. This scopes the fault to the selected candidate
+        # so independent current opportunities still compete against CASH.
         return "CANDIDATE_BLOCKED"
     if reason == (
         "GLOBAL_ACTUATION_PREPARE_FAILED:"
@@ -14530,25 +15065,15 @@ def _global_preflight_entry_jit_receipt(
             and expected_terminal.win_probability_mean == 1.0
             and expected_terminal.loss_probability_mean == 0.0
         )
-        statistical_settlement_hold = (
-            execution_mode == "TAKER_LIMIT"
-            and not settlement_locked_exact_payoff
-            and str(getattr(decision, "capital_action_mode", "") or "")
-            == "SETTLEMENT_LOCKED_BUY"
-            and isinstance(expected_terminal, ExpectedBuyTerminalWealthCertificate)
-        )
         liquidation_capacity = current_precliff_liquidation_capacity(
             current_candidate.native_bid_levels
         )
         if (
             not (
-                statistical_settlement_hold
-                or (
-                    execution_mode == "TAKER_LIMIT"
-                    and settlement_locked_exact_payoff
-                    and typed_exact_payoff_binding
-                    and exact_payoff_decision
-                )
+                execution_mode == "TAKER_LIMIT"
+                and settlement_locked_exact_payoff
+                and typed_exact_payoff_binding
+                and exact_payoff_decision
             )
             and liquidation_capacity + Decimal("1e-9") < shares
         ):
@@ -15872,6 +16397,39 @@ def _global_buy_prefix_certificate_for_proof(
         ) from exc
 
 
+def _decision_p0_from_book_snapshot(
+    trade_conn: sqlite3.Connection | None,
+    *,
+    snapshot_id: str,
+    token_id: str,
+    action: str,
+) -> tuple[Decimal | None, str | None]:
+    """Decision-time EXPLICIT p0 (reversal_plan_tier0_2026-08-24 item 3a).
+
+    The immediately-executable side price an entry would lift, read from the
+    book snapshot the entry's sealed economics are bound to (never our own
+    limit price and never a fill price). For a BUY the executable side is the
+    venue ASK on the traded token; for a SELL it is the venue BID. Fail-closed:
+    a missing connection, missing snapshot row, token mismatch against the
+    snapshot's selected_outcome_token_id, or an absent side quote (one-sided
+    book) all return ``(None, None)`` rather than falling back to any guess.
+    Returns ``(decision_p0, decision_p0_source)`` where the source is the
+    snapshot_id the price was read from.
+    """
+
+    if trade_conn is None:
+        return None, None
+    snapshot = get_snapshot(trade_conn, snapshot_id)
+    if snapshot is None or snapshot.selected_outcome_token_id != token_id:
+        return None, None
+    side_quote = (
+        snapshot.orderbook_top_ask if action == "BUY" else snapshot.orderbook_top_bid
+    )
+    if side_quote is None:
+        return None, None
+    return side_quote, snapshot_id
+
+
 def _global_actuation_selected_proof(
     *,
     global_actuation: object,
@@ -16012,6 +16570,15 @@ def _global_actuation_selected_proof(
     ).strip().upper()
     if global_execution_mode not in {"TAKER_LIMIT", "MAKER_REST"}:
         raise ValueError("GLOBAL_ACTUATION_EXECUTION_MODE_INVALID")
+    # reversal_plan_tier0_2026-08-24 item 3a: decision-time EXPLICIT p0 — the
+    # immediately-executable side price an entry would lift, read from the SAME
+    # book snapshot the economics below are sealed to (rebound.book_snapshot_id).
+    decision_p0, decision_p0_source = _decision_p0_from_book_snapshot(
+        trade_conn,
+        snapshot_id=rebound.book_snapshot_id,
+        token_id=candidate.token_id,
+        action=str(getattr(candidate, "action", "BUY") or "BUY").upper(),
+    )
     cert = _global_current_state_economics_seed(proof)
     cert.update(
         {
@@ -16026,6 +16593,9 @@ def _global_actuation_selected_proof(
                 getattr(global_actuation, "winner_event_id", "") or ""
             ),
             "global_auction_receipt": receipt_ref.as_payload(),
+            "global_selection_revision": (
+                CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION
+            ),
             "global_economic_identity": str(
                 getattr(global_actuation, "economic_identity", "") or ""
             ),
@@ -16084,6 +16654,8 @@ def _global_actuation_selected_proof(
             ),
             "global_max_spend_usd": str(decision.max_spend_usd),
             "global_optimum_semantics": "CUT_TIME_GLOBAL_OPTIMUM",
+            "decision_p0": str(decision_p0) if decision_p0 is not None else None,
+            "decision_p0_source": decision_p0_source,
         }
     )
     if str(getattr(candidate, "action", "BUY") or "BUY").upper() == "BUY":
@@ -16597,6 +17169,53 @@ def _current_solve_ledger_inputs(
             trade_conn.rollback()
 
 
+def _rehydrate_held_pinned_bundle_for_actuation(
+    event: OpportunityEvent,
+    *,
+    selected: object,
+    probability_use: _CurrentProbabilityUse,
+    forecast_conn: sqlite3.Connection,
+    decision_time: datetime,
+) -> object | None:
+    """Rehydrate the monitor-pinned carrier for the selected reduce-only SELL."""
+
+    if (
+        probability_use is not _CurrentProbabilityUse.REDUCE_ONLY_EXIT
+        or event.event_type != "DAY0_EXTREME_UPDATED"
+    ):
+        return None
+    payload = _payload(event)
+    from src.data.replacement_forecast_bundle_reader import (
+        read_prior_complete_replacement_forecast_bundle,
+    )
+
+    result = read_prior_complete_replacement_forecast_bundle(
+        forecast_conn,
+        city=str(payload.get("city") or ""),
+        target_date=str(payload.get("target_date") or ""),
+        temperature_metric=str(
+            payload.get("metric") or payload.get("temperature_metric") or ""
+        ).lower(),
+        decision_time=decision_time,
+    )
+    if result.status == "BLOCKED":
+        raise ValueError(
+            "GLOBAL_ACTUATION_HELD_PINNED_CARRIER_BLOCKED:"
+            f"{result.reason_code}"
+        )
+    if not result.ok:
+        return None
+    selected_identity = str(
+        getattr(selected, "posterior_identity_hash", "") or ""
+    ).strip()
+    bundle = result.bundle
+    if not selected_identity or bundle is None:
+        raise ValueError("GLOBAL_ACTUATION_HELD_PINNED_IDENTITY_MISSING")
+    if selected_identity != str(bundle.posterior_identity_hash or "").strip():
+        raise ValueError("GLOBAL_ACTUATION_HELD_PINNED_IDENTITY_MISMATCH")
+    return bundle
+
+
 def _current_global_actuation_prepared_family(
     event: OpportunityEvent,
     *,
@@ -16615,6 +17234,13 @@ def _current_global_actuation_prepared_family(
     decision = getattr(global_actuation, "decision", None)
     candidate = getattr(decision, "candidate", None)
     probability_use = _current_probability_use_for_global_candidate(candidate)
+    pinned_complete_bundle = _rehydrate_held_pinned_bundle_for_actuation(
+        event,
+        selected=selected,
+        probability_use=probability_use,
+        forecast_conn=forecast_conn,
+        decision_time=decision_time,
+    )
     required_condition_id = str(
         getattr(candidate, "condition_id", "") or ""
     ).strip()
@@ -16647,6 +17273,7 @@ def _current_global_actuation_prepared_family(
             probability_use is _CurrentProbabilityUse.REDUCE_ONLY_EXIT
         ),
         probability_use=probability_use,
+        pinned_complete_bundle=pinned_complete_bundle,
     )
     current_witness = getattr(current, "probability_witness", None)
     probability_mismatches = (
@@ -16668,6 +17295,62 @@ def _current_global_actuation_prepared_family(
             getattr(current_witness, "witness_identity", "missing"),
         )
         raise ValueError("GLOBAL_ACTUATION_PROBABILITY_SUPERSEDED")
+    if (
+        probability_use is _CurrentProbabilityUse.ENTRY
+        and current_day0_payload
+    ):
+        try:
+            held_current = _prepare_current_global_probability_family(
+                event,
+                forecast_conn=forecast_conn,
+                topology_conn=topology_conn,
+                observation_conn=observation_conn,
+                decision_time=decision_time,
+                max_age=FRESHNESS_WINDOW_DEFAULT,
+                required_condition_id=required_condition_id,
+                allow_partial_deterministic=False,
+                allow_unobserved_day0_replacement=True,
+                allow_provisional_day0_replacement=True,
+                probability_use=_CurrentProbabilityUse.HELD_MONITOR,
+            )
+        except Exception as exc:  # noqa: BLE001 - an unmonitorable BUY is unsafe.
+            logging.getLogger(__name__).warning(
+                "global Day0 BUY held probability unavailable: family=%s "
+                "selected_witness=%s error=%s:%s",
+                getattr(selected, "family_key", "unknown"),
+                getattr(selected, "witness_identity", "unknown"),
+                type(exc).__name__,
+                exc,
+            )
+            # SCOPE: this exact selected Day0 BUY candidate. DRAIN: the current
+            # auction excludes it and compares the remaining BUY/SELL/HOLD/CASH
+            # actions. RESET: a later cut rebuilds both current ENTRY and HELD
+            # witnesses; equality restores eligibility without persisted state.
+            raise ValueError(
+                "GLOBAL_ACTUATION_HELD_PROBABILITY_UNAVAILABLE"
+            ) from exc
+        held_witness = getattr(held_current, "probability_witness", None)
+        held_mismatches = (
+            ("probability_witness",)
+            if held_witness is None
+            else _global_probability_action_content_mismatches(
+                held_witness,
+                current_witness,
+            )
+        )
+        if held_mismatches:
+            logging.getLogger(__name__).warning(
+                "global Day0 BUY probability use diverged: family=%s fields=%s "
+                "entry_witness=%s held_witness=%s",
+                getattr(selected, "family_key", "unknown"),
+                ",".join(held_mismatches),
+                getattr(current_witness, "witness_identity", "unknown"),
+                getattr(held_witness, "witness_identity", "missing"),
+            )
+            # SCOPE/DRAIN/RESET are identical to the unavailable branch above:
+            # no new position may be opened when its immediate monitor would
+            # price the same claim from different probability content.
+            raise ValueError("GLOBAL_ACTUATION_PROBABILITY_USE_DIVERGED")
     if isinstance(selected, DeterministicBinPayoffWitness):
         _bind_current_deterministic_day0_witness(
             current_day0_payload,
@@ -18163,6 +18846,99 @@ def _build_event_bound_no_submit_receipt_core(
                     free_cash_usd=free_cash_usd,
                 )
             )
+        # reversal_plan_tier0_2026-08-24 item 6: Tier-0 flat-stake override + the
+        # aggregate open-loss ceiling, at the SAME single chokepoint the D1/D2
+        # comment below documents (overriding _robust_stake_usd here keeps the
+        # portfolio reservation, cost-basis hash, receipt kelly_size_usd,
+        # actionable cert, and USD->shares conversion coherent off one value).
+        # Placed BEFORE D1/D2 fill-up: a Tier-0-admitted candidate's cluster was
+        # already proven unoccupied by _current_entry_candidate_policy, so the
+        # residual/shift-lease fill-up machinery below is not expected to fire
+        # for it — Tier-0 structurally deletes scale-in, it does not rely on
+        # fill-up to no-op.
+        #
+        # candidate/price/execution-mode/cluster admissibility were already
+        # checked in _current_entry_candidate_policy (typed rejection, before
+        # this deep recapture ran at all). This block does two things that gate
+        # can't: (1) size the flat stake off the TRUE venue floor — ``row`` is
+        # this candidate's executable_market_snapshots row, whose
+        # ``min_order_size`` is in SHARES (the plan's corrected venue floor;
+        # sizing.min_order_usd is a $ soft floor and is NOT this value); (2) the
+        # aggregate open-loss ceiling needs the freshest portfolio/reservation
+        # state, only available here, not at the earlier candidate-policy gate.
+        if _recapture.may_submit and tier0_research_mode_enabled():
+            from src.strategy.tier0_policy import (
+                TIER0_REJECT_AGGREGATE_CEILING,
+                load_tier0_risk_ceilings,
+                tier0_aggregate_ceiling_rejection_reason,
+                tier0_flat_stake_shares,
+            )
+
+            _tier0_min_order_shares = (
+                _float_or_default(row.get("min_order_size"), 1.0)
+                if isinstance(row, Mapping) else 1.0
+            )
+            _tier0_flat_shares = tier0_flat_stake_shares(
+                min_order_size_shares=_tier0_min_order_shares,
+            )
+            _tier0_stake_price = float(getattr(_chosen_stake_price, "value", 0.0) or 0.0)
+            _tier0_flat_stake_usd = _tier0_flat_shares * _tier0_stake_price
+            if portfolio_state_provider is not None:
+                from src.state.portfolio import total_exposure_usd
+
+                _tier0_current_open_cost_usd = total_exposure_usd(
+                    portfolio_state_provider()
+                ) + sum(
+                    float(usd) for _, usd in (portfolio_reservation or [])
+                )
+            else:
+                _tier0_current_open_cost_usd = None
+            _tier0_ceilings = load_tier0_risk_ceilings()
+            if _tier0_current_open_cost_usd is None:
+                _tier0_agg_reason = (
+                    f"{TIER0_REJECT_AGGREGATE_CEILING}:portfolio_state_provider_missing"
+                )
+            else:
+                _tier0_agg_reason = tier0_aggregate_ceiling_rejection_reason(
+                    current_open_cost_usd=_tier0_current_open_cost_usd,
+                    candidate_open_cost_usd=_tier0_flat_stake_usd,
+                    conservative_settled_bankroll_usd=float(bankroll_usd),
+                    aggregate_open_loss_pct_ceiling=(
+                        _tier0_ceilings["aggregate_open_loss_pct_ceiling"]
+                    ),
+                )
+            if _tier0_agg_reason is not None:
+                return _finalize_receipt(EventSubmissionReceipt(
+                    False,
+                    event.event_id,
+                    event.causal_snapshot_id,
+                    reason=_tier0_agg_reason,
+                    city=family.city,
+                    target_date=family.target_date,
+                    metric=family.metric,
+                    condition_id=str(candidate.condition_id or ""),
+                    token_id=selected_token_id,
+                    executable_snapshot_id=proof.executable_snapshot_id,
+                    family_id=family.family_id,
+                    bin_label=candidate.bin.label,
+                    direction=direction,
+                    q_live=receipt_q_live,
+                    q_lcb_5pct=receipt_q_lcb,
+                    c_fee_adjusted=execution_price.value,
+                    c_cost_95pct=proof.c_cost_95pct,
+                    p_fill_lcb=proof.p_fill_lcb,
+                    trade_score=trade_score,
+                    native_quote_available=True,
+                    source_status="MATCH",
+                    family_complete=True,
+                ))
+            # Monotone-safe: the flat stake is the venue-legal floor, which is
+            # already <= whatever this recapture just sized (Kelly/global-optimum
+            # sizing never sizes BELOW the venue min order) — this override can
+            # only shrink the committed stake, never grow it, consistent with the
+            # DIRECTION LAW already governing every other runtime override here.
+            _robust_stake_usd = _tier0_flat_stake_usd
+            _stake_floor_provenance["stake_authority"] = "TIER0_FLAT_MICRO_STAKE"
         # D1/D2 SAME-FAMILY MANAGEMENT (2026-06-30 live fix): the local selector owns
         # family-total targets, so same-token selections become residual fill-up and
         # sibling selections become close-before-open SHIFT_BIN. A sealed global
@@ -19715,10 +20491,14 @@ def _normalize_event_bound_executor_submit_result(
     reconciliation_followup_required = bool(result.reconciliation_followup_required)
     side_effect_known = bool(result.side_effect_known)
 
-    if status in {"SUBMITTED", "REJECTED", "TIMEOUT_UNKNOWN", "POST_SUBMIT_UNKNOWN"}:
+    if status in {"SUBMITTED", "TIMEOUT_UNKNOWN", "POST_SUBMIT_UNKNOWN"}:
         venue_call_started = True
-    if status in {"SUBMITTED", "REJECTED"}:
+    if status == "SUBMITTED":
         venue_ack_received = True
+        side_effect_known = True
+    if status == "REJECTED":
+        if venue_ack_received:
+            venue_call_started = True
         side_effect_known = True
     if status in {"TIMEOUT_UNKNOWN", "POST_SUBMIT_UNKNOWN"}:
         reconciliation_followup_required = True
@@ -21535,6 +22315,7 @@ def _build_live_execution_command_certificates(
                 event=event,
                 forecast_authority=forecast_authority,
                 day0_source_certs=day0_source_certs,
+                actionable_payload=actionable.payload,
             ),
             passive_maker_context=passive_maker_context,
             decision_time=decision_time,
@@ -22248,6 +23029,9 @@ def _actionable_payload_from_receipt(
         "_edli_day0_remaining_model_names": _day0_probability_value("remaining_model_names"),
         "_edli_day0_remaining_source_cycle_time_utc": _day0_probability_value(
             "remaining_source_cycle_time_utc"
+        ),
+        "_edli_day0_remaining_provider_source_cycle_time_utc": _day0_probability_value(
+            "remaining_provider_source_cycle_time_utc"
         ),
         "_edli_day0_remaining_capture_times_utc": _day0_probability_value(
             "remaining_capture_times_utc"
@@ -23050,6 +23834,9 @@ def _pre_submit_revalidation_payload_from_final_intent(
         "_edli_day0_remaining_source_cycle_time_utc": payload.get(
             "_edli_day0_remaining_source_cycle_time_utc"
         ),
+        "_edli_day0_remaining_provider_source_cycle_time_utc": payload.get(
+            "_edli_day0_remaining_provider_source_cycle_time_utc"
+        ),
         "_edli_day0_remaining_capture_times_utc": payload.get(
             "_edli_day0_remaining_capture_times_utc"
         ),
@@ -23492,7 +24279,7 @@ def _append_submit_terminal_aggregate_event(
         )
         return event.event_hash
     if submit_result.status in {"REJECTED", "PRE_SUBMIT_ERROR"}:
-        is_pre_submit_rejection = submit_result.status == "PRE_SUBMIT_ERROR"
+        is_pre_submit_rejection = not submit_result.venue_call_started
         event = LiveOrderAggregateLedger(conn, initialize_schema=False).append_event(
             aggregate_id=aggregate_id,
             event_type="SubmitRejected",
@@ -24074,6 +24861,22 @@ def _day0_live_source_parent_certificates(
         return ()
     if _uses_replacement_probability_authority(payload):
         return ()
+    q_source = str(
+        payload.get("_edli_q_source") or payload.get("q_source") or ""
+    ).strip()
+    probability_authority = str(
+        payload.get("probability_authority") or ""
+    ).strip()
+    if (
+        q_source == "day0_remaining_day"
+        and probability_authority
+        == "day0_remaining_day_global_probability_v1"
+    ):
+        # Remaining-day q is a current statistical simplex. Its observation and
+        # forecast inputs already belong to the probability witness; it must not
+        # acquire deterministic DAY0_AUTHORITY / ABSORBING_BOUNDARY parents.
+        # Exact payoff witnesses continue through the absorbing checks below.
+        return ()
 
     from src.events.day0_authority import (
         Day0AuthorityError,
@@ -24210,20 +25013,156 @@ def _final_intent_decision_source_context_payload(
     event: OpportunityEvent,
     forecast_authority: DecisionCertificate,
     day0_source_certs: tuple[DecisionCertificate, ...],
+    actionable_payload: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
     """Return the live source context the executor must verify at submit.
 
     Forecast events use the forecast authority directly. Day0 events are not a
-    separate order type; they are the same qkernel submit path fed by a different
-    source of probability evidence: a live observation hard fact absorbing the
-    latest base forecast distribution. The executor context must therefore bind
-    both certificates instead of pretending the Day0 belief is an entry-primary
-    forecast or dropping the observation from the submit proof.
+    separate order type; they are the same qkernel submit path fed by a current
+    observation plus either a statistical probability witness or an absorbing
+    hard fact. The executor context must bind that Day0 authority instead of
+    pretending the base distribution is an entry-primary forecast.
     """
 
     forecast_payload = dict(forecast_authority.payload)
-    if event.event_type != "DAY0_EXTREME_UPDATED" or not day0_source_certs:
+    if event.event_type != "DAY0_EXTREME_UPDATED":
         return forecast_payload
+
+    if not day0_source_certs:
+        if not isinstance(actionable_payload, Mapping):
+            raise ValueError(
+                "DAY0_STATISTICAL_DECISION_SOURCE_CONTEXT_MISSING_ACTIONABLE"
+            )
+        from src.events.day0_authority import (
+            Day0AuthorityError,
+            assert_live_day0_payload_authority,
+            assert_live_day0_probability_authority,
+        )
+
+        try:
+            assert_live_day0_payload_authority(actionable_payload)
+            assert_live_day0_probability_authority(
+                actionable_payload,
+                direction=actionable_payload.get("direction"),
+                condition_id=actionable_payload.get("condition_id"),
+                q_live=_optional_float(actionable_payload.get("q_live")),
+                q_lcb=_optional_float(actionable_payload.get("q_lcb_5pct")),
+            )
+        except Day0AuthorityError as exc:
+            raise ValueError(
+                f"DAY0_STATISTICAL_DECISION_SOURCE_CONTEXT_INVALID:{exc}"
+            ) from None
+
+        observation_time = _nonnull(
+            actionable_payload.get("observation_time")
+        )
+        observation_available_at = _nonnull(
+            actionable_payload.get("observation_available_at")
+        )
+        raw_payload_sha256 = _nonnull(
+            actionable_payload.get("raw_payload_sha256")
+        )
+        configured_station_id = _nonnull(
+            actionable_payload.get("configured_station_id")
+        )
+        provenance_hash = _nonnull(
+            actionable_payload.get("day0_observation_provenance_hash")
+        )
+        if not observation_time or not observation_available_at:
+            raise ValueError(
+                "DAY0_STATISTICAL_DECISION_SOURCE_CONTEXT_MISSING_OBSERVATION_CLOCK"
+            )
+        if not raw_payload_sha256 or not configured_station_id or not provenance_hash:
+            raise ValueError(
+                "DAY0_STATISTICAL_DECISION_SOURCE_CONTEXT_MISSING_RAW_PROVENANCE"
+            )
+        economics = actionable_payload.get("qkernel_execution_economics")
+        if not isinstance(economics, Mapping):
+            raise ValueError(
+                "DAY0_STATISTICAL_DECISION_SOURCE_CONTEXT_MISSING_QKERNEL"
+            )
+        q_source = _nonnull(
+            actionable_payload.get("_edli_q_source")
+            or actionable_payload.get("q_source")
+        )
+        probability_authority = _nonnull(
+            actionable_payload.get("probability_authority")
+        )
+        probability_identity = _nonnull(
+            economics.get("current_state_identity_hash")
+            or economics.get("q_version")
+            or economics.get("receipt_hash")
+        )
+        if not q_source or not probability_authority or not probability_identity:
+            raise ValueError(
+                "DAY0_STATISTICAL_DECISION_SOURCE_CONTEXT_MISSING_PROBABILITY_IDENTITY"
+            )
+        base_source_id = _nonnull(
+            forecast_payload.get("forecast_source_id")
+            or forecast_payload.get("source_id")
+        )
+        base_model = _nonnull(
+            forecast_payload.get("model_family") or forecast_payload.get("model")
+        )
+        source_id = (
+            "day0_statistical_probability:"
+            f"{_nonnull(actionable_payload.get('city'))}:"
+            f"{_nonnull(actionable_payload.get('target_date'))}:"
+            f"{_nonnull(actionable_payload.get('metric'))}:"
+            f"{_nonnull(actionable_payload.get('station_id')) or 'station'}"
+        )
+        raw_payload_hash = stable_hash(
+            {
+                "source": "day0_statistical_probability_over_base_forecast",
+                "forecast_authority_certificate_hash": (
+                    forecast_authority.certificate_hash
+                ),
+                "q_source": q_source,
+                "probability_authority": probability_authority,
+                "probability_identity": probability_identity,
+                "observation_time": observation_time,
+                "observation_available_at": observation_available_at,
+                "raw_payload_sha256": raw_payload_sha256,
+                "configured_station_id": configured_station_id,
+                "day0_observation_provenance_hash": provenance_hash,
+            }
+        )
+        return {
+            **forecast_payload,
+            "source_id": source_id,
+            "forecast_source_id": source_id,
+            "model": f"day0_observed_probability:{base_model or 'base_forecast'}",
+            "model_family": (
+                f"day0_observed_probability:{base_model or 'base_forecast'}"
+            ),
+            "raw_payload_hash": raw_payload_hash,
+            "posterior_identity_hash": raw_payload_hash,
+            "degradation_level": "OK",
+            "forecast_source_role": "day0_observed_probability",
+            "authority_tier": "DAY0_OBSERVATION",
+            "observation_time": observation_time,
+            "observation_available_at": observation_available_at,
+            "provider_reported_time": actionable_payload.get(
+                "provider_reported_time"
+            ),
+            "raw_payload_sha256": raw_payload_sha256,
+            "configured_station_id": configured_station_id,
+            "day0_observation_provenance_hash": provenance_hash,
+            "decision_source_basis": (
+                "day0_statistical_probability_over_base_forecast"
+            ),
+            "base_forecast_source_id": base_source_id,
+            "base_forecast_model_family": base_model,
+            "base_posterior_identity_hash": forecast_payload.get(
+                "posterior_identity_hash"
+            ),
+            "forecast_authority_certificate_hash": (
+                forecast_authority.certificate_hash
+            ),
+            "day0_probability_q_source": q_source,
+            "day0_probability_authority": probability_authority,
+            "day0_probability_identity": probability_identity,
+        }
 
     day0_authority = next(
         (cert for cert in day0_source_certs if cert.certificate_type == claims.DAY0_AUTHORITY),
@@ -32226,17 +33165,18 @@ def _live_yes_probabilities(
                 raise ValueError("GLOBAL_DAY0_CITY_CONFIG_MISSING")
             unit = str(getattr(city, "settlement_unit", "") or "").strip()
             resolution = SimpleNamespace(measurement_unit=unit)
-            current_observation = _global_day0_execution_payload(
-                event,
-                family=family,
-                resolution=resolution,
-                conditioning=None,
-                observation_conn=calibration_conn,
-                decision_time=decision_time,
-                posterior_id=None,
-                probability_base_identity="provisional_replacement_pending",
-            )
-            payload.update(current_observation)
+            if not isinstance(payload.get("_edli_global_day0_binding"), Mapping):
+                current_observation = _global_day0_execution_payload(
+                    event,
+                    family=family,
+                    resolution=resolution,
+                    conditioning=None,
+                    observation_conn=calibration_conn,
+                    decision_time=decision_time,
+                    posterior_id=None,
+                    probability_base_identity="provisional_replacement_pending",
+                )
+                payload.update(current_observation)
             capture = provenance_capture if provenance_capture is not None else {}
             replacement = _replacement_authority_probability_and_fdr_proof(
                 event=event,
@@ -32259,11 +33199,28 @@ def _live_yes_probabilities(
                 raise ValueError(
                     "GLOBAL_DAY0_PROVISIONAL_POSTERIOR_IDENTITY_MISSING"
                 )
+            replacement_bundle = capture.get("replacement_bundle")
+            if replacement_bundle is None:
+                raise ValueError(
+                    "GLOBAL_DAY0_PROVISIONAL_REPLACEMENT_BUNDLE_MISSING"
+                )
+            probability_conditioning_is_provisional = (
+                _replacement_uses_provisional_day0_conditioning(
+                    replacement_bundle
+                )
+            )
             current_observation = _global_day0_execution_payload(
                 event,
                 family=family,
                 resolution=resolution,
-                conditioning=None,
+                conditioning=_day0_replacement_conditioning(
+                    replacement_bundle,
+                    provisional=probability_conditioning_is_provisional,
+                    metric=str(family.metric),
+                    unit=unit,
+                    decision_time=decision_time,
+                    entry_authority=True,
+                ),
                 observation_conn=calibration_conn,
                 decision_time=decision_time,
                 posterior_id=posterior_id,
@@ -32282,15 +33239,11 @@ def _live_yes_probabilities(
                     ),
                 }
             )
-            replacement_bundle = capture.get("replacement_bundle")
-            if replacement_bundle is None:
-                raise ValueError(
-                    "GLOBAL_DAY0_PROVISIONAL_REPLACEMENT_BUNDLE_MISSING"
+            if probability_conditioning_is_provisional:
+                _assert_provisional_day0_replacement_bundle(
+                    replacement_bundle,
+                    current_observation,
                 )
-            _assert_provisional_day0_replacement_bundle(
-                replacement_bundle,
-                current_observation,
-            )
             payload.update(current_observation)
             probability_block = _global_day0_probability_authority_payload(
                 current_observation
@@ -32680,21 +33633,46 @@ def _assert_provisional_day0_replacement_bundle(
     if not isinstance(provisional, Mapping):
         raise ValueError("GLOBAL_DAY0_PROVISIONAL_POSTERIOR_IDENTITY_MISSING")
 
+    identity_payload = payload
+    identity_value_is_celsius = False
+    binding = payload.get("_edli_global_day0_binding")
+    if isinstance(binding, Mapping):
+        statistical_conditioning = binding.get(
+            "statistical_probability_conditioning"
+        )
+        if isinstance(statistical_conditioning, Mapping):
+            # The top-level Day0 payload deliberately remains settlement-channel
+            # truth.  A fast-residual posterior is instead identified by its
+            # separately validated statistical conditioning.  Comparing that
+            # posterior to the slower settlement extreme makes one coherent
+            # witness contradict itself during local-proof reconstruction.
+            identity_payload = statistical_conditioning
+            identity_value_is_celsius = True
     expected_source = str(
-        payload.get("settlement_source")
-        or payload.get("observation_source")
-        or payload.get("source")
+        identity_payload.get("settlement_source")
+        or identity_payload.get("observation_source")
+        or identity_payload.get("source")
         or ""
     ).strip()
-    expected_time = str(payload.get("observation_time") or "").strip()
+    expected_time = str(identity_payload.get("observation_time") or "").strip()
     metric = str(
-        payload.get("metric") or payload.get("temperature_metric") or ""
+        identity_payload.get("metric")
+        or identity_payload.get("temperature_metric")
+        or payload.get("metric")
+        or payload.get("temperature_metric")
+        or ""
     ).strip().lower()
-    raw_value = payload.get("high_so_far" if metric == "high" else "low_so_far")
+    raw_value = identity_payload.get(
+        "high_so_far" if metric == "high" else "low_so_far"
+    )
     if raw_value in (None, ""):
-        raw_value = payload.get("raw_value")
+        raw_value = identity_payload.get("raw_value")
     if raw_value in (None, ""):
-        raw_value = payload.get("observed_extreme_native")
+        raw_value = identity_payload.get(
+            "observed_extreme_c"
+            if identity_value_is_celsius
+            else "observed_extreme_native"
+        )
     try:
         expected_value_c = float(raw_value)
         observed_value_c = float(provisional["observed_extreme_c"])
@@ -32702,7 +33680,10 @@ def _assert_provisional_day0_replacement_bundle(
         raise ValueError(
             "GLOBAL_DAY0_PROVISIONAL_POSTERIOR_IDENTITY_MISSING"
         ) from None
-    if str(payload.get("settlement_unit") or "C").strip().upper() == "F":
+    if (
+        not identity_value_is_celsius
+        and str(payload.get("settlement_unit") or "C").strip().upper() == "F"
+    ):
         expected_value_c = (expected_value_c - 32.0) * 5.0 / 9.0
     if (
         provisional.get("active") is not True
@@ -32722,6 +33703,309 @@ def _assert_provisional_day0_replacement_bundle(
         raise ValueError("GLOBAL_DAY0_PROVISIONAL_POSTERIOR_IDENTITY_MISMATCH")
 
 
+def _replacement_uses_provisional_day0_conditioning(
+    replacement_bundle: object,
+) -> bool:
+    """Return whether the current posterior q uses the provisional overlay."""
+
+    provenance = getattr(replacement_bundle, "provenance_json", None) or {}
+    if not isinstance(provenance, Mapping):
+        return False
+    provisional = provenance.get("day0_provisional_observation")
+    return isinstance(provisional, Mapping) and provisional.get("active") is True
+
+
+def _assert_day0_post_local_vector_witness(
+    witness: object,
+    *,
+    family: object,
+    decision_time: datetime,
+    target_end: datetime,
+) -> None:
+    """Validate the persisted remaining-vector authority before held readthrough."""
+    from src.data.bayes_precision_fusion_capture import OPENMETEO_MODEL_IDS
+    from src.data.openmeteo_ecmwf_ifs9_anchor import (
+        SINGLE_RUNS_FORECAST_URL,
+        STANDARD_FORECAST_URL,
+    )
+    if not isinstance(witness, Mapping):
+        raise ValueError("GLOBAL_DAY0_POST_LOCAL_VECTOR_WITNESS_MISSING")
+    expected_city = str(getattr(family, "city", "") or "").strip()
+    expected_date = str(getattr(family, "target_date", "") or "").strip()
+    expected_metric = str(getattr(family, "metric", "") or "").strip().lower()
+    vector_id = str(witness.get("vector_id") or "").strip()
+    vector_ids = witness.get("vector_ids_by_model")
+    expected_models = witness.get("expected_models")
+    actual_models = witness.get("actual_models")
+    capture_times = witness.get("capture_times_utc")
+    capture_by_model = witness.get("capture_times_by_model_utc")
+    fetch_started_by_model = witness.get("fetch_started_times_by_model_utc")
+    fetch_finished_by_model = witness.get("fetch_finished_times_by_model_utc")
+    provider_by_model = witness.get("provider_by_model")
+    endpoint_by_model = witness.get("endpoint_by_model")
+    request_hash_by_model = witness.get("request_hash_by_model")
+    source_run_id_by_model = witness.get("source_run_id_by_model")
+    provider_run_id_by_model = witness.get("provider_run_id_by_model")
+    model_api_id_by_model = witness.get("model_api_id_by_model")
+    provider_cycle_by_model = witness.get("provider_source_cycle_time_by_model_utc")
+    provider_available_by_model = witness.get(
+        "provider_source_available_at_by_model_utc"
+    )
+    provider_modified_by_model = witness.get(
+        "provider_source_modified_at_by_model_utc"
+    )
+    source_run_authority_by_model = witness.get("source_run_authority_by_model")
+    endpoint_mode_by_model = witness.get("endpoint_mode_by_model")
+    if (
+        not vector_id
+        or not isinstance(vector_ids, Mapping)
+        or not isinstance(expected_models, (list, tuple))
+        or not isinstance(actual_models, (list, tuple))
+        or not isinstance(capture_times, (list, tuple))
+        or not isinstance(capture_by_model, Mapping)
+        or not isinstance(fetch_started_by_model, Mapping)
+        or not isinstance(fetch_finished_by_model, Mapping)
+        or not isinstance(provider_by_model, Mapping)
+        or not isinstance(endpoint_by_model, Mapping)
+        or not isinstance(request_hash_by_model, Mapping)
+        or not isinstance(source_run_id_by_model, Mapping)
+        or not isinstance(provider_run_id_by_model, Mapping)
+        or not isinstance(model_api_id_by_model, Mapping)
+        or not isinstance(provider_cycle_by_model, Mapping)
+        or not isinstance(provider_available_by_model, Mapping)
+        or not isinstance(provider_modified_by_model, Mapping)
+        or not isinstance(source_run_authority_by_model, Mapping)
+        or not isinstance(endpoint_mode_by_model, Mapping)
+        or str(witness.get("city") or "").strip() != expected_city
+        or str(witness.get("target_date") or "").strip() != expected_date
+        or str(witness.get("metric") or "").strip().lower() != expected_metric
+    ):
+        raise ValueError("GLOBAL_DAY0_POST_LOCAL_VECTOR_WITNESS_INVALID")
+    expected = tuple(str(value).strip() for value in expected_models)
+    actual = tuple(str(value).strip() for value in actual_models)
+    if (
+        not expected
+        or any(not value for value in expected)
+        or any(not value for value in actual)
+        or len(expected) != len(set(expected))
+        or len(actual) != len(set(actual))
+        or set(expected) != set(actual)
+        or set(str(key).strip() for key in vector_ids) != set(actual)
+        or set(str(key).strip() for key in capture_by_model) != set(actual)
+        or set(str(key).strip() for key in fetch_started_by_model) != set(actual)
+        or set(str(key).strip() for key in fetch_finished_by_model) != set(actual)
+        or set(str(key).strip() for key in provider_by_model) != set(actual)
+        or set(str(key).strip() for key in endpoint_by_model) != set(actual)
+        or set(str(key).strip() for key in request_hash_by_model) != set(actual)
+        or set(str(key).strip() for key in source_run_id_by_model) != set(actual)
+        or set(str(key).strip() for key in provider_run_id_by_model) != set(actual)
+        or set(str(key).strip() for key in model_api_id_by_model) != set(actual)
+        or set(str(key).strip() for key in provider_cycle_by_model) != set(actual)
+        or set(str(key).strip() for key in provider_available_by_model) != set(actual)
+        or set(str(key).strip() for key in provider_modified_by_model) != set(actual)
+        or set(str(key).strip() for key in source_run_authority_by_model) != set(actual)
+        or set(str(key).strip() for key in endpoint_mode_by_model) != set(actual)
+        or len(capture_times) != len(actual)
+        or vector_id not in {str(value).strip() for value in vector_ids.values()}
+    ):
+        raise ValueError("GLOBAL_DAY0_POST_LOCAL_VECTOR_WITNESS_IDENTITY_MISMATCH")
+
+    def _utc(value: object, reason: str) -> datetime:
+        try:
+            parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        except (TypeError, ValueError) as exc:
+            raise ValueError(reason) from exc
+        if parsed.tzinfo is None:
+            raise ValueError(reason)
+        return parsed.astimezone(UTC)
+
+    decision_utc = decision_time.astimezone(UTC)
+    target_end_utc = _utc(
+        witness.get("target_end_utc"),
+        "GLOBAL_DAY0_POST_LOCAL_VECTOR_WITNESS_CLOCK_INVALID",
+    )
+    if target_end_utc != target_end.astimezone(UTC):
+        raise ValueError("GLOBAL_DAY0_POST_LOCAL_VECTOR_WITNESS_TARGET_MISMATCH")
+    causal_as_of = _utc(
+        witness.get("causal_as_of_utc"),
+        "GLOBAL_DAY0_POST_LOCAL_VECTOR_WITNESS_CLOCK_INVALID",
+    )
+    local_capture_clock = _utc(
+        witness.get("local_capture_clock_utc"),
+        "GLOBAL_DAY0_POST_LOCAL_VECTOR_WITNESS_CLOCK_INVALID",
+    )
+    source_available = _utc(
+        witness.get("source_available_at_utc"),
+        "GLOBAL_DAY0_POST_LOCAL_VECTOR_WITNESS_CLOCK_INVALID",
+    )
+    if (
+        causal_as_of > decision_utc
+        or local_capture_clock > causal_as_of
+        or source_available > causal_as_of
+        or source_available < local_capture_clock
+    ):
+        raise ValueError("GLOBAL_DAY0_POST_LOCAL_VECTOR_WITNESS_FUTURE")
+    try:
+        from src.data.day0_hourly_vectors import DAY0_HOURLY_BUNDLE_MAX_AGE_HOURS
+
+        if (
+            decision_utc - source_available
+        ).total_seconds() > float(DAY0_HOURLY_BUNDLE_MAX_AGE_HOURS) * 3600.0:
+            raise ValueError("GLOBAL_DAY0_POST_LOCAL_VECTOR_WITNESS_STALE")
+    except ImportError:
+        raise ValueError("GLOBAL_DAY0_POST_LOCAL_VECTOR_WITNESS_INVALID") from None
+
+    parsed_captures: list[datetime] = []
+    for model in actual:
+        capture = _utc(
+            capture_by_model.get(model),
+            "GLOBAL_DAY0_POST_LOCAL_VECTOR_WITNESS_CLOCK_INVALID",
+        )
+        fetch_started = _utc(
+            fetch_started_by_model.get(model),
+            "GLOBAL_DAY0_POST_LOCAL_VECTOR_WITNESS_CLOCK_INVALID",
+        )
+        fetch_finished = _utc(
+            fetch_finished_by_model.get(model),
+            "GLOBAL_DAY0_POST_LOCAL_VECTOR_WITNESS_CLOCK_INVALID",
+        )
+        provider_cycle = _utc(
+            provider_cycle_by_model.get(model),
+            "GLOBAL_DAY0_POST_LOCAL_VECTOR_WITNESS_CLOCK_INVALID",
+        )
+        provider_available = _utc(
+            provider_available_by_model.get(model),
+            "GLOBAL_DAY0_POST_LOCAL_VECTOR_WITNESS_CLOCK_INVALID",
+        )
+        provider_modified = _utc(
+            provider_modified_by_model.get(model),
+            "GLOBAL_DAY0_POST_LOCAL_VECTOR_WITNESS_CLOCK_INVALID",
+        )
+        parsed_captures.append(capture)
+        if (
+            capture > causal_as_of
+            or capture > decision_utc
+            or capture > target_end_utc
+            or capture > fetch_started
+            or fetch_started > fetch_finished
+            or fetch_finished > causal_as_of
+            or fetch_finished > decision_utc
+            or provider_cycle > provider_available
+            or provider_available > fetch_finished
+            or provider_modified > fetch_finished
+            or provider_cycle > causal_as_of
+            or provider_available > causal_as_of
+            or provider_modified > causal_as_of
+        ):
+            raise ValueError("GLOBAL_DAY0_POST_LOCAL_VECTOR_CAPTURE_AFTER_TARGET")
+        if (
+            str(vector_ids.get(model) or "").strip() == ""
+            or not str(provider_by_model.get(model) or "").strip()
+            or not str(endpoint_by_model.get(model) or "").strip()
+            or not str(request_hash_by_model.get(model) or "").strip()
+            or not str(source_run_id_by_model.get(model) or "").strip()
+            or not str(provider_run_id_by_model.get(model) or "").strip()
+            or not str(model_api_id_by_model.get(model) or "").strip()
+            or not str(source_run_authority_by_model.get(model) or "").strip()
+            or not str(endpoint_mode_by_model.get(model) or "").strip()
+            or str(provider_by_model.get(model)).strip() != "openmeteo"
+            or str(model_api_id_by_model.get(model)).strip()
+            != str(OPENMETEO_MODEL_IDS.get(model, model)).strip()
+            or str(source_run_id_by_model.get(model)).strip()
+            != f"day0_hourly:{str(request_hash_by_model.get(model)).strip()}"
+            or str(provider_run_id_by_model.get(model)).strip()
+            != f"openmeteo:{str(model_api_id_by_model.get(model)).strip()}:{provider_cycle.isoformat()}"
+            or str(source_run_authority_by_model.get(model)).strip()
+            not in {"run_pinned_single_runs", "provider_meta_declared"}
+            or str(endpoint_mode_by_model.get(model)).strip()
+            not in {"single_runs", "standard_meta_stamped"}
+            or (
+                str(endpoint_mode_by_model.get(model)).strip() == "single_runs"
+                and str(endpoint_by_model.get(model)).strip() != SINGLE_RUNS_FORECAST_URL
+            )
+            or (
+                str(endpoint_mode_by_model.get(model)).strip()
+                == "standard_meta_stamped"
+                and str(endpoint_by_model.get(model)).strip() != STANDARD_FORECAST_URL
+            )
+            or (
+                str(source_run_authority_by_model.get(model)).strip()
+                == "run_pinned_single_runs"
+                and str(endpoint_mode_by_model.get(model)).strip() != "single_runs"
+            )
+            or (
+                str(source_run_authority_by_model.get(model)).strip()
+                == "provider_meta_declared"
+                and str(endpoint_mode_by_model.get(model)).strip()
+                != "standard_meta_stamped"
+            )
+        ):
+            raise ValueError("GLOBAL_DAY0_POST_LOCAL_VECTOR_WITNESS_IDENTITY_MISMATCH")
+    list_captures = tuple(
+        _utc(value, "GLOBAL_DAY0_POST_LOCAL_VECTOR_WITNESS_CLOCK_INVALID")
+        for value in capture_times
+    )
+    if tuple(sorted(list_captures)) != tuple(sorted(parsed_captures)):
+        raise ValueError("GLOBAL_DAY0_POST_LOCAL_VECTOR_WITNESS_IDENTITY_MISMATCH")
+    if local_capture_clock != max(parsed_captures) or source_available != max(
+        _utc(value, "GLOBAL_DAY0_POST_LOCAL_VECTOR_WITNESS_CLOCK_INVALID")
+        for value in fetch_finished_by_model.values()
+    ):
+        raise ValueError("GLOBAL_DAY0_POST_LOCAL_VECTOR_WITNESS_CLOCK_MISMATCH")
+    carrier_cycle = _utc(
+        witness.get("provider_source_cycle_time_utc"),
+        "GLOBAL_DAY0_POST_LOCAL_VECTOR_WITNESS_CLOCK_INVALID",
+    )
+    ecmwf_cycle = provider_cycle_by_model.get("ecmwf_ifs")
+    if ecmwf_cycle is None or carrier_cycle != _utc(
+        ecmwf_cycle,
+        "GLOBAL_DAY0_POST_LOCAL_VECTOR_WITNESS_CLOCK_INVALID",
+    ):
+        raise ValueError("GLOBAL_DAY0_POST_LOCAL_VECTOR_WITNESS_IDENTITY_MISMATCH")
+
+
+def _provisional_day0_revision_likelihood(
+    conn: sqlite3.Connection,
+    *,
+    source: str,
+    city: str,
+    city_timezone: str,
+    target_date: str,
+    temperature_metric: str,
+    decision_time: datetime,
+    entry_authority: bool,
+) -> Mapping[str, object]:
+    """Resolve only an existing source-specific provisional revision model."""
+    from src.data.day0_observation_reader import (
+        hko_provisional_revision_likelihood,
+        wu_provisional_revision_likelihood,
+    )
+
+    provisional_source = str(source or "").strip().lower()
+    if provisional_source.startswith("hko_hourly_accumulator"):
+        return hko_provisional_revision_likelihood(
+            conn,
+            target_date=target_date,
+            temperature_metric=temperature_metric,
+            decision_time=decision_time,
+        )
+    if provisional_source.startswith("wu"):
+        return wu_provisional_revision_likelihood(
+            conn,
+            city=city,
+            timezone_name=city_timezone,
+            target_date=target_date,
+            temperature_metric=temperature_metric,
+            decision_time=decision_time,
+            # A zero-transition Jeffreys prior is intentionally reduce-only:
+            # ENTRY still requires empirical city history.
+            allow_prior_only=not entry_authority,
+        )
+    if provisional_source.startswith("aviationweather_metar"):
+        raise ValueError("METAR_PROVISIONAL_REVISION_AUTHORITY_UNAVAILABLE")
+    raise ValueError("PROVISIONAL_SOURCE_REVISION_MODEL_UNAVAILABLE")
+
+
 def _day0_replacement_conditioning(
     replacement_bundle: object,
     *,
@@ -32730,8 +34014,12 @@ def _day0_replacement_conditioning(
     unit: str,
     decision_time: datetime,
     entry_authority: bool,
+    allow_stale_supporting_conditioning: bool = False,
 ) -> Mapping[str, object]:
     """Return the current observation conditioning carried by replacement q."""
+
+    if not isinstance(allow_stale_supporting_conditioning, bool):
+        raise ValueError("GLOBAL_DAY0_SUPPORTING_CONDITIONING_POLICY_INVALID")
 
     provenance = getattr(replacement_bundle, "provenance_json", None) or {}
     if not isinstance(provenance, Mapping):
@@ -32790,7 +34078,10 @@ def _day0_replacement_conditioning(
             age_seconds = (
                 decision_time.astimezone(UTC) - observation_time.astimezone(UTC)
             ).total_seconds()
-            if age_seconds > FAST_LANE_ENTRY_MAX_CACHE_AGE_S:
+            if (
+                age_seconds > FAST_LANE_ENTRY_MAX_CACHE_AGE_S
+                and not allow_stale_supporting_conditioning
+            ):
                 # SCOPE: only new ENTRY risk for this Day0 family; held redecision
                 # and reduce-only SELL continue on their independent authority.
                 # DRAIN: the station fast lane publishes its next causal print and
@@ -33526,6 +34817,15 @@ _GLOBAL_PROBABILITY_CONTENT_FIELDS = (
     "sample_matrix_identity",
 )
 
+_GLOBAL_PROBABILITY_ACTION_CONTENT_FIELDS = (
+    "family_key",
+    "resolution_identity",
+    "topology_identity",
+    "band_alpha",
+    "band_basis",
+    "sample_matrix_identity",
+)
+
 
 def _global_probability_witness_content_matches(
     current: object,
@@ -33548,6 +34848,50 @@ def _global_probability_witness_content_mismatches(
         if getattr(current, field, None) != getattr(selected, field, None)
     )
     if not _global_probability_point_q_matches(current, selected):
+        mismatches += ("yes_point_q",)
+    return mismatches
+
+
+def _global_probability_action_content_mismatches(
+    current: object,
+    monitored: object,
+) -> tuple[str, ...]:
+    """Compare the q facts that can change one fixed action's economics.
+
+    ENTRY and HELD_MONITOR may serialize different causal provenance while
+    producing the exact same current probability distribution. That provenance
+    distinction remains in each immutable witness, but it cannot by itself make
+    an immediately monitored BUY economically divergent. A type, semantics,
+    topology, band, sample, binding, or point-q change still fails closed.
+    """
+
+    mismatches: tuple[str, ...] = ()
+    if type(current) is not type(monitored):
+        mismatches += ("witness_type",)
+    mismatches += tuple(
+        field
+        for field in _GLOBAL_PROBABILITY_ACTION_CONTENT_FIELDS
+        if getattr(current, field, None) != getattr(monitored, field, None)
+    )
+    if not str(getattr(current, "sample_matrix_identity", "") or "").strip():
+        if "sample_matrix_identity" not in mismatches:
+            mismatches += ("sample_matrix_identity",)
+    if tuple(getattr(current, "bindings", ()) or ()) != tuple(
+        getattr(monitored, "bindings", ()) or ()
+    ):
+        mismatches += ("bindings",)
+    current_q_version = str(getattr(current, "q_version", "") or "")
+    monitored_q_version = str(getattr(monitored, "q_version", "") or "")
+    if current_q_version != monitored_q_version:
+        from src.events.day0_authority import day0_probability_semantics_revision
+
+        current_revision = day0_probability_semantics_revision(current_q_version)
+        monitored_revision = day0_probability_semantics_revision(
+            monitored_q_version
+        )
+        if current_revision is None or current_revision != monitored_revision:
+            mismatches += ("q_version",)
+    if not _global_probability_point_q_matches(current, monitored):
         mismatches += ("yes_point_q",)
     return mismatches
 
@@ -33858,6 +35202,13 @@ def _global_day0_execution_payload(
         binding["statistical_probability_conditioning"] = dict(
             fast_residual_conditioning
         )
+    remaining_witness = (
+        conditioning.get("day0_remaining_vector_witness")
+        if isinstance(conditioning, Mapping)
+        else None
+    )
+    if isinstance(remaining_witness, Mapping):
+        binding["day0_remaining_vector_witness"] = dict(remaining_witness)
     physical_clock: dict[str, object] | None = None
     physical_probability_boundary: dict[str, object] | None = None
     if physical_fact is not None:
@@ -33968,6 +35319,20 @@ def _global_day0_execution_payload(
         "observation_context_id": "global_current_day0:" + stable_hash(binding),
         "_edli_global_day0_binding": binding,
     }
+    if isinstance(remaining_witness, Mapping):
+        payload["_edli_day0_remaining_vector_witness"] = dict(remaining_witness)
+        provider_cycle = remaining_witness.get("provider_source_cycle_time_utc")
+        if provider_cycle not in (None, ""):
+            payload["_edli_day0_remaining_provider_source_cycle_time_utc"] = provider_cycle
+        payload["_edli_day0_remaining_capture_times_utc"] = list(
+            remaining_witness.get("capture_times_utc") or ()
+        )
+        payload["_edli_day0_remaining_expected_models"] = list(
+            remaining_witness.get("expected_models") or ()
+        )
+        payload["_edli_day0_remaining_model_names"] = list(
+            remaining_witness.get("actual_models") or ()
+        )
     if physical_clock is not None:
         payload.update(
             {
@@ -34084,10 +35449,18 @@ def _global_day0_probability_authority_payload(
                 "_edli_day0_remaining_source_cycle_time_utc",
             ),
             (
+                "remaining_provider_source_cycle_time_utc",
+                "_edli_day0_remaining_provider_source_cycle_time_utc",
+            ),
+            (
                 "remaining_capture_times_utc",
                 "_edli_day0_remaining_capture_times_utc",
             ),
             ("remaining_expected_models", "_edli_day0_remaining_expected_models"),
+            (
+                "remaining_vector_witness",
+                "_edli_day0_remaining_vector_witness",
+            ),
             (
                 "current_temperature_native",
                 "_edli_day0_current_temperature_native",
@@ -34119,6 +35492,14 @@ def _global_day0_probability_authority_payload(
             ),
             ("process_sigma_native", "_edli_day0_process_sigma_native"),
             ("process_sigma_basis", "_edli_day0_process_sigma_basis"),
+            (
+                "remaining_path_center_sigma_native",
+                "_edli_day0_remaining_path_center_sigma_native",
+            ),
+            (
+                "unresolved_path_sigma_native",
+                "_edli_day0_unresolved_path_sigma_native",
+            ),
             ("exit_authority_status", "_edli_day0_exit_authority_status"),
             ("exit_authority_reason", "_edli_day0_exit_authority_reason"),
             ("bound_classification", "_edli_day0_bound_classification"),
@@ -34688,6 +36069,46 @@ def _replacement_global_probability_components(
     )
 
 
+def _held_pinned_day0_probability_components(
+    replacement_bundle: object,
+    *,
+    payload: dict[str, object],
+    family: object,
+    candidates: tuple[MarketTopologyCandidate, ...],
+    bindings: tuple[object, ...],
+) -> tuple[np.ndarray, np.ndarray, str]:
+    """Overlay only the authorized monotone Day0 boundary on a pinned carrier."""
+
+    components = _replacement_global_probability_components(
+        replacement_bundle,
+        candidates=candidates,
+        bindings=bindings,
+    )
+    if components is None:
+        raise ValueError("GLOBAL_HELD_PINNED_POSTERIOR_SIMPLEX_INVALID")
+    samples, point_q, _basis = components
+    mask = _day0_absorbing_mask(payload=payload, family=family)
+    masked_samples = np.asarray(samples, dtype=np.float64) * mask.reshape(1, -1)
+    row_totals = masked_samples.sum(axis=1)
+    if np.any(row_totals <= 0.0) or not np.isfinite(row_totals).all():
+        raise ValueError("GLOBAL_HELD_PINNED_DAY0_OBSERVATION_ELIMINATES_SUPPORT")
+    masked_samples = masked_samples / row_totals.reshape(-1, 1)
+    masked_point = np.asarray(point_q, dtype=np.float64) * mask
+    point_total = float(masked_point.sum())
+    if point_total <= 0.0 or not math.isfinite(point_total):
+        raise ValueError("GLOBAL_HELD_PINNED_DAY0_OBSERVATION_ELIMINATES_POINT")
+    masked_point = masked_point / point_total
+    payload["_edli_day0_held_pinned_mask"] = [float(value) for value in mask]
+    payload["_edli_day0_held_pinned_overlay"] = (
+        "authorized_monotone_day0_observation_v1"
+    )
+    return (
+        np.ascontiguousarray(masked_samples, dtype=np.float64),
+        np.ascontiguousarray(masked_point, dtype=np.float64),
+        _GLOBAL_DAY0_CURRENT_SETTLEMENT_SIMPLEX_BAND_BASIS,
+    )
+
+
 def _day0_remaining_global_probability_components(
     event: OpportunityEvent,
     *,
@@ -35016,6 +36437,8 @@ def _prepare_current_global_probability_family(
     raw_input_hwm_deadline_monotonic: float | None = None,
     raw_input_hwm_read_max_seconds: float | None = None,
     before_raw_input_hwm_read: Callable[[], float | None] | None = None,
+    _force_day0_redecision_fallback: bool = False,
+    pinned_complete_bundle: object | None = None,
 ):
     """Build current simplex or exact-bin payoff authority without price dependency.
 
@@ -35057,6 +36480,30 @@ def _prepare_current_global_probability_family(
             return before_raw_input_hwm_read()
         return raw_input_hwm_deadline_monotonic
 
+    def _prepare_held_day0_fallback():
+        return _prepare_current_global_probability_family(
+            event,
+            forecast_conn=forecast_conn,
+            topology_conn=topology_conn,
+            observation_conn=observation_conn,
+            decision_time=decision_time,
+            max_age=max_age,
+            day0_payload_out=day0_payload_out,
+            cache_metadata_out=cache_metadata_out,
+            required_condition_id=required_condition_id,
+            allow_partial_deterministic=allow_partial_deterministic,
+            allow_unobserved_day0_replacement=allow_unobserved_day0_replacement,
+            allow_provisional_day0_replacement=(
+                allow_provisional_day0_replacement
+            ),
+            probability_use=probability_use,
+            raw_input_hwm_conn=raw_input_hwm_conn,
+            raw_input_hwm_deadline_monotonic=raw_input_hwm_deadline_monotonic,
+            raw_input_hwm_read_max_seconds=raw_input_hwm_read_max_seconds,
+            before_raw_input_hwm_read=before_raw_input_hwm_read,
+            _force_day0_redecision_fallback=True,
+        )
+
     if max_age <= timedelta(0):
         raise ValueError("GLOBAL_PROBABILITY_FRESHNESS_CONTRACT_MISSING")
     if not isinstance(allow_unobserved_day0_replacement, bool):
@@ -35065,7 +36512,21 @@ def _prepare_current_global_probability_family(
         raise ValueError("GLOBAL_PROVISIONAL_DAY0_REPLACEMENT_POLICY_INVALID")
     if not isinstance(probability_use, _CurrentProbabilityUse):
         raise ValueError("GLOBAL_PROBABILITY_USE_INVALID")
+    if not isinstance(_force_day0_redecision_fallback, bool):
+        raise ValueError("GLOBAL_DAY0_REDECISION_FALLBACK_POLICY_INVALID")
     entry_authority = probability_use is _CurrentProbabilityUse.ENTRY
+    if pinned_complete_bundle is not None and entry_authority:
+        raise ValueError("GLOBAL_HELD_PINNED_RECOMPUTE_ENTRY_FORBIDDEN")
+    if pinned_complete_bundle is not None and probability_use not in {
+        _CurrentProbabilityUse.HELD_MONITOR,
+        _CurrentProbabilityUse.REDUCE_ONLY_EXIT,
+    }:
+        raise ValueError("GLOBAL_HELD_PINNED_RECOMPUTE_USE_INVALID")
+    if (
+        pinned_complete_bundle is not None
+        and event.event_type != "DAY0_EXTREME_UPDATED"
+    ):
+        raise ValueError("GLOBAL_HELD_PINNED_RECOMPUTE_DAY0_ONLY")
     bundle_authority_purpose = (
         ReplacementForecastAuthorityPurpose.ENTRY
         if entry_authority
@@ -35108,10 +36569,28 @@ def _prepare_current_global_probability_family(
     post_local_incomplete_monitor_authority = False
     provisional_day0_fact: Mapping[str, object] | None = None
     fast_residual_conditioning: Mapping[str, object] | None = None
+    probability_conditioning_is_provisional = False
     physical_frontier_requires_confirmation = False
     final_daily_observation = None
     source_available_at = ""
-    bundle = None
+    bundle = pinned_complete_bundle
+    posterior_identity_hash = ""
+    dependency_hash = ""
+    posterior_config_hash = ""
+    if pinned_complete_bundle is not None:
+        posterior_identity_hash = str(
+            pinned_complete_bundle.posterior_identity_hash or ""
+        ).strip()
+        dependency_hash = str(
+            pinned_complete_bundle.dependency_hash or ""
+        ).strip()
+        posterior_config_hash = str(
+            pinned_complete_bundle.posterior_config_hash or ""
+        ).strip()
+        if not all(
+            (posterior_identity_hash, dependency_hash, posterior_config_hash)
+        ):
+            raise ValueError("GLOBAL_HELD_PINNED_POSTERIOR_IDENTITY_INCOMPLETE")
     day0_source_clock_bound_identity = ""
     current_day0_redecision_only = False
     if is_day0:
@@ -35205,14 +36684,10 @@ def _prepare_current_global_probability_family(
             )
             if (
                 provisional_day0_observation
-                and entry_authority
-            ):
-                raise ValueError(
-                    "GLOBAL_DAY0_PROVISIONAL_OBSERVATION_NOT_ENTRY_AUTHORITY"
-                )
-            if (
-                provisional_day0_observation
                 and not allow_provisional_day0_replacement
+                and str(
+                    (provisional_day0_fact or {}).get("observation_source") or ""
+                ).strip().lower().startswith("hko_hourly_accumulator")
             ):
                 raise ValueError(
                     "GLOBAL_DAY0_PROVISIONAL_OBSERVATION_NOT_EXECUTION_AUTHORITY"
@@ -35283,8 +36758,9 @@ def _prepare_current_global_probability_family(
                             hours=_DAY0_COVERAGE_WINDOW_GRACE_HOURS
                         )
                     )
+        held_day0_redecision_fallback_eligible = False
         if final_daily_observation is None:
-            current_day0_redecision_only = bool(
+            held_day0_redecision_fallback_eligible = bool(
                 provisional_day0_fact is not None
                 and (
                     provisional_day0_observation
@@ -35297,12 +36773,36 @@ def _prepare_current_global_probability_family(
                 and probability_use
                 in {
                     _CurrentProbabilityUse.HELD_MONITOR,
-                    _CurrentProbabilityUse.REDUCE_ONLY_EXIT,
                 }
             )
+            current_day0_redecision_only = bool(
+                held_day0_redecision_fallback_eligible
+                and (
+                    _force_day0_redecision_fallback
+                    or local_target < local_now.date()
+                )
+            )
+        if pinned_complete_bundle is not None:
+            # A held pinned carrier is already the immutable source-clock
+            # authority.  Its identity must remain available even when the
+            # target is still the city's current local day; that route only
+            # overlays the authorized monotone Day0 observation below.
+            source_cycle_raw = str(
+                pinned_complete_bundle.source_cycle_time or ""
+            ).strip()
+            source_available_at = str(
+                pinned_complete_bundle.source_available_at or source_cycle_raw
+            ).strip()
+            day0_base_identity = str(
+                pinned_complete_bundle.posterior_identity_hash or ""
+            ).strip()
+            if not day0_base_identity:
+                raise ValueError("GLOBAL_HELD_PINNED_POSTERIOR_IDENTITY_MISSING")
         if final_daily_observation is None and current_day0_redecision_only:
             # SCOPE: this already-held family's genuinely provisional Day0 or
-            # post-local incomplete monitor/reduce-only submit revalidation.
+            # post-local incomplete monitor observability. REDUCE_ONLY_EXIT
+            # must retain the comparable source-clock bundle used by ENTRY;
+            # this lower-variance fallback cannot authorize a statistical sale.
             # Definitive current-day evidence uses the replacement bundle for
             # the same probability authority as ENTRY.
             # DRAIN: the strict remaining-window builder below consumes a fresh,
@@ -35337,7 +36837,13 @@ def _prepare_current_global_probability_family(
                     ),
                 }
             )
-        elif final_daily_observation is None:
+        elif final_daily_observation is None and pinned_complete_bundle is None:
+            # Current-day held q first reuses the same source-clock bundle as
+            # ENTRY so an admitted BUY is immediately monitorable on identical
+            # probability content. SCOPE: only this held family. DRAIN: a
+            # current bundle restores the shared authority; if it is missing,
+            # the existing reduce-only remaining-window fallback keeps capital
+            # observable. RESET: every redecision retries the current bundle.
             readiness = latest_replacement_readiness(
                 forecast_conn,
                 city=family.city,
@@ -35346,6 +36852,8 @@ def _prepare_current_global_probability_family(
                 decision_time=decision_time,
             )
             if readiness is None:
+                if held_day0_redecision_fallback_eligible:
+                    return _prepare_held_day0_fallback()
                 raise ValueError("GLOBAL_CURRENT_REPLACEMENT_READINESS_MISSING")
             result = read_replacement_forecast_bundle(
                 forecast_conn,
@@ -35364,6 +36872,8 @@ def _prepare_current_global_probability_family(
                 authority_purpose=bundle_authority_purpose,
             )
             if not result.ok or result.bundle is None:
+                if held_day0_redecision_fallback_eligible:
+                    return _prepare_held_day0_fallback()
                 raise ValueError(
                     "GLOBAL_CURRENT_REPLACEMENT_BUNDLE_BLOCKED:"
                     f"{result.reason_code}"
@@ -35381,6 +36891,9 @@ def _prepare_current_global_probability_family(
             source_cycle_raw = bundle.source_cycle_time
             source_available_at = str(bundle.source_available_at or "").strip()
             day0_base_identity = posterior_identity_hash
+            probability_conditioning_is_provisional = (
+                _replacement_uses_provisional_day0_conditioning(bundle)
+            )
             fast_residual_conditioning = _fast_residual_day0_conditioning(
                 bundle
             )
@@ -35415,7 +36928,7 @@ def _prepare_current_global_probability_family(
                 raise ValueError(
                     "GLOBAL_DAY0_PHYSICAL_FRONTIER_NOT_SETTLEMENT_CONFIRMED"
                 )
-            if provisional_day0_observation:
+            if probability_conditioning_is_provisional:
                 _assert_provisional_day0_replacement_bundle(
                     bundle,
                     {
@@ -35519,6 +37032,11 @@ def _prepare_current_global_probability_family(
     )
     omega = build_outcome_space(family, case)
     if is_day0 and not use_unobserved_day0_replacement:
+        remaining_path_supporting_conditioning = bool(
+            entry_authority
+            and local_target == local_now.date()
+            and _day0_remaining_day_q_enabled()
+        )
         if final_daily_observation is not None:
             current_day0_payload = _global_final_daily_probability_payload(
                 family=family,
@@ -35526,29 +37044,47 @@ def _prepare_current_global_probability_family(
                 probability_base_identity=day0_base_identity,
             )
         else:
+            conditioning = None
+            if pinned_complete_bundle is None and bundle is not None:
+                conditioning = _day0_replacement_conditioning(
+                    bundle,
+                    provisional=probability_conditioning_is_provisional,
+                    metric=str(family.metric),
+                    unit=str(omega.resolution.measurement_unit),
+                    decision_time=decision_time,
+                    entry_authority=entry_authority,
+                    # The source-clock observation is only a provenance
+                    # carrier when the action q is rebuilt from the current
+                    # remaining path below. Its age cannot freeze the whole
+                    # city between hourly provider publications: the
+                    # remaining-path builder prices the unobserved interval
+                    # through decision_time from the causal current-state
+                    # ledger. Direct source-clock action routes retain the
+                    # strict 15-minute gate above.
+                    allow_stale_supporting_conditioning=(
+                        remaining_path_supporting_conditioning
+                    ),
+                )
             current_day0_payload = _global_day0_execution_payload(
                 event,
                 family=family,
                 resolution=omega.resolution,
-                conditioning=(
-                    _day0_replacement_conditioning(
-                        bundle,
-                        provisional=provisional_day0_observation,
-                        metric=str(family.metric),
-                        unit=str(omega.resolution.measurement_unit),
-                        decision_time=decision_time,
-                        entry_authority=entry_authority,
-                    )
-                    if bundle is not None
-                    else None
-                ),
+                conditioning=conditioning,
                 observation_conn=day0_observation_conn,
                 decision_time=decision_time,
                 posterior_id=(
                     bundle.posterior_id if bundle is not None else None
                 ),
                 probability_base_identity=day0_base_identity,
-                allow_equivalent_conditioning_clock_advance=not entry_authority,
+                # The same supporting-carrier exception must cross this second
+                # clock seam atomically.  The current observation ledger owns
+                # action state; a same-extreme carrier clock may differ while
+                # the remaining-path builder below reproduces current q. Value,
+                # unit, source, topology, and JIT equality remain strict.
+                allow_equivalent_conditioning_clock_advance=(
+                    not entry_authority
+                    or remaining_path_supporting_conditioning
+                ),
             )
             if current_day0_redecision_only:
                 current_day0_payload[
@@ -35559,7 +37095,7 @@ def _prepare_current_global_probability_family(
                     raise ValueError(
                         "GLOBAL_DAY0_PROVISIONAL_REPLACEMENT_BUNDLE_MISSING"
                     )
-            elif provisional_day0_observation:
+            elif probability_conditioning_is_provisional:
                 if fast_residual_conditioning is not None:
                     _assert_provisional_day0_replacement_bundle(
                         bundle,
@@ -35622,20 +37158,20 @@ def _prepare_current_global_probability_family(
         payload.update(current_day0_payload)
         if day0_payload_out is not None:
             day0_payload_out.update(current_day0_payload)
-        if (
-            provisional_day0_observation
-            and fast_residual_conditioning is None
-        ):
-            from src.data.day0_observation_reader import (
-                hko_provisional_revision_likelihood,
-            )
-
+        if provisional_day0_observation:
             try:
-                revision_likelihood = hko_provisional_revision_likelihood(
+                provisional_source = str(
+                    current_day0_payload.get("settlement_source") or ""
+                ).strip().lower()
+                revision_likelihood = _provisional_day0_revision_likelihood(
                     day0_observation_conn,
+                    source=provisional_source,
+                    city=str(family.city),
+                    city_timezone=str(city.timezone),
                     target_date=str(family.target_date),
                     temperature_metric=str(family.metric),
                     decision_time=decision_time,
+                    entry_authority=entry_authority,
                 )
             except ValueError as exc:
                 if str(exc) == "HKO_PROVISIONAL_ROLLOVER_UNCONFIRMED":
@@ -35645,6 +37181,10 @@ def _prepare_current_global_probability_family(
                     # world.data_version and rebuilds this family.
                     raise ValueError(
                         "GLOBAL_DAY0_PROVISIONAL_ROLLOVER_UNCONFIRMED"
+                    ) from exc
+                if str(exc) == "METAR_PROVISIONAL_REVISION_AUTHORITY_UNAVAILABLE":
+                    raise ValueError(
+                        "GLOBAL_DAY0_METAR_PROVISIONAL_REVISION_AUTHORITY_UNAVAILABLE"
                     ) from exc
                 # SCOPE: this HKO family held-position q only. DRAIN: enough
                 # causal official snapshots establish the source-specific
@@ -35695,7 +37235,44 @@ def _prepare_current_global_probability_family(
     probability_authority = "replacement_current_global_probability_v1"
     components = None
     exact_yes_payoffs: tuple[tuple[str, int], ...] = ()
-    if final_daily_observation is not None:
+    if pinned_complete_bundle is not None:
+        components = _held_pinned_day0_probability_components(
+            pinned_complete_bundle,
+            payload=payload,
+            family=family,
+            candidates=family.candidates,
+            bindings=bindings,
+        )
+        probability_authority = (
+            "day0_held_same_cycle_day0_recompute_v1"
+        )
+        pinned_metadata = {
+            "probability_authority": probability_authority,
+            "q_source": "day0_held_same_cycle_day0_recompute",
+            "_edli_q_source": "day0_held_same_cycle_day0_recompute",
+            "_edli_day0_q_mode": "held_same_cycle_day0_recompute",
+            "_edli_day0_held_pinned_recompute": True,
+            "_edli_day0_held_pinned_posterior_id": int(
+                pinned_complete_bundle.posterior_id
+            ),
+            "_edli_day0_held_pinned_posterior_identity": str(
+                pinned_complete_bundle.posterior_identity_hash
+            ),
+        }
+        payload.update(pinned_metadata)
+        if day0_payload_out is not None:
+            day0_payload_out.update(pinned_metadata)
+            day0_payload_out.update(
+                {
+                    "_edli_day0_held_pinned_mask": payload.get(
+                        "_edli_day0_held_pinned_mask"
+                    ),
+                    "_edli_day0_held_pinned_overlay": payload.get(
+                        "_edli_day0_held_pinned_overlay"
+                    ),
+                }
+            )
+    elif final_daily_observation is not None:
         components = _final_daily_exact_probability_components(
             omega=omega,
             settled_extreme=final_daily_observation.settled_extreme,
@@ -36072,16 +37649,27 @@ def _prepare_current_global_probability_family(
         current_day0_redecision_only
         and local_target < local_now.date()
     ):
-        raw_capture_times = payload.get(
-            "_edli_day0_remaining_capture_times_utc"
+        persisted_witness = payload.get(
+            "_edli_day0_remaining_vector_witness"
         )
-        if not isinstance(raw_capture_times, list) or not raw_capture_times:
-            raise ValueError("GLOBAL_DAY0_POST_LOCAL_VECTOR_CAPTURE_MISSING")
+        if not isinstance(persisted_witness, Mapping):
+            raise ValueError("GLOBAL_DAY0_POST_LOCAL_VECTOR_WITNESS_MISSING")
         target_end = datetime.combine(
             local_target + timedelta(days=1),
             time.min,
             tzinfo=ZoneInfo(str(city.timezone)),
         ).astimezone(UTC)
+        _assert_day0_post_local_vector_witness(
+            persisted_witness,
+            family=family,
+            decision_time=decision_time,
+            target_end=target_end,
+        )
+        raw_capture_times = payload.get(
+            "_edli_day0_remaining_capture_times_utc"
+        )
+        if not isinstance(raw_capture_times, list) or not raw_capture_times:
+            raise ValueError("GLOBAL_DAY0_POST_LOCAL_VECTOR_CAPTURE_MISSING")
         try:
             capture_times = tuple(
                 datetime.fromisoformat(str(value).replace("Z", "+00:00"))
@@ -36284,6 +37872,11 @@ def _prepare_current_global_probability_family(
             "_edli_day0_peak_set_sample_count",
             "_edli_day0_peak_set_probability_basis",
             "_edli_day0_peak_set_mixture_basis",
+            "_edli_day0_held_pinned_recompute",
+            "_edli_day0_held_pinned_posterior_id",
+            "_edli_day0_held_pinned_posterior_identity",
+            "_edli_day0_held_pinned_mask",
+            "_edli_day0_held_pinned_overlay",
         ):
             if key in payload:
                 day0_payload_out[key] = payload[key]
@@ -36332,6 +37925,12 @@ def _prepare_current_global_probability_family(
             "process_sigma_basis": payload.get(
                 "_edli_day0_process_sigma_basis"
             ),
+            "remaining_path_center_sigma_native": payload.get(
+                "_edli_day0_remaining_path_center_sigma_native"
+            ),
+            "unresolved_path_sigma_native": payload.get(
+                "_edli_day0_unresolved_path_sigma_native"
+            ),
             "source_clock_predictive_sigma_native": payload.get(
                 "_edli_day0_source_clock_predictive_sigma_native"
             ),
@@ -36367,7 +37966,7 @@ def _prepare_current_global_probability_family(
             ),
         }
         source_truth_identity = stable_hash(source_truth)
-        if (
+        if pinned_complete_bundle is None and (
             bundle is None
             or not provisional_day0_observation
             or probability_authority
@@ -36747,7 +38346,13 @@ def _replacement_authority_probability_and_fdr_proof(
             day0_evidence_finality,
         )
 
-        if day0_evidence_finality(payload) == DAY0_PROVISIONAL_CURRENT_SNAPSHOT:
+        if (
+            day0_evidence_finality(payload)
+            == DAY0_PROVISIONAL_CURRENT_SNAPSHOT
+            and _replacement_uses_provisional_day0_conditioning(
+                replacement_bundle
+            )
+        ):
             _assert_provisional_day0_replacement_bundle(
                 replacement_bundle,
                 payload,
@@ -38454,19 +40059,20 @@ def _day0_process_sigma_native(
     family,
     unit: str,
     decision_time: "datetime | None",
+    members_native: object | None = None,
 ) -> float | None:
     """Day0 observation/process width in the settlement native unit.
 
     Day0 remaining-day q is conditioned on a fixed observed running boundary.
     This width belongs to the still-unobserved conditional trajectory:
     instrument noise plus publication-latency uncertainty are applied before the
-    physical max/min with that boundary.  Peak timing and provider disagreement
-    are already represented by the explicit remaining-hour trajectories.  The
-    replacement carrier's ``sigma_pred`` describes the unconditional full-day
-    extreme and remains confidence/source authority; injecting it again as
-    conditional path noise would double-count a different random variable and
-    systematically manufacture anti-modal NO probability.  The helper is shared
-    by point q and q_lcb bootstrap.
+    physical max/min with that boundary.  The explicit remaining-hour provider
+    trajectories already carry their center disagreement, but not their common
+    forecast error.  Decompose the source-clock total predictive variance by
+    subtracting the variance of those current trajectory centers; the unresolved
+    variance remains conditional path error.  This avoids both deleting forecast
+    error and counting provider disagreement twice.  The helper is shared by
+    point q and q_lcb bootstrap.
     """
     try:
         from src.signal.forecast_uncertainty import sigma_instrument
@@ -38494,11 +40100,33 @@ def _day0_process_sigma_native(
             return None
         if not (source_clock_sigma > 0.0 and np.isfinite(source_clock_sigma)):
             return None
+        try:
+            centers = np.asarray(members_native, dtype=np.float64).ravel()
+        except (TypeError, ValueError):
+            return None
+        if not centers.size or not np.isfinite(centers).all():
+            return None
+        path_center_sigma = float(np.std(centers, ddof=0))
+        unresolved_variance = max(
+            source_clock_sigma**2 - path_center_sigma**2,
+            0.0,
+        )
+        sigma = max(sigma, float(np.sqrt(unresolved_variance)))
+        payload["_edli_day0_remaining_path_center_sigma_native"] = (
+            path_center_sigma
+        )
+        payload["_edli_day0_unresolved_path_sigma_native"] = float(
+            np.sqrt(unresolved_variance)
+        )
+        payload["_edli_day0_process_sigma_basis"] = (
+            "source_clock_total_variance_minus_remaining_path_spread_v1"
+        )
+    else:
+        payload["_edli_day0_process_sigma_basis"] = (
+            "conditional_remaining_path_instrument_plus_observation_latency_v2"
+        )
     if not (sigma > 0.0 and np.isfinite(sigma)):
         return None
-    payload["_edli_day0_process_sigma_basis"] = (
-        "conditional_remaining_path_instrument_plus_observation_latency_v2"
-    )
     payload["_edli_day0_process_sigma_native"] = sigma
     return sigma
 
@@ -38509,6 +40137,7 @@ def _day0_extra_member_sigma_native(
     family,
     unit: str,
     decision_time: "datetime | None",
+    members_native: object | None = None,
 ) -> float:
     """Extra member-space sigma for Day0 point q integration.
 
@@ -38524,6 +40153,7 @@ def _day0_extra_member_sigma_native(
         family=family,
         unit=unit,
         decision_time=decision_time,
+        members_native=members_native,
     )
     if sigma is None:
         if "_edli_day0_source_clock_predictive_sigma_native" in payload:
@@ -38761,7 +40391,11 @@ def _make_day0_bootstrap_sampler(
             boundary_survival_probability = 0.0
         mask = _day0_absorbing_mask(payload=payload, family=family)
         sigma = _day0_process_sigma_native(
-            payload=payload, family=family, unit=unit, decision_time=decision_time
+            payload=payload,
+            family=family,
+            unit=unit,
+            decision_time=decision_time,
+            members_native=members,
         )
         if sigma is None:
             raise ValueError("day0 bootstrap sigma invalid")
@@ -39072,6 +40706,7 @@ def _market_analysis_from_event_snapshot(
                 family=family,
                 unit=unit,
                 decision_time=day0_probability_time,
+                members_native=members,
             )
             if day0_extra_member_sigma > 0.0:
                 payload["_edli_day0_extra_member_sigma_native"] = float(day0_extra_member_sigma)
@@ -39220,6 +40855,7 @@ def _market_analysis_from_event_snapshot(
                 family=family,
                 unit=unit,
                 decision_time=day0_probability_time,
+                members_native=members,
             )
             if _process_sigma is not None:
                 _spine_sigma = float(
@@ -39271,11 +40907,23 @@ def _market_analysis_from_event_snapshot(
         # §3). The same canonical accessor the calibration path uses
         # (snapshot.source_cycle_time / issue_time / payload.cycle). Absent ⇒ the bridge
         # fails closed to a typed SPINE_INPUTS_UNAVAILABLE no-trade (never decision_time).
-        _spine_source_cycle = (
-            payload.get("_edli_day0_remaining_source_cycle_time_utc")
-            if _day0_remaining_spine_mode
-            else None
-        ) or snapshot.get("source_cycle_time") or snapshot.get("issue_time") or payload.get("cycle")
+        # The generic Open-Meteo hourly response carries no provider-issued
+        # per-model initialization/run cycle.  Day0's local capture clock is
+        # provenance only and must never become ForecastCase.source_cycle.  A
+        # future provider-cycle carrier may opt in explicitly; absent that
+        # carrier _served_predictive_inputs() fails closed with the typed
+        # SOURCE_CYCLE_NOT_STASHED reason.  Do not mix a snapshot cycle from a
+        # different probability surface into the remaining-day envelope.
+        if _day0_remaining_spine_mode:
+            _spine_source_cycle = payload.get(
+                "_edli_day0_remaining_provider_source_cycle_time_utc"
+            )
+        else:
+            _spine_source_cycle = (
+                snapshot.get("source_cycle_time")
+                or snapshot.get("issue_time")
+                or payload.get("cycle")
+            )
         if _spine_source_cycle:
             payload["_edli_spine_source_cycle_time_utc"] = str(_spine_source_cycle)
     except Exception as _spine_stash_exc:  # noqa: BLE001 — Stage-0 spine is observability-only; never alter a decision
@@ -40924,13 +42572,11 @@ def _remaining_day_extremes_c_with_current_state_evidence(
     """Return extrema after causal, decaying current-state conditioning."""
 
     from src.data.day0_hourly_vectors import (
-        day0_hourly_vector_target_values_utc,
+        align_day0_hourly_vectors_on_common_causal_grid,
     )
     from src.signal.day0_window import (
         condition_day0_hourly_members_on_current_state,
-        remaining_member_extrema_for_day0,
     )
-    from src.types.metric_identity import MetricIdentity
 
     if metric not in {"high", "low"}:
         raise ValueError(f"unsupported metric: {metric}")
@@ -40938,32 +42584,20 @@ def _remaining_day_extremes_c_with_current_state_evidence(
     if observed_utc > decision_time.astimezone(UTC):
         return [], {}
     target = date.fromisoformat(str(target_date)[:10])
-    times: list[str] | None = None
-    member_rows: list[list[float]] = []
-    models: list[str] = []
-    timezone_name: str | None = None
-    for vector in vectors:
-        try:
-            tz = ZoneInfo(str(vector.timezone_name))
-        except Exception:
-            return [], {}
-        values = day0_hourly_vector_target_values_utc(
-            vector,
-            target=target,
-            tz=tz,
-        )
-        if values is None:
-            return [], {}
-        row_times = [instant.isoformat() for instant, _temp in values]
-        if times is None:
-            times = row_times
-            timezone_name = str(vector.timezone_name)
-        elif row_times != times or str(vector.timezone_name) != timezone_name:
-            return [], {}
-        member_rows.append([float(temp) for _instant, temp in values])
-        models.append(str(vector.model))
-    if times is None or timezone_name is None or not member_rows:
+    observed_utc = observation_time.astimezone(UTC)
+    aligned = align_day0_hourly_vectors_on_common_causal_grid(
+        vectors,
+        target_date=target_date,
+        window_start=observed_utc,
+    )
+    if aligned is None:
         return [], {}
+    causal_grid, aligned_rows = aligned
+    timezone_name = str(vectors[0].timezone_name)
+    timezone_obj = ZoneInfo(timezone_name)
+    models = [str(vector.model) for vector in vectors]
+    times = [instant.isoformat() for instant in causal_grid]
+    member_rows = [list(row) for row in aligned_rows]
     conditioned = condition_day0_hourly_members_on_current_state(
         np.asarray(member_rows, dtype=float),
         times,
@@ -40974,17 +42608,32 @@ def _remaining_day_extremes_c_with_current_state_evidence(
     if conditioned is None:
         return [], {}
     conditioned_members, innovation_values = conditioned
-    extrema, _hours_remaining = remaining_member_extrema_for_day0(
-        conditioned_members,
-        times,
-        timezone_name,
-        target,
-        now=observed_utc,
-        temperature_metric=MetricIdentity.from_raw(metric),
-    )
-    if extrema is None:
+    remaining_indices = [
+        index
+        for index, instant in enumerate(causal_grid)
+        if instant > observed_utc
+    ]
+    if not remaining_indices:
+        day_end = datetime.combine(
+            target + timedelta(days=1),
+            time.min,
+            tzinfo=timezone_obj,
+        ).astimezone(UTC)
+        if (
+            causal_grid[0] != causal_grid[-1]
+            or not timedelta(0) < day_end - observed_utc <= timedelta(hours=1)
+            or not timedelta(0) <= observed_utc - causal_grid[0] <= timedelta(hours=1)
+        ):
+            return [], {}
+        remaining_indices = [0]
+    remaining = conditioned_members[:, remaining_indices]
+    if remaining.size == 0:
         return [], {}
-    values = extrema.mins if metric == "low" else extrema.maxes
+    values = (
+        remaining.min(axis=1)
+        if metric == "low"
+        else remaining.max(axis=1)
+    )
     return (
         [float(value) for value in values.tolist()],
         {
@@ -41205,7 +42854,10 @@ def _day0_remaining_day_members(
             except (TypeError, ValueError):
                 continue
         if captured_times:
-            payload["_edli_day0_remaining_source_cycle_time_utc"] = max(captured_times)
+            # Local request/capture clock only; it is not a provider forecast
+            # cycle and is intentionally excluded from qkernel source-cycle
+            # authority.
+            payload["_edli_day0_remaining_local_capture_clock_utc"] = max(captured_times)
             payload["_edli_day0_remaining_capture_times_utc"] = captured_times
         if expected_models:
             payload["_edli_day0_remaining_expected_models"] = list(expected_models)

@@ -1,12 +1,12 @@
 # Created: 2026-06-22
-# Last audited: 2026-06-22
+# Last reused/audited: 2026-08-23
 # Authority basis: docs/evidence/live_order_pathology/2026-06-22_governor_scope_lattice_decision.md
 #                  (frontier consult REQ-20260621-211850, Pro Extended, HIGH confidence)
 """Scope-aware governor gating: a SCOPED single-market unknown side effect triggers
 per-market reduce_only (existing line-186 path) but must NOT trip GLOBAL reduce_only.
 
 GLOBAL reduce_only is reserved for SYSTEMIC signals:
-  - reconcile findings (unchanged),
+  - unscopeable, nonlocal, or multi-market reconcile findings,
   - unscopeable unknowns (fail closed: cannot bound the blast radius -> global),
   - >= SYSTEMIC_MARKET_COUNT_LIMIT distinct independent markets each carrying an unknown.
 
@@ -27,10 +27,10 @@ from src.contracts import Direction, ExecutionIntent, DecisionSourceContext
 from src.contracts.slippage_bps import SlippageBps
 from src.control.heartbeat_supervisor import HeartbeatHealth
 from src.risk_allocator.governor import (
-    AllocationDecision,
     CapPolicy,
     GovernorState,
     RiskAllocator,
+    classify_reconcile_finding_scope,
     classify_unknown_side_effect_scope,
     count_unknown_side_effects,
 )
@@ -178,6 +178,21 @@ def test_reconcile_finding_still_trips_global():
     decision = allocator.can_allocate(_intent(market="m1", size=10), state)
     assert decision.allowed is False
     assert decision.reason == "reduce_only_mode_active"
+
+
+def test_single_scoped_reconcile_finding_isolates_only_its_market():
+    allocator = RiskAllocator(CapPolicy(max_per_market_micro=500_000_000))
+    state = _state(
+        reconcile_finding_count=1,
+        reconcile_finding_markets=("m1",),
+        systemic_reconcile_finding_count=0,
+    )
+
+    assert allocator.reduce_only_mode_active(state) is False
+    blocked = allocator.can_allocate(_intent(market="m1", size=10), state)
+    assert blocked.allowed is False
+    assert blocked.reason == "reconcile_finding_same_market"
+    assert allocator.can_allocate(_intent(market="m2", size=10), state).allowed
 
 
 # ---------------------------------------------------------------------------
@@ -341,6 +356,159 @@ def test_classify_no_unknowns(conn):
     assert scope.is_systemic is False
 
 
+def _insert_reconcile_finding(
+    conn: sqlite3.Connection,
+    *,
+    finding_id: str,
+    kind: str,
+    subject_id: str,
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO exchange_reconcile_findings
+          (finding_id, kind, subject_id, context, evidence_json, recorded_at)
+        VALUES (?, ?, ?, 'ws_gap', '{}', ?)
+        """,
+        (finding_id, kind, subject_id, NOW.isoformat()),
+    )
+    conn.commit()
+
+
+def test_classify_local_orphan_reconcile_finding_by_command_market(conn):
+    _insert_review_required(
+        conn,
+        command_id="c-orphan",
+        market_id="m-orphan",
+        venue_order_id="venue-orphan",
+    )
+    _insert_reconcile_finding(
+        conn,
+        finding_id="f-orphan",
+        kind="local_orphan_order",
+        subject_id="venue-orphan",
+    )
+
+    scope = classify_reconcile_finding_scope(conn, CapPolicy())
+
+    assert scope.total_count == 1
+    assert scope.scoped_markets == ("m-orphan",)
+    assert scope.unscopeable_count == 0
+    assert scope.systemic_count == 0
+
+
+def test_classify_position_drift_by_exact_token_market(conn):
+    _insert_review_required(
+        conn,
+        command_id="c-drift",
+        market_id="m-drift",
+        token_id="token-drift",
+    )
+    _insert_reconcile_finding(
+        conn,
+        finding_id="f-drift",
+        kind="position_drift",
+        subject_id="token-drift",
+    )
+
+    scope = classify_reconcile_finding_scope(conn, CapPolicy())
+
+    assert scope.total_count == 1
+    assert scope.scoped_markets == ("m-drift",)
+    assert scope.unscopeable_count == 0
+    assert scope.systemic_count == 0
+
+
+def test_classify_recorded_trade_finding_by_exact_command_market(conn):
+    _insert_review_required(
+        conn,
+        command_id="c-trade",
+        market_id="m-trade",
+        venue_order_id="venue-trade",
+    )
+    conn.execute(
+        """
+        INSERT INTO venue_trade_facts
+          (trade_id, venue_order_id, command_id, state, filled_size, fill_price,
+           source, observed_at, local_sequence, raw_payload_hash)
+        VALUES (?, ?, ?, 'CONFIRMED', '5', '0.42', 'REST', ?, 1, ?)
+        """,
+        ("trade-1", "venue-trade", "c-trade", NOW.isoformat(), "a" * 64),
+    )
+    _insert_reconcile_finding(
+        conn,
+        finding_id="f-trade",
+        kind="unrecorded_trade",
+        subject_id="trade-1",
+    )
+
+    scope = classify_reconcile_finding_scope(conn, CapPolicy())
+
+    assert scope.total_count == 1
+    assert scope.scoped_markets == ("m-trade",)
+    assert scope.unscopeable_count == 0
+    assert scope.systemic_count == 0
+
+
+def test_ambiguous_position_drift_market_join_remains_systemic(conn):
+    _insert_review_required(
+        conn,
+        command_id="c-drift-a",
+        market_id="m-a",
+        token_id="token-shared",
+    )
+    _insert_review_required(
+        conn,
+        command_id="c-drift-b",
+        market_id="m-b",
+        token_id="token-shared",
+    )
+    _insert_reconcile_finding(
+        conn,
+        finding_id="f-drift-ambiguous",
+        kind="position_drift",
+        subject_id="token-shared",
+    )
+
+    scope = classify_reconcile_finding_scope(conn, CapPolicy())
+
+    assert scope.total_count == 1
+    assert scope.scoped_markets == ()
+    assert scope.unscopeable_count == 1
+    assert scope.systemic_count == 1
+
+
+def test_unrecorded_trade_without_canonical_fact_remains_systemic(conn):
+    _insert_reconcile_finding(
+        conn,
+        finding_id="f-trade-unlinked",
+        kind="unrecorded_trade",
+        subject_id="trade-unlinked",
+    )
+
+    scope = classify_reconcile_finding_scope(conn, CapPolicy())
+
+    assert scope.total_count == 1
+    assert scope.scoped_markets == ()
+    assert scope.unscopeable_count == 1
+    assert scope.systemic_count == 1
+
+
+def test_nonlocal_reconcile_finding_remains_systemic(conn):
+    _insert_reconcile_finding(
+        conn,
+        finding_id="f-collateral",
+        kind="collateral_identity_mismatch",
+        subject_id="wallet",
+    )
+
+    scope = classify_reconcile_finding_scope(conn, CapPolicy())
+
+    assert scope.total_count == 1
+    assert scope.scoped_markets == ()
+    assert scope.unscopeable_count == 1
+    assert scope.systemic_count == 1
+
+
 # ---------------------------------------------------------------------------
 # Live-wiring end-to-end: refresh_global_allocator must publish a SCOPED state
 # (not global) for the real production instance (single market 2615258).
@@ -348,9 +516,7 @@ def test_classify_no_unknowns(conn):
 def test_refresh_global_allocator_scoped_market_does_not_freeze_book(conn, monkeypatch):
     from src.risk_allocator.governor import (
         clear_global_allocator,
-        configure_global_allocator,
         refresh_global_allocator,
-        summary as governor_summary,
     )
 
     # The exact live instance: one scoped REVIEW_REQUIRED command on market 2615258
@@ -384,6 +550,50 @@ def test_refresh_global_allocator_scoped_market_does_not_freeze_book(conn, monke
 
         admitted = assert_global_allocation_allows(_intent(market="999", size=10))
         assert admitted.allowed is True
+    finally:
+        clear_global_allocator()
+
+
+def test_refresh_global_allocator_scoped_orphan_does_not_freeze_book(conn):
+    from src.risk_allocator.governor import (
+        AllocationDenied,
+        assert_global_allocation_allows,
+        clear_global_allocator,
+        refresh_global_allocator,
+    )
+
+    _insert_review_required(
+        conn,
+        command_id="c-orphan",
+        market_id="m-orphan",
+        venue_order_id="venue-orphan",
+    )
+    _insert_reconcile_finding(
+        conn,
+        finding_id="f-orphan",
+        kind="local_orphan_order",
+        subject_id="venue-orphan",
+    )
+    snap = refresh_global_allocator(
+        conn,
+        ledger={"current_drawdown_pct": 0.0, "risk_level": "GREEN"},
+        heartbeat={"health": "HEALTHY"},
+        ws_status={"m5_reconcile_required": False},
+        cap_policy=CapPolicy(),
+    )
+    try:
+        assert snap["state"]["reconcile_finding_markets"] == ["m-orphan"]
+        assert snap["state"]["systemic_reconcile_finding_count"] == 0
+        assert snap["reduce_only"] is False
+        with pytest.raises(AllocationDenied) as blocked:
+            assert_global_allocation_allows(_intent(market="m-orphan", size=10))
+        assert blocked.value.decision.reason in {
+            "unknown_side_effect_same_market",
+            "reconcile_finding_same_market",
+        }
+        assert assert_global_allocation_allows(
+            _intent(market="unrelated", size=10)
+        ).allowed
     finally:
         clear_global_allocator()
 

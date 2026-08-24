@@ -34,6 +34,7 @@ from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 
 BIN = "Will the highest temperature in Karachi be 37°C on June 12?"
@@ -1051,6 +1052,317 @@ def test_day0_hwm_budget_starts_at_actual_prepare_handoff(monkeypatch):
 
     assert observed_connection_deadlines == [pytest.approx(12.5)]
     assert observed["deadline"] == pytest.approx(12.5)
+
+
+def test_day0_pinned_complete_route_skips_raw_hwm_handoff(monkeypatch):
+    import src.data.replacement_forecast_bundle_reader as bundle_reader
+    import src.engine.event_reactor_adapter as era
+    import src.engine.monitor_refresh as mr
+    import src.state.db as db
+
+    world = _day0_event_connection()
+    forecasts = sqlite3.connect(":memory:")
+    pinned_bundle = SimpleNamespace(posterior_id="complete-00")
+    observed = {"forecast_connections": 0, "hwm_connections": 0}
+
+    class PinnedRoutePrepared(RuntimeError):
+        pass
+
+    def forecasts_connection(*, deadline_monotonic=None):
+        observed["forecast_connections"] += 1
+        if deadline_monotonic is not None:
+            observed["hwm_connections"] += 1
+        return forecasts
+
+    def prepare(*_args, **kwargs):
+        assert kwargs["pinned_complete_bundle"] is pinned_bundle
+        assert kwargs["raw_input_hwm_conn"] is None
+        assert kwargs["raw_input_hwm_read_max_seconds"] is None
+        assert kwargs["before_raw_input_hwm_read"] is None
+        raise PinnedRoutePrepared
+
+    monkeypatch.setattr(mr, "_canonical_condition_id", lambda _position: "condition-1")
+    monkeypatch.setattr(mr, "_target_day_has_canonical_observation", lambda *_a, **_k: False)
+    monkeypatch.setattr(db, "get_world_connection_read_only", lambda: world)
+    monkeypatch.setattr(db, "get_forecasts_connection_read_only", forecasts_connection)
+    monkeypatch.setattr(
+        bundle_reader,
+        "read_prior_complete_replacement_forecast_bundle",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            status="READY", ok=True, bundle=pinned_bundle
+        ),
+    )
+    monkeypatch.setattr(era, "_prepare_current_global_probability_family", prepare)
+
+    with pytest.raises(PinnedRoutePrepared):
+        mr._build_current_global_day0_family_snapshot(
+            _pos(),
+            trade_conn=sqlite3.connect(":memory:"),
+            decision_time=datetime(2026, 6, 12, 12, tzinfo=timezone.utc),
+            cached_snapshots=(),
+            deadline_monotonic=time.monotonic() + 2.5,
+            hwm_deadline_monotonic=time.monotonic() + 2.5,
+        )
+
+    assert observed == {"forecast_connections": 1, "hwm_connections": 0}
+
+
+@pytest.mark.parametrize("probability_use", ["HELD_MONITOR", "REDUCE_ONLY_EXIT"])
+def test_day0_pinned_current_local_day_bypasses_hwm_with_identity_parity(
+    monkeypatch,
+    probability_use,
+):
+    """A pinned held carrier is complete on the current local day too.
+
+    The generic current replacement reader requires an HWM deadline.  A pinned
+    carrier must never reach that reader or invoke its optional HWM callback;
+    both held uses must retain the same immutable posterior identity.
+    """
+    import src.data.replacement_forecast_bundle_reader as bundle_reader
+    import src.data.replacement_forecast_current_target_plan as target_plan
+    import src.data.replacement_forecast_readiness as readiness_reader
+    import src.engine.event_reactor_adapter as era
+    import src.engine.qkernel_spine_bridge as qkernel
+    import src.execution.day0_hard_fact_exit as day0_hard_fact_exit
+    import src.solve.solver as solver
+
+    candidates = (
+        SimpleNamespace(
+            condition_id="condition-27",
+            yes_token_id="yes-27",
+            no_token_id="no-27",
+            bin=SimpleNamespace(low=27.0, high=27.0, unit="C", label="27°C"),
+        ),
+        SimpleNamespace(
+            condition_id="condition-28",
+            yes_token_id="yes-28",
+            no_token_id="no-28",
+            bin=SimpleNamespace(low=28.0, high=28.0, unit="C", label="28°C"),
+        ),
+    )
+    family = SimpleNamespace(
+        city="Testopolis",
+        target_date="2026-06-09",
+        metric="high",
+        family_id="Testopolis|2026-06-09|high",
+        binding_hash="family-binding",
+        candidates=candidates,
+    )
+    observation_time = "2026-06-09T10:00:00+00:00"
+    fact = {
+        "observation_source": "aviationweather_metar",
+        "observation_time": observation_time,
+        "observation_available_at": observation_time,
+        "observed_extreme_native": 27.0,
+        "unit": "C",
+        "source": "aviationweather_metar",
+        "station_id": "TEST",
+    }
+    event = SimpleNamespace(
+        event_id="event-pinned-current-day",
+        event_type="DAY0_EXTREME_UPDATED",
+        causal_snapshot_id="snapshot-pinned-current-day",
+        payload_json=json.dumps(
+            {
+                "city": "Testopolis",
+                "target_date": "2026-06-09",
+                "metric": "high",
+                "unit": "C",
+                "settlement_source": "aviationweather_metar",
+                "observation_time": observation_time,
+                "rounded_value": 27,
+                "source_authorized_status": "AUTHORIZED",
+                "live_authority_status": "live",
+            }
+        ),
+    )
+    pinned_bundle = SimpleNamespace(
+        posterior_id=123,
+        posterior_identity_hash="pinned-posterior-identity",
+        dependency_hash="pinned-dependency",
+        posterior_config_hash="pinned-config",
+        source_cycle_time="2026-06-09T00:00:00+00:00",
+        source_available_at="2026-06-09T06:00:00+00:00",
+        provenance_json={},
+    )
+    observed = {"hwm_callback": 0, "generic_reader": 0}
+
+    class _Bound:
+        def evaluate(self, _request):
+            return SimpleNamespace(
+                status="CANDIDATE_FAMILY_READY",
+                candidate_family=family,
+            )
+
+    class _Witness:
+        def __init__(self, **kwargs):
+            self.__dict__.update(kwargs)
+
+    def fail_generic_reader(*_args, **_kwargs):
+        observed["generic_reader"] += 1
+        raise AssertionError("pinned route reached generic replacement reader")
+
+    def fail_hwm_callback():
+        observed["hwm_callback"] += 1
+        raise AssertionError("pinned route invoked HWM callback")
+
+    monkeypatch.setattr(era, "EventBoundDecisionEngine", _Bound)
+    monkeypatch.setattr(era, "_event_family_market_topology_rows", lambda *_: [0, 1])
+    monkeypatch.setattr(
+        era,
+        "_topology_candidate_from_market_event",
+        lambda row, *_: candidates[int(row)],
+    )
+    monkeypatch.setattr(
+        bundle_reader,
+        "market_bin_topology_hash_from_rows",
+        lambda *_args, **_kwargs: "topology-hash",
+    )
+    monkeypatch.setattr(
+        era,
+        "runtime_cities_by_name",
+        lambda: {"Testopolis": SimpleNamespace(timezone="UTC", settlement_unit="C")},
+    )
+    monkeypatch.setattr(day0_hard_fact_exit, "_final_daily_observation_extreme", lambda **_: None)
+    monkeypatch.setattr(target_plan, "_latest_authorized_day0_fact", lambda *_a, **_k: fact)
+    monkeypatch.setattr(
+        era,
+        "_global_day0_execution_payload",
+        lambda *_args, **_kwargs: {
+            "_edli_global_day0_binding": {"observation_time": observation_time},
+            "settlement_source": "aviationweather_metar",
+            "observation_time": observation_time,
+            "observed_extreme_native": 27.0,
+            "settlement_unit": "C",
+        },
+    )
+    monkeypatch.setattr(
+        era,
+        "_held_pinned_day0_probability_components",
+        lambda *_args, **_kwargs: (
+            np.asarray([[0.2, 0.8], [0.3, 0.7]], dtype=float),
+            np.asarray([0.2, 0.8], dtype=float),
+            "pinned-basis",
+        ),
+    )
+    monkeypatch.setattr(era, "_day0_global_candidate_payoff_q_lcb_caps", lambda **_: ())
+    monkeypatch.setattr(era, "_day0_payoff_truth_rows", lambda **_: ())
+    monkeypatch.setattr(era, "_amber_inflated_predictive_sigma_c", lambda *_a, **_k: 1.0)
+    monkeypatch.setattr(qkernel, "build_forecast_case", lambda *_a, **_k: object())
+    monkeypatch.setattr(
+        qkernel,
+        "build_outcome_space",
+        lambda *_a, **_k: SimpleNamespace(
+            resolution=SimpleNamespace(measurement_unit="C"),
+            bins=tuple(
+                SimpleNamespace(
+                    bin_id=f"bin-{value}",
+                    condition_id=f"condition-{value}",
+                    yes_token_id=f"yes-{value}",
+                    no_token_id=f"no-{value}",
+                )
+                for value in (27, 28)
+            ),
+            topology_hash="topology-hash",
+        ),
+    )
+    monkeypatch.setattr(qkernel, "_event_resolution_identity", lambda *_: "resolution")
+    monkeypatch.setattr(solver, "JointOutcomeProbabilityWitness", _Witness)
+    monkeypatch.setattr(bundle_reader, "read_replacement_forecast_bundle", fail_generic_reader)
+    monkeypatch.setattr(
+        readiness_reader,
+        "latest_replacement_readiness",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("pinned route read current replacement readiness")
+        ),
+    )
+
+    observation_conn = sqlite3.connect(":memory:")
+    observation_conn.execute(
+        "CREATE TABLE observation_instants ("
+        "city TEXT, target_date TEXT, running_max REAL, utc_timestamp TEXT, "
+        "local_timestamp TEXT, source TEXT, causality_status TEXT, authority TEXT, "
+        "source_role TEXT, training_allowed INTEGER)"
+    )
+    payload_out = {}
+    prepared = era._prepare_current_global_probability_family(
+        event,
+        forecast_conn=observation_conn,
+        topology_conn=observation_conn,
+        observation_conn=observation_conn,
+        decision_time=datetime(2026, 6, 9, 12, tzinfo=timezone.utc),
+        max_age=timedelta(hours=2),
+        day0_payload_out=payload_out,
+        probability_use=getattr(era._CurrentProbabilityUse, probability_use),
+        raw_input_hwm_conn=None,
+        raw_input_hwm_deadline_monotonic=None,
+        raw_input_hwm_read_max_seconds=None,
+        before_raw_input_hwm_read=fail_hwm_callback,
+        pinned_complete_bundle=pinned_bundle,
+    )
+
+    assert observed == {"hwm_callback": 0, "generic_reader": 0}
+    assert prepared.posterior_id == pinned_bundle.posterior_id
+    assert prepared.probability_witness.posterior_identity_hash == (
+        pinned_bundle.posterior_identity_hash
+    )
+    assert payload_out["_edli_day0_held_pinned_posterior_identity"] == (
+        pinned_bundle.posterior_identity_hash
+    )
+
+
+def test_day0_pinned_carrier_rejects_entry_authority():
+    import src.engine.event_reactor_adapter as era
+
+    with pytest.raises(ValueError, match="GLOBAL_HELD_PINNED_RECOMPUTE_ENTRY_FORBIDDEN"):
+        era._prepare_current_global_probability_family(
+            SimpleNamespace(event_type="DAY0_EXTREME_UPDATED"),
+            forecast_conn=sqlite3.connect(":memory:"),
+            topology_conn=sqlite3.connect(":memory:"),
+            observation_conn=sqlite3.connect(":memory:"),
+            decision_time=datetime(2026, 6, 9, 12, tzinfo=timezone.utc),
+            max_age=timedelta(hours=2),
+            pinned_complete_bundle=SimpleNamespace(
+                posterior_identity_hash="pinned-posterior-identity",
+                dependency_hash="pinned-dependency",
+                posterior_config_hash="pinned-config",
+            ),
+        )
+
+
+def test_reduce_only_actuation_rehydrates_selected_pinned_identity(monkeypatch):
+    import src.data.replacement_forecast_bundle_reader as bundle_reader
+    import src.engine.event_reactor_adapter as era
+
+    event = SimpleNamespace(
+        event_type="DAY0_EXTREME_UPDATED",
+        payload_json=json.dumps(
+            {
+                "city": "Karachi",
+                "target_date": "2026-06-12",
+                "metric": "high",
+            }
+        ),
+    )
+    selected = SimpleNamespace(posterior_identity_hash="pinned-00-identity")
+    bundle = SimpleNamespace(posterior_identity_hash="pinned-00-identity")
+    monkeypatch.setattr(
+        bundle_reader,
+        "read_prior_complete_replacement_forecast_bundle",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            status="READY", ok=True, bundle=bundle
+        ),
+    )
+
+    rehydrated = era._rehydrate_held_pinned_bundle_for_actuation(
+        event,
+        selected=selected,
+        probability_use=era._CurrentProbabilityUse.REDUCE_ONLY_EXIT,
+        forecast_conn=sqlite3.connect(":memory:"),
+        decision_time=datetime(2026, 6, 12, 12, tzinfo=timezone.utc),
+    )
+
+    assert rehydrated is bundle
 
 
 def test_day0_prepare_file_reads_do_not_wait_on_shared_snapshot_fence(

@@ -1,10 +1,12 @@
 # Created: 2026-07-20
-# Last reused/audited: 2026-08-10
+# Last reused/audited: 2026-08-23
 # Authority basis: operator-directed DB hot-path, fault-isolation, and committed ENS wake liveness.
 
 from __future__ import annotations
 
 import sqlite3
+import threading
+from pathlib import Path
 
 import pytest
 
@@ -51,6 +53,39 @@ def test_forecast_live_boot_schema_fast_check_rejects_missing_required_column() 
         conn.close()
 
 
+def test_forecast_live_boot_wake_cannot_block_scheduler_health(monkeypatch) -> None:
+    entered = threading.Event()
+    release = threading.Event()
+
+    def blocked_boot_wake() -> None:
+        entered.set()
+        release.wait(timeout=1.0)
+
+    monkeypatch.setattr(
+        daemon,
+        "_publish_replacement_forecast_boot_wake",
+        blocked_boot_wake,
+    )
+
+    thread = daemon._start_replacement_forecast_boot_wake()
+
+    assert entered.wait(timeout=0.2)
+    assert thread.daemon is True
+    assert thread.is_alive()
+    release.set()
+    thread.join(timeout=0.2)
+    assert not thread.is_alive()
+
+
+def test_forecast_live_scheduler_ready_precedes_optional_boot_wake() -> None:
+    source = Path(daemon.__file__).read_text(encoding="utf-8")
+    main_source = source[source.index("def main() -> None:") :]
+
+    assert main_source.index(
+        '_write_forecast_live_heartbeat(status="scheduler_ready")'
+    ) < main_source.index("_start_replacement_forecast_boot_wake()")
+
+
 def test_replacement_materializer_serializes_forecast_db_writer(monkeypatch) -> None:
     jobs: list[tuple[object, str, dict[str, object]]] = []
 
@@ -78,6 +113,100 @@ def test_replacement_materializer_serializes_forecast_db_writer(monkeypatch) -> 
     )
     assert daemon.REPLACEMENT_FORECAST_MATERIALIZE_MAX_INSTANCES == 1
     assert materialize[2]["max_instances"] == 1
+
+
+@pytest.mark.parametrize("stage", ("request", "seed", "inflight"))
+def test_replacement_recovery_discovery_yields_to_active_hot_queue(
+    monkeypatch, tmp_path: Path, stage: str
+) -> None:
+    request_dir = tmp_path / "requests"
+    seed_dir = tmp_path / "seeds"
+    inflight_dir = tmp_path / "inflight"
+    request_dir.mkdir()
+    seed_dir.mkdir()
+    inflight_dir.mkdir()
+    active_dir = {
+        "request": request_dir,
+        "seed": seed_dir,
+        "inflight": inflight_dir / "batch",
+    }[stage]
+    active_dir.mkdir(exist_ok=True)
+    (active_dir / "family.json").write_text("{}", encoding="utf-8")
+    cfg = {
+        "request_dir": request_dir,
+        "seed_dir": seed_dir,
+        "inflight_dir": inflight_dir,
+    }
+    monkeypatch.setattr(
+        production,
+        "_replacement_forecast_live_materialization_queue_config",
+        lambda: cfg,
+    )
+    monkeypatch.setattr(
+        daemon,
+        "_replacement_forecast_discovery_revision",
+        lambda _cfg: pytest.fail("active queue must preempt the broad DB scan"),
+    )
+
+    result = daemon._replacement_forecast_discovery_job.__wrapped__()
+
+    assert result == {
+        "status": "deferred_active_materialization_queue",
+        "pending_stages": (stage,),
+    }
+
+
+def test_replacement_recovery_discovery_resumes_after_hot_queue_drains(
+    monkeypatch, tmp_path: Path
+) -> None:
+    request_dir = tmp_path / "requests"
+    seed_dir = tmp_path / "seeds"
+    inflight_dir = tmp_path / "inflight"
+    request_dir.mkdir()
+    seed_dir.mkdir()
+    inflight_dir.mkdir()
+    cfg = {
+        "forecast_db": tmp_path / "forecasts.db",
+        "raw_manifest_dir": tmp_path / "raw",
+        "request_dir": request_dir,
+        "seed_dir": seed_dir,
+        "inflight_dir": inflight_dir,
+        "seed_discovery_limit": 10,
+    }
+    revision = ("current",)
+    daemon._replacement_forecast_last_discovery_revision = None
+    monkeypatch.setattr(
+        production,
+        "_replacement_forecast_live_materialization_queue_config",
+        lambda: cfg,
+    )
+    monkeypatch.setattr(
+        daemon,
+        "_replacement_forecast_discovery_revision",
+        lambda _cfg: revision,
+    )
+
+    class _Report:
+        status = "NO_ELIGIBLE_TARGETS"
+        reason_codes: tuple[str, ...] = ()
+        discovered_count = 0
+
+        @staticmethod
+        def as_dict() -> dict[str, object]:
+            return {"status": "NO_ELIGIBLE_TARGETS"}
+
+    calls: list[int] = []
+    monkeypatch.setattr(
+        "src.data.replacement_forecast_seed_discovery."
+        "discover_replacement_forecast_materialization_seeds",
+        lambda **kwargs: calls.append(int(kwargs["limit"])) or _Report(),
+    )
+    try:
+        assert daemon._replacement_forecast_discovery_job.__wrapped__() is None
+        assert calls == [10]
+        assert daemon._replacement_forecast_last_discovery_revision == revision
+    finally:
+        daemon._replacement_forecast_last_discovery_revision = None
 
 
 def test_forecast_live_boot_schema_fast_check_rejects_missing_live_index() -> None:
@@ -155,8 +284,8 @@ def test_committed_ens_run_wakes_only_its_exact_eligible_scopes(monkeypatch) -> 
         lambda: {"forecast_db": "forecast.db"},
     )
 
-    def _enqueue(cfg, *, scopes, limit, **_kwargs):
-        captured.update(cfg=cfg, scopes=scopes, limit=limit)
+    def _enqueue(cfg, *, scopes, limit, **kwargs):
+        captured.update(cfg=cfg, scopes=scopes, limit=limit, **kwargs)
         return {"status": "CYCLE_ADVANCE_TRIGGER", "seeds_enqueued": 2}
 
     monkeypatch.setattr(production, "_enqueue_cycle_advance_reseeds_if_needed", _enqueue)
@@ -177,6 +306,7 @@ def test_committed_ens_run_wakes_only_its_exact_eligible_scopes(monkeypatch) -> 
         ("Paris", "2026-08-11", "high"),
     )
     assert captured["limit"] == 2
+    assert captured["causal_baseline_source_run_id"] == eligible[3]
 
 
 def test_opendata_commit_precedes_cycle_advance_wake(monkeypatch) -> None:
@@ -285,6 +415,7 @@ def test_current_journaled_run_carries_rows_needed_to_replay_wake(monkeypatch) -
         "CYCLE_ADVANCE_FORECAST_DB_MISSING",
         "CYCLE_ADVANCE_PLAN_BLOCKED",
         "CYCLE_ADVANCE_NO_MATERIALIZABLE_CYCLE",
+        "CYCLE_ADVANCE_CAUSAL_BASELINE_INCOMPLETE",
     ),
 )
 def test_failed_opendata_wake_remains_retryable(monkeypatch, status: str) -> None:

@@ -67,6 +67,13 @@ GATE_SITES: tuple[GateSite, ...] = (
         lines_before=32,
         lines_after=0,
     ),
+    GateSite(
+        name="global_batch_preemption_grace",
+        relpath="src/engine/event_reactor_adapter.py",
+        anchor="_global_batch_grace_supersession_count = [0]",
+        lines_before=14,
+        lines_after=0,
+    ),
 )
 
 
@@ -126,6 +133,10 @@ def test_posterior_identity_check_declares_scope_drain_reset():
 
 def test_request_governor_circuit_declares_scope_drain_reset():
     _assert_declares_scope_drain_reset(GATE_SITES[3])
+
+
+def test_global_batch_preemption_grace_declares_scope_drain_reset():
+    _assert_declares_scope_drain_reset(GATE_SITES[4])
 
 
 def test_unknown_gate_site_fails_loudly_not_silently():

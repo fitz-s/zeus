@@ -1,5 +1,5 @@
 # Created: 2026-05-04
-# Last reused/audited: 2026-08-16
+# Last reused/audited: 2026-08-21
 # Authority basis: IOC forward-port (Fix C: allowed_discovery_modes_inverse) — 2026-05-23
 """Heavy runtime helpers extracted from cycle_runner.
 
@@ -3448,6 +3448,25 @@ def _emit_monitor_refreshed_canonical_if_available(
                 decision_unavailable_reason=decision_unavailable_reason,
                 decision_unavailable_trigger=decision_unavailable_trigger,
             )
+            # The projection has no dedicated column for this monitor-turn
+            # authority axis. Keep it on the canonical MONITOR_REFRESHED cut
+            # so reload/recovery cannot reinterpret a BBA-only in-band price
+            # as a full-depth executable book.
+            for event in events:
+                payload = json.loads(str(event.get("payload_json") or "{}"))
+                if isinstance(payload, dict):
+                    payload["held_sell_full_depth_action_authority"] = bool(
+                        getattr(
+                            pos,
+                            "_zeus_held_monitor_full_depth_action_authority",
+                            False,
+                        )
+                    )
+                    event["payload_json"] = json.dumps(
+                        payload,
+                        default=str,
+                        sort_keys=True,
+                    )
             append_many_and_project(conn, events, projection)
             conn.commit()
         except Exception:
@@ -3614,28 +3633,56 @@ def _record_monitor_data_degraded_attempt(
     deps,
     summary: dict,
     stage: str,
+    preserve_current_attempt_axes: bool = False,
 ) -> bool:
     """Persist one attempted redecision without inventing action authority.
 
     A bounded q/book/metadata read that returns unavailable is still a real
     monitor attempt. Leaving the prior MONITOR_REFRESHED timestamp untouched
     makes the fair scheduler select the same failed head forever and blinds the
-    rest of the held book. Revoke both freshness witnesses before persisting so
-    the event cannot authorize BUY, SELL, or an economic HOLD; family-scoped
-    DATA_DEGRADED remains responsible for repairing the missing input.
+    rest of the held book. By default, revoke both freshness witnesses because
+    a pre-refresh failure proved neither axis. A caller that completed the
+    current refresh before exhausting its decision deadline may preserve each
+    independently proven q/book axis. The event still has no action authority
+    and its edge is always cleared; family-scoped DATA_DEGRADED repairs the
+    missing decision input.
     """
 
-    _revoke_monitor_action_authority(pos)
+    preserved_validations: list[str] = []
+    if preserve_current_attempt_axes:
+        missing_fields: set[str] = set()
+        if bool(getattr(pos, "last_monitor_prob_is_fresh", False)):
+            preserved_validations.append(
+                "monitor_attempt_current_probability_preserved"
+            )
+        else:
+            missing_fields.add("fresh_prob_is_fresh")
+        if bool(getattr(pos, "last_monitor_market_price_is_fresh", False)):
+            preserved_validations.append("monitor_attempt_current_market_preserved")
+        else:
+            missing_fields.add("current_market_price_is_fresh")
+        if missing_fields:
+            _revoke_monitor_action_authority(pos, missing_fields=missing_fields)
+        pos.last_monitor_edge = None
+    else:
+        _revoke_monitor_action_authority(pos)
     pos.applied_validations = list(
         dict.fromkeys(
             [
                 *(getattr(pos, "applied_validations", []) or []),
+                *preserved_validations,
                 "monitor_attempt_data_degraded_no_action_authority",
             ]
         )
     )
     normalized_stage = str(stage or "unknown").strip().upper()[:96]
     reason = f"MONITOR_INPUTS_UNAVAILABLE:{normalized_stage}"
+    # A current q and held-side book can exist while the decision window is
+    # exhausted.  Preserve that distinction through the outer monitor outcome:
+    # it is not stale-data HOLD and it must not be collapsed into generic cycle
+    # failure by the scheduler wrapper.
+    if normalized_stage == "REFRESH_DEADLINE":
+        summary["held_monitor_failure_outcome"] = "REFRESH_DEADLINE"
     canonical_written = _emit_monitor_refreshed_canonical_if_available(
         conn,
         pos,
@@ -3648,10 +3695,11 @@ def _record_monitor_data_degraded_attempt(
             summary.get("monitor_canonical_write_failed", 0) + 1
         )
         return False
+    monitor_fresh_prob, _ = _current_monitor_result_probability_and_edge(pos)
     artifact.add_monitor_result(
         deps.MonitorResult(
             position_id=pos.trade_id,
-            fresh_prob=None,
+            fresh_prob=monitor_fresh_prob,
             fresh_edge=None,
             should_exit=False,
             exit_reason=reason,
@@ -4428,7 +4476,12 @@ _PENDING_EXIT_ORDER_STATUSES = {
 }
 
 
-def _sync_position_from_canonical_monitor_row(pos, row) -> None:
+def _sync_position_from_canonical_monitor_row(
+    pos,
+    row,
+    *,
+    current_riskguard_red: bool = False,
+) -> None:
     """Align the runtime Position view with the canonical monitor projection.
 
     The canonical projection decides the live monitor set.  If the in-memory
@@ -4449,8 +4502,19 @@ def _sync_position_from_canonical_monitor_row(pos, row) -> None:
     next_retry = str(_row_get(row, "next_exit_retry_at", "") or "").strip()
     pos.next_exit_retry_at = next_retry or None
     exit_reason = str(_row_get(row, "exit_reason", "") or "").strip()
-    if exit_reason:
+    if current_riskguard_red:
+        # Current RiskGuard policy outranks the prior canonical exit attempt.
+        # The monitor event below persists the RED handoff atomically; submit
+        # still requires both current RED and that exact canonical evidence.
+        pos.exit_reason = "red_force_exit"
+    elif exit_reason.upper() != "RED_FORCE_EXIT":
         pos.exit_reason = exit_reason
+    else:
+        # RED is current policy, not durable economic authority.  A prior
+        # in-memory/canonical RED marker may keep an already-submitted SELL
+        # under single-flight recovery, but it cannot mint a new emergency
+        # decision after RiskGuard returns to GREEN.
+        pos.exit_reason = ""
     pos.last_monitor_prob = _finite_probability_or_none(
         _row_get(row, "last_monitor_prob")
     )
@@ -4463,6 +4527,9 @@ def _sync_position_from_canonical_monitor_row(pos, row) -> None:
     pos.last_monitor_best_bid = _finite_probability_or_none(
         _row_get(row, "last_monitor_best_bid")
     )
+    # The column-less projection defaults closed. A canonical monitor payload
+    # may restore only an explicit full-depth authority fact from that same cut.
+    pos._zeus_held_monitor_full_depth_action_authority = False
     pos.neg_edge_count = 0
     monitor_payload = _row_get(row, "last_monitor_event_payload_json")
     pos._canonical_monitor_refreshed_at = str(
@@ -4479,6 +4546,9 @@ def _sync_position_from_canonical_monitor_row(pos, row) -> None:
                 pos.applied_validations = [
                     str(value) for value in validations if str(value).strip()
                 ]
+            pos._zeus_held_monitor_full_depth_action_authority = (
+                monitor_event.get("held_sell_full_depth_action_authority") is True
+            )
             pos.neg_edge_count = max(0, neg_edge_count)
         except (TypeError, ValueError, json.JSONDecodeError):
             pos.neg_edge_count = 0
@@ -4499,7 +4569,13 @@ def _sync_position_from_canonical_monitor_row(pos, row) -> None:
         pos.next_exit_retry_at = None
 
 
-def _monitoring_phase_positions(portfolio, conn=None, *, now_utc: datetime | None = None) -> list:
+def _monitoring_phase_positions(
+    portfolio,
+    conn=None,
+    *,
+    now_utc: datetime | None = None,
+    current_riskguard_red: bool = False,
+) -> list:
     """Open positions requiring exit/hold redecision.
 
     When canonical ``position_current`` is available, it owns the live monitor
@@ -4530,7 +4606,11 @@ def _monitoring_phase_positions(portfolio, conn=None, *, now_utc: datetime | Non
             pos = by_position_id.get(position_id)
             if pos is None:
                 continue
-            _sync_position_from_canonical_monitor_row(pos, row)
+            _sync_position_from_canonical_monitor_row(
+                pos,
+                row,
+                current_riskguard_red=current_riskguard_red,
+            )
             out.append(pos)
             seen.add(position_id)
         for pos in all_positions:
@@ -4981,11 +5061,19 @@ def _fresh_local_held_monitor_orderbooks(
     deadline_monotonic: float | None = None,
     captured_at_out: list[datetime] | None = None,
 ) -> dict[str, dict]:
+    from src.contracts.executable_market_snapshot import FRESHNESS_WINDOW_DEFAULT
+
     if conn is None:
         return {}
     scope = list(
         dict.fromkeys(
-            (condition_id, token_id)
+            (
+                condition_id,
+                token_id,
+                "sell_yes"
+                if _position_direction_value(pos) == "buy_yes"
+                else "sell_no",
+            )
             for pos in positions
             if (condition_id := str(getattr(pos, "condition_id", "") or "").strip())
             and (token_id := _position_held_token_id(pos))
@@ -4993,8 +5081,12 @@ def _fresh_local_held_monitor_orderbooks(
     )
     if not scope:
         return {}
-    values_sql = ",".join("(?, ?)" for _ in scope)
-    params = [part for pair in scope for part in pair]
+    scope_pairs = [
+        (condition_id, token_id)
+        for condition_id, token_id, _direction in scope
+    ]
+    values_sql = ",".join("(?, ?)" for _ in scope_pairs)
+    params = [part for pair in scope_pairs for part in pair]
     checked_at = now_utc.astimezone(timezone.utc).isoformat()
     params.extend((checked_at, checked_at, checked_at))
     progress_handler_installed = False
@@ -5018,7 +5110,7 @@ def _fresh_local_held_monitor_orderbooks(
         ).fetchone()
         if invalidation_table is None:
             return {}
-        rows = conn.execute(
+        snapshot_rows = conn.execute(
             f"""
             WITH requested(condition_id, token_id) AS (
                 VALUES {values_sql}
@@ -5076,6 +5168,174 @@ def _fresh_local_held_monitor_orderbooks(
             """,
             params,
         ).fetchall()
+        candidates: dict[str, tuple[datetime, dict]] = {}
+        market_channel_tokens: set[str] = set()
+        from src.data.market_scanner import (
+            ExecutableSnapshotCaptureError,
+            _top_book_level_decimal,
+        )
+        from src.engine.monitor_refresh import (
+            _monitor_snapshot_has_held_exit_evidence,
+        )
+
+        for row in snapshot_rows:
+            try:
+                token_id, raw_book, raw_captured_at = row[0], row[1], row[2]
+                if not _monitor_snapshot_has_held_exit_evidence(
+                    active=row[3],
+                    closed=row[4],
+                    accepting_orders=row[5],
+                ):
+                    continue
+                book = json.loads(str(raw_book))
+            except (IndexError, TypeError, ValueError, json.JSONDecodeError):
+                continue
+            token_id = str(token_id or "").strip()
+            asset_id = str(
+                book.get("asset_id")
+                or book.get("assetId")
+                or book.get("token_id")
+                or ""
+            ).strip()
+            if token_id and asset_id == token_id:
+                captured_at = _parse_utc_timestamp(raw_captured_at)
+                if captured_at is not None:
+                    candidates[token_id] = (captured_at, book)
+
+        def _finish_local_books() -> dict[str, dict]:
+            books = {token_id: value[1] for token_id, value in candidates.items()}
+            if captured_at_out is not None and candidates:
+                captured_at_out.append(min(value[0] for value in candidates.values()))
+            summary["held_monitor_orderbooks_market_channel"] = len(
+                market_channel_tokens
+            )
+            return books
+
+        snapshot_row_tokens = {str(row[0] or "").strip() for row in snapshot_rows}
+        fallback_candidates = [
+            triple for triple in scope if triple[1] not in snapshot_row_tokens
+        ]
+        fallback_scope = []
+        if fallback_candidates:
+            fallback_values_sql = ",".join("(?, ?, ?)" for _ in fallback_candidates)
+            fallback_params = [
+                part for triple in fallback_candidates for part in triple
+            ]
+            fallback_params.extend((checked_at, checked_at))
+            fallback_rows = conn.execute(
+                f"""
+            WITH requested(condition_id, token_id, direction) AS (
+                VALUES {fallback_values_sql}
+            )
+            SELECT DISTINCT requested.condition_id,
+                            requested.token_id,
+                            requested.direction
+              FROM requested
+              JOIN executable_market_snapshots AS snapshot
+                ON snapshot.condition_id = requested.condition_id
+               AND snapshot.selected_outcome_token_id = requested.token_id
+             WHERE julianday(snapshot.captured_at) <= julianday(?)
+               AND EXISTS (
+                    SELECT 1
+                      FROM executable_market_snapshot_invalidations AS invalidation
+                     WHERE (
+                            invalidation.condition_id = snapshot.condition_id
+                            OR invalidation.token_id IN (
+                                snapshot.selected_outcome_token_id,
+                                snapshot.yes_token_id,
+                                snapshot.no_token_id
+                            )
+                       )
+                       AND julianday(invalidation.invalidated_at) >=
+                           julianday(snapshot.captured_at)
+                       AND julianday(invalidation.invalidated_at) <= julianday(?)
+               )
+            """,
+                fallback_params,
+            ).fetchall()
+            fallback_scope = [tuple(row) for row in fallback_rows]
+        quote_table = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' "
+            "AND name='execution_feasibility_latest' LIMIT 1"
+        ).fetchone()
+        quote_rows = []
+        if quote_table is not None and fallback_scope:
+            quote_values_sql = ",".join("(?, ?, ?)" for _ in fallback_scope)
+            quote_scope_params = [
+                part for triple in fallback_scope for part in triple
+            ]
+            quote_time_params = (
+                (
+                    now_utc.astimezone(timezone.utc)
+                    - FRESHNESS_WINDOW_DEFAULT
+                ).isoformat(),
+                checked_at,
+                checked_at,
+                checked_at,
+            )
+            quote_rows = conn.execute(
+                f"""
+            WITH requested(condition_id, token_id, direction) AS (
+                VALUES {quote_values_sql}
+            )
+            SELECT latest.token_id,
+                   quote.depth_before_json,
+                   latest.quote_seen_at,
+                   metadata.active,
+                   metadata.closed,
+                   metadata.accepting_orders,
+                   metadata.tradeability_status_json,
+                   latest.best_bid_before,
+                   latest.best_ask_before
+              FROM requested
+              JOIN execution_feasibility_latest AS latest
+                ON latest.condition_id = requested.condition_id
+               AND latest.token_id = requested.token_id
+               AND latest.direction = requested.direction
+              JOIN execution_feasibility_evidence AS quote
+                ON quote.evidence_id = latest.evidence_id
+               AND quote.condition_id = latest.condition_id
+               AND quote.token_id = latest.token_id
+               AND quote.direction = latest.direction
+               AND quote.quote_seen_at = latest.quote_seen_at
+               AND quote.created_at = latest.created_at
+               AND quote.depth_before_json IS NOT NULL
+              JOIN executable_market_snapshots AS metadata
+                ON metadata.snapshot_id = (
+                   SELECT candidate.snapshot_id
+                     FROM executable_market_snapshots AS candidate
+                    WHERE candidate.condition_id = latest.condition_id
+                      AND candidate.selected_outcome_token_id = latest.token_id
+                      AND julianday(candidate.captured_at) <=
+                          julianday(latest.quote_seen_at)
+                      AND julianday(candidate.freshness_deadline) >=
+                          julianday(?)
+                    ORDER BY julianday(candidate.captured_at) DESC,
+                             candidate.snapshot_id DESC
+                    LIMIT 1
+               )
+             WHERE julianday(latest.quote_seen_at) IS NOT NULL
+               AND julianday(latest.quote_seen_at) >= julianday(?)
+               AND julianday(latest.quote_seen_at) <= julianday(?)
+               AND julianday(latest.created_at) <= julianday(?)
+               AND NOT EXISTS (
+                   SELECT 1
+                     FROM executable_market_snapshot_invalidations AS invalidation
+                    WHERE (
+                           invalidation.condition_id = metadata.condition_id
+                           OR invalidation.token_id IN (
+                               metadata.selected_outcome_token_id,
+                               metadata.yes_token_id,
+                               metadata.no_token_id
+                           )
+                      )
+                      AND julianday(invalidation.invalidated_at) >=
+                          julianday(latest.quote_seen_at)
+                      AND julianday(invalidation.invalidated_at) <= julianday(?)
+               )
+                """,
+                (*quote_scope_params, checked_at, *quote_time_params),
+            ).fetchall()
     except Exception as exc:  # noqa: BLE001 - network remains the fallback.
         if (
             deadline_monotonic is not None
@@ -5089,7 +5349,7 @@ def _fresh_local_held_monitor_orderbooks(
             "held monitor local orderbook prefetch failed; using network fallback: %s",
             exc,
         )
-        return {}
+        return _finish_local_books()
     finally:
         if progress_handler_installed:
             conn.set_progress_handler(None, 0)
@@ -5101,40 +5361,67 @@ def _fresh_local_held_monitor_orderbooks(
         summary["held_monitor_orderbook_prefetch_defer_reason"] = (
             "AUXILIARY_DEADLINE_EXPIRED"
         )
-        return {}
+        return _finish_local_books()
 
-    books: dict[str, dict] = {}
-    captured_times: list[datetime] = []
-    from src.engine.monitor_refresh import _monitor_snapshot_is_executable
-
-    for row in rows:
+    for row in quote_rows:
+        token_id = ""
+        captured_at = None
         try:
-            token_id, raw_book, raw_captured_at = row[0], row[1], row[2]
-            if not _monitor_snapshot_is_executable(
+            token_id = str(row[0] or "").strip()
+            if not token_id or not _monitor_snapshot_has_held_exit_evidence(
                 active=row[3],
                 closed=row[4],
                 accepting_orders=row[5],
-                tradeability_status_json=row[6],
             ):
                 continue
-            book = json.loads(str(raw_book))
-        except (IndexError, TypeError, ValueError, json.JSONDecodeError):
+            book = json.loads(str(row[1]))
+            captured_at = _parse_utc_timestamp(row[2])
+            if not isinstance(book, dict) or captured_at is None:
+                continue
+            try:
+                bid, _bid_size = _top_book_level_decimal(book, "bids")
+            except ExecutableSnapshotCaptureError:
+                bid = None
+            if row[7] is not None:
+                if bid is None or not math.isclose(
+                    float(bid), float(row[7]), rel_tol=0.0, abs_tol=1e-9
+                ):
+                    continue
+            try:
+                ask, _ask_size = _top_book_level_decimal(book, "asks")
+            except ExecutableSnapshotCaptureError:
+                ask = None
+            if row[8] is not None:
+                if ask is None or not math.isclose(
+                    float(ask), float(row[8]), rel_tol=0.0, abs_tol=1e-9
+                ):
+                    continue
+            if bid is None and ask is None:
+                continue
+        except (
+            ExecutableSnapshotCaptureError,
+            IndexError,
+            TypeError,
+            ValueError,
+            json.JSONDecodeError,
+        ):
+            previous = candidates.get(token_id)
+            if (
+                previous is not None
+                and captured_at is not None
+                and captured_at >= previous[0]
+            ):
+                candidates.pop(token_id, None)
+                market_channel_tokens.discard(token_id)
             continue
-        token_id = str(token_id or "").strip()
-        asset_id = str(
-            book.get("asset_id")
-            or book.get("assetId")
-            or book.get("token_id")
-            or ""
-        ).strip()
-        if token_id and asset_id == token_id:
-            books[token_id] = book
-            captured_at = _parse_utc_timestamp(raw_captured_at)
-            if captured_at is not None:
-                captured_times.append(captured_at)
-    if captured_at_out is not None and captured_times:
-        captured_at_out.append(min(captured_times))
-    return books
+        book = dict(book)
+        book["asset_id"] = token_id
+        previous = candidates.get(token_id)
+        if previous is None or captured_at > previous[0]:
+            candidates[token_id] = (captured_at, book)
+            market_channel_tokens.add(token_id)
+
+    return _finish_local_books()
 
 
 def _prefetch_held_monitor_orderbooks(
@@ -5783,6 +6070,7 @@ def _refresh_pending_exit_retry_quote_from_current_clob(
 
     from src.engine.monitor_refresh import (
         _HELD_MONITOR_DEADLINE_ATTR,
+        _HELD_MONITOR_FULL_DEPTH_ACTION_AUTHORITY_ATTR,
         monitor_quote_refresh,
     )
 
@@ -5818,6 +6106,7 @@ def _refresh_pending_exit_retry_quote_from_current_clob(
 
     if (
         quote is None
+        or not bool(quote.full_depth_action_authority)
         or (
             deadline_monotonic is not None
             and time.monotonic() >= float(deadline_monotonic)
@@ -5855,6 +6144,7 @@ def _refresh_pending_exit_retry_quote_from_current_clob(
     pos.last_monitor_market_price = telemetry_market_price
     pos.last_monitor_market_price_is_fresh = True
     pos.last_monitor_at = source_timestamp
+    setattr(pos, _HELD_MONITOR_FULL_DEPTH_ACTION_AUTHORITY_ATTR, True)
     return (
         replace(
             exit_context,
@@ -5949,6 +6239,14 @@ def _monitor_global_sell_request_context(position, exit_context) -> dict[str, ob
             if not math.isfinite(held_best_bid):
                 held_best_bid = None
                 book_state = "UNKNOWN"
+            elif not bool(
+                getattr(
+                    position,
+                    "_zeus_held_monitor_full_depth_action_authority",
+                    False,
+                )
+            ):
+                book_state = "NO_EXECUTABLE_BOOK"
             elif not _live_order_quote_is_executable(held_best_bid):
                 book_state = "NO_EXECUTABLE_BOOK"
             elif not bid_observed_at:
@@ -6446,6 +6744,7 @@ def execute_monitoring_phase(
     held_position_monitor_budget_seconds: float | None = None,
     should_preempt_for_urgent_day0: Callable[[], bool] | None = None,
     defer_partial_orderbook_gaps: bool = False,
+    current_riskguard_red: bool = False,
 ):
     from src.engine.monitor_refresh import (
         _DAY0_ZERO_PROBABILITY_EXIT_AUTHORITY_ATTR,
@@ -6454,6 +6753,7 @@ def execute_monitoring_phase(
         HELD_MONITOR_RAW_HWM_READ_MAX_SECONDS,
         _GLOBAL_MONITOR_SAMPLES_ATTR,
         _HELD_MONITOR_DEADLINE_ATTR,
+        _HELD_MONITOR_FULL_DEPTH_ACTION_AUTHORITY_ATTR,
         _HELD_MONITOR_MIN_ORDER_SIZE_ATTR,
         _MONITOR_PROBABILITY_RECEIPT_ATTR,
         install_monitor_day0_family_cache,
@@ -6784,12 +7084,25 @@ def execute_monitoring_phase(
                     "last_monitor_best_bid"
                 )
                 current_observed_at = canonical_monitor_at
+                current_book_action_authority = (
+                    canonical_monitor_payload.get(
+                        "held_sell_full_depth_action_authority"
+                    )
+                    is True
+                )
             else:
                 current_probability_content_identity = str(
                     runtime_probability_content_identity or ""
                 ).strip()
                 current_bid = getattr(position, "last_monitor_best_bid", None)
                 current_observed_at = runtime_monitor_at
+                current_book_action_authority = bool(
+                    getattr(
+                        position,
+                        "_zeus_held_monitor_full_depth_action_authority",
+                        False,
+                    )
+                )
             probability_content_identity = str(
                 (
                     current_probability_content_identity
@@ -6817,6 +7130,7 @@ def execute_monitoring_phase(
                 book_state = (
                     "EXECUTABLE"
                     if current_bid is not None
+                    and current_book_action_authority
                     and _live_order_quote_is_executable(current_bid)
                     else "NO_EXECUTABLE_BOOK"
                 )
@@ -7182,6 +7496,7 @@ def execute_monitoring_phase(
         portfolio,
         conn=conn,
         now_utc=monitor_now_utc,
+        current_riskguard_red=current_riskguard_red,
     )
     install_monitor_day0_family_cache(clob, decision_time=monitor_now_utc)
     install_monitor_replacement_hwm_snapshot(clob, None)
@@ -7301,6 +7616,7 @@ def execute_monitoring_phase(
         portfolio,
         conn=conn,
         now_utc=monitor_now_utc,
+        current_riskguard_red=current_riskguard_red,
     )
     monitor_reservation_count = min(
         primary_reserved_position_count,
@@ -7315,6 +7631,7 @@ def execute_monitoring_phase(
     summary["held_monitor_canonical_position_ids"] = []
     summary["held_monitor_discharged_position_ids"] = []
     summary["held_monitor_no_action_authority_position_ids"] = []
+    summary["held_monitor_non_executable_dust_position_ids"] = []
     if urgent_preemption_requested():
         summary["held_monitor_preempted"] = True
         summary["held_monitor_positions_deferred"] = len(monitor_positions)
@@ -7749,6 +8066,7 @@ def execute_monitoring_phase(
         _GLOBAL_MONITOR_ALPHA_ATTR,
         _GLOBAL_MONITOR_SAMPLES_ATTR,
         _HELD_MONITOR_MIN_ORDER_SIZE_ATTR,
+        _HELD_MONITOR_FULL_DEPTH_ACTION_AUTHORITY_ATTR,
         _MONITOR_PROBABILITY_RECEIPT_ATTR,
     )
     missing_refresh_attr = object()
@@ -8979,7 +9297,6 @@ def execute_monitoring_phase(
                 ),
             )
             if deadline_expiry is not None:
-                restore_refresh_state(pos, refresh_position_state)
                 _record_monitor_data_degraded_attempt(
                     conn,
                     pos,
@@ -8987,6 +9304,7 @@ def execute_monitoring_phase(
                     deps=deps,
                     summary=summary,
                     stage="refresh_deadline",
+                    preserve_current_attempt_axes=True,
                 )
                 if deadline_expiry == "global":
                     break
@@ -9046,7 +9364,6 @@ def execute_monitoring_phase(
                     ),
                 )
                 if deadline_expiry is not None:
-                    restore_refresh_state(pos, refresh_position_state)
                     _record_monitor_data_degraded_attempt(
                         conn,
                         pos,
@@ -9054,6 +9371,7 @@ def execute_monitoring_phase(
                         deps=deps,
                         summary=summary,
                         stage="pending_exit_retry_quote_deadline",
+                        preserve_current_attempt_axes=True,
                     )
                     if deadline_expiry == "global":
                         break
@@ -9190,6 +9508,32 @@ def execute_monitoring_phase(
                     summary=summary,
                 )
 
+            # A BBA-only durable twin is fresh monitor truth, not a depth
+            # witness. This applies before every exit lane, including hard
+            # fact and RED paths: no monitor decision may mint an EXIT_INTENT
+            # from a scalar in-band bid.
+            if should_exit and not bool(
+                getattr(
+                    pos,
+                    "_zeus_held_monitor_full_depth_action_authority",
+                    False,
+                )
+            ):
+                should_exit = False
+                exit_reason = "NO_EXECUTABLE_SELL_BOOK_HOLD"
+                pos.applied_validations = list(
+                    dict.fromkeys(
+                        [
+                            *(pos.applied_validations or []),
+                            "current_sell_book_full_depth_authority_unavailable",
+                            "global_auction_inapplicable:no_executable_sell_book",
+                        ]
+                    )
+                )
+                summary["monitor_statistical_sell_no_book_holds"] = (
+                    summary.get("monitor_statistical_sell_no_book_holds", 0) + 1
+                )
+
             # Statistical SELL remains globally optimized. An absorbing hard-
             # fact SELL is different: positive cash strictly dominates a token
             # with exact terminal value zero, so it must not wait behind the
@@ -9280,6 +9624,10 @@ def execute_monitoring_phase(
                     )
                 except (InvalidOperation, TypeError, ValueError):
                     held_shares = Decimal("0")
+                sellable_shares = held_shares.quantize(
+                    Decimal("0.01"),
+                    rounding=ROUND_FLOOR,
+                )
                 monitor_min_order = getattr(
                     pos,
                     _HELD_MONITOR_MIN_ORDER_SIZE_ATTR,
@@ -9303,15 +9651,22 @@ def execute_monitoring_phase(
                             else datetime.now(timezone.utc)
                         ),
                     )
-                if (
+                below_share_precision = held_shares > 0 and sellable_shares <= 0
+                below_min_order = (
                     fresh_min_order is not None
                     and held_shares > 0
                     and held_shares < fresh_min_order
-                ):
+                )
+                if below_share_precision or below_min_order:
                     dust_error = (
                         "executable_snapshot_gate: size "
-                        f"{held_shares} is below snapshot min_order_size "
-                        f"{fresh_min_order}"
+                        f"{held_shares} is below sell share precision 0.01"
+                        if below_share_precision
+                        else (
+                            "executable_snapshot_gate: size "
+                            f"{held_shares} is below snapshot min_order_size "
+                            f"{fresh_min_order}"
+                        )
                     )
                     dust_reason = f"{exit_reason} [DUST: {dust_error}]"
                     _mark_exit_dust_hold(
@@ -9361,6 +9716,36 @@ def execute_monitoring_phase(
                 pos,
                 exit_context,
             )
+            fresh_no_executable_sell_book = bool(
+                statistical_sell_requires_global
+                and global_sell_request_context["book_state"]
+                == "NO_EXECUTABLE_BOOK"
+                and global_sell_request_context["bid_observed_at"]
+                and exit_context.current_market_price_is_fresh
+            )
+            if fresh_no_executable_sell_book:
+                # A current out-of-band/zero bid is not an executable proposal,
+                # so it cannot compete for capital or require a new global cut.
+                # SCOPE: only this fresh held-token monitor witness. DRAIN: any
+                # already-armed older SELL obligation remains owned by the
+                # independent debt-recovery lane above. RESET: the next monitor
+                # refresh with an in-band bid re-enters the global auction.
+                should_exit = False
+                statistical_sell_requires_global = False
+                exit_reason = "NO_EXECUTABLE_SELL_BOOK_HOLD"
+                local_exit_trigger = exit_reason
+                pos.applied_validations = list(
+                    dict.fromkeys(
+                        [
+                            *(pos.applied_validations or []),
+                            "current_sell_book_not_executable",
+                            "global_auction_inapplicable:no_executable_sell_book",
+                        ]
+                    )
+                )
+                summary["monitor_statistical_sell_no_book_holds"] = (
+                    summary.get("monitor_statistical_sell_no_book_holds", 0) + 1
+                )
             probability_content_identity = str(
                 global_sell_request_context["probability_content_identity"] or ""
             )
@@ -9750,6 +10135,12 @@ def execute_monitoring_phase(
                         "held_monitor_no_action_authority_position_ids",
                         pos,
                     )
+                    if monitoring_non_executable_dust:
+                        _append_held_monitor_coverage_position_id(
+                            summary,
+                            "held_monitor_non_executable_dust_position_ids",
+                            pos,
+                        )
                 _append_held_monitor_coverage_position_id(
                     summary,
                     "held_monitor_canonical_position_ids",
@@ -9762,12 +10153,47 @@ def execute_monitoring_phase(
                 pos.exit_divergence_score = edge_ctx.divergence_score
                 pos.exit_market_velocity_1h = edge_ctx.market_velocity_1h
                 pos.exit_forward_edge = edge_ctx.forward_edge
-                if pending_exit_monitor_only:
+                red_force_exit = (
+                    exit_trigger == "RED_FORCE_EXIT"
+                    and exit_reason == "RED_FORCE_EXIT"
+                )
+                if (
+                    pending_exit_monitor_only
+                    and not red_force_exit
+                ):
                     summary["pending_exit_exit_signal_already_in_flight"] = (
                         summary.get("pending_exit_exit_signal_already_in_flight", 0) + 1
                     )
                     portfolio_dirty = True
                     continue
+                if pending_exit_monitor_only:
+                    # RED outranks retry cooldown/monitor-only policy. The
+                    # execution boundary still rechecks current persisted RED
+                    # authority and adopts any active SELL before submitting,
+                    # so this override cannot create a duplicate order.
+                    summary["pending_exit_red_force_exit_monitor_override"] = (
+                        summary.get(
+                            "pending_exit_red_force_exit_monitor_override",
+                            0,
+                        )
+                        + 1
+                    )
+                if posterior_support_zero_direct_sell:
+                    # MONITOR_REFRESHED advances ``last_monitor_at`` before the
+                    # side effect.  Rebind the immutable direct-SELL proof to
+                    # that canonical observation; the pre-write proof otherwise
+                    # fails its exact submit-time identity check despite no
+                    # probability, support, holding, or book change.
+                    from src.execution.exit_lifecycle import (
+                        BranchwiseDominantSellAuthority,
+                    )
+
+                    branchwise_sell_authority = (
+                        BranchwiseDominantSellAuthority.from_current(
+                            pos,
+                            replace(exit_context, exit_reason=exit_reason),
+                        )
+                    )
                 exit_intent = build_exit_intent(
                     pos,
                     replace(exit_context, exit_reason=exit_reason),

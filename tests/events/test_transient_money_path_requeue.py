@@ -293,6 +293,29 @@ def test_global_preflight_wrapper_preserves_inner_transient_disposition():
     )
 
 
+def test_global_preflight_raw_input_hwm_waits_for_posterior_refresh():
+    conn, store = _store()
+    event = _event("raw-input-hwm-retry-floor")
+    store.insert_or_ignore(event)
+    reactor = _reactor_with_reason(
+        conn,
+        store,
+        "GLOBAL_PREFLIGHT_BATCH_BLOCKED:"
+        "GLOBAL_SELL_CURRENT_AUTHORITY_FAILED:"
+        "ValueError:GLOBAL_CURRENT_REPLACEMENT_BUNDLE_BLOCKED:"
+        "REPLACEMENT_RAW_INPUT_HWM:"
+        "basis=source_cycle_time_raw_forecast_artifacts_lag",
+    )
+
+    result = reactor.process_pending(decision_time=_DT, limit=10)
+
+    assert result.retried == 1
+    assert _status(conn, event.event_id) == "pending"
+    assert _claimed_at(conn, event.event_id) == (
+        _DT + timedelta(seconds=60)
+    ).isoformat()
+
+
 # ---------------------------------------------------------------------------
 # Reactor-level relationship tests
 # ---------------------------------------------------------------------------

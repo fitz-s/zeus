@@ -96,6 +96,9 @@ _held_position_monitor_claim = threading.Lock()
 _held_position_monitor_handoff_pending = threading.Event()
 _periodic_held_position_monitor_handoff_pending = threading.Event()
 _periodic_held_position_monitor_fairness_debt = threading.Event()
+_periodic_held_position_monitor_successor_pending = threading.Event()
+_periodic_held_position_monitor_successor_lock = threading.Lock()
+_periodic_held_position_monitor_successor_generation = 0
 _held_position_monitor_canonical_debt = threading.Event()
 _held_position_monitor_recovery_requested = threading.Event()
 _held_position_monitor_recovery_worker_lock = threading.Lock()
@@ -110,6 +113,9 @@ _edli_boot_fill_bridge_recovery_thread: threading.Thread | None = None
 _EDLI_BOOT_FILL_BRIDGE_RETRY_SECONDS = 30.0
 _held_position_monitor_bootstrap_check_lock = threading.Lock()
 _held_position_monitor_bootstrap_last_check = 0.0
+_held_position_monitor_bootstrap_started_monotonic: float | None = None
+_held_position_monitor_bootstrap_started_at_utc: datetime | None = None
+_held_position_monitor_bootstrap_last_alert_monotonic: float | None = None
 _day0_urgent_wake_pending = threading.Event()
 _day0_held_monitor_preempt_requested = threading.Event()
 _forecast_held_monitor_preempt_requested = threading.Event()
@@ -179,6 +185,16 @@ _CAPITAL_RECOVERY_REACTOR_DRAIN_SECONDS = 15.0
 _EDLI_COMMAND_RECOVERY_LAST_FULL_BUCKET: int | None = None
 HELD_POSITION_MONITOR_FIRST_DELAY_SECONDS = 5.0
 HELD_POSITION_MONITOR_BOOTSTRAP_CHECK_SECONDS = 5.0
+# Bootstrap-stall visibility (2026-08-24 reversal plan item 5a): the gate below
+# is fail-closed by design (SCOPE/DRAIN/RESET at its call sites), but a stall
+# in `_promote_held_position_monitor_bootstrap_from_canonical_progress` used to
+# be silent forever — the 2026-08-18 incident locked entries reduce-only for
+# 12.1h with zero alert. These thresholds turn a silent stall into a visible
+# one without weakening the gate or force-setting the Event.
+BOOTSTRAP_ALERT_AFTER_SECONDS = float(
+    os.environ.get("ZEUS_BOOTSTRAP_ALERT_AFTER_SECONDS", "1800")
+)
+BOOTSTRAP_ALERT_REPEAT_SECONDS = 1800.0
 # The normal full-book monitor runs every 120s.  A separate 30s poll reconstructs
 # overdue work from canonical per-position MONITOR_REFRESHED events after one
 # missed tick plus 30s scheduling tolerance.  It does not create another
@@ -186,6 +202,28 @@ HELD_POSITION_MONITOR_BOOTSTRAP_CHECK_SECONDS = 5.0
 HELD_POSITION_MONITOR_RECOVERY_INTERVAL_SECONDS = 30.0
 HELD_POSITION_MONITOR_RECOVERY_MAX_AGE_SECONDS = 150.0
 HELD_POSITION_MONITOR_RECOVERY_RETRY_SECONDS = 1.0
+# A periodic full-book claim must leave a small scheduler hand-off margin.  Its
+# work may span several bounded tranches, but no one tranche may consume the
+# next 30s tick and turn the oldest overdue position into a max-instance skip.
+HELD_POSITION_MONITOR_CLAIM_QUANTUM_GUARD_SECONDS = 1.0
+
+
+def _held_position_monitor_claim_budget_seconds(*, periodic_full_book: bool) -> float:
+    """Return one claim's bounded work budget without changing exit law."""
+
+    from src.engine.cycle_runtime import _held_position_monitor_budget_seconds
+
+    budget = _held_position_monitor_budget_seconds()
+    if not periodic_full_book:
+        return budget
+    return min(
+        budget,
+        max(
+            0.0,
+            HELD_POSITION_MONITOR_RECOVERY_INTERVAL_SECONDS
+            - HELD_POSITION_MONITOR_CLAIM_QUANTUM_GUARD_SECONDS,
+        ),
+    )
 # Fitz #5 scheduler-liveness (2026-06-08): the EDLI market-substrate warm cycle's
 # APScheduler interval. The refresh wall-clock budget
 # (ZEUS_REACTOR_REFRESH_BUDGET_SECONDS in src.data.substrate_observer) MUST be
@@ -277,6 +315,80 @@ def _utc_run_time_after(seconds: float) -> datetime:
     return datetime.now(timezone.utc) + timedelta(seconds=seconds)
 
 
+def _maybe_alert_held_position_monitor_bootstrap_stall(
+    *,
+    now_monotonic: float,
+    open_position_count: int,
+    covered_count: int,
+    blocking_stale_count: int,
+    blocking_stale_positions: list,
+) -> None:
+    """Escalate a held-position bootstrap stall from silent to visible.
+
+    SCOPE: logging + a best-effort state breadcrumb only; never sets the
+    completion Event and never weakens the fail-closed gate above it. DRAIN:
+    the caller re-invokes this on every un-throttled promotion attempt that
+    is still not-covered; once elapsed time since the first attempt crosses
+    BOOTSTRAP_ALERT_AFTER_SECONDS this repeats at most once per
+    BOOTSTRAP_ALERT_REPEAT_SECONDS. RESET: process restart clears the
+    started/last-alert monotonic markers along with the completion Event.
+    """
+
+    global _held_position_monitor_bootstrap_last_alert_monotonic
+    started = _held_position_monitor_bootstrap_started_monotonic
+    if started is None:
+        return
+    elapsed = now_monotonic - started
+    if elapsed < BOOTSTRAP_ALERT_AFTER_SECONDS:
+        return
+    last_alert = _held_position_monitor_bootstrap_last_alert_monotonic
+    if (
+        last_alert is not None
+        and now_monotonic - last_alert < BOOTSTRAP_ALERT_REPEAT_SECONDS
+    ):
+        return
+    _held_position_monitor_bootstrap_last_alert_monotonic = now_monotonic
+    blocking_ids = [
+        str(item.get("position_id") or "")
+        for item in blocking_stale_positions
+        if item.get("position_id")
+    ]
+    logger.error(
+        "held-position monitor bootstrap stalled %.0fs (alert threshold %.0fs): "
+        "open_positions=%d covered=%d blocking_stale=%d blocking_position_ids=%s "
+        "-- entries remain reduce-only until canonical post-boot coverage completes",
+        elapsed,
+        BOOTSTRAP_ALERT_AFTER_SECONDS,
+        open_position_count,
+        covered_count,
+        blocking_stale_count,
+        blocking_ids,
+    )
+    started_at_utc = _held_position_monitor_bootstrap_started_at_utc
+    try:
+        from src.config import state_path
+
+        payload = {
+            "started_at": started_at_utc.isoformat() if started_at_utc else None,
+            "elapsed_seconds": elapsed,
+            "alert_after_seconds": BOOTSTRAP_ALERT_AFTER_SECONDS,
+            "open_position_count": open_position_count,
+            "covered_count": covered_count,
+            "blocking_stale_count": blocking_stale_count,
+            "blocking_position_ids": blocking_ids,
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+        }
+        out_path = state_path("bootstrap_stall_alert.json")
+        tmp = out_path.with_suffix(out_path.suffix + ".tmp")
+        tmp.write_text(json.dumps(payload, indent=2))
+        tmp.replace(out_path)
+    except Exception as exc:  # noqa: BLE001 - breadcrumb is best-effort.
+        logger.warning(
+            "held-position monitor bootstrap stall breadcrumb write failed: %s",
+            exc,
+        )
+
+
 def _promote_held_position_monitor_bootstrap_from_canonical_progress() -> bool:
     """Release entry work after every held position has a post-boot decision attempt.
 
@@ -286,12 +398,22 @@ def _promote_held_position_monitor_bootstrap_from_canonical_progress() -> bool:
     that exact family fail-closed until its inputs recover. Requiring fresh
     inputs here conflates those debts and turns one provider gap into a global
     reactor/recovery storm.
+
+    A stall past BOOTSTRAP_ALERT_AFTER_SECONDS is escalated via
+    ``_maybe_alert_held_position_monitor_bootstrap_stall`` (logger.error +
+    state/bootstrap_stall_alert.json breadcrumb) instead of staying silent —
+    the gate itself remains fail-closed; the alert never sets the Event.
     """
 
     global _held_position_monitor_bootstrap_last_check
+    global _held_position_monitor_bootstrap_started_monotonic
+    global _held_position_monitor_bootstrap_started_at_utc
     if _held_position_monitor_bootstrap_complete.is_set():
         return True
     now_monotonic = time.monotonic()
+    if _held_position_monitor_bootstrap_started_monotonic is None:
+        _held_position_monitor_bootstrap_started_monotonic = now_monotonic
+        _held_position_monitor_bootstrap_started_at_utc = datetime.now(timezone.utc)
     if (
         now_monotonic - _held_position_monitor_bootstrap_last_check
         < HELD_POSITION_MONITOR_BOOTSTRAP_CHECK_SECONDS
@@ -328,7 +450,7 @@ def _promote_held_position_monitor_bootstrap_from_canonical_progress() -> bool:
                 strict_future=True,
                 monitor_refreshed_only=True,
                 require_fresh_inputs=False,
-                sample_limit=0,
+                sample_limit=5,
             )
         finally:
             conn.close()
@@ -348,6 +470,16 @@ def _promote_held_position_monitor_bootstrap_from_canonical_progress() -> bool:
         required = open_count
         covered = fresh + settlement_recoverable + quote_only_stale
         if blocking_stale > 0 or covered < required:
+            _maybe_alert_held_position_monitor_bootstrap_stall(
+                now_monotonic=now_monotonic,
+                open_position_count=open_count,
+                covered_count=covered,
+                blocking_stale_count=blocking_stale,
+                blocking_stale_positions=cadence_groups.get(
+                    "blocking_stale_positions"
+                )
+                or [],
+            )
             return False
         _held_position_monitor_bootstrap_complete.set()
         logger.info(
@@ -584,7 +716,7 @@ def _exact_held_sell_completion_pending() -> bool:
             "exact held-SELL completion debt unreadable; retaining monitor priority",
             exc_info=True,
         )
-        return False
+        return True
 
 
 def _defer_for_held_position_monitor(job_name: str) -> bool:
@@ -659,7 +791,13 @@ def _defer_for_held_position_monitor(job_name: str) -> bool:
     # canonical coverage clears cadence debt.
     if (
         job_name in _HELD_POSITION_MONITOR_DEFER_JOBS
-        and _held_position_monitor_handoff_pending.is_set()
+        and (
+            _held_position_monitor_handoff_pending.is_set()
+            or (
+                job_name == "edli_event_reactor"
+                and _periodic_held_position_monitor_successor_pending.is_set()
+            )
+        )
     ):
         logger.info("%s deferred: held-position monitor reactor handoff pending", job_name)
         return True
@@ -953,6 +1091,131 @@ def assert_kelly_multiplier_within_correlated_ceiling(cfg: dict) -> None:
         )
 
 
+RISK_POLICY_ARTIFACT_PATH = Path("config/risk_policy.yaml")
+
+# live sizing.* key -> its ceiling key in config/risk_policy.yaml
+RISK_POLICY_CHECKED_LEVERS: tuple[tuple[str, str], ...] = (
+    ("kelly_multiplier", "kelly_multiplier_ceiling"),
+    ("max_correlated_pct", "max_correlated_pct_ceiling"),
+    ("max_portfolio_heat_pct", "max_portfolio_heat_pct_ceiling"),
+    ("max_single_position_pct", "max_single_position_pct_ceiling"),
+)
+
+
+def _load_risk_policy_artifact(path: Path = RISK_POLICY_ARTIFACT_PATH) -> tuple[dict, str, str]:
+    """Load the tracked, content-addressed risk-policy artifact.
+
+    Returns (parsed_mapping, policy_version, sha256_hex_of_raw_bytes).
+    Fail-closed (RuntimeError) on a missing file, unparseable YAML, a
+    non-mapping document, or a missing/empty ``policy_version`` — a risk
+    ceiling with no artifact (or an unversioned one) is ungoverned, same
+    posture as every other sizing boot guard in this module.
+    """
+    if not path.exists():
+        raise RuntimeError(
+            f"RISK_POLICY_ARTIFACT_MISSING: {path} does not exist; every "
+            f"risk-increasing sizing lever must live in a tracked, "
+            f"content-addressed policy artifact (reversal_plan_tier0 item 1b)"
+        )
+    raw_bytes = path.read_bytes()
+    sha256_hex = hashlib.sha256(raw_bytes).hexdigest()
+    import yaml  # local import: matches src/risk_allocator/governor.py::load_cap_policy idiom
+
+    try:
+        loaded = yaml.safe_load(raw_bytes.decode("utf-8"))
+    except yaml.YAMLError as exc:
+        raise RuntimeError(
+            f"RISK_POLICY_ARTIFACT_MALFORMED: {path} is not valid YAML: {exc}"
+        ) from exc
+    if not isinstance(loaded, dict):
+        raise RuntimeError(
+            f"RISK_POLICY_ARTIFACT_MALFORMED: {path} must parse to a mapping, "
+            f"got {type(loaded).__name__}"
+        )
+    policy_version = loaded.get("policy_version")
+    if not policy_version:
+        raise RuntimeError(
+            f"RISK_POLICY_ARTIFACT_MALFORMED: {path} missing non-empty "
+            f"policy_version"
+        )
+    return loaded, str(policy_version), sha256_hex
+
+
+def assert_risk_policy_artifact(
+    cfg: dict,
+    *,
+    path: Path = RISK_POLICY_ARTIFACT_PATH,
+) -> None:
+    """Fail-closed guard: no live risk-increasing sizing value may exceed its
+    ceiling in the tracked, content-addressed ``config/risk_policy.yaml``.
+
+    SCOPE: process-wide daemon boot, same pattern as
+    ``assert_kelly_multiplier_matches_governed_fraction`` /
+    ``assert_kelly_multiplier_within_correlated_ceiling`` above — this guard
+    generalizes them to every risk-increasing ``sizing.*`` lever the live
+    entry path consumes (reversal_plan_tier0 item 1b), not just
+    ``kelly_multiplier``.
+
+    DIRECTION LAW: runtime / control-plane overrides (entries_paused,
+    edge_threshold_multiplier, RiskGuard postures) may LOWER effective risk
+    freely and are never inspected here — this guard only reads ``cfg["sizing"]``
+    and the artifact, so a control-plane lever cannot trip it. Only a live
+    value EXCEEDING its artifact ceiling is a breach.
+
+    DRAIN: lower the offending ``sizing.<key>`` in the active operator config,
+    or raise the ceiling in ``config/risk_policy.yaml`` via a reviewed commit
+    (bump ``policy_version``), then restart.
+    RESET: recomputed on every boot; no strategy, side, or runtime override.
+    """
+    policy, policy_version, sha256_hex = _load_risk_policy_artifact(path)
+    logger.info(
+        "risk_policy_artifact: path=%s policy_version=%s sha256=%s",
+        path, policy_version, sha256_hex,
+    )
+
+    sizing = cfg.get("sizing") or {}
+    for live_key, ceiling_key in RISK_POLICY_CHECKED_LEVERS:
+        raw_ceiling = policy.get(ceiling_key)
+        if raw_ceiling is None or isinstance(raw_ceiling, bool) or not isinstance(raw_ceiling, (int, float)):
+            raise RuntimeError(
+                f"RISK_POLICY_ARTIFACT_MALFORMED: {ceiling_key} missing or "
+                f"non-numeric in {path}"
+            )
+        ceiling = float(raw_ceiling)
+
+        raw_live = sizing.get(live_key)
+        if raw_live is None or isinstance(raw_live, bool) or not isinstance(raw_live, (int, float)):
+            raise RuntimeError(
+                f"RISK_POLICY_BREACH: sizing.{live_key} missing or "
+                f"non-numeric; artifact ceiling {ceiling_key}={ceiling}"
+            )
+        live_value = float(raw_live)
+
+        # Fail-closed on non-finite inputs: NaN/inf bypass the ``>``
+        # comparison below the same way the corr-ceiling guard above does.
+        if not math.isfinite(live_value) or not math.isfinite(ceiling):
+            raise RuntimeError(
+                f"RISK_POLICY_BREACH (NON_FINITE): sizing.{live_key}="
+                f"{live_value}, {ceiling_key}={ceiling} — a NaN/inf value "
+                f"bypasses the ceiling comparison; both must be finite."
+            )
+
+        logger.info(
+            "risk_policy_effective_value: sizing.%s=%s ceiling(%s)=%s",
+            live_key, live_value, ceiling_key, ceiling,
+        )
+
+        if live_value > ceiling:
+            raise RuntimeError(
+                f"RISK_POLICY_BREACH: sizing.{live_key}={live_value} exceeds "
+                f"artifact ceiling {ceiling_key}={ceiling} in {path} "
+                f"(policy_version={policy_version}). Runtime/control-plane "
+                f"overrides may only LOWER risk, never raise it above the "
+                f"tracked artifact. Lower sizing.{live_key} to <= {ceiling} "
+                f"or raise {ceiling_key} via a reviewed commit."
+            )
+
+
 # ---------------------------------------------------------------------------
 # W0-T3: _run_boot_guards / _validate_boot — safe pre-restart smoke
 # (2026-06-03)
@@ -1026,6 +1289,21 @@ def _run_boot_guards(raw_cfg: dict) -> list:
         results.append(("kelly_mult_corr_ceiling", False, str(exc)))
     except Exception as exc:  # pragma: no cover
         results.append(("kelly_mult_corr_ceiling", False, f"unexpected: {exc}"))
+
+    # Guard 5: every risk-increasing sizing.* lever ≤ its tracked,
+    # content-addressed config/risk_policy.yaml ceiling (reversal_plan_tier0
+    # item 1b — generalizes guards 3/4 above beyond kelly_multiplier alone).
+    try:
+        assert_risk_policy_artifact(raw_cfg)
+        results.append((
+            "risk_policy_artifact",
+            True,
+            "all sizing.* risk-increasing levers within config/risk_policy.yaml ceilings",
+        ))
+    except RuntimeError as exc:
+        results.append(("risk_policy_artifact", False, str(exc)))
+    except Exception as exc:  # pragma: no cover
+        results.append(("risk_policy_artifact", False, f"unexpected: {exc}"))
 
     return results
 
@@ -1221,7 +1499,6 @@ def evaluate_edli_stage_readiness(
         return EdliStageReadiness(stage=stage, status=EDLI_STAGE_PASS, live_entries_allowed=False)
 
     reasons: list[str] = []
-    now = datetime.now(timezone.utc)
     if loaded_sha_file:
         identity_observations = _edli_stage_loaded_sha_observations(loaded_sha_file)
         if identity_observations:
@@ -1251,7 +1528,6 @@ def evaluate_edli_stage_readiness(
                     name="SOURCE_HEALTH",
                     path=source_health_json,
                     max_age_seconds=max_age_seconds,
-                    now=now,
                 )
             )
         if status_json:
@@ -1260,7 +1536,6 @@ def evaluate_edli_stage_readiness(
                     name="STATUS_SUMMARY",
                     path=status_json,
                     max_age_seconds=max_age_seconds,
-                    now=now,
                 )
             )
     finally:
@@ -1414,8 +1689,6 @@ def _edli_live_entry_readiness_block(
         max_age_seconds = int(
             edli_cfg.get("edli_stage_readiness_max_age_seconds", 15 * 60)
         )
-        now = datetime.now(timezone.utc)
-
         global_reasons: list[str] = []
         family_reasons: dict[str, str] = {}
         conn = _edli_stage_world_connection(world_db_path)
@@ -1452,7 +1725,6 @@ def _edli_live_entry_readiness_block(
                         name="SOURCE_HEALTH",
                         path=source_health_json,
                         max_age_seconds=max_age_seconds,
-                        now=now,
                     )
                 )
             if status_json:
@@ -1461,7 +1733,6 @@ def _edli_live_entry_readiness_block(
                         name="STATUS_SUMMARY",
                         path=status_json,
                         max_age_seconds=max_age_seconds,
-                        now=now,
                     )
                 )
         finally:
@@ -1701,7 +1972,13 @@ def _edli_stage_open_cap_reservation_families(conn) -> tuple[dict[str, str], int
     return family_reasons, unresolved
 
 
-def _edli_stage_fresh_file_reasons(*, name: str, path: str, max_age_seconds: int, now: datetime) -> list[str]:
+def _edli_stage_fresh_file_reasons(
+    *,
+    name: str,
+    path: str,
+    max_age_seconds: int,
+    now: datetime | None = None,
+) -> list[str]:
     file_path = Path(path)
     if not file_path.exists():
         return [f"EDLI_STAGE_{name}_MISSING:{path}"]
@@ -1718,7 +1995,12 @@ def _edli_stage_fresh_file_reasons(*, name: str, path: str, max_age_seconds: int
         return [f"EDLI_STAGE_{name}_STALE:invalid_timestamp"]
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
-    age = (now - parsed.astimezone(timezone.utc)).total_seconds()
+    # Bind the clock after the atomic payload read. The readiness caller may
+    # spend seconds in DB admission checks while the single status writer
+    # advances this file; a clock sampled before those checks makes a newer,
+    # valid payload look impossibly future-dated and blocks every BUY family.
+    observed_now = now or datetime.now(timezone.utc)
+    age = (observed_now - parsed.astimezone(timezone.utc)).total_seconds()
     if age < -EDLI_STAGE_FRESH_FILE_FUTURE_SKEW_TOLERANCE_SECONDS:
         return [f"EDLI_STAGE_{name}_STALE:{age:.0f}s"]
     age = max(0.0, age)
@@ -2069,11 +2351,12 @@ def _live_health_composite_cycle() -> None:
     ):
         return
 
-    from src.control.live_health import compute_composite_live_health
-    from src.observability.status_summary import write_cycle_pulse
+    from src.control.live_health import refresh_composite_live_health_bounded
 
-    write_cycle_pulse({"mode": "heartbeat_pulse", "heartbeat": True})
-    compute_composite_live_health()
+    refresh_composite_live_health_bounded(
+        parent_pid=os.getpid(),
+        parent_mode=get_mode(),
+    )
 
 
 def _status_summary_refresh_can_defer() -> bool:
@@ -4584,7 +4867,7 @@ def _edli_event_reactor_cycle(
         ),
         held_position_monitor_pending=(
             lambda: (
-                _periodic_held_position_monitor_handoff_pending.is_set()
+                _periodic_held_position_monitor_successor_pending.is_set()
                 or (
                     not canonical_monitor_debt_at_start
                     and monitor_entry_block is None
@@ -4634,6 +4917,7 @@ def _edli_initialize_reactor_wake_cursor() -> None:
     _day0_urgent_wake_pending.clear()
     _day0_held_monitor_preempt_requested.clear()
     _forecast_held_monitor_preempt_requested.clear()
+    _periodic_held_position_monitor_successor_pending.clear()
     with _day0_exit_monitor_attempts_lock:
         completed_wake_ids = tuple(
             wake_id
@@ -5118,6 +5402,26 @@ def _urgent_held_monitor_owner_pending() -> bool:
 def _held_monitor_preempt_generation_now() -> int:
     with _held_monitor_preempt_generation_lock:
         return _held_monitor_preempt_generation
+
+
+def _reserve_periodic_held_monitor_successor() -> int:
+    """Reserve the next reactor-free turn for one claimed full-book monitor."""
+
+    global _periodic_held_position_monitor_successor_generation
+    with _periodic_held_position_monitor_successor_lock:
+        _periodic_held_position_monitor_successor_generation += 1
+        _periodic_held_position_monitor_successor_pending.set()
+        return _periodic_held_position_monitor_successor_generation
+
+
+def _consume_periodic_held_monitor_successor(generation: int | None) -> None:
+    """Consume only the reservation owned by the monitor entering its core turn."""
+
+    if generation is None:
+        return
+    with _periodic_held_position_monitor_successor_lock:
+        if generation == _periodic_held_position_monitor_successor_generation:
+            _periodic_held_position_monitor_successor_pending.clear()
 
 
 def _record_held_monitor_preempt_request() -> None:
@@ -5663,6 +5967,10 @@ def _terminal_held_sell_reauction_receipts(
     """
 
     from src.execution.exit_safety import can_submit_replacement_sell
+    from src.events.day0_authority import (
+        DAY0_ABSORBING_FINALITIES,
+        day0_evidence_finality,
+    )
     from src.runtime.reactor_wake import (
         HELD_SELL_REAUCTION_V4,
         POSITION_NO_LONGER_EXPOSED,
@@ -5925,6 +6233,22 @@ def _terminal_held_sell_reauction_receipts(
         if not isinstance(obligation, dict):
             continue
         validations = monitor_payload.get("applied_validations")
+        probability_receipt = monitor_payload.get("monitor_probability_receipt")
+        hard_fact_evidence = (
+            probability_receipt.get("hard_fact_evidence")
+            if isinstance(probability_receipt, dict)
+            else None
+        )
+        hard_fact_source = (
+            str(hard_fact_evidence.get("source") or "").strip()
+            if isinstance(hard_fact_evidence, dict)
+            else ""
+        )
+        hard_fact_finality = (
+            day0_evidence_finality(hard_fact_evidence)
+            if isinstance(hard_fact_evidence, dict)
+            else ""
+        )
         probability = monitor_payload.get("last_monitor_prob")
         if isinstance(probability, bool):
             continue
@@ -5960,6 +6284,8 @@ def _terminal_held_sell_reauction_receipts(
             or not isinstance(validations, list)
             or "day0_absorbing_hard_fact" not in validations
             or "day0_hard_fact_structural_win_hold" not in validations
+            or not hard_fact_source
+            or hard_fact_finality not in DAY0_ABSORBING_FINALITIES
         ):
             continue
         for request in position_requests:
@@ -6040,6 +6366,8 @@ def _terminal_held_sell_reauction_receipts(
                     monitor_selected_method="day0_absorbing_hard_fact",
                     monitor_should_exit=False,
                     monitor_trigger="DAY0_HARD_FACT_STRUCTURAL_WIN_HOLD",
+                    hard_fact_source=hard_fact_source,
+                    hard_fact_finality=hard_fact_finality,
                 )
             )
     return tuple(receipts)
@@ -6316,9 +6644,6 @@ def _edli_reactor_wake_poll_once() -> bool:
 
     global _edli_last_reactor_wake_id
 
-    if _defer_for_held_position_monitor("edli_event_reactor"):
-        return False
-
     from src.runtime.reactor_wake import (
         GLOBAL_AUCTION_COMPLETION_WAKE_REASON,
         SUPERSEDED_BY_DAY0_HARD_FACT_STRUCTURAL_WIN,
@@ -6333,20 +6658,24 @@ def _edli_reactor_wake_poll_once() -> bool:
     reactor_blocked_by_monitor_fairness = (
         _periodic_held_position_monitor_fairness_debt.is_set()
     )
-    exact_held_sell_wake_ids: frozenset[str] = frozenset()
-    if reactor_blocked_by_monitor_fairness:
-        try:
-            exact_held_sell_wake_ids = frozenset(
-                exact_held_sell_completion_wake_ids(fail_on_error=True)
-            )
-        except (OSError, ValueError):
-            logger.warning(
-                "exact held-SELL completion selection unreadable; retaining wake debt",
-                exc_info=True,
-            )
-            return False
-        if not exact_held_sell_wake_ids:
-            return False
+    try:
+        exact_held_sell_wake_ids = frozenset(
+            exact_held_sell_completion_wake_ids(fail_on_error=True)
+        )
+    except (OSError, ValueError):
+        logger.warning(
+            "exact held-SELL completion selection unreadable; retaining wake debt",
+            exc_info=True,
+        )
+        return False
+    if (
+        not exact_held_sell_wake_ids
+        and _defer_for_held_position_monitor("edli_event_reactor")
+    ):
+        return False
+    if reactor_blocked_by_monitor_fairness and not exact_held_sell_wake_ids:
+        return False
+    prefer_exact_held_sell = bool(exact_held_sell_wake_ids)
 
     excluded_wake_ids = frozenset(
         _exit_monitor_excluded_wake_ids()
@@ -6389,20 +6718,28 @@ def _edli_reactor_wake_poll_once() -> bool:
             wake = (
                 read_reactor_wake(
                     exclude_wake_ids=excluded_wake_ids,
-                    prefer_exact_held_sell=reactor_blocked_by_monitor_fairness,
+                    **(
+                        {"prefer_exact_held_sell": True}
+                        if prefer_exact_held_sell
+                        else {}
+                    ),
                     prefer_forecast_carrier_progress=prefer_forecast_carrier_progress,
                     fail_on_error=(
                         prefer_forecast_carrier_progress
-                        or reactor_blocked_by_monitor_fairness
+                        or prefer_exact_held_sell
                     ),
                 )
                 if excluded_wake_ids
                 else read_reactor_wake(
-                    prefer_exact_held_sell=reactor_blocked_by_monitor_fairness,
+                    **(
+                        {"prefer_exact_held_sell": True}
+                        if prefer_exact_held_sell
+                        else {}
+                    ),
                     prefer_forecast_carrier_progress=prefer_forecast_carrier_progress,
                     fail_on_error=(
                         prefer_forecast_carrier_progress
-                        or reactor_blocked_by_monitor_fairness
+                        or prefer_exact_held_sell
                     ),
                 )
             )
@@ -6410,11 +6747,15 @@ def _edli_reactor_wake_poll_once() -> bool:
             excluded_wake_ids = frozenset(excluded_wake_ids | global_yield_ids)
             wake = read_reactor_wake(
                 exclude_wake_ids=excluded_wake_ids,
-                prefer_exact_held_sell=reactor_blocked_by_monitor_fairness,
+                **(
+                    {"prefer_exact_held_sell": True}
+                    if prefer_exact_held_sell
+                    else {}
+                ),
                 prefer_forecast_carrier_progress=prefer_forecast_carrier_progress,
                 fail_on_error=(
                     prefer_forecast_carrier_progress
-                    or reactor_blocked_by_monitor_fairness
+                    or prefer_exact_held_sell
                 ),
             )
         if (
@@ -6447,7 +6788,7 @@ def _edli_reactor_wake_poll_once() -> bool:
         )
         return False
     if (
-        reactor_blocked_by_monitor_fairness
+        exact_held_sell_wake_ids
         and (
             wake is None
             or wake.wake_id not in exact_held_sell_wake_ids
@@ -7226,8 +7567,6 @@ def _edli_command_recovery_cycle() -> None:
     edli_cfg = _settings_section("edli", {})
     if get_mode() != "live":
         return
-    if _defer_for_held_position_monitor("edli_command_recovery"):
-        return
     from src.execution.command_recovery import (
         capital_blocking_command_scope,
         capital_blocking_command_count,
@@ -7274,6 +7613,16 @@ def _edli_command_recovery_cycle() -> None:
                 "retaining global reactor handoff: %r",
                 exc,
             )
+    # SCOPE: only non-systemic recovery may yield to monitor bootstrap/handoff;
+    # an authenticated fill missing from canonical position truth is already
+    # real exposure and retains global recovery priority. DRAIN: the bounded
+    # live_tick projects that exact fill before general maintenance. RESET: the
+    # resulting FILLED command plus position/event/execution facts clear the
+    # projection blocker on the next scope read.
+    if not global_capital_handoff and _defer_for_held_position_monitor(
+        "edli_command_recovery"
+    ):
+        return
     if not global_capital_handoff and (
         _held_position_monitor_active.is_set()
         or _held_position_monitor_canonical_debt.is_set()
@@ -9130,30 +9479,38 @@ def _edli_boot_fill_bridge_recovery() -> bool:
         bridged = 0
         try:
             from src.ingest.price_channel_ingest import (
+                FILL_BRIDGE_WRITE_TRANCHES_PER_TICK,
+                _edli_durable_fill_bridge_candidate_ids_read_only,
                 _edli_durable_fill_bridge_scan,
-                _edli_durable_fill_bridge_work_exists_read_only,
             )
 
             try:
-                bridge_work_exists = (
-                    _edli_durable_fill_bridge_work_exists_read_only()
+                candidate_aggregate_ids = (
+                    _edli_durable_fill_bridge_candidate_ids_read_only(
+                        limit=FILL_BRIDGE_WRITE_TRANCHES_PER_TICK,
+                    )
                 )
             except Exception as exc:  # noqa: BLE001
-                bridge_work_exists = True
-                logger.warning(
-                    "EDLI boot fill-bridge read-only admission failed; "
-                    "falling back to canonical recovery: %s",
+                logger.error(
+                    "EDLI boot fill-bridge bounded discovery failed; "
+                    "keeping BUY blocked for retry without taking canonical writers: %s",
                     exc,
                     exc_info=True,
                 )
-            if not bridge_work_exists:
+                return False
+            if not candidate_aggregate_ids:
                 logger.info(
                     "EDLI boot fill-bridge recovery: no orphaned confirmed fills"
                 )
                 return True
 
             bridge_conn = get_trade_connection_with_world_required(write_class="live")
-            bridged = _edli_durable_fill_bridge_scan(bridge_conn, now=now)
+            bridged = _edli_durable_fill_bridge_scan(
+                bridge_conn,
+                now=now,
+                limit=len(candidate_aggregate_ids),
+                candidate_aggregate_ids=candidate_aggregate_ids,
+            )
             bridge_conn.commit()
         finally:
             if bridge_conn is not None:
@@ -9169,6 +9526,22 @@ def _edli_boot_fill_bridge_recovery() -> bool:
             )
         else:
             logger.info("EDLI boot fill-bridge recovery: no orphaned confirmed fills")
+        try:
+            remaining = _edli_durable_fill_bridge_candidate_ids_read_only(limit=1)
+        except Exception as exc:  # noqa: BLE001
+            logger.error(
+                "EDLI boot fill-bridge completion proof failed; keeping BUY blocked "
+                "for retry without taking canonical writers: %s",
+                exc,
+                exc_info=True,
+            )
+            return False
+        if remaining:
+            logger.warning(
+                "EDLI boot fill-bridge recovery: bounded tranche complete; "
+                "orphaned fills remain for the next retry"
+            )
+            return False
         return True
     except Exception as exc:  # noqa: BLE001
         # Boot recovery is best-effort: the per-cycle durable scan is the safety
@@ -9275,7 +9648,6 @@ def _exit_monitor_cycle(
     monitor acquires and releases the reactor boundary; network work does not
     hold that gate. The dispatcher owns both signals.
     """
-    from src.engine.cycle_runtime import _held_position_monitor_budget_seconds
     from src.execution.exit_lifecycle import (
         held_monitor_pre_artifact_reserve_seconds,
         run_exit_monitor_cycle,
@@ -9381,9 +9753,10 @@ def _exit_monitor_cycle(
     # the later network phase. Reactor handoff and all pre-monitor preparation
     # consume the same finite budget so a stalled handoff cannot shift the
     # probability/exit work beyond its advertised cadence.
-    monitor_deadline_monotonic = (
-        time.monotonic() + _held_position_monitor_budget_seconds()
+    claim_budget_seconds = _held_position_monitor_claim_budget_seconds(
+        periodic_full_book=periodic_full_book,
     )
+    monitor_deadline_monotonic = time.monotonic() + claim_budget_seconds
     def _periodic_preemption_requested_since_claim() -> bool:
         return _urgent_held_monitor_owner_pending() or (
             _held_monitor_preempt_generation_now() > preempt_generation_at_claim
@@ -9397,12 +9770,16 @@ def _exit_monitor_cycle(
         _forecast_held_monitor_preempt_requested.clear()
 
     monitor_claim_released = False
+    successor_entered_core = False
+    successor_generation = None
 
     def _release_monitor_claim() -> None:
         nonlocal monitor_claim_released
         if monitor_claim_released:
             return
         monitor_claim_released = True
+        if successor_entered_core:
+            _consume_periodic_held_monitor_successor(successor_generation)
         if not urgent_fact:
             _day0_held_monitor_preempt_requested.clear()
             _periodic_held_position_monitor_handoff_pending.clear()
@@ -9427,6 +9804,14 @@ def _exit_monitor_cycle(
                 "canonical monitored exposure is empty"
             )
             return True
+
+        # SCOPE: this claimed full-book monitor generation only. DRAIN: an
+        # in-flight replayable global cut stops at its next safe checkpoint;
+        # no later generic tranche may claim the reactor before this monitor
+        # enters its core run. RESET: consume immediately before
+        # ``run_exit_monitor_cycle``; an incomplete monitor keeps canonical
+        # debt, so its next claim obtains a fresh generation.
+        successor_generation = _reserve_periodic_held_monitor_successor()
 
     # Claim exit priority before waiting. New reactor ticks defer only through
     # the handoff; monitor network work does not stop unrelated decisions.
@@ -9469,6 +9854,10 @@ def _exit_monitor_cycle(
                     _current_periodic_monitor_obligation_count()
                 )
                 if current_obligation_count == 0:
+                    # The reservation belongs to this generation and its
+                    # canonical obligation is now terminally empty.  This is
+                    # the only pre-core path allowed to consume it.
+                    _consume_periodic_held_monitor_successor(successor_generation)
                     _periodic_held_position_monitor_fairness_debt.clear()
                     _held_position_monitor_bootstrap_complete.set()
                     logger.info(
@@ -9541,6 +9930,9 @@ def _exit_monitor_cycle(
                     _periodic_preemption_requested_since_claim()
                 )
             )
+        successor_entered_core = True
+        _consume_periodic_held_monitor_successor(successor_generation)
+        failure_outcome: list[str] = []
         monitor_succeeded = run_exit_monitor_cycle(
             held_position_monitor_active=_held_position_monitor_active,
             # The callback fires immediately after the core artifact and
@@ -9553,9 +9945,11 @@ def _exit_monitor_cycle(
             monitor_handoff_elapsed_seconds=handoff_elapsed_seconds,
             target_families=target_families,
             should_preempt_for_urgent_day0=should_preempt_for_urgent_day0,
+            failure_outcome_sink=failure_outcome.append,
         )
         if monitor_succeeded is not True:
-            raise RuntimeError("EXIT_MONITOR_CYCLE_INCOMPLETE")
+            outcome = failure_outcome[-1] if failure_outcome else "UNKNOWN"
+            raise RuntimeError(f"EXIT_MONITOR_CYCLE_INCOMPLETE:{outcome}")
         if target_families is None:
             # Canonical MONITOR_REFRESHED coverage, observed by
             # _promote_held_position_monitor_bootstrap_from_canonical_progress,

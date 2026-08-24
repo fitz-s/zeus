@@ -1,8 +1,8 @@
-# Lifecycle: created=2026-05-24; last_reviewed=2026-08-19; last_reused=2026-08-19
+# Lifecycle: created=2026-05-24; last_reviewed=2026-08-23; last_reused=2026-08-23
 # Purpose: Current single-live scheduler set and causal executor-class assignment.
 # Reuse: Inspect docs/operations/current/plans/data_temporal_kernel/PLAN.md + the target module before relying on it.
 # Created: 2026-05-24
-# Last reused or audited: 2026-08-19
+# Last reused or audited: 2026-08-23
 # Authority basis: docs/operations/current/plans/data_temporal_kernel/PLAN.md (PR6);
 #   operator spec §7 (Scheduler adapter / executor classes).
 """PR6: registry -> scheduler executor-class assignment (pure planner, daemon wiring deferred)."""
@@ -254,6 +254,96 @@ def test_replacement_availability_fast_poll_skips_heavy_path_when_source_clock_c
     assert call_order == ["probe"]
 
 
+def test_replacement_availability_drains_exact_cycle_anchor_residual_on_priority_lane(
+    monkeypatch, tmp_path
+) -> None:
+    import src.data.replacement_forecast_production as prod
+    import src.data.source_clock_update_probe as source_clock_probe
+    import src.ingest_main as ingest_main
+
+    class _NoChange:
+        updated_sources = ()
+
+        def as_dict(self):
+            return {
+                "status": "SOURCE_CLOCK_NO_PUBLICLY_USABLE_CHANGE",
+                "updated_sources": [],
+                "affected_cities": [],
+                "error": None,
+                "source_runs": {
+                    "ecmwf_ifs": {
+                        "initialisation_time": "2026-08-21T12:00:00+00:00"
+                    }
+                },
+            }
+
+    calls: list[tuple[str, dict[str, object]]] = []
+    monkeypatch.setattr(
+        prod,
+        "_replacement_forecast_live_materialization_queue_config",
+        lambda: {
+            "download_current_targets_enabled": True,
+            "forecast_db": tmp_path / "forecasts.db",
+        },
+    )
+    monkeypatch.setattr(
+        source_clock_probe,
+        "probe_openmeteo_source_clock_updates",
+        lambda **_kwargs: _NoChange(),
+    )
+    monkeypatch.setattr(prod, "_current_target_anchor_gap_count", lambda *_args: 205)
+
+    def _download(_cfg, **kwargs):
+        calls.append(("download", kwargs))
+        return {
+            "status": "CURRENT_TARGET_RAW_INPUTS_DOWNLOADED",
+            "written_manifest_count": 10,
+        }
+
+    monkeypatch.setattr(
+        prod,
+        "_download_replacement_forecast_current_targets_if_needed",
+        _download,
+    )
+    monkeypatch.setattr(
+        prod,
+        "_download_bayes_precision_fusion_source_clock_raw_inputs_if_needed",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("unchanged source clock must not run BPF source fanout")
+        ),
+    )
+    monkeypatch.setattr(
+        prod,
+        "_enqueue_fusion_upgrade_reseeds_if_needed",
+        lambda _cfg, **kwargs: calls.append(("fusion", kwargs))
+        or {"status": "FUSION_UPGRADE_TRIGGER", "seeds_enqueued": 10},
+    )
+    monkeypatch.setattr(
+        prod,
+        "_enqueue_cycle_advance_reseeds_if_needed",
+        lambda _cfg, **kwargs: calls.append(("cycle", kwargs))
+        or {"status": "CYCLE_ADVANCE_TRIGGER", "seeds_enqueued": 10},
+    )
+
+    result = ingest_main._replacement_availability_poll_tick.__wrapped__()
+
+    assert result["anchor_missing_scope_count"] == 205
+    assert result["source_clock_anchor_residual_download"] == {
+        "status": "CURRENT_TARGET_RAW_INPUTS_DOWNLOADED",
+        "fusion_upgrade_status": "FUSION_UPGRADE_TRIGGER",
+        "fusion_upgrade_seeds_enqueued": 10,
+        "cycle_advance_status": "CYCLE_ADVANCE_TRIGGER",
+        "cycle_advance_seeds_enqueued": 10,
+    }
+    assert calls[0][0] == "download"
+    assert calls[0][1]["quota_priority"] is True
+    assert 0.0 < calls[0][1]["max_wall_clock_seconds"] <= 20.0
+    assert calls[1:] == [
+        ("fusion", {"changed_sources": ("ecmwf_ifs",)}),
+        ("cycle", {}),
+    ]
+
+
 def test_replacement_materializer_default_limit_matches_seed_burst(monkeypatch) -> None:
     """Defaults keep both capacity and the canonical live repair lane available."""
     import src.data.replacement_forecast_production as prod
@@ -275,7 +365,9 @@ def test_replacement_materializer_default_limit_matches_seed_burst(monkeypatch) 
     )
 
 
-def test_replacement_materialize_poll_uses_configured_micro_batch(monkeypatch) -> None:
+def test_replacement_materialize_poll_reclaims_priority_after_each_worker_tranche(
+    monkeypatch,
+) -> None:
     """Every hot-queue branch must use the configured bounded micro-batch."""
     import src.data.replacement_forecast_production as prod
     import src.ingest.forecast_live_daemon as daemon
@@ -310,17 +402,19 @@ def test_replacement_materialize_poll_uses_configured_micro_batch(monkeypatch) -
 
     pending["request_dir"] = True
     daemon._replacement_forecast_materialize_poll_job()
-    pending["request_dir"] = False
     pending["seed_dir"] = True
+    daemon._replacement_forecast_materialize_poll_job()
+    pending["request_dir"] = False
     daemon._replacement_forecast_materialize_poll_job()
     pending["seed_dir"] = False
     pending["inflight"] = True
     daemon._replacement_forecast_materialize_poll_job()
 
     assert calls == [
-        {"discover": False, "limit": 8, "seed_limit": 0},
-        {"discover": False, "limit": 8, "seed_limit": 8},
-        {"discover": False, "limit": 8, "seed_limit": 0},
+        {"discover": False, "limit": 1, "seed_limit": 0},
+        {"discover": False, "limit": 1, "seed_limit": 8},
+        {"discover": False, "limit": 1, "seed_limit": 8},
+        {"discover": False, "limit": 1, "seed_limit": 0},
     ]
 
 
@@ -669,6 +763,7 @@ def test_replacement_availability_fast_poll_passes_changed_source_clock_report(m
         ("Wellington", "2026-07-03", "high"),
     )
     assert "quota_critical" not in anchor_calls[1]
+    assert anchor_calls[1]["quota_priority"] is True
     assert 0.0 < anchor_calls[1]["max_wall_clock_seconds"] <= 10.0
     assert cycle_calls[0]["scopes"] == (
         ("Seoul", "2026-07-03", "high"),
@@ -1137,7 +1232,10 @@ def test_ecmwf_source_clock_captures_anchor_before_single_runs_fanout(monkeypatc
                 "written_manifest_count": 0,
             }
         calls.append("anchor")
-        assert kwargs == {"max_wall_clock_seconds": 10.0}
+        assert kwargs == {
+            "max_wall_clock_seconds": 10.0,
+            "quota_priority": True,
+        }
         return {
             "status": "CURRENT_TARGET_RAW_INPUTS_DOWNLOADED",
             "written_manifest_count": 2,
@@ -1282,6 +1380,7 @@ def test_source_commit_reseed_triggers_share_one_manifest_snapshot(
         cfg,
         scopes=(("Paris", "2026-07-18", "high"),),
         manifest_snapshot=snapshot,
+        causal_baseline_source_run_id="ecmwf-open-data:12z",
     )
 
     assert len(load_calls) == 1
@@ -1289,6 +1388,9 @@ def test_source_commit_reseed_triggers_share_one_manifest_snapshot(
     assert trigger_calls[0][1]["manifests"] is loaded
     assert trigger_calls[1][1]["manifests"] is loaded
     assert trigger_calls[1][1]["include_missing_posterior"] is True
+    assert trigger_calls[1][1]["causal_baseline_source_run_id"] == (
+        "ecmwf-open-data:12z"
+    )
     assert trigger_calls[0][1]["computed_at"] == trigger_calls[1][1]["computed_at"]
 
 

@@ -62,6 +62,7 @@ import os
 import signal
 import subprocess
 import sys
+import threading
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -93,6 +94,90 @@ _PROCESS_GIT_HEAD = _git_head_at_boot()
 
 _heartbeat_fails = 0
 MARKET_CHANNEL_FIRST_FIRE_DELAY_SECONDS = 30
+MARKET_CHANNEL_BOOTSTRAP_DEADLINE_SECONDS = 60.0
+_market_channel_bootstrap_lock = threading.Lock()
+_market_channel_bootstrap_worker: threading.Thread | None = None
+_market_channel_bootstrap_generation: str | None = None
+_market_channel_bootstrap_started_monotonic: float | None = None
+
+
+def _market_channel_bootstrap_job(fn):
+    """Keep scheduler capacity bounded while a restart bootstrap reaches registration.
+
+    A timed-out worker is fenced in the lane before a successor starts.  It may
+    finish its current SQLite read, but cannot register a second consumer.
+    """
+
+    from src.ingest import price_channel_ingest as lane
+
+    global _market_channel_bootstrap_generation, _market_channel_bootstrap_started_monotonic
+    global _market_channel_bootstrap_worker
+    now = time.monotonic()
+    with _market_channel_bootstrap_lock:
+        worker = _market_channel_bootstrap_worker
+        generation = _market_channel_bootstrap_generation
+        started_at = _market_channel_bootstrap_started_monotonic
+        if worker is not None and worker.is_alive():
+            elapsed = max(0.0, now - (started_at if started_at is not None else now))
+            if generation is None or elapsed < MARKET_CHANNEL_BOOTSTRAP_DEADLINE_SECONDS:
+                return {
+                    "thread": "bootstrap_worker_running",
+                    "bootstrap_generation": generation,
+                    "bootstrap_elapsed_seconds": elapsed,
+                }
+            # SCOPE: this one bootstrap worker generation, never all consumers.
+            # DRAIN: supersede it before starting its one bounded replacement worker.
+            # RESET: a current ready receipt lets future scheduler fires reuse the owner.
+            lane._edli_supersede_market_channel_bootstrap(generation)
+            failure = {
+                "thread": "bootstrap_worker_superseded",
+                "bootstrap_generation": generation,
+                "bootstrap_elapsed_seconds": elapsed,
+                "scheduler_failed": True,
+                "scheduler_failure_reason": "registration_not_reached",
+            }
+        else:
+            failure = None
+
+        readiness_error = lane._edli_market_channel_sink_readiness_error()
+        if readiness_error is None:
+            target = fn
+            args = ()
+            kwargs = {}
+            generation = None
+        elif (
+            getattr(lane, "_edli_market_channel_thread", None) is not None
+            and lane._edli_market_channel_thread.is_alive()
+        ):
+            # Let the lane's own generation clock retire an unregistered runner.
+            # Starting another generation here would reset that clock forever.
+            target = fn
+            args = ()
+            kwargs = {}
+            with lane._market_channel_bootstrap_lock:
+                generation = lane._market_channel_bootstrap_generation
+        else:
+            generation = lane._edli_begin_market_channel_bootstrap()
+            target = fn
+            args = ()
+            kwargs = {"bootstrap_generation": generation}
+        _market_channel_bootstrap_generation = generation
+        _market_channel_bootstrap_started_monotonic = now
+        _market_channel_bootstrap_worker = threading.Thread(
+            target=target,
+            args=args,
+            kwargs=kwargs,
+            name="edli-market-channel-bootstrap",
+            daemon=True,
+        )
+        _market_channel_bootstrap_worker.start()
+    if failure is not None:
+        return failure
+    return {
+        "thread": "bootstrap_worker_started",
+        "bootstrap_generation": generation,
+        "sink_readiness_error": readiness_error,
+    }
 
 
 def _graceful_shutdown(signum, frame) -> None:
@@ -333,7 +418,9 @@ def main() -> None:
     # PRODUCER 2: market-channel online-service bootstrap (1-min). Job id byte-identical to
     # the order daemon's so dashboards / scheduler_health keying carry over unchanged.
     _scheduler.add_job(
-        _scheduler_job("edli_market_channel_ingestor")(_edli_market_channel_ingestor_cycle),
+        _scheduler_job("edli_market_channel_ingestor")(
+            lambda: _market_channel_bootstrap_job(_edli_market_channel_ingestor_cycle)
+        ),
         "interval",
         minutes=1,
         id="edli_market_channel_ingestor",

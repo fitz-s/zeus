@@ -348,9 +348,9 @@ scripts:
     canonical_command: "PYTHONPATH=. python3 scripts/evaluate_current_regime_capital_advantage.py --trades state/zeus_trades.db --forecasts state/zeus-forecasts.db --artifact state/current_regime_capital_advantage.json"
     external_inputs: []
     promotion_barrier: "Only an exact-revision PASS may be consumed by a separate reviewed admission seam; this script never submits orders or writes canonical DB truth."
-    required_helpers: [src.engine.global_batch_runtime.CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION, src.contracts.global_auction_receipt.assert_global_auction_summary_integrity, src.riskguard.riskguard._day0_live_realized_capital_curve, src.riskguard.riskguard._qkernel_live_realized_capital_curve]
+    required_helpers: [src.engine.global_batch_runtime.CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION, src.contracts.global_auction_receipt.assert_global_auction_summary_integrity, src.riskguard.riskguard._day0_live_realized_capital_curve, src.riskguard.riskguard._qkernel_live_realized_capital_curve, src.state.db.get_world_connection_read_only]
     required_tests: [tests/test_evaluate_current_regime_capital_advantage.py, tests/test_riskguard.py]
-    unguarded_write_rationale: "Reads all canonical DBs through SQLite mode=ro and atomically writes only the declared non-authority JSON evidence artifact."
+    unguarded_write_rationale: "Reads all canonical DBs through SQLite mode=ro, including current EDLI live-order receipts from WORLD rather than the retired TRADE mirror; binds every incremental ENTRY command to its own exact global-auction receipt even when one position spans multiple selection epochs; and atomically writes only the declared non-authority JSON evidence artifact."
   audit_replay_fidelity.py: {class: read_only_evidence}
   audit_time_semantics.py: {class: read_only_evidence}
   automation_analysis.py: {class: read_only_evidence}
@@ -871,7 +871,7 @@ scripts:
     external_inputs: [position_current, position_events, outcome_fact, settlement_attribution]
     promotion_barrier: "Read-only read_only_evidence; output cannot authorize live trading, live restart, submit/cancel, or DB truth mutation."
     required_tests: [tests/test_ops_scripts_smoke.py]
-  deploy_live.py: {class: runtime_support, required_tests: [tests/test_ops_scripts_smoke.py], reuse_when: "Restart live launchd daemons safely: stop the live mesh, run bounded schema/command recovery, verify prerequisite identity and preflight, require the restart-blocking absolute_live_unit_price_band attestation, then bootstrap and verify runtime progress; refuses a dirty or unpushed runtime tree unless explicitly overridden.", do_not_use_when: "Do not use to deploy untested code; the gate is a tree-cleanliness and stopped-recovery protocol, not a correctness proof.", canonical_command: "python3 scripts/deploy_live.py status|restart <daemon|all>"}
+  deploy_live.py: {class: runtime_support, required_tests: [tests/test_ops_scripts_smoke.py], reuse_when: "Restart live launchd daemons safely: stop the live mesh, run bounded schema/command recovery, verify prerequisite identity and preflight, require the restart-blocking absolute_live_unit_price_band attestation, then prove every held position received a post-boot monitor attempt. A loaded-daemon repair handoff with open exposure requires an already-durable entry pause, zero nonterminal commands, and complete recent monitor identity with fresh held-side CLOB for every position; probability-only degradation may hand off to the repair but remains family-blocked by runtime law. Refuses a dirty or unpushed runtime tree unless explicitly overridden.", do_not_use_when: "Do not use to deploy untested code; the gate is a tree-cleanliness and stopped-recovery protocol, not a correctness proof.", canonical_command: "python3 scripts/deploy_live.py status|restart <daemon|all>"}
   download_replacement_forecast_current_targets.py:
     class: etl_writer
     dangerous_if_run: true
@@ -881,7 +881,7 @@ scripts:
     read_targets: [config/cities.json, config/settings.json, state/source_updates/open_meteo_model_updates.jsonl, state/openmeteo_quota.json, state/zeus-world.db, state/zeus-forecasts.db, state/zeus_trades.db, state/replacement_forecast_live/raw_manifests]
     write_targets: [state/openmeteo_quota.json, state/replacement_forecast_live/raw_manifests, state/zeus-forecasts.db, output_json]
     authority_scope: replacement_forecast_raw_capture
-    reuse_when: "Capture current-target run-pinned Open-Meteo anchor payloads, precision metadata, durable rotation state, and raw artifact manifests before replacement posterior materialization."
+    reuse_when: "Capture current-target run-pinned Open-Meteo anchor payloads, precision metadata, durable rotation state, and raw artifact manifests before replacement posterior materialization; source-clock callers propagate their reserved quota lane into metadata, run-pinned, and worker-thread transports, and when that metered lane is exhausted the downloader skips doomed API waves and immediately tries the independently published cross-check-qualified bucket rung. A timeboxed bucket target that completed zero payloads retains its rotation head so the per-cycle point cache can converge on the next slice; rotation resumes after a full target is processed."
     do_not_use_when: "Do not treat downloaded raw artifacts as executable probability authority; only the replacement materializer may publish live forecast_posteriors after exact manifest and freshness validation."
     canonical_command: "python3 scripts/download_replacement_forecast_current_targets.py [--cycle ISO] [--limit N] [--write-db] [--output-json PATH] [--stdout]"
     external_inputs: [Open-Meteo forecast APIs, Open-Meteo bucket partial-run transport]
@@ -924,6 +924,17 @@ scripts:
   extract_tigge_mn2t6_localday_min.py: {class: etl_writer, dangerous_if_run: false, external_inputs: [TIGGE_GRIB_CACHE], write_targets: ["data/local_calendar_day_snapshots/"]}
   extract_tigge_mx2t6_localday_max.py: {class: etl_writer, dangerous_if_run: false, external_inputs: [TIGGE_GRIB_CACHE], write_targets: ["data/local_calendar_day_snapshots/"]}
   force_lifecycle.py: {class: repair, apply_flag: implicit, target_db: state/zeus_trades.db, unguarded_write_rationale: "Direct lifecycle forcing is unsafe and currently unguarded; do not run outside a dedicated repair packet."}
+  watch_full_loss_investigation.py:
+    class: runtime_support
+    dangerous_if_run: false
+    read_targets: [state/zeus_trades.db, state/deployment_freshness.json, git_repo_metadata]
+    write_targets: ["~/.openclaw/workspace-zeus-loss-investigator/"]
+    external_inputs: [codex_binary, dedicated_nonlive_repair_worktree]
+    required_tests: [tests/test_full_loss_investigation_loop.py]
+    reuse_when: "Continuously detect canonical settled positions whose cumulative realized loss is at least 95% of command-deduped confirmed entry-fill gross basis, retract economically corrected false incidents without deleting their trail, and trigger schema-validated ephemeral Codex investigations using only the dedicated full-loss memory registry."
+    do_not_use_when: "Do not treat its investigation memory as canonical trade truth, let it write a live checkout or canonical DB, or use its output as proof that a repair is loaded or profitable."
+    canonical_command: "python3 scripts/watch_full_loss_investigation.py --workspace ~/.openclaw/workspace-zeus-loss-investigator bootstrap|scan-once|daemon|status|record-repair|requeue"
+    unguarded_write_rationale: "Writes only the declared isolated external investigation workspace; canonical Zeus DB access uses SQLite mode=ro."
   generate_calibration_report.py: {class: evidence_report_writer, write_targets: [docs/reference/calibration_report.md, docs/reference/calibration_reliability.svg, stdout], read_targets: [state/zeus-world.db, state/zeus_trades.db], required_tests: [tests/scripts/test_generate_calibration_report.py], reuse_when: "Regenerate the settled-position reliability diagram (predicted probability vs settled frequency, decomposed, cut by lead time/side/strategy/six-class attribution) after new settlements land; READ-ONLY over zeus-world.db + zeus_trades.db via file:...?mode=ro, ATTACH read-only (INV-37); reads settlement_attribution exclusively (settled-only ground truth, never an unsettled/synthetic outcome).", do_not_use_when: "Do not treat this report as a return/PnL claim -- the sample is too small to support one (see the report's closing section); do not hand-edit the generated .md/.svg -- edit this generator instead.", canonical_command: "python3 scripts/generate_calibration_report.py [--stdout] [--world-db PATH] [--trades-db PATH]", external_inputs: [], promotion_barrier: "Generated report artifact only; not a promotion authority or live-decision input.", required_helpers: [], unguarded_write_rationale: "Writes only the declared docs/reference/calibration_report.md + calibration_reliability.svg; both live DB connections are opened mode=ro."}
   generate_calibration_pairs.py: {class: stale_deprecated, status: deprecated, lifecycle: deprecated_fail_closed, fail_closed: true, canonical_command: DO_NOT_RUN, replacement: rebuild_calibration_pairs_canonical.py, delete_policy: archive_or_delete_in_cleanup_packet, reason: legacy market_events calibration-pair generator retired}
   generate_monthly_bounds.py: {class: config_writer}
@@ -2567,6 +2578,148 @@ scripts:
       - tests/test_backfill_bayes_precision_fusion_history_refuses_missing_request_identity.py
       - tests/test_backfill_bayes_precision_fusion_history_is_idempotent_under_new_unique_key.py
       - tests/test_bayes_precision_fusion_no_leak_history_join.py
+
+  # --- reversal-plan tier0 item 4 (2026-08-24): non-circular scoreboard ---
+  scoreboard_panels.py:
+    class: read_only_evidence
+    lifecycle: long_lived
+    status: active
+    authority_scope: offline_no_promotion
+    read_targets: [state/zeus-world.db, state/zeus_trades.db]
+    write_targets: [stdout]
+    dry_run_default: true
+    apply_flag: null
+    target_db: null
+    external_inputs: []
+    dangerous_if_run: false
+    delete_policy: retain_until_superseded
+    reuse_when: >
+      Read the non-circular scoreboard (paired forecast proper-scores vs price,
+      price-only selection edge, execution fill quality, exit lifecycle) for
+      settled positions and executed fills. Replaces the old
+      settlement_attribution.category grader (SKILL_WIN/LUCKY_WIN/...), which
+      is circular because it grades trades against our own q instead of price
+      or settlement truth. Idempotent read-only report; safe to re-run anytime.
+    do_not_use_when: >
+      Any task needs to authorize a live decision or promote evidence to
+      canonical truth — this script's output is offline analytics only.
+    canonical_command: "python3 scripts/scoreboard_panels.py [--root PATH] [--world PATH] [--trades PATH] [--panel P1|P2|P3|P4|ALL]"
+    promotion_barrier: "Read-only analytics; cannot authorize live strategy or DB truth changes."
+    required_helpers: []
+    required_tests: [tests/scripts/test_scoreboard_panels.py]
+    unguarded_write_rationale: "No writes; opens both DBs strictly read-only via file:...?mode=ro&immutable=0 URIs; SELECT-only; prints markdown to stdout."
+
+  # --- reversal-plan tier0 item 9 (2026-08-24): market-anchored walk-forward calibrator ---
+  calibrator_walkforward_report.py:
+    class: read_only_evidence
+    lifecycle: long_lived
+    status: active
+    authority_scope: offline_no_promotion
+    read_targets: [state/zeus-world.db]
+    write_targets: [stdout]
+    dry_run_default: true
+    apply_flag: null
+    target_db: null
+    external_inputs: []
+    dangerous_if_run: false
+    delete_policy: retain_until_superseded
+    reuse_when: >
+      Read the walk-forward evaluation of the offline market-anchored residual
+      calibrator (src/calibration/market_anchored_residual.py): paired
+      log-loss of market p0 alone, raw q, and calibrated r_hat, per month and
+      per |q-p| bucket, plus the fitted beta trajectory and final frozen
+      artifact. Idempotent read-only report; safe to re-run anytime. NOT
+      wired into the live entry path — offline evidence only.
+    do_not_use_when: >
+      Any task needs to authorize a live decision, size a position, or
+      promote a calibrator artifact to a served/canonical parameter set —
+      this script's output is offline analytics only and the module it
+      reports on has no live caller.
+    canonical_command: "python3 -m scripts.calibrator_walkforward_report [--root PATH] [--world PATH] [--min-train-rows N]"
+    promotion_barrier: "Read-only analytics; cannot authorize live strategy, sizing, or DB truth changes."
+    required_helpers: []
+    required_tests: [tests/scripts/test_calibrator_walkforward_report.py, tests/calibration/test_market_anchored_residual.py]
+    unguarded_write_rationale: "No writes; opens zeus-world.db strictly read-only via file:...?mode=ro&immutable=0 URI; SELECT-only; prints markdown to stdout."
+
+  # --- reversal-plan tier0 item 7 (2026-08-24): preregistered selection-lift report ---
+  selection_lift_report.py:
+    class: read_only_evidence
+    lifecycle: long_lived
+    status: active
+    authority_scope: offline_no_promotion
+    read_targets: [state/zeus-world.db]
+    write_targets: [stdout]
+    dry_run_default: true
+    apply_flag: null
+    target_db: null
+    external_inputs: []
+    dangerous_if_run: false
+    delete_policy: retain_until_superseded
+    reuse_when: >
+      Read the preregistered Tier-0 ordinal selection-lift test report (frozen
+      docs/operations/current/plans/tier0_selection_lift_preregistration_2026-08-24.md):
+      permutation p-value, city-date and date-block bootstrap CIs (larger
+      governs), and the decision-rule verdict, over src/analysis/
+      selection_lift.py (DB-agnostic pure computation). Refuses to print a
+      p-value below 100 qualifying observations (the evaluation lock);
+      --pilot-power-check prints only report-only cluster variance instead.
+      Prints "provenance table absent — 0 observations" cleanly if Item 3's
+      candidate-set persistence table (not yet landed as of 2026-08-24) is
+      absent. Idempotent read-only report; safe to re-run anytime. NOT wired
+      into the live entry path — offline evidence only.
+    do_not_use_when: >
+      Any task needs to authorize a live decision, size a position, or treat
+      an accruing (pre-stopping-count) result as evidence — the frozen doc
+      forbids early peeks and this script enforces that by refusing to print
+      p before 100 observations. This script's output is offline analytics
+      only.
+    canonical_command: "python3 -m scripts.selection_lift_report [--root PATH] [--world PATH] [--n-perm N] [--n-boot N] [--seed N] [--pilot-power-check]"
+    promotion_barrier: "Read-only analytics; cannot authorize live strategy, sizing, or DB truth changes; refuses a p-value before the frozen stopping count."
+    required_helpers: []
+    required_tests: [tests/scripts/test_selection_lift_report.py, tests/analysis/test_selection_lift.py]
+    unguarded_write_rationale: "No writes; opens zeus-world.db strictly read-only via file:...?mode=ro&immutable=0 URI (scoreboard_panels.open_ro); SELECT-only; prints markdown to stdout."
+
+  # --- reversal-plan tier0 item 10 (2026-08-24): two-gate capital promotion evaluator ---
+  promotion_gates_report.py:
+    class: read_only_evidence
+    lifecycle: long_lived
+    status: active
+    authority_scope: offline_no_promotion
+    read_targets: [state/zeus-world.db]
+    write_targets: [stdout, state/promotion_gates_ledger.json]
+    dry_run_default: true
+    apply_flag: null
+    target_db: null
+    external_inputs: []
+    dangerous_if_run: false
+    delete_policy: retain_until_superseded
+    reuse_when: >
+      Read the two-gate capital-promotion verdict (src/analysis/
+      promotion_gates.py): GATE A prequential non-inferiority of the
+      market-anchored calibrator's r_hat vs market price p0 on paired
+      log-loss (cluster-robust city-date/date, larger governs, plus a
+      per-|q-p|-bucket no-catastrophic-degradation side condition) and
+      GATE B capital-use readiness (positive-LCB fill residual AND the
+      preregistered selection-lift test's positive-LCB branch). Also
+      documents (not wires) the single bounded Tier-1 sizing formula.
+      Idempotent for --dry-run; a formal (non---dry-run) Gate-B evaluation
+      is a ONE-SHOT alpha-spending event per preregistration_version,
+      enforced by state/promotion_gates_ledger.json — a second formal
+      evaluation is refused (use --dry-run for repeated viewing). Prints
+      "no tier0-settled sample yet" cleanly when the tier0_flagged marker
+      column is absent (true as of 2026-08-24; Tier-0 admission has no DB
+      writer yet). NOT wired into the live entry path — offline evidence
+      only.
+    do_not_use_when: >
+      Any task needs to authorize a live decision, size a position, or
+      treat a Gate A/B PASS as itself a sizing license — Gate A licenses
+      r_hat for ranking/lifecycle use only, never capital sizing; this
+      script's output is offline analytics only.
+    canonical_command: "python3 -m scripts.promotion_gates_report [--root PATH] [--world PATH] [--gate A|B|ALL] [--dry-run] [--preregistration-version V]"
+    promotion_barrier: "Read-only DB access; cannot authorize live strategy, sizing, or DB truth changes; a formal Gate-B evaluation writes only the alpha-spending ledger, never canonical truth."
+    required_helpers: []
+    required_tests: [tests/scripts/test_promotion_gates_report.py, tests/analysis/test_promotion_gates.py]
+    unguarded_write_rationale: "No DB writes; opens zeus-world.db strictly read-only via file:...?mode=ro&immutable=0 URI (scoreboard_panels.open_ro); SELECT-only. The only write is an atomic (tempfile+fsync+os.replace) append to state/promotion_gates_ledger.json recording a formal Gate-B evaluation's timestamp/sample-hash/verdict -- never a DB write, never a live decision, and --dry-run skips it entirely."
 
   # NOTE (R0-f/R0-g prepare packet, 2026-07-08; extended by the loop-build packet,
   # 2026-07-08): scripts/ops/migrate_plist_secrets.sh, scripts/ops/rotate_zeus_logs.sh,

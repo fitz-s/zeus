@@ -1,6 +1,7 @@
 # Created: 2026-06-10
-# Last reused/audited: 2026-08-12
-# Authority basis: docs/authority/replacement_final_form_2026_06_09.md
+# Last reused/audited: 2026-08-19
+# Authority basis: docs/authority/replacement_final_form_2026_06_09.md; 2026-08-19
+#   market-relative capital evidence retirement of stale ENS live authority.
 """Relationship tests for readiness-bound replacement posterior selection.
 
 The current readiness dependency is the only posterior identity licensed for a decision.
@@ -26,6 +27,8 @@ from src.data.replacement_forecast_bundle_reader import (
     PRODUCT_ID,
     ReplacementForecastAuthorityPurpose,
     SOURCE_ID,
+    read_prior_complete_replacement_forecast_bundle,
+    read_pinned_replacement_forecast_bundle,
     read_replacement_forecast_bundle,
 )
 from src.data.replacement_forecast_readiness import (
@@ -119,6 +122,7 @@ def _insert_posterior(
     stale_shape_reused: bool = False,
     translation_applied: bool = False,
     shape_source_cycle_time: datetime | None = None,
+    decorrelated_providers_complete: bool | None = None,
 ) -> int:
     # ``with_ucb`` lets a row carry q_lcb_json but NOT q_ucb_json (the freshest-row
     # twin-authority carrier defect: a 13:08Z row HAS q_ucb, its 13:09Z sibling MISSING it).
@@ -134,6 +138,27 @@ def _insert_posterior(
     # UNIQUE(posterior_identity_hash)); keying on cycle+mode keeps two rows of the same scope
     # insertable, matching production where each cycle's materialization is a distinct row.
     identity_suffix = f"{source_cycle_time.isoformat()}|{q_mode}"
+    provenance = _provenance(
+        q_mode=q_mode,
+        semantics_revision=semantics_revision,
+        shape_lag_hours=shape_lag_hours,
+        stale_shape_reused=stale_shape_reused,
+        translation_applied=translation_applied,
+        shape_source_cycle_time=(
+            shape_source_cycle_time
+            if shape_source_cycle_time is not None
+            else source_cycle_time - timedelta(hours=shape_lag_hours)
+            if math.isfinite(shape_lag_hours)
+            else None
+        ),
+    )
+    if decorrelated_providers_complete is not None:
+        provenance["bayes_precision_fusion"]["decorrelated_providers_complete"] = (
+            decorrelated_providers_complete
+        )
+        provenance["capture_status"] = (
+            "FULL_CURRENT" if decorrelated_providers_complete else "PARTIAL_CURRENT"
+        )
     conn.execute(
         """
         INSERT INTO forecast_posteriors (
@@ -160,22 +185,7 @@ def _insert_posterior(
             json.dumps({"cold": 0.1, "warm": 0.7}) if with_bounds else None,
             "openmeteo_ifs9_aifs_sampled_2t_soft_anchor",
             json.dumps(deps),
-            json.dumps(
-                _provenance(
-                    q_mode=q_mode,
-                    semantics_revision=semantics_revision,
-                    shape_lag_hours=shape_lag_hours,
-                    stale_shape_reused=stale_shape_reused,
-                    translation_applied=translation_applied,
-                    shape_source_cycle_time=(
-                        shape_source_cycle_time
-                        if shape_source_cycle_time is not None
-                        else source_cycle_time - timedelta(hours=shape_lag_hours)
-                        if math.isfinite(shape_lag_hours)
-                        else None
-                    ),
-                )
-            ),
+            json.dumps(provenance),
             "live",
             0,
             _TOPO_HASH,
@@ -345,7 +355,7 @@ def test_missing_current_evidence_shape_is_not_live_readable() -> None:
     assert result.reason_code == "REPLACEMENT_POSTERIOR_READINESS_NOT_LIVE_GRADE"
 
 
-def test_stale_absolute_disagreement_row_retains_entry_authority() -> None:
+def test_stale_absolute_disagreement_row_is_offline_only() -> None:
     conn = _conn()
     posterior_id = _insert_posterior(
         conn,
@@ -369,9 +379,9 @@ def test_stale_absolute_disagreement_row_retains_entry_authority() -> None:
 
     result = _read(conn, readiness, decision_time=_dt(6, 12))
 
-    assert result.ok is True
-    assert result.bundle is not None
-    assert result.bundle.posterior_id == posterior_id
+    assert result.ok is False
+    assert result.reason_code == "REPLACEMENT_POSTERIOR_READINESS_NOT_LIVE_GRADE"
+    assert result.bundle is None
 
 
 def test_stale_shape_selected_ensemble_beyond_outer_bound_is_blocked() -> None:
@@ -400,10 +410,7 @@ def test_stale_shape_selected_ensemble_beyond_outer_bound_is_blocked() -> None:
     result = _read(conn, readiness, decision_time=_dt(6, 12))
 
     assert result.ok is False
-    assert (
-        result.reason_code
-        == "REPLACEMENT_ENSEMBLE_CYCLE_AGE_EXCEEDS_BOUND"
-    )
+    assert result.reason_code == "REPLACEMENT_POSTERIOR_READINESS_NOT_LIVE_GRADE"
 
 
 def test_same_cycle_shape_selected_ensemble_future_or_old_is_blocked() -> None:
@@ -469,7 +476,7 @@ def test_same_cycle_shape_without_selected_ensemble_time_is_blocked() -> None:
     assert result.reason_code == "REPLACEMENT_POSTERIOR_READINESS_NOT_LIVE_GRADE"
 
 
-def test_stale_absolute_disagreement_row_has_held_redecision_authority() -> None:
+def test_stale_absolute_disagreement_row_has_no_held_redecision_authority() -> None:
     conn = _conn()
     posterior_id = _insert_posterior(
         conn,
@@ -498,9 +505,9 @@ def test_stale_absolute_disagreement_row_has_held_redecision_authority() -> None
         authority_purpose=ReplacementForecastAuthorityPurpose.HELD_REDECISION,
     )
 
-    assert result.ok is True
-    assert result.bundle is not None
-    assert result.bundle.posterior_id == posterior_id
+    assert result.ok is False
+    assert result.reason_code == "REPLACEMENT_POSTERIOR_READINESS_NOT_LIVE_GRADE"
+    assert result.bundle is None
 
 
 def test_nonfinite_shape_lag_has_no_held_authority() -> None:
@@ -812,3 +819,245 @@ def test_readiness_bound_q_ucb_missing_cannot_borrow_older_bounds() -> None:
     result = _read(conn, readiness, decision_time=_dt(6, 12))
     assert result.ok is False
     assert result.reason_code == "REPLACEMENT_POSTERIOR_READINESS_NOT_LIVE_GRADE"
+
+
+def test_held_pinned_reader_binds_exact_row_without_raw_hwm() -> None:
+    conn = _conn()
+    statements: list[str] = []
+    conn.set_trace_callback(statements.append)
+    complete_id = _insert_posterior(
+        conn,
+        source_cycle_time=_dt(6, 0),
+        source_available_at=_dt(6, 7),
+        computed_at=_dt(6, 7, 30),
+        q_mode=_FUSED_FULL,
+        with_bounds=True,
+        decorrelated_providers_complete=True,
+    )
+    # This newer partial row is intentionally the latest row.  The exact pinned
+    # read must still return the older immutable complete carrier and must not call
+    # the raw-input HWM reader.
+    _insert_posterior(
+        conn,
+        source_cycle_time=_dt(6, 6),
+        source_available_at=_dt(6, 11),
+        computed_at=_dt(6, 11, 30),
+        q_mode=_FUSED_FULL,
+        with_bounds=True,
+        decorrelated_providers_complete=False,
+    )
+    statements.clear()
+
+    result = read_pinned_replacement_forecast_bundle(
+        conn,
+        posterior_id=complete_id,
+        city="Shanghai",
+        target_date=date(2026, 6, 7),
+        temperature_metric="high",
+        decision_time=_dt(6, 12),
+        current_bin_topology_hash=_TOPO_HASH,
+        authority_purpose=ReplacementForecastAuthorityPurpose.HELD_REDECISION,
+    )
+
+    assert result.ok is True
+    assert result.reason_code == "REPLACEMENT_POSTERIOR_READY"
+    assert result.bundle is not None
+    assert result.bundle.posterior_id == complete_id
+    assert result.bundle.source_cycle_time == _dt(6, 0).isoformat()
+    assert result.bundle.posterior_identity_hash
+    assert not any(
+        statement.lstrip().upper().startswith(("INSERT", "UPDATE", "DELETE", "REPLACE"))
+        for statement in statements
+    )
+
+    repeated = read_pinned_replacement_forecast_bundle(
+        conn,
+        posterior_id=complete_id,
+        city="Shanghai",
+        target_date=date(2026, 6, 7),
+        temperature_metric="high",
+        decision_time=_dt(6, 12),
+        current_bin_topology_hash=_TOPO_HASH,
+        authority_purpose=ReplacementForecastAuthorityPurpose.HELD_REDECISION,
+    )
+    assert repeated.bundle is not None
+    assert repeated.bundle.posterior_identity_hash == result.bundle.posterior_identity_hash
+
+
+def test_prior_complete_reader_resets_when_newer_cycle_is_complete() -> None:
+    conn = _conn()
+    _insert_posterior(
+        conn,
+        source_cycle_time=_dt(6, 0),
+        source_available_at=_dt(6, 7),
+        computed_at=_dt(6, 7, 30),
+        q_mode=_FUSED_FULL,
+        with_bounds=True,
+        decorrelated_providers_complete=True,
+    )
+    _insert_posterior(
+        conn,
+        source_cycle_time=_dt(6, 6),
+        source_available_at=_dt(6, 11),
+        computed_at=_dt(6, 11, 30),
+        q_mode=_FUSED_FULL,
+        with_bounds=True,
+        decorrelated_providers_complete=True,
+    )
+
+    result = read_prior_complete_replacement_forecast_bundle(
+        conn,
+        city="Shanghai",
+        target_date=date(2026, 6, 7),
+        temperature_metric="high",
+        decision_time=_dt(6, 12),
+        current_bin_topology_hash=_TOPO_HASH,
+        authority_purpose=ReplacementForecastAuthorityPurpose.HELD_REDECISION,
+    )
+
+    assert result.ok is False
+    assert result.status == "NOT_APPLICABLE"
+    assert result.reason_code == "REPLACEMENT_PINNED_COMPLETE_CYCLE_RESET"
+
+
+def test_prior_complete_frontier_prefers_source_cycle_over_late_old_recompute() -> None:
+    conn = _conn()
+    old_complete_id = _insert_posterior(
+        conn,
+        source_cycle_time=_dt(6, 0),
+        source_available_at=_dt(6, 7),
+        computed_at=_dt(6, 12),
+        q_mode=_FUSED_FULL,
+        with_bounds=True,
+        decorrelated_providers_complete=True,
+    )
+    _insert_posterior(
+        conn,
+        source_cycle_time=_dt(6, 6),
+        source_available_at=_dt(6, 11),
+        computed_at=_dt(6, 11),
+        q_mode=_FUSED_FULL,
+        with_bounds=True,
+        decorrelated_providers_complete=False,
+    )
+
+    result = read_prior_complete_replacement_forecast_bundle(
+        conn,
+        city="Shanghai",
+        target_date=date(2026, 6, 7),
+        temperature_metric="high",
+        decision_time=_dt(6, 13),
+        current_bin_topology_hash=_TOPO_HASH,
+        authority_purpose=ReplacementForecastAuthorityPurpose.HELD_REDECISION,
+    )
+
+    assert result.ok is True
+    assert result.reason_code == "REPLACEMENT_PINNED_COMPLETE_POSTERIOR_READY"
+    assert result.bundle is not None
+    assert result.bundle.posterior_id == old_complete_id
+
+
+def test_prior_complete_frontier_excludes_future_partial_wave() -> None:
+    conn = _conn()
+    _insert_posterior(
+        conn,
+        source_cycle_time=_dt(6, 0),
+        source_available_at=_dt(6, 7),
+        computed_at=_dt(6, 7, 30),
+        q_mode=_FUSED_FULL,
+        with_bounds=True,
+        decorrelated_providers_complete=True,
+    )
+    for source_cycle_time, source_available_at, computed_at in (
+        (_dt(6, 13), _dt(6, 13, 30), _dt(6, 13, 45)),
+        (_dt(6, 11), _dt(6, 13, 30), _dt(6, 13, 45)),
+        (_dt(6, 10), _dt(6, 10, 30), _dt(6, 13, 45)),
+    ):
+        _insert_posterior(
+            conn,
+            source_cycle_time=source_cycle_time,
+            source_available_at=source_available_at,
+            computed_at=computed_at,
+            q_mode=_FUSED_FULL,
+            with_bounds=True,
+            decorrelated_providers_complete=False,
+        )
+
+    result = read_prior_complete_replacement_forecast_bundle(
+        conn,
+        city="Shanghai",
+        target_date=date(2026, 6, 7),
+        temperature_metric="high",
+        decision_time=_dt(6, 12),
+        current_bin_topology_hash=_TOPO_HASH,
+        authority_purpose=ReplacementForecastAuthorityPurpose.HELD_REDECISION,
+    )
+
+    assert result.ok is False
+    assert result.status == "NOT_APPLICABLE"
+    assert result.reason_code == "REPLACEMENT_PINNED_COMPLETE_CYCLE_RESET"
+
+
+def test_prior_complete_frontier_reaches_carrier_after_large_partial_wave() -> None:
+    conn = _conn()
+    old_complete_id = _insert_posterior(
+        conn,
+        source_cycle_time=_dt(6, 0),
+        source_available_at=_dt(6, 0, 1),
+        computed_at=_dt(6, 0, 2),
+        q_mode=_FUSED_FULL,
+        with_bounds=True,
+        decorrelated_providers_complete=True,
+    )
+    for minute in range(1, 81):
+        source_cycle_time = _dt(6, 0) + timedelta(minutes=minute)
+        _insert_posterior(
+            conn,
+            source_cycle_time=source_cycle_time,
+            source_available_at=source_cycle_time + timedelta(minutes=1),
+            computed_at=source_cycle_time + timedelta(minutes=2),
+            q_mode=_FUSED_FULL,
+            with_bounds=True,
+            decorrelated_providers_complete=False,
+        )
+
+    result = read_prior_complete_replacement_forecast_bundle(
+        conn,
+        city="Shanghai",
+        target_date=date(2026, 6, 7),
+        temperature_metric="high",
+        decision_time=_dt(6, 5),
+        current_bin_topology_hash=_TOPO_HASH,
+        authority_purpose=ReplacementForecastAuthorityPurpose.HELD_REDECISION,
+    )
+
+    assert result.ok is True
+    assert result.bundle is not None
+    assert result.bundle.posterior_id == old_complete_id
+
+
+def test_pinned_reader_is_entry_isolated() -> None:
+    conn = _conn()
+    posterior_id = _insert_posterior(
+        conn,
+        source_cycle_time=_dt(6, 0),
+        source_available_at=_dt(6, 7),
+        computed_at=_dt(6, 7, 30),
+        q_mode=_FUSED_FULL,
+        with_bounds=True,
+        decorrelated_providers_complete=True,
+    )
+
+    result = read_pinned_replacement_forecast_bundle(
+        conn,
+        posterior_id=posterior_id,
+        city="Shanghai",
+        target_date=date(2026, 6, 7),
+        temperature_metric="high",
+        decision_time=_dt(6, 12),
+        current_bin_topology_hash=_TOPO_HASH,
+        authority_purpose=ReplacementForecastAuthorityPurpose.ENTRY,
+    )
+
+    assert result.ok is False
+    assert result.reason_code == "REPLACEMENT_PINNED_HELD_AUTHORITY_REQUIRED"

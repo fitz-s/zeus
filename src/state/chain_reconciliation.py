@@ -238,7 +238,8 @@ class ChainPositionView:
 
 
 _ALLOCATE_DUST = 0.01  # minimum size difference treated as dust, not a gap
-# PR review fix (2026-05-31, issue #1): after the chain_shares first-
+_CHAIN_ONLY_MATCH_SHARE_TOLERANCE = Decimal("0.0001")
+# Copilot review fix (2026-05-31, issue #1): after the chain_shares first-
 # population the old helper returned early when shares were unchanged, leaving
 # chain_seen_at permanently frozen. Re-emit the observation event when the
 # persisted timestamp is older than this threshold to keep classify_chain_state()
@@ -885,7 +886,7 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
         chain_avg_price and chain_cost_basis_usd. A false first element means
         no canonical row exists yet — the position has no projection to update.
 
-        PR review fix (2026-05-31, issue #1): include chain_seen_at so the
+        Copilot review fix (2026-05-31, issue #1): include chain_seen_at so the
         observation helper can decide whether the TIMESTAMP needs refresh
         independently of whether chain_shares changed. Without this the helper
         returned early on shares-unchanged positions and chain_seen_at went
@@ -958,7 +959,7 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
         chain_cost_basis_usd / chain_seen_at onto position_current WITHOUT any
         share mutation or phase transition.
 
-        Timestamp-refresh fix (2026-05-31, review issue #1): after
+        Timestamp-refresh fix (2026-05-31, Copilot review issue #1): after
         first-population, shares are unchanged so the old code returned early
         every cycle — chain_seen_at was frozen at the first-population timestamp
         forever. On daemon restart classify_chain_state() reads chain_seen_at
@@ -1904,15 +1905,140 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
             state_value = getattr(position.state, "value", position.state)
             if str(state_value) not in INACTIVE_RUNTIME_STATES:
                 continue
-            if (
-                chain_condition_id
-                and str(getattr(position, "condition_id", "") or "")
-                and str(getattr(position, "condition_id", "") or "") != chain_condition_id
-            ):
-                continue
             candidates.append(position)
         if not candidates:
             return False
+
+        # ``portfolio.ignored_tokens`` is a loader cache and may be stale or
+        # empty after restart.  A current exact settled-position suppression
+        # is canonical evidence that this terminal token must not be reborn
+        # from a wallet balance.  An unavailable/malformed current projection
+        # is equally unsafe: fail closed for this candidate rather than turn a
+        # DB read fault into active exposure.
+        if conn is None:
+            stats["terminal_chain_exposure_suppression_unavailable"] = (
+                stats.get("terminal_chain_exposure_suppression_unavailable", 0) + 1
+            )
+            logger.error(
+                "TERMINAL_CHAIN_SUPPRESSION_UNAVAILABLE: token=%s condition=%s: no connection",
+                token_id,
+                chain_condition_id,
+            )
+            return False
+        if not chain_condition_id:
+            stats["terminal_chain_exposure_condition_unavailable"] = (
+                stats.get("terminal_chain_exposure_condition_unavailable", 0) + 1
+            )
+            logger.error(
+                "TERMINAL_CHAIN_CONDITION_UNAVAILABLE: token=%s", token_id
+            )
+            return False
+        try:
+            columns = {
+                str(row[1])
+                for row in conn.execute(
+                    "PRAGMA table_info(position_current)"
+                ).fetchall()
+            }
+            if not {
+                "position_id", "trade_id", "direction", "token_id", "no_token_id",
+                "condition_id",
+            } <= columns:
+                raise RuntimeError("position_current identity projection is unavailable")
+            canonical_candidates: list[Position] = []
+            for position in candidates:
+                position_id = str(getattr(position, "position_id", "") or "")
+                trade_id = str(getattr(position, "trade_id", "") or "")
+                if not position_id:
+                    position_id = trade_id
+                if not trade_id:
+                    trade_id = position_id
+                if not position_id or not trade_id:
+                    stats["terminal_chain_exposure_canonical_identity_unavailable"] = (
+                        stats.get("terminal_chain_exposure_canonical_identity_unavailable", 0) + 1
+                    )
+                    continue
+                canonical_rows = conn.execute(
+                    """
+                    SELECT position_id, trade_id, direction, token_id, no_token_id, condition_id
+                      FROM position_current
+                     WHERE position_id = ? OR trade_id = ?
+                    """,
+                    (position_id, trade_id),
+                ).fetchall()
+                if len(canonical_rows) != 1:
+                    stats["terminal_chain_exposure_canonical_identity_unavailable"] = (
+                        stats.get("terminal_chain_exposure_canonical_identity_unavailable", 0) + 1
+                    )
+                    continue
+                canonical = canonical_rows[0]
+                direction = str(canonical["direction"] or "").strip().lower()
+                canonical_token_id = (
+                    str(canonical["no_token_id"] or "").strip()
+                    if direction == "buy_no"
+                    else str(canonical["token_id"] or "").strip()
+                    if direction == "buy_yes"
+                    else ""
+                )
+                canonical_condition_id = str(canonical["condition_id"] or "").strip()
+                if (
+                    canonical_token_id != token_id
+                    or not canonical_condition_id
+                    or canonical_condition_id != chain_condition_id
+                ):
+                    stats["terminal_chain_exposure_condition_mismatch"] = (
+                        stats.get("terminal_chain_exposure_condition_mismatch", 0) + 1
+                    )
+                    continue
+                canonical_candidates.append(position)
+            if not canonical_candidates:
+                logger.error(
+                    "TERMINAL_CHAIN_CANONICAL_IDENTITY_MISMATCH: token=%s chain_condition=%s",
+                    token_id,
+                    chain_condition_id,
+                )
+                return False
+            candidates = canonical_candidates
+
+            suppression_columns = {
+                str(row[1])
+                for row in conn.execute(
+                    "PRAGMA table_info(token_suppression)"
+                ).fetchall()
+            }
+            if not {"token_id", "condition_id", "suppression_reason"} <= suppression_columns:
+                raise RuntimeError("token_suppression current projection is unavailable")
+            suppression = conn.execute(
+                """
+                SELECT suppression_reason
+                  FROM token_suppression
+                 WHERE token_id = ?
+                   AND condition_id = ?
+                """,
+                (token_id, chain_condition_id),
+            ).fetchone()
+        except Exception as exc:
+            stats["terminal_chain_exposure_suppression_unavailable"] = (
+                stats.get("terminal_chain_exposure_suppression_unavailable", 0) + 1
+            )
+            logger.error(
+                "TERMINAL_CHAIN_SUPPRESSION_UNAVAILABLE: token=%s condition=%s: %s",
+                token_id,
+                chain_condition_id,
+                exc,
+            )
+            return False
+        if suppression is not None:
+            suppression_reason = str(
+                suppression["suppression_reason"]
+                if hasattr(suppression, "keys")
+                else suppression[0]
+            )
+            if suppression_reason == "settled_position":
+                stats["terminal_chain_exposure_settlement_suppressed"] = (
+                    stats.get("terminal_chain_exposure_settlement_suppressed", 0) + 1
+                )
+                return False
 
         needs_fill_owner = len(candidates) > 1 or any(
             str(getattr(position.state, "value", position.state))
@@ -2102,7 +2228,7 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
             not chain_size.is_finite()
             or not local_size.is_finite()
             or chain_size <= 0
-            or chain_size != local_size
+            or abs(chain_size - local_size) > _CHAIN_ONLY_MATCH_SHARE_TOLERANCE
         ):
             return False
 
@@ -2975,7 +3101,7 @@ def check_quarantine_timeouts(portfolio: PortfolioState) -> int:
     now = datetime.now(timezone.utc)
     expired = 0
 
-    # PR #352 (Part-3 audit, PR #350 review finding): ChainOnlyFact 48h review
+    # PR #352 (Part-3 audit, Copilot #350 finding): ChainOnlyFact 48h review
     # escalation consumer. Chain-only inventory is NOT a local Position, so the
     # position "exit evaluation" above does not apply — there is nothing to
     # exit. Instead, its review_state escalates UNRESOLVED -> EXPIRED at the 48h

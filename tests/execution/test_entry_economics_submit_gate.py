@@ -9,7 +9,10 @@ import pytest
 
 import src.execution.executor as executor_module
 from src.contracts import Direction, ExecutionIntent
-from src.contracts.global_auction_receipt import GlobalAuctionReceiptRef
+from src.contracts.global_auction_receipt import (
+    CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION,
+    GlobalAuctionReceiptRef,
+)
 from src.contracts.slippage_bps import SlippageBps
 from src.contracts.strategy_capital_allocation import STRATEGY_LOG_UTILITY_BASIS
 from src.decision_kernel.canonicalization import (
@@ -87,6 +90,7 @@ def _current_state_econ(**overrides) -> dict:
         global_winner_event_id="event-current-1",
         global_economic_identity="global-economic-current-1",
         global_optimum_semantics="CUT_TIME_GLOBAL_OPTIMUM",
+        global_selection_revision=CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION,
         global_execution_mode="TAKER_LIMIT",
         global_candidate_id="candidate-current-1",
         global_bin_id="bin-1",

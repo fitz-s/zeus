@@ -1,5 +1,5 @@
 # Created: 2026-05-14
-# Last reused/audited: 2026-07-16
+# Last reused/audited: 2026-08-24
 # Authority basis: docs/archive/2026-Q2/task_2026-05-08_deep_alignment_audit/DATA_DAEMON_LIVE_EFFICIENCY_REFACTOR_PLAN.md section 6.1, section 6.2, and section 8 Phase 4; Phase 6 durable work journaling; docs/archive/2026-Q2/task_2026-05-16_live_continuous_run_package/LIVE_CONTINUOUS_RUN_PACKAGE_PLAN.md source-health gate; a0d51d480b507f324 root-cause + docs/operations/live_review_may23.md (ECMWF 00z ingest schedule fix).
 """Dedicated OpenData live forecast producer daemon.
 
@@ -19,6 +19,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
@@ -133,11 +134,15 @@ FORECAST_LIVE_SOURCE_HEALTH_JOB_ID = "forecast_live_source_health_probe"
 # lanes. The functions themselves are live-authority gated (no-op when trade authority is off).
 REPLACEMENT_FORECAST_DOWNLOAD_JOB_ID = "replacement_forecast_download"
 REPLACEMENT_FORECAST_MATERIALIZE_JOB_ID = "replacement_forecast_live_materialize"
+REPLACEMENT_FORECAST_PRIORITY_MATERIALIZE_JOB_ID = (
+    "replacement_forecast_live_materialize_priority"
+)
 REPLACEMENT_FORECAST_DISCOVERY_JOB_ID = "replacement_forecast_live_discovery"
 REPLACEMENT_FORECAST_STARTUP_JOB_ID = "replacement_forecast_download_startup_catch_up"
 REPLACEMENT_AVAILABILITY_POLL_JOB_ID = "replacement_cycle_availability_poll"
 ANCHOR_META_CROSS_CHECK_JOB_ID = "anchor_meta_stamp_cross_check"
 REPLACEMENT_FORECAST_EXECUTOR_LANE = "replacement_production"
+REPLACEMENT_FORECAST_PRIORITY_EXECUTOR_LANE = "replacement_priority"
 # forecast_posteriors has one SQLite writer. Parallel commit subprocesses do not
 # add write throughput; they can exhaust the subprocess timeout waiting on each
 # other and permanently strand the freshest family request in failed/.
@@ -154,11 +159,18 @@ REPLACEMENT_FORECAST_MATERIALIZE_MAX_INSTANCES = 1
 REPLACEMENT_FORECAST_DOWNLOAD_EXECUTOR_LANE = "replacement_download"
 _replacement_forecast_last_discovery_revision: tuple[object, ...] | None = None
 FORECAST_LIVE_HEARTBEAT_SECONDS = 30
-FORECAST_LIVE_SAFE_CYCLE_POLL_SECONDS = 5 * 60
+# Publication is the causal edge for time-sensitive market entry. The release
+# calendar still fails closed before safe_fetch_at; polling once per minute only
+# bounds the post-release detection delay instead of donating up to five minutes
+# of executable alpha to the market. Source-run journaling keeps repeated polls
+# idempotent after a cycle commits.
+FORECAST_LIVE_SAFE_CYCLE_POLL_SECONDS = 60
 FORECAST_LIVE_SOURCE_HEALTH_SECONDS = 10 * 60
 FORECAST_LIVE_SOURCE_HEALTH_SOURCE_IDS = frozenset({"ecmwf_open_data"})
 _CURRENT_SOURCE_CYCLE_STATUSES = frozenset({"SUCCESS"})
 _OPENDATA_WAKE_ACKED_SOURCE_RUN_IDS: set[str] = set()
+_OPENDATA_SAFE_CYCLE_EXECUTOR: ThreadPoolExecutor | None = None
+_OPENDATA_SAFE_CYCLE_FUTURES: dict[str, Any] = {}
 _OPENDATA_WAKE_TERMINAL_STATUSES = frozenset(
     {
         "CYCLE_ADVANCE_TRIGGER",
@@ -194,6 +206,7 @@ FORECAST_LIVE_WORK_JOB_NAME_BY_TRACK = {
 
 _TRUTHFUL_FAIL_STATUSES = frozenset(
     {
+        "failed",
         "download_failed",
         "empty_ingest",
         "extract_failed",
@@ -907,6 +920,7 @@ def _enqueue_committed_opendata_cycle_advance_reseeds(
             _replacement_forecast_live_materialization_queue_config(),
             scopes=scopes,
             limit=len(scopes),
+            causal_baseline_source_run_id=source_run_id,
         )
         logger.info(
             "forecast-live OpenData committed ENS wake source_run_id=%s scopes=%d report=%s",
@@ -991,6 +1005,90 @@ def _run_due_opendata_tracks(
         return {track: futures[track].result() for track in tracks}
 
 
+def _safe_cycle_executor() -> ThreadPoolExecutor:
+    global _OPENDATA_SAFE_CYCLE_EXECUTOR
+    if _OPENDATA_SAFE_CYCLE_EXECUTOR is None:
+        _OPENDATA_SAFE_CYCLE_EXECUTOR = ThreadPoolExecutor(
+            max_workers=2,
+            thread_name_prefix="opendata-safe-track",
+        )
+    return _OPENDATA_SAFE_CYCLE_EXECUTOR
+
+
+def _dispatch_due_opendata_tracks(
+    *,
+    _runner: Callable[[str], dict] | None = None,
+    _executor: Any | None = None,
+    _inflight: dict[str, Any] | None = None,
+) -> dict[str, dict[str, object]]:
+    """Keep HIGH and LOW release work independent across scheduler ticks.
+
+    A track download can legitimately outlive the one-minute detection cadence.
+    The scheduler callback must therefore dispatch at most one future per track
+    and return immediately; otherwise one slow track occupies the single
+    forecast-source scheduler lane and suppresses release checks for its sibling.
+    Track file locks and source-run identities remain the execution/journal
+    singleton authority.
+    """
+
+    runner = _runner or _run_journaled_opendata_track_if_due
+    executor = _executor or _safe_cycle_executor()
+    inflight = (
+        _inflight if _inflight is not None else _OPENDATA_SAFE_CYCLE_FUTURES
+    )
+    reports: dict[str, dict[str, object]] = {}
+
+    for track in ("mx2t6_high", "mn2t6_low"):
+        previous = inflight.get(track)
+        if previous is not None and not previous.done():
+            reports[track] = {"status": "in_flight"}
+            continue
+
+        completed: dict[str, object] | None = None
+        if previous is not None:
+            try:
+                result = previous.result()
+                completed = (
+                    result
+                    if isinstance(result, dict)
+                    else {"status": "invalid_result"}
+                )
+            except Exception as exc:  # noqa: BLE001 - isolate the sibling track
+                logger.error(
+                    "forecast-live OpenData %s async poll failed: %s",
+                    track,
+                    exc,
+                    exc_info=True,
+                )
+                completed = {
+                    "status": "failed",
+                    "error": f"{type(exc).__name__}:{exc}",
+                }
+
+        try:
+            inflight[track] = executor.submit(runner, track)
+        except Exception as exc:  # noqa: BLE001 - keep the sibling dispatchable
+            reports[track] = {
+                "status": "failed",
+                "error": f"submit:{type(exc).__name__}:{exc}",
+            }
+            continue
+
+        if (
+            completed is not None
+            and str(completed.get("status") or "").lower()
+            in _TRUTHFUL_FAIL_STATUSES
+        ):
+            reports[track] = {**completed, "resubmitted": True}
+        else:
+            reports[track] = {
+                "status": "submitted",
+                "previous_status": completed.get("status") if completed is not None else None,
+            }
+
+    return reports
+
+
 @_scheduler_job(FORECAST_LIVE_DAILY_HIGH_JOB_ID)
 def _opendata_mx2t6_cycle() -> dict:
     """00z cron trigger: fires at 08:10 UTC, after the 08:05 UTC safe_fetch window."""
@@ -1023,8 +1121,11 @@ def _opendata_startup_catch_up() -> dict:
 
 
 @_scheduler_job(FORECAST_LIVE_SAFE_CYCLE_POLL_JOB_ID)
-def _opendata_safe_cycle_poll() -> dict:
-    results = _run_due_opendata_tracks()
+def _opendata_safe_cycle_poll(
+    *,
+    _dispatcher: Callable[[], dict[str, dict[str, object]]] | None = None,
+) -> dict:
+    results = (_dispatcher or _dispatch_due_opendata_tracks)()
     failed, reason = _classify_result({"tracks": results})
     return {"status": "partial" if failed else "ok", "reason": reason, "tracks": results}
 
@@ -1198,23 +1299,68 @@ def _replacement_forecast_materialize_job(
     discover: bool = True,
     limit: int | None = None,
     seed_limit: int | None = None,
-) -> None:
-    """LIGHT seed_discovery -> seed -> materialize on already-downloaded manifests (no download).
-
-    Interval-driven; delegates to the shared production function, which is live-authority gated and
-    fail-soft."""
+) -> dict[str, object]:
+    """Run one bounded background materialization lane."""
     from src.data.replacement_forecast_production import (
-        _replacement_forecast_live_materialize_cycle,
+        _replacement_forecast_live_materialization_queue_config,
     )
 
-    # Single health writer: the forecast-live scheduler wrapper owns this job's
-    # health entry. Calling the production wrapper would swallow exceptions and
-    # then let this outer wrapper overwrite FAILED with OK.
-    _replacement_forecast_live_materialize_cycle.__wrapped__(
-        discover=discover,
-        limit=limit,
-        seed_limit=seed_limit,
+    cfg = _replacement_forecast_live_materialization_queue_config()
+    return _replacement_forecast_materialize_lane(
+        cfg,
+        lane="background",
+        seed_limit=(
+            max(0, int(seed_limit))
+            if seed_limit is not None
+            else max(1, int(cfg.get("poll_batch_limit") or 1))
+        ),
     )
+
+
+@_scheduler_job(REPLACEMENT_FORECAST_PRIORITY_MATERIALIZE_JOB_ID)
+def _replacement_forecast_priority_materialize_job() -> dict[str, object]:
+    """Run one independent bounded Day0/held priority claim."""
+    from src.data.replacement_forecast_production import (
+        _replacement_forecast_live_materialization_queue_config,
+    )
+
+    cfg = _replacement_forecast_live_materialization_queue_config()
+    return _replacement_forecast_materialize_lane(
+        cfg,
+        lane="priority",
+        seed_limit=1,
+    )
+
+
+def _replacement_forecast_materialize_lane(
+    cfg: dict[str, object],
+    *,
+    lane: str,
+    seed_limit: int,
+) -> dict[str, object]:
+    """Run one bounded durable queue lane without sharing the background slot."""
+    from src.data.replacement_forecast_live_materialization_queue import (
+        process_replacement_forecast_live_materialization_queue,
+    )
+
+    report = process_replacement_forecast_live_materialization_queue(
+        request_dir=cfg["request_dir"],
+        processed_dir=cfg["processed_dir"],
+        failed_dir=cfg["failed_dir"],
+        seed_dir=cfg["seed_dir"],
+        seed_processed_dir=cfg["seed_processed_dir"],
+        seed_failed_dir=cfg["seed_failed_dir"],
+        forecast_db=cfg["forecast_db"],
+        raw_manifest_dir=cfg["raw_manifest_dir"],
+        seed_discovery_limit=1,
+        seed_limit=seed_limit,
+        limit=1,
+        discover=False,
+        lane=lane,
+    )
+    result = report.as_dict()
+    logger.info("replacement forecast materialization lane=%s report=%s", lane, result)
+    return result
 
 
 def _replacement_forecast_queue_pending(
@@ -1292,40 +1438,38 @@ def _replacement_forecast_discovery_revision(
 
 
 def _replacement_forecast_materialize_poll_job() -> None:
-    """Drain only source-committed work; global discovery has its own lane."""
+    """Compatibility one-shot for callers predating split scheduler jobs."""
 
     from src.data.replacement_forecast_production import (
         _replacement_forecast_live_materialization_queue_config,
     )
-
     cfg = _replacement_forecast_live_materialization_queue_config()
-    batch_limit = max(1, int(cfg["poll_batch_limit"]))
     requests_pending = _replacement_forecast_queue_pending(cfg, "request_dir")
     seeds_pending = _replacement_forecast_queue_pending(cfg, "seed_dir")
     inflight_pending = _replacement_forecast_inflight_pending(cfg)
-    if requests_pending:
+    if seeds_pending:
         _replacement_forecast_materialize_job(
             discover=False,
-            limit=batch_limit,
-            seed_limit=0,
+            limit=1,
+            seed_limit=max(1, int(cfg.get("poll_batch_limit") or 1)),
         )
-    elif seeds_pending:
+    elif requests_pending:
         _replacement_forecast_materialize_job(
             discover=False,
-            limit=batch_limit,
-            seed_limit=batch_limit,
+            limit=1,
+            seed_limit=0,
         )
     elif inflight_pending:
         _replacement_forecast_materialize_job(
             discover=False,
-            limit=batch_limit,
+            limit=1,
             seed_limit=0,
         )
 
 
 @_scheduler_job(REPLACEMENT_FORECAST_DISCOVERY_JOB_ID)
-def _replacement_forecast_discovery_job() -> None:
-    """Run global recovery discovery without occupying the hot materialization lane."""
+def _replacement_forecast_discovery_job() -> dict[str, object] | None:
+    """Run global recovery discovery only when the hot materialization queue is idle."""
 
     global _replacement_forecast_last_discovery_revision
 
@@ -1337,6 +1481,27 @@ def _replacement_forecast_discovery_job() -> None:
     )
 
     cfg = _replacement_forecast_live_materialization_queue_config()
+    pending_stages = tuple(
+        stage
+        for stage, pending in (
+            ("request", _replacement_forecast_queue_pending(cfg, "request_dir")),
+            ("seed", _replacement_forecast_queue_pending(cfg, "seed_dir")),
+            ("inflight", _replacement_forecast_inflight_pending(cfg)),
+        )
+        if pending
+    )
+    if pending_stages:
+        # Global recovery is a backstop, never part of the hot q-production
+        # critical path. Its current-target/HWM scan is deliberately broad and
+        # can compete with the exact-family queue reads on the same forecast DB.
+        # SCOPE: discovery only; queued requests and seeds keep draining.
+        # DRAIN: the one-second materialization poll consumes every active stage.
+        # RESET: once all three stages are empty, the unchanged discovery
+        # revision remains unacknowledged and the next minute runs recovery.
+        return {
+            "status": "deferred_active_materialization_queue",
+            "pending_stages": pending_stages,
+        }
     revision = _replacement_forecast_discovery_revision(cfg)
     if revision is not None and revision == _replacement_forecast_last_discovery_revision:
         return
@@ -1374,6 +1539,35 @@ def _publish_replacement_forecast_boot_wake() -> object | None:
     return _publish_current_forecast_posterior_wake(
         _replacement_forecast_live_materialization_queue_config()
     )
+
+
+def _start_replacement_forecast_boot_wake() -> threading.Thread:
+    """Publish the optional boot catch-up without delaying scheduler health.
+
+    The catch-up scans the append tail of the large forecast DB.  It is useful
+    liveness work, but the one-second materializer already republishes committed
+    posterior wakes after startup, so this scan cannot own daemon readiness.
+    Running it on a daemon thread keeps heartbeat and exact-family production
+    live even when the read is slow; failure remains loud and fail-soft.
+    """
+
+    def publish() -> None:
+        try:
+            _publish_replacement_forecast_boot_wake()
+        except Exception:
+            logger.warning(
+                "forecast-live current-posterior boot wake failed; "
+                "periodic materialization remains active",
+                exc_info=True,
+            )
+
+    thread = threading.Thread(
+        target=publish,
+        name="forecast-live-boot-wake",
+        daemon=True,
+    )
+    thread.start()
+    return thread
 
 
 def _replacement_forecast_live_cfg() -> dict:
@@ -1442,12 +1636,22 @@ def _register_replacement_forecast_production_jobs(
     materialize_poll_seconds = _replacement_forecast_materialize_poll_seconds()
     # Light materialize: interval (consumes already-downloaded manifests; no download).
     scheduler.add_job(  # type: ignore[attr-defined]
-        _replacement_forecast_materialize_poll_job,
+        _replacement_forecast_materialize_job,
         "interval",
         seconds=materialize_poll_seconds,
         id=REPLACEMENT_FORECAST_MATERIALIZE_JOB_ID,
         executor=REPLACEMENT_FORECAST_EXECUTOR_LANE,
         max_instances=REPLACEMENT_FORECAST_MATERIALIZE_MAX_INSTANCES,
+        coalesce=True,
+        misfire_grace_time=120,
+    )
+    scheduler.add_job(  # type: ignore[attr-defined]
+        _replacement_forecast_priority_materialize_job,
+        "interval",
+        seconds=1,
+        id=REPLACEMENT_FORECAST_PRIORITY_MATERIALIZE_JOB_ID,
+        executor=REPLACEMENT_FORECAST_PRIORITY_EXECUTOR_LANE,
+        max_instances=1,
         coalesce=True,
         misfire_grace_time=120,
     )
@@ -1481,9 +1685,11 @@ def _register_replacement_forecast_production_jobs(
     )
     logger.info(
         "replacement-forecast production jobs registered (downloads_owner=ingest_main; "
-        "materialize queue poll=%ds discovery=%dmin; lane=%s)",
-        materialize_poll_seconds, materialize_minutes,
+        "materialize background=%ds priority=1s discovery=%dmin; lanes=%s,%s)",
+        materialize_poll_seconds,
+        materialize_minutes,
         REPLACEMENT_FORECAST_EXECUTOR_LANE,
+        REPLACEMENT_FORECAST_PRIORITY_EXECUTOR_LANE,
     )
 
 
@@ -1510,12 +1716,14 @@ def build_scheduler(*, startup_run_date: datetime | None = None):
     # heartbeat or OpenData lanes. The replacement jobs are registered (after the scheduler is
     # built) on this lane.
     def _replacement_production_executor() -> dict[str, object]:
-        # Two SEPARATE single-worker lanes: the heavy download must never serialize ahead of
-        # (and starve) the light materialize that refreshes readiness — see
-        # REPLACEMENT_FORECAST_DOWNLOAD_EXECUTOR_LANE.
+        # Three separate lanes: background materialization, reserved priority
+        # materialization, and heavy download never serialize behind each other.
         return {
             REPLACEMENT_FORECAST_EXECUTOR_LANE: _APSchedulerThreadPoolExecutor(
                 max_workers=REPLACEMENT_FORECAST_MATERIALIZE_MAX_INSTANCES
+            ),
+            REPLACEMENT_FORECAST_PRIORITY_EXECUTOR_LANE: _APSchedulerThreadPoolExecutor(
+                max_workers=1
             ),
             REPLACEMENT_FORECAST_DOWNLOAD_EXECUTOR_LANE: _APSchedulerThreadPoolExecutor(max_workers=1),
         }
@@ -1578,17 +1786,10 @@ def main() -> None:
 
     signal.signal(signal.SIGTERM, _graceful_shutdown)
     _source_health_probe_tick()
-    try:
-        _publish_replacement_forecast_boot_wake()
-    except Exception:
-        logger.warning(
-            "forecast-live current-posterior boot wake failed; "
-            "periodic materialization remains active",
-            exc_info=True,
-        )
     _scheduler = build_scheduler()
     jobs = [job.id for job in _scheduler.get_jobs()]
     _write_forecast_live_heartbeat(status="scheduler_ready")
+    _start_replacement_forecast_boot_wake()
     logger.info("Forecast-live scheduler ready. %d jobs: %s", len(jobs), jobs)
     try:
         _scheduler.start()

@@ -57,6 +57,10 @@ import os
 from dataclasses import dataclass
 from typing import Mapping, Optional, Sequence
 
+from src.data.replacement_forecast_cycle_policy import (
+    CURRENT_EVIDENCE_SEMANTICS_REVISION,
+)
+
 
 # ---------------------------------------------------------------------------
 # Named constants.
@@ -439,8 +443,21 @@ def artifact_status(*, expected_posterior_version: str = DEFAULT_POSTERIOR_VERSI
     meta = art.get("_meta") if isinstance(art.get("_meta"), dict) else {}
     cells = art.get("cells") if isinstance(art.get("cells"), dict) else {}
     version = str(meta.get("posterior_version", ""))
-    status = "ACTIVE_VALID" if (cells and version == expected_posterior_version) else (
-        "STALE_VERSION" if version != expected_posterior_version else "ACTIVE_INVALID"
+    semantics = str(meta.get("probability_semantics_revision", ""))
+    status = (
+        "ACTIVE_VALID"
+        if cells
+        and version == expected_posterior_version
+        and semantics == CURRENT_EVIDENCE_SEMANTICS_REVISION
+        else (
+            "STALE_VERSION"
+            if version != expected_posterior_version
+            else (
+                "STALE_SEMANTICS"
+                if semantics != CURRENT_EVIDENCE_SEMANTICS_REVISION
+                else "ACTIVE_INVALID"
+            )
+        )
     )
     return {
         "path": path,
@@ -448,6 +465,8 @@ def artifact_status(*, expected_posterior_version: str = DEFAULT_POSTERIOR_VERSI
         "active": bool(cells),
         "cell_count": len(cells),
         "posterior_version": version,
+        "probability_semantics_revision": semantics,
+        "expected_probability_semantics_revision": CURRENT_EVIDENCE_SEMANTICS_REVISION,
         "temperature_metrics": sorted(_artifact_armed_metrics(meta)),
         "max_settled_at": meta.get("max_settled_at"),
     }
@@ -646,6 +665,7 @@ def apply_selection_calibrator(
     serves the conservative beta/Wilson 95% lower bound of the cell's realized settlement hit-rate; on
     a thin cell it serves the same 95% lower bound of the narrowest pool that clears ``min_n``.
     """
+    loaded_runtime_artifact = artifact is None
     art = artifact if artifact is not None else load_artifact()
     key = cell_key(side=side, lead_days=lead_days, bin_class=bin_class, raw_side_prob=raw_side_prob)
 
@@ -661,6 +681,15 @@ def apply_selection_calibrator(
     art_version = str(meta.get("posterior_version", "")) if isinstance(meta, Mapping) else ""
     if art_version and expected_posterior_version and art_version != expected_posterior_version:
         return _fail_closed(key, "FAIL_CLOSED_STALE_VERSION")
+    # The posterior method string stayed constant across a source-clock shape
+    # semantics cutover. A live artifact must grade this exact probability
+    # world; otherwise old OOF cells can falsely license model superiority
+    # against a deep contrary market. Explicit artifacts are replay/test inputs
+    # whose semantic identity is owned by their caller.
+    if loaded_runtime_artifact and str(
+        meta.get("probability_semantics_revision", "")
+    ) != CURRENT_EVIDENCE_SEMANTICS_REVISION:
+        return _fail_closed(key, "FAIL_CLOSED_STALE_SEMANTICS")
 
     clean_metric = str(temperature_metric or "").strip().lower()
     if clean_metric not in {"high", "low"}:

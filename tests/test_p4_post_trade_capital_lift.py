@@ -220,6 +220,27 @@ def test_harvester_runs_on_daemon_start_then_keeps_bounded_settlement_cadence():
     assert next_run.func.attr == "now"
 
 
+def test_capital_evidence_avoids_boot_writer_contention_then_keeps_cadence():
+    call = _add_job_call(_P4_DAEMON, "current_regime_capital_evidence")
+    assert call is not None
+    keywords = {kw.arg: kw.value for kw in call.keywords if kw.arg}
+    assert isinstance(keywords.get("minutes"), ast.Constant)
+    assert 0 < keywords["minutes"].value <= 5
+    assert isinstance(keywords.get("max_instances"), ast.Constant)
+    assert keywords["max_instances"].value == 1
+    assert isinstance(keywords.get("coalesce"), ast.Constant)
+    assert keywords["coalesce"].value is True
+    next_run = keywords.get("next_run_time")
+    assert isinstance(next_run, ast.BinOp)
+    assert isinstance(next_run.op, ast.Add)
+    assert isinstance(next_run.left, ast.Call)
+    assert isinstance(next_run.left.func, ast.Attribute)
+    assert next_run.left.func.attr == "now"
+    assert isinstance(next_run.right, ast.Call)
+    assert isinstance(next_run.right.func, ast.Name)
+    assert next_run.right.func.id == "timedelta"
+
+
 def test_boot_identity_precedes_immediate_scheduler_work():
     """Deploy identity must not wait behind boot-triggered network/capital jobs."""
     main_node = _find_func(_P4_DAEMON, "main")
@@ -1103,6 +1124,132 @@ def test_payout_observer_timeout_is_scheduler_failure(monkeypatch):
             "payout observer child exceeded 242.0s and was killed",
         )
     ]
+
+
+def test_capital_evidence_fail_verdict_is_a_successful_freshness_refresh(
+    monkeypatch,
+    tmp_path,
+):
+    from src.ingest import post_trade_capital_daemon as daemon
+
+    calls = []
+
+    def _run(cmd, *, cwd, check, timeout, env):
+        calls.append(
+            (cmd, cwd, check, timeout, env["ZEUS_DB_BUSY_TIMEOUT_MS"])
+        )
+        (tmp_path / "current_regime_capital_advantage.json").write_text(
+            json.dumps(
+                {
+                    "artifact_role": "OBSERVATIONAL_EVIDENCE_NOT_ORDER_AUTHORITY",
+                    "evaluated_at": daemon.datetime.now(
+                        daemon.timezone.utc
+                    ).isoformat(),
+                    "verdict": "FAIL",
+                    "failures": ["INSUFFICIENT_CURRENT_REGIME_SETTLED_TARGET_DATES"],
+                }
+            )
+        )
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(daemon.subprocess, "run", _run)
+    monkeypatch.setattr(
+        daemon, "_capital_evidence_child_deadline_seconds", lambda: 45.0
+    )
+    monkeypatch.setenv("ZEUS_DB_BUSY_TIMEOUT_MS", "300000")
+    monkeypatch.setattr("src.config.state_path", lambda name: tmp_path / name)
+
+    artifact = daemon._current_regime_capital_evidence_isolated()
+
+    assert artifact["verdict"] == "FAIL"
+    assert calls == [
+        (
+            [daemon.sys.executable, "-c", daemon._CAPITAL_EVIDENCE_CHILD_CODE],
+            daemon.Path(daemon.__file__).resolve().parents[2],
+            False,
+            47.0,
+            "5000",
+        )
+    ]
+
+
+def test_capital_evidence_child_revalidates_prior_proof_registry():
+    from src.ingest import post_trade_capital_daemon as daemon
+
+    child = daemon._CAPITAL_EVIDENCE_CHILD_CODE
+
+    compile(child, "capital-evidence-child", "exec")
+    assert "_prior_proof_registry(artifact_path)" in child
+    assert "prior_proof_registry=" in child
+    assert "_atomic_write(artifact_path, artifact)" in child
+
+
+def test_capital_evidence_default_deadline_covers_bounded_curve_reads(monkeypatch):
+    from src.ingest import post_trade_capital_daemon as daemon
+
+    variable = "ZEUS_POST_TRADE_CAPITAL_EVIDENCE_DEADLINE_SECONDS"
+    assert daemon._CAPITAL_EVIDENCE_START_DELAY_SECONDS == 75.0
+    assert daemon._CAPITAL_EVIDENCE_READ_BUSY_TIMEOUT_MS == 5_000
+    monkeypatch.delenv(variable, raising=False)
+    assert daemon._capital_evidence_child_deadline_seconds() == 75.0
+
+    monkeypatch.setenv(variable, "invalid")
+    assert daemon._capital_evidence_child_deadline_seconds() == 75.0
+
+    monkeypatch.setenv(variable, "0")
+    assert daemon._capital_evidence_child_deadline_seconds() == 75.0
+
+
+def test_capital_evidence_timeout_is_scheduler_failure(monkeypatch):
+    from src.ingest import post_trade_capital_daemon as daemon
+
+    trace = []
+
+    def _timeout(*args, **kwargs):
+        raise subprocess.TimeoutExpired(args[0], kwargs["timeout"])
+
+    monkeypatch.setattr(daemon.subprocess, "run", _timeout)
+    monkeypatch.setattr(
+        daemon, "_capital_evidence_child_deadline_seconds", lambda: 45.0
+    )
+    monkeypatch.setattr(
+        "src.observability.scheduler_health._write_scheduler_health",
+        lambda job_name, *, failed, reason: trace.append((job_name, failed, reason)),
+    )
+
+    daemon._scheduler_job("current_regime_capital_evidence")(
+        daemon._current_regime_capital_evidence_isolated
+    )()
+
+    assert trace == [
+        (
+            "current_regime_capital_evidence",
+            True,
+            "capital evidence child exceeded 47.0s and was killed",
+        )
+    ]
+
+
+def test_capital_evidence_rejects_stale_child_artifact(monkeypatch, tmp_path):
+    from src.ingest import post_trade_capital_daemon as daemon
+
+    def _run(*args, **kwargs):
+        (tmp_path / "current_regime_capital_advantage.json").write_text(
+            json.dumps(
+                {
+                    "artifact_role": "OBSERVATIONAL_EVIDENCE_NOT_ORDER_AUTHORITY",
+                    "evaluated_at": "2026-01-01T00:00:00+00:00",
+                    "verdict": "PASS",
+                }
+            )
+        )
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(daemon.subprocess, "run", _run)
+    monkeypatch.setattr("src.config.state_path", lambda name: tmp_path / name)
+
+    with pytest.raises(RuntimeError, match="stale or invalid evidence"):
+        daemon._current_regime_capital_evidence_isolated()
 
 
 def test_collateral_cold_tls_budget_exceeds_observed_handshake(monkeypatch):

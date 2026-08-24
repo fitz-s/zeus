@@ -10,7 +10,7 @@ SessionStart injects only a prefix of this file; this digest keeps the whole law
 
 **Time law [§0].** Freshness gates fail closed (DATA_DEGRADED), never stale-as-fresh; re-fetch executable truth at submit (FC-03). Learning strictly walk-forward; decision probability frozen as immutable certificate; no look-ahead.
 
-**Probability authority [§0 + docs/authority/replacement_final_form_2026_06_09.md].** Replacement chain is strategy of record. On the source-clock live route, current provider center + latest causal target-specific ENS within-spread + absolute ENS-center disagreement + simultaneous provider between-spread produce one settlement-preimage q and current-evidence q bounds; missing current shape fails closed. Historical residual/floor/mixture transforms and legacy ENS/Platt are offline evidence only.
+**Probability authority [§0 + docs/authority/replacement_final_form_2026_06_09.md].** Replacement chain is strategy of record. On the source-clock live route, current provider center + same-cycle causal target-specific ENS within-spread + absolute ENS-center disagreement + simultaneous provider between-spread produce one settlement-preimage q and current-evidence q bounds; missing same-cycle shape fails closed. Historical residual/floor/mixture transforms, stale ENS shapes, and legacy ENS/Platt are offline evidence only.
 
 **Proof discipline [§1 — both tables mandatory before any live/armed/safe claim].** Narrowest authoritative surface wins: direct instructions > AGENTS > executable law > authority docs > current facts > references > derived context (CodeGraph/CRG answer WHERE, never what is true) > archives. Stale surface = say stale, stop using it. Do not collapse §1's per-claim proof lines.
 
@@ -64,10 +64,10 @@ The replacement chain is the strategy of record. Authority basis: `docs/authorit
 
 Durable chain:
 
-`current provider center mu* -> current target-specific ENS within-spread + absolute ENS-center disagreement + simultaneous provider between-spread -> sigma_pred = sqrt(within^2 + ens_center_delta^2 + between^2) -> settlement-preimage integration of N(mu*, sigma_pred) -> current-evidence q point + q_lcb/q_ucb confidence -> symmetric YES/NO expected executable edge -> Fractional Kelly -> Position Size`
+`current provider center mu* -> same-cycle current target-specific ENS within-spread + absolute ENS-center disagreement + simultaneous provider between-spread -> sigma_pred = sqrt(within^2 + ens_center_delta^2 + between^2) -> settlement-preimage integration of N(mu*, sigma_pred) -> current-evidence q point + q_lcb/q_ucb confidence -> symmetric YES/NO expected executable edge -> Fractional Kelly -> Position Size`
 
 This decision-time current-evidence form is mandatory for source-clock live
-posteriors. A missing/invalid current ENS shape blocks the posterior; it must not
+posteriors. A missing/invalid same-cycle current ENS shape blocks the posterior; it must not
 fall back to historical residual sigma, constant/fitted floors, fitted uniform or
 city mixtures, or a fitted affine center shift. Older fusion/calibration machinery
 may remain as offline evidence, never as a

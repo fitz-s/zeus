@@ -1,5 +1,5 @@
 # Created: 2026-05-18
-# Last reused/audited: 2026-08-12
+# Last reused/audited: 2026-08-21
 # Authority basis: active finite-evidence plan restart-guard SCOPE/DRAIN/RESET; PRECEDENCE-1
 """Antibody tests for PRECEDENCE-1: pause_entries operator precedence guard.
 
@@ -871,6 +871,68 @@ def test_restart_guard_proof_refuses_sha_monitor_or_queue_debt(monkeypatch):
         },
     )
     assert cp.prove_deploy_live_restart_guard(witness)["green"] is False
+
+
+def test_restart_guard_accepts_post_boot_probability_degraded_monitor_attempt(
+    monkeypatch,
+):
+    expected_sha = "9" * 40
+    witness = cp.arm_deploy_live_restart_guard(
+        expected_sha,
+        issued_at="2026-08-08T00:00:00+00:00",
+    )["witness"]
+    _mock_restart_guard_proof_inputs(monkeypatch, loaded_sha=expected_sha)
+    monkeypatch.setattr(
+        cp,
+        "_restart_guard_queue_evidence",
+        lambda *_args, **_kwargs: {
+            "stale_processing": False,
+            "claimable_pending": True,
+            "post_issued_progress": True,
+            "green": True,
+        },
+    )
+    import src.ops.monitor_cadence as monitor_cadence
+
+    evidence = {
+        "open_position_count": 1,
+        "monitored_position_ids": ["probability-degraded"],
+        "fresh_position_count": 0,
+        "stale_or_missing_position_count": 1,
+        "stale_or_missing_positions": [
+            {
+                "position_id": "probability-degraded",
+                "issue": "monitor_probability_stale",
+            }
+        ],
+        "blocking_stale_position_count": 1,
+        "blocking_stale_positions": [
+            {
+                "position_id": "probability-degraded",
+                "issue": "monitor_probability_stale",
+            }
+        ],
+        "quote_only_stale_position_count": 0,
+        "quote_only_stale_positions": [],
+        "probability_only_stale_position_count": 1,
+        "probability_only_stale_positions": [
+            {
+                "position_id": "probability-degraded",
+                "issue": "monitor_probability_stale",
+            }
+        ],
+        "future_monitor_event_count": 0,
+    }
+    monkeypatch.setattr(
+        monitor_cadence,
+        "collect_monitor_cadence_evidence",
+        lambda _conn, **_kwargs: evidence,
+    )
+
+    proof = cp.prove_deploy_live_restart_guard(witness)
+    assert proof["green"] is True
+    assert proof["monitor"]["restart_blocking_stale_position_count"] == 0
+    assert proof["monitor"]["blocking_stale_position_count"] == 1
 
 
 def test_restart_guard_ignores_quote_only_debt_but_blocks_decision_debt(monkeypatch):

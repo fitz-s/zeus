@@ -27,7 +27,10 @@ import numpy as np
 import pytest
 
 from src.contracts.strategy_capital_allocation import STRATEGY_LOG_UTILITY_BASIS
-from src.contracts.global_auction_receipt import GlobalAuctionReceiptRef
+from src.contracts.global_auction_receipt import (
+    CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION,
+    GlobalAuctionReceiptRef,
+)
 from src.engine import event_reactor_adapter as era
 from src.engine import qkernel_spine_bridge as bridge
 from src.decision_kernel.canonicalization import stable_hash
@@ -467,6 +470,12 @@ def test_spine_inputs_unavailable_when_source_cycle_absent():
         q_by_bin=[0.05, 0.45, 0.40, 0.10], q_lcb_by_bin=[0.02, 0.32, 0.28, 0.05],
     )
     payload = _payload(mu=20.4, sigma=1.2, members=[19.8, 20.1, 20.5, 21.0, 20.7], source_cycle=None)
+    # A Day0 local capture clock is provenance only; it cannot satisfy the
+    # provider-issued forecast-cycle requirement or reach ForecastCaseFactory.
+    payload["_edli_day0_remaining_local_capture_clock_utc"] = (
+        "2026-06-13T11:59:00+00:00"
+    )
+    assert bridge._served_predictive_inputs(payload) is None
     result = _drive(family, proofs, payload)
     assert result.selected_proof is None
     assert result.no_trade_reason.startswith(bridge.NO_TRADE_SPINE_INPUTS_UNAVAILABLE)
@@ -1645,6 +1654,9 @@ def test_global_current_winner_survives_book_and_sizes_from_its_sealed_curve():
         "global_winner_event_id": "event-global-current",
         "global_economic_identity": "global-economic-current",
         "global_optimum_semantics": "CUT_TIME_GLOBAL_OPTIMUM",
+        "global_selection_revision": (
+            CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION
+        ),
         "global_candidate_id": "global-candidate-current",
         "global_execution_mode": "TAKER_LIMIT",
         "global_bin_id": "bin-1",

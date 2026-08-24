@@ -311,11 +311,11 @@ files:
   src/main.py:
     zone: K2_runtime
     authority_role: live_daemon_entry
-    why: Live-only daemon entry point. Its targeted executable snapshot refresh now passes per-row trade write coordinator leases into market_scanner instead of holding the legacy trade writer lock around CLOB refresh; runtime snapshot freshness checks use executable_market_snapshot_latest before falling back to the append log. The 10-minute chain-mirror backstop is non-deferrable because it refreshes upstream holdings authority before a short serialized trade-DB transaction; active entry, redecision, or monitor consumers cannot starve chain_seen_at past its fail-closed bound. Incomplete exact held-SELL completion debt snapshots all currently queued exact wake IDs for one fair non-held selection turn without acknowledging or weakening the durable debt. Canonical held-monitor cadence debt present at reactor admission becomes an exact-family BUY block (global BUY block only when scope is unreadable), while transient monitor fairness/handoff remains the only global admission preemption and newly emerging mid-cut debt still cancels the replayable cut. Capital-blocking cancel recovery keeps the shared reactor admission fence through its exact venue snapshot and DB apply, so a newly admitted auction cannot repeatedly defeat the debt's RESET after the scheduler already reserved the handoff. At boot it installs the process-local collateral singleton as a read-only validated consumer of the sidecar's pre-migrated snapshots, never as a schema writer.
+    why: Live-only daemon entry point. Its targeted executable snapshot refresh now passes per-row trade write coordinator leases into market_scanner instead of holding the legacy trade writer lock around CLOB refresh; runtime snapshot freshness checks use executable_market_snapshot_latest before falling back to the append log. EDLI admission samples the freshness clock after each atomic evidence-file read, so DB-check latency plus a concurrent status pulse cannot misclassify a newer valid summary as future-dated and globally block BUY. The 10-minute chain-mirror backstop is non-deferrable because it refreshes upstream holdings authority before a short serialized trade-DB transaction; active entry, redecision, or monitor consumers cannot starve chain_seen_at past its fail-closed bound. Incomplete exact held-SELL completion debt snapshots all currently queued exact wake IDs for one fair non-held selection turn without acknowledging or weakening the durable debt. Canonical held-monitor cadence debt present at reactor admission becomes an exact-family BUY block (global BUY block only when scope is unreadable), while transient monitor fairness/handoff remains the only global admission preemption and newly emerging mid-cut debt still cancels the replayable cut. Capital-blocking cancel recovery keeps the shared reactor admission fence through its exact venue snapshot and DB apply, so a newly admitted auction cannot repeatedly defeat the debt's RESET after the scheduler already reserved the handoff. At boot it installs the process-local collateral singleton as a read-only validated consumer of the sidecar's pre-migrated snapshots, never as a schema writer.
   src/ingest_main.py:
     zone: K2_runtime
     authority_role: ingest_daemon_entry
-    why: Data-ingest daemon entry point. Schedules all K2 observation/forecast/settlement/UMA ingest ticks independent of the trading daemon. Periodic replacement maintenance reserves a bounded half-tick for held-first BPF capture whenever held exposure and an admitted provider lane coexist, so anchor backlog cannot permanently starve the current shape required for held q. The HKO finalized prior-day Daily Extract has a dedicated five-minute poll with its own advisory lock, so WU batch latency or failure cannot delay post-local-day held-position authority; its read-only presence check and provider fetch happen before one non-blocking short cross-DB commit, never under canonical writer flocks. The realtime HKO source clock remains a separate monitoring role. No imports from src.engine, src.execution, src.strategy, src.signal, src.control, or src.main.
+    why: Data-ingest daemon entry point. Schedules all K2 observation/forecast/settlement/UMA ingest ticks independent of the trading daemon. The active source-clock owner sends ordinary anchor capture through the reserved priority quota lane, including source-commit partitions, and an unchanged-clock tick first measures exact-cycle per-scope anchor gaps then drains only a proven residual; a global source high-water or advanced metadata cursor cannot strand the rest of the city universe. Periodic replacement maintenance reserves a bounded half-tick for held-first BPF capture whenever held exposure and an admitted provider lane coexist, so anchor backlog cannot permanently starve the current shape required for held q. The HKO finalized prior-day Daily Extract has a dedicated five-minute poll with its own advisory lock, so WU batch latency or failure cannot delay post-local-day held-position authority; its read-only presence check and provider fetch happen before one non-blocking short cross-DB commit, never under canonical writer flocks. The realtime HKO source clock remains a separate monitoring role. No imports from src.engine, src.execution, src.strategy, src.signal, src.control, or src.main.
     downstream:
     - src/data/daily_obs_append.py
     - src/data/hourly_instants_append.py
@@ -334,7 +334,7 @@ files:
   src/data/replacement_forecast_live_materialization_queue.py:
     zone: K2_runtime
     authority_role: replacement_live_materialization_queue
-    why: Live replacement forecast queue runner; drains live seed/request files into the materializer on the forecast DB using runtime_layer='live' semantics. Claim-time chain-confirmed exposure from canonical position_current outranks discovery work even when an older enqueue marker predates the fill, so current held-position belief cannot sit behind first-price backlog. Discovery receives the actual configured request and inflight paths, so exact-family pending-work deduplication remains correct when queue directories do not share a parent. Its request coalescing key includes the full Day0 conditioning identity (source, microsecond observation time, observed extreme, unit), so a same-cycle canonical observation correction cannot be discarded as a duplicate before posterior provenance records it. Replaces retired blocked-materialization queue code so live production no longer imports a blocked-labeled implementation.
+    why: Live replacement forecast queue runner; drains live seed/request files into the materializer on the forecast DB using runtime_layer='live' semantics. The queue admits exactly one commit subprocess because all materializations share one SQLite writer; parallel commits multiply cold-page reads and lock contention without adding write throughput. Every child retains the global 30-second outer timeout and receives a queue-owned absolute deadline one second earlier. Its non-canonical atomic stage receipt records open/read snapshot, prepare/fusion, dependency witness, write/verify, or wake. SQLite VM progress and a generation-fenced independent watchdog both enforce that deadline, so one blocking VFS read is interrupted and becomes typed DEFERRED evidence before the outer kill; the same enforcement wraps caller-provided batch connections. Receipt moves atomically rewrite input_json to the current request pathname while retaining the stable request_id. A timeout is requeued with per-family exponential backoff, so an expensive or contended family cannot stop current posterior generation for unrelated cities or be discarded as a permanent probability failure. An exact claim-time chain-confirmed family whose held monitor q is stale receives a one-second retry only when its request is a Day0 observation-advance with a complete conditioning identity and remains within a three-attempt, 75-second cumulative stale-q budget. It never bypasses retry_at or receives a longer subprocess deadline; a fresh q removes the special tier immediately, and exhausted retry budget restores ordinary exponential priority, so one impossible family cannot monopolize the writer. Structured BLOCKED results are terminal for their exact request/current-input/logic fingerprint except the typed Day0 frontier ledger read failure: that reason is transient database availability, so it uses the same bounded retry transport and can never become a permanent missing-probability claim. Other missing-authority reasons are retried only when their fingerprint changes and cannot repeatedly consume the sole writer. A recent successful commit suppresses another subprocess only for a fixed non-sliding short window and only while the exact request/current-input/logic fingerprint is unchanged; a new provider, ENS, Day0 observation, file, logic revision, or window expiry immediately restores normal computation. Claim-time chain-confirmed exposure is the priority-class authority; current-capital seed filenames are stable-partitioned ahead of ordinary backlog before the bounded inspection window, so the bound cannot erase that priority, while the durable cursor still advances the remainder. Each class then has newest-queued-source-cycle and older-cycle subtiers. Within one source-cycle scope an exact canonical SUCCESS baseline precedes an anchor-first stale baseline, after which request computed_at FIFO applies rather than an unrelated historical enqueue marker. A second source-cycle boundary check immediately before request build/subprocess skips work below the family's current posterior/eligible ENS HWM and defers work above the eligible ENS HWM; neither stale requests nor deterministic cycles that cannot yet construct a same-cycle ENS shape may consume the sole writer. A future-of-ENS producer-owned seed stays pending in place, preserving exact-family deduplication across recovery, cycle-advance, and fusion-upgrade producers; while that boundary is active, duplicate coalescing cannot move an exact producer-owned path out from under its durable marker. The one-second queue cadence rechecks the retained debt and equality with the later ENS HWM resets both the defer and normal coalescing without a new file. Unreadable HWM state preserves the original materializer path. The bounded seed window applies the request semantic key plus exact seed producer authority and latest-computed-at order before the one-seed admission limit, so an older identical unfenced seed cannot consume the only writer slot merely because duplicates otherwise reach the request stage on different polls; upgrade triggers never coalesce across authority classes, and Day0 cycle-owner seeds stay under their exact canonical ownership fence. Discovery receives the actual configured request and inflight paths, so exact-family pending-work deduplication remains correct when queue directories do not share a parent. Its seed/request coalescing key includes the full Day0 conditioning identity (source, microsecond observation time, observed extreme, unit), so a same-cycle canonical observation correction cannot be discarded as a duplicate before posterior provenance records it. Replaces retired blocked-materialization queue code so live production no longer imports a blocked-labeled implementation.
     hazards:
     - SOURCE_TRUTH_PLANE_COLLAPSE
     - VENUS_CONTROL_ONLY
@@ -345,7 +345,7 @@ files:
   src/data/replacement_cycle_advance_trigger.py:
     zone: K2_runtime
     authority_role: day0_conditioning_reseed_liveness
-    why: Persists cycle-advance markers and Day0 reseed work. A Day0 marker is completion evidence only when its durable full conditioning identity matches the latest canonical fact and either an identical seed remains in flight or the current live posterior provenance consumed that identity; a same-model-cycle canonical Day0 identity advance re-enters this bounded poll lane, while legacy time-only markers are healed by a fresh reseed.
+    why: Persists cycle-advance markers and Day0 reseed work. A Day0 marker is completion evidence only when its durable full conditioning identity matches the latest canonical fact and either an identical seed remains in flight or the current live posterior provenance consumed that identity; a same-model-cycle canonical Day0 identity advance re-enters this bounded poll lane. When deterministic manifests are ahead of the latest decision-time-eligible same-metric ENS, the observation revision reconditions the last ENS-complete carrier immediately instead of waiting on an incomplete future shape; normal cycle advance later replaces it. When an exact ENS source run commits after the deterministic anchor for the same target cycle, the old marker seed may be replaced only if its pinned baseline run differs, the committed run belongs to that exact cycle, no active request owns the old seed, and the marker path still matches under CAS.
     hazards:
     - SOURCE_TRUTH_PLANE_COLLAPSE
     - STALE_BELIEF_AUTHORITY
@@ -363,6 +363,15 @@ files:
     - src/events/reactor.py
     - src/engine/event_reactor_adapter.py
     - src/engine/monitor_refresh.py
+  src/data/day0_observation_reader.py:
+    zone: K2_runtime
+    authority_role: day0_current_observation_and_revision_likelihood_reader
+    why: Reads source-typed current-day extrema without mixing provider roles. Only WU changed-payload observation_revisions that the writer actually applied to canonical observation state provide the causal, conservative Jeffreys estimate that the current hourly boundary survives through the remaining source updates; quarantined payload mismatches are disagreement evidence and never become probability transitions. This uncertainty stays inside q and prevents a revisable WU print from becoming exact payoff authority. If a city has zero applied changed-payload transitions in the bounded lookback, the Jeffreys zero-observation prior is available only to HELD_MONITOR/REDUCE_ONLY_EXIT so existing capital remains re-decidable; ENTRY still requires empirical history and fails closed.
+    hazards:
+    - SOURCE_TRUTH_PLANE_COLLAPSE
+    downstream:
+    - src/engine/event_reactor_adapter.py
+    - src/engine/monitor_refresh.py
   src/data/replacement_current_value_serving.py:
     zone: K2_runtime
     authority_role: replacement_current_value_serving_selector
@@ -375,7 +384,7 @@ files:
   src/data/replacement_forecast_materializer.py:
     zone: K2_runtime
     authority_role: replacement_forecast_posterior_writer
-    why: Writes forecast_posteriors rows with content-addressed identity (posterior_identity_hash/dependency_hash/posterior_config_hash over dependency_hash, q, q_lcb, q_ucb, source_cycle_time) so a later read can prove which raw inputs a served posterior was built from. The source-clock live route binds the latest causal target-specific VERIFIED ECMWF ENS snapshot plus simultaneous provider values into a decision-time current-evidence shape; absolute ENS-member displacement from the served provider center remains an explicit uncertainty component because those same members remain absolute settlement-bin evidence. A qualified same-station fast Day0 witness updates the current physical boundary through its station-local residual distribution, while WU remains the only hard support bound; during the target day the action simplex is still rebuilt from the shrinking remaining-weather interval, and only after that local interval ends may the residual-conditioned final-value carrier serve reduce-only redecision pending settlement publication. Its semantics revisions, snapshot or residual identity, and shape hash enter config/dependency identity; missing or revision-mismatched current shape fails closed instead of falling back to historical residual/floor/mixture probability. On a UNIQUE(posterior_identity_hash) conflict, re-selects the existing row instead of duplicating it.
+    why: Writes forecast_posteriors rows with content-addressed identity (posterior_identity_hash/dependency_hash/posterior_config_hash over dependency_hash, q, q_lcb, q_ucb, source_cycle_time) so a later read can prove which raw inputs a served posterior was built from. The source-clock live route binds the latest causal target-specific VERIFIED ECMWF ENS snapshot plus simultaneous provider values into a decision-time current-evidence shape; the snapshot's matching source_run must already be SUCCESS, COMPLETE, non-partial, and imported by the decision instant, so an incrementally downloaded cycle cannot publish a probability before its final member/step boundary facts exist. Absolute ENS-member displacement from the served provider center remains an explicit uncertainty component because those same members remain absolute settlement-bin evidence. A qualified same-station fast Day0 witness updates the current physical boundary through its station-local residual distribution, while revisable WU current evidence remains a statistical conditioning boundary rather than exact support; during the target day the action simplex is rebuilt from the shrinking remaining-weather interval and source-revision likelihood. Its semantics revisions, snapshot or residual identity, and shape hash enter config/dependency identity; missing or revision-mismatched current shape fails closed instead of falling back to historical residual/floor/mixture probability. The hot materialization path reads sqlite_master and performs zero index DDL when the complete frontier index set already exists, so an unrelated schema/write holder cannot turn every family refresh into a default busy-timeout stall. On a UNIQUE(posterior_identity_hash) conflict, re-selects the existing row instead of duplicating it.
     hazards:
     - SOURCE_TRUTH_PLANE_COLLAPSE
     downstream:
@@ -406,7 +415,7 @@ files:
   src/data/raw_forecast_artifact_manifest.py:
     zone: K2_runtime
     authority_role: replacement_raw_manifest_schema
-    why: Enforces the immutable raw-artifact manifest schema and exposes typed unsupported-field evidence. Current readers stay fail-closed on unknown top-level fields while bounded inventory compatibility may identify the one retired authority stamp without accepting it as current input.
+    why: Enforces the immutable raw-artifact manifest schema and exposes typed unsupported-field evidence. Manifest publication is temp-file plus atomic replace so a producer interruption cannot expose a zero-byte authority file. Current readers stay fail-closed on unknown top-level fields while bounded inventory compatibility may identify the one retired authority stamp without accepting it as current input.
     hazards:
     - SOURCE_TRUTH_PLANE_COLLAPSE
     downstream:
@@ -415,7 +424,7 @@ files:
   src/data/replacement_forecast_seed_discovery.py:
     zone: K2_runtime
     authority_role: replacement_forecast_seed_discovery
-    why: Builds causal replacement materialization seeds from current raw forecast artifacts and Day0 facts. Live discovery resolves the exact content-addressed manifest set selected by the canonical current-target source-run identities instead of rescanning immutable history; an incomplete index falls back to strict inventory. Queue deduplication is scoped to the exact city-date-metric family so unrelated pending work cannot starve discovery. A raw same-station fast extreme may supersede the slower WU seed value only when the seven-day station-local residual likelihood is qualified; thin or missing evidence preserves the settlement-channel seed byte-for-byte.
+    why: Builds causal replacement materialization seeds from current raw forecast artifacts and Day0 facts. Live discovery resolves the exact content-addressed manifest set selected by the canonical current-target source-run identities instead of rescanning immutable history; an incomplete index falls back to strict inventory. The global inventory fallback isolates a malformed manifest as missing truth for only that file and retries it after its signature changes, so one corrupt city cannot veto fresh q generation for every other family; exact producer-committed manifest reads remain fail-loud. Queue deduplication is scoped to the exact city-date-metric family so unrelated pending work cannot starve discovery. Recovery discovery suppresses a deterministic-cycle seed while that exact family is still awaiting its same-cycle eligible ENS shape; unknown boundary state fails open and the queue repeats the authoritative JIT check. A raw same-station fast extreme may supersede the slower WU seed value only when the seven-day station-local residual likelihood is qualified; thin or missing evidence preserves the settlement-channel seed byte-for-byte.
     hazards:
     - SOURCE_TRUTH_PLANE_COLLAPSE
     downstream:
@@ -424,7 +433,7 @@ files:
   src/data/replacement_forecast_bundle_reader.py:
     zone: K2_runtime
     authority_role: replacement_forecast_posterior_reader
-    why: No-bypass reader for live replacement forecast posterior bundles; every live q-serving read path (event_reactor_adapter, replacement_forecast_hook_factory) reads forecast_posteriors through this single choke point. W0.1 (2026-07-02) added an opt-in enforce_raw_input_hwm parameter (default False, byte-identical for existing callers) that fails the read closed when a raw model/artifact input newer than the served posterior's source_cycle_time already exists.
+    why: No-bypass reader for live replacement forecast posterior bundles; every live q-serving read path (event_reactor_adapter, replacement_forecast_hook_factory) reads forecast_posteriors through this single choke point. W0.1 (2026-07-02) added an opt-in enforce_raw_input_hwm parameter (default False, byte-identical for existing callers). ENTRY fails closed on any newer raw input. HELD_REDECISION preserves only the last complete, still-age-valid bundle while deterministic inputs are ahead of the latest eligible same-cycle ENS frontier; a newer eligible ENS cycle, same-cycle late row, identity fault, or HWM read loss still blocks.
     hazards:
     - SOURCE_TRUTH_PLANE_COLLAPSE
     downstream:
@@ -433,8 +442,9 @@ files:
   src/data/replacement_input_hwm.py:
     zone: K2_runtime
     authority_role: replacement_raw_input_hwm_check
-    why: W0.1 (2026-07-02) shared read-time raw-input high-water-mark (HWM) check, moved out of event_reactor_adapter.py so read paths other than the no-submit-cert path (replacement_forecast_bundle_reader's enforce_raw_input_hwm opt-in) can enforce the same fail-closed tripwire without a private cross-module import. Rich source-clock posteriors are checked against the single-authority per-model rows actually consumed by used_weights/used_models and named by bayes_precision_fusion.current_value_serving; configured-but-unused sources cannot expand consumption identity. OpenMeteo anchor proof binds the immutable artifact hash to the posterior's consumed local day and verifies actual multi-day payload coverage rather than equating artifact metadata start day with consumption scope. The top-level posterior source_cycle_time remains the ENS/shape carrier and is not misread as the deterministic-value HWM. Legacy provenance retains the conservative carrier-cycle fallback.
+    why: W0.1 (2026-07-02) shared read-time raw-input high-water-mark (HWM) check, moved out of event_reactor_adapter.py so read paths other than the no-submit-cert path (replacement_forecast_bundle reader's enforce_raw_input_hwm opt-in) can enforce the same fail-closed tripwire without a private cross-module import. It also exposes the newest decision-time-eligible ensemble cycle to pre-materialization admission, but only after the matching source_run is SUCCESS, COMPLETE, non-partial, and imported by the decision instant; this keeps HWM admission identical to the materializer when an ECMWF cycle arrives incrementally. ENTRY rejects every newer raw row. A held reduce-only read may retain the exact last complete bundle only while the latest eligible ENS frontier has not advanced; this prevents a partial deterministic wave from freezing capital release without licensing new risk. Rich source-clock posteriors are checked against the single-authority per-model rows actually consumed by used_weights/used_models and named by bayes_precision_fusion.current_value_serving; configured-but-unused sources cannot expand consumption identity. OpenMeteo anchor proof binds the immutable artifact hash to the posterior's consumed local day and verifies actual multi-day payload coverage rather than equating artifact metadata start day with consumption scope. Same-cycle late rows, newer eligible ENS, identity faults, and HWM read loss remain fail-closed. The top-level posterior source_cycle_time remains the ENS/shape carrier and is not misread as the deterministic-value HWM. Legacy provenance retains the conservative carrier-cycle fallback.
     downstream:
+    - src/data/replacement_forecast_live_materialization_queue.py
     - src/engine/event_reactor_adapter.py
     - src/data/replacement_forecast_bundle_reader.py
   src/runtime/bankroll_provider.py:
@@ -588,15 +598,7 @@ files:
   src/contracts/entry_exposure_obligation.py:
     zone: K0_frozen_kernel
     authority_role: entry_exposure_obligation_contract
-    why: >-
-     Quarantine excision foundation (2026-07-11, docs/rebuild/quarantine_excision_2026-07-11.md
-     BLOCKER-1): the conservative-bound (or unbounded) leg of the three-way per-command exposure law
-     (authoritative settled economics | bounded EntryExposureObligation | unbounded -> DATA_DEGRADED
-     via a ReviewWorkItem). shares x $1 long-only-CTF worst-case bound documented prominently;
-     storage is a SIBLING trade-DB table to review_work_items, not a shared row shape (see
-     src/state/schema/entry_exposure_obligations_schema.py docstring). Foundation only — not
-     consumed by any runtime seam in this packet; T2 wires
-     total_open_obligation_usd/has_unbounded_obligation into exposure/heat accounting.
+    why: "Quarantine excision foundation (2026-07-11, docs/rebuild/quarantine_excision_2026-07-11.md BLOCKER-1): the conservative-bound (or unbounded) leg of the three-way per-command exposure law (authoritative settled economics | bounded EntryExposureObligation | unbounded -> DATA_DEGRADED via a ReviewWorkItem). shares x $1 long-only-CTF worst-case bound documented prominently; storage is a SIBLING trade-DB table to review_work_items, not a shared row shape (see src/state/schema/entry_exposure_obligations_schema.py docstring). Foundation only — not consumed by any runtime seam in this packet; T2 wires total_open_obligation_usd/has_unbounded_obligation into exposure/heat accounting."
     downstream:
     - src/state/entry_exposure_obligation.py
     - src/state/schema/entry_exposure_obligations_schema.py
@@ -730,33 +732,13 @@ files:
   src/contracts/chain_observation_envelope.py:
     zone: K0_frozen_kernel
     authority_role: chain_observation_envelope_contract
-    why: >-
-     Quarantine excision T4 (2026-07-11, docs/rebuild/quarantine_excision_2026-07-11.md Consult
-     adjudication BLOCKER-3): the observation-quality contract a chain observation must satisfy
-     before it may cast a confirmed-absence vote — account_scope, fetched_at, complete (positive
-     evidence of a full unfiltered read, never assumed True), post_command_watermark, source. A
-     positive chain observation always overrides local absence evidence; this type deliberately has
-     no representation for presence, only for a candidate absence vote. Minimal shape buildable from
-     what src.state.chain_reconciliation actually persists onto Position today
-     (last_chain_absence_observed_at / chain_verified_at) — no new chain-read plumbing. Consumed by
-     src.execution.fill_tracker's ambiguous-timeout gate (_confirmed_absent_or_defer).
+    why: "Quarantine excision T4 (2026-07-11, docs/rebuild/quarantine_excision_2026-07-11.md Consult adjudication BLOCKER-3): the observation-quality contract a chain observation must satisfy before it may cast a confirmed-absence vote — account_scope, fetched_at, complete (positive evidence of a full unfiltered read, never assumed True), post_command_watermark, source. A positive chain observation always overrides local absence evidence; this type deliberately has no representation for presence, only for a candidate absence vote. Minimal shape buildable from what src.state.chain_reconciliation actually persists onto Position today (last_chain_absence_observed_at / chain_verified_at) — no new chain-read plumbing. Consumed by src.execution.fill_tracker's ambiguous-timeout gate (_confirmed_absent_or_defer)."
     downstream:
     - src/execution/fill_tracker.py
   src/contracts/review_work_item.py:
     zone: K0_frozen_kernel
     authority_role: review_work_item_contract
-    why: >-
-     Quarantine excision foundation (2026-07-11, docs/rebuild/quarantine_excision_2026-07-11.md
-     Consult adjudication): the owner-local ReviewWorkItem protocol contract replacing scattered
-     quarantine-state mechanisms — frozen dataclass, extensible ReviewReasonCode vocabulary (not
-     DB-CHECK-constrained, see src/state/schema/review_work_items_schema.py docstring), closed
-     WorkItemStatus (OPEN/RESOLVED/SUPERSEDED), and the ResolveWorkItemRequest operator-command
-     shape T6 will bind to a live release valve. FamilyKey is a structural mirror of
-     src.strategy.family_exclusive_dedup.WeatherFamilyKey (K0 must not import K3;
-     src/state/review_work_items.py converts 1:1). T4 (2026-07-11) added TIMEOUT_ABSENCE_UNCONFIRMED
-     (ambiguous pending-entry timeout awaiting chain confirmation; family-blocking).
-     RECOVERED_EXIT_DUST_REMAINDER is deliberately position+command scoped and non-family-blocking:
-     it preserves an authenticated residual without inventing economic closure.
+    why: "Quarantine excision foundation (2026-07-11, docs/rebuild/quarantine_excision_2026-07-11.md Consult adjudication): the owner-local ReviewWorkItem protocol contract replacing scattered quarantine-state mechanisms — frozen dataclass, extensible ReviewReasonCode vocabulary (not DB-CHECK-constrained, see src/state/schema/review_work_items_schema.py docstring), closed WorkItemStatus (OPEN/RESOLVED/SUPERSEDED), and the ResolveWorkItemRequest operator-command shape T6 will bind to a live release valve. FamilyKey is a structural mirror of src.strategy.family_exclusive_dedup.WeatherFamilyKey (K0 must not import K3; src/state/review_work_items.py converts 1:1). T4 (2026-07-11) added TIMEOUT_ABSENCE_UNCONFIRMED (ambiguous pending-entry timeout awaiting chain confirmation; family-blocking). RECOVERED_EXIT_DUST_REMAINDER is deliberately position+command scoped and non-family-blocking: it preserves an authenticated residual without inventing economic closure."
     downstream:
     - src/state/review_work_items.py
     - src/state/schema/review_work_items_schema.py
@@ -1044,7 +1026,7 @@ files:
   src/riskguard/riskguard.py:
     zone: K1_governance
     authority_role: risk_runtime
-    why: Independent risk process; risk output must change trading behavior, and every persisted full or degraded row keeps one risk-details contract shape for health readers. Revision-scoped market-relative alpha evidence clusters sibling bins and HIGH/LOW within one city-date family without collapsing distinct cities into one calendar-date sample. Its canonical risk DB schema includes the transaction-bound cutover generation receipt used for crash-safe migration resume. Its collateral singleton is a read-only validated consumer of sidecar-produced current snapshots, so the protective process cannot contend for the trade-DB writer through repeated collateral DDL.
+    why: Independent risk process; risk output must change trading behavior, and every persisted full or degraded row keeps one risk-details contract shape for health readers. Revision-scoped market-relative alpha evidence clusters sibling bins and HIGH/LOW within one city-date family without collapsing distinct cities into one calendar-date sample. Qkernel retains its existing pretrade capital-proof admission; a new Day0 revision may place one exact current q/book/wealth capital probe, then a revision-scoped durable gate prevents concurrent probes and stops a nonpositive or degraded cohort while same-revision counterfactual evidence continues draining. Positive realized capital permits the next sequential probe, and validated same-revision/current-selector evidence removes the probation bound without weakening source, price, Brier, Kelly, ranking, or submit boundaries. Its canonical risk DB schema includes the transaction-bound cutover generation receipt used for crash-safe migration resume. Its collateral singleton is a read-only validated consumer of sidecar-produced current snapshots, so the protective process cannot contend for the trade-DB writer through repeated collateral DDL.
     downstream:
     - src/engine/cycle_runner.py
     - src/observability/status_summary.py
@@ -1062,7 +1044,7 @@ files:
   src/risk_allocator/governor.py:
     zone: K1_governance
     authority_role: capital_allocation_governor
-    why: R3 A2 RiskAllocator and PortfolioGovernor enforce per-market, per-event, per-resolution-window, correlated-exposure, heartbeat, WS-gap, reconciliation, unknown-side-effect, and manual kill-switch gates before executor submission (drawdown breaker retired R0-e 2026-07-08; riskguard owns realized-settled-loss circuit breaking).
+    why: R3 A2 RiskAllocator and PortfolioGovernor enforce per-market, per-event, per-resolution-window, correlated-exposure, heartbeat, WS-gap, reconciliation, unknown-side-effect, and manual kill-switch gates before executor submission (drawdown breaker retired R0-e 2026-07-08; riskguard owns realized-settled-loss circuit breaking). Subject-local reconciliation findings are isolated only when canonical joins prove exactly one venue-command market: local orphan by venue order, position drift by its ENTRY token, and an already-recorded trade by its canonical trade fact. Missing, ambiguous, nonlocal, collateral, or multi-market findings remain systemic; one exact-market dispute therefore cannot freeze unrelated capital allocation.
     hazards:
     - VENUS_CONTROL_ONLY
     downstream:
@@ -1080,7 +1062,7 @@ files:
   src/data/ecmwf_open_data.py:
     zone: K2_runtime
     authority_role: forecast_fetcher
-    why: Fetches ECMWF/Open-Meteo ensemble data for probability generation.
+    why: Fetches ECMWF/Open-Meteo ensemble data for probability generation and reclaims only old raw GRIB cycle/parameter groups with exact COMPLETE source-run plus count-equal VERIFIED canonical snapshot proof, preserving current/prior days and all ambiguous inputs.
     downstream:
     - src/main.py
   src/data/ensemble_client.py:
@@ -1310,21 +1292,7 @@ files:
   src/data/market_scanner.py:
     zone: K2_runtime
     authority_role: market_discovery
-    why: >-
-     Discovers and parses Polymarket weather markets and bin labels; executable snapshot refresh
-     accepts a per-row persist context so CLOB/network work stays outside the unified trade write
-     lease. Capture-order priority is distinct from writer admission: only caller-typed held/forced
-     exact conditions may use bounded recovery persistence, while pending and broad captures
-     fast-yield. Full-book parsing preserves the venue's distinct domains: counterparty bids are in
-     (0,1], while BUY asks remain in (0,1); an exact-one bid is executable observation truth, not
-     permission to submit above 0.95. JIT, priority, first-seen, and periodic keyframe books persist
-     as full executable evidence; ordinary broad discovery persists only scalar/hash/top-K compact
-     evidence and can never authorize submit or recovery. Raw full-book changes remain
-     reconstructable from immutable keyframes while compact rows carry their own prev-hash interval
-     lineage; the scanner no longer duplicates each change into book_hash_transitions. Current
-     price-channel fallback reads only execution_feasibility_latest; append history cannot restore
-     executable authority when the current projection is absent. Its direct market-events writer
-     opens through the canonical shared cutover lease.
+    why: Discovers and parses Polymarket weather markets and bin labels; executable snapshot refresh accepts a per-row persist context so CLOB/network work stays outside the unified trade write lease. Capture-order priority is distinct from writer admission: only caller-typed held/forced exact conditions may use bounded recovery persistence, while pending and broad captures fast-yield. Full-book parsing preserves the venue's distinct domains: counterparty bids are in (0,1], while BUY asks remain in (0,1); an exact-one bid is executable observation truth, not permission to submit above 0.95. JIT, priority, first-seen, and periodic keyframe books persist as full executable evidence; ordinary broad discovery persists only scalar/hash/top-K compact evidence and can never authorize submit or recovery. Raw full-book changes remain reconstructable from immutable keyframes while compact rows carry their own prev-hash interval lineage; the scanner no longer duplicates each change into book_hash_transitions. Current price-channel fallback reads only execution_feasibility_latest; append history cannot restore executable authority when the current projection is absent. Its direct market-events writer opens through the canonical shared cutover lease.
     write_routes:
     - runtime_trade_write_coordinator
     downstream:
@@ -1361,21 +1329,18 @@ files:
     - src/data/openmeteo_ecmwf_ifs9_anchor.py
     - src/data/solar_append.py
     - src/data/source_health_probe.py
+  src/data/openmeteo_ecmwf_ifs9_bucket_transport.py:
+    zone: K2_runtime
+    authority_role: openmeteo_anchor_bucket_transport
+    why: Reads only an exact bucket-declared ECMWF IFS run whose complete target local-day valid-time set is present and whose city transport method passed the strict bucket/API cross-check. Raw valid-time objects may be read with bounded fanout and successful per-cycle point values may be reused across timeboxed retries, but payload assembly and downstream persistence remain all-or-nothing; no missing timestep, unverified city, or stale run can be gap-filled.
+    hazards:
+    - SOURCE_TRUTH_PLANE_COLLAPSE
+    downstream:
+    - scripts/download_replacement_forecast_current_targets.py
   src/data/latency_metrics.py:
     zone: K2_runtime
     authority_role: input_to_posterior_latency_metric
-    why: >-
-     W0.2 (2026-07-02, order-engine rebuild architecture doc §1 A2 'THE metric') — measure-only
-     input->q_version wall-clock latency, TWO variants. No new table: computes/reads both from
-     columns forecast_posteriors already persists (source_cycle_time, source_available_at,
-     computed_at, family_id). latency_from_issue_seconds = computed_at - source_cycle_time
-     (provider-issued run clock). latency_from_arrival_seconds = computed_at - source_available_at
-     (Zeus's own proof-of-possession clock from the C1-AVAIL-CLOCK mechanism,
-     materializer.py:172-228 — the A2 SLA target, excludes provider publication delay).
-     emit_materialization_latency() is called from replacement_forecast_materializer.py's
-     _insert_posterior on the fresh-INSERT success path only (not the IntegrityError dedup branch)
-     to log both per materialization event; LATENCY_QUERY/fetch_recent_latencies are the read side
-     for a dashboard. No gate, no enforcement — measurement only.
+    why: "W0.2 (2026-07-02, order-engine rebuild architecture doc §1 A2 'THE metric') — measure-only input->q_version wall-clock latency, TWO variants. No new table: computes/reads both from columns forecast_posteriors already persists (source_cycle_time, source_available_at, computed_at, family_id). latency_from_issue_seconds = computed_at - source_cycle_time (provider-issued run clock). latency_from_arrival_seconds = computed_at - source_available_at (Zeus's own proof-of-possession clock from the C1-AVAIL-CLOCK mechanism, materializer.py:172-228 — the A2 SLA target, excludes provider publication delay). emit_materialization_latency() is called from replacement_forecast_materializer.py's _insert_posterior on the fresh-INSERT success path only (not the IntegrityError dedup branch) to log both per materialization event; LATENCY_QUERY/fetch_recent_latencies are the read side for a dashboard. No gate, no enforcement — measurement only."
     downstream:
     - src/data/replacement_forecast_materializer.py
   src/data/openmeteo_model_updates.py:
@@ -1397,7 +1362,7 @@ files:
   src/data/bayes_precision_fusion_download.py:
     zone: K2_runtime
     authority_role: replacement_raw_forecast_capture
-    why: Captures exact current and previous Open-Meteo model runs into raw forecast evidence, accepts a partial current-day run only when its missing prefix is already elapsed and its suffix covers the unresolved local day, and exposes distinct source-clock and held-capital quota lanes; it does not derive probabilities or place orders.
+    why: Captures exact current and previous Open-Meteo model runs into raw forecast evidence, accepts a partial current-day run only when its missing prefix is already elapsed and its suffix covers the unresolved local day, and exposes distinct source-clock and held-capital quota lanes. Current-run completion is measured only across the HIGH/LOW metrics actually present in the current target family; an absent non-market sibling metric cannot cause an otherwise complete multi-location batch to refetch forever and consume source-clock quota. It does not derive probabilities or place orders.
     hazards:
     - SOURCE_TRUTH_PLANE_COLLAPSE
     downstream:
@@ -1411,7 +1376,7 @@ files:
   src/data/replacement_forecast_production.py:
     zone: K2_runtime
     authority_role: replacement_forecast_runtime_orchestrator
-    why: Orchestrates source-clock capture, current-target materialization, and commit notifications while leaving probability math, market truth, and order authority to their owning modules. Bounded extra-model passes rotate across city-date groups after each attempted prefix so an unavailable early provider scope cannot indefinitely starve later current targets; canonical held families remain in the BPF target and coverage universe even after they leave new-market discovery, and their chunks consume the held-capital quota tranche instead of competing in the ordinary source-clock lane. Capture admission preserves full-day geometry for future targets while allowing current Day0 remaining-window vectors to reach the stricter downstream payload validator.
+    why: Orchestrates source-clock capture, current-target materialization, and commit notifications while leaving probability math, market truth, and order authority to their owning modules. The availability poll measures exact-cycle current-target anchor gaps instead of treating one scope's global source high-water as complete cycle coverage; bounded polls keep rotating across residual scopes and explicitly select the reserved source-clock quota lane. Its exact-cycle bucket reader survives timeboxed broad retries for the whole source cycle; completion of an overlapping held-capital scoped slice cannot discard the broad slice's partially decoded hourly points. Bounded extra-model passes rotate across city-date groups after each attempted prefix so an unavailable early provider scope cannot indefinitely starve later current targets; canonical held families remain in the BPF target and coverage universe even after they leave new-market discovery, and their chunks consume the held-capital quota tranche instead of competing in the ordinary source-clock lane. Capture admission preserves full-day geometry for future targets while allowing current Day0 remaining-window vectors to reach the stricter downstream payload validator. Exact committed ENS wakes carry their baseline source-run identity through the production wrapper so cycle idempotency cannot collapse a new current shape into an earlier anchor-first seed for the same cycle.
     hazards:
     - SOURCE_TRUTH_PLANE_COLLAPSE
     downstream:
@@ -1437,7 +1402,7 @@ files:
   src/data/polymarket_client.py:
     zone: K2_runtime
     authority_role: clob_boundary
-    why: CLOB market-data compatibility wrapper; live placement/cancel/order query delegates to the R3 Z2 PolymarketV2Adapter boundary. R3 A2 threads RiskAllocator-selected order_type through this shim so maker/taker policy reaches the venue adapter. Held-monitor public-book network phases run in a DB-free, command-free spawned child that the parent can terminate after the remaining read budget; process startup, IPC, and OS reap are explicit cleanup tails rather than an absolute method-level wall-clock guarantee. Inner HTTP phases are also clamped.
+    why: CLOB market-data compatibility wrapper; live placement/cancel/order query delegates to the R3 Z2 PolymarketV2Adapter boundary. Its get_order None contract is explicitly capability-typed because only an authenticated adapter VenueOrderNotFound is normalized to None; untyped clients cannot inherit that absence authority. R3 A2 threads RiskAllocator-selected order_type through this shim so maker/taker policy reaches the venue adapter. Held-monitor public-book network phases run in a DB-free, command-free spawned child that the parent can terminate after the remaining read budget; process startup, IPC, and OS reap are explicit cleanup tails rather than an absolute method-level wall-clock guarantee. Inner HTTP phases are also clamped.
     downstream:
     - src/engine/cycle_runner.py
     - src/engine/evaluator.py
@@ -1522,7 +1487,7 @@ files:
   src/ingest/forecast_live_daemon.py:
     zone: K2_runtime
     authority_role: forecast_live_daemon_entry
-    why: Dedicated OpenData live forecast producer daemon; schedules ECMWF OpenData HIGH/LOW ingest plus replacement source-clock recovery, heartbeat, and source-health refresh. Seed discovery continues behind unrelated queue backlog and rechecks revisions while an exact family remains pending, preventing a global queue-head starvation ratchet.
+    why: Dedicated OpenData live forecast producer daemon; schedules ECMWF OpenData HIGH/LOW ingest plus replacement source-clock recovery, heartbeat, and source-health refresh. Its release-calendar dispatcher runs every 60 seconds and maintains at most one asynchronous future per HIGH/LOW track: a long partial fetch remains singleton-journaled but cannot occupy the scheduler callback or suppress its sibling's release check. Pre-release safe_fetch remains fail-closed, while an idle track detects a post-release cycle within one minute and source-run journaling makes later polls idempotent. Broad recovery discovery yields while request, seed, or inflight work exists, preventing universe-wide HWM scans from contending with exact-family posterior production; its revision remains unacknowledged so the first idle minute resumes recovery. Each poll admits the configured bounded seed micro-batch into request-level global priority while still claiming only the single safe SQLite writer tranche, so admission breadth cannot be mistaken for writer concurrency. The optional current-posterior boot catch-up runs only after scheduler-ready heartbeat on a daemon thread; a slow append-tail read cannot suppress forecast-live readiness or exact-family periodic production. A committed verified ENS run wakes only its exact eligible scopes and passes its immutable source_run_id as the causal baseline identity for same-cycle late-shape reseeding.
     hazards:
     - SOURCE_TRUTH_PLANE_COLLAPSE
     downstream:
@@ -1563,7 +1528,9 @@ files:
     authority_role: observation_instants_v2_typed_writer
     why: Typed writer enforcing plan v3 antibodies A1 (non-default authority/data_version/provenance_json), A2 (per-city expected
       source), A6 (HK must route hko_hourly_accumulator, never VHHH), and possession causality (imported_at cannot precede
-      the observation bucket or raw source print) before every observation_instants INSERT.
+      the observation bucket or raw source print) before every observation_instants INSERT. A causally newer same-hour WU
+      payload supersedes the current row in either direction while the displaced view remains immutable in observation_revisions;
+      append-only-extremum assumptions cannot preserve a provider value after WU has corrected it.
   src/data/meteostat_bulk_client.py:
     zone: K2_runtime
     authority_role: meteostat_bulk_boundary
@@ -1847,21 +1814,7 @@ files:
   src/engine/cycle_runtime.py:
     zone: K2_runtime
     authority_role: runtime_helper
-    why: >-
-     Extracted heavy helpers from cycle_runner; supports orchestration without becoming authority.
-     R3 A2 threads candidate event/date/cluster allocation metadata into ExecutionIntent for live
-     cap enforcement. Monitor receipts consume the same fresh position-stamped probability and edge
-     as exit evaluation, including lossless reconstruction of exit-specific validation subsets
-     indexed into the event's canonical monitor validation vector. Held-monitor recovery serves the
-     least-recently persisted MONITOR_REFRESHED debt before optional tail work; production batch
-     books use the DB-free killable reader, failure defers without singular fan-out, and
-     quote/probability work shares one cycle deadline instead of resetting a budget per position.
-     The held replacement HWM cut is frozen before auxiliary debt and hard-fact scans can spend its
-     primary reserve, and its raw batch has an independent wall-clock cap so an occasional wait
-     cannot consume the full auxiliary tranche. Deadline expiry revokes new I/O, not a preclassified
-     local absorbing hard fact: one dead-bin rescue explicitly disables quote refresh and retry
-     preflight while recording its direct exit/retry decision, then the next cycle retries
-     executable truth.
+    why: "Extracted heavy helpers from cycle_runner; supports orchestration without becoming authority. R3 A2 threads candidate event/date/cluster allocation metadata into ExecutionIntent for live cap enforcement. Monitor receipts consume the same fresh position-stamped probability and edge as exit evaluation, including lossless reconstruction of exit-specific validation subsets indexed into the event's canonical monitor validation vector. Held-monitor recovery serves the least-recently persisted MONITOR_REFRESHED debt before optional tail work; production batch books use the DB-free killable reader, failure defers without singular fan-out, and quote/probability work shares one cycle deadline instead of resetting a budget per position. A canonical no-action attempt separately identifies a current-proven sub-minimum dust residual so the cadence owner can isolate that unexecutable position without weakening transient probability or book debt. The held replacement HWM cut is frozen before auxiliary debt and hard-fact scans can spend its primary reserve, and its raw batch has an independent wall-clock cap so an occasional wait cannot consume the full auxiliary tranche. Deadline expiry revokes new I/O, not a preclassified local absorbing hard fact: one dead-bin rescue explicitly disables quote refresh and retry preflight while recording its direct exit/retry decision, then the next cycle retries executable truth."
   src/engine/discovery_mode.py:
     zone: K2_runtime
     authority_role: mode_enum
@@ -1937,63 +1890,16 @@ files:
   src/engine/event_reactor_adapter.py:
     zone: K2_runtime
     authority_role: edli_event_reactor_adapter
-    why: >-
-     Connects EDLI opportunity events to the event-bound no-submit proof kernel; builds
-     AuthorityEvidence certs (EXECUTABLE_SNAPSHOT, FORECAST, etc.) and drives the decision compiler
-     through the executor boundary. Candidate admission rejects executable BUY quotes outside the
-     absolute live action band before score or Kelly authority exists. Submit-outcome receipts
-     preserve the complete admitted economics plus durable command and venue-side-effect identity so
-     an acknowledged or unknown submit cannot be reclassified as a retryable pre-venue rejection. A
-     persisted current-evidence shape must carry the shared current probability-semantics revision
-     before it can become forecast authority. The global SELL actuation binds the solver-selected
-     reduction size, exact maker price, measured fill probability, finite rest deadline, and
-     close-vs-reduce intent into the exit boundary; JIT parses BUY asks with strict interior
-     BookLevel semantics and counterparty bids with the distinct probability-domain BidBookLevel, so
-     an exact bid at one can still bind an independently legal 0.95 submitted floor. Its winner
-     claim fence is durably committed through the canonical world connection before the independent
-     trade command write instead of consulting the trade DB's archived processing-table ghost or
-     spanning both DB transactions. Before that claim, targeted current CTF inventory and approval
-     must cover the selected reduction; an unavailable exact SELL is excluded candidate-locally so
-     the same complete cut can compare its runner-up against HOLD/CASH, while actual submit repeats
-     the collateral check against TOCTOU. Global BUY winner preflight consumes and persists the same
-     immutable native JIT bid/ask book before curve re-auction; statistical taker BUYs may bind an
-     explicit typed settlement-lock capital mode without current exit depth, while maker-rest BUYs
-     still require that current pre-cliff capacity. An unproven fresh mode falls through
-     candidate-locally, while a valid fresh mode reaches the final mode-specific builder without
-     weakening submit authority or inventing maker availability from an ask-only projection. Winner
-     preflight explicitly supplies every SQLite authority connection to the book-epoch fence; after
-     a stable SELL proof, periodic monitor pressure drains through its durable completion debt while
-     a newly committed Day0 fact can still revoke the capability at the final venue boundary. Its
-     market-channel read seam consumes only execution_feasibility_latest so a missing projection
-     forces current refresh instead of reviving append history. A deterministic Day0 revalidation
-     atomically serializes the auction's immutable witness, including current native token bindings,
-     source/certificate identities, and capture clock, into its proof payload; fallthrough then
-     rebuilds the nested probability block from the exact selected condition, bin, token, side, and
-     q. Day0 remaining-window probability keeps settlement-boundary value authority separate from
-     same-station physical time authority and integrates extreme(observed, noisy_future), never
-     noise(extreme(observed, future)); conditional path noise is instrument plus observation-latency
-     error, while the full-day source-clock predictive sigma remains mandatory confidence/bounds
-     authority but is not reinjected as path temperature noise. Plateau time can shrink the
-     remaining path without fabricating deterministic settlement truth or terminal excursion mass.
-     An identity-bound provisional settlement-channel observation may keep that replacement
-     probability available for reduce-only held redecision after local midnight while final daily
-     publication is pending; because no future target-day interval remains then, that path consumes
-     the already-bound coherent replacement simplex rather than requiring empty remaining-day
-     members. Definitive current-day settlement evidence never enters that held-only exception:
-     ENTRY, HELD_MONITOR, and REDUCE_ONLY_EXIT bind the same replacement bundle and source-clock
-     identity before constructing remaining-day q. Held monitoring also accepts a newer canonical
-     observation clock when the conditioned extreme and unit are unchanged, persisting both clocks
-     and their lag; value changes, clock reversal, and entry remain fail closed. Exact final truth
-     supersedes provisional authority. Current trajectory conditioning admits only prints fetched by
-     the decision snapshot and derives Fahrenheit precision from the METAR T-group. Neither stale
-     topology tokens, a mixed witness generation, nor a rejected earlier winner can poison the next
-     certificate identity. After a real maker window expires, a sealed positive global current-state
-     solve keeps its current posterior band as the taker bound instead of applying a historical
-     scalar correction after the portfolio argmax; full-depth cost, final JIT, fee, price, and
-     taker-quality walls remain mandatory.
+    why: Connects EDLI opportunity events to the event-bound no-submit proof kernel; builds AuthorityEvidence certs (EXECUTABLE_SNAPSHOT, FORECAST, etc.) and drives the decision compiler through the executor boundary. Candidate admission rejects executable BUY quotes outside the absolute live action band before score or Kelly authority exists. Submit-outcome receipts preserve the complete admitted economics plus durable command and venue-side-effect identity so an acknowledged or unknown submit cannot be reclassified as a retryable pre-venue rejection. A persisted current-evidence shape must carry the shared current probability-semantics revision before it can become forecast authority. A provisional HKO observation that cannot authorize execution is typed as family-local probability unavailability, so that family remains fail-closed without aborting the complete cross-city auction. The global SELL actuation binds the solver-selected reduction size, exact maker price, measured fill probability, finite rest deadline, close-vs-reduce intent, and the selected current q-version/content/source identities into both ExitIntent and capital certificate before the command boundary; JIT parses BUY asks with strict interior BookLevel semantics and counterparty bids with the distinct probability-domain BidBookLevel, so an exact bid at one can still bind an independently legal 0.95 submitted floor. Its winner claim fence is durably committed through the canonical world connection before the independent trade command write instead of consulting the trade DB's archived processing-table ghost or spanning both DB transactions. Before that claim, targeted current CTF inventory and approval must cover the selected reduction; an unavailable exact SELL is excluded candidate-locally so the same complete cut can compare its runner-up against HOLD/CASH, while actual submit repeats the collateral check against TOCTOU. Global BUY winner preflight consumes and persists the same immutable native JIT bid/ask book before curve re-auction; a Day0 BUY additionally requires its current ENTRY and immediate HELD_MONITOR witnesses to reproduce identical probability content, so an unavailable or divergent monitor view rejects that candidate before venue I/O instead of opening a position the next monitor would immediately reverse. Statistical taker BUYs may bind an explicit typed settlement-lock capital mode without current exit depth, while maker-rest BUYs still require that current pre-cliff capacity. An unproven fresh mode falls through candidate-locally, while a valid fresh mode reaches the final mode-specific builder without weakening submit authority or inventing maker availability from an ask-only projection. Winner preflight explicitly supplies every SQLite authority connection to the book-epoch fence; after a stable SELL proof, periodic monitor pressure drains through its durable completion debt while a newly committed Day0 fact can still revoke the capability at the final venue boundary. Its market-channel read seam consumes only execution_feasibility_latest so a missing projection forces current refresh instead of reviving append history. A deterministic Day0 revalidation atomically serializes the auction's immutable witness, including current native token bindings, source/certificate identities, and capture clock, into its proof payload; fallthrough then rebuilds the nested probability block from the exact selected condition, bin, token, side, and q. Day0 remaining-window probability keeps settlement-boundary value authority separate from same-station physical time authority and integrates extreme(observed, noisy_future), never noise(extreme(observed, future)); the current provider-path center variance is subtracted from source-clock total predictive variance, and only the unresolved conditional path error is reinjected, with instrument plus observation-latency uncertainty as its irreducible floor. This preserves common forecast error without double-counting provider disagreement. Plateau time can shrink the remaining path without fabricating deterministic settlement truth or terminal excursion mass. A fast-residual posterior keeps its statistical conditioning identity separate from the slower settlement-channel payload during local-proof reconstruction; current fast truth is revalidated before that identity is reused, while deterministic payoff truth remains settlement-channel only. Global JIT local-proof reconstruction preserves that selected statistical binding until the replacement bundle is loaded, then reproduces the bundle conditioning against current fast truth instead of overwriting it with an unconditioned settlement-only payload. The current remaining-day statistical simplex carries no deterministic DAY0_AUTHORITY or ABSORBING_BOUNDARY parents; only an exact-payoff witness may traverse that hard-fact certificate seam, so provisional statistical redecision is not mislabeled as settlement certainty. Its final executor context is typed as Day0 observed probability and binds the exact statistical q identity plus observation provenance; it never falls back to a base-distribution-only forecast context or claims absorbing truth. An identity-bound provisional settlement-channel observation may keep that replacement probability available for reduce-only held redecision after local midnight while final daily publication is pending; because no future target-day interval remains then, that path consumes the already-bound coherent replacement simplex rather than requiring empty remaining-day members. Definitive current-day settlement evidence never enters that held-only exception: ENTRY, HELD_MONITOR, and REDUCE_ONLY_EXIT bind the same replacement bundle and source-clock identity before constructing remaining-day q. Held-monitor fallback may keep exposure observable when that bundle is temporarily unavailable, but REDUCE_ONLY_EXIT must fail closed until the comparable source-clock bundle returns; the lower-variance fallback cannot authorize a statistical loss sale that the next full witness immediately reverses. Held monitoring also accepts a newer canonical observation clock when the conditioned extreme and unit are unchanged, persisting both clocks and their lag; value changes, clock reversal, and entry remain fail closed. Exact final truth supersedes provisional authority. Current trajectory conditioning admits only prints fetched by the decision snapshot and derives Fahrenheit precision from the METAR T-group. Neither stale topology tokens, a mixed witness generation, nor a rejected earlier winner can poison the next certificate identity. After a real maker window expires, a sealed positive global current-state solve keeps its current posterior band as the taker bound instead of applying a historical scalar correction after the portfolio argmax; full-depth cost, final JIT, fee, price, and taker-quality walls remain mandatory.
     downstream:
     - src/events/reactor.py
     - src/engine/event_bound_final_intent.py
+  src/engine/event_bound_final_intent.py:
+    zone: K2_runtime
+    authority_role: executor_submit_result_bridge
+    why: Translates the sanctioned executor result into EDLI receipt facts. Explicit executor venue-call and ACK fields outrank generic outcome labels, so a local rejection cannot fabricate venue evidence while a real post-call rejection preserves its exact boundary tuple.
+    downstream:
+    - src/engine/event_reactor_adapter.py
   src/engine/global_single_order_auction.py:
     zone: K2_K3_coordination
     authority_role: global_single_order_auction_coordinator
@@ -2013,7 +1919,7 @@ files:
   src/engine/global_batch_runtime.py:
     zone: K2_K3_coordination
     authority_role: current_global_single_order_runtime
-    why: Owns one complete current auction epoch from canonical runtime-open held-family enumeration and independent current-family scan through exact one-winner actuation; queue pages provide only an eventual claimed event owner and never define the feasible set. Winner-preflight SQLite authority reads inherit the executable book epoch deadline and urgent monitor cancellation, so a slow canonical scan cannot outlive the cut or starve held-capital redecision. Global receipt INSERT-plus-commit units join the canonical TRADE writer turnstile at STANDARD priority inside the same work deadline, so registered MONITOR writers cannot be overtaken and lock contention remains typed retryable work rather than an economic rejection. An unpaged claim callback returns the exact immutable carrier actually claimed, so causal-carrier reuse cannot bind actuation to a newly proposed but unclaimed economic ID. Each carrier owns at most one durable command attempt; canonical trade-execution events, never world/forecast state, identify the spent set from which continuous redecision derives a stable successor generation. That preserves claim idempotency until claimed while preventing collision with the old command fence. Current live-order state, not carrier reuse, continues to own active/unknown duplicate safety. Recurring decision receipts retain complete causal hashes and bounded one-hop reconstruction; semantic candidate rows plus keyed BUY-candidate and condition-mask indexes encode only changed action slots instead of rewriting high-cardinality stable indexes every epoch. During a live entry pause the same prepared current q/book/wealth cut also freezes a content-addressed, venue-inert global BUY counterfactual; it can drain settlement-graded capital evidence without becoming a second actuator or alternate probability authority.
+    why: Owns one complete current auction epoch from canonical runtime-open held-family enumeration and independent current-family scan through exact one-winner actuation; queue pages provide only an eventual claimed event owner and never define the feasible set. Every held family is prepared under held-redecision authority even when ENTRY authority also succeeds; equal probability content keeps ENTRY candidate seeds while rebinding temporal SELL authority, whereas divergent content selects the held witness and disables BUY for that family so relaxed held evidence can release capital but never add risk. Winner-preflight SQLite authority reads inherit the executable book epoch deadline and urgent monitor cancellation, so a slow canonical scan cannot outlive the cut or starve held-capital redecision. Global receipt INSERT-plus-commit units join the canonical TRADE writer turnstile at STANDARD priority inside the same work deadline, so registered MONITOR writers cannot be overtaken and lock contention remains typed retryable work rather than an economic rejection. An unpaged claim callback returns the exact immutable carrier actually claimed, so causal-carrier reuse cannot bind actuation to a newly proposed but unclaimed economic ID. Each carrier owns at most one durable command attempt; canonical trade-execution events, never world/forecast state, identify the spent set from which continuous redecision derives a stable successor generation. That preserves claim idempotency until claimed while preventing collision with the old command fence. Current live-order state, not carrier reuse, continues to own active/unknown duplicate safety. Recurring decision receipts retain complete causal hashes and bounded one-hop reconstruction; semantic candidate rows plus keyed BUY-candidate and condition-mask indexes encode only changed action slots instead of rewriting high-cardinality stable indexes every epoch. During a live entry pause the same prepared current q/book/wealth cut also freezes a content-addressed, venue-inert global BUY counterfactual; its persistence identity is scoped to the city-date evidence cluster, so distinct cities on one target date reach settlement grading while sibling bins and HIGH/LOW within one city-date remain deduplicated. It can drain settlement-graded capital evidence without becoming a second actuator or alternate probability authority.
     downstream:
     - src/engine/global_auction_universe.py
     - src/engine/global_single_order_auction.py
@@ -2042,7 +1948,7 @@ files:
   src/events/day0_authority.py:
     zone: K2_runtime
     authority_role: day0_probability_semantics_and_hard_fact_contract
-    why: Owns Day0 live-authority validation, q-source/mode grammar, and revision-stamped q-version identity so changed conditional probability laws cannot pool with old realized capital evidence.
+    why: Owns Day0 live-authority validation, q-source/mode grammar, and revision-stamped q-version identity so changed conditional probability laws cannot pool with old realized capital evidence. WU current/hourly carriers are provisional because the venue settles a revisable Daily Observations product; their empirical revision-survival likelihood stays inside q and can never create exact bin payoffs. The v6 identity distinguishes held/reduce-only WU Jeffreys prior-only redecision from older regimes while ENTRY remains empirically gated.
     downstream:
     - src/engine/event_reactor_adapter.py
     - src/riskguard/riskguard.py
@@ -2075,21 +1981,33 @@ files:
       winner claim path threads the actual
       retained carrier through claimed-set coverage and actuation; transient
       finalization carries the exact claim generation so a late worker cannot
-      revive a superseded winner pointer. An expired global-auction epoch is an
+      revive a superseded winner pointer. A carrier that loses its command fence
+      or whose submit-time increment wealth identity is superseded terminalizes;
+      only a fresh event identity may reset the full current q/book/wealth
+      comparison, so durable command evidence can never be replayed. An expired global-auction epoch is an
       explicit transient redecision reason, so expiry starts a fresh cut without
       relying on the unknown-reason fallback or replaying stale truth. Qkernel
       MAKER_TAKER_FORBIDDEN after
       fresh-book revalidation is a transient re-rank condition, not a terminal
-      event verdict. Day0 hourly refresh rotates over the complete held-capital
-      segment by offered slots, so throttle and provider failure cannot trap a
-      bounded microbatch on its first page or starve later held families of
-      current probability authority. Held reauction request inference uses the
+      event verdict. Day0 hourly refresh rotates over the longest held,
+      discovery-priority, and maintenance segment with a unit cursor advance,
+      while every active microbatch reserves one discovery slot after
+      protecting held capital. Segment-size mismatch, throttle, or one provider
+      failure therefore cannot trap the cursor on an early page or starve
+      unrelated cities of current probability authority. Held reauction request inference uses the
       same inclusive submit-price band as the durable request validator, so a
       positive but non-submittable bid remains explicit no-book debt instead of
       disappearing before publish. V4 reservation reuses one stable
       position/family/held-token/SELL generation and request through an O(1)
       per-debt lineage lookup; changing q/book publishes a new attempt witness
-      without scanning or freezing the global wake queue.
+      without scanning or freezing the global wake queue. Exact held-SELL and
+      generic completion reservations retain durable auction ownership, but an
+      unresolved canonical monitor handoff debt takes one upstream refresh turn
+      before the reactor reacquires that reservation, preventing the two lanes
+      from waiting on the same reactor lock indefinitely. That debt remains
+      authoritative when it appears after a protected cut has started: every
+      construct, process, and selection phase yields at its next safe checkpoint
+      while the durable completion token survives for the post-refresh retry.
     downstream:
     - src/engine/event_reactor_adapter.py
     - src/engine/global_batch_runtime.py
@@ -2174,20 +2092,20 @@ files:
     zone: K2_runtime
     authority_role: venue_command_recovery
     why: >-
-      Scans unresolved durable venue commands and appends recovery events without bypassing command grammar. Mixed-token repair delegates its exact command/execution-fact rehome CAS and provenance to the typed venue_command_repo seam; an EDLI absorbed-fill marker suppresses generic reprojection only when proof hash, position, and current canonical aggregate all match. Confirmed maker fills become execution facts while their ACKED remainder is still resting, even when the initial LIVE order fact still reports zero matched; maker cancel races likewise aggregate all canonical confirmed trade legs for one order. Recovered partial SELLs fold each authenticated trade identity exactly once against an immutable pre-recovery lot baseline; canonical cumulative fills, order aggregate, and fresh residual must conserve, dust remains pending with a typed non-family-blocking review item, and no partial leg can manufacture economic closure. A later terminal close adds that exact partial fold to the remaining-lot terminal economics and rounds only once, so restart projection cannot overwrite earlier realized gains or losses. A terminal FAK partial-reduction releases its mutex only when the command/order-bound economic-fill projection and a later synced Chain observation agree on the total remaining position; the unfilled command prefix is never confused with total held exposure. Already-realized venue fill facts in the probability domain are projected even when their price is outside the new-order action band; that observation cannot authorize another out-of-band command. Authenticated terminal zero-fill evidence expires only that command commitment without voiding an older same-position fill, and a shared command/order invariant forbids every terminal zero-fill append when canonical order truth already records any finite positive matched size; trade-list absence cannot negate that fact. A global MAKER_REST held SELL atomically writes the existing V4 fresh-auction obligation before release. V4 keeps position/family/held-token/SELL debt scope and generation stable while q/book content is an attempt witness; append-only receipt lineage admits concurrent witnesses without allowing an old receipt to complete or roll back the newest durable attempt. Both its missing terminal-fact materialization and late local-orphan RESET are command-scoped and cannot depend on the aggregate position being empty, because other orders may own its existing shares. Deploy-time restart recovery runs that same point-order terminal proof before its read-only alignment gate and gives complete account pagination a separately bounded large-account deadline, while the scheduled live tick retains its short cadence budget. A point-in-time account snapshot never clears a post-submit unknown by token-level absence: without a command/order/trade fact causally bound to the original submit, duplicate and cap authority stay fail-closed. Terminal positive-fill EXIT remainders are selected by one shared candidate law; command recovery alone releases them while atomically persisting the V4 held-sell reauction obligation. Boot invalid-entry authority recovery ranks canonical order facts only for zero-exposure pending ENTRY commands, so historical fact volume cannot delay scheduler and held-position monitor startup. B71 additionally detects one open position_id carrying authenticated FILLED ENTRY BUY commands for multiple native held tokens, then in one append-first transaction reconstructs token-typed projections, rehomes only child commands/facts with CAS, and fails closed to review on topology, certificate, lifecycle, attribution, or rehome ambiguity; it never submits a venue action.
+      Scans unresolved durable venue commands and appends recovery events without bypassing command grammar. Mixed-token repair delegates its exact command/execution-fact rehome CAS and provenance to the typed venue_command_repo seam; an EDLI absorbed-fill marker suppresses generic reprojection only when proof hash, position, and current canonical aggregate all match. Confirmed maker fills become execution facts while their ACKED remainder is still resting, even when the initial LIVE order fact still reports zero matched; maker cancel races likewise aggregate all canonical confirmed trade legs for one order. A cancelled partial ENTRY discovered after a later authenticated SELL backfills immutable command-level acquisition provenance only when complete entry-minus-exit flow already reproduces the current residual, so recovery cannot resurrect released capital; if that late acquisition exposes a stale full-exit prefix, exact pre-exit entry-minus-exit flow plus a synced residual recovers the true holding and books the already-filled reduction without manufacturing closure. A fully matched FOK/FAK BUY whose trade feed rounded price may also reprice its current local capital basis from the command-bound final submission envelope, while preserving separately observed Chain economics. Authenticated terminal zero-fill order truth also expires a SUBMITTING command whose ACK event was lost, releasing only that command commitment while preserving any older same-position fill. Recovered partial SELLs fold each authenticated trade identity exactly once against an immutable pre-recovery lot baseline; canonical cumulative fills, order aggregate, and fresh residual must conserve, dust remains pending with a typed non-family-blocking review item, and no partial leg can manufacture economic closure. A later authenticated fill supersedes and clears a voided retry placeholder on the same execution intent. A later terminal close adds that exact partial fold to the remaining-lot terminal economics and rounds only once, so restart projection cannot overwrite earlier realized gains or losses. A terminal FAK partial-reduction releases its mutex only when the command/order-bound economic-fill projection and a later synced Chain observation agree on the total remaining position; the unfilled command prefix is never confused with total held exposure. An ACKED/POST_ACKED EXIT on a hard-terminal position remains a restart recovery candidate when canonical confirmed trade facts prove a partial fill: exact point-order absence, complete open-order absence, and matching authenticated account trades expire only its unfilled GTC remainder while leaving the terminal position unchanged. Already-realized venue fill facts in the probability domain are projected even when their price is outside the new-order action band; that observation cannot authorize another out-of-band command. Authenticated terminal zero-fill evidence expires only that command commitment without voiding an older same-position fill, and a shared command/order invariant forbids every terminal zero-fill append when canonical order truth already records any finite positive matched size; trade-list absence cannot negate that fact. A terminal partial ENTRY whose raw terminal fact still carries the cancelled remainder stays in the command-scoped terminalizer even after its position becomes economically closed. Its exposure obligation releases only after canonical terminal-order and positive-fill proof plus either an exact current residual or a canonical full EXIT with zero Chain exposure reproduce the entire entry-minus-exit flow; command state or local phase alone never releases capital. A global MAKER_REST held SELL atomically writes the existing V4 fresh-auction obligation before release. V4 keeps position/family/held-token/SELL debt scope and generation stable while q/book content is an attempt witness; append-only receipt lineage admits concurrent witnesses without allowing an old receipt to complete or roll back the newest durable attempt. Both its missing terminal-fact materialization and late local-orphan RESET are command-scoped and cannot depend on the aggregate position being empty, because other orders may own its existing shares. Deploy-time restart recovery runs that same point-order terminal proof before its read-only alignment gate and gives complete account pagination a separately bounded large-account deadline, while the scheduled live tick retains its short cadence budget. A point-in-time account snapshot never clears a post-submit unknown by token-level absence: without a command/order/trade/terminal-order fact causally bound to the original submit, duplicate and cap authority stay fail-closed. Terminal positive-fill EXIT remainders are selected by one shared candidate law; command recovery alone releases them while atomically persisting the V4 held-sell reauction obligation. Boot invalid-entry authority recovery ranks canonical order facts only for zero-exposure pending ENTRY commands, so historical fact volume cannot delay scheduler and held-position monitor startup. B71 additionally detects one open position_id carrying authenticated FILLED ENTRY BUY commands for multiple native held tokens, then in one append-first transaction reconstructs token-typed projections, rehomes only child commands/facts with CAS, and fails closed to review on topology, certificate, lifecycle, attribution, or rehome ambiguity; it never submits a venue action.
     downstream:
     - src/engine/cycle_runner.py
     - src/state/venue_command_repo.py
   src/execution/venue_sync_contract.py:
     zone: K2_runtime
     authority_role: venue_recovery_snapshot_boundary
-    why: Separates command recovery into DB snapshot, connection-free venue I/O, and short apply phases. Account absence is authoritative only after one complete adapter-owned orders-plus-trades snapshot finishes inside its shared monotonic deadline; adapter failure, pagination ambiguity, or timeout aborts before any apply mutation.
+    why: Separates command recovery into DB snapshot, connection-free venue I/O, and short apply phases. Account absence is authoritative only after one complete adapter-owned orders-plus-trades snapshot finishes inside its shared monotonic deadline; adapter failure, pagination ambiguity, or timeout aborts before any apply mutation. Typed authenticated point-order absence remains distinguishable from an untyped None response across the NETWORK-to-APPLY boundary.
     downstream:
     - src/execution/command_recovery.py
   src/execution/executor.py:
     zone: K2_runtime
     authority_role: live_order_executor
-    why: Places finite-price live CLOB limits at the real-money boundary. R3 U2 persists pre-submit VenueSubmissionEnvelope provenance before SDK contact; R3 A2 consults RiskAllocator/PortfolioGovernor before persistence or contact. Legal modes are post-only GTC/GTD maker, ENTRY BUY FOK/FAK certified taker, and EXIT SELL FAK taker; venue-reported fill prices and counterparty bids remain observation/economic truth, not new-order authority. An EXIT SELL may consume a probability-domain bid above the submit ceiling through an independently legal in-band floor, preserving favorable price improvement without ever persisting or submitting an above-band limit. ENTRY admission uses a DDL-free in-transaction collateral preflight so any pre-SDK failure atomically rolls back command, event, envelope, and reservation. A committed V4 global-SELL publish claim is checked inside the same TRADE writer lease before EXIT command persistence. ENTRY carries exact family identity into unresolved exposure so the next global auction prices the correlated endowment without a sibling-token veto.
+    why: Places finite-price live CLOB limits at the real-money boundary. R3 U2 persists pre-submit VenueSubmissionEnvelope provenance before SDK contact; R3 A2 consults RiskAllocator/PortfolioGovernor before persistence or contact. Legal modes are post-only GTC/GTD maker, ENTRY BUY FOK/FAK certified taker, and EXIT SELL FAK taker; venue-reported fill prices and counterparty bids remain observation/economic truth, not new-order authority. An EXIT SELL may consume a probability-domain bid above the submit ceiling through an independently legal in-band floor, preserving favorable price improvement without ever persisting or submitting an above-band limit. ENTRY admission uses a DDL-free in-transaction collateral preflight and the canonical bounded TRADE writer lease, so participating runtime writers serialize before the fresh attached snapshot and any pre-SDK failure atomically rolls back command, event, envelope, and reservation. A committed V4 global-SELL publish claim is checked inside the same TRADE writer lease before EXIT command persistence. ENTRY carries exact family identity into unresolved exposure so the next global auction prices the correlated endowment without a sibling-token veto.
     write_routes:
     - canonical_position_write
     downstream:
@@ -2196,7 +2114,7 @@ files:
   src/execution/exchange_reconcile.py:
     zone: K2_runtime
     authority_role: exchange_reconciliation_sweep
-    why: R3 M5 venue-vs-journal reconciliation sweep; writes findings and linkable trade facts without live venue side effects. Truly exchange-only state does not become a command, while known-position recovered EXIT orders and operator-confirmed external closes use repo-owned typed adoption/absorption helpers with creation-only events and no fabricated SUBMIT history. Recovered EXIT adoption freezes its original lot/conservation proof; each later authenticated leg is handed to the shared partial-economics reducer, so actual-price PnL advances exactly once while dust remains real exposure rather than a fabricated close. A confirmed terminal leg cumulatively grades the exact prior partial-exit fold, and replay repairs a stale terminal-leg-only projection without appending another close event. Authenticated late trade legs converge to the canonical command aggregate and exact position projection without inventing closure. Positive finite fill facts remain observation authority even outside the proposed-order action band. External-drift suppression is reason-typed so an automatic local/chain match cannot hide a later real drift.
+    why: R3 M5 venue-vs-journal reconciliation sweep; writes findings and linkable trade facts without live venue side effects. Truly exchange-only state does not become a command, while known-position recovered EXIT orders and operator-confirmed external closes use repo-owned typed adoption/absorption helpers with creation-only events and no fabricated SUBMIT history. Recovered EXIT adoption freezes its original lot/conservation proof; each later authenticated leg is handed to the shared partial-economics reducer, so actual-price PnL advances exactly once while dust remains real exposure rather than a fabricated close. A confirmed terminal leg cumulatively grades the exact prior partial-exit fold, clears any earlier voided retry placeholder for that command-scoped execution atom, and replay repairs a stale terminal-leg-only projection without appending another close event. Freshness checks bind the exact position plus command instead of a position-wide EXIT key, so one retry cannot mask or overwrite another order's price, fill, or decision attribution. Authenticated late trade legs converge to the canonical command aggregate and exact position projection without inventing closure. Command recovery may explicitly mark a fully matched taker envelope as the exact acquisition-cost authority; the entry fold then prefers that bound shares/price pair over a rounded trade-feed price while leaving Chain observation fields independent. Positive finite fill facts remain observation authority even outside the proposed-order action band. External-drift suppression is reason-typed so an automatic local/chain match cannot hide a later real drift.
     hazards:
     - VENUS_CONTROL_ONLY
     write_routes:
@@ -2227,10 +2145,27 @@ files:
     - src/execution/harvester.py
     - src/state/db.py
     - future T1 fake venue parity
+  src/execution/day0_hard_fact_exit.py:
+    zone: K2_runtime
+    authority_role: day0_absorbing_payoff_and_exit_authority
+    why: >-
+      Converts only source-complete monotone Day0 boundaries into exact held
+      payoff facts. WU intraday and completed-hourly evidence remains
+      statistical because provider revisions and the separate Daily
+      Observations settlement product prevent pathwise finality; same-station
+      AviationWeather METAR remains statistical for the same WU-settled
+      contract even when its raw publication and causal clocks are complete.
+      A scalar memo or intraday containment never creates a hard fact.
+    hazards:
+    - SOURCE_TRUTH_PLANE_COLLAPSE
+    downstream:
+    - src/engine/cycle_runtime.py
+    - src/engine/monitor_refresh.py
+    - src/execution/venue_cancel_journal.py
   src/execution/exit_lifecycle.py:
     zone: K2_runtime
     authority_role: exit_lifecycle_runtime
-    why: Manages exit order lifecycle while preserving exit vs settlement split. Exit liquidity admission and retry/no-order reset require both intent and executable-snapshot counterparty bids inside probability-domain [0.05,1], distinct from the submitted-action [0.05,0.95] band; a favorable bid above the submit ceiling releases stale liquidity debt for fresh auction rather than stranding capital. Already-realized positive finite venue fill receipts are projected from observation truth even outside that action band, and an external open SELL is adopted only with explicit legal price plus GTC/GTD post-only proof while unproved matches are canceled. A global maker SELL is submitted only at the exact price scored by the auction; non-GTC grammar is rejected before snapshot or venue I/O, and its persisted finite rest deadline is an INV-47 scoped reset. Elapsed or missing deadline authority cancels that order and returns only its position to re-auction. An exact synchronous post-only-cross rejection proves no venue side effect and invalidates the stale maker certificate, so only that position returns immediately to a fresh global auction without consuming retry budget; other 400 responses retain generic retry semantics. CANCELED/EXPIRED status alone cannot release a canonical global MAKER_REST held SELL into generic backoff; it remains single-flight until command recovery proves terminal zero-fill and attaches V4 fresh-auction debt. A canonical global SELL intent that fails before any EXIT command is persisted retains the same V4 ownership across restart; canonical event sequence and EXIT_ORDER_POSTED command binding decide ownership, never caller timestamps, and unreadable or malformed proof keeps the position pending. Downstream DB-lock, collateral, or bare-intent error labels cannot downgrade it to ordinary local monitor redecision. V4 fixes debt scope to position/family/held-token/SELL and retains q/book only as the latest refreshable attempt witness; each attempt receipt is append-only and immutable, while completion and acknowledgement are fenced to the fixed-size per-debt lineage's current witness, so an old receipt cannot clear, roll back, or delete current auction work. Intentional partial-position reductions use exact order-bound venue fill quantities, reduce canonical exposure without manufacturing economic closure, and return the remaining claim to normal redecision. Every terminal close path folds those prior exact reductions into the remaining-lot economics and rounds once at the canonical boundary. Generic no-order release defers terminal positive-fill EXIT remainders to command recovery so a monitor/restart race cannot clear pending_exit before the V4 durable reauction debt is written. Its cadence watchdog classifies every current positive-exposure position independently from canonical MONITOR_REFRESHED evidence, so a fresh sibling cannot hide stale, missing, malformed, or future-dated monitor truth; detection remains read-only and recovery remains separately owned.
+    why: Manages exit order lifecycle while preserving exit vs settlement split. Exit liquidity admission and retry/no-order reset require both intent and executable-snapshot counterparty bids inside probability-domain [0.05,1], distinct from the submitted-action [0.05,0.95] band; a favorable bid above the submit ceiling releases stale liquidity debt for fresh auction rather than stranding capital. Already-realized positive finite venue fill receipts are projected from observation truth even outside that action band, and an external open SELL is adopted only with explicit legal price plus GTC/GTD post-only proof while unproved matches are canceled. A global maker SELL is submitted only at the exact price scored by the auction; non-GTC grammar is rejected before snapshot or venue I/O, and its persisted finite rest deadline is an INV-47 scoped reset. Elapsed or missing deadline authority cancels that order and returns only its position to re-auction. An exact synchronous post-only-cross rejection proves no venue side effect and invalidates the stale maker certificate, so only that position returns immediately to a fresh global auction without consuming retry budget; other 400 responses retain generic retry semantics. CANCELED/EXPIRED status alone cannot release a canonical global MAKER_REST held SELL into generic backoff; it remains single-flight until command recovery proves terminal zero-fill and attaches V4 fresh-auction debt. A canonical global SELL intent that fails before any EXIT command is persisted retains the same V4 ownership across restart; canonical event sequence and EXIT_ORDER_POSTED command binding decide ownership, never caller timestamps, and unreadable or malformed proof keeps the position pending. Downstream DB-lock, collateral, or bare-intent error labels cannot downgrade it to ordinary local monitor redecision. V4 fixes debt scope to position/family/held-token/SELL and retains q/book only as the latest refreshable attempt witness; each attempt receipt is append-only and immutable, while completion and acknowledgement are fenced to the fixed-size per-debt lineage's current witness, so an old receipt cannot clear, roll back, or delete current auction work. Intentional partial-position reductions use exact order-bound venue fill quantities, clear any superseded voided retry placeholder, reduce canonical exposure without manufacturing economic closure, and return the remaining claim to normal redecision. Every terminal close path folds those prior exact reductions into the remaining-lot economics and rounds once at the canonical boundary. Generic no-order release defers terminal positive-fill EXIT remainders to command recovery so a monitor/restart race cannot clear pending_exit before the V4 durable reauction debt is written. Its cadence watchdog classifies every current positive-exposure position independently from canonical MONITOR_REFRESHED evidence, so a fresh sibling cannot hide stale, missing, malformed, or future-dated monitor truth; detection remains read-only and recovery remains separately owned. A canonical no-action row proven sub-minimum by current venue size authority is complete for full-book cadence only: it remains an open position, keeps its dedicated health alarm and recurring monitoring, and cannot suppress sibling redecision; every other no-action authority gap retains debt.
     downstream:
     - src/engine/cycle_runtime.py
     - src/execution/harvester.py
@@ -2249,20 +2184,7 @@ files:
   src/execution/fill_tracker.py:
     zone: K2_runtime
     authority_role: fill_tracking
-    why: >-
-     Tracks fills/timeouts for execution learning and lifecycle updates. T4 (quarantine excision,
-     docs/rebuild/quarantine_excision_2026-07-11.md, 2026-07-11): retired all 8 lifecycle-scar mints
-     (_mark_entry_quarantined and its callers) — venue-truth gaps (missing fill economics/authority)
-     and local ledger/canonical/void write failures now stay pending_tracked with an open
-     src.state.review_work_items ReviewWorkItem (MISSING_FILL_ECONOMICS / MISSING_FILL_AUTHORITY /
-     LOCAL_WRITE_FAILURE / TIMEOUT_ABSENCE_UNCONFIRMED) instead of minting a scar; a confirmed fill
-     or confirmed void releases the T2 EntryRiskReservation (src.state.entry_exposure_obligation)
-     and resolves open review debt for that subject. BLOCKER-3: the ambiguous (no definitive CLOB
-     status) timeout branch voids only when this position's own
-     src.contracts.chain_observation_envelope.ChainObservationEnvelope qualifies as a fresh,
-     post-command, complete absence observation — otherwise it defers to
-     src.state.chain_mirror_reconciler's own two-consecutive-absence protocol rather than inferring
-     absence itself.
+    why: "Tracks fills/timeouts for execution learning and lifecycle updates. T4 (quarantine excision, docs/rebuild/quarantine_excision_2026-07-11.md, 2026-07-11): retired all 8 lifecycle-scar mints (_mark_entry_quarantined and its callers) — venue-truth gaps (missing fill economics/authority) and local ledger/canonical/void write failures now stay pending_tracked with an open src.state.review_work_items ReviewWorkItem (MISSING_FILL_ECONOMICS / MISSING_FILL_AUTHORITY / LOCAL_WRITE_FAILURE / TIMEOUT_ABSENCE_UNCONFIRMED) instead of minting a scar; a confirmed fill or confirmed void releases the T2 EntryRiskReservation (src.state.entry_exposure_obligation) and resolves open review debt for that subject. BLOCKER-3: the ambiguous (no definitive CLOB status) timeout branch voids only when this position's own src.contracts.chain_observation_envelope.ChainObservationEnvelope qualifies as a fresh, post-command, complete absence observation — otherwise it defers to src.state.chain_mirror_reconciler's own two-consecutive-absence protocol rather than inferring absence itself."
     downstream:
     - src/engine/cycle_runtime.py
   src/execution/harvester.py:
@@ -2286,18 +2208,7 @@ files:
   src/execution/self_trade_guard.py:
     zone: K2_runtime
     authority_role: self_trade_guard_predicate
-    why: >-
-     SCH-W2.2-SELF-TRADE (arch doc line 53, BUILD, nothing existed). Pure check_self_trade predicate
-     blocking a proposed Zeus order from crossing Zeus's OWN open resting order on the same token_id
-     (BUY at price >= own resting SELL, or SELL at price <= own resting BUY); INDETERMINATE
-     (fail-closed) when the own-open-orders set is unavailable. Scoped per-token_id, not per-family,
-     to avoid double-blocking legitimate opposite-token hedges already governed by
-     src/strategy/family_exclusive_dedup.py. Shared-wallet-safe by construction: venue_order_facts
-     only ever contains Zeus-originated orders (foreign-key to venue_commands, written exclusively
-     by src/state/venue_command_repo.py insert_command), so the operator's independently-placed
-     orders are invisible to this query and can never be blocked. No venue-side self-trade
-     prevention exists in the installed Polymarket SDK, so this is the primary defense, not
-     defense-in-depth. Nothing consumes this yet; W3's solve wires it at envelope build.
+    why: "SCH-W2.2-SELF-TRADE (arch doc line 53, BUILD, nothing existed). Pure check_self_trade predicate blocking a proposed Zeus order from crossing Zeus's OWN open resting order on the same token_id (BUY at price >= own resting SELL, or SELL at price <= own resting BUY); INDETERMINATE (fail-closed) when the own-open-orders set is unavailable. Scoped per-token_id, not per-family, to avoid double-blocking legitimate opposite-token hedges already governed by src/strategy/family_exclusive_dedup.py. Shared-wallet-safe by construction: venue_order_facts only ever contains Zeus-originated orders (foreign-key to venue_commands, written exclusively by src/state/venue_command_repo.py insert_command), so the operator's independently-placed orders are invisible to this query and can never be blocked. No venue-side self-trade prevention exists in the installed Polymarket SDK, so this is the primary defense, not defense-in-depth. Nothing consumes this yet; W3's solve wires it at envelope build."
     downstream: []  # not yet wired; W3 consumes (envelope build)
   src/execution/batch_order_submission.py:
     zone: K2_runtime
@@ -2346,11 +2257,7 @@ files:
   src/signal/day0_high_nowcast_signal.py:
     zone: K3_extension
     authority_role: day0_high_nowcast_signal
-    why: >-
-     T2 Day0Nowcast: HIGH floor semantics mirror class. Horizon guard raises NotApplicableHorizon
-     when hours_remaining > 6 or < 0. settlement_samples() uses max instead of min (floor not
-     ceiling). Does NOT subclass Day0HighSignal (parallel-structure invariant). Caller-site nowcast
-     invocation pattern (Option c); router stays pure.
+    why: "T2 Day0Nowcast: HIGH floor semantics mirror class. Horizon guard raises NotApplicableHorizon when hours_remaining > 6 or < 0. settlement_samples() uses max instead of min (floor not ceiling). Does NOT subclass Day0HighSignal (parallel-structure invariant). Caller-site nowcast invocation pattern (Option c); router stays pure."
     downstream:
     - src/engine/evaluator.py
     - src/engine/monitor_refresh.py
@@ -2437,12 +2344,7 @@ files:
   src/calibration/day0_horizon_calibration.py:
     zone: K3_extension
     authority_role: day0_horizon_platt_calibration
-    why: >-
-     T2 Day0Nowcast: HorizonPlattFit dataclass
-     (alpha/beta/gamma_morning/gamma_afternoon/gamma_post_peak/delta/epsilon) +
-     fit_day0_horizon_platt() fitter via scipy L-BFGS-B. One-hot daypart encoding
-     (pre_sunrise=reference). fit_run_id=uuid4, fit_artifact_id=hpf_v1. Training data from
-     calibration_pairs_v2.
+    why: "T2 Day0Nowcast: HorizonPlattFit dataclass (alpha/beta/gamma_morning/gamma_afternoon/gamma_post_peak/delta/epsilon) + fit_day0_horizon_platt() fitter via scipy L-BFGS-B. One-hot daypart encoding (pre_sunrise=reference). fit_run_id=uuid4, fit_artifact_id=hpf_v1. Training data from calibration_pairs_v2."
     downstream:
     - src/signal/day0_high_nowcast_signal.py
     - src/state/day0_nowcast_store.py
@@ -2758,8 +2660,9 @@ files:
       - resolve_position_metric(position) -> (metric, authority, source) — peer for non-rescue reads
       - LEARNING_AUTHORITY_REQUIRED = "VERIFIED" — anchor for downstream
         learning consumers that filter rescue_events reads.
-      A fresh complete exact token/aggregate match atomically appends an
-      automatic token-suppression resolution and closes only matching
+      A fresh complete token/aggregate match within the canonical four-decimal
+      share projection tolerance atomically appends an automatic
+      token-suppression resolution and closes only matching
       CHAIN_ONLY_UNKNOWN_ASSET review debt; later absence may reopen it.
     downstream:
     - src/engine/cycle_runner.py
@@ -2790,7 +2693,7 @@ files:
   src/state/venue_command_repo.py:
     zone: K2_runtime
     authority_role: venue_command_journal
-    why: Durable venue command/event journal; insert_command rejects BUY/SELL prices outside inclusive [0.05,0.95] and admits only post-only GTC/GTD makers, ENTRY BUY FOK/FAK takers, or EXIT SELL FAK takers. Typed helpers exclusively own recovered EXIT adoption, external-close absorption, and mixed-token command/fact rehome through atomic creation events or CAS provenance; callers never write journal SQL directly. append_trade_fact preserves realized positive finite fill economics and marks whether the observation was inside the action band; observation truth never grants submit authority. Terminal zero-fill append uses one conditional canonical INSERT that atomically refuses any already-committed positive matched fact for the same command/order, so account-read absence cannot race a fill into contradictory zero exposure. Every live nonterminal command records one exact decision-certificate attribution, terminal transitions release collateral reservations atomically, authenticated canceled zero-fill clearance remains command-specific, R3 U1 requires a fresh executable snapshot, and R3 U2 owns envelopes/order/trade/lot/provenance facts. q_version is write-once and required for live ENTRY but nullable for non-entry/recovery.
+    why: Durable venue command/event journal; insert_command rejects BUY/SELL prices outside inclusive [0.05,0.95] and admits only post-only GTC/GTD makers, ENTRY BUY FOK/FAK takers, or EXIT SELL FAK takers. Typed helpers exclusively own recovered EXIT adoption, external-close absorption, and mixed-token command/fact rehome through atomic creation events or CAS provenance; callers never write journal SQL directly. append_trade_fact preserves realized positive finite fill economics and marks whether the observation was inside the action band; observation truth never grants submit authority. Authenticated user-channel fill evidence may arrive before the synchronous SDK submit ACK; the later ACK binds its venue identity without downgrading PARTIAL/FILLED exposure truth. Terminal zero-fill append uses one conditional canonical INSERT that atomically refuses any already-committed positive matched fact for the same command/order, so account-read absence cannot race a fill into contradictory zero exposure. Every live nonterminal command records one exact decision-certificate attribution, terminal transitions release collateral reservations atomically, authenticated canceled zero-fill clearance remains command-specific, R3 U1 requires a fresh executable snapshot, and R3 U2 owns envelopes/order/trade/lot/provenance facts. q_version is write-once and required for live ENTRY plus every globally-ranked SELL carrying a typed receipt closure; it remains nullable for other non-entry/recovery paths.
     write_routes:
     - venue_command_write
     downstream:
@@ -2879,7 +2782,7 @@ files:
   src/state/db.py:
     zone: K2_runtime
     authority_role: db_connection_schema_runtime
-    why: SQLite connections, schema setup, canonical DB queries, and raw provenance projection initialization. Every writable canonical connection holds the shared cutover lease for its full lifetime; all canonical schemas own the transaction-bound cutover generation receipt. Deadline-bound read-only HWM opens use a wall-clock handoff and close late connections; ordinary read-only callers retain direct connection behavior. The sanctioned forecasts+world connection helper retains blocking admission by default and exposes an explicit non-blocking option for bounded retrying source clocks, applied identically to both canonically ordered flocks. Confirmed positive entry execution facts contribute their actual shares and cost to the runtime portfolio whether the command is fully filled or still has a resting partial remainder. Owns the token-suppression reason vocabulary and separates review resolution, permanent ignore, and external-drift suppression semantics. The trade DDL admits the additive POSITION_TOKEN_SPLIT_RECONSTRUCTED repair event so fresh databases preserve B71 append-first evidence.
+    why: SQLite connections, schema setup, canonical DB queries, and raw provenance projection initialization. Every writable canonical connection holds the shared cutover lease for its full lifetime; all canonical schemas own the transaction-bound cutover generation receipt. Deadline-bound read-only HWM opens use a wall-clock handoff and close late connections; ordinary read-only callers retain direct connection behavior. The sanctioned forecasts+world connection helper retains blocking admission by default and exposes an explicit non-blocking option for bounded retrying source clocks, applied identically to both canonically ordered flocks. Confirmed positive entry execution facts contribute their actual shares and cost to the runtime portfolio whether the command is fully filled or still has a resting partial remainder. Every exit execution fact with a venue command is keyed by position plus command, preserving each retry as an immutable attribution atom while the pre-command lifecycle intent retains its position-level key. A confirmed fill writer may explicitly clear an earlier voided_at on the same execution intent; omission still preserves the prior value, so unrelated telemetry cannot resurrect a voided fact. Owns the token-suppression reason vocabulary and separates review resolution, permanent ignore, and external-drift suppression semantics. The trade DDL admits the additive POSITION_TOKEN_SPLIT_RECONSTRUCTED repair event so fresh databases preserve B71 append-first evidence.
     write_routes:
     - canonical_position_write
     - settlement_write
@@ -2949,11 +2852,7 @@ files:
   src/state/day0_nowcast_store.py:
     zone: K2_runtime
     authority_role: day0_nowcast_persistence
-    why: >-
-     T2 Day0Nowcast writer/reader for day0_nowcast_runs + day0_horizon_platt_fits on
-     zeus-forecasts.db. Single-DB forecast write (INV-37 trivially honored — no ATTACH). writer-side
-     nei_v1_ hash (Option β pattern). Live writes under db_writer_lock(LIVE). NOT_DAEMON_WIRED:
-     caller-site wiring (evaluator.py + monitor_refresh.py) is a separate operator-controlled step.
+    why: "T2 Day0Nowcast writer/reader for day0_nowcast_runs + day0_horizon_platt_fits on zeus-forecasts.db. Single-DB forecast write (INV-37 trivially honored — no ATTACH). writer-side nei_v1_ hash (Option β pattern). Live writes under db_writer_lock(LIVE). NOT_DAEMON_WIRED: caller-site wiring (evaluator.py + monitor_refresh.py) is a separate operator-controlled step."
     write_routes:
     - calibration_persistence_write
     downstream:
@@ -2992,23 +2891,14 @@ files:
   src/state/schema/review_work_items_schema.py:
     zone: K2_runtime
     authority_role: review_work_items_schema_owner
-    why: >-
-     Quarantine excision foundation (2026-07-11): DDL owner for review_work_items, callable against
-     ANY owning-DB conn (trade first via init_schema_trade_only; forecasts/world instantiate the
-     identical shape later against their own connections). Partial unique index on (owner_table,
-     subject_id, reason_code, authority_revision) WHERE status='OPEN' is the idempotent-open
-     guarantee; reason_code deliberately has no CHECK (extensible vocabulary, avoids SQLite's
-     cannot-ALTER-CHECK rebuild churn).
+    why: "Quarantine excision foundation (2026-07-11): DDL owner for review_work_items, callable against ANY owning-DB conn (trade first via init_schema_trade_only; forecasts/world instantiate the identical shape later against their own connections). Partial unique index on (owner_table, subject_id, reason_code, authority_revision) WHERE status='OPEN' is the idempotent-open guarantee; reason_code deliberately has no CHECK (extensible vocabulary, avoids SQLite's cannot-ALTER-CHECK rebuild churn)."
     downstream:
     - src/state/db.py
     - src/state/review_work_items.py
   src/state/schema/entry_exposure_obligations_schema.py:
     zone: K2_runtime
     authority_role: entry_exposure_obligations_schema_owner
-    why: >-
-     Quarantine excision foundation (2026-07-11, BLOCKER-1): DDL owner for
-     entry_exposure_obligations, SIBLING to review_work_items on the trade DB (see module docstring
-     for the shape-separation rationale vs. co-locating in review_work_items).
+    why: "Quarantine excision foundation (2026-07-11, BLOCKER-1): DDL owner for entry_exposure_obligations, SIBLING to review_work_items on the trade DB (see module docstring for the shape-separation rationale vs. co-locating in review_work_items)."
     downstream:
     - src/state/db.py
     - src/state/entry_exposure_obligation.py
@@ -3022,31 +2912,20 @@ files:
   src/state/schema/no_trade_events_schema.py:
     zone: K2_runtime
     authority_role: no_trade_events_schema_owner
-    why: >-
-     Phase 2 T2 (PHASE_2_ULTRAPLAN.md v3.1 §5.2): DDL owner for no_trade_events table (world DB).
-     SCHEMA_VERSION 14→18. _rebuild_stale_no_trade_events_table handles in-place CHECK expansion
-     across version bumps. Phase 3 T2: extended CHECK to include 6 SHOULDER_* NoTradeReason members
-     + schema_version IN (14,15,16,17,18).
+    why: "Phase 2 T2 (PHASE_2_ULTRAPLAN.md v3.1 §5.2): DDL owner for no_trade_events table (world DB). SCHEMA_VERSION 14→18. _rebuild_stale_no_trade_events_table handles in-place CHECK expansion across version bumps. Phase 3 T2: extended CHECK to include 6 SHOULDER_* NoTradeReason members + schema_version IN (14,15,16,17,18)."
     downstream:
     - src/state/db.py
   src/state/schema/shoulder_exposure_ledger_schema.py:
     zone: K2_runtime
     authority_role: shoulder_exposure_ledger_schema_owner
-    why: >-
-     Phase 3 T3 (2026-05-21): DDL owner for shoulder_exposure_ledger table (world DB).
-     SCHEMA_VERSION 19. Append-only log of shoulder exposure entries for cross-city cluster cap
-     enforcement per dossier §7.5. CHECK (18, 19). Production wiring via db.py init_schema.
+    why: "Phase 3 T3 (2026-05-21): DDL owner for shoulder_exposure_ledger table (world DB). SCHEMA_VERSION 19. Append-only log of shoulder exposure entries for cross-city cluster cap enforcement per dossier §7.5. CHECK (18, 19). Production wiring via db.py init_schema."
     downstream:
     - src/state/db.py
     - src/state/shoulder_exposure_ledger.py
   src/state/shoulder_exposure_ledger.py:
     zone: K2_runtime
     authority_role: shoulder_exposure_ledger_writer_reader
-    why: >-
-     Phase 3 T3 (2026-05-21): Writer/reader for shoulder_exposure_ledger world DB table.
-     write_shoulder_exposure_entry (append-only), read_cluster_exposure (SUM by cluster+side),
-     read_distinct_cities_in_cluster (Gate 1 cross-city check), read_total_exposure_usd (readiness
-     report). INV-37: all functions require caller-supplied conn.
+    why: "Phase 3 T3 (2026-05-21): Writer/reader for shoulder_exposure_ledger world DB table. write_shoulder_exposure_entry (append-only), read_cluster_exposure (SUM by cluster+side), read_distinct_cities_in_cluster (Gate 1 cross-city check), read_total_exposure_usd (readiness report). INV-37: all functions require caller-supplied conn."
     write_routes:
     - shoulder_exposure_ledger
     downstream:
@@ -3054,19 +2933,7 @@ files:
   src/state/review_work_items.py:
     zone: K2_runtime
     authority_role: review_work_items_writer_reader
-    why: >-
-     Quarantine excision foundation (2026-07-11): writer/reader for review_work_items.
-     open_work_item (idempotent via the partial unique index), resolve_work_item (CAS on
-     authority_revision), resolve_all_open_for_subject (T4, 2026-07-11: CAS-resolves every OPEN item
-     for one subject regardless of reason_code — each row resolved with its own live
-     authority_revision), supersede_on_new_revision, due_work (status='OPEN' AND
-     next_attempt_at<=now ORDER BY priority,next_attempt_at LIMIT N), open_items_by_family,
-     open_unbounded_count, blocked_family_keys (family-block read helper T2's candidate filter
-     consults — reads both open family-scoped work items and blocking ChainOnlyFacts off a
-     caller-supplied portfolio; a prefilter, never an enforcement authority per the adjudication).
-     INV-37: all functions require caller-supplied conn. T4 (2026-07-11) is the first fill_tracker
-     consumer — open_work_item/resolve_all_open_for_subject on its
-     venue-truth-gap/local-write-failure/ambiguous-timeout seams.
+    why: "Quarantine excision foundation (2026-07-11): writer/reader for review_work_items. open_work_item (idempotent via the partial unique index), resolve_work_item (CAS on authority_revision), resolve_all_open_for_subject (T4, 2026-07-11: CAS-resolves every OPEN item for one subject regardless of reason_code — each row resolved with its own live authority_revision), supersede_on_new_revision, due_work (status='OPEN' AND next_attempt_at<=now ORDER BY priority,next_attempt_at LIMIT N), open_items_by_family, open_unbounded_count, blocked_family_keys (family-block read helper T2's candidate filter consults — reads both open family-scoped work items and blocking ChainOnlyFacts off a caller-supplied portfolio; a prefilter, never an enforcement authority per the adjudication). INV-37: all functions require caller-supplied conn. T4 (2026-07-11) is the first fill_tracker consumer — open_work_item/resolve_all_open_for_subject on its venue-truth-gap/local-write-failure/ambiguous-timeout seams."
     write_routes:
     - review_work_items
     downstream:
@@ -3074,16 +2941,7 @@ files:
   src/state/entry_exposure_obligation.py:
     zone: K2_runtime
     authority_role: entry_exposure_obligation_writer_reader
-    why: >-
-     Quarantine excision foundation (2026-07-11, BLOCKER-1): writer/reader for
-     entry_exposure_obligations. open_entry_exposure_obligation (upsert-open keyed by command_id — a
-     live fact, not an append log; meant to be called atomically on a command's failure path),
-     resolve_entry_exposure_obligation, total_open_obligation_usd (SUM of bounded OPEN shares x $1),
-     has_unbounded_obligation (EXISTS OPEN unbounded row -> DATA_DEGRADED trigger). INV-37: all
-     functions require caller-supplied conn. T4 (2026-07-11): fill_tracker's fill-confirmation and
-     confirmed-void success paths both call resolve_entry_exposure_obligation directly (same
-     primitive src.execution.executor._release_entry_risk_reservation wraps) once a command's true
-     fate is settled truth.
+    why: "Quarantine excision foundation (2026-07-11, BLOCKER-1): writer/reader for entry_exposure_obligations. open_entry_exposure_obligation (upsert-open keyed by command_id — a live fact, not an append log; meant to be called atomically on a command's failure path), resolve_entry_exposure_obligation, total_open_obligation_usd (SUM of bounded OPEN shares x $1), has_unbounded_obligation (EXISTS OPEN unbounded row -> DATA_DEGRADED trigger). INV-37: all functions require caller-supplied conn. T4 (2026-07-11): fill_tracker's fill-confirmation and confirmed-void success paths both call resolve_entry_exposure_obligation directly (same primitive src.execution.executor._release_entry_risk_reservation wraps) once a command's true fate is settled truth."
     write_routes:
     - entry_exposure_obligations
     downstream:
@@ -3091,61 +2949,35 @@ files:
   src/strategy/shoulder_cluster_cap.py:
     zone: K2_runtime
     authority_role: shoulder_cluster_cap_gate
-    why: >-
-     Phase 3 T3 (2026-05-21): check_shoulder_cluster_cap(cluster, side, proposed_notional, conn,
-     proposing_city) -> tuple[bool, str]. Two-gate: Gate 1 cross-city presence (different city in
-     same cluster+side → REFUSE), Gate 2 $ hard cap (SHOULDER_CLUSTER_HARD_CAP_USD=2000). Empty
-     cluster (UNKNOWN regime) always allows. INV-37; fires BEFORE phase_aware_kelly_multiplier
-     (Invariant 4).
+    why: "Phase 3 T3 (2026-05-21): check_shoulder_cluster_cap(cluster, side, proposed_notional, conn, proposing_city) -> tuple[bool, str]. Two-gate: Gate 1 cross-city presence (different city in same cluster+side → REFUSE), Gate 2 $ hard cap (SHOULDER_CLUSTER_HARD_CAP_USD=2000). Empty cluster (UNKNOWN regime) always allows. INV-37; fires BEFORE phase_aware_kelly_multiplier (Invariant 4)."
     write_routes: []
     downstream:
     - src/engine/evaluator.py
   src/contracts/no_trade_reason.py:
     zone: K1_contracts
     authority_role: no_trade_reason_enum
-    why: >-
-     Phase 2 T2 (PHASE_2_ULTRAPLAN.md v3.1 §5.2, sha 00c2399742): StrEnum (66 members) covering all
-     69 rejection_reasons=[...] callsites in evaluator.py. Two-tier model: reason=CATEGORY (enum
-     CHECK), reason_detail=free-form detail. UNCATEGORIZED is the §13 fallback. Production wiring
-     complete (T2 production pass).
+    why: "Phase 2 T2 (PHASE_2_ULTRAPLAN.md v3.1 §5.2, sha 00c2399742): StrEnum (66 members) covering all 69 rejection_reasons=[...] callsites in evaluator.py. Two-tier model: reason=CATEGORY (enum CHECK), reason_detail=free-form detail. UNCATEGORIZED is the §13 fallback. Production wiring complete (T2 production pass)."
     write_routes: []
     downstream:
     - src/state/no_trade_events.py
   src/state/no_trade_events.py:
     zone: K2_runtime
     authority_role: no_trade_event_instrumentation
-    why: >-
-     Phase 2 T2 (PHASE_2_ULTRAPLAN.md v3.1 §5.2, sha 00c2399742): writer/reader for no_trade_events
-     table (world DB). INV-37 honored — write_no_trade_event(natural_key: DecisionNaturalKey,
-     reason: NoTradeReason, reason_detail: Optional[str], observed_at: str, *, conn:
-     sqlite3.Connection) requires caller-provided conn (no auto-open on write path). Reader
-     read_no_trade_events_by_market auto-opens if conn=None. PK=(market_slug, temperature_metric,
-     target_date, observation_time, decision_seq) — FK-like joinable with decision_events.
-     decision_seq derived via allocate_decision_seq (UNION of both tables under db_writer_lock) to
-     prevent cross-table collision. Production pass complete (SCHEMA_VERSION 14→15).
+    why: "Phase 2 T2 (PHASE_2_ULTRAPLAN.md v3.1 §5.2, sha 00c2399742): writer/reader for no_trade_events table (world DB). INV-37 honored — write_no_trade_event(natural_key: DecisionNaturalKey, reason: NoTradeReason, reason_detail: Optional[str], observed_at: str, *, conn: sqlite3.Connection) requires caller-provided conn (no auto-open on write path). Reader read_no_trade_events_by_market auto-opens if conn=None. PK=(market_slug, temperature_metric, target_date, observation_time, decision_seq) — FK-like joinable with decision_events. decision_seq derived via allocate_decision_seq (UNION of both tables under db_writer_lock) to prevent cross-table collision. Production pass complete (SCHEMA_VERSION 14→15)."
     write_routes: []
     downstream:
     - src/state/db.py
   src/state/evidence_tier_assignments.py:
     zone: K2_runtime
     authority_role: evidence_tier_assignment_reducer
-    why: >-
-     2026-05-21 evidence-tier governance follow-up: validated writer and deterministic current-state
-     reducer for evidence_tier_assignments. Static strategy_profile registry is baseline; DB
-     operator_override outranks tribunal rows, then migration rows. Used by
-     live_allowed_keys(conn=...) so tribunal/operator evidence-tier assignments can affect runtime
-     strategy eligibility without becoming free-form SQL.
+    why: "2026-05-21 evidence-tier governance follow-up: validated writer and deterministic current-state reducer for evidence_tier_assignments. Static strategy_profile registry is baseline; DB operator_override outranks tribunal rows, then migration rows. Used by live_allowed_keys(conn=...) so tribunal/operator evidence-tier assignments can affect runtime strategy eligibility without becoming free-form SQL."
     write_routes: []
     downstream:
     - src/strategy/strategy_profile.py
   src/state/decision_events.py:
     zone: K2_runtime
     authority_role: decision_event_instrumentation
-    why: >-
-     T1 Path D natural-key writer/reader for decision_events table. Single-DB world write (INV-37
-     trivially honored — no ATTACH). writer-side deid_v1_ hash (Option β). Live writes under
-     db_writer_lock(LIVE); backfill under db_writer_lock(BULK). NOT_DAEMON_WIRED: daemon wiring
-     deferred to Phase 2 activation commit.
+    why: "T1 Path D natural-key writer/reader for decision_events table. Single-DB world write (INV-37 trivially honored — no ATTACH). writer-side deid_v1_ hash (Option β). Live writes under db_writer_lock(LIVE); backfill under db_writer_lock(BULK). NOT_DAEMON_WIRED: daemon wiring deferred to Phase 2 activation commit."
     write_routes:
     - settlement_write
     downstream:
@@ -3292,37 +3124,14 @@ files:
   src/state/attribution_drift.py:
     zone: K2_runtime
     authority_role: derived_attribution_drift_projection
-    why: >-
-     K1-compliant read-only attribution-drift detector per position. Re-applies the entry-time
-     _strategy_key_for dispatch rule (src/engine/evaluator.py L420-441) on persisted row attributes
-     and flags label/semantics mismatch. ATTRIBUTION_DRIFT packet BATCH 1 per round3_verdict.md §1
-     #2 + ULTIMATE_PLAN.md L305-308 (no detector existed for silent attribution drift). Reuses
-     canonical surface (query_authoritative_settlement_rows) + STRATEGY_KEYS list + metric_ready
-     filter from edge_observation.py. KNOWN LIMITATIONS in module docstring: discovery_mode not
-     currently surfaced by _normalize_position_settlement_event so clauses 1-2 of dispatch rule
-     cannot be applied (insufficient_signal); bin.is_shoulder inferred heuristically from persisted
-     bin_label string (per AGENTS.md L66 antibody, classifier conservatively returns unknown rather
-     than guess). Recall-limited but precision-favored — every drift it reports is a real
-     label/semantics mismatch on at least one of clauses 3-5.
+    why: "K1-compliant read-only attribution-drift detector per position. Re-applies the entry-time _strategy_key_for dispatch rule (src/engine/evaluator.py L420-441) on persisted row attributes and flags label/semantics mismatch. ATTRIBUTION_DRIFT packet BATCH 1 per round3_verdict.md §1 #2 + ULTIMATE_PLAN.md L305-308 (no detector existed for silent attribution drift). Reuses canonical surface (query_authoritative_settlement_rows) + STRATEGY_KEYS list + metric_ready filter from edge_observation.py. KNOWN LIMITATIONS in module docstring: discovery_mode not currently surfaced by _normalize_position_settlement_event so clauses 1-2 of dispatch rule cannot be applied (insufficient_signal); bin.is_shoulder inferred heuristically from persisted bin_label string (per AGENTS.md L66 antibody, classifier conservatively returns unknown rather than guess). Recall-limited but precision-favored — every drift it reports is a real label/semantics mismatch on at least one of clauses 3-5."
     hazards:
     - DERIVED_ONLY
     downstream: []
   src/state/ws_poll_reaction.py:
     zone: K2_runtime
     authority_role: derived_reaction_latency_projection
-    why: >-
-     K1-compliant read-only reaction-latency projection per strategy_key. Joins token_price_log
-     (price ticks with source_timestamp + Zeus persist timestamp) → position_current (token_id →
-     strategy_key attribution); computes per-tick latency = (zeus_timestamp - source_timestamp)
-     clipped to [0, ∞); aggregates p50/p95 + n_signals + n_with_action + sample_quality per
-     strategy. WS_OR_POLL_TIGHTENING packet BATCH 1 per round3_verdict.md §1 #2 + ULTIMATE_PLAN.md
-     L312-314. PATH A latency-only chosen by operator GO_BATCH_1; PATH B heuristic-WS-vs-poll
-     inference EXPLICITLY REJECTED per methodology §5.Z2. KNOWN LIMITATIONS in module docstring:
-     data substrate at HEAD does NOT tag each price tick as WS-vs-poll (no update_source column on
-     token_price_log); ws_share/poll_share NOT in return shape — future
-     WS_PROVENANCE_INSTRUMENTATION packet (PATH C deferred per dispatch NOT-IN-SCOPE on src/venue/
-     writer changes) would unlock those fields. Negative latencies clipped to 0 ms (clock-skew
-     defense). Imports consolidated to top per Tier 2 Phase 4 LOW-CAVEAT-EO-2-1.
+    why: "K1-compliant read-only reaction-latency projection per strategy_key. Joins token_price_log (price ticks with source_timestamp + Zeus persist timestamp) → position_current (token_id → strategy_key attribution); computes per-tick latency = (zeus_timestamp - source_timestamp) clipped to [0, ∞); aggregates p50/p95 + n_signals + n_with_action + sample_quality per strategy. WS_OR_POLL_TIGHTENING packet BATCH 1 per round3_verdict.md §1 #2 + ULTIMATE_PLAN.md L312-314. PATH A latency-only chosen by operator GO_BATCH_1; PATH B heuristic-WS-vs-poll inference EXPLICITLY REJECTED per methodology §5.Z2. KNOWN LIMITATIONS in module docstring: data substrate at HEAD does NOT tag each price tick as WS-vs-poll (no update_source column on token_price_log); ws_share/poll_share NOT in return shape — future WS_PROVENANCE_INSTRUMENTATION packet (PATH C deferred per dispatch NOT-IN-SCOPE on src/venue/ writer changes) would unlock those fields. Negative latencies clipped to 0 ms (clock-skew defense). Imports consolidated to top per Tier 2 Phase 4 LOW-CAVEAT-EO-2-1."
     hazards:
     - DERIVED_ONLY
     downstream:
@@ -3330,25 +3139,7 @@ files:
   src/state/calibration_observation.py:
     zone: K2_runtime
     authority_role: derived_calibration_parameter_projection
-    why: >-
-     K1-compliant read-only Platt parameter projection per bucket_key. Reads
-     list_active_platt_models_v2 + list_active_platt_models_legacy from src/calibration/store.py
-     (BATCH 1 read-side additions; pure SELECT; is_active=1 + authority='VERIFIED' filter at
-     source). Returns per-bucket snapshot with param_A/B/C, n_samples, brier_insample, fitted_at,
-     sample_quality (10/30/100 sibling-coherent), bootstrap_count + per-coefficient std + p5/p95
-     percentile bands (DBS-CI tightness signal WITHOUT tuning per dispatch §NOT-IN-SCOPE on α-fusion
-     + DBS-CI), in_window flag, source: v2|legacy. CALIBRATION_HARDENING packet BATCH 1 per
-     round3_verdict.md §1 #2 (FOURTH edge packet) + ULTIMATE_PLAN.md §4 #2. PATH A per-bucket-key
-     snapshot chosen by operator GO_BATCH_1; PATH B decision-log JOIN attribution deferred as future
-     enhancement; PATH C writer-side strategy_key column EXPLICITLY OUT-OF-SCOPE per dispatch ('ANY
-     mutation of platt_models[_v2] tables'). KNOWN LIMITATIONS in module docstring: dispatch's
-     '(city, target_date, strategy_key)' framing is the EVALUATION-TIME identity; persistence is
-     BUCKET-KEYED only (platt_models bucket_key = f'{cluster}_{season}'; platt_models_v2 model_key =
-     f'{temp_metric}:{cluster}:{season}:{data_version}:{input_space}'). drift.py exists at
-     src/calibration/drift.py with HL χ² FORECAST-CALIBRATION drift — parametrically different from
-     BATCH 2 detect_parameter_drift (PARAMETER-TRAJECTORY drift over consecutive refits). Both
-     legacy + v2 surfaces visible with explicit source tag (mirrors manager.py L42-62 v2-then-legacy
-     fallback dedup). Imports consolidated to top per Tier 2 Phase 4 LOW-CAVEAT-EO-2-1.
+    why: "K1-compliant read-only Platt parameter projection per bucket_key. Reads list_active_platt_models_v2 + list_active_platt_models_legacy from src/calibration/store.py (BATCH 1 read-side additions; pure SELECT; is_active=1 + authority='VERIFIED' filter at source). Returns per-bucket snapshot with param_A/B/C, n_samples, brier_insample, fitted_at, sample_quality (10/30/100 sibling-coherent), bootstrap_count + per-coefficient std + p5/p95 percentile bands (DBS-CI tightness signal WITHOUT tuning per dispatch §NOT-IN-SCOPE on α-fusion + DBS-CI), in_window flag, source: v2|legacy. CALIBRATION_HARDENING packet BATCH 1 per round3_verdict.md §1 #2 (FOURTH edge packet) + ULTIMATE_PLAN.md §4 #2. PATH A per-bucket-key snapshot chosen by operator GO_BATCH_1; PATH B decision-log JOIN attribution deferred as future enhancement; PATH C writer-side strategy_key column EXPLICITLY OUT-OF-SCOPE per dispatch ('ANY mutation of platt_models[_v2] tables'). KNOWN LIMITATIONS in module docstring: dispatch's '(city, target_date, strategy_key)' framing is the EVALUATION-TIME identity; persistence is BUCKET-KEYED only (platt_models bucket_key = f'{cluster}_{season}'; platt_models_v2 model_key = f'{temp_metric}:{cluster}:{season}:{data_version}:{input_space}'). drift.py exists at src/calibration/drift.py with HL χ² FORECAST-CALIBRATION drift — parametrically different from BATCH 2 detect_parameter_drift (PARAMETER-TRAJECTORY drift over consecutive refits). Both legacy + v2 surfaces visible with explicit source tag (mirrors manager.py L42-62 v2-then-legacy fallback dedup). Imports consolidated to top per Tier 2 Phase 4 LOW-CAVEAT-EO-2-1."
     hazards:
     - DERIVED_ONLY
     downstream:
@@ -3356,26 +3147,7 @@ files:
   src/state/learning_loop_observation.py:
     zone: K2_runtime
     authority_role: derived_learning_loop_state_projection
-    why: >-
-     K1-compliant read-only settlement→pair→retrain pipeline state projection per bucket_key. Reads
-     list_active_platt_models_v2 + list_active_platt_models_legacy + list_recent_retrain_versions
-     (LEARNING_LOOP BATCH 1 read-side addition to retrain_trigger.py) + retrain_trigger.status()
-     (process-level env+filesystem) + get_pairs_count + get_decision_group_count from
-     src/calibration/store.py. Returns per-bucket snapshot covering 4 pipeline stages:
-     calibration-pair (n_pairs_total/verified/canonical + n_decision_groups), retrain (status,
-     attempts/passes/fails in window, last attempted/promoted, days_since_last_promotion), active
-     model (fitted_at + n_samples), provenance (bucket_key, source v2|legacy,
-     temperature_metric/cluster/season/data_version/input_space). LEARNING_LOOP packet BATCH 1 per
-     round3_verdict.md §1 #2 (FIFTH and FINAL edge packet) + ULTIMATE_PLAN.md §4 #4. PATH A
-     per-bucket-key snapshot chosen by operator GO_BATCH_1; PATH B settlement-event JOIN attribution
-     deferred. LEARNING_LOOP_TRIGGERING (would modify retrain_trigger.py arm/trigger paths)
-     EXPLICITLY OUT-OF-SCOPE per dispatch — separate operator-authorized packet. HONEST DISCLOSURE
-     in module docstring: prior CALIBRATION_HARDENING packet BATCH 3 boot misread the substrate by
-     claiming 'no append-only Platt history table' — calibration_params_versions exists at
-     retrain_trigger.py:242-264 schema and IS append-only (autoincrement version_id, promoted_at +
-     retired_at lifecycle, INSERT on every retrain attempt, UPDATE only sets retired_at).
-     LOW-CITATION-CALIBRATION-3-1 cycle-29 sustained discipline lesson reinforced. Imports
-     consolidated to top per LOW-CAVEAT-EO-2-1.
+    why: "K1-compliant read-only settlement→pair→retrain pipeline state projection per bucket_key. Reads list_active_platt_models_v2 + list_active_platt_models_legacy + list_recent_retrain_versions (LEARNING_LOOP BATCH 1 read-side addition to retrain_trigger.py) + retrain_trigger.status() (process-level env+filesystem) + get_pairs_count + get_decision_group_count from src/calibration/store.py. Returns per-bucket snapshot covering 4 pipeline stages: calibration-pair (n_pairs_total/verified/canonical + n_decision_groups), retrain (status, attempts/passes/fails in window, last attempted/promoted, days_since_last_promotion), active model (fitted_at + n_samples), provenance (bucket_key, source v2|legacy, temperature_metric/cluster/season/data_version/input_space). LEARNING_LOOP packet BATCH 1 per round3_verdict.md §1 #2 (FIFTH and FINAL edge packet) + ULTIMATE_PLAN.md §4 #4. PATH A per-bucket-key snapshot chosen by operator GO_BATCH_1; PATH B settlement-event JOIN attribution deferred. LEARNING_LOOP_TRIGGERING (would modify retrain_trigger.py arm/trigger paths) EXPLICITLY OUT-OF-SCOPE per dispatch — separate operator-authorized packet. HONEST DISCLOSURE in module docstring: prior CALIBRATION_HARDENING packet BATCH 3 boot misread the substrate by claiming 'no append-only Platt history table' — calibration_params_versions exists at retrain_trigger.py:242-264 schema and IS append-only (autoincrement version_id, promoted_at + retired_at lifecycle, INSERT on every retrain attempt, UPDATE only sets retired_at). LOW-CITATION-CALIBRATION-3-1 cycle-29 sustained discipline lesson reinforced. Imports consolidated to top per LOW-CAVEAT-EO-2-1."
     hazards:
     - DERIVED_ONLY
     downstream:
@@ -3411,7 +3183,7 @@ files:
   src/observability/scheduler_health.py:
     zone: K2_runtime
     authority_role: derived_scheduler_health
-    why: Derived scheduler/job-health view for operators; must stay evidence-only and never become canonical truth.
+    why: Derived scheduler/job-health view for operators; cross-thread and cross-process locking makes each read-merge-replace upsert atomic so concurrent daemons cannot erase sibling health rows. It stays evidence-only and never becomes canonical truth.
     downstream:
     - src/main.py
   src/observability/status_summary.py:
@@ -3449,8 +3221,11 @@ files:
       preflight, post-start deploy verification, and operator healthcheck.
       Uses canonical position_events.MONITOR_REFRESHED per current-money-risk
       position; canonical sequence decides which event is latest while its
-      timestamp decides freshness. Unknown exposure remains a fail-closed
-      monitor obligation, and position_current.updated_at is never accepted as
+      timestamp decides freshness. Restart proof separately recognizes a typed
+      post-boot probability-degraded attempt only when held-side CLOB truth is
+      fresh; ordinary runtime cadence and family admission remain fail-closed
+      on the probability loss. Unknown exposure remains a fail-closed monitor
+      obligation, and position_current.updated_at is never accepted as
       monitor/redecision proof.
     hazards:
     - NO_WRITE_PATH
@@ -3543,16 +3318,7 @@ files:
   src/ingest/fill_synchronizer.py:
     zone: K2_runtime
     authority_role: continuous_authenticated_fill_fact_producer
-    why: >-
-     Continuously reads authenticated venue fills, freezes venue/parsing/read-side evidence outside
-     every writer lease, then atomically appends observations and attributed facts, advances command
-     projections, and publishes the monotonic coverage watermark inside one unified TRADE
-     WriteCoordinator transaction. Existing schema is checked read-only so the hot path requests no
-     redundant schema writer lease; a missing cold-start schema is created through its own
-     coordinated unit. Canonical fill recovery uses bounded RECOVERY_CRITICAL admission: it waits
-     behind visible MONITOR intent instead of overtaking it, but cannot starve forever as disposable
-     background work. The scheduler reports bounded contention as retryable failure; it never
-     bypasses the writer turnstile or holds a canonical write transaction across venue I/O.
+    why: Continuously reads authenticated venue fills, freezes venue/parsing/read-side evidence outside every writer lease, then atomically appends observations and attributed facts, advances command projections, and publishes the monotonic coverage watermark inside one unified TRADE WriteCoordinator transaction. Existing schema is checked read-only so the hot path requests no redundant schema writer lease; a missing cold-start schema is created through its own coordinated unit. Canonical fill recovery uses bounded RECOVERY_CRITICAL admission: it waits behind visible MONITOR intent instead of overtaking it, but cannot starve forever as disposable background work. The scheduler reports bounded contention as retryable failure; it never bypasses the writer turnstile or holds a canonical write transaction across venue I/O.
     downstream:
     - src/ingest/price_channel_daemon.py
     - src/execution/command_recovery.py
@@ -3577,7 +3343,7 @@ files:
   src/ingest/post_trade_capital_daemon.py:
     zone: K2_runtime
     authority_role: post_trade_capital_daemon
-    why: Launchable daemon boundary for P4 post-trade capital lifecycle so chain/redeem/wrap faults and WAL contention do not block live order decisions.
+    why: Launchable daemon boundary for P4 post-trade capital lifecycle so chain/redeem/wrap faults and WAL contention do not block live order decisions. It also refreshes the read-only current-regime after-cost capital evidence artifact in a killable bounded child; a normal FAIL verdict remains valid observational evidence, while timeout, process failure, or stale/invalid output fails only this scheduler-health job and never becomes order authority.
     downstream:
     - deploy/launchd/com.zeus.post-trade-capital.plist
   src/data/job_lock.py:
@@ -3588,6 +3354,10 @@ files:
     zone: K2_runtime
     authority_role: pre_submit_certificate_contract
     why: Typed pre-submit certificate helpers for the sole live submission chain; every certificate binds current executable evidence before venue POST.
+  src/decision_kernel/verifier.py:
+    zone: K2_runtime
+    authority_role: decision_certificate_verifier
+    why: Verifies the complete live certificate graph, including exact separation between statistical Day0 forecast/calibration parents and deterministic Day0 absorbing-truth parents before any execution command can be minted.
   src/engine/native_holdings.py:
     zone: K2_runtime
     authority_role: native_holdings_projection

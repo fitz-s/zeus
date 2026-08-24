@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # Created: 2026-06-07
-# Last reused/audited: 2026-08-18
-# Lifecycle: created=2026-06-07; last_reviewed=2026-08-18; last_reused=2026-08-18
+# Last reused/audited: 2026-08-21
+# Lifecycle: created=2026-06-07; last_reviewed=2026-08-21; last_reused=2026-08-21
 # Purpose: Download current-target Open-Meteo ECMWF IFS 9km raw inputs for replacement forecast materialization.
 # Reuse: Run before live replacement materialization when dry-run reports current-target coverage gaps.
 # Authority basis: Raw artifacts are live inputs only after the replacement materializer emits
@@ -310,7 +310,11 @@ def _advance_current_target_rotation(
                 if state_path is not None
                 else _CURRENT_TARGET_ROTATION_OFFSETS.get(cycle_key, 0)
             )
-            next_start = (current_start + max(1, int(attempted_count))) % row_count
+            # A timeboxed bucket payload may have decoded and cached only a valid-time
+            # prefix while completing zero targets. Keep that target at the head so the
+            # next slice can reuse the per-cycle point cache; rotate only past targets
+            # whose full payload was processed.
+            next_start = (current_start + max(0, int(attempted_count))) % row_count
         _CURRENT_TARGET_ROTATION_OFFSETS.clear()
         _CURRENT_TARGET_ROTATION_OFFSETS[cycle_key] = next_start
         if state_path is not None:
@@ -697,6 +701,7 @@ def _try_bucket_rung_three(
     deadline_monotonic: float | None = None,
     bucket_manifest_provider: Callable[[], dict] | None = None,
     bucket_read_point: Callable[[str, int], float] | None = None,
+    bucket_read_workers: int = 1,
 ) -> tuple[dict, dict]:
     """Rung-3 admission gate: serve from the S3 data_spatial bucket, or re-raise rung-2.
 
@@ -773,6 +778,7 @@ def _try_bucket_rung_three(
                 needed_valid_times=needed,
                 manifest=manifest,
                 read_point=bucket_read_point,
+                read_workers=bucket_read_workers,
                 deadline_monotonic=deadline_monotonic,
             )
         else:  # "raw"
@@ -824,6 +830,7 @@ def _resolve_anchor_payload(
     deadline_monotonic: float | None = None,
     bucket_manifest_provider: Callable[[], dict] | None = None,
     bucket_read_point: Callable[[str, int], float] | None = None,
+    bucket_read_workers: int = 1,
     client: httpx.Client | None = None,
     meta_wave_failure: Exception | None = None,
 ) -> tuple[dict, dict]:
@@ -952,6 +959,8 @@ def _resolve_anchor_payload(
         rung_three_kwargs["bucket_manifest_provider"] = bucket_manifest_provider
     if bucket_read_point is not None:
         rung_three_kwargs["bucket_read_point"] = bucket_read_point
+    if bucket_read_workers != 1:
+        rung_three_kwargs["bucket_read_workers"] = bucket_read_workers
     return _try_bucket_rung_three(
         **rung_three_kwargs,
     )
@@ -964,6 +973,7 @@ def _fetch_meta_stamped_anchor_wave(
     deadline_monotonic: float | None,
     client: httpx.Client,
     quota_critical: bool = False,
+    quota_priority: bool = False,
 ) -> tuple[
     dict[tuple[str, str], tuple[dict, dict[str, object], datetime]],
     dict[tuple[str, str], Exception],
@@ -973,12 +983,20 @@ def _fetch_meta_stamped_anchor_wave(
         return {}, {}
     request0 = next(iter(requests.values()))
     timeout = _deadline_timeout(deadline_monotonic, default=30.0)
-    meta_before = fetch_openmeteo_ifs9_model_meta(
-        timeout=timeout,
-        max_retries=1,
-        fast_fail_429=True,
-        client=client,
+    quota_context = (
+        quota_tracker.critical_lane()
+        if quota_critical
+        else quota_tracker.priority_lane()
+        if quota_priority
+        else contextlib.nullcontext()
     )
+    with quota_context:
+        meta_before = fetch_openmeteo_ifs9_model_meta(
+            timeout=timeout,
+            max_retries=1,
+            fast_fail_429=True,
+            client=client,
+        )
     # Refuse before issuing city payload requests when the provider does not declare this run.
     validate_openmeteo_ecmwf_ifs9_meta_window(request0, meta_before, meta_before)
 
@@ -996,6 +1014,8 @@ def _fetch_meta_stamped_anchor_wave(
         quota_context = (
             quota_tracker.critical_lane()
             if quota_critical
+            else quota_tracker.priority_lane()
+            if quota_priority
             else contextlib.nullcontext()
         )
         with quota_context:
@@ -1030,12 +1050,20 @@ def _fetch_meta_stamped_anchor_wave(
             except Exception as exc:  # each city retains its independent bucket fallback
                 failures[key] = exc
 
-    meta_after = fetch_openmeteo_ifs9_model_meta(
-        timeout=_deadline_timeout(deadline_monotonic, default=20.0),
-        max_retries=1,
-        fast_fail_429=True,
-        client=client,
+    quota_context = (
+        quota_tracker.critical_lane()
+        if quota_critical
+        else quota_tracker.priority_lane()
+        if quota_priority
+        else contextlib.nullcontext()
     )
+    with quota_context:
+        meta_after = fetch_openmeteo_ifs9_model_meta(
+            timeout=_deadline_timeout(deadline_monotonic, default=20.0),
+            max_retries=1,
+            fast_fail_429=True,
+            client=client,
+        )
     try:
         provenance = dict(
             validate_openmeteo_ecmwf_ifs9_meta_window(request0, meta_before, meta_after)
@@ -1057,19 +1085,29 @@ def _fetch_run_pinned_anchor_wave(
     *,
     deadline_monotonic: float | None,
     client: httpx.Client,
+    quota_critical: bool = False,
+    quota_priority: bool = False,
 ) -> dict[tuple[str, str], tuple[dict, dict[str, object], datetime]]:
     """Fetch every city/date anchor in one run-pinned multi-location call."""
 
     items = tuple(requests.items())
     if not items:
         return {}
-    payloads = fetch_openmeteo_ecmwf_ifs9_anchor_payloads(
-        tuple(request for _, request in items),
-        timeout=_deadline_timeout(deadline_monotonic, default=30.0),
-        max_retries=1,
-        fast_fail_429=True,
-        client=client,
+    quota_context = (
+        quota_tracker.critical_lane()
+        if quota_critical
+        else quota_tracker.priority_lane()
+        if quota_priority
+        else contextlib.nullcontext()
     )
+    with quota_context:
+        payloads = fetch_openmeteo_ecmwf_ifs9_anchor_payloads(
+            tuple(request for _, request in items),
+            timeout=_deadline_timeout(deadline_monotonic, default=30.0),
+            max_retries=1,
+            fast_fail_429=True,
+            client=client,
+        )
     captured_at = datetime.now(tz=UTC)
     resolved: dict[tuple[str, str], tuple[dict, dict[str, object], datetime]] = {}
     for (key, request), payload in zip(items, payloads, strict=True):
@@ -1110,6 +1148,7 @@ def download_current_target_raw_inputs(
     fetch_workers: int = 4,
     bucket_reader_pool=None,
     quota_critical: bool = False,
+    quota_priority: bool = False,
 ) -> dict[str, object]:
     # Fetch the FULL plan (no limit) so uncovered cities beyond the first `limit`
     # alphabetical slots are visible.  The per-cycle cap is applied AFTER filtering
@@ -1272,12 +1311,39 @@ def download_current_target_raw_inputs(
         and _single_runs_public_for_request(first_request)
     )
     single_runs_wave_failure: Exception | None = None
-    if single_runs_public and len(pending_requests) > 1:
+    metered_quota_context = (
+        quota_tracker.critical_lane()
+        if quota_critical
+        else quota_tracker.priority_lane()
+        if quota_priority
+        else contextlib.nullcontext()
+    )
+    with metered_quota_context:
+        metered_anchor_quota_available = (
+            not pending_requests or quota_tracker.can_call()
+        )
+    downloaded["openmeteo_metered_quota_available"] = (
+        metered_anchor_quota_available
+    )
+    if pending_requests and not metered_anchor_quota_available:
+        quota_skip = RuntimeError(
+            "metered Open-Meteo anchor quota unavailable; using independent bucket rung"
+        )
+        single_runs_wave_failure = quota_skip
+        meta_wave_failures = {key: quota_skip for key in pending_requests}
+
+    if (
+        metered_anchor_quota_available
+        and single_runs_public
+        and len(pending_requests) > 1
+    ):
         try:
             wave_resolved = _fetch_run_pinned_anchor_wave(
                 pending_requests,
                 deadline_monotonic=deadline_monotonic,
                 client=openmeteo_client,
+                quota_critical=quota_critical,
+                quota_priority=quota_priority,
             )
         except httpx.HTTPStatusError as exc:
             status_code = exc.response.status_code
@@ -1294,7 +1360,11 @@ def download_current_target_raw_inputs(
             downloaded["openmeteo_wave_payload_count"] = len(wave_resolved)
         downloaded["openmeteo_single_runs_location_batch_count"] = 1
 
-    if pending_requests and (not single_runs_public or single_runs_wave_failure is not None):
+    if (
+        metered_anchor_quota_available
+        and pending_requests
+        and (not single_runs_public or single_runs_wave_failure is not None)
+    ):
         try:
             wave_resolved, meta_wave_failures = _fetch_meta_stamped_anchor_wave(
                 pending_requests,
@@ -1302,6 +1372,7 @@ def download_current_target_raw_inputs(
                 deadline_monotonic=deadline_monotonic,
                 client=openmeteo_client,
                 quota_critical=quota_critical,
+                quota_priority=quota_priority,
             )
             downloaded["openmeteo_model_meta_fetch_count"] = 2
         except Exception as exc:
@@ -1389,6 +1460,7 @@ def download_current_target_raw_inputs(
                             deadline_monotonic=deadline_monotonic,
                             bucket_manifest_provider=current_bucket_manifests,
                             bucket_read_point=bucket_pool.read,
+                            bucket_read_workers=min(max(1, int(fetch_workers)), 8),
                             client=openmeteo_client,
                             meta_wave_failure=meta_wave_failures.get(target_key),
                         )
@@ -1594,6 +1666,7 @@ def download_current_target_openmeteo_inputs(
     fetch_workers: int = 4,
     bucket_reader_pool=None,
     quota_critical: bool = False,
+    quota_priority: bool = False,
 ) -> dict[str, object]:
     """Live replacement-chain downloader for Open-Meteo current-target inputs."""
 
@@ -1613,6 +1686,7 @@ def download_current_target_openmeteo_inputs(
         fetch_workers=fetch_workers,
         bucket_reader_pool=bucket_reader_pool,
         quota_critical=quota_critical,
+        quota_priority=quota_priority,
     )
 
 

@@ -23,6 +23,7 @@ from typing import Callable, Mapping, Sequence
 from src.contracts.executable_cost_curve import ExecutableCostCurve
 from src.contracts.executable_market_snapshot import FRESHNESS_WINDOW_DEFAULT
 from src.contracts.global_auction_receipt import (
+    CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION,
     global_auction_artifact_summary_hash,
     global_auction_execution_binding_hash,
     global_auction_receipt_ref_from_artifact,
@@ -31,6 +32,7 @@ from src.data.market_topology_rows import prime_frozen_schema_reads
 from src.data.replacement_forecast_cycle_policy import (
     BETWEEN_COHORT_STATUS_SIMULTANEOUS_PROVEN,
     CURRENT_EVIDENCE_SEMANTICS_REVISION,
+    LIVE_CURRENT_EVIDENCE_SEMANTICS_REVISIONS,
     STALE_ENSEMBLE_ABSOLUTE_DISAGREEMENT_SEMANTICS_REVISION,
     _current_evidence_shape,
     current_evidence_shape_has_entry_authority,
@@ -86,16 +88,6 @@ from src.state.collateral_ledger import COLLATERAL_SNAPSHOT_MAX_AGE_SECONDS
 
 _GLOBAL_AUCTION_WRITE_FALLBACK_DEADLINE_MS = 1_000
 _GLOBAL_AUCTION_WRITE_MAX_HOLD_MS = 500
-
-# Capital proof must bind settlements and fills to the exact comparison law
-# that selected one action across the complete executable universe.  Increment
-# this identity whenever the common comparison, feasible-set construction, or
-# sizing semantics change; old receipts remain facts but cannot license the new
-# law.
-CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION = (
-    "global_single_order_posterior_mean_expected_growth_v1"
-)
-
 
 class _GlobalArtifactCommitRevoked(RuntimeError):
     """A receipt lost current authority before its durable commit."""
@@ -372,6 +364,11 @@ _MAKER_FILL_MIN_SAMPLE_SIZE = {"BUY": 30, "SELL": 30}
 _MAKER_FILL_DKW_DELTA = Decimal("0.01")
 _MAKER_FILL_SAMPLE_SOURCE = "canonical_trade_db_actual_maker_outcomes_v1"
 _MAKER_FILL_SAMPLE_MODEL = "empirical_price_improved_gtc_deadline_dkw99_v1"
+# docs/operations/current/plans/reversal_plan_tier0_2026-08-24.md item 8: a
+# convex entry (held side price below this) exits only on belief reversal or
+# emergency, never on capital-velocity reallocation — GLOBAL_CAPITAL_OPTIMAL_SELL
+# is not eligible for it.
+CONVEX_HOLD_PRICE_THRESHOLD = Decimal("0.25")
 
 
 @dataclass(frozen=True)
@@ -654,6 +651,37 @@ def _current_held_obligations(
             )
         )
     return tuple(sorted(obligations, key=lambda row: row.position_id))
+
+
+def _convex_hold_exempt_position_ids(portfolio_state: object) -> frozenset[str]:
+    """Position ids whose entry economics are convex (avg entry price below
+    ``CONVEX_HOLD_PRICE_THRESHOLD``) and therefore ineligible for the
+    capital-velocity GLOBAL_CAPITAL_OPTIMAL_SELL reallocation objective.
+
+    Reads only the position's own typed ``effective_exposure().avg_price``
+    (fill/chain-derived, never a forbidden local-ledger authority column) —
+    see docs/operations/current/plans/reversal_plan_tier0_2026-08-24.md item 8.
+    A position with no positive avg entry price is not exempt (nothing to
+    classify as convex); it stays eligible for the ordinary capital-velocity
+    objective.
+    """
+
+    exempt: set[str] = set()
+    for position in tuple(getattr(portfolio_state, "positions", ()) or ()):
+        position_id = str(
+            getattr(position, "position_id", "")
+            or getattr(position, "trade_id", "")
+            or ""
+        ).strip()
+        if not position_id:
+            continue
+        effective_exposure = getattr(position, "effective_exposure", None)
+        if not callable(effective_exposure):
+            continue
+        avg_price = float(getattr(effective_exposure(), "avg_price", 0.0) or 0.0)
+        if 0.0 < avg_price < float(CONVEX_HOLD_PRICE_THRESHOLD):
+            exempt.add(position_id)
+    return frozenset(exempt)
 
 
 def _expected_holding_coverage_key(
@@ -3219,6 +3247,100 @@ def _compact_buy_rejection_group(
     }
 
 
+def _persist_tier0_candidate_set(
+    conn: sqlite3.Connection,
+    *,
+    evaluations: Sequence[object],
+    selection_epoch_identity: str,
+    decision_at_utc: datetime,
+    family_context_by_key: Mapping[str, Mapping[str, str]] | None,
+) -> None:
+    """reversal_plan_tier0_2026-08-24 item 3b: append-only per-candidate
+    provenance for one winner-producing auction cut.
+
+    Caller-gated: fires only from the mode='global_single_order_auction'
+    completed-auction write inside _store_global_auction_receipt when
+    decision.no_trade_reason is None (a real winner was selected) -- never
+    from the compact delta/duplicate persist branch of the same function,
+    which fires far more often and would blow the "~dozens/day" volume
+    budget. Same trade-DB connection and transaction as the auction receipt
+    write itself (K1/INV-37 single-DB write).
+
+    One row per evaluated candidate (selected and rejected alike), keyed by
+    (selection_epoch_identity, candidate_id) with INSERT OR IGNORE so a
+    retried persist is idempotent. A candidate whose family_key has no
+    resolvable (city, target_date) in ``family_context_by_key`` is skipped
+    entirely rather than written with a fabricated/empty grouping key --
+    fail-closed, matching decision_p0's own "never guess" law.
+    """
+
+    if not evaluations:
+        return
+    from src.calibration.lead_bucket import lead_bucket
+    from src.state.schema.tier0_candidate_set_provenance_schema import (
+        ensure_table as _ensure_tier0_candidate_set_table,
+    )
+
+    _ensure_tier0_candidate_set_table(conn)
+    context_by_key = family_context_by_key or {}
+    created_at = datetime.now(timezone.utc).isoformat()
+    decision_at_iso = decision_at_utc.isoformat()
+    rows: list[tuple[object, ...]] = []
+    for evaluation in evaluations:
+        family_key = str(getattr(evaluation, "family_key", "") or "")
+        context = context_by_key.get(family_key) or {}
+        city = str(context.get("city") or "").strip()
+        target_date = str(context.get("target_date") or "").strip()
+        if not city or not target_date:
+            continue
+        resolution_at_utc = getattr(evaluation, "resolution_at_utc", None)
+        bucket: str | None = None
+        if resolution_at_utc is not None:
+            lead_hours = (
+                resolution_at_utc - decision_at_utc
+            ).total_seconds() / 3600.0
+            if lead_hours >= 0:
+                bucket = lead_bucket(lead_hours)
+        decision_p0 = getattr(evaluation, "decision_p0", None)
+        status = str(getattr(evaluation, "status", "") or "")
+        rows.append(
+            (
+                selection_epoch_identity,
+                decision_at_iso,
+                f"{selection_epoch_identity}:{city}:{target_date}",
+                city,
+                target_date,
+                str(evaluation.candidate_id),
+                family_key,
+                str(evaluation.bin_id),
+                str(evaluation.side),
+                str(evaluation.token_id),
+                str(evaluation.action),
+                float(decision_p0) if decision_p0 is not None else None,
+                getattr(evaluation, "decision_p0_source", None),
+                bucket,
+                0 if status == "REJECTED" else 1,
+                getattr(evaluation, "rejection_reason", None),
+                1 if status == "SELECTED" else 0,
+                str(evaluation.condition_id),
+                created_at,
+            )
+        )
+    if not rows:
+        return
+    conn.executemany(
+        """
+        INSERT OR IGNORE INTO tier0_candidate_set_provenance (
+            selection_epoch_identity, decision_at_utc, city_date_group_id,
+            city, target_date, candidate_id, family_key, bin_id, side,
+            token_id, action, p0, p0_source, lead_bucket, eligible,
+            rejection_reason, selected, market_key, created_at
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        """,
+        rows,
+    )
+
+
 def _store_global_auction_receipt(
     conn,
     *,
@@ -3246,6 +3368,12 @@ def _store_global_auction_receipt(
     holding_probability_witnesses: Mapping[str, object] | None = None,
     wealth_reauction_audit: _WealthReauctionAudit | None = None,
     proof_counterfactual: Mapping[str, object] | None = None,
+    # reversal_plan_tier0_2026-08-24 item 3b: family_key -> {"city",
+    # "target_date", "metric"} for grouping the candidate-set provenance rows
+    # below into per-(city, target_date) opportunity sets. Optional/None-safe
+    # so callers that never light up Tier-0 candidate-set persistence (tests,
+    # any future caller that omits it) keep working unchanged.
+    family_context_by_key: Mapping[str, Mapping[str, str]] | None = None,
     persist_artifact: Callable[[object], int | None] | None = None,
 ) -> int | None:
     """Persist one complete auction comparison before any venue side effect."""
@@ -4302,6 +4430,19 @@ def _store_global_auction_receipt(
                 summary=receipt,
             ),
         )
+        if row_id is not None and getattr(decision, "no_trade_reason", None) is None:
+            # reversal_plan_tier0_2026-08-24 item 3b: candidate-set provenance
+            # only for a real winner, only on the full (non-delta,
+            # non-duplicate) completed-auction write -- see
+            # _persist_tier0_candidate_set docstring for the volume-control
+            # rationale.
+            _persist_tier0_candidate_set(
+                conn,
+                evaluations=evaluations,
+                selection_epoch_identity=selection_epoch_identity,
+                decision_at_utc=decision_at_utc,
+                family_context_by_key=family_context_by_key,
+            )
         if row_id is not None:
             mode = "global_single_order_auction"
             current_receipt_hash = str(receipt["receipt_hash"])
@@ -4951,8 +5092,12 @@ _DAY0_ALPHA_SHADOW_SELECTION_RULE = _ALPHA_SHADOW_SELECTION_RULE
 _QKERNEL_ALPHA_SHADOW_REASON = (
     "MARKET_RELATIVE_ALPHA_SHADOW:forecast_qkernel_entry"
 )
-_QKERNEL_ALPHA_SHADOW_EVENT_VERSION = (
-    "market-relative-alpha-shadow-v4-global-winner"
+_ALPHA_SHADOW_ENTRY_EVENT_VERSION = (
+    "market-relative-alpha-shadow-v6-city-date-cluster"
+)
+_ALPHA_SHADOW_ENTRY_EVENT_PREFIXES = (
+    "market-relative-alpha-shadow-v5-global-selection:",
+    f"{_ALPHA_SHADOW_ENTRY_EVENT_VERSION}:",
 )
 _QKERNEL_ALPHA_SHADOW_DECISION_LAW = "executable_min_order_capital_gain_v2"
 _QKERNEL_ALPHA_SHADOW_SELECTION_RULE = _ALPHA_SHADOW_SELECTION_RULE
@@ -5014,8 +5159,8 @@ def _qkernel_shadow_current_semantics_by_posterior(
         return {}
     # FAIL-CLOSED GATE CONTRACT
     # SCOPE: qkernel no-money shadow evidence only; auction actions are unchanged.
-    # DRAIN: the next same-cycle or bounded latest-causal posterior on this
-    # decision snapshot is eligible.
+    # DRAIN: the next same-cycle target-specific posterior on this decision
+    # snapshot is eligible.
     # RESET: a fresh posterior hash maps to its exact licensed semantics and
     # may claim its target-date key.
     output: dict[str, str] = {}
@@ -5040,10 +5185,7 @@ def _qkernel_shadow_current_semantics_by_posterior(
                     and not current_evidence_shape_semantics_mismatch(provenance)
                 ):
                     revision = str(shape.get("semantics_revision") or "")
-                    if revision in {
-                        CURRENT_EVIDENCE_SEMANTICS_REVISION,
-                        STALE_ENSEMBLE_ABSOLUTE_DISAGREEMENT_SEMANTICS_REVISION,
-                    }:
+                    if revision in LIVE_CURRENT_EVIDENCE_SEMANTICS_REVISIONS:
                         output[str(posterior_identity_hash)] = revision
     except (sqlite3.Error, TypeError, ValueError):
         # Evidence collection may drain an entry gate but must never disturb the
@@ -5200,7 +5342,7 @@ def _market_relative_alpha_shadow_events(
             shadow_reason = _DAY0_ALPHA_SHADOW_REASON
             decision_law = _DAY0_ALPHA_SHADOW_DECISION_LAW
             selection_rule = _DAY0_ALPHA_SHADOW_SELECTION_RULE
-            event_version = "market-relative-alpha-shadow-v4-global-winner"
+            event_version = _ALPHA_SHADOW_ENTRY_EVENT_VERSION
         else:
             revision = str(
                 (qkernel_semantics_by_posterior or {}).get(
@@ -5211,17 +5353,13 @@ def _market_relative_alpha_shadow_events(
             probability_ready = bool(
                 q_version
                 and posterior_identity_hash
-                and revision
-                in {
-                    CURRENT_EVIDENCE_SEMANTICS_REVISION,
-                    STALE_ENSEMBLE_ABSOLUTE_DISAGREEMENT_SEMANTICS_REVISION,
-                }
+                and revision in LIVE_CURRENT_EVIDENCE_SEMANTICS_REVISIONS
             )
             source_status = "current_qkernel_probability_authority"
             shadow_reason = _QKERNEL_ALPHA_SHADOW_REASON
             decision_law = _QKERNEL_ALPHA_SHADOW_DECISION_LAW
             selection_rule = _QKERNEL_ALPHA_SHADOW_SELECTION_RULE
-            event_version = _QKERNEL_ALPHA_SHADOW_EVENT_VERSION
+            event_version = _ALPHA_SHADOW_ENTRY_EVENT_VERSION
         if (
             not city
             or not target_date
@@ -5244,9 +5382,12 @@ def _market_relative_alpha_shadow_events(
         if not math.isfinite(expected_edge) or expected_edge <= 0.0:
             continue
         envelope = {
-            "schema_version": 2,
+            "schema_version": 3,
             "strategy_key": strategy_key,
             "decision_law_id": decision_law,
+            "global_selection_revision": (
+                CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION
+            ),
             "probability_semantics_revision": revision,
             "selection_rule": selection_rule,
             "selection_epoch_identity": selection_epoch_identity,
@@ -5302,7 +5443,9 @@ def _market_relative_alpha_shadow_events(
         return (
             NoTradeRegretEvent(
                 event_id=(
-                    f"{event_version}:{strategy_key}:{revision}:{target_date}"
+                    f"{event_version}:{strategy_key}:"
+                    f"{CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION}:"
+                    f"{revision}:{city}:{target_date}"
                 ),
                 rejection_stage="RISK_GUARD",
                 rejection_reason=shadow_reason,
@@ -5410,12 +5553,12 @@ def _market_relative_alpha_shadow_exit_events(
             "FROM no_trade_regret_events "
             "WHERE rejection_stage='RISK_GUARD' "
             "AND rejection_reason IN (?,?) "
-            "AND event_id LIKE ? "
+            "AND (event_id LIKE ? OR event_id LIKE ?) "
             "ORDER BY decision_time,regret_event_id",
             (
                 _DAY0_ALPHA_SHADOW_REASON,
                 _QKERNEL_ALPHA_SHADOW_REASON,
-                "market-relative-alpha-shadow-v4-global-winner:%",
+                *(f"{prefix}%" for prefix in _ALPHA_SHADOW_ENTRY_EVENT_PREFIXES),
             ),
         ).fetchall()
     except sqlite3.Error:
@@ -5454,8 +5597,10 @@ def _market_relative_alpha_shadow_exit_events(
         except (ArithmeticError, TypeError, ValueError, json.JSONDecodeError):
             continue
         if (
-            int(envelope.get("schema_version") or 0) != 2
+            int(envelope.get("schema_version") or 0) != 3
             or envelope.get("global_proof_winner") is not True
+            or envelope.get("global_selection_revision")
+            != CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION
             or str(envelope.get("selection_rule") or "")
             != _ALPHA_SHADOW_SELECTION_RULE
             or strategy_key
@@ -5514,11 +5659,7 @@ def _market_relative_alpha_shadow_exit_events(
             and current_revision != DAY0_PROBABILITY_SEMANTICS_REVISION
         ) or (
             strategy_key == "forecast_qkernel_entry"
-            and current_revision
-            not in {
-                CURRENT_EVIDENCE_SEMANTICS_REVISION,
-                STALE_ENSEMBLE_ABSOLUTE_DISAGREEMENT_SEMANTICS_REVISION,
-            }
+            and current_revision not in LIVE_CURRENT_EVIDENCE_SEMANTICS_REVISIONS
         ):
             continue
         current_q = family_payoff_point_q(witness, bin_id=bin_id, side=side)
@@ -5654,6 +5795,9 @@ def _market_relative_alpha_shadow_exit_events(
             "decision_law_id": _ALPHA_SHADOW_EXIT_DECISION_LAW,
             "entry_shadow_regret_event_id": str(regret_event_id),
             "entry_shadow_event_id": str(entry_event_id),
+            "global_selection_revision": (
+                CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION
+            ),
             "entry_decision_at_utc": entry_at.isoformat(),
             "entry_probability_semantics_revision": str(
                 envelope.get("probability_semantics_revision") or ""
@@ -7366,12 +7510,18 @@ def process_current_global_batch(
         selection_state = None
         selection_wealth = None
         holding_obligations: tuple[_CurrentHeldObligation, ...] = ()
+        convex_hold_exempt_position_ids: frozenset[str] = frozenset()
         if held_families:
             selection_state, selection_wealth = capture_selection_wealth()
             holding_obligations = (
                 _current_held_obligations(selection_state, selection_wealth)
                 if selection_state is not None
                 else ()
+            )
+            convex_hold_exempt_position_ids = (
+                _convex_hold_exempt_position_ids(selection_state)
+                if selection_state is not None
+                else frozenset()
             )
         claimed_by_family = {}
         duplicate_owner_by_event: dict[str, str] = {}
@@ -7411,24 +7561,71 @@ def process_current_global_batch(
             owner = claimed_by_family.get(family_key, scope_event)
             prepared_receipt = prepare_event(scope_event, scope_at)
             prepared = prepared_receipt.prepared_global_family
-            if prepared is None:
-                failure_receipt = prepared_receipt
-                held_prepare_attempted = bool(
-                    prepare_held_event is not None
-                    and family_key in held_obligation_family_keys
-                )
-                if held_prepare_attempted:
-                    held_receipt = prepare_held_event(scope_event, scope_at)
-                    prepared = held_receipt.prepared_global_family
-                    if prepared is not None:
+            failure_receipt = prepared_receipt
+            held_prepare_attempted = bool(
+                prepare_held_event is not None
+                and family_key in held_obligation_family_keys
+            )
+            if held_prepare_attempted:
+                held_receipt = prepare_held_event(scope_event, scope_at)
+                held_prepared = held_receipt.prepared_global_family
+                if held_prepared is None:
+                    prepared = None
+                    failure_receipt = held_receipt
+                elif prepared is None:
+                    prepared = held_prepared
+                    held_only_family_keys.add(family_key)
+                    held_only_buy_disabled_reasons[family_key] = str(
+                        prepared_receipt.reason
+                        or "GLOBAL_CURRENT_PROBABILITY_PREPARE_FAILED"
+                    )
+                else:
+                    entry_content = _probability_content_identity(
+                        prepared.probability_witness
+                    )
+                    held_content = _probability_content_identity(
+                        held_prepared.probability_witness
+                    )
+                    if not entry_content or not held_content:
+                        prepared = None
+                        failure_receipt = EventSubmissionReceipt(
+                            False,
+                            scope_event.event_id,
+                            scope_event.causal_snapshot_id,
+                            reason=(
+                                "GLOBAL_HELD_ENTRY_PROBABILITY_CONTENT_IDENTITY_MISSING"
+                            ),
+                            proof_accepted=False,
+                        )
+                    elif entry_content != held_content:
+                        # The held-capital action must consume the same current q
+                        # as its monitor. A broader ENTRY witness may still be
+                        # valid for adding risk, but it cannot price SELL/HOLD.
+                        # Use the held witness for this family and remove BUY so
+                        # relaxed held-only evidence cannot authorize new risk.
+                        prepared = held_prepared
                         held_only_family_keys.add(family_key)
-                        held_only_buy_disabled_reasons[family_key] = str(
-                            prepared_receipt.reason
-                            or "GLOBAL_CURRENT_PROBABILITY_PREPARE_FAILED"
+                        held_only_buy_disabled_reasons[family_key] = (
+                            "GLOBAL_HELD_ENTRY_PROBABILITY_CONTENT_DIVERGED"
                         )
                     else:
-                        failure_receipt = held_receipt
-                if prepared is None and (
+                        # Equal probability content permits BUY and SELL to share
+                        # one simplex, but temporal SELL authority still belongs
+                        # to the held-purpose preparation.
+                        prepared = replace(
+                            prepared,
+                            day0_exit_authority_status=(
+                                held_prepared.day0_exit_authority_status
+                            ),
+                            day0_exit_authority_reason=(
+                                held_prepared.day0_exit_authority_reason
+                            ),
+                            sell_action_authority_identity=(
+                                held_prepared.sell_action_authority_identity
+                            ),
+                        )
+            if prepared is None:
+                if (
                     held_prepare_attempted
                     or _current_probability_ineligible(prepared_receipt)
                 ):
@@ -7437,11 +7634,10 @@ def process_current_global_batch(
                     if family_key in claimed_by_family:
                         ineligible_by_event[owner.event_id] = reason
                     continue
-                if prepared is None:
-                    return reject(
-                        "GLOBAL_PREPARED_FAMILY_INCOMPLETE:"
-                        f"{family_key}:{prepared_receipt.reason or 'missing'}"
-                    )
+                return reject(
+                    "GLOBAL_PREPARED_FAMILY_INCOMPLETE:"
+                    f"{family_key}:{prepared_receipt.reason or 'missing'}"
+                )
             if not _forecast_carrier_matches(
                 scope_event,
                 payload_reader(scope_event),
@@ -7498,6 +7694,11 @@ def process_current_global_batch(
                 _current_held_obligations(selection_state, selection_wealth)
                 if selection_state is not None
                 else ()
+            )
+            convex_hold_exempt_position_ids = (
+                _convex_hold_exempt_position_ids(selection_state)
+                if selection_state is not None
+                else frozenset()
             )
         selection_wealth_economic_identity = str(
             getattr(selection_wealth, "economic_identity", "") or ""
@@ -7747,6 +7948,25 @@ def process_current_global_batch(
                 # fresh buy_candidates_enabled authority.
                 if not buy_candidates_enabled and action == "BUY":
                     return "GLOBAL_BUY_CANDIDATES_DISABLED"
+                # SCOPE: auction SELL candidates on a convex held position —
+                # blocks both capital-velocity GLOBAL_CAPITAL_OPTIMAL_SELL and
+                # auction-routed statistical sells (q is cardinal-disqualified,
+                # so a q-scored sell is not a valid convex exit trigger —
+                # reversal_plan_tier0 item 8). DRAIN: hard-fact zero-support
+                # direct sells (POSTERIOR_SUPPORT_ZERO_SELL_DOMINATES, routed
+                # in cycle_runtime outside this auction), RED force exits, and
+                # operational emergencies are untouched. RESET: avg entry
+                # price at or above CONVEX_HOLD_PRICE_THRESHOLD restores
+                # ordinary auction eligibility.
+                if (
+                    action == "SELL"
+                    and str(getattr(candidate, "position_id", "") or "")
+                    in convex_hold_exempt_position_ids
+                ):
+                    return (
+                        "GLOBAL_SELL_CONVEX_HOLD_EXEMPT:"
+                        f"{CONVEX_HOLD_PRICE_THRESHOLD}"
+                    )
                 key = (
                     action,
                     str(getattr(candidate, "family_key", "") or ""),
@@ -8149,6 +8369,7 @@ def process_current_global_batch(
                 holding_probability_witnesses=attempt_probabilities,
                 wealth_reauction_audit=wealth_reauction_audit,
                 proof_counterfactual=proof_counterfactual,
+                family_context_by_key=family_context_by_key,
                     persist_artifact=_global_auction_artifact_persister(
                         trade_conn,
                         work_context=work_context,
@@ -8851,20 +9072,29 @@ def process_current_global_batch(
                         "EDLI_LIVE_CERTIFICATE_BUILD_FAILED:"
                         "LIVE_ENTRY_PROBABILITY_AUTHORITY_UNQUALIFIED:"
                     )
-                    entry_scope_exclusion = reason.startswith(
-                        (
-                            "LIVE_ENTRY_BLOCKED:entry_readiness_family:",
-                            "LIVE_ENTRY_BLOCKED:entry_readiness:",
+                    day0_fast_observation_entry_stale = reason == (
+                        "LIVE_INFERENCE_INPUTS_MISSING:"
+                        "GLOBAL_DAY0_FAST_OBSERVATION_ENTRY_STALE"
+                    )
+                    entry_scope_exclusion = (
+                        reason.startswith(
+                            (
+                                "LIVE_ENTRY_BLOCKED:entry_readiness_family:",
+                                "LIVE_ENTRY_BLOCKED:entry_readiness:",
+                            )
                         )
-                    ) or probability_authority_exclusion
+                        or probability_authority_exclusion
+                        or day0_fast_observation_entry_stale
+                    )
                     if (
                         reason.startswith(
                             "LIVE_ENTRY_BLOCKED:entry_readiness_family:"
                         )
                         or probability_authority_exclusion
+                        or day0_fast_observation_entry_stale
                     ):
-                        # The unqualified witness blocks this family's BUYs,
-                        # never its reduce-only SELLs.
+                        # The family-scoped entry witness blocks every BUY in
+                        # this family, never its reduce-only SELLs.
                         candidate_exclusion_keys = tuple(
                             sorted(
                                 {

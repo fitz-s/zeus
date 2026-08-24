@@ -1,4 +1,4 @@
-# Lifecycle: created=2026-07-04; last_reviewed=2026-07-27; last_reused=2026-07-27
+# Lifecycle: created=2026-07-04; last_reviewed=2026-07-27; last_reused=2026-08-23
 # Purpose: Regression tests for the chain-mirror reconciler.
 # Reuse: Run when position_current chain-mirror classification, the
 #   scripts/reconcile_chain_mirror.py CLI, or the market-rule state model
@@ -374,7 +374,8 @@ def test_already_voided_duplicate_rows_on_same_token_get_no_size_correction():
     for position_id in ("dup-1", "dup-2", "dup-3", "dup-4"):
         row = _row(
             position_id=position_id, phase="voided", direction="buy_yes",
-            token_id="tok-seoul", chain_shares=None, shares=0.0,
+            token_id="tok-seoul", condition_id="cond-seoul",
+            chain_shares=None, shares=0.0,
         )
         finding = classify_local_position(row, chain_by_asset=chain, settlement_by_key={})
         assert finding.classification == CONSISTENT, position_id
@@ -686,6 +687,503 @@ def test_apply_closes_absent_loser_to_settled_closed_worthless(trades_conn, fore
     assert row["chain_state"] == CLOSED_WORTHLESS
 
 
+def test_verified_chain_mirror_settlement_suppresses_stale_wallet_terminal_restore(
+    trades_conn, forecasts_conn
+):
+    """Settlement writer -> suppression prevents stale portfolio resurrection."""
+    from src.state.chain_reconciliation import ChainPosition, reconcile as reconcile_portfolio
+    from src.state.portfolio import PortfolioState, Position
+
+    position_id = "pos-settled-stale-wallet"
+    token_id = "tok-settled-stale-wallet"
+    condition_id = "cond-settled-stale-wallet"
+    _insert_position_current(
+        trades_conn,
+        position_id=position_id,
+        phase="active",
+        city="seoul",
+        target_date="2026-06-21",
+        bin_label="24°C",
+        direction="buy_yes",
+        token_id=token_id,
+        condition_id=condition_id,
+        chain_shares=5.0,
+        shares=5.0,
+        cost_basis_usd=2.5,
+    )
+    _insert_settlement(
+        forecasts_conn,
+        city="seoul",
+        target_date="2026-06-21",
+        winning_bin="20°C",
+    )
+
+    settled = reconcile(
+        trades_conn, forecasts_conn, chain_by_asset={}, apply=True
+    )
+    assert settled.applied == 1
+    suppression = trades_conn.execute(
+        """
+        SELECT condition_id, suppression_reason, source_module, evidence_json
+          FROM token_suppression
+         WHERE token_id = ?
+        """,
+        (token_id,),
+    ).fetchone()
+    assert dict(suppression)["condition_id"] == condition_id
+    assert dict(suppression)["suppression_reason"] == "settled_position"
+    assert json.loads(suppression["evidence_json"])["settlement_authority"] == "VERIFIED"
+
+    # Simulates a stale reload that did not carry the loader's ignored-token
+    # cache but whose wallet still exposes the settled outcome token.
+    stale_portfolio = PortfolioState(
+        positions=[
+            Position(
+                trade_id=position_id,
+                market_id="market-settled-stale-wallet",
+                city="seoul",
+                cluster="seoul",
+                target_date="2026-06-21",
+                bin_label="24°C",
+                direction="buy_yes",
+                state="settled",
+                token_id=token_id,
+                condition_id=condition_id,
+                shares=5.0,
+                cost_basis_usd=2.5,
+                size_usd=2.5,
+                entry_price=0.5,
+            )
+        ],
+        ignored_tokens=[],
+    )
+    stats = reconcile_portfolio(
+        stale_portfolio,
+        [
+            ChainPosition(
+                token_id=token_id,
+                condition_id=condition_id,
+                size=5.0,
+                avg_price=0.5,
+                cost=2.5,
+            )
+        ],
+        conn=trades_conn,
+    )
+
+    assert stale_portfolio.positions[0].state == "settled"
+    assert stats.get("terminal_chain_exposure_restored", 0) == 0
+    assert stats["terminal_chain_exposure_settlement_suppressed"] == 1
+    events = trades_conn.execute(
+        "SELECT event_type FROM position_events WHERE position_id = ? ORDER BY sequence_no",
+        (position_id,),
+    ).fetchall()
+    assert [event["event_type"] for event in events] == ["SETTLED"]
+
+
+def test_chain_mirror_settlement_rolls_back_when_exact_suppression_write_fails(
+    trades_conn, forecasts_conn, monkeypatch
+):
+    """A SETTLED projection cannot commit without its exact suppression."""
+    _insert_position_current(
+        trades_conn,
+        position_id="pos-suppression-rollback",
+        phase="active",
+        city="seoul",
+        target_date="2026-06-21",
+        bin_label="24°C",
+        direction="buy_yes",
+        token_id="tok-suppression-rollback",
+        condition_id="cond-suppression-rollback",
+    )
+    _insert_settlement(
+        forecasts_conn,
+        city="seoul",
+        target_date="2026-06-21",
+        winning_bin="20°C",
+    )
+
+    import src.state.db as state_db
+
+    def _fail_suppression(*args, **kwargs):  # noqa: ANN001, ANN202
+        raise RuntimeError("injected suppression write failure")
+
+    monkeypatch.setattr(state_db, "record_token_suppression", _fail_suppression)
+    report = reconcile(trades_conn, forecasts_conn, chain_by_asset={}, apply=True)
+
+    assert report.applied == 0
+    assert report.errors == [{
+        "position_id": "pos-suppression-rollback",
+        "error": "injected suppression write failure",
+    }]
+    row = trades_conn.execute(
+        "SELECT phase FROM position_current WHERE position_id = 'pos-suppression-rollback'"
+    ).fetchone()
+    assert row["phase"] == "active"
+    assert trades_conn.execute(
+        "SELECT COUNT(*) FROM position_events WHERE position_id = 'pos-suppression-rollback'"
+    ).fetchone()[0] == 0
+    assert trades_conn.execute(
+        "SELECT COUNT(*) FROM token_suppression WHERE token_id = 'tok-suppression-rollback'"
+    ).fetchone()[0] == 0
+
+
+def test_terminal_restore_fails_closed_when_current_suppression_schema_is_unavailable(
+    trades_conn,
+):
+    """An unreadable exact suppression projection cannot reopen a terminal row."""
+    from src.state.chain_reconciliation import ChainPosition, reconcile as reconcile_portfolio
+    from src.state.portfolio import PortfolioState, Position
+
+    position_id = "pos-suppression-schema-unavailable"
+    token_id = "tok-suppression-schema-unavailable"
+    condition_id = "cond-suppression-schema-unavailable"
+    _insert_position_current(
+        trades_conn,
+        position_id=position_id,
+        phase="settled",
+        city="seoul",
+        target_date="2026-06-21",
+        bin_label="24°C",
+        direction="buy_yes",
+        token_id=token_id,
+        condition_id=condition_id,
+        chain_shares=5.0,
+        shares=5.0,
+        cost_basis_usd=2.5,
+    )
+    trades_conn.execute("DROP TABLE token_suppression")
+    stale_portfolio = PortfolioState(
+        positions=[
+            Position(
+                trade_id=position_id,
+                market_id="market-suppression-schema-unavailable",
+                city="seoul",
+                cluster="seoul",
+                target_date="2026-06-21",
+                bin_label="24°C",
+                direction="buy_yes",
+                state="settled",
+                token_id=token_id,
+                condition_id=condition_id,
+                shares=5.0,
+                cost_basis_usd=2.5,
+                size_usd=2.5,
+                entry_price=0.5,
+            )
+        ],
+        ignored_tokens=[],
+    )
+
+    stats = reconcile_portfolio(
+        stale_portfolio,
+        [
+            ChainPosition(
+                token_id=token_id,
+                condition_id=condition_id,
+                size=5.0,
+                avg_price=0.5,
+                cost=2.5,
+            )
+        ],
+        conn=trades_conn,
+    )
+
+    assert stale_portfolio.positions[0].state == "settled"
+    assert stats.get("terminal_chain_exposure_restored", 0) == 0
+    assert stats["terminal_chain_exposure_suppression_unavailable"] == 1
+
+
+def test_terminal_restore_fails_closed_without_suppression_connection():
+    """A terminal wallet balance cannot restore when current suppression is absent."""
+    from src.state.chain_reconciliation import ChainPosition, reconcile as reconcile_portfolio
+    from src.state.portfolio import PortfolioState, Position
+
+    token_id = "tok-suppression-connection-unavailable"
+    stale_portfolio = PortfolioState(
+        positions=[
+            Position(
+                trade_id="pos-suppression-connection-unavailable",
+                market_id="market-suppression-connection-unavailable",
+                city="seoul",
+                cluster="seoul",
+                target_date="2026-06-21",
+                bin_label="24°C",
+                direction="buy_yes",
+                state="voided",
+                token_id=token_id,
+                condition_id="cond-suppression-connection-unavailable",
+                shares=5.0,
+                cost_basis_usd=2.5,
+                size_usd=2.5,
+                entry_price=0.5,
+            )
+        ],
+        ignored_tokens=[],
+    )
+
+    stats = reconcile_portfolio(
+        stale_portfolio,
+        [
+            ChainPosition(
+                token_id=token_id,
+                condition_id="cond-suppression-connection-unavailable",
+                size=5.0,
+                avg_price=0.5,
+                cost=2.5,
+            )
+        ],
+        conn=None,
+    )
+
+    assert stale_portfolio.positions[0].state == "voided"
+    assert stats.get("terminal_chain_exposure_restored", 0) == 0
+    assert stats["terminal_chain_exposure_suppression_unavailable"] == 1
+
+
+def test_terminal_restore_fails_closed_without_exact_chain_condition(trades_conn):
+    """An empty chain condition cannot bind a terminal local token identity."""
+    from src.state.chain_reconciliation import ChainPosition, reconcile as reconcile_portfolio
+    from src.state.portfolio import PortfolioState, Position
+
+    position_id = "pos-empty-chain-condition"
+    token_id = "tok-empty-chain-condition"
+    condition_id = "cond-empty-chain-condition"
+    _insert_position_current(
+        trades_conn,
+        position_id=position_id,
+        phase="voided",
+        direction="buy_yes",
+        token_id=token_id,
+        condition_id=condition_id,
+        shares=5.0,
+        cost_basis_usd=2.5,
+    )
+    stale_portfolio = PortfolioState(
+        positions=[
+            Position(
+                trade_id=position_id,
+                market_id="market-empty-chain-condition",
+                city="manila",
+                cluster="manila",
+                target_date="2026-07-04",
+                bin_label="33°C",
+                direction="buy_yes",
+                state="voided",
+                token_id=token_id,
+                condition_id=condition_id,
+                shares=5.0,
+                cost_basis_usd=2.5,
+                size_usd=2.5,
+                entry_price=0.5,
+            )
+        ],
+        ignored_tokens=[],
+    )
+
+    stats = reconcile_portfolio(
+        stale_portfolio,
+        [
+            ChainPosition(
+                token_id=token_id,
+                condition_id="",
+                size=5.0,
+                avg_price=0.5,
+                cost=2.5,
+            )
+        ],
+        conn=trades_conn,
+    )
+
+    assert stale_portfolio.positions[0].state == "voided"
+    assert stats.get("terminal_chain_exposure_restored", 0) == 0
+    assert stats["terminal_chain_exposure_condition_unavailable"] == 1
+
+
+def test_terminal_restore_uses_canonical_condition_not_stale_runtime_identity(trades_conn):
+    """The canonical exact identity, not stale runtime state, authorizes restore."""
+    from src.state.chain_reconciliation import ChainPosition, reconcile as reconcile_portfolio
+    from src.state.portfolio import PortfolioState, Position
+
+    position_id = "pos-unsuppressed-terminal-restore"
+    token_id = "tok-unsuppressed-terminal-restore"
+    condition_id = "cond-unsuppressed-terminal-restore"
+    _insert_position_current(
+        trades_conn,
+        position_id=position_id,
+        phase="voided",
+        direction="buy_yes",
+        token_id=token_id,
+        condition_id=condition_id,
+        shares=5.0,
+        cost_basis_usd=2.5,
+    )
+    stale_portfolio = PortfolioState(
+        positions=[
+            Position(
+                trade_id=position_id,
+                market_id="market-unsuppressed-terminal-restore",
+                city="manila",
+                cluster="manila",
+                target_date="2026-07-04",
+                bin_label="33°C",
+                direction="buy_yes",
+                state="voided",
+                token_id=token_id,
+                condition_id="stale-runtime-condition",
+                shares=5.0,
+                cost_basis_usd=2.5,
+                size_usd=2.5,
+                entry_price=0.5,
+            )
+        ],
+        ignored_tokens=[],
+    )
+
+    stats = reconcile_portfolio(
+        stale_portfolio,
+        [
+            ChainPosition(
+                token_id=token_id,
+                condition_id=condition_id,
+                size=5.0,
+                avg_price=0.5,
+                cost=2.5,
+            )
+        ],
+        conn=trades_conn,
+    )
+
+    assert stale_portfolio.positions[0].state == "holding"
+    assert stats["terminal_chain_exposure_restored"] == 1
+
+
+@pytest.mark.parametrize("canonical_condition_id", ["", "cond-canonical-other"])
+def test_terminal_restore_refuses_missing_or_mismatched_canonical_condition(
+    trades_conn, canonical_condition_id
+):
+    """A matching stale runtime condition cannot override canonical identity."""
+    from src.state.chain_reconciliation import ChainPosition, reconcile as reconcile_portfolio
+    from src.state.portfolio import PortfolioState, Position
+
+    position_id = "pos-canonical-condition-refusal"
+    token_id = "tok-canonical-condition-refusal"
+    chain_condition_id = "cond-canonical-exact"
+    _insert_position_current(
+        trades_conn,
+        position_id=position_id,
+        phase="voided",
+        direction="buy_yes",
+        token_id=token_id,
+        condition_id=canonical_condition_id,
+        shares=5.0,
+        cost_basis_usd=2.5,
+    )
+    stale_portfolio = PortfolioState(
+        positions=[
+            Position(
+                trade_id=position_id,
+                market_id="market-canonical-condition-refusal",
+                city="manila",
+                cluster="manila",
+                target_date="2026-07-04",
+                bin_label="33°C",
+                direction="buy_yes",
+                state="voided",
+                token_id=token_id,
+                condition_id=chain_condition_id,
+                shares=5.0,
+                cost_basis_usd=2.5,
+                size_usd=2.5,
+                entry_price=0.5,
+            )
+        ],
+        ignored_tokens=[],
+    )
+
+    stats = reconcile_portfolio(
+        stale_portfolio,
+        [
+            ChainPosition(
+                token_id=token_id,
+                condition_id=chain_condition_id,
+                size=5.0,
+                avg_price=0.5,
+                cost=2.5,
+            )
+        ],
+        conn=trades_conn,
+    )
+
+    assert stale_portfolio.positions[0].state == "voided"
+    assert stats.get("terminal_chain_exposure_restored", 0) == 0
+    assert stats["terminal_chain_exposure_condition_mismatch"] == 1
+
+
+@pytest.mark.parametrize(
+    ("chain_condition_id", "reason"),
+    [
+        ("", "chain_condition_identity_missing"),
+        ("cond-other", "chain_condition_identity_mismatch"),
+    ],
+)
+def test_present_chain_condition_must_exactly_bind_mirror_settlement(
+    trades_conn, forecasts_conn, chain_condition_id, reason
+):
+    """Same-token malformed/mismatched chain facts cannot settle or suppress."""
+    token_id = "tok-condition-bound-settlement"
+    _insert_position_current(
+        trades_conn,
+        position_id="pos-condition-bound-settlement",
+        phase="active",
+        city="seoul",
+        target_date="2026-06-21",
+        bin_label="24°C",
+        direction="buy_yes",
+        token_id=token_id,
+        condition_id="cond-local",
+        chain_shares=5.0,
+        shares=5.0,
+        cost_basis_usd=2.5,
+    )
+    _insert_settlement(
+        forecasts_conn,
+        city="seoul",
+        target_date="2026-06-21",
+        winning_bin="20°C",
+    )
+
+    report = reconcile(
+        trades_conn,
+        forecasts_conn,
+        chain_by_asset={
+            token_id: ChainPositionFact(
+                token_id=token_id,
+                condition_id=chain_condition_id,
+                size=5.0,
+                redeemable=True,
+                current_value=0.0,
+                side="Yes",
+            )
+        },
+        apply=True,
+    )
+
+    assert report.applied == 0
+    assert report.findings[0].classification == "ungradeable"
+    assert report.findings[0].details["reason"] == reason
+    assert trades_conn.execute(
+        "SELECT phase FROM position_current WHERE position_id = 'pos-condition-bound-settlement'"
+    ).fetchone()["phase"] == "active"
+    assert trades_conn.execute(
+        "SELECT COUNT(*) FROM position_events WHERE position_id = 'pos-condition-bound-settlement'"
+    ).fetchone()[0] == 0
+    assert trades_conn.execute(
+        "SELECT COUNT(*) FROM token_suppression WHERE token_id = ?",
+        (token_id,),
+    ).fetchone()[0] == 0
+
+
 def test_apply_buy_no_win_emits_distinct_market_and_position_results(
     trades_conn, forecasts_conn
 ):
@@ -830,6 +1328,7 @@ def test_matching_chain_position_refreshes_sell_authority_before_expiry(
         bin_label="34°C",
         direction="buy_no",
         no_token_id=token_id,
+        condition_id="cond-beijing",
         chain_state="synced",
         chain_shares=10.0,
         shares=10.0,
@@ -1099,6 +1598,7 @@ def test_pending_exit_small_chain_delta_refreshes_without_owned_reduction(
         phase="pending_exit",
         direction="buy_no",
         no_token_id=token_id,
+        condition_id="cond-seoul",
         chain_shares=10.0,
         shares=10.0,
         cost_basis_usd=5.7,
@@ -1150,6 +1650,7 @@ def test_active_wallet_residual_refreshes_without_overattributing_owned_lot(
         phase="active",
         direction="buy_no",
         no_token_id=token_id,
+        condition_id="cond-shared",
         chain_shares=6.0,
         shares=6.0,
         cost_basis_usd=3.6,
@@ -1696,6 +2197,7 @@ def test_positive_chain_observation_repairs_already_consumed_torn_economics(
         bin_label="31°C",
         direction="buy_no",
         no_token_id=token_id,
+        condition_id="cond-seoul",
         chain_state="unknown",
         chain_shares=5.0,
         shares=5.0,

@@ -1,5 +1,5 @@
 # Created: 2026-05-24
-# Last reused/audited: 2026-06-29
+# Last reused/audited: 2026-08-23
 # Authority basis: Operator GOAL 2026-06-04 — full-family q/FDR + executable-mask for illiquid bins; never trade an assumed/renormalized subset
 
 import pytest
@@ -74,7 +74,11 @@ def _forecast_event(
     )
 
 
-def _day0_event(*, live_authority_status: str = "live"):
+def _day0_event(
+    *,
+    live_authority_status: str = "live",
+    causal_snapshot_id: str | None = "day0-observation-1",
+):
     payload = Day0ExtremeUpdatedPayload(
         city="Chicago",
         target_date="2026-05-24",
@@ -101,7 +105,7 @@ def _day0_event(*, live_authority_status: str = "live"):
         observed_at="2026-05-24T08:00:00+00:00",
         received_at="2026-05-24T08:06:00+00:00",
         payload=payload,
-        causal_snapshot_id="day0-observation-1",
+        causal_snapshot_id=causal_snapshot_id,
     )
 
 
@@ -435,3 +439,44 @@ def test_live_family_id_stable_across_forecast_refreshes():
 
     assert first.family_id == second.family_id
     assert first.binding_hash != second.binding_hash
+
+
+def test_day0_identity_tracks_conditioning_revision_without_changing_payload_identity():
+    old_revision = _day0_event(causal_snapshot_id="conditioning-old")
+    new_revision = _day0_event(causal_snapshot_id="conditioning-new")
+    rebuilt_old = _day0_event(causal_snapshot_id="conditioning-old")
+
+    assert old_revision.payload_json == new_revision.payload_json
+    assert old_revision.payload_hash == new_revision.payload_hash
+    assert old_revision.idempotency_key != new_revision.idempotency_key
+    assert old_revision.event_id != new_revision.event_id
+    assert rebuilt_old.idempotency_key == old_revision.idempotency_key
+    assert rebuilt_old.event_id == old_revision.event_id
+
+    payload = MarketBookEventPayload(
+        condition_id="condition-1",
+        token_id="yes-1",
+        outcome_label="YES",
+        event_type="BOOK_SNAPSHOT",
+        quote_seen_at="2026-05-24T10:00:00+00:00",
+        book_hash="book-hash-1",
+    )
+
+    def _book_event(causal_snapshot_id: str) -> object:
+        return make_opportunity_event(
+            event_type="BOOK_SNAPSHOT",
+            entity_key="condition-1|yes-1",
+            source="market_channel",
+            observed_at="2026-05-24T10:00:00+00:00",
+            available_at="2026-05-24T10:00:00+00:00",
+            received_at="2026-05-24T10:00:01+00:00",
+            payload=payload,
+            causal_snapshot_id=causal_snapshot_id,
+        )
+
+    book_old_revision = _book_event("conditioning-old")
+    book_new_revision = _book_event("conditioning-new")
+    assert book_old_revision.payload_json == book_new_revision.payload_json
+    assert book_old_revision.payload_hash == book_new_revision.payload_hash
+    assert book_old_revision.idempotency_key == book_new_revision.idempotency_key
+    assert book_old_revision.event_id == book_new_revision.event_id
