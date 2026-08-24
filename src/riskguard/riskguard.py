@@ -3105,8 +3105,10 @@ def _live_realized_capital_curve(
     hybrid close, never as if the full entry were held to settlement. Gross
     canonical P&L is reduced by the frozen fee schedule because venue facts
     may omit fees.
-    This retrospective curve never supplies entry admission for either strategy;
-    current causal alpha and the normal executable economics/risk stack do.
+    This retrospective curve never licenses entry for either strategy. Day0's
+    revision-scoped probation guard may consume it only to bound an unproven
+    revision to one sequential in-flight probe; current causal alpha and the
+    normal executable economics/risk stack remain the positive authority.
     """
 
     if strategy_key not in {"day0_nowcast_entry", "forecast_qkernel_entry"}:
@@ -4522,6 +4524,79 @@ def _market_relative_alpha_rejection_gate_reason(
     return reason, revisions
 
 
+def _day0_revision_probation_gate_reason(
+    semantics_binding: Mapping[str, object],
+    causal_alpha_evidence: Mapping[str, object],
+    capital_curve: Mapping[str, object],
+) -> tuple[str | None, tuple[str, ...]]:
+    """Bound an unproven Day0 revision to one in-flight capital probe.
+
+    SCOPE: only the exact current Day0 probability revision. DRAIN: the existing
+    monitor/exit/settlement lanes close the in-flight position while the
+    no-money counterfactual lane keeps accumulating exact-selector evidence.
+    RESET: validated same-revision capital evidence removes the bound; before
+    validation, one positive realized probe permits the next sequential probe,
+    while nonpositive or degraded capital truth keeps entry gated. A new
+    probability revision starts its own empty probation cohort.
+    """
+
+    if semantics_binding.get("status") != "ok":
+        return None, ()
+    revision = str(semantics_binding.get("current_revision") or "").strip()
+    if not revision:
+        return None, ()
+    if revision not in _market_relative_alpha_unproven_revisions(
+        semantics_binding,
+        causal_alpha_evidence,
+    ):
+        return None, ()
+
+    curve_revision = str(
+        capital_curve.get("probability_semantics_revision") or ""
+    ).strip()
+    status = str(capital_curve.get("status") or "").strip()
+    try:
+        open_positions = int(capital_curve.get("open_position_count") or 0)
+        realized_positions = int(
+            capital_curve.get("realized_position_count") or 0
+        )
+        blocked_positions = int(
+            capital_curve.get("blocked_position_count") or 0
+        )
+        net_pnl = float(capital_curve.get("net_realized_pnl_usd") or 0.0)
+    except (TypeError, ValueError):
+        status = "capital_truth_degraded"
+        open_positions = realized_positions = blocked_positions = 0
+        net_pnl = 0.0
+
+    if (
+        curve_revision != revision
+        or blocked_positions > 0
+        or status in {"capital_truth_degraded", "capital_truth_unavailable"}
+    ):
+        reason = (
+            "day0_revision_probation_truth_degraded("
+            f"status={status or 'missing'},blocked={blocked_positions},"
+            f"revision={revision})"
+        )
+        return reason, (revision,)
+    if open_positions > 0:
+        reason = (
+            "day0_revision_probation_in_flight("
+            f"open={open_positions},realized={realized_positions},"
+            f"revision={revision})"
+        )
+        return reason, (revision,)
+    if realized_positions > 0 and (not math.isfinite(net_pnl) or net_pnl <= 0.0):
+        reason = (
+            "day0_revision_probation_nonpositive("
+            f"realized={realized_positions},net_pnl_usd={net_pnl:.6f},"
+            f"revision={revision})"
+        )
+        return reason, (revision,)
+    return None, ()
+
+
 # Below this many settled observations a per-strategy Brier score is noise,
 # not a verdict (a single loss at p=0.6 scores 0.36 > brier_red). Thin
 # Thin rows remain visible in raw portfolio telemetry and the loss gates. They
@@ -4878,7 +4953,12 @@ def _sync_riskguard_strategy_gate_actions(
     def _scope_covers_reason(reason: str, revisions: set[str]) -> bool:
         if reason.startswith("brier_degraded("):
             return True
-        if reason.startswith("market_relative_alpha_unproven("):
+        if reason.startswith(
+            (
+                "market_relative_alpha_unproven(",
+                "day0_revision_probation_",
+            )
+        ):
             marker = ",revision="
             if marker not in reason or not reason.endswith(")"):
                 return False
@@ -5777,6 +5857,17 @@ def _tick_once() -> RiskLevel:
         day0_market_relative_alpha_gate_required = (
             day0_market_relative_alpha_gate_reason is not None
         )
+        (
+            day0_revision_probation_gate_reason,
+            day0_revision_probation_gate_revisions,
+        ) = _day0_revision_probation_gate_reason(
+            day0_probability_semantics_binding,
+            day0_market_relative_alpha_evidence,
+            day0_live_realized_capital_curve,
+        )
+        day0_revision_probation_gate_required = (
+            day0_revision_probation_gate_reason is not None
+        )
         probability_identity_ready_count = sum(
             bool(row.get("probability_identity_ready", False))
             for row in brier_candidate_rows
@@ -5925,13 +6016,13 @@ def _tick_once() -> RiskLevel:
         recommended_control_reasons: dict[str, list[str]] = {}
         recommended_strategy_gate_reasons: dict[str, list[str]] = {}
         recommended_strategy_gate_scopes: dict[str, set[str]] = {}
-        # Qkernel retains its existing pretrade-proof gate. Day0 v5 instead
-        # bootstraps from its exact current
-        # q/book/wealth optimum while no-evidence/inconclusive shadow history
-        # remains telemetry. Only direct rejection of that same Day0 probability
-        # revision and global selector emits a gate. Every ordinary source,
-        # price, Brier, Kelly, global-ranking, and submit-time JIT boundary stays
-        # cumulative; held monitoring and exits remain outside this entry policy.
+        # Qkernel retains its existing pretrade-proof gate. Day0 bootstraps one
+        # exact current q/book/wealth probe per revision; while that probe is
+        # unresolved, or after its realized capital is nonpositive, the same
+        # revision is gated until exact-selector counterfactual evidence validates
+        # it. Every ordinary source, price, Brier, Kelly, global-ranking, and
+        # submit-time JIT boundary stays cumulative; held monitoring and exits
+        # remain outside this entry policy.
         probability_semantics_level = RiskLevel.GREEN
         if probability_semantics_binding.get("status") == "unavailable":
             probability_semantics_level = RiskLevel.DATA_DEGRADED
@@ -5970,6 +6061,15 @@ def _tick_once() -> RiskLevel:
                 recommended_strategy_gate_scopes.setdefault(
                     strategy, set()
                 ).update(revisions)
+        if day0_revision_probation_gate_reason is not None:
+            _append_reason(
+                recommended_strategy_gate_reasons,
+                "day0_nowcast_entry",
+                day0_revision_probation_gate_reason,
+            )
+            recommended_strategy_gate_scopes.setdefault(
+                "day0_nowcast_entry", set()
+            ).update(day0_revision_probation_gate_revisions)
         degraded_brier_strategies = brier_verdict_breakdown.get(
             "degraded_strategies", {}
         )
@@ -6129,7 +6229,10 @@ def _tick_once() -> RiskLevel:
                     ["forecast_qkernel_entry"],
                 )
             )
-        if day0_market_relative_alpha_gate_required:
+        if (
+            day0_market_relative_alpha_gate_required
+            or day0_revision_probation_gate_required
+        ):
             day0_market_relative_alpha_gate_confirmation = (
                 _confirm_active_durable_strategy_gates(
                     zeus_conn,
@@ -6147,7 +6250,10 @@ def _tick_once() -> RiskLevel:
                 (
                     "day0_nowcast_entry",
                     day0_market_relative_alpha_gate_confirmation,
-                    day0_market_relative_alpha_gate_required,
+                    (
+                        day0_market_relative_alpha_gate_required
+                        or day0_revision_probation_gate_required
+                    ),
                 ),
             )
             if required
@@ -6461,6 +6567,12 @@ def _tick_once() -> RiskLevel:
                 ),
                 "day0_market_relative_alpha_gate_reason": (
                     day0_market_relative_alpha_gate_reason
+                ),
+                "day0_revision_probation_gate_required": (
+                    day0_revision_probation_gate_required
+                ),
+                "day0_revision_probation_gate_reason": (
+                    day0_revision_probation_gate_reason
                 ),
                 "day0_market_relative_alpha_observation": (
                     day0_market_relative_alpha_observation

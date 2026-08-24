@@ -1,14 +1,16 @@
 # Created: 2026-03-30
-# Last reused/audited: 2026-08-22
+# Last reused/audited: 2026-08-24
 # Authority basis: docs/operations/task_2026-04-28_contamination_remediation/plan.md Batch D RiskGuard test-law remediation; Wave26 verification-noise helper alignment; PR90 current-env fallback review fix; 2026-08-15 economic-settlement trailing-loss hotfix.
 #                  2026-05-17 live lock remediation: RiskGuard trade/world DB lock degrades to fresh DATA_DEGRADED rather than stale RED.
-# Lifecycle: created=2026-03-30; last_reviewed=2026-08-22; last_reused=2026-08-22
+# Lifecycle: created=2026-03-30; last_reviewed=2026-08-24; last_reused=2026-08-24
 # Purpose: Guard RiskGuard protective metrics, policy resolution, source authority, and portfolio loader invariants.
 # Reuse: Run after RiskGuard risk details, portfolio loader, settlement source, bankroll, or risk-action changes.
 # 2026-08-17: Brier strategy-gate evidence is independent by target date.
-# 2026-08-22: Day0 v5 missing/inconclusive shadow history remains telemetry;
-# only direct revision-scoped capital rejection gates BUY. Qkernel retains its
-# pretrade proof gate while its current live capital curve is nonpositive.
+# 2026-08-22 prior contract: Day0 missing/inconclusive shadow history remained
+# telemetry and only direct revision-scoped capital rejection gated BUY.
+# 2026-08-24 supersedes that admission shape: an unproven Day0 revision is
+# limited to one sequential in-flight capital probe; nonpositive/degraded
+# capital truth gates only that revision. Qkernel retains its pretrade proof gate.
 """Tests for RiskGuard metrics, policy resolution, and risk levels."""
 
 import json
@@ -5795,6 +5797,8 @@ class TestQkernelMarketRelativeAlphaEvidence:
         assert '"day0_live_realized_capital_curve":' in tick_source
         assert "qkernel_market_relative_alpha_gate_reason" in tick_source
         assert "day0_market_relative_alpha_gate_required" in tick_source
+        assert "day0_revision_probation_gate_required" in tick_source
+        assert "_day0_revision_probation_gate_reason(" in tick_source
         assert "_market_relative_alpha_rejection_gate_reason(" in tick_source
         assert "recommended_strategy_gate_scopes" in tick_source
         assert "live_capital_curve" not in inspect.signature(
@@ -5803,10 +5807,6 @@ class TestQkernelMarketRelativeAlphaEvidence:
         assert "live_capital_curve" not in inspect.signature(
             riskguard_module._market_relative_alpha_gate_reason
         ).parameters
-        assert not hasattr(
-            riskguard_module,
-            "_live_realized_capital_gate_reason",
-        )
 
     def test_same_target_date_high_and_low_count_as_one_evidence_cluster(self):
         from src.events.day0_authority import DAY0_PROBABILITY_SEMANTICS_REVISION
@@ -6094,6 +6094,118 @@ class TestQkernelMarketRelativeAlphaEvidence:
         assert reason is not None
         assert "status=rejected" in reason
         assert f"revision={DAY0_PROBABILITY_SEMANTICS_REVISION})" in reason
+
+    @pytest.mark.parametrize(
+        ("status", "open_count", "realized_count", "blocked_count", "pnl", "fragment"),
+        [
+            (
+                "probation_in_flight", 1, 0, 0, 0.0,
+                "day0_revision_probation_in_flight(open=1,realized=0",
+            ),
+            (
+                "nonpositive", 0, 1, 0, -0.25,
+                "day0_revision_probation_nonpositive(realized=1,net_pnl_usd=-0.250000",
+            ),
+            (
+                "capital_truth_degraded", 0, 0, 1, 0.0,
+                "day0_revision_probation_truth_degraded(",
+            ),
+        ],
+    )
+    def test_unproven_day0_revision_bounds_live_capital_probation(
+        self,
+        status,
+        open_count,
+        realized_count,
+        blocked_count,
+        pnl,
+        fragment,
+    ):
+        from src.events.day0_authority import DAY0_PROBABILITY_SEMANTICS_REVISION
+
+        curve = {
+            "status": status,
+            "probability_semantics_revision": DAY0_PROBABILITY_SEMANTICS_REVISION,
+            "open_position_count": open_count,
+            "realized_position_count": realized_count,
+            "blocked_position_count": blocked_count,
+            "net_realized_pnl_usd": pnl,
+        }
+        reason, revisions = riskguard_module._day0_revision_probation_gate_reason(
+            {
+                "status": "ok",
+                "current_revision": DAY0_PROBABILITY_SEMANTICS_REVISION,
+            },
+            {"cohorts": []},
+            curve,
+        )
+
+        assert fragment in reason
+        assert revisions == (DAY0_PROBABILITY_SEMANTICS_REVISION,)
+
+    def test_unproven_day0_revision_allows_one_probe_then_positive_sequential_probe(self):
+        from src.events.day0_authority import DAY0_PROBABILITY_SEMANTICS_REVISION
+
+        binding = {
+            "status": "ok",
+            "current_revision": DAY0_PROBABILITY_SEMANTICS_REVISION,
+        }
+        base_curve = {
+            "probability_semantics_revision": DAY0_PROBABILITY_SEMANTICS_REVISION,
+            "blocked_position_count": 0,
+        }
+
+        assert riskguard_module._day0_revision_probation_gate_reason(
+            binding,
+            {"cohorts": []},
+            {
+                **base_curve,
+                "status": "awaiting_current_law_fills",
+                "open_position_count": 0,
+                "realized_position_count": 0,
+                "net_realized_pnl_usd": 0.0,
+            },
+        ) == (None, ())
+        assert riskguard_module._day0_revision_probation_gate_reason(
+            binding,
+            {"cohorts": []},
+            {
+                **base_curve,
+                "status": "positive",
+                "open_position_count": 0,
+                "realized_position_count": 1,
+                "net_realized_pnl_usd": 0.25,
+            },
+        ) == (None, ())
+
+    def test_validated_day0_revision_removes_probation_bound(self):
+        from src.events.day0_authority import DAY0_PROBABILITY_SEMANTICS_REVISION
+
+        evidence = {"cohorts": [{
+            "decision_law_id": "executable_min_order_capital_gain_v2",
+            "global_selection_revision": (
+                riskguard_module.CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION
+            ),
+            "probability_semantics_revisions": [DAY0_PROBABILITY_SEMANTICS_REVISION],
+            "validated": True,
+        }]}
+        reason = riskguard_module._day0_revision_probation_gate_reason(
+            {
+                "status": "ok",
+                "current_revision": DAY0_PROBABILITY_SEMANTICS_REVISION,
+            },
+            evidence,
+            {
+                "status": "probation_in_flight",
+                "probability_semantics_revision": DAY0_PROBABILITY_SEMANTICS_REVISION,
+                "open_position_count": 1,
+                "realized_position_count": 0,
+                "blocked_position_count": 0,
+                "net_realized_pnl_usd": 0.0,
+            },
+        )
+
+        assert reason == (None, ())
 
     def test_qkernel_alpha_observation_does_not_gate_unproven_revision(self):
         current = riskguard_module.CURRENT_EVIDENCE_SEMANTICS_REVISION
@@ -7157,6 +7269,56 @@ class TestStrategyPolicyResolver:
             "gate": True,
             "probability_semantics_revisions": [revision],
         }
+        conn.close()
+
+    def test_riskguard_emits_revision_scoped_day0_probation_gate(
+        self,
+        monkeypatch,
+    ):
+        from src.events.day0_authority import DAY0_PROBABILITY_SEMANTICS_REVISION
+
+        _neutralize_hard_safety(monkeypatch)
+        conn = _policy_conn()
+        revision = DAY0_PROBABILITY_SEMANTICS_REVISION
+        status = riskguard_module._sync_riskguard_strategy_gate_actions(
+            conn,
+            {
+                "day0_nowcast_entry": [
+                    "day0_revision_probation_in_flight("
+                    f"open=1,realized=0,revision={revision})"
+                ]
+            },
+            probability_semantics_scopes={
+                "day0_nowcast_entry": {revision}
+            },
+            issued_at="2026-08-24T05:50:00+00:00",
+        )
+        row = conn.execute(
+            "SELECT value FROM risk_actions WHERE action_id = ?",
+            ("riskguard:gate:day0_nowcast_entry",),
+        ).fetchone()
+
+        assert status["emitted_count"] == 1
+        assert json.loads(row["value"]) == {
+            "gate": True,
+            "probability_semantics_revisions": [revision],
+        }
+        now = datetime(2026, 8, 24, 6, 0, tzinfo=timezone.utc)
+        current = policy_module.resolve_strategy_policy(
+            conn,
+            "day0_nowcast_entry",
+            now,
+            probability_semantics_revision=revision,
+        )
+        future = policy_module.resolve_strategy_policy(
+            conn,
+            "day0_nowcast_entry",
+            now,
+            probability_semantics_revision="future-day0-revision",
+        )
+
+        assert current.gated is True
+        assert future.gated is False
         conn.close()
 
     def test_riskguard_emits_multi_revision_scoped_unproven_alpha_gate(self):
