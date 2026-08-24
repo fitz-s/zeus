@@ -2077,7 +2077,11 @@ def _live_health_composite_cycle() -> None:
         return
 
     from src.control.live_health import refresh_composite_live_health_bounded
+    from src.observability.status_summary import write_cycle_pulse
 
+    # This must remain in the daemon parent. A child-process pulse would publish
+    # its ``python -c`` PID as the live daemon and invalidate code attestation.
+    write_cycle_pulse({"mode": "heartbeat_pulse", "heartbeat": True})
     refresh_composite_live_health_bounded()
 
 

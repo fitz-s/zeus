@@ -649,18 +649,14 @@ def test_live_probe_alerts_on_stale_composite_and_direct_business_failure(
 def test_bounded_composite_success_keeps_daemon_process_identity(
     tmp_path, monkeypatch
 ):
+    import src.config as config
     from src.control import live_health
+    import src.main as main
+    import src.observability.status_summary as status_summary
 
     state_dir = tmp_path / "state"
+    state_dir.mkdir()
     status_path = state_dir / "status_summary.json"
-    status = {
-        "process": {"pid": os.getpid(), "mode": "live"},
-        "cycle": {
-            "mode": "edli_event_reactor",
-            "completed_at": "2026-08-23T00:00:00+00:00",
-        },
-    }
-    _write_json(status_path, status)
     child_code = (
         "import json, os; from pathlib import Path; "
         f"state_dir = Path(os.environ[{live_health._COMPOSITE_STATE_DIR_ENV!r}]); "
@@ -670,15 +666,67 @@ def test_bounded_composite_success_keeps_daemon_process_identity(
         "'computed_at': '2026-08-23T00:00:00+00:00', "
         "'failing_surfaces': [], 'surfaces': {}}))"
     )
+    monkeypatch.setattr(config, "state_path", lambda name: state_dir / name)
+    monkeypatch.setattr(status_summary, "STATUS_PATH", status_path)
+    monkeypatch.setattr(
+        status_summary,
+        "_refresh_minimal_runtime_read_model_for_status",
+        lambda _status: True,
+    )
+    monkeypatch.setattr(
+        status_summary,
+        "_get_execution_capability_status",
+        lambda: {"entry": {"status": "requires_intent"}},
+    )
+    monkeypatch.setattr(
+        status_summary,
+        "_refresh_current_open_entry_orders_for_status",
+        lambda _status: None,
+    )
+    monkeypatch.setattr(
+        status_summary,
+        "_refresh_control_status_for_pulse",
+        lambda _status: None,
+    )
+    monkeypatch.setattr(
+        status_summary,
+        "_refresh_pulse_infrastructure_status",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        status_summary,
+        "_project_recommended_commands",
+        lambda _status: None,
+    )
+    monkeypatch.setattr(
+        status_summary,
+        "annotate_truth_payload",
+        lambda payload, *_args, **_kwargs: payload,
+    )
+    monkeypatch.setattr(main, "_status_summary_refresh_can_defer", lambda: True)
+    monkeypatch.setattr(
+        main,
+        "_defer_for_held_position_monitor",
+        lambda _name: False,
+    )
+    monkeypatch.setattr(
+        main,
+        "_defer_for_active_entry_reactor",
+        lambda _name: False,
+    )
     monkeypatch.setattr(live_health, "_COMPOSITE_CHILD_CODE", child_code)
 
-    result = live_health.refresh_composite_live_health_bounded(
-        state_dir=state_dir,
-        timeout_seconds=1.0,
-    )
+    main._live_health_composite_cycle.__wrapped__()
+    first_status = json.loads(status_path.read_text())
+    main._live_health_composite_cycle.__wrapped__()
+    second_status = json.loads(status_path.read_text())
 
-    assert result["healthy"] is True
-    assert json.loads(status_path.read_text()) == status
+    assert json.loads(
+        (state_dir / "live_health_composite.json").read_text()
+    )["healthy"] is True
+    assert first_status["process"]["pid"] == os.getpid()
+    assert second_status["process"]["pid"] == os.getpid()
+    assert second_status["timestamp"] != first_status["timestamp"]
 
 
 def test_bounded_composite_timeout_reaps_child_and_allows_next_cycle(
