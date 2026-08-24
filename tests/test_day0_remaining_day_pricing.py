@@ -426,6 +426,297 @@ def test_istanbul_ogimet_materializer_carrier_path_has_numpy_and_500_rows(
     assert all(sum(row) == pytest.approx(1.0) for row in carrier["samples"])
     conn.close()
 
+def test_tel_aviv_no_confirmed_prior_uses_real_jeffreys_carrier(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """A no-confirmed-history live-shaped request stays statistical, not blind."""
+    from src.data.openmeteo_ecmwf_ifs9_anchor import OpenMeteoIfs9LocalDayAnchor
+    from src.data.replacement_forecast_materializer import (
+        ReplacementForecastMaterializeRequest,
+        _day0_noaa_future_vector_members,
+        _day0_noaa_preliminary_carrier,
+    )
+    import src.data.day0_hourly_vectors as hourly
+
+    target = date(2026, 8, 24)
+    local_tz = ZoneInfo("Asia/Jerusalem")
+    times = tuple(f"{target.isoformat()}T{hour:02d}:00" for hour in range(24))
+    vectors = tuple(
+        Day0HourlyVector(
+            model=model,
+            city="Tel Aviv",
+            target_date=target.isoformat(),
+            timezone_name="Asia/Jerusalem",
+            captured_at="2026-08-24T08:30:00+00:00",
+            times=times,
+            temps_c=tuple(
+                27.0 + hour * (0.2 if model == "ecmwf_ifs" else 0.25)
+                for hour in range(24)
+            ),
+        )
+        for model in ("ecmwf_ifs", "icon_global")
+    )
+    monkeypatch.setattr(
+        hourly,
+        "day0_hourly_models_for_city",
+        lambda _city: ["ecmwf_ifs", "icon_global"],
+    )
+    monkeypatch.setattr(
+        hourly,
+        "read_freshest_day0_hourly_vectors",
+        lambda **_kwargs: list(vectors),
+    )
+    anchor = OpenMeteoIfs9LocalDayAnchor(
+        city_timezone="Asia/Jerusalem",
+        target_local_date=target,
+        high_c=35.0,
+        low_c=24.0,
+        sample_count=1,
+        contributing_local_times=(datetime(2026, 8, 24, 0, tzinfo=local_tz),),
+        contributing_valid_times_utc=(datetime(2026, 8, 23, 21, tzinfo=UTC),),
+        source_cycle_time=datetime(2026, 8, 24, 6, tzinfo=UTC),
+    )
+    request = ReplacementForecastMaterializeRequest(
+        city="Tel Aviv",
+        city_id="Tel Aviv",
+        city_timezone="Asia/Jerusalem",
+        target_date=target,
+        temperature_metric="high",
+        baseline_source_run_id="b0-tel-aviv",
+        baseline_data_version="ecmwf_opendata_mx2t3_local_calendar_day_max",
+        baseline_source_available_at="2026-08-24T08:00:00+00:00",
+        openmeteo_anchor=anchor,
+        openmeteo_source_run_id="om-tel-aviv",
+        openmeteo_source_available_at="2026-08-24T08:10:00+00:00",
+        bins=(
+            SimpleNamespace(lower_c=None, upper_c=30.0),
+            SimpleNamespace(lower_c=31.0, upper_c=32.0),
+            SimpleNamespace(lower_c=33.0, upper_c=None),
+        ),
+        source_cycle_time="2026-08-24T06:00:00+00:00",
+        computed_at="2026-08-24T09:30:00+00:00",
+        day0_observed_extreme_c=33.0,
+        day0_observed_extreme_source="ogimet_metar_llbg",
+        day0_observed_extreme_observation_time="2026-08-24T09:00:00+00:00",
+        day0_observed_extreme_sample_count=24,
+        day0_observed_extreme_unit="C",
+    )
+    conn = sqlite3.connect(":memory:")
+    conn.execute(
+        """CREATE TABLE observation_prints (
+            id INTEGER PRIMARY KEY, city TEXT, station_id TEXT,
+            source_channel TEXT, publish_ts_utc TEXT, value_native REAL,
+            unit TEXT, fetched_at_utc TEXT, raw_report TEXT
+        )"""
+    )
+    future, path_sigma, cutoff = _day0_noaa_future_vector_members(
+        conn, request, metric="high"
+    )
+    carrier, likelihood = _day0_noaa_preliminary_carrier(
+        conn,
+        request,
+        metric="high",
+        future_members_c=future,
+        bins=request.bins,
+        path_error_sigma_c=path_sigma,
+    )
+    assert cutoff == "2026-08-24T09:30:00+00:00"
+    assert likelihood["semantics"] == (
+        "same_station_preliminary_report_survival_likelihood_"
+        "jeffreys_prior_only_v1"
+    )
+    assert likelihood["alpha"] == pytest.approx(0.5)
+    assert likelihood["beta"] == pytest.approx(0.5)
+    assert likelihood["boundary_survival_probability"] == pytest.approx(0.5)
+    assert likelihood["unconfirmed_awc_ids"] == []
+    assert len(str(likelihood["identity_hash"])) == 64
+    assert carrier["sample_count"] == 500
+    assert len(carrier["samples"]) == 500
+    assert all(sum(row) == pytest.approx(1.0) for row in carrier["samples"])
+    conn.close()
+
+
+def test_noaa_prior_only_is_entry_blocked_but_held_allowed():
+    """The typed prior-only basis is reduce-only, never an ENTRY license."""
+    import src.engine.event_reactor_adapter as era
+
+    conn = sqlite3.connect(":memory:")
+    conn.execute(
+        """CREATE TABLE observation_prints (
+            id INTEGER PRIMARY KEY, city TEXT, station_id TEXT,
+            source_channel TEXT, publish_ts_utc TEXT, value_native REAL,
+            unit TEXT, fetched_at_utc TEXT, raw_report TEXT
+        )"""
+    )
+    kwargs = {
+        "source": "ogimet_metar_llbg",
+        "city": "Tel Aviv",
+        "city_timezone": "Asia/Jerusalem",
+        "target_date": "2026-08-24",
+        "temperature_metric": "high",
+        "decision_time": datetime(2026, 8, 24, 9, 30, tzinfo=UTC),
+    }
+    with pytest.raises(
+        ValueError, match="NOAA_PRELIMINARY_SURVIVAL_HISTORY_INSUFFICIENT"
+    ):
+        era._provisional_day0_revision_likelihood(
+            conn, **kwargs, entry_authority=True
+        )
+    held = era._provisional_day0_revision_likelihood(
+        conn, **kwargs, entry_authority=False
+    )
+    assert held["semantics"] == (
+        "same_station_preliminary_report_survival_likelihood_"
+        "jeffreys_prior_only_v1"
+    )
+    assert held["boundary_survival_probability"] == pytest.approx(0.5)
+    conn.close()
+
+
+def test_tel_aviv_ogimet_publish_clock_uses_real_pair_history(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """OGIMET's NULL raw_report still joins the causal AWC->OGIMET prior."""
+    from src.data.openmeteo_ecmwf_ifs9_anchor import OpenMeteoIfs9LocalDayAnchor
+    from src.data.replacement_forecast_materializer import (
+        ReplacementForecastMaterializeRequest,
+        _day0_noaa_future_vector_members,
+        _day0_noaa_preliminary_carrier,
+    )
+    import src.data.day0_hourly_vectors as hourly
+
+    target = date(2026, 8, 24)
+    local_tz = ZoneInfo("Asia/Jerusalem")
+    times = tuple(f"{target.isoformat()}T{hour:02d}:00" for hour in range(24))
+    vectors = tuple(
+        Day0HourlyVector(
+            model=model,
+            city="Tel Aviv",
+            target_date=target.isoformat(),
+            timezone_name="Asia/Jerusalem",
+            captured_at="2026-08-24T08:30:00+00:00",
+            times=times,
+            temps_c=tuple(
+                27.0 + hour * (0.2 if model == "ecmwf_ifs" else 0.25)
+                for hour in range(24)
+            ),
+        )
+        for model in ("ecmwf_ifs", "icon_global")
+    )
+    monkeypatch.setattr(
+        hourly,
+        "day0_hourly_models_for_city",
+        lambda _city: ["ecmwf_ifs", "icon_global"],
+    )
+    monkeypatch.setattr(
+        hourly,
+        "read_freshest_day0_hourly_vectors",
+        lambda **_kwargs: list(vectors),
+    )
+    anchor = OpenMeteoIfs9LocalDayAnchor(
+        city_timezone="Asia/Jerusalem",
+        target_local_date=target,
+        high_c=35.0,
+        low_c=24.0,
+        sample_count=1,
+        contributing_local_times=(datetime(2026, 8, 24, 0, tzinfo=local_tz),),
+        contributing_valid_times_utc=(datetime(2026, 8, 23, 21, tzinfo=UTC),),
+        source_cycle_time=datetime(2026, 8, 24, 6, tzinfo=UTC),
+    )
+    request = ReplacementForecastMaterializeRequest(
+        city="Tel Aviv",
+        city_id="Tel Aviv",
+        city_timezone="Asia/Jerusalem",
+        target_date=target,
+        temperature_metric="high",
+        baseline_source_run_id="b0-tel-aviv",
+        baseline_data_version="ecmwf_opendata_mx2t3_local_calendar_day_max",
+        baseline_source_available_at="2026-08-24T08:00:00+00:00",
+        openmeteo_anchor=anchor,
+        openmeteo_source_run_id="om-tel-aviv",
+        openmeteo_source_available_at="2026-08-24T08:10:00+00:00",
+        bins=(
+            SimpleNamespace(lower_c=None, upper_c=30.0),
+            SimpleNamespace(lower_c=31.0, upper_c=32.0),
+            SimpleNamespace(lower_c=33.0, upper_c=None),
+        ),
+        source_cycle_time="2026-08-24T06:00:00+00:00",
+        computed_at="2026-08-24T09:30:00+00:00",
+        day0_observed_extreme_c=33.0,
+        day0_observed_extreme_source="ogimet_metar_llbg",
+        day0_observed_extreme_observation_time="2026-08-24T09:00:00+00:00",
+        day0_observed_extreme_sample_count=24,
+        day0_observed_extreme_unit="C",
+    )
+    conn = sqlite3.connect(":memory:")
+    conn.execute(
+        """CREATE TABLE observation_prints (
+            id INTEGER PRIMARY KEY, city TEXT, station_id TEXT,
+            source_channel TEXT, publish_ts_utc TEXT, value_native REAL,
+            unit TEXT, fetched_at_utc TEXT, raw_report TEXT
+        )"""
+    )
+    rows = []
+    for index in range(31):
+        observed_at = datetime(
+            2026, 8, 17, 10 + (index % 5), 20, tzinfo=UTC
+        ) + timedelta(days=index // 5)
+        value = 20.0 + index
+        rows.append(
+            (
+                100 + index,
+                "Tel Aviv",
+                "LLBG",
+                "aviationweather_metar",
+                observed_at.isoformat(),
+                value,
+                "C",
+                (observed_at + timedelta(minutes=1)).isoformat(),
+                f"METAR LLBG {observed_at.day:02d}{observed_at.hour:02d}20Z "
+                f"00000KT 9999 SKC {value:.0f}/20 Q1010",
+            )
+        )
+        if index < 16:
+            rows.append(
+                (
+                    200 + index,
+                    "Tel Aviv",
+                    "LLBG",
+                    "ogimet_metar_llbg",
+                    observed_at.isoformat(),
+                    value,
+                    "C",
+                    (observed_at + timedelta(minutes=5)).isoformat(),
+                    None,
+                )
+            )
+    conn.executemany(
+        "INSERT INTO observation_prints VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        rows,
+    )
+    future, path_sigma, _ = _day0_noaa_future_vector_members(
+        conn, request, metric="high"
+    )
+    carrier, likelihood = _day0_noaa_preliminary_carrier(
+        conn,
+        request,
+        metric="high",
+        future_members_c=future,
+        bins=request.bins,
+        path_error_sigma_c=path_sigma,
+    )
+    assert likelihood["semantics"] == (
+        "same_station_preliminary_report_survival_likelihood_v1"
+    )
+    assert likelihood["boundary_survival_probability"] == pytest.approx(
+        16.5 / 17.0
+    )
+    assert len(likelihood["unconfirmed_awc_ids"]) == 15
+    assert carrier["sample_count"] == 500
+    assert sum(carrier["q"]) == pytest.approx(1.0)
+    assert all(sum(row) == pytest.approx(1.0) for row in carrier["samples"])
+    conn.close()
+
 
 def test_noaa_adapter_replays_real_fahrenheit_family_in_native_settlement_units():
     import src.engine.event_reactor_adapter as era

@@ -1261,6 +1261,9 @@ def _day0_noaa_preliminary_carrier(
         target_date=_date_text(request.target_date),
         temperature_metric=metric,
         decision_time=_to_utc(request.computed_at, field_name="computed_at"),
+        # Materialization persists the typed prior-only carrier for held
+        # redecision; the adapter's ENTRY seam rejects that basis explicitly.
+        allow_prior_only=True,
     )
     survival = float(likelihood["boundary_survival_probability"])
     if not 0.0 < survival < 1.0:

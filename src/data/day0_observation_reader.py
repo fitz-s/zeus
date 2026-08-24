@@ -744,13 +744,19 @@ def same_station_preliminary_report_survival_likelihood(
     target_date: str,
     temperature_metric: str,
     decision_time: datetime,
+    allow_prior_only: bool = False,
 ) -> dict[str, object]:
     """Strict-prior AWC→later-OGIMET report confirmation likelihood.
 
-    This is statistical survival evidence for a preliminary same-station
-    report, not a statement that either mirror is final settlement truth.
-    Unpaired reports are coverage debt and deliberately stay outside the Beta
-    denominator.
+    This is statistical survival evidence for an AWC preliminary report
+    confirmed by a later same-station OGIMET mirror, not a statement that
+    either mirror is final settlement truth.  An OGIMET-selected current
+    boundary is the confirming mirror side of this same pair contract; it
+    does not create a second independent probability regime.  Unpaired
+    reports are coverage debt and deliberately stay outside the Beta
+    denominator.  ``allow_prior_only`` is an explicit reduce-only policy;
+    ENTRY callers must leave it false when no confirmed transition history
+    exists.
     """
     from src.data.day0_fast_obs import metar_observation_time_from_raw
 
@@ -758,6 +764,8 @@ def same_station_preliminary_report_survival_likelihood(
     station = str(station_id).strip().upper()
     if metric not in {"high", "low"} or not station or decision_time.tzinfo is None:
         raise ValueError("NOAA_PRELIMINARY_SURVIVAL_INPUT_INVALID")
+    if not isinstance(allow_prior_only, bool):
+        raise ValueError("NOAA_PRELIMINARY_SURVIVAL_PRIOR_POLICY_INVALID")
     target = date.fromisoformat(str(target_date)[:10])
     cutoff = decision_time.astimezone(timezone.utc)
     start = cutoff - timedelta(days=7)
@@ -802,7 +810,15 @@ def same_station_preliminary_report_survival_likelihood(
             value = float(value_raw)
         except (TypeError, ValueError):
             continue
-        observed = metar_observation_time_from_raw(str(raw or ""), published_at=published)
+        if str(channel).strip().lower() == "ogimet_metar_" + station.lower():
+            # The canonical OGIMET ledger stores the mirror's publication clock
+            # as its native hourly observation instant; its raw_report is often
+            # intentionally NULL.  AWC retains the report-issued METAR clock.
+            observed = published
+        else:
+            observed = metar_observation_time_from_raw(
+                str(raw or ""), published_at=published
+            )
         if (
             observed is None
             or observed.astimezone(timezone.utc) >= cutoff
@@ -838,7 +854,29 @@ def same_station_preliminary_report_survival_likelihood(
         (confirmations if math.isclose(value, confirmed, abs_tol=1e-9) else failures).append(record)
     successes, failed = len(confirmations), len(failures)
     if successes + failed == 0:
-        raise ValueError("NOAA_PRELIMINARY_SURVIVAL_HISTORY_INSUFFICIENT")
+        if not allow_prior_only:
+            raise ValueError("NOAA_PRELIMINARY_SURVIVAL_HISTORY_INSUFFICIENT")
+        alpha = beta = 0.5
+        identity = {
+            "semantics": (
+                "same_station_preliminary_report_survival_likelihood_"
+                "jeffreys_prior_only_v1"
+            ),
+            "cutoff": cutoff.isoformat(),
+            "successes": confirmations,
+            "failures": failures,
+            "unconfirmed_awc_ids": unconfirmed,
+            "alpha": alpha,
+            "beta": beta,
+            "evidence_basis": "no_confirmed_same_station_transitions",
+        }
+        return {
+            **identity,
+            "boundary_survival_probability": 0.5,
+            "identity_hash": hashlib.sha256(
+                json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()
+            ).hexdigest(),
+        }
     alpha, beta = successes + 0.5, failed + 0.5
     identity = {"semantics": "same_station_preliminary_report_survival_likelihood_v1", "cutoff": cutoff.isoformat(), "successes": confirmations, "failures": failures, "unconfirmed_awc_ids": unconfirmed, "alpha": alpha, "beta": beta}
     return {**identity, "boundary_survival_probability": alpha / (alpha + beta), "identity_hash": hashlib.sha256(json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()).hexdigest()}

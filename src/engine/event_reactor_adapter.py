@@ -33705,8 +33705,15 @@ def _provisional_day0_revision_likelihood(
 
         city_obj = runtime_cities_by_name().get(str(city))
         station = str(getattr(city_obj, "wu_station", "") or "").strip().upper()
-        if city_obj is None or not station:
-            raise ValueError("NOAA_PRELIMINARY_SURVIVAL_INPUT_INVALID")
+        if (
+            city_obj is None
+            or not station
+            or str(getattr(city_obj, "settlement_source_type", "") or "")
+            .strip()
+            .lower()
+            != "noaa"
+        ):
+            raise ValueError("METAR_PROVISIONAL_REVISION_AUTHORITY_UNAVAILABLE")
         return same_station_preliminary_report_survival_likelihood(
             conn,
             city=city,
@@ -33715,6 +33722,10 @@ def _provisional_day0_revision_likelihood(
             target_date=target_date,
             temperature_metric=temperature_metric,
             decision_time=decision_time,
+            # ENTRY must prove empirical same-station transitions; held
+            # reduce-only redecision may use the typed Jeffreys prior-only
+            # carrier so exit belief does not go blind.
+            allow_prior_only=not entry_authority,
         )
     raise ValueError("PROVISIONAL_SOURCE_REVISION_MODEL_UNAVAILABLE")
 
