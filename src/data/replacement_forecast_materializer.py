@@ -6059,6 +6059,11 @@ def _compute_posterior_payload(
                 _floor_value = float(_floor_steps) * float(request.settlement_step_c)
                 if math.isfinite(_floor_value) and _floor_value > _sigma_after_k:
                     sigma_floor_steps_applied = float(_floor_steps)
+            # The shared Day0 carrier already contains the final q and coherent
+            # samples; its global-normal-only provenance is therefore the
+            # neutral state (no uniform mixture and no catch-all cap).
+            _capped_global: tuple[object, ...] = ()
+            _uniform_applied_global = False
             if _day0_shared_carrier is None:
                 q_global, _capped_global, _uniform_applied_global = _build_scaled_normal_uniform_q(
                     mu=_mu_anchor,
