@@ -350,6 +350,7 @@ def _publish_staged_cycle_advance_seed_if_owned(
     staged_seed_file: Path,
     visible_seed_file: Path,
     identity: str | None,
+    require_identity: bool = False,
 ) -> bool:
     """Atomically expose only a seed still owned by its durable enqueue marker."""
     try:
@@ -375,8 +376,14 @@ def _publish_staged_cycle_advance_seed_if_owned(
                 row["day0_conditioning_identity_json"] if hasattr(row, "keys") else row[1]
             )
         )
+        requested_identity = str(identity or "").strip()
+        if require_identity and not requested_identity:
+            conn.rollback()
+            return False
         if str(recorded_seed or "") != str(visible_seed_file) or (
-            identity is not None and recorded_identity != identity
+            require_identity and recorded_identity != identity
+        ) or (
+            not require_identity and identity is not None and recorded_identity != identity
         ):
             conn.rollback()
             return False
@@ -796,23 +803,30 @@ def _delete_missing_owned_cycle_advance_marker(
     metric: str,
     target_cycle_iso: str,
     seed_file: str,
+    identity: str | None = None,
+    exact_identity: bool = False,
 ) -> bool:
-    """Atomically delete only the vanished UUID owner's marker before a new build starts."""
+    """Atomically delete only the exact owner marker before a new build starts."""
     try:
         if conn.in_transaction:
             conn.commit()
         conn.execute("BEGIN IMMEDIATE")
-        cursor = conn.execute(
-            """
+        query = """
             DELETE FROM cycle_advance_enqueues
              WHERE city = ?
                AND target_date = ?
                AND metric = ?
                AND target_cycle_time = ?
                AND seed_file = ?
-            """,
-            (city, target_date, metric, target_cycle_iso, seed_file),
-        )
+        """
+        params: list[object] = [city, target_date, metric, target_cycle_iso, seed_file]
+        if exact_identity:
+            query += (
+                " AND ((? IS NULL AND day0_conditioning_identity_json IS NULL) "
+                "OR day0_conditioning_identity_json = ?)"
+            )
+            params.extend((identity, identity))
+        cursor = conn.execute(query, tuple(params))
         conn.commit()
         return cursor.rowcount == 1
     except sqlite3.Error:
@@ -977,8 +991,21 @@ def _enqueue_decision(
     recorded_identity = (
         str(recorded_identity_raw) if recorded_identity_raw not in (None, "") else None
     )
+    incoming_version = normalize_observation_version(day0_observed_extreme_observation_time)
+    recorded_version = normalize_observation_version(
+        row["day0_observed_extreme_observation_time"] if hasattr(row, "keys") else row[3]
+    )
+    # Conditioning identities remain monotone on the canonical observation clock. A late
+    # publication with an older observation must not supersede a newer visible owner merely
+    # because another identity field (source/value/unit) differs.
     identity_changed = (
-        incoming_identity is not None and recorded_identity != incoming_identity
+        incoming_identity is not None
+        and recorded_identity != incoming_identity
+        and not (
+            incoming_version is not None
+            and recorded_version is not None
+            and incoming_version < recorded_version
+        )
     )
     visible_seed_file = Path(seed_file) if seed_file else None
     owned_stage_file = (
@@ -986,7 +1013,12 @@ def _enqueue_decision(
         if visible_seed_file is None
         else _marker_owned_cycle_advance_stage_path(visible_seed_file)
     )
-    if visible_seed_file is not None and not visible_seed_file.exists() and owned_stage_file is not None:
+    if (
+        not identity_changed
+        and visible_seed_file is not None
+        and not visible_seed_file.exists()
+        and owned_stage_file is not None
+    ):
         _publish_staged_cycle_advance_seed_if_owned(
             conn,
             city=city,
@@ -996,6 +1028,7 @@ def _enqueue_decision(
             staged_seed_file=owned_stage_file,
             visible_seed_file=visible_seed_file,
             identity=recorded_identity,
+            require_identity=incoming_identity is not None,
         )
     if identity_changed:
         # SCOPE: one family/cycle's exact current enqueue owner. DRAIN: its staged,
@@ -1003,14 +1036,6 @@ def _enqueue_decision(
         # current-evidence tick proves that exact owner absent, removes only its marker,
         # and then admits the newer observation identity. Serializing revisions here
         # preserves full seed/request input identity while preventing owner-swap livelock.
-        if (
-            visible_seed_file is not None
-            and (
-                visible_seed_file.exists()
-                or (owned_stage_file is not None and owned_stage_file.exists())
-            )
-        ):
-            return _CycleAdvanceEnqueueDecision.ALREADY_ENQUEUED
         if visible_seed_file is not None:
             request_check = _day0_enqueue_owner_request_check(
                 city=city,
@@ -1021,7 +1046,7 @@ def _enqueue_decision(
                 identity=recorded_identity,
             )
             if request_check.state is _Day0EnqueueOwnerRequestState.ACTIVE:
-                return _CycleAdvanceEnqueueDecision.ALREADY_ENQUEUED
+                return _CycleAdvanceEnqueueDecision.RETRY_PENDING
             if request_check.state is _Day0EnqueueOwnerRequestState.INDETERMINATE:
                 _LOG.warning(
                     "superseded day0 enqueue owner request INDETERMINATE; retaining marker "
@@ -1033,15 +1058,17 @@ def _enqueue_decision(
                     request_check.reason,
                 )
                 return _CycleAdvanceEnqueueDecision.RETRY_PENDING
-        if visible_seed_file is not None and owned_stage_file is not None:
-            _delete_missing_owned_cycle_advance_marker(
-                conn,
-                city=city,
-                target_date=target_date,
-                metric=metric,
-                target_cycle_iso=target_cycle_iso,
-                seed_file=seed_file,
-            )
+        if not _delete_missing_owned_cycle_advance_marker(
+            conn,
+            city=city,
+            target_date=target_date,
+            metric=metric,
+            target_cycle_iso=target_cycle_iso,
+            seed_file=seed_file,
+            identity=recorded_identity,
+            exact_identity=True,
+        ):
+            return _CycleAdvanceEnqueueDecision.RETRY_PENDING
         return _CycleAdvanceEnqueueDecision.ADMIT
     if incoming_identity is not None:
         if visible_seed_file is not None and visible_seed_file.exists():
@@ -1089,10 +1116,6 @@ def _enqueue_decision(
             )
         return _CycleAdvanceEnqueueDecision.ADMIT
     if day0_observed_extreme_observation_time is not None:
-        incoming_version = normalize_observation_version(day0_observed_extreme_observation_time)
-        recorded_version = normalize_observation_version(
-            row["day0_observed_extreme_observation_time"] if hasattr(row, "keys") else row[3]
-        )
         # Both normalized to fixed-width UTC ISO => lexicographic compare == instant compare.
         if incoming_version is not None and (
             recorded_version is None or incoming_version > recorded_version
@@ -2018,6 +2041,7 @@ def enqueue_cycle_advance_reseeds(
                         observed_extreme_c=day0_payload.get("day0_observed_extreme_c"),
                         unit=day0_payload.get("day0_observed_extreme_unit"),
                     ),
+                    require_identity=bool(day0_payload),
                 )
             else:
                 _discard_unpublished_cycle_advance_stage(staged_seed_file)
@@ -2356,6 +2380,7 @@ def enqueue_single_family_cycle_advance_reseed(
                                 observed_extreme_c=day0_observed_extreme_c,
                                 unit=day0_observed_extreme_unit,
                             ),
+                            require_identity=has_day0_evidence,
                         )
                     else:
                         _discard_unpublished_cycle_advance_stage(staged_seed_file)
@@ -2607,6 +2632,7 @@ def enqueue_single_family_cycle_advance_reseed(
                         observed_extreme_c=day0_observed_extreme_c,
                         unit=day0_observed_extreme_unit,
                     ),
+                    require_identity=has_day0_evidence,
                 )
             else:
                 _discard_unpublished_cycle_advance_stage(staged_seed_file)
@@ -2728,6 +2754,7 @@ def enqueue_single_family_cycle_advance_reseed(
                     observed_extreme_c=day0_observed_extreme_c,
                     unit=day0_observed_extreme_unit,
                 ),
+                require_identity=has_day0_evidence,
             )
         else:
             _discard_unpublished_cycle_advance_stage(staged_seed_file)

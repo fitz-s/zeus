@@ -737,6 +737,198 @@ def test_day0_bridge_publishes_only_the_monotonic_cas_owner(tmp_path, monkeypatc
     )
 
 
+def test_newer_day0_identity_replaces_visible_drained_owner(tmp_path, monkeypatch) -> None:
+    """A visible 21C seed with no live owner cannot suppress a newer 22C identity."""
+    db_path = _prepare_forecast_db(tmp_path)
+    cfg = _queue_config(tmp_path)
+    monkeypatch.setattr(
+        forecast_production,
+        "_replacement_forecast_live_materialization_queue_config",
+        lambda: cfg,
+    )
+    cycle = "2026-07-19T00:00:00+00:00"
+    old_payload = _day0_payload("2026-07-19T05:00:00+00:00")
+    new_payload = {
+        **old_payload,
+        "day0_observed_extreme_observation_time": "2026-07-19T05:01:00+00:00",
+        "day0_observed_extreme_c": 22.0,
+    }
+    old_seed = Path(cfg["seed_dir"]) / "visible-21c.json"
+    old_seed.parent.mkdir(parents=True)
+    old_seed.write_text("old-21c", encoding="utf-8")
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    assert cycle_advance._record_enqueue(
+        conn,
+        city="Shanghai",
+        target_date="2026-07-19",
+        metric="high",
+        consumed_cycle_iso="NO_LIVE_POSTERIOR",
+        target_cycle_iso=cycle,
+        held_position=True,
+        seed_file=str(old_seed),
+        reason="MISSING_LIVE_POSTERIOR",
+        **{
+            key: old_payload[key]
+            for key in (
+                "day0_observed_extreme_observation_time",
+                "day0_observed_extreme_source",
+                "day0_observed_extreme_c",
+                "day0_observed_extreme_unit",
+            )
+        },
+    )
+    conn.commit()
+
+    decision = cycle_advance._enqueue_decision(
+        conn,
+        city="Shanghai",
+        target_date="2026-07-19",
+        metric="high",
+        target_cycle_iso=cycle,
+        **{
+            key: new_payload[key]
+            for key in (
+                "day0_observed_extreme_observation_time",
+                "day0_observed_extreme_source",
+                "day0_observed_extreme_c",
+                "day0_observed_extreme_unit",
+            )
+        },
+    )
+    assert decision is cycle_advance._CycleAdvanceEnqueueDecision.ADMIT
+    assert conn.execute("SELECT COUNT(*) FROM cycle_advance_enqueues").fetchone()[0] == 0
+
+    new_seed = Path(cfg["seed_dir"]) / "visible-22c.json"
+    assert cycle_advance._record_enqueue(
+        conn,
+        city="Shanghai",
+        target_date="2026-07-19",
+        metric="high",
+        consumed_cycle_iso="NO_LIVE_POSTERIOR",
+        target_cycle_iso=cycle,
+        held_position=True,
+        seed_file=str(new_seed),
+        reason="DAY0_OBSERVATION_ADVANCED",
+        **{
+            key: new_payload[key]
+            for key in (
+                "day0_observed_extreme_observation_time",
+                "day0_observed_extreme_source",
+                "day0_observed_extreme_c",
+                "day0_observed_extreme_unit",
+            )
+        },
+    )
+    conn.commit()
+    marker = conn.execute(
+        "SELECT seed_file, day0_conditioning_identity_json FROM cycle_advance_enqueues"
+    ).fetchone()
+    assert marker["seed_file"] == str(new_seed)
+    assert marker["day0_conditioning_identity_json"] == cycle_advance._day0_conditioning_identity(
+        source=new_payload["day0_observed_extreme_source"],
+        observation_time=new_payload["day0_observed_extreme_observation_time"],
+        observed_extreme_c=new_payload["day0_observed_extreme_c"],
+        unit=new_payload["day0_observed_extreme_unit"],
+    )
+    conn.close()
+
+
+def test_old_day0_writer_cannot_publish_after_identity_cas_replacement(tmp_path) -> None:
+    """A late 21C writer cannot expose its seed after the marker moves to 22C."""
+    db_path = _prepare_forecast_db(tmp_path)
+    seed_dir = tmp_path / "seeds"
+    cycle = "2026-07-19T00:00:00+00:00"
+    old_payload = _day0_payload("2026-07-19T05:00:00+00:00")
+    new_payload = {**old_payload, "day0_observed_extreme_c": 22.0}
+    old_identity = cycle_advance._day0_conditioning_identity(
+        source=old_payload["day0_observed_extreme_source"],
+        observation_time=old_payload["day0_observed_extreme_observation_time"],
+        observed_extreme_c=old_payload["day0_observed_extreme_c"],
+        unit=old_payload["day0_observed_extreme_unit"],
+    )
+    assert old_identity is not None
+    old_stage, old_seed = cycle_advance._staged_cycle_advance_seed_paths(
+        seed_path=seed_dir,
+        city="Shanghai",
+        target_date="2026-07-19",
+        metric="high",
+        computed_at=datetime(2026, 7, 19, 5, 1, tzinfo=UTC),
+        seed_name=lambda *_args, **_kwargs: "old.json",
+    )
+    old_stage.parent.mkdir(parents=True)
+    old_stage.write_text("old-21c", encoding="utf-8")
+    conn = sqlite3.connect(db_path)
+    assert cycle_advance._record_enqueue(
+        conn,
+        city="Shanghai",
+        target_date="2026-07-19",
+        metric="high",
+        consumed_cycle_iso="NO_LIVE_POSTERIOR",
+        target_cycle_iso=cycle,
+        held_position=True,
+        seed_file=str(old_seed),
+        **{
+            key: old_payload[key]
+            for key in (
+                "day0_observed_extreme_observation_time",
+                "day0_observed_extreme_source",
+                "day0_observed_extreme_c",
+                "day0_observed_extreme_unit",
+            )
+        },
+    )
+    conn.commit()
+    assert cycle_advance._delete_missing_owned_cycle_advance_marker(
+        conn,
+        city="Shanghai",
+        target_date="2026-07-19",
+        metric="high",
+        target_cycle_iso=cycle,
+        seed_file=str(old_seed),
+        identity=old_identity,
+        exact_identity=True,
+    )
+    new_seed = seed_dir / "new.enqueue-owner.json"
+    assert cycle_advance._record_enqueue(
+        conn,
+        city="Shanghai",
+        target_date="2026-07-19",
+        metric="high",
+        consumed_cycle_iso="NO_LIVE_POSTERIOR",
+        target_cycle_iso=cycle,
+        held_position=True,
+        seed_file=str(new_seed),
+        **{
+            key: new_payload[key]
+            for key in (
+                "day0_observed_extreme_observation_time",
+                "day0_observed_extreme_source",
+                "day0_observed_extreme_c",
+                "day0_observed_extreme_unit",
+            )
+        },
+    )
+    conn.commit()
+
+    assert not cycle_advance._publish_staged_cycle_advance_seed_if_owned(
+        conn,
+        city="Shanghai",
+        target_date="2026-07-19",
+        metric="high",
+        target_cycle_iso=cycle,
+        staged_seed_file=old_stage,
+        visible_seed_file=old_seed,
+        identity=old_identity,
+        require_identity=True,
+    )
+    assert not old_seed.exists()
+    assert conn.execute(
+        "SELECT seed_file FROM cycle_advance_enqueues"
+    ).fetchone()[0] == str(new_seed)
+    conn.close()
+
+
 def test_cycle_advance_loser_never_deletes_the_winner_seed(tmp_path) -> None:
     """Same-identity contention cleans only the loser's UUID-private staging path."""
     db_path = _prepare_forecast_db(tmp_path)
@@ -3154,14 +3346,15 @@ def test_new_day0_revision_waits_for_exact_inflight_owner_then_replaces_it(
         encoding="utf-8",
     )
 
-    assert cycle_advance._already_enqueued(
+    decision = cycle_advance._enqueue_decision(
         conn,
         city="Shanghai",
         target_date="2026-07-19",
         metric="high",
         target_cycle_iso=cycle,
         **new_conditioning,
-    ) is True
+    )
+    assert decision is cycle_advance._CycleAdvanceEnqueueDecision.RETRY_PENDING
     marker = conn.execute(
         "SELECT seed_file, day0_conditioning_identity_json "
         "FROM cycle_advance_enqueues"
@@ -3170,14 +3363,14 @@ def test_new_day0_revision_waits_for_exact_inflight_owner_then_replaces_it(
     assert marker["day0_conditioning_identity_json"] == old_identity
 
     claimed_request.unlink()
-    assert cycle_advance._already_enqueued(
+    assert cycle_advance._enqueue_decision(
         conn,
         city="Shanghai",
         target_date="2026-07-19",
         metric="high",
         target_cycle_iso=cycle,
         **new_conditioning,
-    ) is False
+    ) is cycle_advance._CycleAdvanceEnqueueDecision.ADMIT
     assert conn.execute("SELECT COUNT(*) FROM cycle_advance_enqueues").fetchone()[0] == 0
     conn.close()
 
