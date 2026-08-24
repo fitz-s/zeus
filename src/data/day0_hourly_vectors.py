@@ -968,6 +968,86 @@ def day0_hourly_vector_target_values_utc(
     return tuple(values)
 
 
+def align_day0_hourly_vectors_on_common_causal_grid(
+    vectors: Iterable[Day0HourlyVector],
+    *,
+    target_date: str,
+    window_start: datetime,
+) -> tuple[tuple[datetime, ...], tuple[tuple[float, ...], ...]] | None:
+    """Align a complete provider bundle on one exact UTC causal grid.
+
+    Provider runs can expose different *elapsed* prefixes (for example
+    ``24/21/24`` target-day rows) while still sharing the complete stochastic
+    suffix that begins at the current observation boundary.  The live
+    consumers need a rectangular matrix, so this helper keeps only the exact
+    UTC instants common to every provider: the latest hourly anchor at or
+    before ``window_start`` and every target-day grid point after it.
+
+    This is an alignment operation, not a resampler: no timestamp or value is
+    fabricated.  The per-provider causal coverage gate runs first, then the
+    common grid is checked again.  A missing causal hour, a missing <=1-hour
+    anchor, timezone mismatch, duplicate/non-finite timestamp, or invalid DST
+    shape returns ``None``.  In particular, a future target-day bundle whose
+    provider omits midnight hours remains unavailable; a current-day prefix
+    must never relax that contract.
+    """
+    bundle = tuple(vectors)
+    if not bundle or window_start.tzinfo is None:
+        return None
+    try:
+        target = date.fromisoformat(str(target_date)[:10])
+    except (TypeError, ValueError):
+        return None
+    if not day0_hourly_vectors_cover_remaining_window(
+        list(bundle), target_date=target_date, window_start=window_start
+    ):
+        return None
+
+    timezone_name = str(bundle[0].timezone_name or "").strip()
+    if not timezone_name:
+        return None
+    try:
+        timezone_obj = ZoneInfo(timezone_name)
+    except (TypeError, ZoneInfoNotFoundError):
+        return None
+    for vector in bundle[1:]:
+        if str(vector.timezone_name or "").strip() != timezone_name:
+            return None
+
+    target_grid = _target_day_hour_grid_utc(target=target, tz=timezone_obj)
+    if not target_grid:
+        return None
+    boundary_utc = window_start.astimezone(UTC)
+    anchor_candidates = [instant for instant in target_grid if instant <= boundary_utc]
+    if not anchor_candidates:
+        return None
+    causal_anchor = anchor_candidates[-1]
+    if not timedelta(0) <= boundary_utc - causal_anchor <= timedelta(hours=1):
+        return None
+    causal_grid = tuple(instant for instant in target_grid if instant >= causal_anchor)
+    if not causal_grid:
+        return None
+
+    aligned_rows: list[tuple[float, ...]] = []
+    for vector in bundle:
+        values = day0_hourly_vector_target_values_utc(
+            vector, target=target, tz=timezone_obj
+        )
+        if values is None:
+            return None
+        by_instant: dict[datetime, float] = {}
+        for instant, value in values:
+            if instant in by_instant or not math.isfinite(float(value)):
+                return None
+            by_instant[instant] = float(value)
+        if any(instant not in by_instant for instant in causal_grid):
+            return None
+        aligned_rows.append(tuple(by_instant[instant] for instant in causal_grid))
+    if not aligned_rows or any(len(row) != len(causal_grid) for row in aligned_rows):
+        return None
+    return causal_grid, tuple(aligned_rows)
+
+
 def day0_hourly_vectors_cover_remaining_window(
     vectors: list[Day0HourlyVector],
     *,

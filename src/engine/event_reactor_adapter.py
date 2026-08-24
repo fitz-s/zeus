@@ -42239,9 +42239,7 @@ def _remaining_day_extremes_c_with_current_state_evidence(
     """Return extrema after causal, decaying current-state conditioning."""
 
     from src.data.day0_hourly_vectors import (
-        _target_day_hour_grid_utc,
-        day0_hourly_vectors_cover_remaining_window,
-        day0_hourly_vector_target_values_utc,
+        align_day0_hourly_vectors_on_common_causal_grid,
     )
     from src.signal.day0_window import (
         condition_day0_hourly_members_on_current_state,
@@ -42253,63 +42251,20 @@ def _remaining_day_extremes_c_with_current_state_evidence(
     if observed_utc > decision_time.astimezone(UTC):
         return [], {}
     target = date.fromisoformat(str(target_date)[:10])
-    member_rows: list[list[float]] = []
-    models: list[str] = []
-    timezone_name: str | None = None
-    vector_values: list[dict[datetime, float]] = []
     observed_utc = observation_time.astimezone(UTC)
-    for vector in vectors:
-        try:
-            tz = ZoneInfo(str(vector.timezone_name))
-        except Exception:
-            return [], {}
-        values = day0_hourly_vector_target_values_utc(
-            vector,
-            target=target,
-            tz=tz,
-        )
-        if values is None:
-            return [], {}
-        if timezone_name is None:
-            timezone_name = str(vector.timezone_name)
-        elif str(vector.timezone_name) != timezone_name:
-            return [], {}
-        vector_values.append({instant: float(temp) for instant, temp in values})
-        models.append(str(vector.model))
-    if timezone_name is None or not vector_values:
-        return [], {}
-
-    # Exact provider-run requests may begin their 72-hour horizons at different
-    # local hours.  The elapsed prefix is irrelevant to current-state
-    # conditioning; its causal inputs are the latest hourly anchor at or before
-    # the observation plus every future target-day hour.  Requiring each full
-    # target-day row to be identical therefore converts a valid, complete
-    # remaining-day bundle into an unavailable probability.  Build that common
-    # causal grid explicitly.  No interpolation or missing-hour tolerance is
-    # permitted: every selected provider must contain every required instant.
-    timezone_obj = ZoneInfo(timezone_name)
-    target_grid = _target_day_hour_grid_utc(target=target, tz=timezone_obj)
-    anchor_candidates = [instant for instant in target_grid if instant <= observed_utc]
-    if not anchor_candidates:
-        return [], {}
-    causal_anchor = anchor_candidates[-1]
-    causal_grid = [instant for instant in target_grid if instant >= causal_anchor]
-    if not causal_grid or any(
-        any(instant not in values for instant in causal_grid)
-        for values in vector_values
-    ):
-        return [], {}
-    if not day0_hourly_vectors_cover_remaining_window(
+    aligned = align_day0_hourly_vectors_on_common_causal_grid(
         vectors,
         target_date=target_date,
         window_start=observed_utc,
-    ):
+    )
+    if aligned is None:
         return [], {}
+    causal_grid, aligned_rows = aligned
+    timezone_name = str(vectors[0].timezone_name)
+    timezone_obj = ZoneInfo(timezone_name)
+    models = [str(vector.model) for vector in vectors]
     times = [instant.isoformat() for instant in causal_grid]
-    member_rows = [
-        [values[instant] for instant in causal_grid]
-        for values in vector_values
-    ]
+    member_rows = [list(row) for row in aligned_rows]
     conditioned = condition_day0_hourly_members_on_current_state(
         np.asarray(member_rows, dtype=float),
         times,
@@ -42332,9 +42287,9 @@ def _remaining_day_extremes_c_with_current_state_evidence(
             tzinfo=timezone_obj,
         ).astimezone(UTC)
         if (
-            causal_anchor != target_grid[-1]
+            causal_grid[0] != causal_grid[-1]
             or not timedelta(0) < day_end - observed_utc <= timedelta(hours=1)
-            or not timedelta(0) <= observed_utc - causal_anchor <= timedelta(hours=1)
+            or not timedelta(0) <= observed_utc - causal_grid[0] <= timedelta(hours=1)
         ):
             return [], {}
         remaining_indices = [0]

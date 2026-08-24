@@ -2261,7 +2261,7 @@ def _read_day0_hourly_vectors(
     from src.state.db import get_forecasts_connection_read_only
     from src.data.day0_hourly_vectors import (
         DAY0_HOURLY_BUNDLE_MAX_SKEW_MINUTES,
-        day0_hourly_vector_target_values_utc,
+        align_day0_hourly_vectors_on_common_causal_grid,
         day0_hourly_models_for_city,
         read_freshest_day0_hourly_vectors,
     )
@@ -2300,27 +2300,19 @@ def _read_day0_hourly_vectors(
     if not vectors:
         return None
 
-    times: list[str] | None = None
+    aligned = align_day0_hourly_vectors_on_common_causal_grid(
+        vectors,
+        target_date=target_date,
+        window_start=causal_boundary,
+    )
+    if aligned is None:
+        return None
+    causal_grid, aligned_rows = aligned
+    times = [instant.isoformat() for instant in causal_grid]
     member_rows: list[list[float]] = []
     captured_times: list[datetime] = []
-    for vector in vectors:
-        try:
-            vector_tz = ZoneInfo(str(vector.timezone_name))
-        except Exception:
-            return None
-        target_values = day0_hourly_vector_target_values_utc(
-            vector,
-            target=target_d,
-            tz=vector_tz,
-        )
-        if not target_values:
-            return None
-        row_times = [instant.isoformat() for instant, _value in target_values]
-        values_c = [value for _instant, value in target_values]
-        if times is None:
-            times = row_times
-        elif row_times != times:
-            return None
+    for vector, aligned_row in zip(vectors, aligned_rows, strict=True):
+        values_c = list(aligned_row)
         if not np.isfinite(np.asarray(values_c, dtype=float)).all():
             return None
         unit = str(getattr(city, "settlement_unit", "C") or "C").upper()
@@ -2333,7 +2325,7 @@ def _read_day0_hourly_vectors(
         captured_dt = _parse_utc_datetime(vector.captured_at)
         if captured_dt is not None:
             captured_times.append(captured_dt)
-    if times is None or not member_rows:
+    if not member_rows:
         return None
     captured_dt = max(captured_times) if captured_times else None
     return {

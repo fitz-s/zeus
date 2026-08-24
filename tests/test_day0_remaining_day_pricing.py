@@ -40,6 +40,7 @@ import pytest
 from src.contracts.execution_price import ExecutionPrice as EP
 from src.data.day0_hourly_vectors import (
     Day0HourlyVector,
+    align_day0_hourly_vectors_on_common_causal_grid,
     fetch_day0_hourly_vectors,
     parse_openmeteo_hourly_payload,
     persist_day0_hourly_vectors,
@@ -1535,6 +1536,132 @@ class TestRemainingDaySelection:
 class TestRemainingDayMembers:
     def _family(self):
         return SimpleNamespace(city="Paris", target_date="2026-06-10", metric="high")
+
+    def test_common_causal_grid_aligns_24_21_24_without_interpolation(self):
+        full_times = tuple(f"2026-06-10T{hour:02d}:00" for hour in range(24))
+        short_times = tuple(f"2026-06-10T{hour:02d}:00" for hour in range(15, 24))
+        vectors = [
+            Day0HourlyVector(
+                model=model,
+                city="Paris",
+                target_date="2026-06-10",
+                timezone_name="Europe/Paris",
+                captured_at="2026-06-10T14:25:00+00:00",
+                times=times,
+                temps_c=tuple(float(index + offset) for index in range(len(times))),
+            )
+            for model, times, offset in (
+                ("ecmwf_ifs", full_times, 0),
+                ("icon_global", short_times, 100),
+                ("ukmo_global_deterministic_10km", full_times, 200),
+            )
+        ]
+
+        grid = align_day0_hourly_vectors_on_common_causal_grid(
+            vectors,
+            target_date="2026-06-10",
+            window_start=datetime(2026, 6, 10, 14, 20, tzinfo=UTC),
+        )
+
+        assert grid is not None
+        instants, rows = grid
+        assert instants[0] == datetime(2026, 6, 10, 14, 0, tzinfo=UTC)
+        assert instants[-1] == datetime(2026, 6, 10, 21, 0, tzinfo=UTC)
+        assert len(instants) == 8
+        assert rows[0] == tuple(range(16, 24))
+        assert rows[1] == tuple(range(101, 109))
+        assert rows[2] == tuple(range(216, 224))
+
+    def test_common_causal_grid_rejects_prefix_gap_before_causal_boundary(self):
+        full_times = tuple(f"2026-06-10T{hour:02d}:00" for hour in range(24))
+        short_times = tuple(f"2026-06-10T{hour:02d}:00" for hour in range(3, 24))
+        vectors = [
+            Day0HourlyVector(
+                model=model,
+                city="Moscow",
+                target_date="2026-06-10",
+                timezone_name="Europe/Moscow",
+                captured_at="2026-06-09T23:25:00+00:00",
+                times=times,
+                temps_c=tuple(20.0 for _ in times),
+            )
+            for model, times in (
+                ("ecmwf_ifs", full_times),
+                ("icon_global", short_times),
+                ("ukmo_global_deterministic_10km", full_times),
+            )
+        ]
+
+        assert align_day0_hourly_vectors_on_common_causal_grid(
+            vectors,
+            target_date="2026-06-10",
+            window_start=datetime(2026, 6, 9, 23, 30, tzinfo=UTC),
+        ) is None
+
+    def test_common_causal_grid_does_not_relax_future_midnight_completeness(self):
+        full_times = tuple(f"2026-06-11T{hour:02d}:00" for hour in range(24))
+        short_times = tuple(f"2026-06-11T{hour:02d}:00" for hour in range(3, 24))
+        vectors = [
+            Day0HourlyVector(
+                model=model,
+                city="Moscow",
+                target_date="2026-06-11",
+                timezone_name="Europe/Moscow",
+                captured_at="2026-06-10T23:25:00+00:00",
+                times=times,
+                temps_c=tuple(20.0 for _ in times),
+            )
+            for model, times in (
+                ("ecmwf_ifs", full_times),
+                ("icon_global", short_times),
+                ("ukmo_global_deterministic_10km", full_times),
+            )
+        ]
+
+        assert align_day0_hourly_vectors_on_common_causal_grid(
+            vectors,
+            target_date="2026-06-11",
+            window_start=datetime(2026, 6, 10, 21, 0, tzinfo=UTC),
+        ) is None
+
+    @pytest.mark.parametrize("invalid_kind", ["timezone", "duplicate", "nonfinite"])
+    def test_common_causal_grid_rejects_invalid_provider_shape(self, invalid_kind):
+        full_times = [f"2026-06-10T{hour:02d}:00" for hour in range(24)]
+        invalid_times = list(full_times)
+        invalid_temps = [20.0] * 24
+        timezone_name = "Europe/Paris"
+        if invalid_kind == "timezone":
+            timezone_name = "UTC"
+        elif invalid_kind == "duplicate":
+            invalid_times[10] = invalid_times[9]
+        else:
+            invalid_temps[10] = float("nan")
+        vectors = [
+            Day0HourlyVector(
+                model="ecmwf_ifs",
+                city="Paris",
+                target_date="2026-06-10",
+                timezone_name="Europe/Paris",
+                captured_at="2026-06-10T14:25:00+00:00",
+                times=tuple(full_times),
+                temps_c=tuple(20.0 for _ in full_times),
+            ),
+            Day0HourlyVector(
+                model="icon_global",
+                city="Paris",
+                target_date="2026-06-10",
+                timezone_name=timezone_name,
+                captured_at="2026-06-10T14:25:00+00:00",
+                times=tuple(invalid_times),
+                temps_c=tuple(invalid_temps),
+            ),
+        ]
+
+        assert align_day0_hourly_vectors_on_common_causal_grid(
+            vectors,
+            target_date="2026-06-10",
+            window_start=datetime(2026, 6, 10, 14, 20, tzinfo=UTC),
+        ) is None
 
     def test_current_state_conditioning_aligns_mismatched_elapsed_prefixes(
         self,

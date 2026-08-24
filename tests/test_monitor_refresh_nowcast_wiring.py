@@ -35,6 +35,65 @@ from src.observability.counters import read as read_counter, reset_all as reset_
 from src.state.portfolio import ExitContext, Position
 
 
+def test_monitor_accepts_provider_24_21_24_on_common_causal_grid(monkeypatch) -> None:
+    """Monitor consumes a complete causal suffix despite elapsed-prefix drift."""
+    from src.data.day0_hourly_vectors import Day0HourlyVector
+
+    full_times = tuple(f"2026-06-10T{hour:02d}:00" for hour in range(24))
+    short_times = tuple(f"2026-06-10T{hour:02d}:00" for hour in range(15, 24))
+    vectors = [
+        Day0HourlyVector(
+            model=model,
+            city="Paris",
+            target_date="2026-06-10",
+            timezone_name="Europe/Paris",
+            captured_at="2026-06-10T14:00:00+00:00",
+            times=times,
+            temps_c=tuple(float(index + offset) for index in range(len(times))),
+        )
+        for model, times, offset in (
+            ("ecmwf_ifs", full_times, 0),
+            ("icon_global", short_times, 100),
+            ("ukmo_global_deterministic_10km", full_times, 200),
+        )
+    ]
+    conn = sqlite3.connect(":memory:")
+    monkeypatch.setattr(
+        "src.state.db.get_forecasts_connection_read_only", lambda: conn
+    )
+    monkeypatch.setattr(
+        "src.data.day0_hourly_vectors.day0_hourly_models_for_city",
+        lambda _city: [
+            "ecmwf_ifs",
+            "icon_global",
+            "ukmo_global_deterministic_10km",
+        ],
+    )
+    monkeypatch.setattr(
+        "src.data.day0_hourly_vectors.read_freshest_day0_hourly_vectors",
+        lambda **_kwargs: vectors,
+    )
+    city = SimpleNamespace(
+        name="Paris", timezone="Europe/Paris", settlement_unit="C"
+    )
+
+    result = monitor_refresh_module._read_day0_hourly_vectors(
+        city=city,
+        target_d=date(2026, 6, 10),
+        now=datetime(2026, 6, 10, 14, 30, tzinfo=timezone.utc),
+        remaining_window_start=datetime(2026, 6, 10, 14, 20, tzinfo=timezone.utc),
+    )
+
+    assert result is not None
+    assert result["times"][0] == "2026-06-10T14:00:00+00:00"
+    assert result["times"][-1] == "2026-06-10T21:00:00+00:00"
+    assert result["members_hourly"].shape == (3, 8)
+    assert result["members_hourly"][0].tolist() == list(range(16, 24))
+    assert result["members_hourly"][1].tolist() == list(range(101, 109))
+    assert result["members_hourly"][2].tolist() == list(range(216, 224))
+    conn.close()
+
+
 def test_monitor_utc_parser_shares_observation_timestamp_contract() -> None:
     parsed = monitor_refresh_module._parse_utc_datetime("1784476800")
 
