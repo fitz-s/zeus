@@ -5594,141 +5594,31 @@ def _edli_market_channel_ingestor_cycle(
 
     _edli_assert_market_channel_bootstrap_current(bootstrap_generation)
 
-    from src.events.triggers.market_channel_ingestor import (
-        active_weather_token_metadata_for_tokens,
+    # SCOPE: registration owns only the current generation and starts with an empty
+    # bare universe; all candidate/held/Day0/seed-first reads are post-receipt.
+    # DRAIN: the runner's dedicated connection tranche registers the sink/queue before
+    # the bounded reloader opens any metadata connection.
+    # RESET: reload debt retains this registered subscription and retries next cadence;
+    # it never allows a broad read to retire the current continuity proof.
+    # The outer bootstrap deadline is therefore reserved for runner connection setup
+    # and sink registration, not consumed by metadata hydration.
+    candidate_priority_limit = _edli_bounded_positive_int(
+        edli_cfg,
+        "market_channel_candidate_priority_max_tokens",
+        default=32,
+        maximum=1000,
     )
-    from src.state.db import (
-        ZEUS_WORLD_DB_PATH,
-        _connect_read_only,
-        get_forecasts_connection_read_only,
-        get_trade_connection,
-    )
-
-    # Candidate universe (Blocker #52): tokens the reactor recently decided on must
-    # be PINNED into the ingestor universe so each has a fresh execution_feasibility_
-    # evidence row before the pre-submit witness reads it. The full latest-per-market
-    # universe is captured up to the cap; candidates are never dropped by the cap.
-    candidate_priority_token_ids: list[str] = []
-    try:
-        world_read = _connect_read_only(
-            ZEUS_WORLD_DB_PATH,
-            deadline_monotonic=_market_channel_bootstrap_deadline_monotonic,
-        )
-        with _edli_market_channel_bootstrap_connection(
-            world_read, bootstrap_generation
-        ) as world_read:
-            candidate_priority_limit = _edli_bounded_positive_int(
-                edli_cfg,
-                "market_channel_candidate_priority_max_tokens",
-                default=32,
-                maximum=1000,
-            )
-            candidate_priority_token_ids = _edli_candidate_priority_token_ids(
-                world_read,
-                limit=candidate_priority_limit,
-            )
-    except Exception as exc:  # noqa: BLE001 - priority pinning is best-effort, universe still captured
-        logger.warning("EDLI ingestor candidate-priority read failed (non-fatal): %s", exc)
-    finally:
-        _edli_assert_market_channel_bootstrap_current(bootstrap_generation)
-
-    bootstrap_reads = contextlib.ExitStack()
-    forecasts_read = None
-    try:
-        forecasts_read = get_forecasts_connection_read_only(
-            deadline_monotonic=_market_channel_bootstrap_deadline_monotonic,
-        )
-        forecasts_read = bootstrap_reads.enter_context(
-            _edli_market_channel_bootstrap_connection(
-                forecasts_read, bootstrap_generation
-            )
-        )
-    except Exception as exc:
-        logger.warning(
-            "EDLI ingestor family-priority forecast read failed (non-fatal): %s",
-            exc,
-        )
     day0_priority_token_ids: tuple[str, ...] = ()
-    try:
-        trade_conn = get_trade_connection(
-            write_class=None,
-            deadline_monotonic=_market_channel_bootstrap_deadline_monotonic,
-        )
-        trade_conn = bootstrap_reads.enter_context(
-            _edli_market_channel_bootstrap_connection(
-                trade_conn, bootstrap_generation
-            )
-        )
-        with contextlib.nullcontext(trade_conn):
-            _edli_assert_market_channel_bootstrap_current(bootstrap_generation)
-            held_priority_token_ids = _edli_held_position_priority_token_ids(trade_conn)
-            _edli_publish_held_quote_audit_token_ids(held_priority_token_ids)
-            open_rest_priority_token_ids = _edli_open_rest_priority_token_ids(trade_conn)
-            try:
-                day0_priority_token_ids = _edli_current_day0_priority_token_ids(
-                    trade_conn,
-                    forecasts_read,
-                )
-            except Exception as exc:  # noqa: BLE001 - broad universe remains available
-                logger.warning(
-                    "EDLI ingestor Day0-priority read failed (non-fatal): %s",
-                    exc,
-                )
-            _edli_assert_market_channel_bootstrap_current(bootstrap_generation)
-            priority_token_ids = set(candidate_priority_token_ids)
-            priority_token_ids.update(held_priority_token_ids)
-            priority_token_ids.update(open_rest_priority_token_ids)
-            priority_token_ids.update(day0_priority_token_ids)
-            seed_first_token_ids = _edli_market_channel_seed_first_token_ids(
-                held_priority_token_ids=held_priority_token_ids,
-                open_rest_priority_token_ids=open_rest_priority_token_ids,
-                day0_priority_token_ids=day0_priority_token_ids,
-                candidate_priority_token_ids=candidate_priority_token_ids,
-            )
-            depth_repair_token_ids = _edli_market_channel_depth_repair_token_ids(
-                held_priority_token_ids=held_priority_token_ids,
-                open_rest_priority_token_ids=open_rest_priority_token_ids,
-                candidate_priority_token_ids=candidate_priority_token_ids,
-            )
-            priority_token_ids = _edli_priority_family_token_ids(
-                trade_conn,
-                forecasts_read,
-                priority_token_ids,
-            )
-            _edli_assert_market_channel_bootstrap_current(bootstrap_generation)
-            # SCOPE: this bootstrap only the current generation's bounded priority
-            # token set; broad universe hydration is post-receipt.
-            # DRAIN: registration receipt and consumer queue are created before the
-            # reload callback may scan the compact snapshot projection.
-            # RESET: a failed reload retains the registered subscription and retries
-            # on the next universe refresh; it cannot erase continuity.
-            # Registration must not wait on the broad compact snapshot scan.  Keep
-            # candidate/held/open-rest/Day0 scope bounded for the first consumer;
-            # the persistent service reloads the full universe after its receipt.
-            entry_token_ids = set(priority_token_ids)
-            try:
-                token_metadata = active_weather_token_metadata_for_tokens(
-                    trade_conn,
-                    token_ids=entry_token_ids,
-                    purpose="entry",
-                )
-                token_metadata.update(
-                    active_weather_token_metadata_for_tokens(
-                        trade_conn,
-                        token_ids=held_priority_token_ids,
-                        purpose="exit",
-                    )
-                )
-            except Exception as exc:  # noqa: BLE001 - receipt must not await metadata
-                logger.warning(
-                    "EDLI bounded bootstrap metadata read deferred until registration: %s",
-                    exc,
-                )
-                token_metadata = {}
-            token_ids = set(token_metadata)
-    finally:
-        bootstrap_reads.close()
-        _edli_complete_market_channel_bootstrap(bootstrap_generation)
+    held_priority_token_ids: tuple[str, ...] = ()
+    open_rest_priority_token_ids: tuple[str, ...] = ()
+    priority_token_ids: set[str] = set()
+    seed_first_token_ids: tuple[str, ...] = ()
+    depth_repair_token_ids: tuple[str, ...] = ()
+    token_metadata: dict = {}
+    token_ids: set[str] = set()
+    # No SQLite metadata connection is opened in this tranche. The reloader's first
+    # call after the registered receipt computes every scope above and hydrates it.
+    _edli_complete_market_channel_bootstrap(bootstrap_generation)
 
     def _runner() -> None:
         from src.data.polymarket_client import PolymarketClient

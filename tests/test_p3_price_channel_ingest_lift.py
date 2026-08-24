@@ -69,6 +69,8 @@ _LIFTED_PRODUCERS = (
 
 
 def test_market_channel_bootstrap_separates_entry_and_held_exit_metadata() -> None:
+    from src.ingest import price_channel_ingest
+
     tree = ast.parse(_PRICE_CHANNEL_MODULE.read_text(encoding="utf-8"))
     cycle = next(
         node
@@ -93,21 +95,11 @@ def test_market_channel_bootstrap_separates_entry_and_held_exit_metadata() -> No
     # Broad snapshot hydration is post-registration via the service reloader;
     # bootstrap only performs bounded targeted reads.
     assert entry_calls == []
-    assert len(exit_calls) >= 2
-    assert any(
-        keyword.arg == "purpose"
-        and isinstance(keyword.value, ast.Constant)
-        and keyword.value.value == "entry"
-        for call in exit_calls
-        for keyword in call.keywords
+    assert exit_calls == []
+    reloader_source = inspect.getsource(
+        price_channel_ingest._edli_market_channel_token_metadata_reloader
     )
-    assert any(
-        keyword.arg == "purpose"
-        and isinstance(keyword.value, ast.Constant)
-        and keyword.value.value == "exit"
-        for call in exit_calls
-        for keyword in call.keywords
-    )
+    assert "active_weather_token_metadata_from_snapshots" in reloader_source
 
 
 def test_price_channel_daemon_separates_starting_status_from_ready_heartbeat() -> None:
