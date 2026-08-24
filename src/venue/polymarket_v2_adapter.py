@@ -577,8 +577,8 @@ def _bounded_cancel_request(client: Any, order_id: str, deadline_monotonic: floa
             try:
                 time_payload = time_response.json()
                 timestamp = (
-                    time_payload.get("time") or time_payload.get("timestamp")
-                if isinstance(time_payload, dict)
+                    (time_payload.get("time") or time_payload.get("timestamp"))
+                    if isinstance(time_payload, dict)
                     else int(time_payload)
                 )
                 if timestamp is None:
@@ -669,7 +669,7 @@ def _bounded_heartbeat_request(client: Any, heartbeat_id: str, *, timeout_second
             try:
                 time_payload = time_response.json()
                 candidate = (
-                    time_payload.get("time") or time_payload.get("timestamp")
+                    (time_payload.get("time") or time_payload.get("timestamp"))
                     if isinstance(time_payload, dict)
                     else time_payload
                 )
