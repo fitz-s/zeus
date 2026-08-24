@@ -35,6 +35,8 @@ import inspect
 import json
 import os
 import sqlite3
+import subprocess
+import sys
 import threading
 import time
 import types
@@ -67,6 +69,8 @@ _LIFTED_PRODUCERS = (
 
 
 def test_market_channel_bootstrap_separates_entry_and_held_exit_metadata() -> None:
+    from src.ingest import price_channel_ingest
+
     tree = ast.parse(_PRICE_CHANNEL_MODULE.read_text(encoding="utf-8"))
     cycle = next(
         node
@@ -88,34 +92,312 @@ def test_market_channel_bootstrap_separates_entry_and_held_exit_metadata() -> No
         and isinstance(call.func, ast.Name)
         and call.func.id == "active_weather_token_metadata_for_tokens"
     ]
-    assert len(entry_calls) == 1
-    assert any(keyword.arg == "priority_token_ids" for keyword in entry_calls[0].keywords)
-    assert len(exit_calls) == 1
-    assert any(
-        keyword.arg == "purpose"
-        and isinstance(keyword.value, ast.Constant)
-        and keyword.value.value == "exit"
-        for keyword in exit_calls[0].keywords
+    # Broad snapshot hydration is post-registration via the service reloader;
+    # bootstrap only performs bounded targeted reads.
+    assert entry_calls == []
+    assert exit_calls == []
+    reloader_source = inspect.getsource(
+        price_channel_ingest._edli_market_channel_token_metadata_reloader
     )
+    assert "active_weather_token_metadata_from_snapshots" in reloader_source
 
 
-def test_price_channel_daemon_writes_boot_identity_before_ws_setup() -> None:
+def test_price_channel_daemon_separates_starting_status_from_ready_heartbeat() -> None:
     tree = ast.parse(_PRICE_CHANNEL_DAEMON.read_text(encoding="utf-8"))
     main = next(
         node
         for node in tree.body
         if isinstance(node, ast.FunctionDef) and node.name == "main"
     )
-    calls = {
-        call.func.id: call.lineno
+    calls = [
+        (call.func.id, call.lineno)
         for call in ast.walk(main)
         if isinstance(call, ast.Call)
         and isinstance(call.func, ast.Name)
         and call.func.id
-        in {"_write_price_channel_heartbeat", "_start_user_channel_ingestor"}
-    }
+        in {
+            "_write_price_channel_startup_status",
+            "_write_price_channel_heartbeat",
+            "_start_user_channel_ingestor_async",
+        }
+    ]
 
-    assert calls["_write_price_channel_heartbeat"] < calls["_start_user_channel_ingestor"]
+    starting = next(
+        line
+        for name, line in calls
+        if name == "_write_price_channel_startup_status"
+    )
+    canonical_starting = next(
+        line
+        for name, line in calls
+        if name == "_write_price_channel_heartbeat"
+        and any(
+            isinstance(keyword, ast.keyword)
+            and keyword.arg == "status"
+            and isinstance(keyword.value, ast.Constant)
+            and keyword.value.value == "STARTING"
+            for node in ast.walk(main)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == name
+            for keyword in node.keywords
+        )
+    )
+    async_start = next(
+        line for name, line in calls if name == "_start_user_channel_ingestor_async"
+    )
+    assert starting <= canonical_starting < async_start
+    source = _PRICE_CHANNEL_DAEMON.read_text(encoding="utf-8")
+    assert '_write_price_channel_heartbeat(status="READY")' not in ast.get_source_segment(
+        source, main
+    )
+    assert "_promote_price_channel_heartbeat_ready" in source
+
+
+def test_price_channel_starting_heartbeat_is_not_fresh_until_first_m5_success(
+    monkeypatch, tmp_path
+) -> None:
+    from src import config
+    from src.ingest import price_channel_daemon as daemon
+
+    monkeypatch.setattr(config, "state_path", lambda filename: tmp_path / filename)
+    monkeypatch.setattr(daemon, "_heartbeat_ready", False)
+    monkeypatch.setattr(daemon, "_heartbeat_status", "STARTING")
+    monkeypatch.setattr(daemon, "_heartbeat_published", False)
+    daemon._write_price_channel_heartbeat(status="STARTING")
+    starting = json.loads(
+        (tmp_path / "daemon-heartbeat-price-channel-ingest.json").read_text()
+    )
+    assert starting["status"] == "STARTING"
+    assert starting["ready"] is False
+    assert "alive_at" not in starting
+
+    daemon._promote_price_channel_heartbeat_ready()
+    ready = json.loads(
+        (tmp_path / "daemon-heartbeat-price-channel-ingest.json").read_text()
+    )
+    assert ready["status"] == "READY"
+    assert ready["ready"] is True
+    assert ready["alive_at"]
+
+    daemon._write_price_channel_heartbeat(status="STOPPING")
+    stopping = json.loads(
+        (tmp_path / "daemon-heartbeat-price-channel-ingest.json").read_text()
+    )
+    assert stopping["ready"] is False
+    assert "alive_at" not in stopping
+
+    monkeypatch.setattr(daemon, "_heartbeat_ready", True)
+    daemon._write_price_channel_heartbeat(status="READY")
+    daemon._write_price_channel_heartbeat(status="FAILED")
+    failed = json.loads(
+        (tmp_path / "daemon-heartbeat-price-channel-ingest.json").read_text()
+    )
+    assert failed["ready"] is False
+    assert "alive_at" not in failed
+
+
+def test_m5_heartbeat_promotion_requires_current_scheduler_receipt(monkeypatch, tmp_path):
+    import src.ingest.price_channel_daemon as daemon
+    import src.observability.scheduler_health as scheduler_health
+
+    heartbeat_path = tmp_path / "daemon-heartbeat-price-channel-ingest.json"
+    health_path = tmp_path / "scheduler_jobs_health.json"
+    from src import config
+
+    monkeypatch.setattr(config, "state_path", lambda filename: tmp_path / filename)
+    monkeypatch.setattr(scheduler_health, "_SCHEDULER_HEALTH_PATH", health_path)
+    monkeypatch.setattr(daemon, "_heartbeat_ready", False)
+    monkeypatch.setattr(daemon, "_heartbeat_status", "STARTING")
+    daemon._write_price_channel_heartbeat(status="STARTING")
+
+    result = {"scheduler_failed": False, "status": "m5_authority_proof_complete"}
+    real_write_scheduler_health = scheduler_health._write_scheduler_health
+    monkeypatch.setattr(scheduler_health, "_write_scheduler_health", lambda *_a, **_k: None)
+    daemon._scheduler_job("edli_user_channel_reconcile")(lambda: result)()
+    assert daemon._heartbeat_ready is False
+    assert "alive_at" not in json.loads(heartbeat_path.read_text())
+
+    monkeypatch.setattr(
+        scheduler_health,
+        "_write_scheduler_health",
+        real_write_scheduler_health,
+    )
+    daemon._scheduler_job("edli_user_channel_reconcile")(lambda: result)()
+    assert daemon._heartbeat_ready is True
+    assert json.loads(heartbeat_path.read_text())["alive_at"]
+
+
+def test_startup_failure_abort_is_injected_and_not_a_python_raise(monkeypatch):
+    from src.ingest import price_channel_daemon as daemon
+
+    class Abort(BaseException):
+        pass
+
+    monkeypatch.setattr(daemon.os, "_exit", lambda code: (_ for _ in ()).throw(Abort(code)))
+    with pytest.raises(Abort) as exc_info:
+        daemon._abort_startup_failure()
+    assert exc_info.value.args == (1,)
+
+
+def test_startup_failure_subprocess_abort_leaves_wal_without_clean_close(tmp_path):
+    db_path = tmp_path / "abort-wal.db"
+    script = (
+        "import os, sqlite3, sys\n"
+        "conn = sqlite3.connect(sys.argv[1])\n"
+        "conn.execute('PRAGMA journal_mode=WAL')\n"
+        "conn.execute('PRAGMA wal_autocheckpoint=0')\n"
+        "conn.execute('CREATE TABLE IF NOT EXISTS t (v TEXT)')\n"
+        "conn.executemany('INSERT INTO t VALUES (?)', ((str(i),) for i in range(20000)))\n"
+        "conn.commit()\n"
+        "from src.ingest.price_channel_daemon import _abort_startup_failure\n"
+        "_abort_startup_failure()\n"
+    )
+    completed = subprocess.run(
+        [sys.executable, "-c", script, str(db_path)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert completed.returncode == 1
+    wal_path = Path(str(db_path) + "-wal")
+    assert wal_path.exists()
+    assert wal_path.stat().st_size > 0
+
+
+def test_price_channel_startup_bridge_sets_wal_policy_before_probe_and_releases_read_txn():
+    """The preflight probe cannot inherit autocheckpoint or pin a WAL snapshot."""
+    from src.ingest import price_channel_daemon as daemon
+
+    class Cursor:
+        def __init__(self, events):
+            self.events = events
+
+        def fetchone(self):
+            self.events.append("fetchone")
+            return (1,)
+
+        def close(self):
+            self.events.append("cursor_close")
+
+    class Connection:
+        in_transaction = False
+
+        def __init__(self):
+            self.events = []
+
+        def execute(self, sql):
+            self.events.append(sql)
+            if sql.startswith("SELECT"):
+                return Cursor(self.events)
+            return Cursor(self.events)
+
+        def rollback(self):
+            self.events.append("rollback")
+
+    conn = Connection()
+    daemon._prepare_startup_bridge(conn)
+
+    assert conn.events.index("PRAGMA wal_autocheckpoint = 0") < conn.events.index(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='position_current'"
+    )
+    assert conn.events.count("rollback") >= 2
+    assert conn.events[-1] == "rollback"
+
+
+def test_price_channel_startup_keeper_handoff_precedes_transient_close(monkeypatch):
+    """STARTING is published before keeper handoff; only deliberate close releases it."""
+    from src.ingest import price_channel_daemon as daemon
+
+    events: list[str] = []
+
+    class Cursor:
+        def fetchone(self):
+            events.append("probe")
+            return (1,)
+
+        def close(self):
+            events.append("cursor_close")
+
+    class Connection:
+        in_transaction = False
+
+        def execute(self, sql):
+            events.append(sql)
+            return Cursor()
+
+        def rollback(self):
+            events.append("rollback")
+
+        def close(self):
+            events.append("close")
+
+    conn = Connection()
+    monkeypatch.setattr(daemon, "_bridge_keeper_conn", None)
+    monkeypatch.setattr(
+        daemon,
+        "_write_price_channel_heartbeat",
+        lambda *, status=None: events.append(f"heartbeat:{status}"),
+    )
+
+    daemon._prepare_startup_bridge(conn)
+    daemon._write_price_channel_heartbeat(status="STARTING")
+    daemon._handoff_bridge_keeper(conn)
+    events.append("keeper_handoff")
+    # A second consumer is the proof that closing this short-lived handle is not
+    # the last-close path; the keeper remains open until deliberate cleanup.
+    events.append("non_last_consumer_open")
+    events.append("non_last_consumer_close")
+    daemon._close_bridge_keeper(reason="test_shutdown")
+
+    assert events.index("probe") < events.index("heartbeat:STARTING")
+    assert events.index("heartbeat:STARTING") < events.index("keeper_handoff")
+    assert events.index("keeper_handoff") < events.index("non_last_consumer_open")
+    assert events.index("non_last_consumer_close") < events.index("close")
+    assert events.count("close") == 1
+    assert daemon._bridge_keeper_conn is None
+
+
+def test_price_channel_startup_keeper_failure_abandons_without_last_close(monkeypatch):
+    from src.ingest import price_channel_daemon as daemon
+
+    class Connection:
+        def __init__(self):
+            self.closed = 0
+            self.rollbacks = 0
+
+        def rollback(self):
+            self.rollbacks += 1
+
+        def close(self):
+            self.closed += 1
+
+    conn = Connection()
+    monkeypatch.setattr(daemon, "_bridge_keeper_conn", conn)
+    daemon._abandon_startup_bridge_on_failure()
+
+    assert conn.rollbacks == 0
+    assert conn.closed == 0
+    assert daemon._bridge_keeper_conn is None
+
+
+def test_price_channel_startup_bridge_real_wal_keeper_survives_transient_close(tmp_path):
+    """A live keeper prevents a transient WAL handle from becoming last-close."""
+    from src.ingest import price_channel_daemon as daemon
+
+    db_path = tmp_path / "startup-bridge.db"
+    keeper = sqlite3.connect(db_path)
+    keeper.execute("PRAGMA journal_mode=WAL")
+    keeper.execute("CREATE TABLE position_current (position_id TEXT PRIMARY KEY)")
+    keeper.commit()
+    daemon._prepare_startup_bridge(keeper)
+
+    assert keeper.execute("PRAGMA wal_autocheckpoint").fetchone()[0] == 0
+    assert keeper.in_transaction is False
+    transient = sqlite3.connect(db_path)
+    transient.close()
+    assert keeper.execute("SELECT COUNT(*) FROM position_current").fetchone()[0] == 0
+    keeper.close()
 
 
 def test_candidate_quote_refresh_budget_matches_live_redecision_surface() -> None:
@@ -284,15 +566,17 @@ def test_market_channel_bootstrap_timeout_fences_late_worker_and_retries(monkeyp
     release = Event()
     generations: list[str] = []
 
-    def blocked_bootstrap(*, bootstrap_generation: str) -> None:
+    def blocked_bootstrap(*, bootstrap_generation: str, **_kwargs) -> None:
         generations.append(bootstrap_generation)
         entered.set()
-        release.wait(timeout=1.0)
+        while not lane._edli_market_channel_bootstrap_cancelled(bootstrap_generation):
+            release.wait(timeout=0.01)
 
     first = daemon._market_channel_bootstrap_job(blocked_bootstrap)
     assert first["thread"] == "bootstrap_worker_started"
     assert entered.wait(timeout=1.0)
     old_generation = str(first["bootstrap_generation"])
+    real_monotonic = daemon.time.monotonic
     monkeypatch.setattr(
         daemon,
         "_market_channel_bootstrap_started_monotonic",
@@ -309,11 +593,122 @@ def test_market_channel_bootstrap_timeout_fences_late_worker_and_retries(monkeyp
     assert timed_out["scheduler_failure_reason"] == "registration_not_reached"
     assert lane._edli_market_channel_bootstrap_is_current(old_generation) is False
 
-    release.set()
     current = daemon._market_channel_bootstrap_worker
     assert current is not None
+    daemon.time.monotonic = real_monotonic
+    lane._edli_cancel_market_channel_bootstrap(generations[-1])
     current.join(timeout=1.0)
+    assert not current.is_alive()
+    assert len(generations) == 2
     lane._edli_supersede_market_channel_bootstrap(generations[-1])
+
+
+def test_market_channel_bootstrap_cancel_interrupts_and_closes_registered_reader(monkeypatch):
+    from src.ingest import price_channel_ingest as lane
+
+    monkeypatch.setattr(lane, "_market_channel_bootstrap_generation", None)
+    monkeypatch.setattr(lane, "_market_channel_bootstrap_started_monotonic", None)
+    generation = lane._edli_begin_market_channel_bootstrap(
+        deadline_monotonic=lane.time.monotonic() + 30.0
+    )
+
+    class Connection:
+        def __init__(self):
+            self.interrupted = 0
+            self.closed = 0
+            self.handlers = []
+
+        def set_progress_handler(self, handler, interval):
+            self.handlers.append((handler, interval))
+
+        def interrupt(self):
+            self.interrupted += 1
+
+        def close(self):
+            self.closed += 1
+
+    conn = Connection()
+    with lane._edli_market_channel_bootstrap_connection(conn, generation):
+        assert lane._edli_cancel_market_channel_bootstrap(generation) is True
+        assert conn.interrupted == 1
+    assert conn.closed == 1
+    assert conn.handlers[-1] == (None, 0)
+    lane._edli_supersede_market_channel_bootstrap(generation)
+
+
+def test_market_channel_runner_blocked_connection_is_cancelled_and_joined(monkeypatch):
+    from threading import Event
+
+    from src.ingest import price_channel_ingest as lane
+
+    monkeypatch.setattr(lane, "_market_channel_bootstrap_generation", None)
+    monkeypatch.setattr(lane, "_market_channel_bootstrap_started_monotonic", None)
+    generation = lane._edli_begin_market_channel_bootstrap(
+        deadline_monotonic=lane.time.monotonic() + 30.0
+    )
+    entered = Event()
+    class Connection:
+        def __init__(self):
+            self.closed = 0
+            self.interrupted = 0
+
+        def set_progress_handler(self, _handler, _interval):
+            return None
+
+        def interrupt(self):
+            self.interrupted += 1
+
+        def close(self):
+            self.closed += 1
+
+    conn = Connection()
+
+    def runner():
+        with lane._edli_market_channel_bootstrap_connection(conn, generation):
+            entered.set()
+            while not lane._edli_market_channel_bootstrap_cancelled(generation):
+                entered.wait(timeout=0.01)
+
+    thread = threading.Thread(target=runner, daemon=True)
+    thread.start()
+    assert entered.wait(timeout=1.0)
+    lane._edli_cancel_market_channel_bootstrap(generation)
+    thread.join(timeout=1.0)
+
+    assert not thread.is_alive()
+    assert conn.interrupted == 1
+    assert conn.closed == 1
+    lane._edli_supersede_market_channel_bootstrap(generation)
+
+
+def test_market_channel_registration_releases_bootstrap_deadline_after_success(monkeypatch):
+    from src.ingest import price_channel_ingest as lane
+
+    monkeypatch.setattr(lane, "_market_channel_bootstrap_generation", None)
+    monkeypatch.setattr(lane, "_market_channel_bootstrap_started_monotonic", None)
+    generation = lane._edli_begin_market_channel_bootstrap(
+        deadline_monotonic=lane.time.monotonic() + 30.0
+    )
+
+    class Connection:
+        def __init__(self):
+            self.closed = 0
+            self.handlers = []
+
+        def set_progress_handler(self, handler, interval):
+            self.handlers.append((handler, interval))
+
+        def close(self):
+            self.closed += 1
+
+    conn = Connection()
+    with lane._edli_market_channel_bootstrap_connection(conn, generation):
+        lane._edli_mark_market_channel_bootstrap_registered(generation)
+        assert lane._edli_market_channel_bootstrap_cancelled(generation) is False
+
+    assert conn.closed == 1
+    assert conn.handlers[-1] == (None, 0)
+    lane._edli_supersede_market_channel_bootstrap(generation)
 
 
 def test_market_channel_sink_readiness_requires_current_pid_and_generation(
@@ -2862,6 +3257,7 @@ def test_market_channel_token_metadata_reloader_skips_unchanged_projection(monke
     initial_priorities = set(priorities)
     initial_repair = held | open_rest | candidates
     calls = {"active": 0, "entry": 0, "exit": 0, "closed": 0}
+    order: list[str] = []
 
     class Cursor:
         def fetchone(self):
@@ -2875,6 +3271,7 @@ def test_market_channel_token_metadata_reloader_skips_unchanged_projection(monke
             calls["closed"] += 1
 
     def active_metadata(_conn, *, priority_token_ids):  # noqa: ANN001
+        order.append("broad_hydration")
         calls["active"] += 1
         assert set(priority_token_ids) == priorities
         return {"active-token": object()}
@@ -2887,9 +3284,21 @@ def test_market_channel_token_metadata_reloader_skips_unchanged_projection(monke
             assert set(token_ids) == priorities
         return {token_id: object() for token_id in token_ids}
 
-    monkeypatch.setattr(db, "get_trade_connection", lambda *, write_class=None: Connection())
-    monkeypatch.setattr(db, "get_world_connection", lambda *, write_class=None: Connection())
-    monkeypatch.setattr(db, "get_forecasts_connection_read_only", Connection)
+    monkeypatch.setattr(
+        db,
+        "_connect_read_only",
+        lambda _path, *, deadline_monotonic=None: Connection(),
+    )
+    monkeypatch.setattr(
+        db,
+        "get_trade_connection",
+        lambda *, write_class=None, deadline_monotonic=None: Connection(),
+    )
+    monkeypatch.setattr(
+        db,
+        "get_forecasts_connection_read_only",
+        lambda *, deadline_monotonic=None: Connection(),
+    )
     monkeypatch.setattr(
         market_channel_ingestor,
         "active_weather_token_metadata_from_snapshots",
@@ -2929,6 +3338,9 @@ def test_market_channel_token_metadata_reloader_skips_unchanged_projection(monke
     reload_token_metadata = (
         price_channel_ingest._edli_market_channel_token_metadata_reloader()
     )
+    # The sink receipt is durable before the first reload callback is allowed to
+    # enter the potentially blocking/failing broad scan.
+    order.append("sink_receipt")
     first = reload_token_metadata()
     second = reload_token_metadata()
     candidates.add("day0-token")
@@ -2951,6 +3363,8 @@ def test_market_channel_token_metadata_reloader_skips_unchanged_projection(monke
     assert priority_only.token_metadata is not first.token_metadata
     assert third.token_metadata is not first.token_metadata
     assert calls == {"active": 2, "entry": 3, "exit": 5, "closed": 18}
+    assert order[0] == "sink_receipt"
+    assert order.count("broad_hydration") == 2
 
     cached = {"cached-token": object()}
     cached_reload = price_channel_ingest._edli_market_channel_token_metadata_reloader(
@@ -2973,6 +3387,230 @@ def test_market_channel_token_metadata_reloader_skips_unchanged_projection(monke
         held | open_rest | candidates
     )
     assert calls == {"active": 2, "entry": 3, "exit": 5, "closed": 21}
+
+
+def test_market_channel_universe_reload_interrupts_blocked_sqlite_and_retries_next_cadence(
+    monkeypatch, tmp_path
+):
+    import asyncio
+
+    from src import config
+    from src.events.triggers.market_channel_ingestor import MarketChannelOnlineService
+    from src.ingest import price_channel_ingest as lane
+
+    monkeypatch.setattr(config, "state_path", lambda filename: tmp_path / filename)
+    generation = lane._edli_begin_market_channel_bootstrap(
+        deadline_monotonic=time.monotonic() + 30.0
+    )
+    lane._write_market_channel_sink_readiness(
+        {
+            "schema_version": 1,
+            "generation": generation,
+            "sink_registered": True,
+            "consumer_queue_accepted": True,
+            "phase": "registered",
+        }
+    )
+    assert lane._edli_market_channel_sink_readiness_error() is None
+
+    cancel = threading.Event()
+    monkeypatch.setattr(lane, "_market_channel_universe_reload_generation", generation)
+    monkeypatch.setattr(
+        lane,
+        "_market_channel_universe_reload_deadline",
+        time.monotonic() + 30.0,
+    )
+    monkeypatch.setattr(lane, "_market_channel_universe_reload_cancel", cancel)
+    monkeypatch.setattr(lane, "_market_channel_universe_reload_connections", set())
+    conn = sqlite3.connect(":memory:", check_same_thread=False)
+    entered = threading.Event()
+
+    def blocked_sqlite_step():
+        entered.set()
+        while not cancel.is_set():
+            time.sleep(0.001)
+        return 1
+
+    conn.create_function("blocked_step", 0, blocked_sqlite_step)
+    failure: list[BaseException] = []
+
+    def blocked_reload():
+        try:
+            with lane._edli_market_channel_universe_reload_connection(conn, generation):
+                conn.execute("SELECT blocked_step()").fetchone()
+        except BaseException as exc:  # noqa: BLE001 - deterministic timeout antibody
+            failure.append(exc)
+
+    worker = threading.Thread(target=blocked_reload, daemon=True)
+    started_at = time.monotonic()
+    worker.start()
+    assert entered.wait(timeout=1.0)
+    lane._edli_cancel_market_channel_universe_reload(generation)
+    worker.join(timeout=1.0)
+    elapsed = time.monotonic() - started_at
+    assert not worker.is_alive()
+    assert elapsed < 1.0
+    assert failure
+    assert not lane._market_channel_universe_reload_connections
+    with pytest.raises(sqlite3.ProgrammingError):
+        conn.execute("SELECT 1")
+
+    class Ingestor:
+        active_token_ids = {"registered-token"}
+
+        def replace_token_metadata(self, metadata):
+            self.active_token_ids = set(metadata)
+            return set(metadata)
+
+    class WebSocket:
+        def __init__(self):
+            self.sent = []
+
+        async def send(self, payload):
+            self.sent.append(json.loads(payload))
+
+    attempts = iter((TimeoutError("universe reload deadline"), {"registered-token": object()}))
+
+    def reload_next_cadence():
+        outcome = next(attempts)
+        if isinstance(outcome, BaseException):
+            raise outcome
+        return outcome
+
+    service = MarketChannelOnlineService(Ingestor(), reload_token_metadata=reload_next_cadence)
+    subscribed = {"registered-token"}
+    websocket = WebSocket()
+    asyncio.run(
+        service._sync_subscription_universe(
+            websocket,
+            subscribed_token_ids=subscribed,
+            write_gate=contextlib.nullcontext(),
+            commit=None,
+            logger=None,
+        )
+    )
+    assert subscribed == {"registered-token"}
+    assert service.universe_refresh_error_count == 1
+    asyncio.run(
+        service._sync_subscription_universe(
+            websocket,
+            subscribed_token_ids=subscribed,
+            write_gate=contextlib.nullcontext(),
+            commit=None,
+            logger=None,
+        )
+    )
+    assert subscribed == {"registered-token"}
+    assert websocket.sent == []
+    lane._edli_supersede_market_channel_bootstrap(generation)
+
+
+def test_market_channel_reloader_deadline_interrupts_blocked_broad_hydration(
+    monkeypatch, tmp_path,
+):
+    from src import config
+    from src.events.triggers import market_channel_ingestor
+    from src.ingest import price_channel_ingest as lane
+    from src.state import db
+
+    monkeypatch.setattr(config, "state_path", lambda filename: tmp_path / filename)
+    bootstrap_generation = lane._edli_begin_market_channel_bootstrap(
+        deadline_monotonic=time.monotonic() + 30.0
+    )
+    lane._write_market_channel_sink_readiness(
+        {
+            "schema_version": 1,
+            "generation": bootstrap_generation,
+            "sink_registered": True,
+            "consumer_queue_accepted": True,
+            "phase": "registered",
+        }
+    )
+
+    class Cursor:
+        def fetchone(self):
+            return (1,)
+
+    class Connection:
+        def __init__(self):
+            self.closed = False
+            self.progress = None
+
+        def set_progress_handler(self, callback, _interval):
+            self.progress = callback
+
+        def execute(self, _sql):
+            return Cursor()
+
+        def close(self):
+            self.closed = True
+
+    connections: list[Connection] = []
+
+    def new_connection(*_args, **_kwargs):
+        conn = Connection()
+        connections.append(conn)
+        return conn
+
+    monkeypatch.setattr(db, "_connect_read_only", new_connection)
+    monkeypatch.setattr(db, "get_forecasts_connection_read_only", new_connection)
+    monkeypatch.setattr(db, "get_trade_connection", new_connection)
+    monkeypatch.setattr(lane, "MARKET_CHANNEL_UNIVERSE_REFRESH_DEADLINE_SECONDS", 0.1)
+    monkeypatch.setattr(lane, "_edli_candidate_priority_token_ids", lambda *_a, **_k: [])
+    monkeypatch.setattr(lane, "_edli_held_position_priority_token_ids", lambda *_a: set())
+    monkeypatch.setattr(lane, "_edli_open_rest_priority_token_ids", lambda *_a: set())
+    monkeypatch.setattr(lane, "_edli_current_day0_priority_token_ids", lambda *_a: ())
+    monkeypatch.setattr(lane, "_edli_priority_family_token_ids", lambda *_a: set())
+    monkeypatch.setattr(lane, "_edli_market_channel_seed_first_token_ids", lambda **_k: ())
+    monkeypatch.setattr(lane, "_edli_market_channel_depth_repair_token_ids", lambda **_k: ())
+    monkeypatch.setattr(lane, "_edli_market_channel_token_metadata_fingerprint", lambda *_a: ((1, 1), (), ()))
+    started = threading.Event()
+    blocked = [True]
+
+    def blocked_broad(_conn, *, priority_token_ids):
+        if not blocked[0]:
+            return {"hydrated-token": object()}
+        started.set()
+        while not lane._market_channel_universe_reload_cancel.is_set():
+            time.sleep(0.001)
+        raise sqlite3.OperationalError("interrupted broad hydration")
+
+    monkeypatch.setattr(
+        market_channel_ingestor,
+        "active_weather_token_metadata_from_snapshots",
+        blocked_broad,
+    )
+    reload_token_metadata = lane._edli_market_channel_token_metadata_reloader(
+        initial_token_metadata={},
+        initial_fingerprint=None,
+    )
+    started_at = time.monotonic()
+    with pytest.raises(TimeoutError):
+        reload_token_metadata()
+    assert started.wait(timeout=1.0)
+    assert time.monotonic() - started_at < 1.0
+    assert all(conn.closed for conn in connections)
+    assert not lane._market_channel_universe_reload_connections
+    debt = json.loads(
+        (tmp_path / lane.MARKET_CHANNEL_SINK_READINESS_FILENAME).read_text()
+    )["universe_refresh_debt"]
+    assert debt["generation"] == bootstrap_generation
+    assert debt["pid"] == os.getpid()
+    monkeypatch.setattr(lane, "_market_channel_bootstrap_generation", "stale-bootstrap")
+    lane._edli_clear_market_channel_universe_refresh_debt("stale-attempt")
+    assert lane._market_channel_universe_refresh_debt is not None
+    monkeypatch.setattr(lane, "_market_channel_bootstrap_generation", bootstrap_generation)
+
+    blocked[0] = False
+    second = reload_token_metadata()
+    assert "hydrated-token" in second.token_metadata
+    readiness = json.loads(
+        (tmp_path / lane.MARKET_CHANNEL_SINK_READINESS_FILENAME).read_text()
+    )
+    assert readiness["sink_registered"] is True
+    assert readiness["generation"] == bootstrap_generation
+    assert "universe_refresh_debt" not in readiness
+    lane._edli_supersede_market_channel_bootstrap(bootstrap_generation)
 
 
 def test_price_channel_redecision_wake_is_targeted_urgent_fast_path():
