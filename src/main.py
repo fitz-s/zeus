@@ -1089,6 +1089,131 @@ def assert_kelly_multiplier_within_correlated_ceiling(cfg: dict) -> None:
         )
 
 
+RISK_POLICY_ARTIFACT_PATH = Path("config/risk_policy.yaml")
+
+# live sizing.* key -> its ceiling key in config/risk_policy.yaml
+RISK_POLICY_CHECKED_LEVERS: tuple[tuple[str, str], ...] = (
+    ("kelly_multiplier", "kelly_multiplier_ceiling"),
+    ("max_correlated_pct", "max_correlated_pct_ceiling"),
+    ("max_portfolio_heat_pct", "max_portfolio_heat_pct_ceiling"),
+    ("max_single_position_pct", "max_single_position_pct_ceiling"),
+)
+
+
+def _load_risk_policy_artifact(path: Path = RISK_POLICY_ARTIFACT_PATH) -> tuple[dict, str, str]:
+    """Load the tracked, content-addressed risk-policy artifact.
+
+    Returns (parsed_mapping, policy_version, sha256_hex_of_raw_bytes).
+    Fail-closed (RuntimeError) on a missing file, unparseable YAML, a
+    non-mapping document, or a missing/empty ``policy_version`` — a risk
+    ceiling with no artifact (or an unversioned one) is ungoverned, same
+    posture as every other sizing boot guard in this module.
+    """
+    if not path.exists():
+        raise RuntimeError(
+            f"RISK_POLICY_ARTIFACT_MISSING: {path} does not exist; every "
+            f"risk-increasing sizing lever must live in a tracked, "
+            f"content-addressed policy artifact (reversal_plan_tier0 item 1b)"
+        )
+    raw_bytes = path.read_bytes()
+    sha256_hex = hashlib.sha256(raw_bytes).hexdigest()
+    import yaml  # local import: matches src/risk_allocator/governor.py::load_cap_policy idiom
+
+    try:
+        loaded = yaml.safe_load(raw_bytes.decode("utf-8"))
+    except yaml.YAMLError as exc:
+        raise RuntimeError(
+            f"RISK_POLICY_ARTIFACT_MALFORMED: {path} is not valid YAML: {exc}"
+        ) from exc
+    if not isinstance(loaded, dict):
+        raise RuntimeError(
+            f"RISK_POLICY_ARTIFACT_MALFORMED: {path} must parse to a mapping, "
+            f"got {type(loaded).__name__}"
+        )
+    policy_version = loaded.get("policy_version")
+    if not policy_version:
+        raise RuntimeError(
+            f"RISK_POLICY_ARTIFACT_MALFORMED: {path} missing non-empty "
+            f"policy_version"
+        )
+    return loaded, str(policy_version), sha256_hex
+
+
+def assert_risk_policy_artifact(
+    cfg: dict,
+    *,
+    path: Path = RISK_POLICY_ARTIFACT_PATH,
+) -> None:
+    """Fail-closed guard: no live risk-increasing sizing value may exceed its
+    ceiling in the tracked, content-addressed ``config/risk_policy.yaml``.
+
+    SCOPE: process-wide daemon boot, same pattern as
+    ``assert_kelly_multiplier_matches_governed_fraction`` /
+    ``assert_kelly_multiplier_within_correlated_ceiling`` above — this guard
+    generalizes them to every risk-increasing ``sizing.*`` lever the live
+    entry path consumes (reversal_plan_tier0 item 1b), not just
+    ``kelly_multiplier``.
+
+    DIRECTION LAW: runtime / control-plane overrides (entries_paused,
+    edge_threshold_multiplier, RiskGuard postures) may LOWER effective risk
+    freely and are never inspected here — this guard only reads ``cfg["sizing"]``
+    and the artifact, so a control-plane lever cannot trip it. Only a live
+    value EXCEEDING its artifact ceiling is a breach.
+
+    DRAIN: lower the offending ``sizing.<key>`` in the active operator config,
+    or raise the ceiling in ``config/risk_policy.yaml`` via a reviewed commit
+    (bump ``policy_version``), then restart.
+    RESET: recomputed on every boot; no strategy, side, or runtime override.
+    """
+    policy, policy_version, sha256_hex = _load_risk_policy_artifact(path)
+    logger.info(
+        "risk_policy_artifact: path=%s policy_version=%s sha256=%s",
+        path, policy_version, sha256_hex,
+    )
+
+    sizing = cfg.get("sizing") or {}
+    for live_key, ceiling_key in RISK_POLICY_CHECKED_LEVERS:
+        raw_ceiling = policy.get(ceiling_key)
+        if raw_ceiling is None or isinstance(raw_ceiling, bool) or not isinstance(raw_ceiling, (int, float)):
+            raise RuntimeError(
+                f"RISK_POLICY_ARTIFACT_MALFORMED: {ceiling_key} missing or "
+                f"non-numeric in {path}"
+            )
+        ceiling = float(raw_ceiling)
+
+        raw_live = sizing.get(live_key)
+        if raw_live is None or isinstance(raw_live, bool) or not isinstance(raw_live, (int, float)):
+            raise RuntimeError(
+                f"RISK_POLICY_BREACH: sizing.{live_key} missing or "
+                f"non-numeric; artifact ceiling {ceiling_key}={ceiling}"
+            )
+        live_value = float(raw_live)
+
+        # Fail-closed on non-finite inputs: NaN/inf bypass the ``>``
+        # comparison below the same way the corr-ceiling guard above does.
+        if not math.isfinite(live_value) or not math.isfinite(ceiling):
+            raise RuntimeError(
+                f"RISK_POLICY_BREACH (NON_FINITE): sizing.{live_key}="
+                f"{live_value}, {ceiling_key}={ceiling} — a NaN/inf value "
+                f"bypasses the ceiling comparison; both must be finite."
+            )
+
+        logger.info(
+            "risk_policy_effective_value: sizing.%s=%s ceiling(%s)=%s",
+            live_key, live_value, ceiling_key, ceiling,
+        )
+
+        if live_value > ceiling:
+            raise RuntimeError(
+                f"RISK_POLICY_BREACH: sizing.{live_key}={live_value} exceeds "
+                f"artifact ceiling {ceiling_key}={ceiling} in {path} "
+                f"(policy_version={policy_version}). Runtime/control-plane "
+                f"overrides may only LOWER risk, never raise it above the "
+                f"tracked artifact. Lower sizing.{live_key} to <= {ceiling} "
+                f"or raise {ceiling_key} via a reviewed commit."
+            )
+
+
 # ---------------------------------------------------------------------------
 # W0-T3: _run_boot_guards / _validate_boot — safe pre-restart smoke
 # (2026-06-03)
@@ -1162,6 +1287,21 @@ def _run_boot_guards(raw_cfg: dict) -> list:
         results.append(("kelly_mult_corr_ceiling", False, str(exc)))
     except Exception as exc:  # pragma: no cover
         results.append(("kelly_mult_corr_ceiling", False, f"unexpected: {exc}"))
+
+    # Guard 5: every risk-increasing sizing.* lever ≤ its tracked,
+    # content-addressed config/risk_policy.yaml ceiling (reversal_plan_tier0
+    # item 1b — generalizes guards 3/4 above beyond kelly_multiplier alone).
+    try:
+        assert_risk_policy_artifact(raw_cfg)
+        results.append((
+            "risk_policy_artifact",
+            True,
+            "all sizing.* risk-increasing levers within config/risk_policy.yaml ceilings",
+        ))
+    except RuntimeError as exc:
+        results.append(("risk_policy_artifact", False, str(exc)))
+    except Exception as exc:  # pragma: no cover
+        results.append(("risk_policy_artifact", False, f"unexpected: {exc}"))
 
     return results
 

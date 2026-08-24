@@ -17,6 +17,7 @@ Runtime parameters — all configuration that controls Zeus behavior at runtime.
 | `reality_contracts/data.yaml` | External assumption contract: data source availability and behavior |
 | `data_availability_exceptions.yaml` | K2 hole_scanner whitelist: per-model retro-start dates, publication lag, onboarding floor, fill policy |
 | `risk_caps.yaml` | R3 A2 engineering defaults for RiskAllocator/PortfolioGovernor capacity, drawdown, heartbeat/WS-gap, reconciliation, unknown-side-effect, and maker/taker thresholds |
+| `risk_policy.yaml` | Tracked, content-addressed ceilings for every risk-increasing `sizing.*` lever the live entry path consumes (kelly_multiplier, max_correlated_pct, max_portfolio_heat_pct, max_single_position_pct). Boot guard `src/main.py::assert_risk_policy_artifact` fails closed on any live value exceeding its ceiling and logs `policy_version` + sha256 at every boot. Runtime/control-plane overrides may lower risk freely; they may never raise it above this file |
 | `settings.example.json` | Template for config/settings.json with operator-specific values marked null; copy to settings.json to configure |
 | `source_release_calendar.yaml` | Source release calendar for data-source availability windows and release schedules |
 
@@ -26,6 +27,7 @@ Runtime parameters — all configuration that controls Zeus behavior at runtime.
 - Reality contracts (INV-11) define what Zeus assumes about external systems — when assumptions break, contracts flag it
 - Changes to `provenance_registry.yaml` require tracing to source literature/data
 - `risk_caps.yaml` defaults must remain sane when absent; operator tuning is separate from engineering closeout and must not itself authorize live deployment.
+- `risk_policy.yaml` has no absent-file default — boot fails closed (`RISK_POLICY_ARTIFACT_MISSING`) if it is missing. Raising a ceiling requires a reviewed commit that bumps `policy_version`; lowering `settings.json::sizing.*` below a ceiling never requires touching this file.
 
 ## cities.json — routine check discipline (ROUTINE CHECK NEEDED)
 

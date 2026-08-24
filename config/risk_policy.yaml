@@ -1,0 +1,77 @@
+# Created: 2026-08-24
+# Authority basis: reversal_plan_tier0_2026-08-24.md item 1b — the Aug 1-3
+#   defect (kelly_multiplier=0.25 lived in UNTRACKED config/settings.json;
+#   a same-week commit deleted all multiplicative dampeners; result -$642 in
+#   2 days at unchanged q) was fixed by pinning ONE constant
+#   (src/main.py::GOVERNED_KELLY_MULTIPLIER). The consult's requirement is
+#   broader: every risk-INCREASING sizing value the live entry path consumes
+#   must live in a TRACKED, content-addressed policy artifact — this file —
+#   with a boot guard that fails closed on any live value exceeding its
+#   ceiling here.
+#
+# DIRECTION LAW (load-bearing — do not weaken):
+#   Runtime / control-plane overrides (entries_paused, edge_threshold_multiplier,
+#   RiskGuard postures, etc — see src/control/control_plane.py) may LOWER
+#   effective risk at any time without touching this file. They may NEVER
+#   raise risk above the ceilings pinned here. The boot guard
+#   (src/main.py::assert_risk_policy_artifact) only rejects a LIVE value that
+#   EXCEEDS its ceiling; it never rejects a lower value, and it does not
+#   inspect control-plane state at all (control-plane levers are structurally
+#   outside this file's cfg["sizing"] scope, so they cannot trip this guard).
+#
+# CONTENT ADDRESSING: the boot guard computes sha256 over this file's raw
+# bytes and logs `policy_version` + the hash + every checked effective value
+# at every boot (see assert_risk_policy_artifact). Bump `policy_version` on
+# any ceiling change so the log trail shows exactly which artifact version
+# governed a given boot.
+#
+# CEILINGS BELOW mirror config/settings.example.json::sizing's current
+# operator-governed values exactly (raising a live value above its template
+# default is, by definition, an attempt to exceed the governed ceiling).
+#
+# LEVERS DELIBERATELY NOT PINNED HERE (documented, not silently omitted):
+#   - sizing.max_city_pct: loaded into RiskLimits/sizing_defaults() but
+#     src/strategy/risk_limits.py::check_position_allowed does not consume it
+#     as a blocker, and no other live entry-path caller reads it — a declared,
+#     currently-dead field. Add a ceiling here the day something in the live
+#     entry path starts consuming it.
+#   - src/strategy/kelly.py::GLOBAL_KELLY_FRACTION: a hardcoded source
+#     constant (currently 1.0), not a runtime/config knob — changing it
+#     requires a reviewed git commit, which is itself tracked and
+#     content-addressed (the commit SHA). Out of scope for a config-file
+#     ceiling; if it is ever made config-driven, pin it here first.
+#   - sizing.min_order_usd: a FLOOR, not a risk-increasing ceiling — raising
+#     it makes the minimum trade bigger (more restrictive), lowering it makes
+#     entries easier to reject-past, not risk-amplifying in the sense this
+#     artifact governs.
+
+policy_version: "1"
+
+# Base fractional-Kelly cap (src/strategy/kelly.py::kelly_size mult).
+# Mirrors src/main.py::GOVERNED_KELLY_MULTIPLIER (1/8) — that guard is an
+# EXACT match; this ceiling is a <= bound so a future operator-approved
+# lowering of kelly_multiplier does not also require editing this file.
+kelly_multiplier_ceiling: 0.125
+
+# Correlated-exposure pressure denominator (src/events/money_path_adapters.py
+# corr_pressure = corr_committed / (max_correlated_pct * B)). Raising this
+# value REDUCES corr pressure and therefore INCREASES effective Kelly size —
+# risk-increasing lever. Also the RHS of the existing relational guard
+# src/main.py::assert_kelly_multiplier_within_correlated_ceiling, which only
+# checks kelly_multiplier <= max_correlated_pct; it does not ceiling
+# max_correlated_pct itself. This artifact closes that gap.
+max_correlated_pct_ceiling: 0.25
+
+# Raw-heat pressure denominator (src/events/money_path_adapters.py
+# raw_pressure = raw_committed / (max_portfolio_heat_pct * B)) and the
+# src/engine/cycle_runner.py exposure_gate_hit observability threshold.
+# Raising this value reduces raw-heat pressure — risk-increasing lever.
+max_portfolio_heat_pct_ceiling: 0.5
+
+# Hard per-trade upper-bound clip on the sized stake
+# (src/events/money_path_adapters.py: size_usd = min(size_usd,
+# max_single_position_pct * sizing_bankroll); same ceiling reconciled in
+# src/engine/event_reactor_adapter.py and
+# src/engine/global_single_order_auction.py). Raising this value directly
+# raises the largest single stake the live entry path can place.
+max_single_position_pct_ceiling: 0.1
