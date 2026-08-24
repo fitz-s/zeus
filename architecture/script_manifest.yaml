@@ -2580,6 +2580,36 @@ scripts:
       - tests/test_backfill_bayes_precision_fusion_history_is_idempotent_under_new_unique_key.py
       - tests/test_bayes_precision_fusion_no_leak_history_join.py
 
+  # --- reversal-plan tier0 item 4 (2026-08-24): non-circular scoreboard ---
+  scoreboard_panels.py:
+    class: read_only_evidence
+    lifecycle: long_lived
+    status: active
+    authority_scope: offline_no_promotion
+    read_targets: [state/zeus-world.db, state/zeus_trades.db]
+    write_targets: [stdout]
+    dry_run_default: true
+    apply_flag: null
+    target_db: null
+    external_inputs: []
+    dangerous_if_run: false
+    delete_policy: retain_until_superseded
+    reuse_when: >
+      Read the non-circular scoreboard (paired forecast proper-scores vs price,
+      price-only selection edge, execution fill quality, exit lifecycle) for
+      settled positions and executed fills. Replaces the old
+      settlement_attribution.category grader (SKILL_WIN/LUCKY_WIN/...), which
+      is circular because it grades trades against our own q instead of price
+      or settlement truth. Idempotent read-only report; safe to re-run anytime.
+    do_not_use_when: >
+      Any task needs to authorize a live decision or promote evidence to
+      canonical truth — this script's output is offline analytics only.
+    canonical_command: "python3 scripts/scoreboard_panels.py [--root PATH] [--world PATH] [--trades PATH] [--panel P1|P2|P3|P4|ALL]"
+    promotion_barrier: "Read-only analytics; cannot authorize live strategy or DB truth changes."
+    required_helpers: []
+    required_tests: [tests/scripts/test_scoreboard_panels.py]
+    unguarded_write_rationale: "No writes; opens both DBs strictly read-only via file:...?mode=ro&immutable=0 URIs; SELECT-only; prints markdown to stdout."
+
   # NOTE (R0-f/R0-g prepare packet, 2026-07-08; extended by the loop-build packet,
   # 2026-07-08): scripts/ops/migrate_plist_secrets.sh, scripts/ops/rotate_zeus_logs.sh,
   # scripts/ops/db_hygiene.sh, scripts/ops/loop_guard.py, scripts/ops/loop_enable.sh,

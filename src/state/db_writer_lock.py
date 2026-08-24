@@ -1011,6 +1011,8 @@ SQLITE_CONNECT_ALLOWLIST: frozenset[str] = frozenset(
         "scripts/allocator_bankroll_sensitivity.py",  # read_only_ro_uri: opens zeus_trades.db via file:...?mode=ro uri; SELECT-only over decision_log/executable_market_snapshot_latest; non-authoritative offline Kelly-formula sensitivity probe; writes stdout only
         # --- settled-position calibration report (2026-07-29): READ-ONLY reliability diagram ---
         "scripts/generate_calibration_report.py",  # read_only_ro_uri: opens zeus-world.db via file:...?mode=ro uri, ATTACHes zeus_trades.db read-only (INV-37) for the strategy_key/entry-time join; SELECT-only over settlement_attribution (settled-only ground truth) + trades.position_current/position_events; writes docs/reference/calibration_report.md + docs/reference/calibration_reliability.svg only
+        # --- reversal-plan tier0 item 4 (2026-08-24): non-circular scoreboard ---
+        "scripts/scoreboard_panels.py",  # read_only_ro_uri: opens zeus-world.db + zeus_trades.db independently via file:...?mode=ro&immutable=0 uri; SELECT-only over settlement_attribution + venue_commands/venue_trade_facts; replaces the circular settlement_attribution.category scoreboard with price-anchored forecast/selection/execution/lifecycle panels; writes stdout only
     }
 )
 

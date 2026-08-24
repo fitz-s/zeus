@@ -115,3 +115,4 @@ Only list durable entry points here; use the manifest for the full catalog.
 | `zeus_blocks.py` | Zeus block state read_only_inspection; reads and reports current block conditions (created 2026-05-04) |
 | `doc_citation_lint.py` | Citation-rot detector for Zeus docs; scans .md/.py/.yaml/.json for broken doc references per SCAFFOLD §4 FM-01/FM-04 (created 2026-05-17) |
 | `pr_monitor.py` | Canonical PR monitor; single source of filter logic for Monitor tool armed after gh pr create; 7 filter contracts pinned by tests/test_pr_monitor.py (created 2026-05-17) |
+| `scoreboard_panels.py` | Read-only non-circular scoreboard: paired forecast proper-scores vs price, price-only selection edge, execution fill quality, exit lifecycle (created 2026-08-24, reversal-plan tier0 item 4) |
