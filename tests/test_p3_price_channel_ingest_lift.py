@@ -316,12 +316,15 @@ def test_market_channel_bootstrap_timeout_fences_late_worker_and_retries(monkeyp
     lane._edli_supersede_market_channel_bootstrap(generations[-1])
 
 
-def test_market_channel_sink_readiness_requires_current_pid_and_generation(monkeypatch, tmp_path) -> None:
+def test_market_channel_sink_readiness_requires_current_pid_and_generation(
+    monkeypatch,
+    tmp_path,
+) -> None:
     from src import config
     from src.ingest import price_channel_ingest as lane
 
     target = tmp_path / lane.MARKET_CHANNEL_SINK_READINESS_FILENAME
-    monkeypatch.setattr(config, "state_path", lambda _filename: target)
+    monkeypatch.setattr(config, "state_path", lambda filename: tmp_path / filename)
     monkeypatch.setattr(lane, "_market_channel_bootstrap_generation", None)
     monkeypatch.setattr(lane, "_market_channel_bootstrap_started_monotonic", None)
 
@@ -332,6 +335,7 @@ def test_market_channel_sink_readiness_requires_current_pid_and_generation(monke
         service,
         generation,
         calls.append,
+        calls.append,
     )
     assert lane._edli_market_channel_sink_readiness_error() is None
 
@@ -341,12 +345,99 @@ def test_market_channel_sink_readiness_requires_current_pid_and_generation(monke
     assert proof["sink_registered"] is True
     assert proof["consumer_queue_accepted"] is True
 
+    lane._write_market_channel_continuity(
+        {
+            "schema_version": 1,
+            "channel": "market_channel",
+            "generation": generation,
+            "connected": True,
+            "connected_at": "2026-08-24T00:00:00+00:00",
+            "observed_at": "2026-08-24T00:00:01+00:00",
+        }
+    )
+    continuity_path = tmp_path / lane.MARKET_CHANNEL_CONTINUITY_FILENAME
+    continuity = json.loads(continuity_path.read_text(encoding="utf-8"))
+    continuity["generation"] = "prior-generation"
+    continuity_path.write_text(json.dumps(continuity), encoding="utf-8")
+    action = types.SimpleNamespace(
+        condition_id="condition",
+        token_id="token",
+        reason="held",
+    )
+    rejected = lane._edli_enqueue_held_snapshot_refresh_actions([action])
+    assert rejected["held_snapshot_refresh_actions_enqueued"] == 0
+    assert (
+        "ContinuityUnavailable"
+        in rejected["held_snapshot_refresh_enqueue_unavailable"][0]["debt_reason"]
+    )
+
     proof["pid"] = os.getpid() + 1
     target.write_text(json.dumps(proof), encoding="utf-8")
-    assert "another PID or generation" in lane._edli_market_channel_sink_readiness_error()
+    assert (
+        "another PID or generation"
+        in lane._edli_market_channel_sink_readiness_error()
+    )
 
-    lane._edli_unregister_current_market_channel_action_sink(service, generation, calls.append)
+    lane._edli_unregister_current_market_channel_action_sink(
+        service,
+        generation,
+        calls.append,
+    )
     assert calls == [service, service]
+
+
+def test_market_channel_receipt_write_failure_unregisters_before_next_generation(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    from src import config
+    from src.events.triggers.market_channel_ingestor import (
+        persistent_market_channel_action_receipt,
+        register_persistent_market_channel_action_sink,
+        unregister_persistent_market_channel_action_sink,
+    )
+    from src.ingest import price_channel_ingest as lane
+
+    monkeypatch.setattr(config, "state_path", lambda filename: tmp_path / filename)
+    monkeypatch.setattr(lane, "_market_channel_bootstrap_generation", None)
+    monkeypatch.setattr(lane, "_market_channel_bootstrap_started_monotonic", None)
+    generation = lane._edli_begin_market_channel_bootstrap()
+    original_write = lane._write_market_channel_sink_readiness
+    monkeypatch.setattr(
+        lane,
+        "_write_market_channel_sink_readiness",
+        lambda _payload: (_ for _ in ()).throw(OSError("receipt write failed")),
+    )
+
+    with pytest.raises(OSError, match="receipt write failed"):
+        lane._edli_register_current_market_channel_action_sink(
+            types.SimpleNamespace(
+                invalidate_snapshot=lambda _action: None,
+                refresh_snapshot=lambda _action: None,
+            ),
+            generation,
+            register_persistent_market_channel_action_sink,
+            unregister_persistent_market_channel_action_sink,
+        )
+    assert persistent_market_channel_action_receipt()["queued_exact_actions"] == 0
+
+    monkeypatch.setattr(lane, "_write_market_channel_sink_readiness", original_write)
+    next_generation = lane._edli_begin_market_channel_bootstrap()
+    next_service = types.SimpleNamespace(
+        invalidate_snapshot=lambda _action: None,
+        refresh_snapshot=lambda _action: None,
+    )
+    assert lane._edli_register_current_market_channel_action_sink(
+        next_service,
+        next_generation,
+        register_persistent_market_channel_action_sink,
+        unregister_persistent_market_channel_action_sink,
+    )
+    lane._edli_unregister_current_market_channel_action_sink(
+        next_service,
+        next_generation,
+        unregister_persistent_market_channel_action_sink,
+    )
 
 
 def test_m5_authority_deadline_fails_closed_without_publishing_health(monkeypatch) -> None:
@@ -4088,13 +4179,23 @@ def test_held_position_quote_refresh_writes_feasibility_rows(monkeypatch, tmp_pa
         invalidate_snapshot=invalidated.append,
         refresh_snapshot=refreshed.append,
     )
-    readiness_path = tmp_path / lane.MARKET_CHANNEL_SINK_READINESS_FILENAME
-    monkeypatch.setattr(config, "state_path", lambda _filename: readiness_path)
+    monkeypatch.setattr(config, "state_path", lambda filename: tmp_path / filename)
     generation = lane._edli_begin_market_channel_bootstrap()
     assert lane._edli_register_current_market_channel_action_sink(
         persistent,
         generation,
         register_persistent_market_channel_action_sink,
+        unregister_persistent_market_channel_action_sink,
+    )
+    lane._write_market_channel_continuity(
+        {
+            "schema_version": 1,
+            "channel": "market_channel",
+            "generation": generation,
+            "connected": True,
+            "connected_at": "2026-06-19T10:00:00+00:00",
+            "observed_at": "2026-06-19T10:00:00.500000+00:00",
+        }
     )
 
     acquired = lane._candidate_quote_seed_refresh_lock.acquire(blocking=False)
@@ -6204,12 +6305,33 @@ def test_market_channel_continuity_proof_is_atomically_published(monkeypatch, tm
     from src.ingest import price_channel_ingest as lane
 
     target = tmp_path / lane.MARKET_CHANNEL_CONTINUITY_FILENAME
-    monkeypatch.setattr(config, "state_path", lambda _filename: target)
+    monkeypatch.setattr(config, "state_path", lambda filename: tmp_path / filename)
+    monkeypatch.setattr(lane, "_market_channel_bootstrap_generation", None)
+    monkeypatch.setattr(lane, "_market_channel_bootstrap_started_monotonic", None)
+    generation = lane._edli_begin_market_channel_bootstrap()
+    service = object()
+    calls: list[object] = []
+    assert lane._edli_register_current_market_channel_action_sink(
+        service,
+        generation,
+        calls.append,
+        calls.append,
+    )
+    with pytest.raises(RuntimeError, match="generation is not current"):
+        lane._write_market_channel_continuity(
+            {
+                "schema_version": 1,
+                "channel": "market_channel",
+                "generation": "prior-generation",
+                "connected": True,
+            }
+        )
+    assert not target.exists()
     lane._write_market_channel_continuity(
         {
             "schema_version": 1,
             "channel": "market_channel",
-            "generation": "test-generation",
+            "generation": generation,
             "connected": True,
             "connected_at": "2026-07-17T03:00:00+00:00",
             "observed_at": "2026-07-17T03:00:00.500000+00:00",
@@ -6219,10 +6341,11 @@ def test_market_channel_continuity_proof_is_atomically_published(monkeypatch, tm
 
     proof = json.loads(target.read_text(encoding="utf-8"))
     assert proof["connected"] is True
-    assert proof["generation"] == "test-generation"
+    assert proof["generation"] == generation
     assert proof["active_token_count"] == 154
     assert isinstance(proof["pid"], int) and proof["pid"] > 0
     assert not list(tmp_path.glob("*.tmp"))
+    lane._edli_unregister_current_market_channel_action_sink(service, generation, calls.append)
 
 
 def test_no_regression_market_channel_online_service_wiring_lives_in_lane_module():

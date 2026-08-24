@@ -19569,6 +19569,7 @@ def test_market_channel_continuity_cut_requires_current_matching_daemon(
     checked_at = _dt.datetime(2026, 7, 17, 0, 20, tzinfo=_dt.timezone.utc)
     proof_path = tmp_path / "market-channel-continuity.json"
     heartbeat_path = tmp_path / "daemon-heartbeat-price-channel-ingest.json"
+    readiness_path = tmp_path / "market-channel-action-sink-readiness.json"
     proof_path.write_text(
         json.dumps(
             {
@@ -19582,6 +19583,19 @@ def test_market_channel_continuity_cut_requires_current_matching_daemon(
                     checked_at - _dt.timedelta(milliseconds=200)
                 ).isoformat(),
                 "pid": 42,
+                "generation": "42-current",
+            }
+        ),
+        encoding="utf-8",
+    )
+    readiness_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "pid": 42,
+                "generation": "42-current",
+                "sink_registered": True,
+                "consumer_queue_accepted": True,
             }
         ),
         encoding="utf-8",
@@ -19623,6 +19637,33 @@ def test_market_channel_continuity_cut_requires_current_matching_daemon(
         checked_at=checked_at,
         max_age=_dt.timedelta(minutes=3),
     ) is None
+
+    heartbeat_path.write_text(
+        json.dumps(
+            {
+                "daemon": "price-channel-ingest",
+                "alive_at": checked_at.isoformat(),
+                "pid": 42,
+            }
+        ),
+        encoding="utf-8",
+    )
+    readiness = json.loads(readiness_path.read_text(encoding="utf-8"))
+    readiness["generation"] = "prior-generation"
+    readiness_path.write_text(json.dumps(readiness), encoding="utf-8")
+    assert era._market_channel_continuity_cut(
+        checked_at=checked_at,
+        max_age=_dt.timedelta(minutes=3),
+    ) is None
+    readiness["generation"] = "42-current"
+    readiness["consumer_queue_accepted"] = False
+    readiness_path.write_text(json.dumps(readiness), encoding="utf-8")
+    assert era._market_channel_continuity_cut(
+        checked_at=checked_at,
+        max_age=_dt.timedelta(minutes=3),
+    ) is None
+    readiness["consumer_queue_accepted"] = True
+    readiness_path.write_text(json.dumps(readiness), encoding="utf-8")
 
     heartbeat_path.write_text(
         json.dumps(

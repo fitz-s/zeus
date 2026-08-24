@@ -83,6 +83,8 @@ DEFAULT_REACTOR_CLAIM_BUSY_TIMEOUT_MS = 750
 DEFAULT_REACTOR_LANE_FAIRNESS_FETCH_MIN_EXTRA = 50
 DEFAULT_REACTOR_LANE_FAIRNESS_FETCH_MULTIPLIER = 4
 MARKET_CHANNEL_CONTINUITY_FILENAME = "market-channel-continuity.json"
+MARKET_CHANNEL_SINK_READINESS_FILENAME = "market-channel-action-sink-readiness.json"
+PRICE_CHANNEL_HEARTBEAT_FILENAME = "daemon-heartbeat-price-channel-ingest.json"
 
 
 def _portfolio_snapshot_submit_gate(
@@ -10842,7 +10844,12 @@ def _edli_continuity_proven_pre_submit_book(
     max_quote_age_ms: int,
     continuity_path: Path | None = None,
 ):
-    """Return the current-generation WS depth while its continuity proof is live."""
+    """Return the current-generation WS depth while ownership receipts are live.
+
+    SCOPE: one price-channel daemon PID/generation and its exact depth window.
+    DRAIN: the daemon republishes heartbeat/readiness/continuity while connected.
+    RESET: a stopped sink, PID change, or generation mismatch forces a JIT refresh.
+    """
 
     if trade_conn is None or max_quote_age_ms <= 0:
         return None
@@ -10851,23 +10858,53 @@ def _edli_continuity_proven_pre_submit_book(
             from src.config import state_path
 
             continuity_path = state_path(MARKET_CHANNEL_CONTINUITY_FILENAME)
+            readiness_path = state_path(MARKET_CHANNEL_SINK_READINESS_FILENAME)
+            heartbeat_path = state_path(PRICE_CHANNEL_HEARTBEAT_FILENAME)
+        else:
+            readiness_path = continuity_path.with_name(
+                MARKET_CHANNEL_SINK_READINESS_FILENAME
+            )
+            heartbeat_path = continuity_path.with_name(
+                PRICE_CHANNEL_HEARTBEAT_FILENAME
+            )
         proof = json.loads(continuity_path.read_text(encoding="utf-8"))
-        if not isinstance(proof, dict):
+        readiness = json.loads(readiness_path.read_text(encoding="utf-8"))
+        heartbeat = json.loads(heartbeat_path.read_text(encoding="utf-8"))
+        if (
+            not isinstance(proof, dict)
+            or not isinstance(readiness, dict)
+            or not isinstance(heartbeat, dict)
+        ):
             return None
         connected_at = _parse_utc_instant(proof.get("connected_at"))
         observed_at = _parse_utc_instant(proof.get("observed_at"))
+        alive_at = _parse_utc_instant(heartbeat.get("alive_at"))
         checked_at = datetime.now(timezone.utc)
         if (
             proof.get("schema_version") != 1
             or proof.get("channel") != "market_channel"
             or proof.get("connected") is not True
+            or readiness.get("schema_version") != 1
+            or readiness.get("sink_registered") is not True
+            or readiness.get("consumer_queue_accepted") is not True
+            or heartbeat.get("daemon") != "price-channel-ingest"
+            or int(proof.get("pid") or 0) != int(readiness.get("pid") or -1)
+            or int(proof.get("pid") or 0) != int(heartbeat.get("pid") or -1)
+            or proof.get("generation") != readiness.get("generation")
             or connected_at is None
             or observed_at is None
+            or alive_at is None
             or connected_at > observed_at
         ):
             return None
         proof_age_ms = (checked_at - observed_at).total_seconds() * 1000.0
-        if proof_age_ms < 0.0 or proof_age_ms > float(max_quote_age_ms):
+        heartbeat_age_seconds = (checked_at - alive_at).total_seconds()
+        if (
+            proof_age_ms < 0.0
+            or proof_age_ms > float(max_quote_age_ms)
+            or heartbeat_age_seconds < 0.0
+            or heartbeat_age_seconds > 90.0
+        ):
             return None
         row = trade_conn.execute(
             """

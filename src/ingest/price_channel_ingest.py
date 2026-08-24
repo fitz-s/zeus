@@ -185,24 +185,28 @@ def _edli_enqueue_held_snapshot_refresh_actions(actions) -> dict[str, object]:
 
     enqueued = 0
     unavailable: list[dict[str, str]] = []
-    readiness_error = _edli_market_channel_sink_readiness_error()
     for action in actions:
-        if readiness_error is not None:
-            unavailable.append(
-                _edli_held_snapshot_debt_payload(action, reason=readiness_error)
-            )
-            continue
-        try:
-            enqueue_persistent_market_channel_action(action)
-        except Exception as exc:  # noqa: BLE001 - committed quote must retain exact debt
-            unavailable.append(
-                _edli_held_snapshot_debt_payload(
-                    action,
-                    reason=f"{type(exc).__name__}: {exc}",
+        # SCOPE: this process's one active market-channel PID/generation.
+        # DRAIN: the 60-second held-debt scheduler re-emits rejected actions.
+        # RESET: a current ready receipt plus matching continuity proof permits enqueue.
+        with _market_channel_bootstrap_lock:
+            authority_error = _edli_market_channel_continuity_authority_error()
+            if authority_error is not None:
+                unavailable.append(
+                    _edli_held_snapshot_debt_payload(action, reason=authority_error)
                 )
-            )
-        else:
-            enqueued += 1
+                continue
+            try:
+                enqueue_persistent_market_channel_action(action)
+            except Exception as exc:  # noqa: BLE001 - committed quote must retain exact debt
+                unavailable.append(
+                    _edli_held_snapshot_debt_payload(
+                        action,
+                        reason=f"{type(exc).__name__}: {exc}",
+                    )
+                )
+            else:
+                enqueued += 1
     return {
         "held_snapshot_refresh_actions_enqueued": enqueued,
         "held_snapshot_refresh_enqueue_unavailable": unavailable,
@@ -601,6 +605,15 @@ def _edli_supersede_market_channel_bootstrap(generation: str) -> bool:
 def _edli_market_channel_sink_readiness_error() -> str | None:
     """Require this PID and generation; a stale sidecar is never consumer authority."""
 
+    _payload, error = _edli_current_market_channel_sink_readiness()
+    return error
+
+
+def _edli_current_market_channel_sink_readiness() -> tuple[
+    dict[str, object] | None, str | None
+]:
+    """Return only the receipt that belongs to this live bootstrap generation."""
+
     from src.config import state_path
 
     try:
@@ -608,54 +621,122 @@ def _edli_market_channel_sink_readiness_error() -> str | None:
             state_path(MARKET_CHANNEL_SINK_READINESS_FILENAME).read_text(encoding="utf-8")
         )
     except Exception as exc:  # noqa: BLE001 - missing readiness is fail-closed
-        return f"MarketChannelActionSinkReadinessUnavailable: {type(exc).__name__}: {exc}"
+        return (
+            None,
+            f"MarketChannelActionSinkReadinessUnavailable: {type(exc).__name__}: {exc}",
+        )
     with _market_channel_bootstrap_lock:
         generation = _market_channel_bootstrap_generation
     if not isinstance(payload, dict) or payload.get("schema_version") != 1:
-        return "MarketChannelActionSinkReadinessUnavailable: invalid readiness payload"
+        return (
+            None,
+            "MarketChannelActionSinkReadinessUnavailable: invalid readiness payload",
+        )
     if payload.get("pid") != os.getpid() or payload.get("generation") != generation:
-        return "MarketChannelActionSinkReadinessUnavailable: readiness belongs to another PID or generation"
-    if payload.get("sink_registered") is not True or payload.get("consumer_queue_accepted") is not True:
-        return "MarketChannelActionSinkReadinessUnavailable: persistent consumer is not ready"
+        return (
+            None,
+            "MarketChannelActionSinkReadinessUnavailable: "
+            "readiness belongs to another PID or generation",
+        )
+    if (
+        payload.get("sink_registered") is not True
+        or payload.get("consumer_queue_accepted") is not True
+    ):
+        return (
+            None,
+            "MarketChannelActionSinkReadinessUnavailable: persistent consumer is not ready",
+        )
+    return payload, None
+
+
+def _edli_market_channel_continuity_authority_error() -> str | None:
+    """Require a current local receipt and exact matching continuity generation."""
+
+    from src.config import state_path
+
+    readiness, readiness_error = _edli_current_market_channel_sink_readiness()
+    if readiness_error is not None or readiness is None:
+        return readiness_error
+    try:
+        continuity = json.loads(
+            state_path(MARKET_CHANNEL_CONTINUITY_FILENAME).read_text(encoding="utf-8")
+        )
+    except Exception as exc:  # noqa: BLE001 - missing continuity is fail-closed
+        return f"MarketChannelContinuityUnavailable: {type(exc).__name__}: {exc}"
+    if (
+        not isinstance(continuity, dict)
+        or continuity.get("schema_version") != 1
+        or continuity.get("channel") != "market_channel"
+        or continuity.get("connected") is not True
+        or continuity.get("pid") != readiness.get("pid")
+        or continuity.get("generation") != readiness.get("generation")
+    ):
+        return (
+            "MarketChannelContinuityUnavailable: continuity does not match "
+            "current readiness"
+        )
     return None
 
 
-def _edli_register_current_market_channel_action_sink(service, generation: str, register) -> bool:
-    """Register exactly one consumer and publish readiness in the same generation fence."""
+def _edli_register_current_market_channel_action_sink(
+    service,
+    generation: str,
+    register,
+    unregister,
+) -> bool:
+    """Register one consumer and publish readiness in the same generation fence."""
 
     with _market_channel_bootstrap_lock:
         if generation != _market_channel_bootstrap_generation:
             return False
-        register(service)
-        _write_market_channel_sink_readiness(
-            {
-                "schema_version": 1,
-                "generation": generation,
-                "sink_registered": True,
-                "consumer_queue_accepted": True,
-                "phase": "registered",
-                "registered_at": datetime.now(timezone.utc).isoformat(),
-            }
-        )
-        return True
-
-
-def _edli_unregister_current_market_channel_action_sink(service, generation: str, unregister) -> None:
-    """Withdraw the current generation atomically with its sink registration."""
-
-    with _market_channel_bootstrap_lock:
-        unregister(service)
-        if generation == _market_channel_bootstrap_generation:
+        registered = False
+        receipt_published = False
+        # SCOPE: one in-process service for this PID/generation only.
+        # DRAIN: any receipt publication error unregisters that exact service now.
+        # RESET: a later generation may register only after this finally block
+        # withdraws it.
+        try:
+            register(service)
+            registered = True
             _write_market_channel_sink_readiness(
                 {
                     "schema_version": 1,
                     "generation": generation,
-                    "sink_registered": False,
-                    "consumer_queue_accepted": False,
-                    "phase": "service_stopped",
-                    "observed_at": datetime.now(timezone.utc).isoformat(),
+                    "sink_registered": True,
+                    "consumer_queue_accepted": True,
+                    "phase": "registered",
+                    "registered_at": datetime.now(timezone.utc).isoformat(),
                 }
             )
+            receipt_published = True
+            return True
+        finally:
+            if registered and not receipt_published:
+                unregister(service)
+
+
+def _edli_unregister_current_market_channel_action_sink(
+    service,
+    generation: str,
+    unregister,
+) -> None:
+    """Withdraw the current generation atomically with its sink registration."""
+
+    with _market_channel_bootstrap_lock:
+        try:
+            if generation == _market_channel_bootstrap_generation:
+                _write_market_channel_sink_readiness(
+                    {
+                        "schema_version": 1,
+                        "generation": generation,
+                        "sink_registered": False,
+                        "consumer_queue_accepted": False,
+                        "phase": "service_stopped",
+                        "observed_at": datetime.now(timezone.utc).isoformat(),
+                    }
+                )
+        finally:
+            unregister(service)
 
 
 def _write_market_channel_continuity(payload: dict[str, object]) -> None:
@@ -663,12 +744,23 @@ def _write_market_channel_continuity(payload: dict[str, object]) -> None:
 
     from src.config import state_path
 
-    target = state_path(MARKET_CHANNEL_CONTINUITY_FILENAME)
-    proof = dict(payload)
-    proof["pid"] = os.getpid()
-    tmp = target.with_name(f".{target.name}.{os.getpid()}.tmp")
-    tmp.write_text(json.dumps(proof, sort_keys=True), encoding="utf-8")
-    tmp.replace(target)
+    with _market_channel_bootstrap_lock:
+        readiness, readiness_error = _edli_current_market_channel_sink_readiness()
+        if readiness_error is not None or readiness is None:
+            raise RuntimeError(
+                readiness_error or "market-channel readiness unavailable"
+            )
+        proof = dict(payload)
+        if proof.get("generation") != readiness.get("generation"):
+            raise RuntimeError("market-channel continuity generation is not current")
+        # SCOPE: this PID/generation's market-channel continuity receipt.
+        # DRAIN: the online service republishes every accepted market-channel event.
+        # RESET: receipt withdrawal or a generation mismatch removes this authority.
+        target = state_path(MARKET_CHANNEL_CONTINUITY_FILENAME)
+        proof["pid"] = os.getpid()
+        tmp = target.with_name(f".{target.name}.{os.getpid()}.tmp")
+        tmp.write_text(json.dumps(proof, sort_keys=True), encoding="utf-8")
+        tmp.replace(target)
 PRICE_CHANNEL_DB_WRITE_LEASE_DEADLINE_MS = 25
 PRICE_CHANNEL_DB_WRITE_MAX_HOLD_MS = 1000
 PRICE_CHANNEL_USER_RECONCILE_DB_WRITE_LEASE_DEADLINE_MS = 250
@@ -5505,13 +5597,16 @@ def _edli_market_channel_ingestor_cycle(
                     ),
                     quote_flush_batch_size=PRICE_CHANNEL_BACKGROUND_QUOTE_FLUSH_BATCH_SIZE,
                 )
-                if not _edli_register_current_market_channel_action_sink(
-                    service,
-                    bootstrap_generation,
-                    register_persistent_market_channel_action_sink,
-                ):
-                    return
+                registered = False
                 try:
+                    registered = _edli_register_current_market_channel_action_sink(
+                        service,
+                        bootstrap_generation,
+                        register_persistent_market_channel_action_sink,
+                        unregister_persistent_market_channel_action_sink,
+                    )
+                    if not registered:
+                        return
                     run_market_channel_service_forever(
                         service,
                         logger=logger,
@@ -5528,11 +5623,12 @@ def _edli_market_channel_ingestor_cycle(
                         world_event_rollback=_rollback_world_event,
                     )
                 finally:
-                    _edli_unregister_current_market_channel_action_sink(
-                        service,
-                        bootstrap_generation,
-                        unregister_persistent_market_channel_action_sink,
-                    )
+                    if registered:
+                        _edli_unregister_current_market_channel_action_sink(
+                            service,
+                            bootstrap_generation,
+                            unregister_persistent_market_channel_action_sink,
+                        )
         finally:
             try:
                 feasibility_conn.close()

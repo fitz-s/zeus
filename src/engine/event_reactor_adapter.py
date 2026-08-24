@@ -2601,7 +2601,12 @@ def _market_channel_continuity_cut(
     checked_at: datetime,
     max_age: timedelta,
 ) -> tuple[datetime, datetime] | None:
-    """Return the live WS generation cut when both proof files agree."""
+    """Return the live WS generation cut only when all ownership receipts agree.
+
+    SCOPE: the price-channel daemon PID/generation named by all three sidecars.
+    DRAIN: the daemon republishes continuity and readiness while the consumer runs.
+    RESET: receipt withdrawal, PID change, or generation mismatch rejects this cut.
+    """
 
     if checked_at.tzinfo is None or max_age <= timedelta(0):
         return None
@@ -2618,14 +2623,25 @@ def _market_channel_continuity_cut(
                 encoding="utf-8"
             )
         )
+        readiness = json.loads(
+            state_path("market-channel-action-sink-readiness.json").read_text(
+                encoding="utf-8"
+            )
+        )
         if (
             not isinstance(proof, Mapping)
             or not isinstance(heartbeat, Mapping)
+            or not isinstance(readiness, Mapping)
             or proof.get("schema_version") != 1
+            or readiness.get("schema_version") != 1
             or proof.get("channel") != "market_channel"
             or proof.get("connected") is not True
             or heartbeat.get("daemon") != "price-channel-ingest"
             or int(proof.get("pid") or 0) != int(heartbeat.get("pid") or -1)
+            or int(proof.get("pid") or 0) != int(readiness.get("pid") or -1)
+            or proof.get("generation") != readiness.get("generation")
+            or readiness.get("sink_registered") is not True
+            or readiness.get("consumer_queue_accepted") is not True
         ):
             return None
         connected_at = datetime.fromisoformat(
