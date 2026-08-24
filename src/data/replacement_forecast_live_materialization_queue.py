@@ -63,6 +63,8 @@ _TIMEOUT_RETRY_DEFERRED_REASON = (
     "REPLACEMENT_LIVE_MATERIALIZATION_TIMEOUT_RETRY_DEFERRED"
 )
 _CAPITAL_PROTECTION_TIMEOUT_RETRY_SECONDS = 1.0
+_CAPITAL_PROTECTION_TIMEOUT_RETRY_MAX_ATTEMPTS = 3
+_CAPITAL_PROTECTION_TIMEOUT_RETRY_MAX_ELAPSED_SECONDS = 75.0
 _MATERIALIZATION_STAGE_RECEIPT_SUFFIX = ".stage"
 _MATERIALIZATION_CHILD_DEADLINE_SAFETY_SECONDS = 1.0
 _AWAITING_ENSEMBLE_HWM_REASON = (
@@ -200,7 +202,10 @@ def _stage_receipt_path(input_json: Path) -> Path:
 def _stable_request_id(input_json: Path) -> str:
     """Preserve one identity across timeout-retry filename suffixes."""
 
-    return input_json.name.split(_TIMEOUT_RETRY_MARKER, 1)[0]
+    name = input_json.name
+    if _TIMEOUT_RETRY_MARKER not in name:
+        return name
+    return f"{name.split(_TIMEOUT_RETRY_MARKER, 1)[0]}{input_json.suffix}"
 
 
 def _write_stage_receipt(
@@ -211,8 +216,6 @@ def _write_stage_receipt(
 ) -> None:
     """Atomically expose the last known child stage without touching canonical DBs."""
 
-    target = _stage_receipt_path(input_json)
-    target.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "schema_version": 1,
         "request_id": _stable_request_id(input_json),
@@ -221,9 +224,29 @@ def _write_stage_receipt(
         "deadline_at": deadline_at.astimezone(timezone.utc).isoformat(),
         "updated_at": datetime.now(timezone.utc).isoformat(),
     }
+    _write_stage_receipt_payload(input_json, payload)
+
+
+def _write_stage_receipt_payload(
+    input_json: Path,
+    payload: Mapping[str, object],
+) -> None:
+    """Atomically rewrite one receipt against its current request pathname."""
+
+    target = _stage_receipt_path(input_json)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    current = dict(payload)
+    current.update(
+        {
+            "schema_version": 1,
+            "request_id": _stable_request_id(input_json),
+            "input_json": str(input_json),
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+    )
     temporary = target.with_name(f".{target.name}.{os.getpid()}.tmp")
     with temporary.open("w", encoding="utf-8") as handle:
-        json.dump(payload, handle, sort_keys=True, separators=(",", ":"))
+        json.dump(current, handle, sort_keys=True, separators=(",", ":"))
         handle.flush()
         os.fsync(handle.fileno())
     os.replace(temporary, target)
@@ -239,18 +262,12 @@ def _read_stage_receipt(input_json: Path) -> dict[str, object] | None:
 
 
 def _move_stage_receipt(source: Path, target: Path) -> None:
-    source_receipt = _stage_receipt_path(source)
-    if not source_receipt.exists():
+    payload = _read_stage_receipt(source)
+    if payload is None:
         return
-    target_receipt = _stage_receipt_path(target)
-    try:
-        os.link(source_receipt, target_receipt)
-    except FileExistsError:
-        target_receipt.unlink()
-        os.link(source_receipt, target_receipt)
-    _fsync_directory(target_receipt.parent)
-    source_receipt.unlink(missing_ok=True)
-    _fsync_directory(source_receipt.parent)
+    _write_stage_receipt_payload(target, payload)
+    _stage_receipt_path(source).unlink(missing_ok=True)
+    _fsync_directory(source.parent)
 
 
 def _materialization_command(
@@ -1168,6 +1185,12 @@ def _is_capital_protection_timeout_retry(
 ) -> bool:
     """Recognize a held Day0 state advance after its retry filename changed."""
 
+    _base, attempt, _retry_at = _timeout_retry_state(path)
+    within_budget, _first_timeout = _capital_protection_timeout_budget(
+        path,
+        attempt=attempt,
+        now=datetime.now(timezone.utc),
+    )
     family = (
         str(payload.get("city") or "").strip(),
         str(payload.get("target_date") or "").strip(),
@@ -1175,6 +1198,7 @@ def _is_capital_protection_timeout_retry(
     )
     return (
         _TIMEOUT_RETRY_MARKER in path.name
+        and within_budget
         and family in current_probability_debt
         and str(payload.get("upgrade_trigger") or "").strip()
         == "day0_observation_advanced"
@@ -2223,6 +2247,67 @@ def _timeout_retry_state(path: Path) -> tuple[str, int, float | None]:
     return base, attempt, retry_ns / 1_000_000_000.0
 
 
+def _capital_protection_timeout_budget(
+    path: Path,
+    *,
+    attempt: int,
+    now: datetime,
+) -> tuple[bool, datetime]:
+    """Return whether the exact stale-q retry still owns its urgent budget."""
+
+    receipt = _read_stage_receipt(path) or {}
+    first_timeout = _parse_utc_iso(
+        receipt.get("capital_protection_first_timeout_at")
+    )
+    if first_timeout is None:
+        first_timeout = now
+    elapsed_seconds = max(0.0, (now - first_timeout).total_seconds())
+    return (
+        attempt <= _CAPITAL_PROTECTION_TIMEOUT_RETRY_MAX_ATTEMPTS
+        and elapsed_seconds <= _CAPITAL_PROTECTION_TIMEOUT_RETRY_MAX_ELAPSED_SECONDS,
+        first_timeout,
+    )
+
+
+def _record_capital_protection_timeout_retry(
+    path: Path,
+    *,
+    attempt: int,
+    first_timeout: datetime,
+    urgent: bool,
+) -> None:
+    """Persist retry-budget evidence beside, never inside, canonical truth."""
+
+    receipt = _read_stage_receipt(path) or {
+        "stage": "unknown",
+        "deadline_at": None,
+    }
+    receipt.update(
+        {
+            "capital_protection_first_timeout_at": first_timeout.astimezone(
+                timezone.utc
+            ).isoformat(),
+            "capital_protection_timeout_attempt": attempt,
+            "capital_protection_retry_tier": "urgent" if urgent else "ordinary",
+        }
+    )
+    _write_stage_receipt_payload(path, receipt)
+
+
+def _clear_capital_protection_timeout_retry(path: Path) -> None:
+    """A fresh q ends the stale-q retry epoch instead of carrying its budget."""
+
+    receipt = _read_stage_receipt(path)
+    if receipt is None:
+        return
+    if not any(key.startswith("capital_protection_") for key in receipt):
+        return
+    for key in tuple(receipt):
+        if key.startswith("capital_protection_"):
+            receipt.pop(key, None)
+    _write_stage_receipt_payload(path, receipt)
+
+
 def _restore_claimed_request_after_timeout(
     path: Path,
     request_path: Path,
@@ -2234,16 +2319,33 @@ def _restore_claimed_request_after_timeout(
     request_path.mkdir(parents=True, exist_ok=True)
     base, prior_attempt, _retry_at = _timeout_retry_state(path)
     attempt = prior_attempt + 1
+    now_seconds = time.time()
+    now = datetime.fromtimestamp(now_seconds, timezone.utc)
+    urgent_retry = False
+    if capital_protection:
+        urgent_retry, first_timeout = _capital_protection_timeout_budget(
+            path,
+            attempt=attempt,
+            now=now,
+        )
+        _record_capital_protection_timeout_retry(
+            path,
+            attempt=attempt,
+            first_timeout=first_timeout,
+            urgent=urgent_retry,
+        )
+    else:
+        _clear_capital_protection_timeout_retry(path)
     exponent = min(max(0, attempt - 1), 10)
     delay_seconds = (
         _CAPITAL_PROTECTION_TIMEOUT_RETRY_SECONDS
-        if capital_protection
+        if urgent_retry
         else min(
             _TIMEOUT_RETRY_BASE_SECONDS * (2**exponent),
             _TIMEOUT_RETRY_MAX_SECONDS,
         )
     )
-    retry_ns = int((time.time() + delay_seconds) * 1_000_000_000)
+    retry_ns = int((now_seconds + delay_seconds) * 1_000_000_000)
     while True:
         target = request_path / (
             f"{base}{_TIMEOUT_RETRY_MARKER}{attempt}-{retry_ns}{path.suffix}"

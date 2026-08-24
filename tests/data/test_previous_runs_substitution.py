@@ -35,6 +35,8 @@ import importlib.util
 import sqlite3
 import subprocess
 import sys
+import time
+import threading
 import types
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -3249,8 +3251,101 @@ def test_held_day0_timeout_retry_keeps_stage_and_preempts_unrelated_work(
     assert second.committed_posterior_count == 1
 
 
+def test_held_timeout_retry_budget_returns_to_exponential_queue_fairness(
+    tmp_path, monkeypatch
+) -> None:
+    """A stale held q gets bounded urgency, then unrelated work regains the writer."""
+
+    import src.data.replacement_forecast_live_materialization_queue as queue_mod
+
+    request_dir = tmp_path / "requests"
+    request_dir.mkdir()
+    now = [1_000_000.0]
+    monkeypatch.setattr(queue_mod.time, "time", lambda: now[0])
+    request = {
+        "city": "Held City",
+        "target_date": "2026-07-02",
+        "temperature_metric": "high",
+        "source_cycle_time": "2026-07-02T00:00:00+00:00",
+        "computed_at": "2026-07-02T08:31:11+00:00",
+        "baseline_source_run_id": "baseline",
+        "openmeteo_source_run_id": "anchor",
+        "openmeteo_payload_json": "payload.json",
+        "precision_metadata_json": "precision.json",
+        "bins": [{"bin_id": "30C"}],
+        "upgrade_trigger": "day0_observation_advanced",
+        "day0_observed_extreme_c": 25.0,
+        "day0_observed_extreme_observation_time": "2026-07-02T08:30:00+00:00",
+        "day0_observed_extreme_source": "aviationweather_metar",
+        "day0_observed_extreme_unit": "C",
+    }
+    source = request_dir / "Held.timeout-retry-2-1.json"
+    source.write_text(json.dumps(request), encoding="utf-8")
+    first_timeout = datetime.fromtimestamp(now[0] - 74.0, timezone.utc)
+    queue_mod._write_stage_receipt(
+        source,
+        stage="prepare_fusion",
+        deadline_at=first_timeout,
+    )
+    receipt = json.loads(queue_mod._stage_receipt_path(source).read_text(encoding="utf-8"))
+    receipt["capital_protection_first_timeout_at"] = first_timeout.isoformat()
+    queue_mod._write_stage_receipt_payload(source, receipt)
+
+    urgent = queue_mod._restore_claimed_request_after_timeout(
+        source,
+        request_dir,
+        capital_protection=True,
+    )
+    _base, attempt, urgent_at = queue_mod._timeout_retry_state(urgent)
+    assert attempt == 3
+    assert urgent_at is not None
+    assert urgent_at - now[0] == pytest.approx(1.0)
+    urgent_receipt = json.loads(
+        queue_mod._stage_receipt_path(urgent).read_text(encoding="utf-8")
+    )
+    assert urgent_receipt["input_json"] == str(urgent)
+    assert urgent_receipt["capital_protection_retry_tier"] == "urgent"
+
+    now[0] += 2.0
+    ordinary = queue_mod._restore_claimed_request_after_timeout(
+        urgent,
+        request_dir,
+        capital_protection=True,
+    )
+    _base, attempt, ordinary_at = queue_mod._timeout_retry_state(ordinary)
+    assert attempt == 4
+    assert ordinary_at is not None
+    assert ordinary_at - now[0] == pytest.approx(480.0)
+    ordinary_receipt = json.loads(
+        queue_mod._stage_receipt_path(ordinary).read_text(encoding="utf-8")
+    )
+    assert ordinary_receipt["capital_protection_retry_tier"] == "ordinary"
+
+    unrelated = request_dir / "Unrelated.json"
+    unrelated.write_text(json.dumps({**request, "city": "Unrelated City"}), encoding="utf-8")
+    started: list[str] = []
+
+    def _ready(argv):
+        command = list(argv)
+        started.append(Path(command[command.index("--input-json") + 1]).name)
+        return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
+
+    report = queue_mod.process_replacement_forecast_live_materialization_queue(
+        request_dir=request_dir,
+        processed_dir=tmp_path / "processed",
+        failed_dir=tmp_path / "failed",
+        forecast_db=tmp_path / "forecasts.db",
+        raw_manifest_dir=None,
+        limit=1,
+        runner=_ready,
+    )
+    assert report.processed_count == 1
+    assert started == ["Unrelated.json"]
+    assert ordinary.exists()
+
+
 def test_materializer_child_deadline_receipt_interrupts_sqlite_read(tmp_path) -> None:
-    """The child reports the read/prepare stage before outer timeout can erase it."""
+    """The watchdog interrupts a blocking SQLite callback, not just VM progress."""
 
     script_path = Path(__file__).resolve().parents[2] / "scripts" / "materialize_replacement_forecast_live.py"
     spec = importlib.util.spec_from_file_location("materialize_deadline_test", script_path)
@@ -3266,21 +3361,85 @@ def test_materializer_child_deadline_receipt_interrupts_sqlite_read(tmp_path) ->
     input_json.write_text("{}", encoding="utf-8")
     receipt = module._StageReceipt(
         input_json,
-        datetime.now(timezone.utc) - timedelta(milliseconds=1),
+        datetime.now(timezone.utc) + timedelta(milliseconds=50),
     )
     receipt.mark("prepare_fusion")
-    conn = sqlite3.connect(":memory:")
-    receipt.install_sqlite_progress_handler(conn)
-    with pytest.raises(sqlite3.OperationalError, match="interrupted"):
-        conn.execute(
-            "WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x + 1 FROM n WHERE x < 1000000) SELECT sum(x) FROM n"
-        ).fetchone()
-    receipt.clear_sqlite_progress_handler(conn)
+    interrupted = threading.Event()
+
+    class _RecordingConnection(sqlite3.Connection):
+        interrupt_calls = 0
+
+        def interrupt(self):
+            self.interrupt_calls += 1
+            interrupted.set()
+            return super().interrupt()
+
+    conn = sqlite3.connect(":memory:", factory=_RecordingConnection)
+
+    def _blocking_read():
+        assert interrupted.wait(timeout=1.0)
+        return 1
+
+    conn.create_function("blocking_read", 0, _blocking_read)
+    with receipt.sqlite_deadline_guard(conn):
+        with pytest.raises(sqlite3.OperationalError, match="interrupted"):
+            conn.execute("SELECT blocking_read()").fetchone()
+    interrupt_calls = conn.interrupt_calls
+    time.sleep(0.1)
+    assert conn.interrupt_calls == interrupt_calls == 1
     conn.close()
     payload = json.loads(receipt.path.read_text(encoding="utf-8"))
     assert payload["request_id"] == "Held.json"
     assert payload["stage"] == "prepare_fusion"
     assert payload["deadline_at"]
+
+
+def test_materializer_batch_cli_forwards_deadline_to_each_provided_connection(
+    tmp_path, monkeypatch
+) -> None:
+    """A batch caller cannot silently drop the queue-owned deadline."""
+
+    script_path = (
+        Path(__file__).resolve().parents[2]
+        / "scripts"
+        / "materialize_replacement_forecast_live.py"
+    )
+    spec = importlib.util.spec_from_file_location("materialize_batch_deadline_test", script_path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        sys.modules.pop(spec.name, None)
+
+    import src.state.db as state_db
+
+    input_json = tmp_path / "Held.json"
+    input_json.write_text("{}", encoding="utf-8")
+    conn = sqlite3.connect(":memory:")
+    monkeypatch.setattr(state_db, "get_forecasts_connection", lambda **_kwargs: conn)
+    monkeypatch.setattr(module, "_attach_world_read_only", lambda _conn: None)
+    captured: list[tuple[object, datetime | None]] = []
+    monkeypatch.setattr(
+        module,
+        "_run_one",
+        lambda _input, **kwargs: (
+            captured.append((kwargs["conn"], kwargs["deadline_at"]))
+            or (0, "", "")
+        ),
+    )
+    deadline_text = "2026-08-24T05:00:00+00:00"
+
+    assert module.main(
+        [
+            "--batch-input-json",
+            str(input_json),
+            "--deadline-utc",
+            deadline_text,
+        ]
+    ) == 0
+    assert captured == [(conn, datetime.fromisoformat(deadline_text))]
 
 
 def test_queue_requeues_typed_child_deadline_before_outer_timeout(tmp_path) -> None:

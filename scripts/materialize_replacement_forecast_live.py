@@ -18,6 +18,7 @@ from dataclasses import dataclass, replace
 from datetime import date, datetime, timezone
 from io import StringIO
 from pathlib import Path
+from threading import Event, Lock, Thread
 from typing import Any, Callable, ContextManager, Mapping
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -76,6 +77,63 @@ class MaterializationDeadlineExceeded(RuntimeError):
         super().__init__(f"REPLACEMENT_LIVE_MATERIALIZATION_DEADLINE_{stage.upper()}")
 
 
+class _SQLiteDeadlineGuard:
+    """Interrupt a blocked SQLite call before the queue's outer child kill."""
+
+    def __init__(self, conn, receipt: "_StageReceipt") -> None:
+        self._conn = conn
+        self._receipt = receipt
+        self._stop = Event()
+        self._lock = Lock()
+        self._generation = 0
+        self._active_generation = 0
+        self._thread: Thread | None = None
+
+    def __enter__(self) -> "_SQLiteDeadlineGuard":
+        if self._receipt.deadline_at is None:
+            return self
+        with self._lock:
+            self._generation += 1
+            generation = self._generation
+            self._active_generation = generation
+
+        def _interrupt_at_deadline() -> None:
+            deadline = self._receipt.deadline_at
+            assert deadline is not None
+            remaining = max(
+                0.0, (deadline - datetime.now(UTC)).total_seconds()
+            )
+            if self._stop.wait(remaining):
+                return
+            # The generation fence makes it impossible for a late watchdog to
+            # interrupt a connection after its owning materialization returned.
+            with self._lock:
+                if self._active_generation != generation or self._stop.is_set():
+                    return
+                self._conn.interrupt()
+
+        def _interrupt_when_expired() -> int:
+            return int(self._receipt.deadline_expired())
+
+        self._conn.set_progress_handler(_interrupt_when_expired, 1_000)
+        self._thread = Thread(
+            target=_interrupt_at_deadline,
+            name="replacement-materialize-deadline",
+            daemon=True,
+        )
+        self._thread.start()
+        return self
+
+    def __exit__(self, exc_type, exc, traceback) -> None:
+        with self._lock:
+            self._active_generation = 0
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join()
+        if self._receipt.deadline_at is not None:
+            self._conn.set_progress_handler(None, 0)
+
+
 @dataclass
 class _StageReceipt:
     """Atomic, non-canonical progress evidence retained with one queue request."""
@@ -90,7 +148,10 @@ class _StageReceipt:
 
     @property
     def request_id(self) -> str:
-        return self.input_json.name.split(".timeout-retry-", 1)[0]
+        name = self.input_json.name
+        if ".timeout-retry-" not in name:
+            return name
+        return f"{name.split('.timeout-retry-', 1)[0]}{self.input_json.suffix}"
 
     def mark(self, stage: str) -> None:
         self.stage = stage
@@ -121,18 +182,8 @@ class _StageReceipt:
         if self.deadline_expired():
             raise MaterializationDeadlineExceeded(self.stage, self.deadline_at)
 
-    def install_sqlite_progress_handler(self, conn) -> None:
-        if self.deadline_at is None:
-            return
-
-        def _interrupt_when_expired() -> int:
-            return int(self.deadline_expired())
-
-        conn.set_progress_handler(_interrupt_when_expired, 1_000)
-
-    @staticmethod
-    def clear_sqlite_progress_handler(conn) -> None:
-        conn.set_progress_handler(None, 0)
+    def sqlite_deadline_guard(self, conn) -> _SQLiteDeadlineGuard:
+        return _SQLiteDeadlineGuard(conn, self)
 
 
 class ReplacementForecastWriteDeferred(RuntimeError):
@@ -1000,19 +1051,18 @@ def _materialize(
         )
         try:
             _attach_world_read_only(owned_conn)
-            stage_receipt.install_sqlite_progress_handler(owned_conn)
-            return _materialize(
-                input_json,
-                commit=commit,
-                init_schema=init_schema,
-                conn=owned_conn,
-                publish_wake=publish_wake,
-                schema_ready=schema_ready,
-                writer_lock=writer_lock or _forecast_writer_lock,
-                stage_receipt=stage_receipt,
-            )
+            with stage_receipt.sqlite_deadline_guard(owned_conn):
+                return _materialize(
+                    input_json,
+                    commit=commit,
+                    init_schema=init_schema,
+                    conn=owned_conn,
+                    publish_wake=publish_wake,
+                    schema_ready=schema_ready,
+                    writer_lock=writer_lock or _forecast_writer_lock,
+                    stage_receipt=stage_receipt,
+                )
         finally:
-            stage_receipt.clear_sqlite_progress_handler(owned_conn)
             owned_conn.close()
     if commit and writer_lock is None:
         raise RuntimeError("REPLACEMENT_FORECAST_WRITER_LOCK_REQUIRED")
@@ -1244,16 +1294,29 @@ def _run_one(
     stage_receipt = _StageReceipt(input_json, deadline_at)
     stage_receipt.mark("open_read_snapshot")
     try:
-        returncode, response = _materialize(
-            input_json,
-            commit=commit,
-            init_schema=init_schema,
-            conn=conn,
-            publish_wake=publish_wake,
-            schema_ready=schema_ready,
-            writer_lock=writer_lock,
-            stage_receipt=stage_receipt,
-        )
+        if conn is None:
+            returncode, response = _materialize(
+                input_json,
+                commit=commit,
+                init_schema=init_schema,
+                conn=None,
+                publish_wake=publish_wake,
+                schema_ready=schema_ready,
+                writer_lock=writer_lock,
+                stage_receipt=stage_receipt,
+            )
+        else:
+            with stage_receipt.sqlite_deadline_guard(conn):
+                returncode, response = _materialize(
+                    input_json,
+                    commit=commit,
+                    init_schema=init_schema,
+                    conn=conn,
+                    publish_wake=publish_wake,
+                    schema_ready=schema_ready,
+                    writer_lock=writer_lock,
+                    stage_receipt=stage_receipt,
+                )
         encoded = json.dumps(response, sort_keys=True) + "\n"
         if returncode == 2:
             return returncode, "", log_output.getvalue() + encoded
@@ -1352,16 +1415,60 @@ def main(argv: list[str] | None = None) -> int:
             _attach_world_read_only(conn)
             schema_ready = False
             if args.commit:
+                schema_receipt = _StageReceipt(args.batch_input_json[0], deadline_at)
+                schema_receipt.mark("write_verify")
                 try:
-                    receipt = _prepare_live_schema_and_manifest(
-                        conn,
-                        init_schema=args.init_schema,
-                        schema_ready=False,
-                        openmeteo_manifest=None,
-                        anchor_artifact_id=None,
-                        writer_lock=_forecast_writer_lock,
-                    )
+                    with schema_receipt.sqlite_deadline_guard(conn):
+                        schema_receipt.require_budget()
+                        receipt = _prepare_live_schema_and_manifest(
+                            conn,
+                            init_schema=args.init_schema,
+                            schema_ready=False,
+                            openmeteo_manifest=None,
+                            anchor_artifact_id=None,
+                            writer_lock=_forecast_writer_lock,
+                        )
                     schema_ready = receipt.schema_ready
+                except MaterializationDeadlineExceeded as exc:
+                    stderr = json.dumps(
+                        {
+                            "status": "DEFERRED",
+                            "reason_codes": [str(exc)],
+                            "stage": exc.stage,
+                            "deadline_at": exc.deadline_at.astimezone(UTC).isoformat(),
+                        },
+                        sort_keys=True,
+                    ) + "\n"
+                    for input_json in args.batch_input_json:
+                        _print_batch_envelope(input_json, 75, "", stderr)
+                    return 0
+                except sqlite3.OperationalError as exc:
+                    if schema_receipt.deadline_expired():
+                        deadline_exc = MaterializationDeadlineExceeded(
+                            schema_receipt.stage,
+                            schema_receipt.deadline_at,
+                        )
+                        stderr = json.dumps(
+                            {
+                                "status": "DEFERRED",
+                                "reason_codes": [str(deadline_exc)],
+                                "stage": deadline_exc.stage,
+                                "deadline_at": deadline_exc.deadline_at.astimezone(
+                                    UTC
+                                ).isoformat(),
+                            },
+                            sort_keys=True,
+                        ) + "\n"
+                    else:
+                        stderr = json.dumps(_error_response(exc), sort_keys=True) + "\n"
+                    for input_json in args.batch_input_json:
+                        _print_batch_envelope(
+                            input_json,
+                            75 if schema_receipt.deadline_expired() else 2,
+                            "",
+                            stderr,
+                        )
+                    return 0
                 except Exception as exc:
                     stderr = json.dumps(_error_response(exc), sort_keys=True) + "\n"
                     for input_json in args.batch_input_json:
