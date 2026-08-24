@@ -3830,6 +3830,65 @@ def test_rest_quote_refresh_reuses_only_current_generation_full_depth(monkeypatc
     ]
 
 
+def test_rest_quote_refresh_rejects_same_pid_prior_generation_continuity(monkeypatch, tmp_path):
+    from src import config
+    from src.ingest import price_channel_ingest as lane
+    from src.state.schema.execution_feasibility_evidence_schema import ensure_table
+
+    conn = sqlite3.connect(":memory:")
+    ensure_table(conn)
+    checked_at = datetime.fromisoformat("2026-08-24T05:00:10+00:00")
+    conn.execute(
+        """
+        INSERT INTO execution_feasibility_latest (
+            token_id, direction, evidence_id, event_id, condition_id, outcome_label,
+            quote_seen_at, depth_before_json, created_at, schema_version
+        ) VALUES ('same-pid-old-generation', 'buy_yes', 'e', 'event', 'cond', 'YES',
+                  '2026-08-24T05:00:05+00:00', '{"bids": [], "asks": []}',
+                  '2026-08-24T05:00:05+00:00', 1)
+        """
+    )
+    monkeypatch.setattr(config, "state_path", lambda filename: tmp_path / filename)
+    monkeypatch.setattr(lane, "_market_channel_bootstrap_generation", "current-generation")
+    (tmp_path / lane.MARKET_CHANNEL_SINK_READINESS_FILENAME).write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "pid": os.getpid(),
+                "generation": "current-generation",
+                "sink_registered": True,
+                "consumer_queue_accepted": True,
+            }
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / lane.MARKET_CHANNEL_CONTINUITY_FILENAME).write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "channel": "market_channel",
+                "connected": True,
+                "pid": os.getpid(),
+                "generation": "prior-generation",
+                "connected_at": "2026-08-24T05:00:00+00:00",
+                "observed_at": "2026-08-24T05:00:09+00:00",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    required, covered = lane._edli_tokens_requiring_rest_quote_refresh(
+        conn,
+        ["same-pid-old-generation"],
+        checked_at=checked_at,
+        continuity_max_age=timedelta(seconds=10),
+        evidence_max_age=timedelta(seconds=10),
+    )
+
+    assert covered == 0
+    assert required == ["same-pid-old-generation"]
+
+
 def test_rest_quote_refresh_does_not_treat_quiet_generation_depth_as_fresh(monkeypatch):
     from src.ingest import price_channel_ingest as lane
     from src.state.schema.execution_feasibility_evidence_schema import ensure_table

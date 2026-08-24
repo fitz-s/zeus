@@ -125,6 +125,9 @@ def _market_channel_bootstrap_job(fn):
                     "bootstrap_generation": generation,
                     "bootstrap_elapsed_seconds": elapsed,
                 }
+            # SCOPE: this one bootstrap worker generation, never all consumers.
+            # DRAIN: supersede it before starting its one bounded replacement worker.
+            # RESET: a current ready receipt lets future scheduler fires reuse the owner.
             lane._edli_supersede_market_channel_bootstrap(generation)
             failure = {
                 "thread": "bootstrap_worker_superseded",

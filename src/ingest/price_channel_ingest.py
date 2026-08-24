@@ -3805,24 +3805,34 @@ def _edli_market_channel_generation_cut(
     checked_at: datetime,
     max_age: timedelta,
 ) -> datetime | None:
-    """Return the connected generation start for a current local WS proof."""
+    """Return the connected start only for the current ready WS generation.
+
+    SCOPE: this process's current PID/generation and its exact full-depth rows.
+    DRAIN: invalid coverage returns every token to the bounded REST refresh lane.
+    RESET: only a current ready receipt plus matching continuity can cover a token.
+    """
 
     if checked_at.tzinfo is None or max_age <= timedelta(0):
         return None
     try:
         from src.config import state_path
 
-        proof = json.loads(
-            state_path(MARKET_CHANNEL_CONTINUITY_FILENAME).read_text(
-                encoding="utf-8"
+        with _market_channel_bootstrap_lock:
+            readiness, readiness_error = _edli_current_market_channel_sink_readiness()
+            if readiness_error is not None or readiness is None:
+                return None
+            proof = json.loads(
+                state_path(MARKET_CHANNEL_CONTINUITY_FILENAME).read_text(
+                    encoding="utf-8"
+                )
             )
-        )
         if (
             not isinstance(proof, dict)
             or proof.get("schema_version") != 1
             or proof.get("channel") != "market_channel"
             or proof.get("connected") is not True
-            or int(proof.get("pid") or 0) != os.getpid()
+            or proof.get("pid") != readiness.get("pid")
+            or proof.get("generation") != readiness.get("generation")
         ):
             return None
         connected_at = datetime.fromisoformat(
@@ -5111,6 +5121,9 @@ def _edli_market_channel_ingestor_cycle(
                 and elapsed is not None
                 and elapsed >= 60.0
             ):
+                # SCOPE: the single unregistered bootstrap generation.
+                # DRAIN: fence it, emit failed health, then the scheduler retries owner boot.
+                # RESET: a current registered readiness receipt restores the normal lane.
                 _edli_supersede_market_channel_bootstrap(active_generation)
                 with _market_channel_bootstrap_lock:
                     # The old runner may still be unwinding a blocked pre-register
